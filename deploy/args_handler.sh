@@ -13,7 +13,7 @@ parse_args() {
                 i=$((i+1))
                 ;;
             #nfs|rabbitmq|yr_claw|gateway|web|manager)
-            nfs|rabbitmq|mysql|redis|postgresql|minio|gateway|web|manager)
+            nfs|nfs-sc|rabbitmq|mysql|redis|postgresql|minio|gateway|web|manager)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;

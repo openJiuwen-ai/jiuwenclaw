@@ -15,9 +15,9 @@ gen_gateway_env_file() {
     fi
 
     if [ "${mode}" == "dev" ]; then
-        DEPLOY_VARS["AGENT_SERVER_NFS_MOUNT_PATH"]="/root/.jiuwenclaw"
+        DEPLOY_VARS["CLAW_MOUNT_PATH"]="/root/.jiuwenclaw"
     else
-        DEPLOY_VARS["AGENT_SERVER_NFS_MOUNT_PATH"]="/home/app/.jiuwenclaw"
+        DEPLOY_VARS["CLAW_MOUNT_PATH"]="/home/app/.jiuwenclaw"
     fi
 
     if [ "${deploy_mode}" == "active-standby" ]; then
@@ -112,15 +112,26 @@ gen_gateway_file() {
         # Automatically create nodeSelector and set gateway=enable
         yq eval 'select(.kind == "Deployment").spec.template.spec.nodeSelector |= {"gateway": "enable"}' -i "${file}"
     fi
+
     success "Gateway file generation completed: ${file}"
 }
 
 render_gateway_files() {
+    local pvc_template_file="${CONFIG["CLAW_PVC_TEMPLATE_FILE"]}"
+    local pvc_file="${CONFIG["CLAW_PVC_FILE"]}"
+    local mount_type="${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}"
+    local is_external_pvc="${DEPLOY_VARS["ENABLE_EXTERNAL_PVC"]}"
+
     gen_gateway_env_file
     gen_gateway_config_file
     if [ "${DEPLOY_VARS["DEPLOYMENT_MODE"]}" == "active-standby" ]; then
         DEPLOY_VARS["GATEWAY_REPLICAS"]="2"
     fi
+
+    if [[ "${mount_type}" == "pvc" && "${is_external_pvc}" == "false" ]]; then
+        render_config_template "${pvc_template_file}" "${pvc_file}" "DEPLOY_VARS"
+    fi
+
     gen_gateway_file
 }
 
@@ -132,9 +143,17 @@ deploy_gateway() {
     local conf_file="${CONFIG["GATEWAY_CONFIG_FILE"]}"
     local name="${DEPLOY_VARS["GATEWAY_NAME"]}"
     local gateway_file="${CONFIG["GATEWAY_FILE"]}"
+    local pvc_file="${CONFIG["CLAW_PVC_FILE"]}"
+    local mount_type="${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}"
+    local is_external_pvc="${DEPLOY_VARS["ENABLE_EXTERNAL_PVC"]}"
 
     exec_cmd kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${env_file}
     exec_cmd kubectl create configmap -n ${namespace} ${conf_name} --from-file=config.yaml=${conf_file}
+
+    if [[ "${mount_type}" == "pvc" && "${is_external_pvc}" == "false" ]]; then
+        exec_cmd kubectl apply -f ${pvc_file}
+    fi
+
     exec_cmd kubectl apply -f ${gateway_file}
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
 }
@@ -145,6 +164,8 @@ uninstall_gateway() {
     local conf_name="${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
     local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
     local gateway_file="${CONFIG["GATEWAY_FILE"]}"
+    local mount_type="${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}"
+    local pvc_file="${CONFIG["CLAW_PVC_FILE"]}"
 
     # 先优雅停 Pod，再清理周边资源
     # gateway.yaml 含 ServiceAccount / Role / Deployment 等同文件资源。
@@ -160,5 +181,9 @@ uninstall_gateway() {
 
     if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "jiuwen" ]; then
         delete_k8s_resource "configmap" "${env_name}" "${namespace}"
+    fi
+
+    if [[ "${mount_type}" == "pvc" && -z "${DEPLOY_VARS["CLAW_PVC"]:-}" ]]; then
+        exec_cmd kubectl delete -f ${pvc_file}  --ignore-not-found=true
     fi
 }

@@ -1,6 +1,9 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
+ARG AGENT_RUNTIME_REPOS
+ARG AGENT_RUNTIME_BRANCH
+
 RUN apt-get update && apt-get install -y --no-install-recommends yq
 
 WORKDIR /app/jiuwenclaw
@@ -9,8 +12,8 @@ COPY . /app/jiuwenclaw/
 ENV PATH=$PATH:/home/app/.local/bin
 
 RUN pip install -e ".[all]" \
-    git+https://gitcode.com/openJiuwen/agent-runtime.git@develop_0708_release#subdirectory=foundation \
-    git+https://gitcode.com/openJiuwen/agent-runtime.git@develop_0708_release#subdirectory=management \
+    git+${AGENT_RUNTIME_REPOS}@${AGENT_RUNTIME_BRANCH}#subdirectory=foundation \
+    git+${AGENT_RUNTIME_REPOS}@${AGENT_RUNTIME_BRANCH}#subdirectory=management \
     kubernetes==35.0.0 \
     kubernetes_asyncio==35.0.0 \
     "websockets>=12.0,<16" \

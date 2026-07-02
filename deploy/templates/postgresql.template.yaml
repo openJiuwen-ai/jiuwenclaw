@@ -94,7 +94,7 @@ spec:
   storageClassName: ""
   nfs:
     server: <<NFS_SERVER_ADDR>>
-    path: <<POSTGRES_NFS_PATH>>
+    path: <<NFS_SHARE_PATH>>/<<POSTGRES_NAME>>
     readOnly: false
   mountOptions:
     - nfsvers=4

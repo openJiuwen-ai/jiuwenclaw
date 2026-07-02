@@ -139,6 +139,23 @@ check_if_nfs_up() {
     DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["MASTER_NODE_IP"]}
 }
 
+check_if_nfs_sc_up() {
+    # Check if external PVC
+    if [ -n "${DEPLOY_VARS["CLAW_PVC"]:-}" ]; then
+        info "Use external PVC"
+        DEPLOY_VARS["ENABLE_EXTERNAL_PVC"]="true"
+        return
+    fi
+
+    # No Build-In NFS provider
+    if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["NFS_SC_DNAME"]}"; then
+        error "NFS_SC is not deployed. Please deploy it first with: ./$(basename "$0") up nfs-sc"
+    fi
+
+    DEPLOY_VARS["CLAW_PVC"]="jiuwenclaw-pvc"
+}
+
+
 check_if_rabbitmq_up() {
     local name="${DEPLOY_VARS["RABBITMQ_NAME"]}"
     local user=${DEPLOY_VARS["RABBITMQ_USER"]}
@@ -177,7 +194,7 @@ check_if_mysql_up() {
     if [ -n "${DEPLOY_VARS["DB_HOST"]:-}" ]; then
         info "Use external MySQL server"
         if [ -z "${DEPLOY_VARS["DB_PORT"]:-}" ]; then
-            error "Please define DB_PORT."
+            error "Please define DB_PORT in .env.custom"
 
         fi
         DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]="true"
@@ -192,8 +209,10 @@ check_if_mysql_up() {
     info "Use built-in MySQL server"
     DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
     DEPLOY_VARS["DB_PORT"]="3306"
-    DEPLOY_VARS["DB_USER"]="root"
-    DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+    DEPLOY_VARS["MANAGER_DB_USER"]="root"
+    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+    DEPLOY_VARS["GATEWAY_DB_USER"]="root"
+    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
 }
 
 check_if_postgresql_up() {
@@ -207,7 +226,7 @@ check_if_postgresql_up() {
     if [ -n "${DEPLOY_VARS["DB_HOST"]:-}" ]; then
         info "Use external PostgreSQL server"
         if [ -z "${DEPLOY_VARS["DB_PORT"]:-}" ]; then
-            error "Please define DB_PORT."
+            error "Please define DB_PORT in .env.custom"
 
         fi
         DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]="true"
@@ -222,13 +241,17 @@ check_if_postgresql_up() {
     info "Use built-in PostgreSQL server"
     DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
     DEPLOY_VARS["DB_PORT"]="5432"
-    DEPLOY_VARS["DB_USER"]="postgres"
-    DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+    DEPLOY_VARS["MANAGER_DB_USER"]="postgres"
+    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+    DEPLOY_VARS["GATEWAY_DB_USER"]="postgres"
+    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
 }
 
 
 check_if_db_up() {
     local db_type="${DEPLOY_VARS["DB_TYPE"]}"
+    local external_mysql="${DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]}"
+    local external_postgresql="${DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]}"
 
     info "DB_TYPE: ${db_type}"
     if [ "${db_type}" == "sqlite" ]; then
@@ -236,7 +259,7 @@ check_if_db_up() {
     fi 
     check_if_${db_type}_up
 
-    if [ ${DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]} == "true" ]; then
+    if [[ ${external_mysql} == "true" || "${external_postgresql}" == "true" ]]; then
         if [ -z "${DEPLOY_VARS["MANAGER_DB_USER"]:-}" ]; then
             DEPLOY_VARS["MANAGER_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
         fi
@@ -350,23 +373,32 @@ check_nfs_up_dependency(){
     done
 }
 
+check_nfs_sc_up_dependency(){
+    check_if_nfs_up
+}
+
 check_yr_claw_up_dependency(){
     check_if_nfs_up
     check_if_yr_exist
 }
 
+
 check_gateway_up_dependency(){
-    local jiuwenclaw_path=${DEPLOY_VARS["JIUWENCLAW_PATH"]}
+    local jiuwenclaw_path="${DEPLOY_VARS["NFS_POD_PATH"]}/jiuwenclaw"
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 
-    check_if_nfs_up
+    if [ "${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" == "nfs" ]; then
+        check_if_nfs_up
 
-    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
-        info "Preparing JiuwenClaw data directory: ${jiuwenclaw_path}"
-        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
-        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}\""
-        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}"
-        success "JiuwenClaw directory created successfully in NFS Pod!"
+        if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+            info "Preparing JiuwenClaw data directory: ${jiuwenclaw_path}"
+            local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+            info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}\""
+            kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}"
+            success "JiuwenClaw directory created successfully in NFS Pod!"
+        fi
+    elif [ "${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" == "pvc" ]; then
+        check_if_nfs_sc_up
     fi
 
     check_if_db_up
@@ -386,7 +418,7 @@ check_web_up_dependency(){
 }
 
 check_rabbitmq_up_dependency(){
-    local rabbit_path=${DEPLOY_VARS["RABBITMQ_PATH"]}
+    local rabbit_path="${DEPLOY_VARS["NFS_POD_PATH"]}/${DEPLOY_VARS["RABBITMQ_NAME"]}"
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 
     check_if_nfs_up
@@ -402,7 +434,7 @@ check_rabbitmq_up_dependency(){
 }
 
 check_mysql_up_dependency(){
-    local mysql_path=${DEPLOY_VARS["MYSQL_PATH"]}
+    local mysql_path="${DEPLOY_VARS["NFS_POD_PATH"]}/${DEPLOY_VARS["MYSQL_NAME"]}"
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 
     check_if_nfs_up
@@ -418,7 +450,7 @@ check_mysql_up_dependency(){
 }
 
 check_postgresql_up_dependency(){
-    local pg_path=${DEPLOY_VARS["POSTGRES_PATH"]}
+    local pg_path="${DEPLOY_VARS["NFS_POD_PATH"]}/${DEPLOY_VARS["POSTGRES_NAME"]}"
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 
     check_if_nfs_up
@@ -434,7 +466,7 @@ check_postgresql_up_dependency(){
 }
 
 check_minio_up_dependency(){
-    local minio_path=${DEPLOY_VARS["MINIO_PATH"]}
+    local minio_path="${DEPLOY_VARS["NFS_POD_PATH"]}/${DEPLOY_VARS["MINIO_NAME"]}"
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 
     check_if_nfs_up

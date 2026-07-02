@@ -398,45 +398,43 @@ class RuntimeManagementAgentClient(AgentServerClient):
         service_concurrency = int(os.getenv("AGENT_SERVER_SERVICE_CONCURRENCY", "30"))
         service_ttl = int(os.getenv("AGENT_SERVER_SERVICE_TTL", "180"))
         autoscale_interval = float(os.getenv("AGENT_SERVER_AUTOSCALE_INTERVAL", "5"))
-        nfs_server = os.getenv("AGENT_SERVER_NFS_SERVER", "")
-        nfs_path = os.getenv("AGENT_SERVER_NFS_PATH", "/")
-        nfs_mount_path = os.getenv("AGENT_SERVER_NFS_MOUNT_PATH")
         claw_code_path = os.getenv("CLAW_CODE_PATH")
         claw_code_pod_path = os.getenv("CLAW_CODE_POD_PATH")
         runtime_code_path = os.getenv("RUNTIME_CODE_PATH")
         runtime_code_pod_path = os.getenv("RUNTIME_CODE_POD_PATH")
 
-        agent_host_mounts: list[HostPathMount] = []
-        # 只有当 claw_code_path 和 claw_code_pod_path 都配置时，才添加挂载
-        if claw_code_path and claw_code_pod_path:
-            agent_host_mounts.append(
-                HostPathMount(
-                    host_path=claw_code_path,
-                    mount_path=claw_code_pod_path,
-                    read_only=False,
-                    host_path_type="Directory"
-                )
-            )
-        # 只有当 runtime_code_path 和 runtime_code_pod_path 都配置时，才添加挂载
-        if runtime_code_path and runtime_code_pod_path:
-            agent_host_mounts.append(
-                HostPathMount(
-                    host_path=runtime_code_path+"/management/openjiuwen_runtime/management",
-                    mount_path=runtime_code_pod_path+"/management",
-                    read_only=False,
-                    host_path_type="Directory"
-                )
-            )
-            agent_host_mounts.append(
-                HostPathMount(
-                    host_path=runtime_code_path+"/foundation/openjiuwen_runtime/foundation",
-                    mount_path=runtime_code_pod_path+"/foundation",
-                    read_only=False,
-                    host_path_type="Directory"
-                )
-            )
-
         mode = os.getenv("MODE")
+        if mode == "dev":
+            agent_host_mounts: list[HostPathMount] = []
+            # 只有当 claw_code_path 和 claw_code_pod_path 都配置时，才添加挂载
+            if claw_code_path and claw_code_pod_path:
+                agent_host_mounts.append(
+                    HostPathMount(
+                        host_path=claw_code_path,
+                        mount_path=claw_code_pod_path,
+                        read_only=False,
+                        host_path_type="Directory"
+                    )
+                )
+            # 只有当 runtime_code_path 和 runtime_code_pod_path 都配置时，才添加挂载
+            if runtime_code_path and runtime_code_pod_path:
+                agent_host_mounts.append(
+                    HostPathMount(
+                        host_path=runtime_code_path+"/management/openjiuwen_runtime/management",
+                        mount_path=runtime_code_pod_path+"/management",
+                        read_only=False,
+                        host_path_type="Directory"
+                    )
+                )
+                agent_host_mounts.append(
+                    HostPathMount(
+                        host_path=runtime_code_path+"/foundation/openjiuwen_runtime/foundation",
+                        mount_path=runtime_code_pod_path+"/foundation",
+                        read_only=False,
+                        host_path_type="Directory"
+                    )
+                )
+
         node_name = os.getenv("NODE_NAME")
         ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT", "300"))
         ready_poll_interval = int(os.getenv("AGENT_SERVER_READY_POLL_INTERVAL", "5"))
@@ -642,9 +640,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
                                        if cfg.get("ready_timeout") is not None else ready_timeout),
                         ready_poll_interval=(int(cfg["ready_poll_interval"])
                                              if cfg.get("ready_poll_interval") is not None else ready_poll_interval),
-                        nfs_server=cfg.get("nfs_server") or nfs_server,
-                        nfs_path=cfg.get("nfs_path") or nfs_path,
-                        nfs_mount_path=cfg.get("nfs_mount_path") or nfs_mount_path,
+                        mount_type=os.getenv("CLAW_MOUNT_TYPE"),
+                        pvc=os.getenv("CLAW_PVC"),
+                        nfs_server=cfg.get("nfs_server") or os.getenv("CLAW_NFS_SERVER", ""),
+                        nfs_path=cfg.get("nfs_path") or os.getenv("CLAW_NFS_PATH", "/"),
+                        mount_path=cfg.get("nfs_mount_path") or os.getenv("CLAW_MOUNT_PATH"),
                         mode=cfg.get("mode") or mode,
                         node_name=cfg.get("node_name") or node_name,
                     )
@@ -678,6 +678,8 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     target_container=target_container,
                     invoke_path="",
                     ws_use_tls=False,
+                    ws_ping_interval=float(os.getenv("GATEWAY_CLAW_WS_PING_INTERVAL", "20.0")),
+                    ws_ping_timeout=float(os.getenv("GATEWAY_CLAW_WS_PING_TIMEOUT", "20.0")),
                     **_ch_kwargs,
                 )
 

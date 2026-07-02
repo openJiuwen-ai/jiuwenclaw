@@ -96,8 +96,8 @@ spec:
   persistentVolumeReclaimPolicy: Retain   # 删除 PVC 时保留数据
   storageClassName: ""                    # 不使用 StorageClass
   nfs:
-    server: <<NFS_SERVER_ADDR>>           # NFS 服务器地址
-    path: <<MYSQL_NFS_PATH>>              # NFS 共享路径
+    server: <<NFS_SERVER_ADDR>>                   # NFS 服务器地址
+    path: <<NFS_SHARE_PATH>>/<<MYSQL_NAME>>       # NFS 共享路径
     readOnly: false
   mountOptions:
     - nfsvers=4
