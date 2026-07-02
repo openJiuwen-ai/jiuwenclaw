@@ -6,7 +6,7 @@ import { ConfirmDialog } from '../../../components/ConfirmDialog';
 import { Modal } from '../../../components/Modal';
 import { JsonField, useInvalidJsonChecker } from '../../../components/JsonField';
 import { toast } from '../../../stores/uiStore';
-import { formatTime, truncate } from '../../../utils/format';
+import { truncate } from '../../../utils/format';
 import type {
   PermissionAction,
   PermissionRuleAction,
@@ -53,8 +53,6 @@ export function PermissionsTab({ instanceId }: Props) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [hasRemoteConfig, setHasRemoteConfig] = useState(false);
-  const [revision, setRevision] = useState<number | undefined>();
-  const [updatedAt, setUpdatedAt] = useState<string | null | undefined>();
   const [saving, setSaving] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -73,14 +71,10 @@ export function PermissionsTab({ instanceId }: Props) {
       const data = await PermissionsApi.get(instanceId);
       setForm(permissionsBodyToFormState(data.body ?? {}));
       setHasRemoteConfig(true);
-      setRevision(data.revision);
-      setUpdatedAt(data.updated_at);
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) {
         setForm(createDefaultPermissionsFormState());
         setHasRemoteConfig(false);
-        setRevision(undefined);
-        setUpdatedAt(undefined);
       } else {
         setLoadError(e instanceof ApiError ? e.detail : (e as Error).message);
       }
@@ -118,10 +112,8 @@ export function PermissionsTab({ instanceId }: Props) {
     }
     setSaving(true);
     try {
-      const data = await PermissionsApi.upsert(instanceId, permissionsFormStateToBody(form));
+      await PermissionsApi.upsert(instanceId, permissionsFormStateToBody(form));
       setHasRemoteConfig(true);
-      setRevision(data.revision);
-      setUpdatedAt(data.updated_at);
       toast('success', t('success.saved'));
     } catch (e) {
       toast(
@@ -138,8 +130,6 @@ export function PermissionsTab({ instanceId }: Props) {
       await PermissionsApi.remove(instanceId);
       setForm(createDefaultPermissionsFormState());
       setHasRemoteConfig(false);
-      setRevision(undefined);
-      setUpdatedAt(undefined);
       toast('success', t('instanceConfig.permissions.deleted'));
     } catch (e) {
       toast(
@@ -237,15 +227,8 @@ export function PermissionsTab({ instanceId }: Props) {
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-2">
-        {hasRemoteConfig && revision != null && (
-          <span className="text-[11px] text-muted mono">
-            rev {revision}
-            {updatedAt ? ` · ${formatTime(updatedAt)}` : ''}
-          </span>
-        )}
-        <div className="flex-1" />
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2 flex-wrap">
         <button className="btn sm" onClick={() => void reload()}>
           {t('common.refresh')}
         </button>

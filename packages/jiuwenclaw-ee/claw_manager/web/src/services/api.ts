@@ -37,6 +37,8 @@ import type {
   LogMaskingRuleCreateBody,
   LogMaskingRuleUpdateBody,
   ListItemsResult,
+  LoggingConfig,
+  LoggingConfigUpsertBody,
   PermissionsConfig,
 } from '../types';
 
@@ -720,4 +722,12 @@ export const PermissionsApi = {
     }),
   remove: (instanceId: string) =>
     http<void>(`${instanceBase(instanceId)}/permissions`, { method: 'DELETE' }),
+};
+
+export const LoggingApi = {
+  get: (instanceId: string) => http<LoggingConfig>(`${instanceBase(instanceId)}/logging`),
+  upsert: (instanceId: string, body: LoggingConfigUpsertBody) =>
+    http<LoggingConfig>(`${instanceBase(instanceId)}/logging`, { method: 'PUT', body }),
+  remove: (instanceId: string) =>
+    http<void>(`${instanceBase(instanceId)}/logging`, { method: 'DELETE' }),
 };

@@ -134,6 +134,7 @@
     "tabs": {
       "channel": "Channel",
       "logMasking": "日志脱敏",
+      "logging": "日志级别",
       "permissions": "权限配置"
     },
     "channel": {
@@ -160,6 +161,23 @@
       "source": "来源",
       "data": "扩展数据 (JSON, 可选)",
       "deleteConfirm": "确认删除该日志脱敏规则？将同步通知 Gateway。"
+    },
+    "logging": {
+      "intro": "对应 config.yaml 的 logging 段。保存后写入 Manager DB 并下发至 Gateway 热更新；未托管时使用实例本地 config.yaml。",
+      "managed": "Manager 托管",
+      "yamlFallback": "使用 config.yaml",
+      "resetToYaml": "删除托管配置",
+      "deleteConfirm": "确认删除 Manager 托管的 logging 配置？Gateway 将回退到 config.yaml。",
+      "deleted": "已删除托管配置，Gateway 将回退到 config.yaml",
+      "level": "默认级别 (level)",
+      "levelHint": "未单独指定各日志文件级别时使用",
+      "consoleLevel": "控制台级别 (console_level)",
+      "consoleLevelHint": "控制台输出；省略时沿用 level",
+      "gateway": "Gateway 日志 (gateway)",
+      "channel": "Channel 日志 (channel)",
+      "agentServer": "AgentServer 日志 (agent_server)",
+      "full": "汇总日志 (full)",
+      "fullHint": "full.log 汇总输出级别"
     },
     "permissions": {
       "sections": {
