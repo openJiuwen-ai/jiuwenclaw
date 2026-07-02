@@ -403,9 +403,9 @@ class RuntimeManagementAgentClient(AgentServerClient):
         runtime_code_path = os.getenv("RUNTIME_CODE_PATH")
         runtime_code_pod_path = os.getenv("RUNTIME_CODE_POD_PATH")
 
+        agent_host_mounts: list[HostPathMount] = []
         mode = os.getenv("MODE")
         if mode == "dev":
-            agent_host_mounts: list[HostPathMount] = []
             # 只有当 claw_code_path 和 claw_code_pod_path 都配置时，才添加挂载
             if claw_code_path and claw_code_pod_path:
                 agent_host_mounts.append(
