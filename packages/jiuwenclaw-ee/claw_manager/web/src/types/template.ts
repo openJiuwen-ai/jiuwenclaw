@@ -146,7 +146,7 @@ export interface ServiceConfigTemplateCreateBody {
   template_name: string;
   description?: string;
   agent_image: string;
-  namespace: string;
+  namespace?: string;
   pod_name?: string;
   container_name: string;
   container_port: number;

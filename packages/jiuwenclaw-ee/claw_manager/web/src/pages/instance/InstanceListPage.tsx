@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { InstanceApi, SystemApi } from '../../services/api';
+import { InstanceApi } from '../../services/api';
 import type { InstanceSummary } from '../../types';
 import { useAsync } from '../../hooks/useAsync';
 import { useListSearch } from '../../hooks/useListSearch';
@@ -16,6 +16,7 @@ import {
 } from '../../components/TableColumnSort';
 import { TableColumnFilter } from '../../components/TableColumnFilter';
 import { formatTime, relativeTime } from '../../utils/format';
+import { getAllowLocalProvision } from '../../utils/env';
 import { toast } from '../../stores/uiStore';
 import { ApiError } from '../../services/api';
 import { CreateInstanceModal } from './modal/CreateInstanceModal';
@@ -366,8 +367,7 @@ export function InstanceListPage() {
   const apiSortOrder =
     viewMode === 'brief' ? 'desc' : sortBy ? sortOrder : undefined;
 
-  const systemHealth = useAsync(() => SystemApi.health(), []);
-  const allowLocalProvision = systemHealth.data?.allow_local_provision === true;
+  const allowLocalProvision = getAllowLocalProvision();
 
   const instances = useAsync(
     () =>

@@ -72,8 +72,8 @@
     "placeholderProcessing": "Processing, enter to interrupt...",
     "placeholderProcessingQueue": "Processing, new input will join the queue...",
     "placeholderVoice": "Listening...",
-    "welcomeLogoAlt": "JiuwenClaw logo",
-    "welcomeHeading": "Hi, I'm JiuwenClaw. Nice to meet you!",
+    "welcomeLogoAlt": "{{productName}} logo",
+    "welcomeHeading": "Hi, I'm {{productName}}. Nice to meet you!",
     "welcomeSubtext": "I can answer questions, clear up confusion, and help you complete tasks.",
     "welcomeSuggestions": {
       "journey": "Let's begin a brand-new journey!",
@@ -713,7 +713,7 @@
       "url": "URL",
       "installTimeout": "SkillNet install timed out (it may still be running). Refresh the skill list later.",
       "usageNoticeTitle": "Notes",
-      "usageNotice1": "Installing a skill downloads files from GitHub. <strong>Ensure the machine running JiuwenClaw can reach GitHub</strong> (network / proxy).",
+      "usageNotice1": "Installing a skill downloads files from GitHub. <strong>Ensure the machine running {{productName}} can reach GitHub</strong> (network / proxy).",
       "usageNotice2": "GitHub’s API limits anonymous (unauthenticated) use to about 60 requests per hour per IP. If install fails with rate limiting, wait and retry later. For increased rate limits, configure github_token on the <configLink>configuration page</configLink>.",
       "configPageLinkAria": "Go to configuration page",
       "usageNotice3": "SkillNet search uses a public service; timeouts or errors may be due to network congestion or server load—try again later.",
@@ -825,7 +825,7 @@
     "markdownOnly": "Only Markdown/JSON (.md/.mdx/.json) preview is supported",
     "errors": {
       "refreshFailed": "Refresh failed: unable to rebuild the agent file index. Check the generator script logs.",
-      "loadFailed": "Unable to read the agent file list. Check whether agent/jiuwenclaw_workspace/agent-data.json has been generated."
+      "loadFailed": "Unable to read the agent file list. Check whether agent/jiuwenswarm_workspace/agent-data.json has been generated."
     }
   },
   "fileViewer": {
@@ -969,7 +969,7 @@
   },
   "version": "Version {{version}}",
   "app": {
-    "title": "JiuwenClaw",
+    "title": "{{productName}}",
     "subtitle": "AI Assistant",
     "errorTitle": "Application Error",
     "unknownError": "Unknown error",
@@ -1000,7 +1000,7 @@
     "helpTitle": "Usage Guide",
     "help0": "Extension folder must contain rail.py as the entry file",
     "help1": "Rail extension files must inherit from DeepAgentRail or AgentRail base class",
-    "help2": "Extension files are saved to ~/.jiuwenclaw/agent/jiuwenclaw_workspace/extensions/ directory"
+    "help2": "Extension files are saved to ~/.jiuwenswarm/agent/jiuwenswarm_workspace/extensions/ directory"
   },
   "ownerScopes": {
     "title": "Avatar Permission",

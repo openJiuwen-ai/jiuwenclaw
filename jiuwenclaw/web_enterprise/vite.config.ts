@@ -493,7 +493,10 @@ const uploadApiTarget =
   process.env.JIUWENCLAW_WEB_UPLOAD_TARGET ||
   `http://127.0.0.1:${process.env.JIUWENCLAW_WEB_UPLOAD_PORT || '5174'}`
 
+const repoEnvDir = path.resolve(__dirname, '../..')
+
 export default defineConfig({
+  envDir: repoEnvDir,
   plugins: [
     suppressWsProxySocketErrors(),
     devWsTrafficLogger(),

@@ -72,8 +72,8 @@
     "placeholderProcessing": "处理中，输入新指令可中断...",
     "placeholderProcessingQueue": "处理中，输入新指令将加入等待队列...",
     "placeholderVoice": "正在听取语音...",
-    "welcomeLogoAlt": "JiuwenClaw 标志",
-    "welcomeHeading": "你好，我是JiuwenClaw，很高兴认识你！",
+    "welcomeLogoAlt": "{{productName}} 标志",
+    "welcomeHeading": "你好，我是{{productName}}，很高兴认识你！",
     "welcomeSubtext": "我可以帮你回答问题，解决疑惑，还可以帮你完成一些任务。",
     "welcomeSuggestions": {
       "journey": "让我们开启一段新的旅程吧！",
@@ -713,7 +713,7 @@
       "url": "地址",
       "installTimeout": "SkillNet 安装超时（后台可能仍在进行），请稍后刷新技能列表",
       "usageNoticeTitle": "提示",
-      "usageNotice1": "从 SkillNet 安装技能时，文件实际从 GitHub 下载，<strong>请保证运行 JiuwenClaw 的环境能访问 GitHub</strong>（网络、代理等）。",
+      "usageNotice1": "从 SkillNet 安装技能时，文件实际从 GitHub 下载，<strong>请保证运行 {{productName}} 的环境能访问 GitHub</strong>（网络、代理等）。",
       "usageNotice2": "从 GitHub 拉取依赖其 API：未认证（匿名）约 60 次/小时/本机 IP；若安装失败并提示限流，请隔一段时间再试。如需提高速率限制，请在<configLink>配置页面</configLink>中配置 github_token。",
       "configPageLinkAria": "前往配置页面",
       "usageNotice3": "SkillNet 在线搜索走公网服务，若出现超时或失败，可能是网络拥堵或服务繁忙，请稍后再试。",
@@ -825,7 +825,7 @@
     "markdownOnly": "仅支持 Markdown/JSON（.md/.mdx/.json）预览",
     "errors": {
       "refreshFailed": "刷新失败：无法重建 agent 文件索引，请检查生成脚本日志。",
-      "loadFailed": "无法读取 agent 文件列表，请检查 agent/jiuwenclaw_workspace/agent-data.json 是否已生成。"
+      "loadFailed": "无法读取 agent 文件列表，请检查 agent/jiuwenswarm_workspace/agent-data.json 是否已生成。"
     }
   },
   "fileViewer": {
@@ -969,7 +969,7 @@
   },
   "version": "版本 {{version}}",
   "app": {
-    "title": "JiuwenClaw",
+    "title": "{{productName}}",
     "subtitle": "AI Assistant",
     "errorTitle": "应用加载出错",
     "unknownError": "未知错误",
@@ -1000,7 +1000,7 @@
     "helpTitle": "使用说明",
     "help0": "扩展文件夹必须包含 rail.py 作为入口文件",
     "help1": "Rail 扩展文件必须继承 DeepAgentRail 或 AgentRail 基类",
-    "help2": "扩展文件会被保存到 ~/.jiuwenclaw/agent/jiuwenclaw_workspace/extensions/ 目录"
+    "help2": "扩展文件会被保存到 ~/.jiuwenswarm/agent/jiuwenswarm_workspace/extensions/ 目录"
   },
   "ownerScopes": {
     "title": "分身权限配置",

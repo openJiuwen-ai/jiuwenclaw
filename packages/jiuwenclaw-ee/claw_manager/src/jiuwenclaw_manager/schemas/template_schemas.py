@@ -238,7 +238,7 @@ class ServiceConfigTemplateCreateBody(BaseModel):
     template_name: str = Field(..., min_length=1, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     agent_image: str = Field(..., max_length=512)
-    namespace: str = Field(..., max_length=128)
+    namespace: str = Field(default="default", max_length=128)
     pod_name: str | None = Field(default=None, max_length=128)
     container_name: str = Field(..., max_length=128)
     container_port: int = Field(..., ge=1, le=65535)

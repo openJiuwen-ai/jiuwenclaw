@@ -4,6 +4,7 @@ import { Sidebar } from './components/Sidebar';
 import { Toaster } from './components/Toaster';
 import { ThemeToggle } from './components/ThemeToggle';
 import { LanguageSwitcher } from './components/LanguageSwitcher';
+import { getProductName } from './utils/env';
 import { OverviewPage } from './pages/OverviewPage';
 import { InstanceListPage } from './pages/instance/InstanceListPage';
 import { InstanceDetailPage } from './pages/instance/InstanceDetailPage';
@@ -91,7 +92,7 @@ function Shell() {
     <div className="shell">
       <header className="topbar">
         <div className="brand">
-          <img src="/logo.png" alt="JiuwenClaw" className="brand-logo-img" />
+          <img src="/logo.png" alt={getProductName()} className="brand-logo-img" />
           <div className="brand-text">
             <span className="brand-title">
               {t('brand.title')}

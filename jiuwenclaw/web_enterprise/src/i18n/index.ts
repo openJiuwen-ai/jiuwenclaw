@@ -3,6 +3,9 @@ import { initReactI18next } from 'react-i18next';
 import LanguageDetector from 'i18next-browser-languagedetector';
 import zh from './locales/zh.json';
 import en from './locales/en.json';
+import { getProductName } from '../utils/env';
+
+const productName = getProductName();
 
 const resources = {
   zh: { translation: zh },
@@ -18,6 +21,9 @@ i18n
     supportedLngs: ['zh', 'en'],
     interpolation: {
       escapeValue: false,
+      defaultVariables: {
+        productName,
+      },
     },
     detection: {
       order: ['localStorage', 'navigator'],

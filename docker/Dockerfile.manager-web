@@ -1,6 +1,9 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
+ARG VITE_PRODUCT_NAME=JiuwenSwarm
+ENV VITE_PRODUCT_NAME=${VITE_PRODUCT_NAME}
+
 RUN useradd --create-home --shell /bin/bash app
 
 WORKDIR /app/jiuwenclaw

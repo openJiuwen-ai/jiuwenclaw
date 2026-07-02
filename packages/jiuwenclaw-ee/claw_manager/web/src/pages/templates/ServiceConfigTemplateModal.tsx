@@ -21,7 +21,6 @@ interface FormState {
   template_name: string;
   description: string;
   agent_image: string;
-  namespace: string;
   pod_name: string;
   container_name: string;
   container_port: number;
@@ -80,7 +79,6 @@ const empty: FormState = {
   template_name: '',
   description: '',
   agent_image: '',
-  namespace: 'jiuwenclaw',
   pod_name: '',
   container_name: 'agentserver',
   container_port: 8080,
@@ -147,7 +145,6 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
         template_name: template.template_name,
         description: template.description ?? '',
         agent_image: template.agent_image,
-        namespace: template.namespace,
         pod_name: template.pod_name ?? '',
         container_name: template.container_name,
         container_port: template.container_port,
@@ -204,7 +201,6 @@ export function ServiceConfigTemplateModal({ open, template, onClose, onSaved }:
       template_name: form.template_name.trim(),
       description: opt(form.description),
       agent_image: form.agent_image.trim(),
-      namespace: form.namespace.trim(),
       pod_name: opt(form.pod_name),
       container_name: form.container_name.trim(),
       container_port: form.container_port,

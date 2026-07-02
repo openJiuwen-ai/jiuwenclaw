@@ -143,7 +143,7 @@ async function http<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 // ---------- System ----------
 
 export const SystemApi = {
-  health: () => http<{ status: string; allow_local_provision?: boolean }>('/health'),
+  health: () => http<{ status: string }>('/health'),
   managerWsStatus: () => http<ManagerWsStatus>('/manager-ws/status'),
 };
 
@@ -276,7 +276,6 @@ export const ServiceConfigTemplateApi = {
     page?: number;
     page_size?: number;
     enabled?: boolean;
-    namespace?: string;
     search?: string;
     sort_by?: 'template_name' | 'description' | 'agent_image' | 'updated_at';
     sort_order?: 'asc' | 'desc';

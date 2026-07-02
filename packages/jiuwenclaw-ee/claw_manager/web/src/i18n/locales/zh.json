@@ -41,7 +41,7 @@
     "daysAgo": "{{count}}d 前"
   },
   "brand": {
-    "title": "JiuwenClaw",
+    "title": "{{productName}}",
     "sub": "Claw Manager"
   },
   "nav": {
@@ -74,7 +74,7 @@
   },
   "topology": {
     "title": "实例管理",
-    "subtitle": "管理 JiuwenClaw 实例",
+    "subtitle": "管理 {{productName}} 实例",
     "createInstance": "新建实例",
     "provisionLocal": "本地一键拉起",
     "instanceStatus": "实例状态",
@@ -240,7 +240,6 @@
     "fieldRequired": "请填写{{field}}",
     "searchPlaceholder": "搜索模板 ID、模板名称、模板描述、AgentServer镜像",
     "agentImage": "AgentServer镜像",
-    "namespace": "Namespace",
     "podName": "Pod名称",
     "containerName": "容器名称",
     "containerPort": "容器端口",
@@ -274,7 +273,6 @@
     "sessionTtl": "会话TTL（秒）",
     "poolRange": "空闲/最大",
     "updatedAt": "修改时间",
-    "filterNamespace": "按 Namespace 筛选",
     "sectionContainer": "容器与K8S",
     "sectionReadiness": "就绪探针",
     "sectionNfs": "NFS存储",

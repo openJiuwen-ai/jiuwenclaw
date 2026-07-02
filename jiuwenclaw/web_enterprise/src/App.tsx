@@ -36,6 +36,7 @@ import {
 } from './stores';
 import { useTranslation } from 'react-i18next';
 import i18n from './i18n';
+import { getProductName } from './utils/env';
 import './App.css';
 
 type MainNavKey = 'chat';
@@ -1051,7 +1052,7 @@ function AppContent() {
           <div className="brand">
             <img src="/logo.png" alt="OpenJiuwen" className="brand-logo-img" />
             <div className="brand-text">
-              <span className="brand-title">JiuwenClaw</span>
+              <span className="brand-title">{getProductName()}</span>
               <span className="brand-sub">AI Assistant</span>
             </div>
           </div>

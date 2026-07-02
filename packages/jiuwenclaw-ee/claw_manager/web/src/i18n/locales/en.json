@@ -41,7 +41,7 @@
     "daysAgo": "{{count}}d ago"
   },
   "brand": {
-    "title": "JiuwenClaw",
+    "title": "{{productName}}",
     "sub": "Claw Manager"
   },
   "nav": {
@@ -74,7 +74,7 @@
   },
   "topology": {
     "title": "Instance Management",
-    "subtitle": "Manage JiuwenClaw instances",
+    "subtitle": "Manage {{productName}} instances",
     "createInstance": "Create Instance",
     "provisionLocal": "Provision Locally",
     "instanceStatus": "Status",
@@ -240,7 +240,6 @@
     "fieldRequired": "Please fill in {{field}}",
     "searchPlaceholder": "Search template ID, name, description, AgentServer image",
     "agentImage": "AgentServer Image",
-    "namespace": "Namespace",
     "podName": "Pod Name",
     "containerName": "Container Name",
     "containerPort": "Container Port",
@@ -274,7 +273,6 @@
     "sessionTtl": "Session TTL (s)",
     "poolRange": "Idle / Max",
     "updatedAt": "UPDATED AT",
-    "filterNamespace": "Filter by namespace",
     "sectionContainer": "Container & K8s",
     "sectionReadiness": "Readiness Probe",
     "sectionNfs": "NFS Storage",
