@@ -42,6 +42,7 @@ export interface CommandContext {
     attachments?: FileAttachment[],
     mode?: ClientMode,
     options?: { logAsUser?: boolean },
+    skills?: string[],
   ) => string | null;
   sessionId: string;
   preferredLanguage: PreferredLanguage;

@@ -559,8 +559,17 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
 
 
 def build_user_prompt(content: str | dict, files: dict, channel: str, language: str, *,
-    trusted_dirs: list[str] | None = None, metadata: dict[str, Any] | None = None) -> str:
-    """Build user prompt for the agent."""
+    trusted_dirs: list[str] | None = None, metadata: dict[str, Any] | None = None,
+    skills: list[str] | None = None) -> str:
+    """Build user prompt for the agent.
+
+    Args:
+        skills: 显式传入的 skill 名列表（来自 params.skills，前端从 content 提取）。
+            若提供，直接作为 skills_to_use，且 **不再对 content 做 /skills use 剥离**
+            （content 原样保留，如 "帮我用 /doc写文档"）。
+            若为 None，回退到从 content 文本解析 /skills use（兼容 IM/CLI 老路径），
+            同样不剥离 content，仅提取 skill 名。
+    """
     from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
 
     a2ui_prompt = build_user_prompt_if_a2ui_event(content, channel=channel, language=language)
@@ -573,19 +582,24 @@ def build_user_prompt(content: str | dict, files: dict, channel: str, language: 
         if interaction_ctx:
             interaction_prefix = f"\n{interaction_ctx}\n\n"
 
+    # skills 来源：优先显式参数（params.skills），否则回退从 content 文本解析（兼容老路径）。
+    # 两条路径都 **不剥离 content**——skill 名单独进 skills_to_use，content 原样保留语义通顺。
+    skills_to_use: list[str]
+    if skills:
+        skills_to_use = skills
+    elif isinstance(content, str):
+        parsed_skills, _stripped = _handle_skills_use_slash_command(content)
+        skills_to_use = parsed_skills  # 仅取 skill 名，忽略 _stripped（content 不剥离）
+    else:
+        skills_to_use = []
+
     if isinstance(content, str):
-        skills_to_use, new_content = _handle_skills_use_slash_command(content)
-        if new_content:
-            content = new_content
         # /statusline <prompt> prompt-type 命令（仿 Claude Code，不调用 /skills）
         statusline_prompt, statusline_content = _handle_statusline_prompt_command(content)
         if statusline_prompt:
             content = statusline_content
     else:
-        skills_to_use = []
-
-    # /skills use 命令的 skills_to_use 仍然保留（供 SkillUseRail 正常流程使用）
-    # /statusline 不走 SkillUseRail，直接注入 prompt 文本（见下方拼接）
+        statusline_prompt = ""
 
     if language == "zh":
         prompt = "你收到一条消息：\n"
@@ -794,10 +808,11 @@ class JiuWenSwarm:
     def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, str]:
         """构建 adapter 所需的 inputs 字典."""
         from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+        from jiuwenswarm.common.schema.chat_send import ChatSendParams
 
         config_base = get_config()
         memory_mode = get_memory_mode(config_base)
-        params = request.params if isinstance(request.params, dict) else {}
+        params: ChatSendParams = request.params if isinstance(request.params, dict) else {}
         query = params.get("query")
         if query is None or query == "":
             query = params.get("content", "")
@@ -813,6 +828,12 @@ class JiuWenSwarm:
             for d in raw_trusted_dirs:
                 if isinstance(d, str) and d.strip():
                     trusted_dirs.append(d.strip())
+        # 用户选中的 skill 名列表（前端从 content 提取，如 /doc /review）。
+        # 若提供，build_user_prompt 直接用作 skills_to_use、且不剥离 content。
+        skills: list[str] | None = None
+        raw_skills = params.get("skills")
+        if isinstance(raw_skills, list):
+            skills = [s.strip() for s in raw_skills if isinstance(s, str) and s.strip()] or None
         metadata = request.metadata or {}
         param_project_dir = params.get("project_dir")
         metadata_project_dir = metadata.get("project_dir") if isinstance(metadata, dict) else None
@@ -863,6 +884,7 @@ class JiuWenSwarm:
                         language=language,
                         trusted_dirs=trusted_dirs,
                         metadata=request.metadata,
+                        skills=skills,
                     )
             else:
                 final_query = build_user_prompt(
@@ -872,6 +894,7 @@ class JiuWenSwarm:
                     language=language,
                     trusted_dirs=trusted_dirs,
                     metadata=request.metadata,
+                    skills=skills,
                 )
                 # 调试日志：确认 /statusline prompt 注入是否生效
                 if isinstance(query, str) and "/statusline" in query:
