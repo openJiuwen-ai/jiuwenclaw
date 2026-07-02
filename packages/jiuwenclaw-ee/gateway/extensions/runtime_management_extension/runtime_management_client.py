@@ -46,6 +46,9 @@ from openjiuwen_runtime.management.session.service_manager import (
     QueueItem,
     ServiceManager,
 )
+from openjiuwen_runtime.management.session.session_runtime_manager import (
+    SessionRuntimeManager,
+)
 from openjiuwen_runtime.management.session.timer import Timer
 from openjiuwen_runtime.management.session.ws_client_channel import (
     WSServiceMessageChannel,
@@ -704,10 +707,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
             service_templates = await load_all_service_configs()
             # 每次创建 ServiceManager 时使用新的队列实例，避免热更新时队列被关闭导致后续请求失败
             new_dual_q = PriorityDualAsyncQueues(1000, 100)
-            return ServiceManager(
+            new_timer = Timer()
+            sm = ServiceManager(
                 service_factory=factory,
                 dual_queue=new_dual_q,
-                timer=Timer(),
+                timer=new_timer,
                 service_concurrency=service_concurrency,
                 min_idle_services=min_idle_services,
                 max_services=max_services,
@@ -718,6 +722,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 kubeconfig=_client.kubeconfig,
                 deploy_mode=_client.deploy_mode,
             )
+            # 构造 session 编排层并双向注入（打破构造期循环依赖）
+            srt = SessionRuntimeManager(new_timer, sm)
+            sm.set_session_runtime(srt)
+            return sm
 
         self._create_service_manager = create_service_manager
         self._access: Any = Access(create_service_manager)
