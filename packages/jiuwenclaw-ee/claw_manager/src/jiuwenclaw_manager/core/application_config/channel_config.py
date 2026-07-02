@@ -27,6 +27,7 @@ def _row_to_dict(obj: Any) -> dict[str, Any]:
     config = dict(raw_cfg) if isinstance(raw_cfg, dict) else raw_cfg
     return {
         "id": getattr(obj, "id"),
+        "jiuwenclaw_id": getattr(obj, "jiuwenclaw_id"),
         "channel_id": getattr(obj, "channel_id"),
         "channel_name": getattr(obj, "channel_name"),
         "channel_type": getattr(obj, "channel_type"),

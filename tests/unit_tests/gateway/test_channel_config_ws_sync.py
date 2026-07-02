@@ -65,6 +65,7 @@ def _make_handler(
 def _row_obj(**kwargs: object) -> SimpleNamespace:
     defaults = {
         "id": 1,
+        "jiuwenclaw_id": "test-jid",
         "channel_id": "feishu-1",
         "channel_name": "Feishu",
         "channel_type": "feishu",
@@ -90,6 +91,11 @@ async def test_ws_sync_create_triggers_active_reload(channel_config_sync_module)
             channel_config_sync_module,
             "ensure_db_handler",
             AsyncMock(return_value=handler),
+        ),
+        patch.object(
+            channel_config_sync_module,
+            "get_jiuwenclaw_id",
+            return_value="test-jid",
         ),
         patch.object(channel_config_sync_module, "maybe_trigger_channel_config_reload", reload),
     ):
@@ -128,6 +134,11 @@ async def test_ws_sync_deactivate_triggers_remove_reload(channel_config_sync_mod
             "ensure_db_handler",
             AsyncMock(return_value=handler),
         ),
+        patch.object(
+            channel_config_sync_module,
+            "get_jiuwenclaw_id",
+            return_value="test-jid",
+        ),
         patch.object(channel_config_sync_module, "maybe_trigger_channel_config_reload", reload),
     ):
         result = await apply_channel_config(
@@ -151,6 +162,11 @@ async def test_ws_sync_delete_triggers_remove_reload(channel_config_sync_module)
             channel_config_sync_module,
             "ensure_db_handler",
             AsyncMock(return_value=handler),
+        ),
+        patch.object(
+            channel_config_sync_module,
+            "get_jiuwenclaw_id",
+            return_value="test-jid",
         ),
         patch.object(channel_config_sync_module, "maybe_trigger_channel_config_reload", reload),
     ):

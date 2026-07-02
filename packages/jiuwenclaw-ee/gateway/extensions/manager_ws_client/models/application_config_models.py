@@ -17,6 +17,7 @@ CHANNEL_CONFIG_TABLE_DEF = TableDefinition(
             autoincrement=True,
             nullable=False,
         ),
+        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("channel_id", "string", length=64, nullable=False),
         ColumnDefinition("channel_name", "string", length=128, nullable=False),
         ColumnDefinition("channel_type", "string", length=32, nullable=False),
@@ -27,7 +28,7 @@ CHANNEL_CONFIG_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
-        IndexDefinition(["channel_id"], unique=True),
+        IndexDefinition(["jiuwenclaw_id", "channel_id"], unique=True),
     ],
 )
 
