@@ -99,6 +99,12 @@
       "sourcePrompt": "来源请求：{{prompt}}",
       "noDetail": "后端未提供更详细的任务描述"
     },
+    "contextCompression": {
+      "running": "正在压缩上下文",
+      "completed": "上下文压缩完成 {{count}} 次",
+      "failed": "上下文压缩失败",
+      "close": "关闭上下文压缩提示"
+    },
     "elapsed": {
       "daysHours": "{{days}}天{{hours}}小时",
       "hoursMinutes": "{{hours}}h{{minutes}}m",
@@ -1066,6 +1072,7 @@
       "building": "构建中...",
       "buildFailed": "构建失败",
       "lastBuildFailedUsingExisting": "上次重新构建失败，当前仍在使用上一次成功构建的索引。",
+      "lastBuildCancelledUsingExisting": "上次重新构建已取消，当前仍在使用上一次成功构建的索引。",
       "cancel": "取消构建",
       "cancelling": "取消中...",
       "cancelled": "构建已取消",
@@ -1139,6 +1146,7 @@
       "nodeCategory": "分类",
       "nodeKeywords": "关键词",
       "nodeExamples": "示例",
+      "disabledSkill": "已禁用",
       "nodeTypes": {
         "branch": "分支",
         "skill": "技能"
@@ -1488,7 +1496,8 @@
       "accept": "接收",
       "reject": "拒绝",
       "allowOnce": "本次允许",
-      "alwaysAllow": "总是允许",
+      "sessionAllow": "会话内记住",
+      "alwaysAllow": "永久记住",
       "acceptAll": "全部接收",
       "submit": "确认提交",
       "entryCount": "共 {{count}} 条演进经验"

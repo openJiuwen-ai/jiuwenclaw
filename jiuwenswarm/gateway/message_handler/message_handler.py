@@ -33,6 +33,7 @@ from jiuwenswarm.gateway.message_handler.evolution_approval import (
 )
 from jiuwenswarm.gateway.message_handler.prompts.review_prompt import build_review_prompt
 from jiuwenswarm.gateway.message_handler.prompts.security_review_prompt import (
+    GitPreExecError,
     build_security_review_prompt,
 )
 from jiuwenswarm.extensions.hook_event import GatewayHookEvents
@@ -903,7 +904,7 @@ class MessageHandler(ABC):
     def _build_mode_change_notice_text(mode_label: str) -> str:
         return f"[收到 CLI 指令], mode 已变更为 {mode_label}"
 
-    def _handle_channel_control(self, msg: "Message") -> bool:
+    async def _handle_channel_control(self, msg: "Message") -> bool:
         r"""处理 \new_session / \mode / \skills 指令.
 
         Returns:
@@ -1209,7 +1210,27 @@ class MessageHandler(ABC):
 
         if parsed.action is ParsedControlAction.SECURITY_REVIEW_OK:
             extra_arg = parsed.security_review_arg or ""
-            security_prompt = build_security_review_prompt(extra_arg)
+            cwd = (
+                msg.metadata.get("cwd")
+                if isinstance(msg.metadata, dict)
+                else None
+            )
+            try:
+                # 在注入阶段预执行只读 git 命令并把输出内联进 prompt；
+                # 任一命令非零退出（如 origin/HEAD 未设置 / 无共同历史）即中止，
+                # 不转发给 Agent。
+                # 跑在 executor 里，避免 4×30s 同步 subprocess 阻塞转发循环。
+                security_prompt = await asyncio.get_event_loop().run_in_executor(
+                    None, build_security_review_prompt, extra_arg, cwd
+                )
+            except GitPreExecError as exc:
+                await self._send_channel_notice(
+                    user_infos,
+                    ch,
+                    msg.session_id,
+                    f"/security-review 无法执行：{exc}",
+                )
+                return True
             if msg.params is None:
                 msg.params = {}
             msg.params["query"] = security_prompt
@@ -2551,7 +2572,7 @@ class MessageHandler(ABC):
                 
          
                 # 先处理受控通道的 Channel 控制指令（如 /new_session、/mode、/skills list）
-                if self._handle_channel_control(msg):
+                if await self._handle_channel_control(msg):
                     # 该消息仅用于修改 session/mode，已给 Channel 回复提示，不再转发给 Agent
                     continue
 
@@ -2847,7 +2868,31 @@ class MessageHandler(ABC):
                                 continue
                             elif parsed.action is ParsedControlAction.SECURITY_REVIEW_OK:
                                 extra_arg = parsed.security_review_arg or ""
-                                security_prompt = build_security_review_prompt(extra_arg)
+                                cwd = (
+                                    msg.metadata.get("cwd")
+                                    if isinstance(msg.metadata, dict)
+                                    else None
+                                )
+                                try:
+                                    # 预执行只读 git 并内联输出；
+                                    # 失败则发 notice 中止，不转发给 Agent。
+                                    # 跑在 executor 里，避免 4×30s 同步 subprocess 阻塞转发循环。
+                                    security_prompt = (
+                                        await asyncio.get_event_loop().run_in_executor(
+                                            None,
+                                            build_security_review_prompt,
+                                            extra_arg,
+                                            cwd,
+                                        )
+                                    )
+                                except GitPreExecError as exc:
+                                    await self._send_channel_notice(
+                                        {"id": msg.id, "meta_data": msg.metadata},
+                                        msg.channel_id,
+                                        msg.session_id,
+                                        f"/security-review 无法执行：{exc}",
+                                    )
+                                    continue
                                 msg.params = dict(msg.params)
                                 msg.params["query"] = security_prompt
                                 if "content" in msg.params:

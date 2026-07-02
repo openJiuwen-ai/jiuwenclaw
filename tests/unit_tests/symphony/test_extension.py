@@ -17,6 +17,7 @@ from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.symphony.config import symphony_config_from_dict
+from jiuwenswarm.symphony.orchestration.artifacts import ScoreArtifacts
 
 
 class _Registry:
@@ -174,10 +175,15 @@ def test_plan_passes_candidate_skill_ids(monkeypatch, tmp_path):
         "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
         lambda: object(),
     )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_execution_disabled_skills",
+        lambda: ["skill-b"],
+    )
 
     async def fake_plan_from_score(score_dir, query, received_llm_config, **kwargs):
         del score_dir, query, received_llm_config
         seen["candidate_skill_ids"] = kwargs["candidate_skill_ids"]
+        seen["disabled_skill_names"] = kwargs["disabled_skill_names"]
         return {
             "status": "ready",
             "recommended_plans": [],
@@ -200,6 +206,77 @@ def test_plan_passes_candidate_skill_ids(monkeypatch, tmp_path):
 
     assert result["success"] is True
     assert seen["candidate_skill_ids"] == ["skill-a", "skill-b"]
+    assert seen["disabled_skill_names"] == ["skill-b"]
+
+
+def test_graph_filters_disabled_skills_from_visual_payload(monkeypatch, tmp_path):
+    configured_score_dir = tmp_path / "configured"
+    artifacts = ScoreArtifacts(
+        score_dir=configured_score_dir,
+        manifest={},
+        skills=[
+            {"id": "skill-a", "name": "Alpha Skill"},
+            {"id": "skill-b", "name": "Beta Skill"},
+            {"id": "skill-c", "name": "Gamma Skill"},
+        ],
+        graph={
+            "nodes": [
+                {"id": "skill:skill-a", "type": "skill"},
+                {"id": "skill:skill-b", "type": "skill"},
+                {"id": "skill:skill-c", "type": "skill"},
+            ],
+            "edges": [
+                {"source": "skill:skill-a", "target": "skill:skill-b"},
+                {"source": "skill:skill-a", "target": "skill:skill-c"},
+                {"source": "skill:skill-b", "target": "skill:skill-c"},
+            ],
+        },
+        lookup={
+            "by_output": {
+                "draft": ["skill-a"],
+                "review": ["skill-b"],
+            },
+            "neighbors": {
+                "skill-a": ["skill-b", "skill-c"],
+                "skill-b": ["skill-c"],
+            },
+            "by_text_term": {
+                "alpha": ["skill-a", "skill-b"],
+                "beta": ["skill-b"],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {"paths": {"score_dir": str(configured_score_dir)}}
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_score_artifacts",
+        lambda score_dir: artifacts,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_execution_disabled_skills",
+        lambda: ["Beta Skill"],
+    )
+
+    result = asyncio.run(SymphonyExtension().graph({}))
+
+    assert result["success"] is True
+    assert [skill["id"] for skill in result["skills"]] == ["skill-a", "skill-c"]
+    assert [node["id"] for node in result["graph"]["nodes"]] == [
+        "skill:skill-a",
+        "skill:skill-c",
+    ]
+    assert result["graph"]["edges"] == [
+        {"source": "skill:skill-a", "target": "skill:skill-c"}
+    ]
+    assert result["score_lookup"] == {
+        "by_output": {"draft": ["skill-a"]},
+        "neighbors": {"skill-a": ["skill-c"]},
+        "by_text_term": {"alpha": ["skill-a"]},
+    }
 
 
 def test_plan_rejects_requested_beam_mode(monkeypatch, tmp_path):

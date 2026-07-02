@@ -204,6 +204,74 @@ async def _connect_with_retry(
             await asyncio.sleep(interval)
 
 
+def _exec_gateway_restart() -> None:
+    logger.info("[App] .env updated, restarting Gateway...")
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
+@dataclass
+class GatewayRestartRequest:
+    requested: bool = False
+    ready_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+def _schedule_gateway_restart(
+        restart_request: GatewayRestartRequest | None = None,
+        *,
+        delay: float = 2.0,
+) -> None:
+    if restart_request is not None:
+        restart_request.requested = True
+
+    def _request_restart() -> None:
+        if restart_request is not None:
+            restart_request.ready_event.set()
+            return
+        _exec_gateway_restart()
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.call_later(delay, _request_restart)
+    except RuntimeError:
+        _request_restart()
+
+
+async def _wait_for_gateway_tasks_or_restart(
+        tasks_to_wait: list[asyncio.Task],
+        restart_request: GatewayRestartRequest,
+) -> bool:
+    restart_task = asyncio.create_task(restart_request.ready_event.wait(), name="gateway-restart")
+    service_tasks = set(tasks_to_wait)
+    wait_tasks = set(service_tasks)
+    wait_tasks.add(restart_task)
+    try:
+        while wait_tasks:
+            done, _ = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
+            if restart_task in done:
+                return restart_request.requested or restart_request.ready_event.is_set()
+            for task in done:
+                wait_tasks.discard(task)
+                service_tasks.discard(task)
+                if task.cancelled():
+                    raise asyncio.CancelledError
+                exc = task.exception()
+                if exc is not None:
+                    if restart_request.requested:
+                        logger.warning("[App] service task failed while Gateway restart is pending: %s", exc)
+                        return True
+                    raise exc
+            if not service_tasks:
+                return restart_request.requested or restart_request.ready_event.is_set()
+        return restart_request.requested or restart_request.ready_event.is_set()
+    finally:
+        if not restart_task.done():
+            restart_task.cancel()
+            try:
+                await restart_task
+            except asyncio.CancelledError:
+                pass
+
+
 @dataclass
 class RouteConfig:
     """单条路由的配置（/acp, /cli 等）。"""
@@ -274,6 +342,25 @@ class GatewayServer:
             client_ws for key, client_ws in self._session_to_client.items()
             if isinstance(key, tuple) and key[0] == channel_id and not getattr(client_ws, "closed", False)
         ]
+
+    def get_active_session_ids(self, channel_id: str, exclude_ws: Any = None) -> set[str]:
+        """返回当前已绑定到活跃连接的 session_id 集合（排除 exclude_ws 自身）。
+
+        用于 /resume 冲突检测：当目标 session 已在另一个 TUI 窗口打开时，
+        前端可据此给出提示而非切换 session。
+        """
+        result: set[str] = set()
+        for key, ws in self._session_to_client.items():
+            if not isinstance(key, tuple) or len(key) < 2 or key[0] != channel_id:
+                continue
+            if ws is exclude_ws:
+                continue
+            if bool(getattr(ws, "closed", False)):
+                continue
+            sid = str(key[1] or "").strip()
+            if sid:
+                result.add(sid)
+        return result
 
     @staticmethod
     def _extract_routing_session_id(msg, *, include_top_level: bool = True) -> str | None:
@@ -675,7 +762,8 @@ class GatewayServer:
             )
             return
 
-        session_id = str(params.get("session_id") or "").strip() or req_id
+        explicit_session_id = bool(str(params.get("session_id") or "").strip())
+        session_id = (str(params.get("session_id") or "").strip()) or req_id
 
         # 1. forward 优先：方法在 forward_methods 中则转发到 MessageHandler
         if method in route.forward_methods:
@@ -695,9 +783,32 @@ class GatewayServer:
                 return
 
             request_key = self._client_route_key(route.channel_id, req_id)
+            # 仅当客户端显式提供 session_id 时才计算 session_key，
+            # 避免 session_id 回退到 req_id 时在 _session_to_client 中积累
+            # 无用的逐请求条目（污染 get_active_session_ids 遍历与冲突检测）。
+            session_key = self._client_route_key(route.channel_id, session_id) if explicit_session_id else None
+            # 检测 session 是否已在其他窗口打开：若已绑定到另一个仍活跃的连接，
+            # 拒绝当前请求，避免多窗口 session 冲突（事件路由串台、binding 被覆盖）。
+            # 前端 session.list 的 active_in_window 标记是"事后快照"，此处是实时防线。
+            if session_key is not None:
+                existing_ws = self._session_to_client.get(session_key)
+                if (
+                    existing_ws is not None
+                    and existing_ws is not ws
+                    and not bool(getattr(existing_ws, "closed", False))
+                ):
+                    logger.warning(
+                        "GatewayServer reject %s: session %s already active in another %s connection",
+                        method, session_id, route.channel_id,
+                    )
+                    await self.send_response(
+                        ws, req_id, ok=False,
+                        error=f"Session {session_id} is already active in another window. Close that window first.",
+                        code="SESSION_IN_USE",
+                    )
+                    return
             if request_key is not None:
                 self._request_to_client[request_key] = ws
-            session_key = self._client_route_key(route.channel_id, session_id)
             if session_key is not None:
                 self._session_to_client[session_key] = ws
 
@@ -867,18 +978,8 @@ async def _run(
     from jiuwenswarm.common.updater import UpdaterService
     from openjiuwen.core.runner import Runner
 
-    def _do_restart() -> None:
-        logger.info("[App] .env updated, restarting Gateway...")
-        os.execv(sys.executable, [sys.executable, *sys.argv])
-
-    def _schedule_restart() -> None:
-        try:
-            loop = asyncio.get_running_loop()
-            loop.call_later(2.0, _do_restart)
-        except RuntimeError:
-            _do_restart()
-
     logger.info("[App] Gateway starting, connecting AgentServer: %s", agent_server_url)
+    restart_request = GatewayRestartRequest()
 
     callback_framework = Runner.callback_framework
     extension_registry = ExtensionRegistry.create_instance(
@@ -1056,7 +1157,7 @@ async def _run(
             return True
         except Exception as e:  # noqa: BLE001
             logger.warning("[App] hot config reload failed, scheduling restart: %s", e)
-            _schedule_restart()
+            _schedule_gateway_restart(restart_request)
             return False
 
     web_channel = None
@@ -1704,10 +1805,14 @@ async def _run(
             agent_server_url,
         )
 
+    restart_requested = False
     try:
         tasks_to_wait = [task for task in (gateway_server_task, web_task) if task is not None]
         if tasks_to_wait:
-            await asyncio.gather(*tasks_to_wait)
+            restart_requested = await _wait_for_gateway_tasks_or_restart(
+                tasks_to_wait,
+                restart_request,
+            )
     except KeyboardInterrupt:
         logger.info("received Ctrl+C, shutting down...")
     except asyncio.CancelledError:
@@ -1817,6 +1922,9 @@ async def _run(
             pass
 
         logger.info("[App] Gateway stopped")
+
+    if restart_requested:
+        _exec_gateway_restart()
 
 
 def main() -> None:

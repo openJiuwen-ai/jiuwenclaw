@@ -343,16 +343,10 @@ function normalizeGraph(payload: SkillGraphPayload): NormalizedGraph {
 
   const edges = asArray(payload.graph?.edges)
     .map(normalizeEdge)
-    .filter((edge): edge is GraphEdge => Boolean(edge));
-
-  edges.forEach((edge) => {
-    if (!nodeMap.has(edge.source)) {
-      nodeMap.set(edge.source, normalizeNode({ id: edge.source }, nodeMap.size, skillsById));
-    }
-    if (!nodeMap.has(edge.target)) {
-      nodeMap.set(edge.target, normalizeNode({ id: edge.target }, nodeMap.size, skillsById));
-    }
-  });
+    .filter((edge): edge is GraphEdge => {
+      if (!edge) return false;
+      return nodeMap.has(edge.source) && nodeMap.has(edge.target);
+    });
 
   const nodes = [...nodeMap.values()];
   const byId = new Map(nodes.map((node) => [node.id, node]));

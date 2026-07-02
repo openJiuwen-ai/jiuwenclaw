@@ -324,12 +324,16 @@ interface UseWebSocketReturn {
   getInflightCount: () => number;
 }
 
-interface ContextCompressionStatePayload {
-  status: string;
-  summary: string;
-  operation_id: string;
-  phase: string;
-  processor: string;
+interface ContextCompressionStatePayload extends Record<string, unknown> {
+  status?: string;
+  summary?: string;
+  operation_id?: string;
+  phase?: string;
+  processor?: string;
+  role?: string;
+  member_name?: string;
+  rid?: number;
+  session_id?: string;
 }
 
 interface PendingContextCompressionStart {
@@ -492,6 +496,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   });
   const pendingContextCompressionStartRef =
     useRef<PendingContextCompressionStart | null>(null);
+  const pendingTeamMemberContextCompressionStartRef =
+    useRef<Map<string, PendingContextCompressionStart>>(new Map());
   const holdContextUsageUntilVisibleReplyRef = useRef(false);
   const contextUsageHoldSessionIdRef = useRef<string | null>(null);
   const pendingContextUsageRef = useRef<{
@@ -532,6 +538,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     updateSession,
     setContextCompressionStats,
     setHeartbeatStatus,
+    setTeamMemberContextCompressionStatus,
+    clearTeamMemberContextCompressionStatus,
   } =
     useSessionStore();
 
@@ -655,6 +663,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     }
   }, []);
 
+  const clearPendingTeamMemberContextCompressionStart = useCallback((memberId: string) => {
+    const pending = pendingTeamMemberContextCompressionStartRef.current.get(memberId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingTeamMemberContextCompressionStartRef.current.delete(memberId);
+  }, []);
+
+  const clearAllPendingTeamMemberContextCompressionStarts = useCallback(() => {
+    for (const pending of pendingTeamMemberContextCompressionStartRef.current.values()) {
+      clearTimeout(pending.timer);
+    }
+    pendingTeamMemberContextCompressionStartRef.current.clear();
+  }, []);
+
   const resetContextCompressionTurn = useCallback(() => {
     clearPendingContextCompressionStart();
     contextCompressionSummaryRef.current = { count: 0, summaries: [] };
@@ -667,28 +689,32 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setContextCompressionStatus(undefined, summary.count > 0 ? summary : undefined);
   }, [clearPendingContextCompressionStart, setContextCompressionStatus]);
 
+  const buildContextCompressionRuntimeState = useCallback(
+    (payload: ContextCompressionStatePayload): Omit<ContextCompressionRuntime, 'status'> | null => {
+      const summary = payload.summary?.trim() || '';
+      if (!summary) return null;
+      return {
+        summary,
+        operationId: payload.operation_id?.trim() || '',
+        phase: payload.phase?.trim() || undefined,
+        processor: payload.processor?.trim() || undefined,
+      };
+    },
+    []
+  );
+
   const handleContextCompressionState = useCallback(
     (payload: ContextCompressionStatePayload) => {
-      const status = payload.status.trim().toLowerCase();
-      const summary = payload.summary.trim();
-      if (!status || !summary) return;
-
-      const operationId = payload.operation_id.trim();
-      const phase = payload.phase.trim() || undefined;
-      const processor = payload.processor.trim() || undefined;
-      const runtimeState = {
-        summary,
-        operationId,
-        phase,
-        processor,
-      };
+      const status = payload.status?.trim().toLowerCase() || '';
+      const runtimeState = buildContextCompressionRuntimeState(payload);
+      if (!status || !runtimeState) return;
 
       if (status === 'completed') {
         clearPendingContextCompressionStart();
         const current = contextCompressionSummaryRef.current;
         const nextSummary = {
           count: current.count + 1,
-          summaries: [...current.summaries, summary],
+          summaries: [...current.summaries, runtimeState.summary],
         };
         contextCompressionSummaryRef.current = nextSummary;
         setContextCompressionStatus({
@@ -740,12 +766,96 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         });
       }
     },
-    [clearPendingContextCompressionStart, setContextCompressionStatus]
+    [buildContextCompressionRuntimeState, clearPendingContextCompressionStart, setContextCompressionStatus]
+  );
+
+  const findExistingTeamMemberId = useCallback((memberName: unknown): string | null => {
+    if (typeof memberName !== 'string' || !memberName.trim()) {
+      return null;
+    }
+    const candidate = memberName.trim();
+    const existingMember = useSessionStore
+      .getState()
+      .teamMembers.find((member) => member.member_id === candidate);
+    return existingMember?.member_id || null;
+  }, []);
+
+  const handleTeamMemberContextCompressionState = useCallback(
+    (payload: ContextCompressionStatePayload, memberId: string) => {
+      const status = payload.status?.trim().toLowerCase() || '';
+      const runtimeState = buildContextCompressionRuntimeState(payload);
+      if (!status || !runtimeState) return;
+
+      if (status === 'completed') {
+        clearPendingTeamMemberContextCompressionStart(memberId);
+        const current =
+          useSessionStore.getState().teamMemberContextCompression[memberId]?.summary;
+        const nextSummary = {
+          count: (current?.count || 0) + 1,
+          summaries: [...(current?.summaries || []), runtimeState.summary],
+        };
+        setTeamMemberContextCompressionStatus(memberId, {
+          ...runtimeState,
+          status: 'completed',
+        }, nextSummary);
+        return;
+      }
+
+      if (status === 'started' || status === 'running') {
+        clearPendingTeamMemberContextCompressionStart(memberId);
+        const pending: PendingContextCompressionStart = {
+          runtimeState,
+          shown: false,
+          timer: setTimeout(() => {
+            if (pendingTeamMemberContextCompressionStartRef.current.get(memberId) !== pending) return;
+            pending.shown = true;
+            setTeamMemberContextCompressionStatus(memberId, {
+              ...pending.runtimeState,
+              status: 'running',
+            });
+          }, CONTEXT_COMPRESSION_START_DELAY_MS),
+        };
+        pendingTeamMemberContextCompressionStartRef.current.set(memberId, pending);
+        return;
+      }
+
+      if (status === 'noop' || status === 'skipped') {
+        const pending = pendingTeamMemberContextCompressionStartRef.current.get(memberId);
+        if (pending && !pending.shown) {
+          clearPendingTeamMemberContextCompressionStart(memberId);
+          return;
+        }
+        if (pending) {
+          clearPendingTeamMemberContextCompressionStart(memberId);
+        }
+        setTeamMemberContextCompressionStatus(memberId, {
+          ...runtimeState,
+          status: 'unchanged',
+        });
+        return;
+      }
+
+      if (status === 'failed' || status === 'error') {
+        clearPendingTeamMemberContextCompressionStart(memberId);
+        setTeamMemberContextCompressionStatus(memberId, {
+          ...runtimeState,
+          status: 'failed',
+        });
+      }
+    },
+    [
+      buildContextCompressionRuntimeState,
+      clearPendingTeamMemberContextCompressionStart,
+      setTeamMemberContextCompressionStatus,
+    ]
   );
 
   useEffect(() => {
-    return clearPendingContextCompressionStart;
-  }, [clearPendingContextCompressionStart]);
+    return () => {
+      clearPendingContextCompressionStart();
+      clearAllPendingTeamMemberContextCompressionStarts();
+    };
+  }, [clearAllPendingTeamMemberContextCompressionStarts, clearPendingContextCompressionStart]);
 
   // 发送聊天消息
   const sendMessage = useCallback(
@@ -1313,15 +1423,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       if (nextMembers.length === sessionStore.teamMembers.length) {
         return;
       }
+      clearPendingTeamMemberContextCompressionStart(normalizedMemberId);
+      clearTeamMemberContextCompressionStatus(normalizedMemberId);
       sessionStore.setTeamMembers(nextMembers);
       if (nextMembers.length === 0) {
         clearedTeamPanelSessionRef.current = sessionId || null;
+        clearAllPendingTeamMemberContextCompressionStarts();
         clearTodos();
         const currentSessionStore = useSessionStore.getState();
         currentSessionStore.setTeamMembers([]);
         currentSessionStore.setTeamTaskEvents([]);
         currentSessionStore.setTeamTasks([]);
         currentSessionStore.setTeamMemberExecutionEvents([]);
+        currentSessionStore.clearAllTeamMemberContextCompressionStatus();
         currentSessionStore.setTeamHistoryMessages([]);
       }
     };
@@ -1413,7 +1527,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
         const currentMode = useSessionStore.getState().mode;
         const content = normalizeFinalContent(payload);
-        finishContextCompressionTurn();
 
         // team 模式下，过滤成员输出，只保留外层 leader 回复。
         if (isHiddenTeamTeammateMessagePayload(currentMode, payload)) {
@@ -1435,6 +1548,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           return;
         }
+        finishContextCompressionTurn();
         // Defensive: chat.final is the definitive end-of-response marker.
         // The primary transition is driven by chat.processing_status
         // (is_processing=false), but if that frame is lost the UI would be stuck
@@ -1780,6 +1894,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         'context.compression_state',
         ({ payload }) => {
           if (!shouldHandleSessionEvent(payload)) return;
+          if (isTeamTeammateMessagePayload(payload)) {
+            const memberId = findExistingTeamMemberId(getTeamPayloadMemberName(payload));
+            if (!memberId) return;
+            handleTeamMemberContextCompressionState(payload, memberId);
+            return;
+          }
           handleContextCompressionState(payload);
         }
       ),
@@ -2467,11 +2587,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     addToolResult,
     appendTeamMemberOutputDelta,
     appendStreamContent,
+    clearAllPendingTeamMemberContextCompressionStarts,
+    clearPendingTeamMemberContextCompressionStart,
     clearSubtasks,
     clearTodos,
+    clearTeamMemberContextCompressionStatus,
+    findExistingTeamMemberId,
     finishContextCompressionTurn,
     handleConnectionAck,
     handleContextCompressionState,
+    handleTeamMemberContextCompressionState,
     handleTtsPlayback,
     revealPendingContextUsage,
     setMode,

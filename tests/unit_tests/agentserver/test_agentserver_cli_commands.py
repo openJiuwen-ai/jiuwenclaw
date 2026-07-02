@@ -270,6 +270,9 @@ async def test_handle_command_simplify_returns_prompt(server, fake_ws):
     assert "perform all three reviews yourself directly" in prompt
     # No Additional Focus section when no target is given
     assert "Additional Focus" not in prompt
+    # Security is explicitly out of scope — must point to /security-review
+    assert "security" in prompt.lower()
+    assert "/security-review" in prompt
 
 
 @pytest.mark.asyncio

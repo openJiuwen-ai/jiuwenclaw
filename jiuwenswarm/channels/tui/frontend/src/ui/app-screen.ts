@@ -1030,6 +1030,7 @@ function sessionToSelectItem(s: SessionMeta, showProject = false): SelectItem {
   const msgCount = s.message_count ?? 0;
   if (msgCount > 0) parts.push(`${msgCount} msgs`);
   if (showProject && s.project_dir?.trim()) parts.push(s.project_dir.trim());
+  if (s.active_in_window) parts.push("in another window");
   return {
     value: s.session_id,
     label: getDisplayLabel(s),
@@ -1179,6 +1180,8 @@ export class AppScreen implements Component, Focusable {
   private pendingSubmittedBaseline = 0;
   private pendingSubmittedSessionId: string | null = null;
   private transcriptScrollOffset = 0;
+  private btwOverlayScrollOffset = 0;
+  private lastBtwOverlayKey: string | null = null;
   private lastTranscriptLineCount = 0;
   private lastTranscriptLineWidth = 0;
   /** Image attachments keyed by composer `@path` tokens (e.g. cached base64 for terminal preview). */
@@ -1915,6 +1918,15 @@ export class AppScreen implements Component, Focusable {
       this.configEditorState !== null ||
       this.diffViewerState !== null;
 
+    if (
+      !pendingQuestion &&
+      !hasOverlay &&
+      snapshot.btwOverlay &&
+      this.handleBtwOverlayScrollInput(data)
+    ) {
+      return;
+    }
+
     if (!pendingQuestion && !hasOverlay && this.handleTranscriptScrollInput(data)) {
       return;
     }
@@ -1927,6 +1939,7 @@ export class AppScreen implements Component, Focusable {
       // 关闭 BTW overlay（如果可见）
       if (snapshot.btwOverlay) {
         this.state.clearBtwOverlay();
+        this.btwOverlayScrollOffset = 0;
       }
       // 取消正在进行的 BTW WS 请求（加载中状态），不影响主会话
       this.state.requestLocalInterrupt();
@@ -1963,6 +1976,7 @@ export class AppScreen implements Component, Focusable {
     if (!pendingQuestion && !hasOverlay && !snapshot.cancellableWork && isCancelWorkKey) {
       if (snapshot.btwOverlay) {
         this.state.clearBtwOverlay();
+        this.btwOverlayScrollOffset = 0;
         this.tui.requestRender();
         return;
       }
@@ -2491,6 +2505,13 @@ export class AppScreen implements Component, Focusable {
     }
     this.lastTranscriptLineCount = transcriptLineCount;
     this.lastTranscriptLineWidth = width;
+    const btwOverlayKey = snapshot.btwOverlay
+      ? `${snapshot.btwOverlay.question}\0${snapshot.btwOverlay.answer}`
+      : null;
+    if (btwOverlayKey !== this.lastBtwOverlayKey) {
+      this.btwOverlayScrollOffset = 0;
+      this.lastBtwOverlayKey = btwOverlayKey;
+    }
     const screenLines = buildAppScreenLines(snapshot, {
       width,
       height: this.tui.terminal.rows,
@@ -2512,6 +2533,12 @@ export class AppScreen implements Component, Focusable {
       onTranscriptScrollOffsetChange: (offset) => {
         this.transcriptScrollOffset = offset;
       },
+      btwOverlayScrollOffset: this.btwOverlayScrollOffset,
+      onBtwOverlayScrollOffsetChange: (offset) => {
+        this.btwOverlayScrollOffset = offset;
+      },
+      btwOverlayIndex: snapshot.btwOverlayIndex,
+      btwOverlayTotal: snapshot.btwOverlayTotal,
       runningElapsedMs:
         !snapshot.isInterrupted &&
         (snapshot.isProcessing ||
@@ -2976,6 +3003,67 @@ export class AppScreen implements Component, Focusable {
     }
   }
 
+  private handleBtwOverlayScrollInput(data: string): boolean {
+    const wheelOffset = getSgrMouseWheelOffset(data, this.btwOverlayScrollOffset);
+    if (wheelOffset !== null) {
+      this.btwOverlayScrollOffset = wheelOffset;
+      this.tui.requestRender();
+      return true;
+    }
+
+    // ←/→ 在 btw 历史间切换（必须在 scroll 之前消费，避免落入 composer）
+    if (matchesKey(data, "left")) {
+      this.state.navigateBtw(-1);
+      this.tui.requestRender();
+      return true;
+    }
+    if (matchesKey(data, "right")) {
+      this.state.navigateBtw(1);
+      this.tui.requestRender();
+      return true;
+    }
+    // x 删除当前 btw 条目（剩余非空则跳到相邻，为空则关闭 overlay）
+    if (data.toLowerCase() === "x") {
+      this.state.deleteCurrentBtwEntry();
+      this.tui.requestRender();
+      return true;
+    }
+
+    const pageSize = Math.max(1, Math.floor(this.tui.terminal.rows * 0.8));
+    if (matchesKey(data, "up")) {
+      this.btwOverlayScrollOffset = Math.max(0, this.btwOverlayScrollOffset - 1);
+      this.tui.requestRender();
+      return true;
+    }
+    if (matchesKey(data, "down")) {
+      this.btwOverlayScrollOffset += 1;
+      this.tui.requestRender();
+      return true;
+    }
+
+    const scrollAction = resolveAction("Scroll", data);
+    switch (scrollAction) {
+      case "scroll:pageUp":
+        this.btwOverlayScrollOffset = Math.max(0, this.btwOverlayScrollOffset - pageSize);
+        this.tui.requestRender();
+        return true;
+      case "scroll:pageDown":
+        this.btwOverlayScrollOffset += pageSize;
+        this.tui.requestRender();
+        return true;
+      case "scroll:top":
+        this.btwOverlayScrollOffset = 0;
+        this.tui.requestRender();
+        return true;
+      case "scroll:bottom":
+        this.btwOverlayScrollOffset = Number.MAX_SAFE_INTEGER;
+        this.tui.requestRender();
+        return true;
+      default:
+        return false;
+    }
+  }
+
   private clearPendingSubmittedInput(requestRender = true): void {
     this.pendingSubmittedInput = null;
     this.pendingSubmittedBaseline = 0;
@@ -3152,6 +3240,20 @@ export class AppScreen implements Component, Focusable {
     const sessions = this.resumeSessionList?.sessions ?? [];
     const matchedSession = sessions.find((s) => s.session_id === nextSessionId);
     const accentColor = matchedSession?.accent_color ?? "default";
+
+    // 检测目标 session 是否已在其他 TUI 窗口打开，避免多窗口 session 冲突
+    if (matchedSession?.active_in_window) {
+      const title = matchedSession.title?.trim() || nextSessionId;
+      this.state.addItem(
+        addInfo(
+          this.state.getSnapshot().sessionId,
+          `Session "${title}" is already open in another TUI window. Close that window first or choose a different session.`,
+          "r",
+        ),
+      );
+      this.tui.requestRender();
+      return;
+    }
 
     // 跨项目目录已由后端 session.list 完成过滤（_session_matches_project），
     // 此处不再重复校验，避免前后端路径规范化差异（resolve vs realpath）
@@ -3568,20 +3670,27 @@ export class AppScreen implements Component, Focusable {
         } else {
           displayName = m;
         }
-        // 同名模型显示 api_key_prefix + api_base 作为区分标识
-        const suffixParts: string[] = [];
-        if (sameNameTotal > 1 && meta?.api_key_prefix) {
-          suffixParts.push(`key:${meta.api_key_prefix}…`);
+        // 仅当同名模型且 provider+api_base 也完全相同时（真正无法区分）才显示 key 末4位
+        // 避免泄露过多 key 明文，且只在必要时露出尾号
+        let labelSuffix = "";
+        if (sameNameTotal > 1 && meta?.api_key_suffix) {
+          const _mk = (mm: ModelMeta | undefined) =>
+            `${mm?.model_provider ?? ""}|${mm?.api_base ?? ""}`;
+          const myFingerprint = _mk(meta);
+          // selectableWithOrigIdx 与 selectable 同序，origIdx 索引回 modelsMeta
+          const conflictCount = selectableWithOrigIdx.reduce((acc, ent) => {
+            const xm = modelsMeta[ent.origIdx];
+            return xm && _mk(xm) === myFingerprint ? acc + 1 : acc;
+          }, 0);
+          if (conflictCount > 1) {
+            labelSuffix = ` […${meta.api_key_suffix}]`;
+          }
         }
-        if (sameNameTotal > 1 && meta?.api_base) {
-          suffixParts.push(meta.api_base);
-        }
-        const suffix = suffixParts.length > 0 ? ` [${suffixParts.join(" | ")}]` : "";
         const provider = meta?.model_provider ? ` · ${meta.model_provider}` : "";
         const apiBase = meta?.api_base ? ` · ${meta.api_base}` : "";
         const reasoning = meta?.reasoning_level ? ` · reasoning:${meta.reasoning_level}` : "";
         return {
-          label: `${i + 1}. ${displayName}${isCurrent ? " (current)" : ""}`,
+          label: `${i + 1}. ${displayName}${labelSuffix}${isCurrent ? " (current)" : ""}`,
           description: `${provider}${apiBase}${reasoning}`.replace(/^ · /, ""),
           value: `${m}${MODEL_VALUE_SEPARATOR}${entry.origIdx}`,
         };

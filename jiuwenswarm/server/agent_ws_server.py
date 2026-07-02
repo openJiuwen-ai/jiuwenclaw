@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
+from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
+
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService, reset_harness_packages_state
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
@@ -50,6 +52,7 @@ from jiuwenswarm.server.runtime.session.session_history import (
 )
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
+    effective_files_from_policy,
     find_auto_managed_match,
     find_nested_files_conflict,
     list_effective_sandbox_files,
@@ -151,6 +154,13 @@ _SIMPLIFY_PROMPT_TEMPLATE = """\
 # Simplify: Code Review and Cleanup
 
 Review all changed files for reuse, quality, and efficiency. Fix any issues found.
+
+## Scope
+
+This review covers **reuse, quality, and efficiency only** — the three dimensions below. It is NOT a security review.
+
+- Do NOT flag, fix, or report security vulnerabilities (injection, XSS, hard-coded secrets, auth flaws, etc.). Those are out of scope here and are handled by `/security-review`, which reports findings without modifying code.
+- If you happen to notice a likely security issue while reviewing, do not fix it — at most note it in one line at the end ("possible security concern in <file>:<line>, run /security-review") and continue with the reuse/quality/efficiency review.
 
 ## Phase 1: Identify Changes
 
@@ -879,8 +889,6 @@ class AgentWebSocketServer:
 
     async def _connection_handler(self, ws: Any) -> None:
         """处理单个 Gateway WebSocket 连接，同一连接可并发处理多个请求."""
-        import websockets
-
         remote = ws.remote_address
         logger.info("[AgentWebSocketServer] 新连接: %s", remote)
 
@@ -907,7 +915,7 @@ class AgentWebSocketServer:
                 task = asyncio.create_task(self._handle_message(ws, raw, send_lock))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
-        except websockets.exceptions.ConnectionClosed:
+        except WebSocketConnectionClosed:
             logger.info("[AgentWebSocketServer] 连接关闭: %s", remote)
         except Exception as e:
             logger.exception("[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e)
@@ -915,7 +923,10 @@ class AgentWebSocketServer:
             self._current_ws = None
             self._current_send_lock = None
             self._clear_ws_acp_client_capabilities(ws)
-            self._session_stream_tasks.clear()
+            connection_tasks = list(tasks)
+            for task in connection_tasks:
+                if not task.done():
+                    task.cancel()
             # Gateway 进程退出/端口关闭时，必须先取消各 session 内流式生产者（SessionManager）
             # 并中止 DeepAgent 内层循环；否则仅等待 _handle_message 任务结束会一直阻塞到任务自然完成。
             try:
@@ -937,11 +948,9 @@ class AgentWebSocketServer:
                 )
             except Exception:
                 logger.exception("[AgentWebSocketServer] team stream cancel failed")
-            if tasks:
-                for t in list(tasks):
-                    if not t.done():
-                        t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+            if connection_tasks:
+                await asyncio.gather(*connection_tasks, return_exceptions=True)
+            self._session_stream_tasks.clear()
 
     async def _handle_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
@@ -953,8 +962,14 @@ class AgentWebSocketServer:
                 channel_id="",
                 message=f"JSON 解析失败: {e}",
             )
-            async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+            try:
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+            except WebSocketConnectionClosed:
+                logger.info(
+                    "[AgentWebSocketServer] WebSocket 已关闭，JSON 解析错误未发送: %s",
+                    e,
+                )
             return
 
         try:
@@ -1241,6 +1256,12 @@ class AgentWebSocketServer:
                 request.request_id,
                 request.session_id,
             )
+        except WebSocketConnectionClosed as e:
+            logger.info(
+                "[AgentWebSocketServer] WebSocket 已关闭，放弃请求回包: request_id=%s: %s",
+                request.request_id,
+                e,
+            )
         except Exception as e:
             logger.exception(
                 "[AgentWebSocketServer] 处理请求失败: request_id=%s: %s",
@@ -1256,8 +1277,15 @@ class AgentWebSocketServer:
             wire = encode_agent_response_for_wire(
                 error_resp, response_id=request.request_id
             )
-            async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+            try:
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+            except WebSocketConnectionClosed as send_exc:
+                logger.info(
+                    "[AgentWebSocketServer] WebSocket 已关闭，错误响应未发送: request_id=%s: %s",
+                    request.request_id,
+                    send_exc,
+                )
 
     @staticmethod
     def _should_trigger_before_chat_request_hook(request: AgentRequest) -> bool:
@@ -1665,6 +1693,11 @@ class AgentWebSocketServer:
                         )
             except asyncio.CancelledError:
                 pass
+            except WebSocketConnectionClosed:
+                logger.info(
+                    "[AgentWebSocketServer] keepalive 停止，WebSocket 已关闭: request_id=%s",
+                    request.request_id,
+                )
 
         # 启动心跳任务
         heartbeat_task = asyncio.create_task(_heartbeat_loop())
@@ -1679,8 +1712,15 @@ class AgentWebSocketServer:
                     response_id=request.request_id,
                     sequence=chunk_count - 1,
                 )
-                async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                try:
+                    async with send_lock:
+                        await ws.send(json.dumps(wire, ensure_ascii=False))
+                except WebSocketConnectionClosed:
+                    logger.info(
+                        "[AgentWebSocketServer] 流式响应停止，WebSocket 已关闭: request_id=%s",
+                        request.request_id,
+                    )
+                    return
                 # 清除 event，让心跳任务重新开始计时
                 heartbeat_event.clear()
         finally:
@@ -1690,6 +1730,8 @@ class AgentWebSocketServer:
                 try:
                     await heartbeat_task
                 except asyncio.CancelledError:
+                    pass
+                except WebSocketConnectionClosed:
                     pass
             # 清除 session 流式任务追踪（仅清除自身，避免误删后续新任务）
             if self._session_stream_tasks.get(session_id) is current_task:
@@ -4157,8 +4199,8 @@ class AgentWebSocketServer:
                 return project_dir.strip()
         try:
             agent = self._agent_manager.get_agent_nowait(channel_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[command.sandbox] get_agent_nowait failed: %s", exc)
+        except Exception as exc:
+            logger.info("[command.sandbox] get_agent_nowait failed: %s", exc)
             return None
         adapter = self._resolve_adapter(agent)
         if adapter is None:
@@ -4210,6 +4252,22 @@ class AgentWebSocketServer:
             return False
         return bool(getattr(adapter, "_is_code_agent", False))
 
+    @staticmethod
+    def _effective_files_from_adapter(adapter: Any) -> dict[str, list[dict[str, str]]] | None:
+        """Read effective sandbox file mounts from the adapter's active sysop card."""
+        card = getattr(adapter, "_sys_operation_card", None)
+        if card is None:
+            return None
+        gateway_config = getattr(card, "gateway_config", None)
+        launcher = getattr(gateway_config, "launcher_config", None) if gateway_config else None
+        extra_params = getattr(launcher, "extra_params", None) if launcher else None
+        if not isinstance(extra_params, dict):
+            return None
+        policy = extra_params.get("policy")
+        if not isinstance(policy, dict):
+            return None
+        return effective_files_from_policy(policy)
+
     def _attach_effective_sandbox_files(
         self,
         payload: dict[str, Any],
@@ -4218,25 +4276,41 @@ class AgentWebSocketServer:
     ) -> None:
         """Inject ``effective_files`` into the ``/sandbox`` response payload.
 
-        ``effective_files`` summarises what the sandbox will actually grant
-        write access to (and what it will always deny) -- the union of
-        intrinsic agent files / ``daily_memory`` / current project dir plus
-        the user-configured allow list, and jiuwenswarm's own ``config.yaml``
-        plus the user-configured deny list. The TUI ``/sandbox status`` and
-        ``/sandbox files list`` panels render this directly under
-        ``files.allow_write`` / ``files.deny_write`` so the user sees the
-        same set the policy builder would compute at sandbox-start time.
-
-        The project dir reported in ``allow_write`` is sourced from the live
-        adapter (see :meth:`_resolve_active_project_dir`) so the panel
-        matches the user's trusted directory rather than the agent-server's
-        cwd, which is usually ``~/.jiuwenswarm`` and not what the user means
-        by "project".
-
-        Best-effort: failures are logged and swallowed so the underlying
-        sub-command response still goes back to the client.
+        Prefer the filesystem policy cached on the active adapter's sysop card
+        (same payload jiuwenbox uses at exec time). Fall back to a fresh build
+        when no matching agent/sysop exists yet.
         """
         try:
+            project_dir = self._resolve_active_project_dir(channel_id, params)
+            adapter = None
+            try:
+                agent = self._agent_manager.get_agent_nowait(
+                    channel_id,
+                    project_dir=project_dir,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[command.sandbox] get_agent_nowait failed: %s", exc)
+                agent = None
+            if agent is not None:
+                adapter = self._resolve_adapter(agent)
+            if adapter is not None:
+                adapter_project_dir = getattr(adapter, "_project_dir", None)
+                if (
+                    project_dir
+                    and adapter_project_dir
+                    and str(adapter_project_dir) != str(project_dir)
+                ):
+                    logger.warning(
+                        "[command.sandbox] project_dir mismatch for effective_files: "
+                        "client=%r adapter=%r",
+                        project_dir,
+                        adapter_project_dir,
+                    )
+                cached = self._effective_files_from_adapter(adapter)
+                if cached is not None:
+                    payload["effective_files"] = cached
+                    return
+
             files_runtime: dict[str, Any] | None = None
             runtime = payload.get("runtime")
             if isinstance(runtime, dict):
@@ -4249,7 +4323,6 @@ class AgentWebSocketServer:
                     files_runtime = files_in_payload
             if files_runtime is None:
                 files_runtime = get_sandbox_runtime().get("files") or {}
-            project_dir = self._resolve_active_project_dir(channel_id, params)
             is_code_agent = self._resolve_active_is_code_agent(channel_id)
             payload["effective_files"] = list_effective_sandbox_files(
                 files_runtime,

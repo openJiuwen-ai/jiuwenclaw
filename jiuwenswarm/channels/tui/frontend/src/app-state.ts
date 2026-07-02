@@ -145,6 +145,10 @@ export interface AppSnapshot {
   currentQueryUsage: CurrentQueryUsage;
   /** /btw 侧问题覆盖层：独立于 transcript 渲染，不受滚动影响 */
   btwOverlay: { question: string; answer: string } | null;
+  /** 当前 btw overlay 在历史中的下标（-1 表示无选中） */
+  btwOverlayIndex: number;
+  /** btw 历史总数（用于提示 i/n） */
+  btwOverlayTotal: number;
   /** BTW 是否处于活动状态（加载中或 overlay 可见），Esc 优先消费 */
   btwActive: boolean;
 }
@@ -367,6 +371,10 @@ export class CliPiAppState {
   private suppressInterruptResult = false;
   /** /btw 侧问题覆盖层：独立于 transcript 渲染 */
   private btwOverlay: { question: string; answer: string } | null = null;
+  /** /btw 历史记录（按提问先后顺序），overlay 是其中"当前选中"条目的视图 */
+  private btwHistory: { question: string; answer: string }[] = [];
+  /** 当前 overlay 在 btwHistory 中的下标，-1 表示无选中 */
+  private btwOverlayIndex = -1;
   /** BTW 是否处于活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   private _btwActive = false;
   /** 本地中断请求标志，cancel() 调用时立即置 true，用于 long-running 命令的中断检测。 */
@@ -984,6 +992,8 @@ export class CliPiAppState {
         this.lastStreamActivityAt === null ? null : Date.now() - this.lastStreamActivityAt,
       currentQueryUsage: { ...this.currentQueryUsage },
       btwOverlay: this.btwOverlay,
+      btwOverlayIndex: this.btwOverlayIndex,
+      btwOverlayTotal: this.btwHistory.length,
       btwActive: this._btwActive,
     };
   }
@@ -1279,6 +1289,8 @@ export class CliPiAppState {
     this.resetCurrentUsageTokens();
     this.workflowRuns = [];
     this.btwOverlay = null;
+    this.btwHistory = [];
+    this.btwOverlayIndex = -1;
     this._btwActive = false;
     this.pendingPlanEntrySource = null;
     if (this.accentColor !== "default") {
@@ -1316,9 +1328,11 @@ export class CliPiAppState {
     // 用户发言后重置自动回顾状态，允许下一次空闲时触发新的回顾
     if (item.kind === "user") {
       this.autoRecapState = "idle";
-      // 用户发送新消息时自动清除 /btw overlay
-      if (this.btwOverlay !== null) {
+      // 用户发送新消息时自动清除 /btw overlay（含历史）
+      if (this.btwOverlay !== null || this.btwHistory.length > 0) {
         this.btwOverlay = null;
+        this.btwHistory = [];
+        this.btwOverlayIndex = -1;
         this._btwActive = false;
       }
     }
@@ -1328,6 +1342,8 @@ export class CliPiAppState {
   /** 设置 /btw 侧问题覆盖层（独立于 transcript 渲染，不受滚动影响） */
   readonly setBtwOverlay = (question: string, answer: string): void => {
     this.btwOverlay = { question, answer };
+    this.btwHistory.push({ question, answer });
+    this.btwOverlayIndex = this.btwHistory.length - 1;
     this.emitChange();
   };
 
@@ -1339,13 +1355,42 @@ export class CliPiAppState {
     }
   };
 
-  /** 清除 /btw 侧问题覆盖层 */
+  /** 清除 /btw 侧问题覆盖层（同时清空历史，Esc 视为放弃这批侧问） */
   readonly clearBtwOverlay = (): void => {
-    if (this.btwOverlay !== null) {
+    if (this.btwOverlay !== null || this.btwHistory.length > 0) {
       this.btwOverlay = null;
+      this.btwHistory = [];
+      this.btwOverlayIndex = -1;
       this._btwActive = false;
       this.emitChange();
     }
+  };
+
+  /** 在 btw 历史中前后切换当前 overlay（仅 ≥2 条时生效） */
+  readonly navigateBtw = (direction: -1 | 1): void => {
+    if (this.btwHistory.length < 2 || this.btwOverlayIndex < 0) return;
+    const len = this.btwHistory.length;
+    const next = Math.max(0, Math.min(len - 1, this.btwOverlayIndex + direction));
+    if (next === this.btwOverlayIndex) return;
+    this.btwOverlayIndex = next;
+    this.btwOverlay = this.btwHistory[next];
+    this.emitChange();
+  };
+
+  /** 删除当前 btw 条目；剩余非空则跳到相邻条目，为空则关闭 overlay */
+  readonly deleteCurrentBtwEntry = (): void => {
+    if (this.btwOverlayIndex < 0 || this.btwHistory.length === 0) return;
+    this.btwHistory.splice(this.btwOverlayIndex, 1);
+    const len = this.btwHistory.length;
+    if (len === 0) {
+      this.btwOverlay = null;
+      this.btwOverlayIndex = -1;
+      this._btwActive = false;
+    } else {
+      this.btwOverlayIndex = Math.min(this.btwOverlayIndex, len - 1);
+      this.btwOverlay = this.btwHistory[this.btwOverlayIndex];
+    }
+    this.emitChange();
   };
 
   readonly isHelpVisible = (): boolean => {
@@ -1390,6 +1435,8 @@ export class CliPiAppState {
     this.pendingQuestion = null;
     this.lastError = null;
     this.btwOverlay = null;
+    this.btwHistory = [];
+    this.btwOverlayIndex = -1;
     this._btwActive = false;
     this.setStreamingStateInternal(StreamingState.Idle);
     this.collapsedToolGroupIds.clear();

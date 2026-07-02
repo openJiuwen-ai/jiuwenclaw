@@ -14,6 +14,8 @@ export interface SessionMeta {
   project_dir?: string;
   /** 会话首条消息时所在的 git 分支（gateway 回填；非 git/detached 为 "HEAD"，存量会话为空串） */
   git_branch?: string;
+  /** 该会话已在另一个 TUI 窗口打开（gateway 由 _session_to_client 标记），resume 前端拦截冲突 */
+  active_in_window?: boolean;
 }
 
 export interface SessionListPayload {
@@ -63,6 +65,17 @@ async function doResume(
   ctx: Parameters<SlashCommand["action"]>[0],
   session: SessionMeta,
 ): Promise<void> {
+  if (session.active_in_window) {
+    const title = session.title?.trim() || session.session_id;
+    ctx.addItem(
+      addInfo(
+        ctx.sessionId,
+        `Session "${title}" is already open in another TUI window. Close that window first or choose a different session.`,
+        "r",
+      ),
+    );
+    return;
+  }
   ctx.updateSession(session.session_id);
   ctx.clearEntries();
   ctx.setAccentColor(session.accent_color || "default");
@@ -137,9 +150,10 @@ export function createResumeCommand(): SlashCommand {
               ? new Date(s.last_message_at * 1000).toLocaleString()
               : "-";
             const title = s.title || "-";
+            const activeTag = s.active_in_window ? "  [open in another window]" : "";
             return {
               label: String(i + 1),
-              value: `${s.session_id}  |  ${title}  |  msgs: ${s.message_count ?? 0}  |  ${lastActive}`,
+              value: `${s.session_id}  |  ${title}  |  msgs: ${s.message_count ?? 0}  |  ${lastActive}${activeTag}`,
             };
           });
           ctx.addItem(
@@ -182,9 +196,10 @@ export function createResumeCommand(): SlashCommand {
               ? new Date(s.last_message_at * 1000).toLocaleString()
               : "-";
             const title = s.title || "(untitled)";
+            const activeTag = s.active_in_window ? "  [open in another window]" : "";
             return {
               label: String(i + 1),
-              value: `${s.session_id}  |  ${title}  |  msgs: ${s.message_count ?? 0}  |  ${lastActive}`,
+              value: `${s.session_id}  |  ${title}  |  msgs: ${s.message_count ?? 0}  |  ${lastActive}${activeTag}`,
             };
           });
           ctx.addItem(

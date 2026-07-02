@@ -7,7 +7,10 @@ from typing import Any, Sequence
 
 from jiuwenswarm.symphony.config import SymphonyOrchestrationConfig
 from jiuwenswarm.symphony.llm import LLMConfig
-from jiuwenswarm.symphony.orchestration import load_score_artifacts
+from jiuwenswarm.symphony.orchestration.artifacts import (
+    filter_disabled_score_artifacts,
+    load_score_artifacts,
+)
 from jiuwenswarm.symphony.orchestration.execution_graph import build_execution_graph
 from jiuwenswarm.symphony.orchestration.planning.fast import FastOneShotPlanner
 from jiuwenswarm.symphony.orchestration.planning.utils import clamp
@@ -25,6 +28,7 @@ async def plan_from_score(
     ranker: Any | None = None,
     orchestration_config: SymphonyOrchestrationConfig | None = None,
     candidate_skill_ids: Sequence[str] | None = None,
+    disabled_skill_names: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Run online planning from an existing Symphony score."""
 
@@ -33,7 +37,10 @@ async def plan_from_score(
         min_edge_confidence = orchestration_config.min_edge_confidence
     mode = orchestration_config.mode if orchestration_config is not None else "fast"
 
-    artifacts = load_score_artifacts(score_dir)
+    artifacts = filter_disabled_score_artifacts(
+        load_score_artifacts(score_dir),
+        disabled_skill_names,
+    )
     if mode != "fast":
         raise ValueError(f"Unsupported orchestration mode: {mode}")
 

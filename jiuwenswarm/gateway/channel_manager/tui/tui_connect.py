@@ -1260,6 +1260,19 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             # 会话首条消息时记录的分支；存量会话无该字段时回填空串（前端按"兜底显示"处理）
             s["git_branch"] = str(ch_meta.get("git_branch") or "").strip()
 
+        # 标记已在其他 TUI 窗口中打开的会话，供前端拦截冲突的 /resume
+        try:
+            active_session_ids = channel.get_active_session_ids("tui", exclude_ws=ws)
+        except Exception:
+            logger.warning(
+                "[tui] session.list: get_active_session_ids failed, active_in_window degraded",
+                exc_info=True,
+            )
+            active_session_ids = set()
+        for s in cli_sessions:
+            if s.get("session_id") in active_session_ids:
+                s["active_in_window"] = True
+
         # 当前项目的 git 分支，供前端 Ctrl+B 过滤对比（非 git/失败为哨兵 "HEAD"）
         from jiuwenswarm.common.utils import resolve_git_branch
 
@@ -2326,28 +2339,28 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 _first_alias = resolve_env_vars(str(_defs[0].get("alias", ""))) if _defs[0].get("alias") else ""
                 payload["current"] = _first_alias or _first_name or os.getenv("MODEL_NAME", "unknown")
                 payload["current_model_name"] = _first_name or os.getenv("MODEL_NAME", "unknown")
-                payload["models"] = [
-                    {
-                        "name": resolve_env_vars(str(e.get("alias", ""))) or
-                                resolve_env_vars(str((e.get("model_client_config") or {}).get("model_name", ""))),
-                        "alias": resolve_env_vars(str(e.get("alias", ""))) if e.get("alias") else "",
-                        "model_name": resolve_env_vars(str((e.get("model_client_config") or {}).get("model_name", ""))),
-                        "model_provider": resolve_env_vars(
-                            str((e.get("model_client_config") or {}).get("client_provider", ""))),
-                        "api_base": resolve_env_vars(str((e.get("model_client_config") or {}).get("api_base", ""))),
-                        "reasoning_level": resolve_env_vars(
-                            str((e.get("model_config_obj") or {}).get("reasoning_level", ""))),
-                        "api_key_prefix": (
-                            resolve_env_vars(
-                                str((e.get("model_client_config") or {}).get("api_key", ""))
-                            )[:8]
-                            if resolve_env_vars(
-                                str((e.get("model_client_config") or {}).get("api_key", ""))
-                            )
-                            else ""
-                        ),
+
+                def _model_meta(i: int, e: dict) -> dict:
+                    mcc = e.get("model_client_config") or {}
+                    mco = e.get("model_config_obj") or {}
+                    _alias = e.get("alias", "")
+                    _resolved_alias = resolve_env_vars(str(_alias)) if _alias else ""
+                    _model_name = resolve_env_vars(str(mcc.get("model_name", "")))
+                    _api_key = resolve_env_vars(str(mcc.get("api_key", "")))
+                    return {
+                        "name": _resolved_alias or _model_name,
+                        "alias": _resolved_alias,
+                        "model_name": _model_name,
+                        "model_provider": resolve_env_vars(str(mcc.get("client_provider", ""))),
+                        "api_base": resolve_env_vars(str(mcc.get("api_base", ""))),
+                        "reasoning_level": resolve_env_vars(str(mco.get("reasoning_level", ""))),
+                        # 同名模型冲突时用于区分：仅展示末4位，避免泄露过多 key 信息
+                        "api_key_suffix": _api_key[-4:] if _api_key else "",
                         "is_current": i == 0,
                     }
+
+                payload["models"] = [
+                    _model_meta(i, e)
                     for i, e in enumerate(_defs) if isinstance(e, dict)
                 ]
             else:

@@ -23,8 +23,6 @@ const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
 
 /** 后端约定：最后一帧 `history.message` 使用 `payload.status: done`（兼容旧版 `payload.content: done`） */
 const HISTORY_RESTORE_DONE_CONTENT = 'done';
-/** 流式 chunk 之间的兜底：正常情况由 `done` / `page_complete` 等结束帧关闭；仅当缺少明确结束标记时使用 */
-const HISTORY_RESTORE_IDLE_MS = 500;
 
 export interface HistoryToolReplayItem {
   kind: 'tool_call' | 'tool_result';
@@ -487,15 +485,8 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
 
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
-  let idleTimer: number | null = null;
   let disposed = false;
 
-  const clearIdleTimer = () => {
-    if (idleTimer !== null) {
-      window.clearTimeout(idleTimer);
-      idleTimer = null;
-    }
-  };
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed || generation !== restoreGeneration) {
       return;
@@ -511,7 +502,6 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     }
 
     if (isHistoryRestoreDonePayload(payload)) {
-      clearIdleTimer();
       finalize();
       return;
     }
@@ -526,21 +516,13 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     }
 
     if (isHistoryBatchEnd(payload)) {
-      clearIdleTimer();
       finalize();
-      return;
     }
-
-    clearIdleTimer();
-    idleTimer = window.setTimeout(() => {
-      finalize();
-    }, HISTORY_RESTORE_IDLE_MS);
   });
 
   function dispose(): void {
     if (disposed) return;
     disposed = true;
-    clearIdleTimer();
     unsubscribe();
     if (activeRestore?.generation === generation) {
       activeRestore = null;
@@ -659,15 +641,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
 
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
-  let idleTimer: number | null = null;
   let disposed = false;
 
-  const clearIdleTimer = () => {
-    if (idleTimer !== null) {
-      window.clearTimeout(idleTimer);
-      idleTimer = null;
-    }
-  };
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed || generation !== restoreGeneration) {
       return;
@@ -683,7 +658,6 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
     }
 
     if (isHistoryRestoreDonePayload(payload)) {
-      clearIdleTimer();
       finalize();
       return;
     }
@@ -698,21 +672,13 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
     }
 
     if (isHistoryBatchEnd(payload)) {
-      clearIdleTimer();
       finalize();
-      return;
     }
-
-    clearIdleTimer();
-    idleTimer = window.setTimeout(() => {
-      finalize();
-    }, HISTORY_RESTORE_IDLE_MS);
   });
 
   function dispose(): void {
     if (disposed) return;
     disposed = true;
-    clearIdleTimer();
     unsubscribe();
     activePageFetchDispose = null;
     if (activeRestore?.generation === generation) {

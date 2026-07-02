@@ -251,6 +251,25 @@ bash scripts/build.sh
 - `./dist/jiuwenswarm-<version>-py3-none-any.whl`（主包）
 - `./packages/jiuwenswarm-tui/dist/jiuwenswarm_tui-<version>-<platform>.whl`（TUI sidecar 包）
 
+#### 6.1.2 单独构建 jiuwenbox 包
+
+`jiuwenbox` 是独立的沙箱系统包（配置文件 `jiuwenbox/pyproject.toml`），可通过 `scripts/build_python_packages.py` 跳过主包和 TUI sidecar，仅构建 jiuwenbox wheel：
+
+```bash
+python scripts/build_python_packages.py --skip-root --skip-sidecar --clean
+```
+
+该命令会：
+
+1. 清理 `jiuwenbox/` 下的 `dist/`、`build/`、`jiuwenbox.egg-info`（因 `--clean` 触发）
+2. 在 `jiuwenbox/` 目录下执行 `uv build --wheel`，产物输出到 `jiuwenbox/dist/`
+
+产物：`./jiuwenbox/dist/jiuwenbox-<version>-py3-none-any.whl`
+
+> 说明：`build_python_packages.py` 默认会构建主包、TUI sidecar 和 jiuwenbox 三者。仅当需要单独出 jiuwenbox 包时，才用 `--skip-root --skip-sidecar` 跳过另外两者。若三者全部跳过（同时传 `--skip-root --skip-sidecar --skip-jiuwenbox`），脚本会报错退出。
+
+> 注意：`jiuwenbox` 要求 Python `>=3.11`。若构建机器的系统 Python 低于该版本，请显式指定 3.11 解释器（例如 `python3.11 scripts/build_python_packages.py --skip-root --skip-sidecar --clean`），否则构建会因依赖解析失败而报错。
+
 ### 6.2 桌面版 EXE / DMG 打包
 
 桌面版通过 [PyInstaller](https://pyinstaller.org/) 将 Python 应用打包为独立可执行文件。

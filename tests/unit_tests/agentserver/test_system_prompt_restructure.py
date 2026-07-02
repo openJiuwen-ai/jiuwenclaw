@@ -11,10 +11,10 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 )
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 
+from jiuwenswarm.common import utils as _utils_mod
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
-from jiuwenswarm.agents.harness.common.rails import runtime_prompt_rail as _runtime_mod
 from jiuwenswarm.agents.harness.common.rails import skill_retrieval_prompt_rail as _skill_retrieval_prompt_mod
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import SkillRetrievalPromptRail
@@ -236,7 +236,7 @@ async def test_runtime_time_section_participates_in_priority_order():
 
 @pytest.mark.asyncio
 async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_available(tmp_path, monkeypatch):
-    monkeypatch.setattr(_runtime_mod, "get_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
     builder = SystemPromptBuilder(language="en")
     agent = _FakeAgent(builder)
     runtime_rail = RuntimePromptRail(language="en", channel="web")
@@ -281,8 +281,9 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
 
 @pytest.mark.asyncio
 async def test_runtime_git_status_attachment_clears_when_git_context_disappears(tmp_path, monkeypatch):
-    monkeypatch.setattr(_runtime_mod, "get_config_dir", lambda: tmp_path)
-    runtime_state = tmp_path / "runtime_state.yaml"
+    monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
+    runtime_state = tmp_path / "runtime_state" / "default.yaml"
+    runtime_state.parent.mkdir(parents=True, exist_ok=True)
     runtime_state.write_text(
         "git_branch: feature/test\n"
         "git_status: M file.py\n"
@@ -354,11 +355,13 @@ async def test_runtime_prompt_language_output_prefers_rail_language_over_runtime
 ):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    (config_dir / "runtime_state.yaml").write_text(
+    state_dir = config_dir / "runtime_state"
+    state_dir.mkdir()
+    (state_dir / "default.yaml").write_text(
         "model: test-model\nmode: team.plan\nlanguage: en\nchannel: tui\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(_runtime_mod, "get_config_dir", lambda: config_dir)
+    monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: config_dir)
 
     builder = SystemPromptBuilder(language="cn")
     agent = _FakeAgent(builder)

@@ -92,7 +92,7 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Skill Symphony</strong></td>
-      <td width="28%"><a href="en/symphony.md">Skill Symphony</a></td>
+      <td width="28%"><a href="en/Symphony.md">Skill Symphony</a></td>
       <td width="50%">Introduces skill orchestration and dispatch system.</td>
     </tr>
     <tr>

@@ -1157,12 +1157,49 @@ def test_deep_adapter_registers_evolution_interrupt_rail_before_skill_evolution(
     assert interrupt_index < skill_evolution_index
 
 
+def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+
+    class FakeHooksConfig:
+        events = {}
+
+    adapter = JiuWenSwarmDeepAdapter()
+    ask_user_rail = object()
+
+    monkeypatch.setattr(adapter, "_filesystem_rail_enabled_for_profile", lambda: False)
+    monkeypatch.setattr(adapter, "_build_runtime_prompt_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_response_prompt_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_stream_event_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_security_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_heartbeat_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_circuit_breaker_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_avatar_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_subagent_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_skill_rail", lambda **_kwargs: None)
+    monkeypatch.setattr(adapter, "_build_skill_retrieval_prompt_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_structured_ask_user_rail", lambda: ask_user_rail)
+    monkeypatch.setattr(interface_deep_module, "build_permission_rail", lambda **_kwargs: None)
+    monkeypatch.setattr(interface_deep_module, "_build_context_processor_rail", lambda **_kwargs: None)
+    monkeypatch.setattr(interface_deep_module, "load_hooks_config", lambda _config: FakeHooksConfig())
+
+    plan_rails = adapter._build_agent_rails({}, {"models": {}}, mode="agent.plan")  # pylint: disable=protected-access
+    fast_rails = adapter._build_agent_rails({}, {"models": {}}, mode="agent.fast")  # pylint: disable=protected-access
+
+    assert ask_user_rail in plan_rails
+    assert ask_user_rail in fast_rails
+
+
 def test_deep_adapter_unregisters_evolution_runtime_rails_when_leaving_plan(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     class FakeInstance:
         def __init__(self):
             self.unregistered = []
+            self.registered = []
+
+        async def register_rail(self, rail):
+            self.registered.append(rail)
 
         async def unregister_rail(self, rail):
             self.unregistered.append(rail)
@@ -1179,8 +1216,10 @@ def test_deep_adapter_unregisters_evolution_runtime_rails_when_leaving_plan(monk
     adapter._context_assemble_rail = "agent-context-assemble-rail"  # pylint: disable=protected-access
     adapter._context_assemble_mode = "agent.fast"  # pylint: disable=protected-access
 
+    ask_user_rail = object()
     monkeypatch.setattr(adapter, "_handle_memory_rail_by_config", _noop)
     monkeypatch.setattr(adapter, "_handle_external_memory_rail_by_config", _noop)
+    monkeypatch.setattr(adapter, "_build_structured_ask_user_rail", lambda: ask_user_rail)
     monkeypatch.setattr(interface_deep_module, "_build_context_processor_rail", lambda _config: None)
 
     asyncio.run(adapter._update_rails_for_mode("agent.fast"))  # pylint: disable=protected-access
@@ -1194,6 +1233,80 @@ def test_deep_adapter_unregisters_evolution_runtime_rails_when_leaving_plan(monk
     assert adapter._skill_evolution_rail is None  # pylint: disable=protected-access
     assert adapter._evolution_interrupt_rail is None  # pylint: disable=protected-access
     assert adapter._subagent_rail is None  # pylint: disable=protected-access
+    assert adapter._ask_user_rail is ask_user_rail  # pylint: disable=protected-access
+
+
+def test_deep_adapter_registers_ask_user_rail_when_entering_plan_mode(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+
+    class FakeAbilityManager:
+        @staticmethod
+        def list():
+            return []
+
+    class FakeInstance:
+        def __init__(self):
+            self.registered = []
+            self.ability_manager = FakeAbilityManager()
+
+        async def register_rail(self, rail):
+            self.registered.append(rail)
+
+        async def unregister_rail(self, _rail):
+            return None
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = FakeInstance()  # pylint: disable=protected-access
+    adapter._config_cache = {"evolution": {"enabled": False}}  # pylint: disable=protected-access
+    adapter._context_assemble_rail = "existing-context-assemble-rail"  # pylint: disable=protected-access
+    adapter._context_assemble_mode = "agent.plan"  # pylint: disable=protected-access
+
+    ask_user_rail = object()
+    monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_structured_ask_user_rail", lambda: ask_user_rail)
+    monkeypatch.setattr(adapter, "_handle_memory_rail_by_config", _noop)
+    monkeypatch.setattr(adapter, "_handle_external_memory_rail_by_config", _noop)
+
+    asyncio.run(adapter._update_rails_for_mode("agent.plan"))  # pylint: disable=protected-access
+
+    assert ask_user_rail in adapter._instance.registered  # pylint: disable=protected-access
+    assert adapter._ask_user_rail is ask_user_rail  # pylint: disable=protected-access
+
+
+def test_deep_adapter_registers_ask_user_rail_when_entering_fast_mode(monkeypatch):
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+
+    class FakeInstance:
+        def __init__(self):
+            self.registered = []
+
+        async def register_rail(self, rail):
+            self.registered.append(rail)
+
+        async def unregister_rail(self, _rail):
+            return None
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = FakeInstance()  # pylint: disable=protected-access
+    adapter._context_assemble_rail = "existing-context-assemble-rail"  # pylint: disable=protected-access
+    adapter._context_assemble_mode = "agent.fast"  # pylint: disable=protected-access
+
+    ask_user_rail = object()
+    monkeypatch.setattr(adapter, "_build_structured_ask_user_rail", lambda: ask_user_rail)
+    monkeypatch.setattr(adapter, "_handle_memory_rail_by_config", _noop)
+    monkeypatch.setattr(adapter, "_handle_external_memory_rail_by_config", _noop)
+    monkeypatch.setattr(interface_deep_module, "_build_context_processor_rail", lambda _config: None)
+
+    asyncio.run(adapter._update_rails_for_mode("agent.fast"))  # pylint: disable=protected-access
+
+    assert ask_user_rail in adapter._instance.registered  # pylint: disable=protected-access
+    assert adapter._ask_user_rail is ask_user_rail  # pylint: disable=protected-access
 
 
 def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch, tmp_path):
