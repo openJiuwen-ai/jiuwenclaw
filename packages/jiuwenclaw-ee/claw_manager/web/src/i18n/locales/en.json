@@ -128,7 +128,8 @@
   "instanceConfig": {
     "tabs": {
       "channel": "Channel",
-      "logMasking": "Log Masking"
+      "logMasking": "Log Masking",
+      "permissions": "Permissions"
     },
     "channel": {
       "register": "Register Channel",
@@ -154,6 +155,42 @@
       "source": "Source",
       "data": "Extra Data (JSON, optional)",
       "deleteConfirm": "Delete this log masking rule? Gateway will be notified."
+    },
+    "permissions": {
+      "sections": {
+        "general": "General",
+        "tools": "Tool Permissions",
+        "rules": "Shell Rules",
+        "fileGuard": "File Guard",
+        "advanced": "Advanced"
+      },
+      "resetToYaml": "Remove managed config",
+      "deleteConfirm": "Remove Manager-managed permissions? Gateway will fall back to config.yaml.",
+      "deleted": "Managed config removed; Gateway will fall back to config.yaml",
+      "enabled": "Enable permission control",
+      "defaults": "Default action for unlisted tools",
+      "defaultsHint": "allow / ask / deny for tools not listed below",
+      "denyGuidanceMessage": "Deny guidance message",
+      "denyGuidanceMessageHint": "Optional message shown when a tool is denied",
+      "toolName": "Tool name",
+      "action": "Action",
+      "newTool": "Add tool permission",
+      "editTool": "Edit tool permission",
+      "toolsHint": "Tool-level allow / ask / deny; overrides shell rules",
+      "ruleId": "Rule ID",
+      "rulePattern": "Match pattern",
+      "newRule": "Add shell rule",
+      "editRule": "Edit shell rule",
+      "rulesHint": "Matches shell command text only; action is allow or deny",
+      "fileGuardWorkspace": "Workspace",
+      "fileGuardRwEnabled": "Allow read/write inside workspace by default",
+      "fileGuardGlobal": "Global whitelist (JSON)",
+      "fileGuardTrustedExec": "Trusted exec directories (JSON array)",
+      "fileGuardToolBindings": "Tool bindings (JSON)",
+      "exampleTag": "Example",
+      "commandIntent": "Command intent",
+      "commandIntentEnabled": "Enable command intent extraction",
+      "commandIntentTimeout": "Timeout (seconds)"
     }
   },
   "modelTemplate": {

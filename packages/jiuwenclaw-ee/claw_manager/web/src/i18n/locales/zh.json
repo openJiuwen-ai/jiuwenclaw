@@ -128,7 +128,8 @@
   "instanceConfig": {
     "tabs": {
       "channel": "Channel",
-      "logMasking": "日志脱敏"
+      "logMasking": "日志脱敏",
+      "permissions": "权限配置"
     },
     "channel": {
       "register": "注册 Channel",
@@ -154,6 +155,42 @@
       "source": "来源",
       "data": "扩展数据 (JSON, 可选)",
       "deleteConfirm": "确认删除该日志脱敏规则？将同步通知 Gateway。"
+    },
+    "permissions": {
+      "sections": {
+        "general": "基础设置",
+        "tools": "工具权限",
+        "rules": "Shell 规则",
+        "fileGuard": "文件路径",
+        "advanced": "高级"
+      },
+      "resetToYaml": "删除托管配置",
+      "deleteConfirm": "确认删除 Manager 托管的 permissions 配置？Gateway 将回退到 config.yaml。",
+      "deleted": "已删除托管配置，Gateway 将回退到 config.yaml",
+      "enabled": "启用权限管控",
+      "defaults": "未列明工具的默认动作",
+      "defaultsHint": "allow / ask / deny，对 tools 中未单独配置的工具生效",
+      "denyGuidanceMessage": "拒绝提示文案",
+      "denyGuidanceMessageHint": "工具被拒绝时展示给用户的说明（可选）",
+      "toolName": "工具名称",
+      "action": "动作",
+      "newTool": "添加工具权限",
+      "editTool": "编辑工具权限",
+      "toolsHint": "整工具级 allow / ask / deny，优先级高于 Shell 规则",
+      "ruleId": "规则 ID",
+      "rulePattern": "匹配模式",
+      "newRule": "添加 Shell 规则",
+      "editRule": "编辑 Shell 规则",
+      "rulesHint": "仅匹配 shell 命令文本；action 为 allow 或 deny",
+      "fileGuardWorkspace": "Workspace",
+      "fileGuardRwEnabled": "Workspace 内默认放行读写",
+      "fileGuardGlobal": "Global 白名单 (JSON)",
+      "fileGuardTrustedExec": "可信执行目录 (JSON 数组)",
+      "fileGuardToolBindings": "Tool Bindings (JSON)",
+      "exampleTag": "示例模板",
+      "commandIntent": "命令意图抽取",
+      "commandIntentEnabled": "启用命令意图抽取",
+      "commandIntentTimeout": "超时（秒）"
     }
   },
   "modelTemplate": {

@@ -37,6 +37,7 @@ import type {
   LogMaskingRuleCreateBody,
   LogMaskingRuleUpdateBody,
   ListItemsResult,
+  PermissionsConfig,
 } from '../types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
@@ -505,4 +506,15 @@ export const LogMaskingRuleApi = {
     http<void>(`${instanceBase(instanceId)}/log-masking-rules/${encodeURIComponent(ruleId)}`, {
       method: 'DELETE',
     }),
+};
+
+export const PermissionsApi = {
+  get: (instanceId: string) => http<PermissionsConfig>(`${instanceBase(instanceId)}/permissions`),
+  upsert: (instanceId: string, body: Record<string, unknown>) =>
+    http<PermissionsConfig>(`${instanceBase(instanceId)}/permissions`, {
+      method: 'PUT',
+      body: { body },
+    }),
+  remove: (instanceId: string) =>
+    http<void>(`${instanceBase(instanceId)}/permissions`, { method: 'DELETE' }),
 };
