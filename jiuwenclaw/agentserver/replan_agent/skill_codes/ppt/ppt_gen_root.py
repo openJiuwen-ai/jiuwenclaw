@@ -12,6 +12,7 @@ from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.content_plan import Con
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.outline_review import OutlineReviewNode
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.deep_research import DeepResearchNode
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.style_prepare import StylePrepareNode
+from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.image_prepare import ImagePrepareNode
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.ppt_page_gen import PPTPageGenNode
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.ppt_export import PPTExportNode
 from jiuwenclaw.agentserver.replan_agent.skill_codes.ppt.delivery import DeliveryNode
@@ -54,6 +55,7 @@ class PPTGenRootNode(PlanNode):
             OutlineReviewNode(),
             DeepResearchNode(),
             StylePrepareNode(),
+            ImagePrepareNode(),
             PPTPageGenNode(),
             PPTExportNode(),
             DeliveryNode(),

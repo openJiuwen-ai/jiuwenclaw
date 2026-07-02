@@ -17,6 +17,9 @@ _DOC_EXTENSIONS = (
     ".pdf",
     ".md",
     ".txt",
+)
+
+_IMAGE_EXTENSIONS = (
     ".png",
     ".jpg",
     ".jpeg",
@@ -88,7 +91,23 @@ def _dedupe_paths(paths: list[str]) -> list[str]:
 
 def _looks_like_document_path(path: str) -> bool:
     suffix = Path(path).suffix.casefold()
-    return suffix in _DOC_EXTENSIONS
+    return suffix in _DOC_EXTENSIONS or suffix in _IMAGE_EXTENSIONS
+
+
+def _is_image_path(path: str) -> bool:
+    return Path(path).suffix.casefold() in _IMAGE_EXTENSIONS
+
+
+def _split_image_paths(paths: list[str]) -> tuple[list[str], list[str]]:
+    """将路径列表分流为 (doc_paths, image_paths)。图片不进 doc_paths，避免触发 P3 Eve 解析。"""
+    docs: list[str] = []
+    images: list[str] = []
+    for p in paths:
+        if _is_image_path(p):
+            images.append(p)
+        else:
+            docs.append(p)
+    return docs, images
 
 
 _FILE_PATH_KEYS = ("path", "file_path", "filepath", "local_path", "uri")
@@ -370,7 +389,10 @@ class IntentClassifyNode(PlanNode):
 
     async def _execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         doc_paths, slots = await self._collect_doc_paths(inputs)
+        # 图片路径分流：图片不进 doc_paths（不触发 P3 Eve），单独存 image_paths 供 Diana
+        doc_paths, image_paths = _split_image_paths(doc_paths)
         inputs["doc_paths"] = doc_paths
+        inputs["image_paths"] = image_paths
         inputs["has_documents"] = bool(doc_paths)
 
         # 仅在场景 C（无附件、无路径、slots 非空）时写入预填信息
