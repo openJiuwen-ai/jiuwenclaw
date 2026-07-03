@@ -641,6 +641,7 @@ react:
       - reload_original_context_messages
       - load_qa_index                 # 展开指定 QA 块内「概览+逐 round 目录」；非 Selector 选块
       - deepresearch_run_task
+      - skill_turbo
     subagents:
       enabled: true
       inherit_parent_eager_tools: true
@@ -655,17 +656,16 @@ react:
     auto_save: true           # true = 每轮对话后自动保存演进经验
     skill_base_dir: "agent/skills"  # Skill 根目录
 
-  replan_agent:
-    # RePlanAgent 试验开关：默认关闭。开启后 agent 模式请求会先尝试 RePlanAgent，未命中/失败自动回落现有 DeepAgent。
+  skill_turbo:
+    # 开启后 agent 模式请求会先尝试 SkillTurbo，未命中/失败自动回落现有 DeepAgent。
     enabled: true
-    force_enable: false  # [TEMP-FORCE-REPLAN] 测试强制开关，前端【快速】按钮合入后删除
     # [TEMP-EXTERNAL-SKILL] PPT skill 的外部目录名（与原版 pptx-craft 区分）。
     # 测试在 skill_root 下放入该名称的 skill 子目录即可。
     skill_name: pptx-craft
     # [TEMP-EXTERNAL-SKILL] 外部 skill 目录的 SHA256 校验值。
     # 转测前由开发计算并填写，校验失败时打 WARNING 日志但不阻塞执行。
     # 计算方法（注意：导入 environment 而非 pipeline_init；Windows 路径需用 r'' 原始字符串）：
-    #   python -c "from jiuwenclaw.agentserver.replan_agent.environment import _compute_dir_checksum; print(_compute_dir_checksum(r'<skill_root>\pptx-craft-replan'))"
+    #   python -c "from jiuwenclaw.agentserver.skill_turbo.environment import _compute_dir_checksum; print(_compute_dir_checksum(r'<skill_root>\pptx-craft-skill_turbo'))"
     skill_checksum: 03fdacfcc92207294e226671066e5c6b8c7b64187ce6d47f1844d59f2a90a0dc
 
   # LLM 调用重试配置（应用层；OpenAI SDK 重试见 models.*.model_client_config.max_retries）
@@ -931,6 +931,7 @@ permissions:
     cron_delete_job: allow
     cron_toggle_job: allow
     cron_preview_job: allow
+    skill_turbo: allow
 
   rules:
     - id: shell_allow_dir
