@@ -75,6 +75,44 @@ _REPLAN_STREAM_FLUSH_INTERVAL_SECONDS: float = 3.0
 # 需要缓冲的事件类型
 _BUFFERABLE_EVENT_TYPES: frozenset[str] = frozenset({"chat.delta", "chat.reasoning"})
 
+# ──────────────────────── 节点显示名映射 ────────────────────────
+# 将内部 plan_name（如 p0_pipeline_init）映射为界面上展示的中文名称。
+# 排序遵循 ppt_gen_root 节点 sub_plans 的执行顺序（Stage 0 → Stage N）。
+# 仅影响前端展示，不改变内部 plan_name 标识。
+_NODE_DISPLAY_NAMES: dict[str, str] = {
+    "p0_pipeline_init": "Stage 0: 流水线初始化",
+    "p1_intent_classify": "Stage 1: 意图分类",
+    "p3_document_parse": "Stage 2: 文档解析",
+    "p2_requirement_collect": "Stage 3: 需求收集",
+    "p3_5_template_context": "Stage 4: 模板上下文预处理",
+    "p4_content_plan": "Stage 5: 内容策划",
+    "p5_outline_review": "Stage 6: 大纲审阅",
+    "p6_deep_research": "Stage 7: 深度研究",
+    "p7_style_prepare": "Stage 8: 风格准备",
+    "p6_5_image_prepare": "Stage 9: 图片准备",
+    "p8_ppt_page_gen": "Stage 10: 幻灯片生成",
+    "p9_ppt_export": "Stage 11: PPTX导出",
+    "p10_delivery": "Stage 12: 交付",
+    "ppt_gen_root": "PPT生成",
+}
+
+
+def _display_name(plan_name: str) -> str:
+    """将内部 plan_name 转为界面上展示的中文名称，未映射时原样返回。"""
+    return _NODE_DISPLAY_NAMES.get(plan_name, plan_name)
+
+
+def _replace_plan_names_in_text(text: str) -> str:
+    """将文本中出现的已映射 plan_name 替换为对应的中文显示名。"""
+    if not text:
+        return text
+    result = text
+    for raw, display in _NODE_DISPLAY_NAMES.items():
+        if raw in result:
+            result = result.replace(raw, display)
+    return result
+
+
 # Request上下文
 _request_id_var: ContextVar[str] = ContextVar("replan_request_id", default="")
 _channel_id_var: ContextVar[str] = ContextVar("replan_channel_id", default="")
@@ -1499,7 +1537,7 @@ class RePlanExecutor:
             if reasoning_content and session:
                 payload: dict[str, Any] = {
                     "content": str(reasoning_content),
-                    "plan_name": node_name,
+                    "plan_name": _display_name(node_name),
                 }
                 if source_id is not None:
                     payload[STREAM_SOURCE_ID_FIELD] = source_id
@@ -1520,7 +1558,7 @@ class RePlanExecutor:
             if result and session:
                 output_payload: dict[str, Any] = {
                     "content": str(result),
-                    "plan_name": node_name,
+                    "plan_name": _display_name(node_name),
                 }
                 if source_id is not None:
                     output_payload[STREAM_SOURCE_ID_FIELD] = source_id
@@ -1630,7 +1668,7 @@ class RePlanExecutor:
                         if session:
                             reasoning_payload: dict[str, Any] = {
                                 "content": str(reasoning_content),
-                                "plan_name": node_name,
+                                "plan_name": _display_name(node_name),
                             }
                             if source_id is not None:
                                 reasoning_payload[STREAM_SOURCE_ID_FIELD] = source_id
@@ -1658,7 +1696,7 @@ class RePlanExecutor:
                         if session:
                             output_payload: dict[str, Any] = {
                                 "content": str(text_chunk),
-                                "plan_name": node_name,
+                                "plan_name": _display_name(node_name),
                             }
                             if source_id is not None:
                                 output_payload[STREAM_SOURCE_ID_FIELD] = source_id
@@ -2086,10 +2124,11 @@ class RePlanExecutor:
         node: PlanNode,
         task_id: str | None,
     ) -> AgentResponseChunk:
+        display = _display_name(node.plan_name)
         payload = {
             "event_type": "node.started",
-            "plan_name": node.plan_name,
-            "content": f"节点 {node.plan_name} 开始执行\n",
+            "plan_name": display,
+            "content": f"节点 {display} 开始执行\n",
         }
         if task_id:
             payload["task_id"] = task_id
@@ -2104,7 +2143,7 @@ class RePlanExecutor:
     ) -> AgentResponseChunk:
         payload = {
             "event_type": "node.finished",
-            "plan_name": node.plan_name,
+            "plan_name": _display_name(node.plan_name),
         }
         if task_id:
             payload["task_id"] = task_id
@@ -2124,16 +2163,24 @@ class RePlanExecutor:
         data_payload = content if isinstance(content, dict) else None
         
         if isinstance(content, dict):
-            # 从 chunk 中提取正确的 plan_name（如果存在）
+            # 从 chunk 中提取正确的 plan_name（如果存在），并转为显示名
             chunk_plan_name = content.get("node") or content.get("plan_name")
             if chunk_plan_name:
-                plan_name = chunk_plan_name
-            
+                plan_name = _display_name(chunk_plan_name)
+
             # 提取实际内容：优先 content 字段，其次 message 字段，最后空字符串
             # 不再把整个 dict 作为 content 回退，避免语义不清
             actual_content = content.get("content", "")
             if not actual_content:
                 actual_content = content.get("message", "")
+
+            # 将消息文本中出现的内部 plan_name 替换为中文显示名
+            actual_content = _replace_plan_names_in_text(actual_content)
+
+            # 将 data_payload 中的 current_node 转为显示名（浅拷贝避免修改原始 chunk）
+            if data_payload is not None and "current_node" in data_payload:
+                data_payload = dict(data_payload)
+                data_payload["current_node"] = _display_name(data_payload["current_node"])
         
         payload = {
             "event_type": "chat.delta",
@@ -2157,7 +2204,7 @@ class RePlanExecutor:
         payload = {
             "event_type": "chat.error",
             "error": error,
-            "plan_name": node.plan_name,
+            "plan_name": _display_name(node.plan_name),
         }
         if task_id:
             payload["task_id"] = task_id
@@ -2218,7 +2265,7 @@ class RePlanExecutor:
             task_id = f"task_{uuid.uuid4().hex[:8]}"
             task_state = {
                 "task_id": task_id,
-                "task_content": subplan.plan_name,
+                "task_content": _display_name(subplan.plan_name),
                 "task_index": idx,
                 "source": "replan",
                 "status": "pending",
@@ -2478,7 +2525,7 @@ class RePlanExecutor:
         task_id = f"task_{uuid.uuid4().hex[:8]}"
         task_state = {
             "task_id": task_id,
-            "task_content": subplan.plan_name,
+            "task_content": _display_name(subplan.plan_name),
             "task_index": len(task_states),
             "source": "replan",
             "status": "pending",
@@ -2498,8 +2545,9 @@ class RePlanExecutor:
         plan_name: str,
         task_states: dict[str, dict[str, Any]],
     ) -> tuple[str, dict[str, Any]] | None:
+        display = _display_name(plan_name)
         for task_id, state in task_states.items():
-            if state.get("task_content") == plan_name:
+            if state.get("task_content") == display:
                 return task_id, state
         return None
 
@@ -2512,7 +2560,7 @@ class RePlanExecutor:
         _current_task_context_var.set(
             {
                 "task_id": task_id,
-                "task_name": subplan.plan_name,
+                "task_name": _display_name(subplan.plan_name),
                 "depth": subplan.depth,
                 "start_time": timestamp,
             }
@@ -2559,7 +2607,7 @@ class RePlanExecutor:
             "channel_id": _channel_id_var.get(),
             "payload": {
                 "task_id": task_id,
-                "task_content": subplan.plan_name,
+                "task_content": _display_name(subplan.plan_name),
                 "task_index": task_state.get("task_index", 0),
                 "total_tasks": len(task_states),
                 "parent_request_id": request_id,
@@ -2578,7 +2626,7 @@ class RePlanExecutor:
             "channel_id": _channel_id_var.get(),
             "payload": {
                 "task_id": data.task_id,
-                "task_content": data.subplan.plan_name,
+                "task_content": _display_name(data.subplan.plan_name),
                 "status": data.status,
                 "duration_ms": data.duration_ms,
                 "timestamp": data.timestamp,
