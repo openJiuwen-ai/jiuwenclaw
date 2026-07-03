@@ -2350,24 +2350,32 @@ class MessageHandler(ABC):
                             msg.id, msg.channel_id, msg.session_id, "supplement",
                         )
 
-                        from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
-
                         agent_msg = await self._prepare_agent_dispatch_message(msg)
-                        supplement_env = e2a_from_agent_fields(
-                            request_id=f"supplement_{int(time.time() * 1000):x}",
+                        from jiuwenclaw.schema.message import Message
+
+                        supplement_interrupt = Message(
+                            id=f"supplement_{int(time.time() * 1000):x}",
+                            type="req",
                             channel_id=msg.channel_id,
                             session_id=agent_msg.session_id,
-                            req_method=ReqMethod.CHAT_CANCEL,
-                            params={"intent": "supplement", "session_id": agent_msg.session_id},
-                            is_stream=False,
+                            params={
+                                "intent": "supplement",
+                                "session_id": agent_msg.session_id,
+                            },
                             timestamp=time.time(),
+                            ok=True,
+                            req_method=ReqMethod.CHAT_CANCEL,
+                            provider=getattr(msg, "provider", None),
+                            chat_id=getattr(msg, "chat_id", None),
+                            user_id=getattr(msg, "user_id", None),
+                            bot_id=getattr(msg, "bot_id", None),
+                            metadata=msg.metadata,
                         )
+                        supplement_env = self.message_to_e2a(supplement_interrupt)
                         try:
                             await self._send_interrupt_to_agent(supplement_env)
                         except Exception:
                             pass  # 即使失败也继续启动新任务
-
-                        from jiuwenclaw.schema.message import Message
 
                         new_req_id = f"req_{int(time.time() * 1000):x}_{msg.id}"
                         sup_meta = dict(msg.metadata) if msg.metadata else None
