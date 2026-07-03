@@ -21,7 +21,7 @@ _OUTLINE_NAME = "outline.md"
 _SEARCH_RESULTS_FOR_P43_MAX_CHARS = 8000
 _PAGE_HEADING_PATTERN = re.compile(r"^###\s+P(\d+)\s*:", re.MULTILINE)
 _OUTLINE_FIELD_PATTERN = re.compile(
-    r"^-\s*\*\*(?P<field>[^*]+)\*\*[：:]\s*(?P<value>.+?)\s*$",
+    r"^-?\s*\*\*(?P<field>[^*]+)\*\*[：:]\s*(?P<value>.+?)\s*$",
     re.MULTILINE,
 )
 _P4_MAX_ATTEMPTS = 2
@@ -74,8 +74,8 @@ _P43_COMMON_RULES = """大纲格式要求（必须严格遵守）：
    - **内容概要**：具体有信息量
    - **研究查询**：✅ 页 2-4 个精准查询；❌ 页填 `-`
    - **数据需求**：✅ 页写具体数据类型和维度，数据需求必须具体化；❌ 页填 `-`
-4. 内容页数（研究需求：✅）等于 page_count；默认总页数为 page_count + 2（封面 + 结束页）。
-   仅当用户明确要求目录/章节/过渡/总结等结构页时才额外增加，这些结构页不占用内容页数。
+4. 内容页数（研究需求：✅）必须等于 page_count。封面（cover）、结束页（ending）及用户明确要求的结构页（section/agenda/transition/conclusion 等）标 ❌，其余页必须标 ✅。
+   禁止自行添加 section/transition/agenda 等结构页；仅当用户明确要求时才添加，且为额外页（总页数 = page_count + 2 + 结构页数），不得占用内容页额度。
    **页面顺序**：cover 必须是 P1（首页），ending 必须是末页（P{总页数}）。
 5. 基于给定素材与搜索结果，不编造不存在的趋势或数据。
 6. 只输出 Markdown 正文，不要 JSON，不要代码围栏。"""
@@ -428,6 +428,7 @@ def _build_p43_prompt(
     presentation_purpose = str(inputs.get("presentation_purpose") or "").strip()
     include_sources = _should_include_searched_sources(inputs)
     degraded = _is_no_search_degraded(inputs)
+    user_text = PptCommon.collect_user_text(inputs).strip()
 
     parts = [
         f"请生成 outline.md 正文，主题：{topic}\n",
@@ -439,6 +440,8 @@ def _build_p43_prompt(
     ]
     if presentation_purpose:
         parts.append(f"- presentation_purpose: {presentation_purpose}\n")
+    if user_text:
+        parts.append(f"- 用户原文：{user_text}\n")
     parts.append(f"- include_searched_sources_section: {include_sources}\n")
     if degraded:
         parts.append(
@@ -500,8 +503,10 @@ def _validate_outline_markdown_basic(text: str, *, topic: str, page_count: Any) 
     expected_content_pages = int(page_count) if page_count is not None else None
     if expected_content_pages is not None:
         pages = _split_outline_pages(stripped)
+        # 仅统计 ✅ 页（研究需求为 ✅ 的内容页），结构页（❌）不计入内容页配额。
+        # 使用 < 比较容忍 LLM 多生成内容页，但不容忍内容页不足。
         content_count = sum(1 for _, blk in pages if _is_research_required_page(blk))
-        if content_count != expected_content_pages:
+        if content_count < expected_content_pages:
             raise ContentPlanError(
                 f"P4.3 outline 内容页数（✅）应为 {expected_content_pages}，"
                 f"实际 {content_count}"
@@ -805,6 +810,9 @@ class P43OutlineGenNode(PlanNode):
                 "3. call_llm 生成大纲 Markdown\n"
                 "4. write_file 落盘 `{output_dir}/outline.md`\n"
                 "\n"
+                "### outline.md 格式规范（必须严格遵守）\n"
+                f"{_P43_COMMON_RULES}\n"
+                "\n"
                 "### 失败兜底\n"
                 "- LLM 生成空内容: raise ContentPlanError\n"
                 "- write_file 失败: raise ContentPlanError\n"
@@ -849,6 +857,9 @@ class P44ValidateNode(PlanNode):
                 "2. 校验结构标记：`# 大纲：`、`## 页面规划`\n"
                 "3. 校验 ✅ 页研究查询 / 数据需求\n"
                 "4. 搜索模式下校验 `## 已搜索来源` 章节\n"
+                "\n"
+                "### outline.md 合规格式（校验不通过时需按此格式修复后重写文件）\n"
+                f"{_P43_COMMON_RULES}\n"
                 "\n"
                 "### 失败兜底\n"
                 "- outline.md 不存在或为空: raise ContentPlanError\n"
