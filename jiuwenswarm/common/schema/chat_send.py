@@ -68,3 +68,48 @@ class ChatSendParams(TypedDict, total=False):
 
     original_request: NotRequired[str]
     """原始请求（supplement 场景保留）。"""
+
+    session_id: NotRequired[str]
+    """会话 ID（Web 前端通过 params 传递，通常由 Message 框架层提取到 request.session_id）。"""
+
+    model_name: NotRequired[str]
+    """模型名称（Web 前端可选传递）。"""
+
+    request_id: NotRequired[str]
+    """请求 ID（interrupt resume / 问答回复场景关联）。"""
+
+    source: NotRequired[str]
+    """来源标识（如 permission_interrupt / confirm_interrupt / ask_user_interrupt / evolution_interrupt）。"""
+
+    is_supplement: NotRequired[bool]
+    """是否为补充请求（Gateway 用于判断 supplement 流程）。"""
+
+    supplement_input: NotRequired[str]
+    """补充请求的原始输入。"""
+
+    plan_approval_kind: NotRequired[str]
+    """team.plan 审批类型（如 plan_approval）。"""
+
+    plan_content: NotRequired[str]
+    """team.plan 审批内容。"""
+
+    plan_language: NotRequired[str]
+    """team.plan 审批语言（cn / en）。"""
+
+    approval_schema: NotRequired[str]
+    """审批 schema（evolution interrupt 场景）。"""
+
+    evolution_meta: NotRequired[dict]
+    """进化元数据（evolution interrupt 场景）。"""
+
+    activate_response: NotRequired[dict]
+    """auto_harness 激活响应（{interaction_id, action, feedback}）。"""
+
+    team: NotRequired[bool]
+    """团队模式布尔标志。"""
+
+    run: NotRequired[dict]
+    """Run 上下文结构（cron / 定时任务场景由 Gateway 注入）。"""
+
+    cron: NotRequired[dict]
+    """定时任务信息（由 Gateway cron scheduler 注入）。"""
