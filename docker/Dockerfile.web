@@ -1,6 +1,8 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
+ARG AGENT_RUNTIME_REPOS
+ARG AGENT_RUNTIME_BRANCH
 ARG VITE_PRODUCT_NAME=JiuwenSwarm
 ENV VITE_PRODUCT_NAME=${VITE_PRODUCT_NAME}
 
@@ -16,7 +18,11 @@ WORKDIR /app/jiuwenclaw
 RUN sed -i '/openjiuwen_runtime_foundation/d' pyproject.toml
 RUN sed -i '/openjiuwen_runtime_foundation/d' packages/jiuwenclaw-ee/claw_manager/pyproject.toml
 RUN sed -i '/openjiuwen_runtime_management/d' packages/jiuwenclaw-ee/gateway/extensions/runtime_management_extension/pyproject.toml
-RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[all]" --no-cache-dir
+
+RUN pip install -e . \
+    git+${AGENT_RUNTIME_REPOS}@${AGENT_RUNTIME_BRANCH}#subdirectory=foundation \
+    --no-cache-dir \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 切换成 app 用户，再执行 npm 构建
 USER app
