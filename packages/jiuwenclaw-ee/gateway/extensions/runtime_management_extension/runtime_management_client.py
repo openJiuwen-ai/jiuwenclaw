@@ -1216,15 +1216,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         "已 %.1f 秒无真实业务输出，共收到 %d 个 chunk",
                         request.request_id, idle_duration, chunk_count,
                     )
+                    # 静默结束流：不向用户页下发内部超时文案，由 Gateway 识别终止哨兵并收尾
                     yield AgentResponseChunk(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
-                        payload={
-                            "error": (
-                                f"Stream idle timeout after {idle_duration:.1f}s "
-                                "without real business chunks"
-                            )
-                        },
+                        payload={"is_complete": True},
                         is_complete=True,
                     )
                     return
