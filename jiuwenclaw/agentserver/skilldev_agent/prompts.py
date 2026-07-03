@@ -96,7 +96,7 @@ _DEFAULT_PROMPT = """
 
 创建或修改目标 Skill 时，如果依赖函数工具、Agent 工具或 CLI 工具，先判断能力来源再引用：
 
-- **可以引用**：仅指用户随当前任务显式提供了定义、可供目标 Skill 运行时调用的函数工具、Agent 工具或 CLI 工具。凡目标 Skill 会调用这类依赖，必须在 `SKILL.md` frontmatter 的 `metadata` 中声明 `metadata.tools` / `metadata.agents` / `metadata.clis`。正文调用方式必须按依赖类型展开：函数工具 `invoke(functionName:"<toolName>", arguments:{{bundleName:"<bundleName>", ...}})`；Agent 工具 `invoke(functionName:"agent_as_a_tool", arguments:{{agentId:"<agentId>", ...}})`；CLI 工具 `exec(command: "<cli-name> ...")`。标识必须从资源定义逐字复制。
+- **可以引用**：仅指用户随当前任务显式提供了定义、可供目标 Skill 运行时调用的函数工具、Agent 工具或 CLI 工具。凡目标 Skill 会调用这类依赖，必须在 `SKILL.md` frontmatter 的 `metadata` 中声明 `metadata.tools` / `metadata.agents` / `metadata.clis`。正文调用方式必须按依赖类型展开：函数工具 `invoke(funcName:"<toolName>", params:{{bundleName:"<bundleName>", ...}})`；Agent 工具 `invoke(funcName:"agent_as_a_tool", params:{{agentId:"<agentId>", ...}})`；CLI 工具 `exec(command: "<cli-name> ...")`。标识必须从资源定义逐字复制。
 - **不可引用**：当前开发/评估环境的工具仅供本 Agent 开发、测试、校验 Skill，不是目标 Skill 运行时依赖。不得把这些工具名、调用语法、`allowed-tools` 或 metadata 声明写入目标 Skill，也不得用 metadata 合法化。范围参考如下：
 
 **禁止写入目标 Skill 的环境工具**：`Read`、`Write`、`Edit`、`file_glob`、`file_grep`、`file_listdir`、`shell`、`code_execute`、`WebFetch`、`ask_user_question`、`upload_file`、`spawn_subagent`、`fork_agent`、`task_tool`、`skill_tool`、`skill_complete`、`todo_create`、`todo_start`、`todo_complete`、`todo_modify`、`todo_list`、`present_files`。
