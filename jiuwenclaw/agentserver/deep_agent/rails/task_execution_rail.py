@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -21,6 +22,11 @@ from openjiuwen.harness.tools.todo_resume import todo_create_blocked_message
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 from jiuwenclaw.utils import get_agent_sessions_dir
+from jiuwenclaw.agentserver.deep_agent.artifact_body_scan import (
+    _clean_path_candidate,
+    _path_identity,
+    scan_body_text_for_paths,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,21 +54,7 @@ def _mark_as_sent(path: str) -> None:
     for k in expired_keys:
         _ARTIFACT_SEND_CACHE.pop(k, None)
 
-# 文件路径检测的正则表达式模式（仅用于正文回退扫描）
-_FILE_PATH_PATTERNS = [
-    # 变量路径：{workspace}/... 或 {output_dir}/...
-    re.compile(
-        r'\{(?:workspace|output_dir)\}[/\\][^\s\]\}\)\,\'\"`<>，。；、：]+\.[a-zA-Z0-9]{1,10}',
-        re.IGNORECASE,
-    ),
-    # 绝对/相对路径：必须包含 workspace 或 output 目录段
-    re.compile(
-        r'(?:(?:[A-Za-z]:)?[/\\]|\.{1,2}[/\\])?[^\s\]\}\)\,\'\"`<>，。；、：]*'
-        r'[/\\](?:workspace|output)[/\\][^\s\]\}\)\,\'\"`<>，。；、：]*'
-        r'[^\s\]\}\)\,\'\"`<>，。；、：]+\.[a-zA-Z0-9]{1,10}',
-        re.IGNORECASE,
-    ),
-]
+# 文件路径检测的正则表达式模式（仅用于正文回退扫描，实现见 artifact_body_scan）
 
 # 需要排除的路径模式（非产物文件），系统敏感目录基于时间戳校验过滤
 _ALWAYS_EXCLUDED_PATH_PATTERNS = [
@@ -92,8 +84,6 @@ _STRUCTURED_PATH_FIELD_KEYWORDS = frozenset({
     "result",
 })
 
-_PATH_TRAILING_CHARS = "'\"`\\]\\}\\),.;:，。；、："
-
 
 def _is_excluded_path(path_str: str) -> bool:
     """检查路径是否应排除（非产物）
@@ -103,16 +93,6 @@ def _is_excluded_path(path_str: str) -> bool:
         if pattern.search(path_str):
             return True
     return False
-
-
-def _clean_path_candidate(path_str: str) -> str:
-    """清理正则或结构化字段中提取到的路径候选。"""
-    return path_str.strip().strip(_PATH_TRAILING_CHARS).strip()
-
-
-def _path_identity(path_str: str) -> str:
-    """生成用于去重的路径标识，兼容 Windows/Unix 分隔符和变量大小写。"""
-    return path_str.replace("\\", "/").lower()
 
 
 def _iter_structured_path_values(value: Any, parent_key: str = "") -> list[str]:
@@ -146,6 +126,7 @@ def _extract_artifact_paths_from_tool_result(
     *,
     scan_body_text: bool = False,
     skip_mtime_check: bool = False,
+    cancel_event: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
     """从工具输出结果中提取文件路径并验证是否为有效的工件。
     
@@ -193,6 +174,8 @@ def _extract_artifact_paths_from_tool_result(
         )
 
         for p in potential_paths:
+            if cancel_event is not None and cancel_event.is_set():
+                return []
             if not p:
                 continue
             if _is_excluded_path(p):
@@ -242,42 +225,39 @@ def _extract_artifact_paths_from_tool_result(
         len(result_text),
     )
 
-    # 使用正则表达式从文本中提取路径
-    seen_paths: set[str] = set()
-    total_regex_matches = 0
-    for pattern in _FILE_PATH_PATTERNS:
-        matches = pattern.findall(result_text)
-        total_regex_matches += len(matches)
-        for match in matches:
-            # 清理路径（去除尾部的非法字符）
-            cleaned_path = _clean_path_candidate(match)
-            if not cleaned_path:
-                continue
-            candidate_identity = _path_identity(cleaned_path)
-            if candidate_identity in seen_paths:
-                continue
-            seen_paths.add(candidate_identity)
+    path_candidates, total_regex_matches, lines_scanned, lines_skipped = (
+        scan_body_text_for_paths(result_text, cancel_event=cancel_event)
+    )
 
-            # 排除非产物路径（skill文件、示例路径等）
-            if _is_excluded_path(cleaned_path):
-                continue
+    if cancel_event is not None and cancel_event.is_set():
+        logger.info("[ArtifactDetector] Body scan cancelled")
+        return []
 
-            artifact = _validate_and_build_artifact(
-                cleaned_path,
-                workspace_base,
-                tool_start_time=tool_start_time,
-                skip_mtime_check=skip_mtime_check,
-            )
-            if not artifact:
-                continue
+    for cleaned_path in path_candidates:
+        if cancel_event is not None and cancel_event.is_set():
+            return []
+        if _is_excluded_path(cleaned_path):
+            continue
 
-            identity = _path_identity(artifact.get("path", cleaned_path))
-            if identity not in seen_artifact_paths:
-                artifacts.append(artifact)
-                seen_artifact_paths.add(identity)
+        artifact = _validate_and_build_artifact(
+            cleaned_path,
+            workspace_base,
+            tool_start_time=tool_start_time,
+            skip_mtime_check=skip_mtime_check,
+        )
+        if not artifact:
+            continue
+
+        identity = _path_identity(artifact.get("path", cleaned_path))
+        if identity not in seen_artifact_paths:
+            artifacts.append(artifact)
+            seen_artifact_paths.add(identity)
     logger.info(
-        "[ArtifactDetector] Body scan fallback done: regex_matches=%d artifacts=%d",
+        "[ArtifactDetector] Body scan fallback done: regex_matches=%d "
+        "lines_scanned=%d lines_skipped=%d artifacts=%d",
         total_regex_matches,
+        lines_scanned,
+        lines_skipped,
         len(artifacts),
     )
     
