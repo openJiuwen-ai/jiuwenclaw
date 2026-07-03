@@ -678,6 +678,86 @@ def remove_team_mode_session_dirs_at_startup() -> None:
         logger.info("启动清理: 已删除 %d 个 team 模式会话目录", removed)
 
 
+def migrate_legacy_session_metadata_at_startup() -> None:
+    """AgentServer 启动时给老会话的 metadata.json 补全新字段并写回磁盘。
+
+    升级后新增了 project_path / model / last_user_message_at / status 四个字段，
+    老会话的 metadata.json 缺这些字段。本函数在启动时遍历所有会话目录，
+    按字段语义补默认值并落盘，保证磁盘上 schema 统一、前端永远拿到稳定结构。
+
+    各字段兜底值来源：
+      - project_path / model / status：常量默认（""/""/"idle"），老会话本就没存过
+      - last_user_message_at：从已有时间字段推算 ——
+        last_message_at（agent 最后输出时间）→ created_at（创建时间）→ 目录 mtime
+        不能给常量 0.0，否则老会话排序/时间显示错乱
+    """
+    sessions_dir = get_agent_sessions_dir()
+    if not sessions_dir.is_dir():
+        return
+
+    migrated = 0
+    for session_dir in sessions_dir.iterdir():
+        if not session_dir.is_dir():
+            continue
+        if session_dir.name.startswith(_HEARTBEAT_SESSION_PREFIX):
+            continue
+        meta_path = session_dir / "metadata.json"
+        if not meta_path.is_file():
+            continue
+        try:
+            raw = json.loads(meta_path.read_text(encoding="utf-8") or "{}")
+        except (OSError, ValueError) as exc:
+            # OSError：并发删除/权限致 read_text 失败；ValueError：JSONDecodeError/UnicodeDecodeError
+            logger.warning("启动迁移跳过会话 %s: 读取 metadata.json 失败: %s", session_dir.name, exc)
+            continue
+        if not isinstance(raw, dict):
+            continue
+
+        changed = False
+        # project_path / model：常量默认
+        if "project_path" not in raw:
+            raw["project_path"] = ""
+            changed = True
+        if "model" not in raw:
+            raw["model"] = ""
+            changed = True
+        if "status" not in raw:
+            raw["status"] = "idle"
+            changed = True
+        # last_user_message_at：从已有时间字段推算，保证语义合理
+        if "last_user_message_at" not in raw:
+            # 优先用已有时间字段；不能用 ``or`` 短路——合法的 0.0 时间戳是 falsy
+            # 会被跳过。显式 None 判定后回退到目录 mtime（OSError 时 0.0 兜底）。
+            fallback = raw.get("last_message_at")
+            if fallback is None:
+                fallback = raw.get("created_at")
+            if fallback is None:
+                fallback = session_dir.stat().st_mtime
+            try:
+                raw["last_user_message_at"] = float(fallback) if fallback is not None else 0.0
+            except (TypeError, ValueError):
+                raw["last_user_message_at"] = session_dir.stat().st_mtime
+            changed = True
+
+        if changed:
+            try:
+                with _FILE_LOCK:
+                    meta_path.write_text(
+                        json.dumps(raw, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                # 同步更新内存缓存，避免读到旧值
+                with _CACHE_LOCK:
+                    _METADATA_CACHE[session_dir.name] = raw.copy()
+                migrated += 1
+            except (OSError, ValueError, TypeError) as exc:
+                # OSError：写盘失败；ValueError/TypeError：json.dumps 序列化失败
+                logger.warning("启动迁移写回会话 %s 失败: %s", session_dir.name, exc)
+
+    if migrated:
+        logger.info("启动迁移: 已补全 %d 个老会话的 metadata 字段", migrated)
+
+
 def get_all_sessions_metadata(
     limit: int = 20,
     offset: int = 0,

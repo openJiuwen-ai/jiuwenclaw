@@ -1520,3 +1520,107 @@ class TestSessionGetMetadataHandler:
         assert resp_a["payload"]["project_path"] == "E:\\A"
         assert resp_b["payload"]["model"] == "modelB"
         assert resp_b["payload"]["project_path"] == "E:\\B"
+
+
+# ===========================================================================
+# migrate_legacy_session_metadata_at_startup
+# 覆盖 P2：stat() OSError 不得中断迁移；or 短路不得跳过合法 0.0 时间戳
+# ===========================================================================
+class TestMigrateLegacySessionMetadata:
+    """启动迁移：给老会话 metadata.json 补全 project_path/model/status/last_user_message_at。"""
+
+    @staticmethod
+    def test_fills_missing_constant_fields(sessions_dir):
+        """缺 project_path/model/status 的老会话被补常量默认值并写回。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            migrate_legacy_session_metadata_at_startup,
+        )
+
+        sdir = sessions_dir / "old_session"
+        sdir.mkdir()
+        (sdir / "metadata.json").write_text(
+            json.dumps({"session_id": "old_session"}), encoding="utf-8"
+        )
+
+        migrate_legacy_session_metadata_at_startup()
+
+        meta = _read_json(sdir / "metadata.json")
+        assert meta["project_path"] == ""
+        assert meta["model"] == ""
+        assert meta["status"] == "idle"
+        assert "last_user_message_at" in meta
+
+    @staticmethod
+    def test_last_user_message_at_uses_last_message_at_when_present(sessions_dir):
+        """有 last_message_at 时优先用它，不被 or 短路跳过 0.0。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            migrate_legacy_session_metadata_at_startup,
+        )
+
+        sdir = sessions_dir / "s_with_lma"
+        sdir.mkdir()
+        (sdir / "metadata.json").write_text(
+            json.dumps({"session_id": "s_with_lma", "last_message_at": 123.0}),
+            encoding="utf-8",
+        )
+
+        migrate_legacy_session_metadata_at_startup()
+        assert _read_json(sdir / "metadata.json")["last_user_message_at"] == 123.0
+
+    @staticmethod
+    def test_zero_last_message_at_not_short_circuited(sessions_dir):
+        """last_message_at=0.0（合法但 falsy）不得被 ``or`` 跳过回退到 stat mtime。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            migrate_legacy_session_metadata_at_startup,
+        )
+
+        sdir = sessions_dir / "s_zero"
+        sdir.mkdir()
+        (sdir / "metadata.json").write_text(
+            json.dumps({"session_id": "s_zero", "last_message_at": 0.0}),
+            encoding="utf-8",
+        )
+
+        migrate_legacy_session_metadata_at_startup()
+        # 0.0 是合法值，应被采用而非回退到目录 mtime
+        assert _read_json(sdir / "metadata.json")["last_user_message_at"] == 0.0
+
+    @staticmethod
+    def test_falls_back_to_dir_mtime(sessions_dir):
+        """无任何时间字段时回退到目录 mtime（OSError 时 0.0 兜底）。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            migrate_legacy_session_metadata_at_startup,
+        )
+
+        sdir = sessions_dir / "s_no_time"
+        sdir.mkdir()
+        (sdir / "metadata.json").write_text(
+            json.dumps({"session_id": "s_no_time"}), encoding="utf-8"
+        )
+        expected_mtime = sdir.stat().st_mtime
+
+        migrate_legacy_session_metadata_at_startup()
+        assert _read_json(sdir / "metadata.json")["last_user_message_at"] == expected_mtime
+
+    @staticmethod
+    def test_corrupt_metadata_skipped(sessions_dir):
+        """metadata.json 非法 JSON 时跳过该会话，不影响其它会话迁移。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            migrate_legacy_session_metadata_at_startup,
+        )
+
+        bad = sessions_dir / "s_corrupt"
+        bad.mkdir()
+        (bad / "metadata.json").write_text("{not json", encoding="utf-8")
+
+        good = sessions_dir / "s_good"
+        good.mkdir()
+        (good / "metadata.json").write_text(
+            json.dumps({"session_id": "s_good"}), encoding="utf-8"
+        )
+
+        # 不抛异常，且 good 仍被迁移
+        migrate_legacy_session_metadata_at_startup()
+        assert _read_json(good / "metadata.json")["project_path"] == ""
+        # bad 的文件原样保留（未被改写）
+        assert (bad / "metadata.json").read_text(encoding="utf-8") == "{not json"
