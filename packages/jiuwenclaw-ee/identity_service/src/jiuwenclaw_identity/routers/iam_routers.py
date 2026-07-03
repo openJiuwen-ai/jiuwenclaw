@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from openjiuwen_runtime.foundation.db.handler import DBHandler
@@ -16,6 +16,7 @@ from jiuwenclaw_identity.schemas.iam_schemas import (
     OrgUpdateBody,
     SetMembershipBody,
     UserCreateBody,
+    UsersBatchCreateBody,
     UserUpdateBody,
 )
 
@@ -110,6 +111,58 @@ async def create_user(body: UserCreateBody, handler: _Handler):
         )
     except ValueError as e:
         raise _bad(e) from e
+
+
+@user_router.post("/batch")
+async def batch_create_users(body: UsersBatchCreateBody, handler: _Handler):
+    """批量新建用户（前端解析 Excel/CSV 后提交 JSON）。
+
+    逐行处理、部分成功：建用户失败(重名/缺项)只标记该行 error；组织无效或设置报错
+    仅忽略该组织并归入无组织(告警),绝不使建用户失败。
+    """
+    usvc = UserService(handler)
+    # 一次性载入有效组织，内存校验（id 与名称都可匹配）
+    orgs_page = await OrgService(handler).list(1, 200)
+    orgs = orgs_page.get("items", []) if isinstance(orgs_page, dict) else []
+    valid_ids = {org["group_id"] for org in orgs}
+    name_to_id = {org["name"]: org["group_id"] for org in orgs if org.get("name")}
+
+    results: list[dict[str, Any]] = []
+    ok_count = 0
+    for idx, item in enumerate(body.users):
+        row = idx + 1
+        try:
+            created = await usvc.create(
+                user_id=None, display_name=(item.display_name or item.username).strip(),
+                is_admin=item.is_admin, username=item.username, password=item.password,
+            )
+        except ValueError as exc:
+            results.append({"row": row, "username": item.username, "ok": False, "error": str(exc)})
+            continue
+        uid = created["user_id"]
+        warnings: list[str] = []
+        resolved: list[str] = []
+        for token in item.orgs:
+            tok = str(token).strip()
+            if not tok:
+                continue
+            gid = tok if tok in valid_ids else name_to_id.get(tok)
+            if gid:
+                resolved.append(gid)
+            else:
+                warnings.append(f"组织 '{tok}' 不存在，已忽略")
+        if resolved:
+            try:
+                await usvc.set_orgs(uid, resolved)
+            except ValueError as exc:  # 极端情况：仍归入无组织，不失败
+                warnings.append(f"设置组织失败，已归入无组织：{exc}")
+        ok_count += 1
+        results.append({"row": row, "username": item.username, "ok": True, "user_id": uid, "warnings": warnings})
+
+    return {
+        "summary": {"total": len(body.users), "ok": ok_count, "failed": len(body.users) - ok_count},
+        "results": results,
+    }
 
 
 @user_router.get("/{user_id}")

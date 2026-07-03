@@ -332,6 +332,13 @@ export const UserApi = {
   remove: (id: string) => idpHttp<{ deleted: boolean }>(`/v1/users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   setOrgs: (id: string, group_ids: string[]) =>
     idpHttp<{ group_ids: string[] }>(`/v1/users/${encodeURIComponent(id)}/orgs`, { method: 'PUT', body: { group_ids } }),
+  batchCreate: (
+    users: Array<{ username: string; password: string; display_name?: string; is_admin?: boolean; orgs?: string[] }>,
+  ) =>
+    idpHttp<{
+      summary: { total: number; ok: number; failed: number };
+      results: Array<{ row: number; username: string; ok: boolean; user_id?: string; warnings?: string[]; error?: string }>;
+    }>('/v1/users/batch', { method: 'POST', body: { users } }),
 };
 
 export const BotApi = {
