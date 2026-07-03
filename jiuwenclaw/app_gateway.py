@@ -1796,6 +1796,14 @@ async def _run(
         except Exception:  # noqa: BLE001
             logger.warning("[App] permissions_config cold load skipped", exc_info=True)
 
+        try:
+            from jiuwenclaw.agentserver.memory.config import reload_memory_config_from_gateway_db
+
+            await reload_memory_config_from_gateway_db()
+            logger.info("[App] memory_config loaded from Gateway DB (if any)")
+        except Exception:  # noqa: BLE001
+            logger.warning("[App] memory_config cold load skipped", exc_info=True)
+
     # ---------- LeaderElection 初始化 ----------
     leader_election = None
     config = get_config()
