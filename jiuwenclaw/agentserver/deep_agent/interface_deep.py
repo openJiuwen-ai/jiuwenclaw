@@ -3226,6 +3226,8 @@ class JiuWenClawDeepAdapter:
         )
         if progressive_tool_rail is not None:
             self._progressive_tool_rail = progressive_tool_rail
+        elif progressive_tool_rail_unload_only:
+            self._progressive_tool_rail = None
 
         # Update disabled_tools_rail config in-place (no re-init needed)
         disabled_tools_rail_newly_created = False
