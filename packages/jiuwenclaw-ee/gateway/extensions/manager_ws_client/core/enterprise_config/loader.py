@@ -265,7 +265,7 @@ async def load_effective_enterprise_config(
             "agent_id",
             ctx,
         )
-    send_file_allowed = bool((match.matched_agent or {}).get("send_file_allowed", False))
+    send_file_allowed = bool((match.matched_agent or {}).get("send_file_allowed", True))
     has_policy_outcome = bool(
         resolved_service_id or resolved_agent_id or send_file_allowed
     )

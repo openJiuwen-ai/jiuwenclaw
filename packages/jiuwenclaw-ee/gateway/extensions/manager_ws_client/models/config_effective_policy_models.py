@@ -86,7 +86,7 @@ CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF = TableDefinition(
         ColumnDefinition("priority", "integer", nullable=False, default=0),
         ColumnDefinition("match_expr", "string", length=8192, nullable=True),
         ColumnDefinition("template_ref", "json", nullable=False),
-        ColumnDefinition("send_file_allowed", "boolean", nullable=False, default=False),
+        ColumnDefinition("send_file_allowed", "boolean", nullable=False, default=True),
         ColumnDefinition("enabled", "boolean", nullable=False, default=True),
         ColumnDefinition("data", "json", nullable=True),
         ColumnDefinition("created_at", "datetime", nullable=False),

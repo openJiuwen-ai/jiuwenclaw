@@ -380,6 +380,7 @@
       "searchPlaceholder": "搜索策略 ID、策略名称、策略描述或优先级"
     },
     "fieldRequired": "请填写{{field}}",
+    "priorityHint": "按优先级从大到小匹配，同优先级按修改时间从大到小匹配。只取第一条匹配到的策略应用。",
     "templateRef": {
       "title": "模板引用",
       "slot": "槽位",
