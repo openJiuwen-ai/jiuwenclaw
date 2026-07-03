@@ -103,6 +103,14 @@ description: Imperative description of when to trigger and what to do.
 - Include examples where they clarify behavior.
 - Body structure can reference these sections as needed: domain knowledge, tool definitions, exemplar playbook, SOP, safety red lines, and human collaboration.
 
+### Prohibited environment tools
+
+The following tools are available in the current development/evaluation environment but **must never** appear in the generated skill:
+
+`Read`、`Write`、`Edit`、`file_glob`、`file_grep`、`file_listdir`、`shell`、`code_execute`、`WebFetch`、`ask_user_question`、`upload_file`、`spawn_subagent`、`fork_agent`、`task_tool`、`skill_tool`、`skill_complete`、`todo_create`、`todo_start`、`todo_complete`、`todo_modify`、`todo_list`、`present_files`
+
+Even when the skill needs similar functionality, do not use environment tool names directly; use descriptive alternatives instead. For example: write "写入文件" instead of "使用 `Write` 写入文件"; write "联网获取信息" instead of "使用 `WebFetch` 工具获取信息".
+
 ### Local-execution `scripts/` generation gate
 
 A skill executes locally when `metadata.clis` is non-empty.
@@ -119,6 +127,7 @@ Local-execution skills must not generate `scripts/` by default. If a script is g
 - Body is under 500 lines; bulky reference material moved to `references/`.
 - Security validation passes: no dangerous commands, hardcoded credentials, or path traversal in the skill body or scripts.
 - No stray files outside the skill folder.
+- No prohibited environment tools (`Read`, `Write`, `Edit`, `file_glob`, `file_grep`, `file_listdir`, `shell`, `code_execute`, `WebFetch`, `ask_user_question`, `upload_file`, `spawn_subagent`, `fork_agent`, `task_tool`, `skill_tool`, `skill_complete`, `todo_create`, `todo_start`, `todo_complete`, `todo_modify`, `todo_list`, `present_files`) appear in the skill body, `allowed-tools`, or `metadata`.
 
 ---
 
