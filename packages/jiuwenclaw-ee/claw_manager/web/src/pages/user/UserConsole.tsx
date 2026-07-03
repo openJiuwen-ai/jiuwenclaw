@@ -23,9 +23,9 @@ export function UserConsole() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
       <header className="topbar" style={{ flexShrink: 0 }}>
         <div className="brand">
-          <img src="/logo.png" alt="JiuwenClaw" className="brand-logo-img" />
+          <img src="/logo.png" alt="JiuwenSwarm" className="brand-logo-img" />
           <div className="brand-text">
-            <span className="brand-title">JiuwenClaw</span>
+            <span className="brand-title">JiuwenSwarm</span>
             <span className="brand-sub">{t('userConsole.brandSub')}</span>
           </div>
         </div>
