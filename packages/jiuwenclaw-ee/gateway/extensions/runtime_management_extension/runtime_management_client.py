@@ -321,6 +321,11 @@ class _SessionRequest(ISessionRequest):
         return self._req.request_id
 
     @property
+    def channel_id(self) -> str:
+        # 与 AgentServer 同源：直接取 AgentRequest.channel_id（由 e2a_to_agent_request 从 envelope.channel 写入）
+        return str(self._req.channel_id or "")
+
+    @property
     def raw_msg(self) -> Any:
         return json.dumps(self._envelope.to_dict(), ensure_ascii=False)
 
