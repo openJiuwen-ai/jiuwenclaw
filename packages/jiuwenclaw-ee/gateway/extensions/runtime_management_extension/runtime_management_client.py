@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import importlib
 import uuid as uuid_mod
@@ -724,6 +725,8 @@ class RuntimeManagementAgentClient(AgentServerClient):
         self._create_service_manager = create_service_manager
         self._access: Any = Access(create_service_manager)
         self._connected = False
+        self._stream_abort_events: dict[str, asyncio.Event] = {}
+        self._stream_access_gens: dict[str, AsyncIterator[Any]] = {}
         # 防抖：短时间内多次 config.push 只触发一次 update_config
         self._config_update_handle: Optional[asyncio.TimerHandle] = None
         self._config_update_debounce_seconds: float = float(
@@ -1097,14 +1100,53 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 metadata={},
             )
 
+    async def _release_access_stream(
+        self,
+        rid: str,
+        access_gen: AsyncIterator[Any],
+    ) -> None:
+        """关闭 Access.send_message 生成器，触发其 finally 设置 cancel 以释放 WSS 在途槽位。"""
+        self._stream_access_gens.pop(rid, None)
+        with contextlib.suppress(Exception):
+            await access_gen.aclose()
+
+    def abort_request_stream(self, request_id: str) -> None:
+        """终止 Access/WSS 层流式 pull，配合 Gateway process_stream task.cancel() 使用。
+
+        openjiuwen_runtime Access 在 ``send_message`` 内用 ``SessionRequestWrapper.cancel``
+        与 WSS ``await wrapper.cancel`` 联动；须 aclose 生成器才能在用户 cancel 时尽快释放
+        服务实例并发，否则 WSS 会一直等到流自然结束。
+        """
+        rid = _wire_request_id_key(request_id)
+        abort_ev = self._stream_abort_events.get(rid)
+        if abort_ev is not None and not abort_ev.is_set():
+            abort_ev.set()
+        access_gen = self._stream_access_gens.get(rid)
+        if access_gen is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(
+            self._release_access_stream(rid, access_gen),
+            name=f"gw-access-aclose-{rid[:24]}",
+        )
+
     async def send_request_stream(self, envelope: E2AEnvelope) -> AsyncIterator[AgentResponseChunk]:
         """发送流式请求。"""
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
+        rid = _wire_request_id_key(request.request_id)
+        abort_ev = asyncio.Event()
+        self._stream_abort_events[rid] = abort_ev
 
         # 加载服务配置
         service_template = None
         loaded = await load_effective_service_config_for_request(request)
+        if abort_ev.is_set():
+            self._stream_abort_events.pop(rid, None)
+            raise asyncio.CancelledError()
         if loaded is not None:
             entities = loaded.service_config or []
             if entities:
@@ -1143,12 +1185,16 @@ class RuntimeManagementAgentClient(AgentServerClient):
             service_template=service_template,
         )
 
+        access_gen = self._access.send_message(session_request)
+        self._stream_access_gens[rid] = access_gen
         try:
             # 企业版空闲超时机制：跟踪最后一个真实业务 chunk 的时间
             last_real_chunk_time = asyncio.get_event_loop().time()
             chunk_count = 0
-            
-            async for chunk in self._access.send_message(session_request):
+
+            async for chunk in access_gen:
+                if abort_ev.is_set():
+                    raise asyncio.CancelledError()
                 chunk_count += 1
                 
                 # 检查是否是真实业务 chunk（排除 keepalive）
@@ -1170,15 +1216,21 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         "已 %.1f 秒无真实业务输出，共收到 %d 个 chunk",
                         request.request_id, idle_duration, chunk_count,
                     )
-                    raise TimeoutError(
-                        f"Stream idle timeout after {idle_duration:.1f}s without real business chunks"
+                    yield AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload={
+                            "error": (
+                                f"Stream idle timeout after {idle_duration:.1f}s "
+                                "without real business chunks"
+                            )
+                        },
+                        is_complete=True,
                     )
-                
+                    return
+
                 yield chunk
-                
-        except TimeoutError:
-            # 重新抛出超时异常，让上层处理
-            raise
+
         except Exception as exc:
             logger.exception("[RuntimeManagementAgentClient] send_request_stream failed: %s", exc)
             yield AgentResponseChunk(
@@ -1187,3 +1239,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 payload={"error": str(exc)},
                 is_complete=True,
             )
+        finally:
+            self._stream_abort_events.pop(rid, None)
+            if rid in self._stream_access_gens:
+                await self._release_access_stream(rid, access_gen)
