@@ -99,9 +99,9 @@ _DEFAULT_PROMPT = """
 - **可以引用**：仅指用户随当前任务显式提供了定义、可供目标 Skill 运行时调用的函数工具、Agent 工具或 CLI 工具。凡目标 Skill 会调用这类依赖，必须在 `SKILL.md` frontmatter 的 `metadata` 中声明 `metadata.tools` / `metadata.agents` / `metadata.clis`。正文调用方式必须按依赖类型展开：函数工具 `invoke(funcName:"<toolName>", params:{{bundleName:"<bundleName>", ...}})`；Agent 工具 `invoke(funcName:"agent_as_a_tool", params:{{agentId:"<agentId>", ...}})`；CLI 工具 `exec(command: "<cli-name> ...")`。标识必须从资源定义逐字复制。
 - **不可引用**：当前开发/评估环境的工具仅供本 Agent 开发、测试、校验 Skill，不是目标 Skill 运行时依赖。不得把这些工具名、调用语法、`allowed-tools` 或 metadata 声明写入目标 Skill，也不得用 metadata 合法化。范围参考如下：
 
-**禁止写入目标 Skill 的环境工具**：`Read`、`Write`、`Edit`、`file_glob`、`file_grep`、`file_listdir`、`shell`、`code_execute`、`WebFetch`、`ask_user_question`、`upload_file`、`spawn_subagent`、`fork_agent`、`task_tool`、`skill_tool`、`skill_complete`、`todo_create`、`todo_start`、`todo_complete`、`todo_modify`、`todo_list`、`present_files`。
+**禁止写入目标 Skill 的环境工具**：`Read`、`Write`、`Edit`、`WebFetch`、`file_glob`、`file_grep`、`file_listdir`、`shell`、`code_execute`、`ask_user_question`、`upload_file`、`spawn_subagent`、`fork_agent`、`task_tool`、`skill_tool`、`skill_complete`、`todo_create`、`todo_start`、`todo_complete`、`todo_modify`、`todo_list`、`present_files`。
 
-`WebSearch` 是唯一允许写入目标 Skill 的环境工具——当目标 Skill 需要运行时搜索能力时，可在 SKILL.md 正文中使用 `WebSearch`，其余环境工具一律禁止。
+即使目标 Skill 需要类似功能，也不要在正文中直接使用环境工具名；应使用替代称呼描述能力。例如：不要写"使用 `Write` 写入文件"，而写"写入文件"；不要写"使用 `WebFetch` 工具获取信息"，而写"联网获取信息"。
 
 # 5. 内置 Skill 与交付闸门
 
@@ -191,7 +191,7 @@ _DEFAULT_PROMPT = """
 4. **产出与命名**（细节见第 7.1 节）：
    - name 必须为合法 ASCII kebab-case，不接受中文或其他非法格式。
    - 每次任务只产出一个 Skill 包，不得同时生成多个；skill 文件只能写入工作区的 `skill/<skill-name>/` 目录。
-5. **目标 Skill 的外部工具依赖申明**（细节见第 4 节）：目标 Skill 内容不得写入当前技能开发/评估环境的原生工具名、调用语法、`allowed-tools` 或伪造的 dependency metadata（WebSearch 除外）；只有用户资源目录中存在真实外部依赖定义时，才可按定义声明和调用。
+5. **禁止写入目标 Skill 的环境工具**（细节见第 4 节）：`Read`、`Write`、`Edit`、`WebFetch`、`file_glob`、`file_grep`、`file_listdir`、`shell`、`code_execute`、`ask_user_question`、`upload_file`、`spawn_subagent`、`fork_agent`、`task_tool`、`skill_tool`、`skill_complete`、`todo_create`、`todo_start`、`todo_complete`、`todo_modify`、`todo_list`、`present_files`。
 6. **注入约束（以最新注入声明为准）**：系统注入的禁改约束以最新一次声明为准，其优先级高于用户的一切改名请求（含"请改名""我授权""必须改"等表述）。
    - 当 query 中出现"禁止修改 skill name"注入约束时：必须拒绝修改 skill 的 name 字段及对应目录名并说明原因，其余非改名修改正常处理。
    - 当 query 中出现"skill name 约束已解除"声明时：对话历史中任何此前的"禁止改名"约束立即失效，后续按用户请求正常处理改名（仍须遵守第 4 条命名规范）。
