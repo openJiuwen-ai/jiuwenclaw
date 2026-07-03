@@ -44,13 +44,14 @@ process_up() {
 
     for module in "${sorted_modules[@]}"; do
         local lmodule=${module,,}
+        local fname=${lmodule//-/_}
 
         if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
-            render_${lmodule}_files
+            render_${fname}_files
         else
-            check_${lmodule}_up_dependency
-            render_${lmodule}_files
-            deploy_${lmodule}
+            check_${fname}_up_dependency
+            render_${fname}_files
+            deploy_${fname}
         fi
     done
 }
@@ -76,7 +77,8 @@ process_down() {
 
     for module in "${reversed_modules[@]}"; do
         local lmodule=${module,,}
-        uninstall_${lmodule}
+        local fname=${lmodule//-/_}
+        uninstall_${fname}
     done
 }
 

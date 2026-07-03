@@ -110,7 +110,7 @@ spec:
   storageClassName: ""
   nfs:
     server: <<NFS_SERVER_ADDR>>   
-    path: <<MINIO_NFS_PATH>>                  
+    path: <<NFS_SHARE_PATH>>/<<MINIO_NAME>>   
     readOnly: false
   mountOptions:
     - nfsvers=4

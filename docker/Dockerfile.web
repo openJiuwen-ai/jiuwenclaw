@@ -1,19 +1,34 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
+
 # 复用 registry 的 web 镜像当 base,它结尾切到了非 root 的 app 用户;先切回 root
 USER root
+
+ARG AGENT_RUNTIME_REPOS
+ARG AGENT_RUNTIME_BRANCH
+ARG VITE_PRODUCT_NAME=JiuwenSwarm
+ENV VITE_PRODUCT_NAME=${VITE_PRODUCT_NAME}
 
 # base 可能已自带 app 用户,幂等处理
 RUN id app >/dev/null 2>&1 || useradd --create-home --shell /bin/bash app
 
 WORKDIR /app/jiuwenclaw
+
 COPY . /app/jiuwenclaw/
 RUN chown -R app:app /app/jiuwenclaw
 
 # 重装我们的 Python 源码(含把 /file-api 挂到 broker 的改动)。
 # 不再 npm build 前端:broker 只跑 ws + /file-api,静态由 webui(/、/chat)同源提供。
-RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[all]" --no-cache-dir
+
+RUN sed -i '/openjiuwen_runtime_foundation/d' pyproject.toml
+RUN sed -i '/openjiuwen_runtime_foundation/d' packages/jiuwenclaw-ee/claw_manager/pyproject.toml
+RUN sed -i '/openjiuwen_runtime_management/d' packages/jiuwenclaw-ee/gateway/extensions/runtime_management_extension/pyproject.toml
+
+RUN pip install -e . \
+    git+${AGENT_RUNTIME_REPOS}@${AGENT_RUNTIME_BRANCH}#subdirectory=foundation \
+    --no-cache-dir \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 USER app
 WORKDIR /app/jiuwenclaw

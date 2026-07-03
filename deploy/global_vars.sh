@@ -19,8 +19,14 @@ declare -A CONFIG=(
     ["GATEWAY_TEMPLATE_FILE"]="${TEMPLATE_DIR}/gateway.template.yaml"
     ["GATEWAY_FILE"]="${CONFIG_DIR}/gateway.yaml"
 
+    ["CLAW_PVC_TEMPLATE_FILE"]="${TEMPLATE_DIR}/claw-pvc.template.yaml"
+    ["CLAW_PVC_FILE"]="${CONFIG_DIR}/claw-pvc.yaml"
+
     ["NFS_TEMPLATE_FILE"]="${TEMPLATE_DIR}/nfs.template.yaml"
     ["NFS_FILE"]="${CONFIG_DIR}/nfs.yaml"
+
+    ["NFS_SC_TEMPLATE_FILE"]="${TEMPLATE_DIR}/nfs-sc.template.yaml"
+    ["NFS_SC_FILE"]="${CONFIG_DIR}/nfs-sc.yaml"
 
     ["RABBITMQ_TEMPLATE_FILE"]="${TEMPLATE_DIR}/rabbitmq.template.yaml"
     ["RABBITMQ_FILE"]="${CONFIG_DIR}/rabbitmq.yaml"
@@ -68,7 +74,7 @@ declare -A ARGS=(
 
 # ==== All available modules ====
 #declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB" "MANAGER")
-declare -ga ALL_MODULES=("NFS" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "GATEWAY" "WEB" "MANAGER" "WEBUI")
+declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "GATEWAY" "WEB" "MANAGER" "WEBUI")
 
 declare -ga MODULES=()
 
@@ -93,33 +99,31 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_ENV_FILE_NAME"]="jiuwenclaw-gateway-env"
     ["GATEWAY_REPLICAS"]="1"
     ["ENTERPRISE_WEB_WS_PORT"]="19000"
-    ["JIUWENCLAW_PATH"]="/exports/jiuwenclaw"
-    ["JIUWENCLAW_NFS_PATH"]="/jiuwenclaw"
     ["NFS_NAME"]="nfs-server"
     ["NFS_IMAGE"]="ghcr.io/obeone/nfs-server:2.2.2"
     ["NFS_HOST_PATH"]="/data/nfs"
+    ["NFS_POD_PATH"]="/exports"
     ["NFS_SHARE_PATH"]="/"
     ["PVC_NAME"]="pvc-nfs-shared"
     ["PV_NAME"]="pv-nfs-shared"
+    ["NFS_SC_NAME"]="nfs-storage"
+    ["NFS_SC_DNAME"]="nfs-provisioner"
+    ["NFS_SC_IMAGE"]="registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.2"
+    ["CLAW_MOUNT_TYPE"]="pvc"
+    ["CLAW_STORAGE_SIZE"]="1Gi"
     ["AGENT_SERVER_POD_NAME"]="jiuwenclaw-agentserver"
     ["WEB_NAME"]="jiuwenclaw-web"
     ["RABBITMQ_NAME"]="rabbitmq"
     ["RABBITMQ_IMAGE"]="rabbitmq:3.9.22-management"
-    ["RABBITMQ_PATH"]="/exports/rabbitmq"
-    ["RABBITMQ_NFS_PATH"]="/rabbitmq"
     ["RABBITMQ_USER"]="admin"
     ["RABBITMQ_PASSWORD"]="Rabbitmq@123"
     ["RABBITMQ_STORAGE_SIZE"]="2Gi"
     ["MYSQL_NAME"]="mysql"
     ["MYSQL_IMAGE"]="mysql:8.0"
-    ["MYSQL_PATH"]="/exports/mysql"
-    ["MYSQL_NFS_PATH"]="/mysql"
     ["MYSQL_ROOT_PASSWORD"]="Root@123456"
     ["MYSQL_STORAGE_SIZE"]="4Gi"
     ["POSTGRES_NAME"]="postgresql"
     ["POSTGRES_IMAGE"]="postgres:16"
-    ["POSTGRES_PATH"]="/exports/postgresql"
-    ["POSTGRES_NFS_PATH"]="/postgresql"
     ["POSTGRES_PASSWORD"]="Root@123456"
     ["POSTGRES_STORAGE_SIZE"]="4Gi"
     ["REDIS_NAME"]="redis"
@@ -140,8 +144,6 @@ declare -A DEPLOY_VARS=(
     ["MINIO_SECURE"]="false"
     ["MINIO_REGION"]="default"
     ["MINIO_STORAGE_SIZE"]="4Gi"
-    ["MINIO_PATH"]="/exports/minio"
-    ["MINIO_NFS_PATH"]="/minio"
     ["MANAGER_SERVER_NAME"]="jiuwenclaw-manager-server"
     ["MANAGER_WEB_NAME"]="jiuwenclaw-manager-web"
     ["MANAGER_REST_PORT"]="8765"
@@ -161,6 +163,8 @@ declare -A DEPLOY_VARS=(
     ["OBS_TYPE"]="minio"
     ["OBS_BUCKET"]="jiuwenclaw"
     ["OBS_PUBLIC_BASE_URL"]=""
+    ["WS_ORIGIN_CHECK_ENABLED"]="false"
+    ["WS_ALLOWED_ORIGINS"]=""
     ["DB_TYPE"]="sqlite"
     ["MANAGER_DB_NAME"]="manager"
     ["GATEWAY_DB_NAME"]="gateway"
@@ -169,6 +173,7 @@ declare -A DEPLOY_VARS=(
     ["MANAGER_SQLITE_PATH"]="manager.db"
     ["GATEWAY_SQLITE_PATH"]="gateway.db"
     ["ENABLE_EXTERNAL_NFS"]="false"
+    ["ENABLE_EXTERNAL_PVC"]="false"
     ["ENABLE_EXTERNAL_RABBITMQ"]="false"
     ["ENABLE_EXTERNAL_MYSQL"]="false"
     ["ENABLE_EXTERNAL_POSTGRES"]="false"
@@ -178,6 +183,9 @@ declare -A DEPLOY_VARS=(
     ["RENDER_ONLY"]="false"
     ["ENABLE_GATEWAY_SCHED_LABEL"]="false"
     ["TIMEZONE"]="Asia/Shanghai"
+    ["NO_CHECK_PORTS"]="false"
+    ["GATEWAY_CLAW_WS_PING_INTERVAL"]="20.0"
+    ["GATEWAY_CLAW_WS_PING_TIMEOUT"]="20.0"
 )
 
 

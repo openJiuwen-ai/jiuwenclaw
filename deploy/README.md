@@ -105,6 +105,8 @@ JiuwenClaw_deployTool_0.0.74k_arm64/
     ├── minio.template.yaml                 # MinIO 存储 Kubernetes 资源模板
     ├── mysql.template.yaml                 # MySQL 数据库 Kubernetes 资源模板
     ├── nfs.template.yaml                   # NFS 存储 Kubernetes 资源模板
+    ├── nfs-sc.template.yaml                # NFS 存储供给 Kubernetes 资源模板
+    ├── claw-pvc.template.yaml              # 业务内置持久卷PVC资源清单模板
     ├── postgresql.template.yaml            # PostgreSQL 数据库 Kubernetes 资源模板
     ├── redis.template.yaml                 # Redis 缓存 Kubernetes 资源模板
     └── web.template.yaml                   # Web 前端 Kubernetes 部署资源模板
@@ -113,8 +115,8 @@ JiuwenClaw_deployTool_0.0.74k_arm64/
 ### 1.6 修改配置文件`.env.custom`
 
 修改配置前，请先查阅配置文件参数说明书 `.env.example`，明确各配置项含义与使用规则；再结合自身实际环境，按需调整配置文件`.env.custom`的参数，完成部署环境与业务场景适配。
-以下参数为常规必改填配置，需按实际信息填写：
 
+以下为系统运行必需参数，需依据实际大模型服务凭证完整填写：
 ```
 # ====================== 大模型接口配置 ======================
 # 模型厂商标识（如：OpenAI等）
@@ -129,6 +131,10 @@ API_BASE=""
 # 大模型鉴权密钥
 API_KEY=""
 
+```
+
+如需支持飞书客户端向机器人发起对话，则补充本段配置；如果仅需通过 Web 端与机器人交互则无需配置本段参数。
+```
 # ==============================================================
 # 飞书机器人配置（FEISHU_BOTS）
 # 配置格式：一行一个机器人，规则为 Bot Name:App ID:App Secret
@@ -168,6 +174,7 @@ FEISHU_BOTS="
 
 **部署工具支持对以下独立模块进行精细化管理：**
 - **nfs**：NFS 存储服务模块
+- **nfs-sc**：NFS 存储供给模块
 - **mysql**：MySQL 存储服务模块
 - **redis**：Redis 服务模块
 - **postgresql**：PostgreSQL 存储服务模块
@@ -178,7 +185,8 @@ FEISHU_BOTS="
 
 **单模块操作示例：**
 ```
-./deploy.sh [操作命令] nfs          # 仅操作 NFS 模块
+./deploy.sh [操作命令] nfs          # 仅操作 NFS 存储模块
+./deploy.sh [操作命令] nfs-sc       # 仅操作 NFS 存储供给模块
 ./deploy.sh [操作命令] mysql        # 仅操作 MySQL 模块
 ./deploy.sh [操作命令] redis        # 仅操作 Redis 模块
 ./deploy.sh [操作命令] postgresql   # 仅操作 PostgreSQL 模块
@@ -198,6 +206,7 @@ FEISHU_BOTS="
 
 ```
 ./deploy.sh up nfs        # 启动 NFS 存储模块（只需一次）
+./deploy.sh up nfs-sc     # 启动 NFS 存储供给模块（只需一次）
 ./deploy.sh up mysql      # 启动 MySQL 存储模块（只需一次）
 ./deploy.sh up postgresql # 启动 PostgreSQL 存储模块（只需一次）
 ./deploy.sh up minio      # 启动 MinIO 存储模块（只需一次）
@@ -214,6 +223,8 @@ FEISHU_BOTS="
 ./deploy.sh down postgresql # 卸载 PostgreSQL 存储模块（非必要不卸载）
 ./deploy.sh down minio      # 卸载 MinIO 存储模块（非必要不卸载）
 ./deploy.sh down nfs        # 卸载 NFS 存储模块（非必要不卸载）
+./deploy.sh down nfs-sc     # 卸载 NFS 存储供给模块（非必要不卸载）
+
 ./deploy.sh restart             # 重启 Gateway 服务模块（按需重启）
 ./deploy.sh restart web         # 重启 Web 前端模块（按需重启）
 ./deploy.sh restart manager     # 重启 Manager 管理模块（按需重启）
@@ -222,10 +233,11 @@ FEISHU_BOTS="
 ./deploy.sh restart postgresql  # 重启 PostgreSQL 存储模块（非必要不重启）
 ./deploy.sh restart minio       # 重启 MinIO 存储模块（非必要不重启）
 ./deploy.sh restart nfs         # 重启 NFS 存储模块（非必要不重启）
+./deploy.sh restart nfs-sc      # 重启 NFS 存储供给模块（非必要不重启）
 ```
 
 **重要说明：**
-每当升级新版本服务时，对于**NFS、MySQL、PostgreSQL、Redis、MinIO** 等全局基础依赖组件应尽量保持不变，无需重复部署。仅需对业务服务**Gateway、Web、CLAW-Manager**进行版本替换：在旧版本部署目录中，依次卸载 业务模块；随后切换至新版本部署工具目录，启动对应新版业务模块。
+每当升级新版本服务时，对于**NFS、NFS-SC、MySQL、PostgreSQL、Redis、MinIO** 等全局基础依赖组件应尽量保持不变，无需重复部署。仅需对业务服务**Gateway、Web、CLAW-Manager**进行版本替换：在旧版本部署目录中，依次卸载 业务模块；随后切换至新版本部署工具目录，启动对应新版业务模块。
 
 ### 2.3 配置参数（选填）
 
@@ -249,7 +261,7 @@ FEISHU_BOTS="
 
 ### 3.1 部署 NFS 服务
 
-#### 3.1.1 工具内置部署（开发环境可用）
+#### 3.1.1 工具内置部署 NFS 服务（开发环境可用）
 
 本部署工具提供一键部署能力，可直接在集群内快速搭建 NFS 存储服务：
 ```
@@ -260,25 +272,43 @@ FEISHU_BOTS="
 - 本部署工具仅支持 AMD64 架构 环境下单机部署；
 - ARM64 架构、高可用 / 分布式 NFS 场景，需用户自行搭建外部 NFS 服务。
 
-#### 3.1.2 外部独立部署（生产环境推荐）
+#### 3.1.2 工具内置部署 NFS 存储供给组件（开发环境可用）
+
+本部署工具提供一键部署 NFS 存储供给组件，组件底层基于 nfs-subdir-external-provisioner 实现，提供标准 K8s StorageClass，业务 Pod 可通过 PVC 动态申领独立 NFS 存储子目录，实现数据持久化挂载。
+```
+./deploy.sh up nfs_sc          # 部署 NF S存储供给组件（基础依赖，只需也只能一次）
+```
+部署完成后自动生成对应 StorageClass，搭配 CLAW_MOUNT_TYPE=pvc 模式使用，可自动创建隔离式 NFS 持久卷。
+
+
+#### 3.1.3 外部独立部署 NFS 服务（生产环境推荐）
 生产环境下，推荐用户自行搭建高可用的外部 NFS 服务，搭建完成后需在自定义配置文件 `.env.custom` 中填写如下参数，完成外部 NFS 服务的对接工作：
 
 ```
+# 设置产品组件的存储挂载模式为nfs
+CLAW_MOUNT_TYPE="nfs"
+
 # 外部 NFS 服务的连接地址
 NFS_SERVER_ADDR=""
 
-# 本工具内置部署的 AgentServer 组件在外部 NFS 服务中的共享目录，请确保该目录存在，且目录属主UID/GID统一为1000
-JIUWENCLAW_NFS_PATH=""
-
-# 本工具内置部署的 MySQL 服务在 外部 NFS 服务中的共享目录（外部 MySQL 服务不用填），请确保该目录存在
-MYSQL_NFS_PATH=""
-
-# 本工具内置部署的 PostgreSQL 服务在 外部 NFS 服务中的共享目录（外部 PostgreSQL 服务不用填），请确保该目录存在
-POSTGRES_NFS_PATH=""
-
-# 本工具内置部署的 MinIO 服务在 外部 NFS 服务中的共享目录（未使用 "本工具内置部署的 MinIO 服务" 作为OBS服务的不用填），请确保该目录存在
-MINIO_NFS_PATH=""
+# 外部 NFS 服务的共享根目录路径
+NFS_SHARE_PATH=""
 ```
+
+#### 3.1.3 复用预创建 PVC 持久卷（生产环境推荐）
+
+若客户有其他高可用企业级存储组件，并基于其组件的 StorageClass 预创建好了持久化 PVC 资源，业务组件可直接复用现有 PVC 完成存储挂载，配置如下：
+```
+# 设置产品组件的存储挂载模式为pvc
+CLAW_MOUNT_TYPE="pvc"
+
+# 外部 PVC 的名字，该 PVC 需存在，且与业务 Pod 处于同一 Namespace
+CLAW_PVC=""
+
+# 外部 PVC 绑定的 StorageClass 名称
+NFS_SC_NAME=""
+```
+
 
 ### 3.2 部署数据库服务
 
@@ -297,41 +327,31 @@ DB_TYPE="sqlite"
 ./deploy.sh up mysql        # 部署 MySQL 存储模块（基础依赖，只需也只能一次）
 ./deploy.sh up postgresql   # 部署 PostgreSQL 存储模块（基础依赖，只需也只能一次）
 ```
+
+若需为该服务挂载外部 NFS 服务实现数据持久化，需在配置文件`.env.custom` 中设置：
+```
+# 外部 NFS 服务的连接地址
+NFS_SERVER_ADDR=""
+
+# 外部 NFS 服务的共享根目录路径
+# 前置约束：共享目录下必须预先创建 mysql / postgresql 对应子目录用于数据存储
+NFS_SHARE_PATH=""
+```
+
 **注意：** 本部署工具仅支持单实例数据库服务部署，如需高可用数据库服务，请采用外部独立部署方式。
 
 #### 3.2.2 外部独立部署（生产环境推荐）
 
 生产环境下，推荐用户自行搭建高可用的外部数据库服务，搭建完成后需在自定义配置文件 `.env.custom` 中填写如下参数，完成外部数据库服务的对接工作。
 
-**MySQL 外部服务的配置：**
 ```
-# 外部 MySQL 服务的连接地址
+# 外部数据库服务的连接地址
 DB_HOST=""
 
-# 外部 MySQL 服务的连接端口
-DB_PORT=""
-
-# 外部 MySQL 服务的用户名跟密码，账号权限区分规则：
-# 1. 分库独立账号配置：分别定义 MANAGER_DB_USER / MANAGER_DB_PASSWORD、GATEWAY_DB_USER / GATEWAY_DB_PASSWORD，实现两个业务库账号、密码完全隔离
-# 2. 全局统一账号配置：仅配置 DB_USER、DB_PASSWORD，Manager、Gateway 共用同一套数据库访问凭证
-# 优先级规则：分库专属账号变量优先级 > 全局通用账号变量；若两类变量同时配置，以分库专属账号为准，全局账号配置自动失效
-DB_USER=""
-DB_PASSWORD=""
-GATEWAY_DB_USER=""
-GATEWAY_DB_PASSWORD=""
-MANAGER_DB_USER=""
-MANAGER_DB_PASSWORD=""
-```
-
-**PostgreSQL 外部服务的配置：**
-```
-# 外部 PostgreSQL 服务的连接地址
-DB_HOST=""
-
-# 外部 PostgreSQL 服务的连接端口
+# 外部数据库服务服务的连接端口
 DB_PORT=
 
-# 外部 PostgreSQL 服务的用户名跟密码，账号权限区分规则：
+# 外部数据库服务服务的用户名跟密码，账号权限区分规则：
 # 1. 分库独立账号配置：分别定义 MANAGER_DB_USER / MANAGER_DB_PASSWORD、GATEWAY_DB_USER / GATEWAY_DB_PASSWORD，实现两个业务库账号、密码完全隔离
 # 2. 全局统一账号配置：仅配置 DB_USER、DB_PASSWORD，Manager、Gateway 共用同一套数据库访问凭证
 # 优先级规则：分库专属账号变量优先级 > 全局通用账号变量；若两类变量同时配置，以分库专属账号为准，全局账号配置自动失效
@@ -342,10 +362,10 @@ GATEWAY_DB_PASSWORD=""
 MANAGER_DB_USER=""
 MANAGER_DB_PASSWORD=""
 
-# Manager 模块 PostgreSQL 专属 Schema 名称, 默认为public
+# (仅 PostgreSQL 有效) Manager 模块的专属 Schema 名称, 默认为public
 MANAGER_PG_SCHEMA=""
 
-# Gateway 模块 PostgreSQL 专属 Schema 名称, 默认为public
+# (仅 PostgreSQL 有效) Gateway 模块的专属 Schema 名称, 默认为public
 GATEWAY_PG_SCHEMA=""
 ```
 
@@ -387,14 +407,25 @@ REDIS_PASSWORD=""
 OBS_TYPE=""
 ```
 
-#### 3.4.1 工具内置部署（开发环境可用）
+#### 3.4.1 工具内置部署 MinIO 服务（开发环境可用）
 
 本部署工具提供一键部署能力，可在集群内快速拉起单节点 MinIO 对象存储实例：
 ```
 ./deploy.sh up minio        # 部署 MinIO 存储模块（基础依赖，只需也只能一次）
 ```
 
-#### 3.4.2 外部独立部署（生产环境推荐）
+若需为该服务挂载外部 NFS 服务实现数据持久化，需在配置文件`.env.custom` 中设置：
+```
+# 外部 NFS 服务的连接地址
+NFS_SERVER_ADDR=""
+
+# 外部 NFS 服务的共享根目录路径
+# 前置约束：共享目录下必须预先创建 minio 对应子目录用于数据存储
+NFS_SHARE_PATH=""
+```
+**注意：** 本部署工具仅支持单实例 MinIO 服务部署，如需高可用 MinIO 服务，请采用外部独立部署方式。
+
+#### 3.4.2 外部独立部署 MinIO 服务（生产环境推荐）
 
 生产环境下，推荐用户自行搭建高可用的外部 MinIO 服务，搭建完成后需在自定义配置文件 `.env.custom` 中填写如下参数，完成外部 MinIO 服务的对接工作。
 ```
@@ -434,6 +465,32 @@ Gateway 是 JiuwenSwarm 的多渠道接入网关与消息调度核心，负责 A
 # Gateway 部署模式：standalone（默认，不连 Redis）| active-standby（双实例主备，需 Redis）
 DEPLOYMENT_MODE=standalone
 ```
+
+若需为业务服务挂载外部 NFS 服务实现数据持久化，需在配置文件`.env.custom` 中设置：
+```
+# 设置产品组件的存储挂载模式为nfs
+CLAW_MOUNT_TYPE="nfs"
+
+# 外部 NFS 服务的连接地址
+NFS_SERVER_ADDR=""
+
+# 外部 NFS 服务的共享根目录路径
+# 前置约束：共享目录下必须预先创建 jiuwenclaw 对应子目录用于数据存储
+NFS_SHARE_PATH=""
+```
+
+若需为业务服务挂载外部 PVC 服务实现数据持久化，需在配置文件`.env.custom` 中设置：
+```
+# 设置产品组件的存储挂载模式为pvc
+CLAW_MOUNT_TYPE="pvc"
+
+# 外部 PVC 的名字，该 PVC 需存在，且与业务 Pod 处于同一 Namespace
+CLAW_PVC=""
+
+# 外部 PVC 绑定的 StorageClass 名称
+NFS_SC_NAME=""
+```
+
 ### 4.2 部署 Manager（可选部署）
 
 Manager 为平台管理模块，提供策略下发和配置、业务实例监控等管理能力，用于辅助运维人员完成系统管控。该组件为可选部署项，可根据实际运维需求选择性部署。执行以下命令完成管理模块部署：

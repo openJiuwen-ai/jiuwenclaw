@@ -1,6 +1,9 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
+ARG AGENT_RUNTIME_REPOS
+ARG AGENT_RUNTIME_BRANCH
+
 # 复用 registry 的 manager 镜像当 base,它结尾切到了非 root 的 app 用户;先切回 root
 USER root
 
@@ -11,8 +14,15 @@ WORKDIR /app/jiuwenclaw
 COPY . /app/jiuwenclaw/
 RUN chown -R app:app /app/jiuwenclaw
 
+RUN sed -i '/openjiuwen_runtime_foundation/d' pyproject.toml
+RUN sed -i '/openjiuwen_runtime_foundation/d' packages/jiuwenclaw-ee/claw_manager/pyproject.toml
+RUN sed -i '/openjiuwen_runtime_management/d' packages/jiuwenclaw-ee/gateway/extensions/runtime_management_extension/pyproject.toml
+
 # 用 root 执行 pip install → 安装到系统全局
-RUN pip install -e "./packages/jiuwenclaw-ee/claw_manager" -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN pip install -e "./packages/jiuwenclaw-ee/claw_manager" \
+    git+${AGENT_RUNTIME_REPOS}@${AGENT_RUNTIME_BRANCH}#subdirectory=foundation \
+    --no-cache-dir \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 USER app
 WORKDIR /app/jiuwenclaw
