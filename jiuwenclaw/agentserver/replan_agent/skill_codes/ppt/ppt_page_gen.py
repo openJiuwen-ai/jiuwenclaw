@@ -24,6 +24,41 @@ _PPT_DIR = str(Path(__file__).resolve().parent)
 logger = logging.getLogger(__name__)
 
 
+_CHART_CANDIDATE_TYPES = {"data", "comparison", "technology", "trend"}
+
+
+def _extract_designer_section(text: str) -> str:
+    """从 designer/SKILL.md 原文提取防溢出约束 + 语义区域指南章节。
+
+    文件 IO 由 PrepareNode 通过 read_file 工具完成后传入 text，
+    skill_code 中禁止直接做文件 IO（校验器禁止 open/read_text 等）。
+    """
+    if not text:
+        return ""
+    # 提取「防溢出硬性约束」章节到代码块结束
+    start = text.find("### 防溢出硬性约束")
+    if start == -1:
+        return ""
+    # 取到下一个 --- 分隔线或文件末尾
+    end = text.find("\n---", start)
+    if end == -1:
+        end = len(text)
+    css_section = text[start:end]
+
+    # 提取「语义区域」相关内容（main 直接子元素规则）
+    # 限定在 CSS 章节之前搜索，避免误匹配 CSS 章节之后的不相关内容
+    search_end = start  # CSS 章节开始位置作为语义区域搜索上界
+    sem_start = text.find("✅ 正确示例 - 单一主视觉页面可只有一个语义区域", 0, search_end)
+    if sem_start == -1:
+        sem_start = text.find("main 的直接子元素数量由页面叙事决定", 0, search_end)
+    sem_end = text.find("---", sem_start) if sem_start != -1 else -1
+    sem_section = ""
+    if sem_start != -1 and sem_end != -1:
+        sem_section = "\n\n### 语义区域划分指南\n" + text[sem_start:sem_end]
+
+    return css_section + sem_section
+
+
 _PRESET_STYLE_IDS = {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech"}
 _DEFAULT_GEN_RETRY_ROUND = 1
 _DEFAULT_DENSITY_RETRY_ROUND = 1
@@ -84,7 +119,11 @@ _DESIGN_RULES_DIGEST = (
     "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`，主要内容必须放在安全区内；"
     "子元素禁止额外加 padding，否则导致双重边距\n"
     "3. 三级字号：标题 36-48px / 副标题 24-28px / 正文 16-20px\n"
-    "4. 图表类型：时序数据→柱状图(bar)；趋势数据→折线图(line)；对比数据→分组柱状图(grouped bar)；占比数据→饼图(pie)；禁止混用，禁止用图片占位\n"
+    "4. 图表类型：时序数据→折线图(line)；对比数据→柱状图/分组柱状图(bar)；"
+    "占比数据→饼图(pie)；多维能力对比→雷达图(radar)；禁止用图片占位\n"
+    "4.1 图表渲染器（强制）：ECharts 必须用 `echarts.init(document.getElementById('xxx'), null, {renderer:'svg'})` "
+    "单行初始化，禁止用变量赋值（如 `var chartDom=...; echarts.init(chartDom)`），"
+    "禁止 Canvas 渲染器（会导致转 PPTX 后变位图）\n"
     "5. 步骤/流程页 → 用 HTML/CSS 绘制节点+连线+文字，禁止纯文字描述\n"
     "6. 关键数字必须有放大数字卡片，结论必须有摘要高亮\n"
     "7. 防溢出：单行文字不超容器宽度；连续段落 ≤ 100 字（超过必须拆列表）\n"
@@ -133,7 +172,8 @@ _STRUCTURAL_DESIGN_RULES = (
     "3. 字号：封面标题 48-64px / 副标题 24-28px / 日期 18px；"
     "结束页标题 42-48px / 正文 22px\n"
     "4. 防溢出：单行文字不超容器宽度\n"
-    "5. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体\n"
+    "5. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体；"
+    "页面背景色必须与风格规范一致（商务经典=白色 `bg-white`），禁止自行使用渐变或深色背景\n"
     "6. 布局：居中排列（`flex flex-col items-center justify-center`），"
     "不强制 grid-cols-2 双栏\n"
     "7. 留白：允许较高留白，不强制数据卡片、图表或数据来源页脚\n"
@@ -159,53 +199,56 @@ _PAGE_TYPE_RE = re.compile(r"类型\*{0,2}[：:]\s*(\w+)", re.IGNORECASE)
 
 _PAGE_LAYOUT_TEMPLATES = {
     "data": (
-        "### 推荐布局（data 类型，直接套用标准骨架）\n"
+        "### 参考布局（data 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
         '<div class="content-safe flex flex-col gap-3 h-full">\n'
         '  <header class="flex-shrink-0">4-6 个关键数字卡片，grid grid-cols-6</header>\n'
-        '  <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
+        '  <main class="flex-1 min-h-0 grid grid-cols-[3fr_2fr] gap-3">\n'
         '    <section class="h-full min-h-0 overflow-hidden">6 个核心论点卡片，grid grid-cols-2 grid-rows-3 gap-2</section>\n'
-        '    <section class="h-full min-h-0 overflow-hidden">ECharts 柱状图 + 对比表格</section>\n'
+        '    <section class="h-full min-h-0 overflow-hidden">ECharts 图表 + 对比表格</section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
         '</div>\n'
         "```\n"
-        "- ECharts 用柱状图(bar)，禁止用折线图\n"
+        "- ECharts 图表类型根据数据形态选择（柱状图/饼图/雷达图）\n"
     ),
     "trend": (
-        "### 推荐布局（trend 类型，直接套用标准骨架）\n"
+        "### 参考布局（trend 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
         '<div class="content-safe flex flex-col gap-3 h-full">\n'
         '  <header class="flex-shrink-0">3 个关键数字卡片</header>\n'
-        '  <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
-        '    <section class="h-full min-h-0 overflow-hidden">ECharts 折线图（趋势数据）</section>\n'
-        '    <section class="h-full min-h-0 overflow-hidden">4-6 个核心论点卡片，flex-col gap-2</section>\n'
+        '  <main class="flex-1 min-h-0 flex gap-3 overflow-hidden">\n'
+        '    <section class="flex-1 min-h-0 overflow-hidden">ECharts 折线图（趋势数据）</section>\n'
+        '    <section class="w-[40%] min-h-0 overflow-hidden">4-6 个核心论点卡片，flex-col gap-2</section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
         '</div>\n'
         "```\n"
-        "- ECharts 用折线图(line)，禁止用柱状图\n"
+        "- ECharts 默认折线图(line)，数据形态更适合其他类型时可切换\n"
     ),
     "comparison": (
-        "### 推荐布局（comparison 类型，直接套用标准骨架）\n"
+        "### 参考布局（comparison 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
         '<div class="content-safe flex flex-col gap-3 h-full">\n'
-        '  <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
-        '    <section class="h-full min-h-0 overflow-hidden">对比对象 A 的卡片（grid grid-cols-2 grid-rows-3）</section>\n'
-        '    <section class="h-full min-h-0 overflow-hidden">对比对象 B 的卡片（grid grid-cols-2 grid-rows-3）</section>\n'
+        '  <main class="flex-1 min-h-0 flex flex-col gap-3 overflow-hidden">\n'
+        '    <div class="flex gap-3 flex-1 min-h-0">\n'
+        '      <section class="flex-1 min-h-0 overflow-hidden">对比对象 A 的卡片（grid grid-cols-2 grid-rows-3）</section>\n'
+        '      <section class="flex-1 min-h-0 overflow-hidden">对比对象 B 的卡片（grid grid-cols-2 grid-rows-3）</section>\n'
+        '    </div>\n'
+        '    <section class="flex-shrink-0">对比表格</section>\n'
         '  </main>\n'
-        '  <footer class="flex-shrink-0">对比表格 + 数据来源汇总条</footer>\n'
+        '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
         '</div>\n'
         "```\n"
-        "- ECharts 用分组柱状图(grouped bar)\n"
+        "- ECharts 默认分组柱状图(grouped bar)，占比数据用饼图\n"
     ),
     "case": (
-        "### 推荐布局（case 类型，直接套用标准骨架）\n"
+        "### 参考布局（case 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
         '<div class="content-safe flex flex-col gap-3 h-full">\n'
         '  <header class="flex-shrink-0">3 个关键数字卡片</header>\n'
-        '  <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
-        '    <section class="h-full min-h-0 overflow-hidden">6 个核心论点卡片，grid grid-cols-2 grid-rows-3</section>\n'
+        '  <main class="flex-1 min-h-0 grid grid-cols-[2fr_3fr] gap-3">\n'
+        '    <section class="h-full min-h-0 overflow-hidden">6 个核心论点卡片，flex-col gap-2</section>\n'
         '    <section class="h-full min-h-0 overflow-hidden">ECharts 图表 + 关键数据表格</section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">案例素材详细描述 + 数据来源页脚</footer>\n'
@@ -213,17 +256,22 @@ _PAGE_LAYOUT_TEMPLATES = {
         "```\n"
     ),
     "technology": (
-        "### 推荐布局（technology 类型，直接套用标准骨架）\n"
+        "### 参考布局（technology 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
         '<div class="content-safe flex flex-col gap-3 h-full">\n'
         '  <header class="flex-shrink-0">4 个关键数字卡片</header>\n'
-        '  <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
-        '    <section class="h-full min-h-0 overflow-hidden">6 个核心论点卡片，grid grid-cols-2 grid-rows-3</section>\n'
-        '    <section class="h-full min-h-0 overflow-hidden">ECharts 图表 + 对比表格</section>\n'
+        '  <main class="flex-1 min-h-0 flex flex-col gap-3 overflow-hidden">\n'
+        '    <section class="flex-1 min-h-0 overflow-hidden">ECharts 图表 + 对比表格</section>\n'
+        '    <section class="flex-1 min-h-0 overflow-hidden">6 个核心论点卡片，grid grid-cols-3 grid-rows-2 gap-2</section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
         '</div>\n'
         "```\n"
+        "- ECharts 图表选型（与 skill charts.md 数据类型表一致，直接按数据形态选）："
+        "比较类别→柱状图(bar)；时间序列→折线图(line)；类别占比→饼图(pie)；"
+        "多维数据比较→雷达图(radar)；两变量关系→散点图(scatter)；"
+        "单一变量分布→直方图(histogram)；数据分布/离群值→箱线图(boxplot)；"
+        "层次结构→树状图(treemap)；矩阵数据→热力图(heatmap)\n"
     ),
     "cover": (
         "### 推荐布局（cover 类型，封面页）\n"
@@ -258,10 +306,6 @@ def _detect_page_type(outline_page: str) -> str:
     return ""
 
 
-_STRUCTURAL_PAGE_TYPES = {
-    "cover", "ending", "agenda", "section", "chapter", "transition", "conclusion",
-}
-
 _STRUCTURAL_DENSITY_CHECKLIST = (
     "### 结构页密度检查（4 项，全部必须通过）\n"
     "1. 完整显示：核心内容未被裁切、滚动、折叠或省略\n"
@@ -271,7 +315,7 @@ _STRUCTURAL_DENSITY_CHECKLIST = (
 )
 
 _DENSITY_CHECKLIST_DIGEST = (
-    "### 内容密度检查（10 项，全部必须通过）\n"
+    "### 内容密度检查（11 项，全部必须通过）\n"
     "1. 数据可视化：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式且页面为'数据有限'时可降至 2 个数据卡片）\n"
     "2. 核心要点：6-10 个列表项或卡片\n"
     "3. 装饰图标：≥3 个 FontAwesome 图标（class 含 `fa-`）\n"
@@ -279,9 +323,13 @@ _DENSITY_CHECKLIST_DIGEST = (
     "5. 数据来源：页脚有标注（机构名 / 资料名）\n"
     "6. 无大段文字：无连续 > 100 字段落\n"
     "7. 视觉层级：标题 → 副标题 → 正文 → 注释 层级清晰\n"
-    "8. 布局正确：main 元素 class 含 `grid grid-cols-2`，且恰好 2 个直接子元素（`<section>` 或 `<div>`）\n"
+    "8. 布局正确：main 元素采用双区域布局（如 `grid grid-cols-2`、`grid grid-cols-[3fr_2fr]`、"
+    "`flex gap-4` 等），且恰好 2 个直接子元素（`<section>` 或 `<div>`）；"
+    "禁止所有页面使用相同布局，需根据内容叙事选择不同布局比例和方向\n"
     "9. 完整显示：核心内容未使用 line-clamp、省略号、滚动或折叠隐藏\n"
     "10. 内容完整：标题、正文、图表标签、数据来源和数据卡片全部完整显示，无裁切\n"
+    "11. ECharts SVG 检查：所有 echarts.init 调用必须包含 `{renderer:'svg'}` 参数，"
+    "且使用 `document.getElementById('xxx')` 直接传参，禁止变量赋值\n"
 )
 
 
@@ -305,6 +353,85 @@ def _is_valid_html(text: str) -> bool:
         return False
     lower = text.lower()
     return ("<html" in lower or "<!doctype html" in lower) and "ppt-slide" in lower
+
+
+# 匹配 <h1>/<h2> 中「第X页」占位符（X 为数字或中文数字）
+_PLACEHOLDER_HEADING_RE = re.compile(
+    r'(<(h[12])[^>]*>)\s*第\s*([\d一二三四五六七八九十]+)\s*页\s*(</\2>)',
+    re.IGNORECASE,
+)
+
+
+def _extract_title_from_outline(outline_page: str) -> str:
+    """从 outline 片段中提取页面标题，用于替换「第X页」占位符。
+
+    outline 片段格式示例：
+      ### P3: 类型*data | 标题*xxx | 研究需求*✅
+      ### P3: xxx标题
+    """
+    if not outline_page:
+        return ""
+    for line in outline_page.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("### P"):
+            continue
+        # 去掉 "### P{N}:" 前缀
+        rest = stripped.split(":", 1)[-1].strip() if ":" in stripped else ""
+        if not rest:
+            continue
+        # 格式1: "类型*data | 标题*xxx | 研究需求*✅"
+        if "标题" in rest:
+            for seg in rest.split("|"):
+                seg = seg.strip()
+                if seg.startswith("标题"):
+                    val = seg.split("*", 1)[-1].strip() if "*" in seg else seg.split("：", 1)[-1].strip()
+                    val = val.strip("*").strip()
+                    if val and val != "标题":  # 排除空值和独立"标题"segment
+                        return val
+            # 标题字段存在但值为空或字面量"标题"，格式异常，跳过格式2 fallback
+            continue
+        # 格式2: 直接是标题文本
+        if rest and not rest.startswith("类型"):
+            return rest
+    return ""
+
+
+def _replace_placeholder_headings(html: str, outline_page: str) -> str:
+    """后置校验：将 <h1>/<h2> 中的「第X页」占位符替换为 outline 中的实际标题。"""
+    title = _extract_title_from_outline(outline_page)
+    if not title:
+        return html
+
+    def _replacer(m: re.Match) -> str:
+        return f"{m.group(1)}{title}{m.group(4)}"
+
+    return _PLACEHOLDER_HEADING_RE.sub(_replacer, html)
+
+
+# 匹配 echarts.init(xxx) 未带 renderer 参数的单参数调用
+# 支持两种传参：变量名 或 document.getElementById('xxx') 直接传参
+# 多参数调用（含 renderer 等）天然不匹配，无需额外排除
+_ECHARTS_INIT_NO_SVG_RE = re.compile(
+    r"echarts\.init\(\s*"
+    r"(?:"
+    r"(\w+)"                                              # 形式1: 变量名
+    r"|(document\.getElementById\(\s*['\"][^'\"]+['\"]\s*\))"  # 形式2: getElementById
+    r")\s*\)"
+)
+
+
+def _fix_echarts_svg_renderer(html: str) -> str:
+    """后置校验：确保所有 echarts.init 调用使用 SVG 渲染器。
+
+    匹配两种单参数调用：变量名 或 document.getElementById('xxx')，
+    自动补充 {renderer:'svg'} 参数。
+    已有 renderer 参数或多参数调用不处理。
+    """
+    def _replacer(m: re.Match) -> str:
+        arg = (m.group(1) or m.group(2) or "").strip()
+        return f"echarts.init({arg}, null, {{renderer:'svg'}})"
+
+    return _ECHARTS_INIT_NO_SVG_RE.sub(_replacer, html)
 
 
 def _post_check_data_viz(html: str, failed_items: list[str], search_mode: str) -> list[str]:
@@ -546,6 +673,8 @@ def _build_page_prompt(
     outline_page: str,
     research_page: str,
     *,
+    designer_md_text: str = "",
+    charts_md_text: str = "",
     outline_is_full: bool = False,
     research_is_full: bool = False,
     rewrite_hint: str = "",
@@ -592,7 +721,13 @@ def _build_page_prompt(
     no_research = not research_page.strip()
 
     page_type = _detect_page_type(outline_page)
-    is_structural = page_type in _STRUCTURAL_PAGE_TYPES
+    # 与 skill SKILL.md「页面研究契约」一致：用研究需求字段判断是否结构页
+    # 大纲中格式为「✅ 页研究查询: ...」或「✅ 数据需求: ...」，有则为内容页
+    # 无上述字段则为结构页（仅依据大纲）
+    has_research_need = "✅" in outline_page and (
+        "页研究查询" in outline_page or "数据需求" in outline_page or "研究需求" in outline_page
+    )
+    is_structural = not has_research_need
 
     if no_outline:
         outline_label = "大纲（未提供，请根据重写指引和搜索补充数据自行推断页面类型与布局）"
@@ -634,13 +769,35 @@ def _build_page_prompt(
     design_rules = _STRUCTURAL_DESIGN_RULES if is_structural else _DESIGN_RULES_DIGEST
     html_skeleton = _STRUCTURAL_HTML_SKELETON if is_structural else _HTML_SKELETON
 
+    # 注入 skill designer 规范（防溢出 CSS 约束 + 语义区域指南）
+    # 文件内容由 PrepareNode 通过 read_file 工具读取后传入
+    designer_section = ""
+    if not is_structural and designer_md_text:
+        designer_md = _extract_designer_section(designer_md_text)
+        if designer_md:
+            designer_section = f"\n### skill designer 约束（必须遵守）\n{designer_md}\n"
+
+    # 图表候选页注入 charts.md（独立判断，不依赖 SKILL.md 读取结果）
+    if not is_structural and page_type in _CHART_CANDIDATE_TYPES and charts_md_text:
+        designer_section += f"\n### ECharts 图表编码规范（必须遵守）\n{charts_md_text}\n"
+
+    # 布局多样性约束：禁止连续两页相同布局
+    diversity_rule = ""
+    if not is_structural:
+        diversity_rule = (
+            "\n### 布局多样性约束\n"
+            "- 禁止连续两页使用完全相同的 main 布局结构（grid 列数、子元素数量、比例分配）\n"
+            "- 主动使用不同的布局比例（如 `flex-[3]_flex-[2]`、`grid-cols-[3fr_2fr]`、`flex-[5]_flex-[4]` 等）\n"
+            "- 根据内容叙事选择布局，而非机械套用模板\n"
+        )
+
     return (
         "## 0. 输出要求（最高优先级）\n"
         f"- 输出**第 {page_number} 页**完整 HTML（含 <!DOCTYPE>、<html>、<head>、<body>）\n"
         "- 严禁任何解释、注释、Markdown 代码块包裹，只输出 HTML 原文\n"
         "- 页面尺寸严格 1280×720px\n"
         '- 必须包含 `<div class="ppt-slide">` 容器\n'
-        "- 禁止在思考过程中反复计算像素或纠结布局，直接套用下方推荐布局模板\n"
+        "- 禁止在思考过程中反复计算像素或纠结布局，参考下方布局示例并根据内容调整\n"
         "- 一次性输出完整 HTML，禁止输出'final code''truly final'等反复确认语句\n"
         "\n"
         "## 1. 视觉风格规范（强制遵守）\n"
@@ -650,6 +807,8 @@ def _build_page_prompt(
         f"{_CDN_HEAD_SNIPPET}"
         "\n"
         f"{design_rules}"
+        f"{designer_section}"
+        f"{diversity_rule}"
         "\n"
         f"{html_skeleton}"
         "\n"
@@ -679,7 +838,7 @@ def _build_page_prompt(
         "## 5. 任务\n"
         f"你负责生成**第 {page_number} 页** HTML。仅生成该页，直接输出 HTML 原文。"
         "先产出可运行 HTML，再按密度检查清单做小步修正；禁止在写文件前反复做像素级完整规划。"
-        "生成时必须同时满足上述「内容密度检查（10 项）」全部要求，"
+        "生成时必须同时满足上述「内容密度检查（11 项）」全部要求，"
         "确保首次生成即通过密度检查，避免后续重写。"
     )
 
@@ -696,6 +855,8 @@ class PageGenContext:
     outline_is_full: bool
     research_is_full: bool
     image_map_page: str  # 本页图片素材描述（空串=无图）
+    designer_md_text: str  # designer/SKILL.md 原文（由 PrepareNode 通过 read_file 读取）
+    charts_md_text: str  # designer/charts.md 原文（由 PrepareNode 通过 read_file 读取）
 
 
 class PrepareNode(PlanNode):
@@ -796,6 +957,11 @@ class PrepareNode(PlanNode):
                         raise
                     logger.warning("[P8.0] image_map.json 解析失败: %s", e)
 
+        # 读取 skill designer 规范文件（通过 read_file 工具，skill_code 禁止直接 IO）
+        pptx_root = str(inputs.get("pptx_root") or _PPT_DIR)
+        designer_md_text = await self._read_file(f"{pptx_root}/designer/SKILL.md")
+        charts_md_text = await self._read_file(f"{pptx_root}/designer/charts.md")
+
         logger.info(
             "[P8.0] 预处理完成 outline_pages=%d research_pages=%d image_map_pages=%d",
             len(outline_pages),
@@ -810,6 +976,8 @@ class PrepareNode(PlanNode):
             "style_text": style_text,
             "all_pages": all_pages,
             "image_map": image_map,
+            "designer_md_text": designer_md_text,
+            "charts_md_text": charts_md_text,
         }
 
     async def _read_file(self, path: str) -> str:
@@ -879,7 +1047,7 @@ class PageWorkerNode(PlanNode):
                 "调 LLM 生成 HTML；剥 ```html 包裹 → 校验（含 <!DOCTYPE> + ppt-slide 容器）→ write_file 落盘\n"
                 "   - 失败按 gen_retry_round 重试（仅本页）\n"
                 "   - 重试后仍失败 → 进 missing_pages，该页闭环终止\n"
-                "2. 密度判定阶段：调 LLM 做 10 项密度检查（受控 JSON 输出），叠加程序化后置校验（echarts/card 计数）\n"
+                "2. 密度判定阶段：调 LLM 做 11 项密度检查（受控 JSON 输出），叠加程序化后置校验（echarts/card 计数）\n"
                 "   - 检查项：数据可视化 / 核心要点 / 装饰图标 / 空白率 / 数据来源 / 大段文字 / 视觉层级 / 布局正确 / 完整显示 / 内容完整\n"
                 "   - 数据可视化阈值：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式降至 2 个）\n"
                 "3. 不通过 → 修复阶段（按 density_retry_round 轮）：\n"
@@ -911,6 +1079,8 @@ class PageWorkerNode(PlanNode):
                 "| 类别占比数据（总和 100%） | 饼图/环形图 |\n"
                 "| 对比数据（2-3 类别） | 条形图或对比卡片 |\n"
                 "| 多类别比较（≥4 类别） | 柱状图 |\n"
+                "| 多维能力对比（≥3 维度） | 雷达图(radar) |\n"
+                "| 两变量相关性 | 散点图(scatter) |\n"
                 "| 关键观点 | 带图标的列表项 |\n"
                 "| 真实案例 | 案例卡片（公司名 + 数据 + 效果） |\n"
                 "\n"
@@ -940,6 +1110,8 @@ class PageWorkerNode(PlanNode):
         style_text = str(inputs.get("style_text") or "")
         all_pages: list[int] = list(inputs.get("all_pages") or [])
         image_map: dict[str, Any] = inputs.get("image_map") or {}
+        designer_md_text = str(inputs.get("designer_md_text") or "")
+        charts_md_text = str(inputs.get("charts_md_text") or "")
 
         if not pages_dir or not all_pages:
             logger.error("[P8.1] 必填输入缺失，跳过生成")
@@ -967,6 +1139,8 @@ class PageWorkerNode(PlanNode):
                 gen_retry_round=gen_retry_round,
                 density_retry_round=density_retry_round,
                 image_map=image_map,
+                designer_md_text=designer_md_text,
+                charts_md_text=charts_md_text,
             )
             for p in all_pages
         ]
@@ -1022,6 +1196,8 @@ class PageWorkerNode(PlanNode):
         gen_retry_round: int,
         density_retry_round: int,
         image_map: dict[str, Any],
+        designer_md_text: str = "",
+        charts_md_text: str = "",
     ) -> dict[str, Any]:
         """单页闭环：生成(含重试) → 密度判定 → 搜索补充+重写(含重试)。"""
         path = f"{pages_dir}/page-{page_num}.pptx.html"
@@ -1048,6 +1224,8 @@ class PageWorkerNode(PlanNode):
             outline_is_full=outline_is_full,
             research_is_full=research_is_full,
             image_map_page=image_map_page,
+            designer_md_text=designer_md_text,
+            charts_md_text=charts_md_text,
         )
 
         html = ""
@@ -1066,15 +1244,18 @@ class PageWorkerNode(PlanNode):
 
         report: dict[str, Any] = {"pass": True}
         low_density = False
-        page_type = _detect_page_type(outline_page)
-        is_structural = page_type in _STRUCTURAL_PAGE_TYPES
+        # 与 _build_page_prompt 一致：基于「页研究查询/数据需求」字段判定结构页
+        has_research_need = "✅" in outline_page and (
+            "页研究查询" in outline_page or "数据需求" in outline_page or "研究需求" in outline_page
+        )
+        is_structural = not has_research_need
         total_rounds = max(density_retry_round + 1, 1)
         for round_idx in range(total_rounds):
             current = await self._read_file(path)
             if not current:
                 logger.warning("[P8.1] 页面 %d 重检时读取失败，保守判通过", page_num)
                 break
-            report = await self._check_one(page_num, current, search_mode, page_type)
+            report = await self._check_one(page_num, current, search_mode, outline_page)
             if report.get("pass", True):
                 break
             if round_idx == total_rounds - 1:
@@ -1121,6 +1302,8 @@ class PageWorkerNode(PlanNode):
                     outline_is_full=ctx.outline_is_full,
                     research_is_full=False,
                     image_map_page=ctx.image_map_page,
+                    designer_md_text=ctx.designer_md_text,
+                    charts_md_text=ctx.charts_md_text,
                 ),
                 system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
                 node_name=f"p8_1_page_{ctx.page_num}",
@@ -1135,6 +1318,9 @@ class PageWorkerNode(PlanNode):
         if not _is_valid_html(html):
             logger.warning("[P8.1] 页面 %d HTML 校验失败", ctx.page_num)
             return ""
+        # 后置校验：替换「第X页」标题占位符为 outline 中的实际标题
+        html = _replace_placeholder_headings(html, ctx.outline_page)
+        html = _fix_echarts_svg_renderer(html)
         return html
 
     async def _check_one(
@@ -1142,10 +1328,14 @@ class PageWorkerNode(PlanNode):
         page_num: int,
         html: str,
         search_mode: str,
-        page_type: str = "",
+        outline_page: str = "",
     ) -> dict[str, Any]:
         """单页密度判定（LLM + 程序化后置校验）。LLM 异常保守判通过。"""
-        is_structural = page_type in _STRUCTURAL_PAGE_TYPES
+        # 与 _build_page_prompt 一致：基于「页研究查询/数据需求」字段判定结构页
+        has_research_need = outline_page and "✅" in outline_page and (
+            "页研究查询" in outline_page or "数据需求" in outline_page or "研究需求" in outline_page
+        )
+        is_structural = not has_research_need
 
         if is_structural:
             checklist = _STRUCTURAL_DENSITY_CHECKLIST
@@ -1268,6 +1458,8 @@ class PageWorkerNode(PlanNode):
                     rewrite_hint=hint,
                     original_html=original_html,
                     image_map_page=ctx.image_map_page,
+                    designer_md_text=ctx.designer_md_text,
+                    charts_md_text=ctx.charts_md_text,
                 ),
                 system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
                 node_name=f"p8_2_page_{ctx.page_num}",
@@ -1282,6 +1474,9 @@ class PageWorkerNode(PlanNode):
         if not _is_valid_html(html):
             logger.warning("[P8.1] 页面 %d 重写产物 HTML 校验失败", ctx.page_num)
             return ""
+        # 后置校验：替换「第X页」标题占位符为 outline 中的实际标题
+        html = _replace_placeholder_headings(html, ctx.outline_page)
+        html = _fix_echarts_svg_renderer(html)
         return html
 
     async def _read_file(self, path: str) -> str:

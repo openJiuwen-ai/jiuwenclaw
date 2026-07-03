@@ -29,6 +29,8 @@ _VALID_RESEARCH_DEPTHS = frozenset({"L1", "L2", "L3"})
 
 _STYLE_LABEL_TO_ID: dict[str, str] = {
     "商务经典": "business-classic",
+    "华为": "business-classic",
+    "华为风格": "business-classic",
     "科技极简": "tech-minimal",
     "典雅叙事": "elegant-narrative",
     "工业科技": "industrial-tech",
@@ -158,6 +160,7 @@ def _normalize_style_id(value: Any) -> str:
     lowered = raw.casefold()
     alias_map = {
         "business-classic": "business-classic",
+        "huawei": "business-classic",
         "tech-minimal": "tech-minimal",
         "tech minimal": "tech-minimal",
         "elegant-narrative": "elegant-narrative",
