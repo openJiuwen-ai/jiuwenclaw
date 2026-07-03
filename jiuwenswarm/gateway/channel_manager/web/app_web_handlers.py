@@ -1496,14 +1496,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         offset = 0
         if isinstance(params, dict):
             raw_limit = params.get("limit")
-            if isinstance(raw_limit, int):
+            if isinstance(raw_limit, int) and not isinstance(raw_limit, bool):
                 limit = raw_limit
+            elif isinstance(raw_limit, float) and raw_limit.is_integer():
+                # JSON 2.0 会被解析为 float,归一为 int;非整数浮点(2.5)落穿到默认
+                limit = int(raw_limit)
             elif isinstance(raw_limit, str) and raw_limit.strip().isdigit():
                 limit = int(raw_limit.strip())
 
             raw_offset = params.get("offset")
-            if isinstance(raw_offset, int):
+            if isinstance(raw_offset, int) and not isinstance(raw_offset, bool):
                 offset = raw_offset
+            elif isinstance(raw_offset, float) and raw_offset.is_integer():
+                offset = int(raw_offset)
             elif isinstance(raw_offset, str) and raw_offset.strip().isdigit():
                 offset = int(raw_offset.strip())
 
@@ -1551,7 +1556,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=meta)
 
     async def _session_create(ws, req_id, params, session_id):
-        """创建一个新 session（在 agent/sessions 下创建一个新目录）。"""
+        """创建一个新 session（在 agent/sessions 下创建一个新目录）。
+
+        project_path 为可选参数,指定工作目录绝对路径,绑定后不可变;
+        不传或空串时归入默认空项目,行为与现状一致(存量调用零影响)。
+        """
         if not isinstance(params, dict):
             await channel.send_response(
                 ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST",
@@ -1564,6 +1573,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         session_id_to_create = session_id_to_create.strip()
+
+        # project_path: 可选,非空时必须为绝对路径,否则 BAD_REQUEST
+        project_path = str(params.get("project_path") or "").strip()
+        if project_path and not os.path.isabs(project_path):
+            await channel.send_response(
+                ws, req_id,
+                ok=False,
+                error="project_path must be an absolute path",
+                code="BAD_REQUEST",
+            )
+            return
 
         workspace_session_dir = get_agent_sessions_dir()
         if not workspace_session_dir.exists():
@@ -1584,9 +1604,67 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             user_id=params.get("user_id", ""),
             title=params.get("title", ""),
             mode=params.get("mode", "unknown"),
+            project_path=project_path,
         )
 
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": session_id_to_create})
+
+    async def _session_rename(ws, req_id, params, session_id):
+        """重命名会话标题(查询/设置/清除三种语义),复用 apply_session_rename。
+
+        与 list/create/delete 同走本地路径,不转发 AgentServer。
+        title 不传→查询、空串/纯空白→清除、非空→设置(截断 200 字符)。
+        """
+        from jiuwenswarm.server.runtime.session.session_rename import apply_session_rename
+
+        ok, payload, err, code = apply_session_rename(
+            params if isinstance(params, dict) else {},
+            session_id,
+            init_channel_id=channel.channel_id,
+        )
+        if ok:
+            await channel.send_response(ws, req_id, ok=True, payload=payload or {})
+        else:
+            await channel.send_response(
+                ws, req_id, ok=False, error=err or "session.rename failed", code=code,
+            )
+
+    async def _session_pin(ws, req_id, params, session_id):
+        """置顶/取消置顶会话,操作后对所有置顶会话紧凑重编号为 1..N。幂等。
+
+        置顶时会话从项目分组剥离,进入全局置顶区;取消置顶时回归原项目。
+        """
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST",
+            )
+            return
+        sid = params.get("session_id")
+        if not isinstance(sid, str) or not sid.strip():
+            await channel.send_response(
+                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST",
+            )
+            return
+        sid = sid.strip()
+        raw_pinned = params.get("pinned")
+        if not isinstance(raw_pinned, bool):
+            await channel.send_response(
+                ws, req_id, ok=False, error="pinned must be boolean", code="BAD_REQUEST",
+            )
+            return
+
+        from jiuwenswarm.server.runtime.session.session_metadata import set_session_pinned
+
+        result = set_session_pinned(sid, raw_pinned)
+        if result is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="session not found", code="NOT_FOUND",
+            )
+            return
+        new_pinned, new_order = result
+        await channel.send_response(
+            ws, req_id, ok=True, payload={"pinned": new_pinned, "pin_order": new_order},
+        )
 
     async def _session_delete(ws, req_id, params, session_id):
         """删除一个 session（在 agent/sessions 下删除一个目录）。"""
@@ -1659,6 +1737,477 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         shutil.rmtree(session_dir)
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": session_id_to_delete})
+
+    async def _project_list(ws, req_id, params, session_id):
+        """获取项目列表(含统计),已排序,包含默认项目。
+
+        filter: ``"all"``(默认) / ``"pinned"`` / ``"unpinned"``
+        include_hidden: 是否包含已软删除(``hidden:true``)项目,默认 ``false``。
+            仅 ``"all"`` / ``"unpinned"`` 生效;``"pinned"`` 模式自动排除隐藏项目。
+
+        统计口径: ``session_count`` / ``last_message_at`` / ``last_user_message_at``
+        仅统计该项目的**非置顶**会话。置顶会话不计入任何项目统计。
+        隐藏项目统计恒为 0/null(其非置顶会话已临时归属默认项目)。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        filter_val = str(params.get("filter") or "all").strip() or "all"
+        if filter_val not in ("all", "pinned", "unpinned"):
+            filter_val = "all"
+        include_hidden = bool(params.get("include_hidden", False))
+
+        from jiuwenswarm.server.runtime.session import project_store
+        from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
+
+        # 加载全部项目(含隐藏,用于会话归属判断);cache_bust 跨进程拿最新
+        all_projects = project_store.list_projects(include_hidden=True, cache_bust=True)
+        # 可见项目的 project_path 集合: 命中则归属该项目,否则归入默认项目
+        visible_paths = {p.project_path for p in all_projects if not p.hidden}
+
+        # 扫描全部会话,按归属 project_path 聚合非置顶会话统计
+        sessions = collect_all_sessions_metadata()
+        stats: dict[str, dict[str, Any]] = {}
+
+        def _ensure_stats(key: str) -> dict[str, Any]:
+            st = stats.get(key)
+            if st is None:
+                st = {"session_count": 0, "last_message_at": None, "last_user_message_at": None}
+                stats[key] = st
+            return st
+
+        for s in sessions:
+            # 置顶会话已从项目分组剥离,不计入任何项目统计
+            if s.get("pinned"):
+                continue
+            pp = str(s.get("project_path") or "")
+            # 归属判断: project_path 命中可见项目 → 该项目; 否则 → 默认项目("")
+            key = pp if (pp and pp in visible_paths) else ""
+            st = _ensure_stats(key)
+            st["session_count"] += 1
+            lm = s.get("last_message_at")
+            if isinstance(lm, (int, float)) and not isinstance(lm, bool):
+                if st["last_message_at"] is None or lm > st["last_message_at"]:
+                    st["last_message_at"] = lm
+            lum = s.get("last_user_message_at")
+            if isinstance(lum, (int, float)) and not isinstance(lum, bool):
+                if st["last_user_message_at"] is None or lum > st["last_user_message_at"]:
+                    st["last_user_message_at"] = lum
+
+        def _zero_stats() -> dict[str, Any]:
+            return {"session_count": 0, "last_message_at": None, "last_user_message_at": None}
+
+        def _build_project_info(proj: Any, is_default: bool = False) -> dict[str, Any]:
+            if is_default:
+                st = stats.get("", _zero_stats())
+                return {
+                    "project_id": "default",
+                    "name": "默认项目",
+                    "project_path": "",
+                    "pinned": False,
+                    "pin_order": 0,
+                    "is_default": True,
+                    "hidden": False,
+                    "session_count": st["session_count"],
+                    "last_message_at": st["last_message_at"],
+                    "last_user_message_at": st["last_user_message_at"],
+                    "created_at": 0,
+                }
+            # 隐藏项目统计恒为 0/null(其非置顶会话已归属默认项目)
+            st = _zero_stats() if proj.hidden else stats.get(proj.project_path, _zero_stats())
+            return {
+                "project_id": proj.project_id,
+                "name": proj.name,
+                "project_path": proj.project_path,
+                "pinned": proj.pinned,
+                "pin_order": proj.pin_order,
+                "is_default": False,
+                "hidden": proj.hidden,
+                "session_count": st["session_count"],
+                "last_message_at": st["last_message_at"],
+                "last_user_message_at": st["last_user_message_at"],
+                "created_at": proj.created_at,
+            }
+
+        def _lum_sort_key(info: dict[str, Any]) -> float:
+            v = info["last_user_message_at"]
+            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+        if filter_val == "pinned":
+            # 仅置顶项目,按 pin_order 升序;隐藏项目已在 remove 时取消置顶,无需额外过滤
+            items = [_build_project_info(p) for p in all_projects if p.pinned]
+            items.sort(key=lambda x: x["pin_order"])
+        elif filter_val == "unpinned":
+            # 非置顶项目(按 include_hidden 决定是否含隐藏),按 last_user_message_at 倒序,末位默认项目
+            items = [_build_project_info(p) for p in all_projects
+                     if not p.pinned and (include_hidden or not p.hidden)]
+            items.sort(key=_lum_sort_key, reverse=True)
+            items.append(_build_project_info(None, is_default=True))
+        else:  # "all"
+            # 置顶项目在前(按 pin_order 升序) → 非置顶项目(按 last_user_message_at 倒序) → 末位默认项目
+            pinned_items = [_build_project_info(p) for p in all_projects if p.pinned]
+            pinned_items.sort(key=lambda x: x["pin_order"])
+            unpinned_items = [_build_project_info(p) for p in all_projects
+                              if not p.pinned and (include_hidden or not p.hidden)]
+            unpinned_items.sort(key=_lum_sort_key, reverse=True)
+            items = pinned_items + unpinned_items + [_build_project_info(None, is_default=True)]
+
+        await channel.send_response(ws, req_id, ok=True, payload={"projects": items})
+
+    def _to_session_info(meta: dict[str, Any]) -> dict[str, Any]:
+        """将会话元数据投影为 SessionInfo(排除 delivery_context/channel_metadata 等内部字段)。"""
+        lum = meta.get("last_user_message_at")
+        return {
+            "session_id": str(meta.get("session_id", "")),
+            "title": str(meta.get("title", "")),
+            "created_at": meta.get("created_at", 0),
+            "last_message_at": meta.get("last_message_at", 0),
+            "message_count": int(meta.get("message_count", 0)),
+            "mode": str(meta.get("mode", "unknown")),
+            "pinned": bool(meta.get("pinned", False)),
+            "pin_order": int(meta.get("pin_order", 0)),
+            "project_path": str(meta.get("project_path", "")),
+            "last_user_message_at": lum if isinstance(lum, (int, float)) and not isinstance(lum, bool) else None,
+            "model": str(meta.get("model", "")),
+        }
+
+    async def _project_get_sessions(ws, req_id, params, session_id):
+        """获取项目下的非置顶会话列表,按 last_user_message_at 倒序。
+
+        project_id 传 ``"default"`` 时,返回默认项目自身非置顶会话 + 所有已隐藏
+        (``hidden:true``)项目的非置顶会话(这些会话在项目隐藏期间临时归属默认项目)。
+        置顶会话不出现(由 ``project.pinned_sessions`` 获取)。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        project_id = str(params.get("project_id") or "").strip()
+        if not project_id:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project_id is required", code="BAD_REQUEST",
+            )
+            return
+
+        # limit 不传则不限;offset 默认 0
+        raw_limit = params.get("limit")
+        limit: int | None = None
+        if isinstance(raw_limit, int) and not isinstance(raw_limit, bool):
+            limit = raw_limit
+        elif isinstance(raw_limit, float) and raw_limit.is_integer():
+            # JSON 2.0 会被解析为 float,归一为 int;非整数浮点(2.5)落穿到默认(不限)
+            limit = int(raw_limit)
+        elif isinstance(raw_limit, str) and raw_limit.strip().isdigit():
+            limit = int(raw_limit.strip())
+        raw_offset = params.get("offset")
+        offset = 0
+        if isinstance(raw_offset, int) and not isinstance(raw_offset, bool):
+            offset = raw_offset
+        elif isinstance(raw_offset, float) and raw_offset.is_integer():
+            offset = int(raw_offset)
+        elif isinstance(raw_offset, str) and raw_offset.strip().isdigit():
+            offset = int(raw_offset.strip())
+        offset = max(0, offset)
+        if limit is not None:
+            limit = max(1, limit)
+
+        from jiuwenswarm.server.runtime.session import project_store
+        from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
+
+        if project_id == "default":
+            # 默认项目: 非置顶会话 project_path 为空,或不属于任何可见项目
+            # (含命中已隐藏项目的会话、孤立会话)→ 临时归属默认,与 project.list 统计口径一致
+            all_projects = project_store.list_projects(include_hidden=True, cache_bust=True)
+            visible_paths = {p.project_path for p in all_projects if not p.hidden and p.project_path}
+
+            def _belongs(meta: dict[str, Any]) -> bool:
+                pp = str(meta.get("project_path") or "")
+                return not pp or pp not in visible_paths
+        else:
+            proj = project_store.get_project_by_id(project_id, cache_bust=True)
+            if proj is None or proj.hidden:
+                await channel.send_response(
+                    ws, req_id, ok=False, error="project not found", code="NOT_FOUND",
+                )
+                return
+            target_path = proj.project_path
+
+            def _belongs(meta: dict[str, Any]) -> bool:
+                return str(meta.get("project_path") or "") == target_path
+
+        sessions = collect_all_sessions_metadata()
+        # 仅非置顶会话 + 归属匹配
+        matched = [s for s in sessions if not s.get("pinned") and _belongs(s)]
+
+        def _lum(s: dict[str, Any]) -> float:
+            v = s.get("last_user_message_at")
+            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+        matched.sort(key=_lum, reverse=True)
+
+        total = len(matched)
+        page = matched[offset: offset + limit] if limit is not None else matched[offset:]
+
+        await channel.send_response(ws, req_id, ok=True, payload={
+            "sessions": [_to_session_info(s) for s in page],
+            "total": total,
+        })
+
+    async def _project_create(ws, req_id, params, session_id):
+        """创建项目,指定工作目录。
+
+        自动恢复: 若 ``project_path`` 命中已隐藏(``hidden:true``)项目,置
+        ``hidden:false`` 并按传入 ``name`` 更新展示名,其下会话因 ``project_path``
+        仍匹配自动重新归属。响应 ``restored`` 标识恢复/新建。仅当 ``project_path``
+        与已有可见项目重复时返回 ``CONFLICT``。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        name = str(params.get("name") or "").strip()
+        if not name:
+            await channel.send_response(
+                ws, req_id, ok=False, error="name is required", code="BAD_REQUEST",
+            )
+            return
+        project_path = str(params.get("project_path") or "").strip()
+        if not project_path:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project_path is required", code="BAD_REQUEST",
+            )
+            return
+        if not os.path.isabs(project_path):
+            await channel.send_response(
+                ws, req_id,
+                ok=False,
+                error="project_path must be an absolute path",
+                code="BAD_REQUEST",
+            )
+            return
+
+        from jiuwenswarm.server.runtime.session import project_store
+        from jiuwenswarm.server.runtime.session.project_store import ProjectPathConflict
+
+        # 原子完成查重/恢复/新建(锁内,无 TOCTOU 窗口):
+        # 命中隐藏项目 → 恢复;命中可见项目 → CONFLICT;无匹配 → 新建
+        try:
+            proj, restored = project_store.create_or_restore_project(name, project_path)
+        except ProjectPathConflict:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project_path already exists", code="CONFLICT",
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload={
+            "project_id": proj.project_id,
+            "restored": restored,
+        })
+
+    async def _project_rename(ws, req_id, params, session_id):
+        """重命名项目,仅修改展示名,不改动工作目录路径。
+
+        默认项目禁止重命名(``FORBIDDEN``)。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        project_id = str(params.get("project_id") or "").strip()
+        if not project_id:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project_id is required", code="BAD_REQUEST",
+            )
+            return
+        name = str(params.get("name") or "").strip()
+        if not name:
+            await channel.send_response(
+                ws, req_id, ok=False, error="name is required", code="BAD_REQUEST",
+            )
+            return
+
+        from jiuwenswarm.server.runtime.session import project_store
+
+        if project_id == "default":
+            await channel.send_response(
+                ws, req_id, ok=False, error="default project cannot be renamed", code="FORBIDDEN",
+            )
+            return
+        proj = project_store.get_project_by_id(project_id, cache_bust=True)
+        if proj is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project not found", code="NOT_FOUND",
+            )
+            return
+        proj.name = name
+        project_store.save_project(proj)
+        await channel.send_response(ws, req_id, ok=True, payload={})
+
+    async def _project_pin(ws, req_id, params, session_id):
+        """置顶/取消置顶项目,操作后对所有置顶项目紧凑重编号为 1..N。幂等。
+
+        默认项目禁止置顶(``FORBIDDEN``)。新置顶项目 ``pin_order`` 默认 0,
+        重编号后置于置顶区顶部(与 ``session.pin`` 行为一致)。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        project_id = str(params.get("project_id") or "").strip()
+        if not project_id:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project_id is required", code="BAD_REQUEST",
+            )
+            return
+        raw_pinned = params.get("pinned")
+        if not isinstance(raw_pinned, bool):
+            await channel.send_response(
+                ws, req_id, ok=False, error="pinned must be boolean", code="BAD_REQUEST",
+            )
+            return
+
+        from jiuwenswarm.server.runtime.session import project_store
+
+        if project_id == "default":
+            await channel.send_response(
+                ws, req_id, ok=False, error="default project cannot be pinned", code="FORBIDDEN",
+            )
+            return
+        proj = project_store.get_project_by_id(project_id, cache_bust=True)
+        if proj is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project not found", code="NOT_FOUND",
+            )
+            return
+
+        # 幂等: 已处于目标状态也视为成功,仍走重编号保证 pin_order 紧凑
+        proj.pinned = raw_pinned
+        if not raw_pinned:
+            proj.pin_order = 0
+        project_store.save_project(proj)
+        # 紧凑重编号所有置顶项目为 1..N(消除间隙)
+        project_store.reindex_project_pin_orders()
+        # 重读拿操作后的 pin_order
+        updated = project_store.get_project_by_id(project_id, cache_bust=True)
+        new_order = updated.pin_order if updated is not None else 0
+        await channel.send_response(ws, req_id, ok=True, payload={
+            "pinned": raw_pinned,
+            "pin_order": new_order,
+        })
+
+    async def _project_remove(ws, req_id, params, session_id):
+        """移除项目(软删除:``hidden=true``)。其下非置顶会话临时归入默认项目;
+        置顶会话不受影响。幂等:已隐藏再移除返回 ``affected_sessions: 0``。
+
+        默认项目禁止移除(``FORBIDDEN``)。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        project_id = str(params.get("project_id") or "").strip()
+        if not project_id:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project_id is required", code="BAD_REQUEST",
+            )
+            return
+
+        from jiuwenswarm.server.runtime.session import project_store
+        from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
+
+        if project_id == "default":
+            await channel.send_response(
+                ws, req_id, ok=False, error="default project cannot be removed", code="FORBIDDEN",
+            )
+            return
+        proj = project_store.get_project_by_id(project_id, cache_bust=True)
+        if proj is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project not found", code="NOT_FOUND",
+            )
+            return
+
+        # 幂等: 已隐藏再移除视为成功,无会话受影响
+        if proj.hidden:
+            await channel.send_response(
+                ws, req_id, ok=True, payload={"affected_sessions": 0},
+            )
+            return
+
+        # 统计将临时归入默认项目的非置顶会话数(project_path 匹配且未置顶;置顶会话不受影响)
+        target_path = proj.project_path
+        sessions = collect_all_sessions_metadata()
+        affected = sum(
+            1 for s in sessions
+            if not s.get("pinned") and str(s.get("project_path") or "") == target_path
+        )
+
+        proj.hidden = True
+        # 隐藏项目自动取消置顶: 隐藏项目不应出现在置顶区
+        if proj.pinned:
+            proj.pinned = False
+            proj.pin_order = 0
+        project_store.save_project(proj)
+        # 紧凑重编号(若原为置顶项目,取消后需消除间隙)
+        project_store.reindex_project_pin_orders()
+        await channel.send_response(
+            ws, req_id, ok=True, payload={"affected_sessions": affected},
+        )
+
+    async def _project_restore(ws, req_id, params, session_id):
+        """恢复已软删除(``hidden:true``)的项目为可见。其下会话因 ``project_path``
+        仍匹配自动重新归属到该项目。
+
+        已是可见的项目返回 ``CONFLICT``(无可恢复内容);默认项目禁止恢复(``FORBIDDEN``)。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        project_id = str(params.get("project_id") or "").strip()
+        if not project_id:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project_id is required", code="BAD_REQUEST",
+            )
+            return
+
+        from jiuwenswarm.server.runtime.session import project_store
+        from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
+
+        if project_id == "default":
+            await channel.send_response(
+                ws, req_id, ok=False, error="default project cannot be restored", code="FORBIDDEN",
+            )
+            return
+        proj = project_store.get_project_by_id(project_id, cache_bust=True)
+        if proj is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project not found", code="NOT_FOUND",
+            )
+            return
+
+        # 已是可见 → 无可恢复内容
+        if not proj.hidden:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project is not hidden", code="CONFLICT",
+            )
+            return
+
+        # 统计将重新归属到该项目的非置顶会话数(project_path 匹配且未置顶)
+        target_path = proj.project_path
+        sessions = collect_all_sessions_metadata()
+        affected = sum(
+            1 for s in sessions
+            if not s.get("pinned") and str(s.get("project_path") or "") == target_path
+        )
+
+        proj.hidden = False
+        project_store.save_project(proj)
+        await channel.send_response(
+            ws, req_id, ok=True, payload={"affected_sessions": affected},
+        )
+
+    async def _project_pinned_sessions(ws, req_id, params, session_id):
+        """获取全部置顶会话,按 ``pin_order`` 升序排列。
+
+        置顶会话已从项目分组中剥离,通过本接口独立获取。``project_path`` 仍指向
+        原归属项目。不接受任何参数。
+        """
+        from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
+
+        sessions = collect_all_sessions_metadata()
+        pinned = [s for s in sessions if s.get("pinned")]
+        pinned.sort(key=lambda s: int(s.get("pin_order", 0) or 0))
+
+        await channel.send_response(ws, req_id, ok=True, payload={
+            "sessions": [_to_session_info(s) for s in pinned],
+        })
 
     async def _path_get(ws, req_id, params, session_id):
         """读 browser.chrome_path 并返回给前端（会解析环境变量）。"""
@@ -2572,6 +3121,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("session.create", _session_create)
     channel.register_method("session.delete", _session_delete)
     channel.register_method("session.get_metadata", _session_get_metadata)
+    channel.register_method("session.rename", _session_rename)
+    channel.register_method("session.pin", _session_pin)
+
+    channel.register_method("project.list", _project_list)
+    channel.register_method("project.get_sessions", _project_get_sessions)
+    channel.register_method("project.create", _project_create)
+    channel.register_method("project.rename", _project_rename)
+    channel.register_method("project.pin", _project_pin)
+    channel.register_method("project.remove", _project_remove)
+    channel.register_method("project.restore", _project_restore)
+    channel.register_method("project.pinned_sessions", _project_pinned_sessions)
 
     channel.register_method("path.get", _path_get)
     channel.register_method("path.set", _path_set)

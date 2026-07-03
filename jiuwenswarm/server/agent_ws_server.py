@@ -43,7 +43,11 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
-from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
+from jiuwenswarm.server.runtime.session.session_metadata import (
+    get_all_sessions_metadata,
+    init_session_metadata,
+    remove_session_metadata_cache,
+)
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
     history_exists,
@@ -5820,10 +5824,37 @@ class AgentWebSocketServer:
             channel_id = request.channel_id or "default"
             params = request.params if isinstance(request.params, dict) else {}
             mode, _, _ = resolve_agent_request_mode(params.get("mode", "agent.plan"))
+
+            # project_path 校验前置:非空时必须为绝对路径。校验须早于 create_session,
+            # 与 Web 侧 _session_create 顺序一致,避免校验失败时留下已创建但未 init
+            # metadata 的悬挂状态(create_session 当前虽无副作用,前置校验更稳妥)。
+            project_path = str(params.get("project_path") or "").strip()
+            if project_path and not os.path.isabs(project_path):
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": "project_path must be an absolute path", "code": "BAD_REQUEST"},
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                return
+
             explicit_session_id = params.get("session_id")
             session_id = await self._agent_manager.create_session(
                 channel_id=channel_id,
                 session_id=str(explicit_session_id).strip() if isinstance(explicit_session_id, str) else None,
+            )
+
+            # 写入 session metadata（首次锁定 project_path）
+            init_session_metadata(
+                session_id=session_id,
+                channel_id=channel_id,
+                user_id=params.get("user_id", ""),
+                title=params.get("title", ""),
+                mode=mode,
+                project_path=project_path,
             )
 
             if mode == "team":

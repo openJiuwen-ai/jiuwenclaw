@@ -191,6 +191,8 @@ def init_session_metadata(
         "project_path": project_path,
         "model": model,
         "last_user_message_at": _current_timestamp(),
+        "pinned": False,
+        "pin_order": 0,
         "status": "idle",
     }
     _write_metadata_sync(session_id, metadata)
@@ -213,6 +215,10 @@ def update_session_metadata(
     project_path: str | None = None,
     model: str | None = None,
     last_user_message_at: float | None = None,
+    pinned: bool | None = None,
+    pin_order: int | None = None,
+    touch_last_message_at: bool = True,
+    cache_bust: bool = False,
 ) -> None:
     """更新会话元数据(异步写入,不阻塞调用方)
 
@@ -221,8 +227,19 @@ def update_session_metadata(
       - title="x"   → 设置为 "x"
       - title=""    → 忽略（防御意外空值覆盖已有标题）
       - 若需显式清除标题，请设置 clear_title=True
+
+    pinned / pin_order 语义：覆盖式，由 session.pin handler 传入；
+    未传(None)时不修改。紧凑重编号由 handler 层统一完成。
+
+    touch_last_message_at：是否刷新 ``last_message_at`` 为当前时刻。默认 ``True``
+    (消息追加等场景)。纯状态更新(如 ``set_session_pinned`` 的置顶/重编号)应传
+    ``False``,避免腐蚀最后消息时间,破坏 session.list 排序与前端展示。
+
+    cache_bust：是否强制读盘(跳过内存缓存)。默认 ``False``。
+    跨进程同步场景(如 ``set_session_pinned`` 的重编号)应传 ``True``,
+    避免 Gateway 缓存中的陈旧数据覆盖 AgentServer 的并发更新。
     """
-    metadata = _read_metadata(session_id)
+    metadata = _read_metadata(session_id, cache_bust=cache_bust)
 
     if not metadata:
         # 如果元数据不存在,创建新的(外部渠道隐式创建 session 的兜底)
@@ -244,6 +261,8 @@ def update_session_metadata(
             "project_path": project_path or "",
             "model": model or "",
             "last_user_message_at": last_user_message_at if last_user_message_at is not None else _current_timestamp(),
+            "pinned": bool(pinned),
+            "pin_order": pin_order if pin_order is not None else 0,
             "status": "idle",
         }
         # 首次创建时写入 channel_metadata
@@ -267,6 +286,11 @@ def update_session_metadata(
         # last_user_message_at：覆盖式——仅在用户消息时由调用方传入
         if last_user_message_at is not None:
             metadata["last_user_message_at"] = last_user_message_at
+        # pinned / pin_order：覆盖式——由 session.pin handler 传入
+        if pinned is not None:
+            metadata["pinned"] = bool(pinned)
+        if pin_order is not None:
+            metadata["pin_order"] = int(pin_order)
         # project_path：首次锁定——仅当当前值为空时写入，后续不覆盖
         if project_path and not metadata.get("project_path"):
             metadata["project_path"] = project_path
@@ -288,8 +312,10 @@ def update_session_metadata(
         if channel_metadata and not metadata.get("channel_metadata"):
             metadata["channel_metadata"] = channel_metadata
 
-        # 总是更新最后消息时间
-        metadata["last_message_at"] = _current_timestamp()
+        # 更新最后消息时间(可由 touch_last_message_at=False 关闭,供置顶重编号等
+        # 非消息操作复用本函数而不腐蚀 last_message_at 语义)
+        if touch_last_message_at:
+            metadata["last_message_at"] = _current_timestamp()
 
     _enqueue_write(session_id, metadata)
 
@@ -404,8 +430,87 @@ def get_session_metadata(session_id: str, cache_bust: bool = False) -> dict[str,
         metadata.setdefault("project_path", "")
         metadata.setdefault("model", "")
         metadata.setdefault("last_user_message_at", metadata.get("created_at", 0.0))
+        metadata.setdefault("pinned", False)
+        metadata.setdefault("pin_order", 0)
         metadata.setdefault("status", "idle")
     return metadata
+
+
+# 会话级 pin 重编号全局序列化锁:保障「设置目标 → 收集所有置顶 → 重编号 → 写回」全过程原子性。
+# Gateway 为会话级 pin 的唯一写入方(仅经 Web 本地 handler 处理,不转发 AgentServer)。
+_SESSION_PIN_LOCK = threading.Lock()
+
+
+def set_session_pinned(session_id: str, pinned: bool) -> tuple[bool, int] | None:
+    """置顶/取消置顶会话,并对所有置顶会话紧凑重编号为 1..N。幂等。
+
+    整个操作在进程内全局锁内完成:
+      1. 设置目标会话 ``pinned``(取消时同步清零 ``pin_order``);
+      2. 扫描全部会话,收集 ``pinned=True`` 的会话;
+      3. 按 ``pin_order`` 升序稳定排序,重新分配 1..N(消除间隙);
+      4. 逐个写回。
+
+    新置顶的会话 ``pin_order`` 默认为 0,排序后置于最前(即新置顶会显示在置顶区顶部)。
+    非置顶会话 ``pin_order`` 置 0。幂等:对已处于目标状态的会话再次操作视为成功。
+
+    所有写入均以 ``touch_last_message_at=False`` 调用 ``update_session_metadata``:
+    置顶不是消息,不应刷新 ``last_message_at``(否则会腐蚀 ``session.list`` 排序与
+    ``SessionInfo`` 展示的「最后消息时间」语义)。
+
+    Args:
+        session_id: 目标会话 ID
+        pinned: ``True``=置顶,``False``=取消置顶
+
+    Returns:
+        ``(操作后的 pinned, 操作后的 pin_order)``;会话不存在(metadata 缺失)时返回 ``None``。
+        取消置顶时 ``pin_order`` 恒为 0。
+    """
+    with _SESSION_PIN_LOCK:
+        meta = _read_metadata(session_id, cache_bust=True)
+        if not meta:
+            return None
+        # 1. 设置目标会话 pinned 状态(保留原 pin_order 供重编号排序,取消时清零)
+        if pinned:
+            update_session_metadata(
+                session_id=session_id, pinned=True,
+                touch_last_message_at=False, cache_bust=True,
+            )
+        else:
+            update_session_metadata(
+                session_id=session_id, pinned=False, pin_order=0,
+                touch_last_message_at=False, cache_bust=True,
+            )
+
+        # 2. 收集所有置顶会话(读缓存:步骤 1 刚把新状态写入缓存,cache_bust=False
+        #    能立即看到;且 pinned/pin_order 仅由 Gateway 进程写入,缓存即权威源。
+        #    若用 cache_bust=True 读盘,异步写入未落盘时会读到步骤 1 之前的旧状态,
+        #    导致取消置顶的会话被重新纳入重编号而又写回 pinned=True。)
+        sessions_dir = get_agent_sessions_dir()
+        pinned_list: list[tuple[str, int]] = []
+        if sessions_dir.is_dir():
+            for session_dir in sessions_dir.iterdir():
+                if not session_dir.is_dir():
+                    continue
+                sid = session_dir.name
+                if sid.startswith(_HEARTBEAT_SESSION_PREFIX):
+                    continue
+                m = _read_metadata(sid)
+                if not m:
+                    continue
+                if m.get("pinned"):
+                    pinned_list.append((sid, int(m.get("pin_order", 0))))
+
+        # 3. 升序排序 + 4. 紧凑重编号写回(force disk read 避免回滚覆盖)
+        pinned_list.sort(key=lambda x: x[1])
+        new_orders: dict[str, int] = {}
+        for idx, (sid, _old) in enumerate(pinned_list, start=1):
+            update_session_metadata(
+                session_id=sid, pinned=True, pin_order=idx,
+                touch_last_message_at=False, cache_bust=True,
+            )
+            new_orders[sid] = idx
+
+        return pinned, new_orders.get(session_id, 0)
 
 
 def increment_session_round_count(session_id: str) -> int:
@@ -477,6 +582,12 @@ def set_session_delivery_context(
             "message_count": 0,
             "mode": "unknown",
             "round_id": 0,
+            "project_path": "",
+            "model": "",
+            "last_user_message_at": _current_timestamp(),
+            "pinned": False,
+            "pin_order": 0,
+            "status": "idle",
         }
     else:
         if normalized_channel_id:
@@ -619,3 +730,57 @@ def get_all_sessions_metadata(
 
     total = len(sessions)
     return sessions[offset: offset + limit], total
+
+
+def collect_all_sessions_metadata() -> list[dict[str, Any]]:
+    """收集全部会话元数据(不分页、不排序),供项目统计与置顶会话聚合使用。
+
+    跳过 heartbeat 会话;强制读盘(``cache_bust=True``)以跨进程拿最新数据。
+    无 ``metadata.json`` 的旧会话以目录时间戳构造最小兜底信息
+    (``project_path=""``、``pinned=False``),归入默认项目统计。
+    返回的每个 dict 已对新增字段应用默认值兜底。
+    """
+    sessions_dir = get_agent_sessions_dir()
+    if not sessions_dir.is_dir():
+        return []
+    result: list[dict[str, Any]] = []
+    for session_dir in sessions_dir.iterdir():
+        if not session_dir.is_dir():
+            continue
+        sid = session_dir.name
+        if sid.startswith(_HEARTBEAT_SESSION_PREFIX):
+            continue
+        meta = _read_metadata(sid, cache_bust=True)
+        if not meta:
+            # 旧会话无 metadata.json: 构造最小兜底,归入默认项目
+            try:
+                st = session_dir.stat()
+            except OSError:
+                continue
+            meta = {
+                "session_id": sid,
+                "project_path": "",
+                "pinned": False,
+                "pin_order": 0,
+                "last_message_at": st.st_mtime,
+                # 与 get_session_metadata / 同函数 else 分支一致: 无用户消息时
+                # 回退到 created_at(保证排序稳定性,避免空会话全部沉底)
+                "last_user_message_at": st.st_ctime,
+                "created_at": st.st_ctime,
+            }
+        else:
+            # 兜底默认值,保证新增字段齐全(存量会话无需迁移)
+            meta.setdefault("project_path", "")
+            meta.setdefault("pinned", False)
+            meta.setdefault("pin_order", 0)
+            meta.setdefault("last_user_message_at", meta.get("created_at", 0.0))
+        result.append(meta)
+
+    # 对齐 get_all_sessions_metadata: 清理存量会话标题中残留的系统注入 XML 标签
+    # (如 <system-reminder>、<file-content>),避免通过项目接口返给前端
+    for s in result:
+        if s.get("title"):
+            sanitized = _sanitize_title(s["title"])
+            if sanitized != s["title"]:
+                s["title"] = sanitized
+    return result
