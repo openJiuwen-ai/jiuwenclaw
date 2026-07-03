@@ -1,13 +1,25 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
+ARG AGENT_RUNTIME_REPOS
+ARG AGENT_RUNTIME_BRANCH
+
 RUN useradd --create-home --shell /bin/bash app
 
 WORKDIR /app/jiuwenclaw
 COPY . /app/jiuwenclaw/
 RUN chown -R app:app /app/jiuwenclaw
 
-RUN pip install -e ".[all]" --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN sed -i '/openjiuwen_runtime_foundation/d' pyproject.toml
+RUN sed -i '/openjiuwen_runtime_foundation/d' packages/jiuwenclaw-ee/claw_manager/pyproject.toml
+RUN sed -i '/openjiuwen_runtime_management/d' packages/jiuwenclaw-ee/gateway/extensions/runtime_management_extension/pyproject.toml
+
+RUN pip install -e . \
+    git+${AGENT_RUNTIME_REPOS}@${AGENT_RUNTIME_BRANCH}#subdirectory=foundation \
+    --no-cache-dir \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+
 RUN mkdir -p /home/app/.jiuwenclaw && printf 'yes\nzh\n' | jiuwenclaw-init
 RUN chown -R app:app /home/app/.jiuwenclaw
 
