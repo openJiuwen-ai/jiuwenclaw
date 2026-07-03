@@ -144,6 +144,8 @@
       "channelType": "Channel Type",
       "config": "Config (JSON)",
       "filterType": "Filter by type",
+      "customType": "Custom type",
+      "customTypePlaceholder": "Enter channel type",
       "initialStatus": "Initial Status",
       "statusActive": "active",
       "statusInactive": "inactive",

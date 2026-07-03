@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ApiError, ChannelApi } from '../../../services/api';
 import { useAsync } from '../../../hooks/useAsync';
@@ -28,6 +28,9 @@ const emptyForm: FormState = {
   config: '{}',
 };
 
+const CUSTOM_CHANNEL_TYPE = '__custom__';
+const REGISTER_CHANNEL_TYPES = ['web', 'feishu'] as const;
+
 export function ChannelTab({ instanceId }: { instanceId: string }) {
   const { t } = useTranslation();
   const [channelType, setChannelType] = useState('');
@@ -41,11 +44,35 @@ export function ChannelTab({ instanceId }: { instanceId: string }) {
   const { data, loading, error, reload } = useAsync(
     () =>
       ChannelApi.list(instanceId, {
-        channel_type: channelType || undefined,
         status: statusFilter || undefined,
       }),
-    [instanceId, channelType, statusFilter]
+    [instanceId, statusFilter]
   );
+
+  const typeOptions = useMemo(() => {
+    const types = new Set<string>();
+    for (const row of data?.items ?? []) {
+      const type = row.channel_type?.trim();
+      if (type) types.add(type);
+    }
+    return Array.from(types).sort();
+  }, [data?.items]);
+
+  const formChannelTypeSelect = (REGISTER_CHANNEL_TYPES as readonly string[]).includes(form.channel_type)
+    ? form.channel_type
+    : CUSTOM_CHANNEL_TYPE;
+
+  useEffect(() => {
+    if (channelType && !typeOptions.includes(channelType)) {
+      setChannelType('');
+    }
+  }, [channelType, typeOptions]);
+
+  const items = useMemo(() => {
+    const all = data?.items ?? [];
+    if (!channelType) return all;
+    return all.filter((row) => row.channel_type === channelType);
+  }, [data?.items, channelType]);
 
   const update = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     setForm((s) => ({ ...s, [k]: v }));
@@ -57,6 +84,10 @@ export function ChannelTab({ instanceId }: { instanceId: string }) {
     }
     if (!form.channel_name.trim()) {
       toast('warn', t('instanceConfig.channel.channelName'));
+      return;
+    }
+    if (!form.channel_type.trim()) {
+      toast('warn', t('instanceConfig.channel.channelType'));
       return;
     }
     const configErr = checkJson(form.config);
@@ -99,17 +130,23 @@ export function ChannelTab({ instanceId }: { instanceId: string }) {
     }
   };
 
-  const items = data?.items ?? [];
-
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2 flex-wrap">
-        <input
-          className="input !w-36"
-          placeholder={t('instanceConfig.channel.filterType')}
+        <select
+          className="select !w-36"
           value={channelType}
+          aria-label={t('instanceConfig.channel.filterType')}
           onChange={(e) => setChannelType(e.target.value)}
-        />
+          disabled={typeOptions.length === 0}
+        >
+          <option value="">{t('common.all')}</option>
+          {typeOptions.map((type) => (
+            <option key={type} value={type}>
+              {type}
+            </option>
+          ))}
+        </select>
         <select
           className="select !w-32"
           value={statusFilter}
@@ -217,7 +254,35 @@ export function ChannelTab({ instanceId }: { instanceId: string }) {
           </div>
           <div>
             <label className="label">{t('instanceConfig.channel.channelType')}</label>
-            <input className="input" value={form.channel_type} onChange={(e) => update('channel_type', e.target.value)} />
+            <div className="flex flex-col gap-2">
+              <select
+                className="select"
+                value={formChannelTypeSelect}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (value === CUSTOM_CHANNEL_TYPE) {
+                    update('channel_type', '');
+                  } else {
+                    update('channel_type', value);
+                  }
+                }}
+              >
+                {REGISTER_CHANNEL_TYPES.map((type) => (
+                  <option key={type} value={type}>
+                    {type}
+                  </option>
+                ))}
+                <option value={CUSTOM_CHANNEL_TYPE}>{t('instanceConfig.channel.customType')}</option>
+              </select>
+              {formChannelTypeSelect === CUSTOM_CHANNEL_TYPE && (
+                <input
+                  className="input"
+                  value={form.channel_type}
+                  placeholder={t('instanceConfig.channel.customTypePlaceholder')}
+                  onChange={(e) => update('channel_type', e.target.value)}
+                />
+              )}
+            </div>
           </div>
           <div>
             <label className="label">bot_id</label>

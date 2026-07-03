@@ -144,6 +144,8 @@
       "channelType": "Channel 类型",
       "config": "配置 (JSON)",
       "filterType": "按类型筛选",
+      "customType": "自定义类型",
+      "customTypePlaceholder": "输入 Channel 类型",
       "initialStatus": "初始状态",
       "statusActive": "active",
       "statusInactive": "inactive",
