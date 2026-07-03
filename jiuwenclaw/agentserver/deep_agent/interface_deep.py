@@ -2583,6 +2583,13 @@ class JiuWenClawDeepAdapter:
             list(loaded.models),
         )
 
+    def _runtime_agent_scope_id(self) -> str:
+        agent_id = str(self._agent_id or "").strip()
+        service_id = str(self._service_id or "").strip()
+        if service_id and agent_id:
+            return f"{service_id}_{agent_id}"
+        return agent_id or "jiuwenclaw"
+
     async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent.plan") -> None:
         """初始化 DeepAgent 实例.
 
@@ -2642,9 +2649,10 @@ class JiuWenClawDeepAdapter:
                 exc,
             )
             raise
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
+        agent_card = AgentCard(name=self._agent_name, id=self._runtime_agent_scope_id())
 
         tool_cards = await self._get_tool_cards(agent_card.id, mode=mode)
+        logger.info("[JiuWenClawDeepAdapter] Agent card id: %s", agent_card.id)
         self._tool_cards = tool_cards
 
         from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
