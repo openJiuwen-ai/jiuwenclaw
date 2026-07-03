@@ -20,6 +20,7 @@ from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
+from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
@@ -31,6 +32,11 @@ from jiuwenswarm.common.security.ws_origin import (
     is_allowed_browser_origin,
 )
 from jiuwenswarm.common.schema.message import Message, Mode, ReqMethod
+from jiuwenswarm.common.ws_diagnostics import (
+    describe_ws_exception,
+    describe_ws_peer,
+    format_ws_diagnostics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +136,14 @@ class WebChannel(BaseChannel):
             await ws.send(json.dumps(frame, ensure_ascii=False))
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
-                logger.debug("WebChannel send_response skipped on closed websocket: id={} err={}", req_id, e)
+                logger.debug(
+                    "WebChannel send_response skipped on closed websocket: %s",
+                    format_ws_diagnostics(
+                        {"id": req_id},
+                        describe_ws_peer(ws),
+                        describe_ws_exception(e),
+                    ),
+                )
                 return
             raise
 
@@ -153,7 +166,14 @@ class WebChannel(BaseChannel):
             await ws.send(json.dumps(frame, ensure_ascii=False))
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
-                logger.debug("WebChannel send_event skipped on closed websocket: event={} err={}", event, e)
+                logger.debug(
+                    "WebChannel send_event skipped on closed websocket: %s",
+                    format_ws_diagnostics(
+                        {"event": event, "seq": seq, "stream_id": stream_id},
+                        describe_ws_peer(ws),
+                        describe_ws_exception(e),
+                    ),
+                )
                 return
             raise
 
@@ -180,10 +200,10 @@ class WebChannel(BaseChannel):
                     if response.status == 200:
                         return await response.read()
                     else:
-                        logger.warning("WebChannel 文件下载失败: {}, 状态码: {}", url, response.status)
+                        logger.warning("WebChannel 文件下载失败: %s, 状态码: %s", url, response.status)
                         return None
         except Exception as e:
-            logger.warning("WebChannel 文件下载异常: {}, 错误: {}", url, e)
+            logger.warning("WebChannel 文件下载异常: %s, 错误: %s", url, e)
             return None
 
     async def _process_files(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -212,7 +232,7 @@ class WebChannel(BaseChannel):
                             f.write(file_content)
                         file_info["path"] = file_path
                     except Exception as e:
-                        logger.warning("WebChannel 文件保存失败: {}", e)
+                        logger.warning("WebChannel 文件保存失败: %s", e)
 
             downloaded_files.append(file_info)
 
@@ -445,16 +465,45 @@ class WebChannel(BaseChannel):
                 if inspect.isawaitable(result):
                     await result
             except Exception as e:  # pragma: no cover
-                logger.warning("WebChannel on_connect hook error: {}", e)
+                logger.warning(
+                    "WebChannel on_connect hook error: %s",
+                    format_ws_diagnostics(
+                        {"remote": remote, "path": request_path},
+                        describe_ws_peer(ws),
+                        describe_ws_exception(e),
+                    ),
+                )
 
         try:
             async for raw in ws:
                 await self._handle_raw_message(ws, raw, query)
+        except WebSocketConnectionClosed as e:  # pragma: no cover - 连接生命周期容错
+            logger.info(
+                "WebChannel 连接关闭: %s",
+                format_ws_diagnostics(
+                    {"remote": remote, "path": request_path},
+                    describe_ws_peer(ws),
+                    describe_ws_exception(e),
+                ),
+            )
         except Exception as e:  # pragma: no cover - 连接生命周期容错
-            logger.warning("WebChannel 连接异常: %s", e)
+            logger.warning(
+                "WebChannel 连接异常: %s",
+                format_ws_diagnostics(
+                    {"remote": remote, "path": request_path},
+                    describe_ws_peer(ws),
+                    describe_ws_exception(e),
+                ),
+            )
         finally:
             self._clients.discard(ws)
-            logger.info(f"WebChannel 连接关闭: remote={remote}")
+            logger.info(
+                "WebChannel 连接清理完成: %s",
+                format_ws_diagnostics(
+                    {"remote": remote, "path": request_path, "clients": len(self._clients)},
+                    describe_ws_peer(ws),
+                ),
+            )
 
     async def _handle_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
         try:
@@ -526,12 +575,23 @@ class WebChannel(BaseChannel):
                 ws_closed = bool(getattr(ws, "closed", False))
                 if ws_closed:
                     logger.warning(
-                        "WebChannel method handler aborted on closed websocket ({}): {}",
-                        method, e,
+                        "WebChannel method handler aborted on closed websocket: %s",
+                        format_ws_diagnostics(
+                            {"method": method, "id": req_id, "session_id": session_id},
+                            describe_ws_peer(ws),
+                            describe_ws_exception(e),
+                        ),
                     )
                     return
 
-                logger.error("WebChannel method handler error ({}): {}", method, e)
+                logger.error(
+                    "WebChannel method handler error: %s",
+                    format_ws_diagnostics(
+                        {"method": method, "id": req_id, "session_id": session_id},
+                        describe_ws_peer(ws),
+                        describe_ws_exception(e),
+                    ),
+                )
                 try:
                     await self.send_response(
                         ws, req_id, ok=False,

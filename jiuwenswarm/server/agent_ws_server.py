@@ -35,6 +35,11 @@ from jiuwenswarm.common.e2a.wire_codec import (
 )
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.version import __version__
+from jiuwenswarm.common.ws_diagnostics import (
+    describe_ws_exception,
+    describe_ws_peer,
+    format_ws_diagnostics,
+)
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
@@ -117,6 +122,20 @@ _CODE_MODE_SYNC_METHODS = frozenset({
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
 _HISTORY_PAGE_SIZE = 20
+_HISTORY_WIRE_STRING_LIMIT = 16 * 1024
+_HISTORY_WIRE_METADATA_STRING_LIMIT = 256
+_HISTORY_WIRE_LIST_LIMIT = 100
+_HISTORY_WIRE_DEPTH_LIMIT = 8
+_HISTORY_WIRE_RECORD_MAX_BYTES = 64 * 1024
+_TEAM_HISTORY_DEFAULT_LIMIT = 500
+_TEAM_HISTORY_MAX_LIMIT = 1000
+_TEAM_HISTORY_DEFAULT_MAX_BYTES = 2 * 1024 * 1024
+_TEAM_HISTORY_MIN_MAX_BYTES = 2048
+_TEAM_HISTORY_MAX_MAX_BYTES = 6 * 1024 * 1024
+_TEAM_HISTORY_FRAME_OVERHEAD_BYTES = 1024
+_WORKFLOW_SNAPSHOT_MAX_BYTES = 6 * 1024 * 1024
+_WORKFLOW_SNAPSHOT_FRAME_OVERHEAD_BYTES = 2048
+_WORKFLOW_SNAPSHOT_MAX_WORKFLOWS = 1000
 
 _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
     {
@@ -131,6 +150,303 @@ _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
         "context.rewind_summary",
     }
 )
+
+
+def _json_wire_size(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+    except Exception:
+        return len(str(value).encode("utf-8", errors="replace"))
+
+
+def _coerce_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _truncate_string_by_bytes(value: str, max_bytes: int) -> str:
+    raw = value.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return value
+    suffix = " [truncated]"
+    budget = max(0, max_bytes - len(suffix.encode("utf-8")))
+    return raw[:budget].decode("utf-8", errors="ignore") + suffix
+
+
+def _sanitize_history_wire_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > _HISTORY_WIRE_DEPTH_LIMIT:
+        return "<truncated>"
+    if isinstance(value, str):
+        return _truncate_string_by_bytes(value, _HISTORY_WIRE_STRING_LIMIT)
+    if isinstance(value, dict):
+        return {
+            str(key): _sanitize_history_wire_value(item, depth=depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _sanitize_history_wire_value(item, depth=depth + 1)
+            for item in value[:_HISTORY_WIRE_LIST_LIMIT]
+        ]
+    if isinstance(value, tuple):
+        return [
+            _sanitize_history_wire_value(item, depth=depth + 1)
+            for item in value[:_HISTORY_WIRE_LIST_LIMIT]
+        ]
+    return value
+
+
+def _collapse_oversized_history_record(record: dict[str, Any]) -> dict[str, Any]:
+    keep_keys = {
+        "id",
+        "role",
+        "request_id",
+        "channel_id",
+        "session_id",
+        "timestamp",
+        "event_type",
+        "mode",
+        "member_name",
+        "member_id",
+        "source_member",
+        "name",
+        "status",
+    }
+    collapsed = {
+        key: _sanitize_history_wire_value(value)
+        for key, value in record.items()
+        if key in keep_keys
+    }
+    content = record.get("content")
+    if isinstance(content, str) and content.strip():
+        collapsed["content"] = _truncate_string_by_bytes(content, 512)
+    event = record.get("event")
+    if isinstance(event, dict):
+        collapsed["event"] = {
+            key: _sanitize_history_wire_value(event.get(key))
+            for key in ("type", "member_id", "task_id", "id", "status", "new_status", "team_id")
+            if key in event
+        }
+    collapsed["truncated"] = True
+    return collapsed
+
+
+def _compact_wire_metadata_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _truncate_string_by_bytes(value, _HISTORY_WIRE_METADATA_STRING_LIMIT)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _truncate_string_by_bytes(str(value), _HISTORY_WIRE_METADATA_STRING_LIMIT)
+
+
+def _minimal_history_record_for_wire(record: dict[str, Any]) -> dict[str, Any]:
+    keep_keys = {
+        "id",
+        "role",
+        "request_id",
+        "channel_id",
+        "session_id",
+        "timestamp",
+        "event_type",
+        "mode",
+        "member_name",
+        "member_id",
+        "source_member",
+        "name",
+        "status",
+    }
+    minimal = {
+        key: _compact_wire_metadata_value(value)
+        for key, value in record.items()
+        if key in keep_keys
+    }
+    minimal["content"] = "[truncated]"
+    minimal["truncated"] = True
+    return minimal
+
+
+def _sanitize_history_record_for_wire(record: Any) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        return {"content": _sanitize_history_wire_value(record), "truncated": True}
+    sanitized = _sanitize_history_wire_value(record)
+    if not isinstance(sanitized, dict):
+        return {"content": str(sanitized), "truncated": True}
+    if _json_wire_size(sanitized) <= _HISTORY_WIRE_RECORD_MAX_BYTES:
+        return sanitized
+    return _collapse_oversized_history_record(sanitized)
+
+
+def _select_history_record_page(
+    records: list[dict[str, Any]],
+    *,
+    cursor: int,
+    limit: int,
+    max_bytes: int,
+    session_id: str,
+) -> tuple[list[dict[str, Any]], int]:
+    total = len(records)
+    if cursor >= total:
+        return [], total
+
+    budget = max(
+        _TEAM_HISTORY_MIN_MAX_BYTES,
+        max_bytes - _TEAM_HISTORY_FRAME_OVERHEAD_BYTES,
+    )
+    base_payload = {
+        "records": [],
+        "session_id": session_id,
+        "cursor": cursor,
+        "next_cursor": cursor,
+        "has_more": cursor < total,
+        "total": total,
+    }
+    used = _json_wire_size(base_payload)
+    page: list[dict[str, Any]] = []
+    next_cursor = cursor
+
+    for idx in range(cursor, total):
+        if len(page) >= limit:
+            break
+        record = records[idx]
+        record_size = _json_wire_size(record) + 1
+        if record_size > budget:
+            record = _collapse_oversized_history_record(record)
+            record_size = _json_wire_size(record) + 1
+        if page and used + record_size > budget:
+            break
+        if not page and used + record_size > budget:
+            record = _collapse_oversized_history_record(record)
+            record_size = _json_wire_size(record) + 1
+            if used + record_size > budget:
+                record = _minimal_history_record_for_wire(record)
+                record_size = _json_wire_size(record) + 1
+                if used + record_size > budget:
+                    record = {"id": _compact_wire_metadata_value(record.get("id")), "truncated": True}
+                    record_size = _json_wire_size(record) + 1
+        page.append(record)
+        used += record_size
+        next_cursor = idx + 1
+
+    return page, next_cursor
+
+
+def _collapse_oversized_workflow_snapshot_item(item: dict[str, Any]) -> dict[str, Any]:
+    keep_keys = {
+        "id",
+        "name",
+        "status",
+        "agent_count",
+        "completed_agent_count",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "token_count",
+        "estimated_token_count",
+    }
+    collapsed = {
+        key: _sanitize_history_wire_value(value)
+        for key, value in item.items()
+        if key in keep_keys
+    }
+    for key in ("summary", "description", "error", "result"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            collapsed[key] = _truncate_string_by_bytes(value, 512)
+        elif value is not None:
+            collapsed[key] = _truncate_string_by_bytes(str(value), 512)
+    collapsed["truncated"] = True
+    return collapsed
+
+
+def _minimal_workflow_snapshot_item_for_wire(item: dict[str, Any]) -> dict[str, Any]:
+    keep_keys = {
+        "id",
+        "name",
+        "status",
+        "agent_count",
+        "completed_agent_count",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "token_count",
+        "estimated_token_count",
+    }
+    minimal = {
+        key: _compact_wire_metadata_value(value)
+        for key, value in item.items()
+        if key in keep_keys
+    }
+    minimal["summary"] = "[truncated]"
+    minimal["truncated"] = True
+    return minimal
+
+
+def _sanitize_workflow_snapshot_item_for_wire(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {"summary": _sanitize_history_wire_value(item), "truncated": True}
+    sanitized = _sanitize_history_wire_value(item)
+    if not isinstance(sanitized, dict):
+        return {"summary": str(sanitized), "truncated": True}
+    if _json_wire_size(sanitized) <= _HISTORY_WIRE_RECORD_MAX_BYTES:
+        return sanitized
+    return _collapse_oversized_workflow_snapshot_item(sanitized)
+
+
+def _build_workflow_snapshot_payload(workflows: Any, *, session_id: str) -> dict[str, Any]:
+    source = workflows if isinstance(workflows, list) else []
+    sanitized_workflows = [
+        _sanitize_workflow_snapshot_item_for_wire(item)
+        for item in source
+        if isinstance(item, dict)
+    ]
+    total = len(sanitized_workflows)
+    payload: dict[str, Any] = {
+        "type": "workflow_run_snapshot",
+        "workflows": [],
+        "session_id": session_id,
+        "total": total,
+        "truncated": False,
+    }
+    budget = max(
+        _TEAM_HISTORY_MIN_MAX_BYTES,
+        _WORKFLOW_SNAPSHOT_MAX_BYTES - _WORKFLOW_SNAPSHOT_FRAME_OVERHEAD_BYTES,
+    )
+    used = _json_wire_size(payload)
+    page: list[dict[str, Any]] = []
+
+    for workflow in sanitized_workflows:
+        if len(page) >= _WORKFLOW_SNAPSHOT_MAX_WORKFLOWS:
+            payload["truncated"] = True
+            break
+        item = workflow
+        item_size = _json_wire_size(item) + 1
+        if item_size > budget:
+            item = _collapse_oversized_workflow_snapshot_item(item)
+            item_size = _json_wire_size(item) + 1
+            payload["truncated"] = True
+        if page and used + item_size > budget:
+            payload["truncated"] = True
+            break
+        if not page and used + item_size > budget:
+            item = _collapse_oversized_workflow_snapshot_item(item)
+            item_size = _json_wire_size(item) + 1
+            if used + item_size > budget:
+                item = _minimal_workflow_snapshot_item_for_wire(item)
+                item_size = _json_wire_size(item) + 1
+                if used + item_size > budget:
+                    item = {"id": _compact_wire_metadata_value(item.get("id")), "truncated": True}
+                    item_size = _json_wire_size(item) + 1
+                payload["truncated"] = True
+        page.append(item)
+        used += item_size
+
+    if len(page) < total:
+        payload["truncated"] = True
+    payload["workflows"] = page
+    return payload
 
 
 def _request_query_text(request: AgentRequest) -> str:
@@ -915,8 +1231,21 @@ class AgentWebSocketServer:
                 task = asyncio.create_task(self._handle_message(ws, raw, send_lock))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
-        except WebSocketConnectionClosed:
-            logger.info("[AgentWebSocketServer] 连接关闭: %s", remote)
+        except WebSocketConnectionClosed as e:
+            logger.info(
+                "[AgentWebSocketServer] 连接关闭: %s",
+                format_ws_diagnostics(
+                    {
+                        "remote": remote,
+                        "active_tasks": len(tasks),
+                        "session_stream_tasks": len(self._session_stream_tasks),
+                        "ping_interval": self._ping_interval,
+                        "ping_timeout": self._ping_timeout,
+                    },
+                    describe_ws_peer(ws),
+                    describe_ws_exception(e),
+                ),
+            )
         except Exception as e:
             logger.exception("[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e)
         finally:
@@ -965,10 +1294,14 @@ class AgentWebSocketServer:
             try:
                 async with send_lock:
                     await ws.send(json.dumps(wire, ensure_ascii=False))
-            except WebSocketConnectionClosed:
+            except WebSocketConnectionClosed as send_exc:
                 logger.info(
                     "[AgentWebSocketServer] WebSocket 已关闭，JSON 解析错误未发送: %s",
-                    e,
+                    format_ws_diagnostics(
+                        {"json_error": str(e)},
+                        describe_ws_peer(ws),
+                        describe_ws_exception(send_exc),
+                    ),
                 )
             return
 
@@ -1258,9 +1591,17 @@ class AgentWebSocketServer:
             )
         except WebSocketConnectionClosed as e:
             logger.info(
-                "[AgentWebSocketServer] WebSocket 已关闭，放弃请求回包: request_id=%s: %s",
-                request.request_id,
-                e,
+                "[AgentWebSocketServer] WebSocket 已关闭，放弃请求回包: %s",
+                format_ws_diagnostics(
+                    {
+                        "request_id": request.request_id,
+                        "channel_id": request.channel_id,
+                        "session_id": request.session_id,
+                        "is_stream": request.is_stream,
+                    },
+                    describe_ws_peer(ws),
+                    describe_ws_exception(e),
+                ),
             )
         except Exception as e:
             logger.exception(
@@ -1282,9 +1623,17 @@ class AgentWebSocketServer:
                     await ws.send(json.dumps(wire, ensure_ascii=False))
             except WebSocketConnectionClosed as send_exc:
                 logger.info(
-                    "[AgentWebSocketServer] WebSocket 已关闭，错误响应未发送: request_id=%s: %s",
-                    request.request_id,
-                    send_exc,
+                    "[AgentWebSocketServer] WebSocket 已关闭，错误响应未发送: %s",
+                    format_ws_diagnostics(
+                        {
+                            "request_id": request.request_id,
+                            "channel_id": request.channel_id,
+                            "session_id": request.session_id,
+                            "is_stream": request.is_stream,
+                        },
+                        describe_ws_peer(ws),
+                        describe_ws_exception(send_exc),
+                    ),
                 )
 
     @staticmethod
@@ -2512,16 +2861,26 @@ class AgentWebSocketServer:
             # liveness — fall back to the persisted checkpoint so historical /
             # terminal workflow runs remain queryable after the team session
             # is cancelled or stopped.
-            from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
-                restore_workflow_runs,
-            )
+            try:
+                from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+                    restore_workflow_runs,
+                )
 
-            restored = restore_workflow_runs(session_id)
-            workflows = (
-                [run.to_workflow_run_dict() for run in restored.values()]
-                if restored
-                else []
-            )
+                restored = restore_workflow_runs(session_id)
+                workflows = (
+                    [run.to_workflow_run_dict() for run in restored.values()]
+                    if restored
+                    else []
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[WF_DBG command_workflows] checkpoint restore failed: "
+                    "channel_id=%s session_id=%s error=%s",
+                    channel_id,
+                    session_id,
+                    exc,
+                )
+                workflows = []
             logger.info(
                 "[WF_DBG command_workflows] no live handler, restored from checkpoint: "
                 "channel_id=%s session_id=%s workflows_count=%d",
@@ -2533,11 +2892,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=channel_id,
                 ok=True,
-                payload={
-                    "type": "workflow_run_snapshot",
-                    "workflows": workflows,
-                    "session_id": session_id,
-                },
+                payload=_build_workflow_snapshot_payload(workflows, session_id=session_id),
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
@@ -2563,11 +2918,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=channel_id,
                 ok=True,
-                payload={
-                    "type": "workflow_run_snapshot",
-                    "workflows": snapshot,
-                    "session_id": session_id,
-                },
+                payload=_build_workflow_snapshot_payload(snapshot, session_id=session_id),
             )
         except Exception as e:
             logger.warning(
@@ -2581,7 +2932,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=channel_id,
                 ok=True,
-                payload={"type": "workflow_run_snapshot", "workflows": [], "session_id": session_id},
+                payload=_build_workflow_snapshot_payload([], session_id=session_id),
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
@@ -2589,7 +2940,7 @@ class AgentWebSocketServer:
             await ws.send(json.dumps(wire, ensure_ascii=False))
 
     async def _handle_team_history_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        """一次性返回 team 模式所需的全部历史数据，避免与 history.get 并发竞争。"""
+        """Return a bounded page of team history records for panel restore."""
         params = request.params if isinstance(request.params, dict) else {}
         session_id = params.get("session_id")
         channel_id = request.channel_id or "web"
@@ -2612,13 +2963,60 @@ class AgentWebSocketServer:
         except Exception as exc:  # noqa: BLE001
             logger.warning("[team.history.get] read failed: session_id=%s error=%s", session_id, exc)
             records = []
-        logger.debug("[team.history.get] session_id=%s records=%d", session_id, len(records))
+
+        sanitized_records = [
+            _sanitize_history_record_for_wire(record)
+            for record in records
+            if isinstance(record, dict)
+        ]
+        total = len(sanitized_records)
+        cursor = _coerce_int(
+            params.get("cursor", params.get("offset", 0)),
+            default=0,
+            minimum=0,
+            maximum=max(0, total),
+        )
+        limit = _coerce_int(
+            params.get("limit"),
+            default=_TEAM_HISTORY_DEFAULT_LIMIT,
+            minimum=1,
+            maximum=_TEAM_HISTORY_MAX_LIMIT,
+        )
+        max_bytes = _coerce_int(
+            params.get("max_bytes"),
+            default=_TEAM_HISTORY_DEFAULT_MAX_BYTES,
+            minimum=_TEAM_HISTORY_MIN_MAX_BYTES,
+            maximum=_TEAM_HISTORY_MAX_MAX_BYTES,
+        )
+        page_records, next_cursor = _select_history_record_page(
+            sanitized_records,
+            cursor=cursor,
+            limit=limit,
+            max_bytes=max_bytes,
+            session_id=session_id,
+        )
+        logger.debug(
+            "[team.history.get] session_id=%s total=%d cursor=%d returned=%d next_cursor=%d max_bytes=%d",
+            session_id,
+            total,
+            cursor,
+            len(page_records),
+            next_cursor,
+            max_bytes,
+        )
 
         resp = AgentResponse(
             request_id=request.request_id,
             channel_id=channel_id,
             ok=True,
-            payload={"records": records, "session_id": session_id},
+            payload={
+                "records": page_records,
+                "session_id": session_id,
+                "cursor": cursor,
+                "next_cursor": next_cursor,
+                "has_more": next_cursor < total,
+                "total": total,
+            },
         )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
@@ -5378,7 +5776,10 @@ class AgentWebSocketServer:
         ordered = list(reversed(restorable))
         start = (page_idx - 1) * page_size
         end = start + page_size
-        page_messages = ordered[start:end]
+        page_messages = [
+            _sanitize_history_record_for_wire(item)
+            for item in ordered[start:end]
+        ]
         logger.debug(
             "[history.get] session_id=%s page_idx=%s raw_total=%s restorable_total=%s total_pages=%s returned=%s",
             normalized_session_id,

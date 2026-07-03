@@ -197,7 +197,11 @@ async def _run_interactive_loop(
     # long-running streams still respect the overall cap. When unset, a
     # generous per-recv idle timeout keeps the connection alive.
     total_timeout = timeout if timeout and timeout > 0 else None
-    recv_idle_timeout = 300.0
+    # Short idle timeout so the loop can react to Ctrl+C within ~1 second
+    # on platforms where signal handlers cannot wake a blocked socket recv
+    # (e.g. Windows ProactorEventLoop). The spinner ticks every 0.2 s, so
+    # the loop is woken up frequently regardless.
+    recv_idle_timeout = 1.0
     deadline = None
     if total_timeout is not None:
         deadline = time.monotonic() + total_timeout
@@ -254,9 +258,10 @@ async def _run_interactive_loop(
         def _win_sigint_handler(signum, frame) -> None:
             nonlocal interrupted, _force_exit
             if interrupted:
-                # Second Ctrl+C — force exit
-                _force_exit = True
-                logger.warning("Force exiting...")
+                # Second Ctrl+C — force exit (only log once)
+                if not _force_exit:
+                    _force_exit = True
+                    logger.warning("Force exiting...")
                 return
             interrupted = True
             logger.warning("Interrupted. Sending cancel (press Ctrl+C again to force exit)...")
@@ -272,55 +277,91 @@ async def _run_interactive_loop(
 
     try:
         while True:
-            # Compute the recv timeout: when a total deadline is set, use
-            # the remaining budget (clamped to a small floor so we still
-            # yield to the event loop); otherwise fall back to the idle
-            # timeout.
+            # Check interruption flags immediately (no blocking wait).
+            if _force_exit:
+                renderer.clear_loading()
+                return 130
+
+            if interrupted:
+                renderer.clear_loading()
+                try:
+                    await asyncio.wait_for(
+                        client.send_request({
+                            "type": "req",
+                            "id": f"interrupt-{uuid_module.uuid4().hex[:8]}",
+                            "method": "chat.interrupt",
+                            "is_stream": False,
+                            "params": {
+                                "session_id": request["params"]["session_id"],
+                                "intent": "cancel",
+                                "mode": request["params"]["mode"],
+                            },
+                        }),
+                        timeout=3.0,
+                    )
+                except (asyncio.TimeoutError, ConnectionError, KeyboardInterrupt):
+                    pass
+                except Exception:
+                    logger.exception("cancel request failed")
+                return 130
+
+            # Compute the remaining budget for the total deadline.
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     logger.warning("response timed out")
                     return 1
-                cur_timeout = max(remaining, 0.1)
+                cur_timeout = max(min(remaining, 0.3), 0.01)
             else:
                 cur_timeout = recv_idle_timeout
-            try:
-                data = await asyncio.wait_for(client.recv(), timeout=cur_timeout)
-            except asyncio.TimeoutError:
-                if deadline is not None:
-                    # Total budget exhausted
+
+            # Race recv against a short sleep so the event loop can
+            # react to Ctrl+C flags (critical on Windows ProactorEventLoop
+            # where asyncio.wait_for cancellation may not interrupt IOCP).
+            recv_task = asyncio.create_task(client.recv())
+            sleep_task = asyncio.create_task(asyncio.sleep(cur_timeout))
+            done, _ = await asyncio.wait(
+                [recv_task, sleep_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            # Cancel whichever didn't finish. Await recv cancellation with a
+            # short timeout to avoid concurrent reads on the WebSocket,
+            # but never block indefinitely on a stuck recv cancellation.
+            if not recv_task.done():
+                recv_task.cancel()
+                try:
+                    await asyncio.wait_for(recv_task, timeout=1.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+            if not sleep_task.done():
+                sleep_task.cancel()
+
+            # Total deadline exhausted
+            if recv_task not in done and deadline is not None:
+                if time.monotonic() >= deadline:
                     logger.warning("response timed out")
                     return 1
-                # Idle timeout between events — keep waiting
                 continue
+
+            # Sleep woke up before recv — loop back and re-check flags
+            if recv_task not in done:
+                continue
+
+            try:
+                data = recv_task.result()
             except ConnectionError:
                 return 0
             except KeyboardInterrupt:
-                # Windows: Ctrl+C interrupts the blocking recv() with
-                # KeyboardInterrupt even when a signal handler is set.
-                # The handler has already set the `interrupted` flag, so
-                # fall through to the graceful-cancel path below.
                 if _force_exit:
                     return 130
                 if not interrupted:
                     interrupted = True
-
-            if _force_exit:
-                return 130
-
-            if interrupted:
-                await client.send_request({
-                    "type": "req",
-                    "id": f"interrupt-{uuid_module.uuid4().hex[:8]}",
-                    "method": "chat.interrupt",
-                    "is_stream": False,
-                    "params": {
-                        "session_id": request["params"]["session_id"],
-                        "intent": "cancel",
-                        "mode": request["params"]["mode"],
-                    },
-                })
-                return 130
+                continue
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                logger.exception("recv_task.result() failed")
+                continue
 
             if data.get("type") != "event":
                 continue

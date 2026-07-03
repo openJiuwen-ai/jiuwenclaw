@@ -240,8 +240,7 @@ react:
       offload_writeback_enabled: false
     round_level_compressor_config:
       rounds_threshold: 2
-      tokens_threshold: 230000
-      trigger_total_tokens: 230000
+      trigger_context_ratio: 0.9
       target_total_tokens: 160000
       compression_call_max_tokens: 250000
       keep_last_round: true

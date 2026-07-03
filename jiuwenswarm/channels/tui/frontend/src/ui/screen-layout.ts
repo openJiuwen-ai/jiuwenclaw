@@ -243,8 +243,8 @@ function renderBtwOverlay(
     const totalEarly = overlayTotal ?? (overlayIndex !== undefined && overlayIndex >= 0 ? 1 : 0);
     const earlyHint =
       totalEarly > 1
-        ? `Esc dismiss | ←/→ history ${(overlayIndex ?? 0) + 1}/${totalEarly} | x delete`
-        : "Esc dismiss | x delete";
+        ? `Esc dismiss | ←/→ history ${(overlayIndex ?? 0) + 1}/${totalEarly} | c copy | x delete`
+        : "Esc dismiss | c copy | x delete";
     return {
       lines: [
         padToWidth(palette.text.accent(headerText), safeWidth),
@@ -271,6 +271,7 @@ function renderBtwOverlay(
   // 用数组拼接避免尾部多余管道符（不可滚动分支末尾不再出现 " | "）
   const hintParts = ["Esc dismiss"];
   if (showHistory) hintParts.push(`←/→ history ${posLabel}`);
+  hintParts.push("c copy");
   hintParts.push("x delete");
   if (answerLines.length > bodyHeight) {
     hintParts.push("↑/↓ scroll", "PgUp/PgDn page", `${rangeStart}-${rangeEnd}/${answerLines.length}`);

@@ -69,6 +69,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("env")
             self.system_prompt_builder.remove_section("browser_tool_policy")
             self.system_prompt_builder.remove_section("tui_current_project_policy")
+            self.system_prompt_builder.remove_section("trusted_dirs_policy")
         self.system_prompt_builder = None
         self.attachment_manager = None
 
@@ -150,7 +151,8 @@ class RuntimePromptRail(DeepAgentRail):
             "language_output",
             "env",
             "browser_tool_policy",
-            "tui_current_project_policy"):
+            "tui_current_project_policy",
+            "trusted_dirs_policy"):
             self.system_prompt_builder.remove_section(name)
 
         # ── time ──
@@ -519,17 +521,11 @@ class RuntimePromptRail(DeepAgentRail):
                     content={"cn": current_project_policy, "en": current_project_policy},
                     priority=99,
                 ))
-                await self._upsert_prompt_attachment(
-                    ctx,
-                    section="trusted_dirs_policy",
-                    content=trusted_dirs_content,
-                    kind=PromptAttachmentKind.WORKSPACE_DELTA,
+                self.system_prompt_builder.add_section(PromptSection(
+                    name="trusted_dirs_policy",
+                    content={"cn": trusted_dirs_content, "en": trusted_dirs_content},
                     priority=90,
-                )
-            else:
-                await self._clear_prompt_attachment(ctx, section="trusted_dirs_policy")
-        else:
-            await self._clear_prompt_attachment(ctx, section="trusted_dirs_policy")
+                ))
 
     async def _upsert_prompt_attachment(
         self,

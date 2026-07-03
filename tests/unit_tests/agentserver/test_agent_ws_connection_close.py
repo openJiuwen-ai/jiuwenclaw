@@ -71,6 +71,10 @@ async def test_handle_message_treats_no_close_frame_as_disconnect(caplog):
     assert ws.sent == []
     assert "no close frame received or sent" in caplog.text
     assert "WebSocket 已关闭，放弃请求回包" in caplog.text
+    assert "request_id=req-closed" in caplog.text
+    assert "channel_id=tui" in caplog.text
+    assert "exc_type='ConnectionClosedError'" in caplog.text
+    assert "close_code=1006" in caplog.text
     assert "处理请求失败" not in caplog.text
 
 

@@ -53,6 +53,11 @@ import {
   buildA2UIClientEventContent,
   setA2UIActionHandler,
 } from './features/a2ui/actionBridge';
+import {
+  isDesktopSaveCancelled,
+  isDesktopSaveOk,
+} from './utils/desktopSave';
+import type { DesktopSaveApiResult } from './utils/desktopSave';
 import './App.css';
 
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
@@ -79,6 +84,17 @@ type ConfigSaveAllPayload = {
   models?: ModelEntry[];
   agents?: AgentsTeamsSavePayload["agents"];
   team?: AgentsTeamsSavePayload["team"];
+};
+
+type WindowWithPyWebview = Window & {
+  pywebview?: {
+    api?: {
+      save_data_url?: (
+        dataUrl: string,
+        filename: string,
+      ) => DesktopSaveApiResult;
+    };
+  };
 };
 
 function clearTeamRuntimeState(): void {
@@ -187,6 +203,22 @@ function downloadDataUrl(dataUrl: string, filename: string): void {
   document.body.removeChild(link);
 }
 
+async function saveShareImage(dataUrl: string, filename: string): Promise<boolean> {
+  const pywebviewApi = (window as WindowWithPyWebview).pywebview?.api;
+  if (pywebviewApi?.save_data_url) {
+    const result = await pywebviewApi.save_data_url(dataUrl, filename);
+    if (isDesktopSaveCancelled(result)) {
+      return false;
+    }
+    if (!isDesktopSaveOk(result)) {
+      throw new Error('share_desktop_save_failed');
+    }
+    return true;
+  }
+  downloadDataUrl(dataUrl, filename);
+  return true;
+}
+
 function AppContent() {
   const { t, i18n } = useTranslation();
   const tRef = useRef(t);
@@ -210,6 +242,7 @@ function AppContent() {
   const [newSessionToastVisible, setNewSessionToastVisible] = useState(false);
   const [heartbeatToastVisible, setHeartbeatToastVisible] = useState(false);
   const [heartbeatToastMessage, setHeartbeatToastMessage] = useState('');
+  const [saveToastVisible, setSaveToastVisible] = useState(false);
   const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
   const [securityAlertVisible, setSecurityAlertVisible] = useState(false);
   const [securityAlertContent, setSecurityAlertContent] = useState('');
@@ -245,6 +278,7 @@ function AppContent() {
   const restartAutoCloseTimerRef = useRef<number | null>(null);
   const newSessionToastTimerRef = useRef<number | null>(null);
   const heartbeatToastTimerRef = useRef<number | null>(null);
+  const saveToastTimerRef = useRef<number | null>(null);
   const lastHeartbeatToastKeyRef = useRef<string | null>(null);
   /** 自「恢复会话」加载 history 后的分页元数据；用于聊天区顶部加载更早消息 */
   const [historyPagerMeta, setHistoryPagerMeta] = useState<{
@@ -492,6 +526,22 @@ function AppContent() {
     }
   }, []);
 
+  const clearSaveToastTimer = useCallback(() => {
+    if (saveToastTimerRef.current != null) {
+      window.clearTimeout(saveToastTimerRef.current);
+      saveToastTimerRef.current = null;
+    }
+  }, []);
+
+  const showSaveToast = useCallback(() => {
+    setSaveToastVisible(true);
+    clearSaveToastTimer();
+    saveToastTimerRef.current = window.setTimeout(() => {
+      setSaveToastVisible(false);
+      saveToastTimerRef.current = null;
+    }, 3000);
+  }, [clearSaveToastTimer]);
+
   const securityAlertTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -733,8 +783,9 @@ function AppContent() {
       clearRestartAutoCloseTimer();
       clearNewSessionToastTimer();
       clearHeartbeatToastTimer();
+      clearSaveToastTimer();
     };
-  }, [clearHeartbeatToastTimer, clearNewSessionToastTimer, clearRestartAutoCloseTimer]);
+  }, [clearHeartbeatToastTimer, clearNewSessionToastTimer, clearRestartAutoCloseTimer, clearSaveToastTimer]);
 
   useEffect(() => {
     const normalized = heartbeatMessage?.trim();
@@ -1411,7 +1462,10 @@ function AppContent() {
         if (shareExportTokenRef.current !== token) {
           return;
         }
-        downloadDataUrl(dataUrl, shareExportFilenameRef.current);
+        const saved = await saveShareImage(dataUrl, shareExportFilenameRef.current);
+        if (saved) {
+          showSaveToast();
+        }
       } catch (error) {
         console.error('Failed to render share image:', error);
         const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
@@ -1423,7 +1477,7 @@ function AppContent() {
         }
       }
     })();
-  }, [shareExportSnapshot, t]);
+  }, [shareExportSnapshot, showSaveToast, t]);
 
   const heartbeatToastPreviewRaw = heartbeatToastMessage.replace(/\s+/g, ' ').trim();
   const heartbeatToastPreview = heartbeatToastPreviewRaw.length > 120
@@ -1619,6 +1673,14 @@ function AppContent() {
         <div className="app-toast-wrapper app-toast-wrapper--top-center">
           <div className="app-session-toast animate-rise">
             {t('chat.sessionCreated')}
+          </div>
+        </div>
+      )}
+
+      {saveToastVisible && (
+        <div className="app-toast-wrapper app-toast-wrapper--top-center">
+          <div className="app-session-toast animate-rise">
+            {t('common.saveSuccess')}
           </div>
         </div>
       )}

@@ -339,13 +339,13 @@ async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path):
     assert "# Current Project Workspace" in prompt
     assert "Current project directory" in prompt
     assert "Do not call `pwd`, `ls`" in prompt
-    rendered = agent.prompt_attachment_manager.render(
-        await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
-    )
-    assert "Current project directory" in rendered
-    assert str(current_dir) in rendered
-    assert str(stale_dir) not in rendered
-    assert str(extra_dir) in rendered
+    assert "# Working Directory Policy" in prompt
+    assert str(current_dir) in prompt
+    assert str(stale_dir) not in prompt
+    assert str(extra_dir) in prompt
+
+    items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
+    assert [item.id for item in items if item.id.endswith(".trusted_dirs_policy")] == []
 
 
 @pytest.mark.asyncio

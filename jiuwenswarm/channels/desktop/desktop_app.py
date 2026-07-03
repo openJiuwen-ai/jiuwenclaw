@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import http.client
 import logging
 import os
@@ -28,6 +30,9 @@ APP_CHILD_FLAG = "--desktop-run-app"
 WEB_CHILD_FLAG = "--desktop-run-web"
 UPDATE_HELPER_FLAG = "--desktop-install-update"
 STARTUP_TIMEOUT_SECONDS = 45.0
+PNG_DATA_URL_PREFIX = "data:image/png;base64,"
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+DesktopSaveResult = dict[str, bool]
 
 
 def _setup_logger() -> logging.Logger:
@@ -64,6 +69,10 @@ def _setup_logger() -> logging.Logger:
 
 
 logger = _setup_logger()
+
+
+def _desktop_save_result(ok: bool, cancelled: bool = False) -> DesktopSaveResult:
+    return {"ok": ok, "cancelled": cancelled}
 
 
 def _creationflags() -> int:
@@ -231,6 +240,10 @@ class _WindowApi:
         logger.info("[desktop] download_file called: url=%s, filename=%s", full_url, filename)
         return self._runtime.download_file(full_url, filename)
 
+    def save_data_url(self, data_url: str, filename: str) -> DesktopSaveResult:
+        """保存前端生成的 data URL 文件，供分享图片导出使用。"""
+        return self._runtime.save_data_url(data_url, filename)
+
 
 class DesktopRuntime:
     def __init__(
@@ -322,10 +335,14 @@ class DesktopRuntime:
                 if not download_dir.exists():
                     download_dir.mkdir(parents=True, exist_ok=True)
 
+                safe_name = Path(filename).name
+                if not safe_name:
+                    raise ValueError("empty_filename")
+
                 # 处理文件名冲突
-                target_path = download_dir / filename
+                target_path = download_dir / safe_name
                 if target_path.exists():
-                    base, ext = Path(filename).stem, Path(filename).suffix
+                    base, ext = Path(safe_name).stem, Path(safe_name).suffix
                     counter = 1
                     while target_path.exists():
                         target_path = download_dir / f"{base} ({counter}){ext}"
@@ -342,6 +359,60 @@ class DesktopRuntime:
 
         threading.Thread(target=_download, daemon=True).start()
         return True
+
+    @staticmethod
+    def _sanitize_filename(filename: str) -> str:
+        safe_name = Path(filename).name
+        if not safe_name:
+            raise ValueError("empty_filename")
+        return safe_name
+
+    def _select_save_path(self, filename: str, file_types: tuple[str, ...]) -> Path | None:
+        if self.window is None or not hasattr(self.window, "create_file_dialog"):
+            raise RuntimeError("desktop_window_unavailable")
+
+        download_dir = Path.home() / "Downloads"
+        download_dir.mkdir(parents=True, exist_ok=True)
+        selected_paths = self.window.create_file_dialog(
+            webview.FileDialog.SAVE,
+            directory=str(download_dir),
+            save_filename=self._sanitize_filename(filename),
+            file_types=file_types,
+        )
+        if not selected_paths:
+            return None
+        if isinstance(selected_paths, str):
+            return Path(selected_paths)
+        return Path(selected_paths[0])
+
+    def save_data_url(self, data_url: str, filename: str) -> DesktopSaveResult:
+        """选择保存位置并保存 PNG data URL。"""
+        if not isinstance(data_url, str) or not data_url.startswith(PNG_DATA_URL_PREFIX):
+            logger.error("[desktop] invalid data url for share export")
+            return _desktop_save_result(False)
+
+        try:
+            image_bytes = base64.b64decode(data_url[len(PNG_DATA_URL_PREFIX):], validate=True)
+        except binascii.Error as exc:
+            logger.error("[desktop] failed to decode share export data url: %s", exc)
+            return _desktop_save_result(False)
+
+        if not image_bytes.startswith(PNG_SIGNATURE):
+            logger.error("[desktop] share export data is not a PNG")
+            return _desktop_save_result(False)
+
+        try:
+            selected_path = self._select_save_path(filename, ("PNG Image (*.png)",))
+            if selected_path is None:
+                logger.info("[desktop] share image save cancelled by user")
+                return _desktop_save_result(False, cancelled=True)
+
+            selected_path.write_bytes(image_bytes)
+            logger.info("[desktop] share image saved to: %s", selected_path)
+            return _desktop_save_result(True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.error("[desktop] failed to save share image: %s", exc)
+            return _desktop_save_result(False)
 
     @staticmethod
     def _show_download_complete(file_path: str) -> None:

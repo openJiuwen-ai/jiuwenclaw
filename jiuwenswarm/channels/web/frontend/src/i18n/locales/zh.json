@@ -8,6 +8,7 @@
     "loading": "加载中...",
     "save": "保存",
     "saving": "保存中...",
+    "saveSuccess": "保存成功",
     "error": "错误",
     "ok": "确定",
     "and": "和",
@@ -1329,7 +1330,12 @@
         "skillMdNotFound": "下载未完成或内容不完整，未找到 SKILL.md，请重试。",
         "parseSkillFailed": "无法解析下载的技能文件",
         "skillAlreadyInstalled": "该技能已安装。",
-        "invalidMirrorUrl": "mirror_url 不是有效的 http(s) 地址。"
+        "invalidMirrorUrl": "mirror_url 不是有效的 http(s) 地址。",
+        "githubNotFound": "该技能的 GitHub 源地址已失效（404 未找到）。仓库、文件或分支可能已被删除、移动或重命名，SkillNet 收录的信息可能已过期，暂时无法安装该技能。",
+        "githubRateLimited": "GitHub 访问被限流或拒绝（403）。匿名请求限额约为 60 次/小时，请稍后再试；如需更高限额，可在配置页面填写 github_token。",
+        "githubUnauthorized": "GitHub 认证失败（401）。请检查配置页面中的 github_token 是否有效。",
+        "githubNetwork": "连接 GitHub 失败（网络超时或多次重试后仍失败）。请检查网络或代理设置后重试。",
+        "githubApiError": "GitHub 返回错误（{{status}}）：{{message}}。请稍后重试。"
       }
     },
     "clawhub": {

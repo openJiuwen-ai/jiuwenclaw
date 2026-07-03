@@ -36,6 +36,7 @@ import {
 } from "../core/commands/CommandService.js";
 import type { SlashCommand } from "../core/commands/types.js";
 import { addCommandEcho, addError, addInfo } from "../core/commands/helpers.js";
+import { copyToClipboard } from "../core/commands/clipboard.js";
 import { CheckboxList, CheckboxGroup as CheckboxGroupType } from "./components/checkbox-list.js";
 import type { FileAttachment } from "../core/protocol.js";
 import {
@@ -2024,9 +2025,12 @@ export class AppScreen implements Component, Focusable {
     // Global ctrl+l/t/g/o only apply on the main screen — defer while an overlay
     // or the team panel is active so context-specific bindings (e.g. ResumeList)
     // can use the same physical keys.
+    // Exception: app:toggleTranscript (ctrl+o) is allowed even when overlays are
+    // open, so users can fold/unfold the transcript behind the overlay.
     const skipGlobalMainScreenKeys = hasOverlay || this.showTeamPanel;
     let handled = false;
-    if (!skipGlobalMainScreenKeys) {
+    if (!skipGlobalMainScreenKeys || resolveAction("Global", data) === "app:toggleTranscript") {
+      const isToggleTranscript = resolveAction("Global", data) === "app:toggleTranscript";
       handled = handleAppScreenKeyInput(data, {
         interruptTask: () => this.interruptTask(),
         exitApp: () => this.exit(),
@@ -2085,9 +2089,13 @@ export class AppScreen implements Component, Focusable {
           this.tui.requestRender();
         },
       });
-    }
-    if (handled) {
-      return;
+      // For ctrl+o with overlays active, the delegate toggleTranscript is called
+      // but handleAppScreenKeyInput only returns true when skipGlobalMainScreenKeys
+      // is false (it matches Global context via keymap.ts). So we trust the
+      // delegate callback has run and mark it handled ourselves.
+      if (handled || isToggleTranscript) {
+        return;
+      }
     }
 
     if (permissionRequest && activeQuestion) {
@@ -3022,6 +3030,16 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
       return true;
     }
+    // 复制当前 /btw 整条记录（问题+回答）到剪贴板（按 c —— 对齐 claudecode /btw 快捷键）。
+    // 注意：overlay 显示时输入栏仍在，小写 c 会被吞触发复制；
+    // 想在输入框输入小写 c 需先 Esc 关闭 overlay。
+    if (matchesKey(data, "c")) {
+      const overlay = this.state.getSnapshot().btwOverlay;
+      if (overlay) {
+        void this.copyBtwEntry(overlay.question, overlay.answer);
+      }
+      return true;
+    }
     // x 删除当前 btw 条目（剩余非空则跳到相邻，为空则关闭 overlay）
     if (data.toLowerCase() === "x") {
       this.state.deleteCurrentBtwEntry();
@@ -3062,6 +3080,28 @@ export class AppScreen implements Component, Focusable {
       default:
         return false;
     }
+  }
+
+  /**
+   * 复制 /btw 整条记录（问题 + 回答）到系统剪贴板，并在状态栏显示短暂反馈。
+   * 使用 transientNotice（独立于 transcript，固定在屏幕底部渲染），
+   * 与 /copy 命令的反馈保持一致。格式仿 overlay 标题行：/btw <question> + 回答。
+   */
+  private async copyBtwEntry(question: string, answer: string): Promise<void> {
+    const text = `/btw ${question}\n\n${answer}`;
+    const ok = await copyToClipboard(text);
+    this.transientNotice = ok
+      ? "已复制 /btw 问答到剪贴板"
+      : "无法访问剪贴板（系统不支持）";
+    if (this.transientNoticeTimer) {
+      clearTimeout(this.transientNoticeTimer);
+    }
+    this.transientNoticeTimer = setTimeout(() => {
+      this.transientNotice = null;
+      this.transientNoticeTimer = null;
+      this.tui.requestRender();
+    }, 2500);
+    this.tui.requestRender();
   }
 
   private clearPendingSubmittedInput(requestRender = true): void {
