@@ -224,7 +224,6 @@
       "skills": "能告诉我你有哪些技能吗？"
     },
     "newSession": "新建会话",
-    "sessionCreated": "已新建会话",
     "modePlan": "规划模式",
     "modeAgent": "性能模式",
     "modeAgentTeam": "集群模式",
@@ -243,7 +242,6 @@
       "addModel": "添加自定义模型",
       "placeholder": "选择模型"
     },
-    "newSessionDisabled": "处理中或录音中不可新建",
     "modeSwitchDisabledProcessing": "当前对话运行中，请新建对话后选择模式",
     "configLockedHistory": "会话已有消息，请新建会话后更改配置",
     "modeSwitchTitle": "切换模式",

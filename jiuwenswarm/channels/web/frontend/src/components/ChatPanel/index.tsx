@@ -38,7 +38,6 @@ interface ChatPanelProps {
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
-  onNewSession: () => Promise<void>;
   onUserAnswer: (requestId: string, answers: UserAnswer[]) => void;
   onExportShare?: () => void | Promise<void>;
   isExportingShare?: boolean;
@@ -201,7 +200,6 @@ export function ChatPanel({
   onCancel,
   onSwitchMode,
   isProcessing,
-  onNewSession,
   onUserAnswer,
   onExportShare,
   isExportingShare = false,
@@ -426,7 +424,6 @@ export function ChatPanel({
                   onCancel={onCancel}
                   onSwitchMode={onSwitchMode}
                   isProcessing={isProcessing}
-                  onNewSession={onNewSession}
                   autoFocusKey={autoFocusKey}
                   onNavigateToSkills={onNavigateToSkills}
                 />
@@ -452,7 +449,6 @@ export function ChatPanel({
             onCancel={onCancel}
             onSwitchMode={onSwitchMode}
             isProcessing={isProcessing}
-            onNewSession={onNewSession}
             autoFocusKey={autoFocusKey}
             onNavigateToSkills={onNavigateToSkills}
           />

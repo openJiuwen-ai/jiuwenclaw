@@ -224,7 +224,6 @@
       "skills": "Can you tell me what skills you have?"
     },
     "newSession": "New Session",
-    "sessionCreated": "Session created",
     "modePlan": "Planning Mode",
     "modeAgent": "Performance Mode",
     "modeAgentTeam": "Cluster Mode",
@@ -243,7 +242,6 @@
       "addModel": "Add Custom Model",
       "placeholder": "Select Model"
     },
-    "newSessionDisabled": "Cannot create session while processing or recording",
     "configLockedHistory": "Session has messages — create a new session to change config",
     "modeSwitchDisabledProcessing":"This conversation is running. Start a new conversation to choose another mode",
     "modeSwitchTitle": "Switch Mode",

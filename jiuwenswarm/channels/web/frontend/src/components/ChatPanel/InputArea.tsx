@@ -44,7 +44,6 @@ interface InputAreaProps {
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
-  onNewSession: () => Promise<void>;
   autoFocusKey?: string | null;
   /** 跳转到技能管理页 */
   onNavigateToSkills?: () => void;
@@ -57,7 +56,6 @@ export function InputArea({
   onCancel,
   onSwitchMode,
   isProcessing,
-  onNewSession,
   autoFocusKey = null,
   onNavigateToSkills,
 }: InputAreaProps) {
@@ -468,15 +466,6 @@ export function InputArea({
   //   [handleVoiceEnd]
   // );
 
-  const handleNewSession = useCallback(async () => {
-    if (isListening || (isInterruptible && !isTeamMode)) return;
-    setPendingVoiceText('');
-    if (inputRef.current) {
-      inputRef.current.innerHTML = '';
-    }
-    await onNewSession();
-  }, [isListening, isInterruptible, isTeamMode, onNewSession]);
-
   const handleModeSwitch = useCallback(async (targetMode: AgentMode) => {
     if (isProcessing || hasHistory || mode === targetMode) return;
     onSwitchMode(targetMode);
@@ -677,21 +666,6 @@ export function InputArea({
         </div>
 
         <div className="chat-input-actions">
-          <button
-            type="button"
-            onClick={handleNewSession}
-            disabled={isListening || (isInterruptible && !isTeamMode)}
-            className={cx(
-              'chat-input-btn',
-              (isListening || (isInterruptible && !isTeamMode)) && 'chat-input-btn--disabled',
-            )}
-            title={isListening || (isInterruptible && !isTeamMode) ? t('chat.newSessionDisabled') : t('chat.newSession')}
-          >
-            <svg className="chat-input-btn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-            </svg>
-          </button>
-
           {/* {speechSupported && (
             <button
               type="button"

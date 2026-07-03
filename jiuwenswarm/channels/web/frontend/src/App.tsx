@@ -1513,7 +1513,6 @@ function AppContent() {
                       onCancel={handleCancel}
                       onSwitchMode={handleSwitchMode}
                       isProcessing={isProcessing}
-                      onNewSession={handleNewSession}
                       onUserAnswer={handleUserAnswer}
                       onExportShare={handleExportShare}
                       isExportingShare={isExportingShare}
