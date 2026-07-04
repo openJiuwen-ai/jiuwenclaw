@@ -43,12 +43,20 @@ import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
 import { useTeamPanelState } from './features/teamPanelState';
 import { AgentMode, UserAnswer, ModelEntry, type Session } from './types';
-import { ensureSessionRuntimes, useSessionStore, useChatStore, useTodoStore, useHarnessStore } from './stores';
+import {
+  ensureSessionRuntimes,
+  useSessionStore,
+  useChatStore,
+  useTodoStore,
+  useHarnessStore,
+  useWorkspaceStore,
+} from './stores';
 import { useChatRoute } from './multi-session/routing/useChatRoute';
-import { ConversationSidebar } from './multi-session/sidebar/ConversationSidebar';
+import { ConversationSidebar, type NewConversationOptions } from './multi-session/sidebar/ConversationSidebar';
 import { DeleteDialog } from './multi-session/dialogs/Dialogs';
 import {
   NEW_CONVERSATION_ID,
+  createConversationTitle,
   forgetCreatedConversation,
   isConversationMissing,
   reconcileCreatedConversations,
@@ -91,6 +99,22 @@ type ConfigSaveAllPayload = {
   agents?: AgentsTeamsSavePayload["agents"];
   team?: AgentsTeamsSavePayload["team"];
 };
+
+function getWorkContextForSession(sessionId: string): {
+  project_path?: string;
+} {
+  const sessionState = useSessionStore.getState();
+  const workspaceState = useWorkspaceStore.getState();
+  const session =
+    sessionState.currentSession?.session_id === sessionId
+      ? sessionState.currentSession
+      : sessionState.sessions.find((item) => item.session_id === sessionId);
+  const selectedProject = workspaceState.selectedProject;
+
+  return {
+    project_path: session?.project_path || selectedProject?.project_path || undefined,
+  };
+}
 
 function clearTeamRuntimeState(sessionId: string): void {
   const sessionStore = useSessionStore.getState();
@@ -262,8 +286,10 @@ function AppContent() {
   const shareExportRef = useRef<HTMLDivElement>(null);
   const shareExportFilenameRef = useRef('jiuwenswarm-share.png');
   const shareExportTokenRef = useRef(0);
+  const preserveSelectedProjectOnChatNewRef = useRef(false);
   /** 为 true 表示刚从「会话列表」恢复；history 为空时在 useEffect 的 onEmpty 中提示一次 */
   const historyRestoreFromPanelHintRef = useRef(false);
+  const { loadProjects, setSelectedProject } = useWorkspaceStore();
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -276,6 +302,11 @@ function AppContent() {
       setActiveNav('chat');
     } else if (route.kind === 'chat-new') {
       if (window.location.pathname !== '/chat/new') navigate({ kind: 'chat-new' }, { replace: true });
+      if (preserveSelectedProjectOnChatNewRef.current) {
+        preserveSelectedProjectOnChatNewRef.current = false;
+      } else {
+        useWorkspaceStore.getState().setSelectedProject(null);
+      }
       sessionIdRef.current = 'new';
       setSessionId('new');
       setActiveNav('chat');
@@ -288,6 +319,13 @@ function AppContent() {
     ensureSessionRuntimes(sessionId);
     useChatStore.getState().setActiveSessionId(sessionId);
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!initialDataLoaded) {
+      return;
+    }
+    void loadProjects();
+  }, [initialDataLoaded, loadProjects]);
 
   const { setCurrentSession, setSessions, setAvailableModels, setMode, heartbeatMessage, heartbeatUpdatedAt, setTeamLeaderMemberIds } = useSessionStore();
   const sessions = useSessionStore((s) => s.sessions);
@@ -1016,7 +1054,7 @@ function AppContent() {
     setComposerFocusNonce((nonce) => nonce + 1);
   }, []);
 
-  const enterNewConversation = useCallback((targetMode: AgentMode = mode) => {
+  const enterNewConversation = useCallback((targetMode: AgentMode = mode, options: NewConversationOptions = {}) => {
     const currentSessionId = sessionIdRef.current;
     const currentRuntime = useSessionStore.getState().getRuntime(currentSessionId);
     const selectedModelName = currentRuntime?.selectedModelName ?? null;
@@ -1025,6 +1063,11 @@ function AppContent() {
     );
     setHistoryLoadingMore(false);
     resetNewConversationRuntime({ mode: targetMode, selectedModelName });
+    if (options.preserveProject) {
+      preserveSelectedProjectOnChatNewRef.current = true;
+    } else {
+      setSelectedProject(null);
+    }
     sessionIdRef.current = NEW_CONVERSATION_ID;
     setSessionId(NEW_CONVERSATION_ID);
     setCurrentSession(null);
@@ -1032,11 +1075,11 @@ function AppContent() {
     navigate({ kind: 'chat-new' });
     setActiveNav('chat');
     requestComposerFocus();
-  }, [disposeInFlightHistoryHandles, mode, navigate, requestComposerFocus, setCurrentSession, setTeamAreaExpanded]);
+  }, [disposeInFlightHistoryHandles, mode, navigate, requestComposerFocus, setCurrentSession, setSelectedProject, setTeamAreaExpanded]);
 
-  const handleNewSession = useCallback(async () => {
-    enterNewConversation();
-  }, [enterNewConversation]);
+  const handleNewSession = useCallback(async (options?: NewConversationOptions) => {
+    enterNewConversation(mode, options);
+  }, [enterNewConversation, mode]);
 
   // 切换模式
   const handleSwitchMode = useCallback((targetMode: AgentMode) => {
@@ -1062,20 +1105,40 @@ function AppContent() {
         mode: newRuntime?.mode ?? mode,
         selectedModelName: newRuntime?.selectedModelName ?? null,
       };
+      const workContext = getWorkContextForSession(NEW_CONVERSATION_ID);
       try {
-        const payload = await request<{ sessionId?: string }>('session.create', {
+        const createParams: Record<string, unknown> = {
           session_id: newSid,
           mode: runtimeSettings.mode,
-        });
-        if (payload.sessionId !== newSid) throw new Error('session.create returned an unexpected session id');
-        registerCreatedConversation(newSid, runtimeSettings, Date.now(), content);
+          title: createConversationTitle(content),
+        };
+        if (workContext.project_path) {
+          createParams.project_path = workContext.project_path;
+        }
+        const payload = await request<{ session_id?: string; sessionId?: string }>('session.create', createParams);
+        const createdSessionId = payload.session_id ?? payload.sessionId;
+        if (createdSessionId !== newSid) throw new Error('session.create returned an unexpected session id');
+        registerCreatedConversation(
+          newSid,
+          runtimeSettings,
+          Date.now(),
+          content,
+          { project_path: workContext.project_path },
+        );
         promotedFromNewSessionIdsRef.current.add(newSid);
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
         sessionIdRef.current = newSid;
         setSessionId(newSid);
         navigate({ kind: 'chat-session', sessionId: newSid }, { replace: true });
+        const createdSessionProject = {
+          project_path: workContext.project_path || '',
+          pinned: false,
+        };
         const sent = await sendMessage(content, newSid);
-        if (!sent) useChatStore.getState().setInputValue(newSid, content);
+        await useWorkspaceStore.getState().refreshSessionWorkspace(createdSessionProject);
+        if (!sent) {
+          useChatStore.getState().setInputValue(newSid, content);
+        }
       } catch (error) {
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
         useChatStore.getState().setThinking(NEW_CONVERSATION_ID, false);
@@ -1089,7 +1152,16 @@ function AppContent() {
     }
     disposeInFlightHistoryHandles(currentSessionId);
     const sent = await sendMessage(content, currentSessionId);
-    if (!sent) useChatStore.getState().setInputValue(currentSessionId, content);
+    if (sent) {
+      const sessionState = useSessionStore.getState();
+      const session =
+        sessionState.currentSession?.session_id === currentSessionId
+          ? sessionState.currentSession
+          : sessionState.sessions.find((item) => item.session_id === currentSessionId);
+      await useWorkspaceStore.getState().refreshSessionWorkspace(session);
+    } else {
+      useChatStore.getState().setInputValue(currentSessionId, content);
+    }
   }, [disposeInFlightHistoryHandles, mode, navigate, request, sendMessage, t]);
 
   useEffect(() => {
@@ -1324,10 +1396,10 @@ function AppContent() {
     ]
   );
 
-  const requestSessionNavigation = useCallback((target: Session | 'new') => {
-    if (target === 'new') { enterNewConversation(); return; }
+  const requestSessionNavigation = useCallback((target: Session | 'new', options?: NewConversationOptions) => {
+    if (target === 'new') { enterNewConversation(mode, options); return; }
     void handleRestoreSession(target.session_id, target.mode);
-  }, [enterNewConversation, handleRestoreSession]);
+  }, [enterNewConversation, handleRestoreSession, mode]);
 
   const handleDeleteConversation = useCallback(async () => {
     if (!deleteTarget) return;
@@ -1335,6 +1407,7 @@ function AppContent() {
     if (runtime?.isProcessing || runtime?.pendingQuestion) return;
     setDialogBusy(true); setDialogError(null);
     try {
+      const deletedSession = deleteTarget;
       await request('session.delete', { session_id: deleteTarget.session_id });
       forgetCreatedConversation(deleteTarget.session_id);
       useSessionStore.getState().removeSession(deleteTarget.session_id);
@@ -1344,6 +1417,7 @@ function AppContent() {
       useHarnessStore.getState().removeRuntime(deleteTarget.session_id);
       const deletingCurrent = sessionIdRef.current === deleteTarget.session_id;
       setDeleteTarget(null);
+      await useWorkspaceStore.getState().refreshSessionWorkspace(deletedSession);
       if (deletingCurrent) {
         enterNewConversation();
       }
@@ -1480,7 +1554,7 @@ function AppContent() {
               <ConversationSidebar
                 sessions={sessions}
                 activeSessionId={sessionId === 'new' ? null : sessionId}
-                onNew={() => requestSessionNavigation('new')}
+                onNew={(options) => requestSessionNavigation('new', options)}
                 onSelect={requestSessionNavigation}
                 onDelete={(session) => { setDialogError(null); setDeleteTarget(session); }}
               />

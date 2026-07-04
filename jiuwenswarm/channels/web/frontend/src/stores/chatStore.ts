@@ -68,6 +68,7 @@ export interface HistoryPagerMeta {
 export interface ChatRuntime {
   messages: Message[];
   isProcessing: boolean;
+  executionError: string | null;
   isThinking: boolean;
   isLoadingHistory: boolean;
   historyPagerMeta: HistoryPagerMeta | null;
@@ -103,6 +104,7 @@ function createEmptyRuntime(): ChatRuntime {
   return {
     messages: [],
     isProcessing: false,
+    executionError: null,
     isThinking: false,
     isLoadingHistory: false,
     historyPagerMeta: null,
@@ -147,6 +149,7 @@ interface ChatState {
   appendStreamContent: (sessionId: string, content: string, streamKey?: string) => void;
   startStreaming: (sessionId: string, messageId: string, streamKey?: string) => void;
   stopStreaming: (sessionId: string, streamKey?: string) => void;
+  setExecutionError: (sessionId: string, error: string | null) => void;
   setProcessing: (sessionId: string, status: boolean) => void;
   setThinking: (sessionId: string, status: boolean) => void;
   setLoadingHistory: (sessionId: string, status: boolean) => void;
@@ -316,6 +319,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
+  setExecutionError: (sessionId, error) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, executionError: error },
+        },
+      };
+    });
+  },
+
   setProcessing: (sessionId, status) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
@@ -327,6 +343,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             [sessionId]: {
               ...runtime,
               isProcessing: status,
+              executionError: status ? null : runtime.executionError,
               messages: runtime.messages.map((msg) =>
                 msg.isStreaming ? { ...msg, isStreaming: false } : msg
               ),
@@ -337,7 +354,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return {
         runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, isProcessing: status },
+          [sessionId]: {
+            ...runtime,
+            isProcessing: status,
+            executionError: status ? null : runtime.executionError,
+          },
         },
       };
     });

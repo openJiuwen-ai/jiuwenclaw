@@ -4,8 +4,11 @@ import { Square } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
-import { useChatStore, useSessionStore } from '../../stores';
-import { AgentMode, Permission } from '../../types';
+import { useChatStore, useSessionStore, useWorkspaceStore } from '../../stores';
+import { AgentMode, Permission, type ProjectInfo } from '../../types';
+import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
+import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
+import { projectCreateErrorKey } from '../../multi-session/sidebar/projectCreateErrors';
 import { AGENT_MODE_OPTIONS, PERMISSION_OPTIONS } from '../../config/chatConfig';
 import clsx from 'clsx';
 import { PermissionWarningDialog } from './PermissionWarningDialog';
@@ -16,6 +19,14 @@ import sendIcon from '../../assets/send.svg';
 import sendActiveIcon from '../../assets/send_active.svg';
 import chatSkillIcon from '../../assets/skillIcon.svg';
 import configIcon from '../../assets/sidebar/config.svg';
+import workAddIcon from '../../assets/work-mode/add-project.svg';
+import workArrowRightIcon from '../../assets/work-mode/arrow-right.svg';
+import workCheckIcon from '../../assets/work-mode/check.svg';
+import workCloseIcon from '../../assets/work-mode/close.svg';
+import workFolderIcon from '../../assets/work-mode/folder.svg';
+import workCollapseIcon from '../../assets/work-mode/collapse.svg';
+import workExpandIcon from '../../assets/work-mode/expand.svg';
+import workSearchIcon from '../../assets/work-mode/search.svg';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
@@ -37,6 +48,10 @@ type InputAreaInstalledPlugin = {
   git_commit?: string | null;
   skills: string[];
 };
+
+function getProjectLabel(project: ProjectInfo | null, fallback: string): string {
+  return project ? project.name : fallback;
+}
 
 interface InputAreaProps {
   onSubmit: (content: string) => void;
@@ -61,12 +76,20 @@ export function InputArea({
 }: InputAreaProps) {
   const [pendingVoiceText, setPendingVoiceText] = useState('');
   const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
+  const [workMenuOpen, setWorkMenuOpen] = useState<'project' | null>(null);
+  const [workDialogOpen, setWorkDialogOpen] = useState(false);
+  const [projectNameDraft, setProjectNameDraft] = useState('');
+  const [projectPathDraft, setProjectPathDraft] = useState('');
+  const [projectPathError, setProjectPathError] = useState<string | null>(null);
+  const [projectSearch, setProjectSearch] = useState('');
+  const [projectCreateMode, setProjectCreateMode] = useState<ProjectCreateMode>('blank');
   const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
   const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   /** 保存技能插入前的光标位置，用于在光标处插入 chip */
   const savedRangeRef = useRef<Range | null>(null);
   const modeMenuRef = useRef<HTMLDivElement>(null);
+  const workMenuRef = useRef<HTMLDivElement>(null);
   const autoSendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isComposingRef = useRef(false);
   // const activePointerIdRef = useRef<number | null>(null);
@@ -79,12 +102,56 @@ export function InputArea({
   const evolutionStatus = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.evolutionStatus ?? null);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
   const currentSession = useSessionStore((s) => s.currentSession);
+  const activeSession = useSessionStore((s) => {
+    if (!activeSessionId || activeSessionId === NEW_CONVERSATION_ID) return null;
+    if (s.currentSession?.session_id === activeSessionId) return s.currentSession;
+    return s.sessions.find((session) => session.session_id === activeSessionId) ?? null;
+  });
+  const {
+    projects,
+    selectedProject,
+    setSelectedProject,
+    createProject,
+  } = useWorkspaceStore();
   const loadedMsgLen = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages?.length ?? 0);
   const hasHistory = (currentSession?.message_count ?? 0) > 0 || loadedMsgLen > 0;
   const isInterruptible = isProcessing || isPaused;
   const isAgentMode = mode === 'agent.fast';
   const isTeamMode = mode === 'team';
   const isAutoHarnessMode = mode === 'auto_harness';
+  const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
+  const showWorkContextRow = activeSessionId === NEW_CONVERSATION_ID;
+
+  const filteredProjects = useMemo(() => {
+    const keyword = projectSearch.trim().toLowerCase();
+    if (!keyword) return projects;
+    return projects.filter((project) => (
+      project.name.toLowerCase().includes(keyword)
+      || project.project_path.toLowerCase().includes(keyword)
+    ));
+  }, [projectSearch, projects]);
+
+  const displayedProject = useMemo<ProjectInfo | null>(() => {
+    if (activeSession?.project_path) {
+      const matched = projects.find((project) => project.project_path === activeSession.project_path);
+      if (matched) return matched;
+      const path = activeSession.project_path || '';
+      return {
+        project_id: path || 'default',
+        project_path: path,
+        name: path.split('/').filter(Boolean).pop() || t('multiSession.project.projects'),
+        pinned: false,
+        pin_order: 0,
+        is_default: path === '',
+        hidden: false,
+        session_count: 0,
+        last_message_at: null,
+        last_user_message_at: null,
+        created_at: 0,
+      };
+    }
+    return selectedProject;
+  }, [activeSession, projects, selectedProject]);
 
   const {
     isListening,
@@ -159,6 +226,29 @@ export function InputArea({
       document.removeEventListener('pointerdown', handlePointerDown);
     };
   }, [isModeMenuOpen]);
+
+  useEffect(() => {
+    if (!workMenuOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!workMenuRef.current?.contains(event.target as Node)) {
+        setWorkMenuOpen(null);
+      }
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setWorkMenuOpen(null);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [workMenuOpen]);
 
   useEffect(() => {
     if (autoFocusKey) {
@@ -480,6 +570,26 @@ export function InputArea({
     setIsModeMenuOpen(false);
   }, [isProcessing, mode]);
 
+  const handleAddProjectPath = useCallback(async () => {
+    const name = projectNameDraft.trim();
+    const projectPath = projectCreateMode === 'blank' ? '' : projectPathDraft.trim();
+    if (!name || (projectCreateMode === 'existing' && !projectPath)) return;
+    setProjectPathError(null);
+    if (projectPath && (!projectPath.startsWith('/') || projectPath.startsWith('~/'))) {
+      setProjectPathError(t('multiSession.project.absolutePathError'));
+      return;
+    }
+    try {
+      await createProject(name, projectPath);
+      setProjectNameDraft('');
+      setProjectPathDraft('');
+      setWorkDialogOpen(false);
+    } catch (error) {
+      const errorKey = projectCreateErrorKey(error);
+      setProjectPathError(errorKey ? t(errorKey) : error instanceof Error ? error.message : String(error));
+    }
+  }, [createProject, projectCreateMode, projectNameDraft, projectPathDraft, t]);
+
   const currentMode = AGENT_MODE_OPTIONS.find((item) => item.value === mode) ?? AGENT_MODE_OPTIONS[0];
   const evolutionLabel = getEvolutionPillLabel(mode, evolutionStatus, t);
 
@@ -487,7 +597,8 @@ export function InputArea({
     <div
       className={cx(
         'chat-input-container',
-        isModeMenuOpen && 'chat-input-container--menu-open',
+        showWorkContextRow && 'chat-input-container--work-home',
+        (isModeMenuOpen || workMenuOpen) && 'chat-input-container--menu-open',
         isListening && 'chat-input-container--recording',
       )}
     >
@@ -718,6 +829,191 @@ export function InputArea({
         </div>
       </div>
 
+      {showWorkContextRow ? (
+        <div ref={workMenuRef} className="chat-work-context-row">
+          <div className={clsx('chat-work-select', workMenuOpen === 'project' && 'chat-work-select--open')}>
+            <button
+              type="button"
+              className={clsx('chat-work-select__trigger', displayedProject && 'chat-work-select__trigger--selected')}
+              onClick={() => !isWorkContextLocked && setWorkMenuOpen((open) => open === 'project' ? null : 'project')}
+              disabled={isWorkContextLocked}
+              title={displayedProject?.project_path || (isWorkContextLocked ? t('multiSession.project.lockedProjectTitle') : t('multiSession.project.chooseProjectDirectory'))}
+            >
+              <img className="chat-work-select__root-icon" src={workFolderIcon} alt="" aria-hidden="true" />
+              <span>{getProjectLabel(displayedProject, t('multiSession.project.chooseProjectDirectory'))}</span>
+              <img
+                className="chat-work-select__chevron"
+                src={workMenuOpen === 'project' ? workCollapseIcon : workExpandIcon}
+                alt=""
+                aria-hidden="true"
+              />
+            </button>
+            {displayedProject && !isWorkContextLocked ? (
+              <span className="chat-work-select__clear-wrap" aria-hidden="false">
+                <span className="chat-work-select__clear-label">{t('multiSession.project.clearProject')}</span>
+                <button
+                  type="button"
+                  className="chat-work-select__clear"
+                  aria-label={t('multiSession.project.clearProject')}
+                  onClick={() => {
+                    setSelectedProject(null);
+                    setWorkMenuOpen(null);
+                  }}
+                >
+                  <img src={workCloseIcon} alt="" aria-hidden="true" />
+                </button>
+              </span>
+            ) : null}
+            {workMenuOpen === 'project' && !isWorkContextLocked ? (
+              <div className={clsx('chat-work-select__menu', projects.length > 0 && 'chat-work-select__menu--projects')} role="menu">
+                {projects.length === 0 ? (
+                  <ProjectCreateMenu
+                    onCreate={(mode) => {
+                      setProjectCreateMode(mode);
+                      setWorkDialogOpen(true);
+                      setWorkMenuOpen(null);
+                    }}
+                    itemClassName="chat-work-select__option chat-work-select__option--compact"
+                    blankIcon={<img src={workAddIcon} alt="" aria-hidden="true" />}
+                    existingIcon={<img src={workFolderIcon} alt="" aria-hidden="true" />}
+                  />
+                ) : (
+                  <>
+                    <label className="chat-work-select__search-wrap">
+                      <img src={workSearchIcon} alt="" aria-hidden="true" />
+                      <input
+                        className="chat-work-select__search"
+                        value={projectSearch}
+                        onChange={(event) => setProjectSearch(event.target.value)}
+                        placeholder={t('multiSession.project.searchProject')}
+                      />
+                    </label>
+                    {filteredProjects.map((project) => {
+                      const active = selectedProject?.project_id === project.project_id;
+                      return (
+                        <button
+                          type="button"
+                          key={project.project_id}
+                          className={clsx('chat-work-select__option', active && 'is-active')}
+                          onClick={() => {
+                            setSelectedProject(project);
+                            setWorkMenuOpen(null);
+                          }}
+                          role="menuitemradio"
+                          aria-checked={active}
+                          title={project.project_path}
+                        >
+                          <img src={workFolderIcon} alt="" aria-hidden="true" />
+                          <span>{project.name}</span>
+                          {active ? <img className="chat-work-select__check" src={workCheckIcon} alt="" aria-hidden="true" /> : null}
+                        </button>
+                      );
+                    })}
+                    {filteredProjects.length === 0 ? (
+                      <div className="chat-work-select__empty">{t('multiSession.project.noProjectMatches')}</div>
+                    ) : null}
+                    <ProjectAddSubmenu
+                      onCreate={(mode) => {
+                        setProjectCreateMode(mode);
+                        setWorkDialogOpen(true);
+                        setWorkMenuOpen(null);
+                      }}
+                    />
+                  </>
+                )}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {workDialogOpen ? (
+        <div className="chat-work-dialog-backdrop" role="presentation">
+          <form
+            className="chat-work-dialog"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleAddProjectPath();
+            }}
+          >
+            <button
+              type="button"
+              className="chat-work-dialog__close"
+              aria-label={t('common.close')}
+              onClick={() => {
+                setProjectPathDraft('');
+                setProjectNameDraft('');
+                setProjectPathError(null);
+                setWorkDialogOpen(false);
+              }}
+            >
+              <img src={workCloseIcon} alt="" aria-hidden="true" />
+            </button>
+            <div className="chat-work-dialog__title">{t('multiSession.project.newProject')}</div>
+            <input
+              className="chat-work-dialog__input"
+              value={projectNameDraft}
+              onChange={(event) => setProjectNameDraft(event.target.value)}
+              placeholder={t('multiSession.project.namePlaceholder')}
+              autoFocus
+            />
+            {projectCreateMode === 'existing' ? (
+              <input
+                className="chat-work-dialog__input"
+                value={projectPathDraft}
+                onChange={(event) => setProjectPathDraft(event.target.value)}
+                placeholder="/Users/name/work/project"
+              />
+            ) : null}
+            <div className="chat-work-dialog__actions">
+              <button
+                type="button"
+                onClick={() => {
+                  setProjectPathDraft('');
+                  setProjectNameDraft('');
+                  setProjectPathError(null);
+                  setWorkDialogOpen(false);
+                }}
+              >
+                {t('multiSession.project.cancel')}
+              </button>
+              <button
+                type="submit"
+                disabled={!projectNameDraft.trim() || (projectCreateMode === 'existing' && !projectPathDraft.trim())}
+              >
+                {t('multiSession.project.confirm')}
+              </button>
+            </div>
+            {projectPathError ? <div className="chat-work-dialog__error">{projectPathError}</div> : null}
+          </form>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ProjectAddSubmenu({ onCreate }: { onCreate: (mode: ProjectCreateMode) => void }) {
+  const { t } = useTranslation();
+  return (
+    <div className="chat-work-select__add" role="none">
+      <button
+        type="button"
+        className="chat-work-select__option chat-work-select__option--compact"
+        role="menuitem"
+        aria-haspopup="menu"
+      >
+        <img src={workAddIcon} alt="" aria-hidden="true" />
+        <span>{t('multiSession.project.addNewProject')}</span>
+        <img className="chat-work-select__arrow" src={workArrowRightIcon} alt="" aria-hidden="true" />
+      </button>
+      <div className="chat-work-select__submenu" role="menu">
+        <ProjectCreateMenu
+          onCreate={onCreate}
+          itemClassName="chat-work-select__option chat-work-select__option--compact"
+          blankIcon={<img src={workAddIcon} alt="" aria-hidden="true" />}
+          existingIcon={<img src={workFolderIcon} alt="" aria-hidden="true" />}
+        />
+      </div>
     </div>
   );
 }

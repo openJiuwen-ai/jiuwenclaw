@@ -6,12 +6,20 @@ export * from './message';
 export * from './skillTree';
 export * from './todo';
 export * from './websocket';
+export * from '../features/workspace/projectTypes';
 
 // 会话类型
 export interface Session {
   session_id: string;
   title: string;
   project_path: string;
+  pinned?: boolean;
+  pin_order?: number;
+  renamed_at?: string | null;
+  display_title?: string | null;
+  is_custom_title?: boolean;
+  title_source?: 'auto' | 'user';
+  model?: string;
   mode: AgentMode;
   status: SessionStatus;
   message_count: number;

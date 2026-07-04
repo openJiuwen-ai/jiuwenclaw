@@ -510,7 +510,7 @@ export function SessionSidebar({
               onClick={() => onNavigate(item.key)}
             >
               <span className="nav-item__icon">{item.icon}</span>
-              <span className="nav-item__text">{t(item.labelKey)}</span>
+              <span className="nav-item__text">{getNavItemLabel(item)}</span>
             </button>
           ))}
         </nav>

@@ -29,7 +29,13 @@ import {
   ContextCompressionSummary,
   WsEvent,
 } from '../types';
-import { ensureSessionRuntimes, useChatStore, useTodoStore, useSessionStore, useHarnessStore } from '../stores';
+import {
+  ensureSessionRuntimes,
+  useChatStore,
+  useTodoStore,
+  useSessionStore,
+  useHarnessStore,
+} from '../stores';
 import type { TeamTask, TeamTaskStatus } from '../stores/sessionStore';
 import { webClient } from '../services/webClient';
 import {
@@ -1522,6 +1528,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // showing the stop button. Setting isProcessing=false here is safe —
         // processing_status will override if needed.
         if (!useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) {
+          useChatStore.getState().setExecutionError(sessionId, null);
           useChatStore.getState().setProcessing(sessionId, false);
           useChatStore.getState().setThinking(sessionId, false);
           useChatStore.getState().clearSubtasks(sessionId);
@@ -2022,6 +2029,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().setLoadingHistory(sessionId, false);
           return;
         }
+        useChatStore.getState().setExecutionError(sessionId, errorMsg);
         onErrorRef.current?.(errorMsg);
         useChatStore.getState().addMessage(sessionId, {
           id: `error-${Date.now()}`,
@@ -2581,6 +2589,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('harness.session_finished', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
+        useChatStore.getState().setExecutionError(sessionId, null);
         useChatStore.getState().setProcessing(sessionId, false);
         useChatStore.getState().setThinking(sessionId, false);
         useHarnessStore.getState().setHarnessRunning(sessionId, false);
