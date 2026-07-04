@@ -7,6 +7,7 @@
 - [E2A protocol (Gateway↔Agent)](E2A-protocol.md)
 - [A2A integration](A2A.md)
 - [A2UI generated UI](A2UI.md)
+- [Project & Session Management (Web)](Project-Session-Management.md)
 - [Configuration](Configuration.md)
 - [Distributed Team](DistributedTeam.md)
 - [Multi-Instance](MultiInstance.md)

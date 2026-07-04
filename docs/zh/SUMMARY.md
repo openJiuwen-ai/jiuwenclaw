@@ -8,6 +8,7 @@
 - [E2A 协议（Gateway↔Agent）](E2A-protocol.md)
 - [A2A 接入说明](A2A.md)
 - [A2UI 生成式界面](A2UI.md)
+- [项目与会话管理（Web 端）](项目与会话管理.md)
 - [配置说明](配置信息.md)
 - [分布式 Team](分布式Team.md)
 - [Agent Team 使用指南](AgentTeam.md)

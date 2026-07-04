@@ -1762,7 +1762,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # 加载全部项目(含隐藏,用于会话归属判断);cache_bust 跨进程拿最新
         all_projects = project_store.list_projects(include_hidden=True, cache_bust=True)
         # 可见项目的 project_path 集合: 命中则归属该项目,否则归入默认项目
-        visible_paths = {p.project_path for p in all_projects if not p.hidden}
+        # 过滤空路径: 默认项目不入库,project_path 为空串不应出现在 visible_paths 中
+        visible_paths = {p.project_path for p in all_projects if not p.hidden and p.project_path}
 
         # 扫描全部会话,按归属 project_path 聚合非置顶会话统计
         sessions = collect_all_sessions_metadata()
@@ -2064,7 +2065,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         proj = project_store.get_project_by_id(project_id, cache_bust=True)
-        if proj is None:
+        if proj is None or proj.hidden:
             await channel.send_response(
                 ws, req_id, ok=False, error="project not found", code="NOT_FOUND",
             )
