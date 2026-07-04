@@ -68,12 +68,12 @@ def _session_dir(session_id: str, *, create: bool = True) -> Path:
     return session_dir
 
 
-def _history_file(session_id: str) -> Path:
-    return _session_dir(session_id) / _LEGACY_HISTORY_FILENAME
+def _history_file(session_id: str, *, create: bool = True) -> Path:
+    return _session_dir(session_id, create=create) / _LEGACY_HISTORY_FILENAME
 
 
-def _history_jsonl_file(session_id: str) -> Path:
-    return _session_dir(session_id) / _JSONL_HISTORY_FILENAME
+def _history_jsonl_file(session_id: str, *, create: bool = True) -> Path:
+    return _session_dir(session_id, create=create) / _JSONL_HISTORY_FILENAME
 
 
 def use_legacy_history_json() -> bool:
@@ -91,18 +91,18 @@ def get_write_history_path(session_id: str) -> Path:
 def get_read_history_path(session_id: str) -> Path:
     """Return the preferred history source, falling back to legacy json."""
     if use_legacy_history_json():
-        legacy_path = _history_file(session_id)
+        legacy_path = _history_file(session_id, create=False)
         if legacy_path.exists():
             return legacy_path
-        jsonl_path = _history_jsonl_file(session_id)
+        jsonl_path = _history_jsonl_file(session_id, create=False)
         if jsonl_path.exists():
             return jsonl_path
         return legacy_path
 
-    jsonl_path = _history_jsonl_file(session_id)
+    jsonl_path = _history_jsonl_file(session_id, create=False)
     if jsonl_path.exists():
         return jsonl_path
-    legacy_path = _history_file(session_id)
+    legacy_path = _history_file(session_id, create=False)
     if legacy_path.exists():
         return legacy_path
     return jsonl_path

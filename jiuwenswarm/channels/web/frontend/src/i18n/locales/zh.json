@@ -1730,7 +1730,7 @@
     "deleteRunningDisabled": "运行中或等待回复的对话不能删除",
     "runtime": { "processing": "处理中" },
     "deleteDialog": { "title": "删除对话", "description": "确定删除“{{title}}”吗？此操作不可撤销。" },
-    "notFound": { "title": "对话不存在或已删除", "newConversation": "新建对话", "recentConversation": "返回最近对话" },
+    "notFound": { "title": "对话不存在或已删除", "newConversation": "新建对话" },
     "errors": { "delete": "删除对话失败", "create": "创建对话失败", "send": "发送消息失败" }
   },
   "mermaid": {

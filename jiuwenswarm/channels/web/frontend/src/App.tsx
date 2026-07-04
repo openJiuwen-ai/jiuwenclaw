@@ -1440,7 +1440,6 @@ function AppContent() {
   const routeSessionMissing = route.kind === 'chat-session'
     && isConversationMissing(route.sessionId, initialDataLoaded, sessions);
   const showConversationNotFound = route.kind === 'not-found' || routeSessionMissing;
-  const mostRecentSession = sessions[0];
   const isNewSessionPromotion = Boolean(sessionId && promotedFromNewSessionIdsRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
 
@@ -1493,11 +1492,6 @@ function AppContent() {
                       <button className="btn primary" onClick={() => enterNewConversation()}>
                         {t('multiSession.notFound.newConversation')}
                       </button>
-                      {mostRecentSession && (
-                        <button className="btn" onClick={() => void handleRestoreSession(mostRecentSession.session_id, mostRecentSession.mode)}>
-                          {t('multiSession.notFound.recentConversation')}
-                        </button>
-                      )}
                     </div>
                   </div>
                 )}

@@ -1728,7 +1728,7 @@
     "deleteRunningDisabled": "Running conversations and conversations awaiting input cannot be deleted",
     "runtime": { "processing": "Processing" },
     "deleteDialog": { "title": "Delete conversation", "description": "Delete “{{title}}”? This action cannot be undone." },
-    "notFound": { "title": "Conversation not found or deleted", "newConversation": "New conversation", "recentConversation": "Back to recent conversation" },
+    "notFound": { "title": "Conversation not found or deleted", "newConversation": "New conversation" },
     "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
   },
   "mermaid": {
