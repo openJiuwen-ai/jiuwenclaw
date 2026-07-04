@@ -178,6 +178,7 @@ class OtelTraceAdapter:
 
         # Find root span
         root = self._find_root_span(parsed_spans)
+        root_attrs = root.get("attributes", {})
 
         # Extract trace-level fields
         trace_input = self._extract_trace_input(parsed_spans)
@@ -205,11 +206,21 @@ class OtelTraceAdapter:
         total_tokens = self._sum_total_tokens(parsed_spans)
         generation_count = len([s for s in parsed_spans if s.get('span_type') == 'LLM'])
 
+        # Extract task_name from root span attributes or name
+        # Priority: jiuwenclaw.task.name > gen_ai.task.name > jiuwenswarm.req.method > span.name
+        task_name = (
+            root_attrs.get("jiuwenclaw.task.name") or
+            root_attrs.get("gen_ai.task.name") or
+            root_attrs.get("jiuwenswarm.req.method") or  # Gateway-level method (session.create, etc.)
+            root.get("name", "unknown")
+        )
+
         # Build cleaned_trace
         cleaned_trace = {
             "id": trace_id,
             "timestamp": _ns_to_iso(root.get("start_time_ns")),
             "name": root.get("name", "N/A"),
+            "task_name": task_name,  # Add task_name field for filtering
             "input": trace_input,
             "output": trace_output,
             "latency": _ns_to_ms(root.get("duration_ns")),
@@ -286,12 +297,63 @@ class OtelTraceAdapter:
         return {}
 
     def _extract_trace_output(self, spans: list[dict]) -> dict:
-        """Extract trace-level output from last LLM span."""
+        """Extract trace-level output - find final assistant response.
+
+        Strategy:
+        1. Find assistant message WITHOUT tool_calls → this is final response to user
+        2. If all have tool_calls → execution trace, aggregate execution info
+        3. This distinguishes "conversation traces" from "execution traces"
+        """
         llm_spans = [s for s in spans if s.get("span_type") == "LLM"]
-        if llm_spans:
-            last_llm = llm_spans[-1]
-            return self._extract_llm_output(last_llm)
-        return {}
+        if not llm_spans:
+            return {}
+
+        # Step 1: Find final response (assistant message without tool_calls)
+        for llm_span in reversed(llm_spans):  # Check from last to first
+            output = self._extract_llm_output(llm_span)
+            tool_calls = output.get("tool_calls", [])
+            content = output.get("content", "")
+
+            # If no tool_calls and has content → final response
+            if not tool_calls and content.strip():
+                output["response_type"] = "final_response"
+                return output
+
+        # Step 2: No final response found → execution trace
+        # Aggregate execution information from all LLM spans
+        first_llm = self._extract_llm_output(llm_spans[0])
+        last_llm = self._extract_llm_output(llm_spans[-1])
+
+        # Collect all tool calls
+        all_tools = []
+        for llm_span in llm_spans:
+            output = self._extract_llm_output(llm_span)
+            tool_calls = output.get("tool_calls", [])
+            for tc in tool_calls:
+                func = tc.get("function", {})
+                tool_name = func.get("name", tc.get("name", "unknown"))
+                if tool_name not in all_tools:  # Deduplicate
+                    all_tools.append(tool_name)
+
+        # Build execution summary
+        first_content = first_llm.get("content", "")
+        last_tools = [tc.get("function", {}).get("name", tc.get("name", ""))
+                      for tc in last_llm.get("tool_calls", [])]
+
+        result = {
+            "role": "assistant",
+            "response_type": "execution_step",
+            "content": first_content,  # Initial thinking/planning
+            "tool_calls": last_llm.get("tool_calls", []),  # Last step's tool calls
+            "execution_summary": {
+                "total_llm_calls": len(llm_spans),
+                "tools_used": all_tools,
+                "first_thinking": first_content[:200] if first_content else "",
+                "last_step_tools": last_tools,
+            }
+        }
+
+        return result
 
     def _extract_llm_input(self, span: dict) -> dict:
         """Extract LLM input - prioritize attributes."""
@@ -510,12 +572,13 @@ class OtelTraceAdapter:
                                             texts.append(part_content)
                                 return " ".join(texts) if texts else ""
 
-        # Fallback: from events
-        events = llm_spans[0].get("events", [])
-        for ev in events:
-            if ev.get("name") == "gen_ai.system.message":
-                ev_attrs = _parse_attrs(ev.get("attributes"))
-                return ev_attrs.get("content", "")
+        # Fallback: from events (only if llm_spans exists)
+        if llm_spans:
+            events = llm_spans[0].get("events", [])
+            for ev in events:
+                if ev.get("name") == "gen_ai.system.message":
+                    ev_attrs = _parse_attrs(ev.get("attributes"))
+                    return ev_attrs.get("content", "")
 
         return ""
 

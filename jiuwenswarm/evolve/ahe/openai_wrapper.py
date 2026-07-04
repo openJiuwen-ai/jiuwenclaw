@@ -76,14 +76,43 @@ class OpenAIModelWrapper:
             "messages": formatted_messages,
             "temperature": self._temperature,
             "max_tokens": self._max_tokens,
+            "timeout": 60.0,  # Add 60 second timeout to prevent hanging
         }
 
         # Add tools if provided
         if tools:
             params["tools"] = tools
 
-        # Call OpenAI API
-        response = await self._client.chat.completions.create(**params)
+        # Call OpenAI API with timeout protection
+        try:
+            response = await self._client.chat.completions.create(**params)
+        except Exception as exc:
+            # Log timeout or other API errors with full stack trace
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(
+                "OpenAIModelWrapper.invoke failed: %s",
+                exc,
+                exc_info=True,  # Print full stack trace
+            )
+            # Raise exception to let caller handle the error explicitly
+            raise
+
+        # Defensive check: verify response has choices
+        if not response.choices:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "OpenAI API returned empty choices. Model: %s, Messages: %d",
+                self._model,
+                len(messages),
+            )
+            # Return empty content but with proper structure
+            class EmptyResponse:
+                content = ""
+                tool_calls = None
+                choices = []
+            return EmptyResponse()
 
         # Extract message from response
         message = response.choices[0].message

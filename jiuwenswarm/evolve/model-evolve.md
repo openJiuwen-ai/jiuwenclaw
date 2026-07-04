@@ -495,3 +495,8 @@ Worker 第一版只负责把已准入 candidate 转成外部可消费样本，�
 高置信 pass trace 自动生成轻量 training Proposal，再由 `ModelTrainingCandidateEvaluator` 准入；failure trace 经过 Diagnosis、training Proposal 和 `ModelTrainingCandidateEvaluator` 准入；通过 Decision 的 training Proposal 由 `TrainingCandidateWriter` 写入 `training_candidates`；Worker 再消费 candidate，生成 `model_training_samples` 并交付外部训练团队。
 
 这个设计保留了 PDA 审计链，同时避免把 trace 筛选做成复杂的多阶段流程。第一版只做必要准入，后续再根据训练团队反馈增强排序、去重和课程学习策略。
+
+
+## 实现约束
+1. 模型自演进的开关可以独立开启，即组件自演进开启之后模型自演进可以关闭。
+2. 模型中需要考虑如果诊断结果是大模型的问题，那么这种trace不应该进入候选训练数据集中，因为小模型也无法学习

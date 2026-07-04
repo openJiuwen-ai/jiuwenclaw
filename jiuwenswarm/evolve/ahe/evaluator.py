@@ -208,22 +208,22 @@ class TraceOutcomeEvaluator:
         for trace in normalized_traces:
             # First try fast evaluation
             fast = self.evaluate_fast(trace)
-            logger.info("evaluate_fast taace_id %s, result is %s", trace["id"], fast)
+            # logger.info("evaluate_fast taace_id %s, result is %s", trace["id"], fast)
 
             # If heuristic returns uncertain, try LLM evaluation
-            if fast.outcome == "uncertain" and fast.judgment_method == "heuristic":
-                input_text = self._extract_input(trace)
-                output_text = self._extract_output(trace)
-                if input_text and output_text:
-                    # Truncate to avoid token limit issues
-                    llm_outcome = await self.evaluate(input_text[:2000], output_text[:2000])
-                    logger.info("evaluate input is %s", input_text[:300])
-                    logger.info("evaluate output is %s", output_text[:300])
-                    llm_outcome.trace_id = trace.get("id", trace.get("trace_id", ""))
-                    llm_outcome.task_name = TaskNameInferrer.infer(trace)
-                    outcomes.append(llm_outcome)
-                    continue
-
+            # if fast.outcome == "uncertain" and fast.judgment_method == "heuristic":
+            input_text = self._extract_input(trace)
+            output_text = self._extract_output(trace)
+            logger.info("evaluate input is %s", input_text[:300])
+            logger.info("evaluate output is %s", output_text[:300])
+            if input_text and output_text:
+                # Truncate to avoid token limit issues
+                llm_outcome = await self.evaluate(input_text[:2000], output_text[:2000])
+                llm_outcome.trace_id = trace.get("id", trace.get("trace_id", ""))
+                llm_outcome.task_name = TaskNameInferrer.infer(trace)
+                outcomes.append(llm_outcome)
+                continue
+            
             fast.task_name = TaskNameInferrer.infer(trace)
             outcomes.append(fast)
 
@@ -309,10 +309,54 @@ class TraceOutcomeEvaluator:
 
     @staticmethod
     def _extract_output(trace: dict) -> str:
-        """Extract Agent final output from NormalizedTrace."""
+        """Extract Agent final output from NormalizedTrace.
+
+        Handles:
+        1. Final response (assistant message without tool_calls)
+        2. Execution trace (tool execution results)
+        """
         output_data = trace.get("output", {})
         if isinstance(output_data, dict):
+            # Check response type
+            response_type = output_data.get("response_type", "")
+
+            if response_type == "final_response":
+                # Has final assistant reply
+                return output_data.get("content", str(output_data))
+
+            elif response_type == "execution_step":
+                # Execution trace without final reply
+                # Use execution_summary if available
+                summary = output_data.get("execution_summary", {})
+                if summary:
+                    tools = summary.get("tools_used", [])
+                    first_thinking = summary.get("first_thinking", "")
+                    total_calls = summary.get("total_llm_calls", 0)
+
+                    parts = []
+                    if first_thinking:
+                        parts.append(f"Agent plan: {first_thinking}")
+                    if tools:
+                        parts.append(f"Tools executed: {', '.join(tools)}")
+                    parts.append(f"Total LLM calls: {total_calls}")
+
+                    return "[Execution trace]\n" + "\n".join(parts)
+
+                # Fallback: try tool_calls
+                tool_calls = output_data.get("tool_calls", [])
+                if tool_calls:
+                    tools_used = [tc.get("function", {}).get("name", "") for tc in tool_calls]
+                    content = output_data.get("content", "")
+                    if content.strip():
+                        return f"[Execution] {content}\nTools: {', '.join(tools_used)}"
+                    else:
+                        return f"[Execution trace - tools used: {', '.join(tools_used)}]"
+                else:
+                    return "[Execution trace - no output captured]"
+
+            # Fallback: use content field
             return output_data.get("content", str(output_data))
+
         return str(output_data)
 
     @staticmethod
@@ -396,10 +440,11 @@ class TraceOutcomeEvaluator:
             if not api_base:
                 api_base = "https://api.deepseek.com/v1"  # Fallback to DeepSeek API
 
-            # Create AsyncOpenAI client
+            # Create AsyncOpenAI client with timeout to prevent hanging
             client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=api_base,
+                timeout=60.0,  # Add 60 second timeout
             )
 
             # Return wrapper that matches expected interface

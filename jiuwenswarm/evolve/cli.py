@@ -370,6 +370,25 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # 配置演进系统日志（只对 evolve 模块生效）
+    from jiuwenswarm.evolve.logging_config import setup_evolve_logging, get_log_file_path
+    from pathlib import Path
+    import os
+
+    # 自动生成日志文件路径
+    workspace = Path(os.path.expanduser("~/.jiuwenswarm"))
+    log_file = get_log_file_path(workspace, prefix="evolution")
+
+    # 配置日志：stdout 显示 INFO，文件记录 DEBUG
+    setup_evolve_logging(
+        log_file=log_file,
+        console_level="INFO",
+        file_level="DEBUG",
+        show_file_path=True,  # 显示文件路径+行号
+    )
+
+    logger.info("Evolution log file: %s", log_file)
+
     if args.command == "run":
         code = _run_command(args)
     elif args.command == "list":

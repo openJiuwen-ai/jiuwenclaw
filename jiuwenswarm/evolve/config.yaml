@@ -48,9 +48,9 @@ evolve:
 
   # 演进专用 LLM
   llm:
-    model_name: "deepseek-v4-pro"             # 模型名称
+    model_name: "qwen3.6-plus"             # 模型名称
     api_key: "${EVOLVE_API_KEY}"    # 支持环境变量替换，也可直接填写（不推荐）
-    api_base: "https://api.deepseek.com/v1"  # API base URL（DeepSeek 需要 /v1 路径）
+    api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"  # API base URL（DeepSeek 需要 /v1 路径）
     temperature: 0.1                # 生成温度
     max_tokens: 2000                # 最大 token 数
     verify_ssl: false                # SSL 验证开关

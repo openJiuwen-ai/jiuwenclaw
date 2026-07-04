@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 # Compatible section for error/fix experiences.
 _DEFAULT_SECTION = "Troubleshooting"
 _DEFAULT_ACTION = "append"
+_EFFECTIVE_AFTER_RELOAD_MESSAGE = (
+    "Skill evolution applied. It will take effect in newly created sessions "
+    "or after agent reload."
+)
 
 
 def _resolve_skill_name(proposal: Proposal) -> str:
@@ -239,6 +243,8 @@ class SkillExperienceWriter(ApplyWriter):
                 "SkillExperienceWriter: rendered markdown using EvolutionStore for '%s'",
                 skill_name,
             )
+            self._refresh_runtime_skill_state(skill_name)
+            logger.info(_EFFECTIVE_AFTER_RELOAD_MESSAGE)
 
             # Log the operation (handle record being None for non-ADD operations)
             if record:
@@ -264,7 +270,8 @@ class SkillExperienceWriter(ApplyWriter):
                 stored_object_id=str(evolution_path),
                 reason=(
                     f"EvolutionRecord {record_id} applied to "
-                    f"{skill_name}/evolutions.json"
+                    f"{skill_name}/evolutions.json. "
+                    f"{_EFFECTIVE_AFTER_RELOAD_MESSAGE}"
                 ),
                 applier_name=self.name,
             )
@@ -347,7 +354,7 @@ class SkillExperienceWriter(ApplyWriter):
                 "content": content,
                 "target": "body",
             },
-            "applied": False,
+            "applied": True,
             "score": float(proposal.metadata.get("max_score", 0.6)),
             "usage_stats": {
                 "times_presented": 0,
@@ -423,7 +430,7 @@ class SkillExperienceWriter(ApplyWriter):
                 "content": content,
                 "target": "body",
             },
-            "applied": False,
+            "applied": True,
             "score": float(proposal.metadata.get("max_score", 0.6)),
             "usage_stats": {
                 "times_presented": 0,
@@ -506,6 +513,7 @@ class SkillExperienceWriter(ApplyWriter):
                 entry.pop("section", None)
                 entry.pop("action", None)
                 entry.pop("target", None)
+                entry["applied"] = True
 
                 logger.info("REPLACE %s with new content", target_id)
                 return
@@ -533,9 +541,59 @@ class SkillExperienceWriter(ApplyWriter):
                 entry["metadata"]["state"] = "deprecated"
                 entry["metadata"]["deprecated_by"] = proposal.proposal_id
                 entry["metadata"]["deprecated_at"] = datetime.now(timezone.utc).isoformat()
+                entry["applied"] = True
 
                 logger.info("DEPRECATE %s", target_id)
                 return
         logger.warning("DEPRECATE target %s not found", target_id)
 
-    
+    def _refresh_runtime_skill_state(self, skill_name: str) -> None:
+        """Best-effort refresh after writing evolutions.
+
+        Rendering updates files on disk. Runtime agents may still hold derived
+        skill indexes or SkillUtil caches, so refresh the JiuwenSwarm indexes and
+        call known openjiuwen cache hooks when available. Missing hooks are
+        ignored because this writer must also work in CLI/test environments.
+        """
+        try:
+            from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+
+            manager = SkillManager(workspace_dir=str(self._skills_dir.parent))
+            refresh = getattr(manager, "_refresh_agent_data_indexes", None)
+            if callable(refresh):
+                refresh()
+        except Exception as exc:
+            logger.debug(
+                "SkillExperienceWriter: runtime skill index refresh skipped for %s: %s",
+                skill_name,
+                exc,
+            )
+
+        try:
+            import importlib
+
+            skills_mod = importlib.import_module("openjiuwen.core.single_agent.skills")
+            for hook_name in (
+                "clear_skill_cache",
+                "clear_cache",
+                "invalidate_skill_cache",
+                "reload_skills",
+            ):
+                hook = getattr(skills_mod, hook_name, None)
+                if callable(hook):
+                    try:
+                        hook()
+                    except TypeError:
+                        hook(skill_name)
+                    logger.info(
+                        "SkillExperienceWriter: called openjiuwen skill refresh hook %s",
+                        hook_name,
+                    )
+                    break
+        except Exception as exc:
+            logger.debug(
+                "SkillExperienceWriter: openjiuwen skill cache refresh skipped for %s: %s",
+                skill_name,
+                exc,
+            )
+

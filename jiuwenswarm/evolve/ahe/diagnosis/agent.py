@@ -71,17 +71,17 @@ class DiagnosisAgent:
         """
         if mode not in ("diagnose", "propose"):
             raise ValueError(f"mode must be 'diagnose' or 'propose', got '{mode}'")
-        logger.info("start to run diagnosis agent")
+
         # Resolve NormalizedTrace data
         traces = normalized_traces
         if traces is None and trace_ids:
             traces = await self._clean_traces(trace_ids)
 
         if not traces:
-            logger.warning("DiagnosisAgent: no NormalizedTrace data available")
+            logger.warning("No NormalizedTrace data available")
             return DiagnosisResult(mode=mode, issues=[], response="No trace data", iterations=0)
 
-        # Initialize tool executor with NormalizedTrace data
+        # Initialize tool executor
         self._tool_executor = DiagnosisToolExecutor(
             normalized_traces=traces,
             store=self._store,
@@ -91,28 +91,63 @@ class DiagnosisAgent:
         # Build initial messages
         trace_ids_to_show = [nt.get("id") or nt.get("trace_id", "unknown") for nt in traces]
         messages = self._build_messages(trace_ids_to_show, mode, question)
-        logger.info("start react loop, message is %s", messages[:100])
+
+        logger.info(
+            "DiagnosisAgent: starting ReAct loop (traces=%d, mode=%s)",
+            len(traces), mode
+        )
         # ReAct loop
+        empty_response_count = 0
+        turn = 0
         for iteration in range(self._max_iterations):
+            turn += 1
+
+            # 简洁的 turn 信息
+            logger.info("=== Turn %d/%d ===", turn, self._max_iterations)
+
             # 1. Call LLM with tools
             content, tool_calls = await self._call_llm(messages)
-            logger.info("diagnosis agent response_text is %s", content)
-            logger.info("diagnosis agent tool_calls is %s", tool_calls)
+
+            # 检测连续空响应（可能是没有 model）
+            if not content and not tool_calls:
+                empty_response_count += 1
+                logger.warning(
+                    "Turn %d: Empty response (no content, no tool_calls)",
+                    turn
+                )
+                if empty_response_count >= 3:
+                    logger.error(
+                        "DiagnosisAgent: %d consecutive empty responses, breaking loop",
+                        empty_response_count
+                    )
+                    return DiagnosisResult(
+                        mode=mode,
+                        issues=[],
+                        response="DiagnosisAgent: no LLM model available",
+                        iterations=turn,
+                        budget_exceeded=True,
+                    )
+                continue
 
             if not tool_calls:
                 # Pure text response → append and continue
+                logger.info("Turn %d: Text response only (%d chars)", turn, len(content))
                 messages.append({"role": "assistant", "content": content})
+                empty_response_count = 0
                 continue
 
-            logger.info("start to call tools (found %d tool_calls)", len(tool_calls))
+            # Tool calls detected
+            logger.info(
+                "Turn %d: Tool calls: %s",
+                turn,
+                [tc.get("name") for tc in tool_calls]
+            )
 
-            # 2. Append assistant message with tool_calls in OpenAI format
-            # Build tool_calls structure for assistant message
+            # 2. Append assistant message with tool_calls
             assistant_tool_calls = []
             for tc in tool_calls:
-                # Ensure tool_call has valid id (generate if missing)
-                tc_id = tc.get("id") or f"call_{tc['name']}_{iteration}"
-                tc["id"] = tc_id  # Update tc dict for later use
+                tc_id = tc.get("id") or f"call_{tc['name']}_{turn}"
+                tc["id"] = tc_id
 
                 assistant_tool_calls.append({
                     "id": tc_id,
@@ -132,21 +167,21 @@ class DiagnosisAgent:
             # 3. Execute tools and append results
             for tc in tool_calls:
                 if tc["name"] == "submit_result":
-                    # Stop signal — parse result
-                    logger.info("submit_result detected, finalizing diagnosis...")
-                    return self._finalize(tc["arguments"].get("result", ""), iteration + 1, mode)
-                logger.info("executing tool: %s", tc["name"])
+                    logger.info("Turn %d: submit_result detected, finalizing", turn)
+                    return self._finalize(tc["arguments"].get("result", ""), turn, mode)
+
+                logger.debug("Executing tool: %s", tc["name"])  # DEBUG级别，不显示在stdout
                 result = self._execute_tool(tc["name"], tc["arguments"])
 
-                # Append tool result in OpenAI format
+                # Append tool result
                 tool_content = json.dumps(result, ensure_ascii=False, default=str)
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tc["id"],  # Use the validated id
+                    "tool_call_id": tc["id"],
                     "content": tool_content,
                 })
 
-            # 4. Check context size and compress if needed
+            # 4. Check context size
             messages = self._compact_context_if_needed(messages)
         # Budget exceeded
         last_text = ""
@@ -269,8 +304,16 @@ class DiagnosisAgent:
         try:
             # Directly pass dict messages to model (no need for SimpleMessage conversion)
             # openai_wrapper.py already handles both dict and object messages correctly
-            logger.info("call llm with message %s", messages[:100])
+            # logger.info("call llm with message %s", str(messages)[:100])
             response = await self._model.invoke(messages=messages, tools=DIAGNOSIS_TOOL_SCHEMAS)
+
+            # Defensive check: verify response has choices
+            if not response.choices:
+                logger.warning(
+                    "DiagnosisAgent: API response has no choices. Model: %s",
+                    self._model._model if hasattr(self._model, '_model') else 'unknown',
+                )
+                return "", []  # Return empty content and tool_calls
 
             # Extract content and tool_calls
             message = response.choices[0].message
@@ -344,10 +387,11 @@ class DiagnosisAgent:
             else:
                 logger.info("DiagnosisAgent: using configured api_base: %s", api_base)
 
-            # Create AsyncOpenAI client
+            # Create AsyncOpenAI client with timeout to prevent hanging
             client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=api_base,
+                timeout=60.0,  # Add 60 second timeout
             )
 
             # Return wrapper that matches expected interface

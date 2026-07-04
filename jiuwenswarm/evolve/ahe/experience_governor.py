@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -209,8 +210,9 @@ class ExperienceGovernor:
             return False
 
         # ADD-specific: check capacity
-        if operation.op == ExperienceOperationType.ADD and not ctx.can_add:
-            return False
+        if operation.op == ExperienceOperationType.ADD:
+            if not ctx.can_add:
+                return False
 
         # Target-specific: check replaceable/mergeable
         if operation.op == ExperienceOperationType.REPLACE:
@@ -305,35 +307,74 @@ class ExperienceGovernor:
             })
         return summaries
 
-    @staticmethod
-    def _find_similar(entries: list[dict], query_hint: str) -> list[dict]:
-        """Find experiences with content similar to the query hint.
+    @classmethod
+    def _find_similar(cls, entries: list[dict], query_hint: str) -> list[dict]:
+        """Recall candidate experiences that may be similar to the query hint.
 
-        Simple text similarity: check if query keywords appear in
-        experience content.
+        Uses lightweight lexical similarity only. This intentionally avoids an
+        LLM in the governance path: the result is only context for Proposer and
+        DecisionPolicy, not a hard duplicate judgment.
         """
         if not query_hint:
             return []
 
-        # Extract key words from query hint
-        keywords = set(query_hint.lower().split())
+        query_tokens = cls._tokenize_similarity_text(query_hint)
+        if not query_tokens:
+            return []
 
         similar = []
         for entry in entries:
+            state = entry.get("metadata", {}).get("state", "active")
+            if state == "deprecated":
+                continue
             change = entry.get("change", {})
-            content = change.get("content", "").lower()
-            # Check if any keyword appears in content
-            overlap = sum(1 for kw in keywords if kw in content)
-            if overlap >= 1:  # At least one keyword match
+            content = str(change.get("content", ""))
+            content_tokens = cls._tokenize_similarity_text(content)
+            if not content_tokens:
+                continue
+
+            overlap_tokens = query_tokens & content_tokens
+            overlap = len(overlap_tokens)
+            union = len(query_tokens | content_tokens)
+            jaccard = overlap / union if union else 0.0
+            coverage = overlap / min(len(query_tokens), len(content_tokens))
+
+            if overlap >= 3 and (jaccard >= 0.12 or coverage >= 0.35):
                 similar.append({
                     "id": entry.get("id", ""),
                     "content": content[:200],
                     "overlap_count": overlap,
+                    "similarity": round(max(jaccard, coverage), 4),
                 })
 
-        # Sort by overlap count (most similar first)
-        similar.sort(key=lambda x: x.get("overlap_count", 0), reverse=True)
+        similar.sort(
+            key=lambda x: (
+                x.get("similarity", 0),
+                x.get("overlap_count", 0),
+            ),
+            reverse=True,
+        )
         return similar[:5]  # Top 5 similar experiences
+
+    @staticmethod
+    def _tokenize_similarity_text(text: str) -> set[str]:
+        """Tokenize mixed Chinese/English text for cheap duplicate detection."""
+        lowered = str(text or "").lower()
+        ascii_tokens = {
+            token
+            for token in re.findall(r"[a-z0-9_./\\:-]{3,}", lowered)
+            if token not in {
+                "the", "and", "for", "with", "from", "this", "that",
+                "should", "must", "when", "如果", "应该",
+            }
+        }
+
+        cjk_chars = re.findall(r"[\u4e00-\u9fff]", lowered)
+        cjk_bigrams = {
+            "".join(cjk_chars[i:i + 2])
+            for i in range(len(cjk_chars) - 1)
+        }
+        return ascii_tokens | cjk_bigrams
 
     @staticmethod
     def _find_replaceable(entries: list[dict]) -> list[dict]:

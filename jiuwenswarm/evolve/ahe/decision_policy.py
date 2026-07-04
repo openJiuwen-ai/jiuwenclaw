@@ -41,6 +41,14 @@ LLM_DECISION_SYSTEM_PROMPT = """你是一名智能体演进决策专家。判断
 3. **可信度**: predicted_impact 是否可信（不夸大、有依据）？
 4. **风险**: risk 是否可接受（不会导致功能回退或用户体验下降）？
 5. **治理合规**: 操作类型（operations）是否适合当前治理上下文？
+6. **经验去重**: proposed new_content 是否已被 existing/similar experiences 覆盖？
+
+## 经验去重规则
+
+- 如果已有经验已经覆盖当前失败模式，不要接受新增同类经验；返回 rejected，并说明应 NOOP 或 MERGE 到已有经验。
+- 如果 proposal 使用 ADD，但 new_content 只是对已有经验的同义改写，应返回 rejected。
+- 如果 proposal 使用 MERGE/UPDATE，必须判断 target_experience_id 是否合理，且是否真的增加了新的 evidence 或更清晰的行为约束。
+- 只有当 proposed new_content 提供了已有经验没有覆盖的新失败模式、新约束或更准确的行动准则时，才允许 active。
 
 ## 输出 JSON (必选)
 
@@ -193,12 +201,17 @@ class AheDecisionPolicy(DecisionPolicy):
             # No target skill - skip governance context (will be rejected by governance check)
             user_content += "\n## Governance Context\n- No target skill specified (will be rejected)\n"
         else:
-            ctx = self._governor.get_context(target_skill)
+            ctx = self._governor.get_context(
+                target_skill,
+                query_hint=self._build_proposal_similarity_hint(proposal),
+            )
             user_content += (
                 f"\n## Governance Context\n"
                 f"- skill: {ctx.skill_name}\n"
                 f"- existing experiences: {ctx.current_count}/{ctx.max_count}\n"
                 f"- allowed operations: {[o.value for o in ctx.allowed_operations]}\n"
+                f"- existing_experiences: {json.dumps(ctx.existing_experiences, ensure_ascii=False)}\n"
+                f"- candidate_similar_experiences: {json.dumps(ctx.similar_experiences, ensure_ascii=False)}\n"
         )
 
         try:
@@ -210,11 +223,16 @@ class AheDecisionPolicy(DecisionPolicy):
 
             response = await self._model.invoke(messages=messages)
 
-            # Extract content
-            if hasattr(response, 'choices'):
+            # Extract content with defensive check
+            if hasattr(response, 'choices') and response.choices:
                 content = response.choices[0].message.content or ""
             else:
-                content = response.content if hasattr(response, "content") else str(response)
+                logger.warning(
+                    "AheDecisionPolicy: API response has no choices for decision. "
+                    "Proposals: %d, treating as empty response",
+                    len(proposals),
+                )
+                content = response.content if hasattr(response, "content") else ""
 
             parsed = self._parse_llm_json(str(content))
             score = float(parsed.get("score", 0.5))
@@ -252,6 +270,19 @@ class AheDecisionPolicy(DecisionPolicy):
                 suggestion=DecisionSuggestion.CANDIDATE,
                 blocking=False,
             )
+
+    @staticmethod
+    def _build_proposal_similarity_hint(proposal: Proposal) -> str:
+        """Build compact text for recalling potentially similar experiences."""
+        parts: list[str] = [
+            proposal.root_cause or "",
+            proposal.predicted_impact or "",
+            json.dumps(proposal.targeted_fix, ensure_ascii=False),
+            json.dumps(proposal.metadata.get("operations", []), ensure_ascii=False),
+        ]
+        for ev in proposal.failure_evidence:
+            parts.append(ev.description)
+        return "\n".join(part[:1000] for part in parts if part)
 
     @staticmethod
     def _is_duplicate(proposal: Proposal) -> bool:
@@ -319,30 +350,13 @@ class AheDecisionPolicy(DecisionPolicy):
                 api_base = "https://api.deepseek.com/v1"
                 logger.info("AheDecisionPolicy: api_base not configured, using DeepSeek default: %s", api_base)
 
-            client = AsyncOpenAI(api_key=api_key, base_url=api_base)
+            client = AsyncOpenAI(api_key=api_key, base_url=api_base, timeout=60.0)
 
             return OpenAIModelWrapper(
                 client=client,
                 model=llm_cfg.get("model_name", "deepseek-v4-pro"),
                 temperature=llm_cfg.get("temperature", 0.1),
                 max_tokens=llm_cfg.get("max_tokens", 2000),
-            )
-        except Exception as exc:
-            logger.warning("AheDecisionPolicy._init_model failed: %s", exc)
-            return None
-
-            return Model(
-                model_client_config=ModelClientConfig(
-                    client_provider=client_cfg.get("client_provider", "OpenAI"),
-                    api_base=client_cfg.get("api_base", ""),
-                    api_key=client_cfg.get("api_key", ""),
-                    verify_ssl=client_cfg.get("verify_ssl", False),
-                ),
-                model_config=ModelRequestConfig(
-                    model=client_cfg.get("model_name", "gpt-4"),
-                    temperature=model_cfg.get("temperature", 0.4),
-                    max_tokens=1000,
-                ),
             )
         except Exception as exc:
             logger.warning("AheDecisionPolicy._init_model failed: %s", exc)
