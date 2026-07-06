@@ -923,18 +923,21 @@ class ProcessRuntime(RuntimeAdapter):
                 ]
 
         config.seccomp_fd = seccomp_fd
-        if self._needs_setpriv_for_process_identity(process_uid):
+        if self._needs_privdrop_for_process_identity(
+            process_uid,
+            use_user_namespace=policy.namespace.user,
+        ):
             if process_uid is None or process_gid is None:
                 raise RuntimeError(
-                    "run_as_user/run_as_group could not be resolved for setpriv",
+                    "run_as_user/run_as_group could not be resolved for privilege drop",
                 )
-            config.command = self._wrap_command_with_setpriv(
+            config.command = self._wrap_command_with_privdrop(
                 config.command,
                 process_uid,
                 process_gid,
             )
             logger.info(
-                "Using setpriv for sandbox command as host uid %d gid %d",
+                "Dropping sandbox command to host uid %d gid %d via Python",
                 process_uid,
                 process_gid,
             )
@@ -1296,42 +1299,45 @@ class ProcessRuntime(RuntimeAdapter):
             os.chmod(path, fallback_mode)
 
     @staticmethod
-    def _needs_setpriv_for_process_identity(uid: int | None) -> bool:
-        """Whether to drop to the host uid via setpriv after bwrap setup.
+    def _needs_privdrop_for_process_identity(
+        uid: int | None,
+        *,
+        use_user_namespace: bool,
+    ) -> bool:
+        """Whether to drop to the host uid before running the sandbox command.
 
-        The jiuwenbox server normally runs as root; bubblewrap only applies
-        ``--uid`` together with ``--unshare-user``. ``setpriv`` runs the sandbox
-        command as the real host uid/gid from ``run_as_user`` / ``run_as_group``
-        without changing ``namespace.user`` in policy.
+        When ``namespace.user`` is enabled, bubblewrap already applies
+        ``--uid`` / ``--gid`` together with ``--unshare-user``.
+
+        Privilege drop is only needed when the server runs as root *and* the
+        sandbox reuses the host user namespace (``namespace.user: false``).
         """
-        if os.geteuid() != 0 or uid is None or uid == 0:
+        if use_user_namespace:
             return False
-        if shutil.which("setpriv") is None:
-            logger.warning(
-                "setpriv (util-linux) is not installed; sandbox command will not "
-                "drop to host uid %d",
-                uid,
-            )
-            return False
-        return True
+        return os.geteuid() == 0 and uid is not None and uid != 0
 
     @staticmethod
-    def _wrap_command_with_setpriv(
+    def _wrap_command_with_privdrop(
         command: list[str],
         uid: int,
         gid: int,
     ) -> list[str]:
-        setpriv = shutil.which("setpriv")
-        if setpriv is None:
-            raise RuntimeError("setpriv (util-linux) is required to run as host user")
-        return [
-            setpriv,
-            f"--reuid={uid}",
-            f"--regid={gid}",
-            "--init-groups",
-            "--",
-            *command,
-        ]
+        """Wrap ``command`` in a short Python helper that drops uid/gid.
+
+        Uses stdlib ``os.setuid`` / ``os.setgid`` so jiuwenbox does not depend
+        on the external ``setpriv(1)`` binary from util-linux.
+        """
+        encoded_command = json.dumps(command)
+        script = "; ".join([
+            "import json, os",
+            f"uid, gid = {uid}, {gid}",
+            f"cmd = json.loads({encoded_command!r})",
+            "exec('try:\\n os.setgroups([])\\nexcept OSError:\\n pass', globals())",
+            "os.setgid(gid)",
+            "os.setuid(uid)",
+            "os.execvp(cmd[0], cmd)",
+        ])
+        return [PYTHON_EXECUTABLE, "-S", "-c", script]
 
     def _ensure_policy_directories(
         self,
@@ -1364,8 +1370,6 @@ class ProcessRuntime(RuntimeAdapter):
             self._apply_path_permissions(host_path, permissions)
             if self._needs_userns_write_fallback(policy, uid, permissions):
                 self._apply_userns_write_fallback(host_path)
-            elif self._needs_userns_owner_access_fallback(policy, uid):
-                self._apply_userns_file_access_fallback(host_path)
             self._ensure_writable_when_chown_unavailable(host_path, owner_applied)
             binds.append({
                 "host_path": str(host_path),
