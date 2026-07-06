@@ -85,6 +85,7 @@ declare -A DEPLOY_VARS=(
     ["MODE"]=product
     ["CLAW_CODE_PATH"]=""
     ["CLAW_CODE_POD_PATH"]="/app/jiuwenclaw"
+    ["JIUWENBOX_CODE_POD_PATH"]="/usr/local/lib/python3.11/site-packages/jiuwenbox"
     ["RUNTIME_CODE_PATH"]=""
     ["RUNTIME_CODE_POD_PATH"]="/usr/local/lib/python3.11/site-packages/openjiuwen_runtime"
     ["NAMESPACE"]="default"
