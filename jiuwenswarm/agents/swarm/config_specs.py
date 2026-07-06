@@ -397,6 +397,9 @@ def _build_team_capability_specs(
         RailSpec(type=name, params=_rail_params(name, config))
         for name in _COMMON_RAIL_NAMES
     ]
+    if role == "leader":
+        rails_specs.append(RailSpec(type=registry.STRUCTURED_ASK_USER))
+
     if _retrieval_enabled(config):
         rails_specs.append(
             RailSpec(
