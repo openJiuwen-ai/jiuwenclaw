@@ -2168,13 +2168,54 @@ class JiuWenSwarmDeepAdapter:
         return self._model
 
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
-        """根据请求中的 model_name 参数查找对应模型（支持别名），未匹配则回退默认模型。
+        """根据请求解析本次使用的模型。
 
-        支持两种格式：
-        - 纯 model_name：查找 is_default=true 的条目
-        - {model_name}#{index}：查找指定索引的条目
+        支持三种来源（优先级从高到低）：
+        1. 请求级完整覆盖：params 同时带 api_base/api_key/model 时，现场构造一个
+           临时 Model（不进缓存），仅本次请求生效。用于 RL 等需要按次指定模型端点的
+           场景；client_provider 可选（默认 OpenAI）。不带四件套时完全不影响原行为。
+        2. 预配模型按名选择：params.model_name 在 config.yaml models.defaults 列表中
+           命中（支持 {model_name}#{index} 与纯 model_name / alias）。
+        3. 以上都不匹配：回退默认模型（is_default=true）。
         """
-        requested = (request.params.get("model_name") or "").strip()
+        params = request.params if isinstance(request.params, dict) else {}
+
+        # 1) 请求级完整覆盖（apibase/key/model 三件齐全即生效）
+        api_base = (params.get("api_base") or params.get("apibase") or "").strip()
+        api_key = (params.get("api_key") or params.get("key") or "").strip()
+        per_call_model = (params.get("model") or params.get("model_name") or "").strip()
+        if api_base and api_key and per_call_model:
+            provider = (
+                params.get("client_provider")
+                or params.get("model_provider")
+                or params.get("modelprovider")
+                or params.get("provider")
+                or "OpenAI"
+            ).strip() or "OpenAI"
+            mcc: dict[str, Any] = {
+                "api_base": api_base,
+                "api_key": api_key,
+                "model_name": per_call_model,
+                "client_provider": provider,
+                # 与 config.yaml 模板一致：默认不校验 SSL（否则需 ssl_cert）。
+                "verify_ssl": False,
+                "custom_headers": {},
+            }
+            # 可选字段透传（覆盖默认）
+            for opt in ("timeout", "verify_ssl", "custom_headers"):
+                if params.get(opt) is not None:
+                    mcc[opt] = params[opt]
+            try:
+                return self._build_model_from_entry(mcc, params.get("model_config_obj") or {})
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] 请求级模型构造失败，回退默认模型: %s",
+                    exc,
+                )
+                return self._model
+
+        # 2/3) 预配模型按名选择 / 回退默认
+        requested = (params.get("model_name") or "").strip()
         if not requested:
             return self._model
         # 精确匹配（#index 格式或纯 model_name key）
@@ -2851,6 +2892,36 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenClawDeepAdapter] TelemetryRail create failed: %s", exc)
             rail = None
         return rail
+
+    def _set_telemetry_context_for_request(self, request: AgentRequest) -> None:
+        """Populate TelemetryRail request-scoped context before invoking the agent.
+
+        deep 模式下 TelemetryRail.before_invoke 依赖 _request_context ContextVar
+        携带 channel_id/session_id/request_id/trace_context。该 ContextVar 只能通过
+        set_telemetry_context() 设置——此前无人调用，导致 agent 侧 span 的
+        request_id 为空、且不挂到调用方 trace 上（trace_context 永远 None）。
+        在 Runner.run_agent* 之前调用本方法即可修复。
+
+        若 metadata 含 W3C traceparent（由 HTTP/上层调用方注入），agent span 会
+        以其为 parent，实现跨进程/跨调用的 trace 传播。Telemetry 关闭时本方法 no-op。
+
+        Args:
+            request: 当前 AgentRequest
+        """
+        rail = getattr(self, "_telemetry_rail", None)
+        if rail is None:
+            return
+        try:
+            rail.set_telemetry_context(
+                channel_id=(request.channel_id or ""),
+                session_id=(request.session_id or ""),
+                request_id=(request.request_id or ""),
+                metadata=request.metadata,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] set_telemetry_context failed: %s", exc
+            )
 
     @staticmethod
     def _build_tokenjuice_rail(config: dict[str, Any] | None = None) -> Any | None:
@@ -5572,6 +5643,7 @@ class JiuWenSwarmDeepAdapter:
         self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
+        self._set_telemetry_context_for_request(request)
         if self._stream_event_rail is not None:
             self._stream_event_rail.reset_abort(session_id)
         try:
@@ -5809,6 +5881,7 @@ class JiuWenSwarmDeepAdapter:
         self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
+        self._set_telemetry_context_for_request(request)
         stream_consumer_cancelled = False
         try:
             await self._update_runtime_config(

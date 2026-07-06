@@ -78,3 +78,17 @@ def is_telemetry_initialized() -> bool:
         True if telemetry has been initialized, False otherwise.
     """
     return _initialized
+
+
+def reset_telemetry() -> None:
+    """Reset the telemetry initialized flag (test-only).
+
+    Allows ``init_telemetry()`` to be re-invoked after env/config changes in
+    tests. Note that the global OTel TracerProvider/MeterProvider installed by
+    the first init cannot be replaced (OTel forbids overriding), so a second
+    init only re-reads config and re-applies instrumentors; it does not swap
+    the active provider. Exposed as a public function so callers need not poke
+    the private ``_initialized`` module attribute.
+    """
+    global _initialized
+    _initialized = False

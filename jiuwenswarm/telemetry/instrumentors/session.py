@@ -110,7 +110,12 @@ def instrument_session(
             queue = self._session_queues[session_id]
             while True:
                 try:
-                    priority, task_func = await queue.get()
+                    # Queue items are (priority, task_func, ctx) 3-tuples; the
+                    # sentinel to stop the processor is (priority, None, None).
+                    # ctx is the caller's ContextVar context, passed to
+                    # create_task so the task inherits workspace/cwd/project_root
+                    # rather than the processor Task's (possibly stale) context.
+                    priority, task_func, task_ctx = await queue.get()
                     if task_func is None:
                         break
 
@@ -119,7 +124,9 @@ def instrument_session(
                     self._stuck_reported.pop(session_id, None)
                     _emit_state(session_id, "active", "task_started")
 
-                    self._session_tasks[session_id] = asyncio.create_task(task_func())
+                    self._session_tasks[session_id] = asyncio.create_task(
+                        task_func(), context=task_ctx
+                    )
                     try:
                         await self._session_tasks[session_id]
                         # >>> 埋点: state=idle, reason=task_completed

@@ -157,6 +157,17 @@ async def _run(host: str, port: int) -> None:
     )
     await server.start()
 
+    # ---------- Trace HTTP 端点（可选）：POST /run -> OTel trace ----------
+    trace_http_server = None
+    if os.getenv("JIUWENSWARM_TRACE_HTTP_ENABLED", "").lower() in {"1", "true", "yes", "on"}:
+        try:
+            from jiuwenswarm.server.trace_http import TraceHttpServer
+            trace_http_server = TraceHttpServer(agent_manager=server._agent_manager)
+            await trace_http_server.start()
+        except Exception as exc:
+            logger.warning("[AgentServer] TraceHttpServer start failed: %s", exc)
+            trace_http_server = None
+
     logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
 
     stop_event = asyncio.Event()
@@ -186,6 +197,11 @@ async def _run(host: str, port: int) -> None:
         pass
     finally:
         logger.info("[AgentServer] stopping…")
+        if trace_http_server is not None:
+            try:
+                await trace_http_server.stop()
+            except Exception as exc:
+                logger.warning("[AgentServer] TraceHttpServer stop failed: %s", exc)
         if teammate_bootstrap_task is not None:
             teammate_bootstrap_task.cancel()
             try:
