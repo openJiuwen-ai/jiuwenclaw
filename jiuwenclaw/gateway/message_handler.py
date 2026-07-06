@@ -2857,11 +2857,13 @@ class MessageHandler(ABC):
         """
         import aiohttp
 
-        # 在 K8s 同一集群中，Service 名称可直接通过 DNS 解析
-        # 格式：<service-name>（同 namespace）
-        web_server_url = "http://jiuwenclaw-web-nodeport:5173"
-        logger.warning(
-            "[MessageHandler] 使用默认 K8s Service URL: %s",
+        # 优先从环境变量读取 Web Server 地址，未设置时回退到 K8s 同集群默认 Service URL
+        web_server_url = os.getenv(
+            "ENTERPRISE_WEB_SERVICE_URL",
+            "http://jiuwenclaw-web-nodeport:5173",
+        )
+        logger.info(
+            "[MessageHandler] Web Server URL: %s",
             web_server_url,
         )
         
