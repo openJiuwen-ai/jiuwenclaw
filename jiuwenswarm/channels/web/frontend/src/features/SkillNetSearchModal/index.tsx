@@ -87,6 +87,41 @@ function levelPillClass(level: string | undefined): string {
   return "border-border bg-secondary text-text-muted";
 }
 
+/** 延迟本地化的错误：存 key/params（无 key 时存 text），渲染时才解析，以便随语言切换。 */
+type LocErr = { key?: string; params?: Record<string, unknown>; text?: string };
+
+function isLocErr(v: unknown): v is LocErr {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    ("key" in (v as Record<string, unknown>) ||
+      "text" in (v as Record<string, unknown>))
+  );
+}
+
+/** 由后端 detail_key/detail 构造 LocErr：优先 key，其次原始 detail，末了兜底 key。 */
+function toLocErr(
+  detailKey: string | undefined,
+  detailParams: Record<string, unknown> | undefined,
+  detail: string | undefined,
+  fallbackKey: string
+): LocErr {
+  if (detailKey) return { key: detailKey, params: detailParams };
+  const raw = detail?.trim();
+  if (raw) return { text: raw };
+  return { key: fallbackKey };
+}
+
+/** 让 catch 分支拿回 LocErr，而非已解析成字符串的 message。 */
+class LocalizedError extends Error {
+  loc: LocErr;
+  constructor(loc: LocErr) {
+    super(loc.text ?? loc.key ?? "");
+    this.name = "LocalizedError";
+    this.loc = loc;
+  }
+}
+
 type EvaluateOverlayState =
   | { phase: "loading"; item: SkillNetItem }
   | {
@@ -95,7 +130,7 @@ type EvaluateOverlayState =
       ok: true;
       evaluation: SkillNetEvaluation;
     }
-  | { phase: "result"; item: SkillNetItem; ok: false; message: string };
+  | { phase: "result"; item: SkillNetItem; ok: false; message: LocErr };
 
 type SkillNetItem = {
   skill_name: string;
@@ -155,9 +190,9 @@ export function SkillNetSearchModal({
   const [installingUrls, setInstallingUrls] = useState<Set<string>>(() => new Set());
   const installingUrlsRef = useRef<Set<string>>(new Set());
   /** 顶部红条：搜索失败、或并发上限等（与按 URL 的安装失败分离） */
-  const [bannerError, setBannerError] = useState<string | null>(null);
+  const [bannerError, setBannerError] = useState<LocErr | null>(null);
   /** 某 skill_url 安装失败时的说明（成功或重试开装时会清除该条） */
-  const [installErrorByUrl, setInstallErrorByUrl] = useState<Record<string, string>>({});
+  const [installErrorByUrl, setInstallErrorByUrl] = useState<Record<string, LocErr>>({});
   const [installedSuccess, setInstalledSuccess] = useState<string | null>(null);
   const installedSuccessTimerRef = useRef<number | null>(null);
   /** 仅允许同时进行一条评估（SkillNet 会调 LLM，较慢） */
@@ -167,6 +202,23 @@ export function SkillNetSearchModal({
     useState<EvaluateOverlayState | null>(null);
   /** 用于取消评估请求、避免关闭叠层后仍全局禁用「评估」按钮 */
   const evaluateSeqRef = useRef(0);
+
+  /** 把 LocErr 解析为当前语言文本；嵌套 LocErr 参数会先递归解析。 */
+  const resolveLoc = (e: LocErr | null | undefined): string => {
+    if (!e) return "";
+    if (e.key) {
+      const params = e.params
+        ? Object.fromEntries(
+            Object.entries(e.params).map(([k, v]) => [
+              k,
+              isLocErr(v) ? resolveLoc(v) : v,
+            ])
+          )
+        : undefined;
+      return t(e.key, params as Record<string, string> | undefined);
+    }
+    return e.text ?? "";
+  };
   const evaluateAbortRef = useRef<AbortController | null>(null);
 
   const dismissEvaluateOverlay = useCallback(() => {
@@ -216,10 +268,14 @@ export function SkillNetSearchModal({
             skills?: SkillNetItem[];
           }>("skills.skillnet.search", withSession({ q, limit: 20 }));
           if (!data.success) {
-            const message = data.detail_key
-              ? t(data.detail_key, data.detail_params as Record<string, string> | undefined)
-              : (data.detail?.trim() || t("skills.errors.skillNetSearchFailed"));
-            throw new Error(message);
+            throw new LocalizedError(
+              toLocErr(
+                data.detail_key,
+                data.detail_params,
+                data.detail,
+                "skills.errors.skillNetSearchFailed"
+              )
+            );
           }
           setResults(data.skills || []);
           setLoadState("success");
@@ -229,14 +285,14 @@ export function SkillNetSearchModal({
           console.error(err);
           setResults([]);
           setLoadState("error");
-          const fallbackDetail = t("skills.errors.skillNetSearchFailedHint");
-          const detail =
-            err instanceof Error && err.message.trim()
-              ? err.message.trim()
-              : fallbackDetail;
-          setBannerError(
-            t("skills.errors.skillNetSearchErrorBanner", { detail })
-          );
+          const detail: LocErr =
+            err instanceof LocalizedError
+              ? err.loc
+              : { key: "skills.errors.skillNetSearchFailedHint" };
+          setBannerError({
+            key: "skills.errors.skillNetSearchErrorBanner",
+            params: { detail },
+          });
         }
       })();
     }
@@ -288,10 +344,14 @@ export function SkillNetSearchModal({
         skills?: SkillNetItem[];
       }>("skills.skillnet.search", withSession({ q, limit: 20 }));
       if (!data.success) {
-        const message = data.detail_key
-          ? t(data.detail_key, data.detail_params as Record<string, string> | undefined)
-          : (data.detail?.trim() || t("skills.errors.skillNetSearchFailed"));
-        throw new Error(message);
+        throw new LocalizedError(
+          toLocErr(
+            data.detail_key,
+            data.detail_params,
+            data.detail,
+            "skills.errors.skillNetSearchFailed"
+          )
+        );
       }
       setResults(data.skills || []);
       setLoadState("success");
@@ -301,14 +361,14 @@ export function SkillNetSearchModal({
       console.error(err);
       setResults([]);
       setLoadState("error");
-      const fallbackDetail = t("skills.errors.skillNetSearchFailedHint");
-      const detail =
-        err instanceof Error && err.message.trim()
-          ? err.message.trim()
-          : fallbackDetail;
-      setBannerError(
-        t("skills.errors.skillNetSearchErrorBanner", { detail })
-      );
+      const detail: LocErr =
+        err instanceof LocalizedError
+          ? err.loc
+          : { key: "skills.errors.skillNetSearchFailedHint" };
+      setBannerError({
+        key: "skills.errors.skillNetSearchErrorBanner",
+        params: { detail },
+      });
     }
   }, [query, t, withSession, dismissEvaluateOverlay]);
 
@@ -333,17 +393,16 @@ export function SkillNetSearchModal({
           signal: ac.signal,
         });
         if (!data.success) {
-          const message = data.detail_key
-            ? t(
-                data.detail_key,
-                data.detail_params as Record<string, string> | undefined
-              )
-            : (data.detail?.trim() || t("skills.skillNet.evaluateFailed"));
           setEvaluateOverlay({
             phase: "result",
             item,
             ok: false,
-            message,
+            message: toLocErr(
+              data.detail_key,
+              data.detail_params,
+              data.detail,
+              "skills.skillNet.evaluateFailed"
+            ),
           });
           return;
         }
@@ -360,7 +419,7 @@ export function SkillNetSearchModal({
             phase: "result",
             item,
             ok: false,
-            message: t("skills.skillNet.evaluateEmptyResult"),
+            message: { key: "skills.skillNet.evaluateEmptyResult" },
           });
         }
       } catch (err) {
@@ -368,10 +427,10 @@ export function SkillNetSearchModal({
           return;
         }
         console.error(err);
-        const message =
-          err instanceof Error && err.message.trim()
-            ? err.message.trim()
-            : t("skills.skillNet.evaluateFailed");
+        const message: LocErr =
+          err instanceof LocalizedError
+            ? err.loc
+            : { key: "skills.skillNet.evaluateFailed" };
         setEvaluateOverlay({
           phase: "result",
           item,
@@ -400,11 +459,10 @@ export function SkillNetSearchModal({
       if (!url) return;
       if (installingUrlsRef.current.has(url)) return;
       if (installingUrlsRef.current.size >= SKILLNET_MAX_CONCURRENT_INSTALLS) {
-        setBannerError(
-          t("skills.skillNet.concurrentLimitReached", {
-            max: SKILLNET_MAX_CONCURRENT_INSTALLS,
-          })
-        );
+        setBannerError({
+          key: "skills.skillNet.concurrentLimitReached",
+          params: { max: SKILLNET_MAX_CONCURRENT_INSTALLS },
+        });
         return;
       }
       installingUrlsRef.current.add(url);
@@ -430,10 +488,6 @@ export function SkillNetSearchModal({
           withSession({ url: item.skill_url, force: forceOverwrite })
         );
         if (!data.success) {
-          const message = data.detail_key
-            ? t(data.detail_key, data.detail_params as Record<string, string> | undefined)
-            : (data.detail || t("skills.errors.skillNetInstallFailed"));
-
           // 如果是"已安装"错误且尚未强制覆盖，则弹窗确认
           if (!forceOverwrite && data.detail_key === "skills.skillNet.errors.skillAlreadyInstalled") {
             installingUrlsRef.current.delete(url);
@@ -449,7 +503,14 @@ export function SkillNetSearchModal({
             return;
           }
 
-          throw new Error(message);
+          throw new LocalizedError(
+            toLocErr(
+              data.detail_key,
+              data.detail_params,
+              data.detail,
+              "skills.errors.skillNetInstallFailed"
+            )
+          );
         }
 
         let name: string = item.skill_name;
@@ -476,10 +537,6 @@ export function SkillNetSearchModal({
               break;
             }
             if (st.status === "failed" || (!st.success && st.status !== "pending")) {
-              const message = st.detail_key
-                ? t(st.detail_key, st.detail_params as Record<string, string> | undefined)
-                : (st.detail || t("skills.errors.skillNetInstallFailed"));
-
               // 如果是"已安装"错误且尚未强制覆盖，则弹窗确认
               if (!forceOverwrite && st.detail_key === "skills.skillNet.errors.skillAlreadyInstalled") {
                 installingUrlsRef.current.delete(url);
@@ -495,12 +552,19 @@ export function SkillNetSearchModal({
                 return;
               }
 
-              throw new Error(message);
+              throw new LocalizedError(
+                toLocErr(
+                  st.detail_key,
+                  st.detail_params,
+                  st.detail,
+                  "skills.errors.skillNetInstallFailed"
+                )
+              );
             }
             await new Promise((r) => window.setTimeout(r, pollMs));
           }
           if (!finished) {
-            throw new Error(t("skills.skillNet.installTimeout"));
+            throw new LocalizedError({ key: "skills.skillNet.installTimeout" });
           }
         } else {
           name = data.skill?.name || item.skill_name;
@@ -519,11 +583,11 @@ export function SkillNetSearchModal({
         await onInstalled?.(name);
       } catch (err) {
         console.error(err);
-        const message =
-          err instanceof Error && err.message
-            ? err.message
-            : t("skills.errors.skillNetInstallFailedHint");
-        setInstallErrorByUrl((prev) => ({ ...prev, [url]: message }));
+        const loc: LocErr =
+          err instanceof LocalizedError
+            ? err.loc
+            : { key: "skills.errors.skillNetInstallFailedHint" };
+        setInstallErrorByUrl((prev) => ({ ...prev, [url]: loc }));
       } finally {
         installingUrlsRef.current.delete(url);
         syncInstallingState();
@@ -560,7 +624,7 @@ export function SkillNetSearchModal({
 
           {bannerError && (
             <div className="px-3 py-2 rounded-md bg-secondary text-sm text-danger break-words whitespace-pre-wrap max-h-48 overflow-y-auto">
-              {bannerError}
+              {resolveLoc(bannerError)}
             </div>
           )}
 
@@ -715,7 +779,7 @@ export function SkillNetSearchModal({
                                 className="text-[11px] text-danger text-right leading-snug break-words"
                                 role="alert"
                               >
-                                {rowInstallError}
+                                {resolveLoc(rowInstallError)}
                               </p>
                             ) : null}
                           </div>
@@ -922,7 +986,7 @@ export function SkillNetSearchModal({
 
           {bannerError && (
             <div className="mt-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger break-words whitespace-pre-wrap max-h-48 overflow-y-auto">
-              {bannerError}
+              {resolveLoc(bannerError)}
             </div>
           )}
 
@@ -1084,7 +1148,7 @@ export function SkillNetSearchModal({
                             className="text-[11px] text-danger text-right leading-snug break-words"
                             role="alert"
                           >
-                            {rowInstallError}
+                            {resolveLoc(rowInstallError)}
                           </p>
                         ) : null}
                       </div>
@@ -1235,7 +1299,7 @@ export function SkillNetSearchModal({
                   </div>
                   <div className="px-5 py-4 flex-1 min-h-0 overflow-y-auto">
                     <p className="text-sm text-text-muted leading-relaxed whitespace-pre-wrap break-words">
-                      {evaluateOverlay.message}
+                      {resolveLoc(evaluateOverlay.message)}
                     </p>
                   </div>
                   <div className="px-5 py-3 border-t border-border/80">

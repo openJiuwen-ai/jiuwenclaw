@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import pytest
 from websockets.exceptions import ConnectionClosedError
@@ -58,6 +59,9 @@ class AgentClientHarness(WebSocketAgentServerClient):
 
     def get_message_queue_for_test(self, request_id: str):
         return self._message_queues[request_id]
+
+    def set_message_queue_for_test(self, request_id: str, queue) -> None:
+        self._message_queues[request_id] = queue
 
     async def run_message_receiver_loop_for_test(self) -> None:
         await self._message_receiver_loop()
@@ -211,6 +215,32 @@ async def test_message_receiver_loop_stops_on_closed_websocket():
 
     assert client.is_running_for_test() is False
     assert ws.recv_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_message_receiver_loop_logs_close_diagnostics(caplog):
+    target_logger = logging.getLogger("jiuwenswarm.gateway.routing.agent_client")
+    target_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.INFO, logger=target_logger.name)
+
+    client = AgentClientHarness()
+    ws = ClosingRecvWebSocket()
+    client.set_ws_for_test(ws)
+    client.set_running_for_test(True)
+    client.set_server_ready_for_test(True)
+    client.set_message_queue_for_test("rid-pending", asyncio.Queue())
+
+    try:
+        await asyncio.wait_for(client.run_message_receiver_loop_for_test(), timeout=0.1)
+    finally:
+        target_logger.removeHandler(caplog.handler)
+
+    assert "AgentServer WebSocket 已关闭" in caplog.text
+    assert "exc_type='ConnectionClosedError'" in caplog.text
+    assert "message='no close frame received or sent'" in caplog.text
+    assert "close_code=1006" in caplog.text
+    assert "pending_requests=1" in caplog.text
+    assert "server_ready=True" in caplog.text
 
 
 @pytest.mark.asyncio

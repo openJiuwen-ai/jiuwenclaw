@@ -367,7 +367,7 @@ export class CliPiAppState {
   private streamStallNoticeTimer: ReturnType<typeof setTimeout> | null = null;
   private streamStallNoticeShown = false;
   private streamStalled = false;
-  /** 当 closeUi 中 cancelBeforeExit 调 cancel({showNotice:false}) 时置 true，抑制 chat.interrupt_result 的 UI 通知。 */
+  /** 静默中断当前任务时置 true，抑制 chat.interrupt_result 的 UI 通知。 */
   private suppressInterruptResult = false;
   /** /btw 侧问题覆盖层：独立于 transcript 渲染 */
   private btwOverlay: { question: string; answer: string } | null = null;
@@ -1237,6 +1237,27 @@ export class CliPiAppState {
       if (this.activeCommandRequestId === id) {
         this.activeCommandRequestId = null;
       }
+    }
+  };
+
+  readonly notifyDisconnectBeforeExit = async (reason = "user_exit"): Promise<void> => {
+    if (this.connectionStatus !== "connected") {
+      return;
+    }
+    const id = `tui_disconnect_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
+    try {
+      await this.wsClient.request(
+        id,
+        "tui.disconnect",
+        {
+          reason,
+          session_id: this.sessionId,
+          mode: this.mode,
+        },
+        500,
+      );
+    } catch {
+      // Best effort only; the process is exiting.
     }
   };
 

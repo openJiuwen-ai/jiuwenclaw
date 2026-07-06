@@ -72,6 +72,11 @@ import {
   buildA2UIClientEventContent,
   setA2UIActionHandler,
 } from './features/a2ui/actionBridge';
+import {
+  isDesktopSaveCancelled,
+  isDesktopSaveOk,
+} from './utils/desktopSave';
+import type { DesktopSaveApiResult } from './utils/desktopSave';
 import './App.css';
 
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
@@ -115,6 +120,17 @@ function getWorkContextForSession(sessionId: string): {
     project_path: session?.project_path || selectedProject?.project_path || undefined,
   };
 }
+
+type WindowWithPyWebview = Window & {
+  pywebview?: {
+    api?: {
+      save_data_url?: (
+        dataUrl: string,
+        filename: string,
+      ) => DesktopSaveApiResult;
+    };
+  };
+};
 
 function clearTeamRuntimeState(sessionId: string): void {
   const sessionStore = useSessionStore.getState();
@@ -199,6 +215,22 @@ function downloadDataUrl(dataUrl: string, filename: string): void {
   document.body.removeChild(link);
 }
 
+async function saveShareImage(dataUrl: string, filename: string): Promise<boolean> {
+  const pywebviewApi = (window as WindowWithPyWebview).pywebview?.api;
+  if (pywebviewApi?.save_data_url) {
+    const result = await pywebviewApi.save_data_url(dataUrl, filename);
+    if (isDesktopSaveCancelled(result)) {
+      return false;
+    }
+    if (!isDesktopSaveOk(result)) {
+      throw new Error('share_desktop_save_failed');
+    }
+    return true;
+  }
+  downloadDataUrl(dataUrl, filename);
+  return true;
+}
+
 function AppContent() {
   const { t, i18n } = useTranslation();
   const { route, navigate } = useChatRoute();
@@ -222,6 +254,7 @@ function AppContent() {
   const [a2uiRefreshPending, setA2uiRefreshPending] = useState(false);
   const [heartbeatToastVisible, setHeartbeatToastVisible] = useState(false);
   const [heartbeatToastMessage, setHeartbeatToastMessage] = useState('');
+  const [saveToastVisible, setSaveToastVisible] = useState(false);
   const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
   const [securityAlertVisible, setSecurityAlertVisible] = useState(false);
   const [securityAlertContent, setSecurityAlertContent] = useState('');
@@ -272,6 +305,7 @@ function AppContent() {
 
   const restartAutoCloseTimerRef = useRef<number | null>(null);
   const heartbeatToastTimerRef = useRef<number | null>(null);
+  const saveToastTimerRef = useRef<number | null>(null);
   const lastHeartbeatToastKeyRef = useRef<string | null>(null);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   /** 仅用于强制重跑「首屏 history」effect：从会话列表恢复时若 sessionId 未变，也要重新拉 history 并恢复 historyPagerMeta */
@@ -290,10 +324,6 @@ function AppContent() {
   /** 为 true 表示刚从「会话列表」恢复；history 为空时在 useEffect 的 onEmpty 中提示一次 */
   const historyRestoreFromPanelHintRef = useRef(false);
   const { loadProjects, setSelectedProject } = useWorkspaceStore();
-
-  useEffect(() => {
-    sessionIdRef.current = sessionId;
-  }, [sessionId]);
 
   useEffect(() => {
     if (route.kind === 'chat-session') {
@@ -538,6 +568,22 @@ function AppContent() {
     }
   }, []);
 
+  const clearSaveToastTimer = useCallback(() => {
+    if (saveToastTimerRef.current != null) {
+      window.clearTimeout(saveToastTimerRef.current);
+      saveToastTimerRef.current = null;
+    }
+  }, []);
+
+  const showSaveToast = useCallback(() => {
+    setSaveToastVisible(true);
+    clearSaveToastTimer();
+    saveToastTimerRef.current = window.setTimeout(() => {
+      setSaveToastVisible(false);
+      saveToastTimerRef.current = null;
+    }, 3000);
+  }, [clearSaveToastTimer]);
+
   const securityAlertTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -778,8 +824,9 @@ function AppContent() {
     return () => {
       clearRestartAutoCloseTimer();
       clearHeartbeatToastTimer();
+      clearSaveToastTimer();
     };
-  }, [clearHeartbeatToastTimer, clearRestartAutoCloseTimer]);
+  }, [clearHeartbeatToastTimer, clearRestartAutoCloseTimer, clearSaveToastTimer]);
 
   useEffect(() => {
     const normalized = heartbeatMessage?.trim();
@@ -1493,7 +1540,10 @@ function AppContent() {
         if (shareExportTokenRef.current !== token) {
           return;
         }
-        downloadDataUrl(dataUrl, shareExportFilenameRef.current);
+        const saved = await saveShareImage(dataUrl, shareExportFilenameRef.current);
+        if (saved) {
+          showSaveToast();
+        }
       } catch (error) {
         console.error('Failed to render share image:', error);
         const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
@@ -1505,7 +1555,7 @@ function AppContent() {
         }
       }
     })();
-  }, [shareExportSnapshot, t]);
+  }, [shareExportSnapshot, showSaveToast, t]);
 
   const heartbeatToastPreviewRaw = heartbeatToastMessage.replace(/\s+/g, ' ').trim();
   const heartbeatToastPreview = heartbeatToastPreviewRaw.length > 120
@@ -1732,6 +1782,14 @@ function AppContent() {
         <div className="app-toast-wrapper app-toast-wrapper--top">
           <div className="app-connection-toast animate-rise">
             {serverConfig ? t('connection.connecting') : t('connection.loadingConfig')}
+          </div>
+        </div>
+      )}
+
+      {saveToastVisible && (
+        <div className="app-toast-wrapper app-toast-wrapper--top-center">
+          <div className="app-session-toast animate-rise">
+            {t('common.saveSuccess')}
           </div>
         </div>
       )}

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -27,7 +28,7 @@ from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from websockets.exceptions import ConnectionClosedError
+from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 from openjiuwen.core.common.logging import LogManager
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
@@ -37,6 +38,7 @@ parse_dotenv_early("jiuwenswarm-gateway")
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect import AcpGatewayBridge
+from jiuwenswarm.gateway.routing.agent_request_timeout import coerce_client_timeout_ms
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.utils import (
     get_cron_jobs_path,
@@ -285,6 +287,7 @@ class RouteConfig:
     outbound_interceptor: Callable[..., Awaitable[bool]] | None = None
     cleanup_handler: Callable[..., Any] | None = None
     disconnect_handler: Callable[..., Any] | None = None
+    session_bind_handler: Callable[..., Any] | None = None
 
 
 @dataclass
@@ -321,6 +324,9 @@ class GatewayServer:
         self._clients: set[Any] = set()
         self._request_to_client: dict[tuple[str, str], Any] = {}
         self._session_to_client: dict[tuple[str, str], Any] = {}
+        self._pending_session_clients: dict[tuple[str, str], Any] = {}
+        self._web_pending_cancels: dict[str, tuple[asyncio.Task, float]] = {}
+        self.message_handler_ref = None
         self._acp_bridge = AcpGatewayBridge(
             self._dispatch_on_message,
             bind_session_client=self._bind_acp_session_client,
@@ -362,6 +368,12 @@ class GatewayServer:
                 result.add(sid)
         return result
 
+    def is_session_bound_to_client(self, channel_id: str, session_id: str, ws: Any) -> bool:
+        session_key = self._client_route_key(channel_id, session_id)
+        if session_key is None:
+            return False
+        return self._session_to_client.get(session_key) is ws
+
     @staticmethod
     def _extract_routing_session_id(msg, *, include_top_level: bool = True) -> str | None:
         """Best-effort session id from message fields for outbound event routing."""
@@ -381,6 +393,33 @@ class GatewayServer:
                 return str(sid).strip()
         return None
 
+    @staticmethod
+    def _ws_is_open(ws: Any) -> bool:
+        return ws is not None and not bool(getattr(ws, "closed", False))
+
+    async def _send_frame_to_ws(
+        self,
+        ws: Any,
+        frame: dict[str, Any],
+        *,
+        channel_id: str | None,
+        request_id: str | None,
+        session_id: str | None,
+    ) -> bool:
+        if not self._ws_is_open(ws):
+            return False
+        try:
+            await ws.send(json.dumps(frame, ensure_ascii=False))
+            return True
+        except ConnectionClosed:
+            logger.info(
+                "[GatewayServer] WebSocket closed while sending: channel_id=%s session_id=%s id=%s",
+                channel_id,
+                session_id,
+                request_id,
+            )
+            return False
+
     def on_message(self, callback) -> None:
         self._on_message_cb = callback
 
@@ -396,6 +435,137 @@ class GatewayServer:
         session_key = self._client_route_key("acp", session_id)
         if session_key is not None:
             self._session_to_client[session_key] = ws
+
+    async def _bind_route_session_client(
+        self,
+        route: RouteConfig,
+        session_id: str,
+        ws: Any,
+    ) -> bool:
+        session_key = self._client_route_key(route.channel_id, session_id)
+        if session_key is None:
+            return False
+        existing_ws = self._session_to_client.get(session_key)
+        if (
+            existing_ws is not None
+            and existing_ws is not ws
+            and not bool(getattr(existing_ws, "closed", False))
+        ):
+            if self._ws_is_open(ws):
+                self._pending_session_clients[session_key] = ws
+            return False
+        self._session_to_client[session_key] = ws
+        if self._pending_session_clients.get(session_key) is ws:
+            self._pending_session_clients.pop(session_key, None)
+        if existing_ws is ws or route.session_bind_handler is None:
+            return True
+        try:
+            result = route.session_bind_handler(route.channel_id, session_id)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.warning(
+                "GatewayServer session bind handler failed: channel_id=%s session_id=%s",
+                route.channel_id,
+                session_id,
+                exc_info=True,
+            )
+        return True
+
+    async def _promote_pending_session_client(
+        self,
+        route: RouteConfig,
+        session_key: tuple[str, str],
+    ) -> None:
+        pending_ws = self._pending_session_clients.pop(session_key, None)
+        if not self._ws_is_open(pending_ws):
+            return
+        existing_ws = self._session_to_client.get(session_key)
+        if (
+            existing_ws is not None
+            and existing_ws is not pending_ws
+            and self._ws_is_open(existing_ws)
+        ):
+            return
+        self._session_to_client[session_key] = pending_ws
+        if route.session_bind_handler is None:
+            return
+        try:
+            result = route.session_bind_handler(route.channel_id, session_key[1])
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.warning(
+                "GatewayServer pending session bind handler failed: channel_id=%s session_id=%s",
+                route.channel_id,
+                session_key[1],
+                exc_info=True,
+            )
+
+    WEB_DISCONNECT_GRACE_SECONDS = 60
+
+    def web_cancel_pending_cleanup(self, session_id: str) -> None:
+        entry = self._web_pending_cancels.pop(session_id, None)
+        if entry is not None:
+            task, _ = entry
+            if not task.done():
+                task.cancel()
+            logger.info(
+                "[App] Web 重连，取消待清理 session: session_id=%s",
+                session_id,
+            )
+
+    async def _web_delayed_session_cleanup(
+        self,
+        session_id: str,
+        grace_seconds: float,
+    ) -> None:
+        try:
+            await asyncio.sleep(grace_seconds)
+        except asyncio.CancelledError:
+            return
+        self._web_pending_cancels.pop(session_id, None)
+        logger.info(
+            "[App] Web 断连宽限期满，清理 session: session_id=%s",
+            session_id,
+        )
+        message_handler = self._get_message_handler()
+        if message_handler is None:
+            return
+        try:
+            await message_handler.cancel_agent_sessions_on_disconnect(
+                session_keys=[("web", session_id)],
+                stale_request_keys=[],
+            )
+        except Exception:
+            logger.warning(
+                "[App] Web 延迟清理 session 失败: session_id=%s",
+                session_id,
+                exc_info=True,
+            )
+
+    def schedule_web_session_cleanup(self, session_id: str) -> None:
+        existing = self._web_pending_cancels.get(session_id)
+        if existing is not None:
+            old_task, _ = existing
+            if not old_task.done():
+                old_task.cancel()
+        task = asyncio.create_task(
+            self._web_delayed_session_cleanup(
+                session_id,
+                self.WEB_DISCONNECT_GRACE_SECONDS,
+            ),
+            name=f"web-cleanup-{session_id}",
+        )
+        self._web_pending_cancels[session_id] = (task, time.time())
+        logger.info(
+            "[App] Web 断连，调度延迟清理: session_id=%s grace=%ds",
+            session_id,
+            self.WEB_DISCONNECT_GRACE_SECONDS,
+        )
+
+    def _get_message_handler(self):
+        return self.message_handler_ref
 
     def _install_default_route_hooks(self) -> None:
         for route in self.config.routes.values():
@@ -509,6 +679,7 @@ class GatewayServer:
         self._clients.clear()
         self._request_to_client.clear()
         self._session_to_client.clear()
+        self._pending_session_clients.clear()
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -516,91 +687,46 @@ class GatewayServer:
         logger.info("[App] Gateway server stopped")
 
     async def send(self, msg) -> None:
-        ws = None
+        request_ws = None
         request_key = self._client_route_key(getattr(msg, "channel_id", None), getattr(msg, "id", None))
         if request_key is not None:
-            ws = self._request_to_client.get(request_key)
-            if ws is None:
-                ws = self._request_to_client.get(request_key[1])
-        if ws is None:
-            session_key = self._client_route_key(
-                getattr(msg, "channel_id", None),
-                getattr(msg, "session_id", None),
-            )
-            if session_key is not None:
-                ws = self._session_to_client.get(session_key)
-                if ws is None:
-                    ws = self._session_to_client.get(session_key[1])
-        if ws is None or bool(getattr(ws, "closed", False)):
-            if ws is None:
-                channel_id = getattr(msg, "channel_id", None)
-                # 多 TUI 窗口：有 session_id 时精确路由；无 session_id 时广播（如 cron 推送到 TUI）。
-                if channel_id and channel_id != "acp":
-                    if msg.type == "res":
-                        payload_data = dict(msg.payload or {}) if isinstance(msg.payload, dict) else {}
-                        frame = {"type": "res", "id": msg.id, "ok": bool(msg.ok), "payload": payload_data}
-                    else:
-                        frame = _build_event_frame(msg)
+            request_ws = self._request_to_client.get(request_key)
+            if request_ws is None:
+                request_ws = self._request_to_client.get(request_key[1])
 
-                    session_id = self._extract_routing_session_id(msg, include_top_level=False)
-                    if session_id:
-                        session_key = self._client_route_key(channel_id, session_id)
-                        if session_key:
-                            client = self._session_to_client.get(session_key)
-                            if client is not None and not bool(getattr(client, "closed", False)):
-                                data = json.dumps(frame, ensure_ascii=False)
-                                try:
-                                    await client.send(data)
-                                except Exception:
-                                    logger.debug(
-                                        "[GatewayServer] session-routed send failed: session_id=%s",
-                                        session_id,
-                                        exc_info=True,
-                                    )
-                                return
-                    elif not self._extract_routing_session_id(msg, include_top_level=True):
-                        clients = self._find_channel_clients(channel_id)
-                        if clients:
-                            data = json.dumps(frame, ensure_ascii=False)
-                            logger.info(
-                                "[GatewayServer] broadcast fallback (no session_id): "
-                                "channel_id=%s clients=%d id=%s type=%s",
-                                channel_id, len(clients), getattr(msg, "id", None), msg.type,
-                            )
-                            await asyncio.gather(
-                                *[c.send(data) for c in clients],
-                                return_exceptions=True,
-                            )
-                            return
-                logger.warning(
-                    "[GatewayServer] message dropped: no WebSocket client found for channel_id=%s session_id=%s id=%s",
-                    getattr(msg, "channel_id", None),
-                    getattr(msg, "session_id", None),
-                    getattr(msg, "id", None),
-                )
-            return
+        routing_session_id = self._extract_routing_session_id(msg, include_top_level=True)
+        session_key = self._client_route_key(getattr(msg, "channel_id", None), routing_session_id)
+        session_ws = None
+        if session_key is not None:
+            session_ws = self._session_to_client.get(session_key)
+            if session_ws is None:
+                session_ws = self._session_to_client.get(session_key[1])
+
+        ws = request_ws if self._ws_is_open(request_ws) else None
+        if ws is None and self._ws_is_open(session_ws):
+            ws = session_ws
 
         if getattr(msg, "channel_id", None) == "acp":
-            handled = await self._acp_bridge.send_message(msg, ws)
-            if handled:
+            if ws is not None and await self._acp_bridge.send_message(msg, ws):
                 return
 
         # 让 route 的 outbound_interceptor 有机会拦截
-        for route in self.config.routes.values():
-            if route.channel_id == msg.channel_id and route.outbound_interceptor is not None:
-                try:
-                    handled = route.outbound_interceptor(msg, ws)
-                    if asyncio.iscoroutine(handled):
-                        handled = await handled
-                    if handled:
-                        return
-                except Exception:
-                    logger.warning(
-                        "GatewayServer outbound interceptor failed: channel_id=%s",
-                        msg.channel_id,
-                        exc_info=True,
-                    )
-                break
+        if ws is not None:
+            for route in self.config.routes.values():
+                if route.channel_id == msg.channel_id and route.outbound_interceptor is not None:
+                    try:
+                        handled = route.outbound_interceptor(msg, ws)
+                        if asyncio.iscoroutine(handled):
+                            handled = await handled
+                        if handled:
+                            return
+                    except Exception:
+                        logger.warning(
+                            "GatewayServer outbound interceptor failed: channel_id=%s",
+                            msg.channel_id,
+                            exc_info=True,
+                        )
+                    break
 
         if msg.type == "res":
             payload = dict(msg.payload or {}) if isinstance(msg.payload, dict) else {}
@@ -612,21 +738,58 @@ class GatewayServer:
             }
             if not msg.ok:
                 frame["error"] = str(payload.get("error") or "request failed")
-            await ws.send(json.dumps(frame, ensure_ascii=False))
-            return
-
-        event_name = "chat.final"
-        if msg.event_type is not None:
-            event_name = msg.event_type.value
-
-        if isinstance(msg.payload, dict):
-            payload = {**msg.payload}
-            payload.setdefault("session_id", msg.session_id)
         else:
-            payload = {"session_id": msg.session_id, "content": str(msg.payload or "")}
+            event_name = "chat.final"
+            if msg.event_type is not None:
+                event_name = msg.event_type.value
 
-        frame = {"type": "event", "event": event_name, "payload": payload}
-        await ws.send(json.dumps(frame, ensure_ascii=False))
+            if isinstance(msg.payload, dict):
+                payload = {**msg.payload}
+                payload.setdefault("session_id", msg.session_id)
+            else:
+                payload = {"session_id": msg.session_id, "content": str(msg.payload or "")}
+
+            frame = {"type": "event", "event": event_name, "payload": payload}
+
+        seen_ws: set[int] = set()
+        for target in (request_ws, session_ws):
+            if target is None or id(target) in seen_ws:
+                continue
+            seen_ws.add(id(target))
+            sent = await self._send_frame_to_ws(
+                target,
+                frame,
+                channel_id=getattr(msg, "channel_id", None),
+                request_id=getattr(msg, "id", None),
+                session_id=routing_session_id,
+            )
+            if sent:
+                return
+
+        channel_id = getattr(msg, "channel_id", None)
+        if channel_id and channel_id != "acp":
+            # 多 TUI 窗口：无 session_id 时广播（如 cron 推送到 TUI）。
+            if not self._extract_routing_session_id(msg, include_top_level=True):
+                clients = self._find_channel_clients(channel_id)
+                if clients:
+                    data = json.dumps(frame, ensure_ascii=False)
+                    logger.info(
+                        "[GatewayServer] broadcast fallback (no session_id): "
+                        "channel_id=%s clients=%d id=%s type=%s",
+                        channel_id, len(clients), getattr(msg, "id", None), msg.type,
+                    )
+                    await asyncio.gather(
+                        *[c.send(data) for c in clients],
+                        return_exceptions=True,
+                    )
+                    return
+
+        logger.warning(
+            "[GatewayServer] message dropped: no WebSocket client found for channel_id=%s session_id=%s id=%s",
+            getattr(msg, "channel_id", None),
+            routing_session_id,
+            getattr(msg, "id", None),
+        )
 
     async def _connection_handler(self, ws: Any, path: str | None = None) -> None:
         raw_path = path if path is not None else getattr(ws, "path", "")
@@ -678,6 +841,11 @@ class GatewayServer:
             ]
             for session_key in stale_session_keys:
                 self._session_to_client.pop(session_key, None)
+            stale_pending_session_keys = [
+                key for key, client in self._pending_session_clients.items() if client is ws
+            ]
+            for session_key in stale_pending_session_keys:
+                self._pending_session_clients.pop(session_key, None)
             if route.disconnect_handler is not None:
                 try:
                     # Pass stale_request_keys so the handler can recover session_ids
@@ -703,6 +871,8 @@ class GatewayServer:
                         request_path,
                         exc_info=True,
                     )
+            for session_key in stale_session_keys:
+                await self._promote_pending_session_client(route, session_key)
 
     async def _handle_raw_message(self, ws: Any, raw: str, request_path: str, route: RouteConfig) -> None:
         from jiuwenswarm.common.schema.message import Message, Mode, ReqMethod
@@ -764,6 +934,7 @@ class GatewayServer:
 
         explicit_session_id = bool(str(params.get("session_id") or "").strip())
         session_id = (str(params.get("session_id") or "").strip()) or req_id
+        session_key = self._client_route_key(route.channel_id, session_id) if explicit_session_id else None
 
         # 1. forward 优先：方法在 forward_methods 中则转发到 MessageHandler
         if method in route.forward_methods:
@@ -783,10 +954,6 @@ class GatewayServer:
                 return
 
             request_key = self._client_route_key(route.channel_id, req_id)
-            # 仅当客户端显式提供 session_id 时才计算 session_key，
-            # 避免 session_id 回退到 req_id 时在 _session_to_client 中积累
-            # 无用的逐请求条目（污染 get_active_session_ids 遍历与冲突检测）。
-            session_key = self._client_route_key(route.channel_id, session_id) if explicit_session_id else None
             # 检测 session 是否已在其他窗口打开：若已绑定到另一个仍活跃的连接，
             # 拒绝当前请求，避免多窗口 session 冲突（事件路由串台、binding 被覆盖）。
             # 前端 session.list 的 active_in_window 标记是"事后快照"，此处是实时防线。
@@ -810,7 +977,7 @@ class GatewayServer:
             if request_key is not None:
                 self._request_to_client[request_key] = ws
             if session_key is not None:
-                self._session_to_client[session_key] = ws
+                await self._bind_route_session_client(route, session_id, ws)
 
             default_mode = Mode.CODE_NORMAL if route.channel_id == "tui" else Mode.AGENT_PLAN
             mode = Mode.from_raw(params.get("mode"), default=default_mode)
@@ -833,6 +1000,9 @@ class GatewayServer:
                 from jiuwenswarm.common.utils import resolve_git_branch
 
                 metadata["git_branch"] = resolve_git_branch(project_dir.strip())
+            client_timeout_ms = coerce_client_timeout_ms(data.get("timeout_ms"))
+            if route.channel_id == "tui" and client_timeout_ms is not None:
+                metadata["client_timeout_ms"] = client_timeout_ms
 
             is_stream = bool(data.get("is_stream", False))
 
@@ -868,6 +1038,8 @@ class GatewayServer:
         # 2. 本地 handler：发 ack 或纯本地处理
         local_handler = route.local_handlers.get(method)
         if local_handler is not None:
+            if session_key is not None:
+                await self._bind_route_session_client(route, session_id, ws)
             try:
                 await local_handler(ws, req_id, params, session_id)
             except Exception as e:
@@ -926,6 +1098,7 @@ def _build_route_config_map(bindings: list[GatewayRouteBinding]) -> dict[str, Ro
             outbound_interceptor=binding.outbound_interceptor,
             cleanup_handler=binding.cleanup_handler,
             disconnect_handler=binding.disconnect_handler,
+            session_bind_handler=binding.session_bind_handler,
         )
         for binding in bindings
     }
@@ -1233,12 +1406,34 @@ async def _run(
         routes=_build_route_config_map(route_bindings),
     )
     gateway_server = GatewayServer(gateway_server_config, _DummyBus())
+    gateway_server.message_handler_ref = message_handler
     for binding in route_bindings:
         route_config = gateway_server_config.routes[binding.path]
         channel_manager.register_external_channel(route_config.channel_id, gateway_server)
         if binding.install is not None:
             binding.install(gateway_server)
     gateway_server.on_message(acp_inbound_server.handle_message)
+
+    # 注册 Web 断连延迟清理回调
+    def _on_web_disconnect(ws, session_ids: set[str]):
+        for sid in session_ids:
+            gateway_server.schedule_web_session_cleanup(sid)
+
+    web_channel.on_disconnect(_on_web_disconnect)
+
+    # Web 重连时取消待清理任务：包装入站回调，在原始逻辑前插入取消检查
+    async def _web_message_wrapper(original_cb, msg):
+        sid = getattr(msg, "session_id", None)
+        if sid:
+            gateway_server.web_cancel_pending_cleanup(sid)
+        if original_cb is not None:
+            result = original_cb(msg)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        return False
+
+    web_channel.wrap_message_callback(_web_message_wrapper)
 
     a2a_server_enabled = str(os.getenv("A2A_SERVER_ENABLED", "")).strip().lower() in {
         "1",

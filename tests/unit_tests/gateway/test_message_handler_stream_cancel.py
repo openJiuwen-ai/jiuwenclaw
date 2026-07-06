@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from jiuwenswarm.common.schema import Message
+from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 
@@ -44,6 +45,18 @@ class _DisconnectingStreamAgentClient:
         if False:  # pragma: no cover - keeps this an async generator
             yield env
         raise RuntimeError("AgentServer WebSocket connection closed")
+
+
+class _HangingAgentClient:
+    @staticmethod
+    async def send_request(env: object) -> SimpleNamespace:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    async def send_request_stream(env: object):
+        if False:  # pragma: no cover - keeps this an async generator
+            yield env
 
 
 class _TestMessageHandler(MessageHandler):
@@ -109,6 +122,49 @@ async def _drain_robot_messages(handler: _TestMessageHandler) -> list[Message]:
         if msg is None:
             return messages
         messages.append(msg)
+
+
+@pytest.mark.asyncio
+async def test_tui_non_stream_request_times_out_before_frontend_request(monkeypatch) -> None:
+    handler = _TestMessageHandler.create_with_client(_HangingAgentClient())
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.routing.agent_request_timeout._TUI_DEFAULT_UNARY_TIMEOUT_SECONDS",
+        0.01,
+        raising=False,
+    )
+    msg = Message(
+        id="tui-timeout-request",
+        type="req",
+        channel_id="tui",
+        session_id="sess-tui-timeout",
+        params={"value": "check"},
+        timestamp=0.0,
+        ok=True,
+        req_method=ReqMethod.COMMAND_STATUS,
+        is_stream=False,
+    )
+    env = e2a_from_agent_fields(
+        request_id=msg.id,
+        channel_id=msg.channel_id,
+        session_id=msg.session_id,
+        req_method=ReqMethod.COMMAND_STATUS,
+        params=msg.params,
+        is_stream=False,
+        timestamp=0.0,
+    )
+
+    await asyncio.wait_for(
+        handler._process_non_stream_request(msg, env),  # pylint: disable=protected-access
+        timeout=0.2,
+    )
+
+    outputs = await _drain_robot_messages(handler)
+    assert len(outputs) == 1
+    assert outputs[0].ok is False
+    assert outputs[0].payload == {
+        "error": "AgentServer request timed out",
+        "code": "AGENT_SERVER_TIMEOUT",
+    }
 
 
 @pytest.mark.asyncio
@@ -424,6 +480,45 @@ async def test_disconnect_recovers_session_from_stale_request_keys() -> None:
     await asyncio.sleep(0)
     # Exactly one chat.interrupt must have been emitted for the recovered session.
     assert len(_FakeAgentClient.sent_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancel_can_be_delayed_until_grace_expires() -> None:
+    handler = _TestMessageHandler.create()
+    _seed_stream_task(
+        handler, rid="rid-delayed", channel_id="tui", session_id="sess_delayed",
+    )
+
+    await handler.schedule_cancel_agent_sessions_on_disconnect(
+        [],
+        stale_request_keys=[("tui", "rid-delayed")],
+        delay_seconds=0.01,
+    )
+
+    await asyncio.sleep(0)
+    assert _FakeAgentClient.sent_requests == []
+
+    await asyncio.sleep(0.03)
+    assert len(_FakeAgentClient.sent_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconnect_cancels_scheduled_disconnect_cancel() -> None:
+    handler = _TestMessageHandler.create()
+    _seed_stream_task(
+        handler, rid="rid-reconnect", channel_id="tui", session_id="sess_reconnect",
+    )
+
+    await handler.schedule_cancel_agent_sessions_on_disconnect(
+        [],
+        stale_request_keys=[("tui", "rid-reconnect")],
+        delay_seconds=0.03,
+    )
+
+    assert handler.cancel_scheduled_disconnect_cancel("tui", "sess_reconnect") is True
+    await asyncio.sleep(0.05)
+
+    assert _FakeAgentClient.sent_requests == []
 
 
 @pytest.mark.asyncio

@@ -998,7 +998,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           session_id: sessionId,
           intent,
         };
-        if (useSessionStore.getState().getRuntime(sessionId)?.mode === 'team' && (intent === 'pause' || intent === 'resume')) {
+        if (
+          useSessionStore.getState().getRuntime(sessionId)?.mode === 'team'
+          && ['pause', 'resume', 'cancel', 'supplement'].includes(intent)
+        ) {
           params.mode = 'team';
           params.team = true;
         }

@@ -188,6 +188,101 @@ class TestHandleCommandWorkflows:
         assert payload["truncated"] is True
 
     @pytest.mark.anyio
+    async def test_handler_preserves_too_large_first_snapshot_as_placeholder(self, monkeypatch) -> None:
+        """A huge first workflow should be represented instead of dropped."""
+        from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        request = _make_request(session_id="sess-large-workflow", channel_id="web")
+        send_lock = asyncio.Lock()
+
+        snapshot_data = [
+            {
+                "id": "wf-too-large-" + ("x" * 10_000),
+                "name": "workflow-too-large",
+                "status": "running",
+                "description": "x" * 100_000,
+                "steps": [{"id": "step-1", "output": "x" * 100_000}],
+            }
+        ]
+        fake_handler = _FakeWorkflowHandler(snapshot=snapshot_data)
+        fake_tm = _FakeTeamManager(workflow_handler=fake_handler)
+
+        monkeypatch.setattr(agent_ws_server_module, "_WORKFLOW_SNAPSHOT_MAX_BYTES", 2048)
+
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=fake_tm,
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        encoded_size = len(ws.sent[0].encode("utf-8"))
+        assert encoded_size <= 2048
+
+        payload = self._extract_payload_from_wire(json.loads(ws.sent[0]))
+        assert len(payload["workflows"]) == 1
+        assert payload["workflows"][0]["truncated"] is True
+        assert payload["workflows"][0]["id"].startswith("wf-too-large-")
+        assert payload["workflows"][0]["status"] == "running"
+        assert payload["truncated"] is True
+
+    @pytest.mark.anyio
+    async def test_handler_degrades_to_id_placeholder_when_minimal_exceeds_budget(
+        self, monkeypatch
+    ) -> None:
+        """When even the minimal snapshot exceeds budget, fall back to {id, truncated}."""
+        from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        request = _make_request(session_id="sess-minimal-workflow", channel_id="web")
+        send_lock = asyncio.Lock()
+
+        # Every keep_key near the 256B metadata limit forces minimal > budget.
+        near_limit = "y" * 250
+        snapshot_data = [
+            {
+                "id": "wf-min-" + ("z" * 245),
+                "name": near_limit,
+                "status": near_limit,
+                "agent_count": near_limit,
+                "completed_agent_count": near_limit,
+                "started_at": near_limit,
+                "completed_at": near_limit,
+                "duration_ms": near_limit,
+                "token_count": near_limit,
+                "estimated_token_count": near_limit,
+                "description": "x" * 100_000,
+            }
+        ]
+        fake_handler = _FakeWorkflowHandler(snapshot=snapshot_data)
+        fake_tm = _FakeTeamManager(workflow_handler=fake_handler)
+
+        monkeypatch.setattr(agent_ws_server_module, "_WORKFLOW_SNAPSHOT_MAX_BYTES", 2048)
+
+        with patch(
+            "jiuwenswarm.agents.harness.team.get_team_manager",
+            return_value=fake_tm,
+        ):
+            await server._handle_command_workflows(ws, request, send_lock)
+
+        encoded_size = len(ws.sent[0].encode("utf-8"))
+        assert encoded_size <= 2048
+
+        payload = self._extract_payload_from_wire(json.loads(ws.sent[0]))
+        assert len(payload["workflows"]) == 1
+        assert payload["truncated"] is True
+        first = payload["workflows"][0]
+        assert first["truncated"] is True
+        assert first["id"].startswith("wf-min-")
+        # Minimal fields are dropped once degraded to the id-only placeholder.
+        assert "name" not in first
+        assert "status" not in first
+
+    @pytest.mark.anyio
     async def test_handler_exception_returns_empty_snapshot(self) -> None:
         """When handler raises exception, return empty workflows list."""
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer

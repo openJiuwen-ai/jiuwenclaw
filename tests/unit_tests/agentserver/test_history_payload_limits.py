@@ -167,3 +167,52 @@ def test_history_get_sanitizes_large_restorable_records(monkeypatch):
         len(json.dumps(message, ensure_ascii=False).encode("utf-8"))
         <= getattr(agent_ws_server_module, "_HISTORY_WIRE_RECORD_MAX_BYTES")
     )
+
+
+@pytest.mark.asyncio
+async def test_team_history_get_preserves_too_large_first_record_as_placeholder(monkeypatch):
+    server = agent_ws_server_module.AgentWebSocketServer.__new__(
+        agent_ws_server_module.AgentWebSocketServer
+    )
+    ws = FakeWebSocket()
+    huge_id = "tool-result-too-large-" + ("x" * 10_000)
+    records = [
+        {
+            "id": huge_id,
+            "role": "teammate",
+            "member_name": "agent-1",
+            "event_type": "chat.tool_result",
+            "mode": "team",
+            "timestamp": 1.0,
+            "content": "x" * 100_000,
+            "tool_result": {
+                "tool_name": "edit_file",
+                "result": "x" * 100_000,
+            },
+        }
+    ]
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "read_team_history_records",
+        lambda session_id: records,
+    )
+
+    request = AgentRequest(
+        request_id="req-team-history-placeholder",
+        channel_id="web",
+        req_method=ReqMethod.TEAM_HISTORY_GET,
+        params={"session_id": "sess-large", "limit": 20, "max_bytes": 2048},
+    )
+
+    await getattr(server, "_handle_team_history_get")(ws, request, asyncio.Lock())
+
+    payload = ws.sent[0]["payload"]
+    encoded_size = len(json.dumps(ws.sent[0], ensure_ascii=False).encode("utf-8"))
+    assert encoded_size <= 2048
+    assert len(payload["records"]) == 1
+    assert payload["next_cursor"] == 1
+    assert payload["has_more"] is False
+    assert payload["records"][0]["truncated"] is True
+    assert payload["records"][0]["id"].startswith("tool-result-too-large-")
+    assert payload["records"][0]["event_type"] == "chat.tool_result"

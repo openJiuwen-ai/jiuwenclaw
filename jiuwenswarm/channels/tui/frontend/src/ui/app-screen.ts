@@ -93,7 +93,7 @@ import {
 } from "./components/team-shared.js";
 import { padToWidth, prefixedLines, renderStyledMarkdownLines, renderWrappedText } from "./rendering/text.js";
 import { chalk, editorTheme, palette, selectListTheme, setCurrentThemeName } from "./theme.js";
-import type { Hunk, GitDiffData, TurnDiff } from "../core/types.js";
+import type { Hunk, GitDiffData, GitDiffStats, TurnDiff } from "../core/types.js";
 
 const END_CURSOR = "\x1b[7m \x1b[0m";
 const ENABLE_MOUSE_TRACKING = "\x1b[?1000h\x1b[?1006h";
@@ -373,14 +373,120 @@ interface DiffFileEntry {
   source: "working" | string;
 }
 
+export interface DiffSourceEntry {
+  label: string;
+  title: string;
+  subtitle: string;
+  stats: GitDiffStats | null;
+  files: DiffFileEntry[];
+  emptyMessage: string;
+}
+
 type DiffViewerState = {
   viewMode: "list" | "detail";
   selectedIndex: number;
-  files: DiffFileEntry[];
+  sourceIndex: number;
+  sources: DiffSourceEntry[];
   scrollOffset: number;
-  title: string;
-  subtitle: string;
 };
+
+type DiffFilePayload = {
+  filePath: string;
+  linesAdded: number;
+  linesRemoved: number;
+  isNewFile: boolean;
+  isUntracked?: boolean;
+  isBinary?: boolean;
+  isLargeFile?: boolean;
+  isTruncated?: boolean;
+  hunks?: Hunk[];
+};
+
+function toDiffFileEntry(file: DiffFilePayload, source: "working" | string): DiffFileEntry {
+  return {
+    filePath: file.filePath,
+    linesAdded: file.linesAdded,
+    linesRemoved: file.linesRemoved,
+    isNewFile: file.isNewFile,
+    isUntracked: file.isUntracked ?? (source === "working" ? file.isNewFile : false),
+    isBinary: file.isBinary ?? false,
+    isLargeFile: file.isLargeFile ?? false,
+    isTruncated: file.isTruncated ?? false,
+    hunks: file.hunks || [],
+    source,
+  };
+}
+
+function sortDiffFiles(files: DiffFileEntry[]): DiffFileEntry[] {
+  return files.sort((a, b) => a.filePath.localeCompare(b.filePath));
+}
+
+export function truncateDiffPathStart(pathValue: string, maxWidth: number): string {
+  if (pathValue.length <= maxWidth) {
+    return pathValue;
+  }
+  if (maxWidth <= 1) {
+    return "…";
+  }
+  return `…${pathValue.slice(-(maxWidth - 1))}`;
+}
+
+function formatDiffStats(stats: GitDiffStats | null): string {
+  const filesChanged = stats?.filesChanged ?? 0;
+  const linesAdded = stats?.linesAdded ?? 0;
+  const linesRemoved = stats?.linesRemoved ?? 0;
+  const noun = filesChanged === 1 ? "file" : "files";
+  const parts = [`${filesChanged} ${noun} changed`];
+  if (linesAdded > 0) {
+    parts.push(`+${linesAdded}`);
+  }
+  if (linesRemoved > 0) {
+    parts.push(`-${linesRemoved}`);
+  }
+  return parts.join(" ");
+}
+
+export function buildDiffViewerSources(payload: Record<string, unknown>): DiffSourceEntry[] {
+  const turns = (payload.turns || []) as TurnDiff[];
+  const gitDiff = (payload.gitDiff || null) as GitDiffData | null;
+  const sources: DiffSourceEntry[] = [];
+  const currentStats = gitDiff?.stats ?? {
+    filesChanged: 0,
+    linesAdded: 0,
+    linesRemoved: 0,
+  };
+  const currentFiles = gitDiff
+    ? sortDiffFiles(Object.values(gitDiff.files).map((file) => toDiffFileEntry(file, "working")))
+    : [];
+
+  sources.push({
+    label: "Current",
+    title: "Diff (git diff HEAD)",
+    subtitle: formatDiffStats(currentStats),
+    stats: currentStats,
+    files: currentFiles,
+    emptyMessage: currentStats.filesChanged > 0 && currentFiles.length === 0
+      ? "Too many files to display details"
+      : "Working tree is clean",
+  });
+
+  for (const turn of turns) {
+    const files = sortDiffFiles(
+      Object.values(turn.files).map((file) => toDiffFileEntry(file, `Turn ${turn.turnIndex}`)),
+    );
+    const prompt = turn.userPromptPreview ? `  ·  ${turn.userPromptPreview}` : "";
+    sources.push({
+      label: `T${turn.turnIndex}`,
+      title: `Diff (Turn ${turn.turnIndex})`,
+      subtitle: `${formatDiffStats(turn.stats)}${prompt}`,
+      stats: turn.stats,
+      files,
+      emptyMessage: "No file changes in this turn",
+    });
+  }
+
+  return sources;
+}
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
 
@@ -1276,6 +1382,9 @@ export class AppScreen implements Component, Focusable {
   private viewedTeamMemberId: string | null = null;
   private transientNotice: string | null = null;
   private transientNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  // ESC 双击清空输入框的待触发状态:第一次 Esc 置 true 并显示提示,
+  // 3 秒内第二次 Esc 清空输入框;超时后由 transientNoticeTimer 一并复位。
+  private escClearPending = false;
   private animationTimer: ReturnType<typeof setInterval> | null = null;
   private animationPhase = 0;
   private runningStartedAtMs: number | null = null;
@@ -1326,6 +1435,13 @@ export class AppScreen implements Component, Focusable {
         this.schedulePastedTextStateClear();
       } else {
         this.cancelPastedTextStateClear();
+      }
+      // 输入框内容变化（用户继续打字、Ctrl+C/interruptTask 清空、提交清空等）
+      // 都让 ESC 双击待触发状态失效——用户已改变意图，下次 Esc 视为第一次。
+      // 同时清掉“Press Esc again to clear input”提示，避免残留。
+      if (this.escClearPending) {
+        this.clearEscClearPending();
+        this.transientNotice = null;
       }
       this.tui.requestRender();
     };
@@ -1478,6 +1594,7 @@ export class AppScreen implements Component, Focusable {
       clearTimeout(this.transientNoticeTimer);
       this.transientNoticeTimer = null;
     }
+    this.clearEscClearPending();
     this.clearCtrlCPendingForQuestion();
     if (this.animationTimer) {
       clearInterval(this.animationTimer);
@@ -1492,6 +1609,15 @@ export class AppScreen implements Component, Focusable {
     if (this.ctrlCPendingForQuestionTimer) {
       clearTimeout(this.ctrlCPendingForQuestionTimer);
       this.ctrlCPendingForQuestionTimer = null;
+    }
+  }
+
+  /** 清除 ESC 双击清空输入框的待触发状态及其提示定时器。 */
+  private clearEscClearPending(): void {
+    this.escClearPending = false;
+    if (this.transientNoticeTimer) {
+      clearTimeout(this.transientNoticeTimer);
+      this.transientNoticeTimer = null;
     }
   }
 
@@ -1601,59 +1727,14 @@ export class AppScreen implements Component, Focusable {
 
   /** Enter DiffViewer mode to browse git/turn diffs interactively */
   enterDiffViewer(payload: Record<string, unknown>): void {
-    const turns = (payload.turns || []) as TurnDiff[];
-    const gitDiff = (payload.gitDiff || null) as GitDiffData | null;
-    const files: DiffFileEntry[] = [];
-
-    if (gitDiff) {
-      for (const f of Object.values(gitDiff.files)) {
-        files.push({
-          filePath: f.filePath,
-          linesAdded: f.linesAdded,
-          linesRemoved: f.linesRemoved,
-          isNewFile: f.isNewFile,
-          isUntracked: f.isUntracked ?? f.isNewFile,
-          isBinary: f.isBinary ?? false,
-          isLargeFile: f.isLargeFile ?? false,
-          isTruncated: f.isTruncated ?? false,
-          hunks: f.hunks || [],
-          source: "working",
-        });
-      }
-    }
-
-    for (const turn of turns) {
-      for (const f of Object.values(turn.files)) {
-        files.push({
-          filePath: f.filePath,
-          linesAdded: f.linesAdded,
-          linesRemoved: f.linesRemoved,
-          isNewFile: f.isNewFile,
-          isUntracked: f.isUntracked ?? false,
-          isBinary: f.isBinary ?? false,
-          isLargeFile: f.isLargeFile ?? false,
-          isTruncated: f.isTruncated ?? false,
-          hunks: f.hunks || [],
-          source: `Turn ${turn.turnIndex}`,
-        });
-      }
-    }
-
-    const totalAdded = files.reduce((s, f) => s + f.linesAdded, 0);
-    const totalRemoved = files.reduce((s, f) => s + f.linesRemoved, 0);
-    const turnCount = turns.length;
-    const title = `Diff (git diff HEAD)`;
-    const parts: string[] = [`${files.length} files changed  +${totalAdded} -${totalRemoved}`];
-    if (turnCount > 0) parts.push(`turns:${turnCount}`);
-    const subtitle = parts.join("  ·  ");
+    const sources = buildDiffViewerSources(payload);
 
     this.diffViewerState = {
       viewMode: "list",
       selectedIndex: 0,
-      files,
+      sourceIndex: 0,
+      sources,
       scrollOffset: 0,
-      title,
-      subtitle,
     };
     this.tui.requestRender();
   }
@@ -1661,6 +1742,26 @@ export class AppScreen implements Component, Focusable {
   exitDiffViewer(): void {
     this.diffViewerState = null;
     this.tui.requestRender();
+  }
+
+  private _currentDiffSource(): DiffSourceEntry | null {
+    if (!this.diffViewerState) return null;
+    return this.diffViewerState.sources[this.diffViewerState.sourceIndex]
+      ?? this.diffViewerState.sources[0]
+      ?? null;
+  }
+
+  private _selectDiffSource(sourceIndex: number): void {
+    if (!this.diffViewerState) return;
+    const maxIndex = Math.max(0, this.diffViewerState.sources.length - 1);
+    this.diffViewerState.sourceIndex = Math.max(0, Math.min(sourceIndex, maxIndex));
+    this.diffViewerState.selectedIndex = 0;
+    this.diffViewerState.scrollOffset = 0;
+  }
+
+  private _diffViewerHeaderLineCount(): number {
+    if (!this.diffViewerState) return 0;
+    return this.diffViewerState.sources.length > 1 ? 4 : 3;
   }
 
   private handleDiffViewerInput(data: string, height: number): void {
@@ -1678,6 +1779,19 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (this.diffViewerState.viewMode === "list") {
+      const source = this._currentDiffSource();
+      if (!source) return;
+
+      if (matchesKey(data, "left") || data.toLowerCase() === "h") {
+        this._selectDiffSource(this.diffViewerState.sourceIndex - 1);
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "right") || data.toLowerCase() === "l") {
+        this._selectDiffSource(this.diffViewerState.sourceIndex + 1);
+        this.tui.requestRender();
+        return;
+      }
       // List view paginates a 5-file centered window derived from
       // selectedIndex at render time, so navigation only needs to move the
       // selection; the window follows automatically.
@@ -1689,14 +1803,14 @@ export class AppScreen implements Component, Focusable {
         return;
       }
       if (matchesKey(data, "down") || data.toLowerCase() === "j") {
-        if (this.diffViewerState.selectedIndex < this.diffViewerState.files.length - 1) {
+        if (this.diffViewerState.selectedIndex < source.files.length - 1) {
           this.diffViewerState.selectedIndex++;
           this.tui.requestRender();
         }
         return;
       }
       if (matchesKey(data, "return")) {
-        const file = this.diffViewerState.files[this.diffViewerState.selectedIndex];
+        const file = source.files[this.diffViewerState.selectedIndex];
         if (file) {
           this.diffViewerState.viewMode = "detail";
           this.diffViewerState.scrollOffset = 0;
@@ -1710,7 +1824,7 @@ export class AppScreen implements Component, Focusable {
         return;
       }
       if (matchesKey(data, "end") || data.toLowerCase() === "shift+g") {
-        this.diffViewerState.selectedIndex = Math.max(0, this.diffViewerState.files.length - 1);
+        this.diffViewerState.selectedIndex = Math.max(0, source.files.length - 1);
         this.tui.requestRender();
         return;
       }
@@ -1718,7 +1832,8 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (this.diffViewerState.viewMode === "detail") {
-      const file = this.diffViewerState.files[this.diffViewerState.selectedIndex];
+      const source = this._currentDiffSource();
+      const file = source?.files[this.diffViewerState.selectedIndex];
       if (!file) return;
 
       if (matchesKey(data, "left") || data.toLowerCase() === "h") {
@@ -1729,7 +1844,7 @@ export class AppScreen implements Component, Focusable {
       }
 
       const totalLines = this._countDiffLines(file);
-      const availableHeight = Math.max(1, height - 3);
+      const availableHeight = Math.max(1, height - this._diffViewerHeaderLineCount() - 1);
 
       if (matchesKey(data, "up") || data.toLowerCase() === "k") {
         this.diffViewerState.scrollOffset = Math.max(0, this.diffViewerState.scrollOffset - 1);
@@ -1842,11 +1957,24 @@ export class AppScreen implements Component, Focusable {
 
     const safeWidth = Math.max(1, width);
     const lines: string[] = [];
+    const source = this._currentDiffSource();
+    if (!source) return lines;
 
     // Title
-    lines.push(padToWidth(palette.border.panel(`━━━ ${this.diffViewerState.title} ━━━`), safeWidth));
+    lines.push(padToWidth(palette.border.panel(`━━━ ${source.title} ━━━`), safeWidth));
     // Subtitle
-    lines.push(padToWidth(palette.text.dim(`  ${this.diffViewerState.subtitle}`), safeWidth));
+    lines.push(padToWidth(palette.text.dim(`  ${source.subtitle}`), safeWidth));
+    if (this.diffViewerState.sources.length > 1) {
+      const selector = this.diffViewerState.sources
+        .map((item, index) => {
+          if (index === this.diffViewerState?.sourceIndex) {
+            return palette.text.accent(`[${item.label}]`);
+          }
+          return palette.text.dim(item.label);
+        })
+        .join(palette.text.dim(" · "));
+      lines.push(padToWidth(`  ${selector}`, safeWidth));
+    }
     lines.push(padToWidth(palette.text.dim(`  ${"─".repeat(Math.max(0, safeWidth - 4))}`), safeWidth));
 
     if (this.diffViewerState.viewMode === "list") {
@@ -1854,10 +1982,10 @@ export class AppScreen implements Component, Focusable {
       // mirroring Claude Code's DiffFileList. When there are more files than
       // the window, show ↑/↓ "N more files" hints above/below the window.
       const MAX_VISIBLE = 5;
-      const total = this.diffViewerState.files.length;
+      const total = source.files.length;
 
       if (total === 0) {
-        lines.push(padToWidth(palette.text.dim("  No file changes in this session"), safeWidth));
+        lines.push(padToWidth(palette.text.dim(`  ${source.emptyMessage}`), safeWidth));
       } else {
         let start: number;
         let end: number;
@@ -1882,13 +2010,11 @@ export class AppScreen implements Component, Focusable {
         }
 
         for (let i = start; i < end; i++) {
-          const file = this.diffViewerState.files[i]!;
+          const file = source.files[i]!;
           const isSelected = i === this.diffViewerState.selectedIndex;
           const pointer = isSelected ? "❯ " : "  ";
           const relativePath = this._toRelativePath(file.filePath);
-          const displayPath = relativePath.length > safeWidth - 16
-            ? relativePath.slice(0, safeWidth - 19) + "..."
-            : relativePath;
+          const displayPath = truncateDiffPathStart(relativePath, Math.max(1, safeWidth - 16));
 
           // 构建右侧状态标签（对齐 Claude Code FileStats）:
           // - untracked → "untracked"
@@ -1907,28 +2033,36 @@ export class AppScreen implements Component, Focusable {
             statsLabel = "Large file modified";
             statsStyled = palette.text.dim("Large file modified");
           } else {
-            const addPart = palette.status.success(`+${file.linesAdded}`);
-            const removePart = palette.status.error(`-${file.linesRemoved}`);
-            statsLabel = `+${file.linesAdded} -${file.linesRemoved}`;
-            statsStyled = `${addPart} ${removePart}`;
+            const statParts: string[] = [];
+            const styledParts: string[] = [];
+            if (file.linesAdded > 0) {
+              statParts.push(`+${file.linesAdded}`);
+              styledParts.push(palette.status.success(`+${file.linesAdded}`));
+            }
+            if (file.linesRemoved > 0) {
+              statParts.push(`-${file.linesRemoved}`);
+              styledParts.push(palette.status.error(`-${file.linesRemoved}`));
+            }
+            statsLabel = statParts.join(" ");
+            statsStyled = styledParts.join(" ");
             if (file.isTruncated) {
-              statsLabel += " (truncated)";
-              statsStyled += palette.text.dim(" (truncated)");
+              statsLabel = statsLabel ? `${statsLabel} (truncated)` : "(truncated)";
+              statsStyled = statsStyled
+                ? `${statsStyled}${palette.text.dim(" (truncated)")}`
+                : palette.text.dim("(truncated)");
             }
           }
 
-          const sourceLabel = file.source === "working" || file.isUntracked
-            ? ""
-            : file.isNewFile
-              ? "(new)"
-              : file.source;
+          const sourceLabel = file.isNewFile && !file.isUntracked ? "(new)" : "";
           const line = `${pointer}${displayPath}`;
-          const rightLabel = sourceLabel ? `${sourceLabel} ${statsLabel}` : statsLabel;
-          const rightStyled = sourceLabel
-            ? `${palette.text.dim(sourceLabel)} ${statsStyled}`
-            : statsStyled;
-          const padded = padToWidth(line, safeWidth - rightLabel.length - 1);
-          const fullLine = `${padded}${rightStyled}`;
+          const rightLabel = [sourceLabel, statsLabel].filter(Boolean).join(" ");
+          const rightStyled = [
+            sourceLabel ? palette.text.dim(sourceLabel) : "",
+            statsStyled,
+          ].filter(Boolean).join(" ");
+          const fullLine = rightLabel
+            ? `${padToWidth(line, Math.max(1, safeWidth - rightLabel.length - 1))}${rightStyled}`
+            : padToWidth(line, safeWidth);
           if (isSelected) {
             lines.push(palette.text.accent(fullLine));
           } else {
@@ -1945,11 +2079,11 @@ export class AppScreen implements Component, Focusable {
         }
       }
     } else {
-      const file = this.diffViewerState.files[this.diffViewerState.selectedIndex];
+      const file = source.files[this.diffViewerState.selectedIndex];
       if (!file) return lines;
 
       const detailLines = this._renderDiffDetailLines(file, safeWidth);
-      const availableHeight = Math.max(1, this.tui.terminal.rows - 4);
+      const availableHeight = Math.max(1, this.tui.terminal.rows - lines.length - 1);
 
       const offset = this.diffViewerState.scrollOffset;
       const maxLines = Math.min(detailLines.length, offset + availableHeight);
@@ -1968,9 +2102,10 @@ export class AppScreen implements Component, Focusable {
       return lines;
     }
 
-    const hintText = this.diffViewerState.files.length > 0
-      ? "  ↑/↓ to select · Enter to view · Esc to close"
-      : "  Esc to close";
+    const sourceHint = this.diffViewerState.sources.length > 1 ? "←/→ source · " : "";
+    const hintText = source.files.length > 0
+      ? `  ${sourceHint}↑/↓ to select · Enter to view · Esc to close`
+      : `  ${sourceHint}Esc to close`;
     lines.push(padToWidth(palette.text.dim(hintText), safeWidth));
 
     return lines;
@@ -1983,6 +2118,11 @@ export class AppScreen implements Component, Focusable {
   interruptTask(): void {
     this.state.cancel();
     this.editor.setText("");
+    // 中断任务会清空输入框，同步复位 ESC 双击待触发状态，避免下次 Esc 被误判为“第二次”。
+    if (this.escClearPending) {
+      this.clearEscClearPending();
+      this.transientNotice = null;
+    }
     this.tui.requestRender();
   }
 
@@ -2097,6 +2237,46 @@ export class AppScreen implements Component, Focusable {
       }
     }
 
+    // ESC 双击清空输入框（仅空闲主屏 + 输入框非空）
+    // 第一次 Esc：输入框非空时显示“再按一次清空”提示；3 秒内第二次 Esc：清空输入框。
+    // 输入框为空时不响应。优先级低于 btw/cancellableWork/不可中断命令/help 等守卫。
+    if (!pendingQuestion && !hasOverlay && !snapshot.cancellableWork && isCancelWorkKey) {
+      const hasInput = this.editor.getText().length > 0;
+      // 兜底：若 pending 仍为 true 但输入框已空（被其他途径清空且未触发 onChange 复位），
+      // 先复位 pending，避免下次 Esc 被误判为“第二次”而清空用户新输入的文字。
+      if (this.escClearPending && !hasInput) {
+        this.clearEscClearPending();
+        this.transientNotice = null;
+      }
+      if (this.escClearPending) {
+        // 第二次 Esc（在窗口内）：清空输入框并清除提示
+        this.clearEscClearPending();
+        if (hasInput) {
+          this.editor.setText("");
+        }
+        this.transientNotice = null;
+        this.tui.requestRender();
+        return;
+      }
+      if (hasInput) {
+        // 第一次 Esc（输入框非空）：进入待清空状态并显示提示
+        this.escClearPending = true;
+        this.transientNotice = "Press Esc again to clear input";
+        if (this.transientNoticeTimer) {
+          clearTimeout(this.transientNoticeTimer);
+        }
+        this.transientNoticeTimer = setTimeout(() => {
+          this.escClearPending = false;
+          this.transientNoticeTimer = null;
+          this.transientNotice = null;
+          this.tui.requestRender();
+        }, 3000);
+        this.tui.requestRender();
+        return;
+      }
+      // 输入框为空：不响应，继续后续流程
+    }
+
     if (this.startupPromptList !== null && matchesKey(data, "ctrl+c")) {
       this.startupPromptList.handleInput(data);
       this.tui.requestRender();
@@ -2131,9 +2311,12 @@ export class AppScreen implements Component, Focusable {
     // Global ctrl+l/t/g/o only apply on the main screen — defer while an overlay
     // or the team panel is active so context-specific bindings (e.g. ResumeList)
     // can use the same physical keys.
+    // Exception: app:toggleTranscript (ctrl+o) is allowed even when overlays are
+    // open, so users can fold/unfold the transcript behind the overlay.
     const skipGlobalMainScreenKeys = hasOverlay || this.showTeamPanel;
     let handled = false;
-    if (!skipGlobalMainScreenKeys) {
+    if (!skipGlobalMainScreenKeys || resolveAction("Global", data) === "app:toggleTranscript") {
+      const isToggleTranscript = resolveAction("Global", data) === "app:toggleTranscript";
       handled = handleAppScreenKeyInput(data, {
         interruptTask: () => this.interruptTask(),
         exitApp: () => this.exit(),
@@ -2170,6 +2353,11 @@ export class AppScreen implements Component, Focusable {
         },
         clearInput: () => {
           this.editor.setText("");
+          // 清空输入框时同步复位 ESC 双击待触发状态，避免下次 Esc 被误判为“第二次”。
+          if (this.escClearPending) {
+            this.clearEscClearPending();
+            this.transientNotice = null;
+          }
           this.tui.requestRender();
         },
         isIdle: () => {
@@ -2192,9 +2380,13 @@ export class AppScreen implements Component, Focusable {
           this.tui.requestRender();
         },
       });
-    }
-    if (handled) {
-      return;
+      // For ctrl+o with overlays active, the delegate toggleTranscript is called
+      // but handleAppScreenKeyInput only returns true when skipGlobalMainScreenKeys
+      // is false (it matches Global context via keymap.ts). So we trust the
+      // delegate callback has run and mark it handled ourselves.
+      if (handled || isToggleTranscript) {
+        return;
+      }
     }
 
     if (permissionRequest && activeQuestion) {

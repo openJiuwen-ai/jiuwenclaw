@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from websockets.exceptions import ConnectionClosedError
 
 from jiuwenswarm.gateway.app_gateway import (
     GatewayServer,
@@ -33,6 +34,29 @@ class FakeWebSocket:
         return code, reason
 
 
+class ClosedSendWebSocket(FakeWebSocket):
+    def __init__(self):
+        super().__init__()
+        self.closed = True
+
+    async def send(self, data):
+        raise ConnectionClosedError(None, None)
+
+
+class IterableFakeWebSocket(FakeWebSocket):
+    def __init__(self, frames=None):
+        super().__init__()
+        self.frames = list(frames or [])
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.frames:
+            raise StopAsyncIteration
+        return self.frames.pop(0)
+
+
 class GatewayServerProbe(GatewayServer):
     def __init__(self, config: GatewayServerConfig, router) -> None:
         super().__init__(config, router)
@@ -47,6 +71,9 @@ class GatewayServerProbe(GatewayServer):
 
     def bind_session_client(self, session_id: str, ws, *, channel_id: str = "acp") -> None:
         self._session_to_client[(channel_id, session_id)] = ws
+
+    def bind_request_client_ws(self, request_id: str, ws, *, channel_id: str = "acp") -> None:
+        self._request_to_client[(channel_id, request_id)] = ws
 
     async def handle_raw_message_public(self, ws, raw: str, *, path: str = "/acp") -> None:
         await self._handle_raw_message(ws, raw, path, self.config.routes[path])
@@ -344,6 +371,140 @@ async def test_gateway_server_send_event_targets_session_client():
             "session_id": "sess-2",
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_falls_back_to_session_client_when_request_ws_closed():
+    server = build_server()
+    old_ws = ClosedSendWebSocket()
+    new_ws = FakeWebSocket()
+    server.bind_request_client_ws("req-closed", old_ws, channel_id="tui")
+    server.bind_session_client("sess-reconnected", new_ws, channel_id="tui")
+
+    await server.send(
+        Message(
+            id="req-closed",
+            type="event",
+            channel_id="tui",
+            session_id="sess-reconnected",
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={"content": "still running"},
+            event_type=EventType.CHAT_DELTA,
+        )
+    )
+
+    assert new_ws.sent_frames == [
+        {
+            "type": "event",
+            "event": "chat.delta",
+            "payload": {
+                "content": "still running",
+                "session_id": "sess-reconnected",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_binds_session_for_local_request_and_calls_hook():
+    bound_sessions = []
+
+    async def local_handler(ws, req_id, params, session_id):
+        await server.send_response(ws, req_id, ok=True, payload={"session_id": session_id})
+
+    async def session_bind_handler(channel_id, session_id):
+        bound_sessions.append((channel_id, session_id))
+
+    config = GatewayServerConfig(
+        enabled=True,
+        host="127.0.0.1",
+        port=19001,
+        routes={
+            "/tui": RouteConfig(
+                path="/tui",
+                channel_id="tui",
+                local_handlers={"config.get": local_handler},
+                session_bind_handler=session_bind_handler,
+            ),
+        },
+    )
+    server = GatewayServerProbe(config, DummyBus())
+    ws = FakeWebSocket()
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-config",
+                "method": "config.get",
+                "params": {"session_id": "sess-local"},
+            }
+        ),
+        path="/tui",
+    )
+
+    await server.send(
+        Message(
+            id="req-after-reconnect",
+            type="event",
+            channel_id="tui",
+            session_id="sess-local",
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={"content": "resumed"},
+            event_type=EventType.CHAT_DELTA,
+        )
+    )
+
+    assert bound_sessions == [("tui", "sess-local")]
+    assert ws.sent_frames[-1] == {
+        "type": "event",
+        "event": "chat.delta",
+        "payload": {"content": "resumed", "session_id": "sess-local"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_promotes_pending_session_client_after_stale_owner_cleanup():
+    disconnected = []
+    rebound = []
+
+    async def disconnect_handler(ws, stale_session_keys, stale_request_keys):
+        disconnected.append((stale_session_keys, stale_request_keys))
+
+    def session_bind_handler(channel_id, session_id):
+        rebound.append((channel_id, session_id))
+
+    config = GatewayServerConfig(
+        enabled=True,
+        host="127.0.0.1",
+        port=19001,
+        routes={
+            "/tui": RouteConfig(
+                path="/tui",
+                channel_id="tui",
+                disconnect_handler=disconnect_handler,
+                session_bind_handler=session_bind_handler,
+            ),
+        },
+    )
+    server = GatewayServerProbe(config, DummyBus())
+    route = server.config.routes["/tui"]
+    old_ws = IterableFakeWebSocket()
+    new_ws = FakeWebSocket()
+    server.bind_session_client("sess-race", old_ws, channel_id="tui")
+
+    assert await server._bind_route_session_client(route, "sess-race", new_ws) is False  # pylint: disable=protected-access
+
+    await server._connection_handler(old_ws, "/tui")  # pylint: disable=protected-access
+
+    assert disconnected == [([("tui", "sess-race")], [])]
+    assert rebound == [("tui", "sess-race")]
+    assert server._session_to_client[("tui", "sess-race")] is new_ws  # pylint: disable=protected-access
 
 
 @pytest.mark.asyncio
@@ -1536,6 +1697,45 @@ async def test_gateway_server_handle_raw_message_forwards_request():
     assert msg.req_method == ReqMethod.CHAT_SEND
     assert msg.params.get("content") == "hello"
     assert msg.mode.value == "agent.fast"
+    assert ws.sent_frames == []
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_forwards_tui_client_timeout_as_metadata_only():
+    server = build_server()
+    server.config.routes["/tui"].forward_no_local_handler_methods = frozenset({"chat.send"})
+    ws = FakeWebSocket()
+    seen = []
+
+    async def on_message(msg):
+        seen.append(msg)
+
+    server.on_message(on_message)
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-tui-timeout",
+                "method": "chat.send",
+                "timeout_ms": 60_000,
+                "params": {
+                    "session_id": "sess-tui-timeout",
+                    "content": "hello",
+                    "mode": "code.normal",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        path="/tui",
+    )
+
+    assert len(seen) == 1
+    msg = seen[0]
+    assert msg.channel_id == "tui"
+    assert msg.metadata["client_timeout_ms"] == 60_000
+    assert "timeout_ms" not in msg.params
     assert ws.sent_frames == []
 
 

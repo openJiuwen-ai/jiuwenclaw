@@ -1,4 +1,4 @@
-import { flattenArrayPayload, formatValue, makeItem } from "../helpers.js";
+import { flattenArrayPayload, makeItem } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 
 type SkillNetItem = {
@@ -46,7 +46,7 @@ async function pollSkillNetInstall(
   installId: string,
   maxWaitMs: number = 15 * 60 * 1000,
   pollMs: number = 800,
-): Promise<{ success?: boolean; status?: string; detail?: string; skill?: { name?: string; source?: string } }> {
+): Promise<{ success?: boolean; status?: string; detail?: string; detail_key?: string; skill?: { name?: string; source?: string } }> {
   const deadline = Date.now() + maxWaitMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, pollMs));
@@ -61,6 +61,61 @@ async function pollSkillNetInstall(
     // still pending — keep polling
   }
   return { success: false, detail: `SkillNet install timed out after ${Math.round(maxWaitMs / 1000)}s` };
+}
+
+/** Detect "skill already installed" from a SkillNet install result (sync response or polled final status).
+ *  Backend signals this via detail_key "skills.skillNet.errors.skillAlreadyInstalled"
+ *  or a Chinese detail containing 已安装/已存在. */
+function isSkillNetAlreadyInstalled(result: { detail?: string; detail_key?: string } | undefined): boolean {
+  if (!result) return false;
+  if (result.detail_key === "skills.skillNet.errors.skillAlreadyInstalled") return true;
+  return !!(result.detail?.includes("已存在") || result.detail?.includes("已安装"));
+}
+
+/** After a SkillNet install reports "already installed" (the async backend detects this
+ *  during polling, not in the initial sync response), prompt the user to overwrite or cancel.
+ *  Returns true if handled (overwrite attempted or cancelled), false if not an "already installed" case. */
+async function promptSkillNetOverwrite(
+  ctx: import("../types.js").CommandContext,
+  url: string,
+  result: { detail?: string; detail_key?: string } | undefined,
+): Promise<boolean> {
+  if (!isSkillNetAlreadyInstalled(result)) return false;
+  const answers = await ctx.askQuestions([
+    {
+      header: "SkillNet",
+      question: `Skill already exists. Do you want to force overwrite it from SkillNet?`,
+      options: [
+        { label: "Yes, overwrite", description: `Re-install from SkillNet, replacing the existing version` },
+        { label: "No, cancel", description: "Keep the existing skill unchanged" },
+      ],
+    },
+  ]);
+  const selected = answers[0]?.selected_options?.[0];
+  if (selected !== "Yes, overwrite") {
+    ctx.addItem(makeItem(ctx.sessionId, "info", `Installation cancelled. Skill remains unchanged.`));
+    return true;
+  }
+  ctx.addItem(makeItem(ctx.sessionId, "info", `Force re-installing from SkillNet: ${url}`));
+  const forcePayload = await ctx.request<{ success?: boolean; detail?: string; pending?: boolean; install_id?: string }>(
+    "skills.skillnet.install",
+    { url, force: true },
+    120_000,
+  );
+  if (forcePayload.success && forcePayload.pending && forcePayload.install_id) {
+    ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${forcePayload.install_id.slice(0, 8)})`));
+    const finalSt = await pollSkillNetInstall(ctx, forcePayload.install_id);
+    if (finalSt.success && finalSt.status === "done") {
+      ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${finalSt.skill?.name || url}`));
+    } else {
+      ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet force install failed: ${url}`));
+    }
+  } else if (forcePayload.success && !forcePayload.pending) {
+    ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${url}`));
+  } else {
+    ctx.addItem(makeItem(ctx.sessionId, "error", forcePayload.detail || `SkillNet force install failed: ${url}`));
+  }
+  return true;
 }
 
 async function listSkills(ctx: import("../types.js").CommandContext): Promise<void> {
@@ -163,6 +218,36 @@ export function createSkillsCommand(): SlashCommand {
             if (payload.success) {
               const skillName = payload.skill?.name || spec;
               ctx.addItem(makeItem(ctx.sessionId, "info", `Skill imported: ${skillName}`));
+            } else if (payload.detail?.includes("已存在") || payload.detail?.includes("已安装")) {
+              // Skill already installed — ask user if they want to force overwrite
+              const existingName = payload.detail.replace(/^skill\s+/, "").replace(/[\s已存在安装]+.*$/, "") || spec;
+              const answers = await ctx.askQuestions([
+                {
+                  header: "Import",
+                  question: `Skill "${existingName}" is already installed. Do you want to force overwrite it?`,
+                  options: [
+                    { label: "Yes, overwrite", description: `Re-import from "${spec}", replacing the existing version` },
+                    { label: "No, cancel", description: "Keep the existing skill unchanged" },
+                  ],
+                },
+              ]);
+              const selected = answers[0]?.selected_options?.[0];
+              if (selected === "Yes, overwrite") {
+                ctx.addItem(makeItem(ctx.sessionId, "info", `Force re-importing from: ${spec}`));
+                const forcePayload = await ctx.request<{ success?: boolean; detail?: string; skill?: { name?: string } }>(
+                  "skills.import_local",
+                  { path: spec, force: true },
+                  120_000,
+                );
+                if (forcePayload.success) {
+                  const skillName = forcePayload.skill?.name || spec;
+                  ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-imported: ${skillName}`));
+                } else {
+                  ctx.addItem(makeItem(ctx.sessionId, "error", forcePayload.detail || `Import failed: ${spec}`));
+                }
+              } else {
+                ctx.addItem(makeItem(ctx.sessionId, "info", `Import cancelled. Skill remains unchanged.`));
+              }
             } else {
               ctx.addItem(
                 makeItem(ctx.sessionId, "error", payload.detail || `Import failed: ${spec}`),
@@ -300,51 +385,21 @@ export function createSkillsCommand(): SlashCommand {
               120_000,
             );
             if (!installPayload.success) {
-              if (installPayload.detail?.includes("已存在") || installPayload.detail?.includes("已安装")) {
-                const answers = await ctx.askQuestions([
-                  {
-                    header: "SkillNet",
-                    question: `Skill "${exactMatch.skill_name}" is already installed. Do you want to force overwrite it?`,
-                    options: [
-                      { label: "Yes, overwrite", description: `Re-install from SkillNet, replacing the existing version` },
-                      { label: "No, cancel", description: "Keep the existing skill unchanged" },
-                    ],
-                  },
-                ]);
-                const selected = answers[0]?.selected_options?.[0];
-                if (selected === "Yes, overwrite") {
-                  const forcePayload = await ctx.request<{ success?: boolean; detail?: string; pending?: boolean; install_id?: string }>(
-                    "skills.skillnet.install",
-                    { url: skillUrl, force: true },
-                    120_000,
-                  );
-                  if (forcePayload.success && forcePayload.pending && forcePayload.install_id) {
-                    ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${forcePayload.install_id.slice(0, 8)})`));
-                    const finalSt = await pollSkillNetInstall(ctx, forcePayload.install_id);
-                    if (finalSt.success && finalSt.status === "done") {
-                      ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${finalSt.skill?.name || exactMatch.skill_name}`));
-                    } else {
-                      ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet force install failed`));
-                    }
-                  } else if (forcePayload.success && !forcePayload.pending) {
-                    ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${exactMatch.skill_name}`));
-                  } else {
-                    ctx.addItem(makeItem(ctx.sessionId, "error", forcePayload.detail || `SkillNet force install failed`));
-                  }
-                } else {
-                  ctx.addItem(makeItem(ctx.sessionId, "info", `Installation cancelled. Skill remains unchanged.`));
-                }
-              } else {
-                ctx.addItem(makeItem(ctx.sessionId, "error", installPayload.detail || `SkillNet install failed: ${skillUrl}`));
-              }
+              // SkillNet install is async: "already installed" is normally detected during polling,
+              // but handle the sync response defensively before falling back to a plain error.
+              if (await promptSkillNetOverwrite(ctx, skillUrl, installPayload)) return;
+              ctx.addItem(makeItem(ctx.sessionId, "error", installPayload.detail || `SkillNet install failed: ${skillUrl}`));
               return;
             }
-            // Async install — poll for completion
+            // Async install — poll for completion. "Already installed" is detected here by the
+            // backend during the background job, surfaced as status=failed with a specific detail.
             if (installPayload.pending && installPayload.install_id) {
               ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${installPayload.install_id.slice(0, 8)})`));
               const finalSt = await pollSkillNetInstall(ctx, installPayload.install_id);
               if (finalSt.success && finalSt.status === "done") {
                 ctx.addItem(makeItem(ctx.sessionId, "info", `Skill installed from SkillNet: ${finalSt.skill?.name || exactMatch.skill_name}`));
+              } else if (await promptSkillNetOverwrite(ctx, skillUrl, finalSt)) {
+                return;
               } else {
                 ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet install failed: ${skillUrl}`));
               }
@@ -383,6 +438,43 @@ export function createSkillsCommand(): SlashCommand {
           );
           if (payload.success) {
             ctx.addItem(makeItem(ctx.sessionId, "info", `Skill installed: ${finalSpec}`));
+          } else if (payload.detail?.includes("已存在") || payload.detail?.includes("已安装")) {
+            // Builtin skills cannot be force-overwritten (backend rejects force) — just warn.
+            // A bare name (no @) or "<name>@builtin" both resolve to a builtin on the backend.
+            const isBuiltin = !finalSpec.includes("@") || finalSpec.endsWith("@builtin");
+            if (isBuiltin) {
+              const builtinName = finalSpec.replace(/@builtin$/i, "");
+              ctx.addItem(makeItem(ctx.sessionId, "info",
+                `Skill "${builtinName}" is already installed (built-in). Reinstallation is not supported — the existing version is kept.`));
+              return;
+            }
+            // Marketplace skill already installed — ask user if they want to force overwrite
+            const answers = await ctx.askQuestions([
+              {
+                header: "Install",
+                question: `Skill "${finalSpec}" is already installed. Do you want to force overwrite it?`,
+                options: [
+                  { label: "Yes, overwrite", description: `Re-install "${finalSpec}", replacing the existing version` },
+                  { label: "No, cancel", description: "Keep the existing skill unchanged" },
+                ],
+              },
+            ]);
+            const selected = answers[0]?.selected_options?.[0];
+            if (selected === "Yes, overwrite") {
+              ctx.addItem(makeItem(ctx.sessionId, "info", `Force re-installing: ${finalSpec}`));
+              const forcePayload = await ctx.request<{ success?: boolean; detail?: string }>(
+                "skills.install",
+                { spec: finalSpec, force: true },
+                120_000,
+              );
+              if (forcePayload.success) {
+                ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed: ${finalSpec}`));
+              } else {
+                ctx.addItem(makeItem(ctx.sessionId, "error", forcePayload.detail || `Install failed: ${finalSpec}`));
+              }
+            } else {
+              ctx.addItem(makeItem(ctx.sessionId, "info", `Installation cancelled. Skill "${finalSpec}" remains unchanged.`));
+            }
           } else {
             ctx.addItem(
               makeItem(ctx.sessionId, "error", payload.detail || `Install failed: ${finalSpec}`),
@@ -692,53 +784,21 @@ export function createSkillsCommand(): SlashCommand {
                 120_000,
               );
               if (!installPayload.success) {
-                // Skill already installed — ask user if they want to force overwrite
-                if (installPayload.detail?.includes("已存在") || installPayload.detail?.includes("已安装")) {
-                  const answers = await ctx.askQuestions([
-                    {
-                      header: "SkillNet",
-                      question: `Skill already exists. Do you want to force overwrite it from SkillNet?`,
-                      options: [
-                        { label: "Yes, overwrite", description: `Re-install from SkillNet, replacing the existing version` },
-                        { label: "No, cancel", description: "Keep the existing skill unchanged" },
-                      ],
-                    },
-                  ]);
-                  const selected = answers[0]?.selected_options?.[0];
-                  if (selected === "Yes, overwrite") {
-                    ctx.addItem(makeItem(ctx.sessionId, "info", `Force re-installing from SkillNet: ${url}`));
-                    const forcePayload = await ctx.request<{ success?: boolean; detail?: string; pending?: boolean; install_id?: string }>(
-                      "skills.skillnet.install",
-                      { url, force: true },
-                      120_000,
-                    );
-                    if (forcePayload.success && forcePayload.pending && forcePayload.install_id) {
-                      ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${forcePayload.install_id.slice(0, 8)})`));
-                      const finalSt = await pollSkillNetInstall(ctx, forcePayload.install_id);
-                      if (finalSt.success && finalSt.status === "done") {
-                        ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${finalSt.skill?.name || url}`));
-                      } else {
-                        ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet force install failed: ${url}`));
-                      }
-                    } else if (forcePayload.success && !forcePayload.pending) {
-                      ctx.addItem(makeItem(ctx.sessionId, "info", `Skill re-installed from SkillNet: ${url}`));
-                    } else {
-                      ctx.addItem(makeItem(ctx.sessionId, "error", forcePayload.detail || `SkillNet force install failed: ${url}`));
-                    }
-                  } else {
-                    ctx.addItem(makeItem(ctx.sessionId, "info", `Installation cancelled. Skill remains unchanged.`));
-                  }
-                } else {
-                  ctx.addItem(makeItem(ctx.sessionId, "error", installPayload.detail || `SkillNet install failed: ${url}`));
-                }
+                // SkillNet install is async: the sync response rarely carries "already installed"
+                // directly, but handle it defensively before falling back to a plain error.
+                if (await promptSkillNetOverwrite(ctx, url, installPayload)) return;
+                ctx.addItem(makeItem(ctx.sessionId, "error", installPayload.detail || `SkillNet install failed: ${url}`));
                 return;
               }
-              // Async install — poll for completion
+              // Async install — poll for completion. "Already installed" is detected here by the
+              // backend during the background job, surfaced as status=failed with a specific detail.
               if (installPayload.pending && installPayload.install_id) {
                 ctx.addItem(makeItem(ctx.sessionId, "info", `Downloading... (install_id: ${installPayload.install_id.slice(0, 8)})`));
                 const finalSt = await pollSkillNetInstall(ctx, installPayload.install_id);
                 if (finalSt.success && finalSt.status === "done") {
                   ctx.addItem(makeItem(ctx.sessionId, "info", `Skill installed from SkillNet: ${finalSt.skill?.name || url}`));
+                } else if (await promptSkillNetOverwrite(ctx, url, finalSt)) {
+                  return;
                 } else {
                   ctx.addItem(makeItem(ctx.sessionId, "error", finalSt.detail || `SkillNet install failed: ${url}`));
                 }

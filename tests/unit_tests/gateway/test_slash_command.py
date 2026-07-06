@@ -200,6 +200,34 @@ def test_format_skills_list_for_notice() -> None:
     assert "b" in out
 
 
+def test_format_skills_list_for_notice_im_invariants() -> None:
+    """IM 通道（微信等）仅从 payload.content 取文本，skills.list 载荷必须能渲染出非空 content。
+
+    /skills list 在 IM 端无返回的根因：skills.list 响应 ``{"skills": [...]}`` 不含
+    ``content``，被通道当作空消息丢弃。这里锁定 _skills_slash_notice 依赖的渲染入口
+    在成功/空/错误三态下都产出可下发文本。
+    """
+    # 成功：有技能
+    ok_text = format_skills_list_for_notice(
+        {"skills": [{"name": "a", "description": "d", "source": "local"}]}
+    )
+    assert ok_text and ok_text.strip()
+    assert "【技能列表】" in ok_text
+
+    # 空：无技能
+    empty_text = format_skills_list_for_notice({"skills": []})
+    assert empty_text and empty_text.strip()
+
+    # 错误：上游返回 error 字段
+    err_text = format_skills_list_for_notice({"error": "boom"})
+    assert err_text and err_text.strip()
+    assert "boom" in err_text
+
+    # 异常：载荷为 None / 非 dict
+    assert format_skills_list_for_notice(None).strip()
+    assert format_skills_list_for_notice({}).strip()
+
+
 def test_first_batch_registry_ids() -> None:
     ids = {e.id for e in FIRST_BATCH_REGISTRY}
     expected = {

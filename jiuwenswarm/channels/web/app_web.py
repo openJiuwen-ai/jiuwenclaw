@@ -32,6 +32,7 @@ parse_dotenv_early("jiuwenswarm-web")
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
+from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
 from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
     get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, wait_for_tcp_port
 from jiuwenswarm.server.runtime.session.session_history import history_exists, load_history_records
@@ -418,7 +419,18 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 ctx = ssl.create_default_context() if get_ssl_verify() else get_insecure_ssl_context()
                 upstream = ctx.wrap_socket(upstream, server_hostname=upstream_host)
         except OSError as exc:
-            self.log_error("proxy ws connect failed: %s", exc)
+            self.log_error(
+                "proxy ws connect failed: %s",
+                format_ws_diagnostics(
+                    {
+                        "client": self.client_address,
+                        "upstream_host": upstream_host,
+                        "upstream_port": upstream_port,
+                        "scheme": parsed.scheme,
+                    },
+                    describe_ws_exception(exc),
+                ),
+            )
             self.send_error(502, "proxy ws connect failed")
             return
 
@@ -447,13 +459,35 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 if len(response_head) > self._WS_HANDSHAKE_MAX_SIZE:
                     break
             if not response_head:
+                self.log_error(
+                    "proxy ws handshake failed: %s",
+                    format_ws_diagnostics(
+                        {
+                            "client": self.client_address,
+                            "upstream_host": upstream_host,
+                            "upstream_port": upstream_port,
+                            "reason": "empty response",
+                        }
+                    ),
+                )
                 self.send_error(502, "proxy ws handshake failed: empty response")
                 return
 
             self.connection.sendall(response_head)
 
             if b" 101 " not in response_head.split(b"\r\n", 1)[0]:
-                self.logger.info("[ws][handshake] upstream returned non-101, tunnel closed")
+                status_line = response_head.split(b"\r\n", 1)[0].decode("latin-1", errors="replace")
+                self.logger.info(
+                    "[ws][handshake] upstream returned non-101, tunnel closed: %s",
+                    format_ws_diagnostics(
+                        {
+                            "client": self.client_address,
+                            "upstream_host": upstream_host,
+                            "upstream_port": upstream_port,
+                            "status": status_line,
+                        }
+                    ),
+                )
                 return
 
             self.logger.info(
@@ -468,15 +502,53 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             while True:
                 readable, _, errored = select.select(sockets, [], sockets, self._WS_SELECT_TIMEOUT)
                 if errored:
+                    self.log_error(
+                        "proxy ws socket error, closing tunnel: %s",
+                        format_ws_diagnostics(
+                            {
+                                "client": self.client_address,
+                                "upstream_host": upstream_host,
+                                "upstream_port": upstream_port,
+                                "errored": [
+                                    "client" if sock is self.connection else "upstream"
+                                    for sock in errored
+                                ],
+                            }
+                        ),
+                    )
                     break
                 if not readable:
                     continue
                 for sock in readable:
+                    direction = "frontend->backend" if sock is self.connection else "backend->frontend"
                     try:
                         data = sock.recv(self._WS_RECV_BUFFER)
-                    except OSError:
+                    except OSError as recv_exc:
+                        self.log_error(
+                            "proxy ws recv failed, closing tunnel: %s",
+                            format_ws_diagnostics(
+                                {
+                                    "client": self.client_address,
+                                    "upstream_host": upstream_host,
+                                    "upstream_port": upstream_port,
+                                    "direction": direction,
+                                },
+                                describe_ws_exception(recv_exc),
+                            ),
+                        )
                         data = b""
                     if not data:
+                        self.logger.info(
+                            "[ws][tunnel] peer closed: %s",
+                            format_ws_diagnostics(
+                                {
+                                    "client": self.client_address,
+                                    "upstream_host": upstream_host,
+                                    "upstream_port": upstream_port,
+                                    "direction": direction,
+                                }
+                            ),
+                        )
                         return
                     target = upstream if sock is self.connection else self.connection
                     if sock is self.connection:
@@ -501,12 +573,33 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                             _, writable, _ = select.select([], [target], [], 1.0)
                             if not writable:
                                 # 长时间不可写，对端疑似卡死，关闭隧道避免空转
-                                self.log_error("proxy ws write stalled, closing tunnel")
+                                self.log_error(
+                                    "proxy ws write stalled, closing tunnel: %s",
+                                    format_ws_diagnostics(
+                                        {
+                                            "client": self.client_address,
+                                            "upstream_host": upstream_host,
+                                            "upstream_port": upstream_port,
+                                            "direction": direction,
+                                            "pending_bytes": len(pending),
+                                        }
+                                    ),
+                                )
                                 return
                             continue
                         pending = pending[sent:]
         except Exception as exc:  # noqa: BLE001
-            self.log_error("proxy ws error: %s", exc)
+            self.log_error(
+                "proxy ws error: %s",
+                format_ws_diagnostics(
+                    {
+                        "client": self.client_address,
+                        "upstream_host": upstream_host,
+                        "upstream_port": upstream_port,
+                    },
+                    describe_ws_exception(exc),
+                ),
+            )
             try:
                 self.send_error(502, "proxy ws error")
             except Exception:  # noqa: BLE001

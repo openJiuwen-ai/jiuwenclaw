@@ -8,6 +8,7 @@
     "loading": "Loading...",
     "save": "Save",
     "saving": "Saving...",
+    "saveSuccess": "Saved successfully",
     "error": "Error",
     "ok": "OK",
     "and": "and",
@@ -780,7 +781,7 @@
       "apiBaseUrlInvalid": "API Base URL must start with http:// or https://",
       "modelNameTooLong": "Model name is too long, please keep it under 100 characters",
       "aliasTooLong": "Alias is too long, please keep it under 100 characters",
-      "apiBaseTooLong": "API Base URL is too long, please keep it under 100 characters",
+      "apiBaseTooLong": "API Base URL is too long, please keep it under 256 characters",
       "apiKeyTooLong": "API Key is too long, please keep it under 500 characters",
       "reasoningDefault": "Use default",
       "alias": "Alias",
@@ -1357,7 +1358,12 @@
         "skillMdNotFound": "Download incomplete or missing SKILL.md. Please retry.",
         "parseSkillFailed": "Could not parse the downloaded skill file.",
         "skillAlreadyInstalled": "This skill is already installed.",
-        "invalidMirrorUrl": "mirror_url is not a valid http(s) URL."
+        "invalidMirrorUrl": "mirror_url is not a valid http(s) URL.",
+        "githubNotFound": "This skill's GitHub source is no longer available (404 Not Found). The repository, file, or branch may have been deleted, moved, or renamed — SkillNet's listing is likely out of date, so it can't be installed right now.",
+        "githubRateLimited": "GitHub request was rate-limited or forbidden (403). Anonymous requests are capped (~60/hour). Please try again later, or add a github_token on the settings page for a higher limit.",
+        "githubUnauthorized": "GitHub authentication failed (401). Please check that github_token on the settings page is valid.",
+        "githubNetwork": "Failed to reach GitHub (network timeout, or still failing after retries). Please check your network/proxy and try again.",
+        "githubApiError": "GitHub returned an error ({{status}}): {{message}}. Please try again later."
       }
     },
     "clawhub": {

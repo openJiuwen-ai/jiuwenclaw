@@ -44,6 +44,13 @@ from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
+from jiuwenswarm.gateway.routing.agent_request_timeout import (
+    AGENT_SERVER_TIMEOUT_CODE,
+    AGENT_SERVER_TIMEOUT_ERROR,
+    AgentRequestTimeoutError,
+    resolve_agent_request_timeout_seconds,
+    send_agent_request_with_timeout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +63,26 @@ _AUTO_HARNESS_LOCAL_REPO = _AUTO_HARNESS_CONFIG_DIR / "repo" / "openJiuwen--agen
 # Default values for ci_gate config
 _DEFAULT_CI_GATE_PYTHON_EXECUTABLE = sys.executable
 _DEFAULT_CI_GATE_INSTALL_COMMAND = "uv sync --active --group dev --extra cli"
+
+
+def _resolve_agent_client(agent_client: Any) -> Any:
+    if isinstance(agent_client, dict):
+        return agent_client.get("value")
+    return agent_client
+
+
+async def _send_tui_agent_request(real_client: Any, env: Any, *, label: str) -> Any:
+    timeout_seconds = resolve_agent_request_timeout_seconds(
+        channel_id="tui",
+        method=getattr(env, "method", None),
+        is_stream=bool(getattr(env, "is_stream", False)),
+    )
+    return await send_agent_request_with_timeout(
+        real_client,
+        env,
+        label=f"tui {label}",
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _get_auto_harness_config() -> dict[str, Any]:
@@ -577,7 +604,11 @@ async def _clear_agent_config_cache(agent_client=None) -> None:
                 channel_id="",
                 req_method=ReqMethod.AGENT_RELOAD_CONFIG,
             )
-            await agent_client.send_request(env)
+            await _send_tui_agent_request(
+                _resolve_agent_client(agent_client),
+                env,
+                label="config.cache_clear",
+            )
         else:
             get_config()
     except Exception as e:  # noqa: BLE001
@@ -1149,11 +1180,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 limit = int(raw_limit.strip())
         limit = max(1, min(limit, 200))
 
-        real_client = (
-            agent_client.get("value")
-            if isinstance(agent_client, dict)
-            else agent_client
-        )
+        real_client = _resolve_agent_client(agent_client)
         if real_client is None:
             await channel.send_response(
                 ws, req_id, ok=True, payload={"sessions": []}
@@ -1168,7 +1195,19 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             is_stream=False,
             timestamp=time.time(),
         )
-        resp = await real_client.send_request(env)
+        try:
+            resp = await _send_tui_agent_request(
+                real_client, env, label="session.list",
+            )
+        except AgentRequestTimeoutError:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=AGENT_SERVER_TIMEOUT_ERROR,
+                code=AGENT_SERVER_TIMEOUT_CODE,
+            )
+            return
         if not resp.ok:
             await channel.send_response(ws, req_id, ok=False, error="session.list failed")
             return
@@ -1359,7 +1398,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     is_stream=False,
                     timestamp=time.time(),
                 )
-                resp = await real_client.send_request(env)
+                resp = await _send_tui_agent_request(
+                    real_client, env, label="session.delete",
+                )
                 if resp.ok:
                     pl = resp.payload if isinstance(resp.payload, dict) else {}
                     await channel.send_response(ws, req_id, ok=True, payload=pl)
@@ -1417,11 +1458,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         """
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 
-        real_client = (
-            agent_client.get("value")
-            if isinstance(agent_client, dict)
-            else agent_client
-        )
+        real_client = _resolve_agent_client(agent_client)
         if real_client is None:
             return False
 
@@ -1435,7 +1472,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 is_stream=False,
                 timestamp=time.time(),
             )
-            resp = await real_client.send_request(env)
+            resp = await _send_tui_agent_request(
+                real_client, env, label=params.error_label,
+            )
             if resp.ok:
                 pl = resp.payload if isinstance(resp.payload, dict) else {}
                 await channel.send_response(params.ws, params.req_id, ok=True, payload=pl)
@@ -1453,11 +1492,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
 
-        real_client = (
-            agent_client.get("value")
-            if isinstance(agent_client, dict)
-            else agent_client
-        )
+        real_client = _resolve_agent_client(agent_client)
         if real_client is None:
             return None, 0
 
@@ -1475,7 +1510,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 is_stream=False,
                 timestamp=time.time(),
             )
-            resp = await real_client.send_request(env)
+            resp = await _send_tui_agent_request(
+                real_client, env, label="command.compact_partial",
+            )
             if resp.ok:
                 pl = resp.payload if isinstance(resp.payload, dict) else {}
                 summary = pl.get("summary") if pl.get("status") == "ok" else None
@@ -1716,7 +1753,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     is_stream=False,
                     timestamp=time.time(),
                 )
-                resp = await real_client.send_request(env)
+                resp = await _send_tui_agent_request(
+                    real_client, env, label="command.rewind_compact",
+                )
                 if resp.ok:
                     pl = resp.payload if isinstance(resp.payload, dict) else {}
                     pl["summary"] = llm_summary
@@ -1751,11 +1790,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
 
-        real_client = (
-            agent_client.get("value")
-            if isinstance(agent_client, dict)
-            else agent_client
-        )
+        real_client = _resolve_agent_client(agent_client)
         if real_client is not None:
             try:
                 env = e2a_from_agent_fields(
@@ -1767,7 +1802,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     is_stream=False,
                     timestamp=time.time(),
                 )
-                resp = await real_client.send_request(env)
+                resp = await _send_tui_agent_request(
+                    real_client, env, label="session.rename",
+                )
                 if resp.ok:
                     pl = resp.payload if isinstance(resp.payload, dict) else {}
                     await channel.send_response(ws, req_id, ok=True, payload=pl)
@@ -1947,6 +1984,27 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload["intent"] = intent
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
+    async def _tui_disconnect_request(ws, req_id, params, session_id):
+        try:
+            setattr(ws, "_jiuwenswarm_tui_user_exit", True)
+        except Exception:
+            logger.debug("[tui.disconnect] mark user exit flag failed", exc_info=True)
+
+        payload = {"accepted": True, "session_id": session_id}
+        try:
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except Exception:
+            logger.debug("[tui.disconnect] response skipped on closed ws", exc_info=True)
+
+        mh = bind.message_handler
+        sid = (session_id or "").strip()
+        owns_session = True
+        is_bound_to_client = getattr(channel, "is_session_bound_to_client", None)
+        if callable(is_bound_to_client):
+            owns_session = bool(is_bound_to_client("tui", sid, ws))
+        if mh is not None and sid and owns_session:
+            await mh.cancel_agent_sessions_on_disconnect([("tui", sid)])
+
     async def _chat_user_answer(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
         request_id = params.get("request_id") if isinstance(params, dict) else None
@@ -1995,7 +2053,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 timestamp=time.time(),
             )
             try:
-                await real_client.send_request(_reload_env)
+                await _send_tui_agent_request(
+                    real_client, _reload_env, label=f"command.model.{label}",
+                )
             except Exception as _e_reload:
                 logger.warning("[cli command.model] %s AGENT_RELOAD_CONFIG failed: %s", label, _e_reload)
             if on_config_saved:
@@ -2498,7 +2558,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 timestamp=time.time(),
             )
             try:
-                await real_client.send_request(_reload_env)
+                await _send_tui_agent_request(
+                    real_client, _reload_env, label="command.model.switch",
+                )
             except Exception as _e_reload:
                 logger.warning("[cli model.switch] AGENT_RELOAD_CONFIG failed: %s", _e_reload)
             if on_config_saved:
@@ -2566,6 +2628,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "chat.send", _chat_send)
     channel.register_local_handler(path, "chat.resume", _chat_resume)
     channel.register_local_handler(path, "chat.interrupt", _chat_interrupt)
+    channel.register_local_handler(path, "tui.disconnect", _tui_disconnect_request)
     channel.register_local_handler(path, "chat.user_answer", _chat_user_answer)
     channel.register_local_handler(path, "history.get", _history_get)
     channel.register_local_handler(path, "command.model", _command_model)
@@ -2896,6 +2959,8 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         stale_session_keys: list[tuple[str, str]],
         stale_request_keys: list[tuple[str, str]] | None = None,
     ) -> None:
+        if bool(getattr(_ws, "_jiuwenswarm_tui_user_exit", False)):
+            return
         mh = bind.message_handler
         if mh is None:
             return
@@ -2905,10 +2970,19 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         request_keys = stale_request_keys or []
         if not stale_session_keys and not request_keys:
             return
-        await mh.cancel_agent_sessions_on_disconnect(
-            stale_session_keys,
-            stale_request_keys=request_keys,
-        )
+        if hasattr(mh, "schedule_cancel_agent_sessions_on_disconnect"):
+            await mh.schedule_cancel_agent_sessions_on_disconnect(
+                stale_session_keys,
+                stale_request_keys=request_keys,
+            )
+            return
+        await mh.cancel_agent_sessions_on_disconnect(stale_session_keys, stale_request_keys=request_keys)
+
+    def _tui_session_bound(channel_id: str, session_id: str) -> None:
+        mh = bind.message_handler
+        if mh is None or not hasattr(mh, "cancel_scheduled_disconnect_cancel"):
+            return
+        mh.cancel_scheduled_disconnect_cancel(channel_id, session_id)
 
     return GatewayRouteBinding(
         path=bind.path,
@@ -2917,4 +2991,5 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         forward_no_local_handler_methods=CLI_FORWARD_NO_LOCAL_HANDLER_METHODS,
         install=_install,
         disconnect_handler=_tui_disconnect,
+        session_bind_handler=_tui_session_bound,
     )

@@ -209,6 +209,10 @@ class TeamManager:
         self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
+        # 当 cancel 请求到达时设置，通知正在执行的 pause 操作中止自身并让 cancel 执行
+        self._cancel_requested: dict[str, bool] = {}
+        # 追踪当前正在执行的 pause 任务，供 cancel 抢占取消
+        self._active_pause_tasks: dict[str, asyncio.Task] = {}
         self._active_team_names: dict[str, str] = {}
         self._pending_team_names: dict[str, str] = {}
         # session_id → TeamSkillEvolutionRail instance (set by customizer, used for drain/approval)
@@ -625,7 +629,12 @@ class TeamManager:
         self._pending_team_names.pop(session_id, None)
 
     def clear_active_runtime(self, session_id: str) -> None:
-        self._active_team_names.pop(session_id, None)
+        removed = self._active_team_names.pop(session_id, None)
+        if removed is not None:
+            logger.info(
+                "[TeamManager] clear_active_runtime: session_id=%s team_name=%s remaining_active=%s",
+                session_id, removed, list(self._active_team_names),
+            )
 
     def _lookup_session_team_name(self, session_id: str) -> str | None:
         active_team_name = self._active_team_names.get(session_id)
@@ -1501,6 +1510,73 @@ class TeamManager:
 
         self._clear_team_rail_registries(session_id)
 
+    async def _stop_runner_team_runtime(
+        self, session_id: str, team_name: str, caller: str
+    ) -> bool:
+        """Stop Runner-owned team runtime, with proper cancellation and error handling.
+
+        Args:
+            session_id: The session ID
+            team_name: The team name to stop
+            caller: Caller identifier for logging (e.g., "cancel", "terminate", "pause")
+
+        Returns:
+            True if stop was successful, False otherwise
+        """
+        try:
+            result = await Runner.stop_agent_team(
+                team_name=team_name,
+                session_id=session_id,
+            )
+            logger.info(
+                "[TeamManager] %s: Runner pool entry removed: "
+                "session_id=%s team_name=%s",
+                caller,
+                session_id,
+                team_name,
+            )
+            return result
+        except asyncio.CancelledError:
+            logger.warning(
+                "[TeamManager] %s: Runner stop cancelled: "
+                "session_id=%s team_name=%s",
+                caller,
+                session_id,
+                team_name,
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                "[TeamManager] %s: Runner stop failed: "
+                "session_id=%s team_name=%s error=%s",
+                caller,
+                session_id,
+                team_name,
+                exc,
+            )
+            return False
+
+    async def _finalize_runtime_cleanup(self, session_id: str, caller: str) -> None:
+        """Finalize runtime cleanup: cleanup locals and clear active/pending registrations."""
+        logger.info(
+            "[TeamManager] %s: executing cleanup, session_id=%s",
+            caller,
+            session_id,
+        )
+        await self._cleanup_runtime_locals(session_id)
+        logger.info(
+            "[TeamManager] %s: cleanup done, clearing active, session_id=%s",
+            caller,
+            session_id,
+        )
+        self.clear_active_runtime(session_id)
+        self.clear_pending_runtime(session_id)
+        logger.info(
+            "[TeamManager] %s: clear done, session_id=%s",
+            caller,
+            session_id,
+        )
+
     async def terminate_session_runtime(self, session_id: str, reason: str = "") -> bool:
         """Stop-like teardown for the current team session runtime.
 
@@ -1531,24 +1607,14 @@ class TeamManager:
             # Stop Runner-owned runtime first before cleaning locals
             # to avoid gate/teardown races
             if team_name:
-                try:
-                    await Runner.stop_agent_team(team_name=team_name, session_id=session_id)
-                except Exception as exc:
-                    logger.warning(
-                        "[TeamManager] runner stop failed: session_id=%s error=%s",
-                        session_id,
-                        exc,
-                    )
+                await self._stop_runner_team_runtime(session_id, team_name, "terminate")
 
             if has_local_team_runtime:
                 cleaned = await self._destroy_team(session_id)
             else:
                 cleaned = False
 
-            await self._cleanup_runtime_locals(session_id)
-
-            self.clear_active_runtime(session_id)
-            self.clear_pending_runtime(session_id)
+            await self._finalize_runtime_cleanup(session_id, "terminate")
         logger.info(
             "[TeamManager] %steam session terminated: session_id=%s cleaned=%s",
             reason,
@@ -1566,7 +1632,37 @@ class TeamManager:
 
         Used for team cancel intent where the session should not be resumed.
         """
+        logger.info(
+            "[TeamManager] cancel_session_runtime 入口: session_id=%s reason=%s",
+            session_id, reason,
+        )
+        # 通知正在执行的 pause 操作中止自身，让 cancel 尽快获取 lifecycle lock
+        self._cancel_requested[session_id] = True
+
+        # 抢占：主动取消正在执行的 pause 任务，使其抛出 CancelledError 释放锁
+        pause_task = self._active_pause_tasks.get(session_id)
+        if pause_task and not pause_task.done():
+            pause_task.cancel()
+            logger.info(
+                "[TeamManager] cancel: preempting pause task, session_id=%s",
+                session_id,
+            )
+
+        # 如果 lifecycle lock 被其他操作（如 pause）持有，先尝试直接停止 Runner
+        # 以避免 cancel 被 pause 阻塞长达数分钟
+        lock = self._get_lifecycle_lock(session_id)
+        if lock.locked():
+            team_name = self._resolve_session_team_name(session_id)
+            if team_name:
+                await self._stop_runner_team_runtime(
+                    session_id, team_name, "cancel: forced"
+                )
+
+
         async with self._get_lifecycle_lock(session_id):
+            # 清理 cancel_requested 标志
+            self._cancel_requested.pop(session_id, None)
+
             has_stream_task = session_id in self._stream_tasks
             has_local_team_runtime = self._has_local_team_runtime(session_id)
             has_team_runtime = (
@@ -1591,33 +1687,14 @@ class TeamManager:
             # to avoid gate/teardown races and ensure pool removal
             runner_stopped = False
             if team_name:
-                try:
-                    runner_stopped = await Runner.stop_agent_team(
-                        team_name=team_name,
-                        session_id=session_id,
-                    )
-                    logger.info(
-                        "[TeamManager] Runner pool entry removed: session_id=%s team_name=%s stopped=%s",
-                        session_id,
-                        team_name,
-                        runner_stopped,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "[TeamManager] runner stop failed: session_id=%s team_name=%s error=%s",
-                        session_id,
-                        team_name,
-                        exc,
-                    )
+                runner_stopped = await self._stop_runner_team_runtime(
+                    session_id, team_name, "cancel"
+                )
                 await self._stop_runner_team_agent_transport(session_id)
 
             cleaned = False
 
-            # Cleanup locals (watcher, stream, monitor, skill rails)
-            await self._cleanup_runtime_locals(session_id)
-
-            self.clear_active_runtime(session_id)
-            self.clear_pending_runtime(session_id)
+            await self._finalize_runtime_cleanup(session_id, "cancel")
 
         logger.info(
             "[TeamManager] %steam session cancelled: session_id=%s cleaned=%s runner_stopped=%s",
@@ -1710,6 +1787,14 @@ class TeamManager:
             if not has_stream_task and not has_team_runtime:
                 return False
 
+            # 如果 cancel 请求已到达，中止 pause 并让 cancel 执行
+            if self._cancel_requested.get(session_id):
+                logger.info(
+                    "[TeamManager] %s pause aborted: cancel requested for session_id=%s",
+                    reason, session_id,
+                )
+                return False
+
             logger.info(
                 "[TeamManager] %s pause team session runtime: session_id=%s",
                 reason,
@@ -1720,10 +1805,36 @@ class TeamManager:
             runner_paused = False
             if team_name:
                 try:
-                    runner_paused = await Runner.pause_agent_team(
-                        team_name=team_name,
-                        session_id=session_id,
-                    )
+                    # 再次检查 cancel 标志，避免在等待 Runner.pause 时 cancel 已到达
+                    if self._cancel_requested.get(session_id):
+                        logger.info(
+                            "[TeamManager] %s pause aborted before Runner.pause: session_id=%s",
+                            reason, session_id,
+                        )
+                        return False
+
+                    # 注册当前 pause 任务，供 cancel 抢占取消
+                    self._active_pause_tasks[session_id] = asyncio.current_task()
+                    try:
+                        runner_paused = await Runner.pause_agent_team(
+                            team_name=team_name,
+                            session_id=session_id,
+                        )
+                    except asyncio.CancelledError:
+                        logger.info(
+                            "[TeamManager] %s pause aborted: cancelled by cancel request, session_id=%s",
+                            reason, session_id,
+                        )
+                        team_name = self._resolve_session_team_name(session_id)
+                        if team_name:
+                            await self._stop_runner_team_runtime(
+                                session_id, team_name, "pause aborted"
+                            )
+                        await self._finalize_runtime_cleanup(session_id, "pause aborted")
+                        return False
+                    finally:
+                        self._active_pause_tasks.pop(session_id, None)
+
                 except Exception as exc:
                     logger.warning(
                         "[TeamManager] runner pause failed: session_id=%s team_name=%s error=%s",
