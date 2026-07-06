@@ -5,6 +5,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from jiuwenclaw.agentserver.skill_turbo.plan_node import AbortError, PlanNode
@@ -961,6 +962,7 @@ class PageWorkerNode(PlanNode):
         )
         prompt = (
             "请识别以下来源中的幽灵来源（不可靠/虚假来源），返回应排除的序号列表。\n\n"
+            f"当前日期：{datetime.now(tz=timezone.utc).strftime('%Y-%m-%d')}\n\n"
             f"页面数据需求：{needs}\n\n"
             f"来源列表：\n{source_list}\n\n"
             "幽灵来源特征：\n"

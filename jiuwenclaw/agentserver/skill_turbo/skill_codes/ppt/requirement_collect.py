@@ -161,11 +161,18 @@ def _normalize_style_id(value: Any) -> str:
     alias_map = {
         "business-classic": "business-classic",
         "huawei": "business-classic",
+        "华为": "business-classic",
+        "华为风格": "business-classic",
+        "商务经典": "business-classic",
         "tech-minimal": "tech-minimal",
         "tech minimal": "tech-minimal",
+        "科技极简": "tech-minimal",
         "elegant-narrative": "elegant-narrative",
+        "典雅叙事": "elegant-narrative",
         "industrial-tech": "industrial-tech",
+        "工业科技": "industrial-tech",
         "free": "free",
+        "自由发挥": "free",
         "custom": "custom",
     }
     if lowered in alias_map:
@@ -1452,6 +1459,10 @@ class RequirementCollectNode(PlanNode):
                 v = pre_slots.get(slot)
                 if slot == "page_count" and v is not None:
                     ctx[slot] = v
+                elif slot == "style_id" and isinstance(v, str) and v.strip():
+                    # 归一化 style_id（如"华为风格"→"business-classic"）
+                    normalized = _normalize_style_id(v)
+                    ctx[slot] = normalized if normalized else v.strip()
                 elif isinstance(v, str) and v.strip():
                     ctx[slot] = v
             await self.skip_subplan(self.sub_plans[0], ctx, message="slots pre-filled from query")
