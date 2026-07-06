@@ -37,6 +37,18 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 
 ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: <<GATEWAY_NAME>>-secret
+  namespace: <<NAMESPACE>>
+type: Opaque
+stringData:
+  # 这里放所有敏感密码，无需base64编码，apply时自动加密
+  GATEWAY_DB_PASSWORD: "<<GATEWAY_DB_PASSWORD>>"
+  REDIS_PASSWORD: "<<REDIS_PASSWORD>>"
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -73,7 +85,10 @@ spec:
           # 用于调试模式：启用后容器将保持运行，可进入 Pod 手动调试程序
           # command: ["/bin/sh"]
           # args: ["-c", "sleep infinity"]
-          envFrom: []
+          envFrom:
+            # 密码密钥变量
+            - secretRef:
+                name: <<GATEWAY_NAME>>-secret
           volumeMounts:
             - name: gateway-config
               mountPath: /root/.jiuwenclaw/config/config.yaml
