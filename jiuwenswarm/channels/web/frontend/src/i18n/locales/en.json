@@ -171,6 +171,17 @@
       }
     }
   },
+  "artifacts": {
+    "title": "Artifacts",
+    "tab": "Artifacts",
+    "count": "{{count}} item(s)",
+    "empty": "No artifacts",
+    "download": "Download",
+    "selectArtifact": "Select an artifact to preview",
+    "previewUnsupported": "Preview is only supported for Markdown files",
+    "previewMissingPath": "No readable local path is available for this artifact",
+    "previewFailed": "Failed to load Markdown preview"
+  },
   "teams": {
     "title": "Team Management",
     "subtitle": "Inspect team directories or delete teams",

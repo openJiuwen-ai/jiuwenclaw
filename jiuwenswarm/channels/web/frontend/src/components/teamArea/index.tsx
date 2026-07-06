@@ -4,9 +4,10 @@
 
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Minimize2, Users } from 'lucide-react';
+import { FileText, Minimize2, Users } from 'lucide-react';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
 import type { Message } from '../../types';
+import { ArtifactsPanel, useSessionArtifactsCount } from '../ArtifactsPanel';
 import { TaskPlanningPanel } from './TaskPlanningPanel';
 import { TeamMembersPanel } from './TeamMembersPanel';
 import teamProcessIcon from '../../assets/team-process.svg';
@@ -108,6 +109,7 @@ function ExpandedTeamArea({
 }) {
   const { t } = useTranslation();
   const { completedTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
+  const artifactsCount = useSessionArtifactsCount();
 
   const selectedMember = useMemo(() => {
     if (!externalSelectedMemberId) return null;
@@ -129,6 +131,12 @@ function ExpandedTeamArea({
       key: 'team',
       label: t('team.membersTab'),
       icon: <Users size={16} />,
+    },
+    {
+      key: 'artifacts',
+      label: t('artifacts.tab'),
+      count: artifactsCount,
+      icon: <FileText size={16} />,
     },
   ] as const;
 
@@ -170,6 +178,10 @@ function ExpandedTeamArea({
             totalTasks={totalTasks}
             completedTasks={completedTasks}
           />
+        ) : activeTab === 'artifacts' ? (
+          <div className="flex min-w-0 flex-1 overflow-hidden border border-border rounded-lg mt-0 mx-6 mb-6">
+            <ArtifactsPanel />
+          </div>
         ) : (
           <TeamMembersPanel
             variant="expanded"

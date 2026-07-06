@@ -171,6 +171,17 @@
       }
     }
   },
+  "artifacts": {
+    "title": "产物",
+    "tab": "产物",
+    "count": "{{count}} 个产物",
+    "empty": "暂无产物",
+    "download": "下载",
+    "selectArtifact": "请选择一个产物预览",
+    "previewUnsupported": "仅支持 Markdown 文件预览",
+    "previewMissingPath": "当前产物没有可读取的本地路径",
+    "previewFailed": "Markdown 预览加载失败"
+  },
   "teams": {
     "title": "团队管理",
     "subtitle": "查看团队目录或删除团队",
