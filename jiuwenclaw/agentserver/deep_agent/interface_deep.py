@@ -6342,6 +6342,11 @@ class JiuWenClawDeepAdapter:
                 "falling back to DeepAgent. session_id=%s",
                 request.session_id,
             )
+            # pre_run 已在 _skill_turbo_load_resume_ctx 中执行，需配对 post_run 释放资源
+            try:
+                await session.post_run()
+            except Exception:
+                pass
             return None
 
         logger.info(

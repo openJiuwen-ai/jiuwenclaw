@@ -919,6 +919,10 @@ class SkillTurboExecutor:
             clear_session = create_agent_session(
                 session_id=sid, card=card
             ) if sid else create_agent_session(card=card)
+            # 必须与 _setup_execution_context 一致，使用 __skill_turbo agent_id 隔离
+            # checkpointer key，否则 clear_node_artifacts 命中默认 key（card.id），
+            # 残留产物存储在 {card.id}__skill_turbo key 下永远无法被清除。
+            set_skill_turbo_id(clear_session, card)
             await clear_session.pre_run(inputs=None)
             await clear_node_artifacts(clear_session)
             await clear_session.post_run()
