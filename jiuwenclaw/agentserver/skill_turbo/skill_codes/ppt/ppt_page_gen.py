@@ -118,22 +118,33 @@ _DESIGN_RULES_DIGEST = (
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
     "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`，主要内容必须放在安全区内；"
     "子元素禁止额外加 padding，否则导致双重边距\n"
-    "3. 三级字号：标题 36-48px / 副标题 24-28px / 正文 16-20px\n"
+    "3. 三级字号：页面标题 36-48px / 副标题 24-28px / 正文 16-20px；"
+    "但紧凑卡片内（grid 子项或 flex-col 中 ≥3 个并列卡片）标题 ≤18px、正文 ≤14px，"
+    "同级卡片字号必须一致，禁止个别卡片字号放大导致内容溢出\n"
     "4. 图表类型：时序数据→折线图(line)；对比数据→柱状图/分组柱状图(bar)；"
     "占比数据→饼图(pie)；多维能力对比→雷达图(radar)；禁止用图片占位\n"
     "4.1 图表渲染器（强制）：ECharts 必须用 `echarts.init(document.getElementById('xxx'), null, {renderer:'svg'})` "
     "单行初始化，禁止用变量赋值（如 `var chartDom=...; echarts.init(chartDom)`），"
     "禁止 Canvas 渲染器（会导致转 PPTX 后变位图）\n"
+    "4.2 图表最小高度（强制）：图表容器实际渲染高度必须 ≥ 250px（内联 SVG 的 viewBox height ≥ 250），"
+    "否则 Y 轴名称/图例/标签会溢出重叠；"
+    "用 `min-h-[250px]` 或 `flex-1` 确保图表区域有足够空间；禁止把图表挤在高度 < 200px 的容器里\n"
     "5. 步骤/流程页 → 用 HTML/CSS 绘制节点+连线+文字，禁止纯文字描述\n"
     "6. 关键数字必须有放大数字卡片，结论必须有摘要高亮\n"
-    "7. 防溢出：单行文字不超容器宽度；连续段落 ≤ 100 字（超过必须拆列表）\n"
+    "7. 防溢出：单行文字不超容器宽度；连续段落 ≤ 100 字（超过必须拆列表）；"
+    "文本容器（p、span、div）必须加 `break-words` 类防止中英混排时英文/数字处不换行溢出\n"
     "8. 布局结构：严格遵循标准 HTML 骨架——main 用 `grid grid-cols-2 gap-3`，"
     "恰好 2 个 `<section>` 子元素；header/main/footer 纵向排列在 content-safe 内\n"
     "9. grid 子元素：必须 `h-full min-h-0 overflow-hidden`\n"
     "10. flex-col 子元素：必须 `flex-1 min-h-0 overflow-hidden`\n"
-    "11. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体\n"
+    "10.1 内容预算：flex-col 中有多个子元素时，禁止把大块内容（如完整表格）设 `flex-shrink-0`，"
+    "否则会挤压其他 `flex-1` 兄弟元素至高度为 0；大块内容也要参与弹性收缩或拆分\n"
+    "11. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体；"
+    "所有页面 `<body>` 背景色必须统一，从风格规范中取一致的背景色，禁止部分页面用浅灰/灰色背景而其他页用白色\n"
     "12. 页脚：底部必须有数据来源汇总条（如'数据来源：央行、财政部、...'），即使卡片内已有来源标注也必须保留页脚，禁止纯数字编号\n"
     "13. 布局实现：所有区域用 `flex-1 min-h-0` 自动分配高度，禁止手动计算 px 值；子元素用 `h-full min-h-0 overflow-hidden` 防溢出，信任 flex/grid 自动布局\n"
+    "13.1 表格禁用 CSS Grid：html-to-pptx 引擎不支持 `display:grid` 渲染表格，grid 表格会被转为低质量截图；"
+    "数据表格必须用 `<table><tr><td>` 原生标签或 `flex` 布局替代 `grid grid-cols-N`\n"
     "14. 全局禁止 `rounded-*` 类，所有元素 border-radius:0（饼图/环形图的圆形不受此限制）\n"
     "15. 内容页根节点必须同时携带 `class=\"ppt-slide\"`、`type=\"content\"` 与 `data-page-role=\"content\"`；"
     "`data-page-role` 不是旧 `type` 属性的替代品，两者并存\n"
@@ -173,7 +184,7 @@ _STRUCTURAL_DESIGN_RULES = (
     "结束页标题 42-48px / 正文 22px\n"
     "4. 防溢出：单行文字不超容器宽度\n"
     "5. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体；"
-    "页面背景色必须与风格规范一致（商务经典=白色 `bg-white`），禁止自行使用渐变或深色背景\n"
+    "所有页面背景色必须统一，从风格规范中取一致的背景色，禁止部分页面自行使用不同背景色\n"
     "6. 布局：居中排列（`flex flex-col items-center justify-center`），"
     "不强制 grid-cols-2 双栏\n"
     "7. 留白：允许较高留白，不强制数据卡片、图表或数据来源页脚\n"
@@ -272,6 +283,17 @@ _PAGE_LAYOUT_TEMPLATES = {
         "多维数据比较→雷达图(radar)；两变量关系→散点图(scatter)；"
         "单一变量分布→直方图(histogram)；数据分布/离群值→箱线图(boxplot)；"
         "层次结构→树状图(treemap)；矩阵数据→热力图(heatmap)\n"
+        "- 双轴图标签防重叠（无论用 echarts.init 还是内联 SVG 都必须遵守）："
+        "柱状图标签放柱顶上方（y 坐标减小），折线图标签放数据点下方（y 坐标增大），"
+        "两组标签垂直间距 ≥15px，禁止两组标签都在数据点上方；"
+        "用 echarts.init 时【强制】每个 series 都必须设 labelLayout:{moveOverlap:'shiftY'}，"
+        "同时配合 label.position:'top'/'bottom' 错开（两者并存，不可二选一）；"
+        "原因：双轴图两轴量程独立，仅靠 position 错开无法保证标签不重叠（数据点屏幕坐标过近时 top/bottom 标签仍会撞），"
+        "moveOverlap:'shiftY' 是 ECharts 原生运行时防重叠算法，渲染时自动检测并向 Y 方向错开重叠标签；"
+        "用内联 SVG 时折线图 text 的 transform translate y = 数据点 y + 12（向下偏移），柱状图 text 的 y = 柱顶 y - 8（向上偏移）\n"
+        "- 图例防叠字（无论用 echarts.init 还是内联 SVG 都必须遵守）："
+        "图例项 ≥3 个时，用 echarts.init 设 legend:{type:'scroll'} 或 legend:{orient:'vertical'}；"
+        "用内联 SVG 时确保图例文字间距 ≥ 每项文字宽度+20px，排不下就换行或竖排；禁止水平挤排叠字\n"
     ),
     "cover": (
         "### 推荐布局（cover 类型，封面页）\n"
@@ -432,6 +454,29 @@ def _fix_echarts_svg_renderer(html: str) -> str:
         return f"echarts.init({arg}, null, {{renderer:'svg'}})"
 
     return _ECHARTS_INIT_NO_SVG_RE.sub(_replacer, html)
+
+
+# 匹配 echarts-static-svg 容器块（用于检测空 SVG）
+# 约定：容器内有且仅有一个 <svg> 根元素，且其后紧跟容器闭合 </div>
+# 这样可避免容器内嵌套 <div>（图例/标题/布局包装等）导致 .*?</div> 提前截断真实 SVG 内容
+_STATIC_SVG_BLOCK_RE = re.compile(
+    r'<div class="echarts-static-svg"[^>]*>.*?</svg>\s*</div>',
+    re.IGNORECASE | re.DOTALL,
+)
+# SVG 内有实际图形内容的元素
+_SVG_CONTENT_TAGS = re.compile(
+    r'<(?:path|rect|circle|ellipse|line|polyline|polygon|text|tspan|image|use)\b',
+    re.IGNORECASE,
+)
+
+
+def _has_empty_chart_svg(html: str) -> bool:
+    """检测是否存在空的 echarts-static-svg（有容器但 SVG 内无图形元素）。"""
+    for m in _STATIC_SVG_BLOCK_RE.finditer(html):
+        svg_block = m.group(0)
+        if not _SVG_CONTENT_TAGS.search(svg_block):
+            return True
+    return False
 
 
 def _post_check_data_viz(html: str, failed_items: list[str], search_mode: str) -> list[str]:
@@ -1381,6 +1426,10 @@ class PageWorkerNode(PlanNode):
             llm_failed = list(failed_items)
             if not is_structural:
                 failed_items = _post_check_data_viz(html, failed_items, search_mode)
+                # 主动检测空 SVG 图表：有 echarts-static-svg 容器但 SVG 内无图形元素
+                if _has_empty_chart_svg(html) and "缺数据可视化" not in failed_items:
+                    failed_items.append("缺数据可视化")
+                    logger.info("[P8.1] 页面 %d 检测到空SVG图表，标记缺数据可视化", page_num)
             if len(failed_items) < len(llm_failed):
                 removed = [x for x in llm_failed if x not in failed_items]
                 logger.info(
