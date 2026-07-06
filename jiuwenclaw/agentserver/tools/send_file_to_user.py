@@ -108,7 +108,7 @@ class SendFileToolkit:
         session_id = ctx.get("session_id") or self.session_id
         channel_id = ctx.get("channel_id") or self.channel_id
         # ctx 已绑定时以其为权威：缺失即视为本请求无 metadata，避免回退到被并发
-        # 请求覆盖的脏实例字段；仅在无 ContextVar（deep/feishu 等非 replan 路径）时回退。
+        # 请求覆盖的脏实例字段；仅在无 ContextVar（deep/feishu 等非 skill_turbo 路径）时回退。
         if ctx:
             metadata = ctx.get("metadata")
         else:

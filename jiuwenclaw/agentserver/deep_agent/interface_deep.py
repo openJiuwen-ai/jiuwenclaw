@@ -79,8 +79,8 @@ from openjiuwen.harness.rails.lsp_rail import LspRail
 from openjiuwen.harness.rails.context_engineering_rail import ContextEngineeringRail
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
-from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload as _ReplanConfirmPayload
-from openjiuwen.core.runner.callback import AbortError as _ReplanAbortError
+from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload as _SkillTurboConfirmPayload
+from openjiuwen.core.runner.callback import AbortError as _SkillTurboAbortError
 from openjiuwen.agent_evolving.signal import SignalDetector
 try:
     from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
@@ -137,13 +137,12 @@ from jiuwenclaw.agentserver.deep_agent.interrupt_resume_helpers import (
     prepare_interrupt_resume_for_request,
     set_todo_resume_snapshot_pending,
 )
-from jiuwenclaw.agentserver.replan_agent.node_artifact_store import (
-    load_node_artifacts as _replan_load_node_artifacts,
-)
-from jiuwenclaw.agentserver.replan_agent.permission_bridge import (
-    clear_resume_ctx as _replan_clear_resume_ctx,
-    extract_tool_interrupt as _replan_extract_tool_interrupt,
-    load_resume_ctx as _replan_load_resume_ctx,
+from jiuwenclaw.agentserver.skill_turbo.permission_bridge import (
+    build_interaction_output_from_abort as _skill_turbo_build_interaction_output,
+    clear_resume_ctx as _skill_turbo_clear_resume_ctx,
+    extract_tool_interrupt as _skill_turbo_extract_tool_interrupt,
+    load_resume_ctx as _skill_turbo_load_resume_ctx,
+    set_skill_turbo_id as _skill_turbo_set_agent_id,
 )
 from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     build_paused_plan_decision_prompt_from_session_snapshot,
@@ -3620,6 +3619,7 @@ class JiuWenClawDeepAdapter:
 
         # Initialize fork_agent tools
         await loop.run_in_executor(None, self._init_subagent_tools)
+        await loop.run_in_executor(None, self._init_skill_turbo_tool)
 
         cfg = get_config()
         self._embed_fingerprint = self._embed_config_fingerprint(cfg)
@@ -3671,6 +3671,40 @@ class JiuWenClawDeepAdapter:
     def _get_fork_agent_executor(self) -> Any | None:
         """Return this adapter's local subagent executor."""
         return getattr(self, "_fork_agent_executor", None)
+
+    def _init_skill_turbo_tool(self) -> None:
+        """Initialize skill_turbo tool for SkillTurbo integration."""
+        if self._instance is None:
+            return
+        try:
+            config_base = get_config()
+            react_config = config_base.get("react", {}) if isinstance(config_base, dict) else {}
+            skill_turbo_config = react_config.get("skill_turbo", {}) if isinstance(react_config, dict) else {}
+            # 检查 SkillTurbo 是否启用
+            enabled = skill_turbo_config.get("enabled", False) if isinstance(skill_turbo_config, dict) else False
+            if not enabled:
+                logger.info("[JiuWenClawDeepAdapter] SkillTurbo disabled, skipping tool registration")
+                return
+
+            from openjiuwen.core.runner import Runner as RunnerClass
+            from jiuwenclaw.agentserver.skill_turbo.skill_turbo_tools import get_skill_turbo_tools
+
+            for tool in get_skill_turbo_tools():
+                try:
+                    RunnerClass.resource_mgr.add_tool(tool)
+                except Exception as e:
+                    if "already exist" not in str(e):
+                        logger.warning("[JiuWenClawDeepAdapter] Failed to register skill_turbo tool: %s", e)
+                        continue
+                self._instance.ability_manager.add(tool.card)
+
+            # 注入 adapter 到 StreamEventRail
+            if self._stream_event_rail is not None:
+                self._stream_event_rail.set_skill_turbo_adapter(self)
+
+            logger.info("[JiuWenClawDeepAdapter] skill_turbo tool initialized")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] Failed to initialize skill_turbo tool: %s", exc)
 
     def _cleanup_circuit_breaker_session(self, session_id: str | None) -> None:
         circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
@@ -4440,7 +4474,15 @@ class JiuWenClawDeepAdapter:
 
         resolved_language = self._resolve_runtime_language()
 
-        md = params.request_metadata or {}
+        md = dict(params.request_metadata or {})
+        # 注入 request_id / channel_id，供 skill_turbo 等工具从 metadata 直接读取
+        md["request_id"] = params.request_id or ""
+        md["channel_id"] = params.channel_id or ""
+        # 写入 ContextVar，供 skill_turbo 工具安全读取（避免实例属性并发覆盖）
+        from jiuwenclaw.agentserver.skill_turbo.skill_turbo_tools import (
+            set_current_request_metadata,
+        )
+        set_current_request_metadata(md)
         v = md.get("effective_project_dir")
         logger.info(f"get effect project dir:{v}, ori dir: {self._workspace_dir}")
         if isinstance(v, str) and v.strip():
@@ -4926,13 +4968,13 @@ class JiuWenClawDeepAdapter:
             if clear_todo_resume_snapshot_pending:
                 set_todo_resume_snapshot_pending(session, pending=False)
             await post_agent_execute_for_session(session)
-            # 同时清理 RePlanAgent 自己的 resume 上下文，避免下次 plain chat 时
+            # 同时清理 SkillTurbo 自己的 resume 上下文，避免下次 plain chat 时
             # 误命中"resume 路径"。
             try:
-                await _replan_clear_resume_ctx(session)
+                await _skill_turbo_clear_resume_ctx(session)
             except Exception:
                 logger.debug(
-                    "[JiuWenClawDeepAdapter] clear replan resume ctx failed",
+                    "[JiuWenClawDeepAdapter] clear skill_turbo resume ctx failed",
                     exc_info=True,
                 )
             await session.post_run()
@@ -5967,6 +6009,10 @@ class JiuWenClawDeepAdapter:
 
         session = create_agent_session(session_id=session_id, card=self._instance.card)
         await session.pre_run(inputs=None)
+        # SkillTurbo 节点产物存在独立的 __skill_turbo checkpointer key 下，需用单独的 session 读写
+        skill_turbo_session = create_agent_session(session_id=session_id, card=self._instance.card)
+        _skill_turbo_set_agent_id(skill_turbo_session, self._instance.card)
+        await skill_turbo_session.pre_run(inputs=None)
         try:
             # 哨兵：plan_pause 或 interrupt_resume 已经注入，不需要兜底
             if is_interrupt_recovery_injected(session):
@@ -5986,6 +6032,14 @@ class JiuWenClawDeepAdapter:
                         session_id, file_exc,
                     )
 
+            # 读取 SkillTurbo 节点产物（中断的 skill_turbo 工具内部产物）
+            skill_turbo_summary = await self._read_skill_turbo_node_artifacts_summary(skill_turbo_session)
+            if skill_turbo_summary:
+                if summary:
+                    summary = f"{summary}\n{skill_turbo_summary}"
+                else:
+                    summary = skill_turbo_summary
+
             if not summary:
                 return
 
@@ -5995,6 +6049,11 @@ class JiuWenClawDeepAdapter:
 
             # 一次性使用：注入后即清除（session state + disk file）
             clear_interrupt_artifacts_summary_from_session(session)
+            # 同时清除 SkillTurbo 节点产物记录
+            from jiuwenclaw.agentserver.skill_turbo.node_artifact_store import (
+                clear_node_artifacts,
+            )
+            await clear_node_artifacts(skill_turbo_session)
             try:
                 workspace_dir = get_agent_workspace_dir()
                 clear_interrupt_artifacts_file(workspace_dir, session_id)
@@ -6018,6 +6077,60 @@ class JiuWenClawDeepAdapter:
             )
         finally:
             await session.post_run()
+            await skill_turbo_session.post_run()
+
+    @staticmethod
+    async def _read_skill_turbo_node_artifacts_summary(session: Any) -> str | None:
+        """读取 SkillTurbo 节点产物记录，格式化为可读摘要文本。
+
+        SkillTurbo executor 在中断时将节点产物持久化到 session state 的
+        ``__skill_turbo_node_artifacts__`` key。此方法通过 ``load_node_artifacts``
+        读取并格式化为摘要（调用方需已 ``pre_run``）。
+        """
+        from jiuwenclaw.agentserver.skill_turbo.node_artifact_store import (
+            load_node_artifacts,
+        )
+        state = await load_node_artifacts(session)
+        if not state:
+            return None
+        nodes = state.get("nodes") or {}
+        skill = state.get("skill", "unknown")
+        summaries = JiuWenClawDeepAdapter._build_skill_turbo_artifacts_summary(nodes)
+        if not summaries:
+            return None
+        lines = [f"[SkillTurbo ({skill}) 已完成节点产物]"] + summaries
+        logger.info(
+            "[JiuWenClawDeepAdapter] SkillTurbo node artifacts found session=%s nodes=%d",
+            getattr(session, "session_id", "?"),
+            len(nodes),
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_skill_turbo_artifacts_summary(nodes: dict[str, Any]) -> list[str]:
+        """将节点产物 nodes 构建为可读摘要列表。
+
+        格式: ``- {plan_name}: {info 摘要} | 文件: {路径列表}``
+        """
+        summaries: list[str] = []
+        for plan_name, node_info in nodes.items():
+            if not isinstance(node_info, dict):
+                continue
+            parts: list[str] = []
+            info = node_info.get("info")
+            if isinstance(info, dict) and info:
+                parts.append(", ".join(
+                    f"{k}={v}" for k, v in info.items() if v is not None
+                ))
+            files = node_info.get("files")
+            if isinstance(files, list) and files:
+                parts.append("文件: " + ", ".join(
+                    f.get("path", "") for f in files
+                    if isinstance(f, dict) and f.get("path")
+                ))
+            if parts:
+                summaries.append(f"- {plan_name}: {' | '.join(parts)}")
+        return summaries
 
     async def prepare_plan_pause_for_request(self, request: AgentRequest) -> None:
         """On next agent.plan message after cancel: clear task_plan, inject decision prompt, clear flag."""
@@ -6119,72 +6232,10 @@ class JiuWenClawDeepAdapter:
             logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)
             return None
 
-    # ──────────── RePlanAgent 集成 ────────────
+    # ──────────── SkillTurbo 集成 ────────────
 
-    @staticmethod
-    def _is_replan_agent_enabled() -> bool:
-        """检查 RePlanAgent 是否启用."""
-        config_base = get_config()
-        react_config = config_base.get("react", {}) if isinstance(config_base, dict) else {}
-        replan_config = react_config.get("replan_agent", {}) if isinstance(react_config, dict) else {}
-        if not isinstance(replan_config, dict):
-            return False
-        enabled = replan_config.get("enabled", False)
-        if isinstance(enabled, bool):
-            return enabled
-        if isinstance(enabled, str):
-            normalized = enabled.strip().lower()
-            return normalized in {"1", "true", "yes", "on", "enabled"}
-        return bool(enabled)
-
-    @staticmethod
-    def _parse_prefer_replan_flag(params: dict[str, Any]) -> bool:
-        raw = params.get("prefer_replan", params.get("preferReplan"))
-        if raw is None:
-            return False
-        if isinstance(raw, bool):
-            return raw
-        if isinstance(raw, str):
-            normalized = raw.strip().lower()
-            return normalized in {"1", "true", "yes", "on", "enabled"}
-        return bool(raw)
-
-    def _should_try_replan_agent(self, request: AgentRequest) -> bool:
-        """判断是否需要尝试 RePlanAgent."""
-        # 1. 配置启用检查
-        if not self._is_replan_agent_enabled():
-            return False
-
-        # 2. mode 检查 - 只处理 agent.* 模式
-        mode = request.params.get("mode", "agent.plan") if isinstance(request.params, dict) else "agent.plan"
-        mode_root = str(mode).split(".")[0] if mode else "agent"
-        if mode_root != "agent":
-            return False
-
-        params = request.params if isinstance(request.params, dict) else {}
-
-        # 3. resume 请求：带 answers 但 query 可能为空，直接放行
-        #    relay-claw 的 permissionBridge submitAnswer 发出的 resume 请求
-        #    params.query='' + params.answers=[...]，必须走 RePlan resume 路径，
-        #    否则 fall through 到 DeepAgent 导致降级。
-        answers = params.get("answers") or []
-        if answers:
-            return True
-
-        # 4. task 非空检查（仅对非 resume 请求）
-        task = params.get("query", "")
-        if not task:
-            return False
-
-        # [TEMP-FORCE-REPLAN] 测试强制开关，前端【快速】按钮合入后整段删除
-        if (get_config().get("react", {}).get("replan_agent", {}) or {}).get("force_enable", False):
-            return True
-
-        # 5. 前端显式开启「快速」模式时才走 RePlanAgent
-        return self._parse_prefer_replan_flag(params)
-
-    def _build_replan_config(self) -> dict[str, Any]:
-        """构建 RePlanAgent 配置."""
+    def build_skill_turbo_config(self) -> dict[str, Any]:
+        """构建 SkillTurbo 配置."""
         tool_cards = []
         if self._instance is not None:
             ability_manager = getattr(self._instance, "ability_manager", None)
@@ -6192,34 +6243,34 @@ class JiuWenClawDeepAdapter:
                 tool_cards = ability_manager.list()
 
         # 创建 fallback handler，复用 DeepAgent 的工具/rail/模型/权限配置
-        fallback_handler = self._create_replan_fallback_handler()
+        fallback_handler = self._create_skill_turbo_fallback_handler()
 
         return {
-            "skill_codes_dir": "jiuwenclaw.agentserver.replan_agent.skill_codes",
+            "skill_codes_dir": "jiuwenclaw.agentserver.skill_turbo.skill_codes",
             "tool_cards": tool_cards,
             "model_client": self._model,
             "fallback_handler": fallback_handler,
             # 传递 agent card，executor 创建 session 时需要它来初始化 checkpointer，
             # 否则 session.pre_run/post_run 会因 card.id 为 None 崩溃，导致 resume_ctx 无法持久化。
             "card": self._instance.card if self._instance is not None else None,
-            # LLM 并发上限，同一 RePlanExecutor 内最多并行 LLM 调用数
+            # LLM 并发上限，同一 SkillTurboExecutor 内最多并行 LLM 调用数
             "llm_concurrency_limit": 20,
             # 多模态能力透传：复用 DeepAdapter 已算好的可用性判断（config.yaml 各 model
             # 是否配独立 api_key + 环境变量是否齐全），与主 agent 行为保持一致。
-            # 注意 _video_model_config 在 DeepAdapter 侧是 bool，replan 侧字段名为 video_model_enabled。
+            # 注意 _video_model_config 在 DeepAdapter 侧是 bool，skill_turbo 侧字段名为 video_model_enabled。
             "vision_model_config": self._vision_model_config,
             "audio_model_config": self._audio_model_config,
             "video_model_enabled": bool(self._video_model_config),
             "image_gen_enabled": bool(self._image_gen_enabled),
         }
 
-    def _create_replan_fallback_handler(self) -> Any:
-        """创建 RePlan 节点级 fallback handler。
+    def _create_skill_turbo_fallback_handler(self) -> Any:
+        """创建 SkillTurbo 节点级 fallback handler。
 
         基于 DeepAgent subagent，复用主 agent 的工具、rail、模型、权限配置。
         每次请求创建独立的 subagent session，避免污染主会话。
         """
-        from jiuwenclaw.agentserver.replan_agent.fallback_handler import DeepAgentFallbackHandler
+        from jiuwenclaw.agentserver.skill_turbo.fallback_handler import DeepAgentFallbackHandler
 
         return DeepAgentFallbackHandler(
             adapter=self,
@@ -6228,208 +6279,69 @@ class JiuWenClawDeepAdapter:
             session_id="",
         )
 
-    async def _try_replan_agent(
-        self,
-        request: AgentRequest,
-        inputs: dict[str, Any],
-    ) -> AgentResponse | None:
-        """尝试使用 RePlanAgent 处理请求，失败返回 None."""
-        if not self._should_try_replan_agent(request):
-            return None
-
-        task = request.params.get("query", "") if isinstance(request.params, dict) else ""
-
-        from jiuwenclaw.agentserver.replan_agent.agent import RePlanAgent, RePlanNotHandled
-
-        token_trace_sid = _LLM_TRACE_SESSION_ID.set(request.session_id or "default")
-        token_trace_rid = _LLM_TRACE_REQUEST_ID.set(request.request_id or "")
-        token_trace_iter = _LLM_TRACE_ITERATION.set(0)
-        token_trace_model = _LLM_TRACE_MODEL_NAME.set(
-            getattr(self._model, "model_config", None) and getattr(self._model.model_config, "model_name", "") or ""
-        )
-        try:
-            replan_agent = RePlanAgent(self._build_replan_config())
-            raw_interactive = request.params.get("interactive_ask", request.params.get("interactiveAsk"))
-            interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
-            async with ask_user_question_request_scope(
-                interactive_ask=interactive_ask,
-                session_id=request.session_id or "default",
-                stream_request_id=request.request_id or "",
-                channel_id=request.channel_id or "",
-            ):
-                result = await replan_agent.run(task, inputs)
-        except RePlanNotHandled as exc:
-            logger.info("[JiuWenClawDeepAdapter] RePlanAgent 未处理，继续 DeepAgent 流程: %s", exc)
-            return None
-        except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] RePlanAgent 执行失败，继续 DeepAgent 流程: %s", exc, exc_info=True)
-            return None
-        finally:
-            _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
-
-        # 处理结果
-        if isinstance(result, AgentResponse):
-            return result
-        if isinstance(result, dict):
-            payload = result if "content" in result or "files" in result else {"content": str(result)}
-        else:
-            payload = {"content": str(result)}
-        return AgentResponse(
-            request_id=request.request_id,
-            channel_id=request.channel_id,
-            ok=True,
-            payload=payload,
-            metadata=request.metadata,
-        )
-
-    async def _try_replan_agent_stream(
+    async def _try_skill_turbo_resume(
         self,
         request: AgentRequest,
         inputs: dict[str, Any],
     ) -> AsyncIterator[AgentResponseChunk] | None:
-        """尝试使用 RePlanAgent 流式处理请求，失败返回 None。
+        """检测 resume 请求并走 SkillTurbo resume 路径。
 
-        按以下优先级路由：
-        1. 若 ``request.params.answers`` 非空且 session 中有 ``__replan_resume_ctx__``，
-           走 resume 路径（跳过 planner，重放 plan_code，注入用户审批答案）。
-        2. 否则按正常路径走 ``replan_agent.run_stream``，
-           AbortError 被捕获并转为 HITL 三件套 chunk 发送给前端。
-
-        Returns:
-            AsyncIterator[AgentResponseChunk] | None:
-            - 如果应该使用 RePlanAgent，返回 AsyncIterator
-            - 否则返回 None
+        仅处理 answers 非空 + resume_ctx 存在的请求。
+        其他请求（无 answers 或无 resume_ctx）返回 None，由 DeepAgent 主流程处理。
         """
-        if not self._should_try_replan_agent(request):
-            return None
-
-        if inputs is None:
-            inputs = {}
-
         params = request.params if isinstance(getattr(request, "params", None), dict) else {}
         answers: list = params.get("answers") or []
 
-        # ── 节点产物上下文注入：非 resume 请求且 session 有未消费的 RePlan 节点产物时，
-        #    将摘要注入 inputs["__replan_prior_artifacts__"]，供 planner LLM 判断
-        #    当前任务是"从零开始"还是"基于已有产物的增量操作"。 ──
-        if not answers and self._instance is not None:
-            artifact_check_session = None
-            try:
-                artifact_check_session = create_agent_session(
-                    session_id=request.session_id or "default",
-                    card=self._instance.card,
-                )
-                existing_artifacts = await _replan_load_node_artifacts(artifact_check_session)
-                if (
-                    existing_artifacts
-                    and isinstance(existing_artifacts.get("nodes"), dict)
-                    and existing_artifacts["nodes"]
-                ):
-                    nodes = existing_artifacts["nodes"]
-                    summaries = self._build_artifacts_summary(nodes)
-                    if summaries:
-                        inputs = dict(inputs)
-                        inputs["__replan_prior_artifacts__"] = "\n".join(summaries)
-                        logger.info(
-                            "[JiuWenClawDeepAdapter] RePlan node artifacts injected to context "
-                            "for planner routing: session_id=%s nodes=%d",
-                            request.session_id,
-                            len(nodes),
-                        )
-            except Exception as exc:
-                logger.debug(
-                    "[JiuWenClawDeepAdapter] load replan node artifacts for routing failed: %s",
-                    exc,
-                    exc_info=True,
-                )
-            finally:
-                if artifact_check_session is not None:
-                    try:
-                        await artifact_check_session.post_run()
-                    except Exception:
-                        pass
+        if not answers:
+            return None
 
-        # ── Resume 路径 ──
-        if answers:
-            session = create_agent_session(
-                session_id=request.session_id or "default",
-                card=self._instance.card if self._instance is not None else None,
-            )
-            resume_ctx = await _replan_load_resume_ctx(session)
-            if resume_ctx is not None:
-                logger.info(
-                    "[JiuWenClawDeepAdapter] RePlan resume detected: tcid=%s",
-                    resume_ctx.get("pending_tool_call_id"),
-                )
-                return self._make_replan_resume_stream(
-                    request=request,
-                    inputs=inputs,
-                    session=session,
-                    resume_ctx=resume_ctx,
-                    answers=answers,
-                )
-            # answers 非空但 resume_ctx 丢失（session 过期/清理），
-            # 不走正常路径（task 为空无意义），返回 None 让上层降级到 DeepAgent。
+        if self._instance is None:
+            return None
+
+        session = create_agent_session(
+            session_id=request.session_id or "default",
+            card=self._instance.card,
+        )
+        _skill_turbo_set_agent_id(session, self._instance.card)
+        resume_ctx = await _skill_turbo_load_resume_ctx(session)
+        if resume_ctx is None:
             logger.warning(
-                "[JiuWenClawDeepAdapter] RePlan resume requested but resume_ctx is None; "
+                "[JiuWenClawDeepAdapter] SkillTurbo resume requested but resume_ctx is None; "
                 "falling back to DeepAgent. session_id=%s",
                 request.session_id,
             )
+            # pre_run 已在 _skill_turbo_load_resume_ctx 中执行，需配对 post_run 释放资源
+            try:
+                await session.post_run()
+            except Exception:
+                pass
             return None
 
-        # ── 正常路径 ──
-        task = params.get("query", "")
-
-        from jiuwenclaw.agentserver.replan_agent.agent import RePlanAgent, RePlanNotHandled
-
-        async def _stream_impl() -> AsyncIterator[AgentResponseChunk]:
-            token_trace_sid = _LLM_TRACE_SESSION_ID.set(request.session_id or "default")
-            token_trace_rid = _LLM_TRACE_REQUEST_ID.set(request.request_id or "")
-            token_trace_iter = _LLM_TRACE_ITERATION.set(0)
-            token_trace_model = _LLM_TRACE_MODEL_NAME.set(
-                getattr(self._model, "model_config", None) and getattr(self._model.model_config, "model_name", "") or ""
+        logger.info(
+            "[JiuWenClawDeepAdapter] SkillTurbo resume detected: tcid=%s",
+            resume_ctx.get("pending_tool_call_id"),
+        )
+        # 清除 harness 的 ToolInterruptionState：SkillTurbo 有自己的 resume 机制
+        # （resume_ctx + resume_stream），不走 harness 的 handle_resume（重执 tool call）。
+        # 若不清除，下次 invoke 会检测到并尝试 harness resume，导致重复执行。
+        try:
+            from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
+            session.update_state({INTERRUPTION_KEY: None})
+        except Exception as exc:
+            logger.debug(
+                "[JiuWenClawDeepAdapter] clear ToolInterruptionState failed: %s", exc
             )
-            replan_agent = RePlanAgent(self._build_replan_config())
-            raw_interactive = params.get("interactive_ask", params.get("interactiveAsk"))
-            interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
-            try:
-                async with ask_user_question_request_scope(
-                    interactive_ask=interactive_ask,
-                    session_id=request.session_id or "default",
-                    stream_request_id=request.request_id or "",
-                    channel_id=request.channel_id or "",
-                ):
-                    async for chunk in replan_agent.run_stream(
-                        task, inputs, request.request_id, request.channel_id
-                    ):
-                        yield chunk
-            except _ReplanAbortError as e:
-                # HITL 中断 → 转成前端三件套
-                logger.info(
-                    "[JiuWenClawDeepAdapter] _stream_impl caught AbortError, emitting HITL chunks: %s",
-                    e,
-                )
-                async for hitl_chunk in self._emit_replan_hitl_chunks(
-                    request, e
-                ):
-                    yield hitl_chunk
-                return
-            except RePlanNotHandled as exc:
-                logger.info("[JiuWenClawDeepAdapter] RePlanAgent 未处理，继续 DeepAgent 流程: %s", exc)
-                return
-            except Exception as _stream_exc:
-                logger.warning(
-                    "[JiuWenClawDeepAdapter] _stream_impl caught generic Exception (will re-raise): %r",
-                    _stream_exc,
-                    exc_info=True,
-                )
-                raise
-            finally:
-                _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
+        if inputs is None:
+            inputs = {}
+        return self._make_skill_turbo_resume_stream(
+            request=request,
+            inputs=inputs,
+            session=session,
+            resume_ctx=resume_ctx,
+            answers=answers,
+        )
 
-        return _stream_impl()
-
-    def _make_replan_resume_stream(
+    def _make_skill_turbo_resume_stream(
         self,
         request: AgentRequest,
         inputs: dict[str, Any],
@@ -6438,7 +6350,7 @@ class JiuWenClawDeepAdapter:
         answers: list,
     ) -> AsyncIterator[AgentResponseChunk] | None:
         """构造 resume 的流式 AsyncIterator。"""
-        from jiuwenclaw.agentserver.replan_agent.agent import RePlanAgent, RePlanNotHandled
+        from jiuwenclaw.agentserver.skill_turbo.agent import SkillTurbo, SkillTurboNotHandled
 
         async def _resume_impl() -> AsyncIterator[AgentResponseChunk]:
             token_trace_sid = _LLM_TRACE_SESSION_ID.set(request.session_id or "default")
@@ -6447,10 +6359,10 @@ class JiuWenClawDeepAdapter:
             token_trace_model = _LLM_TRACE_MODEL_NAME.set(
                 getattr(self._model, "model_config", None) and getattr(self._model.model_config, "model_name", "") or ""
             )
-            replan_agent = RePlanAgent(self._build_replan_config())
+            skill_turbo = SkillTurbo(self.build_skill_turbo_config())
 
             # 将前端 answers 转为 ConfirmPayload（rail 期望格式）
-            user_input = self._replan_answers_to_confirm_payload(answers, resume_ctx)
+            user_input = self._skill_turbo_answers_to_confirm_payload(answers, resume_ctx)
 
             params = request.params or {}
             raw_interactive = params.get(
@@ -6459,7 +6371,7 @@ class JiuWenClawDeepAdapter:
             interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
 
             try:
-                await _replan_clear_resume_ctx(session)
+                await _skill_turbo_clear_resume_ctx(session)
                 try:
                     await session.post_run()
                 except Exception:
@@ -6470,7 +6382,7 @@ class JiuWenClawDeepAdapter:
                     stream_request_id=request.request_id or "",
                     channel_id=request.channel_id or "",
                 ):
-                    async for chunk in replan_agent.resume_stream(
+                    async for chunk in skill_turbo.resume_stream(
                         plan_code=resume_ctx["plan_code"],
                         inputs=resume_ctx.get("inputs", inputs),
                         request_id=request.request_id,
@@ -6479,15 +6391,15 @@ class JiuWenClawDeepAdapter:
                         user_input=user_input,
                     ):
                         yield chunk
-            except _ReplanAbortError as e:
+            except _SkillTurboAbortError as e:
                 # 二次中断：理论上不应发生（rail 已收到答案），但防御性处理
-                async for hitl_chunk in self._emit_replan_hitl_chunks(
+                async for hitl_chunk in self._emit_skill_turbo_hitl_chunks(
                     request, e
                 ):
                     yield hitl_chunk
                 return
-            except RePlanNotHandled:
-                logger.info("[JiuWenClawDeepAdapter] RePlan resume fallback to DeepAgent")
+            except SkillTurboNotHandled:
+                logger.info("[JiuWenClawDeepAdapter] SkillTurbo resume fallback to DeepAgent")
                 return
             finally:
                 _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
@@ -6495,10 +6407,10 @@ class JiuWenClawDeepAdapter:
         return _resume_impl()
 
     @staticmethod
-    def _replan_answers_to_confirm_payload(
+    def _skill_turbo_answers_to_confirm_payload(
         answers: list,
         resume_ctx: dict[str, Any],
-    ) -> _ReplanConfirmPayload:
+    ) -> _SkillTurboConfirmPayload:
         """将前端 answers（用户对 ask_user_question 的答复）转为 ConfirmPayload。
 
         前端 answers 结构：
@@ -6522,18 +6434,22 @@ class JiuWenClawDeepAdapter:
                 text = first
 
         if text == "拒绝":
-            return _ReplanConfirmPayload(approved=False, feedback="user rejected")
+            return _SkillTurboConfirmPayload(approved=False, feedback="user rejected")
         if text == "总是允许":
-            return _ReplanConfirmPayload(approved=True, auto_confirm=True, persist_allow=True)
-        return _ReplanConfirmPayload(approved=True)
+            return _SkillTurboConfirmPayload(approved=True, auto_confirm=True, persist_allow=True)
+        return _SkillTurboConfirmPayload(approved=True)
 
     @staticmethod
-    async def _emit_replan_hitl_chunks(
+    async def _emit_skill_turbo_hitl_chunks(
         request: AgentRequest,
-        abort_exc: _ReplanAbortError,
+        abort_exc: _SkillTurboAbortError,
     ) -> AsyncIterator[AgentResponseChunk]:
-        """AbortError → HITL 三件套 chunk（tool_call pending + ask_user_question + invocation_paused）。"""
-        tic = _replan_extract_tool_interrupt(abort_exc)
+        """AbortError → HITL 三件套 chunk（tool_call pending + ask_user_question + invocation_paused）。
+
+        此方法主要用于 resume 路径的二次中断防御性处理。首次中断时 executor 已主动
+        向 parent_session 写 __interaction__ 流事件，不经过此方法。
+        """
+        tic = _skill_turbo_extract_tool_interrupt(abort_exc)
         if tic is None:
             raise abort_exc
 
@@ -6561,7 +6477,7 @@ class JiuWenClawDeepAdapter:
         # (1.5) chat.tool_update — 让前端建立工具调用卡片上下文
         # DeepAgent 正常 HITL 路径中，前端会先收到 chat.tool_update(status=in_progress)，
         # 再收到 chat.ask_user_question。前端依赖 tool_update 来渲染工具调用卡片，
-        # 然后在卡片上叠加审批按钮。RePlan 不走 LLM tool_calls.delta 流程，
+        # 然后在卡片上叠加审批按钮。SkillTurbo 不走 LLM tool_calls.delta 流程，
         # 所以需要补一个 tool_update 让前端能正确渲染。
         yield AgentResponseChunk(
             request_id=rid,
@@ -6578,71 +6494,43 @@ class JiuWenClawDeepAdapter:
         )
 
         # (2) chat.ask_user_question — 复用 DeepAgent 格式
-        # 注意：convert_interactions_to_ask_user_question 期望 payload 是
-        # InteractionOutput（含 id/value），其中 value 才是带 message/ui_options 的
-        # InterruptRequest。直接把 InterruptRequest 当 payload 会导致 value 缺失，
-        # extract_question_from_interaction 取不到 message，前端无法渲染弹窗。
-        from openjiuwen.core.session.interaction.interaction import InteractionOutput
-        from openjiuwen.core.session.stream import OutputSchema
-        from openjiuwen.core.single_agent.interrupt.response import (
-            ToolCallInterruptRequest as _ReplanToolCallInterruptRequest,
-        )
-
-        # 用 ToolCallInterruptRequest 包装，携带 tool_name / tool_call_id / tool_args，
-        # 让前端能在弹窗里看到具体工具名与命令预览。
-        try:
-            tool_call_request = _ReplanToolCallInterruptRequest.from_tool_call(
-                tic.request, tic.tool_call,
-            )
-            logger.info(
-                "[JiuWenClawDeepAdapter] HITL ToolCallInterruptRequest built: tool=%s tcid=%s msg=%s",
-                tc_data.get("name"), tc_data.get("id"),
-                getattr(tool_call_request, "message", None),
-            )
-        except Exception as tcr_exc:
-            tool_call_request = tic.request
+        # 构造逻辑与 executor 侧共用 build_interaction_output_from_abort，保持一致。
+        interaction_output = _skill_turbo_build_interaction_output(abort_exc)
+        if interaction_output is None:
             logger.warning(
-                "[JiuWenClawDeepAdapter] HITL from_tool_call failed: %s; falling back to raw tic.request",
-                tcr_exc,
-                exc_info=True,
-            )
-
-        interaction_payload = InteractionOutput(
-            id=(tic.tool_call.id if tic.tool_call else "") or "",
-            value=tool_call_request,
-        )
-        ask_payload = convert_interactions_to_ask_user_question([
-            OutputSchema(
-                type="__interaction__",
-                index=0,
-                payload=interaction_payload,
-            )
-        ])
-        logger.info(
-            "[JiuWenClawDeepAdapter] HITL ask_payload type=%s value=%s",
-            type(ask_payload).__name__,
-            ask_payload,
-        )
-        if ask_payload:
-            # 使用原始 request_id（rid），而非 tool_call_id。
-            # relay-claw 的 permissionBridge 用 payload.request_id 作为 jiuwenRequestId，
-            # resume 时把它放进 params.request_id 发回 jiuwenclaw。
-            # jiuwenclaw 的 resume 路径靠 session_id 找 resume_ctx，不依赖 request_id 匹配，
-            # 但保持 request_id 一致可避免 relay-claw 侧的队列路由错乱。
-            if isinstance(ask_payload, dict):
-                ask_payload["request_id"] = rid
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload=ask_payload,
-                is_complete=False,
-            )
-        else:
-            logger.warning(
-                "[JiuWenClawDeepAdapter] HITL ask_payload is None; tool=%s tcid=%s",
+                "[JiuWenClawDeepAdapter] HITL build_interaction_output returned None; tool=%s tcid=%s",
                 tc_data.get("name"),
                 tc_data.get("id"),
             )
+        else:
+            ask_payload = convert_interactions_to_ask_user_question([
+                interaction_output
+            ])
+            logger.info(
+                "[JiuWenClawDeepAdapter] HITL ask_payload type=%s value=%s",
+                type(ask_payload).__name__,
+                ask_payload,
+            )
+            if ask_payload:
+                # 使用原始 request_id（rid），而非 tool_call_id。
+                # relay-claw 的 permissionBridge 用 payload.request_id 作为 jiuwenRequestId，
+                # resume 时把它放进 params.request_id 发回 jiuwenclaw。
+                # jiuwenclaw 的 resume 路径靠 session_id 找 resume_ctx，不依赖 request_id 匹配，
+                # 但保持 request_id 一致可避免 relay-claw 侧的队列路由错乱。
+                if isinstance(ask_payload, dict):
+                    ask_payload["request_id"] = rid
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload=ask_payload,
+                    is_complete=False,
+                )
+            else:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] HITL ask_payload is None; tool=%s tcid=%s",
+                    tc_data.get("name"),
+                    tc_data.get("id"),
+                )
 
         # (3) chat.invocation_paused — 标记等待用户输入
         # is_complete=True + awaiting_user_input=True → E2A 网关转为 is_final=False，
@@ -6659,81 +6547,6 @@ class JiuWenClawDeepAdapter:
             },
             is_complete=True,
         )
-
-    @staticmethod
-    def _build_artifacts_summary(nodes: dict[str, Any]) -> list[str]:
-        """将节点产物 nodes 构建为可读摘要列表。
-
-        格式: ``- {plan_name}: {info 摘要} | 文件: {路径列表}``
-        """
-        summaries: list[str] = []
-        for plan_name, node_info in nodes.items():
-            if not isinstance(node_info, dict):
-                continue
-            parts: list[str] = []
-            info = node_info.get("info")
-            if isinstance(info, dict) and info:
-                parts.append(", ".join(f"{k}={v}" for k, v in info.items() if v is not None))
-            files = node_info.get("files")
-            if isinstance(files, list) and files:
-                parts.append("文件: " + ", ".join(
-                    f.get("path", "") for f in files if isinstance(f, dict) and f.get("path")
-                ))
-            if parts:
-                summaries.append(f"- {plan_name}: {' | '.join(parts)}")
-        return summaries
-
-    async def _inject_replan_node_artifacts(
-        self,
-        session_id: str,
-        inputs: dict[str, Any],
-    ) -> dict[str, Any]:
-        """读取已持久化的 RePlan 节点产物，拼成补充提示注入 inputs。
-
-        不在此处清除——产物保留在 session 中，由下次 RePlan 启动时
-        _clear_stale_node_artifacts 覆盖。注入提示中已含守卫规则
-        （关键参数不一致则不复用），LLM 会自主判断。
-        """
-        artifact_session = None
-        try:
-            artifact_session = create_agent_session(
-                session_id=session_id,
-                card=self._instance.card if self._instance is not None else None,
-            )
-            node_artifacts = await _replan_load_node_artifacts(artifact_session)
-            if not (node_artifacts and isinstance(node_artifacts.get("nodes"), dict)):
-                return inputs
-
-            nodes = node_artifacts["nodes"]
-            summaries = self._build_artifacts_summary(nodes)
-
-            if summaries:
-                reuse_block = (
-                    "以下步骤已在上轮 RePlan 阶段成功完成，请勿重做：\n"
-                    + "\n".join(summaries)
-                    + "\n\n注意：若当前任务与上述产物的任意关键参数（主题 topic、"
-                    "页数 page_count、风格 style_id、受众 audience、演示目的 "
-                    "presentation_purpose）不一致，请勿复用，应从零开始重新制作。"
-                )
-                inputs = dict(inputs)
-                existing = inputs.get("query", "")
-                inputs["query"] = f"{existing}\n\n{reuse_block}" if existing else reuse_block
-                logger.info(
-                    "[JiuWenClawDeepAdapter] RePlan node artifacts reused: "
-                    "session_id=%s nodes=%d",
-                    session_id,
-                    len(nodes),
-                )
-            # 注入后不清除——产物保留供后续请求复用，由下次 RePlan 启动时覆盖
-        except Exception as exc:
-            logger.debug(
-                "[JiuWenClawDeepAdapter] load replan node artifacts failed: %s", exc,
-                exc_info=True,
-            )
-        finally:
-            if artifact_session is not None:
-                await artifact_session.post_run()
-        return inputs
 
     async def process_message_impl(
             self, request: AgentRequest, inputs: dict[str, Any]
@@ -6759,10 +6572,7 @@ class JiuWenClawDeepAdapter:
                 metadata=request.metadata,
             )
 
-        # 尝试使用 RePlanAgent 处理
-        replan_result = await self._try_replan_agent(request, inputs)
-        if replan_result is not None:
-            return replan_result
+        # ── SkillTurbo V2：已工具化，不再由适配器主动尝试 ──
 
         session_id = request.session_id or "default"
         query = request.params.get("query", "")
@@ -6921,69 +6731,15 @@ class JiuWenClawDeepAdapter:
                 is_complete=False,
             )
 
-        # 尝试使用 RePlanAgent 流式处理
-        logger.info(
-            "[JiuWenClawDeepAdapter] 尝试使用 RePlanAgent 流式处理: request_id=%s, inputs=%s",
-            request.request_id,
-            inputs,
-        )
-        replan_stream = await self._try_replan_agent_stream(request, inputs)
-        if replan_stream is not None:
-            replan_handled = False
-            replan_completed = False
-            replan_failed = False
-            replan_complete_chunk: AgentResponseChunk | None = None
-            try:
-                async for chunk in replan_stream:
-                    replan_handled = True
-                    payload = getattr(chunk, "payload", None)
-                    usage_meta = self._extract_usage_metadata_from_payload(payload)
-                    if usage_meta is not None:
-                        self._accumulate_usage_metadata(usage_accumulator, usage_meta)
-                    if self._is_replan_failure_payload(payload):
-                        replan_failed = True
-                        continue
-                    if getattr(chunk, "is_complete", False):
-                        replan_complete_chunk = chunk
-                        continue
-                    if replan_failed:
-                        continue
-                    yield chunk
-            except Exception as exc:
-                replan_failed = True
-                logger.warning(
-                    "[JiuWenClawDeepAdapter] RePlanAgent 执行失败，继续 DeepAgent 流程: %s (type=%r)",
-                    exc,
-                    type(exc),
-                    exc_info=True,
-                )
+        # ── SkillTurbo V2：resume 请求仍由适配器层面路由 ──
+        skill_turbo_resume_stream = await self._try_skill_turbo_resume(request, inputs)
+        if skill_turbo_resume_stream is not None:
+            async for chunk in skill_turbo_resume_stream:
+                yield chunk
+            return
 
-            replan_completed = replan_complete_chunk is not None and not replan_failed
-            if replan_completed:
-                summary = self._build_usage_summary(usage_accumulator)
-                logger.info("[JiuWenClawDeepAdapter] llm_usage summary: request_id=%s session_id=%s usage=%s",
-                            rid, session_id, summary)
-                if usage_accumulator["total_tokens"] > 0:
-                    yield AgentResponseChunk(
-                        request_id=rid,
-                        channel_id=cid,
-                        payload={
-                            "event_type": "chat.usage_summary",
-                            "session_id": session_id,
-                            "usage": summary,
-                        },
-                        is_complete=False,
-                    )
-                yield replan_complete_chunk
-                return
+        # ── SkillTurbo V2：正常请求已工具化（skill_turbo），由 LLM 在 ReAct 循环中选择调用 ──
 
-            if replan_handled:
-                logger.info(
-                    "[JiuWenClawDeepAdapter] RePlanAgent 未完整完成，继续 DeepAgent 流程: request_id=%s",
-                    request.request_id,
-                )
-        # ── RePlan 节点产物复用：降级到 DeepAgent 时，注入已持久化的节点产物。 ──
-        inputs = await self._inject_replan_node_artifacts(session_id, inputs)
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
         self._last_runtime_mode = mode
@@ -7710,17 +7466,6 @@ class JiuWenClawDeepAdapter:
             return None
         usage_meta = raw_meta.get("usage_metadata", raw_meta)
         return usage_meta if isinstance(usage_meta, dict) else None
-
-    @staticmethod
-    def _is_replan_failure_payload(payload: Any) -> bool:
-        if not isinstance(payload, dict):
-            return False
-        event_type = payload.get("event_type")
-        if event_type == "chat.error":
-            return True
-        if event_type == "plan.finished" and payload.get("status") == "failed":
-            return True
-        return False
 
     @staticmethod
     def _accumulate_usage_metadata(
