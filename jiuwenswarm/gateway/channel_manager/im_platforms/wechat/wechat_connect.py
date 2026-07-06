@@ -841,7 +841,19 @@ class WechatChannel(BaseChannel):
         payload = getattr(msg, "payload", None) or {}
         if not isinstance(payload, dict):
             return False
-        return payload.get("is_complete") is True
+        if payload.get("is_complete") is not True:
+            return False
+        # 仅当是「纯哨兵」帧才视作流结束标记：AgentServer 流式终帧 payload 正是
+        # ``{"is_complete": True}``（见 interface.py:2129），正文已由前置 chat.delta 下发。
+        # 但 /skills list 等非流式通知经 _send_channel_notice 也会带 is_complete=True，
+        # 且其正文在 payload.content 里——若不在此排除，整段技能列表会被当哨兵丢弃。
+        if payload.get("content") not in (None, ""):
+            return False
+        if payload.get("error") not in (None, ""):
+            return False
+        if payload.get("event_type"):
+            return False
+        return set(payload.keys()) <= {"is_complete"}
 
     @staticmethod
     def _is_stream_accept_ack_only(msg: Message) -> bool:

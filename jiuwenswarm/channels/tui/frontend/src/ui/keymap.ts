@@ -116,6 +116,7 @@ const GLOBAL_ACTION_HANDLERS: Partial<Record<KeybindingAction, (d: AppScreenKeym
 export const APP_SCREEN_KEY_BINDINGS: readonly KeyBindingDisplay[] = [
   { key: "ctrl+c", label: "ctrl+c", description: "中断任务；连按两次退出" },
   { key: "ctrl+d", label: "ctrl+d", description: "中断任务；连按两次退出" },
+  { key: "escape", label: "esc", description: "取消任务；空闲时连按两次清空输入框", action: "app:cancelWork" },
   { key: "ctrl+l", label: "ctrl+l", description: "重绘屏幕", action: "app:redraw" },
   { key: "ctrl+t", label: "ctrl+t", description: "显示/隐藏 Todos 面板", action: "app:toggleTodos" },
   { key: "ctrl+g", label: "ctrl+g", description: "显示/隐藏 Team 面板", action: "app:toggleTeamPanel" },

@@ -32,8 +32,64 @@ def test_git_diff_from_subdir_includes_repo_root_untracked_files(tmp_path):
     assert str(tracked) in diff["files"]
     assert str(untracked) in diff["files"]
     assert diff["files"][str(untracked)]["isUntracked"] is True
-    assert diff["files"][str(untracked)]["linesAdded"] == 2
+    assert diff["files"][str(untracked)]["linesAdded"] == 0
+    assert diff["files"][str(untracked)]["hunks"] == []
     assert diff["stats"]["filesChanged"] == 2
+    assert diff["stats"]["linesAdded"] == 1
+    assert diff["stats"]["linesRemoved"] == 1
+
+
+def test_git_diff_stats_include_tracked_files_beyond_detail_cap(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test User")
+
+    for i in range(60):
+        file_path = repo / f"file-{i:02d}.txt"
+        file_path.write_text("before\n", encoding="utf-8")
+
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial")
+
+    for i in range(60):
+        file_path = repo / f"file-{i:02d}.txt"
+        file_path.write_text("after\n", encoding="utf-8")
+
+    diff = DiffService().get_git_diff(str(repo))
+
+    assert diff is not None
+    assert len(diff["files"]) == 50
+    assert diff["stats"]["filesChanged"] == 60
+    assert diff["stats"]["linesAdded"] == 60
+    assert diff["stats"]["linesRemoved"] == 60
+
+
+def test_git_diff_preserves_tabs_in_file_paths(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test User")
+    _git(repo, "config", "core.quotepath", "false")
+
+    tab_name = "dir\tfile.txt"
+    tab_file = repo / tab_name
+    tab_file.write_text("before\nbefore2\nbefore3\n", encoding="utf-8")
+    _git(repo, "add", "--", tab_name)
+    _git(repo, "commit", "-m", "initial")
+
+    tab_file.write_text("after\nafter2\n", encoding="utf-8")
+
+    diff = DiffService().get_git_diff(str(repo))
+
+    assert diff is not None
+    tab_abs = str(tab_file)
+    assert tab_abs in diff["files"]
+    file_info = diff["files"][tab_abs]
+    assert file_info["linesAdded"] == 2
+    assert file_info["linesRemoved"] == 3
 
 
 def test_git_diff_staged_rename_with_modification_keeps_hunks(tmp_path):

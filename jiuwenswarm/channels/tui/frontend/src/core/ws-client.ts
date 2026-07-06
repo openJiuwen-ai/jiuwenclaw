@@ -3,7 +3,13 @@ import type { Frame, ReqFrame, ResFrame } from "./protocol.js";
 import { isResFrame } from "./protocol.js";
 
 export type FrameHandler = (frame: Frame) => void;
-export type ConnectionStatus = "idle" | "connecting" | "connected" | "reconnecting" | "auth_failed" | "message_too_big";
+export type ConnectionStatus =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "auth_failed"
+  | "message_too_big";
 
 interface PendingRequest {
   resolve: (frame: ResFrame) => void;
@@ -94,7 +100,14 @@ export class WsClient {
         reject(new Error(`socket not connected: ${method}`));
         return;
       }
-      const frame: ReqFrame = { type: "req", id, method, params, ...(isStream ? { is_stream: true } : {}) };
+      const frame: ReqFrame = {
+        type: "req",
+        id,
+        method,
+        timeout_ms: timeoutMs,
+        params,
+        ...(isStream ? { is_stream: true } : {}),
+      };
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`request timeout: ${method}`));
@@ -173,7 +186,13 @@ export class WsClient {
         if (frame.ok) {
           setTimeout(() => pending.resolve(frame), 0);
         } else {
-          setTimeout(() => pending.reject(new Error(frame.error ?? `request failed: ${frame.code ?? "unknown"}`)), 0);
+          setTimeout(
+            () =>
+              pending.reject(
+                new Error(frame.error ?? `request failed: ${frame.code ?? "unknown"}`),
+              ),
+            0,
+          );
         }
         return;
       }
@@ -193,9 +212,10 @@ export class WsClient {
     // Keep behavior aligned with web client:
     // use exponential backoff for the first retries, then keep retrying
     // at a fixed interval so long-running tasks can recover automatically.
-    const delay = this.retryCount < this.maxBackoffRetries
-      ? Math.min(this.baseDelay * 2 ** this.retryCount, 30000)
-      : 2000;
+    const delay =
+      this.retryCount < this.maxBackoffRetries
+        ? Math.min(this.baseDelay * 2 ** this.retryCount, 30000)
+        : 2000;
     this.retryCount += 1;
     this.reconnectTimer = setTimeout(() => this.doConnect(), delay);
   }

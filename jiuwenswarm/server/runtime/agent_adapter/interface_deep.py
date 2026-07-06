@@ -383,6 +383,7 @@ def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> Conte
     cec = cec if isinstance(cec, dict) else {}
     return ReActAgentConfig().context_engine_config.model_copy(
         update={
+            "enable_reload": bool(cec.get("enable_reload", False)),
             "enable_kv_cache_release": bool(cec.get("enable_kv_cache_release", False)),
             "enable_openrouter_model_context_window_tokens": bool(
                 cec.get("enable_openrouter_model_context_window_tokens", False)
@@ -4116,7 +4117,7 @@ class JiuWenSwarmDeepAdapter:
     ) -> None:
         """注册 cron 和 send_file 工具（与 mode 无关，每次请求刷新）。"""
         # 定时工具：按当前 session 的 channel 注册（contextvar 已由 _bind_runtime_cron_context 设置）
-        if not (session_id.startswith("heartbeat") or session_id.startswith("cron")):
+        if session_id is None or not session_id.startswith(("heartbeat", "cron")):
             try:
                 cron_tools = self._build_cron_tools()
                 if cron_tools:

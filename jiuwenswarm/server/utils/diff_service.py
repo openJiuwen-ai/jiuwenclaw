@@ -494,6 +494,91 @@ class DiffService:
         return hunks, truncated
 
     @staticmethod
+    def _decode_c_escaped(inner: str) -> str:
+        """Decode git's C-style escapes in an already-unquoted path segment.
+
+        Handles ``\\t \\n \\r \\a \\b \\v \\f \\" \\\\`` , octal ``\\NNN`` and
+        hex ``\\xNN``; unknown escapes keep the backslash literally.
+        """
+        simple = {
+            "a": 0x07, "b": 0x08, "t": 0x09, "n": 0x0A,
+            "v": 0x0B, "f": 0x0C, "r": 0x0D, '"': 0x22, "\\": 0x5C,
+        }
+        out = bytearray()
+        i = 0
+        while i < len(inner):
+            ch = inner[i]
+            if ch != "\\":
+                out.extend(ch.encode("utf-8"))
+                i += 1
+                continue
+            i += 1
+            if i >= len(inner):
+                break
+            esc = inner[i]
+            if esc in simple:
+                out.append(simple[esc])
+                i += 1
+                continue
+            if esc == "x":
+                hexd = inner[i + 1:i + 3]
+                if len(hexd) == 2 and all(c in "0123456789abcdefABCDEF" for c in hexd):
+                    out.append(int(hexd, 16) & 0xFF)
+                    i += 3
+                    continue
+            if esc in "01234567":
+                j = i
+                oct_digits = ""
+                while j < len(inner) and inner[j] in "01234567" and len(oct_digits) < 3:
+                    oct_digits += inner[j]
+                    j += 1
+                out.append(int(oct_digits, 8) & 0xFF)
+                i = j
+                continue
+            # Unknown escape: keep backslash and the char literally.
+            out.extend(b"\\")
+            out.extend(esc.encode("utf-8"))
+            i += 1
+        return out.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _unquote_git_path(path: str) -> str:
+        """Decode a git-quoted path back to its raw bytes.
+
+        git wraps paths containing control chars / quotes / backslashes in
+        double quotes and C-escapes the offending bytes. This quoting is
+        independent of ``core.quotepath`` (which only governs non-ASCII bytes),
+        so a literal TAB in a filename is emitted as ``"dir\\tfile.txt"``
+        regardless of that setting. Feeding the quoted form straight into
+        ``Path(repo) / path`` resolves to a non-existent file, so numstat,
+        diff headers and ls-files paths must be unquoted here to match the
+        real on-disk relative path. Unquoted paths are returned verbatim.
+        """
+        if not (len(path) >= 2 and path.startswith('"') and path.endswith('"')):
+            return path
+        return DiffService._decode_c_escaped(path[1:-1])
+
+    @staticmethod
+    def _extract_diff_header_path(token: str) -> str | None:
+        """Extract the on-disk relative path from a ``--- a/`` / ``+++ b/`` token.
+
+        git quotes the whole ``a/<path>`` / ``b/<path>`` form when the path
+        contains control chars (e.g. ``+++ "b/dir\\tfile.txt"``), so the prefix
+        lives inside the quotes. Strip the prefix and decode, returning the
+        real relative path, or ``None`` for ``/dev/null`` (deleted/new file
+        counterpart).
+        """
+        if token == "/dev/null":
+            return None
+        quoted = len(token) >= 2 and token.startswith('"') and token.endswith('"')
+        inner = token[1:-1] if quoted else token
+        for prefix in ("b/", "a/"):
+            if inner.startswith(prefix):
+                rel = inner[len(prefix):]
+                return DiffService._decode_c_escaped(rel) if quoted else rel
+        return DiffService._decode_c_escaped(inner) if quoted else inner
+
+    @staticmethod
     def _run_git_command(project_dir: str, args: list[str]) -> str | None:
         """在 project_dir 中运行 git 命令，返回 stdout 或 None."""
         import subprocess
@@ -585,7 +670,8 @@ class DiffService:
             parts = line.split("\t")
             if len(parts) < 3:
                 continue
-            added_str, removed_str, file_path = parts[0], parts[1], parts[2]
+            added_str, removed_str = parts[0], parts[1]
+            file_path = "\t".join(parts[2:])
             # rename 的 numstat 路径需归一化为新路径，否则与 _parse_git_diff_hunks
             # 从 "+++ b/new" 提取的 key 不一致，导致 hunks 丢失。
             # 两种形式:
@@ -599,6 +685,9 @@ class DiffService:
                 file_path = file_path[:m.start()] + m.group(2) + file_path[m.end():]
             if " => " in file_path:
                 file_path = file_path.rsplit(" => ", 1)[-1].strip()
+            # 控制字符路径（如含 TAB）会被 git 加引号并 C 转义（与
+            # core.quotepath 无关），解码回原始字节串才能对应磁盘真实文件。
+            file_path = DiffService._unquote_git_path(file_path)
             is_binary = added_str == "-" and removed_str == "-"
             result[file_path] = {
                 "added": 0 if is_binary else int(added_str),
@@ -647,10 +736,14 @@ class DiffService:
         line_counts: dict[str, int] = {}
         truncated: set[str] = set()
 
-        # 匹配 diff 头部: diff --git a/path b/path, --- a/path, +++ b/path
+        # 匹配 diff 头部: --- a/path, +++ b/path
+        # 控制字符路径会被整体加引号（如 +++ "b/dir\tfile.txt"），b/ 前缀在引号内，
+        # 所以捕获整个 token（含引号）再用 _extract_diff_header_path 剥前缀+解码。
+        # 限定 b//a/ 前缀或两端引号，避免把以 "++ " 开头的 hunk 内容行（会变成
+        # "+++ ..."，无 b/ 前缀也非两端引号）误判为文件头。
         # 对于删除文件，+++ b/ 行是 +++ /dev/null 不会匹配，需要回退到 --- a/ 行
-        file_header_new_re = re.compile(r"^\+\+\+ b/(.+)$")
-        file_header_old_re = re.compile(r"^--- a/(.+)$")
+        file_header_new_re = re.compile(r'^\+\+\+ (b/.*|".*")$')
+        file_header_old_re = re.compile(r'^--- (a/.*|".*")$')
         # 匹配 hunk 头部: @@ -oldStart,oldLines +newStart,newLines @@
         hunk_header_re = re.compile(
             r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@"
@@ -660,20 +753,22 @@ class DiffService:
             # 检测文件头（优先 +++ b/ 行）
             file_match = file_header_new_re.match(line)
             if file_match:
-                current_file = file_match.group(1)
-                if current_file not in files:
-                    files[current_file] = []
-                    line_counts[current_file] = 0
-                current_hunk = None
+                resolved = DiffService._extract_diff_header_path(file_match.group(1))
+                if resolved is not None:
+                    current_file = resolved
+                    if current_file not in files:
+                        files[current_file] = []
+                        line_counts[current_file] = 0
+                    current_hunk = None
                 continue
 
             # 回退：对于删除文件，+++ b/ 不匹配（是 +++ /dev/null），
             # 从 --- a/ 行提取文件路径
             file_match = file_header_old_re.match(line)
             if file_match:
-                path = file_match.group(1)
-                if path != "/dev/null":
-                    current_file = path
+                resolved = DiffService._extract_diff_header_path(file_match.group(1))
+                if resolved is not None:
+                    current_file = resolved
                     if current_file not in files:
                         files[current_file] = []
                         line_counts[current_file] = 0
@@ -736,14 +831,19 @@ class DiffService:
                 continue
             full = "diff --git " + chunk
             if len(full.encode("utf-8", errors="replace")) > MAX_DIFF_SIZE_BYTES:
-                # 提取文件路径用于标记
-                m = re.search(r"^\+\+\+ b/(.+)$", full, re.MULTILINE)
+                # 提取文件路径用于标记。路径可能被引号包裹（控制字符），
+                # 需用 _extract_diff_header_path 解码以与 numstat key 对齐。
+                m = re.search(r'^\+\+\+ (b/.*|".*")$', full, re.MULTILINE)
                 if m:
-                    large_files.add(m.group(1))
+                    resolved = DiffService._extract_diff_header_path(m.group(1))
+                    if resolved is not None:
+                        large_files.add(resolved)
                 else:
-                    m2 = re.search(r"^--- a/(.+)$", full, re.MULTILINE)
-                    if m2 and m2.group(1) != "/dev/null":
-                        large_files.add(m2.group(1))
+                    m2 = re.search(r'^--- (a/.*|".*")$', full, re.MULTILINE)
+                    if m2:
+                        resolved = DiffService._extract_diff_header_path(m2.group(1))
+                        if resolved is not None:
+                            large_files.add(resolved)
                 continue
             kept.append(full)
         return "".join(kept), large_files
@@ -751,10 +851,11 @@ class DiffService:
     def _get_untracked_files(
         self, project_dir: str, max_files: int = MAX_FILES
     ) -> dict[str, dict[str, Any]]:
-        """获取未跟踪文件列表并生成合成 diff（全部为新增行）."""
-        # core.quotepath=false 让 git 直接输出原始 UTF-8 文件名，
-        # 而非八进制转义串（如 "aaa_design/Code\346\250\241..."），
-        # 否则中文路径无法对应到磁盘真实路径，read_text 会失败、hunk 为空。
+        """获取未跟踪文件列表，仅记录文件名和状态."""
+        # core.quotepath=false 让 git 对非 ASCII 字节直接输出原始 UTF-8 文件名
+        # （而非八进制转义串），否则中文路径无法对应磁盘真实路径。但 ASCII 控制字符
+        # （如 TAB）无论该设置如何都会被加引号并 C 转义（如 "dir\tfile.txt"），
+        # 仍需 _unquote_git_path 解码才能对应磁盘真实文件。
         output = self._run_git_command(
             project_dir,
             ["-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard"],
@@ -769,40 +870,18 @@ class DiffService:
             rel_path = rel_path.strip()
             if not rel_path:
                 continue
+            rel_path = DiffService._unquote_git_path(rel_path)
             abs_path = str(Path(project_dir) / rel_path)
-            try:
-                content = Path(abs_path).read_text(encoding="utf-8", errors="replace")
-            except (OSError, ValueError):
-                # 二进制文件或无法读取，只记录文件名不含 hunk
-                content = None
-
-            if content is not None:
-                lines = content.splitlines()
-                is_truncated = len(lines) > MAX_LINES_PER_FILE
-                if is_truncated:
-                    lines = lines[:MAX_LINES_PER_FILE]
-                hunks = [{
-                    "oldStart": 0,
-                    "oldLines": 0,
-                    "newStart": 1,
-                    "newLines": len(lines),
-                    "lines": [f"+{line}" for line in lines],
-                }]
-                lines_added = len(lines)
-            else:
-                hunks = []
-                lines_added = 0
-                is_truncated = False
 
             files[abs_path] = {
                 "filePath": abs_path,
-                "hunks": hunks,
+                "hunks": [],
                 "isNewFile": True,
-                "isBinary": content is None,
+                "isBinary": False,
                 "isLargeFile": False,
-                "isTruncated": is_truncated,
+                "isTruncated": False,
                 "isUntracked": True,
-                "linesAdded": lines_added,
+                "linesAdded": 0,
                 "linesRemoved": 0,
                 "lastEditTime": None,
             }
@@ -836,6 +915,7 @@ class DiffService:
             return None
 
         files: dict[str, dict[str, Any]] = {}
+        total_files_changed = 0
         total_added = 0
         total_removed = 0
 
@@ -862,6 +942,9 @@ class DiffService:
             diff_output = self._run_git_command(repo_dir, ["diff", "HEAD"])
             if numstat_output and diff_output:
                 per_file_stats = self._parse_git_numstat(numstat_output)
+                total_files_changed += len(per_file_stats)
+                total_added += sum(int(stats["added"]) for stats in per_file_stats.values())
+                total_removed += sum(int(stats["removed"]) for stats in per_file_stats.values())
                 filtered_output, large_files = self._split_large_file_diffs(diff_output)
                 all_hunks, truncated_files = self._parse_git_diff_hunks(filtered_output)
 
@@ -876,8 +959,6 @@ class DiffService:
                         hunks = all_hunks.get(rel_path, [])
                     lines_added = stats["added"]
                     lines_removed = stats["removed"]
-                    total_added += lines_added
-                    total_removed += lines_removed
 
                     files[abs_path] = {
                         "filePath": abs_path,
@@ -901,6 +982,7 @@ class DiffService:
                 file_info.setdefault("isLargeFile", False)
                 file_info.setdefault("isTruncated", False)
                 files[abs_path] = file_info
+                total_files_changed += 1
                 total_added += file_info["linesAdded"]
 
         if not files:
@@ -908,7 +990,7 @@ class DiffService:
 
         return {
             "stats": {
-                "filesChanged": len(files),
+                "filesChanged": total_files_changed,
                 "linesAdded": total_added,
                 "linesRemoved": total_removed,
             },
