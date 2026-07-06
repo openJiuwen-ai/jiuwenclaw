@@ -52,44 +52,6 @@ def _normalize_fs_entry(entry: Any, default_permissions: str) -> dict[str, Any] 
     return None
 
 
-def _relax_workspace_perms(root: Path) -> None:
-    """递归把工作区放权到 sandbox uid 可写, 兜底 bwrap userns 不能映射 owner 的场景.
-
-    """
-    try:
-        if root.is_symlink():
-            return
-        is_dir = root.is_dir()
-    except OSError as exc:
-        logger.debug("[sysop_builder] cannot stat %s: %s; skip chmod", root, exc)
-        return
-    extra = 0o007 if is_dir else 0o006
-    try:
-        st_mode = root.stat().st_mode & 0o7777
-    except OSError as exc:
-        logger.debug("[sysop_builder] cannot read mode of %s: %s; skip chmod", root, exc)
-    else:
-        new_mode = st_mode | extra
-        if new_mode != st_mode:
-            try:
-                root.chmod(new_mode)
-            except OSError as exc:
-                logger.warning(
-                    "[sysop_builder] could not relax perms on %s (%s -> %s): %s; "
-                    "sandbox writes through bind mount may still hit Permission denied",
-                    root, oct(st_mode), oct(new_mode), exc,
-                )
-    if not is_dir:
-        return
-    try:
-        children = list(root.iterdir())
-    except OSError as exc:
-        logger.debug("[sysop_builder] cannot list %s: %s; skip recurse", root, exc)
-        return
-    for child in children:
-        _relax_workspace_perms(child)
-
-
 def _resolve_shared_dir(shared_dir: str | Path | None) -> Path | None:
     """Resolve and ensure the deep agent shared dir exists & is sandbox-writable."""
     if not shared_dir:
@@ -118,7 +80,6 @@ def _resolve_shared_dir(shared_dir: str | Path | None) -> Path | None:
             resolved,
         )
         return None
-    _relax_workspace_perms(resolved)
     return resolved
 
 
