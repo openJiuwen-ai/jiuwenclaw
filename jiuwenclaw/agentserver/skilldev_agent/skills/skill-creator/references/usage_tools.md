@@ -2,7 +2,7 @@
 
 Translate a toolDefinition into two things in the new skill:
 
-1. **Call syntax** — an `invoke(funcName:"<toolName>", params:{...})` call.
+1. **Call syntax** — an `invoke(functionName:"<toolName>", arguments:{...})` call.
 2. **Tool-definitions block** — a `### Function: <toolName>` entry in the skill body's single **tool definitions** section.
 
 Both are generated from the same source JSON below.
@@ -49,15 +49,15 @@ This single definition drives both outputs below.
 
 ## Output 1 — Call syntax
 
-`funcName` is the toolDefinition `toolName`. `params` carries the tool arguments, plus `bundleName`:
+`functionName` is the toolDefinition `toolName`. `arguments` carries the tool arguments, plus `bundleName`:
 
-- `params.bundleName` is always required and comes from `toolDefinition.bundleName`.
-- Build the remaining params from the `arguments` JSON Schema; include every field in `arguments.required`.
+- `arguments.bundleName` is always required and comes from `toolDefinition.bundleName`.
+- Build the remaining arguments from the `arguments` JSON Schema; include every field in `arguments.required`.
 
 From the example:
 
 ```text
-invoke(funcName:"weather_query", params:{bundleName:"bundle_001", city:"北京"})
+invoke(functionName:"weather_query", arguments:{bundleName:"bundle_001", city:"北京"})
 ```
 
 ## Output 2 — Tool-definitions block
@@ -89,10 +89,10 @@ No 约束 / 语义 line here — the definition implies no special preconditions
 
 | Field | How to use it | Hard rule |
 | --- | --- | --- |
-| `bundleName` | Into metadata, source filename, and `invoke.params.bundleName`. | Copy exactly; never invent. Always present in `params`. |
-| `toolName` | Into `invoke.funcName` and the block heading. | Copy exactly. Never write `toolName(...)` as a direct call. |
+| `bundleName` | Into metadata, source filename, and `invoke.arguments.bundleName`. | Copy exactly; never invent. Always present in `arguments`. |
+| `toolName` | Into `invoke.functionName` and the block heading. | Copy exactly. Never write `toolName(...)` as a direct call. |
 | `description` | Decide when the tool should be called. | — |
-| `arguments` | JSON Schema for building `invoke.params` and the `- **参数**` line. | Include all `required` fields; preserve schema value types; pass as structured data, never command text. |
+| `arguments` | JSON Schema for building `invoke.arguments` and the `- **参数**` line. | Include all `required` fields; preserve schema value types; pass as structured data, never command text. |
 | `pluginType` | Backend category. | — |
 | `deviceCommand` | Backend command template. | Never call directly; always go through `invoke`. |
 | `schemaVersion`, `generatedAt`, `toolType`, `protocol` | Internal/transport metadata. | Do not include in generated usage instructions. |
