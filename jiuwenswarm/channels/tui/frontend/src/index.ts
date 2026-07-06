@@ -47,20 +47,16 @@ const tui = new TUI(terminal);
 let closed = false;
 let screen: AppScreen | null = null;
 
-/** 退出 CLI 前先向服务端发 `chat.interrupt`，结束当前会话中正在运行的 agent 任务（已连接时；idle 时多为 no-op）。 */
-async function cancelBeforeExit(): Promise<void> {
-  if (appState.getSnapshot().connectionStatus !== "connected") {
-    return;
-  }
-  appState.cancel({ showNotice: false });
-  await new Promise((resolve) => setTimeout(resolve, 200));
+/** 正常退出 CLI 前显式通知服务端；异常崩溃不走该路径。 */
+async function notifyDisconnectBeforeExit(): Promise<void> {
+  await appState.notifyDisconnectBeforeExit("user_exit");
 }
 
 async function closeUi(exitCode = 0): Promise<void> {
   if (closed) return;
   closed = true;
   try {
-    await cancelBeforeExit();
+    await notifyDisconnectBeforeExit();
   } catch {
     // Best effort only.
   }
@@ -77,11 +73,6 @@ async function closeUi(exitCode = 0): Promise<void> {
 async function crash(error: unknown): Promise<void> {
   const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
   if (!closed) {
-    try {
-      await cancelBeforeExit();
-    } catch {
-      // Best effort only.
-    }
     screen?.dispose();
     appState.stop();
     try {

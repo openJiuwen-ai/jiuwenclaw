@@ -256,7 +256,7 @@ const EVOLUTION_KEYS = new Set(["evolution_auto_scan", "skill_create"]);
 // 模型字段长度校验常量
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
-const MAX_API_BASE_LENGTH = 100;
+const MAX_API_BASE_LENGTH = 256;
 const MAX_API_KEY_LENGTH = 500;
 
 // URL 格式校验函数

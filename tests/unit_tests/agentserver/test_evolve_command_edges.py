@@ -365,6 +365,35 @@ async def test_agent_evolve_rebuild_routes_to_slash_adapter(monkeypatch):
     assert result["skill_name"] == "demo-skill"
 
 
+@pytest.mark.anyio
+async def test_agent_evolve_rollback_routes_to_slash_without_rail(monkeypatch):
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._config_cache = {"evolution": {"enabled": True}}  # pylint: disable=protected-access
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+
+    async def _unexpected_ensure_rail(_mode: str):
+        raise AssertionError("rollback slash must not initialize or require SkillEvolutionRail")
+
+    async def _fake_handler(query, context):
+        assert query == "/evolve_rollback demo-skill latest"
+        assert context.mode == "agent.plan"
+        return {"result_type": "answer", "output": "rolled back"}
+
+    monkeypatch.setattr(adapter, "_ensure_evolution_rail_for_slash", _unexpected_ensure_rail)
+    monkeypatch.setattr(interface_deep_module, "handle_evolution_slash_command", _fake_handler)
+
+    result = await adapter._handle_slash_command(  # pylint: disable=protected-access
+        "/evolve_rollback demo-skill latest",
+        session_id="sess-agent-evolve",
+        mode="agent.plan",
+    )
+
+    assert result is not None
+    assert result["slash_command"] == "evolve_rollback"
+    assert result["result_type"] == "answer"
+    assert result["output"] == "rolled back"
+
+
 @pytest.mark.parametrize(
     "action",
     [

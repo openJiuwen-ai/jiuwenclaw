@@ -75,15 +75,28 @@ function groupAll(
       ? (r as any).tools.join(", ")
       : String((r as any).tools ?? "");
     const pattern = String((r as any).pattern ?? "");
-    const action = String((r as any).action ?? "").toLowerCase();
+    let action = String((r as any).action ?? "").toLowerCase();
+    // 当 action 未显式配置时，根据 severity 推断（与后端 permission_mode=normal 一致）
+    if (!action || !["allow", "ask", "deny"].includes(action)) {
+      const severity = String((r as any).severity ?? "").toUpperCase();
+      if (severity === "LOW" || severity === "MEDIUM") {
+        action = "allow";
+      } else if (severity === "HIGH" || severity === "CRITICAL") {
+        action = "ask";
+      } else {
+        action = "ask"; // 默认 fallback
+      }
+    }
     const group = action === "allow" ? result.allow : action === "deny" ? result.deny : result.ask;
+    // 缩短 label 中的 pattern 显示，避免过长被截断
+    const shortPattern = pattern.length > 30 ? pattern.slice(0, 27) + "..." : pattern;
     group.rules.push({
       kind: "rule",
       key: rid,
       tools: toolsRawStr,
       pattern,
       action,
-      label: shortenToolList(toolsRawStr) + `(${pattern})`,
+      label: shortenToolList(toolsRawStr) + `(${shortPattern})`,
       description: `pattern: ${pattern}`,
     });
   }
@@ -323,6 +336,18 @@ async function manageRule(
   ctx: CommandCtx,
   entry: RuleEntry,
 ): Promise<"reload" | "exit" | null> {
+  // 先在聊天区域显示完整规则信息，使用 meta.items 让每行用不同颜色
+  ctx.addItem(
+    makeItem(ctx.sessionId, "info", "规则详情", "🔒", {
+      items: [
+        { label: "规则 ID", value: entry.key },
+        { label: "工具", value: entry.tools },
+        { label: "Pattern", value: entry.pattern },
+        { label: "动作", value: entry.action },
+      ],
+    }),
+  );
+
   const options = [
     { label: "移到 ALLOW", description: "自动允许匹配此 pattern 的请求" },
     { label: "移到 ASK", description: "匹配时需要确认" },
@@ -331,7 +356,7 @@ async function manageRule(
     { label: "返回", description: "返回列表" },
   ];
 
-  const selected = await pickOne(ctx, `规则: ${entry.key}`, `tools: ${entry.tools}\npattern: ${entry.pattern}\n当前: ${entry.action}`, options, "perm_rule_action");
+  const selected = await pickOne(ctx, `规则: ${entry.key}`, `当前: ${entry.action}`, options, "perm_rule_action");
   if (!selected || selected === "返回") return null;
 
   if (selected.startsWith("移到 ")) {

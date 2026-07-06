@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -232,6 +233,15 @@ def _resolve_project_dir(override: str | Path | None) -> Path | None:
     return None
 
 
+def _sandbox_isolation_custom_id(project_dir: str | Path | None) -> str:
+    """Stable SysOperation isolation key suffix for per-project sandbox sharing."""
+    resolved = _resolve_project_dir(project_dir)
+    if resolved is None:
+        return "project_default"
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:16]
+    return f"project_{digest}"
+
+
 def build_filesystem_policy(
     files_runtime: dict[str, Any] | None,
     *,
@@ -354,6 +364,7 @@ def build_filesystem_policy(
         _mount_rw_dir(resolved_workspace)
 
     resolved_project = _resolve_project_dir(project_dir)
+    logger.info(f'zzx: resolved_project: {resolved_project}')
     if resolved_project is not None:
         _mount_rw_dir(resolved_project)
 
@@ -446,8 +457,12 @@ def create_sandbox_sysop_card(
         if idle_check_interval is not None:
             extra_params["idle_check_interval"] = idle_check_interval
 
+        isolation_custom_id = _sandbox_isolation_custom_id(project_dir)
         gateway_config = SandboxGatewayConfig(
-            isolation=SandboxIsolationConfig(container_scope=ContainerScope.SYSTEM),
+            isolation=SandboxIsolationConfig(
+                container_scope=ContainerScope.CUSTOM,
+                custom_id=isolation_custom_id,
+            ),
             launcher_config=PreDeployLauncherConfig(
                 base_url=sandbox_url,
                 sandbox_type=sandbox_type,
@@ -465,6 +480,7 @@ def create_sandbox_sysop_card(
         logger.info(
             "[sysop_builder] sandbox SysOperationCard created:\n"
             "  base_url=%s sandbox_type=%s\n"
+            "  isolation_custom_id=%s\n"
             "  idle_ttl=%s idle_check_interval=%s\n"
             "  preserve_file_sharing_mode=%s\n"
             "  excluded_commands(%d)=%s\n"
@@ -477,6 +493,7 @@ def create_sandbox_sysop_card(
             "  policy_mode=%s",
             sandbox_url,
             sandbox_type,
+            isolation_custom_id,
             idle_ttl_seconds,
             idle_check_interval,
             _PRESERVE_FILE_SHARING_MODE,
@@ -552,6 +569,45 @@ def _resolve_display_path(raw: str | Path | None) -> str | None:
             text, exc,
         )
         return None
+
+
+def _filesystem_policy_to_display_entries(
+    fs_policy: dict[str, Any],
+) -> dict[str, list[dict[str, str]]]:
+    """Convert ``filesystem_policy.bind_mounts`` into ``/sandbox`` display entries."""
+    allow: list[dict[str, str]] = []
+    deny: list[dict[str, str]] = []
+    read_only = {
+        str(path)
+        for path in (fs_policy.get("read_only") or [])
+        if str(path).strip()
+    }
+    for mount in fs_policy.get("bind_mounts") or []:
+        if not isinstance(mount, dict):
+            continue
+        host_path = str(mount.get("host_path") or mount.get("sandbox_path") or "").strip()
+        if not host_path:
+            continue
+        sandbox_path = str(mount.get("sandbox_path") or host_path).strip()
+        mount_mode = str(mount.get("mode") or "rw").lower()
+        access = "ro" if sandbox_path in read_only or mount_mode == "ro" else "rw"
+        kind = _classify_host_kind(host_path)
+        if kind == "directory" and host_path != "/":
+            display_path = host_path.rstrip("/") + "/"
+        else:
+            display_path = host_path
+        entry = {"path": display_path, "access": access, "kind": kind}
+        bucket = deny if access == "ro" else allow
+        _append_unique(bucket, entry)
+    return {"allow_write": allow, "deny_write": deny}
+
+
+def effective_files_from_policy(policy: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
+    """Derive ``/sandbox`` display entries from a cached launcher policy dict."""
+    fs_policy = policy.get("filesystem_policy") if isinstance(policy, dict) else {}
+    if not isinstance(fs_policy, dict):
+        fs_policy = {}
+    return _filesystem_policy_to_display_entries(fs_policy)
 
 
 def list_auto_managed_sandbox_paths(
@@ -738,6 +794,7 @@ __all__ = [
     "build_filesystem_policy",
     "create_sandbox_sysop_card",
     "create_local_sysop_card",
+    "effective_files_from_policy",
     "find_auto_managed_match",
     "find_nested_files_conflict",
     "list_auto_managed_sandbox_paths",

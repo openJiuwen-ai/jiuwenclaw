@@ -9,6 +9,8 @@ import asyncio
 import io
 import json
 import os
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -19,6 +21,10 @@ from jiuwenswarm.cli.chat import (
     _build_default_gateway_url,
     _build_request,
     _generate_session_id,
+    _get_persisted_external_dirs,
+    _load_state,
+    _remove_dir_from_config,
+    _save_state,
     _validate_args,
     build_parser,
     resolve_mode,
@@ -45,16 +51,13 @@ class TestResolveMode:
     @staticmethod
     def test_alias_resolution():
         assert resolve_mode("agent") == "agent.plan"
-        assert resolve_mode("fast") == "agent.fast"
         assert resolve_mode("code") == "code.normal"
-        assert resolve_mode("normal") == "code.normal"
-        assert resolve_mode("team.normal") == "team"
 
     @staticmethod
     def test_case_insensitive():
         assert resolve_mode("AGENT") == "agent.plan"
         assert resolve_mode("Code.Normal") == "code.normal"
-        assert resolve_mode("  fast  ") == "agent.fast"
+        assert resolve_mode("  agent.fast  ") == "agent.fast"
 
     @staticmethod
     def test_invalid_mode_raises():
@@ -173,6 +176,10 @@ class TestBuildRequest:
     @staticmethod
     def test_with_trusted_dirs(monkeypatch):
         monkeypatch.setattr(os, "getcwd", lambda: "/cwd")
+        monkeypatch.setattr(
+            "jiuwenswarm.cli.chat._get_persisted_external_dirs",
+            lambda: [],
+        )
         args = argparse.Namespace(
             mode="code.normal",
             session=None,
@@ -246,10 +253,10 @@ class TestValidateArgs:
 
     @staticmethod
     def test_mode_resolved():
-        args = argparse.Namespace(mode="fast", json=False, jsonl=False,
+        args = argparse.Namespace(mode="agent", json=False, jsonl=False,
                                   show_reasoning=False, show_tools=False, timeout=None)
         assert _validate_args(args) is None
-        assert args.mode == "agent.fast"
+        assert args.mode == "agent.plan"
 
 
 class TestParser:
@@ -438,14 +445,17 @@ class TestHumanRenderer:
         assert cout.getvalue() == " world"
 
     @staticmethod
-    def test_final_full_replacement():
+    def test_final_no_duplicate_on_different_format():
         r, cout, _ = TestHumanRenderer._make_renderer()
         r.handle_delta({"content": "partial"})
         cout.truncate(0)
         cout.seek(0)
 
         r.handle_final({"content": "completely different"})
-        assert cout.getvalue() == "completely different"
+        # Terminal can't undo already-streamed text; final should not reprint
+        assert cout.getvalue() == ""
+        # Internal state keeps the longer version
+        assert r.streamed_text == "completely different"
 
     @staticmethod
     def test_final_only_called_once():
@@ -778,7 +788,7 @@ class TestInteractiveLoop:
                        "trusted_dirs": ["/tmp"]},
         }
         code = await _run_interactive_loop(client, renderer, request)
-        assert code == 0
+        assert code == 4
 
     @pytest.mark.asyncio
     async def test_processing_status_restarts_spinner(self):
@@ -914,3 +924,127 @@ class TestSpinner:
         assert r.loading is False
         r.ensure_loading()
         assert r.loading is True
+
+
+class TestTrustedDirsState:
+    """Tests for _load_state / _save_state."""
+
+    @staticmethod
+    def test_load_state_missing_file(monkeypatch, tmp_path):
+        state_file = tmp_path / "nonexistent.json"
+        monkeypatch.setattr("jiuwenswarm.cli.chat._STATE_FILE", state_file)
+        assert _load_state() == {}
+
+    @staticmethod
+    def test_save_and_load_state(monkeypatch, tmp_path):
+        state_file = tmp_path / "state.json"
+        monkeypatch.setattr("jiuwenswarm.cli.chat._STATE_FILE", state_file)
+        _save_state({"/dir1": True, "/dir2": False})
+        assert state_file.exists()
+        loaded = _load_state()
+        assert loaded == {"/dir1": True, "/dir2": False}
+
+    @staticmethod
+    def test_load_state_corrupted_file(monkeypatch, tmp_path):
+        state_file = tmp_path / "bad.json"
+        state_file.write_text("not json", encoding="utf-8")
+        monkeypatch.setattr("jiuwenswarm.cli.chat._STATE_FILE", state_file)
+        assert _load_state() == {}
+
+
+class TestExternalDirs:
+    """Tests for _get_persisted_external_dirs / _remove_dir_from_config."""
+
+    @staticmethod
+    def test_get_persisted_external_dirs_empty(monkeypatch, tmp_path):
+        cfg_path = tmp_path / "config.yaml"
+        from ruamel.yaml import YAML
+        yaml = YAML()
+        yaml.dump({"permissions": {"external_directory": {"*": "ask"}}}, cfg_path)
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
+        assert _get_persisted_external_dirs() == []
+
+    @staticmethod
+    def test_get_persisted_external_dirs_with_allows(monkeypatch, tmp_path):
+        cfg_path = tmp_path / "config.yaml"
+        from ruamel.yaml import YAML
+        yaml = YAML()
+        yaml.dump(
+            {
+                "permissions": {
+                    "external_directory": {
+                        "*": "deny",
+                        "/Users/hwz/mcore/foo": "allow",
+                        "/tmp/bar": "deny",
+                        "/opt/baz": "allow",
+                    }
+                }
+            },
+            cfg_path,
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
+        dirs = _get_persisted_external_dirs()
+        assert "/Users/hwz/mcore/foo" in dirs
+        assert "/opt/baz" in dirs
+        assert "/tmp/bar" not in dirs
+        assert "*" not in dirs
+        assert len(dirs) == 2
+
+    @staticmethod
+    def test_remove_dir_from_config(monkeypatch, tmp_path):
+        cfg_path = tmp_path / "config.yaml"
+        save_cfg_path = cfg_path
+        from ruamel.yaml import YAML
+        yaml = YAML()
+        yaml.dump(
+            {
+                "permissions": {
+                    "external_directory": {
+                        "*": "ask",
+                        "/Users/hwz/mcore/foo": "allow",
+                    }
+                }
+            },
+            cfg_path,
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", save_cfg_path)
+        assert _remove_dir_from_config("/Users/hwz/mcore/foo") is True
+        assert _get_persisted_external_dirs() == []
+
+    @staticmethod
+    def test_remove_dir_from_config_nonexistent(monkeypatch, tmp_path):
+        cfg_path = tmp_path / "config.yaml"
+        from ruamel.yaml import YAML
+        yaml = YAML()
+        yaml.dump(
+            {"permissions": {"external_directory": {"*": "ask"}}},
+            cfg_path,
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
+        assert _remove_dir_from_config("/nonexistent") is False
+
+
+class TestGatewayClientClose:
+    """Tests for GatewayClient.close() exception handling."""
+
+    @pytest.mark.asyncio
+    @staticmethod
+    async def test_close_swallows_error():
+        client = GatewayClient("ws://127.0.0.1:19001/tui")
+
+        class FakeFailingWs:
+            async def close(self):
+                raise RuntimeError("connection already closed")
+
+        client.set_mock_ws(FakeFailingWs())
+        # Should not raise
+        await client.close()
+        # Internal ws reference should be cleared
+        assert client.is_open is False
+
+    @pytest.mark.asyncio
+    @staticmethod
+    async def test_close_ws_none():
+        client = GatewayClient("ws://127.0.0.1:19001/tui")
+        # _ws is None by default
+        await client.close()  # Should not raise

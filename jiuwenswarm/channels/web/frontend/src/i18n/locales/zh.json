@@ -8,6 +8,7 @@
     "loading": "加载中...",
     "save": "保存",
     "saving": "保存中...",
+    "saveSuccess": "保存成功",
     "error": "错误",
     "ok": "确定",
     "and": "和",
@@ -98,6 +99,12 @@
     "taskDetail": {
       "sourcePrompt": "来源请求：{{prompt}}",
       "noDetail": "后端未提供更详细的任务描述"
+    },
+    "contextCompression": {
+      "running": "正在压缩上下文",
+      "completed": "上下文压缩完成 {{count}} 次",
+      "failed": "上下文压缩失败",
+      "close": "关闭上下文压缩提示"
     },
     "elapsed": {
       "daysHours": "{{days}}天{{hours}}小时",
@@ -746,7 +753,7 @@
       "apiBaseUrlInvalid": "API Base URL 必须以 http:// 或 https:// 开头",
       "modelNameTooLong": "模型名称过长，请控制在 100 字符以内",
       "aliasTooLong": "别名过长，请控制在 100 字符以内",
-      "apiBaseTooLong": "API Base URL 过长，请控制在 100 字符以内",
+      "apiBaseTooLong": "API Base URL 过长，请控制在 256 字符以内",
       "apiKeyTooLong": "API Key 过长，请控制在 500 字符以内",
       "reasoningDefault": "使用默认值",
       "alias": "别名",
@@ -1066,6 +1073,7 @@
       "building": "构建中...",
       "buildFailed": "构建失败",
       "lastBuildFailedUsingExisting": "上次重新构建失败，当前仍在使用上一次成功构建的索引。",
+      "lastBuildCancelledUsingExisting": "上次重新构建已取消，当前仍在使用上一次成功构建的索引。",
       "cancel": "取消构建",
       "cancelling": "取消中...",
       "cancelled": "构建已取消",
@@ -1139,6 +1147,7 @@
       "nodeCategory": "分类",
       "nodeKeywords": "关键词",
       "nodeExamples": "示例",
+      "disabledSkill": "已禁用",
       "nodeTypes": {
         "branch": "分支",
         "skill": "技能"
@@ -1321,7 +1330,12 @@
         "skillMdNotFound": "下载未完成或内容不完整，未找到 SKILL.md，请重试。",
         "parseSkillFailed": "无法解析下载的技能文件",
         "skillAlreadyInstalled": "该技能已安装。",
-        "invalidMirrorUrl": "mirror_url 不是有效的 http(s) 地址。"
+        "invalidMirrorUrl": "mirror_url 不是有效的 http(s) 地址。",
+        "githubNotFound": "该技能的 GitHub 源地址已失效（404 未找到）。仓库、文件或分支可能已被删除、移动或重命名，SkillNet 收录的信息可能已过期，暂时无法安装该技能。",
+        "githubRateLimited": "GitHub 访问被限流或拒绝（403）。匿名请求限额约为 60 次/小时，请稍后再试；如需更高限额，可在配置页面填写 github_token。",
+        "githubUnauthorized": "GitHub 认证失败（401）。请检查配置页面中的 github_token 是否有效。",
+        "githubNetwork": "连接 GitHub 失败（网络超时或多次重试后仍失败）。请检查网络或代理设置后重试。",
+        "githubApiError": "GitHub 返回错误（{{status}}）：{{message}}。请稍后重试。"
       }
     },
     "clawhub": {
@@ -1488,7 +1502,8 @@
       "accept": "接收",
       "reject": "拒绝",
       "allowOnce": "本次允许",
-      "alwaysAllow": "总是允许",
+      "sessionAllow": "会话内记住",
+      "alwaysAllow": "永久记住",
       "acceptAll": "全部接收",
       "submit": "确认提交",
       "entryCount": "共 {{count}} 条演进经验"

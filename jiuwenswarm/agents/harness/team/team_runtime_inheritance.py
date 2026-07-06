@@ -26,6 +26,7 @@ from openjiuwen.harness.rails import (
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 
+from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
@@ -76,6 +77,7 @@ RAIL_WHITELIST = frozenset({
     "SecurityRail",
     "HeartbeatRail",
     "AvatarPromptRail",
+    "StructuredAskUserRail",
     "FileSystemRail",
     "SysOperationRail",
     "TeamSkillEvolutionRail",
@@ -199,6 +201,14 @@ def build_member_rails(
         logger.info("[TeamRuntime] JiuSwarmStreamEventRail created")
     except Exception as exc:
         logger.warning("[TeamRuntime] JiuSwarmStreamEventRail failed: %s", exc)
+
+    if role == "leader":
+        try:
+            rail = StructuredAskUserRail(language=language)
+            rails_list.append(rail)
+            logger.info("[TeamRuntime] StructuredAskUserRail created for leader")
+        except Exception as exc:
+            logger.warning("[TeamRuntime] StructuredAskUserRail failed: %s", exc)
 
     try:
         rail = TaskPlanningRail()

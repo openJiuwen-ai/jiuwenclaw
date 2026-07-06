@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.extensions.sdk import BaseExtension
+from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 from jiuwenswarm.symphony.llm import LLMConfig
 from jiuwenswarm.symphony.config import load_symphony_config, symphony_config_from_dict
 from jiuwenswarm.symphony.build import build_score as service_build_score
 from jiuwenswarm.symphony.build import score_status
 from jiuwenswarm.symphony.orchestration import load_score_artifacts
+from jiuwenswarm.symphony.orchestration.artifacts import filter_disabled_score_artifacts
 from jiuwenswarm.symphony.orchestration.execution_graph import select_primary_plan
 from jiuwenswarm.symphony.orchestration.service import plan_from_score
 from jiuwenswarm.symphony.score_storage import resolve_score_artifact_dir
@@ -136,7 +138,10 @@ class SymphonyExtension(BaseExtension):
 
         def load() -> dict[str, Any]:
             try:
-                artifacts = load_score_artifacts(score_dir)
+                artifacts = filter_disabled_score_artifacts(
+                    load_score_artifacts(score_dir),
+                    load_execution_disabled_skills(),
+                )
             except FileNotFoundError as exc:
                 payload = _missing_artifacts_payload(score_dir, exc)
                 payload["orchestration_min_edge_confidence"] = (
@@ -203,6 +208,7 @@ class SymphonyExtension(BaseExtension):
             LLMConfig.from_default_model(),
             orchestration_config=orchestration_config,
             candidate_skill_ids=candidate_skill_ids,
+            disabled_skill_names=load_execution_disabled_skills(),
         )
         if payload.get("success") is False:
             return {

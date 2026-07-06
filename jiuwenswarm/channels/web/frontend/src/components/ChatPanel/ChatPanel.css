@@ -133,6 +133,63 @@
   background: color-mix(in srgb, var(--secondary) 44%, transparent);
 }
 
+.team-event-group.team-event-group--context-compression {
+  margin: 0 12px;
+  border: 1px solid rgba(25, 25, 25, 0.12);
+  border-bottom: none;
+  border-radius: 18px 18px 0 0;
+}
+
+:root:not([data-theme="light"]) .team-event-group.team-event-group--context-compression {
+  border-color: var(--chat-composer-border);
+  box-shadow: none;
+}
+
+.team-event-group-summary.team-event-group-summary--context-compression {
+  min-height: 36px;
+  padding: 7px 18px;
+  background: transparent;
+  cursor: default;
+}
+
+.team-event-group-summary--context-compression:hover {
+  background: transparent;
+}
+
+.team-event-group-summary--context-compression .team-event-group-summary__title {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.team-event-group-summary--context-compression .team-event-group-summary__activity {
+  min-width: 0;
+  color: var(--text-muted);
+}
+
+.team-event-group-summary__icon--details,
+.team-event-group-summary__icon--close {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+
+.team-event-group-summary__icon--close {
+  cursor: pointer;
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.team-event-group-summary__icon--close:hover {
+  background: var(--secondary);
+  color: var(--text);
+}
+
 :root:not([data-theme="light"]) .chat-active-team-group .team-event-group-summary:hover,
 :root:not([data-theme="light"]) .chat-active-team-group button.team-event-group-row:hover {
   background: color-mix(in srgb, var(--panel-hover) 56%, transparent);

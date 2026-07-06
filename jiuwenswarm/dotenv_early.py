@@ -26,8 +26,27 @@ IMPORTANT: This ensures module-level code uses correct workspace path.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
+
+# gRPC C-core hygiene — must be set BEFORE grpc initializes (it is imported
+# lazily by the OTLP/otel exporter and chromadb). This module is the first
+# jiuwenswarm import in every entrypoint, so setting it here guarantees grpc
+# reads it at init.
+#
+# When the agent server forks for tool subprocesses (e.g. the bash tool running
+# ``curl | python3``), grpc's pthread_atfork child handler floods the child's
+# stderr with INFO lines like::
+#
+#   I.... ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(26, ...)
+#
+# which the tool captures via 2>&1 and mixes into its result. The forked child
+# immediately exec()s away and never touches the inherited grpc channel, so
+# disabling fork support removes the handler (and the noise) safely; VERBOSITY
+# is lowered as defense in depth against other INFO-level C-core chatter.
+os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "0")
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 
 # Early logger for startup diagnostics (outputs to stderr)
 _early_logger = logging.getLogger("jiuwenswarm.early")
@@ -121,7 +140,6 @@ def _load_bootstrap_by_name_early(name: str, component_name: str) -> Path | None
     Returns:
         Path to loaded .env if successful, None otherwise
     """
-    import os
 
     # Basic instance name validation (just check it's not empty/reserved)
     if not name or name.lower() in ("default", "config", "tmp"):

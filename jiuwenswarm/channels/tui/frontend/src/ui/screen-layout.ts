@@ -5,7 +5,7 @@ import { isTeamWorking } from "./components/team-shared.js";
 import { renderTeamStatusPill } from "./components/team-status-pill.js";
 import { renderTodoList } from "./components/todo-list.js";
 import { APP_SCREEN_KEY_BINDINGS } from "./keymap.js";
-import { padToWidth } from "./rendering/text.js";
+import { padToWidth, renderWrappedText } from "./rendering/text.js";
 import { palette } from "./theme.js";
 import { buildTranscriptLines } from "./transcript-renderer.js";
 import { loadTuiConfig } from "../core/tui-config-store.js";
@@ -30,6 +30,12 @@ export interface ScreenLayoutOptions {
   runningElapsedMs?: number;
   transcriptScrollOffset?: number;
   onTranscriptScrollOffsetChange?: (offset: number) => void;
+  btwOverlayScrollOffset?: number;
+  onBtwOverlayScrollOffsetChange?: (offset: number) => void;
+  /** 当前 btw overlay 在历史中的下标（-1 无），用于提示 i/n */
+  btwOverlayIndex?: number;
+  /** btw 历史总数 */
+  btwOverlayTotal?: number;
 }
 
 function formatSubtaskStatus(status: string): string {
@@ -211,9 +217,16 @@ function buildStatusLineBar(snapshot: AppSnapshot, width: number): string[] {
 function renderBtwOverlay(
   overlay: { question: string; answer: string },
   width: number,
-): string[] {
+  maxHeight: number,
+  scrollOffset: number,
+  overlayIndex?: number,
+  overlayTotal?: number,
+): { lines: string[]; offset: number } {
   const lines: string[] = [];
   const safeWidth = Math.max(1, width);
+  const availableHeight = Math.max(0, Math.floor(maxHeight));
+  if (availableHeight <= 0) return { lines: [], offset: 0 };
+  const footerHeight = 2;
   // 确保与其他固定区块有视觉分隔
   lines.push(" ".repeat(safeWidth));
 
@@ -225,16 +238,51 @@ function renderBtwOverlay(
   lines.push(padToWidth(palette.text.dim("─".repeat(Math.min(safeWidth, 80))), safeWidth));
 
   // 回答内容：完整展示，不折叠（btw 本身是单轮简短回答，不会过长）
-  const answerLines = overlay.answer.split("\n");
-  for (const line of answerLines) {
-    lines.push(padToWidth(palette.text.secondary(line), safeWidth));
+  const bodyHeight = Math.max(0, availableHeight - lines.length - footerHeight);
+  if (bodyHeight <= 0) {
+    const totalEarly = overlayTotal ?? (overlayIndex !== undefined && overlayIndex >= 0 ? 1 : 0);
+    const earlyHint =
+      totalEarly > 1
+        ? `Esc dismiss | ←/→ history ${(overlayIndex ?? 0) + 1}/${totalEarly} | c copy | x delete`
+        : "Esc dismiss | c copy | x delete";
+    return {
+      lines: [
+        padToWidth(palette.text.accent(headerText), safeWidth),
+        padToWidth(palette.text.dim(earlyHint), safeWidth),
+      ].slice(-availableHeight),
+      offset: 0,
+    };
   }
 
+  const answerLines = overlay.answer
+    .split("\n")
+    .flatMap((line) => renderWrappedText(safeWidth, line, palette.text.secondary));
+  const maxOffset = Math.max(0, answerLines.length - bodyHeight);
+  const offset = Math.min(maxOffset, Math.max(0, Math.floor(scrollOffset)));
+  const visibleAnswerLines = answerLines.slice(offset, offset + bodyHeight);
+  for (const line of visibleAnswerLines) {
+    lines.push(line);
+  }
+  const rangeStart = answerLines.length === 0 ? 0 : offset + 1;
+  const rangeEnd = Math.min(offset + visibleAnswerLines.length, answerLines.length);
+  const total = overlayTotal ?? (overlayIndex !== undefined && overlayIndex >= 0 ? 1 : 0);
+  const showHistory = total > 1;
+  const posLabel = showHistory ? `${(overlayIndex ?? 0) + 1}/${total}` : "";
+  // 用数组拼接避免尾部多余管道符（不可滚动分支末尾不再出现 " | "）
+  const hintParts = ["Esc dismiss"];
+  if (showHistory) hintParts.push(`←/→ history ${posLabel}`);
+  hintParts.push("c copy");
+  hintParts.push("x delete");
+  if (answerLines.length > bodyHeight) {
+    hintParts.push("↑/↓ scroll", "PgUp/PgDn page", `${rangeStart}-${rangeEnd}/${answerLines.length}`);
+  }
+  const scrollHint = hintParts.join(" | ");
+
   // 提示行: Esc to dismiss
-  lines.push(padToWidth(palette.text.dim("Esc to dismiss"), safeWidth));
+  lines.push(padToWidth(palette.text.dim(scrollHint), safeWidth));
   lines.push(" ".repeat(safeWidth));
 
-  return lines;
+  return { lines, offset };
 }
 
 function buildShortcutLines(width: number): string[] {
@@ -315,10 +363,7 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
           options.width,
         )
       : [];
-  const btwOverlayLines =
-    snapshot.btwOverlay ? renderBtwOverlay(snapshot.btwOverlay, options.width) : [];
-
-  const fixedLines = [
+  const fixedLinesBeforeBtw = [
     ...todoLines,
     ...(todoLines.length > 0 &&
     (teamStatusLines.length > 0 || miniTeamTreeLines.length > 0 || teamPanelLines.length > 0)
@@ -328,7 +373,8 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
     ...miniTeamTreeLines,
     ...teamPanelLines,
     ...options.questionLines,
-    ...btwOverlayLines,
+  ];
+  const fixedLinesAfterBtw = [
     ...options.editorLines,
     ...options.composerPreviewLines,
     ...statusLineBarLines,
@@ -336,6 +382,26 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
     ...shortcutLines,
   ];
   const height = Math.floor(options.height ?? 0);
+  const btwMaxHeight =
+    height > 0
+      ? Math.max(0, height - fixedLinesBeforeBtw.length - fixedLinesAfterBtw.length)
+      : Number.MAX_SAFE_INTEGER;
+  const requestedBtwOverlayScrollOffset = options.btwOverlayScrollOffset ?? 0;
+  const renderedBtwOverlay = snapshot.btwOverlay
+    ? renderBtwOverlay(
+        snapshot.btwOverlay,
+        options.width,
+        btwMaxHeight,
+        requestedBtwOverlayScrollOffset,
+        options.btwOverlayIndex,
+        options.btwOverlayTotal,
+      )
+    : { lines: [], offset: 0 };
+  if (renderedBtwOverlay.offset !== requestedBtwOverlayScrollOffset) {
+    options.onBtwOverlayScrollOffsetChange?.(renderedBtwOverlay.offset);
+  }
+  const btwOverlayLines = renderedBtwOverlay.lines;
+  const fixedLines = [...fixedLinesBeforeBtw, ...btwOverlayLines, ...fixedLinesAfterBtw];
   if (height <= 0) {
     return [...transcriptLines, ...fixedLines];
   }

@@ -366,6 +366,87 @@ def _control_message() -> Message:
     )
 
 
+@pytest.mark.parametrize("path", ["stream", "server_push"])
+@pytest.mark.asyncio
+async def test_regular_stream_chunks_do_not_read_evolution_auto_save_config(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    calls = 0
+
+    def count_auto_save_reads() -> bool:
+        nonlocal calls
+        calls += 1
+        return True
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.message_handler.message_handler.get_evolution_auto_save_enabled",
+        count_auto_save_reads,
+    )
+    handler = _TestMessageHandler.create()
+
+    payload = {"event_type": "chat.delta", "content": "chunk"}
+    if path == "stream":
+        published = await handler.publish_stream_chunk(
+            SimpleNamespace(
+                channel_id="web",
+                request_id="stream-1",
+                payload=payload,
+                is_complete=False,
+            ),
+            session_id="sess-1",
+        )
+        assert published is True
+    else:
+        await handler.handle_agent_server_push(
+            {
+                "request_id": "stream-1",
+                "channel_id": "web",
+                "session_id": "sess-1",
+                "is_complete": False,
+                "payload": payload,
+                "metadata": {},
+            }
+        )
+
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_interrupt_evolution_approval_does_not_read_auto_save_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def count_auto_save_reads() -> bool:
+        nonlocal calls
+        calls += 1
+        return True
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.message_handler.message_handler.get_evolution_auto_save_enabled",
+        count_auto_save_reads,
+    )
+    handler = _TestMessageHandler.create()
+    chunk = _evolution_question_chunk("call_123", include_approval_context=True)
+    chunk.payload["evolution_meta"] = _interrupt_approval_meta()
+
+    should_publish = await handler.publish_stream_chunk(
+        chunk,
+        session_id="sess-1",
+        request_metadata={"k": "v"},
+    )
+
+    assert calls == 0
+    assert should_publish is True
+    assert handler.pending_evolution_approval("sess-1") == "call_123"
+    assert handler.user_message_queue_empty() is True
+    out = await handler.consume_robot_messages(timeout=0)
+    assert out is not None
+    assert out.payload["request_id"] == "call_123"
+    assert out.metadata == {"k": "v"}
+
+
 def test_processing_status_is_only_emitted_for_chat_streams() -> None:
     handler = _TestMessageHandler.create()
 

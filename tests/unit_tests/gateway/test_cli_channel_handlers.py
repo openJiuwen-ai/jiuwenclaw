@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from jiuwenswarm.gateway.channel_manager.tui.tui_connect import (
@@ -14,11 +16,18 @@ class FakeGatewayServer:
     def __init__(self):
         self.local_handlers: dict[str, dict] = {}  # path -> {method: handler}
         self.responses = []
+        self.session_owners = {}
 
     def register_local_handler(self, path, method, handler):
         if path not in self.local_handlers:
             self.local_handlers[path] = {}
         self.local_handlers[path][method] = handler
+
+    def bind_session_owner(self, channel_id, session_id, ws):
+        self.session_owners[(channel_id, session_id)] = ws
+
+    def is_session_bound_to_client(self, channel_id, session_id, ws):
+        return self.session_owners.get((channel_id, session_id)) is ws
 
     async def send_response(self, ws, req_id, *, ok, payload=None, error=None, code=None):
         self.responses.append(
@@ -30,6 +39,23 @@ class FakeGatewayServer:
                 "code": code,
             }
         )
+
+
+class FakeMessageHandler:
+    def __init__(self):
+        self.cancelled = []
+        self.scheduled = []
+        self.reconnected = []
+
+    async def cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
+        self.cancelled.append((session_keys, stale_request_keys or []))
+
+    async def schedule_cancel_agent_sessions_on_disconnect(self, session_keys, *, stale_request_keys=None):
+        self.scheduled.append((session_keys, stale_request_keys or []))
+
+    def cancel_scheduled_disconnect_cancel(self, channel_id, session_id):
+        self.reconnected.append((channel_id, session_id))
+        return True
 
 
 @pytest.mark.asyncio
@@ -53,6 +79,7 @@ async def test_register_cli_handlers_registers_local_methods():
     assert "chat.send" in cli_handlers
     assert "chat.resume" in cli_handlers
     assert "history.get" in cli_handlers
+    assert "tui.disconnect" in cli_handlers
 
     await cli_handlers["chat.send"](object(), "req-1", {}, "sess-1")
 
@@ -65,6 +92,75 @@ async def test_register_cli_handlers_registers_local_methods():
             "code": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_tui_disconnect_handler_cancels_session_immediately():
+    server = FakeGatewayServer()
+    handler = FakeMessageHandler()
+
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=None,
+            message_handler=handler,
+            on_config_saved=None,
+            path="/tui",
+        )
+    )
+
+    ws = object()
+    server.bind_session_owner("tui", "sess-exit", ws)
+    await server.local_handlers["/tui"]["tui.disconnect"](
+        ws,
+        "req-exit",
+        {"reason": "user_exit"},
+        "sess-exit",
+    )
+
+    assert handler.cancelled == [([("tui", "sess-exit")], [])]
+    assert server.responses[-1] == {
+        "id": "req-exit",
+        "ok": True,
+        "payload": {"accepted": True, "session_id": "sess-exit"},
+        "error": None,
+        "code": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_tui_disconnect_handler_does_not_cancel_session_owned_by_another_ws():
+    server = FakeGatewayServer()
+    handler = FakeMessageHandler()
+    owner_ws = object()
+    exiting_ws = object()
+    server.bind_session_owner("tui", "sess-shared", owner_ws)
+
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=None,
+            message_handler=handler,
+            on_config_saved=None,
+            path="/tui",
+        )
+    )
+
+    await server.local_handlers["/tui"]["tui.disconnect"](
+        exiting_ws,
+        "req-exit-other",
+        {"reason": "user_exit"},
+        "sess-shared",
+    )
+
+    assert handler.cancelled == []
+    assert server.responses[-1] == {
+        "id": "req-exit-other",
+        "ok": True,
+        "payload": {"accepted": True, "session_id": "sess-shared"},
+        "error": None,
+        "code": None,
+    }
 
 
 def test_build_cli_route_binding_creates_route_and_install_hook():
@@ -84,6 +180,42 @@ def test_build_cli_route_binding_creates_route_and_install_hook():
     assert "config.validate_model" in cli_handlers
     assert "session.list" in cli_handlers
     assert "chat.send" in cli_handlers
+
+
+@pytest.mark.asyncio
+async def test_tui_route_disconnect_schedules_cancel_for_transport_close():
+    handler = FakeMessageHandler()
+    binding = build_cli_route_binding(CliRouteBindParams(path="/tui", message_handler=handler))
+
+    await binding.disconnect_handler(
+        object(),
+        [("tui", "sess-drop")],
+        [("tui", "req-drop")],
+    )
+
+    assert handler.scheduled == [([("tui", "sess-drop")], [("tui", "req-drop")])]
+    assert handler.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_tui_route_disconnect_skips_scheduled_cancel_after_explicit_exit():
+    handler = FakeMessageHandler()
+    binding = build_cli_route_binding(CliRouteBindParams(path="/tui", message_handler=handler))
+    ws = type("FakeWs", (), {})()
+    ws._jiuwenswarm_tui_user_exit = True  # pylint: disable=protected-access
+
+    await binding.disconnect_handler(ws, [("tui", "sess-exit")], [])
+
+    assert handler.scheduled == []
+
+
+def test_tui_session_bind_handler_cancels_pending_disconnect_cancel():
+    handler = FakeMessageHandler()
+    binding = build_cli_route_binding(CliRouteBindParams(path="/tui", message_handler=handler))
+
+    binding.session_bind_handler("tui", "sess-reconnect")
+
+    assert handler.reconnected == [("tui", "sess-reconnect")]
 
 
 @pytest.mark.asyncio
@@ -134,4 +266,46 @@ async def test_config_validate_model_handler_uses_local_probe(monkeypatch):
         },
         "error": None,
         "code": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_list_returns_agent_timeout_before_tui_request_timeout(monkeypatch):
+    server = FakeGatewayServer()
+
+    class HangingAgentClient:
+        async def send_request(self, env):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.routing.agent_request_timeout._TUI_DEFAULT_UNARY_TIMEOUT_SECONDS",
+        0.01,
+        raising=False,
+    )
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=HangingAgentClient(),
+            message_handler=None,
+            on_config_saved=None,
+            path="/tui",
+        )
+    )
+
+    await asyncio.wait_for(
+        server.local_handlers["/tui"]["session.list"](
+            object(),
+            "req-session-list",
+            {"limit": 10},
+            "sess-1",
+        ),
+        timeout=0.2,
+    )
+
+    assert server.responses[-1] == {
+        "id": "req-session-list",
+        "ok": False,
+        "payload": {},
+        "error": "AgentServer request timed out",
+        "code": "AGENT_SERVER_TIMEOUT",
     }

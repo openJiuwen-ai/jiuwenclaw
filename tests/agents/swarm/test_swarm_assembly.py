@@ -25,10 +25,12 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
+from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
 from openjiuwen.agent_teams.schema import deep_agent_spec as das
 from openjiuwen.agent_teams.harness.manifest import get_catalog, resolve_factory
 from openjiuwen.agent_teams.schema.blueprint import LeaderSpec, TeamAgentSpec
@@ -69,6 +71,12 @@ from jiuwenswarm.agents.swarm.providers import (
     member_rails,
     runtime_tools,
     tools,
+)
+from jiuwenswarm.agents.swarm.providers.code_subagents import (
+    SWARM_BROWSER_AGENT,
+    _PARENT_MODEL_EXTRAS_KEY,
+    _browser_key,
+    build_swarm_browser_agent,
 )
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
@@ -361,6 +369,7 @@ def test_unknown_swarm_rail_type_raises() -> None:
         (
             "leader",
             {
+                registry.STRUCTURED_ASK_USER,
                 registry.TEAM_SKILL_EVOLUTION,
                 registry.TEAM_SKILL_CREATE,
             },
@@ -377,7 +386,7 @@ def test_build_member_capability_specs_rail_names(
     role: str,
     extra_rails: set[str],
 ) -> None:
-    """Each role gets the common rails plus its role-specific evolution rails."""
+    """Each role gets the common rails plus its role-specific extra rails."""
     config = {
         "agents": {
             "leader": {"skills": ["alpha"]},
@@ -390,8 +399,8 @@ def test_build_member_capability_specs_rail_names(
 
     assert _COMMON_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    # The common set has exactly 15 entries; the role adds only its evolution
-    # rails on top.
+    # The common set has exactly 15 entries; the role adds only its explicit
+    # extra rails on top.
     assert len(_COMMON_RAIL_NAMES) == 15
     assert rail_names == _COMMON_RAIL_NAMES | extra_rails
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
@@ -526,12 +535,39 @@ def test_code_skill_use_rail_kept_as_auto_list_when_retrieval_enabled(
 
 @pytest.mark.parametrize("role", ["leader", "teammate"])
 def test_team_member_deep_agent_spec_uses_agentic_skill_disclosure(role: str) -> None:
-    """Chat-team members keep skill_tool while retrieval owns discovery."""
+    """Chat-team members avoid the core full-skill discovery path."""
     base = DeepAgentSpec(enable_skill_discovery=False)
 
     spec = build_member_deep_agent_spec(_agentic_retrieval_config(), "team", role, base)
+    skill_rails = [rail for rail in (spec.rails or []) if rail.type == CORE_SKILL_USE]
 
-    assert spec.enable_skill_discovery is True
+    assert spec.enable_skill_discovery is False
+    assert len(skill_rails) == 1
+    assert skill_rails[0].params["skill_mode"] == SkillUseRail.SKILL_MODE_AUTO_LIST
+    assert skill_rails[0].params["include_tools"] is False
+
+
+@pytest.mark.parametrize("role", ["leader", "teammate"])
+def test_team_member_deep_agent_spec_normalizes_existing_skill_use_rail(role: str) -> None:
+    """Chat-team members normalize an existing skill rail to auto-list mode."""
+    base = DeepAgentSpec(
+        enable_skill_discovery=False,
+        rails=[
+            RailSpec(
+                type="SkillUseRail",
+                params={"skill_mode": SkillUseRail.SKILL_MODE_ALL},
+            )
+        ],
+    )
+
+    spec = build_member_deep_agent_spec(_agentic_retrieval_config(), "team", role, base)
+    skill_rails = [rail for rail in (spec.rails or []) if rail.type in {CORE_SKILL_USE, "SkillUseRail"}]
+
+    assert spec.enable_skill_discovery is False
+    assert len(skill_rails) == 1
+    assert skill_rails[0].type == "SkillUseRail"
+    assert skill_rails[0].params["skill_mode"] == SkillUseRail.SKILL_MODE_AUTO_LIST
+    assert skill_rails[0].params["include_tools"] is False
 
 
 @pytest.mark.parametrize("role", ["leader", "teammate"])
@@ -546,14 +582,15 @@ def test_team_member_deep_agent_spec_keeps_core_skill_discovery_when_retrieval_d
 
 @pytest.mark.parametrize("mode", ["code.team", "team.plan"])
 def test_code_member_deep_agent_spec_keeps_skill_use_rail_when_retrieval_enabled(mode: str) -> None:
-    """Code profiles keep skill_tool while retrieval owns discovery."""
+    """Code profiles keep skill_tool access without all-mode skill injection."""
     base = DeepAgentSpec(enable_skill_discovery=False)
 
     spec = build_member_deep_agent_spec(_agentic_retrieval_config(), mode, "leader", base)
-    rail_names = {rail.type for rail in (spec.rails or [])}
+    skill_rails = [rail for rail in (spec.rails or []) if rail.type == registry.CODE_SKILL_USE]
 
     assert spec.enable_skill_discovery is False
-    assert registry.CODE_SKILL_USE in rail_names
+    assert len(skill_rails) == 1
+    assert skill_rails[0].params["skill_mode"] == SkillUseRail.SKILL_MODE_AUTO_LIST
 
 
 @pytest.mark.parametrize("mode", ["code.team", "team.plan"])
@@ -1576,6 +1613,22 @@ def test_team_plan_leader_structured_ask_user_provider_builds() -> None:
     ).__name__ == "StructuredAskUserRail"
 
 
+def test_structured_ask_user_language_uses_team_leader_preferred_language() -> None:
+    team_leader = SwarmBuildContext(
+        mode="team",
+        role="leader",
+        config={"preferred_language": "zh"},
+    )
+    team_teammate = SwarmBuildContext(
+        mode="team",
+        role="teammate",
+        config={"preferred_language": "zh"},
+    )
+
+    assert code_rails.structured_ask_user_language(team_leader) == "cn"
+    assert code_rails.structured_ask_user_language(team_teammate) == "en"
+
+
 @pytest.mark.asyncio
 async def test_team_plan_leader_permission_rail_skips_exit_plan_mode(
     monkeypatch: pytest.MonkeyPatch,
@@ -2009,18 +2062,6 @@ def test_swarm_assembly_hint_from_seed_and_legacy() -> None:
     assert rmb._swarm_assembly_hint(types.SimpleNamespace()) == {}
 
 
-# ---------------------------------------------------------------------------
-# Browser isolation (feat/team-browser-isolation)
-# ---------------------------------------------------------------------------
-
-from jiuwenswarm.agents.swarm.providers.code_subagents import (
-    _browser_key,
-    _PARENT_MODEL_EXTRAS_KEY,
-    build_swarm_browser_agent,
-    SWARM_BROWSER_AGENT,
-)
-
-
 def test_browser_key_derivation() -> None:
     """_browser_key composes session+member into a unique, stable key."""
     # Normal: session_id + member_name → "sess-alice"
@@ -2082,7 +2123,6 @@ def test_browser_subagent_provider_passes_correct_browser_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """build_swarm_browser_agent passes the per-member browser_key to agent-core."""
-    from unittest.mock import MagicMock, call
     from jiuwenswarm.agents.swarm.providers import code_subagents as _cs
 
     captured: list[dict] = []

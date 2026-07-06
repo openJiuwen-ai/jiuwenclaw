@@ -4,12 +4,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 from typing import Any
+from urllib.parse import urlparse
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig
+
+_HTTP_MCP_TRANSPORTS = frozenset({"sse", "http", "streamable-http", "streamable_http"})
 
 
 def extract_enabled_mcp_server_entries(config_base: dict[str, Any]) -> list[dict[str, Any]]:
@@ -114,6 +119,55 @@ def build_enabled_mcp_server_configs(
     return configs
 
 
+async def preflight_mcp_server_reachable(
+    cfg: McpServerConfig, *, timeout: float = 3.0
+) -> tuple[bool, str]:
+    """Cheap reachability probe for HTTP-based MCP servers.
+
+    Why this exists: when an HTTP MCP server is unreachable, openjiuwen still
+    enters the mcp ``streamablehttp_client`` async context (which spins up an
+    anyio task group with background request tasks) before failing on
+    ``session.initialize()``. Tearing that context back down leaks orphaned
+    background tasks and raises noisy ``aclose(): asynchronous generator is
+    already running`` / ``Attempted to exit cancel scope in a different task``
+    errors. Probing the host:port first lets us skip registration cleanly.
+
+    Returns ``(reachable, reason)``. Non-HTTP transports (stdio/playwright/…)
+    report reachable — they are spawned locally and have no cheap probe.
+    """
+    transport = (getattr(cfg, "client_type", "") or "").strip().lower()
+    if transport not in _HTTP_MCP_TRANSPORTS:
+        return True, ""
+
+    url = (getattr(cfg, "server_path", "") or "").strip()
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return False, f"invalid url: {url!r}"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        return False, f"tcp connect to {host}:{port} timed out after {timeout}s"
+    except Exception as exc:
+        # Connection refused / DNS failure / etc. — also defensive: the probe
+        # itself must never break startup with an unexpected exception type.
+        return False, f"tcp connect to {host}:{port} failed: {type(exc).__name__}: {exc}"
+
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except Exception as exc:
+        logger.debug(
+            "[mcp-preflight] reachability probe socket close failed for %s:%s: %r",
+            host, port, exc,
+        )
+    return True, ""
+
+
 def _stable_mcp_server_id(scope: str, name: str, payload: dict[str, Any]) -> str:
     stable_payload = {
         key: value
@@ -141,4 +195,5 @@ __all__ = [
     "build_enabled_mcp_server_configs",
     "build_mcp_server_config",
     "extract_enabled_mcp_server_entries",
+    "preflight_mcp_server_reachable",
 ]
