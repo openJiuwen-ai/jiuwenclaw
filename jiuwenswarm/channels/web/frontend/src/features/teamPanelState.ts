@@ -33,7 +33,14 @@ function loadTeamPanelState(): TeamPanelState {
   if (!raw) {
     return DEFAULT_TEAM_PANEL_STATE;
   }
-  return JSON.parse(raw) as TeamPanelState;
+  const parsed = JSON.parse(raw) as TeamPanelState;
+  return {
+    ...DEFAULT_TEAM_PANEL_STATE,
+    ...parsed,
+    activeTab: parsed.activeTab === 'planning' || parsed.activeTab === 'team' || parsed.activeTab === 'artifacts'
+      ? parsed.activeTab
+      : DEFAULT_TEAM_PANEL_STATE.activeTab,
+  };
 }
 
 function saveTeamPanelState(nextState: TeamPanelState): void {

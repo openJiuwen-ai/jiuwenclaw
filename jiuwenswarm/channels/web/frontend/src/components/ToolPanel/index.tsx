@@ -7,7 +7,9 @@
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
 import { useEffect, useMemo, useRef } from 'react';
+import { FileText, ListTodo, Minimize2 } from 'lucide-react';
 import { webRequest } from '../../services/webClient';
+import { ArtifactsPanel, useSessionArtifactsCount } from '../ArtifactsPanel';
 import { TeamArea } from '../teamArea';
 import { TaskPlanningPanel } from '../teamArea/TaskPlanningPanel';
 import { HarnessExtensionTree } from './HarnessExtensionTree';
@@ -76,6 +78,90 @@ function mergeById<T>(
     }
   });
   return Array.from(itemsById.values());
+}
+
+function ExpandedSingleAgentArea({
+  activeTab,
+  tasks,
+  members,
+  totalTasks,
+  completedTasks,
+  onTabChange,
+  onCollapse,
+}: {
+  activeTab: TabType;
+  tasks: TeamTask[];
+  members: Parameters<typeof TaskPlanningPanel>[0]['members'];
+  totalTasks: number;
+  completedTasks: number;
+  onTabChange: (tab: TabType) => void;
+  onCollapse: () => void;
+}) {
+  const { t } = useTranslation();
+  const artifactsCount = useSessionArtifactsCount();
+  const resolvedTab = activeTab === 'artifacts' ? 'artifacts' : 'planning';
+  const tabs = [
+    {
+      key: 'planning',
+      label: t('team.planning.tab'),
+      count: `${completedTasks}/${totalTasks}`,
+      icon: <ListTodo size={16} />,
+    },
+    {
+      key: 'artifacts',
+      label: t('artifacts.tab'),
+      count: artifactsCount,
+      icon: <FileText size={16} />,
+    },
+  ] as const;
+
+  return (
+    <div className="flex h-full flex-col overflow-hidden bg-card">
+      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-border">
+        <div className="flex items-center gap-2">
+          {tabs.map((tab) => (
+            <button
+              key={tab.key}
+              className={`h-9 rounded-lg px-4 text-sm transition-colors flex items-center gap-2 ${
+                resolvedTab === tab.key
+                  ? 'bg-secondary font-medium text-text'
+                  : 'text-text-muted hover:bg-secondary/50 hover:text-text'
+              }`}
+              onClick={() => onTabChange(tab.key)}
+            >
+              {tab.icon}
+              {tab.label} ({tab.count})
+            </button>
+          ))}
+        </div>
+
+        <button
+          onClick={onCollapse}
+          className="rounded p-2 text-text-muted transition-colors hover:bg-secondary hover:text-text"
+          title={t('team.collapse')}
+        >
+          <Minimize2 size={16} />
+        </button>
+      </div>
+
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {resolvedTab === 'artifacts' ? (
+          <div className="flex min-w-0 flex-1 overflow-hidden border border-border rounded-lg mt-0 mx-6 mb-6">
+            <ArtifactsPanel />
+          </div>
+        ) : (
+          <TaskPlanningPanel
+            variant="expanded"
+            tasks={tasks}
+            members={members}
+            totalTasks={totalTasks}
+            completedTasks={completedTasks}
+            hideAssignee
+          />
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function ToolPanel({
@@ -282,7 +368,28 @@ export function ToolPanel({
   }
   const compressionDisplay = `${afterK}K/${beforeK}K (${compressionRateDisplay}%)`;
 
-  if (teamAreaExpanded && mode === 'team') {
+  if (teamAreaExpanded && mode !== 'auto_harness') {
+    if (mode !== 'team') {
+      return (
+        <div
+          data-testid="tool-panel"
+          className="bg-panel h-full overflow-hidden flex-1 flex flex-col"
+        >
+          <div className="h-full bg-panel flex flex-col overflow-hidden">
+            <ExpandedSingleAgentArea
+              activeTab={teamAreaActiveTab}
+              tasks={todoTeamTasks}
+              members={teamMembers}
+              totalTasks={todos.length}
+              completedTasks={todoCompletedTasks}
+              onTabChange={setTeamAreaActiveTab}
+              onCollapse={() => setTeamAreaExpanded(false)}
+            />
+          </div>
+        </div>
+      );
+    }
+
     // 展开模式 - 更宽的面板，只显示 TeamArea
     return (
       <div
@@ -351,7 +458,10 @@ export function ToolPanel({
               members={teamMembers}
               totalTasks={todos.length}
               completedTasks={todoCompletedTasks}
-              hideExpandButton
+              onExpand={() => {
+                setTeamAreaActiveTab('planning');
+                setTeamAreaExpanded(true);
+              }}
               hideAssignee
               title={t('chat.recentTasks')}
             />

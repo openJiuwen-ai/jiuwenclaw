@@ -349,6 +349,13 @@ function AppContent() {
   } = useTeamPanelState();
   const [chatPanelWidthPct, setChatPanelWidthPct] = useState(33.33);
 
+  const handleToggleDetailPanel = useCallback((expanded: boolean) => {
+    if (expanded && mode !== 'team' && teamAreaActiveTab === 'team') {
+      setTeamAreaActiveTab('planning');
+    }
+    setTeamAreaExpanded(expanded);
+  }, [mode, setTeamAreaActiveTab, setTeamAreaExpanded, teamAreaActiveTab]);
+
   const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -428,7 +435,7 @@ function AppContent() {
         return todos.length > 0 || hasMessages || hasHeartbeat;
     }
   }, [mode, todos.length, teamTaskEvents.length, teamTasks.length, teamMembers.length, extensionReady?.runtimePath, messages.length, heartbeatMessage]);
-  const isTeamAreaExpanded = mode === 'team' && teamAreaExpanded && toolPanelHasContent;
+  const isTeamAreaExpanded = mode !== 'auto_harness' && teamAreaExpanded && toolPanelHasContent;
 
   // WebSocket 连接 - provider 由后端配置决定 - provider 由后端配置决定，前端默认不在 URL query 传递
   const {
@@ -1589,7 +1596,7 @@ function AppContent() {
                       teamAreaExpanded={isTeamAreaExpanded}
                       autoFocusKey={composerFocusKey}
                       onNavigateToSkills={() => handleNavigate('skills')}
-                      onToggleTeamArea={setTeamAreaExpanded}
+                      onToggleTeamArea={handleToggleDetailPanel}
                       historyPager={
                         historyPagerMeta
                           ? {
