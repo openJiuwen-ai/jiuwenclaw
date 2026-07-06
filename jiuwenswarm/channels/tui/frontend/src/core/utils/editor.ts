@@ -43,8 +43,14 @@ export function getEditorInfo(): { source: string; value: string } {
 }
 
 export function isGuiEditor(editor: string): boolean {
-  const base = basename(editor.split(" ")[0] ?? "");
-  return GUI_EDITORS.some((gui) => base.includes(gui));
+  // Check all parts of the command, not just the first word.
+  // On Windows, the default editor is "start /wait notepad" — the actual
+  // editor name ("notepad") is in the arguments, not the command itself.
+  return editor.split(/\s+/).some((token) => {
+    if (!token) return false;
+    const base = basename(token);
+    return GUI_EDITORS.some((gui) => base.includes(gui));
+  });
 }
 
 export function parseEditorCommand(editor: string): { cmd: string; args: string[] } {
