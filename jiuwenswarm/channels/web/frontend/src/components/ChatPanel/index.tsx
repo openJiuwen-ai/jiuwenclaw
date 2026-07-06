@@ -4,7 +4,7 @@
  * 聊天面板，包含消息列表和输入区域
  */
 
-import React, { useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useCallback, useMemo, useState } from 'react';
 import { ArrowRight, LoaderCircle, Share2, Sparkles } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
@@ -13,8 +13,14 @@ import { AgentMode, Message, UserAnswer } from '../../types';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
 import { InputArea } from './InputArea';
-import chatIcon from './chat.svg';
-import expandIcon from './expand.svg';
+import chatIcon from '../../assets/chat.svg';
+import expandIcon from '../../assets/expand.svg';
+import lineUpIcon from '../../assets/lineUp.svg';
+import loadSendIcon from '../../assets/load-send.svg';
+import editIcon from '../../assets/edit.svg';
+import deleteIcon from '../../assets/delete.svg';
+import moveIcon from '../../assets/move.svg';
+import restartIcon from '../../assets/restart.svg';
 import { SubtaskProgress } from './SubtaskProgress';
 import { InlineQuestionCard } from './InlineQuestionCard';
 import { HistoryPagerBar } from './HistoryPagerBar';
@@ -128,6 +134,206 @@ function ActiveTeamGroupEntry({ isProcessing, teamAreaExpanded }: { isProcessing
       todos={todos}
       executionEvents={teamMemberExecutionEvents}
     />
+  );
+}
+
+/** 单 Agent 模式的消息队列卡片，展示在输入框上方 */
+function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProcessing: boolean; onSendTask?: (content: string) => void }) {
+  const [expanded, setExpanded] = useState(true);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const { t } = useTranslation();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
+  const taskQueue = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.taskQueue ?? []);
+  const queuePaused = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.queuePaused ?? false);
+  const removeFromTaskQueue = useChatStore((s) => s.removeFromTaskQueue);
+  const reorderTaskQueue = useChatStore((s) => s.reorderTaskQueue);
+  const setQueuePaused = useChatStore((s) => s.setQueuePaused);
+  const setInputValue = useChatStore((s) => s.setInputValue);
+
+  const isAgentMode = mode === 'agent.fast' || mode === 'agent.plan';
+
+  // 有等待任务时自动展开
+  useEffect(() => {
+    if (taskQueue.length > 0) {
+      setExpanded(true);
+    }
+  }, [taskQueue.length]);
+
+  if (!isAgentMode || taskQueue.length === 0) {
+    return null;
+  }
+
+  const handleResume = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const sid = useChatStore.getState().activeSessionId;
+    if (!sid) return;
+    setQueuePaused(sid, false);
+    // 触发下一条队列任务
+    const runtime = useChatStore.getState().getRuntime(sid);
+    const nextTask = runtime?.taskQueue[0];
+    if (nextTask) {
+      removeFromTaskQueue(sid, nextTask.id);
+      onSendTask?.(nextTask.content);
+    }
+  };
+
+  const handleRemoveTask = (e: React.MouseEvent, taskId: string) => {
+    e.stopPropagation();
+    const sid = useChatStore.getState().activeSessionId;
+    if (sid) {
+      removeFromTaskQueue(sid, taskId);
+    }
+  };
+
+  const handleEditTask = (e: React.MouseEvent, taskId: string, content: string) => {
+    e.stopPropagation();
+    const sid = useChatStore.getState().activeSessionId;
+    if (sid) {
+      setInputValue(sid, content);
+      removeFromTaskQueue(sid, taskId);
+      window.dispatchEvent(new CustomEvent('chat-input-sync', { detail: { sessionId: sid, value: content } }));
+    }
+  };
+
+  const handleSendTask = (e: React.MouseEvent, taskId: string, content: string) => {
+    e.stopPropagation();
+    const sid = useChatStore.getState().activeSessionId;
+    if (sid) {
+      removeFromTaskQueue(sid, taskId);
+    }
+    onSendTask?.(content);
+  };
+
+  const handleDragStart = (index: number) => {
+    setDragIndex(index);
+  };
+
+  const handleDragOver = (e: React.DragEvent, index: number) => {
+    e.preventDefault();
+    setDragOverIndex(index);
+  };
+
+  const handleDrop = (index: number) => {
+    if (dragIndex === null || dragIndex === index) {
+      setDragIndex(null);
+      setDragOverIndex(null);
+      return;
+    }
+    const sid = useChatStore.getState().activeSessionId;
+    if (sid) {
+      reorderTaskQueue(sid, dragIndex, index);
+    }
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+
+  const handleDragEnd = () => {
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+
+  return (
+    <div className="chat-active-team-group animate-rise">
+      <div className="team-event-group team-event-group--activity">
+        <button
+          type="button"
+          className="team-event-group-summary"
+          onClick={() => setExpanded(prev => !prev)}
+          aria-expanded={expanded}
+        >
+          <span className="team-event-group-summary__main">
+            <span className="team-event-group-summary__title">{t('chatUi.messageQueue')}</span>
+            {queuePaused && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginLeft: '8px' }}>
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#f5a623', flexShrink: 0 }} />
+                <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{t('chat.paused')}</span>
+              </span>
+            )}
+          </span>
+          {queuePaused && (
+            <span
+              role="button"
+              tabIndex={0}
+              className="team-event-group-summary__activity"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', marginLeft: 'auto', justifyContent: 'end', flexShrink: 0, cursor: 'pointer' }}
+              onClick={handleResume}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleResume(e as unknown as React.MouseEvent); } }}
+            >
+              <img src={restartIcon} alt="" className="w-3.5 h-3.5" />
+              {t('chat.resume')}
+            </span>
+          )}
+        </button>
+        {expanded && (
+          <div className="team-event-group-list team-event-group-list--activity">
+            {taskQueue.map((task, index) => (
+              <div
+                key={task.id}
+                className="team-event-group-row team-event-group-row--activity"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '8px',
+                  opacity: dragIndex === index ? 0.4 : 1,
+                  background: dragOverIndex === index ? 'var(--bg-hover)' : 'transparent',
+                  transition: 'opacity 0.15s ease, background 0.15s ease',
+                }}
+                onDragOver={(e) => handleDragOver(e, index)}
+                onDrop={() => handleDrop(index)}
+                onDragEnd={handleDragEnd}
+              >
+                <div className="team-event-group-row__main" style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                  {/* 拖动图标：所有任务可拖，悬浮显示 */}
+                  <img
+                    src={moveIcon}
+                    alt=""
+                    draggable
+                    onDragStart={() => handleDragStart(index)}
+                    className="queue-drag-handle"
+                    title={t('chat.dragTask')}
+                  />
+                  <div className="team-event-group-row__avatar" style={{ display: 'flex', alignItems: 'center' }}>
+                    <img src={lineUpIcon} alt="" className="w-4 h-4" />
+                  </div>
+                  <span className="team-event-group-row__member" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {task.content}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+                  <button
+                    type="button"
+                    className="chat-input-task-action chat-input-task-action--send"
+                    title={t('chat.sendTask')}
+                    onClick={(e) => handleSendTask(e, task.id, task.content)}
+                  >
+                    <img src={loadSendIcon} alt="" className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    className="chat-input-task-action chat-input-task-action--edit"
+                    title={t('chat.editTask')}
+                    onClick={(e) => handleEditTask(e, task.id, task.content)}
+                  >
+                    <img src={editIcon} alt="" className="w-3 h-3" />
+                  </button>
+                  <button
+                    type="button"
+                    className="chat-input-task-action chat-input-task-action--delete"
+                    title={t('chat.removeTask')}
+                    onClick={(e) => handleRemoveTask(e, task.id)}
+                  >
+                    <img src={deleteIcon} alt="" className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -417,6 +623,7 @@ export function ChatPanel({
               <h2 className="chat-welcome__heading"><WelcomeHeading /></h2>
               <div className="chat-welcome__composer">
                 <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
+                <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />
                 <InputArea
                   onSubmit={handleSendMessage}
@@ -442,6 +649,7 @@ export function ChatPanel({
       {hasConversation && (
         <div className="chat-compose">
           <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
+          <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
           <InterruptResultBubble />
           <InputArea
             onSubmit={handleSendMessage}

@@ -1600,6 +1600,11 @@
 }
 
 .chat-skill-select__state {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 16px 12px;
   text-align: center;
   font-size: 12px;

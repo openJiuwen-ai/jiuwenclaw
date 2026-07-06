@@ -92,6 +92,7 @@ export interface ChatRuntime {
     toolResultDedupDropped: number;
   };
   taskQueue: TaskItem[];
+  queuePaused: boolean;
   pendingQuestion: AskUserQuestionPayload | null;
   inputValue: string;
   /** evolutionStatus 自动清除定时器，按 session 隔离 */
@@ -128,6 +129,7 @@ function createEmptyRuntime(): ChatRuntime {
       toolResultDedupDropped: 0,
     },
     taskQueue: [],
+    queuePaused: false,
     pendingQuestion: null,
     inputValue: '',
     evolutionStatusClearTimer: null,
@@ -156,6 +158,7 @@ interface ChatState {
   setHistoryPagerMeta: (sessionId: string, meta: HistoryPagerMeta | null) => void;
   setEvolutionStatus: (sessionId: string, status: EvolutionStatusPayload | null) => void;
   setPaused: (sessionId: string, paused: boolean, task?: string | null) => void;
+  setQueuePaused: (sessionId: string, paused: boolean) => void;
   setInterruptResult: (sessionId: string, result: InterruptResultPayload | null) => void;
   setSwitchingMode: (sessionId: string, switching: boolean) => void;
   setNewSession: (sessionId: string, isNew: boolean) => void;
@@ -170,6 +173,7 @@ interface ChatState {
   addToTaskQueue: (sessionId: string, content: string) => void;
   clearTaskQueue: (sessionId: string) => void;
   removeFromTaskQueue: (sessionId: string, id: string) => void;
+  reorderTaskQueue: (sessionId: string, fromIndex: number, toIndex: number) => void;
   setPendingQuestion: (sessionId: string, question: AskUserQuestionPayload | null) => void;
   setInputValue: (sessionId: string, value: string) => void;
   setUsageSummary: (sessionId: string, messageId: string, usage: UsageSummary) => void;
@@ -444,6 +448,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, isPaused: paused, pausedTask: task ?? null },
+        },
+      };
+    });
+  },
+
+  setQueuePaused: (sessionId, paused) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, queuePaused: paused },
         },
       };
     });
@@ -978,7 +995,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return {
         runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, taskQueue: [] },
+          [sessionId]: { ...runtime, taskQueue: [], queuePaused: false },
         },
       };
     });
@@ -995,6 +1012,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ...runtime,
             taskQueue: runtime.taskQueue.filter((task) => task.id !== id),
           },
+        },
+      };
+    });
+  },
+
+  reorderTaskQueue: (sessionId, fromIndex, toIndex) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const queue = [...runtime.taskQueue];
+      if (fromIndex < 0 || fromIndex >= queue.length || toIndex < 0 || toIndex >= queue.length || fromIndex === toIndex) {
+        return state;
+      }
+      const [moved] = queue.splice(fromIndex, 1);
+      queue.splice(toIndex, 0, moved);
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, taskQueue: queue },
         },
       };
     });

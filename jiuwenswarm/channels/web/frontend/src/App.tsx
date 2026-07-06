@@ -326,6 +326,21 @@ function AppContent() {
   const { loadProjects, setSelectedProject } = useWorkspaceStore();
 
   useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  const {
+    teamAreaExpanded,
+    teamAreaActiveTab,
+    teamAreaActiveDetailTab,
+    teamAreaSelectedMemberId,
+    setTeamAreaExpanded,
+    setTeamAreaActiveTab,
+    setTeamAreaActiveDetailTab,
+    setTeamAreaSelectedMemberId,
+  } = useTeamPanelState();
+
+  useEffect(() => {
     if (route.kind === 'chat-session') {
       sessionIdRef.current = route.sessionId;
       setSessionId(route.sessionId);
@@ -340,8 +355,9 @@ function AppContent() {
       sessionIdRef.current = 'new';
       setSessionId('new');
       setActiveNav('chat');
+      setTeamAreaExpanded(false);
     }
-  }, [navigate, route]);
+  }, [navigate, route, setTeamAreaExpanded]);
 
   useEffect(() => { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed)); }, [sidebarCollapsed]);
 
@@ -367,16 +383,6 @@ function AppContent() {
   const teamTaskEvents = useSessionStore((s) => s.runtimes[sessionId]?.teamTaskEvents ?? []);
   const teamTasks = useSessionStore((s) => s.runtimes[sessionId]?.teamTasks ?? []);
   const teamMembers = useSessionStore((s) => s.runtimes[sessionId]?.teamMembers ?? []);
-  const {
-    teamAreaExpanded,
-    teamAreaActiveTab,
-    teamAreaActiveDetailTab,
-    teamAreaSelectedMemberId,
-    setTeamAreaExpanded,
-    setTeamAreaActiveTab,
-    setTeamAreaActiveDetailTab,
-    setTeamAreaSelectedMemberId,
-  } = useTeamPanelState();
   const [chatPanelWidthPct, setChatPanelWidthPct] = useState(33.33);
 
   const handleToggleDetailPanel = useCallback((expanded: boolean) => {
@@ -1112,11 +1118,12 @@ function AppContent() {
     const currentSessionId = sessionIdRef.current;
     const currentRuntime = useSessionStore.getState().getRuntime(currentSessionId);
     const selectedModelName = currentRuntime?.selectedModelName ?? null;
+    const projectPath = currentRuntime?.projectDirectory ?? null;
     disposeInFlightHistoryHandles(
       currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined,
     );
     setHistoryLoadingMore(false);
-    resetNewConversationRuntime({ mode: targetMode, selectedModelName });
+    resetNewConversationRuntime({ mode: targetMode, selectedModelName, projectPath });
     if (options.preserveProject) {
       preserveSelectedProjectOnChatNewRef.current = true;
     } else {
@@ -1158,14 +1165,18 @@ function AppContent() {
       const runtimeSettings = {
         mode: newRuntime?.mode ?? mode,
         selectedModelName: newRuntime?.selectedModelName ?? null,
+        projectPath: newRuntime?.projectDirectory ?? null,
       };
       const workContext = getWorkContextForSession(NEW_CONVERSATION_ID);
       try {
         const createParams: Record<string, unknown> = {
           session_id: newSid,
           mode: runtimeSettings.mode,
-          title: createConversationTitle(content),
+          title: createConversationTitle(content).slice(0, 100),
         };
+        if (runtimeSettings.selectedModelName) {
+          createParams.model = runtimeSettings.selectedModelName;
+        }
         if (workContext.project_path) {
           createParams.project_path = workContext.project_path;
         }
@@ -1179,6 +1190,10 @@ function AppContent() {
           content,
           { project_path: workContext.project_path },
         );
+        // 迁移 'new' 会话的已选技能到新会话
+        const pendingSkills = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.selectedSkills ?? [];
+        pendingSkills.forEach((skill) => useSessionStore.getState().addSelectedSkill(newSid, skill));
+        useSessionStore.getState().clearSelectedSkills(NEW_CONVERSATION_ID);
         promotedFromNewSessionIdsRef.current.add(newSid);
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
         sessionIdRef.current = newSid;
@@ -1243,6 +1258,13 @@ function AppContent() {
     if (mode === 'team') {
       void pause(currentSessionId);
       return;
+    }
+    // agent 模式下有队列任务时，暂停队列自动发送
+    if (mode === 'agent.fast' || mode === 'agent.plan') {
+      const runtime = useChatStore.getState().getRuntime(currentSessionId);
+      if (runtime && runtime.taskQueue.length > 0) {
+        useChatStore.getState().setQueuePaused(currentSessionId, true);
+      }
     }
     void cancel(currentSessionId);
   }, [cancel, mode, pause]);

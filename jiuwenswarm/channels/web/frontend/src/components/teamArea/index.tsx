@@ -4,13 +4,14 @@
 
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FileText, Minimize2, Users } from 'lucide-react';
+import { FileText, Minimize2 } from 'lucide-react';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
 import type { Message } from '../../types';
 import { ArtifactsPanel, useSessionArtifactsCount } from '../ArtifactsPanel';
 import { TaskPlanningPanel } from './TaskPlanningPanel';
 import { TeamMembersPanel } from './TeamMembersPanel';
 import teamProcessIcon from '../../assets/team-process.svg';
+import teamIcon from '../../assets/team.svg';
 import {
   normalizeTaskStatus,
   type TabType,
@@ -130,7 +131,7 @@ function ExpandedTeamArea({
     {
       key: 'team',
       label: t('team.membersTab'),
-      icon: <Users size={16} />,
+      icon: <img src={teamIcon} width={16} height={16} />,
     },
     {
       key: 'artifacts',
@@ -142,7 +143,7 @@ function ExpandedTeamArea({
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-card">
-      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-border">
+      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-b border-border">
         <div className="flex items-center gap-2">
           {tabs.map((tab) => (
             <button

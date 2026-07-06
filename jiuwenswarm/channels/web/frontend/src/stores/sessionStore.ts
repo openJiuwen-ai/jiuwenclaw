@@ -744,8 +744,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const normalized = skill.trim();
     if (!normalized) return;
     set((state) => {
-      const runtime = state.runtimes[sessionId];
-      if (!runtime) return state;
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
       if (runtime.selectedSkills.includes(normalized)) return state;
       return {
         runtimes: {

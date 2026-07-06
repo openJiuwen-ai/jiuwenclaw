@@ -12,22 +12,26 @@ export const NEW_CONVERSATION_ID = 'new';
 interface ConversationRuntimeSettings {
   mode: AgentMode;
   selectedModelName: string | null;
+  projectPath?: string | null;
 }
 
 const locallyCreatedConversations = new Map<string, Session>();
 
 export function createConversationTitle(content: string): string {
-  return content.trim().replace(/\n/g, ' ');
+  return content.replace(/\{\{skill:[^}]+\}\}/g, '').trim().replace(/\n/g, ' ');
 }
 
 function applyRuntimeSettings(
   sessionId: string,
-  { mode, selectedModelName }: ConversationRuntimeSettings,
+  { mode, selectedModelName, projectPath }: ConversationRuntimeSettings,
 ): void {
   ensureSessionRuntimes(sessionId);
   useSessionStore.getState().setMode(sessionId, mode);
   if (selectedModelName) {
     useSessionStore.getState().setSelectedModelName(sessionId, selectedModelName);
+  }
+  if (projectPath) {
+    useSessionStore.getState().setProjectDirectory(sessionId, projectPath);
   }
 }
 
@@ -59,7 +63,7 @@ export function registerCreatedConversation(
     session_id: sessionId,
     title: createConversationTitle(initialContent),
     project_id: workContext.project_id || '',
-    project_path: workContext.project_path || '',
+    project_path: workContext.project_path || settings.projectPath || '',
     mode: settings.mode,
     status: 'active',
     message_count: 0,

@@ -807,10 +807,10 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
         plugins?: InstalledPluginItem[];
       }>(
         "skills.list",
-        withSession({
+        {
           with_installed: true,
           ...(refreshMarketplaces ? { refresh_marketplaces: true } : {}),
-        }),
+        },
         {
           timeoutMs: refreshMarketplaces
             ? SKILLS_FETCH_TIMEOUT_REFRESH_MS

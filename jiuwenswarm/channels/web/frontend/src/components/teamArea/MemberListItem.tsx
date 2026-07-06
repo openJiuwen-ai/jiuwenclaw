@@ -45,7 +45,7 @@ export function MemberListItem({
     <button
       type="button"
       onClick={onClick}
-      className={`flex w-full items-center gap-3 rounded-lg text-left transition-colors ${
+      className={`flex w-full items-center gap-3 rounded-md text-left transition-colors ${
         compact ? 'p-2' : 'p-3'
       } ${
         selected

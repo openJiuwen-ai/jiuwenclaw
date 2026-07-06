@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, useMemo } from 'react';
+﻿﻿﻿﻿﻿﻿﻿﻿﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Square } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
@@ -97,7 +97,7 @@ export function InputArea({
   const { t } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const isPaused = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isPaused ?? false);
-  const taskQueue = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.taskQueue ?? []);
+  const queuePaused = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.queuePaused ?? false);
   const inputValue = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.inputValue ?? '');
   const evolutionStatus = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.evolutionStatus ?? null);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
@@ -116,7 +116,7 @@ export function InputArea({
   const loadedMsgLen = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages?.length ?? 0);
   const hasHistory = (currentSession?.message_count ?? 0) > 0 || loadedMsgLen > 0;
   const isInterruptible = isProcessing || isPaused;
-  const isAgentMode = mode === 'agent.fast';
+  const isAgentMode = mode === 'agent.fast' || mode === 'agent.plan';
   const isTeamMode = mode === 'team';
   const isAutoHarnessMode = mode === 'auto_harness';
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
@@ -265,6 +265,27 @@ export function InputArea({
     inputRef.current.textContent = text;
   }, [activeSessionId]);
 
+  // 监听外部设置 inputValue 的事件（如编辑排队任务）
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { sessionId: string; value: string };
+      const sid = useChatStore.getState().activeSessionId;
+      if (detail.sessionId === sid && inputRef.current) {
+        inputRef.current.textContent = detail.value;
+        inputRef.current.focus();
+        // 将光标移到末尾
+        const range = document.createRange();
+        range.selectNodeContents(inputRef.current);
+        range.collapse(false);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      }
+    };
+    window.addEventListener('chat-input-sync', handler);
+    return () => window.removeEventListener('chat-input-sync', handler);
+  }, []);
+
   /** 从 contenteditable 提取纯文本（跳过 chip 节点，过滤零宽空格） */
   const extractPlainText = useCallback((): string => {
     const el = inputRef.current;
@@ -318,6 +339,19 @@ export function InputArea({
     const sid = useChatStore.getState().activeSessionId;
     if (isTeamMode) {
       onSubmit(trimmed);
+    } else if (queuePaused && isAgentMode && sid) {
+      // 队列已暂停时，弹窗提示用户选择
+      const queueLen = useChatStore.getState().getRuntime(sid)?.taskQueue.length ?? 0;
+      const shouldClear = window.confirm(t('chat.queuePausedConfirm', { count: queueLen }));
+      if (shouldClear) {
+        // 清空队列并发送
+        useChatStore.getState().clearTaskQueue(sid);
+        useChatStore.getState().setQueuePaused(sid, false);
+        onSubmit(trimmed);
+      } else {
+        // 保持队列，新消息加入队列
+        useChatStore.getState().addToTaskQueue(sid, trimmed);
+      }
     } else if (isInterruptible) {
       if (isAgentMode) {
         if (sid) {
@@ -338,7 +372,7 @@ export function InputArea({
     if (inputRef.current) {
       inputRef.current.innerHTML = '';
     }
-  }, [extractRichContent, pendingVoiceText, isInterruptible, isListening, onSubmit, onInterrupt, stopListening, isAgentMode, isTeamMode]);
+  }, [extractRichContent, pendingVoiceText, isInterruptible, isListening, onSubmit, onInterrupt, stopListening, isAgentMode, isTeamMode, queuePaused, t]);
 
   const trimmedDraft = (inputValue + pendingVoiceText).trim();
   const hasDraft = trimmedDraft.length > 0 || isListening;
@@ -609,40 +643,6 @@ export function InputArea({
         </div>
       )}
 
-      {/* 智能执行模式下的等待任务盒子 */}
-      {isAgentMode && taskQueue.length > 0 && (
-        <div className="chat-input-task-queue">
-          <div className="chat-input-task-queue-header">
-            <svg className="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
-            </svg>
-            {t('chat.waitingTasksCount', { count: taskQueue.length })}
-          </div>
-          <div className="chat-input-task-queue-list">
-            {taskQueue.map((task) => (
-              <div key={task.id} className="chat-input-task-item">
-                <span className="chat-input-task-content">{task.content}</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const sid = useChatStore.getState().activeSessionId;
-                    if (sid) {
-                      useChatStore.getState().removeFromTaskQueue(sid, task.id);
-                    }
-                  }}
-                  className="chat-input-task-remove"
-                  title={t('chat.removeTask')}
-                >
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       <div
         ref={inputRef}
         contentEditable
@@ -762,11 +762,11 @@ export function InputArea({
           </div>
           <PermissionSelector />
 
-          <SkillSelector
+          {!isTeamMode && <SkillSelector
             onNavigateToSkills={onNavigateToSkills}
             onInsertSkill={insertSkillChip}
             onRemoveSkill={removeSkillChip}
-          />
+          />}
 
           {evolutionLabel && (
             <div className="chat-input-evolution-pill" title={evolutionLabel}>
@@ -1351,7 +1351,7 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
         plugins?: InputAreaInstalledPlugin[];
       }>(
         'skills.list',
-        { with_installed: true, session_id: activeSessionId },
+        { with_installed: true },
         { timeoutMs: 30_000 },
       );
       setSkills(data.skills || []);

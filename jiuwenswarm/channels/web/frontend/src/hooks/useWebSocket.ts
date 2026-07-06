@@ -1,4 +1,4 @@
-﻿/**
+/**
  * WebSocket Hook
  *
  * 管理 WebSocket 连接和消息处理
@@ -892,11 +892,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         useChatStore.getState().setPaused(sessionId, false);
       }
       try {
+        // content 中将 {{skill:名称}} 替换为纯技能名
+        const plainContent = content.replace(/\{\{skill:([^}]+)\}\}/g, '$1');
         await request('chat.send', {
           session_id: sessionId,
-          content,
+          content: plainContent,
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
+          skills: selectedSkills,
         });
         return true;
       } catch (error) {
@@ -1941,13 +1944,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
           // 检查是否有等待的任务队列
           const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
-          const taskQueue = useChatStore.getState().getRuntime(sessionId)?.taskQueue ?? [];
+          const runtime = useChatStore.getState().getRuntime(sessionId);
+          const taskQueue = runtime?.taskQueue ?? [];
+          const queuePaused = runtime?.queuePaused ?? false;
           if (
-            currentMode === 'agent.fast' &&
+            (currentMode === 'agent.fast' || currentMode === 'agent.plan') &&
             !resumeAlreadyCompleted &&
+            !queuePaused &&
             taskQueue.length > 0
           ) {
-            // 智能执行模式下，自动处理队列中的下一个任务
+            // 智能执行/单Agent模式下，自动处理队列中的下一个任务
             const nextTask = taskQueue[0];
             if (nextTask && sendMessageRef.current) {
               // 从队列中移除该任务
@@ -2141,8 +2147,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               useChatStore.getState().setThinking(sessionId, false);
               // 任务已完成时，检查并触发队列中的下一个任务
               const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
-              const taskQueue = useChatStore.getState().getRuntime(sessionId)?.taskQueue ?? [];
-              if (currentMode === 'agent.fast' && taskQueue.length > 0) {
+              const runtime = useChatStore.getState().getRuntime(sessionId);
+              const taskQueue = runtime?.taskQueue ?? [];
+              const queuePaused = runtime?.queuePaused ?? false;
+              if ((currentMode === 'agent.fast' || currentMode === 'agent.plan') && !queuePaused && taskQueue.length > 0) {
                 const nextTask = taskQueue[0];
                 if (nextTask && sendMessageRef.current) {
                   useChatStore.getState().removeFromTaskQueue(sessionId, nextTask.id);

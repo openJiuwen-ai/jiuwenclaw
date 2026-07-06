@@ -252,7 +252,7 @@ export function TeamMembersPanel({
   }
 
   return (
-    <div className="flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden border border-border rounded-lg mt-0 mx-6 mb-6 ">
+    <div className="flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden mt-0 mx-6 mb-6">
       {activeDetailTab === 'members' && (
         <aside className="w-[260px] shrink-0 overflow-y-auto border-r border-border bg-card">
           <div className="px-3 pt-4">
@@ -695,7 +695,7 @@ function ProcessListCard({
   const { t } = useTranslation();
 
   return (
-    <div className="mx-auto max-w-[720px] overflow-hidden rounded-lg border border-border bg-card">
+    <div className="mx-auto max-w-[720px] overflow-hidden rounded-md border border-border bg-card">
       {items.length === 0 ? (
         <div className="px-5 py-12 text-center text-sm text-text-muted">
           {t('team.noProcessData')}
