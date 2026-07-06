@@ -249,7 +249,7 @@ async def test_agent_policy_crud(manager_api: ManagerApiHarness):
         },
     )
     policy_id = int(created["id"])
-    assert created["send_file_allowed"] is False
+    assert created["send_file_allowed"] is True
 
     listed = await h.get_json(
         "/config-effective/agent-policies",

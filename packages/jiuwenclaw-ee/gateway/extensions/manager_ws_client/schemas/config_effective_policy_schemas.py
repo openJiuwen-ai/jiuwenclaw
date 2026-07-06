@@ -112,7 +112,7 @@ class ConfigEffectiveAgentPolicyCreateRequest(BaseModel):
     priority: int = 0
     match_expr: str | None = None
     template_ref: TemplateRefField = Field(default_factory=dict)
-    send_file_allowed: bool = False
+    send_file_allowed: bool = True
     enabled: bool = True
     data: dict[str, Any] | None = None
 

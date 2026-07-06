@@ -360,7 +360,20 @@ class E2aEnvelopResponseParser(IResponseParser):
         if is_e2a_response_wire_dict(data):
             try:
                 e2a = E2AResponse.from_dict(dict(data))
-                return bool(e2a.is_final)
+                if e2a.is_final:
+                    return True
+                # HITL 暂停帧（chat.invocation_paused / awaiting_user_input=True）：
+                # AgentServer 端故意以 is_final=False + e2a.chunk 下发，避免客户端
+                # 误判为“任务成功完成”。但对 Gateway 的流式传输而言，该帧表示
+                # 本次请求的流式会话已结束（等待用户答复会以新 request_id 恢复），
+                # 必须视为 completed，否则 Access.send_message 会一直挂起、
+                # inflight 不释放，直到 message_timeout(300s) 才超时。
+                body = e2a.body if isinstance(e2a.body, dict) else {}
+                if body.get("awaiting_user_input") is True:
+                    return True
+                if body.get("event_type") == "chat.invocation_paused":
+                    return True
+                return False
             except Exception:
                 return False
         return bool(data.get("is_complete"))
