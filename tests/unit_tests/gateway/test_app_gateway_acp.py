@@ -143,7 +143,7 @@ async def test_schedule_gateway_restart_sets_event_without_execv(monkeypatch):
     )
     restart_request = gateway_module.GatewayRestartRequest()
 
-    gateway_module._schedule_gateway_restart(restart_request, delay=0.0)  # pylint: disable=protected-access
+    gateway_module._schedule_gateway_restart(restart_request, delay=0.0)
 
     await asyncio.wait_for(restart_request.ready_event.wait(), timeout=1.0)
     assert restart_request.requested is True
@@ -158,7 +158,7 @@ async def test_wait_for_gateway_tasks_returns_false_when_services_finish():
     restart_request = gateway_module.GatewayRestartRequest()
 
     result = await asyncio.wait_for(
-        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),  # pylint: disable=protected-access
+        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),
         timeout=1.0,
     )
 
@@ -172,9 +172,9 @@ async def test_wait_for_gateway_tasks_keeps_delayed_restart_when_services_finish
     service_task = asyncio.create_task(asyncio.sleep(0))
     restart_request = gateway_module.GatewayRestartRequest()
 
-    gateway_module._schedule_gateway_restart(restart_request, delay=1.0)  # pylint: disable=protected-access
+    gateway_module._schedule_gateway_restart(restart_request, delay=1.0)
     result = await asyncio.wait_for(
-        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),  # pylint: disable=protected-access
+        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),
         timeout=1.0,
     )
 
@@ -191,9 +191,9 @@ async def test_wait_for_gateway_tasks_keeps_delayed_restart_when_service_fails()
     service_task = asyncio.create_task(fail_service())
     restart_request = gateway_module.GatewayRestartRequest()
 
-    gateway_module._schedule_gateway_restart(restart_request, delay=1.0)  # pylint: disable=protected-access
+    gateway_module._schedule_gateway_restart(restart_request, delay=1.0)
     result = await asyncio.wait_for(
-        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),  # pylint: disable=protected-access
+        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),
         timeout=1.0,
     )
 
@@ -498,13 +498,13 @@ async def test_gateway_server_promotes_pending_session_client_after_stale_owner_
     new_ws = FakeWebSocket()
     server.bind_session_client("sess-race", old_ws, channel_id="tui")
 
-    assert await server._bind_route_session_client(route, "sess-race", new_ws) is False  # pylint: disable=protected-access
+    assert await server._bind_route_session_client(route, "sess-race", new_ws) is False
 
-    await server._connection_handler(old_ws, "/tui")  # pylint: disable=protected-access
+    await server._connection_handler(old_ws, "/tui")
 
     assert disconnected == [([("tui", "sess-race")], [])]
     assert rebound == [("tui", "sess-race")]
-    assert server._session_to_client[("tui", "sess-race")] is new_ws  # pylint: disable=protected-access
+    assert server._session_to_client[("tui", "sess-race")] is new_ws
 
 
 @pytest.mark.asyncio

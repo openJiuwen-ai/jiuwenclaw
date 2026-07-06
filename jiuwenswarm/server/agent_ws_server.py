@@ -4760,7 +4760,7 @@ class AgentWebSocketServer:
                     channel_id,
                     project_dir=project_dir,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.debug("[command.sandbox] get_agent_nowait failed: %s", exc)
                 agent = None
             if agent is not None:

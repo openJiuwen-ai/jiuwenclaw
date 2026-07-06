@@ -202,7 +202,7 @@ async def test_tui_route_disconnect_skips_scheduled_cancel_after_explicit_exit()
     handler = FakeMessageHandler()
     binding = build_cli_route_binding(CliRouteBindParams(path="/tui", message_handler=handler))
     ws = type("FakeWs", (), {})()
-    ws._jiuwenswarm_tui_user_exit = True  # pylint: disable=protected-access
+    ws._jiuwenswarm_tui_user_exit = True
 
     await binding.disconnect_handler(ws, [("tui", "sess-exit")], [])
 

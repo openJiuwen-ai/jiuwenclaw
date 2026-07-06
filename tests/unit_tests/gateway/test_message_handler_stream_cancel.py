@@ -154,7 +154,7 @@ async def test_tui_non_stream_request_times_out_before_frontend_request(monkeypa
     )
 
     await asyncio.wait_for(
-        handler._process_non_stream_request(msg, env),  # pylint: disable=protected-access
+        handler._process_non_stream_request(msg, env),
         timeout=0.2,
     )
 
