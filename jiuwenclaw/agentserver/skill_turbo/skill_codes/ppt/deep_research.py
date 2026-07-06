@@ -784,6 +784,7 @@ class PageWorkerNode(PlanNode):
             result = await self.stream_llm_collect(
                 prompt=prompt,
                 system_prompt="你是来源可信度评估助手，只输出 JSON 对象。",
+                concurrent=True,
             )
             raw_scores = self.extract_json(result, expected_type=dict)
             if not isinstance(raw_scores, dict):
@@ -982,6 +983,7 @@ class PageWorkerNode(PlanNode):
             result = await self.stream_llm_collect(
                 prompt=prompt,
                 system_prompt="你是来源可靠性验证助手，只输出 JSON 数组。",
+                concurrent=True,
             )
             exclude_indices = self.extract_json(result, expected_type=list)
             if isinstance(exclude_indices, list):
@@ -1064,6 +1066,7 @@ class PageWorkerNode(PlanNode):
             result = await self.stream_llm_collect(
                 prompt=prompt,
                 system_prompt="你是数据充分性校验助手，只输出 JSON。",
+                concurrent=True,
             )
             check = self.extract_json(result, expected_type=dict)
             if isinstance(check, dict) and not check.get("pass", False):
@@ -1446,6 +1449,7 @@ class PageWorkerNode(PlanNode):
             result = await self.stream_llm_collect(
                 prompt=prompt,
                 system_prompt="你是研究报告校验助手，只输出 JSON。",
+                concurrent=True,
             )
             check = self.extract_json(result, expected_type=dict)
             if isinstance(check, dict):
