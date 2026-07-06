@@ -391,17 +391,30 @@ class MessageHandler(ABC):
             )
             await self.publish_robot_messages(status_msg)
 
-    async def _cancel_agent_work_for_session(self, msg: "Message", old_sid: str | None) -> None:
+    def _abort_agent_stream_pull(self, request_id: str) -> None:
+        """通知 AgentClient 终止 Access/WSS 层流式 pull（与 task.cancel() 配合）。"""
+        abort_fn = getattr(self._agent_client, "abort_request_stream", None)
+        if not callable(abort_fn):
+            return
+        try:
+            abort_fn(request_id)
+        except Exception:
+            logger.warning(
+                "[MessageHandler] abort_request_stream 失败: request_id=%s",
+                request_id,
+                exc_info=True,
+            )
+
+    def _cancel_agent_work_for_session(self, msg: "Message", old_sid: str | None) -> None:
         """取消指定 session 的网关流式任务，并向 AgentServer 发送 CHAT_CANCEL（与 Web chat.interrupt intent=cancel 对齐）。
+
+        同步方法：不得在 forward_loop 上 await 任何流式收尾或 Agent 中断。
 
         网关侧仅取消 ``_stream_sessions[rid] == old_sid`` 的流式任务。AgentServer 对 ``intent=cancel`` 仍可能
         ``cancel_all_session_tasks``（与现网 unary 中断一致）；若需仅撤销单 session 需在 interface 层扩展协议。
         """
-        from jiuwenclaw.schema.message import Message, ReqMethod
-
         self._clear_session_evolution_states(old_sid)
 
-        tasks_to_cancel: list[asyncio.Task] = []
         rids_cancelled: list[str] = []
 
         for rid, task in list(self._stream_tasks.items()):
@@ -413,18 +426,15 @@ class MessageHandler(ABC):
                     rid,
                     old_sid,
                 )
+                self._abort_agent_stream_pull(rid)
                 task.cancel()
-                tasks_to_cancel.append(task)
                 rids_cancelled.append(rid)
-
-        if tasks_to_cancel:
-            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
         # 与 pause/resume 一致：interrupt_result 使用前端 chat.interrupt 的 ws id，
         # 而非被 cancel 的 chat.send 流式 request_id（否则 web_enterprise 会丢弃该事件）。
         interrupt_notify_id = (msg.id or "").strip()
         if interrupt_notify_id:
-            await self._send_interrupt_result_notification(
+            self._schedule_interrupt_result_notification(
                 interrupt_notify_id, msg.channel_id, old_sid, "cancel",
             )
 
@@ -437,28 +447,10 @@ class MessageHandler(ABC):
 
         # 即使网关侧已无活跃流式拉取任务（例如 Agent 正在执行 shell/工具），也必须通知 AgentServer，
         # 否则仅断开 CLI WebSocket 无法停止已派发的工作。
-
-        cancel_req = Message(
-            id=f"interrupt_{int(time.time() * 1000):x}_{secrets.token_hex(3)}",
-            type="req",
-            channel_id=msg.channel_id,
-            session_id=sid_for_agent,
-            params={
-                "intent": "cancel",
-                "session_id": sid_for_agent,
-            },
-            timestamp=time.time(),
-            ok=True,
-            req_method=ReqMethod.CHAT_CANCEL,
-            metadata=msg.metadata,
-            provider=getattr(msg, "provider", None),
-            chat_id=getattr(msg, "chat_id", None),
-            user_id=getattr(msg, "user_id", None),
-            bot_id=getattr(msg, "bot_id", None),
+        asyncio.create_task(
+            self._send_cancel_interrupt_to_agent(msg, sid_for_agent),
+            name=f"gw-agent-cancel-{sid_for_agent[:24]}",
         )
-        agent_msg = await self._prepare_agent_dispatch_message(cancel_req)
-        env_interrupt = self.message_to_e2a(agent_msg)
-        await self._send_interrupt_to_agent(env_interrupt)
 
     async def cancel_agent_sessions_on_disconnect(
         self,
@@ -485,7 +477,7 @@ class MessageHandler(ABC):
                 is_stream=False,
             )
             try:
-                await self._cancel_agent_work_for_session(stub, sid)
+                self._cancel_agent_work_for_session(stub, sid)
             except Exception:
                 logger.warning(
                     "[MessageHandler] disconnect cancel failed: channel_id=%s session_id=%s",
@@ -500,7 +492,7 @@ class MessageHandler(ABC):
         msg: "Message",
     ) -> None:
         """先完成旧会话取消与 AgentServer 中断，再下发 session 已变更提示。"""
-        await self._cancel_agent_work_for_session(msg, params.old_sid)
+        self._cancel_agent_work_for_session(msg, params.old_sid)
         await self._send_channel_notice(
             params.user_infos,
             params.channel_id,
@@ -514,7 +506,7 @@ class MessageHandler(ABC):
         msg: "Message",
     ) -> None:
         """与 /new_session 一致：先取消当前会话在网关与 Agent 侧的任务，再下发 mode 已变更提示。"""
-        await self._cancel_agent_work_for_session(msg, params.old_sid)
+        self._cancel_agent_work_for_session(msg, params.old_sid)
         await self._send_channel_notice(
             params.user_infos,
             params.channel_id,
@@ -2333,7 +2325,7 @@ class MessageHandler(ABC):
                                 "[MessageHandler] evolution phase pending, queue supplement input: session_id=%s",
                                 msg.session_id,
                             )
-                            await self._send_interrupt_result_notification(
+                            self._schedule_interrupt_result_notification(
                                 msg.id,
                                 msg.channel_id,
                                 msg.session_id,
@@ -2342,14 +2334,8 @@ class MessageHandler(ABC):
                             )
                             continue
 
-                        # 有新输入：取消旧任务 → 清空 todo / task_plan → 启动新任务（非并发）
-
-                        # 1. 取消 gateway 侧当前 session 相关的流式任务（而非所有任务）
-                        tasks_to_cancel = []
-                        rids_cancelled = []
                         current_sid = msg.session_id
                         for rid, task in list(self._stream_tasks.items()):
-                            # 只取消与当前 session_id 关联的任务
                             if self._stream_sessions.get(rid) != current_sid:
                                 continue
                             if not task.done():
@@ -2357,38 +2343,39 @@ class MessageHandler(ABC):
                                     "[MessageHandler] supplement: 取消流式任务 request_id=%s session_id=%s",
                                     rid, current_sid,
                                 )
+                                self._abort_agent_stream_pull(rid)
                                 task.cancel()
-                                tasks_to_cancel.append(task)
-                                rids_cancelled.append(rid)
-                        if tasks_to_cancel:
-                            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
-                        # 2. 通知前端 supplement（前端据此判断 is_processing 状态）
-                        await self._send_interrupt_result_notification(
+                        self._schedule_interrupt_result_notification(
                             msg.id, msg.channel_id, msg.session_id, "supplement",
                         )
 
-                        # 3. 发送 supplement intent 到 AgentServer（取消任务并清空 todo / task_plan）
-                        #    用 await 确保 agent 侧先完成取消再启动新任务
-                        from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
-
                         agent_msg = await self._prepare_agent_dispatch_message(msg)
-                        supplement_env = e2a_from_agent_fields(
-                            request_id=f"supplement_{int(time.time() * 1000):x}",
+                        from jiuwenclaw.schema.message import Message
+
+                        supplement_interrupt = Message(
+                            id=f"supplement_{int(time.time() * 1000):x}",
+                            type="req",
                             channel_id=msg.channel_id,
                             session_id=agent_msg.session_id,
-                            req_method=ReqMethod.CHAT_CANCEL,
-                            params={"intent": "supplement", "session_id": agent_msg.session_id},
-                            is_stream=False,
+                            params={
+                                "intent": "supplement",
+                                "session_id": agent_msg.session_id,
+                            },
                             timestamp=time.time(),
+                            ok=True,
+                            req_method=ReqMethod.CHAT_CANCEL,
+                            provider=getattr(msg, "provider", None),
+                            chat_id=getattr(msg, "chat_id", None),
+                            user_id=getattr(msg, "user_id", None),
+                            bot_id=getattr(msg, "bot_id", None),
+                            metadata=msg.metadata,
                         )
+                        supplement_env = self.message_to_e2a(supplement_interrupt)
                         try:
                             await self._send_interrupt_to_agent(supplement_env)
                         except Exception:
                             pass  # 即使失败也继续启动新任务
-
-                        # 4. 入队新任务（单一任务，不并发）
-                        from jiuwenclaw.schema.message import Message
 
                         new_req_id = f"req_{int(time.time() * 1000):x}_{msg.id}"
                         sup_meta = dict(msg.metadata) if msg.metadata else None
@@ -2430,15 +2417,13 @@ class MessageHandler(ABC):
                         )
 
                     elif intent == "cancel":
-                        await self._cancel_agent_work_for_session(msg, msg.session_id)
+                        self._cancel_agent_work_for_session(msg, msg.session_id)
 
                     elif intent in ("pause", "resume"):
-                        # 暂停/恢复：不取消流式任务，转发给 AgentServer 处理 ReAct 循环
                         agent_msg = await self._prepare_agent_dispatch_message(msg)
                         env_interrupt = self.message_to_e2a(agent_msg)
                         asyncio.create_task(self._send_interrupt_to_agent(env_interrupt))
-                        # 通知前端状态变更
-                        await self._send_interrupt_result_notification(
+                        self._schedule_interrupt_result_notification(
                             msg.id, msg.channel_id, msg.session_id, intent,
                         )
 
@@ -3217,6 +3202,62 @@ class MessageHandler(ABC):
             )
         except Exception as e:
             logger.warning("[MessageHandler] AgentServer 中断请求失败(忽略): %s", e)
+
+    async def _send_cancel_interrupt_to_agent(
+        self,
+        msg: "Message",
+        sid_for_agent: str,
+    ) -> None:
+        """后台发送 chat.interrupt(cancel) 到 AgentServer，避免阻塞 forward_loop。"""
+        from jiuwenclaw.schema.message import Message, ReqMethod
+
+        cancel_req = Message(
+            id=f"interrupt_{int(time.time() * 1000):x}_{secrets.token_hex(3)}",
+            type="req",
+            channel_id=msg.channel_id,
+            session_id=sid_for_agent,
+            params={
+                "intent": "cancel",
+                "session_id": sid_for_agent,
+            },
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.CHAT_CANCEL,
+            metadata=msg.metadata,
+            provider=getattr(msg, "provider", None),
+            chat_id=getattr(msg, "chat_id", None),
+            user_id=getattr(msg, "user_id", None),
+            bot_id=getattr(msg, "bot_id", None),
+        )
+        try:
+            agent_msg = await self._prepare_agent_dispatch_message(cancel_req)
+            env_interrupt = self.message_to_e2a(agent_msg)
+            await self._send_interrupt_to_agent(env_interrupt)
+        except Exception:
+            logger.exception(
+                "[MessageHandler] 后台发送 cancel interrupt 失败: session_id=%s",
+                sid_for_agent,
+            )
+
+    def _schedule_interrupt_result_notification(
+        self,
+        request_id: str,
+        channel_id: str,
+        session_id: str | None,
+        intent: str,
+        message: str | None = None,
+    ) -> None:
+        """异步通知前端 interrupt_result，不在 forward_loop 上 await publish。"""
+        asyncio.create_task(
+            self._send_interrupt_result_notification(
+                request_id,
+                channel_id,
+                session_id,
+                intent,
+                message=message,
+            ),
+            name=f"gw-interrupt-result-{intent}-{request_id[:24]}",
+        )
 
     async def _send_interrupt_result_notification(
         self,

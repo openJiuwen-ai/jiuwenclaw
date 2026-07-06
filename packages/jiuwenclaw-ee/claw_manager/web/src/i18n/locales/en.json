@@ -380,6 +380,7 @@
       "searchPlaceholder": "Search policy ID, name, description, or priority"
     },
     "fieldRequired": "Please fill in {{field}}",
+    "priorityHint": "Match in descending order of priority, and for the same priority, match in descending order of updated time. Only apply the first matching policy.",
     "templateRef": {
       "title": "Template References",
       "slot": "Slot",

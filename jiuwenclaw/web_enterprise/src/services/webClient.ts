@@ -23,6 +23,28 @@ interface PendingRequest {
 const MAX_RECONNECT_ATTEMPTS = 5;
 const DEFAULT_TIMEOUT_MS = 15000;
 
+/** 暂停期间暂存、恢复后回放的流式事件 */
+const PAUSABLE_STREAM_EVENTS = new Set([
+  'chat.delta',
+  'chat.final',
+  'chat.media',
+  'chat.file',
+  'chat.tool_call',
+  'chat.tool_result',
+  'team.member.tool_call',
+  'team.member.tool_result',
+  'todo.updated',
+  'context.compressed',
+  'context.usage',
+  'chat.subtask_update',
+  'chat.usage_summary',
+]);
+
+export interface PauseBufferHook {
+  isActive: () => boolean;
+  onBuffer: (event: WsEvent) => void;
+}
+
 const LEGACY_EVENT_MAP: Record<string, string> = {
   connection_ack: 'connection.ack',
   content_chunk: 'chat.delta',
@@ -83,6 +105,7 @@ class WebClient {
   private activeWsUrl: string | null = null;
   private requestSeq = 0;
   private streamEventFilter: ((event: WsEvent) => boolean) | null = null;
+  private pauseBufferHook: PauseBufferHook | null = null;
 
   getState(): WebConnectionState {
     return this.state;
@@ -102,6 +125,15 @@ class WebClient {
   /** 丢弃已 cancel 的 chat/context 流式事件（在 dispatch 前统一过滤） */
   setStreamEventFilter(filter: ((event: WsEvent) => boolean) | null): void {
     this.streamEventFilter = filter;
+  }
+
+  /** 暂停期间将流式输出写入暂存区，恢复后通过 replayBufferedEvent 回放 */
+  setPauseBufferHook(hook: PauseBufferHook | null): void {
+    this.pauseBufferHook = hook;
+  }
+
+  replayBufferedEvent(event: WsEvent): void {
+    this.dispatchEventToHandlers(event);
   }
 
   on(eventName: string, handler: EventHandler): () => void {
@@ -465,6 +497,20 @@ class WebClient {
   }
 
   private dispatchEvent(event: WsEvent): void {
+    const hook = this.pauseBufferHook;
+    if (hook?.isActive()) {
+      if (event.event === 'chat.processing_status') {
+        return;
+      }
+      if (PAUSABLE_STREAM_EVENTS.has(event.event)) {
+        hook.onBuffer(event);
+        return;
+      }
+    }
+    this.dispatchEventToHandlers(event);
+  }
+
+  private dispatchEventToHandlers(event: WsEvent): void {
     const handlers = this.handlers.get(event.event);
     if (!handlers || handlers.size === 0) {
       return;

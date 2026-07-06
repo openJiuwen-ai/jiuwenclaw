@@ -2583,6 +2583,13 @@ class JiuWenClawDeepAdapter:
             list(loaded.models),
         )
 
+    def _runtime_agent_scope_id(self) -> str:
+        agent_id = str(self._agent_id or "").strip()
+        service_id = str(self._service_id or "").strip()
+        if service_id and agent_id:
+            return f"{service_id}_{agent_id}"
+        return agent_id or "jiuwenclaw"
+
     async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent.plan") -> None:
         """初始化 DeepAgent 实例.
 
@@ -2642,9 +2649,10 @@ class JiuWenClawDeepAdapter:
                 exc,
             )
             raise
-        agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
+        agent_card = AgentCard(name=self._agent_name, id=self._runtime_agent_scope_id())
 
         tool_cards = await self._get_tool_cards(agent_card.id, mode=mode)
+        logger.info("[JiuWenClawDeepAdapter] Agent card id: %s", agent_card.id)
         self._tool_cards = tool_cards
 
         from jiuwenclaw.agentserver.permissions.config_loader import get_effective_permissions_config
@@ -3432,11 +3440,9 @@ class JiuWenClawDeepAdapter:
                     updated_todos = await self._cancel_pending_todos(request.session_id)
                 except Exception as exc:
                     logger.warning("[JiuWenClawDeepAdapter] supplement 标记 todo cancelled 失败: %s", exc)
-            await self._clear_session_persisted_interrupt_state(
+            await self._release_session_persistence_checkpoint(
                 request.session_id,
                 reason="interrupt(supplement)",
-                clear_interrupt=True,
-                clear_task_plan=True,
             )
             logger.info(
                 "[JiuWenClawDeepAdapter] interrupt(supplement): 已停止执行并清空 todo/task_plan request_id=%s",
@@ -3465,11 +3471,9 @@ class JiuWenClawDeepAdapter:
                     updated_todos = await self._cancel_pending_todos(request.session_id)
                 except Exception as exc:
                     logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)
-            await self._clear_session_persisted_interrupt_state(
+            await self._release_session_persistence_checkpoint(
                 request.session_id,
                 reason="interrupt(cancel)",
-                clear_interrupt=True,
-                clear_task_plan=True,
             )
 
             logger.info(
@@ -3586,6 +3590,67 @@ class JiuWenClawDeepAdapter:
                 reason,
                 session_id,
                 exc,
+            )
+
+    async def _release_session_persistence_checkpoint(
+        self,
+        session_id: str | None,
+        *,
+        reason: str,
+    ) -> None:
+        """Release persistence checkpointer blobs for one session.
+
+        After ``chat.interrupt(cancel|supplement)``, the next ``chat.send`` must not
+        ``recover()`` an in-flight turn (tool calls / permission ASK) from KV storage.
+        """
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        get_fn = getattr(CheckpointerFactory, "get_checkpointer", None)
+        if not callable(get_fn):
+            return
+        try:
+            checkpointer = get_fn()
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] %s: get checkpointer failed session_id=%s error=%s",
+                reason,
+                sid,
+                exc,
+            )
+            return
+        if checkpointer is None:
+            return
+        release_fn = getattr(checkpointer, "release", None)
+        if not callable(release_fn):
+            return
+
+        agent_id = None
+        if self._instance is not None:
+            card = getattr(self._instance, "card", None)
+            if card is not None:
+                agent_id = (getattr(card, "id", None) or "").strip() or None
+
+        try:
+            if agent_id:
+                await release_fn(sid, agent_id)
+            else:
+                await release_fn(sid)
+            logger.info(
+                "[JiuWenClawDeepAdapter] %s: persistence checkpoint released "
+                "session_id=%s agent_id=%s",
+                reason,
+                sid,
+                agent_id or "all",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] %s: persistence checkpoint release failed "
+                "session_id=%s error=%s",
+                reason,
+                sid,
+                exc,
+                exc_info=True,
             )
 
     async def abort_on_gateway_disconnect(self) -> None:
