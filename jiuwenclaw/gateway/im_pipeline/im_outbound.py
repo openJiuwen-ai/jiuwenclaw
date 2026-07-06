@@ -115,17 +115,17 @@ class IMOutboundPipeline:
 
     async def apply(self, msg: "Message") -> None:
         """对出站消息执行路由决策，结果写入 msg.metadata（原地修改）。"""
+        # 检查是否需要数字分身路由决策
+        # 优先使用 msg.group_digital_avatar，其次检查 metadata 中的 avatar_mode
+        if not msg.group_digital_avatar and not (msg.metadata or {}).get("avatar_mode"):
+            return
+
         logger.info(
             "[IMOutboundPipeline] apply 入口: channel=%s msg.id=%s group_digital_avatar=%s",
             msg.channel_id, msg.id, msg.group_digital_avatar
         )
 
-        # 检查是否需要数字分身路由决策
-        # 优先使用 msg.group_digital_avatar，其次检查 metadata 中的 avatar_mode
         meta = dict(msg.metadata or {})
-        is_digital_avatar = msg.group_digital_avatar or bool(meta.get("avatar_mode"))
-        if not is_digital_avatar:
-            return
 
         # 幂等：已经有 reply_scope 则跳过
         if str(meta.get("reply_scope") or "").strip():
