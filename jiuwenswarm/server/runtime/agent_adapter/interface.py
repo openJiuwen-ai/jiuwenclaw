@@ -1523,12 +1523,8 @@ class JiuWenSwarm:
             adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
             return await adapter.handle_user_answer(request)
 
-        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
-
-        heartbeat_response = await adapter.handle_heartbeat(request)
-        if heartbeat_response is not None:
-            return heartbeat_response
-
+        # 无状态请求（skills / skilldev / plugins / symphony）不需要 adapter，
+        # 在 _ensure_adapter 之前检查，避免触发 adapter 懒初始化。
         skilldev_response = await self._handle_skilldev_request(request)
         if skilldev_response is not None:
             return skilldev_response
@@ -1544,6 +1540,12 @@ class JiuWenSwarm:
         symphony_response = await self._handle_symphony_request(request)
         if symphony_response is not None:
             return symphony_response
+
+        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+
+        heartbeat_response = await adapter.handle_heartbeat(request)
+        if heartbeat_response is not None:
+            return heartbeat_response
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
@@ -1667,6 +1669,36 @@ class JiuWenSwarm:
                     is_complete=True,
                 )
             return
+
+        # 无状态 RPC（skills / plugins / symphony）不需要 adapter，
+        # 委托给非流式 handler 并包装为单个 chunk，避免触发 adapter 懒初始化。
+        # skilldev 已由上面的流式分支处理，这里不会再命中。
+        for stateless_handler in (
+            self._handle_skills_request,
+            self._handle_plugins_request,
+            self._handle_symphony_request,
+        ):
+            stateless_response = await stateless_handler(request)
+            if stateless_response is not None:
+                if stateless_response.ok:
+                    chunk_payload = stateless_response.payload
+                else:
+                    # handler 内部捕获异常并以 ok=False 返回时，注入 chat.error
+                    # 事件标记，使下游能识别为错误（与非流式 resp.ok 传播等价）。
+                    raw_payload = stateless_response.payload
+                    error_msg = (
+                        raw_payload.get("error", "unknown error")
+                        if isinstance(raw_payload, dict)
+                        else "unknown error"
+                    )
+                    chunk_payload = {"event_type": "chat.error", "error": error_msg}
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload=chunk_payload,
+                    is_complete=True,
+                )
+                return
 
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
 

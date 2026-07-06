@@ -2045,6 +2045,16 @@ class AgentWebSocketServer:
 
         return restored_after_approval
 
+    @staticmethod
+    def _is_stateless_method_request(request: AgentRequest) -> bool:
+        """skills / skilldev / plugins / symphony 为无状态 RPC，无需 mode 解析与 adapter. """
+        return (
+            request.req_method is not None
+            and request.req_method.value.startswith(
+                ("skills.", "skilldev.", "plugins.", "symphony.")
+            )
+        )
+
     async def _handle_unary(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """非流式处理：调用 process_message，返回一条 E2AResponse 线 JSON。"""
         channel_id = request.channel_id or "default"
@@ -2063,6 +2073,20 @@ class AgentWebSocketServer:
 
         if request.req_method == ReqMethod.ACP_TOOL_RESPONSE:
             await self._handle_acp_tool_response(ws, request, send_lock)
+            return
+
+        # 无状态请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
+        # code mode 状态管理，直接走 process_message 即可。
+        if self._is_stateless_method_request(request):
+            agent = await self._agent_manager.get_agent(channel_id=channel_id, mode="agent")
+            resp = await agent.process_message(request)
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            async with send_lock:
+                await ws.send(json.dumps(wire, ensure_ascii=False))
+            logger.info(
+                "[AgentWebSocketServer] 非流式响应已发送: request_id=%s",
+                request.request_id,
+            )
             return
 
         mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
@@ -2098,13 +2122,17 @@ class AgentWebSocketServer:
         if current_task is not None:
             self._session_stream_tasks[session_id] = (current_task, stream_stop_event)
 
-        mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
-            request, channel_id
-        )
-
-        restored_plan = await self._ensure_code_mode_state(request, mode, sub_mode, agent)
-        if restored_plan:
-            await self._push_plan_mode_exited(request)
+        # 无状态流式请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
+        # code mode 状态管理，直接走 process_message_stream 即可。
+        if self._is_stateless_method_request(request):
+            agent = await self._agent_manager.get_agent(channel_id=channel_id, mode="agent")
+        else:
+            mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
+                request, channel_id
+            )
+            restored_plan = await self._ensure_code_mode_state(request, mode, sub_mode, agent)
+            if restored_plan:
+                await self._push_plan_mode_exited(request)
 
         chunk_count = 0
         # 心跳控制：当有真实 chunk 发送时重置，空闲时发送心跳
