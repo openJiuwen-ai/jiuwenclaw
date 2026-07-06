@@ -627,6 +627,47 @@ def resolve_request_project_dir(request: AgentRequest) -> str | None:
     return None
 
 
+def _sync_chat_request_metadata(
+    request: AgentRequest,
+    project_dir: str | None,
+    mode: str,
+) -> str | None:
+    """Sync chat request metadata and return the effective locked project path."""
+    session_id = (request.session_id or "").strip()
+    if not session_id:
+        return project_dir
+    params = request.params if isinstance(request.params, dict) else {}
+    model_name = params.get("model_name")
+    if not (isinstance(model_name, str) and model_name.strip()):
+        model_name = os.getenv("MODEL_NAME", "") or None
+    else:
+        model_name = model_name.strip()
+
+    request_project_id = params.get("project_id")
+    request_project_id = (
+        request_project_id.strip()
+        if isinstance(request_project_id, str) and request_project_id.strip()
+        else None
+    )
+    try:
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            sync_session_request_metadata,
+        )
+
+        return sync_session_request_metadata(
+            session_id=session_id,
+            channel_id=request.channel_id or None,
+            mode=mode,
+            model=model_name,
+            project_path=str(project_dir) if project_dir else None,
+            project_id=request_project_id,
+            last_user_message_at=_dt.datetime.now(_dt.timezone.utc).timestamp(),
+        )
+    except (OSError, ValueError) as exc:
+        logger.warning("[AgentWebSocketServer] 同步 chat 请求元数据失败: %s", exc)
+        return project_dir
+
+
 def _harness_error_code(exc: BaseException) -> str:
     """Map a harness package exception to a wire ``code`` for the frontend.
 
@@ -1879,7 +1920,8 @@ class AgentWebSocketServer:
         """Mode resolution and correct agent instance selection."""
         mode, sub_mode = _apply_resolved_mode_to_request(request)
         agent_mode = "agent" if mode == "auto_harness" else mode
-        project_dir = resolve_request_project_dir(request)
+        requested_project_dir = resolve_request_project_dir(request)
+        project_dir = _sync_chat_request_metadata(request, requested_project_dir, mode)
 
         agent = await self._agent_manager.get_agent(
             channel_id=channel_id,
