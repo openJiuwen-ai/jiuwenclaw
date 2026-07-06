@@ -254,6 +254,7 @@ async def save_resume_ctx(
         logger.warning(
             "[SkillTurboResume] save_resume_ctx update_state failed: sid=%s err=%s", sid, e
         )
+        raise
     logger.info(
         "[SkillTurboResume] save_resume_ctx: sid=%s tcid=%s plan_code_len=%d",
         sid, pending_tool_call_id, len(plan_code or ""),
