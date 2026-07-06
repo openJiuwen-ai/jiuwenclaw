@@ -182,6 +182,22 @@ def _normalize_style_id(value: Any) -> str:
     return ""
 
 
+def _resolve_style_id(style_id: Any, style_description: Any = None) -> str:
+    """归一化 style_id，支持从 style_description 回退。
+
+    当 LLM 输出 style_id="custom" + style_description="华为风格" 时，
+    先尝试对 style_description 做归一化，匹配别名映射（如"华为风格"→"business-classic"）。
+    """
+    normalized = _normalize_style_id(style_id)
+    if normalized and normalized != "custom":
+        return normalized
+    if normalized == "custom":
+        desc = _normalize_style_id(style_description)
+        if desc and desc != "custom":
+            return desc
+    return normalized
+
+
 def _style_id_from_label(label: str) -> tuple[str, str]:
     text = label.strip()
     if not text or text == "其他":
@@ -310,7 +326,7 @@ def _merge_slot_payload(
     if isinstance(purpose, str) and purpose.strip():
         inputs["presentation_purpose"] = purpose.strip()
 
-    style_id = _normalize_style_id(payload.get("style_id"))
+    style_id = _resolve_style_id(payload.get("style_id"), payload.get("style_description"))
     if style_id:
         inputs["style_id"] = style_id
 
@@ -657,7 +673,7 @@ def _build_style_question() -> dict[str, Any]:
 
 
 def _style_id_resolved(inputs: dict[str, Any]) -> str:
-    return _normalize_style_id(inputs.get("style_id"))
+    return _resolve_style_id(inputs.get("style_id"), inputs.get("style_description"))
 
 
 def _style_needs_user_ask(inputs: dict[str, Any]) -> bool:
@@ -929,7 +945,7 @@ async def _llm_default_style(node: PlanNode, inputs: dict[str, Any]) -> str:
         )
         payload = _parse_json_payload(response)
         if isinstance(payload, dict):
-            normalized = _normalize_style_id(payload.get("style_id"))
+            normalized = _resolve_style_id(payload.get("style_id"), payload.get("style_description"))
             if normalized and normalized != "custom":
                 return normalized
     except Exception as exc:
@@ -1460,8 +1476,8 @@ class RequirementCollectNode(PlanNode):
                 if slot == "page_count" and v is not None:
                     ctx[slot] = v
                 elif slot == "style_id" and isinstance(v, str) and v.strip():
-                    # 归一化 style_id（如"华为风格"→"business-classic"）
-                    normalized = _normalize_style_id(v)
+                    # 归一化 style_id（如"华为风格"→"business-classic"），支持 style_description 回退
+                    normalized = _resolve_style_id(v, pre_slots.get("style_description"))
                     ctx[slot] = normalized if normalized else v.strip()
                 elif isinstance(v, str) and v.strip():
                     ctx[slot] = v
