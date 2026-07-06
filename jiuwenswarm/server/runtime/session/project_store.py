@@ -80,7 +80,8 @@ else:
 @contextmanager
 def _file_lock(data_path: Path) -> Iterator[None]:
     """跨进程文件锁。锁文件为 ``<data_path>.lock``,与数据文件分离,
-    因此数据文件的原子替换不会破坏锁。"""
+    因此数据文件的原子替换不会破坏锁。
+    """
     data_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = data_path.with_suffix(data_path.suffix + _LOCK_SUFFIX)
     with open(lock_path, "a+b") as f:
@@ -267,6 +268,12 @@ class ProjectPathConflict(Exception):
     """``project_path`` 与已有可见项目重复(由 ``create_or_restore_project`` 在锁内抛出)。"""
 
 
+class ProjectNameConflict(Exception):
+    """``name`` 与已有项目(含隐藏)重复(由 ``create_or_restore_project`` /
+    ``rename_project`` / ``restore_project`` 在锁内抛出)。
+    """
+
+
 def _gen_unique_project_id(existing_projects: list[dict[str, Any]]) -> str:
     """生成不与现有 ``project_id`` 冲突的 ID(须在文件锁内调用)。
 
@@ -304,23 +311,40 @@ def create_project(name: str, project_path: str) -> Project:
 def create_or_restore_project(name: str, project_path: str) -> tuple[Project, bool]:
     """原子地新建或恢复项目(在文件锁内完成查重/恢复/新建,关闭 TOCTOU 窗口)。
 
-    - ``project_path`` 命中已隐藏项目 → 恢复(置 ``hidden=False``,更新 ``name``),
-      返回 ``(proj, True)``;
-    - ``project_path`` 命中可见项目 → 抛 ``ProjectPathConflict``;
+    - ``project_path`` 为空时:跳过路径匹配/恢复/冲突,直接新建(允许多个空路径
+      项目,靠 ``project_id`` + ``name`` 区分,会话按 ``project_id`` 归属);
+    - ``project_path`` 非空且命中已隐藏项目 → 恢复(置 ``hidden=False``,更新
+      ``name``),返回 ``(proj, True)``;
+    - ``project_path`` 非空且命中可见项目 → 抛 ``ProjectPathConflict``;
+    - ``name`` 与其他项目(含隐藏项目、非命中的待恢复项)重复 → 抛 ``ProjectNameConflict``;
     - 无匹配 → 新建(``project_id`` 锁内查重+重生成),返回 ``(proj, False)``。
 
     整个操作在单次 ``_mutate`` 内完成,查重与写入同锁,无 check-then-use 窗口。
     """
     def _do(projects: list[dict[str, Any]]) -> tuple[Project, bool]:
+        # 空 project_path: 不做路径匹配/恢复/冲突,直接走新建分支(允许多个空路径项目)
+        path_match = None
+        if project_path:
+            for p in projects:
+                if p.get("project_path") == project_path:
+                    path_match = p
+                    break
+
+        # 名称唯一性: 与其他项目(含隐藏项目、非命中的待恢复项)的 name 重复时冲突。
+        # 隐藏项目的名称同样保留,防止隐藏期间被新项目复用造成恢复后重名。
         for p in projects:
-            if p.get("project_path") != project_path:
+            if p is path_match:
                 continue
-            if p.get("hidden"):
+            if p.get("name") == name:
+                raise ProjectNameConflict(name)
+
+        if path_match is not None:
+            if path_match.get("hidden"):
                 # 命中隐藏项目 → 自动恢复
-                p["hidden"] = False
-                p["name"] = name
-                p["updated_at"] = _now()
-                return Project.from_dict(p), True
+                path_match["hidden"] = False
+                path_match["name"] = name
+                path_match["updated_at"] = _now()
+                return Project.from_dict(path_match), True
             # 命中可见项目 → 冲突
             raise ProjectPathConflict(project_path)
         # 无匹配 → 新建
@@ -352,6 +376,89 @@ def save_project(project: Project) -> Project:
                 return project
         projects.append(d)
         return project
+
+    return _mutate(_do)
+
+
+def rename_project(project_id: str, name: str) -> Project | None:
+    """原子地重命名项目(锁内完成名称冲突检测与写入,关闭 TOCTOU 窗口)。
+
+    与其他项目(含隐藏项目、非自身)的 ``name`` 重复时抛 ``ProjectNameConflict``。
+    隐藏项目的名称同样保留。项目不存在时返回 ``None``(调用方通常已预检存在性)。
+    """
+    def _do(projects: list[dict[str, Any]]) -> Project | None:
+        target = None
+        for p in projects:
+            if p.get("project_id") == project_id:
+                target = p
+                break
+        if target is None:
+            return None
+        # 名称唯一性: 与其他项目(含隐藏项目、非自身)的 name 重复时冲突
+        for p in projects:
+            if p is target:
+                continue
+            if p.get("name") == name:
+                raise ProjectNameConflict(name)
+        target["name"] = name
+        target["updated_at"] = _now()
+        return Project.from_dict(target)
+
+    return _mutate(_do)
+
+
+def restore_project(project_id: str) -> Project | None:
+    """原子地恢复已软删除项目(锁内完成名称冲突检测与恢复,关闭 TOCTOU 窗口)。
+
+    恢复后 ``name`` 与其他项目(含隐藏项目、非自身)重复时抛 ``ProjectNameConflict``。
+    项目不存在或已是可见时返回 ``None``(调用方通常已预检存在性与隐藏状态)。
+    """
+    def _do(projects: list[dict[str, Any]]) -> Project | None:
+        target = None
+        for p in projects:
+            if p.get("project_id") == project_id:
+                target = p
+                break
+        if target is None:
+            return None
+        if not target.get("hidden"):
+            return None
+        # 名称唯一性: 与其他项目(含隐藏项目、非自身)的 name 重复时冲突
+        for p in projects:
+            if p is target:
+                continue
+            if p.get("name") == target.get("name"):
+                raise ProjectNameConflict(str(target.get("name", "")))
+        target["hidden"] = False
+        target["updated_at"] = _now()
+        return Project.from_dict(target)
+
+    return _mutate(_do)
+
+
+def hide_project(project_id: str) -> Project | None:
+    """原子地隐藏(软删除)项目(锁内完成 hidden 翻转与置顶取消,关闭 TOCTOU 窗口)。
+
+    项目不存在或已是隐藏时返回 ``None``(调用方通常已预检存在性与可见状态)。
+    隐藏时自动取消置顶(``pinned=False``, ``pin_order=0``)。
+    """
+    def _do(projects: list[dict[str, Any]]) -> Project | None:
+        target = None
+        for p in projects:
+            if p.get("project_id") == project_id:
+                target = p
+                break
+        if target is None:
+            return None
+        if target.get("hidden"):
+            return None
+        target["hidden"] = True
+        # 隐藏项目自动取消置顶: 隐藏项目不应出现在置顶区
+        if target.get("pinned"):
+            target["pinned"] = False
+            target["pin_order"] = 0
+        target["updated_at"] = _now()
+        return Project.from_dict(target)
 
     return _mutate(_do)
 

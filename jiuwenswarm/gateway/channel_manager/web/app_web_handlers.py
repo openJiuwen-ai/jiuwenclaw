@@ -720,6 +720,25 @@ class WebHandlersBindParams:
     updater_service: UpdaterService | None = None
 
 
+def _attribute_session_project(
+    meta: dict[str, Any],
+    visible_by_id: set[str],
+) -> str:
+    """返回会话归属的 project_id(或 ``"default"``)。
+
+    仅按 ``session.project_id`` 匹配可见项目;不命中(含无 project_id 的存量会话)
+    归入默认项目。存量会话的 project_path → project_id 解析由启动迁移完成。
+
+    Args:
+        meta: 会话元数据
+        visible_by_id: 可见(非隐藏)项目的 ``project_id`` 集合
+    """
+    sp_id = str(meta.get("project_id") or "")
+    if sp_id and sp_id in visible_by_id:
+        return sp_id
+    return "default"
+
+
 def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     """注册 Web 前端需要的 method 与 on_connect。
     on_config_saved: 可选，config.set 写回后调用的回调；
@@ -1560,6 +1579,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         project_path 为可选参数,指定工作目录绝对路径,绑定后不可变;
         不传或空串时归入默认空项目,行为与现状一致(存量调用零影响)。
+        project_id 为可选参数,指定所属项目 ID,绑定后不可变(首次锁定);
+        非空且非 ``"default"`` 时必须对应一个存在且可见的项目,否则 NOT_FOUND。
+        会话归属仅按 project_id 匹配;不传或项目不可见时归入默认项目。
         """
         if not isinstance(params, dict):
             await channel.send_response(
@@ -1584,6 +1606,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        # project_id: 可选,指定所属项目 ID(首次锁定)。非空且非 "default" 时
+        # 必须对应一个存在且可见的项目,否则 NOT_FOUND(防止静默落入默认项目)
+        project_id = str(params.get("project_id") or "").strip()
+        if project_id and project_id != "default":
+            from jiuwenswarm.server.runtime.session import project_store
+            proj = project_store.get_project_by_id(project_id, cache_bust=True)
+            if proj is None or proj.hidden:
+                await channel.send_response(
+                    ws, req_id, ok=False, error="project not found", code="NOT_FOUND",
+                )
+                return
 
         workspace_session_dir = get_agent_sessions_dir()
         if not workspace_session_dir.exists():
@@ -1605,6 +1638,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             title=params.get("title", ""),
             mode=params.get("mode", "unknown"),
             project_path=project_path,
+            project_id=project_id,
         )
 
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": session_id_to_create})
@@ -1761,11 +1795,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         # 加载全部项目(含隐藏,用于会话归属判断);cache_bust 跨进程拿最新
         all_projects = project_store.list_projects(include_hidden=True, cache_bust=True)
-        # 可见项目的 project_path 集合: 命中则归属该项目,否则归入默认项目
-        # 过滤空路径: 默认项目不入库,project_path 为空串不应出现在 visible_paths 中
-        visible_paths = {p.project_path for p in all_projects if not p.hidden and p.project_path}
+        # 可见(非隐藏)项目的 project_id 集合(会话仅按 project_id 归属)
+        visible_by_id = {p.project_id for p in all_projects if not p.hidden}
 
-        # 扫描全部会话,按归属 project_path 聚合非置顶会话统计
+        # 扫描全部会话,按归属 project_id 聚合非置顶会话统计
         sessions = collect_all_sessions_metadata()
         stats: dict[str, dict[str, Any]] = {}
 
@@ -1780,9 +1813,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             # 置顶会话已从项目分组剥离,不计入任何项目统计
             if s.get("pinned"):
                 continue
-            pp = str(s.get("project_path") or "")
-            # 归属判断: project_path 命中可见项目 → 该项目; 否则 → 默认项目("")
-            key = pp if (pp and pp in visible_paths) else ""
+            # 归属: 仅按 project_id 匹配,不命中归默认项目
+            key = _attribute_session_project(s, visible_by_id)
             st = _ensure_stats(key)
             st["session_count"] += 1
             lm = s.get("last_message_at")
@@ -1799,7 +1831,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         def _build_project_info(proj: Any, is_default: bool = False) -> dict[str, Any]:
             if is_default:
-                st = stats.get("", _zero_stats())
+                st = stats.get("default", _zero_stats())
                 return {
                     "project_id": "default",
                     "name": "默认项目",
@@ -1814,7 +1846,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "created_at": 0,
                 }
             # 隐藏项目统计恒为 0/null(其非置顶会话已归属默认项目)
-            st = _zero_stats() if proj.hidden else stats.get(proj.project_path, _zero_stats())
+            st = _zero_stats() if proj.hidden else stats.get(proj.project_id, _zero_stats())
             return {
                 "project_id": proj.project_id,
                 "name": proj.name,
@@ -1867,6 +1899,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "pinned": bool(meta.get("pinned", False)),
             "pin_order": int(meta.get("pin_order", 0)),
             "project_path": str(meta.get("project_path", "")),
+            "project_id": str(meta.get("project_id", "")),
             "last_user_message_at": lum if isinstance(lum, (int, float)) and not isinstance(lum, bool) else None,
             "model": str(meta.get("model", "")),
         }
@@ -1874,8 +1907,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _project_get_sessions(ws, req_id, params, session_id):
         """获取项目下的非置顶会话列表,按 last_user_message_at 倒序。
 
-        project_id 传 ``"default"`` 时,返回默认项目自身非置顶会话 + 所有已隐藏
-        (``hidden:true``)项目的非置顶会话(这些会话在项目隐藏期间临时归属默认项目)。
+        会话仅按 ``project_id`` 匹配可见项目。``project_id`` 传 ``"default"`` 时,
+        返回不属于任何可见项目的非置顶会话(含命中已隐藏项目的会话、孤立会话),
+        这些会话临时归属默认项目,与 ``project.list`` 统计口径一致。
         置顶会话不出现(由 ``project.pinned_sessions`` 获取)。
         """
         if not isinstance(params, dict):
@@ -1912,26 +1946,22 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         from jiuwenswarm.server.runtime.session import project_store
         from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
 
-        if project_id == "default":
-            # 默认项目: 非置顶会话 project_path 为空,或不属于任何可见项目
-            # (含命中已隐藏项目的会话、孤立会话)→ 临时归属默认,与 project.list 统计口径一致
-            all_projects = project_store.list_projects(include_hidden=True, cache_bust=True)
-            visible_paths = {p.project_path for p in all_projects if not p.hidden and p.project_path}
+        # 可见(非隐藏)项目的 project_id 集合(与 project.list 统计口径一致)
+        all_projects = project_store.list_projects(include_hidden=True, cache_bust=True)
+        visible_by_id = {p.project_id for p in all_projects if not p.hidden}
 
-            def _belongs(meta: dict[str, Any]) -> bool:
-                pp = str(meta.get("project_path") or "")
-                return not pp or pp not in visible_paths
-        else:
+        if project_id != "default":
+            # 校验目标项目存在且可见
             proj = project_store.get_project_by_id(project_id, cache_bust=True)
             if proj is None or proj.hidden:
                 await channel.send_response(
                     ws, req_id, ok=False, error="project not found", code="NOT_FOUND",
                 )
                 return
-            target_path = proj.project_path
 
-            def _belongs(meta: dict[str, Any]) -> bool:
-                return str(meta.get("project_path") or "") == target_path
+        # 归属判断: 仅按 project_id 匹配,不命中归默认
+        def _belongs(meta: dict[str, Any]) -> bool:
+            return _attribute_session_project(meta, visible_by_id) == project_id
 
         sessions = collect_all_sessions_metadata()
         # 仅非置顶会话 + 归属匹配
@@ -1954,10 +1984,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _project_create(ws, req_id, params, session_id):
         """创建项目,指定工作目录。
 
+        ``project_path`` 为可选:传则指定工作目录绝对路径;不传或空串则创建空路径
+        项目(允许多个,靠 ``project_id`` + ``name`` 区分,会话按 ``project_id`` 归属)。
         自动恢复: 若 ``project_path`` 命中已隐藏(``hidden:true``)项目,置
         ``hidden:false`` 并按传入 ``name`` 更新展示名,其下会话因 ``project_path``
-        仍匹配自动重新归属。响应 ``restored`` 标识恢复/新建。仅当 ``project_path``
-        与已有可见项目重复时返回 ``CONFLICT``。
+        仍匹配自动重新归属。响应 ``restored`` 标识恢复/新建。``project_path`` 与已有
+        可见项目重复,或 ``name`` 与已有项目(含隐藏)重复时返回 ``CONFLICT``。
         """
         if not isinstance(params, dict):
             params = {}
@@ -1968,12 +2000,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         project_path = str(params.get("project_path") or "").strip()
-        if not project_path:
-            await channel.send_response(
-                ws, req_id, ok=False, error="project_path is required", code="BAD_REQUEST",
-            )
-            return
-        if not os.path.isabs(project_path):
+        # project_path 非空时必须为绝对路径;为空则创建空路径项目(允许多个)
+        if project_path and not os.path.isabs(project_path):
             await channel.send_response(
                 ws, req_id,
                 ok=False,
@@ -1983,10 +2011,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
 
         from jiuwenswarm.server.runtime.session import project_store
-        from jiuwenswarm.server.runtime.session.project_store import ProjectPathConflict
+        from jiuwenswarm.server.runtime.session.project_store import (
+            ProjectPathConflict, ProjectNameConflict,
+        )
 
         # 原子完成查重/恢复/新建(锁内,无 TOCTOU 窗口):
-        # 命中隐藏项目 → 恢复;命中可见项目 → CONFLICT;无匹配 → 新建
+        # 空 path → 直接新建;命中隐藏项目 → 恢复;命中可见项目 → CONFLICT;
+        # name 重复 → CONFLICT;无匹配 → 新建
         try:
             proj, restored = project_store.create_or_restore_project(name, project_path)
         except ProjectPathConflict:
@@ -1994,15 +2025,21 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="project_path already exists", code="CONFLICT",
             )
             return
+        except ProjectNameConflict:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project name already exists", code="CONFLICT",
+            )
+            return
         await channel.send_response(ws, req_id, ok=True, payload={
             "project_id": proj.project_id,
+            "project_path": proj.project_path,
             "restored": restored,
         })
 
     async def _project_rename(ws, req_id, params, session_id):
         """重命名项目,仅修改展示名,不改动工作目录路径。
 
-        默认项目禁止重命名(``FORBIDDEN``)。
+        默认项目禁止重命名(``FORBIDDEN``)。``name`` 与已有项目(含隐藏)重复时返回 ``CONFLICT``。
         """
         if not isinstance(params, dict):
             params = {}
@@ -2020,20 +2057,26 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
 
         from jiuwenswarm.server.runtime.session import project_store
+        from jiuwenswarm.server.runtime.session.project_store import ProjectNameConflict
 
         if project_id == "default":
             await channel.send_response(
                 ws, req_id, ok=False, error="default project cannot be renamed", code="FORBIDDEN",
             )
             return
-        proj = project_store.get_project_by_id(project_id, cache_bust=True)
-        if proj is None:
+        # 原子完成名称冲突检测与写入(锁内,无 TOCTOU 窗口)
+        try:
+            updated = project_store.rename_project(project_id, name)
+        except ProjectNameConflict:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project name already exists", code="CONFLICT",
+            )
+            return
+        if updated is None:
             await channel.send_response(
                 ws, req_id, ok=False, error="project not found", code="NOT_FOUND",
             )
             return
-        proj.name = name
-        project_store.save_project(proj)
         await channel.send_response(ws, req_id, ok=True, payload={})
 
     async def _project_pin(ws, req_id, params, session_id):
@@ -2123,20 +2166,24 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
 
-        # 统计将临时归入默认项目的非置顶会话数(project_path 匹配且未置顶;置顶会话不受影响)
-        target_path = proj.project_path
+        # 统计将临时归入默认项目的非置顶会话数(当前归属本项目的非置顶会话;
+        # 置顶会话不受影响)。归属口径与 project.list 一致: 仅按 project_id 匹配。
+        all_projects = project_store.list_projects(include_hidden=True, cache_bust=True)
+        visible_by_id = {p.project_id for p in all_projects if not p.hidden}
         sessions = collect_all_sessions_metadata()
-        affected = sum(
-            1 for s in sessions
-            if not s.get("pinned") and str(s.get("project_path") or "") == target_path
-        )
+        affected = 0
+        for s in sessions:
+            if not s.get("pinned") and _attribute_session_project(s, visible_by_id) == project_id:
+                affected += 1
 
-        proj.hidden = True
-        # 隐藏项目自动取消置顶: 隐藏项目不应出现在置顶区
-        if proj.pinned:
-            proj.pinned = False
-            proj.pin_order = 0
-        project_store.save_project(proj)
+        # 原子隐藏(锁内完成 hidden 翻转与置顶取消,无 TOCTOU 窗口)
+        hidden = project_store.hide_project(project_id)
+        if hidden is None:
+            # 竞态: 项目已被其他进程隐藏或删除,视为幂等成功
+            await channel.send_response(
+                ws, req_id, ok=True, payload={"affected_sessions": 0},
+            )
+            return
         # 紧凑重编号(若原为置顶项目,取消后需消除间隙)
         project_store.reindex_project_pin_orders()
         await channel.send_response(
@@ -2144,10 +2191,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
     async def _project_restore(ws, req_id, params, session_id):
-        """恢复已软删除(``hidden:true``)的项目为可见。其下会话因 ``project_path``
+        """恢复已软删除(``hidden:true``)的项目为可见。其下会话因 ``project_id``
         仍匹配自动重新归属到该项目。
 
-        已是可见的项目返回 ``CONFLICT``(无可恢复内容);默认项目禁止恢复(``FORBIDDEN``)。
+        已是可见的项目返回 ``CONFLICT``(无可恢复内容);恢复后 ``name`` 与已有
+        项目(含隐藏)重复时返回 ``CONFLICT``;默认项目禁止恢复(``FORBIDDEN``)。
         """
         if not isinstance(params, dict):
             params = {}
@@ -2159,6 +2207,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
 
         from jiuwenswarm.server.runtime.session import project_store
+        from jiuwenswarm.server.runtime.session.project_store import ProjectNameConflict
         from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
 
         if project_id == "default":
@@ -2180,16 +2229,34 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
 
-        # 统计将重新归属到该项目的非置顶会话数(project_path 匹配且未置顶)
-        target_path = proj.project_path
+        # 统计将重新归属到该项目的非置顶会话数(恢复后该项目的会话数)。
+        # 把待恢复项目视为可见来计数(恢复后即可见)。与 project.list 口径一致。
+        all_projects = project_store.list_projects(include_hidden=True, cache_bust=True)
+        # 可见集合: 非隐藏项目 + 待恢复项目自身(恢复后即可见)
+        visible_by_id = {
+            p.project_id for p in all_projects
+            if not p.hidden or p.project_id == project_id
+        }
         sessions = collect_all_sessions_metadata()
-        affected = sum(
-            1 for s in sessions
-            if not s.get("pinned") and str(s.get("project_path") or "") == target_path
-        )
+        affected = 0
+        for s in sessions:
+            if not s.get("pinned") and _attribute_session_project(s, visible_by_id) == project_id:
+                affected += 1
 
-        proj.hidden = False
-        project_store.save_project(proj)
+        # 原子恢复(锁内完成名称冲突检测与 hidden 翻转,无 TOCTOU 窗口)
+        try:
+            restored = project_store.restore_project(project_id)
+        except ProjectNameConflict:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project name already exists", code="CONFLICT",
+            )
+            return
+        if restored is None:
+            # 竞态: 项目已被其他进程恢复或删除,视为无可恢复内容
+            await channel.send_response(
+                ws, req_id, ok=False, error="project is not hidden", code="CONFLICT",
+            )
+            return
         await channel.send_response(
             ws, req_id, ok=True, payload={"affected_sessions": affected},
         )

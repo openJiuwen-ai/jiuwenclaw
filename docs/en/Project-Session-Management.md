@@ -7,17 +7,17 @@
 
 ## 1. Overview
 
-The Web channel provides project-scoped session management. A session can be bound to a specific project's working directory, or use the default empty project. Projects and sessions are linked via `project_path` path matching.
+The Web channel provides project-scoped session management. A session is bound to a specific project via `project_id`, or uses the default empty project. Projects and sessions are linked via `project_id` matching.
 
 ### Core Concepts
 
 | Concept | Description |
 |---------|-------------|
-| **Default project** | Not persisted; dynamically injected by the API, `project_id="default"`. Rename/remove/pin are forbidden. Sessions with empty `project_path` or no matching visible project are assigned to the default project |
+| **Default project** | Not persisted; dynamically injected by the API, `project_id="default"`. Rename/remove/pin are forbidden. Sessions with empty `project_id` or no matching visible project are assigned to the default project |
 | **Soft delete** | `project.remove` marks `hidden:true` without deleting the record; recoverable. While hidden, its non-pinned sessions temporarily belong to the default project |
 | **Pinned sessions** | Detached from project groups; fetched independently via `project.pinned_sessions`, sorted by `pin_order` ascending |
 | **Pinned projects** | Visually distinguished from non-pinned projects; pinned projects appear first (sorted by `pin_order` ascending) |
-| **project_path immutability** | Once a session's `project_path` is bound, it cannot be changed; no cross-project migration API is provided |
+| **project_id / project_path immutability** | Once a session's `project_id` and `project_path` are bound, they cannot be changed; no cross-project migration API is provided |
 
 ### Communication Convention
 
@@ -74,6 +74,7 @@ Returned by `project.get_sessions` / `project.pinned_sessions`. Projected from `
 | `mode` | string | Session mode |
 | `pinned` | boolean | Whether pinned |
 | `pin_order` | integer | Pin order; 0 when not pinned |
+| `project_id` | string | Bound project ID; empty string for default project |
 | `project_path` | string | Bound project path; empty string for default project |
 | `last_user_message_at` | number \| null | Last user message timestamp (UTC seconds); falls back to `created_at` when no user messages |
 | `model` | string | Current model identifier; empty string when unset |
@@ -129,7 +130,7 @@ Flat paginated session list, unchanged behavior.
 
 ### session.create — Create session
 
-Adds optional `project_path` param; behavior is fully backward-compatible when omitted.
+Adds optional `project_path` and `project_id` params; behavior is fully backward-compatible when omitted.
 
 **Request params:**
 
@@ -139,9 +140,10 @@ Adds optional `project_path` param; behavior is fully backward-compatible when o
 | `title` | string | no | Session title |
 | `mode` | string | no | Mode, default `unknown` (overwritten with the real mode on first `chat.send`) |
 | `project_path` | string | no | Working directory absolute path; omitted or empty string means default empty project |
+| `project_id` | string | no | Target project ID, immutable after first bind. When non-empty and not `"default"`, must correspond to an existing visible project, otherwise `NOT_FOUND`; omitted or invisible project falls back to default |
 
 > Validation: when `project_path` is non-empty, it must be an absolute path, otherwise `BAD_REQUEST`.
-> `project_path` is written to session metadata on creation and is immutable thereafter.
+> Both `project_path` and `project_id` are written to session metadata on creation and are immutable thereafter.
 
 **Response payload:**
 
@@ -149,7 +151,7 @@ Adds optional `project_path` param; behavior is fully backward-compatible when o
 |-------|------|-------------|
 | `session_id` | string | Created session ID |
 
-**Error codes:** `BAD_REQUEST` (`project_path` non-empty but not absolute), `ALREADY_EXISTS` (session already exists)
+**Error codes:** `BAD_REQUEST` (`project_path` non-empty but not absolute), `ALREADY_EXISTS` (session already exists), `NOT_FOUND` (`project_id` does not match an existing visible project)
 
 ---
 
@@ -256,7 +258,7 @@ Returns project list (with statistics), sorted, including the default project.
 
 ### project.get_sessions — Get sessions in project
 
-Returns **non-pinned** sessions for the given `project_id`, sorted. Passing `"default"` includes the default project's own sessions + all hidden projects' non-pinned sessions.
+Returns **non-pinned** sessions for the given `project_id`, sorted. Sessions are matched by `project_id` only. Passing `"default"` returns non-pinned sessions not belonging to any visible project (including sessions with empty `project_id` or matching hidden projects).
 
 **Request params:**
 
@@ -279,42 +281,43 @@ Returns **non-pinned** sessions for the given `project_id`, sorted. Passing `"de
 
 ### project.create — Create project
 
-Creates a project with a specified working directory. If `project_path` matches a hidden project, it is automatically restored.
+Creates a project with an optional working directory. If the non-empty `project_path` matches a hidden project, it is automatically restored. Supports creating empty-path projects (multiple allowed, distinguished by `project_id` + `name`).
 
 **Request params:**
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | yes | Project display name (non-empty); used to update the name when restoring a hidden project |
-| `project_path` | string | yes | Working directory absolute path (non-empty) |
+| `name` | string | yes | Project display name (non-empty, globally unique including hidden projects); used to update the name when restoring |
+| `project_path` | string | no | Working directory absolute path; omitted or empty creates an empty-path project |
 
 **Response payload:**
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `project_id` | string | Project ID (`proj_<8-char hex>` for new, original ID for restored) |
+| `project_path` | string | Project path (empty string for empty-path projects) |
 | `restored` | boolean | `true`=restored a hidden project, `false`=newly created |
 
-> **Auto-restore**: when `project_path` matches a hidden project, sets `hidden:false` and updates the display name; its sessions automatically re-associate. Returns `CONFLICT` only when `project_path` duplicates an existing **visible** project.
+> **Auto-restore**: when a non-empty `project_path` matches a hidden project, sets `hidden:false` and updates the display name; its sessions automatically re-associate via `project_id`. Returns `CONFLICT` when `project_path` duplicates an existing visible project, or `name` duplicates any existing project (including hidden).
 
-**Error codes:** `BAD_REQUEST` (`name` empty, `project_path` empty or not absolute), `CONFLICT` (`project_path` duplicates an existing visible project)
+**Error codes:** `BAD_REQUEST` (`name` empty, `project_path` non-empty but not absolute), `CONFLICT` (`project_path` duplicates an existing visible project, or `name` duplicates an existing project)
 
 ---
 
 ### project.rename — Rename project
 
-Changes only the display name; does not alter the working directory path.
+Changes only the display name; does not alter the working directory path. Returns `CONFLICT` if `name` duplicates any existing project (including hidden).
 
 **Request params:**
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `project_id` | string | yes | Project ID |
-| `name` | string | yes | New name (non-empty) |
+| `name` | string | yes | New name (non-empty, globally unique including hidden projects) |
 
 **Response payload:** empty (`{}`)
 
-**Error codes:** `BAD_REQUEST` (`name` empty), `NOT_FOUND` (project not found), `FORBIDDEN` (default project cannot be renamed)
+**Error codes:** `BAD_REQUEST` (`name` empty), `NOT_FOUND` (project not found), `FORBIDDEN` (default project cannot be renamed), `CONFLICT` (`name` duplicates an existing project)
 
 ---
 
@@ -367,7 +370,7 @@ Marks the project as `hidden:true` and automatically unpins it. Its non-pinned s
 
 ### project.restore — Restore project
 
-Restores a soft-deleted (`hidden:true`) project to visible. Its sessions automatically re-associate because `project_path` still matches.
+Restores a soft-deleted (`hidden:true`) project to visible. Its sessions automatically re-associate because `project_id` still matches. Returns `CONFLICT` if the restored `name` would duplicate an existing project (including hidden).
 
 **Request params:**
 
@@ -381,7 +384,7 @@ Restores a soft-deleted (`hidden:true`) project to visible. Its sessions automat
 |-------|------|-------------|
 | `affected_sessions` | integer | Number of non-pinned sessions re-associated to this project |
 
-**Error codes:** `NOT_FOUND` (project not found), `CONFLICT` (project is not hidden — already visible), `FORBIDDEN` (default project)
+**Error codes:** `NOT_FOUND` (project not found), `CONFLICT` (project is not hidden — already visible, or restored `name` duplicates an existing project), `FORBIDDEN` (default project)
 
 ---
 
@@ -408,13 +411,13 @@ Returns all pinned sessions, sorted by `pin_order` ascending. Pinned sessions ar
 | Method | Category | Description |
 |--------|----------|-------------|
 | `session.list` | Session | Flat pagination, unchanged |
-| `session.create` | Session | Adds optional `project_path` param, backward-compatible default |
+| `session.create` | Session | Adds optional `project_path` / `project_id` params, backward-compatible default |
 | `session.delete` | Session | Unchanged |
 | `session.rename` | Session | Web local handler, query/set/clear |
 | `session.pin` | Session | Pin/unpin session |
 | `project.list` | Project | Project list, supports filter by pin state |
 | `project.get_sessions` | Project | Returns non-pinned sessions by project_id |
-| `project.create` | Project | Create project; auto-restore on hidden project_path match |
+| `project.create` | Project | Create project (supports empty path); auto-restore on hidden path match; globally unique name |
 | `project.rename` | Project | Rename |
 | `project.pin` | Project | Pin/unpin project |
 | `project.remove` | Project | Soft delete (hide) |

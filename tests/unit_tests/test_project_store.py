@@ -270,3 +270,224 @@ class TestPinReindex:
         all_proj = {p.project_id: p for p in list_projects(include_hidden=True, cache_bust=True)}
         assert all_proj[p1.project_id].pin_order == 0  # 非置顶清零
         assert all_proj[p2.project_id].pin_order == 1
+
+
+# ===========================================================================
+# create_or_restore_project: 原子查重/恢复/新建 + 名称唯一性
+# ===========================================================================
+class TestCreateOrRestoreProject:
+    @staticmethod
+    def test_create_new_returns_not_restored(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_or_restore_project,
+        )
+
+        proj, restored = create_or_restore_project("P", "E:\\p")
+        assert proj.project_id.startswith("proj_")
+        assert restored is False
+        assert proj.name == "P"
+        assert proj.project_path == "E:\\p"
+
+    @staticmethod
+    def test_restore_hidden_by_path(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_project, save_project, create_or_restore_project,
+            get_project_by_id,
+        )
+
+        proj = create_project("旧名", "E:\\p")
+        proj.hidden = True
+        save_project(proj)
+
+        restored_proj, restored = create_or_restore_project("新名", "E:\\p")
+        assert restored is True
+        assert restored_proj.project_id == proj.project_id
+        assert restored_proj.name == "新名"
+        assert restored_proj.hidden is False
+        assert get_project_by_id(proj.project_id, cache_bust=True).name == "新名"
+
+    @staticmethod
+    def test_path_conflict_on_visible(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_or_restore_project, ProjectPathConflict,
+        )
+
+        create_or_restore_project("P1", "E:\\p")
+        with pytest.raises(ProjectPathConflict):
+            create_or_restore_project("P2", "E:\\p")  # 同路径,不同名
+
+    @staticmethod
+    def test_name_conflict_on_create(project_store_dir):
+        """新建时 name 与已有可见项目重复 → ProjectNameConflict。"""
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_or_restore_project, ProjectNameConflict,
+        )
+
+        create_or_restore_project("P1", "E:\\p1")
+        with pytest.raises(ProjectNameConflict):
+            create_or_restore_project("P1", "E:\\p2")  # 不同路径,同名
+
+    @staticmethod
+    def test_name_conflict_with_hidden_project_on_create(project_store_dir):
+        """新建时 name 与隐藏项目重复 → ProjectNameConflict(隐藏项目名称同样保留)。"""
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_project, save_project, create_or_restore_project,
+            ProjectNameConflict,
+        )
+
+        proj = create_project("P", "E:\\p1")
+        proj.hidden = True
+        save_project(proj)
+        # 不同路径、与隐藏项目同名 → 冲突
+        with pytest.raises(ProjectNameConflict):
+            create_or_restore_project("P", "E:\\p2")
+
+    @staticmethod
+    def test_name_conflict_excludes_path_match_on_restore(project_store_dir):
+        """按路径恢复时,命中的待恢复项自身不计入名称查重(同名恢复自身)。"""
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_project, save_project, create_or_restore_project,
+        )
+
+        proj = create_project("P", "E:\\p")
+        proj.hidden = True
+        save_project(proj)
+        # 用同名恢复同一项目 → 不应冲突(排除自身)
+        restored_proj, restored = create_or_restore_project("P", "E:\\p")
+        assert restored is True
+        assert restored_proj.name == "P"
+
+    @staticmethod
+    def test_name_conflict_on_restore_with_other_visible(project_store_dir):
+        """恢复时 name 与其他项目重复 → ProjectNameConflict。
+
+        用 create_project(非检查路径)构造冲突态:create_or_restore_project 现会拦截
+        隐藏项目同名,无法直接经由公开 API 同时得到隐藏 P 与可见 P,故 setup 走底层。
+        """
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_project, save_project, create_or_restore_project,
+            ProjectNameConflict,
+        )
+
+        proj = create_project("P", "E:\\p")
+        proj.hidden = True
+        save_project(proj)
+        # 另一个可见项目占用同名(经非检查路径构造)
+        create_project("P", "E:\\p2")
+        with pytest.raises(ProjectNameConflict):
+            create_or_restore_project("P", "E:\\p")  # 恢复时 name 冲突
+
+
+# ===========================================================================
+# rename_project: 原子重命名 + 名称唯一性
+# ===========================================================================
+class TestRenameProject:
+    @staticmethod
+    def test_rename_to_unique(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_project, rename_project, get_project_by_id,
+        )
+
+        proj = create_project("P1", "E:\\p1")
+        updated = rename_project(proj.project_id, "新名")
+        assert updated is not None
+        assert updated.name == "新名"
+        assert get_project_by_id(proj.project_id, cache_bust=True).name == "新名"
+
+    @staticmethod
+    def test_rename_to_self_name_ok(project_store_dir):
+        """重命名为自身当前名不冲突(排除自身)。"""
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_project, rename_project,
+        )
+
+        proj = create_project("P", "E:\\p")
+        updated = rename_project(proj.project_id, "P")
+        assert updated is not None
+        assert updated.name == "P"
+
+    @staticmethod
+    def test_rename_conflict_with_other_visible(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_project, rename_project, ProjectNameConflict,
+        )
+
+        create_project("P1", "E:\\p1")
+        p2 = create_project("P2", "E:\\p2")
+        with pytest.raises(ProjectNameConflict):
+            rename_project(p2.project_id, "P1")
+
+    @staticmethod
+    def test_rename_conflicts_with_hidden_project(project_store_dir):
+        """重命名为隐藏项目的名称 → ProjectNameConflict(隐藏项目名称同样保留)。"""
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_project, save_project, rename_project, ProjectNameConflict,
+        )
+
+        p1 = create_project("P", "E:\\p1")
+        p1.hidden = True
+        save_project(p1)
+        p2 = create_project("P2", "E:\\p2")
+        # 重命名 p2 为 "P"(与隐藏的 p1 同名)→ 冲突
+        with pytest.raises(ProjectNameConflict):
+            rename_project(p2.project_id, "P")
+
+    @staticmethod
+    def test_rename_not_found_returns_none(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import rename_project
+
+        assert rename_project("proj_nope", "X") is None
+
+
+# ===========================================================================
+# restore_project: 原子恢复 + 名称唯一性
+# ===========================================================================
+class TestRestoreProject:
+    @staticmethod
+    def test_restore_hidden(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_project, save_project, restore_project, get_project_by_id,
+        )
+
+        proj = create_project("P", "E:\\p")
+        proj.hidden = True
+        save_project(proj)
+
+        restored = restore_project(proj.project_id)
+        assert restored is not None
+        assert restored.hidden is False
+        assert get_project_by_id(proj.project_id, cache_bust=True).hidden is False
+
+    @staticmethod
+    def test_restore_already_visible_returns_none(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_project, restore_project,
+        )
+
+        proj = create_project("P", "E:\\p")
+        assert restore_project(proj.project_id) is None
+
+    @staticmethod
+    def test_restore_not_found_returns_none(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import restore_project
+
+        assert restore_project("proj_nope") is None
+
+    @staticmethod
+    def test_restore_conflict_on_name(project_store_dir):
+        """恢复后 name 与其他项目重复 → ProjectNameConflict。
+
+        用 create_project(非检查路径)构造冲突态:create_or_restore_project 现会拦截
+        隐藏项目同名,无法直接经由公开 API 同时得到隐藏 P 与可见 P,故 setup 走底层。
+        """
+        from jiuwenswarm.server.runtime.session.project_store import (
+            create_project, save_project, restore_project, ProjectNameConflict,
+        )
+
+        proj = create_project("P", "E:\\p")
+        proj.hidden = True
+        save_project(proj)
+        # 另一个可见项目占用同名(经非检查路径构造)
+        create_project("P", "E:\\p2")
+        with pytest.raises(ProjectNameConflict):
+            restore_project(proj.project_id)

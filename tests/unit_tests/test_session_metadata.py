@@ -1624,3 +1624,61 @@ class TestMigrateLegacySessionMetadata:
         assert _read_json(good / "metadata.json")["project_path"] == ""
         # bad 的文件原样保留（未被改写）
         assert (bad / "metadata.json").read_text(encoding="utf-8") == "{not json"
+
+    @staticmethod
+    def test_resolves_project_id_from_project_path(sessions_dir, tmp_path, monkeypatch):
+        """有 project_path 但无 project_id 的存量会话,迁移时按 path 解析到 project_id。"""
+        # 准备 project_store: 创建一个有路径的项目
+        root = tmp_path / "agent"
+        root.mkdir()
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.project_store.get_agent_root_dir",
+            lambda: root,
+        )
+        from jiuwenswarm.server.runtime.session import project_store
+        project_store.invalidate_cache()
+        proj = project_store.create_project("P", "E:\\legacy_app")
+
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            migrate_legacy_session_metadata_at_startup,
+        )
+
+        # 存量会话: 有 project_path,无 project_id
+        sdir = sessions_dir / "s_legacy"
+        sdir.mkdir()
+        (sdir / "metadata.json").write_text(
+            json.dumps({"session_id": "s_legacy", "project_path": "E:\\legacy_app"}),
+            encoding="utf-8",
+        )
+
+        migrate_legacy_session_metadata_at_startup()
+        meta = _read_json(sdir / "metadata.json")
+        assert meta["project_id"] == proj.project_id
+        # project_path 保留不变
+        assert meta["project_path"] == "E:\\legacy_app"
+
+    @staticmethod
+    def test_unresolvable_project_path_leaves_empty_project_id(sessions_dir, tmp_path, monkeypatch):
+        """project_path 无法匹配任何项目时,project_id 留空(归入默认项目)。"""
+        root = tmp_path / "agent"
+        root.mkdir()
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.project_store.get_agent_root_dir",
+            lambda: root,
+        )
+        from jiuwenswarm.server.runtime.session import project_store
+        project_store.invalidate_cache()
+
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            migrate_legacy_session_metadata_at_startup,
+        )
+
+        sdir = sessions_dir / "s_orphan"
+        sdir.mkdir()
+        (sdir / "metadata.json").write_text(
+            json.dumps({"session_id": "s_orphan", "project_path": "E:\\gone"}),
+            encoding="utf-8",
+        )
+
+        migrate_legacy_session_metadata_at_startup()
+        assert _read_json(sdir / "metadata.json")["project_id"] == ""

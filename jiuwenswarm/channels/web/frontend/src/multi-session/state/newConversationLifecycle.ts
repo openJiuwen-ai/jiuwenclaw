@@ -49,7 +49,7 @@ export function registerCreatedConversation(
   settings: ConversationRuntimeSettings,
   createdAt = Date.now(),
   initialContent = '',
-  workContext: Partial<Pick<Session, 'project_path'>> = {},
+  workContext: Partial<Pick<Session, 'project_id' | 'project_path'>> = {},
 ): void {
   applyRuntimeSettings(sessionId, settings);
   useChatStore.getState().setProcessing(sessionId, true);
@@ -58,6 +58,7 @@ export function registerCreatedConversation(
   const session: Session = {
     session_id: sessionId,
     title: createConversationTitle(initialContent),
+    project_id: workContext.project_id || '',
     project_path: workContext.project_path || '',
     mode: settings.mode,
     status: 'active',

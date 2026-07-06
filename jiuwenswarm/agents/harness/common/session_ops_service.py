@@ -144,6 +144,9 @@ def fork_session(
         "message_count": source_meta.get("message_count", 0),
         "mode": source_mode,
         "forked_from": source_session_id,
+        # 复制源会话的项目归属字段，确保分叉会话继承原项目归属
+        "project_id": source_meta.get("project_id", ""),
+        "project_path": source_meta.get("project_path", ""),
     }
     # 复制源会话的 channel_metadata，确保分叉会话在 /resume 按项目目录过滤时可见
     source_channel_meta = source_meta.get("channel_metadata")

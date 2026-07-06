@@ -570,6 +570,7 @@ def _sync_chat_request_metadata(
     os.getenv、当前时间等进程级关注点，保持 session_metadata 纯存储职责。
 
     - project_path：首次锁定，已锁定则忽略不一致的请求值（仅告警），返回锁定值
+    - project_id：首次锁定，已锁定则忽略请求值（与 project_path 一致，不可改）
     - model：覆盖式（未显式指定时回退到进程 MODEL_NAME）
     - last_user_message_at：覆盖式（每次请求刷新为当前时刻）
     - mode：覆盖式（与 append_history_record 联动一致）
@@ -586,6 +587,10 @@ def _sync_chat_request_metadata(
         model_name = os.getenv("MODEL_NAME", "") or None
     else:
         model_name = model_name.strip()
+    # project_id: 可选,从请求参数提取,首次锁定到会话(会话按 project_id 归属)
+    request_project_id = params.get("project_id")
+    request_project_id = request_project_id.strip() if isinstance(request_project_id, str) and \
+        request_project_id.strip() else None
     try:
         from jiuwenswarm.server.runtime.session.session_metadata import (
             sync_session_request_metadata,
@@ -596,6 +601,7 @@ def _sync_chat_request_metadata(
             mode=mode,
             model=model_name,
             project_path=str(project_dir) if project_dir else None,
+            project_id=request_project_id,
             last_user_message_at=_dt.datetime.now(_dt.timezone.utc).timestamp(),
         )
     except (OSError, ValueError) as exc:
@@ -5840,6 +5846,24 @@ class AgentWebSocketServer:
                 async with send_lock:
                     await ws.send(json.dumps(wire, ensure_ascii=False))
                 return
+            # project_id: 可选,指定所属项目 ID(首次锁定,会话按 project_id 归属)。
+            # 非空且非 "default" 时必须对应一个存在且可见的项目,否则 NOT_FOUND
+            # (防止静默落入默认项目)
+            project_id = str(params.get("project_id") or "").strip()
+            if project_id and project_id != "default":
+                from jiuwenswarm.server.runtime.session import project_store
+                proj = project_store.get_project_by_id(project_id, cache_bust=True)
+                if proj is None or proj.hidden:
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload={"error": "project not found", "code": "NOT_FOUND"},
+                    )
+                    wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                    async with send_lock:
+                        await ws.send(json.dumps(wire, ensure_ascii=False))
+                    return
 
             explicit_session_id = params.get("session_id")
             session_id = await self._agent_manager.create_session(
@@ -5847,7 +5871,7 @@ class AgentWebSocketServer:
                 session_id=str(explicit_session_id).strip() if isinstance(explicit_session_id, str) else None,
             )
 
-            # 写入 session metadata（首次锁定 project_path）
+            # 写入 session metadata（首次锁定 project_path / project_id）
             init_session_metadata(
                 session_id=session_id,
                 channel_id=channel_id,
@@ -5855,6 +5879,7 @@ class AgentWebSocketServer:
                 title=params.get("title", ""),
                 mode=mode,
                 project_path=project_path,
+                project_id=project_id,
             )
 
             if mode == "team":

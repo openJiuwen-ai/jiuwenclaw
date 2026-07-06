@@ -12,6 +12,7 @@ export * from '../features/workspace/projectTypes';
 export interface Session {
   session_id: string;
   title: string;
+  project_id: string;
   project_path: string;
   pinned?: boolean;
   pin_order?: number;
