@@ -23,6 +23,7 @@ import moveIcon from '../../assets/move.svg';
 import restartIcon from '../../assets/restart.svg';
 import { SubtaskProgress } from './SubtaskProgress';
 import { InlineQuestionCard } from './InlineQuestionCard';
+import { InteractionSlot } from '../InteractionSlot';
 import { HistoryPagerBar } from './HistoryPagerBar';
 import { HarnessProgressBar } from './HarnessProgressBar';
 import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
@@ -44,7 +45,7 @@ interface ChatPanelProps {
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
-  onUserAnswer: (requestId: string, answers: UserAnswer[]) => void;
+  onUserAnswer: (requestId: string, answers: UserAnswer[], source?: string) => void;
   onExportShare?: () => void | Promise<void>;
   isExportingShare?: boolean;
   canExportShare?: boolean;
@@ -58,6 +59,8 @@ interface ChatPanelProps {
   onNavigateToSkills?: () => void;
   /** 切换右侧紧缩面板展开状态 */
   onToggleTeamArea?: (expanded: boolean) => void;
+  permissionsEnabled: boolean;
+  onSavePermission: (updates: Record<string, string>) => Promise<void>;
 }
 
 function ThinkingIndicator() {
@@ -416,6 +419,8 @@ export function ChatPanel({
   autoFocusKey = null,
   onNavigateToSkills,
   onToggleTeamArea,
+  permissionsEnabled,
+  onSavePermission,
 }: ChatPanelProps) {
   const { t } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -625,6 +630,7 @@ export function ChatPanel({
                 <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
                 <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />
+                <InteractionSlot onSubmit={onUserAnswer} />
                 <InputArea
                   onSubmit={handleSendMessage}
                   onInterrupt={onInterrupt}
@@ -633,6 +639,8 @@ export function ChatPanel({
                   isProcessing={isProcessing}
                   autoFocusKey={autoFocusKey}
                   onNavigateToSkills={onNavigateToSkills}
+                  permissionsEnabled={permissionsEnabled}
+                  onSavePermission={onSavePermission}
                 />
               </div>
               <div className="chat-suggestions">
@@ -651,6 +659,7 @@ export function ChatPanel({
           <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
           <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
           <InterruptResultBubble />
+          <InteractionSlot onSubmit={onUserAnswer} />
           <InputArea
             onSubmit={handleSendMessage}
             onInterrupt={onInterrupt}
@@ -659,6 +668,8 @@ export function ChatPanel({
             isProcessing={isProcessing}
             autoFocusKey={autoFocusKey}
             onNavigateToSkills={onNavigateToSkills}
+            permissionsEnabled={permissionsEnabled}
+            onSavePermission={onSavePermission}
           />
         </div>
       )}

@@ -14,6 +14,7 @@ import { useChatStore } from '../../stores';
 import { UserAnswer, QuestionOption, Question } from '../../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { classifyPrompt } from '../InteractionSlot/promptRouting';
 
 interface InlineQuestionCardProps {
   onSubmit: (requestId: string, answers: UserAnswer[], source?: string) => void;
@@ -113,7 +114,9 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
     pendingQuestion?.request_id?.startsWith('team_skill_evolve_')
   ) ?? false;
 
-  if (!pendingQuestion) {
+  // 授权 / 交互类弹窗改由输入框上方的 InteractionSlot 承载；
+  // 此处仅保留 legacy（演进审批 / 计划审批）在消息流内渲染。
+  if (!pendingQuestion || classifyPrompt(pendingQuestion) !== 'legacy') {
     return null;
   }
 

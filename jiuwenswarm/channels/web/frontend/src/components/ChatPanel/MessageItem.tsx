@@ -23,6 +23,8 @@ import { StreamingContent } from './StreamingContent';
 import { ToolCallDisplay } from './ToolCallDisplay';
 import { MediaRenderer } from './MediaRenderer';
 import { A2UIMessageContent } from '../../features/a2ui/A2UIMessageContent';
+import { QaSummaryCard } from '../InteractionSlot/QaSummaryCard';
+import { isQaSummaryContent } from '../InteractionSlot/qaSummary';
 import { a2uiContentToText } from '../../features/a2ui/a2uiContent';
 import { formatTimestamp, onTtsStop, sanitizeTtsText } from '../../utils';
 import { useSpeechSynthesis } from '../../hooks';
@@ -353,6 +355,11 @@ export function MessageItem({
         toolResult={toolResult}
       />
     );
+  }
+
+  // 交互问答「问题澄清」回显卡（ask_user 确认后前端合成注入）
+  if (isQaSummaryContent(content)) {
+    return <QaSummaryCard content={content} />;
   }
 
   // 系统消息

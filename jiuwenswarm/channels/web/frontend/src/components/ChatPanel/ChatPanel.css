@@ -867,10 +867,6 @@
 }
 
 .chat-mode-select__menu {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 10px);
-  z-index: 20;
   min-width: 180px;
   overflow-y: auto;
   padding: 6px;
@@ -878,11 +874,6 @@
   border-radius: 10px;
   background: var(--card);
   box-shadow: var(--shadow-lg);
-}
-
-.chat-mode-select__menu--bottom {
-  top: calc(100% + 10px);
-  bottom: auto;
 }
 
 .chat-mode-select__option {
@@ -1485,8 +1476,7 @@
 /* Model selector */
 .model-select__menu {
   min-width: 220px;
-  right: 0;
-  left: auto;
+  max-width: 320px;
 }
 
 .model-select__section-header {
@@ -1521,8 +1511,6 @@
 
 
 .chat-mode-option-tooltip {
-  position: absolute;
-  z-index: 22;
   min-width: 160px;
   max-width: 220px;
   padding: 8px 12px;

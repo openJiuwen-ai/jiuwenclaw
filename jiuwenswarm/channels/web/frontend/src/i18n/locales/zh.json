@@ -1813,5 +1813,31 @@
     "zoomIn": "放大",
     "zoomOut": "缩小",
     "fitView": "适应视图"
+  },
+  "authPrompt": {
+    "title": "操作授权",
+    "titleConfirm": "操作确认",
+    "allowOnce": "授权单次",
+    "allowAlways": "总是允许",
+    "skip": "跳过",
+    "tip": {
+      "allowOnce": "仅本次授权执行",
+      "allowAlways": "记住该规则，以后自动放行",
+      "skip": "拒绝执行此操作"
+    }
+  },
+  "interactionPrompt": {
+    "title": "请回答问题",
+    "prev": "上一题",
+    "next": "下一题",
+    "cancel": "取消",
+    "skip": "跳过",
+    "nextStep": "下一步",
+    "confirm": "确定",
+    "customOption": "自定义",
+    "customPlaceholder": "没有合适的选项？输入您的答案..."
+  },
+  "qaSummary": {
+    "title": "问题澄清"
   }
 }

@@ -1,4 +1,5 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, useMemo } from 'react';
+import { useState, useRef, useCallback, KeyboardEvent, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { Square } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
@@ -62,6 +63,8 @@ interface InputAreaProps {
   autoFocusKey?: string | null;
   /** 跳转到技能管理页 */
   onNavigateToSkills?: () => void;
+  permissionsEnabled: boolean;
+  onSavePermission: (updates: Record<string, string>) => Promise<void>;
 }
 
 
@@ -73,6 +76,8 @@ export function InputArea({
   isProcessing,
   autoFocusKey = null,
   onNavigateToSkills,
+  permissionsEnabled,
+  onSavePermission,
 }: InputAreaProps) {
   const [pendingVoiceText, setPendingVoiceText] = useState('');
   const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
@@ -85,11 +90,13 @@ export function InputArea({
   const [projectCreateMode, setProjectCreateMode] = useState<ProjectCreateMode>('blank');
   const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
   const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
+  const [modeMenuAnchor, setModeMenuAnchor] = useState<DOMRect | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   /** 保存技能插入前的光标位置，用于在光标处插入 chip */
   const savedRangeRef = useRef<Range | null>(null);
   const modeMenuRef = useRef<HTMLDivElement>(null);
   const workMenuRef = useRef<HTMLDivElement>(null);
+  const modeMenuPortalRef = useRef<HTMLDivElement>(null);
   const autoSendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isComposingRef = useRef(false);
   // const activePointerIdRef = useRef<number | null>(null);
@@ -215,7 +222,10 @@ export function InputArea({
     if (!isModeMenuOpen) return;
 
     const handlePointerDown = (event: PointerEvent) => {
-      if (!modeMenuRef.current?.contains(event.target as Node)) {
+      if (
+        !modeMenuRef.current?.contains(event.target as Node) &&
+        !modeMenuPortalRef.current?.contains(event.target as Node)
+      ) {
         setIsModeMenuOpen(false);
       }
     };
@@ -688,7 +698,9 @@ export function InputArea({
                 if (!isModeMenuOpen && modeMenuRef.current) {
                   const rect = modeMenuRef.current.getBoundingClientRect();
                   const spaceBelow = window.innerHeight - rect.bottom;
-                  setMenuDirection(spaceBelow >= 120 ? 'down' : 'up');
+                  const dir = spaceBelow >= 120 ? 'down' : 'up';
+                  setMenuDirection(dir);
+                  setModeMenuAnchor(rect);
                 }
                 setIsModeMenuOpen((open) => !open);
               }}
@@ -710,13 +722,15 @@ export function InputArea({
               )}
             </button>
 
-            {isModeMenuOpen && (
+            {isModeMenuOpen && modeMenuAnchor && createPortal(
               <div
-                className={clsx(
-                  'chat-mode-select__menu',
-                  menuDirection === 'down' && 'chat-mode-select__menu--bottom',
-                )}
+                ref={modeMenuPortalRef}
+                className="chat-mode-select__menu"
                 role="menu"
+                style={menuDirection === 'up'
+                  ? { position: 'fixed', bottom: window.innerHeight - modeMenuAnchor.top + 10, left: modeMenuAnchor.left, zIndex: 9999 }
+                  : { position: 'fixed', top: modeMenuAnchor.bottom + 10, left: modeMenuAnchor.left, zIndex: 9999 }
+                }
               >
                 {AGENT_MODE_OPTIONS.map((m) => (
                   <button
@@ -746,21 +760,23 @@ export function InputArea({
                     )}
                   </button>
                 ))}
-              </div>
+              </div>,
+              document.body
             )}
-            {isModeMenuOpen && hoveredOptionDesc && (
+            {isModeMenuOpen && hoveredOptionDesc && modeMenuAnchor && createPortal(
               <div
                 className="chat-mode-option-tooltip"
                 style={menuDirection === 'up'
-                  ? { bottom: 'calc(100% + 10px)', left: '184px' }
-                  : { top: 'calc(100% + 10px)', left: '184px' }
+                  ? { position: 'fixed', bottom: window.innerHeight - modeMenuAnchor.top + 10, left: modeMenuAnchor.left + 188, zIndex: 10000 }
+                  : { position: 'fixed', top: modeMenuAnchor.bottom + 10, left: modeMenuAnchor.left + 188, zIndex: 10000 }
                 }
               >
                 {t(hoveredOptionDesc)}
-              </div>
+              </div>,
+              document.body
             )}
           </div>
-          <PermissionSelector />
+          <PermissionSelector permissionsEnabled={permissionsEnabled} onSavePermission={onSavePermission} />
 
           {!isTeamMode && <SkillSelector
             onNavigateToSkills={onNavigateToSkills}
@@ -1027,12 +1043,17 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
 
   const [isOpen, setIsOpen] = useState(false);
   const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
+  const [menuAnchor, setMenuAnchor] = useState<DOMRect | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuPortalRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!isOpen) return;
     const handler = (e: PointerEvent) => {
-      if (!menuRef.current?.contains(e.target as Node)) setIsOpen(false);
+      if (
+        !menuRef.current?.contains(e.target as Node) &&
+        !menuPortalRef.current?.contains(e.target as Node)
+      ) setIsOpen(false);
     };
     document.addEventListener('pointerdown', handler);
     return () => document.removeEventListener('pointerdown', handler);
@@ -1068,6 +1089,7 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
           if (!isOpen && menuRef.current) {
             const rect = menuRef.current.getBoundingClientRect();
             setMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
+            setMenuAnchor(rect);
           }
           setIsOpen((v) => !v);
         }}
@@ -1091,14 +1113,15 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
         )}
       </button>
 
-      {isOpen && (
+      {isOpen && menuAnchor && createPortal(
         <div
-          className={clsx(
-            'chat-mode-select__menu',
-            'model-select__menu',
-            menuDirection === 'down' && 'chat-mode-select__menu--bottom',
-          )}
+          ref={menuPortalRef}
+          className="chat-mode-select__menu model-select__menu"
           role="menu"
+          style={menuDirection === 'up'
+            ? { position: 'fixed', bottom: window.innerHeight - menuAnchor.top + 10, left: menuAnchor.left, zIndex: 9999 }
+            : { position: 'fixed', top: menuAnchor.bottom + 10, left: menuAnchor.left, zIndex: 9999 }
+          }
         >
           <div className="model-select__section-header">{t('chat.modelSelector.configured')}</div>
           {chatAvailableModels.map((m, idx) => {
@@ -1140,27 +1163,40 @@ function ModelSelector({ disabled = false }: { disabled?: boolean }) {
             </svg>
             {t('chat.modelSelector.addModel')}
           </button>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
 }
 
-function PermissionSelector({ disabled = false }: { disabled?: boolean }) {
-  const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const permission = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.permission ?? 'default');
-  const setPermission = useSessionStore((s) => s.setPermission);
+function PermissionSelector({
+  disabled = false,
+  permissionsEnabled,
+  onSavePermission,
+}: {
+  disabled?: boolean;
+  permissionsEnabled: boolean;
+  onSavePermission: (updates: Record<string, string>) => Promise<void>;
+}) {
   const { t } = useTranslation();
+
+  const permission: Permission = permissionsEnabled ? 'default' : 'full_access';
 
   const [isOpen, setIsOpen] = useState(false);
   const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
+  const [menuAnchor, setMenuAnchor] = useState<DOMRect | null>(null);
   const [pendingPermission, setPendingPermission] = useState<Permission | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuPortalRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!isOpen) return;
     const handler = (e: PointerEvent) => {
-      if (!menuRef.current?.contains(e.target as Node)) setIsOpen(false);
+      if (
+        !menuRef.current?.contains(e.target as Node) &&
+        !menuPortalRef.current?.contains(e.target as Node)
+      ) setIsOpen(false);
     };
     document.addEventListener('pointerdown', handler);
     return () => document.removeEventListener('pointerdown', handler);
@@ -1168,19 +1204,20 @@ function PermissionSelector({ disabled = false }: { disabled?: boolean }) {
 
   const handleSelect = useCallback((value: Permission) => {
     setIsOpen(false);
+    if (value === permission) return;
     if (value === 'full_access') {
       setPendingPermission('full_access');
     } else {
-      if (activeSessionId) setPermission(activeSessionId, value);
+      onSavePermission({ permissions_enabled: 'true' });
     }
-  }, [activeSessionId, setPermission]);
+  }, [permission, onSavePermission]);
 
   const handleConfirm = useCallback(() => {
-    if (activeSessionId && pendingPermission) {
-      setPermission(activeSessionId, pendingPermission);
+    if (pendingPermission) {
+      onSavePermission({ permissions_enabled: 'false' });
     }
     setPendingPermission(null);
-  }, [activeSessionId, pendingPermission, setPermission]);
+  }, [pendingPermission, onSavePermission]);
 
   const currentPerm = PERMISSION_OPTIONS.find((o) => o.value === permission) ?? PERMISSION_OPTIONS[0];
 
@@ -1203,6 +1240,7 @@ function PermissionSelector({ disabled = false }: { disabled?: boolean }) {
             if (!isOpen && menuRef.current) {
               const rect = menuRef.current.getBoundingClientRect();
               setMenuDirection(window.innerHeight - rect.bottom >= 160 ? 'down' : 'up');
+              setMenuAnchor(rect);
             }
             setIsOpen((v) => !v);
           }}
@@ -1220,14 +1258,15 @@ function PermissionSelector({ disabled = false }: { disabled?: boolean }) {
           </svg>
         </button>
 
-        {isOpen && (
+        {isOpen && menuAnchor && createPortal(
           <div
-            className={clsx(
-              'chat-mode-select__menu',
-              'perm-select__menu',
-              menuDirection === 'down' && 'chat-mode-select__menu--bottom',
-            )}
+            ref={menuPortalRef}
+            className="chat-mode-select__menu perm-select__menu"
             role="menu"
+            style={menuDirection === 'up'
+              ? { position: 'fixed', bottom: window.innerHeight - menuAnchor.top + 10, left: menuAnchor.left, zIndex: 9999 }
+              : { position: 'fixed', top: menuAnchor.bottom + 10, left: menuAnchor.left, zIndex: 9999 }
+            }
           >
             {PERMISSION_OPTIONS.map((opt) => (
               <button
@@ -1260,7 +1299,8 @@ function PermissionSelector({ disabled = false }: { disabled?: boolean }) {
                 )}
               </button>
             ))}
-          </div>
+          </div>,
+          document.body
         )}
       </div>
 

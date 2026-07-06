@@ -688,6 +688,22 @@ function AppContent() {
     }
   }, [clearRestartAutoCloseTimer, closeRestartModal, request]);
 
+  const savePermissionSilent = useCallback(async (updates: Record<string, string>) => {
+    try {
+      await request<{ updated?: string[]; applied_without_restart?: boolean }>('config.set', updates);
+      setServerConfig((prev) => {
+        if (!prev) return updates;
+        return { ...prev, ...updates };
+      });
+    } catch (error) {
+      console.error('Failed to save permission:', error);
+      setRestartModalOpen(true);
+      setRestartSuccess(false);
+      setRestartSeenDisconnect(false);
+      setAppliedWithoutRestart(false);
+    }
+  }, [request]);
+
   const applyConfigSaveUiState = useCallback((appliedWithoutRestart: boolean) => {
     setConfigError(null);
     setRestartModalOpen(true);
@@ -1669,6 +1685,8 @@ function AppContent() {
                       autoFocusKey={composerFocusKey}
                       onNavigateToSkills={() => handleNavigate('skills')}
                       onToggleTeamArea={handleToggleDetailPanel}
+                      permissionsEnabled={serverConfig?.permissions_enabled !== 'false'}
+                      onSavePermission={savePermissionSilent}
                       historyPager={
                         historyPagerMeta
                           ? {

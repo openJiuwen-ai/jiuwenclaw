@@ -8,7 +8,7 @@ import { create } from 'zustand';
 import {
   Session,
   AgentMode,
-  Permission,
+ 
   WebConnectionState,
   ModelEntry,
   Message,
@@ -205,7 +205,6 @@ export interface TeamMemberExecutionEvent {
 export interface SessionRuntime {
   mode: AgentMode;
   selectedModelName: string | null;
-  permission: Permission;
   projectDirectory: string | null;
   contextCompressionRate: number;
   contextCompressionBefore: number | null;
@@ -228,7 +227,6 @@ function createEmptyRuntime(): SessionRuntime {
       if (typeof localStorage === 'undefined') return null;
       try { return localStorage.getItem(MODEL_STORAGE_KEY); } catch { return null; }
     })(),
-    permission: 'default',
     projectDirectory: null,
     contextCompressionRate: 0,
     contextCompressionBefore: null,
@@ -289,7 +287,6 @@ interface SessionState {
 
   // B 类 actions（加 sessionId）
   setMode: (sessionId: string, mode: AgentMode) => void;
-  setPermission: (sessionId: string, permission: Permission) => void;
   setProjectDirectory: (sessionId: string, directory: string | null) => void;
   setTeamTaskEvents: (sessionId: string, events: TeamTaskEvent[]) => void;
   addTeamTaskEvent: (sessionId: string, event: TeamTaskEvent) => void;
@@ -432,19 +429,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, mode: normalizedMode },
-        },
-      };
-    });
-  },
-
-  setPermission: (sessionId, permission) => {
-    set((state) => {
-      const runtime = state.runtimes[sessionId];
-      if (!runtime) return state;
-      return {
-        runtimes: {
-          ...state.runtimes,
-          [sessionId]: { ...runtime, permission },
         },
       };
     });
