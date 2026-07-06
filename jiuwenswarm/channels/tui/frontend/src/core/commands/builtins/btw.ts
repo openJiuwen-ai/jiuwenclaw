@@ -37,6 +37,13 @@ export function createBtwCommand(): SlashCommand {
         return;
       }
 
+      // 清除上一轮残留的中断标志（如 Esc 后快速发消息导致 suppressInterruptResult
+      // 吞掉了 clearInterruptRequested，使 interruptRequested 残留为 true）。
+      // 否则 await 返回后 isInterruptRequested() 仍为 true，btw 会被误判为已取消。
+      if (ctx.isInterruptRequested?.()) {
+        ctx.clearInterruptRequested();
+      }
+
       // 标记 BTW 活动状态，确保 Esc 优先消费（不干扰主会话）
       ctx.setBtwActive?.(true);
 
@@ -63,6 +70,7 @@ export function createBtwCommand(): SlashCommand {
 
         // Check if cancelled mid-request (Esc pressed during wait)
         if (ctx.isInterruptRequested?.()) {
+          ctx.clearInterruptRequested();
           ctx.addItem(
             addInfo(ctx.sessionId, CANCELLED_MSG, "i", { view: "dim" as const }),
           );
@@ -91,6 +99,7 @@ export function createBtwCommand(): SlashCommand {
       } catch (error) {
         // Cancelled by Esc → the WS request was aborted; show dim notice
         if (ctx.isInterruptRequested?.()) {
+          ctx.clearInterruptRequested();
           ctx.addItem(
             addInfo(ctx.sessionId, CANCELLED_MSG, "i", { view: "dim" as const }),
           );

@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 
@@ -35,7 +35,7 @@ def current_platform_key() -> str:
         return f"macos-{machine}"
     if system == "windows":
         return f"windows-{machine}"
-    raise SystemExit(f"unsupported platform for current target: {system}-{machine}")
+    raise ValueError(f"unsupported platform for current target: {system}-{machine}")
 
 
 def output_binary_name(platform_key: str) -> str:
@@ -51,7 +51,7 @@ def resolve_requested_targets(raw: str) -> list[str]:
     unknown = [value for value in values if value not in TARGETS]
     if unknown:
         valid = ", ".join(["current", "all", *TARGETS.keys()])
-        raise SystemExit(f"unknown target(s): {', '.join(unknown)}; valid: {valid}")
+        raise ValueError(f"unknown target(s): {', '.join(unknown)}; valid: {valid}")
     return values
 
 
@@ -123,7 +123,7 @@ def main() -> None:
         built.append(build_target(target))
 
     for path in built:
-        print(path.relative_to(ROOT))
+        logging.info(path.relative_to(ROOT))
 
 
 if __name__ == "__main__":
@@ -131,3 +131,5 @@ if __name__ == "__main__":
         main()
     except subprocess.CalledProcessError as exc:
         raise SystemExit(exc.returncode) from exc
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc

@@ -1402,6 +1402,16 @@ def get_config_dir() -> Path:
     return _config_dir
 
 
+def get_runtime_state_path(session_id: str | None = None) -> Path:
+    """Per-session runtime_state.yaml path under config dir.
+
+    每个 session 独占一份文件，避免心跳/定时/并发 session 共用单文件互相覆盖
+    channel/mode/model/git 等字段。session_id 为空时回退到 ``default``。
+    """
+    sid = re.sub(r"[^A-Za-z0-9_.-]", "_", (session_id or "").strip())[:128] or "default"
+    return get_config_dir() / "runtime_state" / f"{sid}.yaml"
+
+
 def get_workspace_dir() -> Path:
     """Get the workspace directory path."""
     _resolve_paths()

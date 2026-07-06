@@ -202,13 +202,9 @@ def _extract_text_from_agent_payload(payload: dict | None) -> str:
 
 
 def _format_cron_broadcast_text(*, job_name: str, text: str, is_placeholder: bool) -> str:
-    body = str(text or "").strip()
-    if not body:
-        return body
-    if is_placeholder or body.startswith("[cron]"):
-        return body
-    name = str(job_name or "").strip() or "cron"
-    return f"{name} result:\n\n{body}"
+    # Result body, in-progress placeholders, and [cron] status text are all
+    # delivered as-is — no job-name prefix is prepended.
+    return str(text or "").strip()
 
 
 def _cron_next_push_dt(cron_expr: str, base_dt: datetime) -> datetime:

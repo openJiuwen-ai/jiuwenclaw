@@ -2,9 +2,52 @@
 
 from __future__ import annotations
 
+import subprocess
+
 from jiuwenswarm.gateway.message_handler.prompts import response_language_line
 
-_SECURITY_REVIEW_BODY = """\
+
+class GitPreExecError(Exception):
+    """某条只读 git 命令非零退出 —— 预执行失败的中止语义。"""
+
+
+# 预执行的 4 条只读 git 命令。
+# 在 prompt 构建阶段预执行、把输出内联进 prompt，任一非零退出即中止
+# （git 语义：exit != 0 即 error；`git diff A...B` 有 diff 时 exit 0，
+# 只在 origin/HEAD 未设置 / 无共同历史等真失败时才非零）。
+_SECURITY_REVIEW_GIT_COMMANDS: list[tuple[str, list[str]]] = [
+    ("GIT STATUS", ["status"]),
+    ("FILES MODIFIED", ["diff", "--name-only", "origin/HEAD..."]),
+    ("COMMITS", ["log", "--no-decorate", "origin/HEAD..."]),
+    ("DIFF CONTENT", ["diff", "origin/HEAD..."]),
+]
+
+
+def _run_security_review_git(cwd: str | None) -> dict[str, str]:
+    """在 cwd 下预执行 4 条只读 git 命令；非零退出抛 :class:`GitPreExecError`。"""
+    outputs: dict[str, str] = {}
+    for label, args in _SECURITY_REVIEW_GIT_COMMANDS:
+        cmd = ["git", "-C", cwd or "."] + args
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0:
+            raise GitPreExecError(
+                f"git {' '.join(args)} failed (exit {result.returncode}): "
+                f"{result.stderr.strip()}"
+            )
+        outputs[label] = result.stdout
+    return outputs
+
+
+# 无仓库上下文（cwd=None，如单测）时的 fallback intro：保留旧的“指令式”措辞，
+# 让 LLM 自己跑 git。生产路径（message_handler 传 cwd）走 _build_inlined_intro。
+_SECURITY_REVIEW_INTRO_FALLBACK = """\
 You are a senior security engineer conducting a focused security review of the changes on this branch.
 
 Gather context by running these git commands:
@@ -14,8 +57,30 @@ Gather context by running these git commands:
 3. Run `git log --no-decorate origin/HEAD...` for COMMITS
 4. Run `git diff origin/HEAD...` for DIFF CONTENT
 
-Review the complete diff from step 4. This contains all code changes on the current branch.
+Review the complete diff from step 4. This contains all code changes on the current branch."""
 
+
+def _build_inlined_intro(git_outputs: dict[str, str]) -> str:
+    """把 4 条 git 命令的预执行输出内联成固定结构。"""
+    blocks: list[str] = [
+        "You are a senior security engineer conducting a focused security review "
+        "of the changes on this branch.",
+        "",
+    ]
+    for label, _ in _SECURITY_REVIEW_GIT_COMMANDS:
+        blocks.append(f"{label}:")
+        blocks.append("")
+        blocks.append("```")
+        blocks.append(git_outputs.get(label, "").rstrip())
+        blocks.append("```")
+        blocks.append("")
+    blocks.append(
+        "Review the complete diff above. This contains all code changes on the current branch."
+    )
+    return "\n".join(blocks)
+
+
+_SECURITY_REVIEW_BODY_TAIL = """\
 OBJECTIVE:
 Perform a security-focused code review to identify HIGH-CONFIDENCE security vulnerabilities that could have real exploitation potential. This is not a general code review - focus ONLY on security implications newly added by this PR. Do not comment on existing security concerns.
 
@@ -175,14 +240,24 @@ Begin your analysis now. Do this in 3 steps:
 Your final reply must contain the markdown report and nothing else."""
 
 
-def build_security_review_prompt(extra_arg: str = "") -> str:
+def build_security_review_prompt(extra_arg: str = "", cwd: str | None = None) -> str:
     """构建 /security-review 的 prompt。
 
     输出语言来自 config ``preferred_language``；可选 args 原样透传为附加说明。
+
+    当 ``cwd`` 指向仓库时，在 prompt 注入阶段**预执行** 4 条只读 git 命令
+    并把输出**内联**进 prompt（不再让 LLM 自己跑 git）。任一命令非零退出抛
+    :class:`GitPreExecError`，由调用方中止本次 /security-review（不转发给 Agent）。
+    ``cwd`` 为 None（如单测、无仓库上下文）时退回旧的“指令式” prompt，行为不变。
     """
     args = extra_arg.strip() if extra_arg else ""
     lang_line = response_language_line()
-    parts = [_SECURITY_REVIEW_BODY, "", lang_line]
+    if cwd is None:
+        intro = _SECURITY_REVIEW_INTRO_FALLBACK
+    else:
+        git_outputs = _run_security_review_git(cwd)  # 失败抛 GitPreExecError
+        intro = _build_inlined_intro(git_outputs)
+    parts = [intro, "", _SECURITY_REVIEW_BODY_TAIL, "", lang_line]
     if args:
         parts.extend(["", f"Additional instructions: {args}"])
     return "\n".join(parts)

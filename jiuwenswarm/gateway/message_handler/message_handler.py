@@ -20,6 +20,9 @@ from jiuwenswarm.gateway.channel_manager.base import ChannelType
 from jiuwenswarm.common.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS
 from jiuwenswarm.common.config import get_evolution_auto_save_enabled
 from jiuwenswarm.gateway.routing.session_map import SessionMap
+from jiuwenswarm.gateway.routing.agent_request_timeout import (
+    send_agent_request_with_timeout,
+)
 from jiuwenswarm.gateway.message_handler.command_parser.slash_command import (
     ParsedControlAction,
     parse_channel_control_text,
@@ -33,6 +36,7 @@ from jiuwenswarm.gateway.message_handler.evolution_approval import (
 )
 from jiuwenswarm.gateway.message_handler.prompts.review_prompt import build_review_prompt
 from jiuwenswarm.gateway.message_handler.prompts.security_review_prompt import (
+    GitPreExecError,
     build_security_review_prompt,
 )
 from jiuwenswarm.extensions.hook_event import GatewayHookEvents
@@ -49,6 +53,7 @@ _ACP_ORIGINAL_SESSION_ID_KEY = "acp_original_session_id"
 _SINGLE_USER_CHANNEL_IDS = frozenset({
     ChannelType.ACP.value,
 })
+_TUI_DISCONNECT_CANCEL_GRACE_SECONDS = 60.0
 _DEFAULT_INLINE_FILE_SIZE_LIMIT = 128 * 1024
 _KNOWN_JIUWENSWARM_SESSION_PREFIXES = (
     "sess_",
@@ -170,6 +175,7 @@ class MessageHandler(ABC):
         self._stream_metadata: dict[str, dict[str, Any] | None] = {}  # request_id -> request metadata
         self._stream_modes: dict[str, str] = {}  # request_id -> mode
         self._stream_emits_processing_status: dict[str, bool] = {}  # request_id -> emits chat.processing_status
+        self._disconnect_cancel_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._fire_and_forget_tasks: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
         self._evolution_approval = EvolutionApprovalCoordinator()
         self._session_last_user_query: dict[str, str] = {}
@@ -681,6 +687,10 @@ class MessageHandler(ABC):
                 cancel_mode = state.mode.value if hasattr(state.mode, 'value') else str(state.mode)
         if cancel_mode:
             cancel_params["mode"] = cancel_mode
+        # 前端 cancel/supplement 请求可能带 team 标识，确保传递到 AgentServer
+        # 以便 _handle_cancel 能正确走 team runtime 清理路径
+        if isinstance(msg.params, dict) and msg.params.get("team"):
+            cancel_params["team"] = msg.params["team"]
         if isinstance(msg.params, dict) and msg.params.get("trusted_dirs"):
             cancel_params["trusted_dirs"] = msg.params["trusted_dirs"]
 
@@ -718,7 +728,7 @@ class MessageHandler(ABC):
             return
 
         try:
-            resp = await self._agent_client.send_request(env_interrupt)
+            resp = await self._send_non_stream_agent_request(env_interrupt)
         except Exception as exc:
             logger.warning("[MessageHandler] AgentServer 中断请求失败: %s", exc)
             if cancel_gateway_tasks:
@@ -790,7 +800,7 @@ class MessageHandler(ABC):
         *,
         stale_request_keys: list[tuple[str, str]] | None = None,
     ) -> None:
-        """TUI/WebSocket 异常断开时，取消仍绑定在该连接上的会话（与显式 chat.interrupt 对齐）。
+        """取消仍绑定在断开连接上的会话（与显式 chat.interrupt 对齐）。
 
         Args:
             session_keys: ``(channel_id, session_id)`` 元组，来自 GatewayServer
@@ -801,20 +811,10 @@ class MessageHandler(ABC):
                 ``session_keys`` 为空，这里仍能让我们通过 ``_stream_sessions``
                 找出该 WS 上 in-flight stream 对应的 session_id，避免漏取消。
         """
-        from jiuwenswarm.common.schema.message import Message, ReqMethod
-
-        # 合并两路来源到统一的 (channel_id, session_id) 列表
-        merged: list[tuple[str, str]] = list(session_keys or [])
-        recovered_via_requests: list[tuple[str, str]] = []
-        for channel_id, request_id in stale_request_keys or []:
-            task_session = (self._stream_sessions.get(request_id) or "").strip()
-            if not task_session:
-                continue
-            entry = (channel_id, task_session)
-            if entry in merged:
-                continue
-            merged.append(entry)
-            recovered_via_requests.append(entry)
+        merged, recovered_via_requests = self._merge_disconnect_session_keys(
+            session_keys,
+            stale_request_keys=stale_request_keys,
+        )
 
         logger.info(
             "[MessageHandler] WS 断开触发 cancel: session_keys=%s recovered_from_requests=%s",
@@ -831,37 +831,143 @@ class MessageHandler(ABC):
             if not sid or sid in seen:
                 continue
             seen.add(sid)
-            # 注入 mode 信息，确保 AgentServer 找到正确的 agent
-            disconnect_params = {"intent": "cancel", "session_id": sid}
-            disconnect_state = self._channel_states.get(
-                self._get_channel_state_key(_channel_id, sid)
-            ) or self._channel_states.get(_channel_id)
-            if disconnect_state is not None:
-                disconnect_params["mode"] = (
-                    disconnect_state.mode.value
-                    if hasattr(disconnect_state.mode, 'value')
-                    else str(disconnect_state.mode)
-                )
-            stub = Message(
-                id=f"ws_drop_{int(time.time() * 1000):x}_{secrets.token_hex(4)}",
-                type="req",
-                channel_id=_channel_id,
-                session_id=sid,
-                params=disconnect_params,
-                timestamp=time.time(),
-                ok=True,
-                req_method=ReqMethod.CHAT_CANCEL,
-                is_stream=False,
+            self.cancel_scheduled_disconnect_cancel(_channel_id, sid)
+            await self._cancel_disconnect_session(_channel_id, sid)
+
+    async def schedule_cancel_agent_sessions_on_disconnect(
+        self,
+        session_keys: list[tuple[str, str]],
+        *,
+        stale_request_keys: list[tuple[str, str]] | None = None,
+        delay_seconds: float = _TUI_DISCONNECT_CANCEL_GRACE_SECONDS,
+    ) -> None:
+        """Schedule a disconnect cancel unless the same session reconnects first."""
+        merged, recovered_via_requests = self._merge_disconnect_session_keys(
+            session_keys,
+            stale_request_keys=stale_request_keys,
+        )
+        logger.info(
+            "[MessageHandler] WS 断开延迟 cancel: delay_seconds=%s session_keys=%s recovered_from_requests=%s",
+            delay_seconds,
+            session_keys,
+            recovered_via_requests,
+        )
+        if not merged:
+            return
+
+        seen: set[tuple[str, str]] = set()
+        for channel_id, session_id in merged:
+            sid = (session_id or "").strip()
+            if not sid:
+                continue
+            task_key = (channel_id, sid)
+            if task_key in seen:
+                continue
+            seen.add(task_key)
+            self.cancel_scheduled_disconnect_cancel(channel_id, sid)
+            task = asyncio.create_task(
+                self._delayed_disconnect_cancel(channel_id, sid, delay_seconds)
             )
-            try:
-                await self._cancel_agent_work_for_session(stub, sid)
-            except Exception:
-                logger.warning(
-                    "[MessageHandler] disconnect cancel failed: channel_id=%s session_id=%s",
-                    _channel_id,
-                    sid,
-                    exc_info=True,
-                )
+            self._disconnect_cancel_tasks[task_key] = task
+
+    def cancel_scheduled_disconnect_cancel(self, channel_id: str, session_id: str) -> bool:
+        """Cancel a pending disconnect-triggered cancel for a reconnected session."""
+        sid = (session_id or "").strip()
+        if not channel_id or not sid:
+            return False
+        task = self._disconnect_cancel_tasks.pop((channel_id, sid), None)
+        if task is None:
+            return False
+        if not task.done():
+            task.cancel()
+        logger.info(
+            "[MessageHandler] 已撤销 WS 断开延迟 cancel: channel_id=%s session_id=%s",
+            channel_id,
+            sid,
+        )
+        return True
+
+    def _merge_disconnect_session_keys(
+        self,
+        session_keys: list[tuple[str, str]],
+        *,
+        stale_request_keys: list[tuple[str, str]] | None = None,
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        merged: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add(channel_id: str, session_id: str) -> bool:
+            sid = (session_id or "").strip()
+            if not channel_id or not sid:
+                return False
+            entry = (channel_id, sid)
+            if entry in seen:
+                return False
+            seen.add(entry)
+            merged.append(entry)
+            return True
+
+        for channel_id, session_id in session_keys or []:
+            add(channel_id, session_id)
+
+        recovered_via_requests: list[tuple[str, str]] = []
+        for channel_id, request_id in stale_request_keys or []:
+            task_session = (self._stream_sessions.get(request_id) or "").strip()
+            if add(channel_id, task_session):
+                recovered_via_requests.append((channel_id, task_session))
+
+        return merged, recovered_via_requests
+
+    def _build_disconnect_cancel_message(self, channel_id: str, session_id: str) -> "Message":
+        from jiuwenswarm.common.schema.message import Message, ReqMethod
+
+        disconnect_params = {"intent": "cancel", "session_id": session_id}
+        disconnect_state = self._channel_states.get(
+            self._get_channel_state_key(channel_id, session_id)
+        ) or self._channel_states.get(channel_id)
+        if disconnect_state is not None:
+            disconnect_params["mode"] = (
+                disconnect_state.mode.value
+                if hasattr(disconnect_state.mode, "value")
+                else str(disconnect_state.mode)
+            )
+        return Message(
+            id=f"ws_drop_{int(time.time() * 1000):x}_{secrets.token_hex(4)}",
+            type="req",
+            channel_id=channel_id,
+            session_id=session_id,
+            params=disconnect_params,
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.CHAT_CANCEL,
+            is_stream=False,
+        )
+
+    async def _cancel_disconnect_session(self, channel_id: str, session_id: str) -> None:
+        stub = self._build_disconnect_cancel_message(channel_id, session_id)
+        try:
+            await self._cancel_agent_work_for_session(stub, session_id)
+        except Exception:
+            logger.warning(
+                "[MessageHandler] disconnect cancel failed: channel_id=%s session_id=%s",
+                channel_id,
+                session_id,
+                exc_info=True,
+            )
+
+    async def _delayed_disconnect_cancel(
+        self,
+        channel_id: str,
+        session_id: str,
+        delay_seconds: float,
+    ) -> None:
+        task_key = (channel_id, session_id)
+        try:
+            await asyncio.sleep(max(0.0, delay_seconds))
+            await self._cancel_disconnect_session(channel_id, session_id)
+        finally:
+            if self._disconnect_cancel_tasks.get(task_key) is asyncio.current_task():
+                self._disconnect_cancel_tasks.pop(task_key, None)
 
     async def _new_session_cancel_and_notice(
         self,
@@ -903,7 +1009,7 @@ class MessageHandler(ABC):
     def _build_mode_change_notice_text(mode_label: str) -> str:
         return f"[收到 CLI 指令], mode 已变更为 {mode_label}"
 
-    def _handle_channel_control(self, msg: "Message") -> bool:
+    async def _handle_channel_control(self, msg: "Message") -> bool:
         r"""处理 \new_session / \mode / \skills 指令.
 
         Returns:
@@ -1209,7 +1315,27 @@ class MessageHandler(ABC):
 
         if parsed.action is ParsedControlAction.SECURITY_REVIEW_OK:
             extra_arg = parsed.security_review_arg or ""
-            security_prompt = build_security_review_prompt(extra_arg)
+            cwd = (
+                msg.metadata.get("cwd")
+                if isinstance(msg.metadata, dict)
+                else None
+            )
+            try:
+                # 在注入阶段预执行只读 git 命令并把输出内联进 prompt；
+                # 任一命令非零退出（如 origin/HEAD 未设置 / 无共同历史）即中止，
+                # 不转发给 Agent。
+                # 跑在 executor 里，避免 4×30s 同步 subprocess 阻塞转发循环。
+                security_prompt = await asyncio.get_event_loop().run_in_executor(
+                    None, build_security_review_prompt, extra_arg, cwd
+                )
+            except GitPreExecError as exc:
+                await self._send_channel_notice(
+                    user_infos,
+                    ch,
+                    msg.session_id,
+                    f"/security-review 无法执行：{exc}",
+                )
+                return True
             if msg.params is None:
                 msg.params = {}
             msg.params["query"] = security_prompt
@@ -1229,8 +1355,20 @@ class MessageHandler(ABC):
         reply_session_id: str | None,
         msg: "Message",
     ) -> None:
-        """受控通道整行 /skills list：请求 skills.list 并以 CHAT_FINAL 通知透传。"""
+        """受控通道整行 /skills list：请求 skills.list 并以 CHAT_FINAL 通知透传。
+
+        skills.list 响应载荷形如 ``{"skills": [...]}`` / ``{"error": "..."}``，
+        不含 ``content`` 字段。多数 IM 通道（微信/钉钉/企微/WhatsApp 等）的 ``send``
+        仅从 ``payload.content`` / ``params.content`` 取文本，缺 ``content`` 即被当作
+        空消息丢弃，导致 /skills list 无返回（/skills 本身不经此分支故不受影响）。
+        因此这里用 ``format_skills_list_for_notice`` 把载荷渲染成纯文本放入 ``content``，
+        同时保留原始字段：飞书仍可经 ``_build_skills_list_card_content`` 识别 ``skills``
+        键渲染为卡片，其它 IM 通道则回退到读取 ``content`` 文本。
+        """
         from jiuwenswarm.common.schema.message import Message, ReqMethod
+        from jiuwenswarm.gateway.message_handler.command_parser.slash_command import (
+            format_skills_list_for_notice,
+        )
 
         req_id = f"skills_slash_{int(time.time() * 1000):x}_{secrets.token_hex(3)}"
         skills_req = Message(
@@ -1251,7 +1389,7 @@ class MessageHandler(ABC):
         )
         try:
             env = self.message_to_e2a(skills_req)
-            resp = await self._agent_client.send_request(env)
+            resp = await self._send_non_stream_agent_request(env)
             if resp.ok:
                 if isinstance(resp.payload, dict):
                     notice_payload: dict[str, Any] = dict(resp.payload)
@@ -1264,6 +1402,10 @@ class MessageHandler(ABC):
                 notice_payload = {
                     "error": f"获取技能列表失败{(': ' + err) if err else ''}",
                 }
+            # 渲染纯文本 content，供只读 content 的 IM 通道（微信等）下发。
+            notice_payload["content"] = format_skills_list_for_notice(
+                notice_payload if isinstance(notice_payload, dict) else None
+            )
             await self._send_channel_notice(
                 user_infos, channel_id, reply_session_id, notice_payload
             )
@@ -1273,7 +1415,7 @@ class MessageHandler(ABC):
                 user_infos,
                 channel_id,
                 reply_session_id,
-                {"error": f"获取技能列表失败：{exc}"},
+                {"content": f"获取技能列表失败：{exc}", "error": f"获取技能列表失败：{exc}"},
             )
 
     async def _branch_slash_notice(
@@ -1320,7 +1462,7 @@ class MessageHandler(ABC):
                 is_stream=False,
                 timestamp=time.time(),
             )
-            resp = await self._agent_client.send_request(env)
+            resp = await self._send_non_stream_agent_request(env)
             if not resp.ok:
                 payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
                 raise ValueError(str(payload.get("error") or "session.fork failed"))
@@ -1427,7 +1569,7 @@ class MessageHandler(ABC):
                     is_stream=False,
                     timestamp=time.time(),
                 )
-                resp = await self._agent_client.send_request(env)
+                resp = await self._send_non_stream_agent_request(env)
                 if resp.ok:
                     pl = resp.payload if isinstance(resp.payload, dict) else {}
                     preview = pl.get("content_preview", "")
@@ -1587,7 +1729,7 @@ class MessageHandler(ABC):
             is_stream=False,
             timestamp=time.time(),
         )
-        resp = await self._agent_client.send_request(env)
+        resp = await self._send_non_stream_agent_request(env)
         if not resp.ok:
             payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
             raise RuntimeError(str(payload.get("error") or "acp session.create failed"))
@@ -2208,6 +2350,41 @@ class MessageHandler(ABC):
             session_id,
         )
 
+    async def _publish_stream_connection_error(
+        self,
+        request_id: str,
+        channel_id: str,
+        session_id: str | None,
+        request_metadata: dict[str, Any] | None,
+        error: str,
+    ) -> None:
+        """Publish a visible stream error when the AgentServer connection drops."""
+        from jiuwenswarm.common.schema.message import Message, EventType
+
+        out = Message(
+            id=request_id,
+            type="event",
+            channel_id=channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=False,
+            payload={
+                "event_type": EventType.CHAT_ERROR.value,
+                "error": error,
+                "code": "AGENT_SERVER_CONNECTION_CLOSED",
+                "is_complete": True,
+            },
+            event_type=EventType.CHAT_ERROR,
+            metadata=request_metadata,
+        )
+        await self.publish_robot_messages(out)
+        logger.warning(
+            "[MessageHandler] Stream 因 AgentServer WebSocket 断开而结束: request_id=%s error=%s",
+            request_id,
+            error,
+        )
+
     @staticmethod
     def _non_stream_rpc_may_run_parallel(env: "E2AEnvelope") -> bool:
         """可与其它非流式 RPC 并发，不阻塞 _forward_loop。
@@ -2412,11 +2589,22 @@ class MessageHandler(ABC):
         在 process_stream 和 _handle_agent_server_push 两条路径中复用。
         返回 False 表示该 chunk 已被延后处理，不应继续发布给前端。
         """
+        payload = getattr(chunk, "payload", None)
+        auto_save_enabled = (
+            get_evolution_auto_save_enabled()
+            if (
+                isinstance(payload, dict)
+                and payload.get("event_type") == "chat.ask_user_question"
+                and self._is_evolution_approval_payload(payload)
+                and not self._is_interrupt_evolution_approval_answer_payload(payload)
+            )
+            else False
+        )
         decision = self._evolution_approval.handle_chunk(
             chunk,
             session_id,
             request_metadata,
-            auto_save_enabled=get_evolution_auto_save_enabled(),
+            auto_save_enabled=auto_save_enabled,
         )
         if decision.user_message is not None:
             self._user_messages.put_nowait(decision.user_message)
@@ -2484,10 +2672,20 @@ class MessageHandler(ABC):
             is_stream=True,
         )
 
+    async def _send_non_stream_agent_request(
+        self,
+        env: "E2AEnvelope",
+    ) -> "AgentResponse":
+        return await send_agent_request_with_timeout(
+            self._agent_client,
+            env,
+            label="MessageHandler",
+        )
+
     async def _process_non_stream_request(self, msg: "Message", env: "E2AEnvelope") -> Any:
         """执行单次非流式 Agent 请求并将结果写入 robot_messages（供串行或后台任务复用）。"""
         try:
-            resp = await self._agent_client.send_request(env)
+            resp = await self._send_non_stream_agent_request(env)
             out = self._response_to_message(
                 resp,
                 session_id=msg.session_id,
@@ -2540,7 +2738,7 @@ class MessageHandler(ABC):
                 
          
                 # 先处理受控通道的 Channel 控制指令（如 /new_session、/mode、/skills list）
-                if self._handle_channel_control(msg):
+                if await self._handle_channel_control(msg):
                     # 该消息仅用于修改 session/mode，已给 Channel 回复提示，不再转发给 Agent
                     continue
 
@@ -2690,7 +2888,7 @@ class MessageHandler(ABC):
                             metadata=msg.metadata,
                         )
                         try:
-                            resp = await self._agent_client.send_request(supplement_env)
+                            resp = await self._send_non_stream_agent_request(supplement_env)
                             # 发送被中断工具的 tool_result 给前端
                             payload = resp.payload if isinstance(resp.payload, dict) else {}
                             await self._send_cancelled_tool_results(
@@ -2748,7 +2946,12 @@ class MessageHandler(ABC):
                         )
 
                     elif intent == "cancel":
-                        await self._cancel_agent_work_for_session(msg, msg.session_id)
+                        # 使用 fire_and_forget 模式，避免 await AgentServer 响应阻塞 _forward_loop，
+                        # 导致后续 session.create 等请求在队列中等待超时
+                        await self._cancel_agent_work_for_session(
+                            msg, msg.session_id,
+                            agent_notify="fire_and_forget",
+                        )
 
                     elif intent in ("pause", "resume"):
                         # 暂停/恢复：不取消流式任务，转发给 AgentServer 处理 ReAct 循环
@@ -2819,7 +3022,8 @@ class MessageHandler(ABC):
                                     msg.params["content"] = review_prompt
                                 content = review_prompt
                                 logger.info(
-                                    "[MessageHandler] /review prompt injected for chat.send channel=%s pr_arg=%s",
+                                    "[MessageHandler] /review prompt injected for chat.send "
+                                    "channel=%s pr_arg=%s",
                                     getattr(msg, "channel_id", ""),
                                     pr_arg or "<none>",
                                 )
@@ -2835,7 +3039,31 @@ class MessageHandler(ABC):
                                 continue
                             elif parsed.action is ParsedControlAction.SECURITY_REVIEW_OK:
                                 extra_arg = parsed.security_review_arg or ""
-                                security_prompt = build_security_review_prompt(extra_arg)
+                                cwd = (
+                                    msg.metadata.get("cwd")
+                                    if isinstance(msg.metadata, dict)
+                                    else None
+                                )
+                                try:
+                                    # 预执行只读 git 并内联输出；
+                                    # 失败则发 notice 中止，不转发给 Agent。
+                                    # 跑在 executor 里，避免 4×30s 同步 subprocess 阻塞转发循环。
+                                    security_prompt = (
+                                        await asyncio.get_event_loop().run_in_executor(
+                                            None,
+                                            build_security_review_prompt,
+                                            extra_arg,
+                                            cwd,
+                                        )
+                                    )
+                                except GitPreExecError as exc:
+                                    await self._send_channel_notice(
+                                        {"id": msg.id, "meta_data": msg.metadata},
+                                        msg.channel_id,
+                                        msg.session_id,
+                                        f"/security-review 无法执行：{exc}",
+                                    )
+                                    continue
                                 msg.params = dict(msg.params)
                                 msg.params["query"] = security_prompt
                                 if "content" in msg.params:
@@ -3041,6 +3269,16 @@ class MessageHandler(ABC):
                 rid, channel_id, session_id, request_metadata,
             )
             raise  # 重新抛出，让调用者知道任务被取消
+        except RuntimeError as exc:
+            if "AgentServer WebSocket connection closed" not in str(exc):
+                raise
+            await self._publish_stream_connection_error(
+                rid,
+                channel_id,
+                session_id,
+                request_metadata,
+                str(exc),
+            )
         finally:
             if (
                 not cancelled
@@ -3126,7 +3364,7 @@ class MessageHandler(ABC):
     async def _send_interrupt_to_agent(self, env: "E2AEnvelope") -> None:
         """Fire-and-forget: 发送中断请求到 AgentServer，不阻塞转发循环."""
         try:
-            resp = await self._agent_client.send_request(env)
+            resp = await self._send_non_stream_agent_request(env)
             logger.info(
                 "[MessageHandler] AgentServer 中断响应(已丢弃): request_id=%s ok=%s",
                 resp.request_id, resp.ok,
@@ -3225,6 +3463,11 @@ class MessageHandler(ABC):
     def _build_error_out_message(self, msg: "Message", error: Exception) -> "Message":
         from jiuwenswarm.common.schema.message import Message
 
+        payload: dict[str, Any] = {"error": str(error)}
+        code = getattr(error, "code", None)
+        if isinstance(code, str) and code:
+            payload["code"] = code
+
         return Message(
             id=msg.id,
             type="res",
@@ -3233,7 +3476,7 @@ class MessageHandler(ABC):
             params={},
             timestamp=time.time(),
             ok=False,
-            payload={"error": str(error)},
+            payload=payload,
             metadata=msg.metadata,
         )
 
@@ -3317,6 +3560,13 @@ class MessageHandler(ABC):
         self._stream_metadata.clear()
         self._stream_emits_processing_status.clear()
         self._stream_modes.clear()
+        pending_disconnect_cancels = list(self._disconnect_cancel_tasks.values())
+        for task in pending_disconnect_cancels:
+            if not task.done():
+                task.cancel()
+        if pending_disconnect_cancels:
+            await asyncio.gather(*pending_disconnect_cancels, return_exceptions=True)
+        self._disconnect_cancel_tasks.clear()
         self._evolution_approval.clear_all()
         self._session_last_user_query.clear()
 

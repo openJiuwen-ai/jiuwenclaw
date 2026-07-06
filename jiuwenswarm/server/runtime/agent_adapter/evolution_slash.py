@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from openjiuwen.agent_evolving.checkpointing.evolution_store import EvolutionStore
+from openjiuwen.agent_evolving.experience.archive import EvolutionArchivePair, EvolutionArchiveService
 from openjiuwen.agent_evolving.experience.query import ExperienceQueryService
 from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
 from openjiuwen.harness.rails.evolution.commands import (
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 _COMMANDS = (
     "evolve_simplify",
     "evolve_rebuild",
+    "evolve_rollback",
     "evolve_list",
 )
 _DEFAULT_REVIEW_AGENT_NAME = "evolution_reviewer"
@@ -85,6 +87,8 @@ async def handle_evolution_slash_command(
         return await _handle_evolve_simplify(stripped, store, context)
     if command == "evolve_rebuild":
         return await _handle_evolve_rebuild(stripped, store, context)
+    if command == "evolve_rollback":
+        return await _handle_evolve_rollback(stripped, store, context)
     return await _handle_evolve(stripped, store, context)
 
 
@@ -143,6 +147,44 @@ def _validate_skill(
     if context.mode == "team" and subject_kind == "swarm-skill":
         return validate_team_evolution_skill(store, skill_name, require_skill_md=require_skill_md)
     return validate_evolution_skill(store, skill_name, require_skill_md=require_skill_md)
+
+
+def _format_rollback_usage(
+    store: EvolutionStore,
+    context: EvolutionSlashContext,
+    archive_service: EvolutionArchiveService,
+) -> str:
+    lines = ["请指定 Skill 名称：`/evolve_rollback <skill_name> [version]`"]
+    _ = context
+    rollbackable: list[str] = []
+    try:
+        skill_names = filter_visible_skill_names(store.list_skill_names())
+    except Exception:
+        skill_names = []
+
+    for name in skill_names:
+        subject = _subject(store, name)
+        subject_kind = str(subject.get("kind") or "skill")
+        pairs = archive_service.list_pairs(name, subject_kind=subject_kind)
+        if pairs:
+            rollbackable.append(f"  - **{name}**: {len(pairs)} 个版本，最新 `{pairs[0].version}`")
+
+    if rollbackable:
+        lines.append("")
+        lines.append("可回滚的 Skill：")
+        lines.extend(rollbackable)
+    return "\n".join(lines)
+
+
+def _format_rollback_versions(skill_name: str, pairs: list[EvolutionArchivePair]) -> str:
+    lines = [f"**Skill '{skill_name}' 可用回滚版本（最新在前）：**\n"]
+    for index, pair in enumerate(pairs, 1):
+        marker = " ← 最近" if index == 1 else ""
+        lines.append(f"{index}. `{pair.version}`{marker}")
+    lines.append(f"\n用法：`/evolve_rollback {skill_name} {pairs[0].version}`")
+    lines.append(f"快捷回滚到最近版本：`/evolve_rollback {skill_name} latest`")
+    return "\n".join(lines)
+
 
 
 async def _handle_evolve(
@@ -312,12 +354,23 @@ async def _handle_evolve_rebuild(
         return _error(validation_error)
 
     rebuild_service = ExperienceRebuildService(store=store)
-    rebuild_context = await rebuild_service.prepare_rebuild_context(
-        subject,
-        user_intent=user_intent,
-    )
+    try:
+        rebuild_context = await rebuild_service.prepare_rebuild_context(
+            subject,
+            user_intent=user_intent,
+        )
+    except Exception as exc:
+        logger.warning("[EvolutionSlash] evolve_rebuild failed: %s", exc)
+        return _error(f"重建失败：{exc}")
+
     if rebuild_context is None:
         return _error(f"Skill '{skill_name}' 未生成可执行的重建指令。")
+
+    archive_error = rebuild_context.get("archive_error")
+    if archive_error is not None:
+        return _error(f"重建失败：无法归档 Skill '{skill_name}' 的旧版本：{archive_error}")
+    if not rebuild_context.get("archive_pair"):
+        return _error(f"重建失败：无法归档 Skill '{skill_name}' 的旧版本。")
 
     prompt = build_rebuild_command_prompt(
         subject=subject,
@@ -326,6 +379,67 @@ async def _handle_evolve_rebuild(
         language=context.language,
     )
     return _followup_response("run_rebuild_followup", prompt, skill_name)
+
+
+async def _handle_evolve_rollback(
+    query: str,
+    store: EvolutionStore,
+    context: EvolutionSlashContext,
+) -> dict[str, Any]:
+    parts = query.split(maxsplit=2)
+    skill_name = parts[1].strip() if len(parts) > 1 else ""
+    version_raw = parts[2].strip() if len(parts) > 2 else ""
+    archive_service = EvolutionArchiveService(store=store)
+
+    if not skill_name:
+        return _error(_format_rollback_usage(store, context, archive_service))
+
+    subject = _subject(store, skill_name)
+    validation_error = _validate_skill(
+        store,
+        skill_name,
+        require_skill_md=False,
+        context=context,
+        subject=subject,
+    )
+    if validation_error is not None:
+        return _error(validation_error)
+
+    subject_kind = str(subject.get("kind") or "skill")
+    pairs = archive_service.list_pairs(skill_name, subject_kind=subject_kind)
+    if not pairs:
+        return _error(f"Skill '{skill_name}' 没有成对归档版本可回滚。")
+
+    if not version_raw:
+        return _answer(_format_rollback_versions(skill_name, pairs))
+
+    requested_version = archive_service.normalize_version(version_raw)
+    if requested_version is None:
+        return _error(f"版本 `{version_raw}` 格式无效，请使用短版本号，例如 `{pairs[0].version}`。")
+
+    if requested_version == "latest":
+        pair = pairs[0]
+    else:
+        pair = next((item for item in pairs if item.version == requested_version), None)
+    if pair is None:
+        return _error(f"版本 `{requested_version}` 不存在或归档不成对。")
+
+    try:
+        restored = await archive_service.rollback_to_pair(
+            skill_name,
+            pair,
+            subject_kind=subject_kind,
+        )
+    except Exception as exc:
+        logger.warning("[EvolutionSlash] evolve_rollback failed: %s", exc)
+        return _error(f"回滚失败：{exc}")
+    if not restored:
+        return _error(f"回滚失败：无法将 Skill '{skill_name}' 回滚到 `{pair.version}`。")
+
+    return _answer(
+        f"Skill '{skill_name}' 已成功回滚到 `{pair.version}`。\n\n"
+        "当前状态已自动归档，可再次回滚恢复。"
+    )
 
 
 __all__ = ["EvolutionSlashContext", "handle_evolution_slash_command"]

@@ -168,6 +168,17 @@
   line-height: 1.45;
 }
 
+.skill-graph-panel__error svg {
+  flex-shrink: 0;
+}
+
+.skill-graph-panel__error span {
+  min-width: 0;
+  flex: 1;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .skill-graph-panel__build-log {
   display: flex;
   min-height: 0;

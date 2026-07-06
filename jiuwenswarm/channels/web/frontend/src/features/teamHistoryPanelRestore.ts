@@ -40,6 +40,13 @@ export interface TeamHistoryPanelState {
   messages: Message[];
 }
 
+interface TeamHistoryGetResponse {
+  records: Record<string, unknown>[];
+  session_id: string;
+  next_cursor?: number | string | null;
+  has_more?: boolean;
+}
+
 const TEAM_TASK_STATUSES = new Set<TeamTaskStatus>([
   'pending',
   'blocked',
@@ -711,11 +718,33 @@ export async function loadTeamHistoryPanelState(
   sessionId: string,
   signal?: AbortSignal
 ): Promise<TeamHistoryPanelState> {
-  const result = await webClient.request<{ records: Record<string, unknown>[]; session_id: string }>(
-    'team.history.get',
-    { session_id: sessionId },
-    { signal, timeoutMs: 30_000 }
-  );
-  const records = Array.isArray(result?.records) ? result.records : [];
+  const records: Record<string, unknown>[] = [];
+  let cursor: number | string | null | undefined = 0;
+  let hasMore = true;
+  let guard = 0;
+
+  while (hasMore && guard < 10_000) {
+    guard += 1;
+    const result: TeamHistoryGetResponse = await webClient.request<TeamHistoryGetResponse>(
+      'team.history.get',
+      {
+        session_id: sessionId,
+        cursor,
+        limit: 500,
+        max_bytes: 1024 * 1024,
+      },
+      { signal, timeoutMs: 30_000 }
+    );
+    if (Array.isArray(result?.records)) {
+      records.push(...result.records);
+    }
+    hasMore = Boolean(result?.has_more);
+    const nextCursor: number | string | null | undefined = result?.next_cursor;
+    if (!hasMore || nextCursor === undefined || nextCursor === null || nextCursor === cursor) {
+      break;
+    }
+    cursor = nextCursor;
+  }
+
   return parseTeamHistoryPanelRecords(records, sessionId);
 }

@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime
+import json
 import logging
 import os
 import signal
@@ -25,12 +26,145 @@ from jiuwenswarm.cli.render import HumanRenderer, JsonRenderer, JsonlRenderer
 
 logger = logging.getLogger(__name__)
 
+# ── Trusted-directory persistence (local, no server/harness changes) ───
+
+_STATE_FILE = Path.home() / ".jiuwenswarm" / "cli_trusted_dirs_state.json"
+
+
+def _load_state() -> dict[str, bool]:
+    """Load per-directory prompt state.  {dir_path: keep_bool}."""
+    if _STATE_FILE.exists():
+        try:
+            return json.loads(_STATE_FILE.read_text(encoding="utf-8"))
+        except ValueError:
+            pass
+    return {}
+
+
+def _save_state(state: dict[str, bool]) -> None:
+    _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _get_persisted_external_dirs() -> list[str]:
+    """Read config.yaml for external_directory entries with value 'allow' (excluding '*' wildcard)."""
+    from jiuwenswarm.common.config import CONFIG_YAML_PATH, load_yaml_round_trip
+
+    cfg_path = Path(CONFIG_YAML_PATH) if not isinstance(CONFIG_YAML_PATH, Path) else CONFIG_YAML_PATH
+    if not cfg_path.exists():
+        return []
+    try:
+        data = load_yaml_round_trip(cfg_path)
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    perms = data.get("permissions")
+    if not isinstance(perms, dict):
+        return []
+    ext = perms.get("external_directory")
+    if not isinstance(ext, dict):
+        return []
+    result = []
+    for k, v in ext.items():
+        if str(k) != "*" and str(v) == "allow":
+            result.append(str(k))
+    return result
+
+
+def _remove_dir_from_config(dir_path: str) -> bool:
+    """Remove a single directory entry from config.yaml's external_directory."""
+    from jiuwenswarm.common.config import CONFIG_YAML_PATH, load_yaml_round_trip, dump_yaml_round_trip
+
+    cfg_path = Path(CONFIG_YAML_PATH) if not isinstance(CONFIG_YAML_PATH, Path) else CONFIG_YAML_PATH
+    if not cfg_path.exists():
+        return False
+    try:
+        data = load_yaml_round_trip(cfg_path)
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    perms = data.get("permissions")
+    if not isinstance(perms, dict):
+        return False
+    ext = perms.get("external_directory")
+    if not isinstance(ext, dict):
+        return False
+
+    target = dir_path.rstrip("/")
+    key_to_remove = None
+    for key in list(ext.keys()):
+        if str(key).rstrip("/") == target:
+            key_to_remove = key
+            break
+    if key_to_remove is None:
+        return False
+    del ext[key_to_remove]
+    try:
+        dump_yaml_round_trip(cfg_path, data)
+    except Exception:
+        return False
+    return True
+
+
+async def _persist_trusted_dirs(client: GatewayClient, trusted_dirs: list[str]) -> None:
+    """Tell the agent-server to persist each trusted directory via ``command.add_dir``."""
+    failed: list[str] = []
+    for d in trusted_dirs:
+        resolved = str(Path(d).resolve())
+        try:
+            await client.send_request({
+                "type": "req",
+                "id": f"add_dir-{uuid_module.uuid4().hex[:8]}",
+                "method": "command.add_dir",
+                "is_stream": False,
+                "params": {"path": resolved, "remember": True},
+            })
+        except Exception:
+            logger.warning("Failed to persist trusted directory: %s", resolved, exc_info=True)
+            failed.append(resolved)
+    if failed:
+        write_stderr(
+            "Warning: could not persist the following trusted directories:\n  "
+            + "\n  ".join(failed)
+            + "\n"
+            + "The agent-server may not support command.add_dir.\n"
+        )
+
+
+def _prompt_and_cleanup_dirs() -> None:
+    """Check for newly persisted dirs and ask user whether to keep each one.
+
+    Only called from the REPL loop (interactive TTY).
+    """
+    if not sys.stdin.isatty():
+        return
+
+    persisted = _get_persisted_external_dirs()
+    state = _load_state()
+    new_dirs = [d for d in persisted if d not in state]
+
+    for d in sorted(new_dirs):
+        write_stderr(f"\nNew workspace added: {d}\n")
+        try:
+            answer = input("Keep using this workspace? [Y/n]: ").strip().lower()
+        except EOFError:
+            answer = "y"
+
+        keep = answer not in ("n", "no")
+        state[d] = keep
+        _save_state(state)
+
+        if not keep:
+            if _remove_dir_from_config(d):
+                write_stderr(f"Workspace removed: {d}\n")
+            else:
+                write_stderr(f"Failed to remove workspace: {d}\n")
+
 MODE_ALIASES: dict[str, str] = {
     "agent": "agent.plan",
-    "fast": "agent.fast",
     "code": "code.normal",
-    "normal": "code.normal",
-    "team.normal": "team",
 }
 
 VALID_MODES = frozenset({
@@ -81,7 +215,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--mode", default="code.normal",
-        help="Execution mode (default: code.normal).",
+        help="Execution mode: agent|code|team|agent.plan|agent.fast|code.plan|code.normal|code.team"
+             " (default: code.normal).",
     )
     p.add_argument(
         "--session",
@@ -161,6 +296,13 @@ def _build_request(args: argparse.Namespace, prompt: str) -> dict:
     else:
         trusted_dirs = [str(Path(d).resolve()) for d in trusted_dirs]
 
+    # Merge persisted external_directory allow entries into trusted_dirs
+    # so that RuntimePromptRail can inject them into the system prompt.
+    persisted = _get_persisted_external_dirs()
+    for pd in persisted:
+        if pd not in trusted_dirs:
+            trusted_dirs.append(pd)
+
     return {
         "type": "req",
         "id": f"chat-{uuid_module.uuid4().hex[:12]}",
@@ -197,7 +339,11 @@ async def _run_interactive_loop(
     # long-running streams still respect the overall cap. When unset, a
     # generous per-recv idle timeout keeps the connection alive.
     total_timeout = timeout if timeout and timeout > 0 else None
-    recv_idle_timeout = 300.0
+    # Short idle timeout so the loop can react to Ctrl+C within ~1 second
+    # on platforms where signal handlers cannot wake a blocked socket recv
+    # (e.g. Windows ProactorEventLoop). The spinner ticks every 0.2 s, so
+    # the loop is woken up frequently regardless.
+    recv_idle_timeout = 1.0
     deadline = None
     if total_timeout is not None:
         deadline = time.monotonic() + total_timeout
@@ -254,9 +400,10 @@ async def _run_interactive_loop(
         def _win_sigint_handler(signum, frame) -> None:
             nonlocal interrupted, _force_exit
             if interrupted:
-                # Second Ctrl+C — force exit
-                _force_exit = True
-                logger.warning("Force exiting...")
+                # Second Ctrl+C — force exit (only log once)
+                if not _force_exit:
+                    _force_exit = True
+                    logger.warning("Force exiting...")
                 return
             interrupted = True
             logger.warning("Interrupted. Sending cancel (press Ctrl+C again to force exit)...")
@@ -272,55 +419,93 @@ async def _run_interactive_loop(
 
     try:
         while True:
-            # Compute the recv timeout: when a total deadline is set, use
-            # the remaining budget (clamped to a small floor so we still
-            # yield to the event loop); otherwise fall back to the idle
-            # timeout.
+            # Check interruption flags immediately (no blocking wait).
+            if _force_exit:
+                renderer.clear_loading()
+                return 130
+
+            if interrupted:
+                renderer.clear_loading()
+                try:
+                    await asyncio.wait_for(
+                        client.send_request({
+                            "type": "req",
+                            "id": f"interrupt-{uuid_module.uuid4().hex[:8]}",
+                            "method": "chat.interrupt",
+                            "is_stream": False,
+                            "params": {
+                                "session_id": request["params"]["session_id"],
+                                "intent": "cancel",
+                                "mode": request["params"]["mode"],
+                            },
+                        }),
+                        timeout=3.0,
+                    )
+                except (asyncio.TimeoutError, ConnectionError, KeyboardInterrupt):
+                    pass
+                except Exception:
+                    logger.exception("cancel request failed")
+                return 130
+
+            # Compute the remaining budget for the total deadline.
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     logger.warning("response timed out")
                     return 1
-                cur_timeout = max(remaining, 0.1)
+                cur_timeout = max(min(remaining, 0.3), 0.01)
             else:
                 cur_timeout = recv_idle_timeout
-            try:
-                data = await asyncio.wait_for(client.recv(), timeout=cur_timeout)
-            except asyncio.TimeoutError:
-                if deadline is not None:
-                    # Total budget exhausted
+
+            # Race recv against a short sleep so the event loop can
+            # react to Ctrl+C flags (critical on Windows ProactorEventLoop
+            # where asyncio.wait_for cancellation may not interrupt IOCP).
+            recv_task = asyncio.create_task(client.recv())
+            sleep_task = asyncio.create_task(asyncio.sleep(cur_timeout))
+            done, _ = await asyncio.wait(
+                [recv_task, sleep_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            # Cancel whichever didn't finish. Await recv cancellation with a
+            # short timeout to avoid concurrent reads on the WebSocket,
+            # but never block indefinitely on a stuck recv cancellation.
+            if not recv_task.done():
+                recv_task.cancel()
+                try:
+                    await asyncio.wait_for(recv_task, timeout=1.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+            if not sleep_task.done():
+                sleep_task.cancel()
+
+            # Total deadline exhausted
+            if recv_task not in done and deadline is not None:
+                if time.monotonic() >= deadline:
                     logger.warning("response timed out")
                     return 1
-                # Idle timeout between events — keep waiting
                 continue
-            except ConnectionError:
-                return 0
+
+            try:
+                data = recv_task.result()
+            except OSError:
+                logger.warning("WebSocket connection lost — the Gateway may have closed the connection", exc_info=True)
+                write_stderr("Connection lost. Use --session to re-connect or retry.\n")
+                return 4
+            except Exception:
+                logger.warning("Unexpected error while receiving", exc_info=True)
+                write_stderr("Error receiving response. Check ~/.jiuwenswarm/agent/.logs/full.log\n")
+                return 5
             except KeyboardInterrupt:
-                # Windows: Ctrl+C interrupts the blocking recv() with
-                # KeyboardInterrupt even when a signal handler is set.
-                # The handler has already set the `interrupted` flag, so
-                # fall through to the graceful-cancel path below.
                 if _force_exit:
                     return 130
                 if not interrupted:
                     interrupted = True
-
-            if _force_exit:
-                return 130
-
-            if interrupted:
-                await client.send_request({
-                    "type": "req",
-                    "id": f"interrupt-{uuid_module.uuid4().hex[:8]}",
-                    "method": "chat.interrupt",
-                    "is_stream": False,
-                    "params": {
-                        "session_id": request["params"]["session_id"],
-                        "intent": "cancel",
-                        "mode": request["params"]["mode"],
-                    },
-                })
-                return 130
+                continue
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                logger.exception("recv_task.result() failed")
+                continue
 
             if data.get("type") != "event":
                 continue
@@ -355,29 +540,23 @@ async def _run_interactive_loop(
             elif kind == "interactive":
                 renderer.clear_loading()
                 if sys.stdin.isatty():
-                    source = str(payload.get("source") or "").strip()
-                    request_id = str(payload.get("request_id") or "").strip()
-                    questions = payload.get("questions") or []
+                    request_id = payload.get("request_id", "")
+                    source = payload.get("source", "")
+                    options = payload.get("options", [])
+                    all_options: list[dict[str, Any]] = [opt for opt in options if isinstance(opt, dict)]
 
-                    # Collect all options across questions for input mapping
-                    all_options: list[dict] = []
-                    # Display question(s) and options
-                    if isinstance(questions, list) and questions:
-                        for q in questions:
-                            header = q.get("header", "Input needed")
-                            question_text = q.get("question", "")
-                            options = q.get("options") or []
-                            write_stderr(f"\n[{header}] {question_text}\n")
-                            if isinstance(options, list) and options:
-                                for i, opt in enumerate(options, 1):
-                                    label = opt.get("label", "")
-                                    desc = opt.get("description", "")
-                                    write_stderr(
-                                        f"  {i}. {label}"
-                                        + (f" — {desc}" if desc else "")
-                                        + "\n"
-                                    )
-                                    all_options.append(opt)
+                    if options:
+                        write_stderr(
+                            f"\n[{event_type}] "
+                            f"{payload.get('question') or payload.get('message', 'Input needed')}\n"
+                        )
+                        for idx, opt in enumerate(all_options, 1):
+                            label = opt.get("label") or opt.get("value") or "?"
+                            desc = opt.get("description", "")
+                            if desc:
+                                write_stderr(f"  {idx}. {label} — {desc}\n")
+                            else:
+                                write_stderr(f"  {idx}. {label}\n")
                     else:
                         write_stderr(
                             f"\n[{event_type}] "
@@ -619,6 +798,12 @@ async def _run_chat(
 
     request = _build_request(args, prompt)
 
+    # Persist explicitly-provided trusted dirs after building the request
+    # so _build_request still sees the original trusted_dirs for the prompt.
+    if getattr(args, "trusted_dir", None):
+        await _persist_trusted_dirs(client, args.trusted_dir)
+        args.trusted_dir = None  # prevent re-persistence on subsequent REPL turns
+
     try:
         if args.jsonl:
             renderer: JsonlRenderer | JsonRenderer | HumanRenderer = JsonlRenderer()
@@ -663,6 +848,10 @@ def run_chat(args: argparse.Namespace) -> int:
     if error is not None:
         return error
 
+    # Check for newly persisted dirs before sending the message,
+    # so the user gets a chance to clean up from previous sessions.
+    _prompt_and_cleanup_dirs()
+
     return asyncio.run(_run_chat(args, prompt))
 
 
@@ -693,6 +882,7 @@ def _run_repl(args: argparse.Namespace) -> int:
     exit_code = 0
     try:
         while True:
+            _prompt_and_cleanup_dirs()
             try:
                 line = input("> ")
             except EOFError:

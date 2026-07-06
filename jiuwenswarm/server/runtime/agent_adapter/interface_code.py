@@ -93,14 +93,16 @@ output redirection, file edits outside the plan file, or git commit/push/add),
 and must NOT make any changes to the system. This constraint takes priority
 over any other instructions you receive.
 
-CRITICAL: You MUST call `enter_plan_mode` as your very first action, before
-doing anything else. This tool will create the plan file and give you full
-plan mode instructions. Until then, you may only read files and explore the
-codebase using read-only tools (read_file, grep, list_files, glob, bash for
-read-only commands).
+Read-only actions are allowed directly: you may read files and explore the
+codebase, and run read-only commands (read_file, grep, list_files, glob, bash
+for read-only operations such as gh pr list/view/diff or git status/diff/log).
+Write operations and non-read-only tools are blocked by the runtime.
 
-Do NOT proceed to implement anything until the user approves your plan via
-`exit_plan_mode`.
+If you need to design an implementation approach and produce a plan, call
+`enter_plan_mode` — it creates the plan file and gives you full plan mode
+instructions. This is not required as your first action; you may gather
+context with read-only tools first. Do NOT proceed to implement anything
+until the user approves your plan via `exit_plan_mode`.
 """
 
 # ---------------------------------------------------------------------------
@@ -426,6 +428,15 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         audio_model_config / context_engine_config。
         completion_timeout 从配置读取，可在 react / modes.code 中自定义。
         """
+        # Propagate create params to per-session child adapters (see
+        # JiuWenSwarmDeepAdapter._get_or_create_session_adapter).  The parent
+        # deep adapter sets these fields; code mode must do the same or every
+        # chat turn spawns a session adapter with project_dir=None → default
+        # coding_memory/.
+        self._session_instance_config = dict(config or {}) if isinstance(config, dict) else None
+        self._session_instance_mode = mode
+        self._session_instance_sub_mode = sub_mode
+
         await self.set_checkpoint()
 
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
@@ -1171,10 +1182,24 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 cwd=runtime_config.cwd,
                 project_dir=runtime_config.project_dir or self._project_dir,
             )
+            self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
+        # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
+        # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
+        # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。
+        permission_rail = getattr(self, "_permission_rail", None)
+        if permission_rail is not None:
+            try:
+                permission_rail.set_trusted_dirs(runtime_config.trusted_dirs)
+            except Exception:
+                logger.debug(
+                    "[JiuwenSwarmCodeAdapter] permission_rail.set_trusted_dirs failed",
+                    exc_info=True,
+                )
         self._write_runtime_state(
             mode=runtime_config.mode,
             language=self._resolve_output_language(),
             channel=resolved_channel,
+            session_id=runtime_config.session_id,
             project_dir=runtime_config.project_dir
             or runtime_config.cwd
             or self._project_dir

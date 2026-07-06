@@ -20,6 +20,7 @@ from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
+from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
@@ -31,6 +32,11 @@ from jiuwenswarm.common.security.ws_origin import (
     is_allowed_browser_origin,
 )
 from jiuwenswarm.common.schema.message import Message, Mode, ReqMethod
+from jiuwenswarm.common.ws_diagnostics import (
+    describe_ws_exception,
+    describe_ws_peer,
+    format_ws_diagnostics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +78,9 @@ class WebChannel(BaseChannel):
         self._on_message_cb: Callable[[Message], Any] | None = None
         self._method_handlers: dict[str, MethodHandler] = {}
         self._connect_hooks: list[ConnectHook] = []
+        self._disconnect_hooks: list[ConnectHook] = []
+        # ws -> set[session_id]: 追踪每个连接上活跃的 session
+        self._ws_sessions: dict[int, set[str]] = {}
 
     # ── 公共属性 ──────────────────────────────────────────
 
@@ -99,9 +108,27 @@ class WebChannel(BaseChannel):
         """注册连接建立钩子，新客户端接入时依次调用."""
         self._connect_hooks.append(callback)
 
+    def on_disconnect(self, callback: ConnectHook) -> None:
+        """注册连接断开钩子，客户端断连时依次调用.
+
+        callback 签名: ``async def callback(ws, session_ids: set[str]) -> None``
+        """
+        self._disconnect_hooks.append(callback)
+
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """注册消息接收回调（替代默认的 router.publish_user_messages）。"""
         self._on_message_cb = callback
+
+    def wrap_message_callback(
+        self, wrapper: Callable[[Callable[[Message], Any] | None, Message], Any],
+    ) -> None:
+        """包装现有的消息回调。wrapper 接收 (original_callback, msg) 并返回处理结果。"""
+        original = self._on_message_cb
+
+        def wrapped(msg):
+            return wrapper(original, msg)
+
+        self._on_message_cb = wrapped
 
     # ── 帧发送 API（公开给处理器使用）─────────────────────
 
@@ -130,7 +157,14 @@ class WebChannel(BaseChannel):
             await ws.send(json.dumps(frame, ensure_ascii=False))
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
-                logger.debug("WebChannel send_response skipped on closed websocket: id={} err={}", req_id, e)
+                logger.debug(
+                    "WebChannel send_response skipped on closed websocket: %s",
+                    format_ws_diagnostics(
+                        {"id": req_id},
+                        describe_ws_peer(ws),
+                        describe_ws_exception(e),
+                    ),
+                )
                 return
             raise
 
@@ -153,7 +187,14 @@ class WebChannel(BaseChannel):
             await ws.send(json.dumps(frame, ensure_ascii=False))
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
-                logger.debug("WebChannel send_event skipped on closed websocket: event={} err={}", event, e)
+                logger.debug(
+                    "WebChannel send_event skipped on closed websocket: %s",
+                    format_ws_diagnostics(
+                        {"event": event, "seq": seq, "stream_id": stream_id},
+                        describe_ws_peer(ws),
+                        describe_ws_exception(e),
+                    ),
+                )
                 return
             raise
 
@@ -180,10 +221,10 @@ class WebChannel(BaseChannel):
                     if response.status == 200:
                         return await response.read()
                     else:
-                        logger.warning("WebChannel 文件下载失败: {}, 状态码: {}", url, response.status)
+                        logger.warning("WebChannel 文件下载失败: %s, 状态码: %s", url, response.status)
                         return None
         except Exception as e:
-            logger.warning("WebChannel 文件下载异常: {}, 错误: {}", url, e)
+            logger.warning("WebChannel 文件下载异常: %s, 错误: %s", url, e)
             return None
 
     async def _process_files(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -212,7 +253,7 @@ class WebChannel(BaseChannel):
                             f.write(file_content)
                         file_info["path"] = file_path
                     except Exception as e:
-                        logger.warning("WebChannel 文件保存失败: {}", e)
+                        logger.warning("WebChannel 文件保存失败: %s", e)
 
             downloaded_files.append(file_info)
 
@@ -445,16 +486,61 @@ class WebChannel(BaseChannel):
                 if inspect.isawaitable(result):
                     await result
             except Exception as e:  # pragma: no cover
-                logger.warning("WebChannel on_connect hook error: {}", e)
+                logger.warning(
+                    "WebChannel on_connect hook error: %s",
+                    format_ws_diagnostics(
+                        {"remote": remote, "path": request_path},
+                        describe_ws_peer(ws),
+                        describe_ws_exception(e),
+                    ),
+                )
 
         try:
             async for raw in ws:
                 await self._handle_raw_message(ws, raw, query)
+        except WebSocketConnectionClosed as e:  # pragma: no cover - 连接生命周期容错
+            logger.info(
+                "WebChannel 连接关闭: %s",
+                format_ws_diagnostics(
+                    {"remote": remote, "path": request_path},
+                    describe_ws_peer(ws),
+                    describe_ws_exception(e),
+                ),
+            )
         except Exception as e:  # pragma: no cover - 连接生命周期容错
-            logger.warning("WebChannel 连接异常: %s", e)
+            logger.warning(
+                "WebChannel 连接异常: %s",
+                format_ws_diagnostics(
+                    {"remote": remote, "path": request_path},
+                    describe_ws_peer(ws),
+                    describe_ws_exception(e),
+                ),
+            )
         finally:
             self._clients.discard(ws)
-            logger.info(f"WebChannel 连接关闭: remote={remote}")
+            logger.info(
+                "WebChannel 连接清理完成: %s",
+                format_ws_diagnostics(
+                    {"remote": remote, "path": request_path, "clients": len(self._clients)},
+                    describe_ws_peer(ws),
+                ),
+            )
+            # 取出该 ws 关联的 session_ids，清理映射
+            ws_id = id(ws)
+            disconnected_sessions = self._ws_sessions.pop(ws_id, set())
+            logger.info(
+                "WebChannel 连接关闭: remote=%s sessions=%s",
+                remote,
+                disconnected_sessions or "none",
+            )
+            # 触发断连钩子，传入 session_ids
+            for hook in self._disconnect_hooks:
+                try:
+                    result = hook(ws, disconnected_sessions)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as e:  # pragma: no cover
+                    logger.warning("WebChannel on_disconnect hook error: %s", e)
 
     async def _handle_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
         try:
@@ -487,6 +573,14 @@ class WebChannel(BaseChannel):
         session_id = params.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             session_id = self._make_session_id()
+
+        # 追踪 ws → session_id 映射，用于断连时清理
+        ws_id = id(ws)
+        sessions = self._ws_sessions.get(ws_id)
+        if sessions is None:
+            sessions = set()
+            self._ws_sessions[ws_id] = sessions
+        sessions.add(session_id)
 
         params = await self._process_files(params)
 
@@ -526,12 +620,23 @@ class WebChannel(BaseChannel):
                 ws_closed = bool(getattr(ws, "closed", False))
                 if ws_closed:
                     logger.warning(
-                        "WebChannel method handler aborted on closed websocket ({}): {}",
-                        method, e,
+                        "WebChannel method handler aborted on closed websocket: %s",
+                        format_ws_diagnostics(
+                            {"method": method, "id": req_id, "session_id": session_id},
+                            describe_ws_peer(ws),
+                            describe_ws_exception(e),
+                        ),
                     )
                     return
 
-                logger.error("WebChannel method handler error ({}): {}", method, e)
+                logger.error(
+                    "WebChannel method handler error: %s",
+                    format_ws_diagnostics(
+                        {"method": method, "id": req_id, "session_id": session_id},
+                        describe_ws_peer(ws),
+                        describe_ws_exception(e),
+                    ),
+                )
                 try:
                     await self.send_response(
                         ws, req_id, ok=False,

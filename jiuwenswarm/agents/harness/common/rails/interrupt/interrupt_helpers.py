@@ -703,7 +703,8 @@ def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
 def _default_interrupt_options() -> list[dict[str, str]]:
     return [
         {"label": "本次允许", "description": "仅本次授权执行"},
-        {"label": "总是允许", "description": "记住该规则，以后自动放行"},
+        {"label": "会话内记住", "description": "本次会话内自动放行同类操作"},
+        {"label": "永久记住", "description": "写回磁盘，所有会话均自动放行"},
         {"label": "拒绝", "description": "拒绝执行此工具"},
     ]
 

@@ -542,6 +542,7 @@ Timestamp format: `YYYY-MM-DD-HHmmss`.
 
 Parsed **locally by the TUI**, this command sends a dedicated RPC `command.simplify` to get a server-generated three-phase review prompt, then injects it as an Agent message (`logAsUser: false`). The Agent automatically reviews changed code for reuse, quality, and efficiency, and directly fixes issues found.
 
+- **Scope**: reuse / quality / efficiency **only**. Security vulnerabilities (injection, XSS, hard-coded secrets, auth flaws, etc.) are **out of scope** — do not fix or report them here. Use `/security-review` for a read-only security report.
 - **Alias**: None.
 - **Applicable modes**: **`code.*` only**. Non-code mode shows an error prompting `Run /mode code first`.
 - **Parsing location**: TUI local (not a Gateway controlled channel); unavailable in IM.

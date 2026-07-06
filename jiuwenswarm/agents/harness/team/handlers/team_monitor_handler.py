@@ -235,7 +235,7 @@ class TeamMonitorHandler(BaseMonitorHandler):
 
     @property
     def team_id(self) -> str | None:
-        return self._monitor.team_id if self._monitor else None
+        return self._monitor.team_name if self._monitor else None
 
     async def get_team_snapshot(self) -> dict[str, Any] | None:
         """获取当前团队状态快照，用于刷新后恢复成员列表和任务列表。"""
@@ -271,7 +271,7 @@ class TeamMonitorHandler(BaseMonitorHandler):
                     }
                     for t in tasks
                 ],
-                "team_id": self._monitor.team_id,
+                "team_id": self._monitor.team_name,
             }
         except Exception as e:
             logger.warning(

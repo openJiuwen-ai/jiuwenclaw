@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
+from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
+
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService, reset_harness_packages_state
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
@@ -33,6 +35,11 @@ from jiuwenswarm.common.e2a.wire_codec import (
 )
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.version import __version__
+from jiuwenswarm.common.ws_diagnostics import (
+    describe_ws_exception,
+    describe_ws_peer,
+    format_ws_diagnostics,
+)
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
@@ -50,6 +57,7 @@ from jiuwenswarm.server.runtime.session.session_history import (
 )
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
+    effective_files_from_policy,
     find_auto_managed_match,
     find_nested_files_conflict,
     list_effective_sandbox_files,
@@ -114,6 +122,20 @@ _CODE_MODE_SYNC_METHODS = frozenset({
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
 _HISTORY_PAGE_SIZE = 20
+_HISTORY_WIRE_STRING_LIMIT = 16 * 1024
+_HISTORY_WIRE_METADATA_STRING_LIMIT = 256
+_HISTORY_WIRE_LIST_LIMIT = 100
+_HISTORY_WIRE_DEPTH_LIMIT = 8
+_HISTORY_WIRE_RECORD_MAX_BYTES = 64 * 1024
+_TEAM_HISTORY_DEFAULT_LIMIT = 500
+_TEAM_HISTORY_MAX_LIMIT = 1000
+_TEAM_HISTORY_DEFAULT_MAX_BYTES = 2 * 1024 * 1024
+_TEAM_HISTORY_MIN_MAX_BYTES = 2048
+_TEAM_HISTORY_MAX_MAX_BYTES = 6 * 1024 * 1024
+_TEAM_HISTORY_FRAME_OVERHEAD_BYTES = 1024
+_WORKFLOW_SNAPSHOT_MAX_BYTES = 6 * 1024 * 1024
+_WORKFLOW_SNAPSHOT_FRAME_OVERHEAD_BYTES = 2048
+_WORKFLOW_SNAPSHOT_MAX_WORKFLOWS = 1000
 
 _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
     {
@@ -128,6 +150,303 @@ _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
         "context.rewind_summary",
     }
 )
+
+
+def _json_wire_size(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+    except Exception:
+        return len(str(value).encode("utf-8", errors="replace"))
+
+
+def _coerce_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _truncate_string_by_bytes(value: str, max_bytes: int) -> str:
+    raw = value.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return value
+    suffix = " [truncated]"
+    budget = max(0, max_bytes - len(suffix.encode("utf-8")))
+    return raw[:budget].decode("utf-8", errors="ignore") + suffix
+
+
+def _sanitize_history_wire_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > _HISTORY_WIRE_DEPTH_LIMIT:
+        return "<truncated>"
+    if isinstance(value, str):
+        return _truncate_string_by_bytes(value, _HISTORY_WIRE_STRING_LIMIT)
+    if isinstance(value, dict):
+        return {
+            str(key): _sanitize_history_wire_value(item, depth=depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _sanitize_history_wire_value(item, depth=depth + 1)
+            for item in value[:_HISTORY_WIRE_LIST_LIMIT]
+        ]
+    if isinstance(value, tuple):
+        return [
+            _sanitize_history_wire_value(item, depth=depth + 1)
+            for item in value[:_HISTORY_WIRE_LIST_LIMIT]
+        ]
+    return value
+
+
+def _collapse_oversized_history_record(record: dict[str, Any]) -> dict[str, Any]:
+    keep_keys = {
+        "id",
+        "role",
+        "request_id",
+        "channel_id",
+        "session_id",
+        "timestamp",
+        "event_type",
+        "mode",
+        "member_name",
+        "member_id",
+        "source_member",
+        "name",
+        "status",
+    }
+    collapsed = {
+        key: _sanitize_history_wire_value(value)
+        for key, value in record.items()
+        if key in keep_keys
+    }
+    content = record.get("content")
+    if isinstance(content, str) and content.strip():
+        collapsed["content"] = _truncate_string_by_bytes(content, 512)
+    event = record.get("event")
+    if isinstance(event, dict):
+        collapsed["event"] = {
+            key: _sanitize_history_wire_value(event.get(key))
+            for key in ("type", "member_id", "task_id", "id", "status", "new_status", "team_id")
+            if key in event
+        }
+    collapsed["truncated"] = True
+    return collapsed
+
+
+def _compact_wire_metadata_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _truncate_string_by_bytes(value, _HISTORY_WIRE_METADATA_STRING_LIMIT)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _truncate_string_by_bytes(str(value), _HISTORY_WIRE_METADATA_STRING_LIMIT)
+
+
+def _minimal_history_record_for_wire(record: dict[str, Any]) -> dict[str, Any]:
+    keep_keys = {
+        "id",
+        "role",
+        "request_id",
+        "channel_id",
+        "session_id",
+        "timestamp",
+        "event_type",
+        "mode",
+        "member_name",
+        "member_id",
+        "source_member",
+        "name",
+        "status",
+    }
+    minimal = {
+        key: _compact_wire_metadata_value(value)
+        for key, value in record.items()
+        if key in keep_keys
+    }
+    minimal["content"] = "[truncated]"
+    minimal["truncated"] = True
+    return minimal
+
+
+def _sanitize_history_record_for_wire(record: Any) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        return {"content": _sanitize_history_wire_value(record), "truncated": True}
+    sanitized = _sanitize_history_wire_value(record)
+    if not isinstance(sanitized, dict):
+        return {"content": str(sanitized), "truncated": True}
+    if _json_wire_size(sanitized) <= _HISTORY_WIRE_RECORD_MAX_BYTES:
+        return sanitized
+    return _collapse_oversized_history_record(sanitized)
+
+
+def _select_history_record_page(
+    records: list[dict[str, Any]],
+    *,
+    cursor: int,
+    limit: int,
+    max_bytes: int,
+    session_id: str,
+) -> tuple[list[dict[str, Any]], int]:
+    total = len(records)
+    if cursor >= total:
+        return [], total
+
+    budget = max(
+        _TEAM_HISTORY_MIN_MAX_BYTES,
+        max_bytes - _TEAM_HISTORY_FRAME_OVERHEAD_BYTES,
+    )
+    base_payload = {
+        "records": [],
+        "session_id": session_id,
+        "cursor": cursor,
+        "next_cursor": cursor,
+        "has_more": cursor < total,
+        "total": total,
+    }
+    used = _json_wire_size(base_payload)
+    page: list[dict[str, Any]] = []
+    next_cursor = cursor
+
+    for idx in range(cursor, total):
+        if len(page) >= limit:
+            break
+        record = records[idx]
+        record_size = _json_wire_size(record) + 1
+        if record_size > budget:
+            record = _collapse_oversized_history_record(record)
+            record_size = _json_wire_size(record) + 1
+        if page and used + record_size > budget:
+            break
+        if not page and used + record_size > budget:
+            record = _collapse_oversized_history_record(record)
+            record_size = _json_wire_size(record) + 1
+            if used + record_size > budget:
+                record = _minimal_history_record_for_wire(record)
+                record_size = _json_wire_size(record) + 1
+                if used + record_size > budget:
+                    record = {"id": _compact_wire_metadata_value(record.get("id")), "truncated": True}
+                    record_size = _json_wire_size(record) + 1
+        page.append(record)
+        used += record_size
+        next_cursor = idx + 1
+
+    return page, next_cursor
+
+
+def _collapse_oversized_workflow_snapshot_item(item: dict[str, Any]) -> dict[str, Any]:
+    keep_keys = {
+        "id",
+        "name",
+        "status",
+        "agent_count",
+        "completed_agent_count",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "token_count",
+        "estimated_token_count",
+    }
+    collapsed = {
+        key: _sanitize_history_wire_value(value)
+        for key, value in item.items()
+        if key in keep_keys
+    }
+    for key in ("summary", "description", "error", "result"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            collapsed[key] = _truncate_string_by_bytes(value, 512)
+        elif value is not None:
+            collapsed[key] = _truncate_string_by_bytes(str(value), 512)
+    collapsed["truncated"] = True
+    return collapsed
+
+
+def _minimal_workflow_snapshot_item_for_wire(item: dict[str, Any]) -> dict[str, Any]:
+    keep_keys = {
+        "id",
+        "name",
+        "status",
+        "agent_count",
+        "completed_agent_count",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "token_count",
+        "estimated_token_count",
+    }
+    minimal = {
+        key: _compact_wire_metadata_value(value)
+        for key, value in item.items()
+        if key in keep_keys
+    }
+    minimal["summary"] = "[truncated]"
+    minimal["truncated"] = True
+    return minimal
+
+
+def _sanitize_workflow_snapshot_item_for_wire(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {"summary": _sanitize_history_wire_value(item), "truncated": True}
+    sanitized = _sanitize_history_wire_value(item)
+    if not isinstance(sanitized, dict):
+        return {"summary": str(sanitized), "truncated": True}
+    if _json_wire_size(sanitized) <= _HISTORY_WIRE_RECORD_MAX_BYTES:
+        return sanitized
+    return _collapse_oversized_workflow_snapshot_item(sanitized)
+
+
+def _build_workflow_snapshot_payload(workflows: Any, *, session_id: str) -> dict[str, Any]:
+    source = workflows if isinstance(workflows, list) else []
+    sanitized_workflows = [
+        _sanitize_workflow_snapshot_item_for_wire(item)
+        for item in source
+        if isinstance(item, dict)
+    ]
+    total = len(sanitized_workflows)
+    payload: dict[str, Any] = {
+        "type": "workflow_run_snapshot",
+        "workflows": [],
+        "session_id": session_id,
+        "total": total,
+        "truncated": False,
+    }
+    budget = max(
+        _TEAM_HISTORY_MIN_MAX_BYTES,
+        _WORKFLOW_SNAPSHOT_MAX_BYTES - _WORKFLOW_SNAPSHOT_FRAME_OVERHEAD_BYTES,
+    )
+    used = _json_wire_size(payload)
+    page: list[dict[str, Any]] = []
+
+    for workflow in sanitized_workflows:
+        if len(page) >= _WORKFLOW_SNAPSHOT_MAX_WORKFLOWS:
+            payload["truncated"] = True
+            break
+        item = workflow
+        item_size = _json_wire_size(item) + 1
+        if item_size > budget:
+            item = _collapse_oversized_workflow_snapshot_item(item)
+            item_size = _json_wire_size(item) + 1
+            payload["truncated"] = True
+        if page and used + item_size > budget:
+            payload["truncated"] = True
+            break
+        if not page and used + item_size > budget:
+            item = _collapse_oversized_workflow_snapshot_item(item)
+            item_size = _json_wire_size(item) + 1
+            if used + item_size > budget:
+                item = _minimal_workflow_snapshot_item_for_wire(item)
+                item_size = _json_wire_size(item) + 1
+                if used + item_size > budget:
+                    item = {"id": _compact_wire_metadata_value(item.get("id")), "truncated": True}
+                    item_size = _json_wire_size(item) + 1
+                payload["truncated"] = True
+        page.append(item)
+        used += item_size
+
+    if len(page) < total:
+        payload["truncated"] = True
+    payload["workflows"] = page
+    return payload
 
 
 def _request_query_text(request: AgentRequest) -> str:
@@ -151,6 +470,13 @@ _SIMPLIFY_PROMPT_TEMPLATE = """\
 # Simplify: Code Review and Cleanup
 
 Review all changed files for reuse, quality, and efficiency. Fix any issues found.
+
+## Scope
+
+This review covers **reuse, quality, and efficiency only** — the three dimensions below. It is NOT a security review.
+
+- Do NOT flag, fix, or report security vulnerabilities (injection, XSS, hard-coded secrets, auth flaws, etc.). Those are out of scope here and are handled by `/security-review`, which reports findings without modifying code.
+- If you happen to notice a likely security issue while reviewing, do not fix it — at most note it in one line at the end ("possible security concern in <file>:<line>, run /security-review") and continue with the reuse/quality/efficiency review.
 
 ## Phase 1: Identify Changes
 
@@ -480,26 +806,32 @@ def _reject_extra_sandbox_files_params(params: dict[str, Any]) -> None:
 
 
 def _inject_plan_mode_activation_reminder(request: AgentRequest) -> None:
-    """在用户消息中注入 <system-reminder> 告知 LLM 调用 enter_plan_mode.
+    """在用户消息中注入 <system-reminder> 告知 LLM 当前处于 plan 模式.
 
-    plan 模式行为指令不进 system prompt，
-    而是通过对话中的 tool_result 传递。此提醒是进入 plan 模式后的
-    第一个引导，告诉 LLM 调用 enter_plan_mode 以获取完整指令。
+    plan 模式行为指令不进 system prompt，而是通过对话中的 tool_result
+    传递。此提醒是进入 plan 模式后的第一个引导，告知 LLM 只读约束已生效。
 
-    注意：此提醒需要足够权威和明确，因为 code.plan 模式下
-    AgentModeRail 注入的 system prompt 是静态的（不含动态
-    plan_file 状态），完整指令仍需 enter_plan_mode 的 tool_result。
+    plan 模式的只读约束由工具拦截层强制（非只读工具/写
+    操作被硬拦），此提醒只做约束说明 + 软引导。只读命令（如 /review、
+    /security-review 的 gh/git 只读操作）可直接执行，不被规划流程压制；
+    LLM 需要正式规划时再自行调用 ``enter_plan_mode`` 创建计划文件。
     """
     reminder = (
         "\n\n<system-reminder>\n"
         "Plan mode is active. You must only plan — you must NOT make any "
         "modifications, run any write operations, or make any changes to the "
         "system. This constraint takes priority over any other instructions.\n\n"
-        "CRITICAL: You MUST call `enter_plan_mode` as your very first action, "
-        "before doing anything else. This tool will create the plan file and "
-        "give you full plan mode instructions. Until then, you may only read "
-        "files and explore the codebase using read-only tools (read_file, "
-        "grep, list_files, glob, bash for read-only commands).\n"
+        "Read-only actions are allowed directly: you may read files and explore "
+        "the codebase, and run read-only commands (read_file, grep, list_files, "
+        "glob, bash for read-only operations such as gh pr list/view/diff or "
+        "git status/diff/log). Write operations and non-read-only tools are "
+        "blocked.\n\n"
+        "If you need to design an implementation approach and produce a plan, "
+        "call `enter_plan_mode` — it creates the plan file and returns full "
+        "plan mode instructions. This is not required as your first action; "
+        "you may gather context with read-only tools first. Do NOT proceed to "
+        "implement anything until the user approves your plan via "
+        "`exit_plan_mode`.\n"
         "</system-reminder>"
     )
     if isinstance(request.params, dict):
@@ -550,8 +882,9 @@ class AgentWebSocketServer:
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
-        # session_id → 正在运行的流式 asyncio.Task，用于 interrupt 时精确取消
-        self._session_stream_tasks: dict[str, asyncio.Task] = {}
+        # session_id → (正在运行的流式 asyncio.Task, 停止信号 Event)，用于 interrupt 时精确取消
+        # Event 用于通知 heartbeat_loop 提前退出，避免 stream task 卡住时 keepalive 持续发送
+        self._session_stream_tasks: dict[str, tuple[asyncio.Task, asyncio.Event]] = {}
         # Scheduler service instance (for scheduled auto_harness tasks)
         self._scheduler_service: Optional[AutoHarnessService] = None
         # Model cache for scheduled task execution (same approach as interface_deep)
@@ -873,8 +1206,6 @@ class AgentWebSocketServer:
 
     async def _connection_handler(self, ws: Any) -> None:
         """处理单个 Gateway WebSocket 连接，同一连接可并发处理多个请求."""
-        import websockets
-
         remote = ws.remote_address
         logger.info("[AgentWebSocketServer] 新连接: %s", remote)
 
@@ -901,15 +1232,31 @@ class AgentWebSocketServer:
                 task = asyncio.create_task(self._handle_message(ws, raw, send_lock))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
-        except websockets.exceptions.ConnectionClosed:
-            logger.info("[AgentWebSocketServer] 连接关闭: %s", remote)
+        except WebSocketConnectionClosed as e:
+            logger.info(
+                "[AgentWebSocketServer] 连接关闭: %s",
+                format_ws_diagnostics(
+                    {
+                        "remote": remote,
+                        "active_tasks": len(tasks),
+                        "session_stream_tasks": len(self._session_stream_tasks),
+                        "ping_interval": self._ping_interval,
+                        "ping_timeout": self._ping_timeout,
+                    },
+                    describe_ws_peer(ws),
+                    describe_ws_exception(e),
+                ),
+            )
         except Exception as e:
             logger.exception("[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e)
         finally:
             self._current_ws = None
             self._current_send_lock = None
             self._clear_ws_acp_client_capabilities(ws)
-            self._session_stream_tasks.clear()
+            connection_tasks = list(tasks)
+            for task in connection_tasks:
+                if not task.done():
+                    task.cancel()
             # Gateway 进程退出/端口关闭时，必须先取消各 session 内流式生产者（SessionManager）
             # 并中止 DeepAgent 内层循环；否则仅等待 _handle_message 任务结束会一直阻塞到任务自然完成。
             try:
@@ -931,11 +1278,9 @@ class AgentWebSocketServer:
                 )
             except Exception:
                 logger.exception("[AgentWebSocketServer] team stream cancel failed")
-            if tasks:
-                for t in list(tasks):
-                    if not t.done():
-                        t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+            if connection_tasks:
+                await asyncio.gather(*connection_tasks, return_exceptions=True)
+            self._session_stream_tasks.clear()
 
     async def _handle_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
@@ -947,8 +1292,18 @@ class AgentWebSocketServer:
                 channel_id="",
                 message=f"JSON 解析失败: {e}",
             )
-            async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+            try:
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+            except WebSocketConnectionClosed as send_exc:
+                logger.info(
+                    "[AgentWebSocketServer] WebSocket 已关闭，JSON 解析错误未发送: %s",
+                    format_ws_diagnostics(
+                        {"json_error": str(e)},
+                        describe_ws_peer(ws),
+                        describe_ws_exception(send_exc),
+                    ),
+                )
             return
 
         try:
@@ -1203,14 +1558,23 @@ class AgentWebSocketServer:
                 # 只有 cancel/supplement 才取消流式任务
                 # pause/resume 不取消，因为任务仍在运行（pause 在 checkpoint 阻塞，resume 解除阻塞）
                 stream_task: asyncio.Task | None = None
+                stream_stop_event: asyncio.Event | None = None
                 if intent in ("cancel", "supplement"):
-                    stream_task = self._session_stream_tasks.get(sid)
+                    entry = self._session_stream_tasks.get(sid)
+                    if entry is not None:
+                        if isinstance(entry, tuple):
+                            stream_task, stream_stop_event = entry
+                        else:
+                            stream_task = entry
                     if stream_task is not None and not stream_task.done():
                         logger.info(
                             "[AgentWebSocketServer] cancel: 终止 session 流式任务: session_id=%s intent=%s",
                             sid,
                             intent,
                         )
+                        # 先通知 heartbeat_loop 退出，避免 stream task 卡住时 keepalive 持续发送
+                        if stream_stop_event is not None:
+                            stream_stop_event.set()
                         stream_task.cancel()
 
                 # 专门处理 cancel，复用已有 agent（不再 fallthrough 到 _handle_unary）
@@ -1235,6 +1599,20 @@ class AgentWebSocketServer:
                 request.request_id,
                 request.session_id,
             )
+        except WebSocketConnectionClosed as e:
+            logger.info(
+                "[AgentWebSocketServer] WebSocket 已关闭，放弃请求回包: %s",
+                format_ws_diagnostics(
+                    {
+                        "request_id": request.request_id,
+                        "channel_id": request.channel_id,
+                        "session_id": request.session_id,
+                        "is_stream": request.is_stream,
+                    },
+                    describe_ws_peer(ws),
+                    describe_ws_exception(e),
+                ),
+            )
         except Exception as e:
             logger.exception(
                 "[AgentWebSocketServer] 处理请求失败: request_id=%s: %s",
@@ -1250,8 +1628,23 @@ class AgentWebSocketServer:
             wire = encode_agent_response_for_wire(
                 error_resp, response_id=request.request_id
             )
-            async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+            try:
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+            except WebSocketConnectionClosed as send_exc:
+                logger.info(
+                    "[AgentWebSocketServer] WebSocket 已关闭，错误响应未发送: %s",
+                    format_ws_diagnostics(
+                        {
+                            "request_id": request.request_id,
+                            "channel_id": request.channel_id,
+                            "session_id": request.session_id,
+                            "is_stream": request.is_stream,
+                        },
+                        describe_ws_peer(ws),
+                        describe_ws_exception(send_exc),
+                    ),
+                )
 
     @staticmethod
     def _should_trigger_before_chat_request_hook(request: AgentRequest) -> bool:
@@ -1327,6 +1720,54 @@ class AgentWebSocketServer:
             raise ValueError("Failed to get agent for cancel request")
 
         resp = await agent.process_message(request)
+
+        # Team 模式下 cancel/supplement 需要额外清理 team runtime，
+        # 否则旧 session 的 Runner pool 条目和 stream task 不会被移除，导致 session 泄露。
+        # _handle_cancel 绕过了 interface._process_team_interrupt，所以在此补充清理逻辑。
+        # 注意：Gateway 转发的 cancel 请求可能丢失 mode/team 参数，因此不能仅依赖 params 判断，
+        # 而是直接检查 team_manager 中是否有该 session 的 active/pending runtime。
+        params = request.params if isinstance(request.params, dict) else {}
+        intent = params.get("intent", "cancel")
+        has_team_runtime = False
+        if request.session_id and intent in ("cancel", "supplement"):
+            try:
+                from jiuwenswarm.agents.harness.team import get_team_manager
+                team_manager = get_team_manager(channel_id)
+                has_team_runtime = (
+                    team_manager.is_runtime_active(request.session_id)
+                    or team_manager.is_runtime_pending(request.session_id)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[AgentWebSocketServer] check team runtime failed: session_id=%s error=%s",
+                    request.session_id, exc,
+                )
+        if has_team_runtime and request.session_id:
+            try:
+                from jiuwenswarm.agents.harness.team import get_team_manager
+                team_manager = get_team_manager(channel_id)
+                if intent == "cancel":
+                    cancelled = await team_manager.cancel_session_runtime(
+                        request.session_id, reason=f"_handle_cancel(intent={intent}): "
+                    )
+                    logger.info(
+                        "[AgentWebSocketServer] cancel: team 会话已取消: session_id=%s cancelled=%s",
+                        request.session_id, cancelled,
+                    )
+                else:
+                    terminated = await team_manager.terminate_session_runtime(
+                        request.session_id, reason=f"_handle_cancel(intent={intent}): "
+                    )
+                    logger.info(
+                        "[AgentWebSocketServer] supplement: team 会话已终止: session_id=%s terminated=%s",
+                        request.session_id, terminated,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[AgentWebSocketServer] team 会话清理失败: session_id=%s error=%s",
+                    request.session_id, exc,
+                )
+
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
@@ -1610,8 +2051,10 @@ class AgentWebSocketServer:
         channel_id = request.channel_id or "default"
         session_id = request.session_id or "default"
         current_task = asyncio.current_task()
+        # 停止信号：cancel stream task 时 set，通知 heartbeat_loop 立即退出
+        stream_stop_event = asyncio.Event()
         if current_task is not None:
-            self._session_stream_tasks[session_id] = current_task
+            self._session_stream_tasks[session_id] = (current_task, stream_stop_event)
 
         mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
             request, channel_id
@@ -1627,38 +2070,53 @@ class AgentWebSocketServer:
         heartbeat_task: asyncio.Task | None = None
 
         async def _heartbeat_loop() -> None:
-            """后台心跳任务：在空闲期间定期发送 keepalive chunk."""
+            """后台心跳任务：在空闲期间定期发送 keepalive chunk.
+
+            通过 stream_stop_event 与 stream task 绑定：
+            - stream task 正常完成或被 cancel 时 set stream_stop_event
+            - heartbeat_loop 检测到 stop 信号后立即退出，避免僵尸 keepalive
+            """
             try:
                 while True:
-                    # 等待心跳间隔，如果期间有真实 chunk 发送则 heartbeat_event 被设置，重置等待
-                    try:
-                        await asyncio.wait_for(
-                            heartbeat_event.wait(),
-                            timeout=_STREAM_HEARTBEAT_INTERVAL_SECONDS,
-                        )
+                    # 同时等待心跳间隔和停止信号，任一先到即唤醒
+                    done, _ = await asyncio.wait(
+                        [
+                            asyncio.ensure_future(heartbeat_event.wait()),
+                            asyncio.ensure_future(stream_stop_event.wait()),
+                        ],
+                        timeout=_STREAM_HEARTBEAT_INTERVAL_SECONDS,
+                    )
+                    if stream_stop_event.is_set():
+                        break
+                    if heartbeat_event.is_set():
                         # 有真实 chunk 发送，重置 event 继续等待
                         heartbeat_event.clear()
-                    except asyncio.TimeoutError:
-                        # 超时：空闲超过心跳间隔，发送 keepalive chunk
-                        heartbeat_chunk = AgentResponseChunk(
-                            request_id=request.request_id,
-                            channel_id=channel_id,
-                            payload={"event_type": "keepalive"},
-                            is_complete=False,
-                        )
-                        wire = encode_agent_chunk_for_wire(
-                            heartbeat_chunk,
-                            response_id=request.request_id,
-                            sequence=-1,  # 心跳使用特殊序列号 -1
-                        )
-                        async with send_lock:
-                            await ws.send(json.dumps(wire, ensure_ascii=False))
-                        logger.info(
-                            "[AgentWebSocketServer] keepalive chunk 发送: request_id=%s",
-                            request.request_id,
-                        )
+                        continue
+                    # 超时：空闲超过心跳间隔，发送 keepalive chunk
+                    heartbeat_chunk = AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=channel_id,
+                        payload={"event_type": "keepalive"},
+                        is_complete=False,
+                    )
+                    wire = encode_agent_chunk_for_wire(
+                        heartbeat_chunk,
+                        response_id=request.request_id,
+                        sequence=-1,  # 心跳使用特殊序列号 -1
+                    )
+                    async with send_lock:
+                        await ws.send(json.dumps(wire, ensure_ascii=False))
+                    logger.info(
+                        "[AgentWebSocketServer] keepalive chunk 发送: request_id=%s",
+                        request.request_id,
+                    )
             except asyncio.CancelledError:
                 pass
+            except WebSocketConnectionClosed:
+                logger.info(
+                    "[AgentWebSocketServer] keepalive 停止，WebSocket 已关闭: request_id=%s",
+                    request.request_id,
+                )
 
         # 启动心跳任务
         heartbeat_task = asyncio.create_task(_heartbeat_loop())
@@ -1673,11 +2131,20 @@ class AgentWebSocketServer:
                     response_id=request.request_id,
                     sequence=chunk_count - 1,
                 )
-                async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                try:
+                    async with send_lock:
+                        await ws.send(json.dumps(wire, ensure_ascii=False))
+                except WebSocketConnectionClosed:
+                    logger.info(
+                        "[AgentWebSocketServer] 流式响应停止，WebSocket 已关闭: request_id=%s",
+                        request.request_id,
+                    )
+                    return
                 # 清除 event，让心跳任务重新开始计时
                 heartbeat_event.clear()
         finally:
+            # 通知 heartbeat_loop 立即退出（即使 stream task 卡在 process_message_stream 中）
+            stream_stop_event.set()
             # 停止心跳任务
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
@@ -1685,9 +2152,13 @@ class AgentWebSocketServer:
                     await heartbeat_task
                 except asyncio.CancelledError:
                     pass
+                except WebSocketConnectionClosed:
+                    pass
             # 清除 session 流式任务追踪（仅清除自身，避免误删后续新任务）
-            if self._session_stream_tasks.get(session_id) is current_task:
-                self._session_stream_tasks.pop(session_id, None)
+            if self._session_stream_tasks.get(session_id) is not None:
+                stored = self._session_stream_tasks[session_id]
+                if isinstance(stored, tuple) and stored[0] is current_task:
+                    self._session_stream_tasks.pop(session_id, None)
 
             # Push plan.mode_exited if exit_plan_mode restored mode during processing
             await self._check_post_process_plan_exit(request, agent)
@@ -2464,16 +2935,26 @@ class AgentWebSocketServer:
             # liveness — fall back to the persisted checkpoint so historical /
             # terminal workflow runs remain queryable after the team session
             # is cancelled or stopped.
-            from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
-                restore_workflow_runs,
-            )
+            try:
+                from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+                    restore_workflow_runs,
+                )
 
-            restored = restore_workflow_runs(session_id)
-            workflows = (
-                [run.to_workflow_run_dict() for run in restored.values()]
-                if restored
-                else []
-            )
+                restored = restore_workflow_runs(session_id)
+                workflows = (
+                    [run.to_workflow_run_dict() for run in restored.values()]
+                    if restored
+                    else []
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[WF_DBG command_workflows] checkpoint restore failed: "
+                    "channel_id=%s session_id=%s error=%s",
+                    channel_id,
+                    session_id,
+                    exc,
+                )
+                workflows = []
             logger.info(
                 "[WF_DBG command_workflows] no live handler, restored from checkpoint: "
                 "channel_id=%s session_id=%s workflows_count=%d",
@@ -2485,11 +2966,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=channel_id,
                 ok=True,
-                payload={
-                    "type": "workflow_run_snapshot",
-                    "workflows": workflows,
-                    "session_id": session_id,
-                },
+                payload=_build_workflow_snapshot_payload(workflows, session_id=session_id),
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
@@ -2515,11 +2992,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=channel_id,
                 ok=True,
-                payload={
-                    "type": "workflow_run_snapshot",
-                    "workflows": snapshot,
-                    "session_id": session_id,
-                },
+                payload=_build_workflow_snapshot_payload(snapshot, session_id=session_id),
             )
         except Exception as e:
             logger.warning(
@@ -2533,7 +3006,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=channel_id,
                 ok=True,
-                payload={"type": "workflow_run_snapshot", "workflows": [], "session_id": session_id},
+                payload=_build_workflow_snapshot_payload([], session_id=session_id),
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
@@ -2541,7 +3014,7 @@ class AgentWebSocketServer:
             await ws.send(json.dumps(wire, ensure_ascii=False))
 
     async def _handle_team_history_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        """一次性返回 team 模式所需的全部历史数据，避免与 history.get 并发竞争。"""
+        """Return a bounded page of team history records for panel restore."""
         params = request.params if isinstance(request.params, dict) else {}
         session_id = params.get("session_id")
         channel_id = request.channel_id or "web"
@@ -2564,13 +3037,60 @@ class AgentWebSocketServer:
         except Exception as exc:  # noqa: BLE001
             logger.warning("[team.history.get] read failed: session_id=%s error=%s", session_id, exc)
             records = []
-        logger.debug("[team.history.get] session_id=%s records=%d", session_id, len(records))
+
+        sanitized_records = [
+            _sanitize_history_record_for_wire(record)
+            for record in records
+            if isinstance(record, dict)
+        ]
+        total = len(sanitized_records)
+        cursor = _coerce_int(
+            params.get("cursor", params.get("offset", 0)),
+            default=0,
+            minimum=0,
+            maximum=max(0, total),
+        )
+        limit = _coerce_int(
+            params.get("limit"),
+            default=_TEAM_HISTORY_DEFAULT_LIMIT,
+            minimum=1,
+            maximum=_TEAM_HISTORY_MAX_LIMIT,
+        )
+        max_bytes = _coerce_int(
+            params.get("max_bytes"),
+            default=_TEAM_HISTORY_DEFAULT_MAX_BYTES,
+            minimum=_TEAM_HISTORY_MIN_MAX_BYTES,
+            maximum=_TEAM_HISTORY_MAX_MAX_BYTES,
+        )
+        page_records, next_cursor = _select_history_record_page(
+            sanitized_records,
+            cursor=cursor,
+            limit=limit,
+            max_bytes=max_bytes,
+            session_id=session_id,
+        )
+        logger.debug(
+            "[team.history.get] session_id=%s total=%d cursor=%d returned=%d next_cursor=%d max_bytes=%d",
+            session_id,
+            total,
+            cursor,
+            len(page_records),
+            next_cursor,
+            max_bytes,
+        )
 
         resp = AgentResponse(
             request_id=request.request_id,
             channel_id=channel_id,
             ok=True,
-            payload={"records": records, "session_id": session_id},
+            payload={
+                "records": page_records,
+                "session_id": session_id,
+                "cursor": cursor,
+                "next_cursor": next_cursor,
+                "has_more": next_cursor < total,
+                "total": total,
+            },
         )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
@@ -4151,8 +4671,8 @@ class AgentWebSocketServer:
                 return project_dir.strip()
         try:
             agent = self._agent_manager.get_agent_nowait(channel_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[command.sandbox] get_agent_nowait failed: %s", exc)
+        except Exception as exc:
+            logger.info("[command.sandbox] get_agent_nowait failed: %s", exc)
             return None
         adapter = self._resolve_adapter(agent)
         if adapter is None:
@@ -4204,6 +4724,22 @@ class AgentWebSocketServer:
             return False
         return bool(getattr(adapter, "_is_code_agent", False))
 
+    @staticmethod
+    def _effective_files_from_adapter(adapter: Any) -> dict[str, list[dict[str, str]]] | None:
+        """Read effective sandbox file mounts from the adapter's active sysop card."""
+        card = getattr(adapter, "_sys_operation_card", None)
+        if card is None:
+            return None
+        gateway_config = getattr(card, "gateway_config", None)
+        launcher = getattr(gateway_config, "launcher_config", None) if gateway_config else None
+        extra_params = getattr(launcher, "extra_params", None) if launcher else None
+        if not isinstance(extra_params, dict):
+            return None
+        policy = extra_params.get("policy")
+        if not isinstance(policy, dict):
+            return None
+        return effective_files_from_policy(policy)
+
     def _attach_effective_sandbox_files(
         self,
         payload: dict[str, Any],
@@ -4212,25 +4748,41 @@ class AgentWebSocketServer:
     ) -> None:
         """Inject ``effective_files`` into the ``/sandbox`` response payload.
 
-        ``effective_files`` summarises what the sandbox will actually grant
-        write access to (and what it will always deny) -- the union of
-        intrinsic agent files / ``daily_memory`` / current project dir plus
-        the user-configured allow list, and jiuwenswarm's own ``config.yaml``
-        plus the user-configured deny list. The TUI ``/sandbox status`` and
-        ``/sandbox files list`` panels render this directly under
-        ``files.allow_write`` / ``files.deny_write`` so the user sees the
-        same set the policy builder would compute at sandbox-start time.
-
-        The project dir reported in ``allow_write`` is sourced from the live
-        adapter (see :meth:`_resolve_active_project_dir`) so the panel
-        matches the user's trusted directory rather than the agent-server's
-        cwd, which is usually ``~/.jiuwenswarm`` and not what the user means
-        by "project".
-
-        Best-effort: failures are logged and swallowed so the underlying
-        sub-command response still goes back to the client.
+        Prefer the filesystem policy cached on the active adapter's sysop card
+        (same payload jiuwenbox uses at exec time). Fall back to a fresh build
+        when no matching agent/sysop exists yet.
         """
         try:
+            project_dir = self._resolve_active_project_dir(channel_id, params)
+            adapter = None
+            try:
+                agent = self._agent_manager.get_agent_nowait(
+                    channel_id,
+                    project_dir=project_dir,
+                )
+            except Exception as exc:
+                logger.debug("[command.sandbox] get_agent_nowait failed: %s", exc)
+                agent = None
+            if agent is not None:
+                adapter = self._resolve_adapter(agent)
+            if adapter is not None:
+                adapter_project_dir = getattr(adapter, "_project_dir", None)
+                if (
+                    project_dir
+                    and adapter_project_dir
+                    and str(adapter_project_dir) != str(project_dir)
+                ):
+                    logger.warning(
+                        "[command.sandbox] project_dir mismatch for effective_files: "
+                        "client=%r adapter=%r",
+                        project_dir,
+                        adapter_project_dir,
+                    )
+                cached = self._effective_files_from_adapter(adapter)
+                if cached is not None:
+                    payload["effective_files"] = cached
+                    return
+
             files_runtime: dict[str, Any] | None = None
             runtime = payload.get("runtime")
             if isinstance(runtime, dict):
@@ -4243,7 +4795,6 @@ class AgentWebSocketServer:
                     files_runtime = files_in_payload
             if files_runtime is None:
                 files_runtime = get_sandbox_runtime().get("files") or {}
-            project_dir = self._resolve_active_project_dir(channel_id, params)
             is_code_agent = self._resolve_active_is_code_agent(channel_id)
             payload["effective_files"] = list_effective_sandbox_files(
                 files_runtime,
@@ -5299,7 +5850,10 @@ class AgentWebSocketServer:
         ordered = list(reversed(restorable))
         start = (page_idx - 1) * page_size
         end = start + page_size
-        page_messages = ordered[start:end]
+        page_messages = [
+            _sanitize_history_record_for_wire(item)
+            for item in ordered[start:end]
+        ]
         logger.debug(
             "[history.get] session_id=%s page_idx=%s raw_total=%s restorable_total=%s total_pages=%s returned=%s",
             normalized_session_id,
