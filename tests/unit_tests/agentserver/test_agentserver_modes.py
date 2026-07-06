@@ -1020,7 +1020,10 @@ def test_process_message_stream_treats_plain_team_query_as_first_request_after_r
 
     chunks = asyncio.run(collect_chunks())
 
-    assert FakeSessionManager.submit_task_calls == ["team-session"]
+    # Ordinary chat (including team first request) is scheduled by the facade
+    # task itself; DeepAgent interaction owns session concurrency, so
+    # SessionManager.submit_task is no longer used on this path.
+    assert FakeSessionManager.submit_task_calls == []
     assert fake_adapter.seen_inputs["query"] == "你好"
     assert chunks[0].payload == {"event_type": "chat.done"}
     assert chunks[-1].is_complete is True

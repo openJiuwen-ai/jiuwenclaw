@@ -23,6 +23,91 @@ class _FakeClient:
         self.frames.append(json.loads(data))
 
 
+def test_web_channel_preserves_goal_structured_payloads():
+    goal = {
+        "goal_id": "goal-1",
+        "session_id": "sess-goal",
+        "objective": "ship it",
+        "status": "active",
+    }
+    messages = [
+        (
+            "goal.snapshot",
+            Message(
+                id="req-goal-get",
+                type="event",
+                channel_id="web",
+                session_id="sess-goal",
+                params={},
+                timestamp=0.0,
+                ok=True,
+                payload={"event_type": "goal.snapshot", "action": "get", "goal": goal},
+                event_type=EventType.GOAL_SNAPSHOT,
+            ),
+            {"event_type": "goal.snapshot", "action": "get", "goal": goal, "session_id": "sess-goal"},
+        ),
+        (
+            "goal.updated",
+            Message(
+                id="req-goal-run",
+                type="event",
+                channel_id="web",
+                session_id="sess-goal",
+                params={},
+                timestamp=0.0,
+                ok=True,
+                payload={"event_type": "goal.updated", "goal": goal},
+                event_type=EventType.GOAL_UPDATED,
+            ),
+            {"event_type": "goal.updated", "goal": goal, "session_id": "sess-goal"},
+        ),
+        (
+            "runtime.accepted",
+            Message(
+                id="req-goal-set",
+                type="event",
+                channel_id="web",
+                session_id="sess-goal",
+                params={},
+                timestamp=0.0,
+                ok=True,
+                payload={"event_type": "runtime.accepted", "request_id": "req-goal-set"},
+                event_type=EventType.RUNTIME_ACCEPTED,
+            ),
+            {"event_type": "runtime.accepted", "request_id": "req-goal-set", "session_id": "sess-goal"},
+        ),
+        (
+            "execution.error",
+            Message(
+                id="req-goal-run",
+                type="event",
+                channel_id="web",
+                session_id="sess-goal",
+                params={},
+                timestamp=0.0,
+                ok=True,
+                payload={
+                    "event_type": "execution.error",
+                    "code": "round_execution_error",
+                    "message": "round failed",
+                    "goal": None,
+                },
+                event_type=EventType.EXECUTION_ERROR,
+            ),
+            {
+                "event_type": "execution.error",
+                "code": "round_execution_error",
+                "message": "round failed",
+                "goal": None,
+                "session_id": "sess-goal",
+            },
+        ),
+    ]
+
+    for event_name, msg, expected in messages:
+        assert WebChannel._build_event_payload(msg, event_name) == expected
+
+
 @pytest.mark.asyncio
 async def test_web_channel_preserves_symphony_status_payload():
     channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())

@@ -509,7 +509,31 @@ class MessageHandler(ABC):
             cls._is_chat_send_message(msg)
             and not cls._is_team_chat_send(msg)
             and not cls._is_interrupt_resume_chat_send(msg)
+            and not cls._is_interaction_managed_chat_send(msg)
         )
+
+    @staticmethod
+    def _is_interaction_managed_chat_send(msg: "Message") -> bool:
+        """Whether this input must reach DeepAgent without host stream replacement.
+
+        Ordinary chat keeps JiuwenSwarm's established replace flow: Gateway
+        finishes the previous host stream before starting the next request.
+        Clients that explicitly set ``input_mode`` / ``runtime_mode`` to
+        ``steer`` or ``follow_up``, or set ``attach_goal=true`` for the second
+        step of goal set/resume, must not cancel the existing host stream —
+        OpenJiuwen routes those inputs atomically while the output consumer
+        remains attached.
+
+        Requests without those fields still cancel-then-start (pre-Goal
+        behavior).
+        """
+        params = msg.params if isinstance(msg.params, dict) else {}
+        if params.get("attach_goal") is True:
+            return True
+        input_mode = str(
+            params.get("input_mode") or params.get("runtime_mode") or ""
+        ).strip().lower()
+        return input_mode in {"follow_up", "steer"}
 
     def _get_channel_default_state(self, channel_id: str) -> ChannelControlState:
         """从 config.yaml 读取 Channel 的默认 session_id / mode."""
@@ -667,11 +691,8 @@ class MessageHandler(ABC):
         running snapshot to all web windows.
 
         Centralizes the pop+broadcast sequence so every cancel/interrupt exit
-        path stays in sync — previously each exit popped tracking but skipped
-        the ``task.global_running`` broadcast, leaving the frontend save-lock
-        stuck on the last advertised value (only self-healing on reconnect).
-        The broadcast is best-effort: failures are logged and never propagate,
-        so they cannot break the surrounding cancel flow.
+        path stays in sync. The broadcast is best-effort and never breaks the
+        surrounding cancel flow.
         """
         for rid in rids:
             self._pop_stream_tracking(rid)
@@ -709,7 +730,15 @@ class MessageHandler(ABC):
         new_session_id: str | None,
         task_session: str | None,
     ) -> bool:
-        """Whether an in-flight stream on *channel_id* should be replaced by a new chat.send."""
+        """Whether an ordinary chat.send replaces this in-flight host stream.
+
+        Same-session ordinary chat preserves the pre-Goal JiuwenSwarm
+        lifecycle: finish/cancel the old request before the new request starts.
+        Runtime-managed Goal input is filtered by
+        ``_should_cancel_existing_stream_before_chat_send`` before this method
+        is reached. ACP additionally replaces an orphan stream from another
+        session because it is a single-user channel.
+        """
         if new_session_id and task_session == new_session_id:
             return True
         return self._is_single_user_channel(channel_id)
@@ -744,8 +773,10 @@ class MessageHandler(ABC):
         """Cancel in-flight stream work on *msg.channel_id* before starting a new chat.send.
 
         Stops both gateway stream consumers and AgentServer work (via interrupt).
-        ACP also drops orphan tasks from other session_ids; TUI/CLI only cancel
-        streams that share the same session_id as the incoming chat.send.
+        Ordinary same-session chat retains the established cancel-then-start
+        ordering. Explicit runtime-managed Goal input bypasses this function;
+        ACP additionally drops orphan work from another session because it is
+        a single-user channel.
         """
         channel_id = msg.channel_id
         new_session_id = msg.session_id
@@ -3230,7 +3261,7 @@ class MessageHandler(ABC):
                     except Exception:
                         logger.debug("Gateway hook UserPromptSubmit failed", exc_info=True)
 
-                # 检查是否是中断请求
+
                 if msg.req_method == ReqMethod.CHAT_ANSWER:
                     answer_payload = msg.params if isinstance(msg.params, dict) else {}
                     is_evolution_approval_answer = self._is_evolution_approval_payload(answer_payload)
@@ -3293,6 +3324,7 @@ class MessageHandler(ABC):
                                 message="已加入队列，等待演进完成",
                             )
                             continue
+
 
                         # 有新输入：取消旧任务 → 保留 todo → 启动新任务（非并发）
 
@@ -3620,42 +3652,7 @@ class MessageHandler(ABC):
                         # （例如 TUI 发送新消息时，旧 session 仍在后台空跑）
                         if self._should_cancel_existing_stream_before_chat_send(msg):
                             await self._cancel_stream_tasks_for_channel(msg)
-                        # 流式处理：启动后台任务
-                        # 通知前端新任务开始处理
-                        emit_processing_status = self._should_emit_processing_status_for_stream(msg)
-                        # 先把 tracking 写入，确保 _send_processing_status → _broadcast_task_global_running()
-                        # 能正确计到此任务；否则飞书等跨通道场景下全局运行态广播会漏计，
-                        # 导致 web 前端保存按钮无法被禁用。
-                        self._stream_emits_processing_status[stream_rid] = emit_processing_status
-                        # _stream_modes 同样须在 _send_processing_status 广播前写入：
-                        # 对话流（emit=True）经 _iter_active_stream_modes() 计入运行态，
-                        # 非对话流（emit=False，如 history.get）登记在此仅供退出清理与路由，
-                        # 不计入运行态计数。两者成对 pop，计数与清理口径一致。
-                        self._stream_modes[stream_rid] = (
-                            msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
-                        )
-                        if emit_processing_status:
-                            await self._send_processing_status(
-                                stream_rid, msg.session_id, msg.channel_id,
-                                is_processing=True, app_id=msg.app_id or "",
-                            )
-                        task = asyncio.create_task(
-                            self.process_stream(
-                                env,
-                                msg.session_id,
-                                msg.metadata,
-                                emit_processing_status=emit_processing_status,
-                            )
-                        )
-                        self._stream_tasks[stream_rid] = task
-                        self._stream_channels[stream_rid] = msg.channel_id
-                        self._stream_sessions[stream_rid] = msg.session_id
-                        self._stream_metadata[stream_rid] = msg.metadata
-                        self._stream_app_ids[stream_rid] = msg.app_id or ""
-                        logger.info(
-                            "[MessageHandler] Stream 任务已启动（后台运行）: request_id=%s channel_id=%s 当前并发=%d",
-                            stream_rid, msg.channel_id, len(self._stream_tasks),
-                        )
+                        await self._start_stream_task(msg, env, stream_rid)
                         # 不 await，让流式任务在后台运行，_forward_loop 继续处理下一个消息
                     elif self._non_stream_rpc_may_run_parallel(env):
                         # 非流式且非聊天：后台执行，避免慢 RPC（如 SkillNet）阻塞队列中的其它请求
@@ -3907,6 +3904,45 @@ class MessageHandler(ABC):
         logger.info(
             "[MessageHandler] 已发送流式任务取消通知: request_id=%s",
             request_id,
+        )
+
+    async def _start_stream_task(
+        self,
+        msg: "Message",
+        env: "E2AEnvelope",
+        stream_rid: str,
+    ) -> None:
+        """Start a Gateway stream consumer and register stream bookkeeping."""
+        emit_processing_status = self._should_emit_processing_status_for_stream(msg)
+        self._stream_emits_processing_status[stream_rid] = emit_processing_status
+        self._stream_modes[stream_rid] = (
+            msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
+        )
+        if emit_processing_status:
+            await self._send_processing_status(
+                stream_rid,
+                msg.session_id,
+                msg.channel_id,
+                is_processing=True,
+                app_id=msg.app_id or "",
+            )
+        task = asyncio.create_task(
+            self.process_stream(
+                env,
+                msg.session_id,
+                msg.metadata,
+                emit_processing_status=emit_processing_status,
+            )
+        )
+        self._stream_tasks[stream_rid] = task
+        self._stream_channels[stream_rid] = msg.channel_id
+        self._stream_sessions[stream_rid] = msg.session_id
+        self._stream_metadata[stream_rid] = msg.metadata
+        self._stream_app_ids[stream_rid] = msg.app_id or ""
+        logger.info(
+            "[MessageHandler] Stream 任务已启动（后台运行）: request_id=%s "
+            "channel_id=%s 当前并发=%d",
+            stream_rid, msg.channel_id, len(self._stream_tasks),
         )
 
     async def _send_interrupt_to_agent(self, env: "E2AEnvelope") -> None:

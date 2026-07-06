@@ -1033,8 +1033,10 @@ class AgentWebSocketServer:
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
-        # session_id → 正在运行的流式 asyncio.Task，用于 interrupt 时精确取消
-        self._session_stream_tasks: dict[str, asyncio.Task] = {}
+        # session_id → all live stream tasks. This is host lifecycle tracking
+        # for interrupt/connection cleanup only; it never decides interaction
+        # output ownership.
+        self._session_stream_tasks: dict[str, dict[asyncio.Task, asyncio.Event]] = {}
         # Scheduler service instance (for scheduled auto_harness tasks)
         self._scheduler_service: Optional[AutoHarnessService] = None
         # Model cache for scheduled task execution (same approach as interface_deep)
@@ -1718,16 +1720,20 @@ class AgentWebSocketServer:
 
                 # 只有 cancel/supplement 才取消流式任务
                 # pause/resume 不取消，因为任务仍在运行（pause 在 checkpoint 阻塞，resume 解除阻塞）
-                stream_task: asyncio.Task | None = None
+                stream_tasks: list[asyncio.Task] = []
                 if intent in ("cancel", "supplement"):
-                    stream_task = self._session_stream_tasks.get(sid)
-                    if stream_task is not None and not stream_task.done():
+                    entries = self._session_stream_tasks.get(sid, {})
+                    for stream_task, stream_stop_event in list(entries.items()):
+                        if stream_task.done():
+                            continue
                         logger.info(
                             "[AgentWebSocketServer] cancel: 终止 session 流式任务: session_id=%s intent=%s",
                             sid,
                             intent,
                         )
+                        stream_stop_event.set()
                         stream_task.cancel()
+                        stream_tasks.append(stream_task)
 
                 try:
                     # 专门处理 cancel，复用已有 agent（不再 fallthrough 到 _handle_unary）
@@ -1738,21 +1744,17 @@ class AgentWebSocketServer:
                         allow_create=not cleanup_after_cancel,
                     )
                 finally:
-                    # 等待被取消的 stream task 完成清理（finally 块中的 heartbeat 取消、
-                    # _session_stream_tasks 清理、plan mode exit 检查等），避免僵尸调用。
-                    if stream_task is not None and not stream_task.done():
-                        try:
-                            await stream_task
-                        except asyncio.CancelledError:
-                            pass
-                        except Exception as exc:
-                            logger.warning(
-                                "[AgentWebSocketServer] cancel: stream task cleanup failed: "
-                                "session_id=%s intent=%s error=%s",
-                                sid,
-                                intent,
-                                exc,
-                            )
+                    if stream_tasks:
+                        results = await asyncio.gather(*stream_tasks, return_exceptions=True)
+                        for result in results:
+                            if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+                                logger.warning(
+                                    "[AgentWebSocketServer] cancel: stream task cleanup failed: "
+                                    "session_id=%s intent=%s error=%s",
+                                    sid,
+                                    intent,
+                                    result,
+                                )
                     if cleanup_after_cancel and intent in ("cancel", "supplement"):
                         await self._cleanup_client_disconnect_session_runtime(request)
                 return
@@ -2312,13 +2314,15 @@ class AgentWebSocketServer:
             request.request_id,
         )
 
+
     async def _handle_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
         channel_id = request.channel_id or "default"
         session_id = request.session_id or "default"
         current_task = asyncio.current_task()
+        stream_stop_event = asyncio.Event()
         if current_task is not None:
-            self._session_stream_tasks[session_id] = current_task
+            self._session_stream_tasks.setdefault(session_id, {})[current_task] = stream_stop_event
 
         # 无状态流式请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
         # code mode 状态管理，直接走 process_message_stream 即可。用轻量 agent 获取，
@@ -2439,10 +2443,12 @@ class AgentWebSocketServer:
                     pass
                 except WebSocketConnectionClosed:
                     pass
-            # 清除 session 流式任务追踪（仅清除自身，避免误删后续新任务）
-            if self._session_stream_tasks.get(session_id) is current_task:
-                self._session_stream_tasks.pop(session_id, None)
-
+            # 清除自身的宿主生命周期记录；同 session 的其它请求不受影响。
+            entries = self._session_stream_tasks.get(session_id)
+            if entries is not None and current_task is not None:
+                entries.pop(current_task, None)
+                if not entries:
+                    self._session_stream_tasks.pop(session_id, None)
             # Push plan.mode_exited if exit_plan_mode restored mode during processing
             await self._check_post_process_plan_exit(request, agent)
 

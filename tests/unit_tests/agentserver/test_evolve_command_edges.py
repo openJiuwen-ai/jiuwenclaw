@@ -439,30 +439,54 @@ def _adapter_ready_for_followup_execution(monkeypatch: pytest.MonkeyPatch) -> Ji
     return adapter
 
 
+def _install_interaction_followup_agent(
+    adapter: JiuWenSwarmDeepAdapter,
+    *,
+    chunk: SimpleNamespace,
+    seen_inputs: list[dict],
+) -> None:
+    """Wire attach_output/send_input so slash follow-up continues into interaction."""
+
+    class _FakeInteractionStream:
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            yield chunk
+
+        async def close(self, *, abort_active_round: bool = False) -> None:
+            return None
+
+    async def _send_input(request) -> None:
+        seen_inputs.append(dict(request.inputs))
+
+    adapter._instance.attach_output = AsyncMock(  # pylint: disable=protected-access
+        return_value=_FakeInteractionStream()
+    )
+    adapter._instance.send_input = AsyncMock(  # pylint: disable=protected-access
+        side_effect=_send_input
+    )
+
+
 @pytest.mark.anyio
 async def test_agent_non_stream_slash_followup_continues_into_runner(monkeypatch):
     adapter = _adapter_ready_for_followup_execution(monkeypatch)
     seen_inputs: list[dict] = []
+    _install_interaction_followup_agent(
+        adapter,
+        chunk=SimpleNamespace(type="llm_output", payload={"content": "agent completed"}),
+        seen_inputs=seen_inputs,
+    )
 
-    async def _fake_slash_command(_query, _session_id, _mode):
+    async def _fake_slash_command(_query, _session_id, _mode, channel_id=None):
+        _ = channel_id
         return {
             "action": "run_evolve_followup",
             "followup_prompt": "review and evolve code-runner",
             "result_type": "followup",
         }
 
-    class _FakeRunner:
-        @staticmethod
-        async def run_agent(agent, inputs):
-            assert adapter._instance is not None  # pylint: disable=protected-access
-            seen_inputs.append(dict(inputs))
-            return "agent completed"
-
     monkeypatch.setattr(adapter, "_handle_slash_command", _fake_slash_command)
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.Runner",
-        _FakeRunner,
-    )
 
     response = await adapter.process_message_impl(
         AgentRequest(
@@ -485,26 +509,21 @@ async def test_agent_non_stream_slash_followup_continues_into_runner(monkeypatch
 async def test_agent_stream_slash_followup_continues_into_runner(monkeypatch):
     adapter = _adapter_ready_for_followup_execution(monkeypatch)
     seen_inputs: list[dict] = []
+    _install_interaction_followup_agent(
+        adapter,
+        chunk=SimpleNamespace(type="llm_output", payload={"content": "agent delta"}),
+        seen_inputs=seen_inputs,
+    )
 
-    async def _fake_slash_command(_query, _session_id, _mode):
+    async def _fake_slash_command(_query, _session_id, _mode, channel_id=None):
+        _ = channel_id
         return {
             "action": "run_simplify_followup",
             "followup_prompt": "review and simplify code-runner",
             "result_type": "followup",
         }
 
-    class _FakeRunner:
-        @staticmethod
-        async def run_agent_streaming(agent, inputs):
-            assert adapter._instance is not None  # pylint: disable=protected-access
-            seen_inputs.append(dict(inputs))
-            yield SimpleNamespace(type="llm_output", payload={"content": "agent delta"})
-
     monkeypatch.setattr(adapter, "_handle_slash_command", _fake_slash_command)
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.Runner",
-        _FakeRunner,
-    )
 
     chunks = []
     async for chunk in adapter.process_message_stream_impl(
