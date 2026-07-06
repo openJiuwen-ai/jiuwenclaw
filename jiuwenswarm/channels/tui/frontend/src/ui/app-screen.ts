@@ -2313,10 +2313,16 @@ export class AppScreen implements Component, Focusable {
     // can use the same physical keys.
     // Exception: app:toggleTranscript (ctrl+o) is allowed even when overlays are
     // open, so users can fold/unfold the transcript behind the overlay.
+    const globalAction = resolveAction("Global", data);
     const skipGlobalMainScreenKeys = hasOverlay || this.showTeamPanel;
+    const allowGlobalAction =
+      !skipGlobalMainScreenKeys ||
+      globalAction === "app:toggleTranscript" ||
+      (this.showTeamPanel && !hasOverlay && globalAction === "app:toggleTeamPanel");
     let handled = false;
-    if (!skipGlobalMainScreenKeys || resolveAction("Global", data) === "app:toggleTranscript") {
-      const isToggleTranscript = resolveAction("Global", data) === "app:toggleTranscript";
+    if (allowGlobalAction) {
+      const isToggleTranscript = globalAction === "app:toggleTranscript";
+      const isToggleTeamPanel = globalAction === "app:toggleTeamPanel";
       handled = handleAppScreenKeyInput(data, {
         interruptTask: () => this.interruptTask(),
         exitApp: () => this.exit(),
@@ -2384,7 +2390,7 @@ export class AppScreen implements Component, Focusable {
       // but handleAppScreenKeyInput only returns true when skipGlobalMainScreenKeys
       // is false (it matches Global context via keymap.ts). So we trust the
       // delegate callback has run and mark it handled ourselves.
-      if (handled || isToggleTranscript) {
+      if (handled || isToggleTranscript || isToggleTeamPanel) {
         return;
       }
     }
