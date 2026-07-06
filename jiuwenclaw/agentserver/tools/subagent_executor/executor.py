@@ -981,6 +981,8 @@ Approach each task methodically and deliver high-quality results.
             enable_task_loop=False,
             enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
             auto_create_workspace=False,
+            restrict_to_work_dir=True,
+            allowed_paths=[ws, *[str(p) for p in get_agent_registered_skill_dirs()]],
         )
 
         self._inherit_tools_for_spawn(spawn_agent)
@@ -1164,6 +1166,8 @@ Execute the given task using inherited context and available tools.
             enable_task_loop=False,
             enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
             auto_create_workspace=False,
+            restrict_to_work_dir=True,
+            allowed_paths=[ws, *[str(p) for p in get_agent_registered_skill_dirs()]],
         )
 
         self._inherit_tools_for_fork(fork_agent)
