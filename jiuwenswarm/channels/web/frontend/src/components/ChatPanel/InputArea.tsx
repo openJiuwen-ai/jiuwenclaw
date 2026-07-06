@@ -88,6 +88,10 @@ function getProjectLabel(project: ProjectInfo | null, fallback: string): string 
   return project ? project.name : fallback;
 }
 
+function isDefaultProject(project: ProjectInfo): boolean {
+  return project.is_default || project.project_id === 'default';
+}
+
 interface InputAreaProps {
   onSubmit: (content: string) => void;
   onInterrupt: (newInput?: string) => void;
@@ -141,6 +145,7 @@ export function InputArea({
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const isPaused = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isPaused ?? false);
   const queuePaused = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.queuePaused ?? false);
+  const isLoadingHistory = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isLoadingHistory ?? false);
   const inputValue = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.inputValue ?? '');
   const evolutionStatus = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.evolutionStatus ?? null);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
@@ -196,22 +201,31 @@ export function InputArea({
     setComposerSuggestionIndex((index) => Math.min(index, composerSuggestionItems.length - 1));
   }, [composerSuggestionItems.length]);
 
+  const selectableProjects = useMemo(
+    () => projects.filter((project) => !isDefaultProject(project)),
+    [projects],
+  );
+
   const filteredProjects = useMemo(() => {
     const keyword = projectSearch.trim().toLowerCase();
-    if (!keyword) return projects;
-    return projects.filter((project) => (
+    if (!keyword) return selectableProjects;
+    return selectableProjects.filter((project) => (
       project.name.toLowerCase().includes(keyword)
       || project.project_path.toLowerCase().includes(keyword)
     ));
-  }, [projectSearch, projects]);
+  }, [projectSearch, selectableProjects]);
 
   const displayedProject = useMemo<ProjectInfo | null>(() => {
+    if (activeSession?.project_id && activeSession.project_id !== 'default') {
+      const matched = projects.find((project) => project.project_id === activeSession.project_id);
+      if (matched && !isDefaultProject(matched)) return matched;
+    }
     if (activeSession?.project_path) {
       const matched = projects.find((project) => project.project_path === activeSession.project_path);
-      if (matched) return matched;
+      if (matched && !isDefaultProject(matched)) return matched;
       const path = activeSession.project_path || '';
       return {
-        project_id: path || 'default',
+        project_id: activeSession.project_id || path,
         project_path: path,
         name: path.split('/').filter(Boolean).pop() || t('multiSession.project.projects'),
         pinned: false,
@@ -225,7 +239,7 @@ export function InputArea({
       };
     }
     return selectedProject;
-  }, [activeSession, projects, selectedProject]);
+  }, [activeSession, projects, selectedProject, t]);
 
   const {
     isListening,
@@ -461,7 +475,7 @@ export function InputArea({
   const trimmedDraft = (inputValue + pendingVoiceText).trim();
   const hasDraft = trimmedDraft.length > 0 || isListening;
   const showStop = isProcessing && !isPaused && !hasDraft;
-  const canSubmit = hasDraft || showStop;
+  const canSubmit = showStop || (hasDraft && !isLoadingHistory);
 
   const handleSendButtonClick = useCallback(() => {
     if (showStop) {
@@ -1125,8 +1139,8 @@ export function InputArea({
               </span>
             ) : null}
             {workMenuOpen === 'project' && !isWorkContextLocked ? (
-              <div className={clsx('chat-work-select__menu', projects.length > 0 && 'chat-work-select__menu--projects')} role="menu">
-                {projects.length === 0 ? (
+              <div className={clsx('chat-work-select__menu', selectableProjects.length > 0 && 'chat-work-select__menu--projects')} role="menu">
+                {selectableProjects.length === 0 ? (
                   <ProjectCreateMenu
                     onCreate={(mode) => {
                       setProjectCreateMode(mode);

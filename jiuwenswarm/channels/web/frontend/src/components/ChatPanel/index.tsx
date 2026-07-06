@@ -36,6 +36,7 @@ export interface ChatHistoryPagerProps {
   loadedPages: number;
   totalPages: number;
   loadingMore: boolean;
+  prepending?: boolean;
   onLoadMore: () => void | Promise<void>;
 }
 
@@ -52,6 +53,8 @@ interface ChatPanelProps {
   sessionTitle?: string;
   /** 自会话管理恢复历史后出现；支持分页加载更早消息 */
   historyPager?: ChatHistoryPagerProps | null;
+  /** 历史会话首屏恢复中：保持聊天布局，避免短暂退回欢迎态 */
+  isHistoryRestoring?: boolean;
   /** 右侧面板展开状态：展开时隐藏对话框上方的活跃成员 */
   teamAreaExpanded?: boolean;
   autoFocusKey?: string | null;
@@ -403,6 +406,18 @@ function getShareExportTitle(
   return t('share.export');
 }
 
+const SCROLL_BOTTOM_THRESHOLD_PX = 40;
+const LOAD_OLDER_THRESHOLD_PX = 8;
+const VISIBILITY_RESTORE_SCROLL_SUPPRESS_MS = 300;
+
+function isScrollAtBottom(el: HTMLDivElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_BOTTOM_THRESHOLD_PX;
+}
+
+function scrollToBottom(el: HTMLDivElement): void {
+  el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+}
+
 export function ChatPanel({
   onSendMessage,
   onInterrupt,
@@ -415,6 +430,7 @@ export function ChatPanel({
   canExportShare = false,
   sessionTitle,
   historyPager = null,
+  isHistoryRestoring = false,
   teamAreaExpanded = false,
   autoFocusKey = null,
   onNavigateToSkills,
@@ -430,14 +446,38 @@ export function ChatPanel({
   const contextCompressionRuntime = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRuntime);
   const contextCompressionSummary = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionSummary);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const prependScrollSnapRef = useRef<{ sh: number; st: number } | null>(null);
-  const wasHistoryLoadingRef = useRef(false);
+  const historyLayoutSnapshotRef = useRef<{
+    sessionId: string;
+    loadedPages: number;
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
   const suppressNextScrollToEndRef = useRef(false);
+  const stickToBottomUntilStableRef = useRef(false);
   const [isSending, setIsSending] = React.useState(false);
   const hasTimelineContent = messages.length > 0 || toolExecutionOrder.length > 0;
-  const hasConversation = Boolean(historyPager || hasTimelineContent);
+  const hasConversation = Boolean(isHistoryRestoring || historyPager || hasTimelineContent);
+  const historyLoadedPages = historyPager?.loadedPages ?? 0;
+  const historyTotalPages = historyPager?.totalPages ?? 0;
+  const historyLoadingMore = historyPager?.loadingMore ?? false;
+  const historyPrepending = historyPager?.prepending ?? false;
+  const historyOnLoadMore = historyPager?.onLoadMore;
+  const hasHistoryPager = Boolean(historyPager);
+  const canLoadOlderHistory = Boolean(
+    historyOnLoadMore &&
+    historyLoadedPages < historyTotalPages &&
+    !historyLoadingMore &&
+    !historyPrepending
+  );
+  const showHistoryPager = Boolean(
+    !isHistoryRestoring &&
+    historyPager && (
+      historyLoadingMore ||
+      historyLoadedPages < historyTotalPages ||
+      !hasTimelineContent
+    )
+  );
   const chatContentClassName = hasConversation
     ? `chat-content${mode === 'team' ? ' chat-content--team' : ''}`
     : 'chat-content chat-content--welcome';
@@ -450,76 +490,209 @@ export function ChatPanel({
 
   // 跟踪用户是否正在查看历史消息（不在底部）
   const userScrolledUpRef = useRef(false);
+  // 跟踪上一个 sessionId，切换 session 时需要恢复或重置滚动状态
+  const lastSessionIdRef = useRef<string>(activeSessionId ?? '');
+  // 记忆每个访问过的 session 的滚动位置
+  const sessionScrollTopMapRef = useRef<Map<string, number>>(new Map());
+  // 记录 tab 从隐藏恢复为可见的时间，用于抑制恢复后的自动滚底
+  const visibilityRestoredAtRef = useRef<number>(0);
+
+  const rememberSessionScrollTop = useCallback((sessionId: string, el: HTMLDivElement) => {
+    if (sessionId) {
+      sessionScrollTopMapRef.current.set(sessionId, el.scrollTop);
+    }
+  }, []);
+
+  const updateHistoryLayoutSnapshot = useCallback((sessionId: string, el: HTMLDivElement) => {
+    historyLayoutSnapshotRef.current = {
+      sessionId,
+      loadedPages: historyLoadedPages,
+      scrollHeight: el.scrollHeight,
+      scrollTop: el.scrollTop,
+    };
+  }, [historyLoadedPages]);
+
+  const restoreSessionScrollTop = useCallback((sessionId: string, el: HTMLDivElement): boolean => {
+    const savedScrollTop = sessionScrollTopMapRef.current.get(sessionId);
+    if (savedScrollTop === undefined) {
+      return false;
+    }
+
+    el.scrollTop = savedScrollTop;
+    const atBottom = isScrollAtBottom(el);
+    userScrolledUpRef.current = !atBottom;
+    stickToBottomUntilStableRef.current = atBottom;
+    updateHistoryLayoutSnapshot(sessionId, el);
+    return true;
+  }, [updateHistoryLayoutSnapshot]);
 
   // 检测用户滚动位置
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
-    
-    // 检查是否在底部（有 40px 的阈值）
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+
+    const atBottom = isScrollAtBottom(el);
     userScrolledUpRef.current = !atBottom;
-    
-    // 当滚动到顶部且有更多历史消息时，加载更多
-    if (el.scrollTop <= 8 && historyPager && historyPager.loadedPages < historyPager.totalPages && !historyPager.loadingMore) {
-      void historyPager.onLoadMore();
+    if (!atBottom) {
+      stickToBottomUntilStableRef.current = false;
     }
-  }, [historyPager]);
+
+    const currentSessionId = activeSessionId ?? '';
+    rememberSessionScrollTop(currentSessionId, el);
+
+    // 当滚动到顶部且有更多历史消息时，加载更多
+    if (el.scrollTop <= LOAD_OLDER_THRESHOLD_PX && canLoadOlderHistory && historyOnLoadMore) {
+      void historyOnLoadMore();
+    }
+  }, [activeSessionId, canLoadOlderHistory, historyOnLoadMore, rememberSessionScrollTop]);
+
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    const content = el?.firstElementChild;
+    if (!el || !content || typeof ResizeObserver === 'undefined') return;
+
+    if (stickToBottomUntilStableRef.current && !userScrolledUpRef.current) {
+      scrollToBottom(el);
+    }
+
+    const observer = new ResizeObserver(() => {
+      if (historyLoadingMore || historyPrepending) return;
+      if (!stickToBottomUntilStableRef.current || userScrolledUpRef.current) return;
+      scrollToBottom(el);
+      updateHistoryLayoutSnapshot(activeSessionId ?? '', el);
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [
+    activeSessionId,
+    historyLoadingMore,
+    historyPrepending,
+    updateHistoryLayoutSnapshot,
+  ]);
 
   // 检测鼠标滚轮事件，即使没有滚动条也能触发加载更多
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     // 只有向上滚动时才触发
-    if (e.deltaY < 0 && historyPager && historyPager.loadedPages < historyPager.totalPages && !historyPager.loadingMore) {
+    if (e.deltaY < 0) {
+      stickToBottomUntilStableRef.current = false;
+    }
+    if (e.deltaY < 0 && canLoadOlderHistory && historyOnLoadMore) {
       // 检查是否已经在顶部（没有滚动条时 scrollTop 始终为 0）
       const el = scrollContainerRef.current;
-      if (el && el.scrollTop <= 8) {
-        void historyPager.onLoadMore();
+      if (el && el.scrollTop <= LOAD_OLDER_THRESHOLD_PX) {
+        void historyOnLoadMore();
       }
     }
-  }, [historyPager]);
+  }, [canLoadOlderHistory, historyOnLoadMore]);
 
+  // 监听浏览器 tab 可见性变化：隐藏时记录位置，恢复可见时抑制自动滚底
   useEffect(() => {
+    const handleVisibilityChange = () => {
+      const el = scrollContainerRef.current;
+      const currentSessionId = activeSessionId ?? '';
+      if (document.hidden) {
+        if (el) {
+          rememberSessionScrollTop(currentSessionId, el);
+        }
+      } else {
+        visibilityRestoredAtRef.current = Date.now();
+        if (el) {
+          restoreSessionScrollTop(currentSessionId, el);
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [activeSessionId, rememberSessionScrollTop, restoreSessionScrollTop]);
+
+  useLayoutEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+
+    const snapshot = historyLayoutSnapshotRef.current;
+    const currentSessionId = activeSessionId ?? '';
+
+    if (
+      lastSessionIdRef.current === currentSessionId &&
+      hasHistoryPager &&
+      snapshot &&
+      snapshot.sessionId === currentSessionId &&
+      snapshot.loadedPages > 0 &&
+      historyLoadedPages > snapshot.loadedPages
+    ) {
+      const delta = el.scrollHeight - snapshot.scrollHeight;
+      if (delta !== 0) {
+        el.scrollTop = snapshot.scrollTop + delta;
+        suppressNextScrollToEndRef.current = true;
+      }
+    }
+
+    updateHistoryLayoutSnapshot(currentSessionId, el);
+  }, [
+    activeSessionId,
+    hasHistoryPager,
+    historyLoadedPages,
+    messages.length,
+    toolExecutionOrder.length,
+    updateHistoryLayoutSnapshot,
+  ]);
+
+  useLayoutEffect(() => {
+    const currentSessionId = activeSessionId ?? '';
+    const el = scrollContainerRef.current;
+    if (!el) return;
+
+    // 切换 session 时恢复记忆位置；第一次访问则默认滚到底部
+    if (lastSessionIdRef.current !== currentSessionId) {
+      // 位置已经在 handleScroll / render 阶段记录，这里只恢复目标 session 的位置
+      const restoredScrollTop = restoreSessionScrollTop(currentSessionId, el);
+      if (!restoredScrollTop) {
+        // 第一次访问该 session，从底部开始
+        userScrolledUpRef.current = false;
+        stickToBottomUntilStableRef.current = true;
+        scrollToBottom(el);
+        updateHistoryLayoutSnapshot(currentSessionId, el);
+      }
+
+      lastSessionIdRef.current = currentSessionId;
+      return;
+    }
+
+    if (historyLoadingMore || historyPrepending) {
+      return;
+    }
+
     if (suppressNextScrollToEndRef.current) {
       suppressNextScrollToEndRef.current = false;
       return;
     }
-    
+
+    // tab 重新可见后 300ms 内不自动滚底，避免切回时被状态更新拉到底部
+    if (Date.now() - visibilityRestoredAtRef.current < VISIBILITY_RESTORE_SCROLL_SUPPRESS_MS) {
+      return;
+    }
+
     // 只有当用户在底部时才自动滚动
     if (!userScrolledUpRef.current) {
-      messagesEndRef.current?.scrollIntoView({
-        behavior: historyPager?.loadedPages === 1 ? 'auto' : 'smooth',
-      });
-    }
-  }, [messages, isThinking, contextCompressionRuntime, contextCompressionSummary, historyPager]);
-
-  useLayoutEffect(() => {
-    if (!historyPager) {
-      wasHistoryLoadingRef.current = false;
-      prependScrollSnapRef.current = null;
-      return;
-    }
-    const el = scrollContainerRef.current;
-    if (!el) return;
-
-    if (historyPager.loadingMore) {
-      if (!wasHistoryLoadingRef.current) {
-        prependScrollSnapRef.current = { sh: el.scrollHeight, st: el.scrollTop };
+      const el = scrollContainerRef.current;
+      if (el) {
+        stickToBottomUntilStableRef.current = true;
+        scrollToBottom(el);
+        updateHistoryLayoutSnapshot(activeSessionId ?? '', el);
       }
-      wasHistoryLoadingRef.current = true;
-      return;
     }
-
-    if (wasHistoryLoadingRef.current && prependScrollSnapRef.current) {
-      const snap = prependScrollSnapRef.current;
-      const delta = el.scrollHeight - snap.sh;
-      if (delta > 0) {
-        el.scrollTop = snap.st + delta;
-        suppressNextScrollToEndRef.current = true;
-      }
-      prependScrollSnapRef.current = null;
-    }
-    wasHistoryLoadingRef.current = false;
-  }, [historyPager, messages.length]);
+  }, [
+    activeSessionId,
+    messages,
+    isThinking,
+    contextCompressionRuntime,
+    contextCompressionSummary,
+    historyLoadedPages,
+    historyLoadingMore,
+    historyPrepending,
+    updateHistoryLayoutSnapshot,
+  ]);
 
   // 包装发送消息函数，添加滚动逻辑
   const handleSendMessage = useCallback((content: string) => {
@@ -530,11 +703,16 @@ export function ChatPanel({
   // 当发送消息时强制滚动到底部
   useEffect(() => {
     if (isSending) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      const el = scrollContainerRef.current;
+      if (el) {
+        scrollToBottom(el);
+        updateHistoryLayoutSnapshot(activeSessionId ?? '', el);
+      }
       userScrolledUpRef.current = false;
+      stickToBottomUntilStableRef.current = true;
       setIsSending(false);
     }
-  }, [isSending]);
+  }, [activeSessionId, isSending, updateHistoryLayoutSnapshot]);
 
   const handleSuggestion = useCallback(
     (text: string) => handleSendMessage(text),
@@ -590,7 +768,7 @@ export function ChatPanel({
         <div className={chatContentClassName}>
           {hasConversation ? (
             <>
-              {historyPager && (
+              {showHistoryPager && historyPager && (
                 <HistoryPagerBar
                   loadedPages={historyPager.loadedPages}
                   totalPages={historyPager.totalPages}
@@ -650,7 +828,7 @@ export function ChatPanel({
               </div>
             </div>
           )}
-          <div ref={messagesEndRef} />
+          <div />
         </div>
       </div>
 

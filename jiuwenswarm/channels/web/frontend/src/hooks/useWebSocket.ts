@@ -35,6 +35,7 @@ import {
   useTodoStore,
   useSessionStore,
   useHarnessStore,
+  useWorkspaceStore,
 } from '../stores';
 import type { TeamTask, TeamTaskStatus } from '../stores/sessionStore';
 import { webClient } from '../services/webClient';
@@ -1910,6 +1911,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           typeof payload.session_id === 'string' ? payload.session_id : '';
         if (!sessionId) return;
         updateSession(sessionId, payload as Partial<Session>);
+        useWorkspaceStore.getState().patchSession(sessionId, payload as Partial<Session>);
         if (typeof payload.mode === 'string') {
           useSessionStore.getState().setMode(sessionId, normalizeAgentMode(payload.mode));
         }
@@ -1933,10 +1935,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           return;
         }
         useChatStore.getState().setProcessing(sessionId, isProcessingNow);
-        updateSession(sessionId, {
+        const sessionPatch: Partial<Session> = {
           is_processing: isProcessingNow,
           updated_at: new Date().toISOString(),
-        });
+        };
+        updateSession(sessionId, sessionPatch);
+        useWorkspaceStore.getState().patchSession(sessionId, sessionPatch);
         if (!isProcessingNow) {
           useChatStore.getState().setThinking(sessionId, false);
           useChatStore.getState().clearSubtasks(sessionId);
@@ -2040,6 +2044,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
         useChatStore.getState().setExecutionError(sessionId, errorMsg);
         onErrorRef.current?.(errorMsg);
+        useChatStore.getState().setSessionError(sessionId, errorMsg);
         useChatStore.getState().addMessage(sessionId, {
           id: `error-${Date.now()}`,
           role: 'system',

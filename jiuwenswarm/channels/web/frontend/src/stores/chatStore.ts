@@ -80,6 +80,9 @@ export interface ChatRuntime {
   isNewSession: boolean;
   currentStreamContent: string;
   currentStreamId: string | null;
+  messageRenderKeySeq: number;
+  /** 最近一次 chat.error 的错误信息，用于会话列表展示异常标记 */
+  error: string | null;
   streamBuffers: Map<string, string>;
   activeSubtasks: Map<string, SubtaskState>;
   toolExecutions: Map<string, ToolExecution>;
@@ -117,6 +120,8 @@ function createEmptyRuntime(): ChatRuntime {
     isNewSession: false,
     currentStreamContent: '',
     currentStreamId: null,
+    messageRenderKeySeq: 0,
+    error: null,
     streamBuffers: new Map(),
     activeSubtasks: new Map(),
     toolExecutions: new Map(),
@@ -137,6 +142,26 @@ function createEmptyRuntime(): ChatRuntime {
   };
 }
 
+function assignMessageRenderKeys(
+  runtime: ChatRuntime,
+  messages: Message[]
+): { messages: Message[]; messageRenderKeySeq: number } {
+  let messageRenderKeySeq = runtime.messageRenderKeySeq;
+  return {
+    messages: messages.map((message) => {
+      if (message.renderKey) {
+        return message;
+      }
+      messageRenderKeySeq += 1;
+      return {
+        ...message,
+        renderKey: `message-${messageRenderKeySeq}`,
+      };
+    }),
+    messageRenderKeySeq,
+  };
+}
+
 interface ChatState {
   runtimes: Record<string, ChatRuntime>;
   activeSessionId: string | null;
@@ -147,6 +172,7 @@ interface ChatState {
   removeRuntime: (sessionId: string) => void;
 
   addMessage: (sessionId: string, message: Message) => void;
+  replaceHistoryMessages: (sessionId: string, messages: Message[]) => void;
   updateMessage: (sessionId: string, id: string, updates: Partial<Message>) => void;
   appendStreamContent: (sessionId: string, content: string, streamKey?: string) => void;
   startStreaming: (sessionId: string, messageId: string, streamKey?: string) => void;
@@ -176,6 +202,7 @@ interface ChatState {
   reorderTaskQueue: (sessionId: string, fromIndex: number, toIndex: number) => void;
   setPendingQuestion: (sessionId: string, question: AskUserQuestionPayload | null) => void;
   setInputValue: (sessionId: string, value: string) => void;
+  setSessionError: (sessionId: string, error: string | null) => void;
   setUsageSummary: (sessionId: string, messageId: string, usage: UsageSummary) => void;
   addFileItems: (sessionId: string, files: FileDownloadItem[]) => void;
   setContextCompressionStatus: (
@@ -228,12 +255,56 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
+      const { messages, messageRenderKeySeq } = assignMessageRenderKeys(runtime, [message]);
       return {
         runtimes: {
           ...state.runtimes,
           [sessionId]: {
             ...runtime,
-            messages: [...runtime.messages, message],
+            messages: [...runtime.messages, ...messages],
+            messageRenderKeySeq,
+          },
+        },
+      };
+    });
+  },
+
+  replaceHistoryMessages: (sessionId, messages) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.evolutionStatusClearTimer) {
+        clearTimeout(runtime.evolutionStatusClearTimer);
+      }
+      const assigned = assignMessageRenderKeys(runtime, messages);
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: assigned.messages,
+            messageRenderKeySeq: assigned.messageRenderKeySeq,
+            currentStreamContent: '',
+            currentStreamId: null,
+            streamBuffers: new Map(),
+            evolutionStatus: null,
+            evolutionStatusClearTimer: null,
+            isPaused: false,
+            pausedTask: null,
+            interruptResult: null,
+            switchingMode: false,
+            activeSubtasks: new Map(),
+            toolExecutions: new Map(),
+            toolExecutionOrder: [],
+            orphanResults: new Map(),
+            contextCompressionRuntime: undefined,
+            contextCompressionSummary: undefined,
+            toolMetrics: {
+              toolCallDedupDropped: 0,
+              toolResultDedupDropped: 0,
+            },
+            taskQueue: [],
+            pendingQuestion: null,
           },
         },
       };
@@ -362,7 +433,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ...runtime,
             isProcessing: status,
             executionError: status ? null : runtime.executionError,
+            ...(status ? { error: null } : {}),
           },
+        },
+      };
+    });
+  },
+
+  setSessionError: (sessionId, error) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, error },
         },
       };
     });
@@ -913,12 +998,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
+      const assigned = assignMessageRenderKeys(runtime, olderFirst);
       return {
         runtimes: {
           ...state.runtimes,
           [sessionId]: {
             ...runtime,
-            messages: [...olderFirst, ...runtime.messages],
+            messages: [...assigned.messages, ...runtime.messages],
+            messageRenderKeySeq: assigned.messageRenderKeySeq,
           },
         },
       };

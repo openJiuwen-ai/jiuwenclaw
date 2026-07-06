@@ -38,6 +38,7 @@ const RELATIVE_TIME_REFRESH_MS = 60_000;
 
 export type NewConversationOptions = {
   preserveProject?: boolean;
+  project?: Pick<ProjectInfo, 'project_id' | 'project_path'>;
 };
 
 function isDefaultProject(project: ProjectInfo): boolean {
@@ -45,7 +46,6 @@ function isDefaultProject(project: ProjectInfo): boolean {
 }
 
 interface ConversationSidebarProps {
-  sessions: Session[];
   activeSessionId: string | null;
   onNew: (options?: NewConversationOptions) => void;
   onSelect: (session: Session) => void;
@@ -167,7 +167,8 @@ function ConversationListItem({
   const itemRef = useRef<HTMLDivElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const title = getSessionTitle(session, t('multiSession.untitled'));
-  const indicator = getSessionIndicator(runtime, unread, session.is_processing === true, Boolean(runtime?.executionError));
+  const errorMessage = runtime?.error || runtime?.executionError || null;
+  const indicator = getSessionIndicator(runtime, unread, session.is_processing === true, Boolean(errorMessage));
   const deleteDisabled = indicator === 'processing' || indicator === 'waiting';
 
   let status: React.ReactNode;
@@ -183,7 +184,7 @@ function ConversationListItem({
     status = <span className="conversation-list-item__status-dot" title={t('multiSession.completedUnread')} aria-hidden="true" />;
   } else if (indicator === 'error') {
     status = (
-      <span title={getTaskStatusLabel(indicator, t)}>
+      <span title={errorMessage ?? getTaskStatusLabel(indicator, t)}>
         <CircleAlert className="conversation-list-item__status-error" size={14} strokeWidth={1.8} aria-hidden="true" />
       </span>
     );
@@ -256,9 +257,17 @@ function ConversationListItem({
           disabledActions={deleteDisabled ? ['delete'] : []}
           onAction={(action) => {
             setMenuOpen(false);
-            if (action === 'pin') onPin();
-            if (action === 'rename') onRename();
-            if (action === 'delete') onDelete();
+            switch (action) {
+              case 'pin':
+                onPin();
+                break;
+              case 'rename':
+                onRename();
+                break;
+              case 'delete':
+                onDelete();
+                break;
+            }
           }}
         />
       ) : null}
@@ -355,9 +364,17 @@ function ProjectEntityRow({
           items={getProjectMenuItems(Boolean(isPinned), t)}
           onAction={(action) => {
             setMenuOpen(false);
-            if (action === 'pin') onPin();
-            if (action === 'rename') onRename();
-            if (action === 'delete') onRemove();
+            switch (action) {
+              case 'pin':
+                onPin();
+                break;
+              case 'rename':
+                onRename();
+                break;
+              case 'delete':
+                onRemove();
+                break;
+            }
           }}
         />
       ) : null}
@@ -423,8 +440,14 @@ function ProjectAddMenu({
     <div className="conversation-sidebar__add-menu" role="menu">
       <ProjectCreateMenu
         onCreate={(mode) => {
-          if (mode === 'blank') onCreateBlank();
-          if (mode === 'existing') onSelectExisting();
+          switch (mode) {
+            case 'blank':
+              onCreateBlank();
+              break;
+            case 'existing':
+              onSelectExisting();
+              break;
+          }
         }}
         itemClassName="conversation-list-item__menu-item"
         blankIcon={<img src={addProjectIcon} alt="" aria-hidden="true" />}
@@ -521,7 +544,6 @@ type RenameTarget =
   | { kind: 'session'; id: string; value: string };
 
 export function ConversationSidebar({
-  sessions,
   activeSessionId,
   onNew,
   onSelect,
@@ -567,19 +589,6 @@ export function ConversationSidebar({
     const timer = window.setInterval(() => setRelativeTimeNow(Date.now()), RELATIVE_TIME_REFRESH_MS);
     return () => window.clearInterval(timer);
   }, []);
-
-  useEffect(() => {
-    const { snapshot, completedInBackground } = getProcessingTransitions(
-      previousProcessing.current,
-      sessions,
-      runtimes,
-      activeSessionId,
-    );
-    previousProcessing.current = snapshot;
-    if (completedInBackground.length > 0) {
-      setUnreadSessions((current) => new Set([...current, ...completedInBackground]));
-    }
-  }, [activeSessionId, runtimes, sessions]);
 
   useEffect(() => {
     if (!activeSessionId) return;
@@ -647,6 +656,31 @@ export function ConversationSidebar({
     return [];
   }, [defaultProject, sortedProjectSessions]);
   const orderedPinnedSessions = useMemo(() => sortSessionsForSidebar(pinnedSessions), [pinnedSessions]);
+  const observedSidebarSessions = useMemo(() => {
+    const byId = new Map<string, Session>();
+    for (const session of orderedPinnedSessions) {
+      byId.set(session.session_id, session);
+    }
+    for (const list of Object.values(sortedProjectSessions)) {
+      for (const session of list) {
+        byId.set(session.session_id, session);
+      }
+    }
+    return Array.from(byId.values());
+  }, [orderedPinnedSessions, sortedProjectSessions]);
+
+  useEffect(() => {
+    const { snapshot, completedInBackground } = getProcessingTransitions(
+      previousProcessing.current,
+      observedSidebarSessions,
+      runtimes,
+      activeSessionId,
+    );
+    previousProcessing.current = snapshot;
+    if (completedInBackground.length > 0) {
+      setUnreadSessions((current) => new Set([...current, ...completedInBackground]));
+    }
+  }, [activeSessionId, observedSidebarSessions, runtimes]);
 
   async function handlePinSession(session: Session) {
     setPinError(null);
@@ -781,7 +815,7 @@ export function ConversationSidebar({
           onToggle={() => toggleProjectExpanded(project.project_id)}
           onNew={() => {
             setSelectedProject(project);
-            onNew({ preserveProject: true });
+            onNew({ preserveProject: true, project });
           }}
           onPin={() => {
             if (isDefaultProject(project)) return;
@@ -814,7 +848,7 @@ export function ConversationSidebar({
 
   return (
     <aside className="conversation-sidebar" aria-label={t('multiSession.conversations')}>
-      <div className="brand-title p-2">{t('multiSession.title')}</div>
+      <div className="conversation-sidebar__title">{t('multiSession.title')}</div>
       <button type="button" className="conversation-sidebar__new" onClick={() => {
         setSelectedProject(null);
         setPinError(null);
@@ -823,88 +857,90 @@ export function ConversationSidebar({
         <img src={newTaskIcon} alt="" aria-hidden="true" />
         <span>{t('multiSession.newConversation')}</span>
       </button>
-      {hasPinnedSection ? (
-        <div className="conversation-sidebar__pinned-block">
-          <div className="conversation-sidebar__section-heading conversation-sidebar__section-heading--pinned">
-            <span className="conversation-sidebar__label">{t('multiSession.project.pinned')}</span>
+      <div className="conversation-sidebar__body">
+        {hasPinnedSection ? (
+          <div className="conversation-sidebar__pinned-block">
+            <div className="conversation-sidebar__section-heading conversation-sidebar__section-heading--pinned">
+              <span className="conversation-sidebar__label">{t('multiSession.project.pinned')}</span>
+            </div>
+            <div className="conversation-sidebar__pinned-list">
+              {orderedPinnedSessions.map((session) => {
+                const project = getSessionProject(session);
+                return renderSession(session, Boolean(project));
+              })}
+              {pinnedProjects.map((project) => renderProject(project))}
+            </div>
           </div>
-          <div className="conversation-sidebar__pinned-list">
-            {orderedPinnedSessions.map((session) => {
-              const project = getSessionProject(session);
-              return renderSession(session, Boolean(project));
-            })}
-            {pinnedProjects.map((project) => renderProject(project))}
+        ) : null}
+        {pinError ? (
+          <div className="conversation-sidebar__error" role="alert">
+            {t('multiSession.project.pinFailed')}: {pinError}
           </div>
-        </div>
-      ) : null}
-      {pinError ? (
-        <div className="conversation-sidebar__error" role="alert">
-          {t('multiSession.project.pinFailed')}: {pinError}
-        </div>
-      ) : null}
-      <div className="conversation-sidebar__section-heading" ref={addMenuRef}>
-        <span className="conversation-sidebar__label">{t('multiSession.project.projects')}</span>
-        <div className="conversation-sidebar__section-actions">
-          <button
-            type="button"
-            className="conversation-sidebar__section-action"
-            onClick={() => {
-              setProjectAddMenuOpen((open) => !open);
-            }}
-            title={t('multiSession.project.newProject')}
-            aria-label={t('multiSession.project.newProject')}
-            aria-haspopup="menu"
-            aria-expanded={projectAddMenuOpen}
-          >
-            <img src={plusIcon} alt="" aria-hidden="true" />
-          </button>
-        </div>
-        {projectAddMenuOpen ? (
-          <ProjectAddMenu
-            onCreateBlank={() => {
-              setProjectAddMenuOpen(false);
-              setProjectCreateMode('blank');
-              setPathDialogError(null);
-              setPathDialogOpen(true);
-            }}
-            onSelectExisting={() => {
-              setProjectAddMenuOpen(false);
-              setProjectCreateMode('existing');
-              setPathDialogError(null);
-              setPathDialogOpen(true);
-            }}
-          />
         ) : null}
-      </div>
-      <div className="conversation-sidebar__list">
-        {regularProjects.length === 0 ? (
-          <div className="conversation-sidebar__empty">{t('multiSession.project.noProjects')}</div>
-        ) : null}
-        {regularProjects.map((project) => renderProject(project))}
-      </div>
-      <div className="conversation-sidebar__group">
-        <div className="conversation-sidebar__section-heading">
-          <span className="conversation-sidebar__label">{t('multiSession.conversations')}</span>
-          <button
-            type="button"
-            className="conversation-sidebar__section-new"
-            onClick={() => {
-              setSelectedProject(null);
-              setPinError(null);
-              onNew();
-            }}
-            title={t('multiSession.project.newConversation')}
-            aria-label={t('multiSession.project.newConversation')}
-            data-tooltip={t('multiSession.project.newConversation')}
-          >
-            <img src={plusIcon} alt="" aria-hidden="true" />
-          </button>
+        <div className="conversation-sidebar__section-heading" ref={addMenuRef}>
+          <span className="conversation-sidebar__label">{t('multiSession.project.projects')}</span>
+          <div className="conversation-sidebar__section-actions">
+            <button
+              type="button"
+              className="conversation-sidebar__section-action"
+              onClick={() => {
+                setProjectAddMenuOpen((open) => !open);
+              }}
+              title={t('multiSession.project.newProject')}
+              aria-label={t('multiSession.project.newProject')}
+              aria-haspopup="menu"
+              aria-expanded={projectAddMenuOpen}
+            >
+              <img src={plusIcon} alt="" aria-hidden="true" />
+            </button>
+          </div>
+          {projectAddMenuOpen ? (
+            <ProjectAddMenu
+              onCreateBlank={() => {
+                setProjectAddMenuOpen(false);
+                setProjectCreateMode('blank');
+                setPathDialogError(null);
+                setPathDialogOpen(true);
+              }}
+              onSelectExisting={() => {
+                setProjectAddMenuOpen(false);
+                setProjectCreateMode('existing');
+                setPathDialogError(null);
+                setPathDialogOpen(true);
+              }}
+            />
+          ) : null}
         </div>
-        <div className="conversation-sidebar__group-list">
-          {conversationSessions.length > 0 ? conversationSessions.map((session) => renderSession(session, false)) : (
-            <div className="conversation-sidebar__empty">{t('multiSession.project.noConversations')}</div>
-          )}
-          {defaultProject ? renderSessionPagination(defaultProject.project_id) : null}
+        <div className="conversation-sidebar__list">
+          {regularProjects.length === 0 ? (
+            <div className="conversation-sidebar__empty">{t('multiSession.project.noProjects')}</div>
+          ) : null}
+          {regularProjects.map((project) => renderProject(project))}
+        </div>
+        <div className="conversation-sidebar__group">
+          <div className="conversation-sidebar__section-heading">
+            <span className="conversation-sidebar__label">{t('multiSession.conversations')}</span>
+            <button
+              type="button"
+              className="conversation-sidebar__section-new"
+              onClick={() => {
+                setSelectedProject(null);
+                setPinError(null);
+                onNew();
+              }}
+              title={t('multiSession.project.newConversation')}
+              aria-label={t('multiSession.project.newConversation')}
+              data-tooltip={t('multiSession.project.newConversation')}
+            >
+              <img src={plusIcon} alt="" aria-hidden="true" />
+            </button>
+          </div>
+          <div className="conversation-sidebar__group-list">
+            {conversationSessions.length > 0 ? conversationSessions.map((session) => renderSession(session, false)) : (
+              <div className="conversation-sidebar__empty">{t('multiSession.project.noConversations')}</div>
+            )}
+            {defaultProject ? renderSessionPagination(defaultProject.project_id) : null}
+          </div>
         </div>
       </div>
       {pathDialogOpen ? (

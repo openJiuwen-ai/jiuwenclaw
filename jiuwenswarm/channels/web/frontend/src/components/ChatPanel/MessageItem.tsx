@@ -4,7 +4,7 @@
  * 单条消息显示，支持 TTS 朗读
  */
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, memo } from 'react';
 import type { ReactNode } from 'react';
 import {
   Copy,
@@ -33,7 +33,7 @@ import { MarkdownRenderer } from '../../components/MarkdownRenderer';
 import { isTeamP2PMessageToUser, parseTeamEventMessage } from './teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 
-export function MarkdownMessageBody({
+export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
   className,
   testId,
@@ -49,7 +49,7 @@ export function MarkdownMessageBody({
       testId={testId}
     />
   );
-}
+});
 
 export function TeamMemberMessageFrame({
   member,
@@ -211,7 +211,7 @@ interface MessageItemProps {
   disableA2UIInteraction?: boolean;
 }
 
-export function MessageItem({
+export const MessageItem = memo(function MessageItem({
   message,
   autoSpeak = false,
   showAvatar = true,
@@ -645,7 +645,7 @@ export function MessageItem({
       </div>
     </div>
   );
-}
+});
 
 function formatFileSize(bytes: number | undefined): string {
   if (bytes === undefined || bytes === null || isNaN(bytes)) return '';

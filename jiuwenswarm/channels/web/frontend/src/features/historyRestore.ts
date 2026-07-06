@@ -82,14 +82,19 @@ export interface HistoryRestoreHandle {
 }
 
 let restoreGeneration = 0;
-let activeRestore: HistoryRestoreHandle | null = null;
+const activeHistoryRequests = new Map<string, HistoryRestoreHandle>();
 
-/** 分页拉取与全量恢复互斥，避免 chunk 串台 */
-let activePageFetchDispose: (() => void) | null = null;
+function makeHistoryRestoreKey(sessionId: string): string {
+  return `${sessionId}:restore`;
+}
 
-function disposeActivePageFetch(): void {
-  activePageFetchDispose?.();
-  activePageFetchDispose = null;
+function makeHistoryPageKey(sessionId: string, pageIdx: number): string {
+  return `${sessionId}:page:${pageIdx}`;
+}
+
+function replaceActiveHistoryRequest(key: string): void {
+  activeHistoryRequests.get(key)?.dispose();
+  activeHistoryRequests.delete(key);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -461,7 +466,8 @@ function isHistoryBatchEnd(payload: Record<string, unknown>): boolean {
 function shouldProcessHistoryPayload(
   payload: Record<string, unknown>,
   expectedSessionId: string,
-  expectedPageIdx?: number
+  expectedPageIdx?: number,
+  allowLegacyNoSession = false
 ): boolean {
   const sid = typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
   if (sid && sid !== expectedSessionId) {
@@ -471,14 +477,14 @@ function shouldProcessHistoryPayload(
     return false;
   }
   if (!sid) {
-    return isHistoryRestoreDonePayload(payload) || isHistoryBatchEnd(payload);
+    return allowLegacyNoSession && (isHistoryRestoreDonePayload(payload) || isHistoryBatchEnd(payload));
   }
   return true;
 }
 
 export function beginHistoryRestore(options: BeginHistoryRestoreOptions): HistoryRestoreHandle {
-  disposeActivePageFetch();
-  activeRestore?.dispose();
+  const requestKey = makeHistoryRestoreKey(options.sessionId);
+  replaceActiveHistoryRequest(requestKey);
 
   const generation = restoreGeneration + 1;
   restoreGeneration = generation;
@@ -488,12 +494,12 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   let disposed = false;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
-    if (disposed || generation !== restoreGeneration) {
+    if (disposed) {
       return;
     }
 
     const payload = event.payload;
-    if (!shouldProcessHistoryPayload(payload, options.sessionId)) {
+    if (!shouldProcessHistoryPayload(payload, options.sessionId, undefined, activeHistoryRequests.size === 1)) {
       return;
     }
 
@@ -524,8 +530,8 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     if (disposed) return;
     disposed = true;
     unsubscribe();
-    if (activeRestore?.generation === generation) {
-      activeRestore = null;
+    if (activeHistoryRequests.get(requestKey)?.generation === generation) {
+      activeHistoryRequests.delete(requestKey);
     }
   }
 
@@ -608,7 +614,7 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   }
 
   const handle: HistoryRestoreHandle = { generation, dispose };
-  activeRestore = handle;
+  activeHistoryRequests.set(requestKey, handle);
   return handle;
 }
 
@@ -629,12 +635,12 @@ export interface FetchHistoryPageOptions {
 }
 
 /**
- * 拉取单页历史（用于「加载更早」），与 beginHistoryRestore 互斥。
+ * 拉取单页历史（用于「加载更早」）。
  * 调用方需在订阅建立后再发 `history.get`（含对应 `page_idx`）。
  */
 export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryRestoreHandle {
-  disposeActivePageFetch();
-  activeRestore?.dispose();
+  const requestKey = makeHistoryPageKey(options.sessionId, options.pageIdx);
+  replaceActiveHistoryRequest(requestKey);
 
   const generation = restoreGeneration + 1;
   restoreGeneration = generation;
@@ -644,12 +650,12 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   let disposed = false;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
-    if (disposed || generation !== restoreGeneration) {
+    if (disposed) {
       return;
     }
 
     const payload = event.payload;
-    if (!shouldProcessHistoryPayload(payload, options.sessionId, options.pageIdx)) {
+    if (!shouldProcessHistoryPayload(payload, options.sessionId, options.pageIdx, activeHistoryRequests.size === 1)) {
       return;
     }
 
@@ -680,9 +686,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
     if (disposed) return;
     disposed = true;
     unsubscribe();
-    activePageFetchDispose = null;
-    if (activeRestore?.generation === generation) {
-      activeRestore = null;
+    if (activeHistoryRequests.get(requestKey)?.generation === generation) {
+      activeHistoryRequests.delete(requestKey);
     }
   }
 
@@ -755,7 +760,6 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   }
 
   const handle: HistoryRestoreHandle = { generation, dispose };
-  activeRestore = handle;
-  activePageFetchDispose = dispose;
+  activeHistoryRequests.set(requestKey, handle);
   return handle;
 }

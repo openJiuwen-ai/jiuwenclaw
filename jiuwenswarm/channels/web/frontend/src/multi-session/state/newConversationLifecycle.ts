@@ -54,7 +54,7 @@ export function registerCreatedConversation(
   createdAt = Date.now(),
   initialContent = '',
   workContext: Partial<Pick<Session, 'project_id' | 'project_path'>> = {},
-): void {
+): Session {
   applyRuntimeSettings(sessionId, settings);
   useChatStore.getState().setProcessing(sessionId, true);
 
@@ -75,31 +75,7 @@ export function registerCreatedConversation(
   };
   locallyCreatedConversations.set(sessionId, session);
   useSessionStore.getState().addSession(session);
-}
-
-/**
- * Keep a session confirmed by session.create visible until session.list has
- * observed it. This closes the consistency window between the two endpoints.
- */
-export function reconcileCreatedConversations(serverSessions: Session[]): Session[] {
-  const reconciledServerSessions = serverSessions.map((serverSession) => {
-    const localSession = locallyCreatedConversations.get(serverSession.session_id);
-    if (!localSession) return serverSession;
-
-    if (serverSession.title?.trim() || !localSession.title?.trim()) {
-      locallyCreatedConversations.delete(serverSession.session_id);
-      return serverSession;
-    }
-
-    return { ...serverSession, title: localSession.title };
-  });
-
-  const serverSessionIds = new Set(serverSessions.map((session) => session.session_id));
-
-  const pendingSessions = Array.from(locallyCreatedConversations.values()).filter(
-    (session) => !serverSessionIds.has(session.session_id),
-  );
-  return [...pendingSessions, ...reconciledServerSessions];
+  return session;
 }
 
 export function forgetCreatedConversation(sessionId: string): void {

@@ -1,9 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { CircleAlert } from 'lucide-react';
 import { FileViewer } from '../AgentPanel/FileViewer';
 import { containsIgnoredDirectory } from '../../features/fileTreeFilters';
 import { isHistoryPreviewFile } from '../../features/historyFilePreview';
 import { webRequest } from '../../services/webClient';
+import { useChatStore } from '../../stores/chatStore';
+
+function SessionErrorIndicator({ sessionId }: { sessionId: string }) {
+  const error = useChatStore((state) => state.runtimes[sessionId]?.error);
+  if (!error) return null;
+  return (
+    <span className="shrink-0 text-danger" title={error}>
+      <CircleAlert size={14} />
+    </span>
+  );
+}
 
 interface SessionsPanelProps {
   currentSessionId: string;
@@ -521,7 +533,10 @@ export function SessionsPanel({
                       }}
                       title={session.title || parseSessionDisplayLabel(session.session_id, t)}
                     >
-                      <span className="truncate block">{session.title || parseSessionDisplayLabel(session.session_id, t)}</span>
+                      <span className="flex items-center gap-2">
+                        <span className="truncate block flex-1">{session.title || parseSessionDisplayLabel(session.session_id, t)}</span>
+                        <SessionErrorIndicator sessionId={session.session_id} />
+                      </span>
                       {session.mode === 'team' && session.team_name ? (
                         <span className="mt-1 block truncate text-[11px] text-text-muted">
                           {t('sessions.teamLabel', { team: session.team_name })}

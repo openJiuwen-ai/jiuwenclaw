@@ -54,6 +54,8 @@ export interface Message {
   role: MessageRole;
   content: string;
   timestamp: string;
+  /** 前端渲染身份，避免业务 id 重复或历史 prepend 导致 React key 抖动 */
+  renderKey?: string;
   audioBase64?: string;
   audioMime?: string;
   mediaItems?: MediaItem[];

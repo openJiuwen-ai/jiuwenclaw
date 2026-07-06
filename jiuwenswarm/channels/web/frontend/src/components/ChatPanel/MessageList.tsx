@@ -12,6 +12,22 @@ import { useChatStore, useSessionStore } from '../../stores';
 import { isTeamMemberCollaborationMessage } from './teamEventUtils';
 import { isA2UIClientEventContent } from '../../features/a2ui/a2uiContent';
 
+const legacyMessageKeyCache = new WeakMap<Message, string>();
+let legacyMessageKeyCounter = 0;
+
+function getMessageRenderKey(message: Message): string {
+  if (message.renderKey) {
+    return message.renderKey;
+  }
+  let key = legacyMessageKeyCache.get(message);
+  if (!key) {
+    legacyMessageKeyCounter += 1;
+    key = `legacy-message-${legacyMessageKeyCounter}`;
+    legacyMessageKeyCache.set(message, key);
+  }
+  return key;
+}
+
 interface MessageListProps {
   messages: Message[];
 }
@@ -95,7 +111,7 @@ function buildTimelineItems(
     })
     .map((message, index) => ({
       type: 'message',
-      key: `message-${message.id}-${index}`,
+      key: getMessageRenderKey(message),
       timestampMs: toTimestampMs(message.timestamp),
       sourceIndex: index,
       message,

@@ -29,6 +29,10 @@ export const projectRegistryClient = {
     { project_id: projectId },
   ),
   pinnedSessions: () => webRequest<{ sessions: Session[] }>('project.pinned_sessions'),
+  getSessionMetadata: (sessionId: string) => webRequest<Session>(
+    'session.get_metadata',
+    { session_id: sessionId },
+  ),
   pinSession: (sessionId: string, pinned: boolean) => webRequest<{ pinned: boolean; pin_order: number }>(
     'session.pin',
     { session_id: sessionId, pinned },
