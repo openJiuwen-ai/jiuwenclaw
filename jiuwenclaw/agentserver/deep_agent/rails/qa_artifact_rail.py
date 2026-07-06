@@ -30,6 +30,10 @@ from jiuwenclaw.agentserver.deep_agent.rails.qa_block_assembly_rail import (
 from jiuwenclaw.agentserver.deep_agent.session_active_ctx_registry import (
     SessionActiveCtxRegistry,
 )
+from jiuwenclaw.agentserver.deep_agent.tool_qualify import (
+    register_qualified_tool,
+    remove_tool_from_resource_mgr,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +50,7 @@ class JiuClawQAArtifactRail(DeepAgentRail):
         self._qa_config = qa_config or QAArtifactConfig()
         self._session_memory_config = session_memory_config or SessionMemoryConfig()
         self._mgr = build_qa_artifact_manager(self._qa_config, self._session_memory_config)
-        self._load_qa_tool: LoadQaIndexTool | None = None
+        self._load_qa_tool_id: str | None = None
         self._active_ctx_registry = SessionActiveCtxRegistry()
 
     @property
@@ -80,20 +84,33 @@ class JiuClawQAArtifactRail(DeepAgentRail):
                 self._session_memory_config.model_client = model_client_config
             self.bind_artifact_model_defaults(model_config, model_client_config)
 
-        agent_id = getattr(getattr(agent, "card", None), "id", None)
-        self._load_qa_tool = LoadQaIndexTool(self._render_qa_index_for_tool, agent_id=agent_id)
-        ability_manager = getattr(agent, "ability_manager", None)
-        if ability_manager is not None:
-            for existing in list(ability_manager.list() or []):
-                if existing.name == LOAD_QA_INDEX_TOOL_NAME:
-                    ability_manager.remove(existing.name)
-            ability_manager.add(self._load_qa_tool.card)
-            logger.info("[QAArtifactRail] load_qa_index registered agent_id=%s", agent_id)
+        agent_card_id = getattr(getattr(agent, "card", None), "id", None)
+        if not agent_card_id:
+            logger.warning("[QAArtifactRail] skip load_qa_index: agent.card.id missing")
+            return
+
+        load_qa_tool = LoadQaIndexTool(
+            self._render_qa_index_for_tool,
+            agent_id=agent_card_id,
+        )
+        card = register_qualified_tool(agent, load_qa_tool, agent_card_id)
+        self._load_qa_tool_id = str(card.id)
+        logger.info(
+            "[QAArtifactRail] load_qa_index registered agent_card_id=%s tool_id=%s",
+            agent_card_id,
+            self._load_qa_tool_id,
+        )
 
     def uninit(self, agent) -> None:
-        ability_manager = getattr(agent, "ability_manager", None)
-        if ability_manager is not None and self._load_qa_tool is not None:
-            ability_manager.remove(self._load_qa_tool.card.name)
+        if self._load_qa_tool_id:
+            tool_id = self._load_qa_tool_id
+            try:
+                remove_tool_from_resource_mgr(tool_id)
+                ability_manager = getattr(agent, "ability_manager", None)
+                if ability_manager is not None:
+                    ability_manager.remove(LOAD_QA_INDEX_TOOL_NAME)
+            finally:
+                self._load_qa_tool_id = None
         self._active_ctx_registry.clear()
 
     async def _render_qa_index_for_tool(self, qa_id: str, **kwargs: Any) -> str:
