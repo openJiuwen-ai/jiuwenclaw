@@ -128,6 +128,7 @@ class CodeValidationPolicy:
                 "asyncio",
                 "collections.abc",
                 "dataclasses",
+                "datetime",
                 "json",
                 "logging",
                 "pathlib",
