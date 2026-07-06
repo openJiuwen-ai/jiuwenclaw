@@ -114,7 +114,7 @@ _CDN_HEAD_SNIPPET = (
 
 
 _DESIGN_RULES_DIGEST = (
-    "### 视觉与布局硬约束（精选 17 条）\n"
+    "### 视觉与布局硬约束（精选 18 条）\n"
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
     "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`，主要内容必须放在安全区内；"
     "子元素禁止额外加 padding，否则导致双重边距\n"
@@ -125,7 +125,8 @@ _DESIGN_RULES_DIGEST = (
     "占比数据→饼图(pie)；多维能力对比→雷达图(radar)；禁止用图片占位\n"
     "4.1 图表渲染器（强制）：ECharts 必须用 `echarts.init(document.getElementById('xxx'), null, {renderer:'svg'})` "
     "单行初始化，禁止用变量赋值（如 `var chartDom=...; echarts.init(chartDom)`），"
-    "禁止 Canvas 渲染器（会导致转 PPTX 后变位图）\n"
+    "禁止 Canvas 渲染器（会导致转 PPTX 后变位图）；"
+    "初始化脚本必须写在目标图表容器之后、紧邻 `</body>`，禁止写入 `<head>`（否则 getElementById 得到 null）\n"
     "4.2 图表最小高度（强制）：图表容器实际渲染高度必须 ≥ 250px（内联 SVG 的 viewBox height ≥ 250），"
     "否则 Y 轴名称/图例/标签会溢出重叠；"
     "用 `min-h-[250px]` 或 `flex-1` 确保图表区域有足够空间；禁止把图表挤在高度 < 200px 的容器里\n"
@@ -151,6 +152,10 @@ _DESIGN_RULES_DIGEST = (
     "16. 标题栏、页脚为跨页锚点片段（见风格文件「四、组件样式库」开头的「跨页锚点片段」说明），"
     "必须逐字复用 HTML 结构/class/间距，只改文字内容，禁止自行重新设计\n"
     "17. 标题、正文、图表标签、数据来源和数据卡片必须完整显示，禁止裁切或隐藏\n"
+    "18. 遮罩层≠底色：`bg-black/50`、`from-black/*`、`bg-gradient-*` 等是遮罩层(overlay)，"
+    "必须配合底层 `<img>` 背景图使用以保证文字可读，不是页面/卡片底色；"
+    "页面底色仅用白名单值（商务经典：`bg-white`/`bg-gray4`），"
+    "禁止用 `bg-black`、`from-black/*`、`bg-brandRedBg` 等作整页背景\n"
 )
 
 
@@ -184,7 +189,10 @@ _STRUCTURAL_DESIGN_RULES = (
     "结束页标题 42-48px / 正文 22px\n"
     "4. 防溢出：单行文字不超容器宽度\n"
     "5. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体；"
-    "所有页面背景色必须统一，从风格规范中取一致的背景色，禁止部分页面自行使用不同背景色\n"
+    "所有页面背景色必须统一，从风格规范中取一致的背景色，禁止部分页面自行使用不同背景色；"
+    "页面背景色必须与风格规范一致（商务经典=白色 `bg-white`），禁止自行使用渐变或深色背景；"
+    "封面/结束页如使用图片背景，`from-black/*` 渐变层是遮罩(overlay)非底色，"
+    "商务经典风格封面/结束页优先白底方案，不推荐图片+黑色遮罩方案\n"
     "6. 布局：居中排列（`flex flex-col items-center justify-center`），"
     "不强制 grid-cols-2 双栏\n"
     "7. 留白：允许较高留白，不强制数据卡片、图表或数据来源页脚\n"
@@ -337,7 +345,7 @@ _STRUCTURAL_DENSITY_CHECKLIST = (
 )
 
 _DENSITY_CHECKLIST_DIGEST = (
-    "### 内容密度检查（11 项，全部必须通过）\n"
+    "### 内容密度检查（13 项，全部必须通过）\n"
     "1. 数据可视化：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式且页面为'数据有限'时可降至 2 个数据卡片）\n"
     "2. 核心要点：6-10 个列表项或卡片\n"
     "3. 装饰图标：≥3 个 FontAwesome 图标（class 含 `fa-`）\n"
@@ -352,6 +360,10 @@ _DENSITY_CHECKLIST_DIGEST = (
     "10. 内容完整：标题、正文、图表标签、数据来源和数据卡片全部完整显示，无裁切\n"
     "11. ECharts SVG 检查：所有 echarts.init 调用必须包含 `{renderer:'svg'}` 参数，"
     "且使用 `document.getElementById('xxx')` 直接传参，禁止变量赋值\n"
+    "12. grid-cols 合法性：所有 `grid-cols-[...]` 必须为合法 CSS，不存在无单位裸数字"
+    "（正确：`grid-cols-[3fr_2fr]` `grid-cols-[320px_1fr]`，错误：`grid-cols-[3_2]` `grid-cols-[1.2_1]`）\n"
+    "13. 页面底色检查：底色仅在风格白名单内（商务经典：`bg-white`/`bg-gray4`），"
+    "未使用 `bg-black`/`from-black/*`/`bg-gradient-*`/`bg-brandRed*` 作为整页底色\n"
 )
 
 
@@ -1396,7 +1408,7 @@ class PageWorkerNode(PlanNode):
             failed_enum = (
                 "缺数据可视化 / 核心要点不足 / 缺装饰图标 / 空白率过高 / "
                 "缺数据来源 / 大段文字 / 视觉层级混乱 / 布局错误 / "
-                "内容被隐藏 / 核心内容缺失"
+                "内容被隐藏 / 核心内容缺失 / grid-cols 非法 / 底色超白名单"
             )
 
         prompt = (
