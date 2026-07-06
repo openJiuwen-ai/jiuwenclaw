@@ -7479,6 +7479,7 @@ class JiuWenClawDeepAdapter:
             "input_tokens": 0,
             "output_tokens": 0,
             "total_tokens": 0,
+            "cache_tokens": 0,
             "input_cost": 0.0,
             "output_cost": 0.0,
             "total_cost": 0.0,
@@ -7499,7 +7500,7 @@ class JiuWenClawDeepAdapter:
         usage_accumulator: dict[str, float],
         usage_meta: dict[str, Any],
     ) -> None:
-        for token in ("input_tokens", "output_tokens", "total_tokens"):
+        for token in ("input_tokens", "output_tokens", "total_tokens", "cache_tokens"):
             usage_accumulator[token] += usage_meta.get(token, 0) or 0
         for cost in ("input_cost", "output_cost", "total_cost"):
             usage_accumulator[cost] += usage_meta.get(cost, 0.0) or 0.0
@@ -7511,6 +7512,8 @@ class JiuWenClawDeepAdapter:
             "output_tokens": usage_accumulator["output_tokens"],
             "total_tokens": usage_accumulator["total_tokens"],
         }
+        if usage_accumulator["cache_tokens"] > 0:
+            summary["cache_tokens"] = usage_accumulator["cache_tokens"]
         if usage_accumulator["input_cost"] > 0:
             summary["input_cost"] = round(usage_accumulator["input_cost"], 6)
         if usage_accumulator["output_cost"] > 0:
