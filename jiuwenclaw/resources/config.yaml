@@ -657,7 +657,7 @@ react:
 
   skill_turbo:
     # 开启后 agent 模式请求会先尝试 SkillTurbo，未命中/失败自动回落现有 DeepAgent。
-    enabled: true
+    enabled: false
     # [TEMP-EXTERNAL-SKILL] PPT skill 的外部目录名（与原版 pptx-craft 区分）。
     # 测试在 skill_root 下放入该名称的 skill 子目录即可。
     skill_name: pptx-craft
