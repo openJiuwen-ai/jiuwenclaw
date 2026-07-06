@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +55,7 @@ _P42A_SYSTEM_PROMPT = """你是 PPT 快速调研助手。根据主题、研究�
 
 规则：
 1. 查询应覆盖不同维度：领域现状、关键维度、最新动态、核心玩家、争议热点（可合并到单条 query 的 intent 中）。
-2. 中文主题建议中英双语 query 搭配；添加年份（如 2026）或 latest/report/statistics 等可信来源关键词。
+2. 中文主题建议中英双语 query 搭配；添加当前年份或 latest/report/statistics 等可信来源关键词。
 3. 有用户素材时，聚焦素材未覆盖的维度，避免重复已有信息。
 4. 不要编造已确认的事实；只输出搜索 query，不写结论。
 
@@ -312,8 +313,16 @@ def _parse_p42a_queries(raw: str, *, has_source_material: bool) -> list[dict[str
 
 
 def _build_p42a_prompt(inputs: dict[str, Any], source_material: str) -> str:
+    now = datetime.now(tz=timezone.utc)
+    now_str = now.strftime("%Y-%m-%d")
+    current_year = now.strftime("%Y")
     min_count, max_count = _query_count_bounds(bool(source_material))
     parts = [
+        f"# 当前日期\n\n"
+        f"- 当前日期：{now_str}\n"
+        f"- 当前年份：{current_year}\n"
+        '- 当用户询问"最新、当前、今年、本年、实时、近期"等信息并需要搜索时，'
+        '搜索 query 必须优先使用当前年份或日期\n',
         f"请生成 {min_count}~{max_count} 条并行搜索 query。\n",
         f"- topic: {inputs.get('topic', '')}\n",
         f"- page_count: {inputs.get('page_count')}\n",
