@@ -58,6 +58,7 @@ from jiuwenswarm.common.config import (
     get_evolution_auto_scan_enabled,
     get_skill_create_enabled,
 )
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     MemberInfo,
     RuntimeInfo,
@@ -416,6 +417,16 @@ class TeamManager:
                 mco = entry.get("model_config_obj") or {}
                 if not mcc.get("model_name"):
                     continue
+                # Map the internal ``reasoning_level`` hint to provider-specific
+                # params here; leaving it raw would let ``ModelRequestConfig``
+                # (extra=allow) forward it to ``AsyncCompletions.create()`` and
+                # raise ``unexpected keyword argument 'reasoning_level'``.
+                request_config = build_reasoning_model_request_kwargs(
+                    model_client_config=mcc,
+                    model_config_obj=mco,
+                    model_name=mcc["model_name"],
+                )
+                request_config.pop("model", None)
                 pool_entry = ModelPoolEntry(
                     model_name=mcc["model_name"],
                     api_key=mcc.get("api_key", ""),
@@ -426,7 +437,7 @@ class TeamManager:
                             k: v for k, v in mcc.items()
                             if k not in ("model_name", "api_key", "api_base", "client_provider") and v is not None
                         },
-                        "request": dict(mco),
+                        "request": request_config,
                     },
                 )
                 pool_entries.append(pool_entry.model_dump())
