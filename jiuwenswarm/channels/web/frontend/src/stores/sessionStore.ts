@@ -8,7 +8,6 @@ import { create } from 'zustand';
 import {
   Session,
   AgentMode,
- 
   WebConnectionState,
   ModelEntry,
   Message,

@@ -433,9 +433,9 @@ select {
     }
   }
 
-  /* Shell collapsed - nav column shrinks to 48px icon strip */
+  /* Shell collapsed - nav column shrinks to compact icon strip */
   .shell--collapsed {
-    grid-template-columns: 48px minmax(0, 1fr);
+    grid-template-columns: 64px minmax(0, 1fr);
     grid-template-areas: "nav content";
     --tool-panel-width: 300px;
   }

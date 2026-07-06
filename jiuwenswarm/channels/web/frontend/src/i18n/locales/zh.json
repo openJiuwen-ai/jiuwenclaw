@@ -17,6 +17,7 @@
   },
   "nav": {
     "chat": "对话",
+    "work": "工作",
     "agent": "智能体",
     "teams": "团队",
     "sessions": "会话",
@@ -27,6 +28,7 @@
     "extensions": "Harness",
     "rails": "Rails",
     "harnesspkg": "Harness Package",
+    "more": "更多",
     "settings": "设置",
     "config": "配置信息",
     "browser": "浏览器服务",
@@ -35,7 +37,7 @@
   },
   "team": {
     "members": "团队成员",
-    "membersTab": "Subagents",
+    "membersTab": "团队",
     "statusTab": "状态",
     "filesTab": "文件",
     "taskEventLog": "任务事件日志",

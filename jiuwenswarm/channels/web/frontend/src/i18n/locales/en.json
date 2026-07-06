@@ -17,6 +17,7 @@
   },
   "nav": {
     "chat": "Chat",
+    "work": "Work",
     "agent": "Agent",
     "teams": "Teams",
     "sessions": "Sessions",
@@ -27,6 +28,7 @@
     "extensions": "Harness",
     "rails": "Rails",
     "harnesspkg": "Harness Package",
+    "more": "More",
     "settings": "Settings",
     "config": "Configuration",
     "browser": "Browser Service",

@@ -9,12 +9,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import './SessionSidebar.css';
-import dialogueIcon from '../../assets/sidebar/dialogue.svg';
-import agentIcon from '../../assets/sidebar/agent.svg';
-import sessionIcon from '../../assets/sidebar/session.svg';
 import heartbeatIcon from '../../assets/sidebar/heartbeat.svg';
-import cronIcon from '../../assets/sidebar/cron.svg';
-import skillIcon from '../../assets/sidebar/skill.svg';
 import channelIcon from '../../assets/sidebar/channel.svg';
 import pluginIcon from '../../assets/sidebar/plugin.svg';
 import configIcon from '../../assets/sidebar/config.svg';
@@ -28,6 +23,11 @@ import updateIcon from '../../assets/sidebar/advanced-config.svg';
 import appearanceSystemIcon from '../../assets/sidebar/appearance-system.svg';
 import appearanceDarkIcon from '../../assets/sidebar/appearance-dark.svg';
 import appearanceLightIcon from '../../assets/sidebar/appearance-light.svg';
+import workIcon from '../../assets/工作.svg';
+import cronDesignIcon from '../../assets/定时任务.svg';
+import skillDesignIcon from '../../assets/技能.svg';
+import agentDesignIcon from '../../assets/智能体.svg';
+import moreDesignIcon from '../../assets/更多.svg';
 import { webRequest } from '../../services/webClient';
 
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
@@ -52,29 +52,26 @@ interface NavItem {
   icon: React.ReactNode;
 }
 
+const teamNavIcon = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a8.96 8.96 0 01-12 0m12 0a3.75 3.75 0 00-6 0m6 0A8.96 8.96 0 0012 15.75a8.96 8.96 0 00-6 2.97m12 0A9 9 0 1012 21a8.96 8.96 0 006-2.28zM15 9.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
+  </svg>
+);
+
 const mainNavItems: NavItem[] = [
-  { key: 'chat', labelKey: 'nav.chat', icon: <img src={dialogueIcon} alt="" /> },
-  { key: 'agents', labelKey: 'nav.agent', icon: <img src={agentIcon} alt="" /> },
-  { key: 'sessions', labelKey: 'nav.sessions', icon: <img src={sessionIcon} alt="" /> },
-  {
-    key: 'teams',
-    labelKey: 'nav.teams',
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a8.96 8.96 0 01-12 0m12 0a3.75 3.75 0 00-6 0m6 0A8.96 8.96 0 0012 15.75a8.96 8.96 0 00-6 2.97m12 0A9 9 0 1012 21a8.96 8.96 0 006-2.28zM15 9.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
-      </svg>
-    ),
-  },
-  { key: 'heartbeat', labelKey: 'nav.heartbeat', icon: <img src={heartbeatIcon} alt="" /> },
-  { key: 'cron', labelKey: 'nav.cron', icon: <img src={cronIcon} alt="" /> },
-  { key: 'skills', labelKey: 'nav.skills', icon: <img src={skillIcon} alt="" /> },
+  { key: 'chat', labelKey: 'nav.work', icon: <img src={workIcon} alt="" /> },
+  { key: 'cron', labelKey: 'nav.cron', icon: <img src={cronDesignIcon} alt="" /> },
+  { key: 'skills', labelKey: 'nav.skills', icon: <img src={skillDesignIcon} alt="" /> },
   { key: 'channels', labelKey: 'nav.channels', icon: <img src={channelIcon} alt="" /> },
-  { key: 'extensions', labelKey: 'nav.extensions', icon: <img src={pluginIcon} alt="" /> },
+  { key: 'agents', labelKey: 'nav.agent', icon: <img src={agentDesignIcon} alt="" /> },
+  { key: 'teams', labelKey: 'nav.teams', icon: teamNavIcon },
 ];
 
-const settingsNavItems: NavItem[] = [
-  { key: 'configpanel', labelKey: 'nav.config', icon: <img src={configIcon} alt="" /> },
+const moreNavItems: NavItem[] = [
+  { key: 'heartbeat', labelKey: 'nav.heartbeat', icon: <img src={heartbeatIcon} alt="" /> },
+  { key: 'extensions', labelKey: 'nav.extensions', icon: <img src={pluginIcon} alt="" /> },
   { key: 'browserpanel', labelKey: 'nav.browser', icon: <img src={webIcon} alt="" /> },
+  { key: 'configpanel', labelKey: 'nav.config', icon: <img src={configIcon} alt="" /> },
   { key: 'logspanel', labelKey: 'nav.logs', icon: <img src={logsIcon} alt="" /> },
   { key: 'updatepanel', labelKey: 'nav.update', icon: <img src={updateIcon} alt="" /> },
 ];
@@ -303,7 +300,10 @@ export function SessionSidebar({
 }: SessionSidebarProps) {
   const { t } = useTranslation();
   const [advancedConfigOpen, setAdvancedConfigOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const advancedBtnRef = useRef<HTMLButtonElement>(null);
+  const moreBtnRef = useRef<HTMLButtonElement>(null);
+  const morePanelRef = useRef<HTMLDivElement>(null);
 
   // Tooltip state for collapsed mode
   const [hoveredNav, setHoveredNav] = useState<string | null>(null);
@@ -357,6 +357,15 @@ export function SessionSidebar({
     setAdvancedConfigOpen(!advancedConfigOpen);
   };
 
+  const toggleMore = () => {
+    setMoreOpen((open) => !open);
+  };
+
+  const handleNavClick = (nav: MainNavKey) => {
+    setMoreOpen(false);
+    onNavigate(nav);
+  };
+
   const handleLogoClick = () => {
     if (collapsed && onExpand) {
       onExpand();
@@ -367,6 +376,21 @@ export function SessionSidebar({
 
   const getNavItemLabel = (item: NavItem) => t(item.labelKey);
   const visibleMainNavItems = mainNavItems.filter((item) => !hiddenNavItems.includes(item.key));
+  const visibleMoreNavItems = moreNavItems.filter((item) => !hiddenNavItems.includes(item.key));
+  const isMoreActive = visibleMoreNavItems.some((item) => item.key === activeNav);
+
+  useEffect(() => {
+    if (!moreOpen) return;
+    function handleClickOutside(event: MouseEvent) {
+      const target = event.target as Node;
+      if (moreBtnRef.current?.contains(target) || morePanelRef.current?.contains(target)) {
+        return;
+      }
+      setMoreOpen(false);
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [moreOpen]);
 
   // Collapsed mode: 48px icon-only sidebar
   if (collapsed) {
@@ -394,7 +418,10 @@ export function SessionSidebar({
           onMouseLeave={() => setHoveredNav(null)}
           title={t('chat.newSession')}
         >
-          <img src={plusIcon} alt="" width="16" height="16" />
+          <span className="collapsed-nav-item__icon">
+            <img src={plusIcon} alt="" width="16" height="16" />
+          </span>
+          <span className="collapsed-nav-item__label">{t('chat.newSession')}</span>
         </button></>}
 
         {/* Main nav icons */}
@@ -413,42 +440,54 @@ export function SessionSidebar({
               if (el) navRefs.current.set(item.key, el);
             }}
             className={`collapsed-nav-item${activeNav === item.key ? ' collapsed-nav-item--active' : ''}`}
-            onClick={() => onNavigate(item.key)}
+            onClick={() => handleNavClick(item.key)}
             onMouseEnter={() => handleMouseEnter(item.key)}
             onMouseLeave={() => setHoveredNav(null)}
             title={getNavItemLabel(item)}
           >
-            {item.icon}
+            <span className="collapsed-nav-item__icon">{item.icon}</span>
+            <span className="collapsed-nav-item__label">{getNavItemLabel(item)}</span>
           </button>
         ))}
+
+        {/* More menu */}
+        {visibleMoreNavItems.length > 0 && (
+          <>
+            <Tooltip text={t('nav.more')} targetRef={moreBtnRef} visible={hoveredNav === 'more' && !moreOpen} />
+            <div className="collapsed-more-anchor">
+              <button
+                ref={moreBtnRef}
+                className={`collapsed-nav-item${isMoreActive ? ' collapsed-nav-item--active' : ''}`}
+                onClick={toggleMore}
+                onMouseEnter={() => handleMouseEnter('more')}
+                onMouseLeave={() => setHoveredNav(null)}
+                title={t('nav.more')}
+              >
+                <span className="collapsed-nav-item__icon">
+                  <img src={moreDesignIcon} alt="" />
+                </span>
+                <span className="collapsed-nav-item__label">{t('nav.more')}</span>
+              </button>
+              {moreOpen && (
+                <div ref={morePanelRef} className="collapsed-more-menu">
+                  {visibleMoreNavItems.map((item) => (
+                    <button
+                      key={item.key}
+                      className={`collapsed-more-menu__item${activeNav === item.key ? ' collapsed-more-menu__item--active' : ''}`}
+                      onClick={() => handleNavClick(item.key)}
+                    >
+                      <span className="collapsed-more-menu__icon">{item.icon}</span>
+                      <span className="collapsed-more-menu__text">{getNavItemLabel(item)}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
 
         {/* Separator dot */}
         <div className="collapsed-separator" />
-
-        {/* Settings nav icons */}
-        {settingsNavItems.map((item) => (
-          <Tooltip
-            key={item.key}
-            text={getNavItemLabel(item)}
-            targetRef={{ current: navRefs.current.get(item.key) || null }}
-            visible={hoveredNav === item.key}
-          />
-        ))}
-        {settingsNavItems.map((item) => (
-          <button
-            key={item.key}
-            ref={(el) => {
-              if (el) navRefs.current.set(item.key, el);
-            }}
-            className={`collapsed-nav-item${activeNav === item.key ? ' collapsed-nav-item--active' : ''}`}
-            onClick={() => onNavigate(item.key)}
-            onMouseEnter={() => handleMouseEnter(item.key)}
-            onMouseLeave={() => setHoveredNav(null)}
-            title={getNavItemLabel(item)}
-          >
-            {item.icon}
-          </button>
-        ))}
 
         {/* Bottom spacer */}
         <div className="collapsed-spacer" />
@@ -463,7 +502,10 @@ export function SessionSidebar({
           onMouseLeave={() => setHoveredNav(null)}
           title={t('sessionSidebar.advancedConfig')}
         >
-          <img src={advancedConfigIcon} alt="" width="16" height="16" />
+          <span className="collapsed-nav-item__icon">
+            <img src={advancedConfigIcon} alt="" width="16" height="16" />
+          </span>
+          <span className="collapsed-nav-item__label">{t('sessionSidebar.advancedConfig')}</span>
         </button>
 
         <AdvancedConfigPanel
@@ -495,7 +537,7 @@ export function SessionSidebar({
 
       {/* 智能体 Section */}
       <div className="nav-section">
-        <div className="nav-section-label">{t('nav.agent')}</div>
+        <div className="nav-section-label">{t('nav.work')}</div>
         {showNewSession && <button className="new-chat-btn" onClick={handleNewSession}>
           <span className="new-chat-btn__left">
             <img src={plusIcon} alt="" />
@@ -507,29 +549,41 @@ export function SessionSidebar({
             <button
               key={item.key}
               className={`nav-item ${activeNav === item.key ? 'active' : ''}`}
-              onClick={() => onNavigate(item.key)}
+              onClick={() => handleNavClick(item.key)}
             >
               <span className="nav-item__icon">{item.icon}</span>
               <span className="nav-item__text">{getNavItemLabel(item)}</span>
             </button>
           ))}
-        </nav>
-      </div>
-
-      {/* Settings Section */}
-      <div className="nav-section">
-        <div className="nav-section-label">{t('nav.settings')}</div>
-        <nav className="sidebar-nav">
-          {settingsNavItems.map((item) => (
-            <button
-              key={item.key}
-              className={`nav-item ${activeNav === item.key ? 'active' : ''}`}
-              onClick={() => onNavigate(item.key)}
-            >
-              <span className="nav-item__icon">{item.icon}</span>
-              <span className="nav-item__text">{t(item.labelKey)}</span>
-            </button>
-          ))}
+          {visibleMoreNavItems.length > 0 && (
+            <>
+              <button
+                ref={moreBtnRef}
+                className={`nav-item nav-item--more-toggle ${isMoreActive ? 'active' : ''}`}
+                onClick={toggleMore}
+                aria-expanded={moreOpen || isMoreActive}
+              >
+                <span className="nav-item__icon">
+                  <img src={moreDesignIcon} alt="" />
+                </span>
+                <span className="nav-item__text">{t('nav.more')}</span>
+              </button>
+              {(moreOpen || isMoreActive) && (
+                <div ref={morePanelRef} className="sidebar-more-list">
+                  {visibleMoreNavItems.map((item) => (
+                    <button
+                      key={item.key}
+                      className={`nav-item nav-item--more-child ${activeNav === item.key ? 'active' : ''}`}
+                      onClick={() => handleNavClick(item.key)}
+                    >
+                      <span className="nav-item__icon">{item.icon}</span>
+                      <span className="nav-item__text">{t(item.labelKey)}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </nav>
       </div>
 

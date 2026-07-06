@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, KeyboardEvent, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { Square } from 'lucide-react';
+import { AtSign, Square } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
@@ -28,6 +28,7 @@ import workFolderIcon from '../../assets/work-mode/folder.svg';
 import workCollapseIcon from '../../assets/work-mode/collapse.svg';
 import workExpandIcon from '../../assets/work-mode/expand.svg';
 import workSearchIcon from '../../assets/work-mode/search.svg';
+import { TeamMemberAvatar } from '../TeamMemberAvatar';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
@@ -49,6 +50,39 @@ type InputAreaInstalledPlugin = {
   git_commit?: string | null;
   skills: string[];
 };
+
+type InputAreaTeamMember = {
+  member_id: string;
+  name?: string;
+  status?: string;
+};
+
+type ComposerSuggestionKind = 'member' | 'role';
+
+type ComposerSuggestionState = {
+  kind: ComposerSuggestionKind;
+  query: string;
+};
+
+type ComposerSuggestionItem = {
+  id: string;
+  label: string;
+  status?: string;
+};
+
+function getComposerSuggestionItems(
+  suggestion: ComposerSuggestionState | null,
+  members: ComposerSuggestionItem[]
+): ComposerSuggestionItem[] {
+  if (!suggestion) return [];
+  const query = suggestion.query.trim().toLowerCase();
+  return members
+    .filter((item) => {
+      if (!query) return true;
+      return `${item.label} ${item.id}`.toLowerCase().includes(query);
+    })
+    .slice(0, 8);
+}
 
 function getProjectLabel(project: ProjectInfo | null, fallback: string): string {
   return project ? project.name : fallback;
@@ -90,6 +124,8 @@ export function InputArea({
   const [projectCreateMode, setProjectCreateMode] = useState<ProjectCreateMode>('blank');
   const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
   const [hoveredOptionDesc, setHoveredOptionDesc] = useState<string | null>(null);
+  const [composerSuggestion, setComposerSuggestion] = useState<ComposerSuggestionState | null>(null);
+  const [composerSuggestionIndex, setComposerSuggestionIndex] = useState(0);
   const [modeMenuAnchor, setModeMenuAnchor] = useState<DOMRect | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   /** 保存技能插入前的光标位置，用于在光标处插入 chip */
@@ -108,6 +144,7 @@ export function InputArea({
   const inputValue = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.inputValue ?? '');
   const evolutionStatus = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.evolutionStatus ?? null);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
+  const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []) as InputAreaTeamMember[];
   const currentSession = useSessionStore((s) => s.currentSession);
   const activeSession = useSessionStore((s) => {
     if (!activeSessionId || activeSessionId === NEW_CONVERSATION_ID) return null;
@@ -128,6 +165,36 @@ export function InputArea({
   const isAutoHarnessMode = mode === 'auto_harness';
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const showWorkContextRow = activeSessionId === NEW_CONVERSATION_ID;
+
+  const mentionableMembers = useMemo(() => {
+    return teamMembers
+      .filter((member) => {
+        const id = member.member_id?.trim();
+        return id && id !== 'user';
+      })
+      .map((member) => ({
+        id: member.member_id,
+        label: member.name || member.member_id,
+        status: member.status || '',
+      }));
+  }, [teamMembers]);
+
+  const composerSuggestionItems = useMemo(
+    () => getComposerSuggestionItems(composerSuggestion, mentionableMembers),
+    [composerSuggestion, mentionableMembers]
+  );
+
+  useEffect(() => {
+    setComposerSuggestionIndex(0);
+  }, [composerSuggestion?.kind, composerSuggestion?.query]);
+
+  useEffect(() => {
+    if (composerSuggestionItems.length === 0) {
+      setComposerSuggestionIndex(0);
+      return;
+    }
+    setComposerSuggestionIndex((index) => Math.min(index, composerSuggestionItems.length - 1));
+  }, [composerSuggestionItems.length]);
 
   const filteredProjects = useMemo(() => {
     const keyword = projectSearch.trim().toLowerCase();
@@ -296,7 +363,7 @@ export function InputArea({
     return () => window.removeEventListener('chat-input-sync', handler);
   }, []);
 
-  /** 从 contenteditable 提取纯文本（跳过 chip 节点，过滤零宽空格） */
+  /** 从 contenteditable 提取纯文本（技能 chip 不进入纯文本，其它 token 展开为 @/$ 文本） */
   const extractPlainText = useCallback((): string => {
     const el = inputRef.current;
     if (!el) return '';
@@ -306,8 +373,11 @@ export function InputArea({
         text += node.textContent || '';
       } else if (node.nodeType === Node.ELEMENT_NODE) {
         const elem = node as HTMLElement;
-        if (elem.getAttribute('contenteditable') === 'false') {
-          // 跳过 chip
+        if (elem.getAttribute('contenteditable') === 'false' && elem.dataset.composerToken) {
+          const prefix = elem.dataset.composerToken === 'role' ? '$' : '@';
+          text += `${prefix}${elem.dataset.value || elem.textContent || ''}`;
+        } else if (elem.getAttribute('contenteditable') === 'false') {
+          // 跳过技能 chip
         } else {
           text += elem.textContent || '';
         }
@@ -328,6 +398,9 @@ export function InputArea({
         const elem = node as HTMLElement;
         if (elem.getAttribute('contenteditable') === 'false' && elem.hasAttribute('data-skill')) {
           text += `{{skill:${elem.getAttribute('data-skill')}}}`;
+        } else if (elem.getAttribute('contenteditable') === 'false' && elem.dataset.composerToken) {
+          const prefix = elem.dataset.composerToken === 'role' ? '$' : '@';
+          text += `${prefix}${elem.dataset.value || elem.textContent || ''}`;
         } else {
           text += elem.textContent || '';
         }
@@ -382,6 +455,7 @@ export function InputArea({
     if (inputRef.current) {
       inputRef.current.innerHTML = '';
     }
+    setComposerSuggestion(null);
   }, [extractRichContent, pendingVoiceText, isInterruptible, isListening, onSubmit, onInterrupt, stopListening, isAgentMode, isTeamMode, queuePaused, t]);
 
   const trimmedDraft = (inputValue + pendingVoiceText).trim();
@@ -398,14 +472,173 @@ export function InputArea({
     handleSubmit();
   }, [handleSubmit, showStop, onCancel]);
 
+  const getCurrentComposerTrigger = useCallback((): ComposerSuggestionState | null => {
+    const el = inputRef.current;
+    const selection = window.getSelection();
+    if (!el || !selection || selection.rangeCount === 0) return null;
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed || !el.contains(range.commonAncestorContainer)) return null;
+
+    const beforeRange = range.cloneRange();
+    beforeRange.selectNodeContents(el);
+    beforeRange.setEnd(range.endContainer, range.endOffset);
+    const beforeText = beforeRange.toString().replace(/\u200B/g, '');
+    const match = beforeText.match(/([@$])([\p{L}\p{N}_\-\u4e00-\u9fa5]*)$/u);
+    if (!match) return null;
+
+    return {
+      kind: match[1] === '@' ? 'member' : 'role',
+      query: match[2] || '',
+    };
+  }, []);
+
+  const updateComposerSuggestion = useCallback(() => {
+    const trigger = getCurrentComposerTrigger();
+    if (!trigger || mentionableMembers.length === 0) {
+      setComposerSuggestion(null);
+      return;
+    }
+    setComposerSuggestion(trigger);
+  }, [getCurrentComposerTrigger, mentionableMembers.length]);
+
+  const setRangeStartByTextOffset = useCallback((range: Range, root: HTMLElement, offset: number) => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let consumed = 0;
+    let node = walker.nextNode();
+    while (node) {
+      const text = (node.textContent || '').replace(/\u200B/g, '');
+      const next = consumed + text.length;
+      if (offset <= next) {
+        range.setStart(node, Math.max(0, offset - consumed));
+        return;
+      }
+      consumed = next;
+      node = walker.nextNode();
+    }
+    range.selectNodeContents(root);
+    range.collapse(false);
+  }, []);
+
+  const insertComposerToken = useCallback((kind: ComposerSuggestionKind, value: string, label: string) => {
+    const el = inputRef.current;
+    const selection = window.getSelection();
+    if (!el || !selection || selection.rangeCount === 0) return;
+    const range = selection.getRangeAt(0);
+    if (!el.contains(range.commonAncestorContainer)) return;
+
+    const trigger = getCurrentComposerTrigger();
+    if (trigger) {
+      const beforeRange = range.cloneRange();
+      beforeRange.selectNodeContents(el);
+      beforeRange.setEnd(range.endContainer, range.endOffset);
+      const beforeTextLength = beforeRange.toString().replace(/\u200B/g, '').length;
+      const triggerLength = trigger.query.length + 1;
+      setRangeStartByTextOffset(range, el, Math.max(0, beforeTextLength - triggerLength));
+      range.deleteContents();
+    }
+
+    const chip = document.createElement('span');
+    chip.className = `chat-input-chip-inline chat-input-chip-inline--${kind}`;
+    chip.setAttribute('contenteditable', 'false');
+    chip.dataset.composerToken = kind;
+    chip.dataset.value = value;
+
+    const prefix = document.createElement('span');
+    prefix.className = 'chat-input-chip-inline__prefix';
+    prefix.textContent = kind === 'role' ? '$' : '@';
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'chat-input-chip-inline__label';
+    labelEl.textContent = label;
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'chat-input-chip-inline__remove';
+    removeBtn.setAttribute('aria-label', kind === 'role' ? 'remove role' : 'remove member');
+    removeBtn.innerHTML = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.4"><path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M14 6l-8 8"/></svg>`;
+    removeBtn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const next = chip.nextSibling;
+      if (next && next.nodeType === Node.TEXT_NODE) {
+        const nextText = next.textContent || '';
+        if (nextText === '\u200B') {
+          next.remove();
+        } else if (nextText.startsWith(' ')) {
+          next.textContent = nextText.slice(1);
+        }
+      }
+      chip.remove();
+      const sid = useChatStore.getState().activeSessionId;
+      if (sid) useChatStore.getState().setInputValue(sid, extractPlainText());
+    });
+
+    chip.append(prefix, labelEl, removeBtn);
+    range.insertNode(chip);
+
+    const spacer = document.createTextNode(' ');
+    chip.after(spacer);
+    range.setStartAfter(spacer);
+    range.setEndAfter(spacer);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    const sid = useChatStore.getState().activeSessionId;
+    if (sid) useChatStore.getState().setInputValue(sid, extractPlainText());
+    setComposerSuggestion(null);
+    el.focus();
+  }, [extractPlainText, getCurrentComposerTrigger, setRangeStartByTextOffset]);
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {
+      if (composerSuggestion) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setComposerSuggestion(null);
+          return;
+        }
+
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          if (composerSuggestionItems.length > 0) {
+            setComposerSuggestionIndex((index) => (index + 1) % composerSuggestionItems.length);
+          }
+          return;
+        }
+
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          if (composerSuggestionItems.length > 0) {
+            setComposerSuggestionIndex((index) => (
+              index - 1 + composerSuggestionItems.length
+            ) % composerSuggestionItems.length);
+          }
+          return;
+        }
+
+        if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) {
+          if (isComposingRef.current || e.nativeEvent.isComposing) return;
+          e.preventDefault();
+          const item = composerSuggestionItems[composerSuggestionIndex];
+          if (item) {
+            insertComposerToken(composerSuggestion.kind, item.id, item.label);
+          }
+          return;
+        }
+      }
+
       if (e.key !== 'Enter' || e.shiftKey) return;
       if (isComposingRef.current || e.nativeEvent.isComposing) return;
       e.preventDefault();
       handleSubmit();
     },
-    [handleSubmit]
+    [
+      composerSuggestion,
+      composerSuggestionIndex,
+      composerSuggestionItems,
+      handleSubmit,
+      insertComposerToken,
+    ]
   );
 
   /** contenteditable 输入时同步纯文本到 store + 联动 selectedSkills */
@@ -431,7 +664,8 @@ export function InputArea({
         }
       });
     }
-  }, [extractPlainText]);
+    updateComposerSuggestion();
+  }, [extractPlainText, updateComposerSuggestion]);
 
   /** 保存当前光标位置（用于技能插入时定位） */
   const saveSelection = useCallback(() => {
@@ -643,6 +877,7 @@ export function InputArea({
         'chat-input-container',
         showWorkContextRow && 'chat-input-container--work-home',
         (isModeMenuOpen || workMenuOpen) && 'chat-input-container--menu-open',
+        composerSuggestion && 'chat-input-container--suggestion-open',
         isListening && 'chat-input-container--recording',
       )}
     >
@@ -653,6 +888,15 @@ export function InputArea({
         </div>
       )}
 
+      {composerSuggestion && (
+        <ComposerSuggestionMenu
+          suggestion={composerSuggestion}
+          items={composerSuggestionItems}
+          highlightedIndex={composerSuggestionIndex}
+          onHighlight={setComposerSuggestionIndex}
+          onPick={insertComposerToken}
+        />
+      )}
       <div
         ref={inputRef}
         contentEditable
@@ -1029,6 +1273,62 @@ function ProjectAddSubmenu({ onCreate }: { onCreate: (mode: ProjectCreateMode) =
           blankIcon={<img src={workAddIcon} alt="" aria-hidden="true" />}
           existingIcon={<img src={workFolderIcon} alt="" aria-hidden="true" />}
         />
+      </div>
+    </div>
+  );
+}
+
+function ComposerSuggestionMenu({
+  suggestion,
+  items,
+  highlightedIndex,
+  onHighlight,
+  onPick,
+}: {
+  suggestion: ComposerSuggestionState;
+  items: ComposerSuggestionItem[];
+  highlightedIndex: number;
+  onHighlight: (index: number) => void;
+  onPick: (kind: ComposerSuggestionKind, value: string, label: string) => void;
+}) {
+  const tokenPrefix = suggestion.kind === 'role' ? '$' : '@';
+
+  return (
+    <div className="chat-composer-suggestion" role="listbox">
+      <div className="chat-composer-suggestion__header">
+        <AtSign size={14} />
+        <span>选择团队成员</span>
+      </div>
+      <div className="chat-composer-suggestion__list">
+        {items.length === 0 ? (
+          <div className="chat-composer-suggestion__empty">
+            暂无可选择的团队成员
+          </div>
+        ) : items.map((item, index) => (
+          <button
+            key={`${suggestion.kind}:${item.id}`}
+            type="button"
+            className={clsx(
+              'chat-composer-suggestion__item',
+              highlightedIndex === index && 'chat-composer-suggestion__item--active'
+            )}
+            role="option"
+            aria-selected={highlightedIndex === index}
+            onMouseDown={(event) => event.preventDefault()}
+            onMouseEnter={() => onHighlight(index)}
+            onClick={() => onPick(suggestion.kind, item.id, item.label)}
+          >
+            <span className="chat-composer-suggestion__avatar" aria-hidden="true">
+              <TeamMemberAvatar member={item.id} className="chat-composer-suggestion__team-avatar" />
+            </span>
+            <span className="chat-composer-suggestion__text">
+              <span className="chat-composer-suggestion__label">{item.label}</span>
+              <span className="chat-composer-suggestion__meta">
+                {`${tokenPrefix}${item.id}`}
+              </span>
+            </span>
+          </button>
+        ))}
       </div>
     </div>
   );
