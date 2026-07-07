@@ -466,6 +466,37 @@ class TestProjectRename:
         )
         assert resp["code"] == "BAD_REQUEST"
 
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_rename_illegal_name_bad_request(registered_channel, tmp_path):
+        """重命名为含文件系统非法字符的 name → BAD_REQUEST。"""
+        pa = _abspath(tmp_path, "a")
+        proj = _make_project("P", pa)
+        for bad_name in ["新/A", "新\\A", "新:A", "新*A", '新"A', "新<A", "新>A", "新|A", "新?A"]:
+            resp = await _call(
+                registered_channel, "project.rename",
+                {"project_id": proj.project_id, "name": bad_name},
+            )
+            assert resp["ok"] is False, f"expected BAD_REQUEST for name={bad_name!r}"
+            assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={bad_name!r}"
+        # 原名未被修改
+        from jiuwenswarm.server.runtime.session.project_store import get_project_by_id
+        assert get_project_by_id(proj.project_id, cache_bust=True).name == "P"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_rename_reserved_name_bad_request(registered_channel, tmp_path):
+        """重命名为 Windows 保留设备名 → BAD_REQUEST。"""
+        pa = _abspath(tmp_path, "a")
+        proj = _make_project("P", pa)
+        for reserved in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"]:
+            resp = await _call(
+                registered_channel, "project.rename",
+                {"project_id": proj.project_id, "name": reserved},
+            )
+            assert resp["ok"] is False, f"expected BAD_REQUEST for name={reserved!r}"
+            assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={reserved!r}"
+
 
 # ===========================================================================
 # project.remove / project.restore
@@ -763,40 +794,97 @@ class TestCompat:
 
 
 # ===========================================================================
-# 空 path 项目 + project_id 归属
+# 不传 project_path → 自动生成工作目录 + project_id 归属
 # ===========================================================================
 class TestEmptyPathProject:
     @staticmethod
     @pytest.mark.asyncio
     async def test_create_without_project_path(registered_channel):
-        """不传 project_path → 创建空路径项目,返回 project_path=""。"""
+        """不传 project_path → 在默认工作区下按项目名自动生成工作目录。"""
+        from jiuwenswarm.server.runtime.session.project_store import get_agent_root_dir
+
         resp = await _call(
             registered_channel, "project.create", {"name": "空项目A"}
         )
         assert resp["ok"] is True
         assert resp["payload"]["project_id"].startswith("proj_")
-        assert resp["payload"]["project_path"] == ""
+        expected_path = str(get_agent_root_dir() / "workspace" / "空项目A")
+        assert resp["payload"]["project_path"] == expected_path
+        assert os.path.isdir(expected_path)
         assert resp["payload"]["restored"] is False
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_create_multiple_empty_path_projects(registered_channel):
-        """多个空路径项目可共存,path 均为 "",靠 id+name 区分。"""
+        """不传 project_path 时,各自按项目名生成不同工作目录。"""
+        from jiuwenswarm.server.runtime.session.project_store import get_agent_root_dir
+
+        root = get_agent_root_dir() / "workspace"
         r1 = await _call(registered_channel, "project.create", {"name": "空项目1"})
         r2 = await _call(registered_channel, "project.create", {"name": "空项目2"})
         assert r1["ok"] is True and r2["ok"] is True
         assert r1["payload"]["project_id"] != r2["payload"]["project_id"]
-        assert r1["payload"]["project_path"] == ""
-        assert r2["payload"]["project_path"] == ""
+        assert r1["payload"]["project_path"] == str(root / "空项目1")
+        assert r2["payload"]["project_path"] == str(root / "空项目2")
+        assert os.path.isdir(str(root / "空项目1"))
+        assert os.path.isdir(str(root / "空项目2"))
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_create_empty_path_duplicate_name_conflict(registered_channel):
-        """空路径项目同名 → CONFLICT。"""
+        """同名项目第二次创建 → CONFLICT(路径重复)。"""
         await _call(registered_channel, "project.create", {"name": "同名"})
         resp = await _call(registered_channel, "project.create", {"name": "同名"})
         assert resp["ok"] is False
         assert resp["code"] == "CONFLICT"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_create_without_project_path_illegal_name(registered_channel):
+        """不传 project_path 但项目名含文件系统非法字符 → BAD_REQUEST。"""
+        for bad_name in ["项目/A", "项目\\A", "项目:A", "项目*A", '项目"A', "项目<A", "项目>A", "项目|A", "项目?A"]:
+            resp = await _call(
+                registered_channel, "project.create", {"name": bad_name}
+            )
+            assert resp["ok"] is False, f"expected BAD_REQUEST for name={bad_name!r}"
+            assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={bad_name!r}"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_create_without_project_path_reserved_name(registered_channel):
+        """不传 project_path 但项目名是 Windows 保留设备名 → BAD_REQUEST。"""
+        for reserved in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"]:
+            resp = await _call(
+                registered_channel, "project.create", {"name": reserved}
+            )
+            assert resp["ok"] is False, f"expected BAD_REQUEST for name={reserved!r}"
+            assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={reserved!r}"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_create_with_project_path_illegal_name(registered_channel, tmp_path):
+        """传 project_path 但项目名含文件系统非法字符 → BAD_REQUEST(store 层统一校验)。"""
+        pa = _abspath(tmp_path, "workdir")
+        for bad_name in ["项目/A", "项目\\A", "项目:A", "项目*A", '项目"A', "项目<A", "项目>A", "项目|A", "项目?A"]:
+            resp = await _call(
+                registered_channel, "project.create",
+                {"name": bad_name, "project_path": pa},
+            )
+            assert resp["ok"] is False, f"expected BAD_REQUEST for name={bad_name!r}"
+            assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={bad_name!r}"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_create_with_project_path_reserved_name(registered_channel, tmp_path):
+        """传 project_path 但项目名是 Windows 保留设备名 → BAD_REQUEST(store 层统一校验)。"""
+        pa = _abspath(tmp_path, "workdir")
+        for reserved in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"]:
+            resp = await _call(
+                registered_channel, "project.create",
+                {"name": reserved, "project_path": pa},
+            )
+            assert resp["ok"] is False, f"expected BAD_REQUEST for name={reserved!r}"
+            assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={reserved!r}"
 
     @staticmethod
     @pytest.mark.asyncio

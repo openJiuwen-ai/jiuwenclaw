@@ -1977,8 +1977,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _project_create(ws, req_id, params, session_id):
         """创建项目,指定工作目录。
 
-        ``project_path`` 为可选:传则指定工作目录绝对路径;不传或空串则创建空路径
-        项目(允许多个,靠 ``project_id`` + ``name`` 区分,会话按 ``project_id`` 归属)。
+        ``project_path`` 为可选:传则指定工作目录绝对路径;不传或空串则在默认工作区
+        (``~/.jiuwenswarm/agent/workspace``)下按项目名自动新建文件夹作为工作目录。
+        项目名含文件系统非法字符(``<>:"/\\|?*`` 等)时返回 ``BAD_REQUEST``。
         自动恢复: 若 ``project_path`` 命中已隐藏(``hidden:true``)项目,置
         ``hidden:false`` 并按传入 ``name`` 更新展示名,其下会话因 ``project_path``
         仍匹配自动重新归属。响应 ``restored`` 标识恢复/新建。``project_path`` 与已有
@@ -1993,7 +1994,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         project_path = str(params.get("project_path") or "").strip()
-        # project_path 非空时必须为绝对路径;为空则创建空路径项目(允许多个)
+        # project_path 非空时必须为绝对路径
         if project_path and not os.path.isabs(project_path):
             await channel.send_response(
                 ws, req_id,
@@ -2008,8 +2009,29 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             ProjectPathConflict, ProjectNameConflict,
         )
 
+        # 未传 project_path 时,在默认工作区下按项目名自动生成工作目录
+        if not project_path:
+            try:
+                project_path = project_store.resolve_default_project_path(name)
+            except ValueError as exc:
+                await channel.send_response(
+                    ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST",
+                )
+                return
+            # 创建文件夹(已存在则复用)
+            try:
+                os.makedirs(project_path, exist_ok=True)
+            except OSError as exc:
+                await channel.send_response(
+                    ws, req_id,
+                    ok=False,
+                    error=f"failed to create project directory: {exc}",
+                    code="INTERNAL_ERROR",
+                )
+                return
+
         # 原子完成查重/恢复/新建(锁内,无 TOCTOU 窗口):
-        # 空 path → 直接新建;命中隐藏项目 → 恢复;命中可见项目 → CONFLICT;
+        # 命中隐藏项目 → 恢复;命中可见项目 → CONFLICT;
         # name 重复 → CONFLICT;无匹配 → 新建
         try:
             proj, restored = project_store.create_or_restore_project(name, project_path)
@@ -2023,6 +2045,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="project name already exists", code="CONFLICT",
             )
             return
+        except ValueError as exc:
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST",
+            )
+            return
         await channel.send_response(ws, req_id, ok=True, payload={
             "project_id": proj.project_id,
             "project_path": proj.project_path,
@@ -2033,6 +2060,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         """重命名项目,仅修改展示名,不改动工作目录路径。
 
         默认项目禁止重命名(``FORBIDDEN``)。``name`` 与已有项目(含隐藏)重复时返回 ``CONFLICT``。
+        ``name`` 含文件系统非法字符 / 为保留设备名时返回 ``BAD_REQUEST``。
         """
         if not isinstance(params, dict):
             params = {}
@@ -2063,6 +2091,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except ProjectNameConflict:
             await channel.send_response(
                 ws, req_id, ok=False, error="project name already exists", code="CONFLICT",
+            )
+            return
+        except ValueError as exc:
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST",
             )
             return
         if updated is None:

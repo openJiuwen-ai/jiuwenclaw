@@ -345,6 +345,64 @@ def _gen_unique_project_id(existing_projects: list[dict[str, Any]]) -> str:
     return new_id
 
 
+# 文件系统非法字符(Windows 禁止出现在目录名中;其他平台同样拒绝以保证跨平台一致)
+_DIR_ILLEGAL_CHARS = frozenset('<>:"/\\|?*')
+# Windows 保留设备名,不能作为目录名
+_DIR_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def validate_project_dir_name(name: str) -> str:
+    """校验项目名能否作为目录名;含非法字符或为保留名时抛 ``ValueError``。
+
+    不对名称做任何转换(用户选择"拒绝创建"策略),仅校验。
+    中文名 / 空格 / Unicode 字母数字均允许(各主流文件系统均支持)。
+
+    Raises:
+        ValueError: 名称含文件系统非法字符、为 Windows 保留设备名、
+            全为点/空格、或长度超过 200 字符。
+    """
+    s = str(name or "").strip()
+    if not s:
+        raise ValueError("project name is required")
+    bad = _DIR_ILLEGAL_CHARS.intersection(s)
+    if bad:
+        raise ValueError(
+            f"project name contains illegal characters for directory name: {''.join(sorted(bad))}"
+        )
+    upper = s.upper().rstrip(".")
+    if upper in _DIR_RESERVED_NAMES:
+        raise ValueError(f"project name is a reserved device name: {s}")
+    if all(c in " ." for c in s):
+        raise ValueError("project name must not be all dots or spaces")
+    if len(s) > 200:
+        raise ValueError("project name is too long for directory name (max 200)")
+    return s
+
+
+def resolve_default_project_path(name: str) -> str:
+    """根据项目名在默认工作区下生成工作目录绝对路径。
+
+    创建项目未指定 ``project_path`` 时,在
+    ``~/.jiuwenswarm/agent/workspace/{name}`` 下按项目名生成工作目录。
+    调用方负责 ``mkdir``;本函数仅返回路径并校验名称合法性。
+
+    Args:
+        name: 项目展示名(已 strip)。
+
+    Returns:
+        工作目录绝对路径字符串。
+
+    Raises:
+        ValueError: 名称含文件系统非法字符(详见 :func:`validate_project_dir_name`)。
+    """
+    dir_name = validate_project_dir_name(name)
+    return str(get_agent_root_dir() / "workspace" / dir_name)
+
+
 def create_project(name: str, project_path: str) -> Project:
     """新建项目并持久化(不做 ``project_path`` 去重,供内部/测试使用)。
 
@@ -376,10 +434,14 @@ def create_or_restore_project(name: str, project_path: str) -> tuple[Project, bo
       ``name``),返回 ``(proj, True)``;
     - ``project_path`` 非空且命中可见项目 → 抛 ``ProjectPathConflict``;
     - ``name`` 与其他项目(含隐藏项目、非命中的待恢复项)重复 → 抛 ``ProjectNameConflict``;
+    - ``name`` 含文件系统非法字符 / 为保留设备名 → 抛 ``ValueError``;
     - 无匹配 → 新建(``project_id`` 锁内查重+重生成),返回 ``(proj, False)``。
 
     整个操作在单次 ``_mutate`` 内完成,查重与写入同锁,无 check-then-use 窗口。
     """
+    # 统一校验 name 可作为目录名(所有创建入口的兜底,含非法字符/保留名时抛 ValueError)
+    validate_project_dir_name(name)
+
     def _do(projects: list[dict[str, Any]]) -> tuple[Project, bool]:
         # 空 project_path: 不做路径匹配/恢复/冲突,直接走新建分支(允许多个空路径项目)
         path_match = None
@@ -443,8 +505,12 @@ def rename_project(project_id: str, name: str) -> Project | None:
     """原子地重命名项目(锁内完成名称冲突检测与写入,关闭 TOCTOU 窗口)。
 
     与其他项目(含隐藏项目、非自身)的 ``name`` 重复时抛 ``ProjectNameConflict``。
+    ``name`` 含文件系统非法字符 / 为保留设备名时抛 ``ValueError``。
     隐藏项目的名称同样保留。项目不存在时返回 ``None``(调用方通常已预检存在性)。
     """
+    # 统一校验 name 可作为目录名(含非法字符/保留名时抛 ValueError)
+    validate_project_dir_name(name)
+
     def _do(projects: list[dict[str, Any]]) -> Project | None:
         target = None
         for p in projects:
