@@ -1895,7 +1895,10 @@ export class AppScreen implements Component, Focusable {
   private _toRelativePath(absPath: string): string {
     const cwd = getCurrentCwd() || process.cwd();
     const normalized = path.resolve(absPath);
-    if (normalized.startsWith(cwd + path.sep) || normalized === cwd) {
+    // On Windows, paths are case-insensitive — lower() for safe comparison
+    const a = process.platform === "win32" ? normalized.toLowerCase() : normalized;
+    const b = process.platform === "win32" ? cwd.toLowerCase() : cwd;
+    if (a.startsWith(b + path.sep) || a === b) {
       const rel = path.relative(cwd, normalized);
       return rel || path.basename(absPath);
     }

@@ -589,6 +589,7 @@ class DiffService:
                 cwd=project_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=10,
             )
             if result.returncode != 0:
@@ -608,6 +609,7 @@ class DiffService:
                 cwd=project_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=5,
             )
             if result.returncode != 0:
@@ -632,6 +634,7 @@ class DiffService:
                 cwd=project_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=5,
             )
             if result.returncode != 0:
