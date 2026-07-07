@@ -34,7 +34,7 @@ from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_subagent_base
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawContextEngineeringRail
 from jiuwenclaw.utils import (
     get_agent_registered_skill_dirs,
-    get_agent_root_dir,
+    get_agent_workspace_dir,
     logger,
 )
 from jiuwenclaw.config import get_config
@@ -398,37 +398,37 @@ class ForkAgentExecutor:
             return self._model, None
         return self._resolve_model(model_name=model_name, model_tier=model_tier)
 
-    def _resolve_subagent_workspace_dir(self) -> tuple[str, str]:
-        """Resolve workspace for fork/spawn to match the main agent for the current request.
+    @staticmethod
+    def _resolve_subagent_workspace_dir() -> tuple[str, str]:
+        """Resolve context root for fork/spawn subagent.
 
-        Order: per-request (same as RuntimePromptRail) > parent DeepAgent workspace > agent root.
-        
-        Validates path existence before returning to prevent runtime errors.
+        Context storage (session_memory, offload) goes to agent root,
+        not to the per-request effective_project_dir. This keeps the
+        relay-claw workspace directory free of jiuwenclaw internal files.
+
+        File operations still use cwd (effective_project_dir) inherited from parent.
+        """
+        root = str(get_agent_workspace_dir())
+        root_path = Path(root)
+        if root_path.exists() and root_path.is_dir():
+            return (root, "get_agent_workspace_dir()")
+        logger.warning(
+            "[Subagent] Agent root path does not exist or not a directory: '%s'",
+            root
+        )
+        return (root, "get_agent_workspace_dir()")
+
+    @staticmethod
+    def _resolve_subagent_working_dir() -> str:
+        """Resolve the working directory for prompt injection and file operations.
+
+        Subagent performs file operations via cwd (effective_project_dir),
+        while context storage goes to agent root via _resolve_subagent_workspace_dir.
         """
         req_ws = get_effective_request_workspace_dir()
         if isinstance(req_ws, str) and req_ws.strip():
-            ws_path = Path(req_ws.strip())
-            if ws_path.exists() and ws_path.is_dir():
-                return (req_ws.strip(), "effective_request_workspace_dir")
-            logger.warning(
-                "[Subagent] Request workspace path does not exist or not a directory: '%s'",
-                req_ws.strip()
-            )
-
-        parent_config = getattr(self._parent_agent, "deep_config", None)
-        if parent_config and hasattr(parent_config, "workspace"):
-            parent_ws = getattr(parent_config.workspace, "root_path", None)
-            if parent_ws:
-                root = str(parent_ws).strip()
-                ws_path = Path(root)
-                if ws_path.exists() and ws_path.is_dir():
-                    return (root, "parent_config.workspace.root_path")
-                logger.warning(
-                    "[Subagent] Parent workspace path does not exist or not a directory: '%s'",
-                    root
-                )
-
-        return (get_agent_root_dir(), "get_agent_root_dir()")
+            return req_ws.strip()
+        return str(get_agent_workspace_dir())
 
     def _resolve_subagent_max_iterations(self) -> int:
         """Use parent DeepAgent's max_iterations; then react.max_iterations; then default.
@@ -891,10 +891,12 @@ Approach each task methodically and deliver high-quality results.
             DeepAgent instance for spawn subagent
         """
         ws, ws_source = self._resolve_subagent_workspace_dir()
+        working_dir = self._resolve_subagent_working_dir()
         logger.debug(
-            "[SpawnAgent] workspace_dir=%s source=%s",
+            "[SpawnAgent] context_root=%s source=%s working_dir=%s",
             ws,
             ws_source,
+            working_dir,
         )
 
         config_base = get_config()
@@ -902,7 +904,7 @@ Approach each task methodically and deliver high-quality results.
 
         base_prompt = build_subagent_base_prompt(
             language=language,
-            workspace_dir=ws,
+            workspace_dir=working_dir,
             include_time=True,
         )
         # F-REDUCE: Do not append role prompt or use ContextEngineeringRail.
@@ -1060,14 +1062,15 @@ Approach each task methodically and deliver high-quality results.
             DeepAgent instance configured with message injection rail
         """
         ws, ws_source = self._resolve_subagent_workspace_dir()
-        logger.info("[ForkAgent] Final workspace_dir=%s, source=%s", ws, ws_source)
+        working_dir = self._resolve_subagent_working_dir()
+        logger.info("[ForkAgent] context_root=%s source=%s working_dir=%s", ws, ws_source, working_dir)
 
         config_base = get_config()
         language = config_base.get("preferred_language", "zh")
 
         base_prompt = build_subagent_base_prompt(
             language=language,
-            workspace_dir=ws,
+            workspace_dir=working_dir,
             include_time=True,
         )
 
