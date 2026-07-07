@@ -78,6 +78,9 @@ class WebChannel(BaseChannel):
         self._on_message_cb: Callable[[Message], Any] | None = None
         self._method_handlers: dict[str, MethodHandler] = {}
         self._connect_hooks: list[ConnectHook] = []
+        self._disconnect_hooks: list[ConnectHook] = []
+        # ws -> set[session_id]: 追踪每个连接上活跃的 session
+        self._ws_sessions: dict[int, set[str]] = {}
 
     # ── 公共属性 ──────────────────────────────────────────
 
@@ -105,9 +108,27 @@ class WebChannel(BaseChannel):
         """注册连接建立钩子，新客户端接入时依次调用."""
         self._connect_hooks.append(callback)
 
+    def on_disconnect(self, callback: ConnectHook) -> None:
+        """注册连接断开钩子，客户端断连时依次调用.
+
+        callback 签名: ``async def callback(ws, session_ids: set[str]) -> None``
+        """
+        self._disconnect_hooks.append(callback)
+
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """注册消息接收回调（替代默认的 router.publish_user_messages）。"""
         self._on_message_cb = callback
+
+    def wrap_message_callback(
+        self, wrapper: Callable[[Callable[[Message], Any] | None, Message], Any],
+    ) -> None:
+        """包装现有的消息回调。wrapper 接收 (original_callback, msg) 并返回处理结果。"""
+        original = self._on_message_cb
+
+        def wrapped(msg):
+            return wrapper(original, msg)
+
+        self._on_message_cb = wrapped
 
     # ── 帧发送 API（公开给处理器使用）─────────────────────
 
@@ -383,7 +404,8 @@ class WebChannel(BaseChannel):
                               "history.message",
                               "chat.session_result", "chat.usage_metadata",
                               "chat.usage_summary", "chat.file",
-                              "chat.retract", "security.alert") \
+                              "chat.retract", "security.alert",
+                              "proactive_recommendation") \
                                 or event_name.startswith("team.") \
                                 or event_name.startswith("harness."):
                 # 传递完整 payload，保留所有字段
@@ -410,6 +432,20 @@ class WebChannel(BaseChannel):
                     cron_extra = msg.payload.get("cron")
                     if isinstance(cron_extra, dict):
                         payload["cron"] = cron_extra
+                    # 保留 source 字段，供前端识别消息来源（如主动推荐）
+                    source = msg.payload.get("source")
+                    if source:
+                        payload["source"] = source
+                    # 保留 proactive_type，供前端选对卡片样式（技能推荐/任务提醒/探索发现）
+                    ptype = msg.payload.get("proactive_type")
+                    if ptype:
+                        payload["proactive_type"] = ptype
+                    if source == "proactive_recommendation":
+                        logger.info(
+                            "[WebChannel] proactive push frame: source=%s proactive_type=%s "
+                            "content_len=%d payload_keys=%s",
+                            source, ptype, len(str(payload.get("content", ""))), list(payload.keys()),
+                        )
         else:
             # payload 不是 dict，尝试从 params 提取
             content = str((msg.params or {}).get("content", "") or "")
@@ -504,6 +540,22 @@ class WebChannel(BaseChannel):
                     describe_ws_peer(ws),
                 ),
             )
+            # 取出该 ws 关联的 session_ids，清理映射
+            ws_id = id(ws)
+            disconnected_sessions = self._ws_sessions.pop(ws_id, set())
+            logger.info(
+                "WebChannel 连接关闭: remote=%s sessions=%s",
+                remote,
+                disconnected_sessions or "none",
+            )
+            # 触发断连钩子，传入 session_ids
+            for hook in self._disconnect_hooks:
+                try:
+                    result = hook(ws, disconnected_sessions)
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception as e:  # pragma: no cover
+                    logger.warning("WebChannel on_disconnect hook error: %s", e)
 
     async def _handle_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
         try:
@@ -536,6 +588,14 @@ class WebChannel(BaseChannel):
         session_id = params.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             session_id = self._make_session_id()
+
+        # 追踪 ws → session_id 映射，用于断连时清理
+        ws_id = id(ws)
+        sessions = self._ws_sessions.get(ws_id)
+        if sessions is None:
+            sessions = set()
+            self._ws_sessions[ws_id] = sessions
+        sessions.add(session_id)
 
         params = await self._process_files(params)
 

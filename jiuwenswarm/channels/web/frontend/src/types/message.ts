@@ -66,6 +66,9 @@ export interface Message {
   usageSummary?: UsageSummary;
   // Harness message flag for special styling
   isHarnessMessage?: boolean;
+  // 主动推荐消息标记
+  isProactiveRecommendation?: boolean;
+  proactiveType?: 'skill_recommend' | 'task_reminder' | 'need_exploration';
 }
 
 export interface ToolCall {

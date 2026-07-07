@@ -8,7 +8,7 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
 
 
-def test_git_diff_from_subdir_includes_repo_root_untracked_files(tmp_path):
+def test_git_diff_from_subdir_excludes_untracked_files(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init")
@@ -30,11 +30,8 @@ def test_git_diff_from_subdir_includes_repo_root_untracked_files(tmp_path):
 
     assert diff is not None
     assert str(tracked) in diff["files"]
-    assert str(untracked) in diff["files"]
-    assert diff["files"][str(untracked)]["isUntracked"] is True
-    assert diff["files"][str(untracked)]["linesAdded"] == 0
-    assert diff["files"][str(untracked)]["hunks"] == []
-    assert diff["stats"]["filesChanged"] == 2
+    assert str(untracked) not in diff["files"]
+    assert diff["stats"]["filesChanged"] == 1
     assert diff["stats"]["linesAdded"] == 1
     assert diff["stats"]["linesRemoved"] == 1
 

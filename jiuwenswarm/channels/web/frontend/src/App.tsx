@@ -298,11 +298,11 @@ function AppContent() {
   /** 为 true 表示刚从「会话列表」恢复；history 为空时在 useEffect 的 onEmpty 中提示一次 */
   const historyRestoreFromPanelHintRef = useRef(false);
 
-  useEffect(() => {
-    sessionIdRef.current = sessionId;
-  }, [sessionId]);
 
-  const { setCurrentSession, setSessions, setAvailableModels, setMode, mode, heartbeatMessage, heartbeatUpdatedAt, teamTaskEvents, teamTasks, teamMembers, setTeamLeaderMemberIds } = useSessionStore();
+
+  const { setCurrentSession, setSessions, setAvailableModels, setMode, mode, heartbeatMessage,
+    heartbeatUpdatedAt, teamTaskEvents, teamTasks, teamMembers, setTeamLeaderMemberIds,
+    updateSession } = useSessionStore();
   const {
     teamAreaExpanded,
     teamAreaActiveTab,
@@ -413,6 +413,7 @@ function AppContent() {
         // 重连时保持已有会话，防止被覆盖
         if (!currentStored) {
           console.log('Adopting backend session:', payload.session_id);
+          sessionIdRef.current = payload.session_id;
           setSessionId(payload.session_id);
           storeSessionId(payload.session_id);
         } else {
@@ -422,6 +423,7 @@ function AppContent() {
         // 后端未提供 session_id 且本地也无有效 session：兜底生成
         const fallbackSid = generateSessionId();
         console.log('Generated fallback session:', fallbackSid);
+        sessionIdRef.current = fallbackSid;
         setSessionId(fallbackSid);
         storeSessionId(fallbackSid);
       }
@@ -1035,8 +1037,8 @@ function AppContent() {
 
   // 新建会话：立即生成可用的 session_id，避免停留在 'new' 导致无法发送消息
   const handleNewSession = useCallback(async () => {
-    if (mode === 'team' && sessionId) {
-      cancel(sessionId);
+    if (mode === 'team' && sessionIdRef.current && sessionIdRef.current !== 'new') {
+      cancel(sessionIdRef.current);
     }
     // 切换模式/新建会话时直接设置状态，避免闪现
     useChatStore.getState().setSwitchingMode(true);
@@ -1066,18 +1068,21 @@ function AppContent() {
     clearTodos();
     resetHarnessStore();
     const newSid = generateSessionId();
-    const previousSid = sessionIdRef.current;
     // 立即同步更新 ref 到新值，防止后续发送消息使用旧 ID
     sessionIdRef.current = newSid;
     setSessionId(newSid);
     try {
-      const payload = await request<{ session_id?: string }>('session.create', {
+      const payload = await request<{ session_id?: string; sessionId?: string }>('session.create', {
         session_id: newSid,
-      });
+        mode,
+      }, { timeoutMs: 60_000 });  // session.create 可能因队列等待耗时较长，超时设为 60 秒
+      // 后端返回 sessionId（驼峰），同时兼容 session_id（下划线）
       const createdSid =
-        typeof payload?.session_id === 'string' && payload.session_id
-          ? payload.session_id
-          : newSid;
+        (typeof payload?.sessionId === 'string' && payload.sessionId)
+          ? payload.sessionId
+          : (typeof payload?.session_id === 'string' && payload.session_id)
+            ? payload.session_id
+            : newSid;
       // 如果后端返回的 ID 与生成的不一致，更新 ref
       if (createdSid !== newSid) {
         sessionIdRef.current = createdSid;
@@ -1085,20 +1090,21 @@ function AppContent() {
       }
       setCurrentSession(null);
       storeSessionId(createdSid);
-      // 保持当前模式
-      if (switchMode) {
-        try {
-          await switchMode(createdSid, mode);
-        } catch (error) {
-          console.error('Failed to set mode for new session:', error);
-        }
+      // 设置模式：创建新 session 时已在前方 cancel 旧 session，
+      // 此处只需设置模式状态，不再通过 switchMode 触发 interrupt，
+      // 避免 interrupt 新 session 或与 cancel 响应产生状态冲突
+      setMode(mode);
+      if (createdSid && createdSid !== 'new') {
+        updateSession(createdSid, { mode });
       }
+      useChatStore.getState().setSwitchingMode(false);
       await fetchSessions();
     } catch (error) {
       console.error('Failed to create session:', error);
-      // 创建失败时恢复旧的 session ID
-      sessionIdRef.current = previousSid;
-      setSessionId(previousSid);
+      // 不再回退 sessionId：后端可能已创建目录，且回退会导致
+      // sessionIdRef 与当前 UI 状态不一致，后续 cancel 会指向错误的 session
+      // 用户可以重新点击新建来再次尝试
+      useChatStore.getState().setSwitchingMode(false);
       return;
     }
     setNewSessionToastVisible(true);
@@ -1107,10 +1113,6 @@ function AppContent() {
       setNewSessionToastVisible(false);
       newSessionToastTimerRef.current = null;
     }, 2000);
-    // 延迟重置切换模式状态
-    setTimeout(() => {
-      useChatStore.getState().setSwitchingMode(false);
-    }, 300);
   }, [
     cancel,
     clearMessages,
@@ -1121,13 +1123,13 @@ function AppContent() {
     mode,
     request,
     resetHarnessStore,
-    sessionId,
     setCurrentSession,
+    setMode,
     setTeamAreaExpanded,
     setPaused,
     setProcessing,
     setThinking,
-    switchMode,
+    updateSession,
   ]);
 
   // 切换模式
@@ -1360,6 +1362,7 @@ function AppContent() {
       clearSubtasks();
       resetHarnessStore();
       historyRestoreFromPanelHintRef.current = true;
+      sessionIdRef.current = targetSessionId;
       setSessionId(targetSessionId);
       setCurrentSession(null);
       storeSessionId(targetSessionId);

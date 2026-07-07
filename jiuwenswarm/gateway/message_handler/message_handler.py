@@ -323,6 +323,9 @@ class MessageHandler(ABC):
 
     @classmethod
     def _should_cancel_existing_stream_before_chat_send(cls, msg: "Message") -> bool:
+        # 主动推荐消息不取消现有流式任务，避免干扰用户当前对话
+        if isinstance(msg.params, dict) and msg.params.get("source") == "proactive_recommendation":
+            return False
         return (
             cls._is_chat_send_message(msg)
             and not cls._is_team_chat_send(msg)
@@ -687,6 +690,10 @@ class MessageHandler(ABC):
                 cancel_mode = state.mode.value if hasattr(state.mode, 'value') else str(state.mode)
         if cancel_mode:
             cancel_params["mode"] = cancel_mode
+        # 前端 cancel/supplement 请求可能带 team 标识，确保传递到 AgentServer
+        # 以便 _handle_cancel 能正确走 team runtime 清理路径
+        if isinstance(msg.params, dict) and msg.params.get("team"):
+            cancel_params["team"] = msg.params["team"]
         if isinstance(msg.params, dict) and msg.params.get("trusted_dirs"):
             cancel_params["trusted_dirs"] = msg.params["trusted_dirs"]
 
@@ -2942,7 +2949,12 @@ class MessageHandler(ABC):
                         )
 
                     elif intent == "cancel":
-                        await self._cancel_agent_work_for_session(msg, msg.session_id)
+                        # 使用 fire_and_forget 模式，避免 await AgentServer 响应阻塞 _forward_loop，
+                        # 导致后续 session.create 等请求在队列中等待超时
+                        await self._cancel_agent_work_for_session(
+                            msg, msg.session_id,
+                            agent_notify="fire_and_forget",
+                        )
 
                     elif intent in ("pause", "resume"):
                         # 暂停/恢复：不取消流式任务，转发给 AgentServer 处理 ReAct 循环

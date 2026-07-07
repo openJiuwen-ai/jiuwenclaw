@@ -342,9 +342,23 @@ function parseHistoryTimelineEntry(
         },
       };
     }
+    // 主动推荐消息：从历史记录还原 source/proactive_type，使刷新后仍按
+    // ProactiveRecommendationCard 渲染（否则会退化为普通白色气泡）。
+    const histSource = typeof payload.source === 'string' ? payload.source : '';
+    const isProactiveRecommendation = histSource === 'proactive_recommendation';
+    const histProactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
     return {
       kind: 'message',
-      message: { id, role: 'assistant', content, timestamp: at },
+      message: {
+        id,
+        role: 'assistant',
+        content,
+        timestamp: at,
+        ...(isProactiveRecommendation ? { isProactiveRecommendation } : {}),
+        ...(isProactiveRecommendation && histProactiveType
+          ? { proactiveType: histProactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' }
+          : {}),
+      },
     };
   }
 

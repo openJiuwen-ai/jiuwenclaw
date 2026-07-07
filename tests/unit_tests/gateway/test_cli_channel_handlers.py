@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from jiuwenswarm.gateway.channel_manager.tui import tui_connect as tui_connect_module
 from jiuwenswarm.gateway.channel_manager.tui.tui_connect import (
     CliHandlersBindParams,
     CliRouteBindParams,
@@ -267,6 +268,84 @@ async def test_config_validate_model_handler_uses_local_probe(monkeypatch):
         "error": None,
         "code": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_command_model_switch_sends_scoped_agent_reload(monkeypatch):
+    server = FakeGatewayServer()
+    sent_envs = []
+    defaults = [
+        {
+            "alias": "glm",
+            "model_client_config": {
+                "api_key": "key",
+                "api_base": "https://example.test/v1",
+                "model_name": "GLM-5",
+                "client_provider": "openai",
+            },
+            "model_config_obj": {},
+        },
+        {
+            "alias": "other",
+            "model_client_config": {
+                "api_key": "key",
+                "api_base": "https://example.test/v1",
+                "model_name": "other-model",
+                "client_provider": "openai",
+            },
+            "model_config_obj": {},
+        },
+    ]
+
+    async def fake_send_tui_agent_request(_client, env, *, label):
+        sent_envs.append((env, label))
+
+    monkeypatch.setattr(tui_connect_module, "_send_tui_agent_request", fake_send_tui_agent_request)
+    monkeypatch.setattr(
+        tui_connect_module,
+        "get_config_raw",
+        lambda: {"models": {"defaults": defaults}},
+    )
+    monkeypatch.setattr(tui_connect_module, "ensure_defaults_list_in_config", lambda: defaults)
+    monkeypatch.setattr(tui_connect_module, "update_default_models_in_config", lambda _defaults: None)
+    monkeypatch.setattr(tui_connect_module, "get_config", lambda: {"models": {"defaults": defaults}})
+
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=object(),
+            message_handler=None,
+            on_config_saved=None,
+            path="/tui",
+        )
+    )
+
+    await server.local_handlers["/tui"]["command.model"](
+        object(),
+        "req-switch",
+        {"model": "glm"},
+        "tui_session_1",
+    )
+    await asyncio.sleep(0)
+
+    assert server.responses[-1] == {
+        "id": "req-switch",
+        "ok": True,
+        "payload": {
+            "current": "GLM-5",
+            "requested": "glm",
+            "type": "switched",
+            "applied": True,
+        },
+        "error": None,
+        "code": None,
+    }
+    assert len(sent_envs) == 1
+    env, label = sent_envs[0]
+    assert label == "command.model.switch"
+    assert env.params["target_channel_id"] == "tui"
+    assert env.params["target_session_id"] == "tui_session_1"
+    assert env.params["reason"] == "model_switch"
 
 
 @pytest.mark.asyncio

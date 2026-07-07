@@ -39,6 +39,8 @@ This tutorial focuses on **Web UI configuration**. Subsequent channel setup inst
 
 For manual configuration, edit the `config.yaml` file (default path: `~/.jiuwenswarm/config/config.yaml`), set the corresponding channel to `enabled: true` and fill in the credentials. Changes take effect automatically upon saving.
 
+- **Edit `config.yaml` manually** — Default location is `~/.jiuwenswarm/config/config.yaml` (created automatically on first `jiuwenswarm-start`). Set the desired channel to `enabled: true` and fill in the credentials; saving triggers an automatic reload without restarting.
+
 ### Channel Feature Differences
 
 Different channels have varying capabilities regarding private/group chat support, trigger methods, and permission requirements:

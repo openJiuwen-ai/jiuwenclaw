@@ -719,7 +719,11 @@
       "skillRetrievalBuildEquivalenceEnabled": "启用等价分支合并",
       "skillRetrievalCompactCodes": "紧凑编码模式",
       "skillRetrievalFlattenTree": "平铺检索树",
-      "skillRetrievalMaxExposureDepth": "单次披露深度"
+      "skillRetrievalMaxExposureDepth": "单次披露深度",
+      "proactiveEnabled": "启用主动推荐",
+      "proactiveTickInterval": "检查间隔（分钟）",
+      "proactiveMaxPerDay": "每日推荐上限",
+      "proactiveMaxSessions": "每次检查会话数"
     },
     "keyHelp": {
       "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启",
@@ -753,7 +757,7 @@
       "apiBaseUrlInvalid": "API Base URL 必须以 http:// 或 https:// 开头",
       "modelNameTooLong": "模型名称过长，请控制在 100 字符以内",
       "aliasTooLong": "别名过长，请控制在 100 字符以内",
-      "apiBaseTooLong": "API Base URL 过长，请控制在 100 字符以内",
+      "apiBaseTooLong": "API Base URL 过长，请控制在 256 字符以内",
       "apiKeyTooLong": "API Key 过长，请控制在 500 字符以内",
       "reasoningDefault": "使用默认值",
       "alias": "别名",
@@ -815,7 +819,8 @@
       "skillRetrieval": { "label": "技能交响乐", "hint": "控制技能交响乐" },
       "memory": { "label": "记忆系统敏感信息过滤", "hint": "配置禁止写入记忆的敏感信息类型" },
       "email": { "label": "邮箱配置", "hint": "邮件账号与令牌参数" },
-      "other": { "label": "其他配置", "hint": "未归类的扩展参数" }
+      "other": { "label": "其他配置", "hint": "未归类的扩展参数" },
+      "proactive": { "label": "主动推荐", "hint": "自动分析用户需求，主动提供建议；调度频率请在定时任务面板调整" }
     },
     "booleanLabels": {
       "evolutionAutoScan": "自动检测可演进信号",
@@ -849,6 +854,23 @@
       "loadFailed": "加载工具权限失败",
       "saveFailed": "保存失败"
     },
+    "proactive": {
+      "title": "主动推荐",
+      "description": "自动分析用户需求，根据对话上下文主动提供建议。",
+      "tickInterval": "检查间隔",
+      "tickIntervalDesc": "引擎扫描主动推荐机会的频率",
+      "maxPerDay": "每日上限",
+      "maxPerDayDesc": "每日主动推荐次数上限",
+      "maxSessions": "每次检查会话数",
+      "maxSessionsDesc": "每轮检查最多分析的会话数",
+      "notConnected": "请先连接服务器。",
+      "disabledHint": "请先启用主动推荐，再使用此功能。",
+      "typeLabel": {
+        "skill_recommend": "技能推荐",
+        "task_reminder": "任务提醒",
+        "need_exploration": "探索发现"
+      }
+    },
     "errors": {
       "requiredModelFields": "模型配置为必填：{{fields}}。请完整填写后再保存并重启。",
       "saveFailed": "保存失败，请稍后重试",
@@ -870,6 +892,9 @@
     "loading": "正在加载任务列表...",
     "empty": "暂无定时任务",
     "deleteConfirm": "确定要删除这个任务吗？",
+    "autoManaged": "自动维护",
+    "autoManagedHint": "此任务由主动推荐开关自动创建/删除；开关在设置→主动推荐。调度频率、偏移、时区、推送频道可在此面板编辑，删除请到设置关闭开关。",
+    "autoManagedToggleDisabled": "自动维护任务的开关由设置→主动推荐控制，不可在此切换。",
     "status": {
       "enabled": "启用",
       "disabled": "禁用",

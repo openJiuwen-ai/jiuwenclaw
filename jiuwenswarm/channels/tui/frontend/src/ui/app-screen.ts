@@ -460,13 +460,13 @@ export function buildDiffViewerSources(payload: Record<string, unknown>): DiffSo
 
   sources.push({
     label: "Current",
-    title: "Diff (git diff HEAD)",
+    title: "Uncommitted changes (git diff HEAD)",
     subtitle: formatDiffStats(currentStats),
     stats: currentStats,
     files: currentFiles,
     emptyMessage: currentStats.filesChanged > 0 && currentFiles.length === 0
       ? "Too many files to display details"
-      : "Working tree is clean",
+      : "No changes yet",
   });
 
   for (const turn of turns) {
@@ -1789,7 +1789,10 @@ export class AppScreen implements Component, Focusable {
   private _toRelativePath(absPath: string): string {
     const cwd = getCurrentCwd() || process.cwd();
     const normalized = path.resolve(absPath);
-    if (normalized.startsWith(cwd + path.sep) || normalized === cwd) {
+    // On Windows, paths are case-insensitive — lower() for safe comparison
+    const a = process.platform === "win32" ? normalized.toLowerCase() : normalized;
+    const b = process.platform === "win32" ? cwd.toLowerCase() : cwd;
+    if (a.startsWith(b + path.sep) || a === b) {
       const rel = path.relative(cwd, normalized);
       return rel || path.basename(absPath);
     }
@@ -1997,9 +2000,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     const sourceHint = this.diffViewerState.sources.length > 1 ? "←/→ source · " : "";
-    const hintText = source.files.length > 0
-      ? `  ${sourceHint}↑/↓ to select · Enter to view · Esc to close`
-      : `  ${sourceHint}Esc to close`;
+    const hintText = `  ${sourceHint}↑/↓ to select · Enter to view · Esc to close`;
     lines.push(padToWidth(palette.text.dim(hintText), safeWidth));
 
     return lines;
@@ -2207,10 +2208,16 @@ export class AppScreen implements Component, Focusable {
     // can use the same physical keys.
     // Exception: app:toggleTranscript (ctrl+o) is allowed even when overlays are
     // open, so users can fold/unfold the transcript behind the overlay.
+    const globalAction = resolveAction("Global", data);
     const skipGlobalMainScreenKeys = hasOverlay || this.showTeamPanel;
+    const allowGlobalAction =
+      !skipGlobalMainScreenKeys ||
+      globalAction === "app:toggleTranscript" ||
+      (this.showTeamPanel && !hasOverlay && globalAction === "app:toggleTeamPanel");
     let handled = false;
-    if (!skipGlobalMainScreenKeys || resolveAction("Global", data) === "app:toggleTranscript") {
-      const isToggleTranscript = resolveAction("Global", data) === "app:toggleTranscript";
+    if (allowGlobalAction) {
+      const isToggleTranscript = globalAction === "app:toggleTranscript";
+      const isToggleTeamPanel = globalAction === "app:toggleTeamPanel";
       handled = handleAppScreenKeyInput(data, {
         interruptTask: () => this.interruptTask(),
         exitApp: () => this.exit(),
@@ -2278,7 +2285,7 @@ export class AppScreen implements Component, Focusable {
       // but handleAppScreenKeyInput only returns true when skipGlobalMainScreenKeys
       // is false (it matches Global context via keymap.ts). So we trust the
       // delegate callback has run and mark it handled ourselves.
-      if (handled || isToggleTranscript) {
+      if (handled || isToggleTranscript || isToggleTeamPanel) {
         return;
       }
     }

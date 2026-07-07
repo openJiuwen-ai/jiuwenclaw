@@ -770,17 +770,23 @@ class JiuWenSwarm:
             self,
             config_base: dict[str, Any] | None = None,
             env_overrides: dict[str, Any] | None = None,
+            target_session_id: str | None = None,
     ) -> None:
         """从配置重新加载.
 
         Args:
             config_base: 可选的完整配置快照；传入时优先使用它而不是读取本地 config.yaml。
             env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
+            target_session_id: 可选的目标 session id；传入时限制 session adapter 级联热更新范围。
         """
         adapter = self._ensure_adapter()
         if hasattr(adapter, "try_stop_dreaming"):
             await adapter.try_stop_dreaming()
-        await adapter.reload_agent_config(config_base, env_overrides)
+        await adapter.reload_agent_config(
+            config_base,
+            env_overrides,
+            target_session_id=target_session_id,
+        )
         logger.info("[JiuWenSwarm] Agent config reloaded: sdk=%s", self._sdk_name)
         if hasattr(adapter, "try_start_dreaming"):
             sm = self._session_manager
@@ -1500,12 +1506,8 @@ class JiuWenSwarm:
             adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
             return await adapter.handle_user_answer(request)
 
-        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
-
-        heartbeat_response = await adapter.handle_heartbeat(request)
-        if heartbeat_response is not None:
-            return heartbeat_response
-
+        # 无状态请求（skills / skilldev / plugins / symphony）不需要 adapter，
+        # 在 _ensure_adapter 之前检查，避免触发 adapter 懒初始化。
         skilldev_response = await self._handle_skilldev_request(request)
         if skilldev_response is not None:
             return skilldev_response
@@ -1522,9 +1524,18 @@ class JiuWenSwarm:
         if symphony_response is not None:
             return symphony_response
 
+        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+
+        heartbeat_response = await adapter.handle_heartbeat(request)
+        if heartbeat_response is not None:
+            return heartbeat_response
+
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
-        if not is_interrupt_resume_payload(request.params):
+        # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
+        # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
+        if not is_interrupt_resume_payload(request.params) \
+                and str(request.params.get("source") or "") != "proactive_recommendation":
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
@@ -1645,6 +1656,36 @@ class JiuWenSwarm:
                 )
             return
 
+        # 无状态 RPC（skills / plugins / symphony）不需要 adapter，
+        # 委托给非流式 handler 并包装为单个 chunk，避免触发 adapter 懒初始化。
+        # skilldev 已由上面的流式分支处理，这里不会再命中。
+        for stateless_handler in (
+            self._handle_skills_request,
+            self._handle_plugins_request,
+            self._handle_symphony_request,
+        ):
+            stateless_response = await stateless_handler(request)
+            if stateless_response is not None:
+                if stateless_response.ok:
+                    chunk_payload = stateless_response.payload
+                else:
+                    # handler 内部捕获异常并以 ok=False 返回时，注入 chat.error
+                    # 事件标记，使下游能识别为错误（与非流式 resp.ok 传播等价）。
+                    raw_payload = stateless_response.payload
+                    error_msg = (
+                        raw_payload.get("error", "unknown error")
+                        if isinstance(raw_payload, dict)
+                        else "unknown error"
+                    )
+                    chunk_payload = {"event_type": "chat.error", "error": error_msg}
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload=chunk_payload,
+                    is_complete=True,
+                )
+                return
+
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
 
         session_id = self._session_manager.get_session_id(request.session_id)
@@ -1661,7 +1702,10 @@ class JiuWenSwarm:
             and isinstance(request.params.get("activate_response"), dict)
         )
 
-        if not is_interrupt_resume_payload(request.params):
+        # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
+        # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
+        if not is_interrupt_resume_payload(request.params) \
+                and str(request.params.get("source") or "") != "proactive_recommendation":
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,

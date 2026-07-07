@@ -72,6 +72,9 @@ CRON_JOB_MODES: frozenset[str] = frozenset(
         "agent.fast",
         "team.plan",
         "code.team",
+        # 不走 chat.send，scheduler 消费时直接发 PROACTIVE_TICK WS 请求
+        # 触发 AgentServer ProactiveEngine.tick_now()。由 proactive_cron_sync 自动注册。
+        "proactive.tick",
     }
 )
 
