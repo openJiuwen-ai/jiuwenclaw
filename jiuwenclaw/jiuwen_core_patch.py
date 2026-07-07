@@ -882,6 +882,7 @@ def apply_openai_model_client_patch() -> None:
     setattr(OpenAIModelClient, "_parse_stream_chunk", _impl["_parse_stream_chunk"])
     setattr(OpenAIModelClient, "_parse_response", _impl["_parse_response"])
     setattr(OpenAIModelClient, "_build_request_params", _patched_build_request_params)
+    setattr(OpenAIModelClient, "_MIN_SEGMENT_SIZE", _impl["_MIN_SEGMENT_SIZE"])
 
     OpenAIModelClient.invoke = PatchOpenAIModelClient.invoke
     OpenAIModelClient.stream = PatchOpenAIModelClient.stream
