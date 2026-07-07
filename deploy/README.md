@@ -535,12 +535,40 @@ kubectl describe pod <pod-name> -n <namespace>
 journalctl -u kubelet -f
 ```
 
-### 5.3 查看容器业务日志（业务报错、启动异常）
-适用于排查 Pod 处于 Running 状态的业务端报错的场景， 日志输出内容较多时，建议将日志重定向至本地文件检索关键字 Error 定位异常：
+### 5.3 查看容器业务日志
+
+本节适用于 Pod 状态为 Running 时，排查业务运行报错、接口异常、服务启动失败等问题。
+
+**方式一：通过 kubectl 拉取标准输出日志**
+日志输出内容较多时，建议将日志重定向至本地文件检索关键字 Error 定位异常：
 
 ```
 kubectl logs -f <pod-name> -n <namespace> 2>&1 | tee <file-name>
 ```
+
+**方式二：登录节点读取容器原始日志文件**
+
+默认配置下，容器标准输出日志软链接统一存放于节点 /var/log/containers 目录下，仅对当前节点正在运行的 Pod 生成链接，
+
+```
+# ls /var/log/containers
+jiuwenclaw-agentserver-gcivg9a6xk-aumi6_chenhui_jiuwenbox-f0c50f60193e14524f25f6f949d8c5e8333421812c339cfbaf37fc07a8f30f0f.log
+jiuwenclaw-agentserver-gcivg9a6xk-aumi6_chenhui_jiuwenclaw-agentserver-e5b5a0f61ffd5cf817bf382734d6a50b6af15c81d2ea387c8106548e40005258.log
+jiuwenclaw-gateway-6498fbc8d-nfhcl_chenhui_gateway-38a2134e8932dc4107c4e9cb7ce28e65531eac9f928c802d3cc49840ad363096.log
+jiuwenclaw-web-fd64b644f-p42hf_chenhui_web-aeb66347df8980dea7f4697fe7f6b37eb1529c755efe2fbc778731646f70e7da.log
+```
+**注意**
+
+1. kubelet 可自定义日志根路径 podLogsDir 参数，变更容器日志存储根目录。可通过如下命令查询当前节点生效日志根目录：
+```
+cat /var/lib/kubelet/config.yaml | grep podLogsDir
+```
+- 若命令有输出值：代表集群已自定义日志存储根目录，不再使用默认路径 /var/log/pods。
+- 若命令无任何输出：代表未做自定义配置，使用 kubelet 默认底层日志目录 /var/log/pods
+
+2. /var/log/containers 仅保留当前节点正常运行 Pod 的日志软链接；Pod 删除、漂移、容器完全退出后，软链接会被 kubelet 自动回收消失；
+
+
 
 ### 5.4 进入容器内部检查
 若 Pod 处于 Running 状态，也可进入容器检查是否正常：
