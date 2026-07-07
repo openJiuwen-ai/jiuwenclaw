@@ -768,13 +768,49 @@ class TestPipeline:
     async def test_pipeline_feeds_training_candidates(
         self, mock_store, mock_generator, mock_policy
     ):
+        from jiuwenswarm.evolve.apply_writers.training_writer import (
+            TrainingCandidateWriter,
+        )
+        from jiuwenswarm.evolve.models import (
+            EvidenceRef,
+            Proposal,
+            ProposalTargetType,
+            TraceBatch,
+        )
         from jiuwenswarm.evolve.pipeline import EvolutionPipeline
-        from jiuwenswarm.evolve.models import TraceBatch
+
+        # TrainingCandidateWriter 只处理 target_type=TRAINING 的 ACTIVE 提案:
+        # 把 failure_evidence 里的 trace_id 写进 training_candidates 表。
+        class TrainingGen:
+            def __init__(self):
+                self.name = "training_gen"
+
+            async def generate(self, batch):
+                return [
+                    Proposal(
+                        target_type=ProposalTargetType.TRAINING,
+                        proposal_type="add_training_candidate",
+                        failure_evidence=[
+                            EvidenceRef(
+                                trace_id=batch.trace_ids[0]
+                                if batch.trace_ids
+                                else "t-0",
+                                description="mock training trace",
+                            )
+                        ],
+                        root_cause="Mock issue",
+                        targeted_fix={"action": "mock_fix"},
+                        predicted_impact="Mock improvement",
+                        risk="Low",
+                        proposer_name="training_gen",
+                        metadata={"batch_id": batch.batch_id},
+                    )
+                ]
 
         pipeline = EvolutionPipeline(
-            generators=[mock_generator],
+            generators=[TrainingGen()],
             policies=[mock_policy],
-            writers=[],
+            writers=[TrainingCandidateWriter(store=mock_store)],
             store=mock_store,
         )
         batch = TraceBatch(trace_ids=["t-tc-1"], source="test")
@@ -865,6 +901,8 @@ class TestEndToEnd:
         eval_policy = EvalPolicy()
 
         with tempfile.TemporaryDirectory() as skills_tmp:
+            # writer 契约: 只修改已存在 skill, 不创建新 skill。预建 general/。
+            (Path(skills_tmp) / "general").mkdir(parents=True, exist_ok=True)
             writer = SkillExperienceWriter(skills_dir=skills_tmp)
 
             # We need a store facade
@@ -925,9 +963,9 @@ class TestEndToEnd:
             chain = store.query_by_trace_id("e2e-trace-1")
             assert len(chain["proposals"]) >= 1
 
-            # 12.3: Training candidates fed
-            candidates = store.get_training_candidates()
-            assert any(c["trace_id"] == "e2e-trace-1" for c in candidates)
+            # 本测试聚焦 SKILL 写回流程; training candidate 由
+            # TrainingCandidateWriter + target_type=TRAINING 提案单独覆盖
+            # (见 test_pipeline_feeds_training_candidates),此处不断言。
 
             # An apply record should exist
             assert result.applied_count >= 1
