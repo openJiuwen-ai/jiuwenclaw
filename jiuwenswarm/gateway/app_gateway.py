@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import inspect
 import json
 import logging
 import os
@@ -325,7 +324,6 @@ class GatewayServer:
         self._request_to_client: dict[tuple[str, str], Any] = {}
         self._session_to_client: dict[tuple[str, str], Any] = {}
         self._pending_session_clients: dict[tuple[str, str], Any] = {}
-        self._web_pending_cancels: dict[str, tuple[asyncio.Task, float]] = {}
         self.message_handler_ref = None
         self._acp_bridge = AcpGatewayBridge(
             self._dispatch_on_message,
@@ -501,68 +499,6 @@ class GatewayServer:
                 session_key[1],
                 exc_info=True,
             )
-
-    WEB_DISCONNECT_GRACE_SECONDS = 60
-
-    def web_cancel_pending_cleanup(self, session_id: str) -> None:
-        entry = self._web_pending_cancels.pop(session_id, None)
-        if entry is not None:
-            task, _ = entry
-            if not task.done():
-                task.cancel()
-            logger.info(
-                "[App] Web 重连，取消待清理 session: session_id=%s",
-                session_id,
-            )
-
-    async def _web_delayed_session_cleanup(
-        self,
-        session_id: str,
-        grace_seconds: float,
-    ) -> None:
-        try:
-            await asyncio.sleep(grace_seconds)
-        except asyncio.CancelledError:
-            return
-        self._web_pending_cancels.pop(session_id, None)
-        logger.info(
-            "[App] Web 断连宽限期满，清理 session: session_id=%s",
-            session_id,
-        )
-        message_handler = self._get_message_handler()
-        if message_handler is None:
-            return
-        try:
-            await message_handler.cancel_agent_sessions_on_disconnect(
-                session_keys=[("web", session_id)],
-                stale_request_keys=[],
-            )
-        except Exception:
-            logger.warning(
-                "[App] Web 延迟清理 session 失败: session_id=%s",
-                session_id,
-                exc_info=True,
-            )
-
-    def schedule_web_session_cleanup(self, session_id: str) -> None:
-        existing = self._web_pending_cancels.get(session_id)
-        if existing is not None:
-            old_task, _ = existing
-            if not old_task.done():
-                old_task.cancel()
-        task = asyncio.create_task(
-            self._web_delayed_session_cleanup(
-                session_id,
-                self.WEB_DISCONNECT_GRACE_SECONDS,
-            ),
-            name=f"web-cleanup-{session_id}",
-        )
-        self._web_pending_cancels[session_id] = (task, time.time())
-        logger.info(
-            "[App] Web 断连，调度延迟清理: session_id=%s grace=%ds",
-            session_id,
-            self.WEB_DISCONNECT_GRACE_SECONDS,
-        )
 
     def _get_message_handler(self):
         return self.message_handler_ref
@@ -1413,27 +1349,6 @@ async def _run(
         if binding.install is not None:
             binding.install(gateway_server)
     gateway_server.on_message(acp_inbound_server.handle_message)
-
-    # 注册 Web 断连延迟清理回调
-    def _on_web_disconnect(ws, session_ids: set[str]):
-        for sid in session_ids:
-            gateway_server.schedule_web_session_cleanup(sid)
-
-    web_channel.on_disconnect(_on_web_disconnect)
-
-    # Web 重连时取消待清理任务：包装入站回调，在原始逻辑前插入取消检查
-    async def _web_message_wrapper(original_cb, msg):
-        sid = getattr(msg, "session_id", None)
-        if sid:
-            gateway_server.web_cancel_pending_cleanup(sid)
-        if original_cb is not None:
-            result = original_cb(msg)
-            if inspect.isawaitable(result):
-                result = await result
-            return result
-        return False
-
-    web_channel.wrap_message_callback(_web_message_wrapper)
 
     a2a_server_enabled = str(os.getenv("A2A_SERVER_ENABLED", "")).strip().lower() in {
         "1",
