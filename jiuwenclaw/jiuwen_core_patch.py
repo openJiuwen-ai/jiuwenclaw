@@ -404,6 +404,7 @@ def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
 
 
 class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
+    _MIN_SEGMENT_SIZE = 500
 
     def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
         """
@@ -632,11 +633,12 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             **kwargs,
     ):
         session_id = self.model_client_config.model_extra.get("session", "default")
-        llm_logger.info(
+        llm_logger.debug(
             "[session=%s] [LLM] Input messages: %s",
             session_id,
             str(messages)
         )
+        min_segment_size = self._MIN_SEGMENT_SIZE
         resp = await self._invoke_with_retry(
             _orig_invoke,
             self,
@@ -655,7 +657,6 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         # 分段打印 invoke 的输出
         _content = getattr(resp, "content", None) or ""
         if _content:
-            min_segment_size = 500
             content_len = len(_content)
             if content_len > 0:
                 # 分段打印
@@ -675,7 +676,7 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         llm_logger.info(
             "[session=%s] [LLM] Generation completed. Total segments: %d",
             session_id,
-            (len(_content) + 499) // 500 if _content else 0,
+            (len(_content) + min_segment_size - 1) // min_segment_size if _content else 0,
         )
         return resp
 
@@ -694,7 +695,7 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             **kwargs,
     ):
         session_id = self.model_client_config.model_extra.get("session", "default")
-        llm_logger.info(
+        llm_logger.debug(
             "[session=%s] [LLM] Input messages: %s",
             session_id,
             str(messages)
@@ -702,8 +703,8 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         chunk_counter = 0
         segment_parts = []  # 分段打印缓冲区
         segment_counter = 0  # 已打印段数
-        segment_accum_len = 0  # 累积字符数（避免频繁计算长度）
-        min_segment_size = 500  # 触发打印的最小累积长度
+        segment_accum_len = 0  # 累积字符数
+        min_segment_size = self._MIN_SEGMENT_SIZE
 
         async for chunk in self._stream_with_retry(
                 _orig_stream,
@@ -721,7 +722,7 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         ):
             chunk_counter += 1
             if chunk_counter % 10 == 1:
-                llm_logger.info(
+                llm_logger.debug(
                     "[session=%s] [LLM] Output chunk #%d: %s...",
                     session_id,
                     chunk_counter,
