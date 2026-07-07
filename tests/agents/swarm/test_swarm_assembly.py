@@ -925,7 +925,11 @@ def test_xiaoyi_phone_tools_gated_by_config() -> None:
     )
     disabled = SwarmBuildContext(config={})
 
-    assert len(tools._build_xiaoyi_phone_tools(enabled)) == 27
+    enabled_tools = tools._build_xiaoyi_phone_tools(enabled)
+    assert len(enabled_tools) == 27
+    assert "check_plugin_privilege" not in {
+        tool.card.name for tool in enabled_tools
+    }
     assert tools._build_xiaoyi_phone_tools(disabled) == []
 
 

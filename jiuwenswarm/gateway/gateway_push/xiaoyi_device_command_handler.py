@@ -35,7 +35,19 @@ class XiaoyiDeviceCommandHandler:
                     "XiaoyiChannel is not active",
                 )
             else:
-                result = await channel.execute_phone_tool_command(request=request)
+                if request.context.channel_id == "__cron__":
+                    logger.info(
+                        "[CRON_DEVICE] phase=GATEWAY_DISPATCH rpc_id=%s "
+                        "operation_id=%s intent_name=%s mode=scheduled",
+                        request.rpc_id,
+                        request.operation_id,
+                        request.intent_name,
+                    )
+                    result = await channel.execute_scheduled_phone_tool_command(
+                        request=request
+                    )
+                else:
+                    result = await channel.execute_phone_tool_command(request=request)
                 response = DeviceCommandResponse(
                     rpc_id=request.rpc_id,
                     operation_id=request.operation_id,

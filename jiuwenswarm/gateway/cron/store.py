@@ -14,6 +14,7 @@ from jiuwenswarm.gateway.cron.models import (
     CRON_JOB_DEFAULT_MODE,
     normalize_cron_job_mode,
     normalize_cron_job_timeout_seconds,
+    normalize_required_device_intents,
 )
 from jiuwenswarm.common.utils import get_cron_jobs_path
 
@@ -71,6 +72,8 @@ class CronJobStore:
         mode: str | None = None,
         delete_after_run: bool | None = None,
         timeout_seconds: int | None = None,
+        required_device_intents: list[str] | None = None,
+        xiaoyi_push_id: str | None = None,
     ) -> CronJob:
         now = time.time()
         sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
@@ -82,6 +85,10 @@ class CronJobStore:
             if timeout_seconds is not None
             else None
         )
+        device_intents = normalize_required_device_intents(required_device_intents)
+        push_id = str(xiaoyi_push_id or "").strip() or None
+        if device_intents and not push_id:
+            raise ValueError("xiaoyi_push_id is required for device cron jobs")
         job = CronJob(
             id=str(job_id or "").strip() or uuid.uuid4().hex,
             name=str(name or "").strip(),
@@ -98,6 +105,8 @@ class CronJobStore:
             mode=m,
             delete_after_run=dar,
             timeout_seconds=timeout,
+            required_device_intents=device_intents,
+            xiaoyi_push_id=push_id,
         )
         # validate via round-trip
         CronJob.from_dict(job.to_dict())
@@ -163,6 +172,19 @@ class CronJobStore:
                     updated,
                     timeout_seconds=normalize_cron_job_timeout_seconds(raw_timeout),
                 )
+        if "required_device_intents" in patch:
+            updated = replace(
+                updated,
+                required_device_intents=normalize_required_device_intents(
+                    patch.get("required_device_intents")
+                ),
+            )
+        if "xiaoyi_push_id" in patch:
+            raw_push_id = patch.get("xiaoyi_push_id")
+            updated = replace(
+                updated,
+                xiaoyi_push_id=str(raw_push_id or "").strip() or None,
+            )
 
         updated.updated_at = time.time()
         CronJob.from_dict(updated.to_dict())

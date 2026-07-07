@@ -296,6 +296,8 @@ class XiaoyiChannel(BaseChannel):
         # GUI 工具互斥：避免并发注册多个 handler 导致回包串单；不影响其他工具并发
         self._gui_tool_lock = asyncio.Lock()
         self._device_command_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._privilege_check_lock = asyncio.Lock()
+        self._scheduled_device_command_lock = asyncio.Lock()
 
     @property
     def channel_id(self) -> str:
@@ -926,6 +928,7 @@ class XiaoyiChannel(BaseChannel):
             "xiaoyi_params_session_id": message.get("params", {}).get("sessionId", ""),
             "xiaoyi_task_id": task_id,
             "xiaoyi_rpc_id": str(message.get("id") or ""),
+            "xiaoyi_push_id": str(self.config.push_id or ""),
         }
         # Add media payload to metadata
         params = {"query": text, "task_id": task_id}
@@ -1505,6 +1508,23 @@ class XiaoyiChannel(BaseChannel):
         }
 
         # 发送到所有活跃连接
+        privilege_intent = (
+            command.get("payload", {})
+            .get("executeParam", {})
+            .get("intentName")
+        )
+        if privilege_intent == "CheckPlugInPrivilege":
+            logger.info(
+                "[CRON_DEVICE] phase=PRIVILEGE_WIRE_SEND "
+                "agent_id=%s session_id=%s task_id=%s message_id=%s "
+                "wrapper=%r",
+                self.config.agent_id,
+                session_id,
+                task_id,
+                message_id,
+                wrapper,
+            )
+
         sent = False
         is_gui_command = (
             command.get("header", {}).get("namespace") == "ClawAgent"
@@ -1588,9 +1608,17 @@ class XiaoyiChannel(BaseChannel):
         if not session_id:
             raise RuntimeError("Xiaoyi session_id is missing")
         task_id = context.xiaoyi_task_id or session_id
-        message_id = f"cmd_{request.operation_id}"
-        lock_key = (session_id, request.intent_name)
-        lock = self._device_command_locks.setdefault(lock_key, asyncio.Lock())
+        message_id = (
+            context.xiaoyi_rpc_id
+            if request.intent_name == "CheckPlugInPrivilege"
+            and context.xiaoyi_rpc_id
+            else f"cmd_{request.operation_id}"
+        )
+        if request.intent_name == "CheckPlugInPrivilege":
+            lock = self._privilege_check_lock
+        else:
+            lock_key = (session_id, request.intent_name)
+            lock = self._device_command_locks.setdefault(lock_key, asyncio.Lock())
         async with lock:
             return await self._execute_phone_tool_command_locked(
                 request=request,
@@ -1616,7 +1644,9 @@ class XiaoyiChannel(BaseChannel):
             nonlocal result_data, error
             if event.intent_name != request.intent_name:
                 return
-            if _is_data_event_status_success(event.status):
+            if request.intent_name == "CheckPlugInPrivilege":
+                result_data = {} if event.outputs is None else event.outputs
+            elif _is_data_event_status_success(event.status):
                 result_data = {} if event.outputs is None else event.outputs
             else:
                 error = RuntimeError(f"Device execution failed: {event.status}")
@@ -1666,6 +1696,122 @@ class XiaoyiChannel(BaseChannel):
                 elapsed_ms,
             )
             self.unregister_data_event_handler(request.intent_name, on_data_event)
+
+    async def execute_scheduled_phone_tool_command(
+        self,
+        request: DeviceCommandRequest,
+    ) -> dict[str, Any]:
+        scheduled_device = request.context.metadata.get("scheduled_device")
+        if not isinstance(scheduled_device, dict):
+            logger.warning(
+                "[CRON_DEVICE] phase=SCHEDULED_INTENT_REJECTED rpc_id=%s "
+                "operation_id=%s intent_name=%s reason=missing_scheduled_device",
+                request.rpc_id,
+                request.operation_id,
+                request.intent_name,
+            )
+            raise RuntimeError(
+                "Scheduled Xiaoyi device permissions are missing; "
+                "recreate the cron job"
+            )
+        push_id = str(scheduled_device.get("push_id") or "").strip()
+        required_intents = scheduled_device.get("required_intents")
+        allowed_intents = {
+            str(item or "").strip()
+            for item in required_intents
+            if str(item or "").strip()
+        } if isinstance(required_intents, list) else set()
+        if not push_id:
+            raise RuntimeError("Scheduled Xiaoyi push_id is missing")
+        if not allowed_intents:
+            logger.warning(
+                "[CRON_DEVICE] phase=SCHEDULED_INTENT_REJECTED rpc_id=%s "
+                "operation_id=%s intent_name=%s reason=empty_required_intents",
+                request.rpc_id,
+                request.operation_id,
+                request.intent_name,
+            )
+            raise RuntimeError(
+                "Scheduled Xiaoyi device intents are missing; "
+                "recreate the cron job"
+            )
+        if request.intent_name not in allowed_intents:
+            logger.warning(
+                "[CRON_DEVICE] phase=SCHEDULED_INTENT_REJECTED rpc_id=%s "
+                "operation_id=%s intent_name=%s reason=intent_not_allowed",
+                request.rpc_id,
+                request.operation_id,
+                request.intent_name,
+            )
+            raise RuntimeError(
+                f"Intent {request.intent_name} is not allowed by the scheduled device context"
+            )
+
+        async with self._scheduled_device_command_lock:
+            result_event = asyncio.Event()
+            result_data: dict[str, Any] | None = None
+            error: Exception | None = None
+            started_at = time.monotonic()
+
+            def on_data_event(event: DataEvent) -> None:
+                nonlocal result_data, error
+                if event.intent_name != request.intent_name:
+                    return
+                if _is_data_event_status_success(event.status):
+                    result_data = {} if event.outputs is None else event.outputs
+                else:
+                    error = RuntimeError(
+                        f"Device execution failed: {event.status}"
+                    )
+                result_event.set()
+
+            self.register_data_event_handler(request.intent_name, on_data_event)
+            try:
+                push_config = PushConfig(
+                    mode=self.config.mode,
+                    api_id=self.config.api_id,
+                    push_id=push_id,
+                    push_url=self.config.push_url,
+                    ak=self.config.ak,
+                    sk=self.config.sk,
+                    uid=self.config.uid,
+                    api_key=self.config.api_key,
+                )
+                push_service = XiaoYiPushService(push_config)
+                logger.info(
+                    "[CRON_DEVICE] phase=DIRECTIVE_SEND_BEGIN rpc_id=%s "
+                    "operation_id=%s intent_name=%s",
+                    request.rpc_id,
+                    request.operation_id,
+                    request.intent_name,
+                )
+                sent = await push_service.send_push_with_directives(
+                    push_id=push_id,
+                    session_id=str(uuid.uuid4()),
+                    directives=[request.command],
+                )
+                if not sent:
+                    raise RuntimeError("Failed to send Xiaoyi directive push")
+                await asyncio.wait_for(
+                    result_event.wait(),
+                    timeout=request.timeout_seconds,
+                )
+                if error is not None:
+                    raise error
+                return {} if result_data is None else result_data
+            finally:
+                self.unregister_data_event_handler(
+                    request.intent_name,
+                    on_data_event,
+                )
+                logger.info(
+                    "[CRON_DEVICE] phase=DIRECTIVE_SEND_DONE rpc_id=%s "
+                    "operation_id=%s intent_name=%s elapsed_ms=%s",
+                    request.rpc_id,
+                    request.operation_id,
+                    request.intent_name,
+                    int((time.monotonic() - started_at) * 1000),
+                )
 
     def _get_a2a_parts(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         """从直连或 Wrapped A2A 消息中取出 message.parts."""

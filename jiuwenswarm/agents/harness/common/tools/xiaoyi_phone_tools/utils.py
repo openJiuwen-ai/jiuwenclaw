@@ -46,7 +46,46 @@ async def execute_device_command(
     context = get_device_context()
     if context is None:
         raise RuntimeError("No active Xiaoyi request context")
-    if context.channel_id != "xiaoyi":
+    if context.channel_id == "xiaoyi":
+        pass
+    elif context.channel_id == "__cron__":
+        scheduled_device = context.metadata.get("scheduled_device")
+        if not isinstance(scheduled_device, dict):
+            logger.warning(
+                "[CRON_DEVICE] phase=SCHEDULED_INTENT_REJECTED "
+                "intent_name=%s reason=missing_scheduled_device",
+                intent_name,
+            )
+            raise RuntimeError(
+                "Scheduled Xiaoyi device permissions are missing; "
+                "recreate the cron job"
+            )
+        required_intents = scheduled_device.get("required_intents")
+        allowed_intents = {
+            str(item or "").strip()
+            for item in required_intents
+            if str(item or "").strip()
+        } if isinstance(required_intents, list) else set()
+        if not allowed_intents:
+            logger.warning(
+                "[CRON_DEVICE] phase=SCHEDULED_INTENT_REJECTED "
+                "intent_name=%s reason=empty_required_intents",
+                intent_name,
+            )
+            raise RuntimeError(
+                "Scheduled Xiaoyi device intents are missing; "
+                "recreate the cron job"
+            )
+        if intent_name not in allowed_intents:
+            logger.warning(
+                "[CRON_DEVICE] phase=SCHEDULED_INTENT_REJECTED "
+                "intent_name=%s reason=intent_not_allowed",
+                intent_name,
+            )
+            raise RuntimeError(
+                f"Intent {intent_name} is not allowed by the scheduled device context"
+            )
+    else:
         raise RuntimeError("Xiaoyi device tools require Xiaoyi channel")
 
     response = await get_device_command_manager().call(

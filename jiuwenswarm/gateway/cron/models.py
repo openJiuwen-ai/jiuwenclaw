@@ -111,6 +111,19 @@ def cron_job_modes_for_tools() -> list[str]:
     return sorted(CRON_JOB_MODES)
 
 
+def normalize_required_device_intents(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("required_device_intents must be a list")
+    intents: list[str] = []
+    for item in raw:
+        intent = str(item or "").strip()
+        if intent and intent not in intents:
+            intents.append(intent)
+    return intents
+
+
 def cron_job_metadata() -> dict[str, str | list[str] | int]:
     """Cron job schema for clients (TUI/Web); single source for supported modes."""
     return {
@@ -213,6 +226,8 @@ class CronJob:
     delete_after_run: bool = False
     # 单次执行超时（秒）；未配置时普通模式 10 分钟，team 模式 20 分钟
     timeout_seconds: int | None = None
+    required_device_intents: list[str] = field(default_factory=list)
+    xiaoyi_push_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -238,6 +253,10 @@ class CronJob:
             d["delete_after_run"] = bool(self.delete_after_run)
         if self.timeout_seconds is not None:
             d["timeout_seconds"] = int(self.timeout_seconds)
+        if self.required_device_intents:
+            d["required_device_intents"] = list(self.required_device_intents)
+        if self.xiaoyi_push_id:
+            d["xiaoyi_push_id"] = self.xiaoyi_push_id
         return d
 
     @staticmethod
@@ -317,6 +336,18 @@ class CronJob:
         if timeout_seconds_raw is not None:
             timeout_seconds = normalize_cron_job_timeout_seconds(timeout_seconds_raw)
 
+        required_device_intents = normalize_required_device_intents(
+            data.get("required_device_intents")
+        )
+        push_id_raw = data.get("xiaoyi_push_id")
+        xiaoyi_push_id = (
+            str(push_id_raw).strip()
+            if isinstance(push_id_raw, str) and push_id_raw.strip()
+            else None
+        )
+        if required_device_intents and not xiaoyi_push_id:
+            raise ValueError("xiaoyi_push_id is required for device cron jobs")
+
         return CronJob(
             id=job_id,
             name=name,
@@ -334,6 +365,8 @@ class CronJob:
             mode=job_mode,
             delete_after_run=delete_after_run,
             timeout_seconds=timeout_seconds,
+            required_device_intents=required_device_intents,
+            xiaoyi_push_id=xiaoyi_push_id,
         )
 
 
