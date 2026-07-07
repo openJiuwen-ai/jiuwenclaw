@@ -164,10 +164,12 @@ def _run_command(args: argparse.Namespace) -> int:
 
         config = get_config()
         pipeline = _build_pipeline_from_config(config, use_ahe=args.ahe)
-        trace_reader = pipeline._store._sqlite
+        if pipeline._store is None:
+            print("Error: evolution store not configured", file=sys.stderr)
+            return 1
 
         # Validate trace IDs exist in traces.db
-        all_valid, missing_ids = trace_reader.validate_trace_ids(trace_ids)
+        all_valid, missing_ids = pipeline._store.validate_trace_ids(trace_ids)
         if not all_valid:
             print(
                 "Error: The following trace IDs do not exist in traces.db:",
@@ -210,7 +212,10 @@ def _run_command(args: argparse.Namespace) -> int:
     # Original logic for --latest, --since, --benchmark-run-id
     config = get_config()
     pipeline = _build_pipeline_from_config(config, use_ahe=args.ahe)
-    trace_reader = pipeline._store._sqlite  # type: ignore[union-attr]
+    trace_reader = pipeline._store
+    if trace_reader is None:
+        print("Error: evolution store not configured", file=sys.stderr)
+        return 1
 
     # Build TraceBatch from CLI args
     if args.latest:

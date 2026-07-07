@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jiuwenswarm.evolve.ahe.diagnosis.models import (
     DiagnosisIssue,
@@ -26,6 +26,9 @@ from jiuwenswarm.evolve.ahe.diagnosis.prompts import (
     DIAGNOSIS_TOOL_SCHEMAS,
 )
 from jiuwenswarm.evolve.ahe.diagnosis.tools import DiagnosisToolExecutor
+
+if TYPE_CHECKING:
+    from jiuwenswarm.evolve.models import TraceBatch
 
 logger = logging.getLogger(__name__)
 
@@ -162,14 +165,14 @@ class DiagnosisAgent:
 
     # ── ProposalGenerator interface ───────────────────────────────────
 
-    async def generate(self, batch: Any) -> list:
+    async def generate(self, batch: TraceBatch) -> list:
         """ProposalGenerator interface — propose mode output."""
         from jiuwenswarm.evolve.models import (
             Proposal, ProposalTargetType, ProposalState, EvidenceRef,
         )
 
         result = await self.run(
-            trace_ids=batch.trace_ids,  # type: ignore[attr-defined]
+            trace_ids=batch.trace_ids,
             mode="propose",
         )
         if result.proposals is None:

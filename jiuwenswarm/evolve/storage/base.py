@@ -12,6 +12,8 @@ if TYPE_CHECKING:
         Proposal,
         TraceBatch,
     )
+    from jiuwenswarm.evolve.storage.file_store import FileStore
+    from jiuwenswarm.evolve.storage.sqlite_store import SqliteStore
 
 
 class EvolutionStore:
@@ -21,7 +23,7 @@ class EvolutionStore:
     available for structured query (SQLite) and human inspection (files).
     """
 
-    def __init__(self, sqlite_backend: object, file_backend: object) -> None:
+    def __init__(self, sqlite_backend: SqliteStore, file_backend: FileStore) -> None:
         self._sqlite = sqlite_backend
         self._file = file_backend
 
@@ -90,3 +92,21 @@ class EvolutionStore:
 
     def get_proposal(self, proposal_id: str) -> dict | None:
         return self._sqlite.get_proposal(proposal_id)
+
+    # -- Trace discovery (read-only, delegated to SQLite backend) ---------
+
+    def get_recent_trace_ids(self, limit: int = 20) -> list[str]:
+        return self._sqlite.get_recent_trace_ids(limit=limit)
+
+    def get_trace_ids_since(self, since: str, limit: int = 100) -> list[str]:
+        return self._sqlite.get_trace_ids_since(since, limit=limit)
+
+    def get_trace_ids_by_benchmark(
+        self, benchmark_run_id: str, limit: int = 100
+    ) -> list[str]:
+        return self._sqlite.get_trace_ids_by_benchmark(
+            benchmark_run_id, limit=limit
+        )
+
+    def validate_trace_ids(self, trace_ids: list[str]) -> tuple[bool, list[str]]:
+        return self._sqlite.validate_trace_ids(trace_ids)

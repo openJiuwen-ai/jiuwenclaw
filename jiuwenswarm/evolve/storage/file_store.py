@@ -10,6 +10,15 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from jiuwenswarm.evolve.models import (
+        ApplyRecord,
+        DecisionResult,
+        Proposal,
+        TraceBatch,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -80,53 +89,53 @@ class FileStore:
     # Save methods
     # ------------------------------------------------------------------
 
-    def save_trace_batch(self, batch: object) -> None:
-        d = self._batch_dir(batch.batch_id)  # type: ignore[attr-defined]
+    def save_trace_batch(self, batch: TraceBatch) -> None:
+        d = self._batch_dir(batch.batch_id)
         data = {
-            "batch_id": batch.batch_id,  # type: ignore[attr-defined]
-            "trace_ids": batch.trace_ids,  # type: ignore[attr-defined]
-            "source": batch.source,  # type: ignore[attr-defined]
-            "created_at": batch.created_at,  # type: ignore[attr-defined]
+            "batch_id": batch.batch_id,
+            "trace_ids": batch.trace_ids,
+            "source": batch.source,
+            "created_at": batch.created_at,
             "metadata": getattr(batch, "metadata", {}),
         }
         (d / "batch.json").write_text(
             json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-        self._index[batch.batch_id] = {  # type: ignore[attr-defined]
-            "created_at": batch.created_at,  # type: ignore[attr-defined]
-            "source": batch.source,  # type: ignore[attr-defined]
-            "trace_count": len(batch.trace_ids),  # type: ignore[attr-defined]
+        self._index[batch.batch_id] = {
+            "created_at": batch.created_at,
+            "source": batch.source,
+            "trace_count": len(batch.trace_ids),
         }
         self._save_index()
 
-    def save_proposal(self, proposal: object) -> None:
+    def save_proposal(self, proposal: Proposal) -> None:
         # Proposals are associated with a batch via the batch_id attribute
         # added by the pipeline. If not set, we can't store it in batch dir.
         batch_id = getattr(proposal, "batch_id", None)
         if not batch_id:
             logger.warning(
                 "Proposal %s has no batch_id, using fallback",
-                proposal.proposal_id,  # type: ignore[attr-defined]
+                proposal.proposal_id,
             )
             batch_id = "unknown"
         d = self._batch_dir(batch_id)
         data = {
-            "proposal_id": proposal.proposal_id,  # type: ignore[attr-defined]
-            "target_type": str(proposal.target_type),  # type: ignore[attr-defined]
-            "target_id": proposal.target_id,  # type: ignore[attr-defined]
-            "proposal_type": proposal.proposal_type,  # type: ignore[attr-defined]
+            "proposal_id": proposal.proposal_id,
+            "target_type": str(proposal.target_type),
+            "target_id": proposal.target_id,
+            "proposal_type": proposal.proposal_type,
             "failure_evidence": [
-                e.model_dump() for e in proposal.failure_evidence  # type: ignore[attr-defined]
+                e.model_dump() for e in proposal.failure_evidence
             ],
-            "root_cause": proposal.root_cause,  # type: ignore[attr-defined]
-            "targeted_fix": proposal.targeted_fix,  # type: ignore[attr-defined]
-            "predicted_impact": proposal.predicted_impact,  # type: ignore[attr-defined]
-            "risk": proposal.risk,  # type: ignore[attr-defined]
-            "state": str(proposal.state),  # type: ignore[attr-defined]
-            "proposer_name": proposal.proposer_name,  # type: ignore[attr-defined]
-            "created_at": proposal.created_at,  # type: ignore[attr-defined]
-            "schema_version": proposal.schema_version,  # type: ignore[attr-defined]
-            "metadata": proposal.metadata,  # type: ignore[attr-defined]
+            "root_cause": proposal.root_cause,
+            "targeted_fix": proposal.targeted_fix,
+            "predicted_impact": proposal.predicted_impact,
+            "risk": proposal.risk,
+            "state": str(proposal.state),
+            "proposer_name": proposal.proposer_name,
+            "created_at": proposal.created_at,
+            "schema_version": proposal.schema_version,
+            "metadata": proposal.metadata,
         }
         self._append_to_json_list(d / "proposals.json", data)
         # Update index
@@ -136,46 +145,40 @@ class FileStore:
             )
             self._save_index()
 
-    def save_decision_result(self, dr: object) -> None:
-        # We need to find the batch_id. Store decisions alongside proposals.
-        # For simplicity, we write them to a batch-level file.
-        # The pipeline will have set the proposal's batch_id.
-        # We approximate by writing to the latest batch dir.
-        # A better approach: the pipeline calls save_decision_results with batch context.
-        # For now, write to a flat file.
+    def save_decision_result(self, dr: DecisionResult) -> None:
         data = {
-            "decision_id": dr.decision_id,  # type: ignore[attr-defined]
-            "proposal_id": dr.proposal_id,  # type: ignore[attr-defined]
-            "policy_name": dr.policy_name,  # type: ignore[attr-defined]
-            "policy_version": dr.policy_version,  # type: ignore[attr-defined]
-            "score": dr.score,  # type: ignore[attr-defined]
-            "reason": dr.reason,  # type: ignore[attr-defined]
-            "suggestion": str(dr.suggestion),  # type: ignore[attr-defined]
-            "blocking": dr.blocking,  # type: ignore[attr-defined]
-            "failed_checks": dr.failed_checks,  # type: ignore[attr-defined]
-            "created_at": dr.created_at,  # type: ignore[attr-defined]
-            "schema_version": dr.schema_version,  # type: ignore[attr-defined]
-            "metadata": dr.metadata,  # type: ignore[attr-defined]
+            "decision_id": dr.decision_id,
+            "proposal_id": dr.proposal_id,
+            "policy_name": dr.policy_name,
+            "policy_version": dr.policy_version,
+            "score": dr.score,
+            "reason": dr.reason,
+            "suggestion": str(dr.suggestion),
+            "blocking": dr.blocking,
+            "failed_checks": dr.failed_checks,
+            "created_at": dr.created_at,
+            "schema_version": dr.schema_version,
+            "metadata": dr.metadata,
         }
         # Use proposal_id to locate the batch — but we don't have that mapping easily.
         # Store in a decisions.jsonl at root level for simplicity.
         decisions_file = self._root / "decisions.json"
         self._append_to_json_list(decisions_file, data)
 
-    def save_apply_record(self, ar: object) -> None:
+    def save_apply_record(self, ar: ApplyRecord) -> None:
         data = {
-            "apply_id": ar.apply_id,  # type: ignore[attr-defined]
-            "proposal_id": ar.proposal_id,  # type: ignore[attr-defined]
-            "target_type": str(ar.target_type),  # type: ignore[attr-defined]
-            "target_store": str(ar.target_store),  # type: ignore[attr-defined]
-            "target_id": ar.target_id,  # type: ignore[attr-defined]
-            "status": str(ar.status),  # type: ignore[attr-defined]
-            "stored_object_id": ar.stored_object_id,  # type: ignore[attr-defined]
-            "reason": ar.reason,  # type: ignore[attr-defined]
-            "applier_name": ar.applier_name,  # type: ignore[attr-defined]
-            "created_at": ar.created_at,  # type: ignore[attr-defined]
-            "schema_version": ar.schema_version,  # type: ignore[attr-defined]
-            "metadata": ar.metadata,  # type: ignore[attr-defined]
+            "apply_id": ar.apply_id,
+            "proposal_id": ar.proposal_id,
+            "target_type": str(ar.target_type),
+            "target_store": str(ar.target_store),
+            "target_id": ar.target_id,
+            "status": str(ar.status),
+            "stored_object_id": ar.stored_object_id,
+            "reason": ar.reason,
+            "applier_name": ar.applier_name,
+            "created_at": ar.created_at,
+            "schema_version": ar.schema_version,
+            "metadata": ar.metadata,
         }
         apply_file = self._root / "apply_records.json"
         self._append_to_json_list(apply_file, data)

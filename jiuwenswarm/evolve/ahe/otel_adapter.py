@@ -11,7 +11,10 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from jiuwenswarm.evolve.models import TraceBatch
 
 logger = logging.getLogger(__name__)
 
@@ -313,7 +316,7 @@ class OtelTraceAdapter:
                 if isinstance(tools_raw, str):
                     try:
                         tools = json.loads(tools_raw)
-                    except:
+                    except Exception:
                         tools = []
                 else:
                     tools = tools_raw if isinstance(tools_raw, list) else []
@@ -665,7 +668,7 @@ class OtelTraceAdapter:
                 if isinstance(tools_raw, str):
                     try:
                         tools = json.loads(tools_raw)
-                    except:
+                    except Exception:
                         tools = []
                 else:
                     tools = tools_raw if isinstance(tools_raw, list) else []
@@ -701,10 +704,10 @@ class OtelTraceAdapter:
                     total += int(tokens)
         return total
 
-    def convert_batch(self, batch: object) -> list[dict[str, Any]]:
+    def convert_batch(self, batch: TraceBatch) -> list[dict[str, Any]]:
         """Convert all trace_ids in a TraceBatch."""
         results = []
-        for trace_id in batch.trace_ids:  # type: ignore[attr-defined]
+        for trace_id in batch.trace_ids:
             try:
                 results.append(self.convert_trace(trace_id))
             except Exception as exc:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from jiuwenswarm.evolve.models import (
     ApplyRecord,
@@ -18,6 +19,9 @@ from jiuwenswarm.evolve.models import (
     ProposalState,
     TraceBatch,
 )
+
+if TYPE_CHECKING:
+    from jiuwenswarm.evolve.storage.base import EvolutionStore
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +70,7 @@ class EvolutionPipeline:
         generators: list[object],
         policies: list[object],
         writers: list[object],
-        store: object | None = None,
+        store: EvolutionStore | None = None,
         max_proposals: int = DEFAULT_MAX_PROPOSALS,
         max_behavior_proposals: int = DEFAULT_MAX_BEHAVIOR_PROPOSALS,
         max_traces: int = DEFAULT_MAX_TRACES,

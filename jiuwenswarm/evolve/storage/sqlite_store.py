@@ -7,7 +7,15 @@ import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from jiuwenswarm.evolve.models import (
+        ApplyRecord,
+        DecisionResult,
+        Proposal,
+        TraceBatch,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -150,17 +158,17 @@ class SqliteStore:
     # Trace batches
     # ------------------------------------------------------------------
 
-    def save_trace_batch(self, batch: object) -> None:
+    def save_trace_batch(self, batch: TraceBatch) -> None:
         conn = self._get_conn()
         conn.execute(
             "INSERT OR REPLACE INTO trace_batches "
             "(batch_id, trace_ids, source, created_at, metadata) "
             "VALUES (?, ?, ?, ?, ?)",
             (
-                batch.batch_id,  # type: ignore[attr-defined]
-                json.dumps(batch.trace_ids),  # type: ignore[attr-defined]
-                batch.source,  # type: ignore[attr-defined]
-                batch.created_at,  # type: ignore[attr-defined]
+                batch.batch_id,
+                json.dumps(batch.trace_ids),
+                batch.source,
+                batch.created_at,
                 json.dumps(getattr(batch, "metadata", {})),
             ),
         )
@@ -170,10 +178,10 @@ class SqliteStore:
     # Proposals
     # ------------------------------------------------------------------
 
-    def save_proposal(self, proposal: object) -> None:
+    def save_proposal(self, proposal: Proposal) -> None:
         conn = self._get_conn()
         evidence_json = json.dumps(
-            [e.model_dump() for e in proposal.failure_evidence]  # type: ignore[attr-defined]
+            [e.model_dump() for e in proposal.failure_evidence]
         )
         conn.execute(
             "INSERT OR REPLACE INTO proposals "
@@ -183,21 +191,21 @@ class SqliteStore:
             "schema_version, metadata) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                proposal.proposal_id,  # type: ignore[attr-defined]
-                str(proposal.target_type),  # type: ignore[attr-defined]
-                proposal.target_id,  # type: ignore[attr-defined]
-                proposal.proposal_type,  # type: ignore[attr-defined]
+                proposal.proposal_id,
+                str(proposal.target_type),
+                proposal.target_id,
+                proposal.proposal_type,
                 evidence_json,
-                proposal.root_cause,  # type: ignore[attr-defined]
-                json.dumps(proposal.targeted_fix),  # type: ignore[attr-defined]
-                proposal.predicted_impact,  # type: ignore[attr-defined]
-                proposal.risk,  # type: ignore[attr-defined]
-                str(proposal.state),  # type: ignore[attr-defined]
-                proposal.proposer_name,  # type: ignore[attr-defined]
+                proposal.root_cause,
+                json.dumps(proposal.targeted_fix),
+                proposal.predicted_impact,
+                proposal.risk,
+                str(proposal.state),
+                proposal.proposer_name,
                 getattr(proposal, "batch_id", ""),
-                proposal.created_at,  # type: ignore[attr-defined]
-                proposal.schema_version,  # type: ignore[attr-defined]
-                json.dumps(proposal.metadata),  # type: ignore[attr-defined]
+                proposal.created_at,
+                proposal.schema_version,
+                json.dumps(proposal.metadata),
             ),
         )
         conn.commit()
@@ -206,7 +214,7 @@ class SqliteStore:
     # Decision results
     # ------------------------------------------------------------------
 
-    def save_decision_result(self, dr: object) -> None:
+    def save_decision_result(self, dr: DecisionResult) -> None:
         conn = self._get_conn()
         conn.execute(
             "INSERT OR REPLACE INTO decision_results "
@@ -215,18 +223,18 @@ class SqliteStore:
             "created_at, schema_version, metadata) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                dr.decision_id,  # type: ignore[attr-defined]
-                dr.proposal_id,  # type: ignore[attr-defined]
-                dr.policy_name,  # type: ignore[attr-defined]
-                dr.policy_version,  # type: ignore[attr-defined]
-                dr.score,  # type: ignore[attr-defined]
-                dr.reason,  # type: ignore[attr-defined]
-                str(dr.suggestion),  # type: ignore[attr-defined]
-                1 if dr.blocking else 0,  # type: ignore[attr-defined]
-                json.dumps(dr.failed_checks),  # type: ignore[attr-defined]
-                dr.created_at,  # type: ignore[attr-defined]
-                dr.schema_version,  # type: ignore[attr-defined]
-                json.dumps(dr.metadata),  # type: ignore[attr-defined]
+                dr.decision_id,
+                dr.proposal_id,
+                dr.policy_name,
+                dr.policy_version,
+                dr.score,
+                dr.reason,
+                str(dr.suggestion),
+                1 if dr.blocking else 0,
+                json.dumps(dr.failed_checks),
+                dr.created_at,
+                dr.schema_version,
+                json.dumps(dr.metadata),
             ),
         )
         conn.commit()
@@ -235,7 +243,7 @@ class SqliteStore:
     # Apply records
     # ------------------------------------------------------------------
 
-    def save_apply_record(self, ar: object) -> None:
+    def save_apply_record(self, ar: ApplyRecord) -> None:
         conn = self._get_conn()
         conn.execute(
             "INSERT OR REPLACE INTO apply_records "
@@ -244,18 +252,18 @@ class SqliteStore:
             "created_at, schema_version, metadata) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                ar.apply_id,  # type: ignore[attr-defined]
-                ar.proposal_id,  # type: ignore[attr-defined]
-                str(ar.target_type),  # type: ignore[attr-defined]
-                str(ar.target_store),  # type: ignore[attr-defined]
-                ar.target_id,  # type: ignore[attr-defined]
-                str(ar.status),  # type: ignore[attr-defined]
-                ar.stored_object_id,  # type: ignore[attr-defined]
-                ar.reason,  # type: ignore[attr-defined]
-                ar.applier_name,  # type: ignore[attr-defined]
-                ar.created_at,  # type: ignore[attr-defined]
-                ar.schema_version,  # type: ignore[attr-defined]
-                json.dumps(ar.metadata),  # type: ignore[attr-defined]
+                ar.apply_id,
+                ar.proposal_id,
+                str(ar.target_type),
+                str(ar.target_store),
+                ar.target_id,
+                str(ar.status),
+                ar.stored_object_id,
+                ar.reason,
+                ar.applier_name,
+                ar.created_at,
+                ar.schema_version,
+                json.dumps(ar.metadata),
             ),
         )
         conn.commit()
