@@ -6098,8 +6098,13 @@ class AgentWebSocketServer:
         """处理 session.create 方法.
 
         调用 AgentManager.create_session 创建会话，返回 session_id。
+<<<<<<< HEAD
         同时将 project_dir/project_id 等字段写入会话元数据(metadata.json)并落盘。
         project_id / project_dir 绑定规则(详见
+=======
+        同时将 project_path/project_id 等字段写入会话元数据(metadata.json)并落盘。
+        project_id / project_path 绑定规则(详见
+>>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
         project_store.resolve_session_project_binding):两者皆空→默认项目;
         仅传 project_id→自动补齐 path;同时传→校验一致性;仅传 path→拒绝。
 
@@ -6120,6 +6125,7 @@ class AgentWebSocketServer:
                 session_id=str(explicit_session_id).strip() if isinstance(explicit_session_id, str) else None,
             )
 
+<<<<<<< HEAD
             # 校验并解析 project_id / project_dir 绑定关系:
             # 一致性校验、按 project_id 自动补齐 project_dir、禁止单传 project_dir
             from jiuwenswarm.server.runtime.session import project_store
@@ -6127,6 +6133,15 @@ class AgentWebSocketServer:
             project_dir = str(params.get("project_dir") or "").strip()
             project_id, project_dir, p_err, p_code = project_store.resolve_session_project_binding(
                 project_id, project_dir
+=======
+            # 校验并解析 project_id / project_path 绑定关系:
+            # 一致性校验、按 project_id 自动补齐 project_path、禁止单传 project_path
+            from jiuwenswarm.server.runtime.session import project_store
+            project_id = str(params.get("project_id") or "").strip()
+            project_path = str(params.get("project_path") or "").strip()
+            project_id, project_path, p_err, p_code = project_store.resolve_session_project_binding(
+                project_id, project_path
+>>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
             )
             if p_err:
                 resp = AgentResponse(
@@ -6140,6 +6155,7 @@ class AgentWebSocketServer:
                     await ws.send(json.dumps(wire, ensure_ascii=False))
                 return
 
+<<<<<<< HEAD
             # 会话目录已存在则拒绝,避免覆盖既有会话元数据(与 web 本地 handler 一致)
             session_dir = get_agent_sessions_dir() / session_id
             if session_dir.exists():
@@ -6156,6 +6172,9 @@ class AgentWebSocketServer:
 
             # 初始化会话元数据(同步写盘),将 project_dir/project_id 等字段落盘
             from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+=======
+            # 写入 session metadata（首次锁定 project_path / project_id）
+>>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
             init_session_metadata(
                 session_id=session_id,
                 channel_id=params.get("channel_id", ""),
