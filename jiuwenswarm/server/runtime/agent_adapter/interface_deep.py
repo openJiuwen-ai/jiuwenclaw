@@ -52,6 +52,7 @@ from openjiuwen.harness import (
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import (
+    LLMRetryRail,
     SkillUseRail,
     TaskPlanningRail,
     SecurityRail,
@@ -617,6 +618,7 @@ class JiuWenSwarmDeepAdapter:
         self._memory_rail: MemoryRail | None = None
         self._external_memory_rail: Any = None
         self._external_memory_rail_registered: bool = False
+        self._llm_retry_rail: LLMRetryRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._evolution_interrupt_rail: EvolutionInterruptRail | None = None
@@ -2975,6 +2977,30 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] AvatarPromptRail create failed: %s", exc)
             return None
 
+    @staticmethod
+    def _build_llm_retry_rail(config_base: dict[str, Any] | None = None) -> LLMRetryRail | None:
+        try:
+            config_base = config_base or get_config()
+            guard_cfg = config_base.get("execution_guard", {}) if isinstance(config_base, dict) else {}
+            retry_cfg = guard_cfg.get("llm_retry_rail", {}) if isinstance(guard_cfg, dict) else {}
+            if retry_cfg.get("enabled", False) is not True:
+                logger.info("[JiuWenSwarmDeepAdapter] LLMRetryRail disabled by config")
+                return None
+            rail = LLMRetryRail(
+                max_retries=retry_cfg.get("max_retries", 2),
+                repeat_min_pattern_chars=retry_cfg.get("repeat_min_pattern_chars", 2),
+                repeat_max_pattern_chars=retry_cfg.get("repeat_max_pattern_chars", 64),
+                repeat_min_count=retry_cfg.get("repeat_min_count", 6),
+                repeat_min_total_chars=retry_cfg.get("repeat_min_total_chars", 160),
+                repeat_window_chars=retry_cfg.get("repeat_window_chars", 1024),
+                single_char_repeat_count=retry_cfg.get("single_char_repeat_count", 100),
+            )
+            logger.info("[JiuWenSwarmDeepAdapter] LLMRetryRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] LLMRetryRail create failed: %s", exc)
+            return None
+
     def _build_circuit_breaker_rail(self) -> CircuitBreakerRail | None:
         try:
             guard_cfg = (get_config() or {}).get("execution_guard") or {}
@@ -3052,6 +3078,11 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
+            _RailBuildInfo(
+                "_llm_retry_rail",
+                self._build_llm_retry_rail,
+                {"config_base": config_base},
+            ),
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
@@ -3602,6 +3633,9 @@ class JiuWenSwarmDeepAdapter:
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
             enable_read_image_multimodal=self._vision_model_config is None,
+            enable_llm_retry_rail=((config_base.get("execution_guard") or {}).get("llm_retry_rail") or {}).get(
+                "enabled", False
+            ),
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 
