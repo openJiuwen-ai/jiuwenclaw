@@ -32,6 +32,7 @@ parse_dotenv_early("jiuwenswarm-web")
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
+from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
 from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
     get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, wait_for_tcp_port
@@ -1190,6 +1191,8 @@ def main() -> None:
         help="Load environment from .env file (processed at startup, not used here).",
     )
     args = parser.parse_args()
+
+    install_async_dump_handler("web")
 
     dist_dir = Path(args.dist).expanduser().resolve()
     if not dist_dir.exists():

@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Standalone Gateway entrypoint (split deployment).
 
 This process starts:
@@ -41,6 +41,7 @@ from jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect import AcpGate
 from jiuwenswarm.gateway.routing.agent_request_timeout import coerce_client_timeout_ms
 from jiuwenswarm.common.security.ws_origin import get_header_value
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
+from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
     get_cron_jobs_path,
     get_env_file,
@@ -2435,6 +2436,7 @@ def main() -> None:
     web_port = args.port or int(os.getenv("WEB_PORT", "19000"))
     web_path = args.web_path or os.getenv("WEB_PATH", "/ws")
 
+    install_async_dump_handler("gateway")
     asyncio.run(
         _run(
             agent_server_url=agent_server_url,
