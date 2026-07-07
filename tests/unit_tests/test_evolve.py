@@ -580,6 +580,9 @@ class TestSkillWriter:
         )
 
         with tempfile.TemporaryDirectory() as tmp:
+            # writer 契约: 只修改已存在的 skill, 不创建新 skill。
+            # 预先建好 general/ 目录, 让 writer 走"修改已有 skill"分支。
+            (Path(tmp) / "general").mkdir(parents=True, exist_ok=True)
             writer = SkillExperienceWriter(skills_dir=tmp)
             prop = Proposal(
                 target_type=ProposalTargetType.SKILL,
