@@ -47,6 +47,8 @@ from jiuwenswarm.common.utils import (
     prepare_workspace,
     reset_free_search_runtime_flags,
 )
+from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
@@ -90,7 +92,6 @@ def _build_event_frame(msg) -> dict[str, Any]:
 
 
 def _normalize_gateway_message(msg):
-    from jiuwenswarm.common.schema.message import Message, ReqMethod
 
     req_method = getattr(msg, "req_method", None) or ReqMethod.CHAT_SEND
     params = dict(msg.params or {})
@@ -811,7 +812,6 @@ class GatewayServer:
                 await self._promote_pending_session_client(route, session_key)
 
     async def _handle_raw_message(self, ws: Any, raw: str, request_path: str, route: RouteConfig) -> None:
-        from jiuwenswarm.common.schema.message import Message, Mode, ReqMethod
 
         try:
             data = json.loads(raw)
@@ -1083,7 +1083,6 @@ async def _run(
     )
     from jiuwenswarm.extensions.manager import ExtensionManager
     from jiuwenswarm.extensions.registry import ExtensionRegistry
-    from jiuwenswarm.common.schema.message import Message
     from jiuwenswarm.common.updater import UpdaterService
     from openjiuwen.core.runner import Runner
 
@@ -1227,9 +1226,6 @@ async def _run(
                 env=dict(env_updates or {}),
             )
 
-            from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-            from jiuwenswarm.common.schema.message import ReqMethod
-
             reload_env = e2a_from_agent_fields(
                 request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
                 channel_id="",
@@ -1263,6 +1259,17 @@ async def _run(
                     req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
                 )
                 await client.send_request(restart_env)
+
+            # 主动推荐：enabled 变更时同步 proactive.tick job（创建/删除）
+            proactive_keys = {
+                "proactive_recommendation_enabled",
+            }
+            if updated_env_keys and (proactive_keys & set(updated_env_keys)):
+                try:
+                    from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
+                    await sync_proactive_tick_job(cron_controller, config_payload)
+                except Exception as e:  # noqa: BLE001  # 兜底：proactive 同步失败不阻断配置保存
+                    logger.warning("[App] proactive.tick sync on config save failed: %s", e)
             return True
         except Exception as e:  # noqa: BLE001
             logger.warning("[App] hot config reload failed, scheduling restart: %s", e)
@@ -1272,6 +1279,7 @@ async def _run(
     web_channel = None
     web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
     web_channel = WebChannel(web_config, _DummyBus())
+
     _register_web_handlers(
         WebHandlersBindParams(
             channel=web_channel,
@@ -1895,6 +1903,12 @@ async def _run(
 
     await channel_manager.start_dispatch()
     await cron_scheduler.start()
+    # 主动推荐：按 config 自动注册/删除 proactive.tick 定时 job
+    try:
+        from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
+        await sync_proactive_tick_job(cron_controller, get_config())
+    except Exception as e:  # noqa: BLE001  # 兜底：启动时 proactive job 注册失败不阻断 Gateway 启动
+        logger.warning("[App] proactive.tick auto-register failed (non-fatal): %s", e)
     # 先同步完成监听绑定，避免 IDE/ACP 子进程在端口尚未就绪时连接导致多次重试。
     await gateway_server.start()
     gateway_server_task = asyncio.create_task(

@@ -32,6 +32,7 @@ import clsx from 'clsx';
 import { MarkdownRenderer } from '../../components/MarkdownRenderer';
 import { isTeamP2PMessageToUser, parseTeamEventMessage } from './teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
@@ -346,6 +347,11 @@ export const MessageItem = memo(function MessageItem({
       stop();
     });
   }, [stopGeneratedAudio, stop]);
+
+  // 主动推荐消息 - 使用特殊卡片样式
+  if (message.isProactiveRecommendation) {
+    return <ProactiveRecommendationCard message={message} />;
+  }
 
   // 工具调用/结果消息
   if (role === 'tool') {

@@ -463,7 +463,14 @@ class CronSchedulerService:
         tz = ZoneInfo(job.timezone)
         base = datetime.fromtimestamp(now_ts, tz=tz)
         push_dt = _cron_next_push_dt(job.cron_expr, base)
-        wake_dt = push_dt - timedelta(seconds=max(0, int(job.wake_offset_seconds or 0)))
+        # proactive.tick 无视 wake_offset——到点就执行，不提前 wake。
+        # 否则 wake_dt = push_dt - offset 可能在过去，导致 reschedule 后立刻
+        # 触发 → 每 6 秒循环（实测 14:26-14:28 反复 triggering 同一 run_id）。
+        if getattr(job, "mode", "") == "proactive.tick":
+            offset = 0
+        else:
+            offset = max(0, int(job.wake_offset_seconds or 0))
+        wake_dt = push_dt - timedelta(seconds=offset)
         run_id = f"{job.id}:{int(push_dt.timestamp())}"
         return push_dt, wake_dt, run_id
 
@@ -520,6 +527,77 @@ class CronSchedulerService:
 
     async def _handle_event(self, ev: _Event) -> None:
         job = self._jobs.get(ev.job_id)
+
+        # Handle proactive.tick mode: send WebSocket request to AgentServer
+        if job is not None and job.mode == "proactive.tick" and ev.kind == "wake":
+            logger.info("[Cron] triggering proactive.tick for job=%s run_id=%s", job.id, ev.run_id)
+            try:
+                # Create run state for tracking
+                tz = ZoneInfo(job.timezone)
+                push_ts = int(ev.run_id.split(":")[-1])
+                push_dt = datetime.fromtimestamp(push_ts, tz=tz)
+                wake_dt = push_dt - timedelta(seconds=max(0, int(job.wake_offset_seconds or 0)))
+                state = CronRunState(
+                    run_id=ev.run_id,
+                    job_id=job.id,
+                    wake_at_iso=wake_dt.isoformat(),
+                    push_at_iso=push_dt.isoformat(),
+                    job_name=job.name,
+                    targets=job.targets,
+                    session_id=job.session_id,
+                    chat_type=job.chat_type,
+                    timezone=job.timezone,
+                )
+                self._runs[ev.run_id] = state
+                state.status = "running"
+                state.started_at = self._now_fn()
+
+                # Send proactive.tick request to AgentServer via WebSocket
+                envelope = e2a_from_agent_fields(
+                    request_id=f"proactive-tick-{ev.run_id}",
+                    channel_id="__cron__",
+                    session_id=f"cron_{job.id}",
+                    req_method=ReqMethod.PROACTIVE_TICK,
+                    params={"target_channel": job.targets or None},
+                    is_stream=False,
+                    timestamp=self._now_fn(),
+                    metadata={"cron": {"job_id": job.id, "run_id": ev.run_id}},
+                )
+                resp = await self._agent_client.send_request(envelope)
+
+                state.finished_at = self._now_fn()
+                if resp.ok:
+                    success = resp.payload.get("success", False) if resp.payload else False
+                    state.status = "succeeded" if success else "skipped"
+                    # success 现在表示"是否真的推送了推荐"(cooldown/无新内容/配额已满均为 False)。
+                    # 文案与实际一致：不再出现"已发送"但实际没内容的情况。
+                    state.result_text = "推荐已发送" if success else "本次无需推荐（冷却中或无新内容）"
+                    logger.info("[Cron] proactive.tick completed job=%s success=%s", job.id, success)
+                else:
+                    state.status = "failed"
+                    state.error = resp.payload.get("error", "unknown") if resp.payload else "unknown"
+                    logger.warning("[Cron] proactive.tick failed job=%s: %s", job.id, state.error)
+            except Exception as exc:
+                logger.warning("[Cron] proactive.tick failed job=%s: %s", job.id, exc, exc_info=True)
+            # proactive.tick 走专属分支提前 return，跳过下方 643 通用 reschedule。
+            # 必须显式排下一次 wake，否则只在 reload 时才排，期间漏跑
+            # （实测：19:56 tick 完，20:00 整点不触发，因为没 reload）。
+            try:
+                push_dt, wake_dt, next_run_id = self._compute_next_run(job, now_ts=self._now_fn())
+                self._schedule_event(wake_dt, "wake", job.id, next_run_id)
+                self._schedule_event(push_dt, "push", job.id, next_run_id)
+            except Exception as exc:  # noqa: BLE001  # 兜底：reschedule 失败不阻断本次 tick 结果（下个 reload 会重排）
+                if self._is_croniter_no_next_date(exc):
+                    try:
+                        job.enabled = False
+                        job.expired = True
+                        await self._store.update_job(job.id, {"enabled": False, "expired": True})
+                    except Exception as update_exc:  # noqa: BLE001  # 兜底：标记过期失败仅告警，不影响主流程
+                        logger.warning("[Cron] mark expired after proactive.tick failed job=%s: %s", job.id, update_exc)
+                else:
+                    logger.warning("[Cron] reschedule after proactive.tick failed job=%s: %s", job.id, exc)
+            return
+
         if job is None and ev.kind != "push_update":
             return
         # For wake/push/push_update events: if the job no longer exists in the
@@ -585,6 +663,13 @@ class CronSchedulerService:
                     job.expired = True
                 except Exception as update_exc:
                     logger.warning("[Cron] mark expired after push failed job=%s: %s", job.id, update_exc)
+                return
+            # proactive.tick 的 wake 分支（525）已处理执行 + reschedule，push 事件
+            # 在此仅 _on_push（已 return，不做推送）。若 push 也 reschedule，会和
+            # wake 的 reschedule 重复排 wake 事件，形成 push→reschedule→wake→
+            # reschedule→push 循环（实测每 6 秒反复 triggering 同一 run_id）。
+            # proactive.tick 跳过 push 的 reschedule，由 wake 分支统一管调度。
+            if getattr(job, "mode", "") == "proactive.tick":
                 return
             try:
                 push_dt, wake_dt, next_run_id = self._compute_next_run(job, now_ts=self._now_fn())
@@ -923,6 +1008,12 @@ class CronSchedulerService:
             raise
 
     async def _on_push(self, job: CronJob, run_id: str) -> None:
+        # proactive.tick 的结果在 wake 分支已同步产出：有推荐时由
+        # trigger_main_agent → send_push 直接推送内容；无推荐时静默。
+        # push 事件不再推 result_text 或"正在执行中"占位，避免 wake 的
+        # tick_now 还在跑（LLM 耗时）时误推占位消息。
+        if getattr(job, "mode", None) == "proactive.tick":
+            return
         state = self._runs.get(run_id)
         if state is None:
             tz = ZoneInfo(job.timezone)

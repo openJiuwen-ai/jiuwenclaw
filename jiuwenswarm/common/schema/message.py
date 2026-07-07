@@ -61,7 +61,9 @@ class ReqMethod(Enum):
     AGENT_RELOAD_CONFIG = "agent.reload_config"
 
     MEMORY_COMPUTE = "memory.compute"
-    
+
+    PROACTIVE_TICK = "proactive.tick"  # Trigger proactive recommendation tick (from Cron)
+
     FILES_LIST = "files.list"
     FILES_GET = "files.get"
     TTS_SYNTHESIZE = "tts.synthesize"
@@ -230,6 +232,7 @@ class EventType(Enum):
     WORKFLOW_UPDATED = "workflow.updated"
     HEARTBEAT_RELAY = "heartbeat.relay"
     HISTORY_GET = "history.message"
+    PROACTIVE_RECOMMENDATION = "proactive_recommendation"
 
 
 class Mode(Enum):

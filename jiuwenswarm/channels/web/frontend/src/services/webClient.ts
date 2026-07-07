@@ -522,4 +522,9 @@ export async function webRequest<T = unknown>(
   return webClient.request<T>(method, params, options);
 }
 
+// Expose webClient to window for debugging in development
+if (import.meta.env.DEV) {
+  (window as any).webClient = webClient;
+}
+
 export type { WsEvent, WebMessage };

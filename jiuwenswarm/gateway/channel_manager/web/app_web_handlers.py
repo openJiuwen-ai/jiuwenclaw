@@ -42,6 +42,7 @@ from jiuwenswarm.common.config import (
     update_memory_forbidden_description_in_config,
     update_a2ui_in_config,
     update_updater_in_config,
+    update_proactive_recommendation_in_config,
 )
 from jiuwenswarm.server.runtime.a2ui.integration import (
     get_a2ui_config_payload,
@@ -446,6 +447,9 @@ _CONFIG_YAML_KEYS = frozenset({
     "memory_forbidden_enabled",
     "memory_forbidden_description",
     "a2ui_enabled",
+    "proactive_recommendation_enabled",
+    "proactive_recommendation_max_recommend_per_day",
+    "proactive_recommendation_max_sessions_per_tick",
 })
 
 _SYMPHONY_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
@@ -865,6 +869,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if not payload.get("free_search_bing_enabled"):
                 payload["free_search_bing_enabled"] = "false"
             payload.update(_flatten_modes_team_for_config_panel(raw))
+            # Proactive recommendation — use resolved config (env vars expanded)
+            resolved = get_config()
+            proactive_cfg = resolved.get("proactive_recommendation") or {}
+            payload["proactive_recommendation_enabled"] = "true" if proactive_cfg.get("enabled", False) else "false"
+            payload["proactive_recommendation_max_recommend_per_day"] = str(
+                proactive_cfg.get("max_recommend_per_day", 5))
+            payload["proactive_recommendation_max_sessions_per_tick"] = str(
+                proactive_cfg.get("max_sessions_per_tick", 10))
         except Exception:  # noqa: BLE001
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
@@ -888,6 +900,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 payload.setdefault(key, default_text)
             payload.setdefault("free_search_ddg_enabled", "false")
             payload.setdefault("free_search_bing_enabled", "false")
+            payload.setdefault("proactive_recommendation_enabled", "false")
+            payload.setdefault("proactive_recommendation_max_recommend_per_day", "5")
+            payload.setdefault("proactive_recommendation_max_sessions_per_tick", "10")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     def _persist_env_updates(updates: dict[str, str]) -> None:
@@ -989,6 +1004,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     if not ok:
                         raise _ConfigBadRequest(error or "invalid A2UI config")
                     update_a2ui_in_config(update)
+                elif param_key == "proactive_recommendation_enabled":
+                    update_proactive_recommendation_in_config({"enabled": parsed})
+                elif param_key == "proactive_recommendation_max_recommend_per_day":
+                    update_proactive_recommendation_in_config({"max_recommend_per_day": int(str(val).strip())})
+                elif param_key == "proactive_recommendation_max_sessions_per_tick":
+                    update_proactive_recommendation_in_config({"max_sessions_per_tick": int(str(val).strip())})
                 yaml_updated.append(param_key)
             except Exception as e:  # noqa: BLE001
                 logger.warning("[config.set] 写回 config.yaml 失败 %s: %s", param_key, e)

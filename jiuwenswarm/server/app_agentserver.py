@@ -129,12 +129,14 @@ from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch
 apply_openai_sse_invoke_patch()
 
 
+
 async def _run(host: str, port: int) -> None:
     from openjiuwen.core.runner import Runner
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
     from jiuwenswarm.agents.harness.team.remote_member_bootstrap import run_teammate_bootstrap_daemon
     from jiuwenswarm.extensions.manager import ExtensionManager
     from jiuwenswarm.extensions.registry import ExtensionRegistry
+    from jiuwenswarm.common.config import get_config
 
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 
@@ -169,6 +171,14 @@ async def _run(host: str, port: int) -> None:
         port=port
     )
     await server.start()
+
+    # ---------- ProactiveEngine 初始化 ----------
+    # 适配逻辑（建专用 agent + 触发主 agent 回调）封装在 proactive_adapter，
+    # app_agentserver 只调 init_proactive_engine。
+    from jiuwenswarm.server.runtime.proactive_adapter import init_proactive_engine
+    full_cfg = get_config()
+    proactive_config = full_cfg.get("proactive_recommendation", {}) if isinstance(full_cfg, dict) else {}
+    await init_proactive_engine(server, proactive_config)
 
     logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
 
@@ -266,4 +276,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 

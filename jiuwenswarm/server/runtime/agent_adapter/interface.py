@@ -1555,7 +1555,10 @@ class JiuWenSwarm:
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
-        if not is_interrupt_resume_payload(request.params):
+        # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
+        # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
+        if not is_interrupt_resume_payload(request.params) \
+                and str(request.params.get("source") or "") != "proactive_recommendation":
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
@@ -1722,7 +1725,10 @@ class JiuWenSwarm:
             and isinstance(request.params.get("activate_response"), dict)
         )
 
-        if not is_interrupt_resume_payload(request.params):
+        # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
+        # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
+        if not is_interrupt_resume_payload(request.params) \
+                and str(request.params.get("source") or "") != "proactive_recommendation":
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,

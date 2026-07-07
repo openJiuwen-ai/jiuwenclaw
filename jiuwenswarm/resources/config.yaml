@@ -187,6 +187,12 @@ memory:
       base_id: ${LAKEBASE_MEM_BASE_ID:-}
       database_id: ${LAKEBASE_DATABASE_ID:-}
 
+
+proactive_recommendation:
+  enabled: ${PROACTIVE_RECOMMENDATION_ENABLED:-false}                # 总开关
+  max_recommend_per_day: ${MAX_RECOMMEND_PER_DAY:-5}               # 每天最多推荐次数
+  max_sessions_per_tick: ${MAX_SESSIONS_PER_TICK:-10}              # 每次 Tick 扫描最多几个会话
+
 models:
   defaults:
     - model_client_config:
@@ -934,6 +940,7 @@ mcp:
   #     headers:
   #       Authorization: Bearer ${MCP_TOKEN}
   #     timeout_s: 30
+
 
 modes:
   # 一级模式 agent / code / team

@@ -1569,13 +1569,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const messages = runtime?.messages ?? [];
         const payloadSessionId =
           typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
+
+        // 检查是否为主动推荐消息
+        const source = typeof payload.source === 'string' ? payload.source : '';
+        const isProactiveRecommendation = source === 'proactive_recommendation';
+        const proactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
+
         // 仅当有明确会话绑定时才把 final 合并进当前流式气泡。
-        // 定时任务等广播的 session_id 为空/null，若仍走 currentStreamId 会写到错误气泡甚至“无可见更新”。
+        // 定时任务等广播的 session_id 为空/null，若仍走 currentStreamId 会写到错误气泡甚至”无可见更新”。
         const streamId = currentStreamId;
         if (streamId && payloadSessionId) {
           useChatStore.getState().updateMessage(sessionId, streamId, {
             ...(content ? { content } : {}),
             isStreaming: false,
+            ...(isProactiveRecommendation ? { isProactiveRecommendation, ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}) } : {}),
           });
           useChatStore.getState().stopStreaming(sessionId);
           if (content && !content.includes('MEDIA:')) {
@@ -1645,11 +1652,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           if (last?.role === 'assistant' && last.content === content) {
             return;
           }
+
+          // 检查是否为主动推荐消息
+          const source = typeof payload.source === 'string' ? payload.source : '';
+          const isProactiveRecommendation = source === 'proactive_recommendation';
+          const proactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
+
           useChatStore.getState().addMessage(sessionId, {
             id: messageId,
             role: 'assistant',
             content,
             timestamp: new Date().toISOString(),
+            isProactiveRecommendation,
+            ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}),
           });
           if (!content.includes('MEDIA:')) {
             handleTtsPlayback(sessionId, messageId, content);
@@ -2285,6 +2300,31 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           summary: '完成',
         };
         useChatStore.getState().addToolResult(sessionId, sessionResult);
+      }),
+      webClient.on('proactive_recommendation', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const content = typeof payload.content === 'string' ? payload.content : '';
+        if (!content) return;
+
+        const proactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
+        const proactiveTarget = typeof payload.proactive_target === 'string' ? payload.proactive_target : '';
+        const proactiveReason = typeof payload.proactive_reason === 'string' ? payload.proactive_reason : '';
+
+        const messageId = `proactive-${Date.now()}`;
+        addMessage({
+          id: messageId,
+          role: 'assistant',
+          content,
+          timestamp: new Date().toISOString(),
+          isProactiveRecommendation: true,
+          proactiveType: (proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration') || undefined,
+        });
+
+        console.debug('[ws] proactive_recommendation', {
+          type: proactiveType,
+          target: proactiveTarget,
+          reason: proactiveReason,
+        });
       }),
       webClient.on('team.event', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
