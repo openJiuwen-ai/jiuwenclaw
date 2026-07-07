@@ -367,7 +367,7 @@ async def test_hot_reload_h3_to_h5_ord_rule_lifecycle(
 async def test_agentserver_cold_start_loads_rules_from_gdb(
     log_masking_harness: LogMaskingIntegrationHarness,
 ):
-    """AgentServer 初始化：``reload_log_masking_from_gateway_db`` 从 GDB 加载 enabled 规则。"""
+    """AgentServer 初始化：``reload_log_masking_rule`` 从 GDB 加载 enabled 规则。"""
     h = log_masking_harness
     LogMaskingEngine.reset_for_tests()
     await h.bootstrap_builtin_and_sync()

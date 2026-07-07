@@ -282,7 +282,13 @@ class LogMaskingRuleService:
             return None
 
         if "pattern" in updates and updates["pattern"] is not None:
-            updates["pattern"] = validate_pattern(updates["pattern"])
+            existing_source = str(getattr(existing, "source", "custom") or "custom")
+            is_custom = existing_source.strip().lower() == "custom"
+            updates["pattern"] = validate_pattern(
+                updates["pattern"],
+                check_structure=is_custom,
+                check_performance=is_custom,
+            )
         if "replacement" in updates:
             updates["replacement"] = normalize_replacement(updates.get("replacement"))
         updates.pop("source", None)

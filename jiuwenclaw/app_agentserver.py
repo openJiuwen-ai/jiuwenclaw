@@ -125,7 +125,7 @@ async def _run(host: str, port: int) -> None:
     try:
         from jiuwenclaw.infrastructure.log_masking.engine import LogMaskingEngine
 
-        await LogMaskingEngine.reload_log_masking_from_gateway_db()
+        await LogMaskingEngine.reload_log_masking_rule()
         logger.info("[AgentServer] log masking rules loaded from Gateway DB (if any)")
     except Exception:  # noqa: BLE001
         logger.warning("[AgentServer] log_masking_rule cold load skipped", exc_info=True)

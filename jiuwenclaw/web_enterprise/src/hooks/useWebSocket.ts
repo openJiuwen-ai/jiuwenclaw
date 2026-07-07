@@ -52,6 +52,8 @@ import {
 import { shouldHandleRequestEvent } from './requestEventFilter';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
+/** 后端 tts.synthesize 未实现前关闭自动朗读 */
+const AUTO_TTS_ENABLED = false;
 const BACKEND_PROBE_INTERVAL_MS = 10_000;
 const BACKEND_PROBE_TIMEOUT_MS = 8_000;
 
@@ -217,6 +219,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   const handleTtsPlayback = useCallback(
     (messageId: string, content: string) => {
+      if (!AUTO_TTS_ENABLED) {
+        return;
+      }
       const sanitized = sanitizeTtsText(content);
       if (!sanitized || sanitized.startsWith('[任务已中断]')) {
         return;

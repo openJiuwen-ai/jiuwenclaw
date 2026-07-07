@@ -1423,6 +1423,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
     """
+    from jiuwenclaw.infrastructure.config import settings
     from jiuwenclaw.infrastructure.log_masking import SensitiveDataFilter
 
     logs_root = get_logs_dir()
@@ -1436,12 +1437,19 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     for handler in root.handlers[:]:
         handler.close()
         root.removeHandler(handler)
+    root.filters[:] = [
+        item
+        for item in root.filters
+        if not isinstance(item, SensitiveDataFilter)
+    ]
 
     formatter = logging.Formatter(
         fmt="%(asctime)s.%(msecs)03d [%(process)d] %(levelname)s %(name)s %(filename)s:%(lineno)d: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    privacy_filter = SensitiveDataFilter()
+    privacy_filter: Optional[SensitiveDataFilter] = None
+    if settings.gateway_log_masking_enabled:
+        privacy_filter = SensitiveDataFilter()
 
     def _add_rotating(
         filename: str,
@@ -1457,9 +1465,10 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         )
         h.setLevel(level)
         h.setFormatter(custom_formatter if custom_formatter is not None else formatter)
-        h.addFilter(privacy_filter)
         if name_filter is not None:
             h.addFilter(name_filter)
+        if privacy_filter is not None:
+            h.addFilter(privacy_filter)
         root.addHandler(h)
 
     _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
@@ -1473,7 +1482,8 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(levels.console)
     stream_handler.setFormatter(formatter)
-    stream_handler.addFilter(privacy_filter)
+    if privacy_filter is not None:
+        stream_handler.addFilter(privacy_filter)
     root.addHandler(stream_handler)
     return root
 
