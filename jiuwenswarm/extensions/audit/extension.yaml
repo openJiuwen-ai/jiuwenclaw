@@ -1,0 +1,22 @@
+id: audit
+name: Execution Audit & Alerting
+version: 0.1.0
+description: Audit trail for JiuwenSwarm executions with anomaly alerting — track requests, sessions, token usage, errors and detect patterns like consecutive failures, token budget exceeded, response timeouts.
+author: contributor
+min_jiuwenswarm_version: "0.2.1"
+dependencies: {}
+config_schema:
+  type: object
+  properties:
+    enabled:
+      type: boolean
+      default: true
+    retention_days:
+      type: integer
+      default: 30
+    consecutive_failure_threshold:
+      type: integer
+      default: 3
+    token_daily_threshold:
+      type: integer
+      default: 1000000
