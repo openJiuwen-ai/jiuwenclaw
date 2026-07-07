@@ -159,6 +159,13 @@ async def _run(host: str, port: int) -> None:
             logger.warning(
                 "[AgentServer] jiuwenbox sandbox cleanup failed: %s", exc,
             )
+        # 落盘 session_history 缓冲层剩余数据（atexit 兜底的显式调用，确保 SIGTERM 退出前 flush）
+        try:
+            from jiuwenclaw.agentserver import session_history
+
+            await asyncio.to_thread(session_history.shutdown)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentServer] history flush failed: %s", exc)
         logger.info("[AgentServer] stopped")
 
 
