@@ -175,6 +175,22 @@ uninstall_gateway() {
     exec_cmd kubectl delete deployment "${gateway_name}" -n "${namespace}" --ignore-not-found=true
     wait_pod_terminated "${gateway_name}" "${namespace}"
 
+    # 兜底清理 gateway 动态创建的 agentserver pod
+    # 正常情况下 gateway 在 graceful shutdown 时会由 ServiceManager.stop()
+    # -> cleanup_all_agentserver_pods 自行删除这些 pod；但 gateway 一旦在
+    # terminationGracePeriodSeconds 内被 SIGKILL（例如 busy-loop 阻塞了 shutdown），
+    # 这些 pod 会变成孤儿残留：agentserver pod 无 ownerReference，且不在本脚本的
+    # 清理范围内（MODULES 不含 agentserver）。此处按 gateway 创建 pod 时打下的
+    # 固定 label 兜底删除，保证 down 后无残留。
+    local orphan_pods
+    orphan_pods=$(kubectl get pods -n "${namespace}" -l jiuwenclaw-component=agentserver -o name 2>/dev/null || true)
+    if [ -n "${orphan_pods}" ]; then
+        info "Cleaning up orphan agentserver pods created by gateway (label: jiuwenclaw-component=agentserver)"
+        exec_cmd kubectl delete pod -n "${namespace}" -l jiuwenclaw-component=agentserver --ignore-not-found=true
+    else
+        info "No orphan agentserver pods to clean up."
+    fi
+
     info "Deleting remaining Gateway resources (ServiceAccount, Role, Service, ...)"
     exec_cmd kubectl delete -f "${gateway_file}" --ignore-not-found=true
     delete_k8s_resource "configmap" "${conf_name}" "${namespace}"
