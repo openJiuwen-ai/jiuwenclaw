@@ -161,6 +161,54 @@ def test_team_config_loader_defaults_teammate_mode_to_build_mode():
     assert spec["teammate_mode"] == "build_mode"
 
 
+def test_deep_adapter_can_select_configured_vision_model_by_alias():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._create_model(  # pylint: disable=protected-access
+        {
+            "models": {
+                "defaults": [
+                    {
+                        "model_client_config": {
+                            "api_base": "https://default.example/v1",
+                            "api_key": "default-key",
+                            "model_name": "deepseek-chat",
+                            "client_provider": "OpenAI",
+                            "verify_ssl": False,
+                        },
+                        "model_config_obj": {"temperature": 0.1},
+                        "is_default": True,
+                    }
+                ],
+                "vision": {
+                    "model_client_config": {
+                        "api_base": "https://api.moonshot.cn/v1",
+                        "api_key": "vision-key",
+                        "model_name": "kimi-k2.6",
+                        "client_provider": "OpenAI",
+                        "verify_ssl": False,
+                    },
+                    "model_config_obj": {"temperature": 0.2},
+                },
+            }
+        }
+    )
+
+    request = AgentRequest(
+        request_id="req-vision",
+        channel_id="web",
+        params={"model_name": "Vision"},
+    )
+
+    resolved = adapter._resolve_model_for_request(request)  # pylint: disable=protected-access
+
+    assert resolved.model_config.model_name == "kimi-k2.6"
+    assert resolved.model_client_config.api_base == "https://api.moonshot.cn/v1"
+    assert resolved.model_config.temperature == 1
+    assert resolved.model_config.top_p == 0.95
+
+
 def test_resolve_request_project_dir_uses_metadata_project_dir_for_control_requests():
     request = AgentRequest(
         request_id="req-control",

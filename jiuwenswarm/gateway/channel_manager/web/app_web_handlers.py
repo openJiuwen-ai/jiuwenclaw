@@ -1275,6 +1275,36 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     # ── models.* handlers ────────────────────────────────────────
 
+    def _configured_vision_model(config: dict[str, Any]) -> dict[str, Any] | None:
+        models_config = config.get("models")
+        if not isinstance(models_config, dict):
+            return None
+        vision_config = models_config.get("vision")
+        if not isinstance(vision_config, dict):
+            return None
+        mcc = vision_config.get("model_client_config")
+        if not isinstance(mcc, dict):
+            return None
+        model_name = str(mcc.get("model_name") or "").strip()
+        api_base = str(mcc.get("api_base") or "").strip()
+        api_key = str(mcc.get("api_key") or "").strip()
+        if not model_name or not api_base or not api_key:
+            return None
+        mco = vision_config.get("model_config_obj")
+        if not isinstance(mco, dict):
+            mco = {}
+        return {
+            "model_name": model_name,
+            "api_base": api_base,
+            "api_key": api_key,
+            "model_provider": mcc.get("client_provider", ""),
+            "temperature": mco.get("temperature", 0.95),
+            "reasoning_level": "off" if mco.get("reasoning_level") is False else mco.get("reasoning_level", ""),
+            "is_default": True,
+            "alias": vision_config.get("alias") or "Vision",
+            "model_capability": "vision",
+        }
+
     async def _models_list(ws, req_id, params, session_id):
         """返回已配置的所有默认模型列表（与 config.get 一致，返回解密后的完整值）。
 
@@ -1318,6 +1348,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=True, payload={
                 "models": result,
                 "active_model": active_model,
+                "vision_model": _configured_vision_model(config),
             })
         except Exception as exc:  # noqa: BLE001
             logger.warning("[models.list] %s", exc)

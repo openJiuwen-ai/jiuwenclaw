@@ -36,6 +36,7 @@ export interface ModelEntry {
   api_base: string;
   api_key: string;
   model_provider: string;
+  model_capability?: 'default' | 'vision';
   timeout?: number;
   temperature?: number;
   reasoning_level?: string;

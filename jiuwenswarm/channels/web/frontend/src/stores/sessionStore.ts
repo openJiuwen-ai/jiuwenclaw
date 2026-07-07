@@ -279,7 +279,7 @@ interface SessionState {
   clearTeamMemberContextCompressionStatus: (memberId: string) => void;
   clearAllTeamMemberContextCompressionStatus: () => void;
   setTeamHistoryMessages: (messages: Message[]) => void;
-  setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
+  setAvailableModels: (models: ModelEntry[], activeModel?: string, visionModel?: ModelEntry | null) => void;
   setSelectedModelName: (name: string) => void;
 }
 
@@ -681,18 +681,26 @@ export const useSessionStore = create<SessionState>((set) => ({
   setTeamHistoryMessages: (messages) => {
     set({ teamHistoryMessages: messages });
   },
-  setAvailableModels: (models, activeModel) => {
+  setAvailableModels: (models, activeModel, visionModel = null) => {
     set(() => {
       const chatModels = models.filter((m) => m.is_default !== false);
+      const nextChatModels = visionModel
+        ? [
+            ...chatModels,
+            ...(chatModels.some((m) => (m.alias || m.model_name) === (visionModel.alias || visionModel.model_name))
+              ? []
+              : [{ ...visionModel, model_capability: 'vision' as const, is_default: true }]),
+          ]
+        : chatModels;
       // 优先使用后端返回的 activeModel（默认模型），其次取第一个；有别名时存别名
-      const matchedModel = activeModel ? chatModels.find((m) => m.model_name === activeModel) : null;
+      const matchedModel = activeModel ? nextChatModels.find((m) => m.model_name === activeModel) : null;
       const selected = matchedModel
         ? (matchedModel.alias || matchedModel.model_name)
-        : (chatModels[0] ? (chatModels[0].alias || chatModels[0].model_name) : null);
+        : (nextChatModels[0] ? (nextChatModels[0].alias || nextChatModels[0].model_name) : null);
       if (selected) {
         try { localStorage.setItem(MODEL_STORAGE_KEY, selected); } catch { /* noop */ }
       }
-      return { availableModels: models, chatAvailableModels: chatModels, selectedModelName: selected };
+      return { availableModels: models, chatAvailableModels: nextChatModels, selectedModelName: selected };
     });
   },
   setSelectedModelName: (name) => {

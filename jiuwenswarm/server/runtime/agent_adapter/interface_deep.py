@@ -2088,8 +2088,66 @@ class JiuWenSwarmDeepAdapter:
         )
         return Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
 
+    @staticmethod
+    def _requires_temperature_one(mcc: dict[str, Any]) -> bool:
+        model_name = str(mcc.get("model_name") or "").strip().lower()
+        api_base = str(mcc.get("api_base") or "").strip().lower()
+        return model_name.startswith("kimi-") or "moonshot.cn" in api_base
+
+    @classmethod
+    def _normalize_selectable_model_config(
+        cls,
+        mcc: dict[str, Any],
+        mco: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized = dict(mco)
+        if cls._requires_temperature_one(mcc):
+            normalized["temperature"] = 1
+            normalized["top_p"] = 0.95
+        return normalized
+
+    def _register_model_cache_entry(
+        self,
+        entry: dict[str, Any],
+        name_counter: dict[str, int],
+        fallback_alias: str = "",
+    ) -> None:
+        """Register one model entry into the request-selectable model cache."""
+        mcc = entry.get("model_client_config") or {}
+        if not mcc.get("model_name"):
+            return
+        model_name = mcc["model_name"]
+        idx = name_counter.get(model_name, 0)
+        name_counter[model_name] = idx + 1
+        cache_key = f"{model_name}#{idx}"
+        try:
+            self._model_cache[cache_key] = self._build_model_from_entry(
+                mcc,
+                self._normalize_selectable_model_config(
+                    mcc,
+                    entry.get("model_config_obj") or {},
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] 跳过无效模型条目 %s: %s",
+                model_name, exc,
+            )
+            return
+        if model_name not in self._model_name_to_keys:
+            self._model_name_to_keys[model_name] = []
+        self._model_name_to_keys[model_name].append(cache_key)
+
+        # 同时用纯 model_name 作为 key 指向 is_default=true 的条目
+        if entry.get("is_default") is True:
+            self._model_cache[model_name] = self._model_cache[cache_key]
+
+        alias = entry.get("alias") or fallback_alias
+        if alias and alias != model_name and alias not in self._model_cache:
+            self._model_cache[alias] = self._model_cache[cache_key]
+
     def _build_model_cache_from_defaults(self, config: dict) -> None:
-        """从 models.defaults 列表构建模型缓存。
+        """从 models.defaults 和可选择的多模态模型构建模型缓存。
 
         key 使用 {model_name}#{index} 格式以支持同名模型共存。
         同时记录 _model_name_to_keys 映射以便按 model_name 查找。
@@ -2098,35 +2156,11 @@ class JiuWenSwarmDeepAdapter:
         name_counter: dict[str, int] = {}
 
         for entry in get_default_models(config):
-            mcc = entry.get("model_client_config") or {}
-            if not mcc.get("model_name"):
-                continue
-            model_name = mcc["model_name"]
-            idx = name_counter.get(model_name, 0)
-            name_counter[model_name] = idx + 1
-            cache_key = f"{model_name}#{idx}"
-            try:
-                self._model_cache[cache_key] = self._build_model_from_entry(
-                    mcc,
-                    entry.get("model_config_obj") or {},
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] 跳过无效模型条目 %s: %s",
-                    model_name, exc,
-                )
-                continue
-            if model_name not in self._model_name_to_keys:
-                self._model_name_to_keys[model_name] = []
-            self._model_name_to_keys[model_name].append(cache_key)
+            self._register_model_cache_entry(entry, name_counter)
 
-            # 同时用纯 model_name 作为 key 指向 is_default=true 的条目
-            if entry.get("is_default") is True:
-                self._model_cache[model_name] = self._model_cache[cache_key]
-
-            alias = entry.get("alias", "")
-            if alias and alias != model_name and alias not in self._model_cache:
-                self._model_cache[alias] = self._model_cache[cache_key]
+        vision_entry = (config.get("models") or {}).get("vision")
+        if isinstance(vision_entry, dict):
+            self._register_model_cache_entry(vision_entry, name_counter, fallback_alias="Vision")
 
     def _build_model_cache_legacy(self, config: dict) -> None:
         """回退到旧格式（models.default / react 段）构建单条目缓存。"""

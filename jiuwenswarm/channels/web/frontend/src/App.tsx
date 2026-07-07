@@ -42,7 +42,7 @@ import {
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
 import { useTeamPanelState } from './features/teamPanelState';
-import { AgentMode, UserAnswer, ModelEntry } from './types';
+import { AgentMode, MediaItem, UserAnswer, ModelEntry } from './types';
 import { useSessionStore, useChatStore, useTodoStore, useHarnessStore } from './stores';
 import { useTranslation } from 'react-i18next';
 import {
@@ -474,9 +474,9 @@ function AppContent() {
     }
     // 同步获取多模型列表
     try {
-      const resp = await request<{ models: ModelEntry[]; active_model: string }>('models.list');
+      const resp = await request<{ models: ModelEntry[]; active_model: string; vision_model?: ModelEntry | null }>('models.list');
       if (resp?.models) {
-        setAvailableModels(resp.models, resp.active_model);
+        setAvailableModels(resp.models, resp.active_model, resp.vision_model ?? null);
       }
     } catch (error) {
       console.warn('Failed to fetch models list:', error);
@@ -584,9 +584,9 @@ function AppContent() {
 
   const handleModelsRefresh = useCallback(async () => {
     try {
-      const resp = await request<{ models: ModelEntry[]; active_model: string }>('models.list');
+      const resp = await request<{ models: ModelEntry[]; active_model: string; vision_model?: ModelEntry | null }>('models.list');
       if (resp?.models) {
-        setAvailableModels(resp.models, resp.active_model);
+        setAvailableModels(resp.models, resp.active_model, resp.vision_model ?? null);
       }
     } catch (error) {
       console.warn('Failed to refresh models list:', error);
@@ -1151,11 +1151,11 @@ function AppContent() {
     void switchMode(sessionId, mode);
   }, [sessionId, switchMode]);
 
-  const handleSendMessage = useCallback((content: string) => {
+  const handleSendMessage = useCallback((content: string, mediaItems?: MediaItem[]) => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId || currentSessionId === 'new') return;
     disposeInFlightHistoryHandles();
-    void sendMessage(content, currentSessionId);
+    void sendMessage(content, currentSessionId, mediaItems);
   }, [disposeInFlightHistoryHandles, sendMessage]);
 
   useEffect(() => {

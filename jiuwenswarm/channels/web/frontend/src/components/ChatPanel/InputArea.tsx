@@ -1,23 +1,52 @@
-import { useState, useRef, useCallback, KeyboardEvent, useEffect } from 'react';
+import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Square } from 'lucide-react';
+import { ImagePlus, Square, X } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
 import { useChatStore, useSessionStore } from '../../stores';
-import { AgentMode } from '../../types';
+import { AgentMode, MediaItem } from '../../types';
 import clsx from 'clsx';
 import { getEvolutionPillLabel } from './evolution-status';
 import sendIcon from '../../assets/send.svg';
 import sendActiveIcon from '../../assets/send_active.svg';
 
 interface InputAreaProps {
-  onSubmit: (content: string) => void;
+  onSubmit: (content: string, mediaItems?: MediaItem[]) => void;
   onInterrupt: (newInput?: string) => void;
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
   onNewSession: () => Promise<void>;
+}
+
+const ACCEPTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_IMAGE_COUNT = 8;
+
+function fileToMediaItem(file: File): Promise<MediaItem | null> {
+  if (!ACCEPTED_IMAGE_TYPES.has(file.type) || file.size > MAX_IMAGE_BYTES) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      const base64Data = result.includes(',') ? result.split(',')[1] : '';
+      if (!base64Data) {
+        resolve(null);
+        return;
+      }
+      resolve({
+        type: 'image',
+        mimeType: file.type,
+        filename: file.name || `image-${Date.now()}`,
+        base64Data,
+      });
+    };
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
 }
 
 function ClusterIcon({ className }: { className?: string }) {
@@ -43,7 +72,10 @@ export function InputArea({
   const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
   const [showModeSwitchModal, setShowModeSwitchModal] = useState(false);
   const [pendingMode, setPendingMode] = useState<AgentMode | null>(null);
+  const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
+  const [isDraggingImage, setIsDraggingImage] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const modeMenuRef = useRef<HTMLDivElement>(null);
   const autoSendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isComposingRef = useRef(false);
@@ -112,6 +144,8 @@ export function InputArea({
     },
   });
 
+  const imageInputDisabled = isListening || (isInterruptible && !isTeamMode);
+
   useEffect(() => {
     if (!isListening && pendingVoiceText) {
       const finalText = (inputValue + pendingVoiceText).trim();
@@ -144,6 +178,18 @@ export function InputArea({
     };
   }, []);
 
+  const appendImageFiles = useCallback(async (files: FileList | File[]) => {
+    const imageFiles = Array.from(files).filter((file) => ACCEPTED_IMAGE_TYPES.has(file.type));
+    if (!imageFiles.length) return;
+    const remainingSlots = Math.max(0, MAX_IMAGE_COUNT - mediaItems.length);
+    if (!remainingSlots) return;
+    const nextItems = (await Promise.all(imageFiles.slice(0, remainingSlots).map(fileToMediaItem)))
+      .filter((item): item is MediaItem => Boolean(item));
+    if (nextItems.length) {
+      setMediaItems((prev) => [...prev, ...nextItems].slice(0, MAX_IMAGE_COUNT));
+    }
+  }, [mediaItems.length]);
+
   useEffect(() => {
     if (!isModeMenuOpen) return;
 
@@ -162,35 +208,38 @@ export function InputArea({
 
   const handleSubmit = useCallback(() => {
     const trimmed = (inputValue + pendingVoiceText).trim();
-    if (!trimmed) return;
+    if (!trimmed && mediaItems.length === 0) return;
+    if (isInterruptible && !isTeamMode && mediaItems.length > 0) return;
 
     if (isListening) {
       stopListening();
     }
 
     if (isTeamMode) {
-      onSubmit(trimmed);
+      onSubmit(trimmed, mediaItems);
     } else if (isInterruptible) {
-      if (isAgentMode) {
+      if (isAgentMode && mediaItems.length === 0) {
         addToTaskQueue(trimmed);
       } else {
         onInterrupt(trimmed);
       }
     } else {
-      onSubmit(trimmed);
+      onSubmit(trimmed, mediaItems);
     }
     setInputValue('');
     setPendingVoiceText('');
+    setMediaItems([]);
 
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [inputValue, pendingVoiceText, isInterruptible, isListening, onSubmit, onInterrupt, stopListening, isAgentMode, isTeamMode, addToTaskQueue, setInputValue]);
+  }, [inputValue, pendingVoiceText, mediaItems, isInterruptible, isListening, onSubmit, onInterrupt, stopListening, isAgentMode, isTeamMode, addToTaskQueue, setInputValue]);
 
   const trimmedDraft = (inputValue + pendingVoiceText).trim();
-  const hasDraft = trimmedDraft.length > 0 || isListening;
+  const hasDraft = trimmedDraft.length > 0 || mediaItems.length > 0 || isListening;
+  const isImageInterruptBlocked = isInterruptible && !isTeamMode && mediaItems.length > 0;
   const showStop = isProcessing && !isPaused && !hasDraft;
-  const canSubmit = hasDraft || showStop;
+  const canSubmit = (hasDraft && !isImageInterruptBlocked) || showStop;
 
   const handleSendButtonClick = useCallback(() => {
     if (showStop) {
@@ -217,6 +266,49 @@ export function InputArea({
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
     }
   }, []);
+
+  const handleFileInputChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (files) {
+      void appendImageFiles(files);
+    }
+    event.target.value = '';
+  }, [appendImageFiles]);
+
+  const handlePaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(event.clipboardData.items);
+    const files = items
+      .filter((item) => item.kind === 'file' && ACCEPTED_IMAGE_TYPES.has(item.type))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (files.length) {
+      event.preventDefault();
+      void appendImageFiles(files);
+    }
+  }, [appendImageFiles]);
+
+  const handleDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    const hasImage = Array.from(event.dataTransfer.items).some(
+      (item) => item.kind === 'file' && ACCEPTED_IMAGE_TYPES.has(item.type)
+    );
+    if (!hasImage) return;
+    event.preventDefault();
+    setIsDraggingImage(true);
+  }, []);
+
+  const handleDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setIsDraggingImage(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
+    setIsDraggingImage(false);
+    const files = Array.from(event.dataTransfer.files).filter((file) => ACCEPTED_IMAGE_TYPES.has(file.type));
+    if (!files.length) return;
+    event.preventDefault();
+    void appendImageFiles(files);
+  }, [appendImageFiles]);
 
   // const handleVoiceStart = useCallback(() => {
   //   if (isListening) return;
@@ -274,6 +366,7 @@ export function InputArea({
     if (isListening || (isInterruptible && !isTeamMode)) return;
     setInputValue('');
     setPendingVoiceText('');
+    setMediaItems([]);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -329,7 +422,11 @@ export function InputArea({
         'chat-input-container',
         isModeMenuOpen && 'chat-input-container--menu-open',
         isListening && 'chat-input-container--recording',
+        isDraggingImage && 'chat-input-container--dragging',
       )}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
     >
       {isListening && (
         <div className="chat-input-recording-bar">
@@ -375,6 +472,7 @@ export function InputArea({
         onCompositionStart={() => { isComposingRef.current = true; }}
         onCompositionEnd={() => { isComposingRef.current = false; }}
         onInput={handleInput}
+        onPaste={handlePaste}
         placeholder={
           isListening
             ? t('chat.placeholderVoice')
@@ -394,6 +492,27 @@ export function InputArea({
         rows={1}
         data-testid="chat-input"
       />
+
+      {mediaItems.length > 0 && (
+        <div className="chat-input-media-strip">
+          {mediaItems.map((item, index) => (
+            <div className="chat-input-media-thumb" key={`${item.filename}-${index}`}>
+              <img
+                src={`data:${item.mimeType};base64,${item.base64Data}`}
+                alt={item.filename}
+              />
+              <button
+                type="button"
+                className="chat-input-media-remove"
+                onClick={() => setMediaItems((prev) => prev.filter((_, i) => i !== index))}
+                title={t('chat.removeImage')}
+              >
+                <X size={12} strokeWidth={2} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="chat-input-toolbar">
         <div className="chat-input-toolbar-left">
@@ -466,6 +585,27 @@ export function InputArea({
         </div>
 
         <div className="chat-input-actions">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            multiple
+            className="hidden"
+            onChange={handleFileInputChange}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={imageInputDisabled}
+            className={cx(
+              'chat-input-btn',
+              imageInputDisabled && 'chat-input-btn--disabled',
+            )}
+            title={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
+          >
+            <ImagePlus className="chat-input-btn-icon" strokeWidth={1.8} />
+          </button>
+
           <button
             type="button"
             onClick={handleNewSession}
@@ -505,7 +645,7 @@ export function InputArea({
             </button>
           )} */}
 
-          <ModelSelector />
+          <ModelSelector hasMedia={mediaItems.length > 0} />
 
           <button
             type="button"
@@ -561,37 +701,52 @@ export function InputArea({
   );
 }
 
-function ModelSelector() {
+function ModelSelector({ hasMedia }: { hasMedia: boolean }) {
   const { chatAvailableModels, selectedModelName, setSelectedModelName } = useSessionStore();
   const { t } = useTranslation();
+  const hasVisionModel = chatAvailableModels.some((m) => m.model_capability === 'vision');
 
   if (chatAvailableModels.length === 0) return null;
 
   if (chatAvailableModels.length === 1) {
     return (
-      <span
-        className="text-xs text-text-muted px-2 truncate max-w-[200px]"
-        title={chatAvailableModels[0].model_name}
-      >
-        {chatAvailableModels[0].alias || chatAvailableModels[0].model_name}
+      <span className="chat-model-inline">
+        <span
+          className="chat-model-inline__name"
+          title={chatAvailableModels[0].model_name}
+        >
+          {chatAvailableModels[0].alias || chatAvailableModels[0].model_name}
+        </span>
+        {hasMedia && !hasVisionModel && (
+          <span className="chat-model-inline__warning" title={t('chat.modelSelector.noVisionTooltip')}>
+            {t('chat.modelSelector.noVision')}
+          </span>
+        )}
       </span>
     );
   }
 
   return (
-    <select
-      value={selectedModelName ?? ''}
-      onChange={(e) => setSelectedModelName(e.target.value)}
-      title={t('chat.modelSelector.tooltip')}
-      className="chat-model-selector"
-      data-testid="chat-model-selector"
-    >
-      {chatAvailableModels.map((m, idx) => (
-        <option key={`${m.model_name}-${idx}`} value={m.alias || m.model_name}>
-          {m.alias ? `${m.alias} (${m.model_name})` : m.model_name}
-        </option>
-      ))}
-    </select>
+    <span className="chat-model-inline">
+      <select
+        value={selectedModelName ?? ''}
+        onChange={(e) => setSelectedModelName(e.target.value)}
+        title={t('chat.modelSelector.tooltip')}
+        className="chat-model-selector"
+        data-testid="chat-model-selector"
+      >
+        {chatAvailableModels.map((m, idx) => (
+          <option key={`${m.model_name}-${idx}`} value={m.alias || m.model_name}>
+            {m.alias ? `${m.alias} (${m.model_name})` : m.model_name}
+          </option>
+        ))}
+      </select>
+      {hasMedia && !hasVisionModel && (
+        <span className="chat-model-inline__warning" title={t('chat.modelSelector.noVisionTooltip')}>
+          {t('chat.modelSelector.noVision')}
+        </span>
+      )}
+    </span>
   );
 }
 
