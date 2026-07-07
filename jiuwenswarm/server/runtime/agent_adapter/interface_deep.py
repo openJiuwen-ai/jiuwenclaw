@@ -704,6 +704,18 @@ class JiuWenSwarmDeepAdapter:
         sid = self._session_adapter_key(session_id)
         return self._session_adapters.get(sid)
 
+    def _iter_session_adapters_for_reload(
+        self,
+        target_session_id: str | None = None,
+    ) -> list[tuple[str, "JiuWenSwarmDeepAdapter"]]:
+        target_sid = str(target_session_id or "").strip()
+        if not target_sid:
+            return list(self._session_adapters.items())
+        adapter = self._session_adapters.get(self._session_adapter_key(target_sid))
+        if adapter is None:
+            return []
+        return [(self._session_adapter_key(target_sid), adapter)]
+
     def _touch_session_adapter(self, session_id: str | None) -> None:
         self._session_adapter_last_used[self._session_adapter_key(session_id)] = time.time()
 
@@ -3664,6 +3676,7 @@ class JiuWenSwarmDeepAdapter:
         self,
         config_base: dict[str, Any] | None = None,
         env_overrides: dict[str, Any] | None = None,
+        target_session_id: str | None = None,
     ) -> None:
         """从 config.yaml 重新加载配置，通过 DeepAgent.configure() 热更新当前实例（不新建 DeepAgent）。
 
@@ -3673,7 +3686,18 @@ class JiuWenSwarmDeepAdapter:
         Args:
             config_base: 可选的完整配置快照；传入时优先使用它而不是读取本地 config.yaml。
             env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
+            target_session_id: 可选的目标 session id；传入时仅级联热更新该 session adapter。
         """
+        target_sid = str(target_session_id or "").strip() or None
+        if self._is_session_scoped_adapter and target_sid:
+            own_sid = self._session_adapter_key(self._parent_session_id)
+            if own_sid != self._session_adapter_key(target_sid):
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] skip scoped reload for unrelated session: target=%s self=%s",
+                    target_sid,
+                    own_sid,
+                )
+                return
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
@@ -3834,9 +3858,13 @@ class JiuWenSwarmDeepAdapter:
         await self._sync_mcp_servers_for_runtime(config_base, tag="agent.reload")
 
         if not self._is_session_scoped_adapter:
-            for session_id, adapter in list(self._session_adapters.items()):
+            for session_id, adapter in self._iter_session_adapters_for_reload(target_sid):
                 try:
-                    await adapter.reload_agent_config(config_base, env_overrides)
+                    await adapter.reload_agent_config(
+                        config_base,
+                        env_overrides,
+                        target_session_id=target_sid,
+                    )
                 except Exception as exc:
                     logger.warning(
                         "[JiuWenSwarmDeepAdapter] session adapter reload failed: session_id=%s error=%s",

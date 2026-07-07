@@ -397,7 +397,14 @@ class AgentManager:
                         exc,
                     )
 
-    async def reload_agents_config(self, config, env) -> None:
+    async def reload_agents_config(
+        self,
+        config,
+        env,
+        *,
+        target_channel_id: str | None = None,
+        target_session_id: str | None = None,
+    ) -> None:
         """reload agent config.
 
         使用 ``self._reload_lock`` 串行化, 避免高频触发(如批量 MCP 增删)时多个
@@ -412,7 +419,15 @@ class AgentManager:
                 else:
                     os.environ[key] = str(env_value)
 
-            for channel_id, agents in self.agents.items():
+            target_channel = str(target_channel_id or "").strip() or None
+            target_session = str(target_session_id or "").strip() or None
+            channel_items = (
+                [(target_channel, self.agents.get(target_channel, {}))]
+                if target_channel
+                else list(self.agents.items())
+            )
+
+            for channel_id, agents in channel_items:
                 if not isinstance(agents, dict):
                     logger.warning(
                         "[AgentManager] unexpected agents entry for channel %s: %r",
@@ -420,11 +435,14 @@ class AgentManager:
                         type(agents),
                     )
                     continue
-                for _, agent in agents.items():
-                    await agent.reload_agent_config(
-                        config_base=config,
-                        env_overrides=env,
-                    )
+                for _, agent in list(agents.items()):
+                    reload_kwargs = {
+                        "config_base": config,
+                        "env_overrides": env,
+                    }
+                    if target_session:
+                        reload_kwargs["target_session_id"] = target_session
+                    await agent.reload_agent_config(**reload_kwargs)
                 try:
                     team_config = config if isinstance(config, dict) else get_config()
                     await get_team_manager(channel_id).update_evolution_config(team_config)

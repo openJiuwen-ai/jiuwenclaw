@@ -2553,7 +2553,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 channel_id="cli",
                 session_id=session_id,
                 req_method=ReqMethod.AGENT_RELOAD_CONFIG,
-                params={"config": _config_payload, "env": {}},
+                params={
+                    "config": _config_payload,
+                    "env": {},
+                    "target_channel_id": "tui",
+                    "target_session_id": session_id,
+                    "reason": "model_switch",
+                },
                 is_stream=False,
                 timestamp=time.time(),
             )
