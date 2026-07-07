@@ -87,6 +87,11 @@ class RuntimePromptRail(DeepAgentRail):
 
     def uninit(self, agent) -> None:
         """清理注入的 section 并释放引用。"""
+        # 热重载后 agent.system_prompt_builder 可能已是新引用，退休清理前先同步缓存，
+        # 确保 remove_section 落到当前生效的 builder 上。
+        _builder = getattr(agent, "system_prompt_builder", None)
+        if _builder is not None:
+            self.system_prompt_builder = _builder
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("runtime")
             self.system_prompt_builder.remove_section("workspace")
@@ -154,6 +159,13 @@ class RuntimePromptRail(DeepAgentRail):
             self._language, self._channel, self._agent_name, self._model_name
         )
 
+        # 热重载（DeepAgent._hot_reload_system_prompt）会新建 SystemPromptBuilder 并替换
+        # agent.system_prompt_builder，但保留型 rail 不会重新 init()，缓存的
+        # self.system_prompt_builder 可能指向旧 builder。这里每次从 ctx.agent 现取最新
+        # builder 并刷新缓存，使后续 add_section 都落到当前生效的 builder 上。
+        _builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
+        if _builder is not None:
+            self.system_prompt_builder = _builder
         if not self.system_prompt_builder:
             logger.warning("[RuntimePromptRail] system_prompt_builder 未初始化，无法注入 section")
             return
