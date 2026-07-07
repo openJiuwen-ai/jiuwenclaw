@@ -103,31 +103,69 @@ BOT_TABLE_DEF = TableDefinition(
     ],
 )
 
-# bot 可见性：全局 / 某组织 / 某人。多行表达。
+# bot 可见性：**按实例(jiuwenclaw_id)** 的 全局 / 某组织 / 某人。多行表达。
 #   scope_type=global → scope_id=""（保留空串，保证唯一索引可用）
 #   scope_type=org    → scope_id=group_id
 #   scope_type=user   → scope_id=user_id
+# 同一个全局 bot 可在不同实例上有不同可见范围(每行带 jiuwenclaw_id)。
 BOT_VISIBILITY_TABLE_DEF = TableDefinition(
     table_name="bot_visibility",
     columns=[
         ColumnDefinition("id", "integer", primary_key=True, autoincrement=True, nullable=False),
+        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("bot_id", "string", length=64, nullable=False),
         ColumnDefinition("scope_type", "string", length=8, nullable=False),
         ColumnDefinition("scope_id", "string", length=64, nullable=False, default=""),
         ColumnDefinition("created_at", "datetime", nullable=False),
     ],
     indexes=[
-        # unique(bot_id, scope_type, scope_id) 的最左前缀已覆盖"查某 bot 的可见性"(WHERE bot_id=)；
-        # (scope_type, scope_id) 支持反查"某组织/某人能看哪些 bot"。
-        IndexDefinition(["bot_id", "scope_type", "scope_id"], unique=True),
-        IndexDefinition(["scope_type", "scope_id"], unique=False),
+        # unique(jiuwenclaw_id, bot_id, scope_type, scope_id)：一实例内某 bot 某范围唯一；
+        # 其最左前缀覆盖"某实例上某 bot 的可见性"(WHERE jiuwenclaw_id=,bot_id=)与"某实例有哪些 bot"。
+        IndexDefinition(["jiuwenclaw_id", "bot_id", "scope_type", "scope_id"], unique=True),
+        # 支持 MeService 按实例+范围反查"某实例上某组织/某人能看哪些 bot"。
+        IndexDefinition(["jiuwenclaw_id", "scope_type", "scope_id"], unique=False),
+    ],
+)
+
+# 用户 ↔ 实例(gateway) 绑定：普通用户被管理员分配到哪些实例才能使用其上的 bot。
+# user_id 存字符串、不跨库外键(和 bot_visibility.scope_id 一致；身份目录在 identity 服务)。
+USER_GATEWAY_TABLE_DEF = TableDefinition(
+    table_name="user_gateway",
+    columns=[
+        ColumnDefinition("id", "integer", primary_key=True, autoincrement=True, nullable=False),
+        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
+        ColumnDefinition("user_id", "string", length=64, nullable=False),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        # unique(jiuwenclaw_id, user_id)：一实例内一用户仅一行；最左前缀覆盖"某实例花名册"(WHERE jiuwenclaw_id=)。
+        IndexDefinition(["jiuwenclaw_id", "user_id"], unique=True),
+        # 反查"某用户绑了哪些实例"(所属实例列)。
+        IndexDefinition(["user_id"], unique=False),
+    ],
+)
+
+# 组织 ↔ 实例(gateway) 绑定：组织被分配到哪些实例。语义同 user_gateway。
+ORG_GATEWAY_TABLE_DEF = TableDefinition(
+    table_name="org_gateway",
+    columns=[
+        ColumnDefinition("id", "integer", primary_key=True, autoincrement=True, nullable=False),
+        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
+        ColumnDefinition("group_id", "string", length=64, nullable=False),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["jiuwenclaw_id", "group_id"], unique=True),
+        IndexDefinition(["group_id"], unique=False),
     ],
 )
 
 # 身份表(app_user/auth_identity/auth_session/org/user_org_membership)已迁至独立认证服务
-# (jiuwenclaw_identity 的 identity.db),管理库**不再建**这些表;仅保留平台配置侧的 bot/可见性。
+# (jiuwenclaw_identity 的 identity.db),管理库**不再建**这些表;仅保留平台配置侧的 bot/可见性/实例绑定。
 # 上面的身份 TableDefinition 定义暂保留(未被建表引用),供历史参考,后续可清理。
 IAM_TABLE_DEFINITIONS = (
     BOT_TABLE_DEF,
     BOT_VISIBILITY_TABLE_DEF,
+    USER_GATEWAY_TABLE_DEF,
+    ORG_GATEWAY_TABLE_DEF,
 )

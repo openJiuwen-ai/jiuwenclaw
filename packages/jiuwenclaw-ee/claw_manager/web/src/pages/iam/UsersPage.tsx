@@ -3,17 +3,44 @@ import { useTranslation } from 'react-i18next';
 import * as XLSX from 'xlsx';
 import { Modal } from '../../components/Modal';
 import { useAsync } from '../../hooks/useAsync';
-import { ApiError, IamUser, NO_ORG_GROUP_ID, Org, OrgApi, UserApi } from '../../services/api';
+import { ApiError, IamUser, InstanceBindingApi, NO_ORG_GROUP_ID, Org, OrgApi, UserApi } from '../../services/api';
 import { toast } from '../../stores/uiStore';
+import { AddToInstanceModal, InstanceChips, InstanceFilter, instanceName, useInstances } from './instanceBinding';
 
 export function UsersPage() {
   const { t } = useTranslation();
   const { data, loading, reload } = useAsync(() => UserApi.list(), []);
   const { data: orgsData } = useAsync(() => OrgApi.list(), []);
+  const instances = useInstances();
   const [editing, setEditing] = useState<IamUser | null | undefined>(undefined);
   const [showBatch, setShowBatch] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
+  const [filterJid, setFilterJid] = useState('');
+  const [roster, setRoster] = useState<Set<string> | null>(null); // 模式二：某实例花名册 user_ids
+  const [bindings, setBindings] = useState<Record<string, string[]>>({}); // 模式一：所属实例
+  const [checked, setChecked] = useState<Set<string>>(new Set());
   const users = data?.items ?? [];
   const orgs = orgsData?.items ?? [];
+  const userIdsKey = users.map((u) => u.user_id).join(',');
+
+  // 切实例/换用户：载入 roster（模式二）或 所属实例（模式一）
+  useEffect(() => {
+    setChecked(new Set());
+    if (filterJid) {
+      InstanceBindingApi.listUsers(filterJid).then((r) => setRoster(new Set(r.user_ids))).catch(() => setRoster(new Set()));
+    } else {
+      setRoster(null);
+      if (users.length) {
+        InstanceBindingApi.userGateways(users.map((u) => u.user_id)).then((r) => setBindings(r.bindings)).catch(() => setBindings({}));
+      }
+    }
+  }, [filterJid, userIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const shown = filterJid && roster ? users.filter((u) => roster.has(u.user_id)) : users;
+
+  function reloadRoster() {
+    if (filterJid) InstanceBindingApi.listUsers(filterJid).then((r) => setRoster(new Set(r.user_ids))).catch(() => undefined);
+  }
 
   async function onDelete(u: IamUser) {
     if (!window.confirm(t('iam.confirmDeleteUser', { name: u.display_name, id: u.user_id }))) return;
@@ -26,32 +53,87 @@ export function UsersPage() {
     }
   }
 
+  function toggleCheck(id: string) {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  function toggleAll() {
+    setChecked((prev) => (prev.size === shown.length ? new Set() : new Set(shown.map((u) => u.user_id))));
+  }
+
+  async function onRemoveFromInstance() {
+    const ids = Array.from(checked);
+    if (!ids.length || !filterJid) return;
+    const name = instanceName(instances, filterJid);
+    if (!window.confirm(t('iam.confirmRemoveFromInstance', { defaultValue: '从实例「{{name}}」移除选中的 {{n}} 项？', name, n: ids.length }))) return;
+    try {
+      await InstanceBindingApi.unbindUsers(filterJid, ids);
+      toast('success', t('success.saved'));
+      setChecked(new Set());
+      reloadRoster();
+    } catch (e) {
+      toast('danger', e instanceof ApiError ? e.detail : String(e));
+    }
+  }
+
+  const inInstanceMode = !!filterJid;
+  const cols = inInstanceMode ? 6 : 7;
+  const instName = filterJid ? instanceName(instances, filterJid) : '';
+
   return (
     <div className="page">
       <div className="flex items-center justify-between mb-3">
         <h2 className="card-title">{t('iam.users')}</h2>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <InstanceFilter instances={instances} value={filterJid} onChange={setFilterJid} />
+          {inInstanceMode && (
+            <>
+              <button className="btn danger" disabled={checked.size === 0} onClick={onRemoveFromInstance}>
+                {t('iam.removeFromInstance', { defaultValue: '移除出 {{name}}', name: instName })}{checked.size ? `（${checked.size}）` : ''}
+              </button>
+              <button className="btn" onClick={() => setShowAdd(true)}>
+                {t('iam.addToInstance', { defaultValue: '添加到 {{name}}', name: instName })}
+              </button>
+            </>
+          )}
           <button className="btn" onClick={() => setShowBatch(true)}>{t('iam.batchNewUser')}</button>
           <button className="btn primary" onClick={() => setEditing(null)}>{t('iam.newUser')}</button>
         </div>
       </div>
       <div className="card">
         <table className="table" style={{ width: '100%' }}>
-          <thead><tr><th>{t('iam.userId')}</th><th>{t('iam.displayName')}</th><th>{t('iam.role')}</th><th>{t('iam.status')}</th><th>{t('common.actions')}</th></tr></thead>
+          <thead>
+            <tr>
+              <th style={{ width: 32 }}>
+                <input type="checkbox" checked={shown.length > 0 && checked.size === shown.length} onChange={toggleAll} />
+              </th>
+              <th>{t('iam.userId')}</th>
+              <th>{t('iam.displayName')}</th>
+              <th>{t('iam.role')}</th>
+              <th>{t('iam.status')}</th>
+              {!inInstanceMode && <th>{t('iam.belongInstances', { defaultValue: '所属实例' })}</th>}
+              <th>{t('common.actions')}</th>
+            </tr>
+          </thead>
           <tbody>
-            {users.map((u) => (
+            {shown.map((u) => (
               <tr key={u.user_id}>
+                <td><input type="checkbox" checked={checked.has(u.user_id)} onChange={() => toggleCheck(u.user_id)} /></td>
                 <td className="mono text-xs">{u.user_id}</td>
                 <td>{u.display_name}</td>
                 <td>{u.is_admin ? <span className="badge">{t('iam.roleAdmin')}</span> : t('iam.roleUser')}</td>
                 <td>{u.status}</td>
+                {!inInstanceMode && <td><InstanceChips jids={bindings[u.user_id] ?? []} instances={instances} /></td>}
                 <td style={{ textAlign: 'right' }}>
                   <button className="btn sm" onClick={() => setEditing(u)}>{t('common.edit')}</button>
                   <button className="btn sm danger" style={{ marginLeft: 6 }} onClick={() => onDelete(u)}>{t('common.delete')}</button>
                 </td>
               </tr>
             ))}
-            {!loading && users.length === 0 && <tr><td colSpan={5} className="text-muted">{t('iam.noUsers')}</td></tr>}
+            {!loading && shown.length === 0 && <tr><td colSpan={cols} className="text-muted">{t('iam.noUsers')}</td></tr>}
           </tbody>
         </table>
       </div>
@@ -59,7 +141,25 @@ export function UsersPage() {
         <UserModal user={editing} orgs={orgs} onClose={() => setEditing(undefined)} onSaved={() => { setEditing(undefined); reload(); }} />
       )}
       {showBatch && (
-        <BatchImportModal onClose={() => setShowBatch(false)} onDone={() => reload()} />
+        <BatchImportModal
+          targetJid={filterJid}
+          targetName={instName}
+          onClose={() => setShowBatch(false)}
+          onDone={() => { reload(); reloadRoster(); }}
+        />
+      )}
+      {showAdd && filterJid && (
+        <AddToInstanceModal
+          title={t('iam.addToInstance', { defaultValue: '添加到 {{name}}', name: instName })}
+          candidates={users.filter((u) => !roster?.has(u.user_id)).map((u) => ({ id: u.user_id, label: u.display_name, sub: u.user_id }))}
+          onConfirm={async (ids) => {
+            await InstanceBindingApi.bindUsers(filterJid, ids);
+            toast('success', t('success.saved'));
+            setShowAdd(false);
+            reloadRoster();
+          }}
+          onClose={() => setShowAdd(false)}
+        />
       )}
     </div>
   );
@@ -76,7 +176,9 @@ function parseBool(v: unknown): boolean {
   return s === 'true' || s === '1' || s === 'yes' || s === 'y' || s === '是';
 }
 
-function BatchImportModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+function BatchImportModal({
+  targetJid, targetName, onClose, onDone,
+}: { targetJid: string; targetName: string; onClose: () => void; onDone: () => void }) {
   const { t } = useTranslation();
   const [rows, setRows] = useState<BatchRow[]>([]);
   const [fileName, setFileName] = useState('');
@@ -130,7 +232,17 @@ function BatchImportModal({ onClose, onDone }: { onClose: () => void; onDone: ()
     try {
       const res = await UserApi.batchCreate(rows);
       setResult(res);
-      if (res.summary.ok > 0) onDone();
+      if (res.summary.ok > 0) {
+        // 当前选中了某实例：把成功创建的用户补绑到该实例（跨服务两步：identity 建 → manager 绑）。
+        if (targetJid) {
+          const ids = res.results.filter((r) => r.ok && r.user_id).map((r) => r.user_id as string);
+          if (ids.length) {
+            try { await InstanceBindingApi.bindUsers(targetJid, ids); }
+            catch (e) { toast('danger', `${t('iam.bindInstanceFailed', { defaultValue: '加入实例失败' })}: ${e instanceof ApiError ? e.detail : String(e)}`); }
+          }
+        }
+        onDone();
+      }
     } catch (e) {
       toast('danger', e instanceof ApiError ? e.detail : String(e));
     } finally {
@@ -162,6 +274,13 @@ function BatchImportModal({ onClose, onDone }: { onClose: () => void; onDone: ()
         <input type="file" accept=".xlsx,.csv" onChange={onFile} />
       </div>
       <div className="text-xs text-muted" style={{ marginBottom: 8 }}>{t('iam.batchHint')}</div>
+      {targetJid
+        ? <div className="text-xs" style={{ marginBottom: 8, color: '#2d7d46' }}>
+            {t('iam.batchWillJoin', { defaultValue: '将同时加入实例：{{name}}', name: targetName })}
+          </div>
+        : <div className="text-xs text-muted" style={{ marginBottom: 8 }}>
+            {t('iam.batchNoInstance', { defaultValue: '未选实例：仅创建用户，暂不加入任何实例（可选实例后再添加）' })}
+          </div>}
       {fileName && <div className="text-xs" style={{ marginBottom: 6 }}>{fileName}</div>}
 
       {rows.length > 0 && !result && (

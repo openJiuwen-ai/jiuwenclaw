@@ -10,6 +10,7 @@ from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
 from .application_config_routers import application_config_router
 from .config_effective_policy_routers import config_effective_policy_router
 from .iam_routers import bot_router, me_router
+from .instance_binding_routers import binding_router, gateway_lookup_router
 from .instance_routers import instance_router
 from .template_routers import templates_router
 
@@ -39,6 +40,14 @@ def router_register(app: FastAPI) -> None:
         prefix=INSTANCES_PREFIX,
         tags=["Config Effective Policy"],
     )
+    # 实例 ↔ 用户/组织/bot 绑定（花名册加删、bot 可见范围）。
+    v1_router.include_router(
+        binding_router,
+        prefix=INSTANCES_PREFIX,
+        tags=["Instance Bindings"],
+    )
+    # 反查：一批实体各绑了哪些实例（所属实例列）。
+    v1_router.include_router(gateway_lookup_router, tags=["Instance Bindings"])
 
     @api_router.get("/health", tags=["System"])
     async def health_check() -> dict[str, str]:

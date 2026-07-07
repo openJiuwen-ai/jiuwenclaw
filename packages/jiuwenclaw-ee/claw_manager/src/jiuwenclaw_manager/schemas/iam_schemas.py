@@ -29,3 +29,15 @@ class SetVisibilityBody(BaseModel):
     """整体覆盖某 bot 的可见性（批量）。"""
 
     scopes: list[VisibilityItem] = Field(default_factory=list)
+
+
+class InstanceBindBody(BaseModel):
+    """把一批用户/组织绑定或解绑到某实例（jiuwenclaw_id 走路径）。"""
+
+    ids: list[str] = Field(..., min_length=1, max_length=1000)
+
+
+class InstanceBotVisibilityBody(BaseModel):
+    """设置某 bot 在某实例上的可见范围（jiuwenclaw_id / bot_id 走路径）。空 scopes = 移出该实例。"""
+
+    scopes: list[VisibilityItem] = Field(default_factory=list)

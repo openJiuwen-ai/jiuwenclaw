@@ -93,3 +93,6 @@ spec:
           value: "<<IDENTITY_JWT_ISSUER>>"
         - name: IDENTITY_JWT_AUDIENCE
           value: "<<IDENTITY_JWT_AUDIENCE>>"
+        # 本实例标识(与本命名空间 gateway 同值):/me/bots 据此把可见 bot 限定到当前 gateway。
+        - name: JIUWENCLAW_ID
+          value: "<<JIUWENCLAW_ID>>"

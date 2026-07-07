@@ -119,7 +119,7 @@ export class ApiError extends Error {
 interface RequestOptions {
   method?: string;
   body?: unknown;
-  query?: Record<string, string | number | boolean | null | undefined>;
+  query?: Record<string, string | number | boolean | null | undefined | string[]>;
 }
 
 function buildQuery(query?: RequestOptions['query']) {
@@ -127,7 +127,12 @@ function buildQuery(query?: RequestOptions['query']) {
   const usp = new URLSearchParams();
   for (const [k, v] of Object.entries(query)) {
     if (v === undefined || v === null || v === '') continue;
-    usp.append(k, String(v));
+    if (Array.isArray(v)) {
+      // 数组 → 重复参数（后端 FastAPI Query(list) 读 ?k=a&k=b）。
+      for (const item of v) if (item !== '') usp.append(k, String(item));
+    } else {
+      usp.append(k, String(v));
+    }
   }
   const s = usp.toString();
   return s ? `?${s}` : '';
@@ -286,6 +291,7 @@ export interface IamUser {
 export type BotScopeType = 'global' | 'org' | 'user';
 export interface BotVisibility {
   id: number;
+  jiuwenclaw_id: string;
   bot_id: string;
   scope_type: BotScopeType;
   scope_id: string;
@@ -349,8 +355,48 @@ export const BotApi = {
   update: (id: string, body: { name?: string; description?: string; status?: string }) =>
     http<Bot>(`/v1/bots/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
   remove: (id: string) => http<{ deleted: boolean }>(`/v1/bots/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  setVisibility: (id: string, scopes: { scope_type: string; scope_id: string | null }[]) =>
-    http<{ visibility: BotVisibility[] }>(`/v1/bots/${encodeURIComponent(id)}/visibility`, { method: 'PUT', body: { scopes } }),
+};
+
+// bot 在某实例上的可见范围（一条 = scope_type + scope_id）。
+export interface BotScope {
+  scope_type: BotScopeType;
+  scope_id: string;
+}
+// 某实例已配置的 bot（bot 目录信息 + 该实例上的可见范围集合）。
+export interface InstanceBot extends Bot {
+  scopes: BotScope[];
+}
+
+/** 实例(gateway) ↔ 用户/组织/bot 绑定（全部走管理 API /api，admin）。 */
+export const InstanceBindingApi = {
+  // 用户 ↔ 实例
+  listUsers: (jid: string) => http<{ user_ids: string[] }>(`/v1/instances/${encodeURIComponent(jid)}/users`),
+  bindUsers: (jid: string, ids: string[]) =>
+    http<{ added: string[]; skipped: string[] }>(`/v1/instances/${encodeURIComponent(jid)}/users`, { method: 'POST', body: { ids } }),
+  unbindUsers: (jid: string, ids: string[]) =>
+    http<{ removed: string[] }>(`/v1/instances/${encodeURIComponent(jid)}/users`, { method: 'DELETE', body: { ids } }),
+  // 组织 ↔ 实例
+  listOrgs: (jid: string) => http<{ group_ids: string[] }>(`/v1/instances/${encodeURIComponent(jid)}/orgs`),
+  bindOrgs: (jid: string, ids: string[]) =>
+    http<{ added: string[]; skipped: string[] }>(`/v1/instances/${encodeURIComponent(jid)}/orgs`, { method: 'POST', body: { ids } }),
+  unbindOrgs: (jid: string, ids: string[]) =>
+    http<{ removed: string[] }>(`/v1/instances/${encodeURIComponent(jid)}/orgs`, { method: 'DELETE', body: { ids } }),
+  // bot ↔ 实例（可见范围）
+  listBots: (jid: string) => http<{ bots: InstanceBot[] }>(`/v1/instances/${encodeURIComponent(jid)}/bots`),
+  setBotVisibility: (jid: string, botId: string, scopes: BotScope[]) =>
+    http<{ visibility: BotVisibility[] }>(
+      `/v1/instances/${encodeURIComponent(jid)}/bots/${encodeURIComponent(botId)}/visibility`,
+      { method: 'PUT', body: { scopes } },
+    ),
+  removeBot: (jid: string, botId: string) =>
+    http<{ removed: boolean }>(`/v1/instances/${encodeURIComponent(jid)}/bots/${encodeURIComponent(botId)}`, { method: 'DELETE' }),
+  // 反查：一批实体各绑了哪些实例（所属实例列，防 N+1）。逗号分隔单参数,对反代最稳。
+  userGateways: (userIds: string[]) =>
+    http<{ bindings: Record<string, string[]> }>('/v1/user-gateways', { query: { user_ids: userIds.join(',') } }),
+  orgGateways: (groupIds: string[]) =>
+    http<{ bindings: Record<string, string[]> }>('/v1/org-gateways', { query: { group_ids: groupIds.join(',') } }),
+  botGateways: (botIds: string[]) =>
+    http<{ bindings: Record<string, string[]> }>('/v1/bot-gateways', { query: { bot_ids: botIds.join(',') } }),
 };
 
 // 当前登录用户视角（用户面）：组织来自认证服务,可见 bot 来自管理 API。

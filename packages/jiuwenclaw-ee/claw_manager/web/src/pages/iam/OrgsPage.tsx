@@ -1,16 +1,43 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../../components/Modal';
 import { useAsync } from '../../hooks/useAsync';
-import { ApiError, IamUser, NO_ORG_GROUP_ID, Org, OrgApi, UserApi } from '../../services/api';
+import { ApiError, IamUser, InstanceBindingApi, NO_ORG_GROUP_ID, Org, OrgApi, UserApi } from '../../services/api';
 import { toast } from '../../stores/uiStore';
+import { AddToInstanceModal, InstanceChips, InstanceFilter, instanceName, useInstances } from './instanceBinding';
 
 export function OrgsPage() {
   const { t } = useTranslation();
   const { data, loading, reload } = useAsync(() => OrgApi.list(), []);
+  const instances = useInstances();
   const [editing, setEditing] = useState<Org | null | undefined>(undefined); // undefined=关闭, null=新建
   const [managing, setManaging] = useState<Org | null>(null); // 正在管理成员的组织
+  const [showAdd, setShowAdd] = useState(false);
+  const [filterJid, setFilterJid] = useState('');
+  const [roster, setRoster] = useState<Set<string> | null>(null);
+  const [bindings, setBindings] = useState<Record<string, string[]>>({});
+  const [checked, setChecked] = useState<Set<string>>(new Set());
   const orgs = data?.items ?? [];
+  const orgIdsKey = orgs.map((o) => o.group_id).join(',');
+
+  useEffect(() => {
+    setChecked(new Set());
+    if (filterJid) {
+      InstanceBindingApi.listOrgs(filterJid).then((r) => setRoster(new Set(r.group_ids))).catch(() => setRoster(new Set()));
+    } else {
+      setRoster(null);
+      if (orgs.length) {
+        InstanceBindingApi.orgGateways(orgs.map((o) => o.group_id)).then((r) => setBindings(r.bindings)).catch(() => setBindings({}));
+      }
+    }
+  }, [filterJid, orgIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 无组织(__none__)也是合法可见性范围,同普通组织一样可绑定实例
+  const shown = filterJid && roster ? orgs.filter((o) => roster.has(o.group_id)) : orgs;
+
+  function reloadRoster() {
+    if (filterJid) InstanceBindingApi.listOrgs(filterJid).then((r) => setRoster(new Set(r.group_ids))).catch(() => undefined);
+  }
 
   async function onDelete(o: Org) {
     if (!window.confirm(t('iam.confirmDeleteOrg', { name: o.name }))) return;
@@ -23,21 +50,77 @@ export function OrgsPage() {
     }
   }
 
+  function toggleCheck(id: string) {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  function toggleAll() {
+    setChecked((prev) => (prev.size === shown.length ? new Set() : new Set(shown.map((o) => o.group_id))));
+  }
+
+  async function onRemoveFromInstance() {
+    const ids = Array.from(checked);
+    if (!ids.length || !filterJid) return;
+    const name = instanceName(instances, filterJid);
+    if (!window.confirm(t('iam.confirmRemoveFromInstance', { defaultValue: '从实例「{{name}}」移除选中的 {{n}} 项？', name, n: ids.length }))) return;
+    try {
+      await InstanceBindingApi.unbindOrgs(filterJid, ids);
+      toast('success', t('success.saved'));
+      setChecked(new Set());
+      reloadRoster();
+    } catch (e) {
+      toast('danger', e instanceof ApiError ? e.detail : String(e));
+    }
+  }
+
+  const inInstanceMode = !!filterJid;
+  const cols = inInstanceMode ? 5 : 6;
+  const instName = filterJid ? instanceName(instances, filterJid) : '';
+
   return (
     <div className="page">
       <div className="flex items-center justify-between mb-3">
         <h2 className="card-title">{t('iam.orgs')}</h2>
-        <button className="btn primary" onClick={() => setEditing(null)}>{t('iam.newOrg')}</button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <InstanceFilter instances={instances} value={filterJid} onChange={setFilterJid} />
+          {inInstanceMode && (
+            <>
+              <button className="btn danger" disabled={checked.size === 0} onClick={onRemoveFromInstance}>
+                {t('iam.removeFromInstance', { defaultValue: '移除出 {{name}}', name: instName })}{checked.size ? `（${checked.size}）` : ''}
+              </button>
+              <button className="btn" onClick={() => setShowAdd(true)}>
+                {t('iam.addToInstance', { defaultValue: '添加到 {{name}}', name: instName })}
+              </button>
+            </>
+          )}
+          <button className="btn primary" onClick={() => setEditing(null)}>{t('iam.newOrg')}</button>
+        </div>
       </div>
       <div className="card">
         <table className="table" style={{ width: '100%' }}>
-          <thead><tr><th>{t('iam.groupId')}</th><th>{t('iam.name')}</th><th>{t('iam.status')}</th><th>{t('common.actions')}</th></tr></thead>
+          <thead>
+            <tr>
+              <th style={{ width: 32 }}>
+                <input type="checkbox" checked={shown.length > 0 && checked.size === shown.length} onChange={toggleAll} />
+              </th>
+              <th>{t('iam.groupId')}</th>
+              <th>{t('iam.name')}</th>
+              <th>{t('iam.status')}</th>
+              {!inInstanceMode && <th>{t('iam.belongInstances', { defaultValue: '所属实例' })}</th>}
+              <th>{t('common.actions')}</th>
+            </tr>
+          </thead>
           <tbody>
-            {orgs.map((o) => (
+            {shown.map((o) => (
               <tr key={o.group_id}>
+                <td><input type="checkbox" checked={checked.has(o.group_id)} onChange={() => toggleCheck(o.group_id)} /></td>
                 <td className="mono text-xs">{o.group_id}</td>
                 <td>{o.name}</td>
                 <td>{o.status}</td>
+                {!inInstanceMode && <td><InstanceChips jids={bindings[o.group_id] ?? []} instances={instances} /></td>}
                 <td style={{ textAlign: 'right' }}>
                   <button className="btn sm" onClick={() => setManaging(o)}>{t('iam.members')}</button>
                   <button className="btn sm" style={{ marginLeft: 6 }} onClick={() => setEditing(o)}>{t('common.edit')}</button>
@@ -45,8 +128,8 @@ export function OrgsPage() {
                 </td>
               </tr>
             ))}
-            {!loading && orgs.length === 0 && (
-              <tr><td colSpan={4} className="text-muted">{t('iam.noOrgs')}</td></tr>
+            {!loading && shown.length === 0 && (
+              <tr><td colSpan={cols} className="text-muted">{t('iam.noOrgs')}</td></tr>
             )}
           </tbody>
         </table>
@@ -56,6 +139,21 @@ export function OrgsPage() {
       )}
       {managing && (
         <MembersModal org={managing} onClose={() => setManaging(null)} />
+      )}
+      {showAdd && filterJid && (
+        <AddToInstanceModal
+          title={t('iam.addToInstance', { defaultValue: '添加到 {{name}}', name: instName })}
+          candidates={orgs
+            .filter((o) => !roster?.has(o.group_id))
+            .map((o) => ({ id: o.group_id, label: o.name, sub: o.group_id }))}
+          onConfirm={async (ids) => {
+            await InstanceBindingApi.bindOrgs(filterJid, ids);
+            toast('success', t('success.saved'));
+            setShowAdd(false);
+            reloadRoster();
+          }}
+          onClose={() => setShowAdd(false)}
+        />
       )}
     </div>
   );

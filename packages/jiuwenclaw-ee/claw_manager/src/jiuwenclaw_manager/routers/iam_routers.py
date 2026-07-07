@@ -12,13 +12,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.core.iam import BotService, MeService
+from jiuwenclaw_manager.infrastructure.config import settings
 from jiuwenclaw_manager.infrastructure.db import get_db_handler
 from jiuwenclaw_manager.routers.deps import get_current_user, require_admin
 from jiuwenclaw_manager.schemas.common_schemas import ResponseModel
 from jiuwenclaw_manager.schemas.iam_schemas import (
     BotCreateBody,
     BotUpdateBody,
-    SetVisibilityBody,
 )
 
 _Handler = Annotated[DBHandler, Depends(get_db_handler)]
@@ -39,8 +39,10 @@ me_router = APIRouter(dependencies=[Depends(get_current_user)])
 
 @me_router.get("/bots", response_model=ResponseModel)
 async def my_bots(handler: _Handler, user: _CurUser, group_id: str = Query(...)):
+    # 当前实例由本 manager 部署的 JIUWENCLAW_ID 决定（每命名空间一个），前端无需传。
     bots = await MeService(handler).list_visible_bots(
         getattr(user, "user_id"), group_id, getattr(user, "groups", []),
+        jiuwenclaw_id=settings.jiuwenclaw_id,
     )
     return _ok({"bots": bots})
 
@@ -90,13 +92,5 @@ async def delete_bot(bot_id: str, handler: _Handler):
 
 @bot_router.get("/{bot_id}/visibility", response_model=ResponseModel)
 async def list_bot_visibility(bot_id: str, handler: _Handler):
+    """某 bot 跨所有实例的可见性行（只读参考；按实例的增改在 /instances/{jid}/bots）。"""
     return _ok({"visibility": await BotService(handler).list_visibility(bot_id)})
-
-
-@bot_router.put("/{bot_id}/visibility", response_model=ResponseModel)
-async def set_bot_visibility(bot_id: str, body: SetVisibilityBody, handler: _Handler):
-    try:
-        scopes = [s.model_dump() for s in body.scopes]
-        return _ok({"visibility": await BotService(handler).set_visibility(bot_id, scopes)})
-    except ValueError as e:
-        raise _bad(e) from e
