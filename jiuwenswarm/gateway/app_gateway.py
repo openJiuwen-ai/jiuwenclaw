@@ -1391,6 +1391,8 @@ async def _run(
                 os.getenv("A2A_SERVER_APP_VERSION", "0.1.0")
             ).strip()
                         or "0.1.0",
+            expose_reasoning=str(os.getenv("A2A_SERVER_EXPOSE_REASONING", "true")).strip().lower()
+                             not in {"0", "false", "no", "off"},
         ),
         _DummyBus(),
     )
