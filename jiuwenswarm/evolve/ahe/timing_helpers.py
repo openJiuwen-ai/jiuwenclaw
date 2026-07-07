@@ -20,11 +20,9 @@ def timed_stage(stage_name: str):
         async def wrapper(*args, **kwargs) -> Any:
             stats = get_timing_stats()
             stats.start_stage(stage_name)
-            start = time.time()
 
             try:
                 result = await func(*args, **kwargs)
-                duration = time.time() - start
 
                 # Try to get trace count from result
                 trace_count = 0
@@ -35,7 +33,7 @@ def timed_stage(stage_name: str):
 
                 stats.end_stage(stage_name, trace_count=trace_count)
                 return result
-            except Exception as exc:
+            except Exception:
                 # Still record timing on error
                 stats.end_stage(stage_name, trace_count=0)
                 raise

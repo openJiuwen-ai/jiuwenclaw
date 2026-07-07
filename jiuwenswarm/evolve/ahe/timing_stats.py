@@ -20,7 +20,6 @@ Provides detailed timing reports with:
 from __future__ import annotations
 
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -177,12 +176,6 @@ class AheTimingStats:
         lines.append("-" * 70)
         lines.append(f"{'Stage':<12} {'Calls':<8} {'Traces':<8} {'Duration':<12} {'%Total':<8} {'Avg/Call':<12}")
         lines.append("-" * 70)
-
-        # Calculate total stage time (excluding TOTAL itself)
-        total_stage_time = sum(
-            s.duration for name, s in self.stages.items()
-            if name != "TOTAL" and s.duration > 0
-        )
 
         for stage_name in ["LOAD", "CLEAN", "FILTER", "EVAL", "DIAG", "GOV", "PROPOSE", "APPLY"]:
             stage = self.stages[stage_name]

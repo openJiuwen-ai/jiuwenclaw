@@ -228,9 +228,9 @@ class AheDecisionPolicy(DecisionPolicy):
                 content = response.choices[0].message.content or ""
             else:
                 logger.warning(
-                    "AheDecisionPolicy: API response has no choices for decision. "
-                    "Proposals: %d, treating as empty response",
-                    len(proposals),
+                    "AheDecisionPolicy: API response has no choices for decision "
+                    "for proposal %s, treating as empty response",
+                    proposal.proposal_id,
                 )
                 content = response.content if hasattr(response, "content") else ""
 

@@ -1114,44 +1114,6 @@ class AheProposer(ProposalGenerator):
 
         # 兜底建议
         return "Unknown error type. Check trace structure and OTEL adapter implementation."
-        """Enforce max proposals per batch and max skill proposals.
-
-        Phase 1 rules:
-        - Max 3 proposals total per batch
-        - Max 2 skill proposals per batch
-        """
-        # Mark all as CANDIDATE first, then activate top N
-        for p in proposals:
-            p.state = ProposalState.CANDIDATE
-
-        # Separate skill proposals
-        skill_proposals = [p for p in proposals if p.target_type == ProposalTargetType.SKILL]
-        other_proposals = [p for p in proposals if p.target_type != ProposalTargetType.SKILL]
-
-        # Activate top skill proposals
-        skill_proposals.sort(
-            key=lambda p: float(p.metadata.get("max_score", 0.6)),
-            reverse=True,
-        )
-        for p in skill_proposals[: self._max_skill_proposals]:
-            p.state = ProposalState.ACTIVE
-        for p in skill_proposals[self._max_skill_proposals :]:
-            p.state = ProposalState.CANDIDATE
-
-        # Combine and apply total cap
-        all_proposals = skill_proposals + other_proposals
-        if len(all_proposals) > self._max_proposals:
-            # Keep active ones first
-            all_proposals.sort(
-                key=lambda p: (
-                    0 if p.state == ProposalState.ACTIVE else 1,
-                    -float(p.metadata.get("max_score", 0.6)),
-                )
-            )
-            for p in all_proposals[self._max_proposals :]:
-                p.state = ProposalState.CANDIDATE
-
-        return [p for p in all_proposals if p.state == ProposalState.ACTIVE]
 
     @staticmethod
     def _parse_llm_json(text: str) -> dict:
@@ -1269,13 +1231,12 @@ class AheProposer(ProposalGenerator):
         """Extract the first balanced JSON object/array from text."""
         start = None
         opening = ""
-        closing = ""
         for idx, ch in enumerate(text):
             if ch == "{":
-                start, opening, closing = idx, "{", "}"
+                start, opening = idx, "{"
                 break
             if ch == "[":
-                start, opening, closing = idx, "[", "]"
+                start, opening = idx, "["
                 break
         if start is None:
             return None
