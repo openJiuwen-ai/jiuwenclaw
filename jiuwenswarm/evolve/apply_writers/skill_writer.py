@@ -150,7 +150,7 @@ class SkillExperienceWriter(ApplyWriter):
                     proposal_id=proposal.proposal_id,
                     target_type=ProposalTargetType.SKILL,
                     target_store=TargetStore.SKILL_EXPERIENCE_STORE,
-                    status=ApplyStatus.REJECTED,
+                    status=ApplyStatus.SKIPPED,
                     reason=(
                         f"skill '{skill_name}' is a builtin/system skill "
                         "and cannot be modified by evolution."
@@ -172,7 +172,7 @@ class SkillExperienceWriter(ApplyWriter):
                     proposal_id=proposal.proposal_id,
                     target_type=ProposalTargetType.SKILL,
                     target_store=TargetStore.SKILL_EXPERIENCE_STORE,
-                    status=ApplyStatus.REJECTED,
+                    status=ApplyStatus.SKIPPED,
                     reason=(
                         f"skill '{skill_name}' does not exist in user workspace "
                         f"(skills_dir={self._skills_dir}). "
