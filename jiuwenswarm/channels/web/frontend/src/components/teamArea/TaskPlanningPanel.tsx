@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CircleCheck, File, Puzzle, XCircle } from 'lucide-react';
@@ -23,6 +23,37 @@ type TaskPlanningPanelProps = {
   totalTasks: number;
   completedTasks: number;
   onExpand?: () => void;
+};
+
+const STATUS_CARD_STYLE: Record<TaskColumnKey, { dotColor: string; hoverBg: string; activeRing: string; activeBg: string; textColor: string }> = {
+  completed: {
+    dotColor: 'bg-[#088c58]',
+    hoverBg: 'hover:bg-[#d3f3e6]',
+    activeRing: 'hover:ring-1 hover:ring-[#088c58]/30',
+    activeBg: 'bg-[#d3f3e6]/40',
+    textColor: 'text-[#088c58]',
+  },
+  running: {
+    dotColor: 'bg-[#5e7ce0]',
+    hoverBg: 'hover:bg-[#d1e6fa]',
+    activeRing: 'hover:ring-1 hover:ring-[#5e7ce0]/30',
+    activeBg: 'bg-[#d1e6fa]/40',
+    textColor: 'text-[#5e7ce0]',
+  },
+  waiting: {
+    dotColor: 'bg-[#777777]',
+    hoverBg: 'hover:bg-[#e8e8e8]',
+    activeRing: 'hover:ring-1 hover:ring-[#777777]/30',
+    activeBg: 'bg-[#e8e8e8]/40',
+    textColor: 'text-[#777777]',
+  },
+  cancelled: {
+    dotColor: 'bg-[#c84646]',
+    hoverBg: 'hover:bg-[#fde2e2]',
+    activeRing: 'hover:ring-1 hover:ring-[#c84646]/30',
+    activeBg: 'bg-[#fde2e2]/40',
+    textColor: 'text-[#c84646]',
+  },
 };
 
 export function TaskPlanningPanel({
@@ -102,15 +133,22 @@ export function TaskPlanningPanel({
             </div>
           )}
           <div className="flex justify-between gap-2">
-            {(['completed', 'running', 'waiting', 'cancelled'] as const).map((key) => (
-              <div
-                key={key}
-                className={`flex-1 flex flex-col items-center justify-center py-2 rounded-md bg-secondary`}
-              >
-                <span className="text-lg font-bold text-text-strong">{tabCounts[key]}</span>
-                <span className="text-xs mt-1 text-text-muted">{tabLabels[key]}</span>
-              </div>
-            ))}
+            {(['completed', 'running', 'waiting', 'cancelled'] as const).map((key) => {
+              const style = STATUS_CARD_STYLE[key];
+              const columnTasks = groupedTasks[key];
+              const hasTasks = columnTasks.length > 0;
+              return (
+                <StatusCardWithPopover
+                  key={key}
+                  count={tabCounts[key]}
+                  label={tabLabels[key]}
+                  tasks={columnTasks}
+                  style={style}
+                  hasTasks={hasTasks}
+                  onExpand={onExpand}
+                />
+              );
+            })}
           </div>
         </div>
         <div className="flex-1 overflow-y-auto px-4 pb-3">
@@ -383,6 +421,99 @@ function ResourceLine({
     <div className="mb-2 flex items-center gap-1 text-xs text-text last:mb-0">
       {icon}
       <span className="truncate">{label}</span>
+    </div>
+  );
+}
+
+function StatusCardWithPopover({
+  count,
+  label,
+  tasks,
+  style,
+  hasTasks,
+  onExpand,
+}: {
+  count: number;
+  label: string;
+  tasks: SessionTeamTask[];
+  style: { dotColor: string; hoverBg: string; activeRing: string; activeBg: string; textColor: string };
+  hasTasks: boolean;
+  onExpand?: () => void;
+}) {
+  const { t } = useTranslation();
+  const [isHovered, setIsHovered] = useState(false);
+  const containerRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  const baseClasses = hasTasks
+    ? `flex-1 flex flex-col items-center justify-center py-2 rounded-md bg-secondary cursor-pointer transition-all ${style.hoverBg} ${style.activeRing}`
+    : `flex-1 flex flex-col items-center justify-center py-2 rounded-md bg-secondary opacity-60`;
+
+  return (
+    <div className="relative flex-1">
+      <button
+        ref={containerRef}
+        type="button"
+        className={baseClasses}
+        onClick={onExpand}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
+        onFocus={() => setIsHovered(true)}
+        onBlur={() => setIsHovered(false)}
+        aria-label={`${label}: ${count} ${t('team.planning.tasks')}`}
+      >
+        <div className="flex items-center gap-1.5">
+          <span className={`h-2 w-2 rounded-full ${style.dotColor}`} />
+          <span className="text-lg font-bold text-text-strong">{count}</span>
+        </div>
+        <span className={`text-xs mt-1 ${hasTasks ? style.textColor : 'text-text-muted'}`}>{label}</span>
+      </button>
+
+      {hasTasks && isHovered && (
+        <div
+          ref={popoverRef}
+          className="absolute left-1/2 z-50 mt-1 w-64 -translate-x-1/2 rounded-lg border border-border bg-card shadow-lg overflow-hidden cursor-pointer"
+          style={{ top: '100%' }}
+          onClick={onExpand}
+        >
+          <div className={`px-3 py-2 border-b border-border ${style.activeBg}`}>
+            <div className="flex items-center justify-between">
+              <span className={`text-xs font-medium ${style.textColor}`}>{label}</span>
+              <span className="text-xs text-text-muted">
+                {count} {t('team.planning.tasks')}
+              </span>
+            </div>
+          </div>
+
+          <div className="max-h-48 overflow-y-auto">
+            {tasks.slice(0, 10).map((task) => {
+              const assigneeName = getMemberDisplayName(task.assignee || '');
+              const title = getBoardTaskTitle(task);
+              return (
+                <div
+                  key={task.task_id}
+                  className="flex items-center gap-2 px-3 py-2 border-b border-border last:border-b-0 hover:bg-secondary"
+                >
+                  <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${style.dotColor}`} />
+                  <span className="flex-1 text-xs text-text truncate">{title}</span>
+                  {task.assignee && (
+                    <span className="text-[10px] text-text-muted shrink-0">{assigneeName}</span>
+                  )}
+                </div>
+              );
+            })}
+            {tasks.length > 10 && (
+              <div className="px-3 py-2 text-center text-[10px] text-text-muted border-t border-border">
+                +{tasks.length - 10} {t('team.planning.more')}
+              </div>
+            )}
+          </div>
+
+          <div className="px-3 py-2 border-t border-border bg-secondary">
+            <span className="text-[10px] text-text-muted">{t('team.planning.clickToExpand')}</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

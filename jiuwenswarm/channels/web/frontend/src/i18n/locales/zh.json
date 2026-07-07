@@ -168,7 +168,10 @@
         "completed": "已完成",
         "cancelled": "已取消",
         "failed": "任务失败"
-      }
+      },
+      "tasks": "个任务",
+      "more": "更多",
+      "clickToExpand": "点击展开查看详情"
     }
   },
   "teams": {

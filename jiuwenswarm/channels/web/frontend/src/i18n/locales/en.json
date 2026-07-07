@@ -168,7 +168,10 @@
         "completed": "Completed",
         "cancelled": "Cancelled",
         "failed": "Failed"
-      }
+      },
+      "tasks": "tasks",
+      "more": "more",
+      "clickToExpand": "Click to expand for details"
     }
   },
   "teams": {
