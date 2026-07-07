@@ -199,8 +199,7 @@ FEISHU_BOTS="
 **重要约束：**
 
 - **NFS / MySQL / Redis / PostgreSQL：** 以上基础依赖模块全局仅支持单次部署，固定运行于 default 命名空间，部署命令自动忽略自定义命名空间参数。
-- **Web / Gateway / CLAW-Manager：** 业务服务模块需保持命名空间一致，否则服务间网络互通异常、功能不可用。
-
+- **Web / Gateway / CLAW-Manager：** 业务服务模块需保持命名空间一致（为了环境隔离与日志运维，禁止使用default命令空间），否则服务间网络互通异常、功能不可用。
 
 **使用示例：**
 
@@ -549,7 +548,29 @@ kubectl logs -f <pod-name> -n <namespace> 2>&1 | tee <file-name>
 kubectl exec -it <pod-name> -n <namespace> -c <container-name> bash
 ```
 
-# FAQ
+### 5.5 利用工具一键收集某命名空间下所有 Pod 的实时日志
+
+本部署工具提供轻量批量日志采集脚本，自动对某命名空间下所有 Pod、所有容器开启后台实时日志监听，日志自动落地至带时间戳的本地目录，便于问题回溯与关键字检索：
+```
+./collect_pods_log.sh <namespace>
+```
+**日志文件目录结构示例**
+```
+pod_logs_20260707_163022/
+├── jiuwenclaw-agentserver-28pmfxp0gi-d9k4s-container1.log
+├── jiuwenclaw-agentserver-28pmfxp0gi-d9k4s-container2.log
+├── jiuwenclaw-gateway-6498fbc8d-nfhcl-gateway.log
+└── jiuwenclaw-web-fd64b644f-p42hf-web.log
+```
+
+**注意**
+- 建议业务 Pod 统一部署在独立自定义命名空间，禁止使用 default 命名空间，便于环境隔离与日志运维。
+- 脚本执行前会自动清理当前指定命名空间的历史 kubectl 日志监听进程，避免多进程重复采集、日志重叠问题，且不会影响其他命名空间及其他用户的监听进程。
+- 所有容器日志监听任务均在后台持续运行，实时追加新日志；Pod 新建、重建或重启后需重新执行脚本，接续监听新 Pod 日志。
+- 长时间采集会持续落盘日志，需定期清理历史日志目录，避免磁盘占用过高。
+
+
+# FAQ 
 
 ## 如何在线调试业务代码
 
