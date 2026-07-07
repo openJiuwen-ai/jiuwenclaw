@@ -961,3 +961,79 @@ class TestSessionCreateProjectIdValidation:
             registered_channel, "project.get_sessions", {"project_id": "default"}
         )
         assert "s_noid" in [s["session_id"] for s in r["payload"]["sessions"]]
+
+
+# ===========================================================================
+# session.create + project_id / project_path 一致性校验
+# ===========================================================================
+class TestSessionCreateProjectPathConsistency:
+    """session.create 的 project_id / project_path 绑定规则:
+    仅 project_id 自动补齐、同时传校验一致性、仅 path 拒绝。"""
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_project_id_only_auto_fills_project_path(registered_channel, tmp_path, sessions_dir):
+        """仅传 project_id(无 project_path)→ 按项目记录自动补齐 project_path。"""
+        pa = _abspath(tmp_path, "app")
+        proj = _make_project("P", pa)
+        resp = await _call(
+            registered_channel, "session.create",
+            {"session_id": "s_autofill", "project_id": proj.project_id},
+        )
+        assert resp["ok"] is True
+        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+        meta = get_session_metadata("s_autofill", cache_bust=True)
+        assert meta.get("project_id") == proj.project_id
+        assert meta.get("project_path") == pa
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_project_id_with_matching_path_ok(registered_channel, tmp_path, sessions_dir):
+        """同时传 project_id + 一致的 project_path(含尾部分隔符差异)→ 创建成功。"""
+        pa = _abspath(tmp_path, "app")
+        proj = _make_project("P", pa)
+        resp = await _call(
+            registered_channel, "session.create",
+            {"session_id": "s_match", "project_id": proj.project_id, "project_path": pa},
+        )
+        assert resp["ok"] is True
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_project_id_with_mismatching_path_rejected(registered_channel, tmp_path, sessions_dir):
+        """同时传 project_id + 不一致的 project_path → BAD_REQUEST,不创建会话。"""
+        pa = _abspath(tmp_path, "app")
+        proj = _make_project("P", pa)
+        other = _abspath(tmp_path, "other")
+        resp = await _call(
+            registered_channel, "session.create",
+            {"session_id": "s_mismatch", "project_id": proj.project_id, "project_path": other},
+        )
+        assert resp["ok"] is False
+        assert resp["code"] == "BAD_REQUEST"
+        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+        assert not get_session_metadata("s_mismatch", cache_bust=True)
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_path_only_without_project_id_rejected(registered_channel, tmp_path, sessions_dir):
+        """仅传 project_path 而无 project_id → BAD_REQUEST。"""
+        pa = _abspath(tmp_path, "app")
+        resp = await _call(
+            registered_channel, "session.create",
+            {"session_id": "s_pathonly", "project_path": pa},
+        )
+        assert resp["ok"] is False
+        assert resp["code"] == "BAD_REQUEST"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_default_project_id_with_path_rejected(registered_channel, tmp_path, sessions_dir):
+        """project_id="default" + 非空 project_path → 视为无有效项目却带 path,拒绝。"""
+        pa = _abspath(tmp_path, "app")
+        resp = await _call(
+            registered_channel, "session.create",
+            {"session_id": "s_def_path", "project_id": "default", "project_path": pa},
+        )
+        assert resp["ok"] is False
+        assert resp["code"] == "BAD_REQUEST"

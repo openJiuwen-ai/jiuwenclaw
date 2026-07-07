@@ -252,6 +252,65 @@ def get_project_by_path(
     return None
 
 
+def resolve_session_project_binding(
+    project_id: str, project_path: str
+) -> tuple[str, str, str | None, str | None]:
+    """校验并解析 session.create 的 project_id / project_path 绑定关系。
+
+    规则:
+      1. 两者皆空(或 project_id 为 ``"default"`` 且 path 为空)→ 默认项目,
+         兼容旧版行为(无 project_id / path 的存量调用)。
+      2. 传 project_id 时:未传 project_path 则按项目记录自动补齐;传了则校验
+         与项目绑定路径一致,不一致报错。
+      3. 仅传 project_path 而无有效 project_id(空或 ``"default"``)→ 拒绝,
+         避免 session 有路径却无法归属到任何项目。
+
+    Args:
+        project_id: 调用方传入的 project_id(已 strip)。
+        project_path: 调用方传入的 project_path(已 strip)。
+
+    Returns:
+        ``(resolved_project_id, resolved_project_path, error, code)``:
+        成功时 ``error``/``code`` 为 ``None``;失败时前两项无意义,
+        ``error`` 为错误描述,``code`` 为错误码(``BAD_REQUEST``/``NOT_FOUND``)。
+    """
+    # project_path 非空时必须为绝对路径
+    if project_path and not os.path.isabs(project_path):
+        return "", "", "project_path must be an absolute path", "BAD_REQUEST"
+
+    has_real_project_id = bool(project_id) and project_id != "default"
+
+    # 规则3: 仅传 project_path 而无有效 project_id → 拒绝
+    if project_path and not has_real_project_id:
+        return "", "", "project_path requires a matching project_id", "BAD_REQUEST"
+
+    # 无有效 project_id → 默认项目(此处 project_path 必为空,已由规则3保证)
+    if not has_real_project_id:
+        return project_id or "", "", None, None
+
+    # project_id 非 default:必须对应存在且可见的项目
+    proj = get_project_by_id(project_id, cache_bust=True)
+    if proj is None or proj.hidden:
+        return "", "", "project not found", "NOT_FOUND"
+
+    expected_path = proj.project_path or ""
+    if not project_path:
+        # 规则2: 仅传 project_id → 自动补齐(可能为空路径项目)
+        return project_id, expected_path, None, None
+
+    # 规则2: 同时传 → 校验一致性(规范化后比较,容忍尾部分隔符/大小写差异)
+    if expected_path:
+        same = (
+            os.path.normcase(os.path.normpath(project_path))
+            == os.path.normcase(os.path.normpath(expected_path))
+        )
+    else:
+        same = False
+    if not same:
+        return "", "", "project_path does not match the project's bound path", "BAD_REQUEST"
+    return project_id, expected_path, None, None
+
+
 def list_projects(
     *, include_hidden: bool = False, cache_bust: bool = False
 ) -> list[Project]:

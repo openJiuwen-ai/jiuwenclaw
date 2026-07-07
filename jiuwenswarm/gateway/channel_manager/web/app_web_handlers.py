@@ -1577,11 +1577,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _session_create(ws, req_id, params, session_id):
         """创建一个新 session（在 agent/sessions 下创建一个新目录）。
 
-        project_path 为可选参数,指定工作目录绝对路径,绑定后不可变;
-        不传或空串时归入默认空项目,行为与现状一致(存量调用零影响)。
-        project_id 为可选参数,指定所属项目 ID,绑定后不可变(首次锁定);
-        非空且非 ``"default"`` 时必须对应一个存在且可见的项目,否则 NOT_FOUND。
-        会话归属仅按 project_id 匹配;不传或项目不可见时归入默认项目。
+        project_id / project_path 绑定规则(详见 project_store.resolve_session_project_binding):
+          - 两者皆空(或 project_id 为 "default" 且 path 为空)→ 默认项目,兼容旧版行为;
+          - 仅传 project_id → 按项目记录自动补齐 project_path;
+          - 同时传 project_id + project_path → 校验与项目绑定路径一致,不一致报错;
+          - 仅传 project_path 而无有效 project_id → 拒绝(BAD_REQUEST)。
+        绑定后 project_id / project_path 不可变(首次锁定)。
         """
         if not isinstance(params, dict):
             await channel.send_response(
@@ -1596,27 +1597,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         session_id_to_create = session_id_to_create.strip()
 
-        # project_path: 可选,非空时必须为绝对路径,否则 BAD_REQUEST
+        # 校验并解析 project_id / project_path 绑定关系:
+        # 一致性校验、按 project_id 自动补齐 project_path、禁止单传 project_path
+        from jiuwenswarm.server.runtime.session import project_store
+        project_id = str(params.get("project_id") or "").strip()
         project_path = str(params.get("project_path") or "").strip()
-        if project_path and not os.path.isabs(project_path):
+        project_id, project_path, p_err, p_code = project_store.resolve_session_project_binding(
+            project_id, project_path
+        )
+        if p_err:
             await channel.send_response(
-                ws, req_id,
-                ok=False,
-                error="project_path must be an absolute path",
-                code="BAD_REQUEST",
+                ws, req_id, ok=False, error=p_err, code=p_code,
             )
             return
-        # project_id: 可选,指定所属项目 ID(首次锁定)。非空且非 "default" 时
-        # 必须对应一个存在且可见的项目,否则 NOT_FOUND(防止静默落入默认项目)
-        project_id = str(params.get("project_id") or "").strip()
-        if project_id and project_id != "default":
-            from jiuwenswarm.server.runtime.session import project_store
-            proj = project_store.get_project_by_id(project_id, cache_bust=True)
-            if proj is None or proj.hidden:
-                await channel.send_response(
-                    ws, req_id, ok=False, error="project not found", code="NOT_FOUND",
-                )
-                return
 
         workspace_session_dir = get_agent_sessions_dir()
         if not workspace_session_dir.exists():

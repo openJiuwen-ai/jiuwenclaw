@@ -5978,6 +5978,10 @@ class AgentWebSocketServer:
         """处理 session.create 方法.
 
         调用 AgentManager.create_session 创建会话，返回 session_id。
+        同时将 project_path/project_id 等字段写入会话元数据(metadata.json)并落盘。
+        project_id / project_path 绑定规则(详见
+        project_store.resolve_session_project_binding):两者皆空→默认项目;
+        仅传 project_id→自动补齐 path;同时传→校验一致性;仅传 path→拒绝。
 
         Args:
             ws: WebSocket 连接
@@ -5994,6 +5998,52 @@ class AgentWebSocketServer:
             session_id = await self._agent_manager.create_session(
                 channel_id=channel_id,
                 session_id=str(explicit_session_id).strip() if isinstance(explicit_session_id, str) else None,
+            )
+
+            # 校验并解析 project_id / project_path 绑定关系:
+            # 一致性校验、按 project_id 自动补齐 project_path、禁止单传 project_path
+            from jiuwenswarm.server.runtime.session import project_store
+            project_id = str(params.get("project_id") or "").strip()
+            project_path = str(params.get("project_path") or "").strip()
+            project_id, project_path, p_err, p_code = project_store.resolve_session_project_binding(
+                project_id, project_path
+            )
+            if p_err:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": p_err, "code": p_code},
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                return
+
+            # 会话目录已存在则拒绝,避免覆盖既有会话元数据(与 web 本地 handler 一致)
+            session_dir = get_agent_sessions_dir() / session_id
+            if session_dir.exists():
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": "session already exists", "code": "ALREADY_EXISTS"},
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                return
+
+            # 初始化会话元数据(同步写盘),将 project_path/project_id 等字段落盘
+            from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+            init_session_metadata(
+                session_id=session_id,
+                channel_id=params.get("channel_id", ""),
+                user_id=params.get("user_id", ""),
+                title=params.get("title", ""),
+                mode=params.get("mode", "unknown"),
+                project_path=project_path,
+                project_id=project_id,
             )
 
             if mode == "team":
