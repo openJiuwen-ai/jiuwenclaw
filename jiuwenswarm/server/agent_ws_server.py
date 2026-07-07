@@ -5620,8 +5620,19 @@ class AgentWebSocketServer:
             params = request.params or {}
             config_payload = params.get("config")
             env_overrides = params.get("env")
+            target_channel_id = str(params.get("target_channel_id") or "").strip() or None
+            target_session_id = str(params.get("target_session_id") or "").strip() or None
 
-            await self._agent_manager.reload_agents_config(config_payload, env_overrides)
+            reload_kwargs = {}
+            if target_channel_id:
+                reload_kwargs["target_channel_id"] = target_channel_id
+            if target_session_id:
+                reload_kwargs["target_session_id"] = target_session_id
+            await self._agent_manager.reload_agents_config(
+                config_payload,
+                env_overrides,
+                **reload_kwargs,
+            )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
