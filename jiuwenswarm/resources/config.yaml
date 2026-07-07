@@ -1015,7 +1015,6 @@ modes:
       lifecycle: persistent
       teammate_mode: build_mode
       spawn_mode: inprocess
-      enable_swarmflow: true
 
       # Team-specific permission control.
       enable_permissions: false
