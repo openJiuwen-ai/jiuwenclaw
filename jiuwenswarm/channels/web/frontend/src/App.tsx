@@ -398,12 +398,19 @@ function AppContent() {
   const sessions = useSessionStore((s) => s.sessions);
   const currentSession = useSessionStore((s) => s.currentSession);
   const routeSessionId = route.kind === 'chat-session' ? route.sessionId : null;
+  const projects = useWorkspaceStore((s) => s.projects);
   const sessionTitle = useMemo(() => {
     const session = currentSession?.session_id === sessionId
       ? currentSession
       : sessions.find((s) => s.session_id === sessionId);
     return session?.title?.trim() ?? '';
   }, [currentSession, sessions, sessionId]);
+  const sessionProjectName = useMemo(() => {
+    const session = sessions.find((s) => s.session_id === sessionId);
+    if (!session?.project_path) return '';
+    const project = projects.find((item) => !item.is_default && item.project_path === session.project_path);
+    return project?.name?.trim() ?? '';
+  }, [projects, sessions, sessionId]);
   const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent.plan');
   const teamTaskEvents = useSessionStore((s) => s.runtimes[sessionId]?.teamTaskEvents ?? []);
   const teamTasks = useSessionStore((s) => s.runtimes[sessionId]?.teamTasks ?? []);
@@ -1871,6 +1878,7 @@ function AppContent() {
                       isExportingShare={isExportingShare}
                       canExportShare={Boolean(sessionId && sessionId !== 'new' && (!isProcessing || isPaused))}
                       sessionTitle={sessionTitle}
+                      sessionProjectName={sessionProjectName}
                       teamAreaExpanded={isTeamAreaExpanded}
                       autoFocusKey={composerFocusKey}
                       onNavigateToSkills={() => handleNavigate('skills')}

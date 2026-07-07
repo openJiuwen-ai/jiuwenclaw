@@ -18,6 +18,11 @@ import {
 } from './sidebarModel';
 import { ProjectCreateMenu } from './ProjectCreateMenu';
 import { projectCreateErrorKey } from './projectCreateErrors';
+import {
+  isLikelyAbsolutePath,
+  isProjectDirectoryPickerSupported,
+  selectProjectDirectory,
+} from '../../features/workspace/projectDirectoryPicker';
 import './ConversationSidebar.css';
 import addProjectIcon from '../../assets/work-mode/add-project.svg';
 import collapseIcon from '../../assets/work-mode/collapse.svg';
@@ -460,11 +465,13 @@ function ProjectAddMenu({
 function ProjectCreateDialog({
   mode,
   error,
+  initial,
   onCancel,
   onSubmit,
 }: {
   mode: 'blank' | 'existing';
   error?: string | null;
+  initial?: { name?: string; path?: string } | null;
   onCancel: () => void;
   onSubmit: (name: string, projectPath: string) => void;
 }) {
@@ -472,6 +479,11 @@ function ProjectCreateDialog({
   const [name, setName] = useState('');
   const [projectPath, setProjectPath] = useState('');
   const canSubmit = Boolean(name.trim() && (mode === 'blank' || projectPath.trim()));
+
+  useEffect(() => {
+    setName(initial?.name || '');
+    setProjectPath(initial?.path || '');
+  }, [initial]);
 
   return (
     <div className="conversation-path-dialog-backdrop" role="presentation">
@@ -556,6 +568,7 @@ export function ConversationSidebar({
   const [pathDialogOpen, setPathDialogOpen] = useState(false);
   const [projectCreateMode, setProjectCreateMode] = useState<'blank' | 'existing'>('existing');
   const [pathDialogError, setPathDialogError] = useState<string | null>(null);
+  const [pathDialogInitial, setPathDialogInitial] = useState<{ name?: string; path?: string } | null>(null);
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [pinError, setPinError] = useState<string | null>(null);
@@ -713,12 +726,45 @@ export function ConversationSidebar({
 
   async function handleCreateProject(name: string, projectPath: string) {
     setPathDialogError(null);
-    if (projectPath && (!projectPath.startsWith('/') || projectPath.startsWith('~/'))) {
+    if (projectPath && (!isLikelyAbsolutePath(projectPath) || projectPath.startsWith('~/'))) {
       setPathDialogError(t('multiSession.project.absolutePathError'));
       return;
     }
     try {
       await createProject(name, projectPath);
+      setPathDialogInitial(null);
+      setPathDialogOpen(false);
+    } catch (error) {
+      const errorKey = projectCreateErrorKey(error);
+      setPathDialogError(errorKey ? t(errorKey) : error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function handleSelectExistingProjectDirectory() {
+    setPathDialogError(null);
+    if (!isProjectDirectoryPickerSupported()) {
+      setProjectCreateMode('existing');
+      setPathDialogInitial(null);
+      setPathDialogOpen(true);
+      return;
+    }
+
+    const result = await selectProjectDirectory();
+    if (!result.ok) {
+      if (result.reason === 'cancelled') return;
+      setProjectCreateMode('existing');
+      setPathDialogInitial(null);
+      setPathDialogOpen(true);
+      setPathDialogError(
+        result.reason === 'unsupported'
+          ? t('multiSession.project.directoryPickerUnsupported')
+          : result.message || t('multiSession.project.directoryPickerFailed'),
+      );
+      return;
+    }
+    try {
+      await createProject(result.name, result.path);
+      setPathDialogInitial(null);
       setPathDialogOpen(false);
     } catch (error) {
       const errorKey = projectCreateErrorKey(error);
@@ -877,6 +923,11 @@ export function ConversationSidebar({
             {t('multiSession.project.pinFailed')}: {pinError}
           </div>
         ) : null}
+        {pathDialogError && !pathDialogOpen ? (
+          <div className="conversation-sidebar__error" role="alert">
+            {pathDialogError}
+          </div>
+        ) : null}
         <div className="conversation-sidebar__section-heading" ref={addMenuRef}>
           <span className="conversation-sidebar__label">{t('multiSession.project.projects')}</span>
           <div className="conversation-sidebar__section-actions">
@@ -900,13 +951,12 @@ export function ConversationSidebar({
                 setProjectAddMenuOpen(false);
                 setProjectCreateMode('blank');
                 setPathDialogError(null);
+                setPathDialogInitial(null);
                 setPathDialogOpen(true);
               }}
               onSelectExisting={() => {
                 setProjectAddMenuOpen(false);
-                setProjectCreateMode('existing');
-                setPathDialogError(null);
-                setPathDialogOpen(true);
+                void handleSelectExistingProjectDirectory();
               }}
             />
           ) : null}
@@ -947,8 +997,10 @@ export function ConversationSidebar({
         <ProjectCreateDialog
           mode={projectCreateMode}
           error={pathDialogError}
+          initial={pathDialogInitial}
           onCancel={() => {
             setPathDialogError(null);
+            setPathDialogInitial(null);
             setPathDialogOpen(false);
           }}
           onSubmit={(name, projectPath) => void handleCreateProject(name, projectPath)}

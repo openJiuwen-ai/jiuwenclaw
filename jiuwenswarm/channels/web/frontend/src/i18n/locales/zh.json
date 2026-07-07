@@ -1778,6 +1778,8 @@
       "addNewProject": "添加新项目",
       "namePlaceholder": "请输入简短易识别的项目名称",
       "chooseProjectDirectory": "选择项目目录",
+      "directoryPickerUnsupported": "当前环境无法打开系统目录选择器，请手动填写项目名和路径",
+      "directoryPickerFailed": "目录选择失败，请重试",
       "lockedProjectTitle": "已有会话的项目归属不可在输入框改写",
       "clearProject": "不使用项目",
       "searchProject": "搜索项目",
@@ -1798,7 +1800,8 @@
       "deleteProjectDescription": "确定要移除“{{projectName}}”吗？项目下未置顶会话会临时归入默认项目。",
       "absolutePathError": "请输入绝对路径，例如 /Users/name/work/project",
       "errors": {
-        "pathExists": "该项目路径已存在，请选择其他目录或直接从现有项目开始新对话"
+        "pathExists": "该项目路径已存在，请选择其他目录或直接从现有项目开始新对话",
+        "nameExists": "该项目名已存在，请换个名称"
       },
       "cancel": "取消",
       "confirm": "确定"

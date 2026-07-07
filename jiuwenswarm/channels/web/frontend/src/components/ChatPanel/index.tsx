@@ -30,6 +30,7 @@ import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
 import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
 import welcomeBanner from '../../assets/jiuwen-xiaobanner.png';
+import folderIcon from '../../assets/work-mode/folder.svg';
 import './ChatPanel.css';
 
 export interface ChatHistoryPagerProps {
@@ -51,6 +52,7 @@ interface ChatPanelProps {
   isExportingShare?: boolean;
   canExportShare?: boolean;
   sessionTitle?: string;
+  sessionProjectName?: string;
   /** 自会话管理恢复历史后出现；支持分页加载更早消息 */
   historyPager?: ChatHistoryPagerProps | null;
   /** 历史会话首屏恢复中：保持聊天布局，避免短暂退回欢迎态 */
@@ -429,6 +431,7 @@ export function ChatPanel({
   isExportingShare = false,
   canExportShare = false,
   sessionTitle,
+  sessionProjectName,
   historyPager = null,
   isHistoryRestoring = false,
   teamAreaExpanded = false,
@@ -722,8 +725,16 @@ export function ChatPanel({
     <div className="chat-panel-shell flex flex-col h-full" data-testid="chat-panel">
       {shouldShowChatHeader && (
         <div className="chat-panel-header">
-          <div className="chat-panel-header__title" title={sessionTitle}>
-            {sessionTitle}
+          <div className="chat-panel-header__meta">
+            <div className="chat-panel-header__title" title={sessionTitle}>
+              {sessionTitle}
+            </div>
+            {sessionProjectName && (
+              <div className="chat-panel-header__project" title={sessionProjectName}>
+                <img src={folderIcon} alt="" aria-hidden="true" />
+                <span>{sessionProjectName}</span>
+              </div>
+            )}
           </div>
           <div className="chat-panel-header__actions">
             <button

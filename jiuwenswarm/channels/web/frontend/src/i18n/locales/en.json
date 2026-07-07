@@ -1775,6 +1775,8 @@
       "addNewProject": "Add new project",
       "namePlaceholder": "Enter a short, recognizable project name",
       "chooseProjectDirectory": "Choose project directory",
+      "directoryPickerUnsupported": "This environment cannot open the system directory picker. Enter the project name and path manually.",
+      "directoryPickerFailed": "Failed to choose directory. Please try again.",
       "lockedProjectTitle": "Project assignment cannot be changed from the input box for an existing conversation",
       "clearProject": "Do not use a project",
       "searchProject": "Search projects",
@@ -1795,7 +1797,8 @@
       "deleteProjectDescription": "Remove “{{projectName}}”? Unpinned conversations in this project will temporarily move to the default project.",
       "absolutePathError": "Enter an absolute path, for example /Users/name/work/project",
       "errors": {
-        "pathExists": "This project path already exists. Choose another directory or start a new conversation from the existing project."
+        "pathExists": "This project path already exists. Choose another directory or start a new conversation from the existing project.",
+        "nameExists": "This project name already exists. Please choose another name."
       },
       "cancel": "Cancel",
       "confirm": "Confirm"

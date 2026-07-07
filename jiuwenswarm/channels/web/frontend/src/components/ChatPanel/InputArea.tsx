@@ -16,6 +16,12 @@ import { PermissionWarningDialog } from './PermissionWarningDialog';
 import { ModelProviderIcon } from '../ModelProviderIcon';
 import { getEvolutionPillLabel } from './evolution-status';
 import { webRequest } from '../../services/webClient';
+import {
+  isLikelyAbsolutePath,
+  isProjectDirectoryPickerSupported,
+  selectProjectDirectory,
+} from '../../features/workspace/projectDirectoryPicker';
+import { getInputProjectOptions, isDefaultInputProject } from './projectSelection';
 import sendIcon from '../../assets/send.svg';
 import sendActiveIcon from '../../assets/send_active.svg';
 import chatSkillIcon from '../../assets/skillIcon.svg';
@@ -201,19 +207,14 @@ export function InputArea({
     setComposerSuggestionIndex((index) => Math.min(index, composerSuggestionItems.length - 1));
   }, [composerSuggestionItems.length]);
 
-  const selectableProjects = useMemo(
-    () => projects.filter((project) => !isDefaultProject(project)),
+  const inputProjectOptions = useMemo(
+    () => getInputProjectOptions(projects, projectSearch),
+    [projectSearch, projects],
+  );
+  const hasInputProjectOptions = useMemo(
+    () => getInputProjectOptions(projects).length > 0,
     [projects],
   );
-
-  const filteredProjects = useMemo(() => {
-    const keyword = projectSearch.trim().toLowerCase();
-    if (!keyword) return selectableProjects;
-    return selectableProjects.filter((project) => (
-      project.name.toLowerCase().includes(keyword)
-      || project.project_path.toLowerCase().includes(keyword)
-    ));
-  }, [projectSearch, selectableProjects]);
 
   const displayedProject = useMemo<ProjectInfo | null>(() => {
     if (activeSession?.project_id && activeSession.project_id !== 'default') {
@@ -238,7 +239,7 @@ export function InputArea({
         created_at: 0,
       };
     }
-    return selectedProject;
+    return selectedProject && !isDefaultInputProject(selectedProject) ? selectedProject : null;
   }, [activeSession, projects, selectedProject, t]);
 
   const {
@@ -862,12 +863,54 @@ export function InputArea({
     setIsModeMenuOpen(false);
   }, [isProcessing, mode]);
 
+  const openProjectCreateDialog = useCallback(async (mode: ProjectCreateMode) => {
+    setProjectPathError(null);
+    setProjectCreateMode(mode);
+    setWorkMenuOpen(null);
+
+    if (mode === 'blank') {
+      setProjectNameDraft('');
+      setProjectPathDraft('');
+      setWorkDialogOpen(true);
+      return;
+    }
+
+    if (!isProjectDirectoryPickerSupported()) {
+      setProjectNameDraft('');
+      setProjectPathDraft('');
+      setWorkDialogOpen(true);
+      return;
+    }
+
+    const result = await selectProjectDirectory();
+    if (!result.ok) {
+      if (result.reason !== 'cancelled') {
+        setProjectNameDraft('');
+        setProjectPathDraft('');
+        setWorkDialogOpen(true);
+        setProjectPathError(
+          result.reason === 'unsupported'
+            ? t('multiSession.project.directoryPickerUnsupported')
+            : result.message || t('multiSession.project.directoryPickerFailed'),
+        );
+      }
+      return;
+    }
+
+    try {
+      await createProject(result.name, result.path);
+    } catch (error) {
+      const errorKey = projectCreateErrorKey(error);
+      setProjectPathError(errorKey ? t(errorKey) : error instanceof Error ? error.message : String(error));
+    }
+  }, [createProject, t]);
+
   const handleAddProjectPath = useCallback(async () => {
     const name = projectNameDraft.trim();
     const projectPath = projectCreateMode === 'blank' ? '' : projectPathDraft.trim();
     if (!name || (projectCreateMode === 'existing' && !projectPath)) return;
     setProjectPathError(null);
-    if (projectPath && (!projectPath.startsWith('/') || projectPath.startsWith('~/'))) {
+    if (projectPath && (!isLikelyAbsolutePath(projectPath) || projectPath.startsWith('~/'))) {
       setProjectPathError(t('multiSession.project.absolutePathError'));
       return;
     }
@@ -1139,13 +1182,11 @@ export function InputArea({
               </span>
             ) : null}
             {workMenuOpen === 'project' && !isWorkContextLocked ? (
-              <div className={clsx('chat-work-select__menu', selectableProjects.length > 0 && 'chat-work-select__menu--projects')} role="menu">
-                {selectableProjects.length === 0 ? (
+              <div className={clsx('chat-work-select__menu', hasInputProjectOptions && 'chat-work-select__menu--projects')} role="menu">
+                {!hasInputProjectOptions ? (
                   <ProjectCreateMenu
                     onCreate={(mode) => {
-                      setProjectCreateMode(mode);
-                      setWorkDialogOpen(true);
-                      setWorkMenuOpen(null);
+                      void openProjectCreateDialog(mode);
                     }}
                     itemClassName="chat-work-select__option chat-work-select__option--compact"
                     blankIcon={<img src={workAddIcon} alt="" aria-hidden="true" />}
@@ -1162,7 +1203,7 @@ export function InputArea({
                         placeholder={t('multiSession.project.searchProject')}
                       />
                     </label>
-                    {filteredProjects.map((project) => {
+                    {inputProjectOptions.map((project) => {
                       const active = selectedProject?.project_id === project.project_id;
                       return (
                         <button
@@ -1183,14 +1224,12 @@ export function InputArea({
                         </button>
                       );
                     })}
-                    {filteredProjects.length === 0 ? (
+                    {inputProjectOptions.length === 0 ? (
                       <div className="chat-work-select__empty">{t('multiSession.project.noProjectMatches')}</div>
                     ) : null}
                     <ProjectAddSubmenu
                       onCreate={(mode) => {
-                        setProjectCreateMode(mode);
-                        setWorkDialogOpen(true);
-                        setWorkMenuOpen(null);
+                        void openProjectCreateDialog(mode);
                       }}
                     />
                   </>
@@ -1198,6 +1237,9 @@ export function InputArea({
               </div>
             ) : null}
           </div>
+          {projectPathError && !workDialogOpen ? (
+            <div className="chat-work-select__error" role="alert">{projectPathError}</div>
+          ) : null}
         </div>
       ) : null}
 

@@ -3,5 +3,8 @@ export function projectCreateErrorKey(error: unknown): string | null {
   if (message.includes('project_path already exists')) {
     return 'multiSession.project.errors.pathExists';
   }
+  if (message.includes('project name already exists')) {
+    return 'multiSession.project.errors.nameExists';
+  }
   return null;
 }
