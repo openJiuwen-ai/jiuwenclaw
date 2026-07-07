@@ -43,7 +43,6 @@ class SqliteStore:
 
     def _get_traces_conn(self) -> sqlite3.Connection:
         """Return a *read-only* connection to traces.db."""
-        import os as _os
 
         # Use URI mode with forward-slash path for cross-platform compatibility.
         # On Windows, backslashes break the file: URI so we normalize and

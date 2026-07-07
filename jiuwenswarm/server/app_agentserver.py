@@ -18,7 +18,6 @@ import asyncio
 import logging
 import logging.handlers
 import os
-import sys
 
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import LogManager

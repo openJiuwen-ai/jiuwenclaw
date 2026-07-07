@@ -9,7 +9,6 @@ Verifies that:
 import json
 import tempfile
 from pathlib import Path
-from datetime import datetime, timezone
 
 from jiuwenswarm.evolve.apply_writers.skill_writer import SkillExperienceWriter
 from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
@@ -17,7 +16,6 @@ from jiuwenswarm.evolve.models import (
     Proposal,
     ProposalState,
     ProposalTargetType,
-    TargetStore,
     EvidenceRef,
     ExperienceOperation,
     ExperienceOperationType,

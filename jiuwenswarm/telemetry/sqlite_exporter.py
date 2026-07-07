@@ -6,7 +6,7 @@ import json
 import logging
 import sqlite3
 import threading
-from typing import Any, Optional
+from typing import Any
 
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult

@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import json
 import os
-import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -192,13 +190,13 @@ class TestRegistry:
             trace_samplers,
         )
         # Force import so @register decorators fire
-        import jiuwenswarm.evolve.proposal_generators.rule_proposer  # noqa: F401
-        import jiuwenswarm.evolve.proposal_generators.llm_proposer  # noqa: F401
-        import jiuwenswarm.evolve.decision_policies.rule_policy  # noqa: F401
-        import jiuwenswarm.evolve.decision_policies.eval_policy  # noqa: F401
-        import jiuwenswarm.evolve.apply_writers.skill_writer  # noqa: F401
-        import jiuwenswarm.evolve.apply_writers.memory_writer  # noqa: F401
-        import jiuwenswarm.evolve.apply_writers.training_writer  # noqa: F401
+        import jiuwenswarm.evolve.proposal_generators.rule_proposer
+        import jiuwenswarm.evolve.proposal_generators.llm_proposer
+        import jiuwenswarm.evolve.decision_policies.rule_policy
+        import jiuwenswarm.evolve.decision_policies.eval_policy
+        import jiuwenswarm.evolve.apply_writers.skill_writer
+        import jiuwenswarm.evolve.apply_writers.memory_writer
+        import jiuwenswarm.evolve.apply_writers.training_writer
         import jiuwenswarm.evolve.trigger.sampler  # noqa: F401
 
         assert "rule_proposer" in proposal_generators
@@ -545,7 +543,6 @@ class TestEvalPolicy:
         import jiuwenswarm.evolve.decision_policies.eval_policy  # noqa: F401
         from jiuwenswarm.evolve.decision_policies.eval_policy import EvalPolicy
         from jiuwenswarm.evolve.models import (
-            EvidenceRef,
             Proposal,
             ProposalTargetType,
         )
@@ -818,9 +815,9 @@ class TestEndToEnd:
     @pytest.mark.asyncio
     async def test_full_pipeline_with_skill_writer(self):
         """12.1: E2E: traces.db → RuleProposer → RulePolicy → SkillWriter."""
-        import jiuwenswarm.evolve.proposal_generators.rule_proposer  # noqa: F401
-        import jiuwenswarm.evolve.decision_policies.rule_policy  # noqa: F401
-        import jiuwenswarm.evolve.decision_policies.eval_policy  # noqa: F401
+        import jiuwenswarm.evolve.proposal_generators.rule_proposer
+        import jiuwenswarm.evolve.decision_policies.rule_policy
+        import jiuwenswarm.evolve.decision_policies.eval_policy
         import jiuwenswarm.evolve.apply_writers.skill_writer  # noqa: F401
         from jiuwenswarm.evolve.pipeline import EvolutionPipeline
         from jiuwenswarm.evolve.proposal_generators.rule_proposer import (

@@ -20,11 +20,9 @@ from typing import Any
 from jiuwenswarm.evolve.ahe.diagnosis.models import (
     DiagnosisIssue,
     DiagnosisResult,
-    ALLOWED_ISSUE_TYPES,
 )
 from jiuwenswarm.evolve.ahe.diagnosis.prompts import (
     DIAGNOSIS_SYSTEM_PROMPT,
-    TOOL_DESCRIPTIONS,
     DIAGNOSIS_TOOL_SCHEMAS,
 )
 from jiuwenswarm.evolve.ahe.diagnosis.tools import DiagnosisToolExecutor

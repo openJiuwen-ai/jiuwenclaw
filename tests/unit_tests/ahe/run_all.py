@@ -84,7 +84,7 @@ print("\n=== Running Sync Tests ===")
 sync_errored = []
 
 def test_pda_models():
-    from jiuwenswarm.evolve.models import ExperienceOperationType, ExperienceOperation, EvidenceRef
+    from jiuwenswarm.evolve.models import ExperienceOperationType, ExperienceOperation
     op = ExperienceOperation(op=ExperienceOperationType.ADD, new_content="test", reason="r", evidence_refs=[])
     assert op.op == ExperienceOperationType.ADD
     op2 = ExperienceOperation(op=ExperienceOperationType.NOOP, reason="covered", evidence_refs=[])

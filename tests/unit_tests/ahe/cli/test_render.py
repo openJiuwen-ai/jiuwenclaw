@@ -246,7 +246,6 @@ class TestSpinner:
 
     @staticmethod
     def test_spinner_verb_rotates():
-        from jiuwenswarm.cli.render import _VERBS
         from unittest.mock import patch
 
         fake_time = 1000.0

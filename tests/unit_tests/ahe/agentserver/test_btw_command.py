@@ -388,7 +388,6 @@ class TestCallModelForRecap:
     @pytest.mark.asyncio
     async def test_preserves_list_based_content(self):
         """Structured content blocks must be preserved — no str() conversion."""
-        from unittest.mock import call
 
         adapter = _make_adapter()
         mock_model = AsyncMock()

@@ -886,7 +886,6 @@ class TestSpinner:
 
     @staticmethod
     def test_spinner_verb_rotates():
-        from jiuwenswarm.cli.render import _VERBS
 
         fake_time = 1000.0
 

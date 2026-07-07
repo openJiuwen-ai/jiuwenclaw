@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import time
 
-import pytest
 
 from jiuwenswarm.common.cleanup import (
     cleanup_old_sessions,

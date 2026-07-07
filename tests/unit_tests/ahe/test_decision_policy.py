@@ -1,11 +1,8 @@
 # Copyright (c) Huawei Technologies, Co., Ltd. 2026. All rights reserved.
 """Tests for AheDecisionPolicy — RuleGate + LLMDecision."""
 
-import pytest
 from jiuwenswarm.evolve.models import (
-    Proposal, ProposalTargetType, ProposalState,
-    DecisionResult, DecisionSuggestion, EvidenceRef,
-    ExperienceOperationType, ExperienceOperation,
+    Proposal, ProposalTargetType, DecisionResult, DecisionSuggestion, EvidenceRef,
 )
 from jiuwenswarm.evolve.ahe.decision_policy import AheDecisionPolicy
 from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor

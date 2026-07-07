@@ -1,7 +1,6 @@
 # Copyright (c) Huawei Technologies, Co., Ltd. 2026. All rights reserved.
 """Tests for OtelTraceAdapter — OTEL spans → Langfuse trace dict."""
 
-import pytest
 
 from jiuwenswarm.evolve.ahe.otel_adapter import (
     OtelTraceAdapter,

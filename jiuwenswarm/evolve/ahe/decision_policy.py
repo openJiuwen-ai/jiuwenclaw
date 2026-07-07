@@ -22,9 +22,7 @@ from jiuwenswarm.evolve.models import (
     DecisionSuggestion,
     Proposal,
     ProposalTargetType,
-    ExperienceOperationType,
     ExperienceOperation,
-    EvidenceRef,
 )
 from jiuwenswarm.evolve.decision_policies.base import DecisionPolicy
 from jiuwenswarm.evolve.registry import decision_policies

@@ -1,7 +1,6 @@
 # Copyright (c) Huawei Technologies, Co., Ltd. 2026. All rights reserved.
 """Tests for AheProposer — limit enforcement and proposal parsing."""
 
-import pytest
 from jiuwenswarm.evolve.models import (
     Proposal, ProposalTargetType, ProposalState,
     TraceBatch,

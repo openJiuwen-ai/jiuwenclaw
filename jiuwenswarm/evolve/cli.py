@@ -30,17 +30,17 @@ def _build_pipeline_from_config(config: dict, use_ahe: bool = False) -> object:
         use_ahe: If True, use PDA-style AHE algorithm instead of default generators.
     """
     from jiuwenswarm.evolve.pipeline import EvolutionPipeline
-    from jiuwenswarm.evolve.proposal_generators.llm_proposer import LLMProposer
-    from jiuwenswarm.evolve.decision_policies.rule_policy import RulePolicy
-    from jiuwenswarm.evolve.decision_policies.eval_policy import EvalPolicy
+    from jiuwenswarm.evolve.proposal_generators.llm_proposer import LLMProposer  # noqa: F401  注册副作用
+    from jiuwenswarm.evolve.decision_policies.rule_policy import RulePolicy  # noqa: F401  注册副作用
+    from jiuwenswarm.evolve.decision_policies.eval_policy import EvalPolicy  # noqa: F401  注册副作用
     from jiuwenswarm.evolve.apply_writers.skill_writer import (
-        SkillExperienceWriter,
+        SkillExperienceWriter,  # noqa: F401  注册副作用
     )
     from jiuwenswarm.evolve.apply_writers.memory_writer import (
-        MemoryPolicyWriter,
+        MemoryPolicyWriter,  # noqa: F401  注册副作用
     )
     from jiuwenswarm.evolve.apply_writers.training_writer import (
-        TrainingCandidateWriter,
+        TrainingCandidateWriter,  # noqa: F401  注册副作用
     )
     from jiuwenswarm.evolve.registry import (
         proposal_generators,

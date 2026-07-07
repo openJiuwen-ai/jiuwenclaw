@@ -11,7 +11,6 @@ if TYPE_CHECKING:
         DecisionResult,
         Proposal,
         TraceBatch,
-        JsonValue,
     )
 
 
@@ -28,40 +27,40 @@ class EvolutionStore:
 
     # -- Trace batches ----------------------------------------------------
 
-    def save_trace_batch(self, batch: TraceBatch) -> None:  # noqa: F821
+    def save_trace_batch(self, batch: TraceBatch) -> None:
         self._sqlite.save_trace_batch(batch)
         self._file.save_trace_batch(batch)
 
     # -- Proposals --------------------------------------------------------
 
-    def save_proposal(self, proposal: Proposal) -> None:  # noqa: F821
+    def save_proposal(self, proposal: Proposal) -> None:
         self._sqlite.save_proposal(proposal)
         self._file.save_proposal(proposal)
 
-    def save_proposals(self, proposals: list[Proposal]) -> None:  # noqa: F821
+    def save_proposals(self, proposals: list[Proposal]) -> None:
         for p in proposals:
             self.save_proposal(p)
 
     # -- Decision results -------------------------------------------------
 
-    def save_decision_result(self, dr: DecisionResult) -> None:  # noqa: F821
+    def save_decision_result(self, dr: DecisionResult) -> None:
         self._sqlite.save_decision_result(dr)
         self._file.save_decision_result(dr)
 
     def save_decision_results(
-        self, results: list[DecisionResult]  # noqa: F821
+        self, results: list[DecisionResult]
     ) -> None:
         for r in results:
             self.save_decision_result(r)
 
     # -- Apply records ----------------------------------------------------
 
-    def save_apply_record(self, ar: ApplyRecord) -> None:  # noqa: F821
+    def save_apply_record(self, ar: ApplyRecord) -> None:
         self._sqlite.save_apply_record(ar)
         self._file.save_apply_record(ar)
 
     def save_apply_records(
-        self, records: list[ApplyRecord]  # noqa: F821
+        self, records: list[ApplyRecord]
     ) -> None:
         for r in records:
             self.save_apply_record(r)

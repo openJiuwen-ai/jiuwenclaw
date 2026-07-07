@@ -147,7 +147,7 @@ def test_with_agentic_harness():
         agentic_path = Path(__file__).parent.parent.parent.parent / "agentic-harness-engineering"
         if agentic_path.exists():
             sys.path.insert(0, str(agentic_path))
-            from trace_converter import extract_trace_data
+            from trace_converter import extract_trace_data  # noqa: F401  验证可导入
 
             print("✅ 成功导入trace_converter.extract_trace_data")
 

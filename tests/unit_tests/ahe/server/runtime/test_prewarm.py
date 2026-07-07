@@ -14,11 +14,9 @@ Tests cover:
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
-import pytest
 
 from jiuwenswarm.server.runtime.prewarm.config import PrewarmConfig
 from jiuwenswarm.server.runtime.prewarm.coordinator import PrewarmCoordinator

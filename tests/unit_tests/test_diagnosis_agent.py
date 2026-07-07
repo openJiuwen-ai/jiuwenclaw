@@ -2,7 +2,6 @@
 """Tests for DiagnosisAgent — models, tools, and core functionality."""
 
 import pytest
-import json
 
 from jiuwenswarm.evolve.ahe.diagnosis.models import DiagnosisIssue, DiagnosisResult, ALLOWED_ISSUE_TYPES
 from jiuwenswarm.evolve.ahe.diagnosis.tools import DiagnosisToolExecutor, _truncate_tool_output

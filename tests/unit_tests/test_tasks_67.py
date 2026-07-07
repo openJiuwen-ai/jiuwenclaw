@@ -4,7 +4,7 @@ import asyncio
 from jiuwenswarm.evolve.ahe.proposer import AheProposer
 from jiuwenswarm.evolve.ahe.decision_policy import AheDecisionPolicy
 from jiuwenswarm.evolve.models import (
-    Proposal, ProposalTargetType, ProposalState, EvidenceRef, DecisionSuggestion
+    Proposal, ProposalTargetType, ProposalState, EvidenceRef
 )
 from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
 

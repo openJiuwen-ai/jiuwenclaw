@@ -1,9 +1,7 @@
 # Copyright (c) Huawei Technologies, Co., Ltd. 2026. All rights reserved.
 """Tests for TraceOutcomeEvaluator and TaskNameInferrer."""
 
-import pytest
 from jiuwenswarm.evolve.ahe.evaluator import TraceOutcomeEvaluator, TaskNameInferrer
-from jiuwenswarm.evolve.models import TraceOutcome
 
 
 class TestTaskNameInferrer:
