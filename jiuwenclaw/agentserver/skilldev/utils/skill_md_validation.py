@@ -22,6 +22,7 @@ DESCRIPTION_MAX_CHARS_EN = 1024
 DESCRIPTION_MAX_TOKENS = 300
 BODY_MAX_LINES = 500
 BODY_MAX_TOKENS = 5000
+FRONTMATTER_RE = re.compile(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.DOTALL)
 
 CredentialPattern = tuple[re.Pattern[str], str, str | int | None]
 
@@ -143,15 +144,16 @@ def validate_skill_md_content(content: str) -> str | None:
         ERR_FW_SKILLMD_CREDENTIAL,
     )
 
+    content = content.removeprefix("\ufeff")
     if not content.startswith("---"):
         return ERR_FW_SKILLMD_NO_FRONTMATTER_START
 
-    match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+    match = FRONTMATTER_RE.match(content)
     if not match:
         return ERR_FW_SKILLMD_NO_FRONTMATTER_END
 
     frontmatter_text = match.group(1)
-    body = content[match.end():].lstrip("\n")
+    body = content[match.end():].lstrip("\r\n")
 
     hit_codes: set[str] = set()
 

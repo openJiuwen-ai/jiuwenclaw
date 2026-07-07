@@ -90,6 +90,7 @@ DESCRIPTION_MAX_CHARS_EN = 1024
 DESCRIPTION_MAX_TOKENS = 300
 BODY_MAX_LINES = 500
 BODY_MAX_TOKENS = 5000
+FRONTMATTER_RE = re.compile(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.DOTALL)
 
 
 def _estimate_tokens(text: str) -> int:
@@ -104,6 +105,17 @@ def _estimate_tokens(text: str) -> int:
 
 def _contains_cjk(text: str) -> bool:
     return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def _read_utf8_text(path: Path) -> tuple[str | None, bool]:
+    """Read UTF-8/UTF-8-BOM text, returning (text, is_binary)."""
+    data = path.read_bytes()
+    if b"\0" in data:
+        return None, True
+    try:
+        return data.decode("utf-8-sig"), False
+    except UnicodeDecodeError:
+        return None, False
 
 
 def _find_duplicate_frontmatter_key(frontmatter_text: str) -> str | None:
@@ -167,41 +179,28 @@ def _is_placeholder(value: str | None) -> bool:
     return False
 
 
-def _iter_scannable_files(skill_path: Path, skill_content: str) -> list[tuple[Path, str]]:
-    """Return UTF-8 text files to scan: SKILL.md + scripts/** text files."""
+def _iter_scannable_files(skill_path: Path, skill_content: str) -> tuple[list[tuple[Path, str]], list[str]]:
+    """Return UTF-8/UTF-8-BOM text files to scan plus decode errors."""
     files: list[tuple[Path, str]] = [(skill_path / "SKILL.md", skill_content)]
+    errors: list[str] = []
     scripts_dir = skill_path / "scripts"
     if not scripts_dir.exists():
-        return files
+        return files, errors
 
     for sp in scripts_dir.rglob("*"):
         if not sp.is_file():
             continue
-        try:
-            text = sp.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            # Non-text (binary) files are skipped.
+        text, is_binary = _read_utf8_text(sp)
+        if is_binary:
+            continue
+        if text is None:
+            errors.append(
+                f"Non-UTF-8 text file detected: {sp.relative_to(skill_path)}. "
+                "Use UTF-8 or UTF-8 with BOM."
+            )
             continue
         files.append((sp, text))
-    return files
-
-
-def _iter_script_text_files(skill_path: Path) -> list[tuple[Path, str]]:
-    """Return UTF-8 text files under scripts/** (excluding SKILL.md)."""
-    scripts_dir = skill_path / "scripts"
-    if not scripts_dir.exists():
-        return []
-
-    files: list[tuple[Path, str]] = []
-    for sp in scripts_dir.rglob("*"):
-        if not sp.is_file():
-            continue
-        try:
-            text = sp.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue
-        files.append((sp, text))
-    return files
+    return files, errors
 
 
 def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
@@ -217,16 +216,18 @@ def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
     if not skill_md.exists():
         return False, "SKILL.md not found"
 
-    content = skill_md.read_text(encoding="utf-8")
+    content, is_binary = _read_utf8_text(skill_md)
+    if is_binary or content is None:
+        return False, "SKILL.md must be UTF-8 encoded"
     if not content.startswith("---"):
         return False, "No YAML frontmatter found"
 
-    match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+    match = FRONTMATTER_RE.match(content)
     if not match:
         return False, "Invalid frontmatter format"
 
     frontmatter_text = match.group(1)
-    body = content[match.end():].lstrip("\n")
+    body = content[match.end():].lstrip("\r\n")
 
     dup = _find_duplicate_frontmatter_key(frontmatter_text)
     if dup:
@@ -324,7 +325,8 @@ def validate_skill(skill_path: str | Path) -> tuple[bool, str]:
 def _validate_static_security_all(skill_path: Path, skill_content: str) -> list[str]:
     """Collect all static security errors instead of stopping at the first."""
     errors: list[str] = []
-    files = _iter_scannable_files(skill_path, skill_content)
+    files, scan_errors = _iter_scannable_files(skill_path, skill_content)
+    errors.extend(scan_errors)
 
     for file_path, _ in files:
         rel = file_path.relative_to(skill_path)
@@ -332,8 +334,10 @@ def _validate_static_security_all(skill_path: Path, skill_content: str) -> list[
             errors.append(f"Path traversal detected: {rel}")
 
     # dangerous commands: scripts/** only (SKILL.md excluded)
-    for file_path, text in _iter_script_text_files(skill_path):
+    for file_path, text in files:
         rel = file_path.relative_to(skill_path)
+        if not rel.parts or rel.parts[0] != "scripts":
+            continue
         for line_no, line in enumerate(text.splitlines(), start=1):
             for pattern, label in DANGEROUS_PATTERNS:
                 if pattern.search(line):

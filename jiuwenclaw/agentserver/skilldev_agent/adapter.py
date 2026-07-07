@@ -34,8 +34,6 @@ from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawStreamEventRail
 from jiuwenclaw.agentserver.stream_utils import tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.skilldev_agent.utils.resource_sync import (
-    STATE_REF_FILES,
-    STATE_REF_SKILLS,
     STATE_TOOL_SPECS,
     build_current_ref_file_hint_lines,
     build_current_ref_skill_hint_lines,
@@ -556,15 +554,13 @@ class SkillDevDeepAdapter:
             await write_skill_searched(task_workspace, params.get("skill_searched"))
         await self.update_workspace(task_workspace)
 
-        added_file_lines, removed_file_lines = build_current_ref_file_hint_lines(
+        added_file_lines = build_current_ref_file_hint_lines(
             task_workspace,
             params.get("files") or [],
-            previous_ref_files=previous_state.get(STATE_REF_FILES, []),
         )
-        added_skill_lines, removed_skill_lines = build_current_ref_skill_hint_lines(
+        added_skill_lines = build_current_ref_skill_hint_lines(
             task_workspace,
             params.get("skill_packages") or params.get("skillPackages") or [],
-            previous_ref_skills=previous_state.get(STATE_REF_SKILLS, []),
         )
         added_tool_lines, removed_tool_lines = build_current_tool_spec_hint_lines(
             task_workspace,
@@ -576,9 +572,9 @@ class SkillDevDeepAdapter:
             params,
             task_id,
             added_file_lines=added_file_lines,
-            removed_file_lines=removed_file_lines,
+            removed_file_lines=[],
             added_skill_lines=added_skill_lines,
-            removed_skill_lines=removed_skill_lines,
+            removed_skill_lines=[],
             added_tool_lines=added_tool_lines,
             removed_tool_lines=removed_tool_lines,
         )
