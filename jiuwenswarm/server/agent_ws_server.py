@@ -3673,8 +3673,10 @@ class AgentWebSocketServer:
             session_id = request.session_id or "default"
             project_dir = resolve_request_project_dir(request)
             diff_service = get_diff_service()
-            turns = diff_service.get_turn_diffs(session_id, project_dir)
-            git_diff = diff_service.get_git_diff(project_dir)
+            turns, git_diff = await asyncio.gather(
+                asyncio.to_thread(diff_service.get_turn_diffs, session_id, project_dir),
+                asyncio.to_thread(diff_service.get_git_diff, project_dir),
+            )
 
             logger.info(
                 "[AgentWebSocketServer] command.diff response: session_id=%s turns=%s git_diff=%s project_dir=%s",

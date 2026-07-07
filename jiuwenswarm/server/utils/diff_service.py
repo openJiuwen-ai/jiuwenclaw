@@ -46,10 +46,11 @@ class DiffService:
     def _compute_turn_diffs(self, session_id: str, project_dir: str | None = None) -> list[dict[str, Any]]:
         """计算 turn-based diffs."""
         history = self._read_history(session_id)
-        agent_history = self._read_agent_history(session_id, project_dir)
 
         if not history:
             return []
+
+        agent_history = self._read_agent_history(session_id, project_dir)
 
         turns: list[dict[str, Any]] = []
 
