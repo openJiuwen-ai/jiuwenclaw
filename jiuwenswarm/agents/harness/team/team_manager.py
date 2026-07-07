@@ -78,6 +78,7 @@ _PG_POST_START_READY_INIT_SLEEP = 0.4
 _PG_POST_START_READY_MAX_SLEEP = 2.0
 _PG_POST_START_READY_BACKOFF = 1.45
 _PG_POST_START_LOG_EVERY_SEC = 5.0
+_TEAM_STREAM_EXIT_GRACE_TIMEOUT_SEC = 1.5
 
 # ── Team Observability ──────────────────────────────────────
 # Tracks whether observability is currently active so we can
@@ -1588,6 +1589,55 @@ class TeamManager:
             session_id,
         )
 
+    async def _wait_for_stream_task_exit(
+        self,
+        session_id: str,
+        *,
+        timeout_sec: float = _TEAM_STREAM_EXIT_GRACE_TIMEOUT_SEC,
+    ) -> bool:
+        """Wait briefly for a team stream task to finish its own cleanup."""
+        stream_task = self._stream_tasks.get(session_id)
+        if stream_task is None or stream_task.done():
+            return True
+
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(stream_task),
+                timeout=timeout_sec,
+            )
+            logger.info(
+                "[TeamManager] stream task exited within grace timeout: "
+                "session_id=%s timeout_sec=%.1f",
+                session_id,
+                timeout_sec,
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[TeamManager] stream task did not exit within grace timeout: "
+                "session_id=%s timeout_sec=%.1f; cancelling during cleanup",
+                session_id,
+                timeout_sec,
+            )
+            return False
+        except asyncio.CancelledError:
+            if stream_task.done() and stream_task.cancelled():
+                logger.info(
+                    "[TeamManager] stream task was cancelled during grace timeout: "
+                    "session_id=%s",
+                    session_id,
+                )
+                return True
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[TeamManager] stream task exited with error during grace timeout: "
+                "session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            return True
+
     async def terminate_session_runtime(self, session_id: str, reason: str = "") -> bool:
         """Stop-like teardown for the current team session runtime.
 
@@ -1853,6 +1903,9 @@ class TeamManager:
                         team_name,
                         exc,
                     )
+
+            if runner_paused:
+                await self._wait_for_stream_task_exit(session_id)
 
             # Pause parks the runtime in place (resumable via a later chat.send),
             # so running workflows may still continue — do NOT finalize them.
