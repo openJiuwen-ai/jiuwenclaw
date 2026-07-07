@@ -461,13 +461,13 @@ export function buildDiffViewerSources(payload: Record<string, unknown>): DiffSo
 
   sources.push({
     label: "Current",
-    title: "Diff (git diff HEAD)",
+    title: "Uncommitted changes (git diff HEAD)",
     subtitle: formatDiffStats(currentStats),
     stats: currentStats,
     files: currentFiles,
     emptyMessage: currentStats.filesChanged > 0 && currentFiles.length === 0
       ? "Too many files to display details"
-      : "Working tree is clean",
+      : "No changes yet",
   });
 
   for (const turn of turns) {
@@ -2106,9 +2106,7 @@ export class AppScreen implements Component, Focusable {
     }
 
     const sourceHint = this.diffViewerState.sources.length > 1 ? "←/→ source · " : "";
-    const hintText = source.files.length > 0
-      ? `  ${sourceHint}↑/↓ to select · Enter to view · Esc to close`
-      : `  ${sourceHint}Esc to close`;
+    const hintText = `  ${sourceHint}↑/↓ to select · Enter to view · Esc to close`;
     lines.push(padToWidth(palette.text.dim(hintText), safeWidth));
 
     return lines;
