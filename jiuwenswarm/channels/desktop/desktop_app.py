@@ -29,6 +29,7 @@ FRONTEND_PORT = 5173
 APP_CHILD_FLAG = "--desktop-run-app"
 WEB_CHILD_FLAG = "--desktop-run-web"
 UPDATE_HELPER_FLAG = "--desktop-install-update"
+DESKTOP_ENV_FLAG = "JIUWENSWARM_DESKTOP"
 STARTUP_TIMEOUT_SECONDS = 45.0
 PNG_DATA_URL_PREFIX = "data:image/png;base64,"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -103,6 +104,7 @@ def _build_child_command(name: str, extra_args: list[str] | None = None) -> list
 
 def _build_child_env(name: str) -> dict[str, str]:
     env = os.environ.copy()
+    env[DESKTOP_ENV_FLAG] = "1"
     if name == "app":
         env["WEB_HOST"] = BACKEND_HOST
         env["WEB_PORT"] = str(BACKEND_PORT)

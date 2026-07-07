@@ -31,6 +31,7 @@ DEFAULT_ASSET_PATTERN_MACOS = "JiuwenSwarm-{version}.dmg"
 DEFAULT_ASSET_PATTERN_LINUX = "JiuwenSwarm-{version}.tar.gz"
 DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_TEXT = "HzUzzbjzJNsWmfsdiy2GKcEg"
+DESKTOP_ENV_FLAG = "JIUWENSWARM_DESKTOP"
 
 
 def get_access_token() -> str:
@@ -95,6 +96,9 @@ def _is_newer_version(candidate: str, current: str) -> bool:
 
 
 def _detect_install_mode() -> str:
+    desktop_env = os.getenv(DESKTOP_ENV_FLAG, "").strip().lower()
+    if desktop_env in {"1", "true", "yes", "on"}:
+        return "desktop"
     return "desktop" if getattr(sys, "frozen", False) else "pip"
 
 
