@@ -1880,12 +1880,12 @@ class MessageHandler(ABC):
         try:
             import time as _time
             from jiuwenclaw.schema.message import EventType
-            from jiuwenclaw.gateway.session_index import is_remote_storage
-            if not is_remote_storage():
+            if msg.event_type != EventType.CHAT_FINAL:
                 return
             if str(msg.channel_id or "").strip() != "web":
                 return
-            if msg.event_type != EventType.CHAT_FINAL:
+            from jiuwenclaw.gateway.session_index import is_remote_storage
+            if not is_remote_storage():
                 return
             sid = str(msg.session_id or "").strip()
             if not sid:
