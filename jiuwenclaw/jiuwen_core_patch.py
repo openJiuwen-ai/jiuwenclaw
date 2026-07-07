@@ -925,11 +925,18 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             chunk_usage = getattr(chunk, 'usage', None)
             if chunk_usage:
                 input_cost, output_cost, total_cost = self._extract_cost_info(chunk_usage)
+
+                cache_tokens = 0
+                prompt_tokens_details = getattr(chunk_usage, 'prompt_tokens_details', None)
+                if prompt_tokens_details:
+                    cache_tokens = getattr(prompt_tokens_details, 'cached_tokens', 0) or 0
+
                 usage_metadata = UsageMetadata(
                     model_name=self.model_config.model_name,
                     input_tokens=getattr(chunk_usage, 'prompt_tokens', 0) or 0,
                     output_tokens=getattr(chunk_usage, 'completion_tokens', 0) or 0,
                     total_tokens=getattr(chunk_usage, 'total_tokens', 0) or 0,
+                    cache_tokens=cache_tokens,
                     input_cost=input_cost,
                     output_cost=output_cost,
                     total_cost=total_cost,
@@ -999,11 +1006,17 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             # Extract cost information if available
             input_cost, output_cost, total_cost = self._extract_cost_info(chunk.usage)
 
+            cache_tokens = 0
+            prompt_tokens_details = getattr(chunk.usage, 'prompt_tokens_details', None)
+            if prompt_tokens_details:
+                cache_tokens = getattr(prompt_tokens_details, 'cached_tokens', 0) or 0
+
             usage_metadata = UsageMetadata(
                 model_name=self.model_config.model_name,
                 input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
                 output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
                 total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
+                cache_tokens=cache_tokens,
                 input_cost=input_cost,
                 output_cost=output_cost,
                 total_cost=total_cost,
