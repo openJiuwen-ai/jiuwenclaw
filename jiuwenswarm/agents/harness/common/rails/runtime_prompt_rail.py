@@ -437,8 +437,8 @@ class RuntimePromptRail(DeepAgentRail):
                 priority=98,
             ))
 
-        if self._channel == "tui":
-            # Trusted directories policy for TUI mode
+        if self._channel in ("tui", "web"):
+            # Trusted directories policy for TUI and Web mode
             trusted_dirs = self._existing_dirs(self._trusted_dirs)
             current_dir = (
                 self._existing_dir(self._cwd)
