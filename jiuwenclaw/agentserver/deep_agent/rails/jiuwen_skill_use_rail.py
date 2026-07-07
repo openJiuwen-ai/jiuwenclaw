@@ -224,6 +224,11 @@ class JiuWenSkillUseRail(SkillUseRail):
         )
 
     def uninit(self, agent: "DeepAgent") -> None:
+        # 热重载后 agent.system_prompt_builder 可能已是新引用，退休清理前先同步缓存，
+        # 确保 remove_section 落到当前生效的 builder 上。
+        _builder = getattr(agent, "system_prompt_builder", None)
+        if _builder is not None:
+            self.system_prompt_builder = _builder
         ability_manager = getattr(agent, "ability_manager", None)
         owned_names = getattr(self, "_owned_tool_names", None) or set()
         if ability_manager is not None:
@@ -244,6 +249,14 @@ class JiuWenSkillUseRail(SkillUseRail):
         super().uninit(agent)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        # 热重载（DeepAgent._hot_reload_system_prompt）会新建 SystemPromptBuilder 并替换
+        # agent.system_prompt_builder，但保留型 rail 不会重新 init()，缓存的
+        # self.system_prompt_builder 可能指向旧 builder。这里每次从 ctx.agent 现取最新
+        # builder 并刷新缓存，使后续 add_section 都落到当前生效的 builder 上。
+        # 须在 super().before_model_call 之前刷新，使父类与子类都操作当前 builder。
+        _builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
+        if _builder is not None:
+            self.system_prompt_builder = _builder
         await super().before_model_call(ctx)
         builder = self.system_prompt_builder
         if builder is None:

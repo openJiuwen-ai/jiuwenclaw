@@ -138,6 +138,11 @@ class JiuClawContextEngineeringRail(ContextEngineeringRail):
         self._request_soul = normalize_soul_override(soul)
 
     def uninit(self, agent) -> None:
+        # 热重载后 agent.system_prompt_builder 可能已是新引用，退休清理前先同步缓存，
+        # 确保 remove_section 落到当前生效的 builder 上。
+        _builder = getattr(agent, "system_prompt_builder", None)
+        if _builder is not None:
+            self.system_prompt_builder = _builder
         self._skip_context_files = set()
         self._request_identify = None
         self._request_soul = None
@@ -283,6 +288,13 @@ class JiuClawContextEngineeringRail(ContextEngineeringRail):
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject workspace + context (if not minimal), then offload section."""
+        # 热重载（DeepAgent._hot_reload_system_prompt）会新建 SystemPromptBuilder 并替换
+        # agent.system_prompt_builder，但保留型 rail 不会重新 init()，缓存的
+        # self.system_prompt_builder 可能指向旧 builder。这里每次从 ctx.agent 现取最新
+        # builder 并刷新缓存，使后续 add_section 都落到当前生效的 builder 上。
+        _builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
+        if _builder is not None:
+            self.system_prompt_builder = _builder
         if not self._minimal:
             await self._inject_workspace_context_tools(ctx)
 
