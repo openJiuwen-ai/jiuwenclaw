@@ -9,7 +9,7 @@ import { ArrowRight, LoaderCircle, Share2, Sparkles } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
-import { AgentMode, Message, UserAnswer } from '../../types';
+import { AgentMode, MediaItem, Message, UserAnswer } from '../../types';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
 import { InputArea } from './InputArea';
@@ -42,7 +42,13 @@ export interface ChatHistoryPagerProps {
 }
 
 interface ChatPanelProps {
-  onSendMessage: (content: string) => void;
+  onSendMessage: (content: string, mediaItems?: MediaItem[]) => void;
+  onPersistMedia: (content: string, mediaItems: MediaItem[]) => Promise<{
+    content?: string;
+    query?: string;
+    media_items?: Record<string, unknown>[];
+    files?: Record<string, unknown>;
+  }>;
   onInterrupt: (newInput?: string) => void;
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
@@ -422,6 +428,7 @@ function scrollToBottom(el: HTMLDivElement): void {
 
 export function ChatPanel({
   onSendMessage,
+  onPersistMedia,
   onInterrupt,
   onCancel,
   onSwitchMode,
@@ -698,9 +705,9 @@ export function ChatPanel({
   ]);
 
   // 包装发送消息函数，添加滚动逻辑
-  const handleSendMessage = useCallback((content: string) => {
+  const handleSendMessage = useCallback((content: string, mediaItems?: MediaItem[]) => {
     setIsSending(true);
-    onSendMessage(content);
+    onSendMessage(content, mediaItems);
   }, [onSendMessage]);
 
   // 当发送消息时强制滚动到底部
@@ -822,6 +829,7 @@ export function ChatPanel({
                 <InteractionSlot onSubmit={onUserAnswer} />
                 <InputArea
                   onSubmit={handleSendMessage}
+                  onPersistMedia={onPersistMedia}
                   onInterrupt={onInterrupt}
                   onCancel={onCancel}
                   onSwitchMode={onSwitchMode}
@@ -851,6 +859,7 @@ export function ChatPanel({
           <InteractionSlot onSubmit={onUserAnswer} />
           <InputArea
             onSubmit={handleSendMessage}
+            onPersistMedia={onPersistMedia}
             onInterrupt={onInterrupt}
             onCancel={onCancel}
             onSwitchMode={onSwitchMode}

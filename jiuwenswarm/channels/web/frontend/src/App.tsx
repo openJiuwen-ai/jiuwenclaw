@@ -43,7 +43,7 @@ import {
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
 import { useTeamPanelState } from './features/teamPanelState';
-import { AgentMode, UserAnswer, ModelEntry, type Session } from './types';
+import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session } from './types';
 import {
   ensureSessionRuntimes,
   useSessionStore,
@@ -111,6 +111,17 @@ type ConfigSaveAllPayload = {
   team?: AgentsTeamsSavePayload["team"];
 };
 
+type WindowWithPyWebview = Window & {
+  pywebview?: {
+    api?: {
+      save_data_url?: (
+        dataUrl: string,
+        filename: string,
+      ) => DesktopSaveApiResult;
+    };
+  };
+};
+
 function getWorkContextForSession(sessionId: string): {
   project_id?: string;
   project_dir?: string;
@@ -129,17 +140,6 @@ function getWorkContextForSession(sessionId: string): {
   };
 }
 
-type WindowWithPyWebview = Window & {
-  pywebview?: {
-    api?: {
-      save_data_url?: (
-        dataUrl: string,
-        filename: string,
-      ) => DesktopSaveApiResult;
-    };
-  };
-};
-
 function clearTeamRuntimeState(sessionId: string): void {
   const sessionStore = useSessionStore.getState();
   sessionStore.setTeamMembers(sessionId, []);
@@ -148,6 +148,7 @@ function clearTeamRuntimeState(sessionId: string): void {
   sessionStore.setTeamMemberExecutionEvents(sessionId, []);
   sessionStore.clearAllTeamMemberContextCompressionStatus(sessionId);
   sessionStore.setTeamHistoryMessages(sessionId, []);
+  sessionStore.setTeamHumanShareCommands(sessionId, []);
 }
 
 function waitForNextPaint(): Promise<void> {
@@ -343,6 +344,7 @@ function AppContent() {
   /** 为 true 表示刚从「会话列表」恢复；history 为空时在 useEffect 的 onEmpty 中提示一次 */
   const historyRestoreFromPanelHintRef = useRef(false);
   const { loadProjects, setSelectedProject } = useWorkspaceStore();
+
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -541,6 +543,7 @@ function AppContent() {
   const {
     isConnected,
     request,
+    persistMedia,
     sendMessage,
     sendStructuredChatContent,
     pause,
@@ -1185,7 +1188,7 @@ function AppContent() {
 
   // 当会话 ID 变化或页面加载时，自动加载历史会话
   useEffect(() => {
-    if (!isConnected || !sessionId || sessionId === 'new') return;
+    if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
     
     // 仅处理以 sess_ 开头的会话 ID
     if (!sessionId.startsWith('sess_')) return;
@@ -1446,7 +1449,7 @@ function AppContent() {
     enterNewConversation(targetMode);
   }, [enterNewConversation, setMode]);
 
-  const handleSendMessage = useCallback(async (content: string) => {
+  const handleSendMessage = useCallback(async (content: string, mediaItems?: MediaItem[]) => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId) return;
     if (currentSessionId === NEW_CONVERSATION_ID) {
@@ -1504,7 +1507,7 @@ function AppContent() {
         sessionIdRef.current = newSid;
         setSessionId(newSid);
         navigate({ kind: 'chat-session', sessionId: newSid }, { replace: true });
-        const sent = await sendMessage(content, newSid);
+        const sent = await sendMessage(content, newSid, mediaItems);
         newConversationProjectRef.current = null;
         if (!sent) {
           useChatStore.getState().setInputValue(newSid, content);
@@ -1521,7 +1524,7 @@ function AppContent() {
       return;
     }
     disposeInFlightHistoryHandles(currentSessionId);
-    const sent = await sendMessage(content, currentSessionId);
+    const sent = await sendMessage(content, currentSessionId, mediaItems);
     if (sent) {
       const sessionState = useSessionStore.getState();
       const session =
@@ -1534,10 +1537,18 @@ function AppContent() {
     }
   }, [disposeInFlightHistoryHandles, mode, navigate, request, sendMessage, t]);
 
+  const handlePersistMedia = useCallback((content: string, mediaItems: MediaItem[]) => {
+    const currentSessionId = sessionIdRef.current;
+    if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID) {
+      return Promise.reject(new Error('会话未就绪，请稍后重试'));
+    }
+    return persistMedia(content, currentSessionId, mediaItems);
+  }, [persistMedia]);
+
   useEffect(() => {
     return setA2UIActionHandler((message) => {
       const currentSessionId = sessionIdRef.current;
-      if (!currentSessionId || currentSessionId === 'new') return;
+      if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID) return;
       return sendStructuredChatContent(
         buildA2UIClientEventContent(message),
         currentSessionId,
@@ -1547,7 +1558,7 @@ function AppContent() {
 
   const handleInterrupt = useCallback((newInput?: string) => {
     const currentSessionId = sessionIdRef.current;
-    if (!currentSessionId || currentSessionId === 'new') return;
+    if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID) return;
     const trimmed = newInput?.trim();
     if (!trimmed) return;
     void supplement(currentSessionId, trimmed);
@@ -1555,7 +1566,7 @@ function AppContent() {
 
   const handleCancel = useCallback(() => {
     const currentSessionId = sessionIdRef.current;
-    if (!currentSessionId || currentSessionId === 'new') return;
+    if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID) return;
     if (mode === 'team') {
       void pause(currentSessionId);
       return;
@@ -1572,7 +1583,7 @@ function AppContent() {
 
   const handleUserAnswer = useCallback((requestId: string, answers: UserAnswer[], source?: string) => {
     const currentSessionId = sessionIdRef.current;
-    if (!currentSessionId || currentSessionId === 'new') return;
+    if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID) return;
     void sendUserAnswer(currentSessionId, requestId, answers, source);
   }, [sendUserAnswer]);
 
@@ -1721,7 +1732,7 @@ function AppContent() {
 
   const handleExportShare = useCallback(async () => {
     const currentSessionId = sessionIdRef.current;
-    if (!currentSessionId || currentSessionId === 'new' || (isProcessing && !isPaused) || isExportingShare) {
+    if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID || (isProcessing && !isPaused) || isExportingShare) {
       return;
     }
     setIsExportingShare(true);
@@ -1845,7 +1856,7 @@ function AppContent() {
           <>
             <div className="chat-layout flex-1 flex min-h-0 overflow-hidden">
               <ConversationSidebar
-                activeSessionId={sessionId === 'new' ? null : sessionId}
+                activeSessionId={sessionId === NEW_CONVERSATION_ID ? null : sessionId}
                 onNew={(options) => requestSessionNavigation('new', options)}
                 onSelect={requestSessionNavigation}
                 onDelete={(session) => { setDialogError(null); setDeleteTarget(session); }}
@@ -1869,6 +1880,7 @@ function AppContent() {
                   <div className={`flex-1 min-h-0`}>
                     <ChatPanel
                       onSendMessage={handleSendMessage}
+                      onPersistMedia={handlePersistMedia}
                       onInterrupt={handleInterrupt}
                       onCancel={handleCancel}
                       onSwitchMode={handleSwitchMode}
@@ -1876,7 +1888,7 @@ function AppContent() {
                       onUserAnswer={handleUserAnswer}
                       onExportShare={handleExportShare}
                       isExportingShare={isExportingShare}
-                      canExportShare={Boolean(sessionId && sessionId !== 'new' && (!isProcessing || isPaused))}
+                      canExportShare={Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (!isProcessing || isPaused))}
                       sessionTitle={sessionTitle}
                       sessionProjectName={sessionProjectName}
                       teamAreaExpanded={isTeamAreaExpanded}

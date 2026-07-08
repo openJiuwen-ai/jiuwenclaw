@@ -66,6 +66,22 @@ function isCompletedResumeResult(interruptResult: unknown): boolean {
   return result.intent === 'resume' && result.success === true && result.has_active_task === false;
 }
 
+function isTerminalInterruptResult(interruptResult: unknown): boolean {
+  if (!interruptResult || typeof interruptResult !== 'object') {
+    return false;
+  }
+  const result = interruptResult as {
+    intent?: unknown;
+    success?: unknown;
+    has_active_task?: unknown;
+  };
+  return (
+    result.success === true &&
+    (result.intent === 'cancel' ||
+      (result.intent === 'resume' && result.has_active_task === false))
+  );
+}
+
 function getConnectSignature(options: WebConnectOptions): string {
   return JSON.stringify({
     provider: options.provider || '',
@@ -305,7 +321,8 @@ interface UseWebSocketReturn {
     params?: Record<string, unknown>,
     options?: WebRequestOptions
   ) => Promise<T>;
-  sendMessage: (content: string, sessionId: string) => Promise<boolean>;
+  persistMedia: (content: string, sessionId: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
+  sendMessage: (content: string, sessionId: string, mediaItems?: MediaItem[]) => Promise<boolean>;
   sendStructuredChatContent: (content: unknown, sessionId: string) => Promise<void>;
   interrupt: (
     sessionId: string,
@@ -331,6 +348,42 @@ interface UseWebSocketReturn {
     feedback?: string
   ) => Promise<void>;
   getInflightCount: () => number;
+}
+
+interface PersistMediaResponse {
+  content?: string;
+  query?: string;
+  media_items?: Record<string, unknown>[];
+  files?: Record<string, unknown>;
+}
+
+function isPersistedMediaItem(item: MediaItem): boolean {
+  return typeof item.path === 'string' && item.path.trim().length > 0;
+}
+
+function getMediaMimeType(item: MediaItem): string {
+  return item.mime_type || item.mimeType;
+}
+
+function toPersistedMediaRecord(item: MediaItem): Record<string, unknown> {
+  return {
+    type: item.type,
+    filename: item.filename,
+    mime_type: getMediaMimeType(item),
+    path: item.path,
+    size_bytes: item.size_bytes ?? item.sizeBytes,
+  };
+}
+
+function buildPersistedMediaFiles(mediaItems: MediaItem[]): Record<string, unknown> {
+  return {
+    uploaded_images: mediaItems.map((item) => ({
+      filename: item.filename,
+      path: item.path,
+      mime_type: getMediaMimeType(item),
+      size_bytes: item.size_bytes ?? item.sizeBytes,
+    })),
+  };
 }
 
 interface ContextCompressionStatePayload extends Record<string, unknown> {
@@ -422,6 +475,53 @@ function stableEventId(...parts: unknown[]): string {
     .join(':')
     .replace(/[^a-zA-Z0-9:_-]+/g, '-')
     .slice(0, 180);
+}
+
+function getAgentRefId(payload: Record<string, unknown>): string | undefined {
+  const direct = payload.agent_ref;
+  if (isRecord(direct)) {
+    const id = pickString(direct.id);
+    if (id) {
+      return id;
+    }
+  }
+  const nestedPayload = payload.payload;
+  if (isRecord(nestedPayload)) {
+    const nested = nestedPayload.agent_ref;
+    if (isRecord(nested)) {
+      return pickString(nested.id);
+    }
+  }
+  return undefined;
+}
+
+function upsertHumanShareCommandFromEvent(
+  payload: Record<string, unknown>,
+  event: { member_id?: string; name?: string; mode?: string; timestamp?: number }
+): void {
+  if (event.mode !== 'human' || !event.member_id) {
+    return;
+  }
+  const sessionId = getPayloadSessionId(payload);
+  if (!sessionId) {
+    return;
+  }
+  const teamName = getAgentRefId(payload) || 'unknown';
+  const sessionRef = `team_${teamName}_session_${sessionId}`;
+  useSessionStore.getState().upsertTeamHumanShareCommand(
+    sessionId,
+    {
+      memberName: event.member_id,
+      displayName: event.name,
+      sessionId,
+      teamName,
+      sessionRef,
+      joinCommand: `/join ${sessionRef} as ${event.member_id}`,
+      exitCommand: `/exit ${sessionRef}`,
+      status: 'pending',
+      updatedAt: event.timestamp || Date.now(),
+    },
+  );
 }
 
 function stringifyCompact(value: unknown): string {
@@ -525,6 +625,39 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       return payloadSessionId;
     },
     []
+  );
+
+  const applyInterruptAcceptedState = useCallback(
+    (sessionId: string, intent: InterruptIntent, payload: Record<string, unknown>) => {
+      const accepted = payload.accepted !== false && payload.success !== false;
+      if (!accepted || (intent !== 'pause' && intent !== 'cancel')) return;
+
+      const resultPayload: InterruptResultPayload = {
+        ...payload,
+        session_id: sessionId,
+        intent,
+        success: true,
+        message: pickString(payload.message) ?? '',
+      } as InterruptResultPayload;
+      useChatStore.getState().setInterruptResult(sessionId, resultPayload);
+
+      const isPause = intent === 'pause';
+      useChatStore.getState().setPaused(sessionId, isPause);
+      useChatStore.getState().setProcessing(sessionId, false);
+      useChatStore.getState().setThinking(sessionId, false);
+      if (!isPause) {
+        useChatStore.getState().clearSubtasks(sessionId);
+        useChatStore.getState().stopStreaming(sessionId);
+      }
+
+      const sessionPatch: Partial<Session> = {
+        is_processing: false,
+        updated_at: new Date().toISOString(),
+      };
+      updateSession(sessionId, sessionPatch);
+      useWorkspaceStore.getState().patchSession(sessionId, sessionPatch);
+    },
+    [updateSession]
   );
 
   const handleTtsPlayback = useCallback(
@@ -826,10 +959,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     };
   }, [clearAllPendingTeamMemberContextCompressionStarts]);
 
+  const persistMedia = useCallback(
+    async (content: string, sessionId: string, mediaItems: MediaItem[]) => {
+      return request<PersistMediaResponse>('media.persist', {
+        session_id: sessionId,
+        content,
+        media_items: mediaItems as unknown as Record<string, unknown>[],
+      });
+    },
+    [request],
+  );
+
   // 发送聊天消息
   const sendMessage = useCallback(
-    async (content: string, sessionId: string): Promise<boolean> => {
-      if (!content.trim()) return false;
+    async (content: string, sessionId: string, mediaItems: MediaItem[] = []): Promise<boolean> => {
+      const hasMedia = mediaItems.length > 0;
+      if (!content.trim() && !hasMedia) return false;
 
       const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
       const unsupportedEvolutionMode = unsupportedEvolutionModeMessage(content, currentMode ?? 'agent.plan');
@@ -867,6 +1012,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         id: `user-${Date.now()}`,
         role: 'user',
         content,
+        mediaItems,
         timestamp: new Date().toISOString(),
         ...(selectedSkills.length > 0 ? { skills: selectedSkills } : {}),
       });
@@ -893,11 +1039,25 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         useChatStore.getState().setPaused(sessionId, false);
       }
       try {
-        // content 中将 {{skill:名称}} 替换为纯技能名
-        const plainContent = content.replace(/\{\{skill:([^}]+)\}\}/g, '$1');
+        let outgoingContent = content.replace(/\{\{skill:([^}]+)\}\}/g, '$1');
+        let outgoingMediaItems: Record<string, unknown>[] | undefined;
+        let outgoingFiles: Record<string, unknown> | undefined;
+        if (hasMedia) {
+          if (mediaItems.every(isPersistedMediaItem)) {
+            outgoingMediaItems = mediaItems.map(toPersistedMediaRecord);
+            outgoingFiles = buildPersistedMediaFiles(mediaItems);
+          } else {
+            const persisted = await persistMedia(content, sessionId, mediaItems);
+            outgoingContent = persisted.content ?? persisted.query ?? content;
+            outgoingMediaItems = persisted.media_items;
+            outgoingFiles = persisted.files;
+          }
+        }
         await request('chat.send', {
           session_id: sessionId,
-          content: plainContent,
+          content: outgoingContent,
+          ...(outgoingMediaItems ? { media_items: outgoingMediaItems } : {}),
+          ...(outgoingFiles ? { files: outgoingFiles } : {}),
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
           skills: selectedSkills,
@@ -920,6 +1080,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
     },
     [
+      persistMedia,
       request,
       resetContextCompressionTurn,
       setContextCompressionStats,
@@ -1014,7 +1175,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const selectedModel = useSessionStore.getState().getRuntime(sessionId)?.selectedModelName;
           if (selectedModel) params.model_name = selectedModel;
         }
-        await request('chat.interrupt', params);
+        const response = await request<Record<string, unknown>>('chat.interrupt', params);
+        applyInterruptAcceptedState(sessionId, intent, response);
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
@@ -1023,6 +1185,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     },
     [
       closeActiveTeamLeaderMessages,
+      applyInterruptAcceptedState,
       request,
       resetContextCompressionTurn,
       setConnectionStats,
@@ -1406,6 +1569,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const currentSessionStore = useSessionStore.getState();
         currentSessionStore.setTeamMembers(sessionId, []);
         currentSessionStore.setTeamTaskEvents(sessionId, []);
+        currentSessionStore.setTeamHumanShareCommands(sessionId, []);
         currentSessionStore.setTeamTasks(sessionId, []);
         currentSessionStore.setTeamMemberExecutionEvents(sessionId, []);
         clearAllTeamMemberContextCompressionStatus(sessionId);
@@ -1500,6 +1664,41 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.final', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
+
+        const memberAction = pickString(payload.member_action);
+        const actionMemberName = pickString(payload.member_name);
+        if (
+          actionMemberName &&
+          (memberAction === 'joined' || memberAction === 'left')
+        ) {
+          // 使用 upsert（若 spawned 事件尚未到达则创建占位，后续 spawned 事件会补全 teamName/sessionRef 等字段）
+          useSessionStore.getState().upsertTeamHumanShareCommand(
+            sessionId,
+            {
+              memberName: actionMemberName,
+              displayName: pickString(payload.display_name),
+              sessionId,
+              teamName: '',
+              sessionRef: '',
+              joinCommand: '',
+              exitCommand: '',
+              status: memberAction === 'joined' ? 'joined' : 'left',
+              sourceChannel: pickString(payload.source_channel),
+              userId: pickString(payload.user_id),
+              updatedAt: Date.now(),
+            },
+          );
+          const content = normalizeFinalContent(payload);
+          if (content) {
+            useChatStore.getState().addMessage(sessionId, {
+              id: `team-human-${memberAction}-${Date.now()}`,
+              role: 'system',
+              content,
+              timestamp: normalizeEventTimestampIso(payload.timestamp),
+            });
+          }
+          return;
+        }
 
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         const content = normalizeFinalContent(payload);
@@ -1652,12 +1851,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           if (last?.role === 'assistant' && last.content === content) {
             return;
           }
-
-          // 检查是否为主动推荐消息
-          const source = typeof payload.source === 'string' ? payload.source : '';
-          const isProactiveRecommendation = source === 'proactive_recommendation';
-          const proactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
-
           useChatStore.getState().addMessage(sessionId, {
             id: messageId,
             role: 'assistant',
@@ -1943,7 +2136,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 如果 interrupt_result 指示任务已完成，忽略 processing_status=true
         const interruptResult = useChatStore.getState().getRuntime(sessionId)?.interruptResult;
         const resumeAlreadyCompleted = isCompletedResumeResult(interruptResult);
-        if (isProcessingNow && resumeAlreadyCompleted) {
+        const terminalInterruptResult = isTerminalInterruptResult(interruptResult);
+        if (isProcessingNow && terminalInterruptResult) {
           return;
         }
         if (isProcessingNow && useChatStore.getState().getRuntime(sessionId)?.isPaused) {
@@ -2302,7 +2496,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         useChatStore.getState().addToolResult(sessionId, sessionResult);
       }),
       webClient.on('proactive_recommendation', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
+        const sessionId = resolveEventSessionId(payload);
+        if (!sessionId) return;
         const content = typeof payload.content === 'string' ? payload.content : '';
         if (!content) return;
 
@@ -2311,7 +2506,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const proactiveReason = typeof payload.proactive_reason === 'string' ? payload.proactive_reason : '';
 
         const messageId = `proactive-${Date.now()}`;
-        addMessage({
+        useChatStore.getState().addMessage(sessionId, {
           id: messageId,
           role: 'assistant',
           content,
@@ -2422,6 +2617,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             mode?: string;
           };
           const activeSessionId = getPayloadSessionId(payload) || undefined;
+          upsertHumanShareCommandFromEvent(payload, e);
           if (e.type === 'team.member.shutdown' && e.member_id) {
             applyTeamMemberShutdown(e.member_id, activeSessionId);
           } else if (activeSessionId && clearedTeamPanelSessionRef.current.has(activeSessionId)) {
@@ -2809,6 +3005,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     isConnected,
     connectionState,
     request,
+    persistMedia,
     sendMessage,
     sendStructuredChatContent,
     interrupt,

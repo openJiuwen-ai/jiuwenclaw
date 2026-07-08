@@ -60,6 +60,7 @@ from jiuwenswarm.common.utils import (
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
 from jiuwenswarm.common.version import __version__
+from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachments
 from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     coerce_root_categories_value,
     root_categories_to_text,
@@ -915,7 +916,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if env_path.is_file():
                 with open(env_path, "r", encoding="utf-8") as f:
                     lines = f.readlines()
-            updated_keys = set(updates.keys())
             new_lines: list[str] = []
             for line in lines:
                 stripped = line.strip()
@@ -2402,7 +2402,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         mem = psutil.virtual_memory()
         total_mb = mem.total / (1024 * 1024)
         available_mb = mem.available / (1024 * 1024)
-        used_percent = mem.percent
 
         await channel.send_response(ws, req_id, ok=True,
                                     payload={"rss_mb": rss_mb, "total_mb": total_mb,
@@ -2415,6 +2414,24 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             ok=True,
             payload={"accepted": True, "session_id": session_id},
         )
+
+    async def _media_persist(ws, req_id, params, session_id):
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        normalized = dict(params)
+        try:
+            normalize_chat_media_attachments(normalized, session_id)
+        except Exception as exc:
+            logger.exception("[media.persist] failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+            return
+        payload = {
+            key: normalized[key]
+            for key in ("content", "query", "media_items", "files")
+            if key in normalized
+        }
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _chat_resume(ws, req_id, params, session_id):
         await channel.send_response(
@@ -3270,6 +3287,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("hooks.list", _hooks_list)
 
     channel.register_method("chat.send", _chat_send)
+    channel.register_method("media.persist", _media_persist)
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)
     channel.register_method("chat.user_answer", _chat_user_answer)
@@ -3461,20 +3479,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _forward_harness_to_agent(ws, req_id, params, session_id, *, req_method):
         """harness.*：优先经 E2A 转发到 AgentServer；Agent 未就绪时本地执行（无 agent 实例）。"""
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.agent import AgentRequest
         from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(req_method, ReqMethod):
             await channel.send_response(ws, req_id, ok=False, error="invalid req_method", code="INTERNAL_ERROR")
             return
-
-        synthetic = AgentRequest(
-            request_id=str(req_id) if req_id else "",
-            channel_id="",
-            session_id=session_id,
-            req_method=req_method,
-            params=dict(params) if isinstance(params, dict) else {},
-        )
 
         ac = _resolve(agent_client)
         if ac is None or not getattr(ac, "server_ready", False):

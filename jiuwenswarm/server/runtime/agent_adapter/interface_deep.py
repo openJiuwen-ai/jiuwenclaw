@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import platform
+import re
 import subprocess
 import time
 from collections import Counter
@@ -122,6 +123,7 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
 from jiuwenswarm.agents.harness.common.rails import (
     JiuSwarmStreamEventRail,
+    MultimodalImageRail,
     ResponsePromptRail,
     RuntimePromptRail,
     StructuredAskUserRail,
@@ -270,7 +272,6 @@ from jiuwenswarm.common.utils import (
     get_agent_skills_dir,
     get_agent_workspace_dir,
     get_checkpoint_dir,
-    get_config_dir,
     get_env_file,
     get_prompt_attachment_dir,
     get_runtime_state_path,
@@ -2204,6 +2205,43 @@ class JiuWenSwarmDeepAdapter:
         )
         return Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
 
+    def _register_model_cache_entry(
+        self,
+        entry: dict[str, Any],
+        name_counter: dict[str, int],
+    ) -> None:
+        """Register one model entry into the request-selectable model cache."""
+        mcc = entry.get("model_client_config") or {}
+        if not mcc.get("model_name"):
+            return
+        model_name = mcc["model_name"]
+        idx = name_counter.get(model_name, 0)
+        name_counter[model_name] = idx + 1
+        cache_key = f"{model_name}#{idx}"
+        try:
+            model = self._build_model_from_entry(
+                mcc,
+                entry.get("model_config_obj") or {},
+            )
+            self._model_cache[cache_key] = model
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] 跳过无效模型条目 %s: %s",
+                model_name, exc,
+            )
+            return
+        if model_name not in self._model_name_to_keys:
+            self._model_name_to_keys[model_name] = []
+        self._model_name_to_keys[model_name].append(cache_key)
+
+        # 同时用纯 model_name 作为 key 指向 is_default=true 的条目
+        if entry.get("is_default") is True:
+            self._model_cache[model_name] = self._model_cache[cache_key]
+
+        alias = entry.get("alias") or ""
+        if alias and alias != model_name and alias not in self._model_cache:
+            self._model_cache[alias] = self._model_cache[cache_key]
+
     def _build_model_cache_from_defaults(self, config: dict) -> None:
         """从 models.defaults 列表构建模型缓存。
 
@@ -2214,35 +2252,7 @@ class JiuWenSwarmDeepAdapter:
         name_counter: dict[str, int] = {}
 
         for entry in get_default_models(config):
-            mcc = entry.get("model_client_config") or {}
-            if not mcc.get("model_name"):
-                continue
-            model_name = mcc["model_name"]
-            idx = name_counter.get(model_name, 0)
-            name_counter[model_name] = idx + 1
-            cache_key = f"{model_name}#{idx}"
-            try:
-                self._model_cache[cache_key] = self._build_model_from_entry(
-                    mcc,
-                    entry.get("model_config_obj") or {},
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] 跳过无效模型条目 %s: %s",
-                    model_name, exc,
-                )
-                continue
-            if model_name not in self._model_name_to_keys:
-                self._model_name_to_keys[model_name] = []
-            self._model_name_to_keys[model_name].append(cache_key)
-
-            # 同时用纯 model_name 作为 key 指向 is_default=true 的条目
-            if entry.get("is_default") is True:
-                self._model_cache[model_name] = self._model_cache[cache_key]
-
-            alias = entry.get("alias", "")
-            if alias and alias != model_name and alias not in self._model_cache:
-                self._model_cache[alias] = self._model_cache[cache_key]
+            self._register_model_cache_entry(entry, name_counter)
 
     def _build_model_cache_legacy(self, config: dict) -> None:
         """回退到旧格式（models.default / react 段）构建单条目缓存。"""
@@ -2329,6 +2339,34 @@ class JiuWenSwarmDeepAdapter:
         if requested in name_to_keys and requested in self._model_cache:
             return self._model_cache[requested]
         return self._model
+
+    @staticmethod
+    def _prepare_multimodal_image_inputs(
+        request: AgentRequest,
+        inputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+            extract_multimodal_image_files,
+        )
+
+        image_files = extract_multimodal_image_files(request.params)
+        if not image_files:
+            return inputs
+
+        updated = dict(inputs)
+        updated["_multimodal_image_files"] = image_files
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] Prepared %d image attachment(s) "
+            "for Core multimodal context-window injection",
+            len(image_files),
+        )
+        return updated
+
+    def _resolve_enable_read_image_multimodal(self, config: dict[str, Any]) -> bool:
+        configured = config.get("enable_read_image_multimodal")
+        if isinstance(configured, bool):
+            return configured
+        return self._vision_model_config is None
 
     def _apply_model_to_react_agent(self, model: Model) -> None:
         """将指定模型应用到 react_agent 实例（替换 _llm 和 _config 字段）。
@@ -2985,6 +3023,21 @@ class JiuWenSwarmDeepAdapter:
         return stream_event_rail
 
     @staticmethod
+    def _build_multimodal_image_rail(
+        enable_image_multimodal: bool | None = None,
+    ) -> MultimodalImageRail | None:
+        """Build MultimodalImageRail."""
+        try:
+            multimodal_image_rail = MultimodalImageRail(
+                enable_image_multimodal=enable_image_multimodal,
+            )
+            logger.info("[JiuWenSwarmDeepAdapter] MultimodalImageRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] MultimodalImageRail create failed: %s", exc)
+            multimodal_image_rail = None
+        return multimodal_image_rail
+
+    @staticmethod
     def _build_task_planning_rail() -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
@@ -3176,6 +3229,13 @@ class JiuWenSwarmDeepAdapter:
         rail_infos = [
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
+            _RailBuildInfo(
+                "_multimodal_image_rail",
+                self._build_multimodal_image_rail,
+                {
+                    "enable_image_multimodal": self._resolve_enable_read_image_multimodal(config),
+                },
+            ),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
@@ -3351,7 +3411,7 @@ class JiuWenSwarmDeepAdapter:
             rails=rails,
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
-            enable_read_image_multimodal=self._vision_model_config is None,
+            enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 
@@ -3734,7 +3794,7 @@ class JiuWenSwarmDeepAdapter:
             context_engine_config=_deep_agent_context_engine_config(config),
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
-            enable_read_image_multimodal=self._vision_model_config is None,
+            enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
             enable_llm_retry_rail=((config_base.get("execution_guard") or {}).get("llm_retry_rail") or {}).get(
                 "enabled", False
             ),
@@ -5657,6 +5717,7 @@ class JiuWenSwarmDeepAdapter:
         self._register_session_agent_task(session_id)
         if self._stream_event_rail is not None:
             self._stream_event_rail.reset_abort(session_id)
+        image_files_token = None
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -5672,7 +5733,18 @@ class JiuWenSwarmDeepAdapter:
                 )
             )
             inputs = dict(inputs)
+            inputs = self._prepare_multimodal_image_inputs(
+                request,
+                inputs,
+            )
             await self._sync_prompt_attachments_for_request(session_id)
+            from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                set_current_multimodal_image_files,
+            )
+
+            image_files_token = set_current_multimodal_image_files(
+                inputs.pop("_multimodal_image_files", []) or []
+            )
             result = await Runner.run_agent(agent=self._instance, inputs=inputs)
         except asyncio.CancelledError:
             logger.info(
@@ -5685,6 +5757,12 @@ class JiuWenSwarmDeepAdapter:
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
+            if image_files_token is not None:
+                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                    reset_current_multimodal_image_files,
+                )
+
+                reset_current_multimodal_image_files(image_files_token)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
@@ -5898,6 +5976,7 @@ class JiuWenSwarmDeepAdapter:
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         stream_consumer_cancelled = False
+        image_files_token = None
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -5915,7 +5994,18 @@ class JiuWenSwarmDeepAdapter:
             if self._stream_event_rail is not None:
                 self._stream_event_rail.reset_abort(session_id)
             inputs = dict(inputs)
+            inputs = self._prepare_multimodal_image_inputs(
+                request,
+                inputs,
+            )
             await self._sync_prompt_attachments_for_request(session_id)
+            from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                set_current_multimodal_image_files,
+            )
+
+            image_files_token = set_current_multimodal_image_files(
+                inputs.pop("_multimodal_image_files", []) or []
+            )
             async for chunk in Runner.run_agent_streaming(self._instance, inputs):
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                     parsed = self._parse_stream_chunk(chunk)
@@ -6139,6 +6229,12 @@ class JiuWenSwarmDeepAdapter:
                 is_complete=False,
             )
         finally:
+            if image_files_token is not None:
+                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                    reset_current_multimodal_image_files,
+                )
+
+                reset_current_multimodal_image_files(image_files_token)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
@@ -7333,7 +7429,6 @@ class JiuWenSwarmDeepAdapter:
             return {"status": "failed", "error": "Model returned empty response"}
 
         # Strip <analysis> block to get clean summary
-        import re
         cleaned = re.sub(r"<analysis>.*?</analysis>", "", summary, flags=re.DOTALL).strip()
 
         return {
@@ -7359,7 +7454,6 @@ class JiuWenSwarmDeepAdapter:
             # skip tool call/result records — they contain JSON blobs, not useful for summary
             if role == "user":
                 # strip file-content blocks to save tokens
-                import re
                 cleaned = re.sub(r"<file-content[^>]*>.*?</file-content>", "", content, flags=re.DOTALL).strip()
                 if cleaned:
                     messages.append(UserMessage(content=cleaned))

@@ -9,9 +9,14 @@ export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 export interface MediaItem {
   type: 'image' | 'audio' | 'video' | 'document';
   mimeType: string;
+  mime_type?: string;
   filename: string;
   base64Data?: string;
+  base64_data?: string;
   url?: string;
+  path?: string;
+  sizeBytes?: number;
+  size_bytes?: number;
 }
 
 export interface UsageSummary {
