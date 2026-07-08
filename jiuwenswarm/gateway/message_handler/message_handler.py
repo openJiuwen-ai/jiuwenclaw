@@ -3550,10 +3550,6 @@ class MessageHandler(ABC):
                 "[MessageHandler] Stream 异常: request_id=%s total_chunks=%s error=%s",
                 rid, _proc_count, exc,
             )
-            await self._publish_stream_cancelled_final(
-                rid, channel_id, session_id, request_metadata,
-            )
-            raise  # 重新抛出，让调用者知道任务被取消
         except RuntimeError as exc:
             if "AgentServer WebSocket connection closed" not in str(exc):
                 raise
@@ -3564,6 +3560,15 @@ class MessageHandler(ABC):
                 request_metadata,
                 str(exc),
             )
+        except Exception as exc:
+            logger.exception(
+                "[MessageHandler] Stream 异常: request_id=%s total_chunks=%s error=%s",
+                rid, _proc_count, exc,
+            )
+            await self._publish_stream_cancelled_final(
+                rid, channel_id, session_id, request_metadata,
+            )
+            raise  # 重新抛出，让调用者知道任务被取消
         finally:
             if (
                 not cancelled
