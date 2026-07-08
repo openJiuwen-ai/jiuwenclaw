@@ -28,7 +28,11 @@ logger = logging.getLogger(__name__)
 
 # ── Trusted-directory persistence (local, no server/harness changes) ───
 
-_STATE_FILE = Path.home() / ".jiuwenswarm" / "cli_trusted_dirs_state.json"
+# 基于 get_agent_workspace_dir()（~/.jiuwenswarm/agent/workspace），
+# 跟随 JIUWENSWARM_DATA_DIR 做多实例隔离，与 config.yaml 保持同一基准。
+from jiuwenswarm.common.utils import get_agent_workspace_dir
+
+_STATE_FILE = get_agent_workspace_dir() / "cli_trusted_dirs_state.json"
 
 
 def _load_state() -> dict[str, bool]:
@@ -146,9 +150,9 @@ def _prompt_and_cleanup_dirs() -> None:
     new_dirs = [d for d in persisted if d not in state]
 
     for d in sorted(new_dirs):
-        write_stderr(f"\nNew workspace added: {d}\n")
+        write_stderr(f"\nNew trusted directory detected: {d}\n")
         try:
-            answer = input("Keep using this workspace? [Y/n]: ").strip().lower()
+            answer = input("Keep this directory as trusted? [Y/n]: ").strip().lower()
         except EOFError:
             answer = "y"
 
@@ -158,9 +162,9 @@ def _prompt_and_cleanup_dirs() -> None:
 
         if not keep:
             if _remove_dir_from_config(d):
-                write_stderr(f"Workspace removed: {d}\n")
+                write_stderr(f"Trusted directory removed: {d}\n")
             else:
-                write_stderr(f"Failed to remove workspace: {d}\n")
+                write_stderr(f"Failed to remove trusted directory: {d}\n")
 
 MODE_ALIASES: dict[str, str] = {
     "agent": "agent.plan",
