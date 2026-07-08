@@ -19,14 +19,33 @@ from __future__ import annotations
 import json
 import os
 import logging
+from dataclasses import dataclass
 from typing import Any, List, Union
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 from jiuwenclaw.config import get_file_transfer_config
 from jiuwenclaw.agentserver.file_transfer_manager import get_file_transfer_manager
+from jiuwenclaw.agentserver.tools.cron_tool_context import (
+    get_cron_tool_channel_id,
+    get_cron_tool_metadata,
+    get_cron_tool_session_id,
+)
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SendFileRoute:
+    """Per-request routing context for send_file (resolved from contextvars).
+
+    Encapsulates the 4 related routing fields so they are passed as a single
+    argument instead of 4 separate ones (G.FNM.03).
+    """
+    request_id: str
+    session_id: str
+    channel_id: str
+    metadata: dict[str, Any] | None
 
 
 class SendFileToolkit:
@@ -76,8 +95,34 @@ class SendFileToolkit:
             request_id, session_id, channel_id, bool(self._request_metadata),
         )
 
+    def _resolve_route(self) -> SendFileRoute:
+        """Resolve per-request route from contextvars (set by _bind_runtime_cron_context),
+        falling back to instance attrs for callers that don't set the contextvars.
+
+        Reading from contextvars at execution time makes the toolkit safe to share
+        across concurrent requests: each async task sees its own request's values.
+        """
+        cv_session_id = get_cron_tool_session_id()
+        cv_channel_id = get_cron_tool_channel_id()
+        cv_metadata = get_cron_tool_metadata()
+        session_id = cv_session_id or self.session_id
+        channel_id = cv_channel_id or self.channel_id
+        if cv_metadata:
+            metadata = dict(cv_metadata)
+            request_id = metadata.get("request_id") or self.request_id
+        else:
+            metadata = self._request_metadata
+            request_id = self.request_id
+        return SendFileRoute(
+            request_id=request_id,
+            session_id=session_id,
+            channel_id=channel_id,
+            metadata=metadata,
+        )
+
     async def send_file(self, abs_file_path_list: Union[List[str], str]) -> str:
         """Send files to user."""
+        route = self._resolve_route()
         if isinstance(abs_file_path_list, str):
             try:
                 parsed = json.loads(abs_file_path_list)
@@ -113,20 +158,21 @@ class SendFileToolkit:
 
         logger.info(
             "[SendFileToolkit] send_file 开始 session_id=%s 有效文件=%d 缺失=%d",
-            self.session_id, len(valid_files), len(missing_files),
+            route.session_id, len(valid_files), len(missing_files),
         )
 
         # 检查是否启用分布式文件传输
         ft_config = get_file_transfer_config()
         if ft_config.enabled:
-            return await self._send_file_distributed(valid_files, missing_files)
+            return await self._send_file_distributed(valid_files, missing_files, route)
         else:
-            return await self._send_file_local(valid_files, missing_files)
+            return await self._send_file_local(valid_files, missing_files, route)
 
     async def _send_file_local(
         self,
         valid_files: List[str],
         missing_files: List[str],
+        route: SendFileRoute,
     ) -> str:
         """本地模式：直接传递文件路径。"""
         from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
@@ -141,7 +187,7 @@ class SendFileToolkit:
             for file_path in valid_files:
                 base_name = os.path.basename(file_path)
                 download_info = build_file_download_info(
-                    file_path, base_name, self.session_id
+                    file_path, base_name, route.session_id
                 )
                 files_payload.append({
                     "path": file_path,
@@ -170,9 +216,9 @@ class SendFileToolkit:
             append_history_record,
         )
         append_history_record(
-            session_id=self.session_id,
-            request_id=self.request_id,
-            channel_id=self.channel_id,
+            session_id=route.session_id,
+            request_id=route.request_id,
+            channel_id=route.channel_id,
             role="assistant",
             event_type="chat.file",
             content="",
@@ -181,17 +227,17 @@ class SendFileToolkit:
         )
 
         msg = {
-            "request_id": self.request_id,
-            "channel_id": self.channel_id,
-            "session_id": self.session_id,
+            "request_id": route.request_id,
+            "channel_id": route.channel_id,
+            "session_id": route.session_id,
             "payload": {
                 "event_type": "chat.file",
                 "files": files_payload,
             },
             "is_complete": False,
         }
-        if self._request_metadata:
-            msg["metadata"] = dict(self._request_metadata)
+        if route.metadata:
+            msg["metadata"] = dict(route.metadata)
         await server.send_push(msg)
         result_parts = [f"成功发送 {len(valid_files)} 个文件"]
         if missing_files:
@@ -204,6 +250,7 @@ class SendFileToolkit:
         self,
         valid_files: List[str],
         missing_files: List[str],
+        route: SendFileRoute,
     ) -> str:
         """分布式模式：通过分片传输发送文件到 Gateway。"""
         ft_manager = get_file_transfer_manager()
@@ -216,9 +263,9 @@ class SendFileToolkit:
                     from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
                     server = AgentWebSocketServer.get_instance()
                     msg = {
-                        "request_id": self.request_id,
-                        "channel_id": self.channel_id,
-                        "session_id": self.session_id,
+                        "request_id": route.request_id,
+                        "channel_id": route.channel_id,
+                        "session_id": route.session_id,
                         "payload": {
                             "event_type": event_type,
                             **params,
@@ -230,9 +277,9 @@ class SendFileToolkit:
                 result = await ft_manager.send_file(
                     file_path=file_path,
                     send_callback=send_callback,
-                    session_id=self.session_id,
-                    channel_id=self.channel_id,
-                    request_id=self.request_id,
+                    session_id=route.session_id,
+                    channel_id=route.channel_id,
+                    request_id=route.request_id,
                 )
 
                 if result.get("success"):
@@ -270,10 +317,24 @@ class SendFileToolkit:
 
         return "\n".join(result_parts) if result_parts else "发送完成"
 
-    def get_tools(self) -> List[Tool]:
-        """Return tools for registration in Runner."""
+    def get_tools(self, *, tool_id: str | None = None) -> List[Tool]:
+        """Return tools for registration in Runner.
+
+        Args:
+            tool_id: Optional stable id for the tool card. When provided, the tool
+                is registered under this id (enabling safe single registration and
+                name-based fallback lookup in resource_mgr). When omitted, a random
+                uuid is used (per-instance isolation, e.g. team members).
+        """
         def make_tool(name: str, description: str, input_params: dict, func) -> Tool:
-            card = ToolCard(name=name, description=description, input_params=input_params)
+            card_kwargs: dict[str, Any] = {
+                "name": name,
+                "description": description,
+                "input_params": input_params,
+            }
+            if tool_id:
+                card_kwargs["id"] = tool_id
+            card = ToolCard(**card_kwargs)
             return LocalFunction(card=card, func=func)
 
         return [

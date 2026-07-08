@@ -741,22 +741,28 @@ async def _run_single_request(
                         if event == "chat.processing_status":
                             if payload.get("is_processing") is True:
                                 hitl_paused = False
-                            elif _should_complete_on_processing_idle(
-                                accepted=accepted,
-                                saw_agent_output=saw_agent_output,
-                                hitl_paused=hitl_paused,
-                                payload=payload,
-                            ):
-                                result.final_received = True
-                                result.ok = True
-                                result.accepted = True
-                                result.total_ms = (time.perf_counter() - t0) * 1000
-                                await _log_terminal(
-                                    success=True,
-                                    event="done",
-                                    detail="reason=processing_status_idle",
-                                )
-                                return result
+                            else:
+                                # is_processing=false 表示 Agent 已停止处理；
+                                # 清除可能残留的 hitl_paused（某些权限中断只发
+                                # invocation_paused 不发 ask_user_question，客户端
+                                # 未放行时 hitl_paused 会卡 True，导致完成帧被挡）
+                                hitl_paused = False
+                                if _should_complete_on_processing_idle(
+                                    accepted=accepted,
+                                    saw_agent_output=saw_agent_output,
+                                    hitl_paused=hitl_paused,
+                                    payload=payload,
+                                ):
+                                    result.final_received = True
+                                    result.ok = True
+                                    result.accepted = True
+                                    result.total_ms = (time.perf_counter() - t0) * 1000
+                                    await _log_terminal(
+                                        success=True,
+                                        event="done",
+                                        detail="reason=processing_status_idle",
+                                    )
+                                    return result
                             continue
                         if _is_intra_turn_chat_final(event, payload):
                             if ws_event_log:

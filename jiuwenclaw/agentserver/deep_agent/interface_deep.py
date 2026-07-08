@@ -847,6 +847,7 @@ class JiuWenClawDeepAdapter:
         self._vision_tools_registered: bool = False
         self._audio_tools_registered: bool = False
         self._video_tool_registered: bool = False
+        self._send_file_toolkit: SendFileToolkit | None = None
         self._model: Model | None = None
         self._model_client_config: ModelClientConfig | None = None
         self._model_request_config: ModelRequestConfig | None = None
@@ -2372,7 +2373,8 @@ class JiuWenClawDeepAdapter:
         self._video_tool_registered = False
         if self._video_model_config:
             try:
-                Runner.resource_mgr.add_tool(video_understanding)
+                if not Runner.resource_mgr.get_tool(video_understanding.card.id):
+                    Runner.resource_mgr.add_tool(video_understanding)
                 tool_cards.append(video_understanding.card)
                 self._video_tool_registered = True
             except Exception as exc:
@@ -2445,7 +2447,8 @@ class JiuWenClawDeepAdapter:
         # DeepResearch 执行工具
         try:
             for tool in get_deepresearch_tools():
-                Runner.resource_mgr.add_tool(tool)
+                if not Runner.resource_mgr.get_tool(tool.card.id):
+                    Runner.resource_mgr.add_tool(tool)
                 tool_cards.append(tool.card)
             logger.info(
                 "[JiuWenClawDeepAdapter] deepresearch tools registered successfully",
@@ -2779,19 +2782,13 @@ class JiuWenClawDeepAdapter:
             )
 
             # Register fork_agent tool (ignore if already exists)
-            try:
+            if not RunnerClass.resource_mgr.get_tool(fork_agent.card.id):
                 RunnerClass.resource_mgr.add_tool(fork_agent)
-            except Exception as e:
-                if "already exist" not in str(e):
-                    logger.warning("[JiuWenClawDeepAdapter] Failed to register fork_agent tool: %s", e)
             self._instance.ability_manager.add(fork_agent.card)
 
             # Register spawn_subagent tool (ignore if already exists)
-            try:
+            if not RunnerClass.resource_mgr.get_tool(spawn_subagent.card.id):
                 RunnerClass.resource_mgr.add_tool(spawn_subagent)
-            except Exception as e:
-                if "already exist" not in str(e):
-                    logger.warning("[JiuWenClawDeepAdapter] Failed to register spawn_subagent tool: %s", e)
             self._instance.ability_manager.add(spawn_subagent.card)
 
             logger.info("[JiuWenClawDeepAdapter] Fork agent and spawn_subagent tools initialized")
@@ -3164,19 +3161,33 @@ class JiuWenClawDeepAdapter:
         send_file_channel_allowed = send_file_enabled or channel == "officeclaw"
         has_send_file_request_context = bool(request_id and session_id)
         if send_file_channel_allowed and has_send_file_request_context:
-            # 先卸载上一次请求遗留的 send_file 工具
+            # send_file_to_user 工具用稳定 id 注册一次即可；每次请求只刷新 per-request 上下文。
+            # send_file 在执行时从 contextvar（_bind_runtime_cron_context 设置）读取
+            # request_id/session_id/channel_id/metadata，并发安全，不会串话。
+            if self._send_file_toolkit is None:
+                self._send_file_toolkit = SendFileToolkit(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel_id=get_cron_tool_channel_id(),
+                    metadata=get_cron_tool_metadata(),
+                )
+                for sf_tool in self._send_file_toolkit.get_tools(tool_id="send_file_to_user"):
+                    if not Runner.resource_mgr.get_tool(sf_tool.card.id):
+                        Runner.resource_mgr.add_tool(sf_tool)
+                    self._instance.ability_manager.add(sf_tool.card)
+            else:
+                # 后续请求：只刷新 toolkit 的 fallback 上下文，不重建/不重注册，消除并发竞态
+                self._send_file_toolkit.update_runtime_context(
+                    request_id=request_id,
+                    session_id=session_id,
+                    channel_id=get_cron_tool_channel_id(),
+                    metadata=get_cron_tool_metadata(),
+                )
+        else:
+            # 当前 channel 不允许 send_file：卸载本 agent 上遗留的 send_file 工具卡
             for existing in list(self._instance.ability_manager.list() or []):
                 if getattr(existing, "name", "").startswith("send_file_to_user"):
                     self._instance.ability_manager.remove(existing.name)
-            send_file_toolkit = SendFileToolkit(
-                request_id=request_id,
-                session_id=session_id,
-                channel_id=get_cron_tool_channel_id(),
-                metadata=get_cron_tool_metadata(),
-            )
-            for sf_tool in send_file_toolkit.get_tools():
-                Runner.resource_mgr.add_tool(sf_tool)
-                self._instance.ability_manager.add(sf_tool.card)
 
     def _refresh_acp_runtime_tools(
             self,

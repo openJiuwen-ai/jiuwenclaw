@@ -2659,14 +2659,19 @@ class MessageHandler(ABC):
                 rid,
             )
             self._requests_finished_total += 1
-            # 所有流式任务正常结束后，通知前端全部处理完成
+            # 本 session 的所有流式任务正常结束后，通知前端该 session 处理完成
             # 只有当 AgentServer 没有发送过 processing_status=false 时才发送
-            if not cancelled and not self._stream_tasks and not has_processing_status_false:
+            # 用 per-session 判断（该 session 无其他活跃流），而非全局 _stream_tasks，
+            # 否则并发下只有最后一个 session 能收到完成帧，其余 hang
+            session_still_streaming = (
+                session_id is not None and session_id in self._stream_sessions.values()
+            )
+            if not cancelled and not session_still_streaming and not has_processing_status_false:
                 await self._send_processing_status(
                     rid, session_id, channel_id, is_processing=False,
                 )
                 logger.info(
-                    "[MessageHandler] 所有流式任务已完成，已发送 is_processing=false: session_id=%s",
+                    "[MessageHandler] session 流式任务已完成，已发送 is_processing=false: session_id=%s",
                     session_id,
                 )
 
