@@ -60,11 +60,16 @@ else:
     _new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 _old_workspace = _workspace_dir / "agent" / "workspace"
 
+_enterprise_runtime = bool(os.getenv("AGENT_RUNTIME", "").strip())
+
 # Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
 else:
-    update_config()
+    # 企业级多 Pod 共享 PVC：各 AgentServer 启动时 merge 写 config.yaml 会与并发读竞态。
+    # 配置由部署侧/init 写入 PVC，运行时经 Gateway reload_config 热更新，不在此 merge。
+    if not _enterprise_runtime:
+        update_config()
     cleanup_legacy_flat_agent_dir(_workspace_dir)
 
 configure_openjiuwen_logging_under_jiuwenclaw()

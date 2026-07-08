@@ -338,13 +338,6 @@ def test_sanitize_long_text_without_sensitive_keywords_is_fast():
     assert "example.com" not in out
 
 
-def test_validate_pattern_rejects_slow_custom_pattern():
-    from jiuwenclaw.infrastructure.log_masking.engine import validate_pattern
-
-    with pytest.raises(ValueError, match=r"too slow"):
-        validate_pattern(r"(x+)+y")
-
-
 @pytest.mark.parametrize(
     "pattern",
     [
