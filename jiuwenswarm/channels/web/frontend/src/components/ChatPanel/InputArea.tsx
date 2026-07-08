@@ -128,8 +128,8 @@ export function InputArea({
   const [workMenuOpen, setWorkMenuOpen] = useState<'project' | null>(null);
   const [workDialogOpen, setWorkDialogOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState('');
-  const [projectPathDraft, setProjectPathDraft] = useState('');
-  const [projectPathError, setProjectPathError] = useState<string | null>(null);
+  const [projectDirDraft, setProjectDirDraft] = useState('');
+  const [projectDirError, setProjectDirError] = useState<string | null>(null);
   const [projectSearch, setProjectSearch] = useState('');
   const [projectCreateMode, setProjectCreateMode] = useState<ProjectCreateMode>('blank');
   const [menuDirection, setMenuDirection] = useState<'up' | 'down'>('up');
@@ -221,13 +221,13 @@ export function InputArea({
       const matched = projects.find((project) => project.project_id === activeSession.project_id);
       if (matched && !isDefaultProject(matched)) return matched;
     }
-    if (activeSession?.project_path) {
-      const matched = projects.find((project) => project.project_path === activeSession.project_path);
+    if (activeSession?.project_dir) {
+      const matched = projects.find((project) => project.project_dir === activeSession.project_dir);
       if (matched && !isDefaultProject(matched)) return matched;
-      const path = activeSession.project_path || '';
+      const path = activeSession.project_dir || '';
       return {
         project_id: activeSession.project_id || path,
-        project_path: path,
+        project_dir: path,
         name: path.split('/').filter(Boolean).pop() || t('multiSession.project.projects'),
         pinned: false,
         pin_order: 0,
@@ -864,20 +864,20 @@ export function InputArea({
   }, [isProcessing, mode]);
 
   const openProjectCreateDialog = useCallback(async (mode: ProjectCreateMode) => {
-    setProjectPathError(null);
+    setProjectDirError(null);
     setProjectCreateMode(mode);
     setWorkMenuOpen(null);
 
     if (mode === 'blank') {
       setProjectNameDraft('');
-      setProjectPathDraft('');
+      setProjectDirDraft('');
       setWorkDialogOpen(true);
       return;
     }
 
     if (!isProjectDirectoryPickerSupported()) {
       setProjectNameDraft('');
-      setProjectPathDraft('');
+      setProjectDirDraft('');
       setWorkDialogOpen(true);
       return;
     }
@@ -886,9 +886,9 @@ export function InputArea({
     if (!result.ok) {
       if (result.reason !== 'cancelled') {
         setProjectNameDraft('');
-        setProjectPathDraft('');
+        setProjectDirDraft('');
         setWorkDialogOpen(true);
-        setProjectPathError(
+        setProjectDirError(
           result.reason === 'unsupported'
             ? t('multiSession.project.directoryPickerUnsupported')
             : result.message || t('multiSession.project.directoryPickerFailed'),
@@ -901,29 +901,29 @@ export function InputArea({
       await createProject(result.name, result.path);
     } catch (error) {
       const errorKey = projectCreateErrorKey(error);
-      setProjectPathError(errorKey ? t(errorKey) : error instanceof Error ? error.message : String(error));
+      setProjectDirError(errorKey ? t(errorKey) : error instanceof Error ? error.message : String(error));
     }
   }, [createProject, t]);
 
-  const handleAddProjectPath = useCallback(async () => {
+  const handleAddProjectDir = useCallback(async () => {
     const name = projectNameDraft.trim();
-    const projectPath = projectCreateMode === 'blank' ? '' : projectPathDraft.trim();
-    if (!name || (projectCreateMode === 'existing' && !projectPath)) return;
-    setProjectPathError(null);
-    if (projectPath && (!isLikelyAbsolutePath(projectPath) || projectPath.startsWith('~/'))) {
-      setProjectPathError(t('multiSession.project.absolutePathError'));
+    const projectDir = projectCreateMode === 'blank' ? '' : projectDirDraft.trim();
+    if (!name || (projectCreateMode === 'existing' && !projectDir)) return;
+    setProjectDirError(null);
+    if (projectDir && (!isLikelyAbsolutePath(projectDir) || projectDir.startsWith('~/'))) {
+      setProjectDirError(t('multiSession.project.absolutePathError'));
       return;
     }
     try {
-      await createProject(name, projectPath);
+      await createProject(name, projectDir);
       setProjectNameDraft('');
-      setProjectPathDraft('');
+      setProjectDirDraft('');
       setWorkDialogOpen(false);
     } catch (error) {
       const errorKey = projectCreateErrorKey(error);
-      setProjectPathError(errorKey ? t(errorKey) : error instanceof Error ? error.message : String(error));
+      setProjectDirError(errorKey ? t(errorKey) : error instanceof Error ? error.message : String(error));
     }
-  }, [createProject, projectCreateMode, projectNameDraft, projectPathDraft, t]);
+  }, [createProject, projectCreateMode, projectNameDraft, projectDirDraft, t]);
 
   const currentMode = AGENT_MODE_OPTIONS.find((item) => item.value === mode) ?? AGENT_MODE_OPTIONS[0];
   const evolutionLabel = getEvolutionPillLabel(mode, evolutionStatus, t);
@@ -1154,7 +1154,7 @@ export function InputArea({
               className={clsx('chat-work-select__trigger', displayedProject && 'chat-work-select__trigger--selected')}
               onClick={() => !isWorkContextLocked && setWorkMenuOpen((open) => open === 'project' ? null : 'project')}
               disabled={isWorkContextLocked}
-              title={displayedProject?.project_path || (isWorkContextLocked ? t('multiSession.project.lockedProjectTitle') : t('multiSession.project.chooseProjectDirectory'))}
+              title={displayedProject?.project_dir || (isWorkContextLocked ? t('multiSession.project.lockedProjectTitle') : t('multiSession.project.chooseProjectDirectory'))}
             >
               <img className="chat-work-select__root-icon" src={workFolderIcon} alt="" aria-hidden="true" />
               <span>{getProjectLabel(displayedProject, t('multiSession.project.chooseProjectDirectory'))}</span>
@@ -1216,7 +1216,7 @@ export function InputArea({
                           }}
                           role="menuitemradio"
                           aria-checked={active}
-                          title={project.project_path}
+                          title={project.project_dir}
                         >
                           <img src={workFolderIcon} alt="" aria-hidden="true" />
                           <span>{project.name}</span>
@@ -1237,8 +1237,8 @@ export function InputArea({
               </div>
             ) : null}
           </div>
-          {projectPathError && !workDialogOpen ? (
-            <div className="chat-work-select__error" role="alert">{projectPathError}</div>
+          {projectDirError && !workDialogOpen ? (
+            <div className="chat-work-select__error" role="alert">{projectDirError}</div>
           ) : null}
         </div>
       ) : null}
@@ -1249,7 +1249,7 @@ export function InputArea({
             className="chat-work-dialog"
             onSubmit={(event) => {
               event.preventDefault();
-              void handleAddProjectPath();
+              void handleAddProjectDir();
             }}
           >
             <button
@@ -1257,9 +1257,9 @@ export function InputArea({
               className="chat-work-dialog__close"
               aria-label={t('common.close')}
               onClick={() => {
-                setProjectPathDraft('');
+                setProjectDirDraft('');
                 setProjectNameDraft('');
-                setProjectPathError(null);
+                setProjectDirError(null);
                 setWorkDialogOpen(false);
               }}
             >
@@ -1276,8 +1276,8 @@ export function InputArea({
             {projectCreateMode === 'existing' ? (
               <input
                 className="chat-work-dialog__input"
-                value={projectPathDraft}
-                onChange={(event) => setProjectPathDraft(event.target.value)}
+                value={projectDirDraft}
+                onChange={(event) => setProjectDirDraft(event.target.value)}
                 placeholder="/Users/name/work/project"
               />
             ) : null}
@@ -1285,9 +1285,9 @@ export function InputArea({
               <button
                 type="button"
                 onClick={() => {
-                  setProjectPathDraft('');
+                  setProjectDirDraft('');
                   setProjectNameDraft('');
-                  setProjectPathError(null);
+                  setProjectDirError(null);
                   setWorkDialogOpen(false);
                 }}
               >
@@ -1295,12 +1295,12 @@ export function InputArea({
               </button>
               <button
                 type="submit"
-                disabled={!projectNameDraft.trim() || (projectCreateMode === 'existing' && !projectPathDraft.trim())}
+                disabled={!projectNameDraft.trim() || (projectCreateMode === 'existing' && !projectDirDraft.trim())}
               >
                 {t('multiSession.project.confirm')}
               </button>
             </div>
-            {projectPathError ? <div className="chat-work-dialog__error">{projectPathError}</div> : null}
+            {projectDirError ? <div className="chat-work-dialog__error">{projectDirError}</div> : null}
           </form>
         </div>
       ) : null}

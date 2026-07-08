@@ -1,6 +1,6 @@
 import type { ProjectInfo } from '../../types';
 
-export function isDefaultInputProject(project: Pick<ProjectInfo, 'project_id' | 'project_path' | 'is_default'>): boolean {
+export function isDefaultInputProject(project: Pick<ProjectInfo, 'project_id' | 'project_dir' | 'is_default'>): boolean {
   return project.is_default || project.project_id === 'default';
 }
 
@@ -11,7 +11,7 @@ export function getInputProjectOptions(projects: ProjectInfo[], search = ''): Pr
     if (!keyword) return true;
     return (
       project.name.toLowerCase().includes(keyword)
-      || project.project_path.toLowerCase().includes(keyword)
+      || project.project_dir.toLowerCase().includes(keyword)
     );
   });
 }

@@ -1,7 +1,7 @@
 export type ProjectInfo = {
   project_id: string;
   name: string;
-  project_path: string;
+  project_dir: string;
   pinned: boolean;
   pin_order: number;
   is_default: boolean;

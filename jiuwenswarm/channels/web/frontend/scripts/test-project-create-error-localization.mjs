@@ -12,11 +12,11 @@ const moduleUrl = `data:text/javascript;base64,${Buffer.from(compiled.code).toSt
 const { projectCreateErrorKey } = await import(moduleUrl);
 
 assert.equal(
-  projectCreateErrorKey(new Error('project_path already exists')),
+  projectCreateErrorKey(new Error('project_dir already exists')),
   'multiSession.project.errors.pathExists',
 );
 assert.equal(
-  projectCreateErrorKey(new Error('Error: project_path already exists')),
+  projectCreateErrorKey(new Error('Error: project_dir already exists')),
   'multiSession.project.errors.pathExists',
 );
 assert.equal(projectCreateErrorKey(new Error('permission denied')), null);
@@ -26,7 +26,7 @@ const en = JSON.parse(await readFile(new URL('../src/i18n/locales/en.json', impo
 
 assert.equal(typeof zh.multiSession.project.errors.pathExists, 'string');
 assert.equal(typeof en.multiSession.project.errors.pathExists, 'string');
-assert.notEqual(zh.multiSession.project.errors.pathExists, 'project_path already exists');
-assert.notEqual(en.multiSession.project.errors.pathExists, 'project_path already exists');
+assert.notEqual(zh.multiSession.project.errors.pathExists, 'project_dir already exists');
+assert.notEqual(en.multiSession.project.errors.pathExists, 'project_dir already exists');
 
 console.log('project create error localization ok');

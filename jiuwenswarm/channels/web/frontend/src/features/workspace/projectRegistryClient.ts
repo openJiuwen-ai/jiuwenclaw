@@ -12,9 +12,9 @@ export const projectRegistryClient = {
       ...(limit !== undefined ? { limit } : {}),
     },
   ),
-  create: (name: string, projectPath: string) => webRequest<{ project_id: string; restored: boolean }>(
+  create: (name: string, projectDir: string) => webRequest<{ project_id: string; restored: boolean }>(
     'project.create',
-    { name, project_path: projectPath },
+    { name, project_dir: projectDir },
   ),
   rename: (projectId: string, name: string) => webRequest<Record<string, never>>(
     'project.rename',

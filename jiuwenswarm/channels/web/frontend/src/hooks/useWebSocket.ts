@@ -72,7 +72,7 @@ function getConnectSignature(options: WebConnectOptions): string {
     apiKey: options.apiKey || '',
     apiBase: options.apiBase || '',
     model: options.model || '',
-    projectPath: options.projectPath || '',
+    projectDir: options.projectDir || '',
   });
 }
 
@@ -291,7 +291,7 @@ interface UseWebSocketOptions {
   apiKey?: string;
   apiBase?: string;
   model?: string;
-  projectPath?: string;
+  projectDir?: string;
   onConnect?: (payload: ConnectionAckPayload) => void;
   onDisconnect?: () => void;
   onError?: (error: string) => void;
@@ -463,7 +463,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     apiKey,
     apiBase,
     model,
-    projectPath,
+    projectDir,
     onConnect,
     onDisconnect,
     onError,
@@ -2645,7 +2645,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       apiKey,
       apiBase,
       model,
-      projectPath,
+      projectDir,
     };
     const nextSignature = getConnectSignature(connectOptions);
     const previousSignature = lastConnectSignatureRef.current;
@@ -2675,7 +2675,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     apiBase,
     apiKey,
     model,
-    projectPath,
+    projectDir,
     provider,
     setConnectionStats,
   ]);
@@ -2703,7 +2703,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       apiKey,
       apiBase,
       model,
-      projectPath,
+      projectDir,
     };
     const reconnectByDebugToggle = () => {
       void webClient.disconnect('debug mode toggled').then(() => {
@@ -2718,7 +2718,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     return () => {
       window.removeEventListener(WS_RECONNECT_EVENT, reconnectByDebugToggle);
     };
-  }, [apiBase, apiKey, model, projectPath, provider, setConnectionStats]);
+  }, [apiBase, apiKey, model, projectDir, provider, setConnectionStats]);
 
   useEffect(() => {
     const unsub = webClient.onStateChange((state) => {

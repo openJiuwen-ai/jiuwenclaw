@@ -103,7 +103,7 @@ class Project:
 
     project_id: str
     name: str
-    project_path: str
+    project_dir: str
     pinned: bool = False
     pin_order: int = 0
     hidden: bool = False
@@ -118,7 +118,7 @@ class Project:
         return cls(
             project_id=str(d.get("project_id", "")),
             name=str(d.get("name", "")),
-            project_path=str(d.get("project_path", "")),
+            project_dir=str(d.get("project_dir", "")),
             pinned=bool(d.get("pinned", False)),
             pin_order=int(d.get("pin_order", 0)),
             hidden=bool(d.get("hidden", False)),
@@ -239,52 +239,52 @@ def get_project_by_id(
     return None
 
 
-def get_project_by_path(
-    project_path: str, *, cache_bust: bool = False
+def get_project_by_dir(
+    project_dir: str, *, cache_bust: bool = False
 ) -> Project | None:
-    """按 project_path 查找项目(不限 hidden 状态,由调用方判断)。
+    """按 project_dir 查找项目(不限 hidden 状态,由调用方判断)。
 
     用于 project.create 的冲突检测与隐藏项目自动恢复。
     """
     for p in _load_cache(cache_bust):
-        if p.get("project_path") == project_path:
+        if p.get("project_dir") == project_dir:
             return Project.from_dict(p)
     return None
 
 
 def resolve_session_project_binding(
-    project_id: str, project_path: str
+    project_id: str, project_dir: str
 ) -> tuple[str, str, str | None, str | None]:
-    """校验并解析 session.create 的 project_id / project_path 绑定关系。
+    """校验并解析 session.create 的 project_id / project_dir 绑定关系。
 
     规则:
       1. 两者皆空(或 project_id 为 ``"default"`` 且 path 为空)→ 默认项目,
          兼容旧版行为(无 project_id / path 的存量调用)。
-      2. 传 project_id 时:未传 project_path 则按项目记录自动补齐;传了则校验
+      2. 传 project_id 时:未传 project_dir 则按项目记录自动补齐;传了则校验
          与项目绑定路径一致,不一致报错。
-      3. 仅传 project_path 而无有效 project_id(空或 ``"default"``)→ 拒绝,
+      3. 仅传 project_dir 而无有效 project_id(空或 ``"default"``)→ 拒绝,
          避免 session 有路径却无法归属到任何项目。
 
     Args:
         project_id: 调用方传入的 project_id(已 strip)。
-        project_path: 调用方传入的 project_path(已 strip)。
+        project_dir: 调用方传入的 project_dir(已 strip)。
 
     Returns:
-        ``(resolved_project_id, resolved_project_path, error, code)``:
+        ``(resolved_project_id, resolved_project_dir, error, code)``:
         成功时 ``error``/``code`` 为 ``None``;失败时前两项无意义,
         ``error`` 为错误描述,``code`` 为错误码(``BAD_REQUEST``/``NOT_FOUND``)。
     """
-    # project_path 非空时必须为绝对路径
-    if project_path and not os.path.isabs(project_path):
-        return "", "", "project_path must be an absolute path", "BAD_REQUEST"
+    # project_dir 非空时必须为绝对路径
+    if project_dir and not os.path.isabs(project_dir):
+        return "", "", "project_dir must be an absolute path", "BAD_REQUEST"
 
     has_real_project_id = bool(project_id) and project_id != "default"
 
-    # 规则3: 仅传 project_path 而无有效 project_id → 拒绝
-    if project_path and not has_real_project_id:
-        return "", "", "project_path requires a matching project_id", "BAD_REQUEST"
+    # 规则3: 仅传 project_dir 而无有效 project_id → 拒绝
+    if project_dir and not has_real_project_id:
+        return "", "", "project_dir requires a matching project_id", "BAD_REQUEST"
 
-    # 无有效 project_id → 默认项目(此处 project_path 必为空,已由规则3保证)
+    # 无有效 project_id → 默认项目(此处 project_dir 必为空,已由规则3保证)
     if not has_real_project_id:
         return project_id or "", "", None, None
 
@@ -293,22 +293,22 @@ def resolve_session_project_binding(
     if proj is None or proj.hidden:
         return "", "", "project not found", "NOT_FOUND"
 
-    expected_path = proj.project_path or ""
-    if not project_path:
+    expected_dir = proj.project_dir or ""
+    if not project_dir:
         # 规则2: 仅传 project_id → 自动补齐(可能为空路径项目)
-        return project_id, expected_path, None, None
+        return project_id, expected_dir, None, None
 
     # 规则2: 同时传 → 校验一致性(规范化后比较,容忍尾部分隔符/大小写差异)
-    if expected_path:
+    if expected_dir:
         same = (
-            os.path.normcase(os.path.normpath(project_path))
-            == os.path.normcase(os.path.normpath(expected_path))
+            os.path.normcase(os.path.normpath(project_dir))
+            == os.path.normcase(os.path.normpath(expected_dir))
         )
     else:
         same = False
     if not same:
-        return "", "", "project_path does not match the project's bound path", "BAD_REQUEST"
-    return project_id, expected_path, None, None
+        return "", "", "project_dir does not match the project's bound path", "BAD_REQUEST"
+    return project_id, expected_dir, None, None
 
 
 def list_projects(
@@ -323,8 +323,8 @@ def list_projects(
     return result
 
 
-class ProjectPathConflict(Exception):
-    """``project_path`` 与已有可见项目重复(由 ``create_or_restore_project`` 在锁内抛出)。"""
+class ProjectDirConflict(Exception):
+    """``project_dir`` 与已有可见项目重复(由 ``create_or_restore_project`` 在锁内抛出)。"""
 
 
 class ProjectNameConflict(Exception):
@@ -383,10 +383,10 @@ def validate_project_dir_name(name: str) -> str:
     return s
 
 
-def resolve_default_project_path(name: str) -> str:
+def resolve_default_project_dir(name: str) -> str:
     """根据项目名在默认工作区下生成工作目录绝对路径。
 
-    创建项目未指定 ``project_path`` 时,在
+    创建项目未指定 ``project_dir`` 时,在
     ``~/.jiuwenswarm/agent/workspace/{name}`` 下按项目名生成工作目录。
     调用方负责 ``mkdir``;本函数仅返回路径并校验名称合法性。
 
@@ -403,10 +403,10 @@ def resolve_default_project_path(name: str) -> str:
     return str(get_agent_root_dir() / "workspace" / dir_name)
 
 
-def create_project(name: str, project_path: str) -> Project:
-    """新建项目并持久化(不做 ``project_path`` 去重,供内部/测试使用)。
+def create_project(name: str, project_dir: str) -> Project:
+    """新建项目并持久化(不做 ``project_dir`` 去重,供内部/测试使用)。
 
-    本函数不检测 ``project_path`` 是否与已有项目重复,调用方需自行保证;
+    本函数不检测 ``project_dir`` 是否与已有项目重复,调用方需自行保证;
     ``project_id`` 在锁内查重+重生成,避免碰撞。生产路径请用
     ``create_or_restore_project``(原子完成查重/恢复/新建,无 TOCTOU 窗口)。
     """
@@ -415,7 +415,7 @@ def create_project(name: str, project_path: str) -> Project:
         proj = Project(
             project_id=_gen_unique_project_id(projects),
             name=name,
-            project_path=project_path,
+            project_dir=project_dir,
             created_at=now,
             updated_at=now,
         )
@@ -425,14 +425,14 @@ def create_project(name: str, project_path: str) -> Project:
     return _mutate(_do)
 
 
-def create_or_restore_project(name: str, project_path: str) -> tuple[Project, bool]:
+def create_or_restore_project(name: str, project_dir: str) -> tuple[Project, bool]:
     """原子地新建或恢复项目(在文件锁内完成查重/恢复/新建,关闭 TOCTOU 窗口)。
 
-    - ``project_path`` 为空时:跳过路径匹配/恢复/冲突,直接新建(允许多个空路径
+    - ``project_dir`` 为空时:跳过路径匹配/恢复/冲突,直接新建(允许多个空路径
       项目,靠 ``project_id`` + ``name`` 区分,会话按 ``project_id`` 归属);
-    - ``project_path`` 非空且命中已隐藏项目 → 恢复(置 ``hidden=False``,更新
+    - ``project_dir`` 非空且命中已隐藏项目 → 恢复(置 ``hidden=False``,更新
       ``name``),返回 ``(proj, True)``;
-    - ``project_path`` 非空且命中可见项目 → 抛 ``ProjectPathConflict``;
+    - ``project_dir`` 非空且命中可见项目 → 抛 ``ProjectDirConflict``;
     - ``name`` 与其他项目(含隐藏项目、非命中的待恢复项)重复 → 抛 ``ProjectNameConflict``;
     - ``name`` 含文件系统非法字符 / 为保留设备名 → 抛 ``ValueError``;
     - 无匹配 → 新建(``project_id`` 锁内查重+重生成),返回 ``(proj, False)``。
@@ -443,11 +443,11 @@ def create_or_restore_project(name: str, project_path: str) -> tuple[Project, bo
     validate_project_dir_name(name)
 
     def _do(projects: list[dict[str, Any]]) -> tuple[Project, bool]:
-        # 空 project_path: 不做路径匹配/恢复/冲突,直接走新建分支(允许多个空路径项目)
+        # 空 project_dir: 不做路径匹配/恢复/冲突,直接走新建分支(允许多个空路径项目)
         path_match = None
-        if project_path:
+        if project_dir:
             for p in projects:
-                if p.get("project_path") == project_path:
+                if p.get("project_dir") == project_dir:
                     path_match = p
                     break
 
@@ -467,13 +467,13 @@ def create_or_restore_project(name: str, project_path: str) -> tuple[Project, bo
                 path_match["updated_at"] = _now()
                 return Project.from_dict(path_match), True
             # 命中可见项目 → 冲突
-            raise ProjectPathConflict(project_path)
+            raise ProjectDirConflict(project_dir)
         # 无匹配 → 新建
         now = _now()
         proj = Project(
             project_id=_gen_unique_project_id(projects),
             name=name,
-            project_path=project_path,
+            project_dir=project_dir,
             created_at=now,
             updated_at=now,
         )

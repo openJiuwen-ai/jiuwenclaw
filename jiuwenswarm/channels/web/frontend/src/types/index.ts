@@ -13,7 +13,7 @@ export interface Session {
   session_id: string;
   title: string;
   project_id: string;
-  project_path: string;
+  project_dir: string;
   pinned?: boolean;
   pin_order?: number;
   renamed_at?: string | null;

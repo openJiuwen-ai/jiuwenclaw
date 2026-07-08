@@ -24,7 +24,7 @@ interface WorkspaceState {
   loadPinnedSessions: () => Promise<void>;
   setSelectedProject: (project: ProjectInfo | null) => void;
   toggleProjectExpanded: (projectId: string) => void;
-  createProject: (name: string, projectPath: string) => Promise<ProjectInfo>;
+  createProject: (name: string, projectDir: string) => Promise<ProjectInfo>;
   renameProject: (projectId: string, name: string) => Promise<void>;
   pinProject: (projectId: string, pinned: boolean) => Promise<void>;
   removeProject: (projectId: string) => Promise<void>;
@@ -151,7 +151,7 @@ function mergeSessionProjectContext(session: Session, previousSession: Session |
   return {
     ...session,
     project_id: session.project_id || previousSession.project_id || '',
-    project_path: session.project_path || previousSession.project_path || '',
+    project_dir: session.project_dir || previousSession.project_dir || '',
   };
 }
 
@@ -287,8 +287,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     },
   })),
 
-  createProject: async (name, projectPath) => {
-    const { project_id: projectId } = await projectRegistryClient.create(name, projectPath);
+  createProject: async (name, projectDir) => {
+    const { project_id: projectId } = await projectRegistryClient.create(name, projectDir);
     await get().loadProjects();
     const project = findProject(get().projects, projectId);
     if (!project) throw new Error('project.create returned a project that is missing from project.list');

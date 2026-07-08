@@ -173,7 +173,7 @@ def init_session_metadata(
     title: str = "",
     mode: str = "unknown",
     team_name: str = "",
-    project_path: str = "",
+    project_dir: str = "",
     project_id: str = "",
     model: str = "",
 ) -> None:
@@ -189,7 +189,7 @@ def init_session_metadata(
         "mode": mode,
         "team_name": team_name,
         "round_id": 0,
-        "project_path": project_path,
+        "project_dir": project_dir,
         "project_id": project_id,
         "model": model,
         "last_user_message_at": _current_timestamp(),
@@ -214,7 +214,7 @@ def update_session_metadata(
     mode: str | None = None,
     team_name: str | None = None,
     accent_color: str | None = None,
-    project_path: str | None = None,
+    project_dir: str | None = None,
     project_id: str | None = None,
     model: str | None = None,
     last_user_message_at: float | None = None,
@@ -261,7 +261,7 @@ def update_session_metadata(
             "mode": mode if mode is not None else "unknown",
             "team_name": team_name or "",
             "round_id": 0,
-            "project_path": project_path or "",
+            "project_dir": project_dir or "",
             "project_id": project_id or "",
             "model": model or "",
             "last_user_message_at": last_user_message_at if last_user_message_at is not None else _current_timestamp(),
@@ -295,9 +295,9 @@ def update_session_metadata(
             metadata["pinned"] = bool(pinned)
         if pin_order is not None:
             metadata["pin_order"] = int(pin_order)
-        # project_path：首次锁定——仅当当前值为空时写入，后续不覆盖
-        if project_path and not metadata.get("project_path"):
-            metadata["project_path"] = project_path
+        # project_dir：首次锁定——仅当当前值为空时写入，后续不覆盖
+        if project_dir and not metadata.get("project_dir"):
+            metadata["project_dir"] = project_dir
         # project_id：首次锁定——仅当当前值为空时写入，后续不覆盖
         if project_id and not metadata.get("project_id"):
             metadata["project_id"] = project_id
@@ -333,7 +333,7 @@ def sync_session_request_metadata(
     channel_id: str | None = None,
     mode: str | None = None,
     model: str | None = None,
-    project_path: str | None = None,
+    project_dir: str | None = None,
     project_id: str | None = None,
     last_user_message_at: float | None = None,
 ) -> str | None:
@@ -344,7 +344,7 @@ def sync_session_request_metadata(
     不负责参数来源解析（那由渠道层 ``resolve_request_project_dir`` 等纯解析函数完成）。
 
     字段语义：
-      - project_path：**首次锁定，不可改**。磁盘为空则写入请求值（首次锁定）；
+      - project_dir：**首次锁定，不可改**。磁盘为空则写入请求值（首次锁定）；
         磁盘已有值且与请求值不一致 → 记 warning（说明会话被换项目目录了，有问题），**不覆盖**。
       - model：**覆盖式**，每次请求刷新为本次模型。
       - last_user_message_at：**覆盖式**，调用方传入则刷新。
@@ -353,10 +353,10 @@ def sync_session_request_metadata(
     Args:
         session_id: 会话 ID（空则直接返回 None，不做任何操作）
         channel_id / mode / model / last_user_message_at: 请求级参数，按上述语义写入
-        project_path: 请求携带的项目目录候选值，用于首次锁定
+        project_dir: 请求携带的项目目录候选值，用于首次锁定
 
     Returns:
-        本会话**生效**的 project_path：磁盘已锁定则返回锁定值，否则返回请求候选值
+        本会话**生效**的 project_dir：磁盘已锁定则返回锁定值，否则返回请求候选值
         （首次锁定后即为该值）；无 session_id 或无候选值时返回 None。
     """
     session_id = (session_id or "").strip()
@@ -364,7 +364,7 @@ def sync_session_request_metadata(
         return None
 
     metadata = _read_metadata(session_id)
-    effective_project_path: str | None = None
+    effective_project_dir: str | None = None
 
     if not metadata:
         # 会话元数据不存在：兜底新建（外部渠道隐式创建 session 的场景）
@@ -380,31 +380,31 @@ def sync_session_request_metadata(
             "mode": mode if mode is not None else "unknown",
             "team_name": "",
             "round_id": 0,
-            "project_path": project_path or "",
+            "project_dir": project_dir or "",
             "project_id": project_id or "",
             "model": model or "",
             "last_user_message_at": last_user_message_at if last_user_message_at is not None else now,
             "status": "idle",
         }
-        effective_project_path = project_path or None
+        effective_project_dir = project_dir or None
     else:
-        # 校验 project_path：首次锁定 / 不一致告警不覆盖
-        locked_project = metadata.get("project_path")
+        # 校验 project_dir：首次锁定 / 不一致告警不覆盖
+        locked_project = metadata.get("project_dir")
         if isinstance(locked_project, str) and locked_project.strip():
             # 已锁定：以磁盘值为准
-            effective_project_path = locked_project.strip()
+            effective_project_dir = locked_project.strip()
             # 请求带了不同值 → 告警（会话被换项目目录，有问题），但不覆盖
-            if project_path and project_path.strip() and project_path.strip() != effective_project_path:
+            if project_dir and project_dir.strip() and project_dir.strip() != effective_project_dir:
                 logger.warning(
-                    "会话 %s 的 project_path 已锁定为 %s，忽略请求带来的不一致值 %s（锁定不可改）",
-                    session_id, effective_project_path, project_path.strip(),
+                    "会话 %s 的 project_dir 已锁定为 %s，忽略请求带来的不一致值 %s（锁定不可改）",
+                    session_id, effective_project_dir, project_dir.strip(),
                 )
-        elif project_path and project_path.strip():
+        elif project_dir and project_dir.strip():
             # 未锁定且请求带了值 → 首次锁定写入
-            metadata["project_path"] = project_path.strip()
-            effective_project_path = project_path.strip()
+            metadata["project_dir"] = project_dir.strip()
+            effective_project_dir = project_dir.strip()
 
-        # project_id：首次锁定，已锁定则忽略请求值（与 project_path 一致，不可改）
+        # project_id：首次锁定，已锁定则忽略请求值（与 project_dir 一致，不可改）
         if project_id and not (isinstance(metadata.get("project_id"), str) and metadata.get("project_id", "").strip()):
             metadata["project_id"] = project_id
 
@@ -422,7 +422,7 @@ def sync_session_request_metadata(
         metadata["last_message_at"] = _current_timestamp()
 
     _enqueue_write(session_id, metadata)
-    return effective_project_path
+    return effective_project_dir
 
 
 def get_session_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
@@ -440,7 +440,7 @@ def get_session_metadata(session_id: str, cache_bust: bool = False) -> dict[str,
             if sanitized != metadata["title"]:
                 metadata["title"] = sanitized
         # 兜底：存量会话补默认值，前端永远能拿到稳定 schema
-        metadata.setdefault("project_path", "")
+        metadata.setdefault("project_dir", "")
         metadata.setdefault("project_id", "")
         metadata.setdefault("model", "")
         metadata.setdefault("last_user_message_at", metadata.get("created_at", 0.0))
@@ -596,7 +596,7 @@ def set_session_delivery_context(
             "message_count": 0,
             "mode": "unknown",
             "round_id": 0,
-            "project_path": "",
+            "project_dir": "",
             "project_id": "",
             "model": "",
             "last_user_message_at": _current_timestamp(),
@@ -696,13 +696,13 @@ def remove_team_mode_session_dirs_at_startup() -> None:
 def migrate_legacy_session_metadata_at_startup() -> None:
     """AgentServer 启动时给老会话的 metadata.json 补全新字段并写回磁盘。
 
-    升级后新增了 project_path / model / last_user_message_at / status 四个字段，
+    升级后新增了 project_dir / model / last_user_message_at / status 四个字段，
     老会话的 metadata.json 缺这些字段。本函数在启动时遍历所有会话目录，
     按字段语义补默认值并落盘，保证磁盘上 schema 统一、前端永远拿到稳定结构。
 
     各字段兜底值来源：
-      - project_id：优先按 project_path 从 project_store 解析;无法匹配则 ""
-      - project_path / model / status：常量默认（""/""/"idle"），老会话本就没存过
+      - project_id：优先按 project_dir 从 project_store 解析;无法匹配则 ""
+      - project_dir / model / status：常量默认（""/""/"idle"），老会话本就没存过
       - last_user_message_at：从已有时间字段推算 ——
         last_message_at（agent 最后输出时间）→ created_at（创建时间）→ 目录 mtime
         不能给常量 0.0，否则老会话排序/时间显示错乱
@@ -711,16 +711,16 @@ def migrate_legacy_session_metadata_at_startup() -> None:
     if not sessions_dir.is_dir():
         return
 
-    # 构建 project_path → project_id 映射,用于将存量会话的 project_path 解析为 project_id
+    # 构建 project_dir → project_id 映射,用于将存量会话的 project_dir 解析为 project_id
     try:
         from jiuwenswarm.server.runtime.session.project_store import list_projects
-        path_to_id: dict[str, str] = {
-            p.project_path: p.project_id
+        dir_to_id: dict[str, str] = {
+            p.project_dir: p.project_id
             for p in list_projects(include_hidden=True, cache_bust=True)
-            if p.project_path
+            if p.project_dir
         }
     except Exception:
-        path_to_id = {}
+        dir_to_id = {}
 
     migrated = 0
     for session_dir in sessions_dir.iterdir():
@@ -741,14 +741,14 @@ def migrate_legacy_session_metadata_at_startup() -> None:
             continue
 
         changed = False
-        # project_path / model：常量默认
-        if "project_path" not in raw:
-            raw["project_path"] = ""
+        # project_dir / model：常量默认
+        if "project_dir" not in raw:
+            raw["project_dir"] = ""
             changed = True
-        # project_id: 补默认值;若为空且有 project_path,按路径解析到实际 project_id
+        # project_id: 补默认值;若为空且有 project_dir,按路径解析到实际 project_id
         if not str(raw.get("project_id") or "").strip():
-            pp = str(raw.get("project_path") or "")
-            resolved = path_to_id.get(pp, "") if pp else ""
+            pp = str(raw.get("project_dir") or "")
+            resolved = dir_to_id.get(pp, "") if pp else ""
             if raw.get("project_id") != resolved:
                 raw["project_id"] = resolved
                 changed = True
@@ -829,7 +829,7 @@ def get_all_sessions_metadata(
                 "message_count": 0,
                 "mode": "unknown",
                 "project_id": "",
-                "project_path": "",
+                "project_dir": "",
             }
 
         sessions.append(metadata)
@@ -853,7 +853,7 @@ def collect_all_sessions_metadata() -> list[dict[str, Any]]:
 
     跳过 heartbeat 会话;强制读盘(``cache_bust=True``)以跨进程拿最新数据。
     无 ``metadata.json`` 的旧会话以目录时间戳构造最小兜底信息
-    (``project_id=""``、``project_path=""``、``pinned=False``),归入默认项目统计。
+    (``project_id=""``、``project_dir=""``、``pinned=False``),归入默认项目统计。
     返回的每个 dict 已对新增字段应用默认值兜底。
     """
     sessions_dir = get_agent_sessions_dir()
@@ -876,7 +876,7 @@ def collect_all_sessions_metadata() -> list[dict[str, Any]]:
             meta = {
                 "session_id": sid,
                 "project_id": "",
-                "project_path": "",
+                "project_dir": "",
                 "pinned": False,
                 "pin_order": 0,
                 "last_message_at": st.st_mtime,
@@ -888,7 +888,7 @@ def collect_all_sessions_metadata() -> list[dict[str, Any]]:
         else:
             # 兜底默认值,保证新增字段齐全(存量会话无需迁移)
             meta.setdefault("project_id", "")
-            meta.setdefault("project_path", "")
+            meta.setdefault("project_dir", "")
             meta.setdefault("pinned", False)
             meta.setdefault("pin_order", 0)
             meta.setdefault("last_user_message_at", meta.get("created_at", 0.0))

@@ -43,7 +43,7 @@ const RELATIVE_TIME_REFRESH_MS = 60_000;
 
 export type NewConversationOptions = {
   preserveProject?: boolean;
-  project?: Pick<ProjectInfo, 'project_id' | 'project_path'>;
+  project?: Pick<ProjectInfo, 'project_id' | 'project_dir'>;
 };
 
 function isDefaultProject(project: ProjectInfo): boolean {
@@ -473,16 +473,16 @@ function ProjectCreateDialog({
   error?: string | null;
   initial?: { name?: string; path?: string } | null;
   onCancel: () => void;
-  onSubmit: (name: string, projectPath: string) => void;
+  onSubmit: (name: string, projectDir: string) => void;
 }) {
   const { t } = useTranslation();
   const [name, setName] = useState('');
-  const [projectPath, setProjectPath] = useState('');
-  const canSubmit = Boolean(name.trim() && (mode === 'blank' || projectPath.trim()));
+  const [projectDir, setProjectDir] = useState('');
+  const canSubmit = Boolean(name.trim() && (mode === 'blank' || projectDir.trim()));
 
   useEffect(() => {
     setName(initial?.name || '');
-    setProjectPath(initial?.path || '');
+    setProjectDir(initial?.path || '');
   }, [initial]);
 
   return (
@@ -491,7 +491,7 @@ function ProjectCreateDialog({
         className="conversation-path-dialog"
         onSubmit={(event) => {
           event.preventDefault();
-          if (canSubmit) onSubmit(name.trim(), mode === 'blank' ? '' : projectPath.trim());
+          if (canSubmit) onSubmit(name.trim(), mode === 'blank' ? '' : projectDir.trim());
         }}
       >
         <div className="conversation-path-dialog__title">{t('multiSession.project.newProject')}</div>
@@ -505,8 +505,8 @@ function ProjectCreateDialog({
         {mode === 'existing' ? (
           <input
             className="conversation-path-dialog__input"
-            value={projectPath}
-            onChange={(event) => setProjectPath(event.target.value)}
+            value={projectDir}
+            onChange={(event) => setProjectDir(event.target.value)}
             placeholder="/Users/name/work/project"
           />
         ) : null}
@@ -643,12 +643,12 @@ export function ConversationSidebar({
     }
   }, [expandedProjectIds, loadProjectSessions, projectIdSnapshot]);
 
-  const projectByPath = useMemo(() => {
-    const byPath = new Map<string, ProjectInfo>();
+  const projectByDir = useMemo(() => {
+    const byDir = new Map<string, ProjectInfo>();
     for (const project of projects) {
-      if (project.project_path) byPath.set(project.project_path, project);
+      if (project.project_dir) byDir.set(project.project_dir, project);
     }
-    return byPath;
+    return byDir;
   }, [projects]);
   const defaultProject = useMemo(
     () => projects.find(isDefaultProject),
@@ -724,14 +724,14 @@ export function ConversationSidebar({
     }
   }
 
-  async function handleCreateProject(name: string, projectPath: string) {
+  async function handleCreateProject(name: string, projectDir: string) {
     setPathDialogError(null);
-    if (projectPath && (!isLikelyAbsolutePath(projectPath) || projectPath.startsWith('~/'))) {
+    if (projectDir && (!isLikelyAbsolutePath(projectDir) || projectDir.startsWith('~/'))) {
       setPathDialogError(t('multiSession.project.absolutePathError'));
       return;
     }
     try {
-      await createProject(name, projectPath);
+      await createProject(name, projectDir);
       setPathDialogInitial(null);
       setPathDialogOpen(false);
     } catch (error) {
@@ -811,8 +811,8 @@ export function ConversationSidebar({
   }
 
   function getSessionProject(session: Session): ProjectInfo | undefined {
-    if (session.project_path === '') return defaultProject;
-    return session.project_path ? projectByPath.get(session.project_path) : undefined;
+    if (session.project_dir === '') return defaultProject;
+    return session.project_dir ? projectByDir.get(session.project_dir) : undefined;
   }
 
   function renderSessionPagination(projectId: string) {
@@ -1003,7 +1003,7 @@ export function ConversationSidebar({
             setPathDialogInitial(null);
             setPathDialogOpen(false);
           }}
-          onSubmit={(name, projectPath) => void handleCreateProject(name, projectPath)}
+          onSubmit={(name, projectDir) => void handleCreateProject(name, projectDir)}
         />
       ) : null}
       {renameTarget ? (

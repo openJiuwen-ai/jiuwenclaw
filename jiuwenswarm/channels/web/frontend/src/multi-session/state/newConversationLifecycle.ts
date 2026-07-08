@@ -12,7 +12,7 @@ export const NEW_CONVERSATION_ID = 'new';
 interface ConversationRuntimeSettings {
   mode: AgentMode;
   selectedModelName: string | null;
-  projectPath?: string | null;
+  projectDir?: string | null;
 }
 
 const locallyCreatedConversations = new Map<string, Session>();
@@ -23,15 +23,15 @@ export function createConversationTitle(content: string): string {
 
 function applyRuntimeSettings(
   sessionId: string,
-  { mode, selectedModelName, projectPath }: ConversationRuntimeSettings,
+  { mode, selectedModelName, projectDir }: ConversationRuntimeSettings,
 ): void {
   ensureSessionRuntimes(sessionId);
   useSessionStore.getState().setMode(sessionId, mode);
   if (selectedModelName) {
     useSessionStore.getState().setSelectedModelName(sessionId, selectedModelName);
   }
-  if (projectPath) {
-    useSessionStore.getState().setProjectDirectory(sessionId, projectPath);
+  if (projectDir) {
+    useSessionStore.getState().setProjectDirectory(sessionId, projectDir);
   }
 }
 
@@ -53,7 +53,7 @@ export function registerCreatedConversation(
   settings: ConversationRuntimeSettings,
   createdAt = Date.now(),
   initialContent = '',
-  workContext: Partial<Pick<Session, 'project_id' | 'project_path'>> = {},
+  workContext: Partial<Pick<Session, 'project_id' | 'project_dir'>> = {},
 ): Session {
   applyRuntimeSettings(sessionId, settings);
   useChatStore.getState().setProcessing(sessionId, true);
@@ -63,7 +63,7 @@ export function registerCreatedConversation(
     session_id: sessionId,
     title: createConversationTitle(initialContent),
     project_id: workContext.project_id || '',
-    project_path: workContext.project_path || settings.projectPath || '',
+    project_dir: workContext.project_dir || settings.projectDir || '',
     mode: settings.mode,
     status: 'active',
     message_count: 0,

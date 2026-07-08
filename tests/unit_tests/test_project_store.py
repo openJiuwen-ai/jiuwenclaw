@@ -1,7 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """project_store 模块单元测试 — projects.json 的持久化与 CRUD。
 
-覆盖: 新建/按 ID 查找/按 project_path 查找/更新/列表、隐藏恢复、pin 紧凑重编号。
+覆盖: 新建/按 ID 查找/按 project_dir 查找/更新/列表、隐藏恢复、pin 紧凑重编号。
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def _read_projects(path: Path) -> list[dict]:
 
 
 # ===========================================================================
-# CRUD: 新建 / 按 ID 查找 / 按 project_path 查找
+# CRUD: 新建 / 按 ID 查找 / 按 project_dir 查找
 # ===========================================================================
 class TestCreateProject:
     @staticmethod
@@ -47,7 +47,7 @@ class TestCreateProject:
         proj = create_project("我的应用", "E:\\projA")
         assert proj.project_id.startswith("proj_")
         assert proj.name == "我的应用"
-        assert proj.project_path == "E:\\projA"
+        assert proj.project_dir == "E:\\projA"
         assert proj.hidden is False
         assert proj.pinned is False
         assert proj.pin_order == 0
@@ -69,26 +69,26 @@ class TestCreateProject:
         assert get_project_by_id("proj_nope", cache_bust=True) is None
 
     @staticmethod
-    def test_get_by_path_finds_hidden_and_visible(project_store_dir):
-        """get_project_by_path 不限 hidden 状态,由调用方判断。"""
+    def test_get_by_dir_finds_hidden_and_visible(project_store_dir):
+        """get_project_by_dir 不限 hidden 状态,由调用方判断。"""
         from jiuwenswarm.server.runtime.session.project_store import (
-            create_project, save_project, get_project_by_path,
+            create_project, save_project, get_project_by_dir,
         )
 
         proj = create_project("P1", "E:\\path1")
         proj.hidden = True
         save_project(proj)
 
-        found = get_project_by_path("E:\\path1", cache_bust=True)
+        found = get_project_by_dir("E:\\path1", cache_bust=True)
         assert found is not None
         assert found.hidden is True
         assert found.project_id == proj.project_id
 
     @staticmethod
-    def test_get_by_path_returns_none_for_missing(project_store_dir):
-        from jiuwenswarm.server.runtime.session.project_store import get_project_by_path
+    def test_get_by_dir_returns_none_for_missing(project_store_dir):
+        from jiuwenswarm.server.runtime.session.project_store import get_project_by_dir
 
-        assert get_project_by_path("E:\\nope", cache_bust=True) is None
+        assert get_project_by_dir("E:\\nope", cache_bust=True) is None
 
 
 # ===========================================================================
@@ -118,13 +118,13 @@ class TestSaveProject:
             save_project, get_project_by_id, Project,
         )
 
-        proj = Project(project_id="proj_manual", name="M", project_path="E:\\m")
+        proj = Project(project_id="proj_manual", name="M", project_dir="E:\\m")
         save_project(proj)
 
         found = get_project_by_id("proj_manual", cache_bust=True)
         assert found is not None
         assert found.name == "M"
-        assert found.project_path == "E:\\m"
+        assert found.project_dir == "E:\\m"
 
 
 # ===========================================================================
@@ -286,10 +286,10 @@ class TestCreateOrRestoreProject:
         assert proj.project_id.startswith("proj_")
         assert restored is False
         assert proj.name == "P"
-        assert proj.project_path == "E:\\p"
+        assert proj.project_dir == "E:\\p"
 
     @staticmethod
-    def test_restore_hidden_by_path(project_store_dir):
+    def test_restore_hidden_by_dir(project_store_dir):
         from jiuwenswarm.server.runtime.session.project_store import (
             create_project, save_project, create_or_restore_project,
             get_project_by_id,
@@ -309,11 +309,11 @@ class TestCreateOrRestoreProject:
     @staticmethod
     def test_path_conflict_on_visible(project_store_dir):
         from jiuwenswarm.server.runtime.session.project_store import (
-            create_or_restore_project, ProjectPathConflict,
+            create_or_restore_project, ProjectDirConflict,
         )
 
         create_or_restore_project("P1", "E:\\p")
-        with pytest.raises(ProjectPathConflict):
+        with pytest.raises(ProjectDirConflict):
             create_or_restore_project("P2", "E:\\p")  # 同路径,不同名
 
     @staticmethod

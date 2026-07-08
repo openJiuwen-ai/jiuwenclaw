@@ -727,7 +727,7 @@ def _attribute_session_project(
     """返回会话归属的 project_id(或 ``"default"``)。
 
     仅按 ``session.project_id`` 匹配可见项目;不命中(含无 project_id 的存量会话)
-    归入默认项目。存量会话的 project_path → project_id 解析由启动迁移完成。
+    归入默认项目。存量会话的 project_dir → project_id 解析由启动迁移完成。
 
     Args:
         meta: 会话元数据
@@ -1546,7 +1546,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         })
 
     async def _session_get_metadata(ws, req_id, params, session_id):
-        """返回单个会话的元数据（mode / model / project_path / last_user_message_at 等）。
+        """返回单个会话的元数据（mode / model / project_dir / last_user_message_at 等）。
 
         按单个 session_id 读取，O(1) 不扫描目录，会话再多也不卡；相互隔离。
         供前端恢复会话时还原模型/模式/项目路径选择器。
@@ -1577,12 +1577,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _session_create(ws, req_id, params, session_id):
         """创建一个新 session（在 agent/sessions 下创建一个新目录）。
 
-        project_id / project_path 绑定规则(详见 project_store.resolve_session_project_binding):
+        project_id / project_dir 绑定规则(详见 project_store.resolve_session_project_binding):
           - 两者皆空(或 project_id 为 "default" 且 path 为空)→ 默认项目,兼容旧版行为;
-          - 仅传 project_id → 按项目记录自动补齐 project_path;
-          - 同时传 project_id + project_path → 校验与项目绑定路径一致,不一致报错;
-          - 仅传 project_path 而无有效 project_id → 拒绝(BAD_REQUEST)。
-        绑定后 project_id / project_path 不可变(首次锁定)。
+          - 仅传 project_id → 按项目记录自动补齐 project_dir;
+          - 同时传 project_id + project_dir → 校验与项目绑定路径一致,不一致报错;
+          - 仅传 project_dir 而无有效 project_id → 拒绝(BAD_REQUEST)。
+        绑定后 project_id / project_dir 不可变(首次锁定)。
         """
         if not isinstance(params, dict):
             await channel.send_response(
@@ -1597,13 +1597,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         session_id_to_create = session_id_to_create.strip()
 
-        # 校验并解析 project_id / project_path 绑定关系:
-        # 一致性校验、按 project_id 自动补齐 project_path、禁止单传 project_path
+        # 校验并解析 project_id / project_dir 绑定关系:
+        # 一致性校验、按 project_id 自动补齐 project_dir、禁止单传 project_dir
         from jiuwenswarm.server.runtime.session import project_store
         project_id = str(params.get("project_id") or "").strip()
-        project_path = str(params.get("project_path") or "").strip()
-        project_id, project_path, p_err, p_code = project_store.resolve_session_project_binding(
-            project_id, project_path
+        project_dir = str(params.get("project_dir") or "").strip()
+        project_id, project_dir, p_err, p_code = project_store.resolve_session_project_binding(
+            project_id, project_dir
         )
         if p_err:
             await channel.send_response(
@@ -1630,7 +1630,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             user_id=params.get("user_id", ""),
             title=params.get("title", ""),
             mode=params.get("mode", "unknown"),
-            project_path=project_path,
+            project_dir=project_dir,
             project_id=project_id,
         )
 
@@ -1828,7 +1828,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 return {
                     "project_id": "default",
                     "name": "默认项目",
-                    "project_path": "",
+                    "project_dir": "",
                     "pinned": False,
                     "pin_order": 0,
                     "is_default": True,
@@ -1843,7 +1843,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return {
                 "project_id": proj.project_id,
                 "name": proj.name,
-                "project_path": proj.project_path,
+                "project_dir": proj.project_dir,
                 "pinned": proj.pinned,
                 "pin_order": proj.pin_order,
                 "is_default": False,
@@ -1891,7 +1891,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "mode": str(meta.get("mode", "unknown")),
             "pinned": bool(meta.get("pinned", False)),
             "pin_order": int(meta.get("pin_order", 0)),
-            "project_path": str(meta.get("project_path", "")),
+            "project_dir": str(meta.get("project_dir", "")),
             "project_id": str(meta.get("project_id", "")),
             "last_user_message_at": lum if isinstance(lum, (int, float)) and not isinstance(lum, bool) else None,
             "model": str(meta.get("model", "")),
@@ -1977,12 +1977,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _project_create(ws, req_id, params, session_id):
         """创建项目,指定工作目录。
 
-        ``project_path`` 为可选:传则指定工作目录绝对路径;不传或空串则在默认工作区
+        ``project_dir`` 为可选:传则指定工作目录绝对路径;不传或空串则在默认工作区
         (``~/.jiuwenswarm/agent/workspace``)下按项目名自动新建文件夹作为工作目录。
         项目名含文件系统非法字符(``<>:"/\\|?*`` 等)时返回 ``BAD_REQUEST``。
-        自动恢复: 若 ``project_path`` 命中已隐藏(``hidden:true``)项目,置
-        ``hidden:false`` 并按传入 ``name`` 更新展示名,其下会话因 ``project_path``
-        仍匹配自动重新归属。响应 ``restored`` 标识恢复/新建。``project_path`` 与已有
+        自动恢复: 若 ``project_dir`` 命中已隐藏(``hidden:true``)项目,置
+        ``hidden:false`` 并按传入 ``name`` 更新展示名,其下会话因 ``project_dir``
+        仍匹配自动重新归属。响应 ``restored`` 标识恢复/新建。``project_dir`` 与已有
         可见项目重复,或 ``name`` 与已有项目(含隐藏)重复时返回 ``CONFLICT``。
         """
         if not isinstance(params, dict):
@@ -1993,26 +1993,26 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="name is required", code="BAD_REQUEST",
             )
             return
-        project_path = str(params.get("project_path") or "").strip()
-        # project_path 非空时必须为绝对路径
-        if project_path and not os.path.isabs(project_path):
+        project_dir = str(params.get("project_dir") or "").strip()
+        # project_dir 非空时必须为绝对路径
+        if project_dir and not os.path.isabs(project_dir):
             await channel.send_response(
                 ws, req_id,
                 ok=False,
-                error="project_path must be an absolute path",
+                error="project_dir must be an absolute path",
                 code="BAD_REQUEST",
             )
             return
 
         from jiuwenswarm.server.runtime.session import project_store
         from jiuwenswarm.server.runtime.session.project_store import (
-            ProjectPathConflict, ProjectNameConflict,
+            ProjectDirConflict, ProjectNameConflict,
         )
 
-        # 未传 project_path 时,在默认工作区下按项目名自动生成工作目录
-        if not project_path:
+        # 未传 project_dir 时,在默认工作区下按项目名自动生成工作目录
+        if not project_dir:
             try:
-                project_path = project_store.resolve_default_project_path(name)
+                project_dir = project_store.resolve_default_project_dir(name)
             except ValueError as exc:
                 await channel.send_response(
                     ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST",
@@ -2020,7 +2020,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 return
             # 创建文件夹(已存在则复用)
             try:
-                os.makedirs(project_path, exist_ok=True)
+                os.makedirs(project_dir, exist_ok=True)
             except OSError as exc:
                 await channel.send_response(
                     ws, req_id,
@@ -2034,10 +2034,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # 命中隐藏项目 → 恢复;命中可见项目 → CONFLICT;
         # name 重复 → CONFLICT;无匹配 → 新建
         try:
-            proj, restored = project_store.create_or_restore_project(name, project_path)
-        except ProjectPathConflict:
+            proj, restored = project_store.create_or_restore_project(name, project_dir)
+        except ProjectDirConflict:
             await channel.send_response(
-                ws, req_id, ok=False, error="project_path already exists", code="CONFLICT",
+                ws, req_id, ok=False, error="project_dir already exists", code="CONFLICT",
             )
             return
         except ProjectNameConflict:
@@ -2052,7 +2052,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         await channel.send_response(ws, req_id, ok=True, payload={
             "project_id": proj.project_id,
-            "project_path": proj.project_path,
+            "project_dir": proj.project_dir,
             "restored": restored,
         })
 
@@ -2290,7 +2290,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _project_pinned_sessions(ws, req_id, params, session_id):
         """获取全部置顶会话,按 ``pin_order`` 升序排列。
 
-        置顶会话已从项目分组中剥离,通过本接口独立获取。``project_path`` 仍指向
+        置顶会话已从项目分组中剥离,通过本接口独立获取。``project_dir`` 仍指向
         原归属项目。不接受任何参数。
         """
         from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata

@@ -113,7 +113,7 @@ type ConfigSaveAllPayload = {
 
 function getWorkContextForSession(sessionId: string): {
   project_id?: string;
-  project_path?: string;
+  project_dir?: string;
 } {
   const sessionState = useSessionStore.getState();
   const workspaceState = useWorkspaceStore.getState();
@@ -125,7 +125,7 @@ function getWorkContextForSession(sessionId: string): {
 
   return {
     project_id: session?.project_id || selectedProject?.project_id || undefined,
-    project_path: session?.project_path || selectedProject?.project_path || undefined,
+    project_dir: session?.project_dir || selectedProject?.project_dir || undefined,
   };
 }
 
@@ -339,7 +339,7 @@ function AppContent() {
   const shareExportFilenameRef = useRef('jiuwenswarm-share.png');
   const shareExportTokenRef = useRef(0);
   const preserveSelectedProjectOnChatNewRef = useRef(false);
-  const newConversationProjectRef = useRef<Pick<Session, 'project_id' | 'project_path'> | null>(null);
+  const newConversationProjectRef = useRef<Pick<Session, 'project_id' | 'project_dir'> | null>(null);
   /** 为 true 表示刚从「会话列表」恢复；history 为空时在 useEffect 的 onEmpty 中提示一次 */
   const historyRestoreFromPanelHintRef = useRef(false);
   const { loadProjects, setSelectedProject } = useWorkspaceStore();
@@ -407,8 +407,8 @@ function AppContent() {
   }, [currentSession, sessions, sessionId]);
   const sessionProjectName = useMemo(() => {
     const session = sessions.find((s) => s.session_id === sessionId);
-    if (!session?.project_path) return '';
-    const project = projects.find((item) => !item.is_default && item.project_path === session.project_path);
+    if (!session?.project_dir) return '';
+    const project = projects.find((item) => !item.is_default && item.project_dir === session.project_dir);
     return project?.name?.trim() ?? '';
   }, [projects, sessions, sessionId]);
   const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent.plan');
@@ -1398,18 +1398,18 @@ function AppContent() {
     const currentRuntime = useSessionStore.getState().getRuntime(currentSessionId);
     const selectedModelName = currentRuntime?.selectedModelName ?? null;
     const selectedProject = options.project ?? useWorkspaceStore.getState().selectedProject;
-    const projectPath = selectedProject?.project_path ?? currentRuntime?.projectDirectory ?? null;
+    const projectDir = selectedProject?.project_dir ?? currentRuntime?.projectDirectory ?? null;
     disposeInFlightHistoryHandles(
       currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined,
     );
     setHistoryLoadingMore(false);
-    resetNewConversationRuntime({ mode: targetMode, selectedModelName, projectPath });
+    resetNewConversationRuntime({ mode: targetMode, selectedModelName, projectDir });
     if (options.preserveProject) {
       preserveSelectedProjectOnChatNewRef.current = true;
       newConversationProjectRef.current = selectedProject
         ? {
           project_id: selectedProject.project_id,
-          project_path: selectedProject.project_path,
+          project_dir: selectedProject.project_dir,
         }
         : null;
     } else {
@@ -1452,13 +1452,13 @@ function AppContent() {
       const runtimeSettings = {
         mode: newRuntime?.mode ?? mode,
         selectedModelName: newRuntime?.selectedModelName ?? null,
-        projectPath: newRuntime?.projectDirectory ?? null,
+        projectDir: newRuntime?.projectDirectory ?? null,
       };
       const baseWorkContext = getWorkContextForSession(NEW_CONVERSATION_ID);
       const preservedProject = newConversationProjectRef.current;
       const workContext = {
         project_id: baseWorkContext.project_id || preservedProject?.project_id,
-        project_path: baseWorkContext.project_path || preservedProject?.project_path,
+        project_dir: baseWorkContext.project_dir || preservedProject?.project_dir,
       };
       try {
         const createParams: Record<string, unknown> = {
@@ -1472,8 +1472,8 @@ function AppContent() {
         if (workContext.project_id) {
           createParams.project_id = workContext.project_id;
         }
-        if (workContext.project_path) {
-          createParams.project_path = workContext.project_path;
+        if (workContext.project_dir) {
+          createParams.project_dir = workContext.project_dir;
         }
         const payload = await request<{ session_id?: string; sessionId?: string }>('session.create', createParams);
         const createdSessionId = payload.session_id ?? payload.sessionId;
@@ -1485,7 +1485,7 @@ function AppContent() {
           content,
           {
             project_id: workContext.project_id,
-            project_path: workContext.project_path,
+            project_dir: workContext.project_dir,
           },
         );
         // 迁移 'new' 会话的已选技能到新会话
@@ -1500,7 +1500,7 @@ function AppContent() {
         navigate({ kind: 'chat-session', sessionId: newSid }, { replace: true });
         const createdSessionProject = {
           project_id: workContext.project_id || '',
-          project_path: workContext.project_path || '',
+          project_dir: workContext.project_dir || '',
           pinned: false,
         };
         const sent = await sendMessage(content, newSid);

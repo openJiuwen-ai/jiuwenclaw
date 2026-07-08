@@ -107,16 +107,16 @@ class TestInitSessionMetadata:
 
     @staticmethod
     def test_init_new_fields(sessions_dir):
-        """init 写入新增字段：project_path / model / last_user_message_at / status"""
+        """init 写入新增字段：project_dir / model / last_user_message_at / status"""
         from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
 
         init_session_metadata(
             session_id="sess_new",
-            project_path="E:\\myproj",
+            project_dir="E:\\myproj",
             model="glm-5",
         )
         data = _read_json(sessions_dir / "sess_new" / "metadata.json")
-        assert data["project_path"] == "E:\\myproj"
+        assert data["project_dir"] == "E:\\myproj"
         assert data["model"] == "glm-5"
         assert data["status"] == "idle"
         assert isinstance(data["last_user_message_at"], float)
@@ -131,7 +131,7 @@ class TestInitSessionMetadata:
 
         init_session_metadata(session_id="sess_def")
         data = _read_json(sessions_dir / "sess_def" / "metadata.json")
-        assert data["project_path"] == ""
+        assert data["project_dir"] == ""
         assert data["model"] == ""
 
 
@@ -241,8 +241,8 @@ class TestUpdateSessionMetadata:
         assert data["message_count"] == 3
 
     @staticmethod
-    def test_project_path_first_lock_not_overwritten(sessions_dir):
-        """project_path 首次锁定后，后续传入不同值不覆盖"""
+    def test_project_dir_first_lock_not_overwritten(sessions_dir):
+        """project_dir 首次锁定后，后续传入不同值不覆盖"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             update_session_metadata,
@@ -251,14 +251,14 @@ class TestUpdateSessionMetadata:
 
         init_session_metadata(session_id="sess_pp")
         # 首次锁定
-        update_session_metadata(session_id="sess_pp", project_path="E:\\projA")
+        update_session_metadata(session_id="sess_pp", project_dir="E:\\projA")
         _METADATA_QUEUE.join()
         # 二次传入不同值
-        update_session_metadata(session_id="sess_pp", project_path="E:\\projB")
+        update_session_metadata(session_id="sess_pp", project_dir="E:\\projB")
         _METADATA_QUEUE.join()
 
         data = _read_json(sessions_dir / "sess_pp" / "metadata.json")
-        assert data["project_path"] == "E:\\projA", "project_path 锁定后不可改"
+        assert data["project_dir"] == "E:\\projA", "project_dir 锁定后不可改"
 
     @staticmethod
     def test_model_overwrites_each_request(sessions_dir):
@@ -314,14 +314,14 @@ class TestUpdateSessionMetadata:
         update_session_metadata(
             session_id="sess_fb",
             channel_id="web",
-            project_path="E:\\fb",
+            project_dir="E:\\fb",
             model="glm-5",
             last_user_message_at=2000.0,
         )
         _METADATA_QUEUE.join()
 
         data = _read_json(sessions_dir / "sess_fb" / "metadata.json")
-        assert data["project_path"] == "E:\\fb"
+        assert data["project_dir"] == "E:\\fb"
         assert data["model"] == "glm-5"
         assert data["last_user_message_at"] == 2000.0
         assert data["status"] == "idle"
@@ -357,7 +357,7 @@ class TestGetSessionMetadata:
             get_session_metadata,
         )
 
-        # 模拟旧版本会话：只有老字段，没有 project_path/model/last_user_message_at/status
+        # 模拟旧版本会话：只有老字段，没有 project_dir/model/last_user_message_at/status
         _write_metadata_sync("sess_legacy", {
             "session_id": "sess_legacy",
             "channel_id": "web",
@@ -375,7 +375,7 @@ class TestGetSessionMetadata:
         _METADATA_CACHE.pop("sess_legacy", None)
 
         data = get_session_metadata("sess_legacy", cache_bust=True)
-        assert data["project_path"] == ""
+        assert data["project_dir"] == ""
         assert data["model"] == ""
         assert data["status"] == "idle"
         assert data["last_user_message_at"] == 1000.0  # 回退到 created_at
@@ -963,27 +963,27 @@ class TestSyncSessionRequestMetadata:
     """sync_session_request_metadata：校验请求参数 vs 磁盘 metadata，按字段语义写入。"""
 
     @staticmethod
-    def test_project_path_first_lock_writes_and_returns(sessions_dir):
-        """project_path 首次锁定：磁盘为空 → 写入请求值并返回"""
+    def test_project_dir_first_lock_writes_and_returns(sessions_dir):
+        """project_dir 首次锁定：磁盘为空 → 写入请求值并返回"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             sync_session_request_metadata,
             get_session_metadata,
         )
 
-        init_session_metadata(session_id="s1")  # project_path 为空
+        init_session_metadata(session_id="s1")  # project_dir 为空
         effective = sync_session_request_metadata(
-            session_id="s1", project_path="E:\\projA"
+            session_id="s1", project_dir="E:\\projA"
         )
         _drain_queue()
         assert effective == "E:\\projA"
-        assert get_session_metadata("s1")["project_path"] == "E:\\projA"
+        assert get_session_metadata("s1")["project_dir"] == "E:\\projA"
 
     @staticmethod
-    def test_project_path_locked_ignores_inconsistent_request_value(
+    def test_project_dir_locked_ignores_inconsistent_request_value(
         sessions_dir, monkeypatch
     ):
-        """已锁定 project_path 时，请求带不同值 → 告警 + 不覆盖 + 返回锁定值"""
+        """已锁定 project_dir 时，请求带不同值 → 告警 + 不覆盖 + 返回锁定值"""
         import jiuwenswarm.server.runtime.session.session_metadata as sm
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
@@ -992,7 +992,7 @@ class TestSyncSessionRequestMetadata:
         )
 
         init_session_metadata(session_id="s1")
-        sync_session_request_metadata(session_id="s1", project_path="E:\\locked")
+        sync_session_request_metadata(session_id="s1", project_dir="E:\\locked")
         _drain_queue()
 
         # 拦截 logger.warning，避免依赖 logging propagation
@@ -1006,27 +1006,27 @@ class TestSyncSessionRequestMetadata:
         monkeypatch.setattr(sm.logger, "warning", _capture_warning)
 
         effective = sync_session_request_metadata(
-            session_id="s1", project_path="E:\\other"
+            session_id="s1", project_dir="E:\\other"
         )
         _drain_queue()
 
         assert effective == "E:\\locked", "应返回锁定值而非请求值"
-        assert get_session_metadata("s1")["project_path"] == "E:\\locked", "不应被覆盖"
+        assert get_session_metadata("s1")["project_dir"] == "E:\\locked", "不应被覆盖"
         assert any("已锁定" in w for w in warnings), "应记告警"
 
     @staticmethod
-    def test_project_path_locked_returns_locked_value_when_request_none(sessions_dir):
-        """已锁定后，请求不带 project_path → 返回锁定值"""
+    def test_project_dir_locked_returns_locked_value_when_request_none(sessions_dir):
+        """已锁定后，请求不带 project_dir → 返回锁定值"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             sync_session_request_metadata,
         )
 
         init_session_metadata(session_id="s1")
-        sync_session_request_metadata(session_id="s1", project_path="E:\\locked")
+        sync_session_request_metadata(session_id="s1", project_dir="E:\\locked")
         _drain_queue()
 
-        effective = sync_session_request_metadata(session_id="s1")  # 不传 project_path
+        effective = sync_session_request_metadata(session_id="s1")  # 不传 project_dir
         assert effective == "E:\\locked"
 
     @staticmethod
@@ -1035,12 +1035,12 @@ class TestSyncSessionRequestMetadata:
         from jiuwenswarm.server.runtime.session.session_metadata import (
             sync_session_request_metadata,
         )
-        assert sync_session_request_metadata(session_id="", project_path="E:\\x") is None
-        assert sync_session_request_metadata(session_id="   ", project_path="E:\\x") is None
+        assert sync_session_request_metadata(session_id="", project_dir="E:\\x") is None
+        assert sync_session_request_metadata(session_id="   ", project_dir="E:\\x") is None
 
     @staticmethod
-    def test_sync_none_project_path_when_unlocked(sessions_dir):
-        """未锁定且请求不带 project_path → 返回 None，不写入"""
+    def test_sync_none_project_dir_when_unlocked(sessions_dir):
+        """未锁定且请求不带 project_dir → 返回 None，不写入"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             sync_session_request_metadata,
@@ -1051,7 +1051,7 @@ class TestSyncSessionRequestMetadata:
         effective = sync_session_request_metadata(session_id="s1")
         _drain_queue()
         assert effective is None
-        assert get_session_metadata("s1")["project_path"] == ""
+        assert get_session_metadata("s1")["project_dir"] == ""
 
     @staticmethod
     def test_sync_model_overwritten_each_call(sessions_dir):
@@ -1143,13 +1143,13 @@ class TestSyncSessionRequestMetadata:
             channel_id="web",
             mode="code",
             model="glm-5",
-            project_path="E:\\newproj",
+            project_dir="E:\\newproj",
             last_user_message_at=1234.0,
         )
         _drain_queue()
         assert effective == "E:\\newproj"
         meta = get_session_metadata("s_new")
-        assert meta["project_path"] == "E:\\newproj"
+        assert meta["project_dir"] == "E:\\newproj"
         assert meta["model"] == "glm-5"
         assert meta["mode"] == "code"
         assert meta["last_user_message_at"] == 1234.0
@@ -1165,9 +1165,9 @@ class TestSyncSessionRequestMetadata:
 
         effective = sync_session_request_metadata(session_id="s_min")  # 全默认
         _drain_queue()
-        assert effective is None  # 无 project_path
+        assert effective is None  # 无 project_dir
         meta = get_session_metadata("s_min")
-        assert meta["project_path"] == ""
+        assert meta["project_dir"] == ""
         assert meta["model"] == ""
         assert meta["mode"] == "unknown"
         assert meta["status"] == "idle"
@@ -1204,14 +1204,14 @@ class TestSyncChatRequestMetadata:
 
     @staticmethod
     def test_collects_and_persists(sessions_dir, clean_model_env):
-        """正常路径：采集 model_name/project_dir/mode → 写盘 → 返回生效 project_path"""
+        """正常路径：采集 model_name/project_dir/mode → 写盘 → 返回生效 project_dir"""
         from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
         )
 
-        init_session_metadata(session_id="sess_1")  # project_path 为空
+        init_session_metadata(session_id="sess_1")  # project_dir 为空
         req = _make_agent_request(
             params={"model_name": "glm-5", "mode": "code", "project_dir": "E:\\projA"},
         )
@@ -1222,7 +1222,7 @@ class TestSyncChatRequestMetadata:
         meta = get_session_metadata("sess_1")
         assert meta["model"] == "glm-5"
         assert meta["mode"] == "code"
-        assert meta["project_path"] == "E:\\projA"
+        assert meta["project_dir"] == "E:\\projA"
         assert meta["channel_id"] == "web"
         # last_user_message_at 被刷新为当前时刻
         assert abs(meta["last_user_message_at"] - time.time()) < 5.0
@@ -1238,7 +1238,7 @@ class TestSyncChatRequestMetadata:
         )
 
         init_session_metadata(session_id="sess_1")
-        update_session_metadata(session_id="sess_1", project_path="E:\\locked")
+        update_session_metadata(session_id="sess_1", project_dir="E:\\locked")
         _drain_queue()
 
         # 请求带不同 project_dir，但磁盘已锁定 → 返回锁定值
@@ -1368,7 +1368,7 @@ class TestSyncChatRequestMetadata:
         meta = get_session_metadata("s_new")
         assert meta["model"] == "glm-5"
         assert meta["mode"] == "code"
-        assert meta["project_path"] == "E:\\newproj"
+        assert meta["project_dir"] == "E:\\newproj"
         assert meta["status"] == "idle"
 
 
@@ -1440,14 +1440,14 @@ class TestSessionGetMetadataHandler:
         init_session_metadata(
             session_id="sess_x",
             channel_id="web",
-            project_path="E:\\myproj",
+            project_dir="E:\\myproj",
             model="glm-5",
         )
         update_session_metadata(
             session_id="sess_x",
             mode="agent.plan",
             model="glm-5",
-            project_path="E:\\myproj",
+            project_dir="E:\\myproj",
             last_user_message_at=1234.0,
         )
         _METADATA_QUEUE.join()
@@ -1461,7 +1461,7 @@ class TestSessionGetMetadataHandler:
         assert payload["session_id"] == "sess_x"
         assert payload["mode"] == "agent.plan"
         assert payload["model"] == "glm-5"
-        assert payload["project_path"] == "E:\\myproj"
+        assert payload["project_dir"] == "E:\\myproj"
         assert payload["last_user_message_at"] == 1234.0
         assert payload["status"] == "idle"
 
@@ -1505,8 +1505,8 @@ class TestSessionGetMetadataHandler:
             _METADATA_QUEUE,
         )
 
-        init_session_metadata(session_id="sess_A", model="modelA", project_path="E:\\A")
-        init_session_metadata(session_id="sess_B", model="modelB", project_path="E:\\B")
+        init_session_metadata(session_id="sess_A", model="modelA", project_dir="E:\\A")
+        init_session_metadata(session_id="sess_B", model="modelB", project_dir="E:\\B")
         _METADATA_QUEUE.join()
 
         resp_a = await _call_method(
@@ -1517,9 +1517,9 @@ class TestSessionGetMetadataHandler:
         )
 
         assert resp_a["payload"]["model"] == "modelA"
-        assert resp_a["payload"]["project_path"] == "E:\\A"
+        assert resp_a["payload"]["project_dir"] == "E:\\A"
         assert resp_b["payload"]["model"] == "modelB"
-        assert resp_b["payload"]["project_path"] == "E:\\B"
+        assert resp_b["payload"]["project_dir"] == "E:\\B"
 
 
 # ===========================================================================
@@ -1527,11 +1527,11 @@ class TestSessionGetMetadataHandler:
 # 覆盖 P2：stat() OSError 不得中断迁移；or 短路不得跳过合法 0.0 时间戳
 # ===========================================================================
 class TestMigrateLegacySessionMetadata:
-    """启动迁移：给老会话 metadata.json 补全 project_path/model/status/last_user_message_at。"""
+    """启动迁移：给老会话 metadata.json 补全 project_dir/model/status/last_user_message_at。"""
 
     @staticmethod
     def test_fills_missing_constant_fields(sessions_dir):
-        """缺 project_path/model/status 的老会话被补常量默认值并写回。"""
+        """缺 project_dir/model/status 的老会话被补常量默认值并写回。"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
             migrate_legacy_session_metadata_at_startup,
         )
@@ -1545,7 +1545,7 @@ class TestMigrateLegacySessionMetadata:
         migrate_legacy_session_metadata_at_startup()
 
         meta = _read_json(sdir / "metadata.json")
-        assert meta["project_path"] == ""
+        assert meta["project_dir"] == ""
         assert meta["model"] == ""
         assert meta["status"] == "idle"
         assert "last_user_message_at" in meta
@@ -1621,13 +1621,13 @@ class TestMigrateLegacySessionMetadata:
 
         # 不抛异常，且 good 仍被迁移
         migrate_legacy_session_metadata_at_startup()
-        assert _read_json(good / "metadata.json")["project_path"] == ""
+        assert _read_json(good / "metadata.json")["project_dir"] == ""
         # bad 的文件原样保留（未被改写）
         assert (bad / "metadata.json").read_text(encoding="utf-8") == "{not json"
 
     @staticmethod
-    def test_resolves_project_id_from_project_path(sessions_dir, tmp_path, monkeypatch):
-        """有 project_path 但无 project_id 的存量会话,迁移时按 path 解析到 project_id。"""
+    def test_resolves_project_id_from_project_dir(sessions_dir, tmp_path, monkeypatch):
+        """有 project_dir 但无 project_id 的存量会话,迁移时按 path 解析到 project_id。"""
         # 准备 project_store: 创建一个有路径的项目
         root = tmp_path / "agent"
         root.mkdir()
@@ -1643,23 +1643,23 @@ class TestMigrateLegacySessionMetadata:
             migrate_legacy_session_metadata_at_startup,
         )
 
-        # 存量会话: 有 project_path,无 project_id
+        # 存量会话: 有 project_dir,无 project_id
         sdir = sessions_dir / "s_legacy"
         sdir.mkdir()
         (sdir / "metadata.json").write_text(
-            json.dumps({"session_id": "s_legacy", "project_path": "E:\\legacy_app"}),
+            json.dumps({"session_id": "s_legacy", "project_dir": "E:\\legacy_app"}),
             encoding="utf-8",
         )
 
         migrate_legacy_session_metadata_at_startup()
         meta = _read_json(sdir / "metadata.json")
         assert meta["project_id"] == proj.project_id
-        # project_path 保留不变
-        assert meta["project_path"] == "E:\\legacy_app"
+        # project_dir 保留不变
+        assert meta["project_dir"] == "E:\\legacy_app"
 
     @staticmethod
-    def test_unresolvable_project_path_leaves_empty_project_id(sessions_dir, tmp_path, monkeypatch):
-        """project_path 无法匹配任何项目时,project_id 留空(归入默认项目)。"""
+    def test_unresolvable_project_dir_leaves_empty_project_id(sessions_dir, tmp_path, monkeypatch):
+        """project_dir 无法匹配任何项目时,project_id 留空(归入默认项目)。"""
         root = tmp_path / "agent"
         root.mkdir()
         monkeypatch.setattr(
@@ -1676,7 +1676,7 @@ class TestMigrateLegacySessionMetadata:
         sdir = sessions_dir / "s_orphan"
         sdir.mkdir()
         (sdir / "metadata.json").write_text(
-            json.dumps({"session_id": "s_orphan", "project_path": "E:\\gone"}),
+            json.dumps({"session_id": "s_orphan", "project_dir": "E:\\gone"}),
             encoding="utf-8",
         )
 

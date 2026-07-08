@@ -151,7 +151,7 @@ async def _run(host: str, port: int) -> None:
     await extension_manager.load_all_extensions()
     logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
 
-    # 启动迁移：给老会话的 metadata.json 补全 project_path/model/last_user_message_at/status
+    # 启动迁移：给老会话的 metadata.json 补全 project_dir/model/last_user_message_at/status
     # 等新字段并写回磁盘，保证升级后磁盘 schema 统一、前端永远拿到稳定结构。
     # last_user_message_at 从 last_message_at/created_at/目录 mtime 推算，避免老会话排序错乱。
     # 外层兜底：迁移本身已对单个会话容错，但任何意外异常都不得阻塞 AgentServer 启动。
