@@ -98,7 +98,7 @@ from openjiuwen.harness.tools import (
     create_audio_tools,
     create_vision_tools,
 )
-from openjiuwen.harness.tools.todo import TodoStatus, TodoModifyTool
+from openjiuwen.harness.tools.todo import TodoModifyTool
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
     FullCompactProcessorConfig,
@@ -137,6 +137,9 @@ from jiuwenclaw.agentserver.deep_agent.interrupt_resume_helpers import (
     prepare_interrupt_resume_for_request,
     set_todo_resume_snapshot_pending,
 )
+from jiuwenclaw.agentserver.deep_agent.stale_todo_cleanup_helpers import (
+    prepare_stale_todo_cleanup_for_request,
+)
 from jiuwenclaw.agentserver.skill_turbo.permission_bridge import (
     build_interaction_output_from_abort as _skill_turbo_build_interaction_output,
     clear_resume_ctx as _skill_turbo_clear_resume_ctx,
@@ -146,7 +149,7 @@ from jiuwenclaw.agentserver.skill_turbo.permission_bridge import (
 )
 from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     build_paused_plan_decision_prompt_from_session_snapshot,
-    cancel_todos_via_modify_tool,
+    cancel_pending_todos_on_tool,
     clear_plan_pause_on_session,
     clear_task_plan_on_state,
     merge_supplementary_into_request_params,
@@ -6222,6 +6225,16 @@ class JiuWenClawDeepAdapter:
         """On agent.plan continue/resume: inject todo resume guidance when active todos exist."""
         await prepare_interrupt_resume_for_request(self, request)
 
+    async def prepare_stale_todo_cleanup_for_new_request(self, request: AgentRequest) -> bool:
+        """Cancel orphaned active todos before a fresh non-resume user turn."""
+        if self._instance is None:
+            return False
+        return await prepare_stale_todo_cleanup_for_request(
+            request,
+            agent_card=self._instance.card,
+            get_todo_modify_tool=self._get_todo_modify_tool,
+        )
+
     async def _cancel_pending_todos(self, session_id: str) -> list[dict] | None:
         """将未完成的 todo 项标记为 cancelled.
 
@@ -6235,22 +6248,7 @@ class JiuWenClawDeepAdapter:
 
         file_path = modify_tool.file_path_for_session(session_id)
         try:
-            todos = await modify_tool.load_todos(file_path)
-            if not todos:
-                return None
-
-            _DONE_STATUSES = {
-                TodoStatus.COMPLETED.value,
-                TodoStatus.CANCELLED.value,
-            }
-
-            ids_to_cancel = []
-            for todo in todos:
-                if todo.status.value not in _DONE_STATUSES:
-                    ids_to_cancel.append(todo.id)
-
-            if ids_to_cancel:
-                await cancel_todos_via_modify_tool(modify_tool, ids_to_cancel, session_id=session_id)
+            if await cancel_pending_todos_on_tool(modify_tool, session_id):
                 logger.info(
                     "[JiuWenClawDeepAdapter] 已将 session %s 的未完成任务标记为 cancelled",
                     session_id,

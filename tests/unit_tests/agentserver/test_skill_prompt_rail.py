@@ -81,3 +81,17 @@ def test_before_model_call_falls_back_to_cached_builder_without_ctx_agent():
     asyncio.run(rail.before_model_call(_FakeCtx(agent=None)))
 
     assert builder.get_section("skill_protocol") is not None
+
+
+def test_skill_protocol_cn_requires_cancelled_on_abandon():
+    text = _build_skill_protocol_section_text("cn")
+    assert "todo_modify" in text
+    assert "cancelled" in text
+    assert "不生成 PPT" in text
+
+
+def test_skill_protocol_en_requires_cancelled_on_abandon():
+    text = _build_skill_protocol_section_text("en")
+    assert "todo_modify" in text
+    assert "cancelled" in text
+    assert "not to generate the PPT" in text

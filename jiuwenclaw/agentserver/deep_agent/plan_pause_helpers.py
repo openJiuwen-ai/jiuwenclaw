@@ -54,6 +54,7 @@ INTERRUPT_ARTIFACTS_SUMMARY_KEY = "jiuwenclaw_interrupt_artifacts_summary"
 # → 取消时 str（格式化摘要文本，_persist_interrupt_artifacts_summary 转换）
 # → 注入后 None（clear_interrupt_artifacts_summary_from_session 清空）
 INTERRUPT_RECOVERY_INJECTED_KEY = "jiuwenclaw_interrupt_recovery_injected"
+SKIP_INVOKE_TASK_UPDATE_SYNC_KEY = "jiuwenclaw_skip_invoke_task_update_sync"
 
 PAUSED_PLAN_DECISION_PROMPT_CN = """【系统：plan 暂停后的用户消息】
 用户已 cancel；**未完成**待办已从 todo 文件移除（`todo_list` 通常仅含 completed）。取消时的计划状态见下方快照。
@@ -514,6 +515,19 @@ def mark_interrupt_recovery_injected(session: Any) -> None:
 def clear_interrupt_recovery_injected(session: Any) -> None:
     """Clear the recovery injected marker (for new conversation cycles)."""
     session.update_state({INTERRUPT_RECOVERY_INJECTED_KEY: None})
+
+
+def mark_skip_invoke_task_update_sync(session: Any) -> None:
+    """Mark that before_invoke should not broadcast a stale todo snapshot this turn."""
+    session.update_state({SKIP_INVOKE_TASK_UPDATE_SYNC_KEY: True})
+
+
+def is_skip_invoke_task_update_sync(session: Any) -> bool:
+    return session.get_state(SKIP_INVOKE_TASK_UPDATE_SYNC_KEY) is True
+
+
+def clear_skip_invoke_task_update_sync(session: Any) -> None:
+    session.update_state({SKIP_INVOKE_TASK_UPDATE_SYNC_KEY: None})
 
 
 # ---------------------------------------------------------------------------
