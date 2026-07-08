@@ -78,8 +78,6 @@ export interface Message {
   // 主动推荐消息标记
   isProactiveRecommendation?: boolean;
   proactiveType?: 'skill_recommend' | 'task_reminder' | 'need_exploration';
-  // 用户消息附带的技能列表（输入栏选中并发送）
-  skills?: string[];
 }
 
 export interface ToolCall {
