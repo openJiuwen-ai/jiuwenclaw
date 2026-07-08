@@ -19,6 +19,7 @@ _DEFAULT_AUDIENCE = "通用商务/知识分享"
 _DEFAULT_PRESENTATION_PURPOSE = "auto"
 _DEFAULT_PAGE_COUNT = 6
 _MAX_PAGE_COUNT = 30
+_DEFAULT_STRUCTURAL_PAGES = 2
 
 _VALID_STYLE_IDS = frozenset(
     {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech", "free", "custom"}
@@ -59,6 +60,7 @@ _P21_SLOT_SYSTEM_PROMPT = ("""你是 PPT 需求槽位分析助手。从用户消
 提取字段：
 - topic: 演示主题（字符串；未知则 ""）
 - page_count: 目标页数（整数；未知则 null）
+- is_total_page_count: 布尔值。当用户明确说"总页数 N 页"/"总共 N 页"/"一共 N 页"/"总页数严格为 N 页"等表述，指代含封面和结束页的总页数时为 true；当用户说"内容页 N 页"/"正文 N 页"或仅说"N 页"且上下文无"总/总共/一共"等限定词时为 false；page_count 未知时也填 false
 - audience: 目标受众（字符串；未知则 ""）
 - presentation_purpose: 汇报目的，如「工作汇报」「产品展示」「教学分享」「auto」；未知则 ""
 - style_id: 用户明确提及风格时填写：business-classic / tech-minimal / elegant-narrative / industrial-tech / free / custom；未知则 ""
@@ -74,9 +76,10 @@ _P21_SLOT_SYSTEM_PROMPT = ("""你是 PPT 需求槽位分析助手。从用户消
 4. 不要输出 search_mode / source_type。
 5. topic 缺失时由下游 LLM 生成 4 个主题候选并 ask 用户选择，不要生成询问文案。
 6. pack_dir 存在时 style_id 填 "custom"（模板包优先于预设风格），need_ask_style 设 false。
+7. is_total_page_count 的判断关键：用户是否使用了"总页数"/"总共"/"一共"等明确指代全部页数（含封面结束页）的表述。例如"总页数严格为 8 页"→true；"8 页内容"→false；"做 8 页 PPT"→false。当 is_total_page_count=true 时，page_count 填用户说的总页数原值（如 8），系统会自动从中预留 2 页给封面和结束页，实际内容页数为 page_count - 2。
 
 必须只输出 JSON："""
-    + '{"topic":"","page_count":null,"audience":"","presentation_purpose":"",'
+    + '{"topic":"","page_count":null,"is_total_page_count":false,"audience":"","presentation_purpose":"",'
     + '"style_id":"","style_description":"","pack_dir":"",'
     + '"missing_fields":[],"need_ask_style":true}')
 
@@ -246,6 +249,7 @@ def _set_requirement_artifact(ctx: dict[str, Any]) -> None:
         "info": {
             "topic": ctx.get("topic", ""),
             "page_count": ctx.get("page_count"),
+            "is_total_page_count": ctx.get("is_total_page_count", False),
             "style_id": ctx.get("style_id", ""),
             "audience": ctx.get("audience", ""),
             "presentation_purpose": ctx.get("presentation_purpose", ""),
@@ -260,6 +264,8 @@ def _apply_slot_defaults(inputs: dict[str, Any]) -> None:
         inputs["presentation_purpose"] = _DEFAULT_PRESENTATION_PURPOSE
     if inputs.get("page_count") is None:
         inputs["page_count"] = _DEFAULT_PAGE_COUNT
+    if "is_total_page_count" not in inputs:
+        inputs["is_total_page_count"] = False
 
 
 def _batch_field_is_satisfied(inputs: dict[str, Any], field: str) -> bool:
@@ -317,6 +323,19 @@ def _merge_slot_payload(
     page_count = _normalize_page_count(payload.get("page_count"))
     if page_count is not None:
         inputs["page_count"] = page_count
+
+    is_total_page_count = payload.get("is_total_page_count")
+    if isinstance(is_total_page_count, bool):
+        inputs["is_total_page_count"] = is_total_page_count
+
+    # 当用户明确要求总页数时，将 page_count 从总页数换算为内容页数
+    # （预留首尾页：封面 + 结束页），下游流水线统一以内容页数工作
+    if is_total_page_count and page_count is not None:
+        inputs["page_count"] = max(page_count - _DEFAULT_STRUCTURAL_PAGES, 1)
+        logger.info(
+            "[P2] is_total_page_count=true, page_count %d → %d (内容页数, 预留 %d 首尾页)",
+            page_count, inputs["page_count"], _DEFAULT_STRUCTURAL_PAGES,
+        )
 
     audience = payload.get("audience")
     if isinstance(audience, str) and audience.strip():
@@ -394,6 +413,7 @@ def _parse_slot_analysis_response(raw: str, *, preserve_topic: bool) -> dict[str
         return {
             "topic": "",
             "page_count": None,
+            "is_total_page_count": False,
             "audience": "",
             "presentation_purpose": "",
             "style_id": "",
