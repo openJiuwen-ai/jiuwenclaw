@@ -647,6 +647,23 @@ def _patch_compiler_for_on_conflict():
 
 _patch_compiler_for_on_conflict()
 
+_checkpoint_singleton_lock: asyncio.Lock | None = None
+_shared_checkpoint_checkpointer: Any = None
+
+
+def _get_checkpoint_singleton_lock() -> asyncio.Lock:
+    global _checkpoint_singleton_lock
+    if _checkpoint_singleton_lock is None:
+        _checkpoint_singleton_lock = asyncio.Lock()
+    return _checkpoint_singleton_lock
+
+
+def reset_shared_checkpoint_for_tests() -> None:
+    """Reset process-wide checkpoint singleton (tests only)."""
+    global _shared_checkpoint_checkpointer, _checkpoint_singleton_lock
+    _shared_checkpoint_checkpointer = None
+    _checkpoint_singleton_lock = None
+
 
 async def _build_mysql_handler_engine():
     """构建 checkpoint MySQL AsyncEngine，使用 openjiuwen_runtime SDK.
@@ -1395,28 +1412,34 @@ class JiuWenClawDeepAdapter:
 
     @staticmethod
     async def set_checkpoint():
-        try:
-            PersistenceCheckpointerProvider()
-            checkpoint_path = get_checkpoint_dir()
-            conf = {"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"}
+        global _shared_checkpoint_checkpointer
+        async with _get_checkpoint_singleton_lock():
+            if _shared_checkpoint_checkpointer is not None:
+                CheckpointerFactory.set_default_checkpointer(_shared_checkpoint_checkpointer)
+                return
+            try:
+                PersistenceCheckpointerProvider()
+                checkpoint_path = get_checkpoint_dir()
+                conf = {"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"}
 
-            db_type = os.getenv("GATEWAY_DB_TYPE", "").strip().lower()
-            if db_type == "mysql":
-                mysql_engine = await _build_mysql_handler_engine()
-                if mysql_engine is not None:
-                    conf["db_client"] = mysql_engine
-                    logger.info("[JiuWenClawDeepAdapter] use mysql db_client from SDK")
-            elif db_type in ("postgresql", "postgres", "pg"):
-                postgresql_engine = await _build_postgresql_handler_engine()
-                if postgresql_engine is not None:
-                    conf["db_client"] = postgresql_engine
-                    logger.info("[JiuWenClawDeepAdapter] use postgresql db_client from SDK")
-            checkpointer = await CheckpointerFactory.create(
-                CheckpointerConfig(type="persistence", conf=conf)
-            )
-            CheckpointerFactory.set_default_checkpointer(checkpointer)
-        except Exception as e:
-            logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e)
+                db_type = os.getenv("GATEWAY_DB_TYPE", "").strip().lower()
+                if db_type == "mysql":
+                    mysql_engine = await _build_mysql_handler_engine()
+                    if mysql_engine is not None:
+                        conf["db_client"] = mysql_engine
+                        logger.info("[JiuWenClawDeepAdapter] use mysql db_client from SDK")
+                elif db_type in ("postgresql", "postgres", "pg"):
+                    postgresql_engine = await _build_postgresql_handler_engine()
+                    if postgresql_engine is not None:
+                        conf["db_client"] = postgresql_engine
+                        logger.info("[JiuWenClawDeepAdapter] use postgresql db_client from SDK")
+                checkpointer = await CheckpointerFactory.create(
+                    CheckpointerConfig(type="persistence", conf=conf)
+                )
+                _shared_checkpoint_checkpointer = checkpointer
+                CheckpointerFactory.set_default_checkpointer(checkpointer)
+            except Exception as e:
+                logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e)
 
 
     @staticmethod

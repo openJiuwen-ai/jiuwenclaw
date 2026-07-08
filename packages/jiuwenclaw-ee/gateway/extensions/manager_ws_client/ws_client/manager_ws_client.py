@@ -148,7 +148,7 @@ class ManagerWsClient:
         self._running = False
         self._ready = False
         set_jiuwenclaw_id(None)
-        GatewayDb.bind(None)
+        await GatewayDb.release()
         if self._ws is not None:
             try:
                 await self._ws.close()

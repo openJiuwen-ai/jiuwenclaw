@@ -59,6 +59,12 @@ class GatewayDb(Database):
     @classmethod
     def bind(cls, jiuwenclaw_id: str | None) -> GatewayDb:
         """设置当前进程使用的 ``GatewayDb`` 实例（Manager WS 注册或 AgentServer 启动时调用）。"""
+        if jiuwenclaw_id is None:
+            normalized = None
+        else:
+            normalized = str(jiuwenclaw_id).strip() or None
+        if cls._current is not None and cls._current.jiuwenclaw_id == normalized:
+            return cls._current
         cls._current = cls(jiuwenclaw_id)
         return cls._current
 
@@ -67,6 +73,13 @@ class GatewayDb(Database):
         if cls._current is None:
             cls._current = cls(None)
         return cls._current
+
+    @classmethod
+    async def release(cls) -> None:
+        """断连/注销时释放当前 DB handler，并清空 ``jiuwenclaw_id`` 绑定。"""
+        if cls._current is not None:
+            await cls._current.close()
+        cls._current = cls(None)
 
     def apply_instance_scope(self, table: str, filters: dict[str, Any]) -> dict[str, Any]:
         """为策略/映射表查询附加 ``jiuwenclaw_id`` 隔离条件。"""
