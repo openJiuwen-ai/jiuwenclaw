@@ -78,22 +78,22 @@ _BUFFERABLE_EVENT_TYPES: frozenset[str] = frozenset({"chat.delta", "chat.reasoni
 
 # ──────────────────────── 节点显示名映射 ────────────────────────
 # 将内部 plan_name（如 p0_pipeline_init）映射为界面上展示的中文名称。
-# 排序遵循 ppt_gen_root 节点 sub_plans 的执行顺序（Stage 0 → Stage N）。
+# 排序遵循 ppt_gen_root 节点 sub_plans 的执行顺序（Stage 1 → Stage N）。
 # 仅影响前端展示，不改变内部 plan_name 标识。
 _NODE_DISPLAY_NAMES: dict[str, str] = {
-    "p0_pipeline_init": "Stage 0: 流水线初始化",
-    "p1_intent_classify": "Stage 1: 意图分类",
-    "p3_document_parse": "Stage 2: 文档解析",
-    "p2_requirement_collect": "Stage 3: 需求收集",
-    "p3_5_template_context": "Stage 4: 模板上下文预处理",
-    "p4_content_plan": "Stage 5: 内容策划",
-    "p5_outline_review": "Stage 6: 大纲审阅",
-    "p6_deep_research": "Stage 7: 深度研究",
-    "p7_style_prepare": "Stage 8: 风格准备",
-    "p6_5_image_prepare": "Stage 9: 图片准备",
-    "p8_ppt_page_gen": "Stage 10: 幻灯片生成",
-    "p9_ppt_export": "Stage 11: PPTX导出",
-    "p10_delivery": "Stage 12: 交付",
+    "p0_pipeline_init": "Stage 1: 流水线初始化",
+    "p1_intent_classify": "Stage 2: 意图分类",
+    "p3_document_parse": "Stage 3: 文档解析",
+    "p2_requirement_collect": "Stage 4: 需求收集",
+    "p3_5_template_context": "Stage 5: 模板上下文预处理",
+    "p4_content_plan": "Stage 6: 内容策划",
+    "p5_outline_review": "Stage 7: 大纲审阅",
+    "p6_deep_research": "Stage 8: 深度研究",
+    "p7_style_prepare": "Stage 9: 风格准备",
+    "p6_5_image_prepare": "Stage 10: 图片准备",
+    "p8_ppt_page_gen": "Stage 11: 幻灯片生成",
+    "p9_ppt_export": "Stage 12: PPTX导出",
+    "p10_delivery": "Stage 13: 交付",
     "ppt_gen_root": "PPT生成",
 }
 
@@ -1910,7 +1910,7 @@ class SkillTurboExecutor:
                         request_id,
                         channel_id,
                         node,
-                        f"Fallback 次数超过限制: {self._fallback_count}/{self._config.max_fallback_count}",
+                        str(item),
                         self._current_task_id(),
                     )
                     # Fallback 超限是终止性错误，向上传播让 execute_plan_stream 感知
@@ -2024,8 +2024,8 @@ class SkillTurboExecutor:
                 self._config.max_fallback_count,
             )
             raise FallbackLimitExceededError(
-                f"Fallback 次数超过限制: {self._fallback_count}/{self._config.max_fallback_count}"
-            )
+                f"Fallback 次数超过限制: {self._fallback_count}/{self._config.max_fallback_count}。最后错误: {error}"
+            ) from error
 
     def _record_fallback_call(self, node: PlanNode, trace_prefix: str) -> None:
         self._fallback_count += 1
@@ -2185,6 +2185,11 @@ class SkillTurboExecutor:
 
             # 将消息文本中出现的内部 plan_name 替换为中文显示名
             actual_content = _replace_plan_names_in_text(actual_content)
+
+            # 进度/完成类消息（来自 message 字段）追加换行，避免前端拼接成一行
+            chunk_status = content.get("status")
+            if chunk_status in ("progress", "ok") and actual_content:
+                actual_content = actual_content.rstrip("\n") + "\n"
 
             # 将 data_payload 中的 current_node 转为显示名（浅拷贝避免修改原始 chunk）
             if data_payload is not None and "current_node" in data_payload:
