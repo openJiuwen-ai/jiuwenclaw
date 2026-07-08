@@ -199,7 +199,19 @@ def _resolve_explicit_output_dir(inputs: dict[str, Any]) -> str | None:
 
 
 def _resolve_timestamp_parent_dir(inputs: dict[str, Any]) -> str:
-    """generate-timestamp-dir 的父目录，与 interface.prepare_files_for_agent 的 output 路径一致。"""
+    """generate-timestamp-dir 的父目录。
+
+    优先级：
+    1. workspace_base（显式指定的 output 父目录，避免路径重建导致的不一致）
+    2. effective_project_dir + user_id/chat_id 重建路径（与 interface.prepare_files_for_agent 一致）
+    3. fallback 到 ./workspace
+    """
+    # 优先使用显式指定的 workspace_base（通常来自 SkillTurbo 工具传入的 output_dir）
+    workspace_base = inputs.get("workspace_base") or inputs.get("workspace")
+    if workspace_base:
+        return str(Path(str(workspace_base)).expanduser().resolve())
+
+    # fallback：从 effective_project_dir 重建路径
     project_dir = inputs.get("effective_project_dir")
     if project_dir:
         session = str(inputs.get("conversation_id") or inputs.get("session_id") or "default")
