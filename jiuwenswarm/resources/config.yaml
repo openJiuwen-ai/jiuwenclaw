@@ -504,6 +504,26 @@ execution_guard:
     # 未知/错误工具连续调用达到该次数时停止重试并中断
     unknown_tool_threshold: 10
 
+# CSPL Sentinel：工具输入/输出安全扫描（对标 xy_channel sentinel_hook.ts）
+cspl:
+  # 总开关，默认关闭
+  enabled: false
+  # CSPL 服务根地址，例如 http://lfhagmirror.hwcloudtest.cn:80
+  service_url: ""
+  uid: ""
+  api_key: ""
+  # 华为账号 uid，写入 extra.userId；未配置时默认取 channels.xiaoyi.uid
+  extra_user_id: ""
+  skill_id: skill-scope
+  request_from: openclaw
+  package_name: com.huawei.hag
+  text_source: question
+  timeout_ms: 15000
+  # API 异常时是否放行（fail-open）
+  fail_open: true
+  scan_tool_input: true
+  scan_tool_output: true
+
 channels:
   web:
     send_file_allowed: true

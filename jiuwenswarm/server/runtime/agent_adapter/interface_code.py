@@ -196,6 +196,7 @@ _RAIL_BUILD_NAMES: dict[str, str] = {
     "WorktreeRail": "_build_worktree_rail_via_config",
     "CodeAgentRail": "_build_code_agent_rail",
     "PlanApprovalInterruptRail": "_build_plan_approval_rail",
+    "CsplSentinelRail": "_build_cspl_sentinel_rail",
 }
 
 _TOOL_BUILD_NAMES: dict[str, str] = {
@@ -351,7 +352,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     # 固定 Rails 名字集合 — 用于动态 Rails 去重
     _FIXED_RAIL_NAMES = frozenset({
         "RuntimePromptRail", "ResponsePromptRail",
-        "JiuSwarmStreamEventRail", "SecurityRail",
+        "JiuSwarmStreamEventRail", "SecurityRail", "CsplSentinelRail",
         "LspRail", "ProjectMemoryRail", "PermissionInterruptRail",
         "ContextProcessorRail",
         "SysOperationRail", "CodingMemoryRail",
@@ -552,6 +553,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _RailBuildInfo("_skill_retrieval_prompt_rail", self._build_skill_retrieval_prompt_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
+            _RailBuildInfo("_cspl_sentinel_rail", self._build_cspl_sentinel_rail),
             _RailBuildInfo("_lsp_rail", self._build_lsp_rail_via_config),
             _RailBuildInfo("_project_memory_rail", self._build_project_memory_rail),
             _RailBuildInfo(

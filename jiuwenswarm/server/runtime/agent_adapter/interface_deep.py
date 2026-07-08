@@ -127,6 +127,7 @@ from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
     CircuitBreakerConfig,
 )
+from jiuwenswarm.agents.harness.common.rails.cspl import CsplConfig, CsplSentinelRail
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
 from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
@@ -2908,6 +2909,19 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] CircuitBreakerRail create failed: %s", exc)
             return None
 
+    def _build_cspl_sentinel_rail(self) -> CsplSentinelRail | None:
+        try:
+            cspl_cfg = CsplConfig.load()
+            if not cspl_cfg.enabled:
+                logger.info("[JiuWenSwarmDeepAdapter] CsplSentinelRail disabled by config")
+                return None
+            rail = CsplSentinelRail(cspl_cfg)
+            logger.info("[JiuWenSwarmDeepAdapter] CsplSentinelRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] CsplSentinelRail create failed: %s", exc)
+            return None
+
     def _build_runtime_prompt_rail(self) -> RuntimePromptRail | None:
         """Build RuntimePromptRail for per-model-call time/channel/runtime injection."""
         try:
@@ -2961,6 +2975,7 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
+            _RailBuildInfo("_cspl_sentinel_rail", self._build_cspl_sentinel_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
             _RailBuildInfo(
