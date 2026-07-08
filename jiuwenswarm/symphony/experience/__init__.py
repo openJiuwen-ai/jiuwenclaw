@@ -5,9 +5,11 @@ if TYPE_CHECKING:
     from .distiller import TraceDistiller
     from .cluster import cluster_traces, ClusteredQuery
     from .collector import ExperienceBaseBuilder
+    from .embed import EmbeddingClient
+    from .retriever import ExperienceRetriever
 
 from .evaluator import TraceEvaluator
-from .models import TraceRecord, DistilledPattern
+from .models import TraceRecord, DistilledPattern, ExperienceBankBuildConfig
 from .trace import (
     list_session_ids,
     parse_all_sessions,
@@ -20,6 +22,7 @@ from .trace import (
 __all__ = [
     "TraceRecord",
     "DistilledPattern",
+    "ExperienceBankBuildConfig",
     "list_session_ids",
     "parse_session",
     "parse_all_sessions",
@@ -31,7 +34,9 @@ __all__ = [
     "TraceDistiller",
     "cluster_traces",
     "ClusteredQuery",
-    "ExperienceBaseBuilder"
+    "ExperienceBaseBuilder",
+    'EmbeddingClient',
+    'ExperienceRetriever'
 ]
 
 
@@ -42,7 +47,9 @@ def __getattr__(name):
         "TraceDistiller": ".distiller",
         "cluster_traces": ".cluster",
         "ClusteredQuery": ".cluster",
-        "ExperienceBaseBuilder": ".collector"
+        "ExperienceBaseBuilder": ".collector",
+        "EmbeddingClient": ".embed",
+        "ExperienceRetriever": ".retriever",
     }
     if name in lazy:
         import importlib

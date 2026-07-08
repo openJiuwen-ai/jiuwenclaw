@@ -83,6 +83,17 @@ class TraceRecord:
 
 
 @dataclass
+class ExperienceBankBuildConfig:
+    """Configuration for ExperienceBaseBuilder pipeline."""
+
+    min_cluster_size: int = 1
+    max_workers: int = 8
+    max_success_examples: int = 20
+    pending_flush_threshold: int = 20
+    min_hits_for_pattern: int = 1
+
+
+@dataclass
 class DistilledPattern:
     """Distilled knowledge pattern from one cluster."""
 
@@ -90,8 +101,6 @@ class DistilledPattern:
     effective_skills: list[list[str]] = field(default_factory=list)
     ineffective_skills: list[dict[str, str | list[str]]] = field(default_factory=list)
     success_rate: float = 0.0
-    avg_token_cost_success: float = 0.0
-    avg_token_cost_failure: float = 0.0
     raw_trace_count: int = 0
     pattern_description: str = ""
 
@@ -102,8 +111,6 @@ class DistilledPattern:
             "effective_skills": self.effective_skills,
             "ineffective_skills": self.ineffective_skills,
             "success_rate": self.success_rate,
-            "avg_token_cost_success": self.avg_token_cost_success,
-            "avg_token_cost_failure": self.avg_token_cost_failure,
             "raw_trace_count": self.raw_trace_count,
             "pattern_description": self.pattern_description,
         }
@@ -116,8 +123,6 @@ class DistilledPattern:
             effective_skills=list(d.get("effective_skills", [])),
             ineffective_skills=list(d.get("ineffective_skills", [])),
             success_rate=float(d.get("success_rate", 0.0)),
-            avg_token_cost_success=float(d.get("avg_token_cost_success", 0.0)),
-            avg_token_cost_failure=float(d.get("avg_token_cost_failure", 0.0)),
             raw_trace_count=int(d.get("raw_trace_count", 0)),
             pattern_description=str(d.get("pattern_description", "")),
         )

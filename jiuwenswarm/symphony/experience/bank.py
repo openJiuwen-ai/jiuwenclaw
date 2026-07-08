@@ -30,7 +30,8 @@ _HASH_CHUNK_SIZE = 8192
 class _KnowledgeMeta:
     version: int = 1
     vector_count: int = 0
-    vector_algorithm: str = "IndexFlatIP"
+    vector_algorithm: str = "Flat"
+    vector_dimension: int = 0
     vector_sha256: str = ""
     scalar_sha256: str = ""
 
@@ -55,21 +56,25 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-_FAISSENTRIES = {
-    "IndexFlatIP": faiss.IndexFlatIP,
-    "IndexFlatL2": faiss.IndexFlatL2,
-    "IndexIDMap": faiss.IndexIDMap,
-}
 
 
-def _build_faiss_index(algorithm: str, dim: int) -> faiss.Index:
-    cls = _FAISSENTRIES.get(algorithm)
-    if cls is None:
+def _build_faiss_index(algorithm: str, dim: int) -> tuple[faiss.Index, str]:
+    actual_algorithm = algorithm
+    try:
+        index = faiss.index_factory(dim, algorithm, faiss.METRIC_INNER_PRODUCT)
+    except (RuntimeError, ValueError) as exc:
         LOGGER.warning(
-            "ExperienceBank: unknown FAISS algorithm '%s', falling back to IndexFlatIP", algorithm,
+            "ExperienceBank: index_factory failed for '%s' (dim=%d): %s, falling back to Flat",
+            algorithm, dim, exc,
         )
-        cls = faiss.IndexFlatIP
-    return cls(dim)
+        index = faiss.index_factory(dim, "Flat", faiss.METRIC_INNER_PRODUCT)
+        actual_algorithm = "Flat"
+
+    # IVF-style indices need training before adding vectors
+    if isinstance(index, faiss.IndexIVF):
+        index.nprobe = 10  # reasonable default for search recall
+
+    return index, actual_algorithm
 
 
 def _write_atomic(source: Path, target: Path) -> None:
@@ -79,9 +84,9 @@ def _write_atomic(source: Path, target: Path) -> None:
     try:
         _win_retry(lambda: os.replace(str(source), str(target)), retries=5, delay=0.2)
     except FileNotFoundError:
-        LOGGER.debug("_write_atomic: source file vanished/locked during replace: %s", source)
+        LOGGER.debug("_write_atomic: source=%s, target=%s — file vanished/locked during replace", source, target)
     except Exception:
-        LOGGER.warning("_write_atomic failed for %s -> %s", source, target, exc_info=True)
+        LOGGER.warning("_write_atomic failed", exc_info=True)
 
 
 class ExperienceBank:
@@ -105,7 +110,7 @@ class ExperienceBank:
         index_dir: str | Path,
         embedding_client: EmbeddingClient,
         *,
-        vector_algorithm: str = "IndexFlatIP",
+        vector_algorithm: str = "Flat",
     ) -> None:
         self._dir = Path(index_dir)
         self._embedder = embedding_client
@@ -295,6 +300,15 @@ class ExperienceBank:
                     meta.vector_count, len(self._items),
                 )
 
+            # 4b. Validate vector dimension against manifest
+            if meta.vector_dimension and self._embedding_matrix is not None:
+                actual_dim = self._embedding_matrix.shape[1]
+                if meta.vector_dimension != actual_dim:
+                    LOGGER.warning(
+                        "ExperienceBank: vector_dimension mismatch: manifest says %d, actual %d",
+                        meta.vector_dimension, actual_dim,
+                    )
+
             # 5. Initialize ID counter from max existing ID
             if self._items:
                 max_id = 0
@@ -347,9 +361,11 @@ class ExperienceBank:
             _write_atomic(tmp_emb.with_suffix(".npy"), emb_path)
 
         # 4. Write meta.json (integrity manifest)
+        dim = self._embedding_matrix.shape[1] if self._embedding_matrix is not None else 0
         meta = _KnowledgeMeta(
             vector_count=len(self._items),
             vector_algorithm=self._vector_algorithm,
+            vector_dimension=dim,
             vector_sha256=_sha256_file(vector_dir / _FAISS_FILE) if self._faiss_index is not None else "",
             scalar_sha256=_sha256_file(scalar_path),
         )
@@ -384,7 +400,21 @@ class ExperienceBank:
         arr = np.array(embeddings, dtype=np.float32)
         dim = arr.shape[1]
 
-        index = _build_faiss_index(self._vector_algorithm, dim)
+        index, actual_algorithm = _build_faiss_index(self._vector_algorithm, dim)
+        self._vector_algorithm = actual_algorithm
+
+        # IVF-style indices require training on the dataset first
+        if isinstance(index, faiss.IndexIVF):
+            if len(arr) >= index.nlist:
+                index.train(arr)
+            else:
+                # Too few vectors for IVF; fall back to Flat
+                LOGGER.info(
+                    "ExperienceBank: too few vectors (%d) for IVF nlist=%d, falling back to Flat",
+                    len(arr), index.nlist,
+                )
+                index = faiss.index_factory(dim, "Flat", faiss.METRIC_INNER_PRODUCT)
+                self._vector_algorithm = "Flat"
         index.add(arr)
 
         self._faiss_index = index
