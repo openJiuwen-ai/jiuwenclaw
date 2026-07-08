@@ -1507,14 +1507,6 @@ function AppContent() {
         sessionIdRef.current = newSid;
         setSessionId(newSid);
         navigate({ kind: 'chat-session', sessionId: newSid }, { replace: true });
-<<<<<<< HEAD
-=======
-        const createdSessionProject = {
-          project_id: workContext.project_id || '',
-          project_dir: workContext.project_dir || '',
-          pinned: false,
-        };
->>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
         const sent = await sendMessage(content, newSid, mediaItems);
         newConversationProjectRef.current = null;
         if (!sent) {
