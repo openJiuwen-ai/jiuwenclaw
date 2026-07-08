@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_MODULE_DIR = Path(__file__).parent
 CONFIG_YAML_PATH = get_config_file()
+SWARMFLOW_ENABLED_CONFIG_PATH = ("modes", "team", "jiuwen_team", "enable_swarmflow")
+DEFAULT_SWARMFLOW_ENABLED = False
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
 if _user_config:
@@ -1181,6 +1183,28 @@ def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
     if "modes" not in data or not isinstance(data["modes"], dict):
         data["modes"] = {}
     data["modes"]["team"] = team_mapping
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def _ensure_config_object(parent: dict[str, Any], key: str, path: str) -> dict[str, Any]:
+    value = parent.get(key)
+    if value is None:
+        value = {}
+        parent[key] = value
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} config must be an object")
+    return value
+
+
+def update_swarmflow_enabled_in_config(enabled: bool) -> None:
+    """Update ``modes.team.jiuwen_team.enable_swarmflow`` in config.yaml."""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    current = data
+    path_so_far: list[str] = []
+    for segment in SWARMFLOW_ENABLED_CONFIG_PATH[:-1]:
+        path_so_far.append(segment)
+        current = _ensure_config_object(current, segment, ".".join(path_so_far))
+    current[SWARMFLOW_ENABLED_CONFIG_PATH[-1]] = bool(enabled)
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 

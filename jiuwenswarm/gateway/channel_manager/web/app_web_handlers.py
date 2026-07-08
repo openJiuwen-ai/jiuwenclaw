@@ -24,6 +24,8 @@ from openjiuwen.core.foundation.llm import Model, ProviderType
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 
 from jiuwenswarm.common.config import (
+    DEFAULT_SWARMFLOW_ENABLED,
+    SWARMFLOW_ENABLED_CONFIG_PATH,
     get_config,
     get_config_raw,
     get_default_models,
@@ -40,6 +42,7 @@ from jiuwenswarm.common.config import (
     update_permissions_enabled_in_config,
     update_memory_forbidden_enabled_in_config,
     update_memory_forbidden_description_in_config,
+    update_swarmflow_enabled_in_config,
     update_a2ui_in_config,
     update_updater_in_config,
     update_proactive_recommendation_in_config,
@@ -451,6 +454,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "proactive_recommendation_enabled",
     "proactive_recommendation_max_recommend_per_day",
     "proactive_recommendation_max_sessions_per_tick",
+    "swarmflow_enabled",
 })
 
 _SYMPHONY_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
@@ -555,6 +559,15 @@ def _flatten_skill_retrieval_for_config_panel(raw: dict[str, Any]) -> dict[str, 
         else:
             flat[key] = str(value)
     return flat
+
+
+def _flatten_swarmflow_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
+    enabled = _get_nested_config_value(
+        raw,
+        SWARMFLOW_ENABLED_CONFIG_PATH,
+        DEFAULT_SWARMFLOW_ENABLED,
+    )
+    return {"swarmflow_enabled": "true" if enabled else "false"}
 
 
 def _build_symphony_config_update(params: dict[str, Any]) -> dict[str, Any]:
@@ -864,6 +877,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             memory_desc = memory_cfg.get("description") or {}
             payload["memory_forbidden_description"] = memory_desc
             payload.update(get_a2ui_config_payload(raw))
+            payload.update(_flatten_swarmflow_for_config_panel(raw))
             payload.update(_flatten_symphony_for_config_panel(raw))
             if not payload.get("free_search_ddg_enabled"):
                 payload["free_search_ddg_enabled"] = "false"
@@ -886,6 +900,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("evolution_auto_scan", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("memory_forbidden_description", "")
+            payload.setdefault("swarmflow_enabled", "true" if DEFAULT_SWARMFLOW_ENABLED else "false")
             for key, value in get_default_a2ui_config_payload().items():
                 payload.setdefault(key, value)
             for key, (_, value_type, default) in {
@@ -999,6 +1014,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 elif param_key == "memory_forbidden_description":
                     desc_val = str(val).strip()
                     update_memory_forbidden_description_in_config({preferred_lang: desc_val})
+                elif param_key == "swarmflow_enabled":
+                    update_swarmflow_enabled_in_config(parsed)
                 elif param_key.startswith("a2ui_"):
                     ok, update, error = validate_a2ui_config_update(param_key, val)
                     if not ok:
@@ -1013,6 +1030,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 yaml_updated.append(param_key)
             except Exception as e:  # noqa: BLE001
                 logger.warning("[config.set] 写回 config.yaml 失败 %s: %s", param_key, e)
+                if param_key == "swarmflow_enabled":
+                    raise _ConfigInternalError("failed to update enable_swarmflow") from e
 
         symphony_updates = _build_symphony_config_update(params)
         if symphony_updates:

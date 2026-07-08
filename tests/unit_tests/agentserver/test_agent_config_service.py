@@ -19,6 +19,7 @@ from jiuwenswarm.server.runtime.agent_config_service import (
 )
 from jiuwenswarm.common.config import (
     remove_subagent_from_config,
+    update_swarmflow_enabled_in_config,
     upsert_subagent_in_config,
 )
 
@@ -376,6 +377,53 @@ class TestSubagentConfigMutation:
     def test_remove_empty_name_raises():
         with pytest.raises(ValueError, match="subagent name is required"):
             remove_subagent_from_config("")
+
+
+class TestSwarmflowConfigMutation:
+    """update_swarmflow_enabled_in_config 测试."""
+
+    @pytest.fixture
+    def tmp_config(self, tmp_path, monkeypatch):
+        import jiuwenswarm.common.config as config_mod
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            """
+modes:
+  team:
+    jiuwen_team:
+      team_name: jiuwen_team
+      enable_swarmflow: true
+    secondary_team:
+      team_name: secondary_team
+      enable_swarmflow: true
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config_mod, "CONFIG_YAML_PATH", config_file)
+        return config_file
+
+    @staticmethod
+    def test_updates_modes_team_jiuwen_team_entry(tmp_config):
+        update_swarmflow_enabled_in_config(False)
+
+        data = yaml.safe_load(tmp_config.read_text(encoding="utf-8"))
+        teams = data["modes"]["team"]
+        assert teams["jiuwen_team"]["enable_swarmflow"] is False
+        assert teams["secondary_team"]["enable_swarmflow"] is True
+
+    @staticmethod
+    def test_creates_modes_team_jiuwen_team_entry(tmp_path, monkeypatch):
+        import jiuwenswarm.common.config as config_mod
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("{}\n", encoding="utf-8")
+        monkeypatch.setattr(config_mod, "CONFIG_YAML_PATH", config_file)
+
+        update_swarmflow_enabled_in_config(True)
+
+        data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        assert data["modes"]["team"]["jiuwen_team"]["enable_swarmflow"] is True
 
 
 class TestAgentLLMGeneration:
