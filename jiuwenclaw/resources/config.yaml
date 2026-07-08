@@ -351,7 +351,7 @@ task_memory:
   summary_algo: ACE
 
 # ========== Redis（分布式 Gateway：状态存储 / Pub/Sub / Leader；standalone 下不连接）==========
-# 通过 gateway.deployment_mode 控制：standalone（不连接）/ active-standby（连接 Redis）
+# 通过 gateway.deployment_mode 控制：standalone（不连接）/ active-standby、distributed（连接 Redis）
 redis:
   # standalone | cluster
   mode: ${REDIS_MODE:-standalone}            # standalone | cluster
@@ -388,7 +388,10 @@ gateway:
   # 分机部署时请设置为 remote，否则 session.list 将读取网关本机目录（通常为空）。
   web_session_storage: local
 
-  # ========== 主备部署（standalone：默认；active-standby：连接 Redis + 选主）==========
+  # ========== 部署模式 ==========
+  # standalone（默认）：单机，不连 Redis
+  # active-standby：主备，连接 Redis + LeaderElection 选主
+  # distributed：多副本同时在线，连接 Redis 共享 session（无选主；cron 默认关闭；仅 web/tui 通道）
   deployment_mode: ${DEPLOYMENT_MODE:-standalone}
   # 分布式下用于实例标识；空则启动时自动生成（见 gateway-reliability-enhancement-design §3.2）
   instance_id: ${GATEWAY_INSTANCE_ID:-}

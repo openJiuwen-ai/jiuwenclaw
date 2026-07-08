@@ -8,6 +8,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from jiuwenclaw.extensions.redis.redis_runtime import get_declared_deployment_mode
+from jiuwenclaw.deployment_mode import session_storage_backend
 from jiuwenclaw.gateway.session_storage import (
     LocalSessionStorage,
     RedisSessionStorage,
@@ -144,7 +145,9 @@ class SessionMap:
         self._scope = scope if scope is not None else load_session_map_scope()
         self._storage: SessionStorage
 
-        if get_declared_deployment_mode() == "standalone":
+        # standalone -> 本地文件；active-standby / distributed -> 内存缓存 + Redis
+        # （distributed 跨实例命中依赖 RedisSessionStorage 的 lazy get 回填）。
+        if session_storage_backend(get_declared_deployment_mode()) == "local":
             self._storage = LocalSessionStorage()
         else:
             self._storage = RedisSessionStorage()
