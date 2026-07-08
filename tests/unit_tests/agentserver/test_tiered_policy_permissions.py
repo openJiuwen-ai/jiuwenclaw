@@ -2308,3 +2308,155 @@ def test_persist_cli_trusted_directory_writes_to_live_path_not_frozen_constant(m
     live_global = live_saved["permissions"].get("file_guard", {}).get("global", {})
     assert live_global, "信任目录应写入实时配置的 file_guard.global"
     assert not frozen_saved["permissions"].get("file_guard", {}).get("global"), "诱饵文件不应被写入"
+
+
+def test_persist_permission_allow_rule_auto_creates_permissions_section(monkeypatch):
+    base_dir = _tmp_dir("persist-auto-create-permissions")
+    config_path = base_dir / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"version": 1.0, "preferred_language": "zh"}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    config_mod = importlib.import_module("jiuwenclaw.config")
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
+    _config_dir_with_builtin(base_dir, monkeypatch, [])
+    set_permission_engine(PermissionEngine({"enabled": True, "tools": {"list_files": "ask"}}))
+
+    assert persist_permission_allow_rule("list_files", {"path": "D:\\"})
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert "permissions" in saved
+    assert saved["permissions"]["tools"]["list_files"] == "allow"
+
+
+def test_persist_permission_allow_rule_no_permissions_section_writes_tools_and_path(monkeypatch):
+    base_dir = _tmp_dir("persist-no-perms-full")
+    config_path = base_dir / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"version": 1.0}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    config_mod = importlib.import_module("jiuwenclaw.config")
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
+    _config_dir_with_builtin(base_dir, monkeypatch, [])
+    set_permission_engine(PermissionEngine({"enabled": True, "tools": {"Write": "ask"}}))
+
+    assert persist_permission_allow_rule("Write", {"path": "/tmp/b.txt"})
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["permissions"]["tools"]["Write"] == "allow"
+    assert "approval_overrides" not in saved["permissions"]
+
+
+def test_should_store_auto_confirm_returns_true_when_persist_requested_but_failed():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    fake_session = SimpleNamespace()
+
+    assert PermissionInterruptRail._should_store_auto_confirm(
+        auto_confirm=True,
+        session=fake_session,
+        auto_confirm_key="list_files",
+        persisted=False,
+        persist_requested=True,
+    ) is True
+
+
+def test_should_store_auto_confirm_returns_false_when_persist_succeeded():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    fake_session = SimpleNamespace()
+
+    assert PermissionInterruptRail._should_store_auto_confirm(
+        auto_confirm=True,
+        session=fake_session,
+        auto_confirm_key="list_files",
+        persisted=True,
+        persist_requested=True,
+    ) is False
+
+
+def test_should_store_auto_confirm_returns_false_without_auto_confirm():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    fake_session = SimpleNamespace()
+
+    assert PermissionInterruptRail._should_store_auto_confirm(
+        auto_confirm=False,
+        session=fake_session,
+        auto_confirm_key="list_files",
+        persisted=False,
+    ) is False
+
+
+def test_should_store_auto_confirm_returns_false_without_session():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    assert PermissionInterruptRail._should_store_auto_confirm(
+        auto_confirm=True,
+        session=None,
+        auto_confirm_key="list_files",
+        persisted=False,
+    ) is False
+
+
+def test_should_store_auto_confirm_returns_true_for_simple_allow_once():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    fake_session = SimpleNamespace()
+
+    assert PermissionInterruptRail._should_store_auto_confirm(
+        auto_confirm=True,
+        session=fake_session,
+        auto_confirm_key="bash",
+        persisted=False,
+        persist_requested=False,
+    ) is True
+
+
+def test_web_channel_persist_allow_false_skips_persist_and_stores_auto_confirm(monkeypatch):
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import (
+        PermissionInterruptRail,
+        PermissionConfirmResponse,
+    )
+
+    rail = PermissionInterruptRail(config={"enabled": True, "defaults": "ask"})
+    call_persist_count = 0
+
+    def mock_persist_permission_allow_rule(*args, **kwargs):
+        nonlocal call_persist_count
+        call_persist_count += 1
+        return True
+
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.permissions.patterns.persist_permission_allow_rule",
+        mock_persist_permission_allow_rule,
+    )
+
+    payload = PermissionConfirmResponse(
+        approved=True,
+        feedback="",
+        auto_confirm=True,
+        persist_allow=False,
+    )
+
+    allow_rule_persisted = False
+    persisted = False
+    if payload.persist_allow:
+        allow_rule_persisted = mock_persist_permission_allow_rule(
+            "list_files", {"path": "D:\\"},
+        )
+        persisted = allow_rule_persisted
+
+    assert call_persist_count == 0, "persist_permission_allow_rule 不应被调用"
+    assert allow_rule_persisted is False
+    assert persisted is False
+
+    fake_session = SimpleNamespace()
+    assert PermissionInterruptRail._should_store_auto_confirm(
+        auto_confirm=payload.auto_confirm,
+        session=fake_session,
+        auto_confirm_key="list_files",
+        persisted=allow_rule_persisted,
+        persist_requested=payload.persist_allow,
+    ) is True

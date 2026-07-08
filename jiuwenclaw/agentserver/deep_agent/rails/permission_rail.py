@@ -226,10 +226,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return False
         if persist_requested:
             logger.info(
-                "[PermissionEngine] permission.auto_confirm.skip key=%s reason=persist_failed",
+                "[PermissionEngine] permission.auto_confirm.fallback"
+                " key=%s reason=persist_failed_storing_session_fallback",
                 auto_confirm_key,
             )
-            return False
         return True
 
     @staticmethod
@@ -878,8 +878,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     )
                 should_persist = confirm_payload.persist_allow
                 persisted = False
+                allow_rule_persisted = False
                 if should_persist:
-                    persisted = persist_permission_allow_rule(
+                    allow_rule_persisted = persist_permission_allow_rule(
                         normalized_name,
                         tool_args,
                         permission_context=self._build_pending_permission_context(
@@ -888,6 +889,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                             result,
                         ),
                     )
+                    persisted = allow_rule_persisted
                     logger.info(
                         "[PermissionEngine] permission.persist.result tool=%s channel=acp persisted=%s",
                         tool_name,
@@ -896,14 +898,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     if result.file_operations:
                         try:
                             persist_file_operations_allow(list(result.file_operations))
-                            persisted = True
                             logger.info(
                                 "[PermissionEngine] permission.persist.file_operations tool=%s channel=acp count=%s",
                                 tool_name,
                                 len(result.file_operations),
                             )
                         except Exception:
-                            persisted = False
                             logger.exception(
                                 "[PermissionEngine] permission.persist.file_operations.failed tool=%s",
                                 tool_name,
@@ -912,7 +912,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     auto_confirm=confirm_payload.auto_confirm,
                     session=ctx.session,
                     auto_confirm_key=auto_confirm_key,
-                    persisted=persisted,
+                    persisted=allow_rule_persisted if should_persist else persisted,
                     persist_requested=confirm_payload.persist_allow,
                 ):
                     self._store_auto_confirm(ctx, auto_confirm_key)
@@ -975,6 +975,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             )
 
         persisted = False
+        allow_rule_persisted = False
         pending_context = self._pop_pending_permission_context(
             ctx,
             tool_call_id,
@@ -982,11 +983,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             tool_args,
         )
         if payload.persist_allow:
-            persisted = persist_permission_allow_rule(
+            allow_rule_persisted = persist_permission_allow_rule(
                 normalized_name,
                 tool_args,
                 permission_context=pending_context,
             )
+            persisted = allow_rule_persisted
             logger.info(
                 "[PermissionEngine] permission.persist.result tool=%s channel=%s persisted=%s",
                 tool_name,
@@ -997,7 +999,6 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             if file_ops:
                 try:
                     persist_file_operations_allow(file_ops)
-                    persisted = True
                     logger.info(
                         "[PermissionEngine] permission.persist.file_operations tool=%s channel=%s count=%s",
                         tool_name,
@@ -1005,7 +1006,6 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         len(file_ops),
                     )
                 except Exception:
-                    persisted = False
                     logger.exception(
                         "[PermissionEngine] permission.persist.file_operations.failed tool=%s",
                         tool_name,
@@ -1015,7 +1015,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             auto_confirm=payload.auto_confirm,
             session=ctx.session,
             auto_confirm_key=auto_confirm_key,
-            persisted=persisted,
+            persisted=allow_rule_persisted if payload.persist_allow else persisted,
             persist_requested=payload.persist_allow,
         ):
             self._store_auto_confirm(ctx, auto_confirm_key)
