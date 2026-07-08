@@ -633,7 +633,26 @@ def _sync_chat_request_metadata(
     project_dir: str | None,
     mode: str,
 ) -> str | None:
+<<<<<<< HEAD
     """Sync chat request metadata and return the effective locked project dir."""
+=======
+    """将本次 chat 请求的参数同步到会话元数据，返回生效的 project_dir。
+
+    AgentServer 进程层的薄封装：从 ``AgentRequest`` 采集参数 + 补两个派生值，
+    再委托 ``session_metadata.sync_session_request_metadata`` 做真正的校验/写盘。
+    之所以放在本模块而非 session_metadata.py：避免存储层耦合 AgentRequest 结构、
+    os.getenv、当前时间等进程级关注点，保持 session_metadata 纯存储职责。
+
+    - project_dir：首次锁定，已锁定则忽略不一致的请求值（仅告警），返回锁定值
+    - project_id：首次锁定，已锁定则忽略请求值（与 project_dir 一致，不可改）
+    - model：覆盖式（未显式指定时回退到进程 MODEL_NAME）
+    - last_user_message_at：覆盖式（每次请求刷新为当前时刻）
+    - mode：覆盖式（与 append_history_record 联动一致）
+
+    返回的生效 project_dir 用于 agent 实例选择，保证会话锁定后
+    即便后续请求携带不同 project_dir 也仍用锁定值选 agent。
+    """
+>>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
     session_id = (request.session_id or "").strip()
     if not session_id:
         return project_dir
@@ -6099,12 +6118,17 @@ class AgentWebSocketServer:
 
         调用 AgentManager.create_session 创建会话，返回 session_id。
 <<<<<<< HEAD
+<<<<<<< HEAD
         同时将 project_dir/project_id 等字段写入会话元数据(metadata.json)并落盘。
         project_id / project_dir 绑定规则(详见
 =======
         同时将 project_path/project_id 等字段写入会话元数据(metadata.json)并落盘。
         project_id / project_path 绑定规则(详见
 >>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
+=======
+        同时将 project_dir/project_id 等字段写入会话元数据(metadata.json)并落盘。
+        project_id / project_dir 绑定规则(详见
+>>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
         project_store.resolve_session_project_binding):两者皆空→默认项目;
         仅传 project_id→自动补齐 path;同时传→校验一致性;仅传 path→拒绝。
 
@@ -6126,6 +6150,7 @@ class AgentWebSocketServer:
             )
 
 <<<<<<< HEAD
+<<<<<<< HEAD
             # 校验并解析 project_id / project_dir 绑定关系:
             # 一致性校验、按 project_id 自动补齐 project_dir、禁止单传 project_dir
             from jiuwenswarm.server.runtime.session import project_store
@@ -6142,6 +6167,15 @@ class AgentWebSocketServer:
             project_id, project_path, p_err, p_code = project_store.resolve_session_project_binding(
                 project_id, project_path
 >>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
+=======
+            # 校验并解析 project_id / project_dir 绑定关系:
+            # 一致性校验、按 project_id 自动补齐 project_dir、禁止单传 project_dir
+            from jiuwenswarm.server.runtime.session import project_store
+            project_id = str(params.get("project_id") or "").strip()
+            project_dir = str(params.get("project_dir") or "").strip()
+            project_id, project_dir, p_err, p_code = project_store.resolve_session_project_binding(
+                project_id, project_dir
+>>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
             )
             if p_err:
                 resp = AgentResponse(
@@ -6155,6 +6189,7 @@ class AgentWebSocketServer:
                     await ws.send(json.dumps(wire, ensure_ascii=False))
                 return
 
+<<<<<<< HEAD
 <<<<<<< HEAD
             # 会话目录已存在则拒绝,避免覆盖既有会话元数据(与 web 本地 handler 一致)
             session_dir = get_agent_sessions_dir() / session_id
@@ -6175,12 +6210,19 @@ class AgentWebSocketServer:
 =======
             # 写入 session metadata（首次锁定 project_path / project_id）
 >>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
+=======
+            # 写入 session metadata（首次锁定 project_dir / project_id）
+>>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
             init_session_metadata(
                 session_id=session_id,
                 channel_id=params.get("channel_id", ""),
                 user_id=params.get("user_id", ""),
                 title=params.get("title", ""),
+<<<<<<< HEAD
                 mode=params.get("mode", "unknown"),
+=======
+                mode=mode,
+>>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
                 project_dir=project_dir,
                 project_id=project_id,
             )
