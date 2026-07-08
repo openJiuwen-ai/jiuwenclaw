@@ -254,6 +254,11 @@ def _identity_prompt(
 - 用户询问生成的文件如何获取
 
 **调用方式**：使用文件的绝对路径作为参数调用 `send_file_to_user` 工具。
+
+**跨 channel 投递**：`send_file_to_user` 接受可选参数 `target_channels`（字符串数组），用于指定文件投递的目标 channel（如 `["feishu", "xiaoyi", "web"]`）。
+- 用户在某个 channel（如飞书）请求发送文件、或要求把文件发给指定 channel 时，传入 `target_channels`。
+- 省略 `target_channels` 时，文件会自动投递给当前会话已接入的所有用户 channel（team 模式下含飞书等 IM 端）。
+- 文件路径必须是服务端可访问的绝对路径。
 """
     else:
         content = f"""
@@ -327,6 +332,11 @@ When the `send_file_to_user` tool is available in your tool list, you **must** p
 - User asks how to obtain generated files
 
 **How to call**: Use the absolute file path(s) as the parameter to invoke the `send_file_to_user` tool.
+
+**Cross-channel delivery**: `send_file_to_user` accepts an optional `target_channels` parameter (array of strings) to specify delivery targets by channel id (e.g. `["feishu", "xiaoyi", "web"]`).
+- When a user on a given channel (e.g. Feishu) requests a file, or asks to send a file to a specific channel, pass `target_channels`.
+- When `target_channels` is omitted, the file is auto-delivered to every user channel joined to the current session (including IM endpoints like Feishu in team mode).
+- File paths must be absolute and server-accessible.
 """
     return PromptSection(
         name="identity",

@@ -96,7 +96,12 @@ def teardown_function() -> None:
     reset_team_manager()
 
 
-def test_get_team_manager_is_scoped_by_channel() -> None:
+def test_get_team_manager_is_singleton() -> None:
+    # TeamManager is a process-wide singleton shared across channels so that
+    # bridged follow-up requests (e.g. a /join member replying from feishu
+    # while the originating web stream is still alive) can see the
+    # originating channel's runtime markers and avoid being misidentified as
+    # a first request.
     web_manager = get_team_manager("web")
     feishu_manager = get_team_manager("feishu")
     web_manager_again = get_team_manager("web")
@@ -104,7 +109,11 @@ def test_get_team_manager_is_scoped_by_channel() -> None:
     assert isinstance(web_manager, TeamManager)
     assert isinstance(feishu_manager, TeamManager)
     assert web_manager is web_manager_again
-    assert web_manager is not feishu_manager
+    assert web_manager is feishu_manager  # singleton: same instance regardless of channel
+
+    reset_team_manager()
+    after_reset = get_team_manager("web")
+    assert after_reset is not web_manager  # reset yields a fresh instance
 
 
 @pytest.mark.asyncio
@@ -476,7 +485,7 @@ async def test_create_team_does_not_run_global_runtime_cleanup(monkeypatch: pyte
 
             @staticmethod
             def build():
-                return object()
+                return SimpleNamespace()
 
         return _Spec()
 
@@ -515,7 +524,7 @@ async def test_create_team_appends_session_id_to_team_name(monkeypatch: pytest.M
 
         def build(self):
             created_team_names.append(self.team_name)
-            return object()
+            return SimpleNamespace()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
     monkeypatch.setattr(
@@ -551,7 +560,7 @@ async def test_create_team_appends_session_id_to_web_team_name(monkeypatch: pyte
 
         def build(self):
             created_team_names.append(self.team_name)
-            return object()
+            return SimpleNamespace()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
     monkeypatch.setattr(

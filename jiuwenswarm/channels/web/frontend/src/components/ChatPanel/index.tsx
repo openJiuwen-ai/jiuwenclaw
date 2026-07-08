@@ -5,11 +5,13 @@
  */
 
 import React, { useRef, useEffect, useLayoutEffect, useCallback, useMemo, useState } from 'react';
-import { ArrowRight, LoaderCircle, Share2, Sparkles } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { ArrowRight, CheckCircle2, ClipboardList, Copy, Info, LoaderCircle, Share2, Sparkles, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
 import { AgentMode, MediaItem, Message, UserAnswer } from '../../types';
+import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
 import { InputArea } from './InputArea';
@@ -29,6 +31,7 @@ import { HarnessProgressBar } from './HarnessProgressBar';
 import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
 import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
+import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import welcomeBanner from '../../assets/jiuwen-xiaobanner.png';
 import folderIcon from '../../assets/work-mode/folder.svg';
 import './ChatPanel.css';
@@ -414,6 +417,222 @@ function getShareExportTitle(
   return t('share.export');
 }
 
+function getHumanShareStatusLabel(command: HumanShareCommand, t: TFunction): string {
+  if (command.status === 'joined') return t('humanShare.status.joined');
+  if (command.status === 'left') return t('humanShare.status.left');
+  return t('humanShare.status.pending');
+}
+
+function getHumanShareStatusClass(command: HumanShareCommand): string {
+  if (command.status === 'joined') return 'human-share-modal__badge human-share-modal__badge--joined';
+  if (command.status === 'left') return 'human-share-modal__badge human-share-modal__badge--left';
+  return 'human-share-modal__badge';
+}
+
+function HumanSharePanel({
+  commands,
+  onClose,
+}: {
+  commands: HumanShareCommand[];
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const [copiedKey, setCopiedKey] = React.useState<string | null>(null);
+  const sortedCommands = useMemo(
+    () => [...commands].sort((a, b) => a.memberName.localeCompare(b.memberName)),
+    [commands]
+  );
+  const joinedCount = sortedCommands.filter((command) => command.status === 'joined').length;
+  const exitCommand =
+    sortedCommands.find((command) => command.exitCommand)?.exitCommand ||
+    (() => {
+      const commandWithSessionRef = sortedCommands.find((command) => command.sessionRef);
+      return commandWithSessionRef?.sessionRef ? `/exit ${commandWithSessionRef.sessionRef}` : '';
+    })();
+  const allJoined = sortedCommands.length > 0 && joinedCount === sortedCommands.length;
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  const copyText = useCallback(async (key: string, text: string) => {
+    if (!text) return;
+    await navigator.clipboard.writeText(text);
+    setCopiedKey(key);
+    window.setTimeout(() => {
+      setCopiedKey((current) => current === key ? null : current);
+    }, 1200);
+  }, []);
+
+  return createPortal(
+    <div className="human-share-modal-backdrop" role="presentation" onClick={onClose}>
+      <section
+        className="human-share-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="human-share-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="human-share-modal__header">
+          <div>
+            <div className="human-share-modal__title-row">
+              <h2 id="human-share-title" className="human-share-modal__title">{t('humanShare.title')}</h2>
+            </div>
+            <p className="human-share-modal__summary">
+              {allJoined
+                ? t('humanShare.allJoined', { count: sortedCommands.length })
+                : t('humanShare.waiting', { joined: joinedCount, total: sortedCommands.length })}
+            </p>
+          </div>
+          <button type="button" className="human-share-modal__close" onClick={onClose} aria-label={t('common.close')}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="human-share-modal__body">
+          <div className="human-share-modal__notice" role="note">
+            <Info size={18} strokeWidth={2.4} />
+            <span>{t('humanShare.instructionHint')}</span>
+          </div>
+          {sortedCommands.map((command) => {
+            const displayName = command.displayName || command.memberName;
+            const copied = copiedKey === `join:${command.memberName}`;
+            const shouldShowJoinCommand = command.status !== 'joined' && Boolean(command.joinCommand);
+            return (
+              <section key={`${command.sessionId}:${command.memberName}`} className="human-share-modal__item">
+                <div className="human-share-modal__member">
+                  <TeamMemberAvatar member={command.memberName} className="human-share-modal__avatar" />
+                  <div className="human-share-modal__member-copy">
+                    <div className="human-share-modal__member-name">{displayName}</div>
+                    {displayName !== command.memberName && (
+                      <div className="human-share-modal__member-id">{command.memberName}</div>
+                    )}
+                  </div>
+                  <span className={getHumanShareStatusClass(command)}>
+                    {getHumanShareStatusLabel(command, t)}
+                  </span>
+                </div>
+                {shouldShowJoinCommand ? (
+                  <div className="human-share-modal__command-row">
+                    <code className="human-share-modal__command">{command.joinCommand}</code>
+                    <button
+                      type="button"
+                      className="human-share-modal__copy"
+                      onClick={() => void copyText(`join:${command.memberName}`, command.joinCommand)}
+                    >
+                      {copied ? <CheckCircle2 size={15} /> : <Copy size={15} />}
+                      <span>{copied ? t('humanShare.copied') : t('humanShare.copy')}</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div
+                    className={`human-share-modal__command-note ${
+                      command.status === 'joined'
+                        ? 'human-share-modal__command-note--joined'
+                        : 'human-share-modal__command-note--pending'
+                    }`}
+                  >
+                    {command.status === 'joined' ? <CheckCircle2 size={15} /> : <ClipboardList size={15} />}
+                    <span>
+                      {command.status === 'joined'
+                        ? t('humanShare.joinedNote')
+                        : t('humanShare.commandPending')}
+                    </span>
+                  </div>
+                )}
+              </section>
+            );
+          })}
+
+          {exitCommand && (
+            <section className="human-share-modal__exit">
+              <div className="human-share-modal__exit-title">{t('humanShare.exitTitle')}</div>
+              <div className="human-share-modal__command-row">
+                <code className="human-share-modal__command">{exitCommand}</code>
+                <button
+                  type="button"
+                  className="human-share-modal__copy"
+                  onClick={() => void copyText('exit', exitCommand)}
+                >
+                  {copiedKey === 'exit' ? <CheckCircle2 size={15} /> : <Copy size={15} />}
+                  <span>{copiedKey === 'exit' ? t('humanShare.copied') : t('humanShare.copy')}</span>
+                </button>
+              </div>
+            </section>
+          )}
+        </div>
+      </section>
+    </div>,
+    document.body
+  );
+}
+
+function HumanShareCard({
+  commands,
+  onShare,
+}: {
+  commands: HumanShareCommand[];
+  onShare: () => void;
+}) {
+  const { t } = useTranslation();
+  const sortedCommands = useMemo(
+    () => [...commands].sort((a, b) => a.memberName.localeCompare(b.memberName)),
+    [commands]
+  );
+  const joinedCount = sortedCommands.filter((command) => command.status === 'joined').length;
+  const pendingCount = sortedCommands.filter((command) => command.status !== 'joined').length;
+  const previewMembers = sortedCommands.slice(0, 3).map((command) => command.displayName || command.memberName);
+
+  if (sortedCommands.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="human-share-card" data-testid="human-share-card">
+      <div className="human-share-card__icon" aria-hidden="true">
+        <ClipboardList size={18} strokeWidth={2} />
+      </div>
+      <div className="human-share-card__content">
+        <div className="human-share-card__title">{t('humanShare.cardTitle')}</div>
+        <div className="human-share-card__summary">
+          {t('humanShare.cardSummary', {
+            pending: pendingCount,
+            joined: joinedCount,
+            total: sortedCommands.length,
+          })}
+        </div>
+        <div className="human-share-card__members">
+          {previewMembers.map((member) => (
+            <span key={member} className="human-share-card__member-pill">
+              <TeamMemberAvatar member={member} className="human-share-card__avatar" />
+              <span>{member}</span>
+            </span>
+          ))}
+          {sortedCommands.length > previewMembers.length ? (
+            <span className="human-share-card__more">+{sortedCommands.length - previewMembers.length}</span>
+          ) : null}
+        </div>
+      </div>
+      <button
+        type="button"
+        className="human-share-card__button"
+        data-testid="human-share-card-trigger"
+        onClick={onShare}
+      >
+        <Share2 size={15} strokeWidth={2} />
+        <span>{t('humanShare.shareButton')}</span>
+      </button>
+    </section>
+  );
+}
+
 const SCROLL_BOTTOM_THRESHOLD_PX = 40;
 const LOAD_OLDER_THRESHOLD_PX = 8;
 const VISIBILITY_RESTORE_SCROLL_SUPPRESS_MS = 300;
@@ -456,6 +675,7 @@ export function ChatPanel({
   const contextCompressionRuntime = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRuntime);
   const contextCompressionSummary = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionSummary);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
+  const teamHumanShareCommands = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHumanShareCommands ?? []);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const historyLayoutSnapshotRef = useRef<{
     sessionId: string;
@@ -497,6 +717,9 @@ export function ChatPanel({
   ];
   const shouldShowChatHeader = hasConversation;
   const shareExportTitle = getShareExportTitle(t, isExportingShare, canExportShare);
+  const shouldShowShareExport = Boolean(onExportShare);
+  const shouldShowHumanShare = mode === 'team' && teamHumanShareCommands.length > 0;
+  const [humanShareOpen, setHumanShareOpen] = React.useState(false);
 
   // 跟踪用户是否正在查看历史消息（不在底部）
   const userScrolledUpRef = useRef(false);
@@ -701,6 +924,7 @@ export function ChatPanel({
     historyLoadedPages,
     historyLoadingMore,
     historyPrepending,
+    teamHumanShareCommands.length,
     updateHistoryLayoutSnapshot,
   ]);
 
@@ -744,27 +968,39 @@ export function ChatPanel({
             )}
           </div>
           <div className="chat-panel-header__actions">
-            <button
-              type="button"
-              className={`icon-btn share-export-btn ${isExportingShare ? 'share-export-btn--loading' : ''}`}
-              data-testid="share-export"
-              title={shareExportTitle}
-              aria-label={shareExportTitle}
-              aria-busy={isExportingShare}
-              disabled={!canExportShare || isExportingShare}
-              onClick={() => {
-                void onExportShare?.();
-              }}
-            >
-              {isExportingShare ? (
-                <>
-                  <LoaderCircle className="share-export-btn__spinner" size={16} strokeWidth={2} />
-                  <span className="share-export-btn__label">{t('share.generating')}</span>
-                </>
-              ) : (
-                <Share2 size={16} strokeWidth={2} />
-              )}
-            </button>
+            {shouldShowShareExport && (
+              <button
+                type="button"
+                className={`icon-btn share-export-btn ${isExportingShare ? 'share-export-btn--loading' : ''}`}
+                data-testid="share-export"
+                title={shareExportTitle}
+                aria-label={shareExportTitle}
+                aria-busy={isExportingShare}
+                disabled={!canExportShare || isExportingShare}
+                onClick={() => {
+                  void onExportShare?.();
+                }}
+              >
+                {isExportingShare ? (
+                  <>
+                    <LoaderCircle className="share-export-btn__spinner" size={16} strokeWidth={2} />
+                    <span className="share-export-btn__label">{t('share.generating')}</span>
+                  </>
+                ) : (
+                  <Share2 size={16} strokeWidth={2} />
+                )}
+              </button>
+            )}
+            {shouldShowHumanShare && (
+              <button
+                type="button"
+                className="chat-header-icon-btn"
+                onClick={() => setHumanShareOpen(true)}
+                title={t('humanShare.title')}
+              >
+                <Sparkles size={16} strokeWidth={2} />
+              </button>
+            )}
             <button
               type="button"
               className={`chat-header-icon-btn ${!teamAreaExpanded ? 'chat-header-icon-btn--active' : ''}`}
@@ -781,6 +1017,15 @@ export function ChatPanel({
             </button>
           </div>
         </div>
+      )}
+      <div className="sticky top-0 z-10 px-3 pt-2 bg-bg/95 backdrop-blur-sm">
+        <HarnessProgressBar />
+      </div>
+      {humanShareOpen && (
+        <HumanSharePanel
+          commands={teamHumanShareCommands}
+          onClose={() => setHumanShareOpen(false)}
+        />
       )}
       <div ref={scrollContainerRef} className="chat-scroll flex-1 overflow-y-auto" onScroll={handleScroll} onWheel={handleWheel}>
         <div className={chatContentClassName}>
@@ -800,6 +1045,12 @@ export function ChatPanel({
               {hasTimelineContent ? (
                 <>
                   <MessageList messages={messages} />
+                  {shouldShowHumanShare && (
+                    <HumanShareCard
+                      commands={teamHumanShareCommands}
+                      onShare={() => setHumanShareOpen(true)}
+                    />
+                  )}
                   <SubtaskProgress />
                   {/* 内联审批卡片（演进审批 & 权限审批共用） */}
                   <InlineQuestionCard onSubmit={onUserAnswer} />

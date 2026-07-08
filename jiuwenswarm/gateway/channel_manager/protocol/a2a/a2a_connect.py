@@ -9,6 +9,8 @@ from typing import Any
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -335,7 +337,7 @@ class A2AChannel(BaseChannel):
         self._pending.clear()
         logger.info("[A2AChannel] stopped")
 
-    async def send(self, msg: Message) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
         pending = self._pending.get(str(msg.id))
         if pending is None:
             return

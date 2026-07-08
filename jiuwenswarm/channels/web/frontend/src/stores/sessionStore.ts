@@ -174,6 +174,22 @@ interface TeamMember {
   mode?: string;
 }
 
+export type HumanShareStatus = 'pending' | 'joined' | 'left';
+
+export interface HumanShareCommand {
+  memberName: string;
+  displayName?: string;
+  sessionId: string;
+  teamName: string;
+  sessionRef: string;
+  joinCommand: string;
+  exitCommand: string;
+  status: HumanShareStatus;
+  sourceChannel?: string;
+  userId?: string;
+  updatedAt: number;
+}
+
 export type TeamMemberExecutionEventKind =
   | 'final'
   | 'tool_call'
@@ -212,6 +228,7 @@ export interface SessionRuntime {
   teamTasks: TeamTask[];
   teamMembers: TeamMember[];
   teamLeaderMemberIds: string[];
+  teamHumanShareCommands: HumanShareCommand[];
   teamMemberExecutionEvents: TeamMemberExecutionEvent[];
   teamMemberContextCompression: Record<string, TeamMemberContextCompressionState>;
   teamHistoryMessages: Message[];
@@ -234,6 +251,7 @@ function createEmptyRuntime(): SessionRuntime {
     teamTasks: [],
     teamMembers: [],
     teamLeaderMemberIds: [],
+    teamHumanShareCommands: [],
     teamMemberExecutionEvents: [],
     teamMemberContextCompression: {},
     teamHistoryMessages: [],
@@ -303,6 +321,14 @@ interface SessionState {
   clearSelectedSkills: (sessionId: string) => void;
   addTeamMember: (sessionId: string, member: TeamMember) => void;
   updateTeamMemberStatus: (sessionId: string, memberId: string, newStatus: string, timestamp?: number) => void;
+  setTeamHumanShareCommands: (sessionId: string, commands: HumanShareCommand[]) => void;
+  upsertTeamHumanShareCommand: (sessionId: string, command: HumanShareCommand) => void;
+  updateTeamHumanShareStatus: (
+    sessionId: string,
+    memberName: string,
+    status: HumanShareStatus,
+    patch?: Partial<HumanShareCommand>
+  ) => void;
   setTeamMemberExecutionEvents: (sessionId: string, events: TeamMemberExecutionEvent[]) => void;
   addTeamMemberExecutionEvent: (sessionId: string, event: TeamMemberExecutionEvent) => void;
   setTeamMemberContextCompressionStatus: (
@@ -824,6 +850,88 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         };
       }
       return state;
+    });
+  },
+
+  setTeamHumanShareCommands: (sessionId, commands) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamHumanShareCommands: commands },
+        },
+      };
+    });
+  },
+
+  upsertTeamHumanShareCommand: (sessionId, command) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existingIndex = runtime.teamHumanShareCommands.findIndex(
+        (item) => item.memberName === command.memberName && item.sessionId === command.sessionId
+      );
+      if (existingIndex >= 0) {
+        const updated = [...runtime.teamHumanShareCommands];
+        const existing = updated[existingIndex];
+        updated[existingIndex] = {
+          ...existing,
+          ...command,
+          displayName: command.displayName || existing.displayName,
+          teamName: command.teamName || existing.teamName,
+          sessionRef: command.sessionRef || existing.sessionRef,
+          joinCommand: command.joinCommand || existing.joinCommand,
+          exitCommand: command.exitCommand || existing.exitCommand,
+          status:
+            command.status === 'pending' && existing.status !== 'pending'
+              ? existing.status
+              : command.status,
+        };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamHumanShareCommands: updated },
+          },
+        };
+      }
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            teamHumanShareCommands: [...runtime.teamHumanShareCommands, command],
+          },
+        },
+      };
+    });
+  },
+
+  updateTeamHumanShareStatus: (sessionId, memberName, status, patch = {}) => {
+    const normalizedMemberName = memberName.trim();
+    if (!normalizedMemberName) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            teamHumanShareCommands: runtime.teamHumanShareCommands.map((command) =>
+              command.memberName === normalizedMemberName
+                ? {
+                    ...command,
+                    ...patch,
+                    status,
+                    updatedAt: Date.now(),
+                  }
+                : command
+            ),
+          },
+        },
+      };
     });
   },
 

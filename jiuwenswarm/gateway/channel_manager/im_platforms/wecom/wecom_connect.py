@@ -22,6 +22,8 @@ from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadat
 from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.message import MessageStore
 from jiuwenswarm.common.schema.message import Message, ReqMethod, EventType
 from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -1115,8 +1117,17 @@ class WecomChannel(BaseChannel):
         meta = getattr(msg, "metadata", None) or {}
         return (meta.get("wecom_req_id") or "").strip() or None
 
-    async def send(self, msg: Message) -> None:
-        """通过企业微信发送消息。支持流式（reply_stream）与非流式（send_message）。"""
+    async def send(
+        self,
+        msg: Message,
+        *,
+        routing_target: RoutingTarget | None = None,
+    ) -> None:
+        """通过企业微信发送消息。支持流式（reply_stream）与非流式（send_message）。
+
+        V2: resolved/delivery 为 team 模式分发元数据，企微通道当前通过
+        msg.metadata 获取投递信息，暂不直接消费。
+        """
         if not self._ws_client or not getattr(self._ws_client, "is_connected", False):
             logger.warning("WecomChannel 未连接，跳过发送")
             return

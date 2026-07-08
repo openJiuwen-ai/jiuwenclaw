@@ -122,6 +122,7 @@ class E2AEnvelope:
     identity_origin: IdentityOrigin = IdentityOrigin.USER
     channel: str | None = None
     user_id: str | None = None
+    agent_ref: dict | None = None
     chat_id: str | None = None
     source_agent_id: str | None = None
 
@@ -191,6 +192,7 @@ class E2AResponse:
     identity_origin: IdentityOrigin = IdentityOrigin.AGENT
     channel: str | None = None
     user_id: str | None = None
+    agent_ref: dict | None = None
     source_agent_id: str | None = None
     method: str | None = None
 
@@ -383,6 +385,10 @@ def _envelope_from_dict(data: dict[str, Any]) -> E2AEnvelope:
         identity_origin=origin,
         channel=ch,
         user_id=data.get("user_id"),
+        # V2: agent_ref 全链路透传——入站反序列化须补读，否则 message_to_e2a
+        # 写入 d["agent_ref"] 后被 from_dict 丢弃，AgentServer 永远收不到
+        # （设计 §6.3 agent_ref 全程携带；§5.2 同人多窗 via agent_ref）。
+        agent_ref=data.get("agent_ref"),
         chat_id=data.get("chat_id"),
         source_agent_id=data.get("source_agent_id"),
         method=raw_method,
@@ -436,6 +442,7 @@ def _e2a_response_from_dict(data: dict[str, Any]) -> E2AResponse:
         identity_origin=origin,
         channel=ch,
         user_id=data.get("user_id"),
+        agent_ref=data.get("agent_ref"),
         source_agent_id=data.get("source_agent_id"),
         method=data.get("method"),
         projections=dict(data.get("projections") or {}),

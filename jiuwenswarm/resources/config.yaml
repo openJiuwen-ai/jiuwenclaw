@@ -298,13 +298,13 @@ agents:
     workspace:
       stable_base: true
     max_iterations: 200
-    completion_timeout: 600.0
+    completion_timeout: 6000.0
 
   agent_teammate:
     workspace:
       stable_base: true
     max_iterations: 200
-    completion_timeout: 600.0
+    completion_timeout: 6000.0
 
 telemetry:
   enabled: false                    # 总开关（环境变量 OTEL_ENABLED 优先）
@@ -537,20 +537,22 @@ channels:
   web:
     send_file_allowed: true
   feishu:
-    # 飞书应用配置
-    app_id:
-    app_secret:
-    encrypt_key:
-    verification_token:
-    allow_from:
-    enable_streaming: false
-    enabled: false
     send_file_allowed: true
-    # 群聊数字分身（默认关闭）
-    group_digital_avatar: false
-    my_user_id: ""
-    bot_name: ""
-    enable_memory: false
+    apps:
+      - name: 飞书默认应用
+      # 飞书应用配置
+        app_id:
+        app_secret:
+        encrypt_key:
+        verification_token:
+        allow_from:
+        enable_streaming: false
+        enabled: false
+        # 群聊数字分身（默认关闭）
+        group_digital_avatar: false
+        my_user_id: ""
+        bot_name: ""
+        enable_memory: false
   feishu_enterprise:
     # 企业飞书多 Bot 配置（每个 bot 会注册为独立 channel: feishu_enterprise:<app_id>）
     # bot_a:
@@ -563,25 +565,28 @@ channels:
     #   chat_id:
     #   enabled: false
   xiaoyi:
-    # 华为小艺 A2A 配置
-    mode: xiaoyi_channel
-    ak:
-    sk:
-    api_id:
-    push_id:
-    agent_id:
-    ws_url1: wss://hag.cloud.huawei.com/openclaw/v1/ws/link
-    ws_url2: wss://116.63.174.231/openclaw/v1/ws/link
-    enable_streaming: true
-    enabled: false
-    # xiaoyi_claw配置
-    uid:
-    api_key:
-    push_url:
-    file_upload_url:
-    # 小艺手机端插件tools调用，会添加相关tools到系统提示词
-    phone_tools_enabled: false
     send_file_allowed: true
+    apps:
+      - name: 小艺默认应用
+        # 华为小艺 A2A 配置
+        app_id:
+        mode: xiaoyi_channel
+        ak:
+        sk:
+        api_id:
+        push_id:
+        agent_id:
+        ws_url1: wss://hag.cloud.huawei.com/openclaw/v1/ws/link
+        ws_url2: wss://116.63.174.231/openclaw/v1/ws/link
+        enable_streaming: true
+        enabled: false
+        # xiaoyi_claw配置
+        uid:
+        api_key:
+        push_url:
+        file_upload_url:
+        # 小艺手机端插件tools调用，会添加相关tools到系统提示词
+        phone_tools_enabled: false
   dingtalk:
     # 钉钉应用配置
     client_id:

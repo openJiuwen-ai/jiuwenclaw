@@ -586,13 +586,13 @@ class CronSchedulerService:
                 push_dt, wake_dt, next_run_id = self._compute_next_run(job, now_ts=self._now_fn())
                 self._schedule_event(wake_dt, "wake", job.id, next_run_id)
                 self._schedule_event(push_dt, "push", job.id, next_run_id)
-            except Exception as exc:  # noqa: BLE001  # 兜底：reschedule 失败不阻断本次 tick 结果（下个 reload 会重排）
+            except Exception as exc:  # 兜底：reschedule 失败不阻断本次 tick 结果（下个 reload 会重排）
                 if self._is_croniter_no_next_date(exc):
                     try:
                         job.enabled = False
                         job.expired = True
                         await self._store.update_job(job.id, {"enabled": False, "expired": True})
-                    except Exception as update_exc:  # noqa: BLE001  # 兜底：标记过期失败仅告警，不影响主流程
+                    except Exception as update_exc:  # 兜底：标记过期失败仅告警，不影响主流程
                         logger.warning("[Cron] mark expired after proactive.tick failed job=%s: %s", job.id, update_exc)
                 else:
                     logger.warning("[Cron] reschedule after proactive.tick failed job=%s: %s", job.id, exc)
@@ -1132,14 +1132,37 @@ class CronSchedulerService:
                 cfg = get_config_raw() or {}
                 channels_cfg = cfg.get("channels") or {}
                 ch_cfg = channels_cfg.get(channel_id) or {}
-                if channel_id == "feishu":
-                    last_chat_id = str(ch_cfg.get("last_chat_id") or "").strip()
-                    last_open_id = str(ch_cfg.get("last_open_id") or "").strip()
-                    if last_chat_id or last_open_id:
-                        metadata = {
-                            "feishu_chat_id": last_chat_id,
-                            "feishu_open_id": last_open_id,
-                        }
+                if channel_id == "feishu" or channel_id.startswith("feishu:"):
+                    # V2 多应用：从 apps 列表取对应 app 的 last_*（而非平铺字段）
+                    target_app_id = ""
+                    if channel_id.startswith("feishu:") and not channel_id.startswith("feishu_enterprise:"):
+                        target_app_id = channel_id.split(":", 1)[1].strip()
+                    apps = ch_cfg.get("apps") or []
+                    if isinstance(apps, list):
+                        for app in apps:
+                            if not isinstance(app, dict):
+                                continue
+                            if target_app_id and app.get("app_id") != target_app_id:
+                                continue
+                            if not target_app_id and not app.get("is_default", False):
+                                continue
+                            last_chat_id = str(app.get("last_chat_id") or "").strip()
+                            last_open_id = str(app.get("last_open_id") or "").strip()
+                            if last_chat_id or last_open_id:
+                                metadata = {
+                                    "feishu_chat_id": last_chat_id,
+                                    "feishu_open_id": last_open_id,
+                                }
+                            break
+                    # 兜底：如果 apps 列表为空或无匹配，回退到旧平铺字段
+                    if metadata is None:
+                        last_chat_id = str(ch_cfg.get("last_chat_id") or "").strip()
+                        last_open_id = str(ch_cfg.get("last_open_id") or "").strip()
+                        if last_chat_id or last_open_id:
+                            metadata = {
+                                "feishu_chat_id": last_chat_id,
+                                "feishu_open_id": last_open_id,
+                            }
                 elif channel_id.startswith("feishu_enterprise:"):
                     app_id = channel_id.split(":", 1)[1].strip()
                     enterprise_cfg = channels_cfg.get("feishu_enterprise") or {}

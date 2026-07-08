@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { ChevronRight, Plus, Trash2 } from 'lucide-react';
 import { webRequest } from '../../services/webClient';
 import { AvatarPermEditor } from './AvatarPermEditor';
 import { WechatQrModal } from './WechatQrModal';
@@ -55,6 +56,8 @@ type FeishuConfig = {
 };
 
 type FeishuDraft = {
+  name: string;
+  is_default: boolean;
   enabled: boolean;
   enable_streaming: boolean;
   app_id: string;
@@ -69,6 +72,13 @@ type FeishuDraft = {
   enable_memory: boolean;
 };
 
+type FeishuAppConfig = FeishuConfig & {
+  name: string;
+  is_default: boolean;
+};
+
+type FeishuAppDraft = FeishuDraft;
+
 type XiaoyiConfig = {
   enabled: boolean;
   ak: string;
@@ -79,6 +89,8 @@ type XiaoyiConfig = {
 };
 
 type XiaoyiDraft = {
+  name: string;
+  is_default: boolean;
   enabled: boolean;
   ak: string;
   sk: string;
@@ -86,6 +98,13 @@ type XiaoyiDraft = {
   api_id: string;
   enable_streaming: boolean;
 };
+
+type XiaoyiAppConfig = XiaoyiConfig & {
+  name: string;
+  is_default: boolean;
+};
+
+type XiaoyiAppDraft = XiaoyiDraft;
 
 type DingTalkConfig = {
   enabled: boolean;
@@ -355,6 +374,8 @@ function normalizeFeishuConfig(input: unknown): FeishuConfig {
 
 function draftFromFeishuConfig(conf: FeishuConfig): FeishuDraft {
   return {
+    name: '',
+    is_default: true,
     enabled: conf.enabled,
     enable_streaming: conf.enable_streaming,
     app_id: conf.app_id,
@@ -394,6 +415,49 @@ function buildFeishuPayload(draft: FeishuDraft): Record<string, unknown> {
   };
 }
 
+function sortFeishuApps(apps: FeishuAppConfig[]): FeishuAppConfig[] {
+  return [...apps].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+}
+
+function normalizeFeishuAppConfig(input: unknown, fallbackName = '未命名飞书应用', isDefault = false): FeishuAppConfig {
+  const base = normalizeFeishuConfig(input);
+  const data = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
+  return {
+    ...base,
+    name: String(data.name ?? fallbackName).trim() || fallbackName,
+    is_default: data.is_default === undefined ? isDefault : Boolean(data.is_default),
+  };
+}
+
+function normalizeFeishuAppsConfig(input: unknown): FeishuAppConfig[] {
+  if (input && typeof input === 'object') {
+    const data = input as Record<string, unknown>;
+    if (Array.isArray(data.apps)) {
+      const apps = data.apps.map((item, idx) => normalizeFeishuAppConfig(item, `飞书应用 ${idx + 1}`, idx === 0));
+      return sortFeishuApps(apps.length > 0 ? apps : [normalizeFeishuAppConfig(DEFAULT_FEISHU_CONF, '默认飞书应用', true)]);
+    }
+  }
+  return sortFeishuApps([normalizeFeishuAppConfig(input, '默认飞书应用', true)]);
+}
+
+function draftFromFeishuAppConfig(conf: FeishuAppConfig): FeishuAppDraft {
+  return {
+    ...draftFromFeishuConfig(conf),
+    name: conf.name,
+    is_default: conf.is_default,
+  };
+}
+
+function buildFeishuAppConfig(draft: FeishuAppDraft): FeishuAppConfig {
+  const payload = buildFeishuPayload(draft);
+  return {
+    ...DEFAULT_FEISHU_CONF,
+    ...(payload as FeishuConfig),
+    name: draft.name.trim() || '未命名飞书应用',
+    is_default: draft.is_default,
+  };
+}
+
 function normalizeXiaoyiConfig(input: unknown): XiaoyiConfig {
   if (!input || typeof input !== 'object') {
     return DEFAULT_XIAOYI_CONF;
@@ -411,6 +475,8 @@ function normalizeXiaoyiConfig(input: unknown): XiaoyiConfig {
 
 function draftFromXiaoyiConfig(conf: XiaoyiConfig): XiaoyiDraft {
   return {
+    name: '',
+    is_default: true,
     enabled: conf.enabled,
     ak: conf.ak,
     sk: conf.sk,
@@ -428,6 +494,49 @@ function buildXiaoyiPayload(draft: XiaoyiDraft): Record<string, unknown> {
     agent_id: draft.agent_id.trim(),
     api_id: draft.api_id.trim(),
     enable_streaming: draft.enable_streaming,
+  };
+}
+
+function sortXiaoyiApps(apps: XiaoyiAppConfig[]): XiaoyiAppConfig[] {
+  return [...apps].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+}
+
+function normalizeXiaoyiAppConfig(input: unknown, fallbackName = '未命名小艺应用', isDefault = false): XiaoyiAppConfig {
+  const base = normalizeXiaoyiConfig(input);
+  const data = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
+  return {
+    ...base,
+    name: String(data.name ?? fallbackName).trim() || fallbackName,
+    is_default: data.is_default === undefined ? isDefault : Boolean(data.is_default),
+  };
+}
+
+function normalizeXiaoyiAppsConfig(input: unknown): XiaoyiAppConfig[] {
+  if (input && typeof input === 'object') {
+    const data = input as Record<string, unknown>;
+    if (Array.isArray(data.apps)) {
+      const apps = data.apps.map((item, idx) => normalizeXiaoyiAppConfig(item, `小艺应用 ${idx + 1}`, idx === 0));
+      return sortXiaoyiApps(apps.length > 0 ? apps : [normalizeXiaoyiAppConfig(DEFAULT_XIAOYI_CONF, '默认小艺应用', true)]);
+    }
+  }
+  return sortXiaoyiApps([normalizeXiaoyiAppConfig(input, '默认小艺应用', true)]);
+}
+
+function draftFromXiaoyiAppConfig(conf: XiaoyiAppConfig): XiaoyiAppDraft {
+  return {
+    ...draftFromXiaoyiConfig(conf),
+    name: conf.name,
+    is_default: conf.is_default,
+  };
+}
+
+function buildXiaoyiAppConfig(draft: XiaoyiAppDraft): XiaoyiAppConfig {
+  const payload = buildXiaoyiPayload(draft);
+  return {
+    ...DEFAULT_XIAOYI_CONF,
+    ...(payload as XiaoyiConfig),
+    name: draft.name.trim() || '未命名小艺应用',
+    is_default: draft.is_default,
   };
 }
 
@@ -732,15 +841,25 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
 
-  const [feishuConfig, setFeishuConfig] = useState<FeishuConfig>(DEFAULT_FEISHU_CONF);
-  const [draft, setDraft] = useState<FeishuDraft>(draftFromFeishuConfig(DEFAULT_FEISHU_CONF));
+  const [feishuApps, setFeishuApps] = useState<FeishuAppConfig[]>(() =>
+    normalizeFeishuAppsConfig(DEFAULT_FEISHU_CONF),
+  );
+  const [feishuDraftApps, setFeishuDraftApps] = useState<FeishuAppDraft[]>(() =>
+    normalizeFeishuAppsConfig(DEFAULT_FEISHU_CONF).map(draftFromFeishuAppConfig),
+  );
+  const [expandedFeishuAppIndex, setExpandedFeishuAppIndex] = useState(0);
   const [visibleFields, setVisibleFields] = useState<Record<string, boolean>>({});
   const [feishuLoading, setFeishuLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [xiaoyiConfig, setXiaoyiConfig] = useState<XiaoyiConfig>(DEFAULT_XIAOYI_CONF);
-  const [xiaoyiDraft, setXiaoyiDraft] = useState<XiaoyiDraft>(draftFromXiaoyiConfig(DEFAULT_XIAOYI_CONF));
+  const [xiaoyiApps, setXiaoyiApps] = useState<XiaoyiAppConfig[]>(() =>
+    normalizeXiaoyiAppsConfig(DEFAULT_XIAOYI_CONF),
+  );
+  const [xiaoyiDraftApps, setXiaoyiDraftApps] = useState<XiaoyiAppDraft[]>(() =>
+    normalizeXiaoyiAppsConfig(DEFAULT_XIAOYI_CONF).map(draftFromXiaoyiAppConfig),
+  );
+  const [expandedXiaoyiAppIndex, setExpandedXiaoyiAppIndex] = useState(0);
   const [xiaoyiVisibleFields, setXiaoyiVisibleFields] = useState<Record<string, boolean>>({});
   const [xiaoyiLoading, setXiaoyiLoading] = useState(false);
   const [xiaoyiSaving, setXiaoyiSaving] = useState(false);
@@ -818,9 +937,10 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     setSuccess(null);
     try {
       const payload = await webRequest<{ config?: unknown }>('channel.feishu.get_conf');
-      const normalized = normalizeFeishuConfig(payload?.config);
-      setFeishuConfig(normalized);
-      setDraft(draftFromFeishuConfig(normalized));
+      const normalized = normalizeFeishuAppsConfig(payload?.config);
+      setFeishuApps(normalized);
+      setFeishuDraftApps(normalized.map(draftFromFeishuAppConfig));
+      setExpandedFeishuAppIndex(0);
       setVisibleFields({});
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : t('channels.errors.loadFeishu'));
@@ -835,9 +955,10 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     setXiaoyiSuccess(null);
     try {
       const payload = await webRequest<{ config?: unknown }>('channel.xiaoyi.get_conf');
-      const normalized = normalizeXiaoyiConfig(payload?.config);
-      setXiaoyiConfig(normalized);
-      setXiaoyiDraft(draftFromXiaoyiConfig(normalized));
+      const normalized = normalizeXiaoyiAppsConfig(payload?.config);
+      setXiaoyiApps(normalized);
+      setXiaoyiDraftApps(normalized.map(draftFromXiaoyiAppConfig));
+      setExpandedXiaoyiAppIndex(0);
       setXiaoyiVisibleFields({});
     } catch (err) {
       setXiaoyiSaveError(err instanceof Error ? err.message : t('channels.errors.loadXiaoyi'));
@@ -1058,33 +1179,11 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
   }, [channels, loadState, t]);
 
   const hasConfigChanges = useMemo(() => {
-    const baseDraft = draftFromFeishuConfig(feishuConfig);
-    return (
-      baseDraft.enabled !== draft.enabled ||
-      baseDraft.enable_streaming !== draft.enable_streaming ||
-      baseDraft.app_id !== draft.app_id ||
-      baseDraft.app_secret !== draft.app_secret ||
-      baseDraft.encrypt_key !== draft.encrypt_key ||
-      baseDraft.verification_token !== draft.verification_token ||
-      baseDraft.chat_id !== draft.chat_id ||
-      normalizeAllowFromText(baseDraft.allow_from).join('\n') !== normalizeAllowFromText(draft.allow_from).join('\n') ||
-      baseDraft.group_digital_avatar !== draft.group_digital_avatar ||
-      baseDraft.my_user_id !== draft.my_user_id ||
-      baseDraft.bot_name !== draft.bot_name ||
-      baseDraft.enable_memory !== draft.enable_memory
-    );
-  }, [draft, feishuConfig]);
+    return JSON.stringify(feishuApps) !== JSON.stringify(feishuDraftApps.map(buildFeishuAppConfig));
+  }, [feishuApps, feishuDraftApps]);
   const hasXiaoyiConfigChanges = useMemo(() => {
-    const baseDraft = draftFromXiaoyiConfig(xiaoyiConfig);
-    return (
-      baseDraft.enabled !== xiaoyiDraft.enabled ||
-      baseDraft.ak !== xiaoyiDraft.ak ||
-      baseDraft.sk !== xiaoyiDraft.sk ||
-      baseDraft.agent_id !== xiaoyiDraft.agent_id ||
-      baseDraft.api_id !== xiaoyiDraft.api_id ||
-      baseDraft.enable_streaming !== xiaoyiDraft.enable_streaming
-    );
-  }, [xiaoyiConfig, xiaoyiDraft]);
+    return JSON.stringify(xiaoyiApps) !== JSON.stringify(xiaoyiDraftApps.map(buildXiaoyiAppConfig));
+  }, [xiaoyiApps, xiaoyiDraftApps]);
   const hasDingtalkConfigChanges = useMemo(() => {
     const baseDraft = draftFromDingtalkConfig(dingtalkConfig);
     return (
@@ -1165,8 +1264,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     );
   }, [wechatConfig, wechatDraft]);
 
-  const handleFieldChange = <K extends keyof FeishuDraft>(key: K, value: FeishuDraft[K]) => {
-    setDraft((prev) => ({ ...prev, [key]: value }));
+  const handleFeishuAppFieldChange = <K extends keyof FeishuAppDraft>(
+    index: number,
+    key: K,
+    value: FeishuAppDraft[K],
+  ) => {
+    setFeishuDraftApps((prev) => prev.map((app, i) => (i === index ? { ...app, [key]: value } : app)));
     if (saveError) {
       setSaveError(null);
     }
@@ -1177,17 +1280,66 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
 
   const handleCancelConfig = () => {
     if (!hasConfigChanges) return;
-    setDraft(draftFromFeishuConfig(feishuConfig));
+    setFeishuDraftApps(feishuApps.map(draftFromFeishuAppConfig));
     setSaveError(null);
     setSuccess(null);
   };
 
-  const toggleFieldVisible = (field: keyof FeishuDraft) => {
+  const handleAddFeishuApp = () => {
+    setFeishuDraftApps((prev) => {
+      const next = [
+        ...prev,
+        {
+          ...draftFromFeishuAppConfig({
+            ...DEFAULT_FEISHU_CONF,
+            name: `飞书应用 ${prev.length + 1}`,
+            is_default: false,
+          }),
+        },
+      ];
+      setExpandedFeishuAppIndex(next.length - 1);
+      return next;
+    });
+    setSaveError(null);
+    setSuccess(null);
+  };
+
+  const handleDeleteFeishuApp = (index: number) => {
+    setFeishuDraftApps((prev) => {
+      if (prev.length <= 1) return prev;
+      const next = prev.filter((_, i) => i !== index);
+      if (!next.some((app) => app.is_default) && next.length > 0) {
+        next[0] = { ...next[0], is_default: true };
+      }
+      setExpandedFeishuAppIndex((current) => Math.max(0, Math.min(current >= index ? current - 1 : current, next.length - 1)));
+      return next;
+    });
+    setSaveError(null);
+    setSuccess(null);
+  };
+
+  const handleSetDefaultFeishuApp = (index: number) => {
+    setFeishuDraftApps((prev) => prev.map((app, i) => ({ ...app, is_default: i === index })));
+    setSaveError(null);
+    setSuccess(null);
+  };
+
+  const draft = feishuDraftApps[0] ?? draftFromFeishuAppConfig({ ...DEFAULT_FEISHU_CONF, name: '默认飞书应用', is_default: true });
+
+  const handleFieldChange = <K extends keyof FeishuDraft>(key: K, value: FeishuDraft[K]) => {
+    handleFeishuAppFieldChange(0, key, value);
+  };
+
+  const toggleFieldVisible = (field: string) => {
     setVisibleFields((prev) => ({ ...prev, [field]: !prev[field] }));
   };
 
-  const handleXiaoyiFieldChange = <K extends keyof XiaoyiDraft>(key: K, value: XiaoyiDraft[K]) => {
-    setXiaoyiDraft((prev) => ({ ...prev, [key]: value }));
+  const handleXiaoyiAppFieldChange = <K extends keyof XiaoyiAppDraft>(
+    index: number,
+    key: K,
+    value: XiaoyiAppDraft[K],
+  ) => {
+    setXiaoyiDraftApps((prev) => prev.map((app, i) => (i === index ? { ...app, [key]: value } : app)));
     if (xiaoyiSaveError) {
       setXiaoyiSaveError(null);
     }
@@ -1198,12 +1350,51 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
 
   const handleCancelXiaoyiConfig = () => {
     if (!hasXiaoyiConfigChanges) return;
-    setXiaoyiDraft(draftFromXiaoyiConfig(xiaoyiConfig));
+    setXiaoyiDraftApps(xiaoyiApps.map(draftFromXiaoyiAppConfig));
     setXiaoyiSaveError(null);
     setXiaoyiSuccess(null);
   };
 
-  const toggleXiaoyiFieldVisible = (field: keyof XiaoyiDraft) => {
+  const handleAddXiaoyiApp = () => {
+    setXiaoyiDraftApps((prev) => {
+      const next = [
+        ...prev,
+        {
+          ...draftFromXiaoyiAppConfig({
+            ...DEFAULT_XIAOYI_CONF,
+            name: `小艺应用 ${prev.length + 1}`,
+            is_default: false,
+          }),
+        },
+      ];
+      setExpandedXiaoyiAppIndex(next.length - 1);
+      return next;
+    });
+    setXiaoyiSaveError(null);
+    setXiaoyiSuccess(null);
+  };
+
+  const handleDeleteXiaoyiApp = (index: number) => {
+    setXiaoyiDraftApps((prev) => {
+      if (prev.length <= 1) return prev;
+      const next = prev.filter((_, i) => i !== index);
+      if (!next.some((app) => app.is_default) && next.length > 0) {
+        next[0] = { ...next[0], is_default: true };
+      }
+      setExpandedXiaoyiAppIndex((current) => Math.max(0, Math.min(current >= index ? current - 1 : current, next.length - 1)));
+      return next;
+    });
+    setXiaoyiSaveError(null);
+    setXiaoyiSuccess(null);
+  };
+
+  const handleSetDefaultXiaoyiApp = (index: number) => {
+    setXiaoyiDraftApps((prev) => prev.map((app, i) => ({ ...app, is_default: i === index })));
+    setXiaoyiSaveError(null);
+    setXiaoyiSuccess(null);
+  };
+
+  const toggleXiaoyiFieldVisible = (field: string) => {
     setXiaoyiVisibleFields((prev) => ({ ...prev, [field]: !prev[field] }));
   };
 
@@ -1346,11 +1537,11 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     setSaving(true);
     setSaveError(null);
     try {
-      const payload = buildFeishuPayload(draft);
-      const result = await webRequest<{ config?: unknown }>('channel.feishu.set_conf', payload);
-      const normalized = normalizeFeishuConfig(result?.config);
-      setFeishuConfig(normalized);
-      setDraft(draftFromFeishuConfig(normalized));
+      const apps = feishuDraftApps.map(buildFeishuAppConfig);
+      const result = await webRequest<{ config?: unknown }>('channel.feishu.set_conf', { apps });
+      const normalized = normalizeFeishuAppsConfig(result?.config);
+      setFeishuApps(normalized);
+      setFeishuDraftApps(normalized.map(draftFromFeishuAppConfig));
       setSuccess(t('channels.saved.feishu'));
       void fetchChannels();
     } catch (saveErr) {
@@ -1366,11 +1557,11 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     setXiaoyiSaving(true);
     setXiaoyiSaveError(null);
     try {
-      const payload = buildXiaoyiPayload(xiaoyiDraft);
-      const result = await webRequest<{ config?: unknown }>('channel.xiaoyi.set_conf', payload);
-      const normalized = normalizeXiaoyiConfig(result?.config);
-      setXiaoyiConfig(normalized);
-      setXiaoyiDraft(draftFromXiaoyiConfig(normalized));
+      const apps = xiaoyiDraftApps.map(buildXiaoyiAppConfig);
+      const result = await webRequest<{ config?: unknown }>('channel.xiaoyi.set_conf', { apps });
+      const normalized = normalizeXiaoyiAppsConfig(result?.config);
+      setXiaoyiApps(normalized);
+      setXiaoyiDraftApps(normalized.map(draftFromXiaoyiAppConfig));
       setXiaoyiSuccess(t('channels.saved.xiaoyi'));
       void fetchChannels();
     } catch (saveErr) {
@@ -1519,6 +1710,285 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     whatsappLoading ||
     wecomLoading ||
     wechatLoading;
+
+  const renderToggle = (checked: boolean, onClick: () => void) => (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={onClick}
+      className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+        checked ? 'bg-ok' : 'bg-secondary'
+      }`}
+    >
+      <span
+        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+          checked ? 'translate-x-4' : 'translate-x-0'
+        }`}
+      />
+    </button>
+  );
+
+  const renderFeishuAppField = (app: FeishuAppDraft, appIndex: number, field: keyof FeishuAppDraft) => {
+    const visibilityKey = `${appIndex}.${String(field)}`;
+    const value = app[field];
+    if (typeof value === 'boolean') {
+      return (
+        <tr key={String(field)} className="border-t border-border first:border-t-0 even:bg-secondary/10">
+          <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{String(field)}</td>
+          <td className="px-4 py-2.5 align-middle">
+            {renderToggle(value, () => handleFeishuAppFieldChange(appIndex, field, !value as FeishuAppDraft[typeof field]))}
+          </td>
+        </tr>
+      );
+    }
+    return (
+      <tr key={String(field)} className="border-t border-border first:border-t-0 even:bg-secondary/10">
+        <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{String(field)}</td>
+        <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+          <div className="relative">
+            <input
+              type={isSensitiveField(field) && !visibleFields[visibilityKey] ? 'password' : 'text'}
+              value={String(value ?? '')}
+              onChange={(e) => handleFeishuAppFieldChange(appIndex, field, e.target.value as FeishuAppDraft[typeof field])}
+              placeholder={t('channels.placeholders.configValue')}
+              className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
+                isSensitiveField(field) ? 'pr-10' : ''
+              }`}
+            />
+            {isSensitiveField(field) ? (
+              <button
+                type="button"
+                onClick={() => toggleFieldVisible(visibilityKey)}
+                className="channels-panel__visibility-toggle"
+                aria-label={visibleFields[visibilityKey] ? t('channels.hideValue') : t('channels.showValue')}
+                title={visibleFields[visibilityKey] ? t('channels.hideValue') : t('channels.showValue')}
+              >
+                <VisibilityIcon visible={Boolean(visibleFields[visibilityKey])} />
+              </button>
+            ) : null}
+          </div>
+        </td>
+      </tr>
+    );
+  };
+
+  const renderXiaoyiAppField = (app: XiaoyiAppDraft, appIndex: number, field: keyof XiaoyiAppDraft) => {
+    const visibilityKey = `${appIndex}.${String(field)}`;
+    const value = app[field];
+    if (typeof value === 'boolean') {
+      return (
+        <tr key={String(field)} className="border-t border-border first:border-t-0 even:bg-secondary/10">
+          <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{String(field)}</td>
+          <td className="px-4 py-2.5 align-middle">
+            {renderToggle(value, () => handleXiaoyiAppFieldChange(appIndex, field, !value as XiaoyiAppDraft[typeof field]))}
+          </td>
+        </tr>
+      );
+    }
+    return (
+      <tr key={String(field)} className="border-t border-border first:border-t-0 even:bg-secondary/10">
+        <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{String(field)}</td>
+        <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+          <div className="relative">
+            <input
+              type={isSensitiveXiaoyiField(field) && !xiaoyiVisibleFields[visibilityKey] ? 'password' : 'text'}
+              value={String(value ?? '')}
+              onChange={(e) => handleXiaoyiAppFieldChange(appIndex, field, e.target.value as XiaoyiAppDraft[typeof field])}
+              placeholder={t('channels.placeholders.configValue')}
+              className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
+                isSensitiveXiaoyiField(field) ? 'pr-10' : ''
+              }`}
+            />
+            {isSensitiveXiaoyiField(field) ? (
+              <button
+                type="button"
+                onClick={() => toggleXiaoyiFieldVisible(visibilityKey)}
+                className="channels-panel__visibility-toggle"
+                aria-label={xiaoyiVisibleFields[visibilityKey] ? t('channels.hideValue') : t('channels.showValue')}
+                title={xiaoyiVisibleFields[visibilityKey] ? t('channels.hideValue') : t('channels.showValue')}
+              >
+                <VisibilityIcon visible={Boolean(xiaoyiVisibleFields[visibilityKey])} />
+              </button>
+            ) : null}
+          </div>
+        </td>
+      </tr>
+    );
+  };
+
+  const renderFeishuAppsEditor = () => (
+    <div className="space-y-3">
+      {feishuDraftApps.map((app, index) => {
+        const expanded = expandedFeishuAppIndex === index;
+        const identifier = app.app_id.trim() || '未配置 app_id';
+        return (
+          <div key={`feishu-app-${index}`} className="rounded-xl border border-border bg-card overflow-hidden">
+            <div className="flex items-center gap-3 px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setExpandedFeishuAppIndex(expanded ? -1 : index)}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-secondary hover:text-text"
+                aria-label={expanded ? '收起应用配置' : '展开应用配置'}
+                title={expanded ? '收起应用配置' : '展开应用配置'}
+              >
+                <ChevronRight className={`h-4 w-4 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+              </button>
+              <input
+                type="text"
+                value={app.name}
+                onChange={(e) => handleFeishuAppFieldChange(index, 'name', e.target.value)}
+                className="min-w-[160px] flex-1 rounded-md border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-accent"
+                placeholder="应用名称"
+              />
+              {app.is_default ? (
+                <span className="rounded-full border border-accent bg-accent-subtle px-2.5 py-1 text-xs text-accent">
+                  默认
+                </span>
+              ) : null}
+              {!app.is_default ? (
+                <button
+                  type="button"
+                  onClick={() => handleSetDefaultFeishuApp(index)}
+                  className="rounded-full border border-accent/50 bg-accent-subtle px-2.5 py-1 text-xs font-medium text-accent hover:border-accent hover:bg-accent/15"
+                  aria-label="设为默认应用"
+                  title="设为默认应用"
+                >
+                  设为默认
+                </button>
+              ) : null}
+              <span className="mono max-w-[220px] truncate rounded-md border border-border bg-secondary px-2.5 py-1 text-xs text-text-muted">
+                {identifier}
+              </span>
+              <span
+                className={`rounded-full border px-2.5 py-1 text-xs font-medium ${
+                  app.enabled ? 'border-ok bg-ok-subtle text-ok' : 'border-border bg-secondary text-text-muted'
+                }`}
+              >
+                {app.enabled ? t('channels.status.enabled') : t('channels.status.disabled')}
+              </span>
+              <button
+                type="button"
+                onClick={() => handleDeleteFeishuApp(index)}
+                disabled={feishuDraftApps.length <= 1}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border text-text-muted hover:bg-danger-subtle hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label="删除应用"
+                title="删除应用"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+            {expanded ? (
+              <div className="border-t border-border bg-bg/30">
+                <table className="w-full text-sm">
+                  <tbody>
+                    {(['enabled', 'enable_streaming', 'app_id', 'app_secret', 'encrypt_key', 'verification_token', 'group_digital_avatar'] as const).map(
+                      (field) => renderFeishuAppField(app, index, field),
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+      <button
+        type="button"
+        onClick={handleAddFeishuApp}
+        className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border px-4 py-3 text-sm text-text-muted hover:border-accent hover:bg-accent-subtle hover:text-accent"
+      >
+        <Plus className="h-4 w-4" />
+        添加应用
+      </button>
+    </div>
+  );
+
+  const renderXiaoyiAppsEditor = () => (
+    <div className="space-y-3">
+      {xiaoyiDraftApps.map((app, index) => {
+        const expanded = expandedXiaoyiAppIndex === index;
+        const identifier = app.api_id.trim() || app.agent_id.trim() || '未配置 api_id';
+        return (
+          <div key={`xiaoyi-app-${index}`} className="rounded-xl border border-border bg-card overflow-hidden">
+            <div className="flex items-center gap-3 px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setExpandedXiaoyiAppIndex(expanded ? -1 : index)}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-secondary hover:text-text"
+                aria-label={expanded ? '收起应用配置' : '展开应用配置'}
+                title={expanded ? '收起应用配置' : '展开应用配置'}
+              >
+                <ChevronRight className={`h-4 w-4 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+              </button>
+              <input
+                type="text"
+                value={app.name}
+                onChange={(e) => handleXiaoyiAppFieldChange(index, 'name', e.target.value)}
+                className="min-w-[160px] flex-1 rounded-md border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-accent"
+                placeholder="应用名称"
+              />
+              {app.is_default ? (
+                <span className="rounded-full border border-accent bg-accent-subtle px-2.5 py-1 text-xs text-accent">
+                  默认
+                </span>
+              ) : null}
+              {!app.is_default ? (
+                <button
+                  type="button"
+                  onClick={() => handleSetDefaultXiaoyiApp(index)}
+                  className="rounded-full border border-accent/50 bg-accent-subtle px-2.5 py-1 text-xs font-medium text-accent hover:border-accent hover:bg-accent/15"
+                  aria-label="设为默认应用"
+                  title="设为默认应用"
+                >
+                  设为默认
+                </button>
+              ) : null}
+              <span className="mono max-w-[220px] truncate rounded-md border border-border bg-secondary px-2.5 py-1 text-xs text-text-muted">
+                {identifier}
+              </span>
+              <span
+                className={`rounded-full border px-2.5 py-1 text-xs font-medium ${
+                  app.enabled ? 'border-ok bg-ok-subtle text-ok' : 'border-border bg-secondary text-text-muted'
+                }`}
+              >
+                {app.enabled ? t('channels.status.enabled') : t('channels.status.disabled')}
+              </span>
+              <button
+                type="button"
+                onClick={() => handleDeleteXiaoyiApp(index)}
+                disabled={xiaoyiDraftApps.length <= 1}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border text-text-muted hover:bg-danger-subtle hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label="删除应用"
+                title="删除应用"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+            {expanded ? (
+              <div className="border-t border-border bg-bg/30">
+                <table className="w-full text-sm">
+                  <tbody>
+                    {(['enabled', 'enable_streaming', 'ak', 'sk', 'agent_id', 'api_id'] as const).map((field) =>
+                      renderXiaoyiAppField(app, index, field),
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+      <button
+        type="button"
+        onClick={handleAddXiaoyiApp}
+        className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border px-4 py-3 text-sm text-text-muted hover:border-accent hover:bg-accent-subtle hover:text-accent"
+      >
+        <Plus className="h-4 w-4" />
+        添加应用
+      </button>
+    </div>
+  );
+
   const configErrorNotice = useMemo(() => {
     return Array.from(
       new Set(
@@ -1749,79 +2219,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                       {xiaoyiLoading ? (
                         <div className="text-sm text-text-muted">{t('channels.loading.xiaoyi')}</div>
                       ) : (
-                        <table className="w-full text-sm">
-                          <tbody>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">enabled</td>
-                              <td className="px-4 py-2.5 align-middle">
-                                <button
-                                  type="button"
-                                  role="switch"
-                                  aria-checked={xiaoyiDraft.enabled}
-                                  onClick={() => handleXiaoyiFieldChange('enabled', !xiaoyiDraft.enabled)}
-                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
-                                    xiaoyiDraft.enabled ? 'bg-ok' : 'bg-secondary'
-                                  }`}
-                                >
-                                  <span
-                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
-                                      xiaoyiDraft.enabled ? 'translate-x-4' : 'translate-x-0'
-                                    }`}
-                                  />
-                                </button>
-                              </td>
-                            </tr>
-                            <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                              <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">enable_streaming</td>
-                              <td className="px-4 py-2.5 align-middle">
-                                <button
-                                  type="button"
-                                  role="switch"
-                                  aria-checked={xiaoyiDraft.enable_streaming}
-                                  onClick={() => handleXiaoyiFieldChange('enable_streaming', !xiaoyiDraft.enable_streaming)}
-                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
-                                    xiaoyiDraft.enable_streaming ? 'bg-ok' : 'bg-secondary'
-                                  }`}
-                                >
-                                  <span
-                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
-                                      xiaoyiDraft.enable_streaming ? 'translate-x-4' : 'translate-x-0'
-                                    }`}
-                                  />
-                                </button>
-                              </td>
-                            </tr>
-                            {(['ak', 'sk', 'agent_id', 'api_id'] as const).map((field) => (
-                              <tr key={field} className="border-t border-border first:border-t-0 even:bg-secondary/10">
-                                <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{field}</td>
-                                <td className="px-4 py-2.5 break-all text-[13px] align-middle">
-                                  <div className="relative">
-                                    <input
-                                      type={isSensitiveXiaoyiField(field) && !xiaoyiVisibleFields[field] ? 'password' : 'text'}
-                                      value={xiaoyiDraft[field]}
-                                      onChange={(e) => handleXiaoyiFieldChange(field, e.target.value)}
-                                      placeholder={t('channels.placeholders.configValue')}
-                                      className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
-                                        isSensitiveXiaoyiField(field) ? 'pr-10' : ''
-                                      }`}
-                                    />
-                                    {isSensitiveXiaoyiField(field) ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => toggleXiaoyiFieldVisible(field)}
-                                        className="channels-panel__visibility-toggle"
-                                        aria-label={xiaoyiVisibleFields[field] ? t('channels.hideValue') : t('channels.showValue')}
-                                        title={xiaoyiVisibleFields[field] ? t('channels.hideValue') : t('channels.showValue')}
-                                      >
-                                        <VisibilityIcon visible={Boolean(xiaoyiVisibleFields[field])} />
-                                      </button>
-                                    ) : null}
-                                  </div>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                        renderXiaoyiAppsEditor()
                       )}
                     </div>
                   </div>
@@ -1948,6 +2346,62 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 ) : null}
 
                 {activeChannelId === 'feishu' ? (
+                  <div className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col">
+                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="flex items-center gap-3">
+                          <ChannelHeaderLogo channelId="feishu" label={getChannelLabel(t, 'feishu')} />
+                          <div>
+                            <h4 className="text-sm font-medium text-text">{t('channels.config.feishuTitle')}</h4>
+                            <p className="text-xs text-text-muted mt-1">{t('channels.config.feishuSubtitle')}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void fetchFeishuConfig()}
+                            disabled={saving || isConfigRefreshing}
+                            className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {feishuLoading ? t('common.refreshing') : t('common.refresh')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleCancelConfig}
+                            disabled={!hasConfigChanges || saving}
+                            className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {t('common.cancel')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleSaveConfig()}
+                            disabled={!hasConfigChanges || saving || !isConnected}
+                            className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {saving ? t('common.saving') : t('common.save')}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {success ? (
+                      <div className="mx-4 mt-4 rounded-md border border-[var(--border-ok)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                        {success}
+                      </div>
+                    ) : null}
+
+                    <div className="p-4 pt-3 flex-1 overflow-auto">
+                      {feishuLoading ? (
+                        <div className="text-sm text-text-muted">{t('channels.loading.feishu')}</div>
+                      ) : (
+                        renderFeishuAppsEditor()
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+
+                {false && activeChannelId === 'feishu' ? (
                   <div className="w-full h-full rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col">
                     <div className="px-4 py-3 bg-secondary/30 border-b border-border">
                       <div className="flex items-center justify-between gap-4">

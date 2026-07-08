@@ -12,6 +12,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import ssl
 import time
 import uuid
@@ -23,6 +24,8 @@ import aiohttp
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.gateway.routing.keys import XiaoyiDeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.push import XiaoYiPushService, PushConfig
 from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.formatter import (
     get_status_state_for_event,
@@ -55,13 +58,13 @@ FILE_TYPE_TO_MIME_TYPE: dict[str, str] = {
     "mp4": "video/mp4",
 }
 
-# 全局 XiaoyiChannel 实例引用（供手机端工具调用使用）
-_xiaoyi_channel_instance: Optional["XiaoyiChannel"] = None
+# 全局 XiaoyiChannel 实例字典（供手机端工具调用使用）
+_xiaoyi_channel_instances: dict[str, "XiaoyiChannel"] = {}
 
 
-def get_xiaoyi_channel() -> Optional["XiaoyiChannel"]:
-    """获取全局 XiaoyiChannel 实例（供手机端工具调用使用）."""
-    return _xiaoyi_channel_instance
+def get_xiaoyi_channel(channel_id: str = "xiaoyi") -> Optional["XiaoyiChannel"]:
+    """获取指定 channel_id 的 XiaoyiChannel 实例（供手机端工具调用使用）."""
+    return _xiaoyi_channel_instances.get(channel_id)
 
 
 @dataclass
@@ -79,6 +82,7 @@ class XiaoyiChannelConfig:
     """小艺通道配置（客户端模式）."""
 
     enabled: bool = False
+    channel_id: str = ""  # 路由标识，始终为 "xiaoyi"
     mode: str = "xiaoyi_channel"  # xiaoyi_channel or xiaoyi_claw
     ak: str = ""
     sk: str = ""
@@ -238,6 +242,9 @@ class XiaoyiChannel(BaseChannel):
         self._session_heartbeat_tasks: dict[str, asyncio.Task] = {}  # Response heartbeat tasks for each session
         self._stream_text_buffers: dict[str, str] = {}
         self._task_last_activity: dict[str, float] = {}
+        # V2: team ws 流式合并缓冲（task_id → 累积 delta 文本 + 延迟 flush 任务）
+        self._ws_flush_buffers: dict[str, str] = {}
+        self._ws_flush_tasks: dict[str, asyncio.Task] = {}
         self._on_message_cb: Callable[[Message], Any] | None = None
         # Task timeout management
         self._session_active: set[str] = set()  # Active sessions (concurrent request detection)
@@ -256,6 +263,25 @@ class XiaoyiChannel(BaseChannel):
         self.api_id = config.api_id
         self.push_id = config.push_id
         self._accumulated_texts: dict[str, str] = {}  # Accumulated text per session for push notification
+        # V2 Stream Routing: agent_id → (顶层 sessionId, task_id, push_id, ts) 活跃映射，出站判定 ws vs push 用
+        self._active_push_sessions: dict[str, tuple[str, str, str, float]] = {}
+        # V2: team 投递 ws 活跃窗口——最近 N 秒内有该 agent_id 的 inbound 视为手机端在线，走 ws；超窗走 push。
+        # 手机端收到 final 或长时间无消息会主动关 ws（网关无法直接感知手机 ws 状态），靠 inbound 活跃度间接判断。
+        self._team_ws_alive_window: float = float(
+            getattr(config, "team_ws_alive_window", 60) or 60
+        )
+        # V2: 活跃映射超时清理任务，定期清掉异常断开的 stale 条目
+        self._active_push_cleanup_task: asyncio.Task | None = None
+        # V2: ws 保活任务——周期向活跃 agent_id 发 status-update（空内容），重置手机端空闲计时，
+        # 避免手机端因长时间无消息主动关 ws（部分终端不能用 push，只能靠 ws 维持）。
+        self._team_ws_keepalive_interval: float = float(
+            getattr(config, "team_ws_keepalive_interval", 20) or 20
+        )
+        self._ws_keepalive_task: asyncio.Task | None = None
+        # V2: push 合并窗口缓冲 push_id → [(ts, content, summary)]，避免短时多条 push 轰炸
+        self._push_merge_buffers: dict[str, list[tuple[float, str, str]]] = {}
+        # V2: push 延迟 flush 任务 push_id → asyncio.Task，窗口到期统一发送
+        self._push_flush_tasks: dict[str, asyncio.Task] = {}
         # Data-event 处理器：intent_name -> list of handlers
         self._data_event_handlers: dict[str, List[Callable[[DataEvent], Any]]] = {}
         # InvokeJarvisGUIAgentResponse 原始事件回调列表
@@ -265,7 +291,15 @@ class XiaoyiChannel(BaseChannel):
 
     @property
     def channel_id(self) -> str:
-        return self.name
+        return self.config.channel_id or self.name
+
+    @property
+    def app_id(self) -> str:
+        """V2: app_id 维度，与 inbound bot_id=config.agent_id 对齐，
+        使 ChannelManager 注册的 ChannelKey("xiaoyi", agent_id) 与
+        Subscription 的 RoutingKey.app_id 一致，dispatch 时能命中。
+        """
+        return self.config.agent_id or "default"
 
     @property
     def gui_tool_lock(self) -> asyncio.Lock:
@@ -293,24 +327,25 @@ class XiaoyiChannel(BaseChannel):
 
         self._running = True
         # 注册全局实例（供 tools 使用）
-        global _xiaoyi_channel_instance
-        _xiaoyi_channel_instance = self
+        _xiaoyi_channel_instances[self.channel_id] = self
         logger.info("XiaoyiChannel 已注册为全局实例")
 
         # Start dual channel connections
         for url_key, url in [("ws_url1", self.config.ws_url1), ("ws_url2", self.config.ws_url2)]:
             if url:
                 self._connect_tasks[url_key] = asyncio.create_task(self._reconnect_loop(url_key, url))
+        # V2: 启动活跃映射超时清理任务，每小时清掉异常断开的 stale 条目
+        self._active_push_cleanup_task = asyncio.create_task(self._cleanup_active_push_sessions())
+        # V2: 启动 ws 保活任务，周期发 status-update 重置手机端空闲计时
+        if self._team_ws_keepalive_interval > 0:
+            self._ws_keepalive_task = asyncio.create_task(self._ws_keepalive_loop())
         logger.info("XiaoyiChannel 已启动（客户端模式，双通道）")
 
     async def stop(self) -> None:
-        global _xiaoyi_channel_instance
-
         self._running = False
         # 注销全局实例
-        if _xiaoyi_channel_instance is self:
-            _xiaoyi_channel_instance = None
-            logger.info("XiaoyiChannel 已注销全局实例")
+        _xiaoyi_channel_instances.pop(self.channel_id, None)
+        logger.info("XiaoyiChannel 已注销")
         # Cancel all heartbeat tasks
         for url_key in list(self._heartbeat_tasks.keys()):
             if self._heartbeat_tasks[url_key]:
@@ -354,7 +389,92 @@ class XiaoyiChannel(BaseChannel):
         self._sessions_waiting_for_push.clear()
         self._sessions_marked_for_cleanup.clear()
         self._accumulated_texts.clear()
+        # V2: 清理 push 合并窗口任务
+        for _aid in list(self._push_flush_tasks.keys()):
+            if self._push_flush_tasks[_aid]:
+                self._push_flush_tasks[_aid].cancel()
+        self._push_flush_tasks.clear()
+        self._push_merge_buffers.clear()
+        self._active_push_sessions.clear()
+        # V2: 取消活跃映射超时清理任务
+        if self._active_push_cleanup_task and not self._active_push_cleanup_task.done():
+            self._active_push_cleanup_task.cancel()
+        self._active_push_cleanup_task = None
+        # V2: 取消 ws 保活任务
+        if self._ws_keepalive_task and not self._ws_keepalive_task.done():
+            self._ws_keepalive_task.cancel()
+        self._ws_keepalive_task = None
+        # V2: 清理 ws 流式合并缓冲
+        for _tid in list(self._ws_flush_tasks.keys()):
+            if self._ws_flush_tasks[_tid]:
+                self._ws_flush_tasks[_tid].cancel()
+        self._ws_flush_tasks.clear()
+        self._ws_flush_buffers.clear()
         logger.info("XiaoyiChannel 已停止")
+
+    async def _cleanup_active_push_sessions(self) -> None:
+        """定期清理 _active_push_sessions 中超时的 stale 条目。
+
+        异常断开的 agent_id（未走 final 清理）会在映射里残留。
+        每小时扫描，清掉 1 小时无更新的条目，避免多用户长期运行内存累积。
+        """
+        try:
+            while self._running:
+                await asyncio.sleep(3600)
+                cutoff = time.time() - 3600
+                stale = [
+                    aid for aid, entry in self._active_push_sessions.items()
+                    if entry[3] < cutoff
+                ]
+                for aid in stale:
+                    self._active_push_sessions.pop(aid, None)
+                if stale:
+                    logger.info("[XiaoyiChannel] 清理 %d 个 stale 活跃映射条目", len(stale))
+        except asyncio.CancelledError:
+            pass
+
+    async def _ws_keepalive_loop(self) -> None:
+        """周期向活跃 agent_id 发 status-update（空内容）保活。
+
+        手机端长时间无消息会主动关 ws，部分终端不能用 push 只能靠 ws。
+        每个保活周期扫描 _active_push_sessions，对 ws 仍连接的 agent_id 发一条
+        kind=status-update（message 空），重置手机端空闲计时。
+        仅在 ws_alive 窗口内的 agent_id 保活（超窗说明手机端可能已关，保活发不到）。
+        """
+        try:
+            while self._running:
+                await asyncio.sleep(self._team_ws_keepalive_interval)
+                if not self._ws_connections:
+                    continue
+                # ws 连接是否可用（任一 OPEN）
+                ws_usable = any(ws is not None for ws in self._ws_connections.values())
+                if not ws_usable:
+                    continue
+                now = time.time()
+                # 快照活跃映射，避免迭代中修改
+                snapshot = list(self._active_push_sessions.items())
+                kept = 0
+                for aid, entry in snapshot:
+                    sid, tid, _, ts = entry
+                    # 仅对窗口内的 agent_id 保活（ws 大概率还开着）。
+                    # 保活成功后刷新 last_seen，使 ws_active 持续为 True（防超窗后误走 push）。
+                    if (now - ts) >= self._team_ws_alive_window:
+                        continue
+                    try:
+                        for url_key, ws in self._ws_connections.items():
+                            if ws:
+                                await self._send_status_update_with_state(
+                                    tid, sid, "", "working", url_key,
+                                )
+                        # 保活发出即视为链路仍活，刷新 last_seen 维持 ws_active
+                        self._active_push_sessions[aid] = (sid, tid, entry[2], time.time())
+                        kept += 1
+                    except Exception as e:
+                        logger.debug("[XiaoyiChannel] ws keepalive 失败 agent_id=%s: %s", (aid or "")[:8], e)
+                if kept:
+                    logger.info("[XiaoyiChannel] ws keepalive sent: %d agents", kept)
+        except asyncio.CancelledError:
+            pass
 
     def _extract_platform_receive_info(self, msg: Message) -> tuple[str, str]:
         """
@@ -373,10 +493,26 @@ class XiaoyiChannel(BaseChannel):
         session_id = self._session_task_map.get(task_id, task_id)
         return session_id, task_id
 
-    async def send(self, msg: Message) -> None:
-        """发送消息到小艺服务端（A2A 格式，双通道发送）."""
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
+        """发送消息到小艺服务端（A2A 格式，双通道发送）.
+
+        V2 Stream Routing:
+        - routing_target 为空（非 team 模式）→ 走 _send_legacy 原有单值路径
+        - routing_target 非空（team 模式）→ 双通道投递：
+          活跃会话走 ws 流式，非活跃走 push webhook 全文 final
+        """
+        # ── team 模式：双通道投递 ──
+        if routing_target is not None:
+            await self._send_team(msg, routing_target)
+            return
+
+        # ── 非 team 模式：原有单值路径 ──
         if not self._ws_connections:
             return
+        await self._send_legacy(msg)
+
+    async def _send_legacy(self, msg: Message) -> None:
+        """非 team 模式原有单值投递路径（保留兼容）."""
         logger.info(f"XiaoyiChannel 发送消息: {msg}")
         session_id, task_id = self._extract_platform_receive_info(msg)
         # Handle chat.file event
@@ -497,6 +633,343 @@ class XiaoyiChannel(BaseChannel):
 
             # Clear accumulated text
             self._accumulated_texts.pop(session_id, None)
+            # V2: 清理活跃映射（按 sessionId 反查 agent_id）
+            _aid_to_clean = [
+                aid for aid, (sid, _, _, _) in self._active_push_sessions.items()
+                if sid == session_id
+            ]
+            for aid in _aid_to_clean:
+                self._active_push_sessions.pop(aid, None)
+
+    # ==================== V2 Stream Routing: team 双通道投递 ====================
+
+    # team member 场景只投递结果类消息，丢弃中间过程（对齐飞书 team 卡片语义）。
+    # 保留：TEAM_MESSAGE（团队消息）/ CHAT_FINAL（最终正文）/ CHAT_FILE（文件）/
+    #       CHAT_ERROR（错误）/ CHAT_TOOL_CALL/RESULT（status 透传）/ CHAT_PROCESSING_STATUS（终态信号）。
+    # 丢弃：CHAT_REASONING / CHAT_DELTA / CHAT_ASK_USER_QUESTION / usage / todo / symphony_status 等。
+    _TEAM_ALLOWED_EVENTS = frozenset({
+        EventType.TEAM_MESSAGE,
+        EventType.CHAT_FINAL,
+        EventType.CHAT_FILE,
+        EventType.CHAT_ERROR,
+        EventType.CHAT_TOOL_CALL,
+        EventType.CHAT_TOOL_RESULT,
+        EventType.CHAT_PROCESSING_STATUS,
+    })
+
+    async def _send_team(self, msg: Message, routing_target: RoutingTarget) -> None:
+        """team 模式双通道投递：活跃会话走 ws 流式，非活跃走 push webhook 全文 final."""
+        delivery = routing_target.delivery
+        if delivery is None or not isinstance(delivery, XiaoyiDeliveryTarget):
+            logger.warning(
+                "[XiaoyiChannel] _send_team drop: delivery invalid type=%s event=%s intent=%s",
+                type(delivery).__name__, msg.event_type, routing_target.intent,
+            )
+            return
+
+        # 白名单过滤：team member 场景丢弃中间过程，只投递结果类消息
+        if msg.event_type not in self._TEAM_ALLOWED_EVENTS:
+            return
+
+        agent_id = delivery.agent_id
+        content = self._extract_team_content(msg)
+        # 预解析活跃映射，供诊断日志与通道判定共用
+        ws_session, ws_task, last_seen = self._resolve_active_ws(agent_id, delivery)
+        # 手机端在线判定：最近 _team_ws_alive_window 秒内有该 agent_id 的 inbound。
+        # 手机端收到 final 或长时间无消息会主动关 ws（网关无法直接感知手机 ws 状态），
+        # 只能靠 inbound 活跃度间接判断：最近发过消息 → ws 大概率还开着 → 走 ws；否则走 push。
+        now = time.time()
+        ws_active = bool(
+            ws_session and ws_task and last_seen
+            and (now - last_seen) < self._team_ws_alive_window
+        )
+        logger.info(
+            "[XiaoyiChannel] _send_team enter: event=%s intent=%s agent_id=%s content_len=%d "
+            "ws_active=%s last_seen=%s push_id=%s",
+            msg.event_type, routing_target.intent, (agent_id or "")[:8], len(content),
+            ws_active, (f"{now - last_seen:.1f}s" if last_seen else "none"), bool(delivery.push_id),
+        )
+
+        # status_update / file 类事件透传（不参与 push 合并）
+        if should_send_as_status_update(msg.event_type):
+            if ws_session and ws_task:
+                status_text = get_status_text_for_event(msg.event_type, msg.payload)
+                status_state = get_status_state_for_event(msg.event_type, msg.payload)
+                for url_key in list(self._ws_connections.keys()):
+                    await self._send_status_update_with_state(
+                        ws_task, ws_session, status_text, status_state, url_key
+                    )
+            return
+        if msg.event_type == EventType.CHAT_FILE:
+            if ws_session and ws_task:
+                files = msg.payload.get("files", {}) if isinstance(msg.payload, dict) else {}
+                for file_info in files:
+                    for url_key, ws in self._ws_connections.items():
+                        if ws:
+                            try:
+                                await self._send_file_response(ws_session, ws_task, file_info, url_key)
+                            except Exception as e:
+                                logger.warning(f"XiaoyiChannel 发送文件响应失败 ({url_key}): {e}")
+            return
+
+        # 判定投递通道
+        if ws_active:
+            # ① 活跃会话 → ws 流式投递
+            logger.info("[XiaoyiChannel] _send_team → ws: agent_id=%s sid=%s", (agent_id or "")[:8],
+                        (ws_session or "")[:8])
+            await self._send_ws_to_user(ws_session, ws_task, msg, content)
+        else:
+            # ② 后台 → push webhook 全文 final（带 per-agent_id 合并窗口）
+            # push_id 优先用 delivery 的，否则从活跃映射取（最后一次已知值）
+            push_id = delivery.push_id
+            if not push_id and agent_id:
+                active = self._active_push_sessions.get(agent_id)
+                if active:
+                    push_id = active[2]
+            if push_id and agent_id:
+                logger.info("[XiaoyiChannel] _send_team → push: agent_id=%s push_id=%s", (agent_id or "")[:8],
+                            push_id[:8])
+                await self._send_push_to_user(agent_id, push_id, content)
+            elif self._ws_connections:
+                # ③ 兜底：无 push_id 且无活跃会话，走 legacy（按 metadata 投递）
+                logger.info("[XiaoyiChannel] _send_team → legacy fallback: agent_id=%s", (agent_id or "")[:8])
+                await self._send_legacy(msg)
+            else:
+                logger.warning("[XiaoyiChannel] _send_team drop: no ws/push/legacy available agent_id=%s",
+                               (agent_id or "")[:8])
+
+    def _resolve_active_ws(
+            self, agent_id: str, delivery: XiaoyiDeliveryTarget
+    ) -> tuple[str, str, float]:
+        """解析当前活跃的 (顶层 sessionId, task_id, 最后 inbound 时间戳)。
+
+        优先用 _active_push_sessions[agent_id] 的最新值（inbound 实时维护），
+        避免 /join 时冻结的旧 sessionId 导致 team 异步消息 ws 投递路由不到。
+        delivery.xiaoyi_session_id 仅在无活跃映射时兜底（用户从未发消息的纯 /join 场景）。
+        task_id 始终从活跃映射取（请求级临时值，不进 Subscription）。
+        时间戳用于 team 投递 ws 活跃窗口判定：超窗说明手机端可能已关 ws，应降级 push。
+        """
+        active = self._active_push_sessions.get(agent_id) if agent_id else None
+        if active:
+            return active[0], active[1], active[3]
+        return delivery.xiaoyi_session_id, "", 0.0
+
+    def _extract_team_content(self, msg: Message) -> str:
+        """从 Message.payload 抽取 team 消息文本内容.
+
+        team.message 走 event.* 结构化字段（与飞书 _send_team_message 对齐），
+        普通 chat 仍走 payload.content/delta。
+        """
+        if not isinstance(msg.payload, dict):
+            return str(msg.payload) if msg.payload else ""
+        event = msg.payload.get("event", {})
+        if isinstance(event, dict) and str(event.get("type", "")).startswith("team.message"):
+            msg_type = event.get("type", "")
+            from_member = event.get("from_member", "") or "team"
+            to_member = event.get("to_member", "")
+            content = str(event.get("content", "") or "")
+            if msg_type == "team.message.broadcast":
+                recipient = "📢 全员"
+            elif msg_type == "team.message.p2p":
+                recipient = f"👾 {to_member}" if to_member else "👾 —"
+            else:
+                recipient = f"👾 {to_member}" if to_member else "👾 —"
+            bar = "─" * 20
+            return f"\n---\n╭{bar}╮\n│ 🤖 {from_member}   →   {recipient}\n╰{bar}╯\n{content}\n"
+        content = msg.payload.get("content", "") or msg.payload.get("delta", "")
+        if isinstance(content, dict):
+            content = content.get("output", str(content))
+        return str(content)
+
+    async def _send_ws_to_user(
+            self, session_id: str, task_id: str, msg: Message, content: str
+    ) -> None:
+        """活跃会话 ws 流式投递（复用 _send_text_response）。
+
+        流式合并：delta chunk 用 16ms（≈60fps）短窗口累积合并发送，
+        缓解高频小 chunk 导致的客户端卡顿，同时保持人眼连续的流式实时性。
+        final 消息立即冲刷缓冲并发送，保证结尾不延迟。
+        """
+        last_chunk = msg.event_type == EventType.CHAT_FINAL
+        is_final = False
+        if isinstance(msg.payload, dict):
+            is_final = bool(msg.payload.get("is_complete", False))
+        if is_final:
+            last_chunk = True
+
+        # team.message 是完整的逻辑消息（monitor 转发全文，非流式 delta），
+        if msg.event_type == EventType.TEAM_MESSAGE:
+            last_chunk = True
+            is_final = False
+
+        # final 消息：冲刷缓冲 + 立即发送
+        if is_final or last_chunk:
+            buf = self._ws_flush_buffers.pop(task_id, "")
+            merged = (buf + content) if buf else content
+            # 末尾加换行，分隔多条 final 消息，避免客户端连在一起显示
+            if merged and not merged.endswith("\n"):
+                merged = merged + "\n"
+            # 取消未决 flush 任务，避免重复发送
+            t = self._ws_flush_tasks.pop(task_id, None)
+            if t and not t.done():
+                t.cancel()
+            for url_key, ws in self._ws_connections.items():
+                if ws:
+                    try:
+                        await self._send_text_response(
+                            session_id, task_id, merged, url_key,
+                            append=True, last_chunk=last_chunk, is_final=is_final,
+                        )
+                        logger.info(
+                            "[XiaoyiChannel] team ws sent: event=%s sid=%s task_id=%s "
+                            "append=True last=%s final=%s len=%d",
+                            msg.event_type, (session_id or "")[:8], task_id,
+                            last_chunk, is_final, len(merged),
+                        )
+                    except Exception as e:
+                        logger.warning(f"XiaoyiChannel team ws 发送失败 ({url_key}): {e}")
+            return
+
+        # delta chunk：累积进缓冲。超过阈值（200 字符）立即同步冲刷，避免 ws.send
+        # 阻塞时 buffer 持续积压导致延迟；否则调度 16ms 延迟 flush 合并高频小 chunk。
+        self._ws_flush_buffers[task_id] = self._ws_flush_buffers.get(task_id, "") + content
+        if len(self._ws_flush_buffers[task_id]) >= 200:
+            buf = self._ws_flush_buffers.pop(task_id, "")
+            t = self._ws_flush_tasks.pop(task_id, None)
+            if t and not t.done():
+                t.cancel()
+            for url_key, ws in self._ws_connections.items():
+                if ws:
+                    try:
+                        await self._send_text_response(
+                            session_id, task_id, buf, url_key,
+                            append=True, last_chunk=False, is_final=False,
+                        )
+                    except Exception as e:
+                        logger.warning(f"XiaoyiChannel team ws 即时冲刷失败 ({url_key}): {e}")
+            return
+        if task_id not in self._ws_flush_tasks or self._ws_flush_tasks[task_id].done():
+            self._ws_flush_tasks[task_id] = asyncio.create_task(
+                self._flush_ws_buffer(session_id, task_id, delay=0.016)
+            )
+
+    async def _flush_ws_buffer(
+            self, session_id: str, task_id: str, delay: float = 0.0
+    ) -> None:
+        """冲刷 ws 流式缓冲，合并发送累积的 delta 文本。"""
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            buf = self._ws_flush_buffers.pop(task_id, "")
+            if not buf:
+                return
+            for url_key, ws in self._ws_connections.items():
+                if ws:
+                    try:
+                        await self._send_text_response(
+                            session_id, task_id, buf, url_key,
+                            append=True, last_chunk=False, is_final=False,
+                        )
+                    except Exception as e:
+                        logger.warning(f"XiaoyiChannel team ws flush 发送失败 ({url_key}): {e}")
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._ws_flush_tasks.pop(task_id, None)
+
+    async def _send_push_to_user(self, agent_id: str, push_id: str, content: str) -> None:
+        """后台 push webhook 投递全文 final，带 per-agent_id 合并窗口。
+
+        同一 agent_id 在 message_merge_window_ms 内的多条消息累积进 buffer，
+        第一条到达时调度延迟 flush 任务，窗口到期统一合并发送一次，
+        避免短时多条 mention 轰炸。push_id 作为 webhook 寻址 token 随 flush 一并发出。
+        """
+        if not self.config.api_id:
+            logger.debug("[PUSH] team push 跳过：api_id 未配置")
+            return
+        if not content.strip():
+            return
+
+        now = time.time()
+        buf = self._push_merge_buffers.setdefault(agent_id, [])
+        buf.append((now, content, content[:30], push_id))
+
+        # 若已有 pending flush 任务，复用之（继续累积）；否则调度延迟 flush
+        if agent_id not in self._push_flush_tasks or self._push_flush_tasks[agent_id].done():
+            window_ms = getattr(self.config, "message_merge_window_ms", 15000) or 15000
+            self._push_flush_tasks[agent_id] = asyncio.create_task(
+                self._flush_push_buffer(agent_id, window_ms / 1000)
+            )
+
+    async def _flush_push_buffer(self, agent_id: str, window_s: float) -> None:
+        """延迟 window 秒后合并发送 buffer 全部内容。"""
+        try:
+            await asyncio.sleep(window_s)
+            buf = self._push_merge_buffers.pop(agent_id, [])
+            if not buf:
+                return
+            # buffer 在 flush 后整体 pop 清空，不存在跨窗口残留，无需按时间过滤
+            merged_content = "\n\n".join(b[1] for b in buf)
+            summary = self._build_push_summary(buf[0][1]) or (
+                merged_content[:30] + "..." if len(merged_content) > 30 else merged_content)
+            # push_id 取 buffer 中最近一次的非空值（同一用户 push_id 稳定）
+            push_id = ""
+            for entry in reversed(buf):
+                if entry[3]:
+                    push_id = entry[3]
+                    break
+            if not push_id:
+                logger.warning("[PUSH] team push flush 跳过：buffer 中无有效 push_id (agent_id=%s)", agent_id[:8])
+                return
+            push_config = PushConfig(
+                mode=self.config.mode,
+                api_id=self.config.api_id,
+                push_id=push_id,
+                push_url=self.config.push_url,
+                ak=self.config.ak,
+                sk=self.config.sk,
+                uid=self.config.uid,
+                api_key=self.config.api_key,
+            )
+            await XiaoYiPushService(push_config).send_push(summary, merged_content)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"[PUSH] team push flush 失败 (agent_id=%s): %s", agent_id[:8], e)
+        finally:
+            self._push_flush_tasks.pop(agent_id, None)
+
+    @staticmethod
+    def _build_push_summary(content: str) -> str:
+        """从 _extract_team_content 拼好的 team 消息里提取 summary。
+
+        格式 @recipient content截断...，取第一条消息的 recipient + 正文前 30 字。
+        content 结构：╭{bar}╮\\n│ 🤖 {from}   →   {recipient}\\n╰{bar}╯\\n{正文}\\n---\\n
+        （recipient 可能带 👾 前缀，如 "👾 human-wolf"；广播为 "📢 全员"）
+        提取失败回退空串（由调用方用截断 merged_content 兜底）。
+        """
+        if not content:
+            return ""
+        # recipient：│ ... →   {recipient} 行的 → 之后部分（可能含 👾 前缀）
+        recipient = ""
+        for line in content.split("\n"):
+            if "→" in line and "🤖" in line:
+                recipient = line.split("→", 1)[1].strip()
+                break
+        # 正文：╰...╯ 之后的行（排除尾部分隔符 ---）
+        body = ""
+        m = re.search(r"╯\s*\n(.*)", content, re.DOTALL)
+        if m:
+            tail = m.group(1)
+            # 去掉结尾的 \n---\n
+            tail = re.sub(r"\n---\s*\n?$", "", tail).strip()
+            body = tail
+        if not recipient and not body:
+            return ""
+        if not body:
+            return f"@{recipient}" if recipient else ""
+        snippet = body[:30] + "..." if len(body) > 30 else body
+        return f"@{recipient} {snippet}" if recipient else snippet
 
     def get_metadata(self) -> ChannelMetadata:
         return ChannelMetadata(
@@ -669,8 +1142,19 @@ class XiaoyiChannel(BaseChannel):
 
     async def _handle_message_stream(self, message: dict[str, Any]) -> None:
         """处理 message/stream 消息，转换为 JiuwenSwarm Message."""
-        session_id = message.get("sessionId") or message.get("params", {}).get("sessionId", "")
-        task_id = message.get("params", {}).get("id", ) or ""
+        # V2: 区分两层 sessionId —— 顶层 sessionId 是物理回发地址（临时），
+        # conversationId / params.sessionId 是逻辑会话（跨请求稳定）。
+        top_session_id = message.get("sessionId", "") or ""
+        conversation_id = (
+                message.get("conversationId")
+                or message.get("params", {}).get("sessionId", "")
+                or ""
+        )
+        # 兼容旧逻辑：inbound 的 session_id 取顶层（物理），逻辑会话独立存 metadata
+        session_id = top_session_id or conversation_id
+        task_id = message.get("params", {}).get("id", "") or message.get("id", "") or ""
+        agent_id = message.get("agentId", "") or self.config.agent_id
+        device_id = message.get("deviceId", "") or ""
         user_message = message.get("params", {}).get("message", {})
         parts = user_message.get("parts", [])
 
@@ -680,6 +1164,7 @@ class XiaoyiChannel(BaseChannel):
 
         # ==================== PROCESS PARTS (TEXT & FILES) ====================
         text = ""
+        push_id = ""  # V2: 从 data part 的 systemVariables 提取，webhook 推送寻址 token
         file_attachments: list[str] = []
         media_files: list[dict[str, Any]] = []
 
@@ -720,9 +1205,17 @@ class XiaoyiChannel(BaseChannel):
             elif kind == "data":
                 data = part.get("data", {})
                 if isinstance(data, dict):
-                    push_id = data.get("variables", {}).get("systemVariables", {}).get("push_id", "")
-                    self.config.push_id = push_id if push_id else self.config.push_id
+                    pid = data.get("variables", {}).get("systemVariables", {}).get("push_id", "")
+                    if pid:
+                        push_id = pid
         # =================================================================
+
+        # V2: 维护 agent_id → (顶层 sessionId, task_id, push_id, ts) 活跃映射，出站判定 ws vs push 用
+        # ts 用于超时清理，避免异常断开的 stale 条目累积（多用户长期运行）
+        if agent_id:
+            self._active_push_sessions[agent_id] = (top_session_id, task_id, push_id, time.time())
+            if push_id:
+                self.config.push_id = push_id  # 内存态保持最新，供 cron 推送兜底
 
         # Log summary of processed attachments
         if file_attachments:
@@ -764,23 +1257,35 @@ class XiaoyiChannel(BaseChannel):
             from jiuwenswarm.common.config import update_channel_in_config
 
             rpc_id = message.get("id")
-            update_channel_in_config(
-                "xiaoyi",
-                {
-                    "last_session_id": session_id or "",
-                    "last_task_id": task_id or "",
-                    "last_message_id": str(rpc_id) if rpc_id is not None else "",
-                },
-            )
+            conf_update: dict[str, Any] = {
+                "last_session_id": session_id or "",
+                "last_task_id": task_id or "",
+                "last_message_id": str(rpc_id) if rpc_id is not None else "",
+            }
+            # V2: 首次收到非空 push_id 时持久化（webhook 推送 token，供 cron 推送兜底）
+            if push_id:
+                conf_update["push_id"] = push_id
+            update_channel_in_config("xiaoyi", conf_update)
         except Exception as config_error:
             logger.warning(f"XiaoyiChannel 更新配置失败: {config_error}")
 
         # ==================== BUILD MESSAGE AND ROUTE ====================
+        # V2 Stream Routing: 填充 5 维字段 ——
+        #   user_id = agentId（per-user agent 标识，RoutingKey.user_id 维度）
+        #   bot_id = config.agent_id（让 MessageHandler._resolve_app_id 兜底拿到 app_id）
+        #   session_id = 逻辑会话（conversationId，非 team 兜底更稳定）
+        #   chat_id = 顶层 sessionId（物理回发兜底）
         # 平台身份写入 metadata，供回发时使用（与 session_id 解耦，\new_session 后仍可正确回发）
+        user_id = agent_id
+        logical_session = conversation_id or session_id
         metadata = {
             "method": "message/stream",
-            "xiaoyi_session_id": session_id,
+            "xiaoyi_session_id": top_session_id,  # 顶层 sessionId（物理回发）
             "xiaoyi_task_id": task_id,
+            "xiaoyi_conversation_id": conversation_id,  # 逻辑会话
+            "xiaoyi_push_id": push_id,  # webhook 推送 token
+            "xiaoyi_device_id": device_id,  # 设备标识（备用）
+            "im_sender_user_id": user_id,  # MessageHandler whoami 用
         }
         # Add media payload to metadata
         params = {"query": text, "task_id": task_id}
@@ -791,13 +1296,16 @@ class XiaoyiChannel(BaseChannel):
             id=message.get("id", ""),
             type="req",
             channel_id=self.channel_id,
-            session_id=session_id,
+            session_id=logical_session,  # 逻辑会话（非 team 兜底）
+            user_id=user_id,  # agentId
+            bot_id=self.config.agent_id,  # ← _resolve_app_id 兜底拿 app_id
+            app_id=self.app_id,
             params=params,
             timestamp=time.time(),
             is_stream=self.config.enable_streaming,
             ok=True,
             req_method=ReqMethod.CHAT_SEND,
-            chat_id=session_id,
+            chat_id=session_id,  # 顶层 sessionId（物理回发兜底）
             metadata=metadata,
         )
 

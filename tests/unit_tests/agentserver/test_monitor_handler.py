@@ -24,12 +24,13 @@ class _FakeMessage:
 
 class _FakeMember:
     def __init__(self, member_name: str, display_name: str = "", status: str = "ready",
-                 execution_status: str | None = None, mode: str = "normal"):
+                 execution_status: str | None = None, mode: str = "normal", role: str = "teammate"):
         self.member_name = member_name
         self.display_name = display_name
         self.status = status
         self.execution_status = execution_status
         self.mode = mode
+        self.role = role
 
 
 class _FakeTask:
@@ -74,6 +75,12 @@ class _FakeMonitor:
     async def get_members(self) -> list[_FakeMember]:
         return list(self._members)
 
+    async def get_member(self, member_name: str, team_name: str | None = None) -> _FakeMember | None:
+        for m in self._members:
+            if m.member_name == member_name:
+                return m
+        return None
+
     async def get_team_info(self):
         if self._leader_member_name is None:
             return None
@@ -107,6 +114,7 @@ async def test_get_team_snapshot_filters_leader_member() -> None:
                 "status": "ready",
                 "execution_status": None,
                 "mode": "normal",
+                "role": "teammate",
             }
         ],
         "tasks": [
@@ -144,6 +152,7 @@ async def test_get_team_snapshot_keeps_members_when_team_info_unavailable() -> N
                 "status": "ready",
                 "execution_status": None,
                 "mode": "normal",
+                "role": "teammate",
             },
             {
                 "member_id": "worker-2",
@@ -151,6 +160,7 @@ async def test_get_team_snapshot_keeps_members_when_team_info_unavailable() -> N
                 "status": "ready",
                 "execution_status": None,
                 "mode": "normal",
+                "role": "teammate",
             },
         ],
         "tasks": [],
@@ -267,5 +277,62 @@ async def test_convert_plain_protocol_message_keeps_json_like_text_unchanged() -
 
         assert converted["event"]["protocol"] == "plain"
         assert converted["event"]["content"] == raw_content
+    finally:
+        await handler.stop()
+
+
+@pytest.mark.anyio
+async def test_member_spawned_event_includes_mode_for_human_agent() -> None:
+    """验证 member_spawned 事件对 human_agent 成员返回 mode="human"."""
+    event = MonitorEvent(
+        event_type=MonitorEventType.MEMBER_SPAWNED,
+        team_name="team-1",
+        timestamp=123,
+        member_name="HumanPlayer_A",
+    )
+    handler = TeamMonitorHandler(
+        _FakeMonitor(
+            members=[_FakeMember("HumanPlayer_A", role="human_agent")],
+            leader_member_name=None,
+            events=[event],
+        ),
+        "sess-monitor",
+    )
+
+    await handler.start()
+    try:
+        converted = await anext(handler.events())
+
+        assert converted["event"]["member_id"] == "HumanPlayer_A"
+        assert converted["event"]["mode"] == "human"
+    finally:
+        await handler.stop()
+
+
+@pytest.mark.anyio
+async def test_member_spawned_event_includes_mode_for_ai_member() -> None:
+    """验证 member_spawned 事件对 AI 成员返回 mode=role（teammate/leader 等）。"""
+    event = MonitorEvent(
+        event_type=MonitorEventType.MEMBER_SPAWNED,
+        team_name="team-1",
+        timestamp=123,
+        member_name="Werewolf_AI_1",
+    )
+    handler = TeamMonitorHandler(
+        _FakeMonitor(
+            members=[_FakeMember("Werewolf_AI_1", role="teammate")],
+            leader_member_name=None,
+            events=[event],
+        ),
+        "sess-monitor",
+    )
+
+    await handler.start()
+    try:
+        converted = await anext(handler.events())
+
+        assert converted["event"]["member_id"] == "Werewolf_AI_1"
+        # AI 成员（role=teammate）返回 mode=role 值
+        assert converted["event"]["mode"] == "teammate"
     finally:
         await handler.stop()

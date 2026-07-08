@@ -1856,8 +1856,18 @@ class JiuWenSwarm:
             durable_final_content = pending_text
 
         async def run_stream_task():
+            logger.info("[JiuWenSwarm] run_stream_task started: request_id=%s session_id=%s", rid, session_id)
+            _put_count = 0
             try:
                 async for chunk in adapter.process_message_stream_impl(request, inputs):
+                    _put_count += 1
+                    if _put_count <= 3:
+                        _pl = getattr(chunk, "payload", None) or {}
+                        _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                        logger.info(
+                            "[JiuWenSwarm] run_stream_task chunk #%s: request_id=%s event_type=%s",
+                            _put_count, rid, _et,
+                        )
                     await stream_queue.put(("chunk", chunk))
             except asyncio.CancelledError:
                 logger.info("[JiuWenSwarm] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
@@ -1866,6 +1876,10 @@ class JiuWenSwarm:
                 logger.exception("[JiuWenSwarm] 流式任务异常: %s", exc)
                 await stream_queue.put(("error", exc))
             finally:
+                logger.info(
+                    "[JiuWenSwarm] run_stream_task finished: request_id=%s total_chunks=%s",
+                    rid, _put_count,
+                )
                 stream_done.set()
 
         # Team 模式: 后续请求直接执行，绕过 Session Manager 队列
@@ -1889,6 +1903,11 @@ class JiuWenSwarm:
         suppress_a2ui_stream = False
         a2ui_pending_render_sent = False
         a2ui_stream_probe = ""
+        _yielded_from_queue = 0
+        logger.info(
+            "[JiuWenSwarm] consumer loop starting: request_id=%s is_team=%s is_first=%s",
+            rid, is_team_mode, is_team_first_request,
+        )
         try:
             while not stream_done.is_set() or not stream_queue.empty():
                 try:
@@ -1897,6 +1916,14 @@ class JiuWenSwarm:
                     continue
 
                 event_type, data = item
+                _yielded_from_queue += 1
+                if _yielded_from_queue <= 3:
+                    _pl = getattr(data, "payload", None) if event_type == "chunk" else None
+                    _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                    logger.info(
+                        "[JiuWenSwarm] consumer loop yield #%s: request_id=%s event_type=%s item_type=%s",
+                        _yielded_from_queue, rid, _et, event_type,
+                    )
 
                 if event_type == "error":
                     if isinstance(data, asyncio.CancelledError):

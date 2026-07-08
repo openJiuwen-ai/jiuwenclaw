@@ -320,6 +320,10 @@ def _build_request(args: argparse.Namespace, prompt: str) -> dict:
             "cwd": cwd,
             "project_dir": project_dir,
             "trusted_dirs": trusted_dirs,
+            # V2: 显式发 agent_ref，支撑同 session 切 mode 不串窗（设计 §5.2 场景 2）。
+            # gateway 用 (channel, scope, agent_ref) 3 元组注册/查找，AgentServer 回带
+            # 同值，切换 mode 后旧 agent 的延迟 chunk 不会错路由到新 agent 的 UI 区块。
+            "agent_ref": {"mode": args.mode, "id": "default"},
         },
     }
 

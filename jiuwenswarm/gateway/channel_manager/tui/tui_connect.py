@@ -408,6 +408,10 @@ class CliRouteBindParams:
     path: str = "/tui"
     channel_id: str = "tui"
     cron_controller: Any = None
+    # V2: 委托 ws 注册的 TuiChannel 实例。GatewayServer 仍作 /tui ws 宿主 + 入站帧解析，
+    # 但把 ws + RoutingKey 委托注册进 TuiChannel 的五维索引，出站由 ChannelManager
+    # 派发到 TuiChannel.send（按 delivery.ws_id 物理寻址）。
+    ws_channel: Any = None
 
 
 @dataclass
@@ -2998,4 +3002,5 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
         install=_install,
         disconnect_handler=_tui_disconnect,
         session_bind_handler=_tui_session_bound,
+        ws_channel=bind.ws_channel,
     )

@@ -275,10 +275,16 @@ def _acp_enabled(config: dict[str, Any]) -> bool:
 
 
 def _context_processor_params(config: dict[str, Any]) -> dict[str, Any]:
-    """Attribute params for the context-compression rail."""
+    """Attribute params for the context-compression rail.
+
+    ``context_engine_config`` lives under ``react`` in config.yaml; reading it
+    at the top level returned ``{}``, leaving the rail with an empty config and
+    no compressors mounted.
+    """
+    react = _config_section(config, "react")
     return {
         "context_engine_enabled": get_context_engine_enabled(config),
-        "context_engine_config": _config_section(config, "context_engine_config"),
+        "context_engine_config": _config_section(react, "context_engine_config"),
     }
 
 

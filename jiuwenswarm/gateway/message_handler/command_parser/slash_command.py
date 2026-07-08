@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import re
 from typing import Any, Literal
 
 
@@ -30,6 +31,8 @@ class GatewaySlashCommand(str, Enum):
     REWIND = "/rewind"
     REVIEW = "/review"
     SECURITY_REVIEW = "/security-review"
+    JOIN = "/join"
+    EXIT = "/exit"
 
 
 class ModeSubcommand(str, Enum):
@@ -71,6 +74,8 @@ CONTROL_MESSAGE_TEXTS: frozenset[str] = frozenset(
         GatewaySlashCommand.SKILLS_LIST.value,
         GatewaySlashCommand.BRANCH.value,
         GatewaySlashCommand.REWIND.value,
+        GatewaySlashCommand.JOIN.value,
+        GatewaySlashCommand.EXIT.value,
     }
 )
 
@@ -95,6 +100,10 @@ class ParsedControlAction(str, Enum):
     REVIEW_BAD = "review_bad"
     SECURITY_REVIEW_OK = "security_review_ok"
     SECURITY_REVIEW_BAD = "security_review_bad"
+    JOIN_OK = "join_ok"
+    JOIN_BAD = "join_bad"
+    EXIT_OK = "exit_ok"
+    EXIT_BAD = "exit_bad"
 
 
 @dataclass(frozen=True)
@@ -116,6 +125,10 @@ class ParsedChannelControl:
     """review_ok 时为用户指定的 PR 编号、URL 或自由文本；空字符串表示未指定，将展示 PR 列表。"""
     security_review_arg: str | None = None
     """security_review_ok 时为用户可选附加说明；空字符串表示未指定。"""
+    session_ref: str | None = None
+    """join/exit 时的 session 引用。"""
+    member_name: str | None = None
+    """join 时的席位名。"""
 
 
 _PR_ARG_MAX_LEN = 2048
@@ -230,6 +243,47 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
         if sanitized is None:
             return ParsedChannelControl(ParsedControlAction.REVIEW_BAD)
         return ParsedChannelControl(ParsedControlAction.REVIEW_OK, pr_arg=sanitized)
+    # /join <session_ref> as <member_name>
+    # 支持两种格式：
+    #   完整: /join team_<name>_session_<id> as <member_name>
+    #   简化: /join <session_id> as <member_name>
+    if t.startswith(GatewaySlashCommand.JOIN.value):
+        parts = t.split()
+        if (
+            len(parts) == 4
+            and parts[0] == GatewaySlashCommand.JOIN.value
+            and parts[2] == "as"
+        ):
+            session_ref = parts[1]
+            member_name = parts[3]
+            # 接受完整格式 team_*_session_* 或简化格式（任意 session_id）
+            if re.match(r'^team_[A-Za-z0-9_-]+_session_[A-Za-z0-9_-]+$', session_ref) or \
+               re.match(r'^[A-Za-z0-9_-]+$', session_ref):
+                return ParsedChannelControl(
+                    ParsedControlAction.JOIN_OK,
+                    session_ref=session_ref,
+                    member_name=member_name,
+                )
+        return ParsedChannelControl(ParsedControlAction.JOIN_BAD)
+    # /exit [session_ref]
+    # 支持三种格式：
+    #   不带参数: /exit（使用当前 session）
+    #   完整: /exit team_<name>_session_<id>
+    #   简化: /exit <session_id>
+    if t.startswith(GatewaySlashCommand.EXIT.value):
+        parts = t.split()
+        if len(parts) == 1 and parts[0] == GatewaySlashCommand.EXIT.value:
+            # /exit 不带 session_id → handler 用当前 session 兜底
+            return ParsedChannelControl(ParsedControlAction.EXIT_OK)
+        if len(parts) == 2 and parts[0] == GatewaySlashCommand.EXIT.value:
+            session_ref = parts[1]
+            if re.match(r'^team_[A-Za-z0-9_-]+_session_[A-Za-z0-9_-]+$', session_ref) or \
+               re.match(r'^[A-Za-z0-9_-]+$', session_ref):
+                return ParsedChannelControl(
+                    ParsedControlAction.EXIT_OK,
+                    session_ref=session_ref,
+                )
+        return ParsedChannelControl(ParsedControlAction.EXIT_BAD)
     return ParsedChannelControl(ParsedControlAction.NONE)
 
 
@@ -263,6 +317,10 @@ def is_control_like_for_im_batching(text: str) -> bool:
     if t.startswith(GatewaySlashCommand.REVIEW.value):
         return True
     if t.startswith(GatewaySlashCommand.SECURITY_REVIEW.value):
+        return True
+    if t.startswith(GatewaySlashCommand.JOIN.value):
+        return True
+    if t.startswith(GatewaySlashCommand.EXIT.value):
         return True
     return False
 

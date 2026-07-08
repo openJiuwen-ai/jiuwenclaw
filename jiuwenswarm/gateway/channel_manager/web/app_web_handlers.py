@@ -33,6 +33,7 @@ from jiuwenswarm.common.config import (
     update_default_models_in_config,
     update_heartbeat_in_config,
     update_channel_in_config,
+    replace_channel_subsection_with_cleanup,
     update_browser_in_config,
     update_preferred_language_in_config,
     update_context_engine_enabled_in_config,
@@ -724,6 +725,200 @@ def _make_session_id() -> str:
     return f"sess_{ts}_{suffix}"
 
 
+# ---------------------------------------------------------------------------
+# 飞书 Feishu / 小艺 Xiaoyi 多应用配置 — 默认值 & 归一化函数
+# ---------------------------------------------------------------------------
+
+_FEISHU_APP_DEFAULTS: dict[str, Any] = {
+    "name": "默认应用",
+    "is_default": False,
+    "enabled": True,
+    "app_id": "",
+    "app_secret": "",
+    "encrypt_key": "",
+    "verification_token": "",
+    "allow_from": ["0.0.0.0/0"],
+    "enable_streaming": True,
+    "group_digital_avatar": False,
+    "my_user_id": "",
+    "bot_name": "",
+    "enable_memory": False,
+}
+
+
+def _merge_apps_by_id(
+    new_apps: list[dict],
+    existing_apps: list[dict],
+) -> list[dict]:
+    """将新 apps 与已有 apps 按 app_id 合并，保留前端未显式发送的字段。
+
+    各 channel 的 ``_normalize_*_conf`` 会用对应的 ``_*_APP_DEFAULTS`` 空值填充
+    前端未发的字段。合并以已有值为基座、新值覆盖，避免已配置的敏感字段（如
+    app_secret / sk 等）被默认空值覆盖丢失。
+
+    Parameters
+    ----------
+    new_apps : list[dict]
+        前端提交并经归一化的新 apps 列表。
+    existing_apps : list[dict]
+        从 cm.get_conf (或 config.yaml) 读出的已有 apps 列表。
+
+    Returns
+    -------
+    list[dict]
+        合并后的 apps 列表。
+    """
+    if not isinstance(existing_apps, list) or not existing_apps:
+        return new_apps
+
+    existing_by_app_id = {
+        a["app_id"]: a
+        for a in existing_apps
+        if isinstance(a, dict) and a.get("app_id")
+    }
+    if not existing_by_app_id:
+        return new_apps
+
+    return [
+        {**existing_by_app_id[app["app_id"]], **app}
+        if isinstance(app, dict) and app.get("app_id") in existing_by_app_id
+        else app
+        for app in new_apps
+    ]
+
+
+def _normalize_feishu_conf(raw: dict) -> dict:
+    """将 channels.feishu 统一为 apps 格式，并为每个 app 补充缺省字段。
+
+    输入可以是旧平铺格式（``{"app_id": "xxx", "app_secret": "yyy"}``）
+    或新多应用格式（``{"apps": [...]}``）。返回结果始终包含 ``apps`` 列表。
+    若输入为空或非 dict，返回 ``{"apps": []}``。
+    """
+    if not isinstance(raw, dict):
+        logger.debug("[normalize_feishu] 输入非 dict (%s), 返回空 apps", type(raw).__name__)
+        return {"apps": []}
+    if "apps" in raw:
+        apps_raw = raw["apps"]
+        app_names = [a.get("name", "?") for a in apps_raw] if isinstance(apps_raw, list) else []
+        logger.debug(
+            "[normalize_feishu] 多应用格式, apps=%d, names=%s",
+            len(apps_raw) if isinstance(apps_raw, list) else -1,
+            app_names,
+        )
+        apps = [
+            {**_FEISHU_APP_DEFAULTS, **app}
+            for app in apps_raw
+        ]
+        return {**raw, "apps": apps}
+    # 旧平铺格式 → 转为 apps
+    keys_present = [k for k in ("app_id", "app_secret", "encrypt_key", "verification_token") if k in raw]
+    logger.debug("[normalize_feishu] 旧平铺格式, keys=%s, 转为单 app", keys_present)
+    return {
+        **raw,
+        "apps": [_normalize_single_feishu_to_app(raw)],
+    }
+
+
+def _normalize_single_feishu_to_app(raw: dict) -> dict:
+    """将单个平铺飞书配置转为 apps 列表项。"""
+    return {
+        **_FEISHU_APP_DEFAULTS,
+        "is_default": True,
+        "name": raw.get("name", "默认应用"),
+        "enabled": bool(raw.get("enabled", True)),
+        "app_id": raw.get("app_id", ""),
+        "app_secret": raw.get("app_secret", ""),
+        "encrypt_key": raw.get("encrypt_key", ""),
+        "verification_token": raw.get("verification_token", ""),
+        "allow_from": raw.get("allow_from") or ["0.0.0.0/0"],
+        "enable_streaming": bool(raw.get("enable_streaming", True)),
+        "group_digital_avatar": bool(raw.get("group_digital_avatar", False)),
+        "my_user_id": raw.get("my_user_id", ""),
+        "bot_name": raw.get("bot_name", ""),
+        "enable_memory": bool(raw.get("enable_memory", False)),
+        **raw,
+    }
+
+
+_XIAOYI_APP_DEFAULTS: dict[str, Any] = {
+    "name": "默认应用",
+    "is_default": False,
+    "enabled": True,
+    "ak": "",
+    "sk": "",
+    "app_id": "",
+    "api_id": "",
+    "agent_id": "",
+    "enable_streaming": True,
+    "mode": "xiaoyi_channel",
+    "push_id": "",
+    "ws_url1": "wss://hag.cloud.huawei.com/openclaw/v1/ws/link",
+    "ws_url2": "wss://116.63.174.231/openclaw/v1/ws/link",
+    "phone_tools_enabled": False,
+    "uid": "",
+    "api_key": "",
+    "push_url": "",
+    "file_upload_url": "",
+}
+
+
+def _normalize_xiaoyi_conf(raw: dict) -> dict:
+    """将 channels.xiaoyi 统一为 apps 格式，并为每个 app 补充缺省字段。
+
+    输入可以是旧平铺格式或新多应用格式。返回结果始终包含 ``apps`` 列表。
+    若输入为空或非 dict，返回 ``{"apps": []}``。
+    """
+    if not isinstance(raw, dict):
+        logger.debug("[normalize_xiaoyi] 输入非 dict (%s), 返回空 apps", type(raw).__name__)
+        return {"apps": []}
+    if "apps" in raw:
+        apps_raw = raw["apps"]
+        app_names = [a.get("name", "?") for a in apps_raw] if isinstance(apps_raw, list) else []
+        logger.debug(
+            "[normalize_xiaoyi] 多应用格式, apps=%d, names=%s",
+            len(apps_raw) if isinstance(apps_raw, list) else -1,
+            app_names,
+        )
+        apps = [
+            {**_XIAOYI_APP_DEFAULTS, **app}
+            for app in apps_raw
+        ]
+        return {**raw, "apps": apps}
+    # 旧平铺格式 → 转为 apps
+    keys_present = [k for k in ("ak", "sk", "agent_id") if k in raw]
+    logger.debug("[normalize_xiaoyi] 旧平铺格式, keys=%s, 转为单 app", keys_present)
+    return {
+        **raw,
+        "apps": [_normalize_single_xiaoyi_to_app(raw)],
+    }
+
+
+def _normalize_single_xiaoyi_to_app(raw: dict) -> dict:
+    """将单个平铺小艺配置转为 apps 列表项。"""
+    return {
+        **_XIAOYI_APP_DEFAULTS,
+        "is_default": True,
+        "name": raw.get("name", "默认应用"),
+        "enabled": bool(raw.get("enabled", True)),
+        "ak": raw.get("ak", ""),
+        "sk": raw.get("sk", ""),
+        "app_id": raw.get("app_id", ""),
+        "api_id": str(raw.get("api_id") or ""),
+        "agent_id": raw.get("agent_id", ""),
+        "enable_streaming": bool(raw.get("enable_streaming", True)),
+        "mode": raw.get("mode", "xiaoyi_channel"),
+        "push_id": raw.get("push_id", ""),
+        "ws_url1": raw.get("ws_url1", "wss://hag.cloud.huawei.com/openclaw/v1/ws/link"),
+        "ws_url2": raw.get("ws_url2", "wss://116.63.174.231/openclaw/v1/ws/link"),
+        "phone_tools_enabled": bool(raw.get("phone_tools_enabled", False)),
+        "uid": raw.get("uid", ""),
+        "api_key": raw.get("api_key", ""),
+        "push_url": raw.get("push_url", ""),
+        "file_upload_url": raw.get("file_upload_url", ""),
+        **raw,
+    }
+
+
 @dataclass
 class WebHandlersBindParams:
     """Named bundle for :func:`_register_web_handlers` (avoids long positional / keyword lists)."""
@@ -812,7 +1007,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if ac is None or not getattr(ac, "server_ready", False):
             logger.debug("[_on_connect] Agent 未就绪，跳过 connection.ack")
             return
-        sid = _make_session_id()
+        # V2: 复用 ws 握手时注册的占位 session_id，而不是另 make 一个新 sid。
+        # 原实现凭空生成 sid_B 与 ws 在 _clients_by_key 中注册的 sid_A 不一致，
+        # 导致 send() 按 session_id 反查落空、ACK 被丢弃，前端收不到 connection.ack。
+        # 复用 sid_A 后，ACK 走标准 send 流程即可命中本 ws，无需特殊路由兜底。
+        sid = getattr(ws, "_jiuwen_initial_sid", None) or _make_session_id()
 
         ack_msg = Message(
             id=f"ack-{sid}",
@@ -2630,10 +2829,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 error=str(e), code="INTERNAL_ERROR"
             )
 
+    def _mask_sensitive(params: dict | list, sensitive_keys: frozenset[str]) -> dict | list:
+        """递归脱敏，替换敏感字段值为 ``****``。"""
+        if isinstance(params, dict):
+            return {
+                k: (_mask_sensitive(v, sensitive_keys) if isinstance(v, (dict, list))
+                    else "****" if k in sensitive_keys else v)
+                for k, v in params.items()
+            }
+        if isinstance(params, list):
+            return [_mask_sensitive(item, sensitive_keys) if isinstance(item, (dict, list)) else item
+                    for item in params]
+        return params
+
+    _feishu_sensitive_keys: frozenset[str] = frozenset({"app_secret", "encrypt_key", "verification_token"})
+    _xiaoyi_sensitive_keys: frozenset[str] = frozenset({"sk", "api_key"})
+
     async def _channel_feishu_get_conf(ws, req_id, params, session_id):
         """返回 FeishuChannel 的当前配置（由 ChannelManager 管理）。"""
         cm = _resolve(channel_manager)
         if cm is None:
+            logger.warning("[channel.feishu.get_conf] channel_manager not available, req_id=%s", req_id)
             await channel.send_response(
                 ws,
                 req_id,
@@ -2643,16 +2859,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            conf = cm.get_conf("feishu")
+            raw = cm.get_conf("feishu")
+            conf = _normalize_feishu_conf(raw)
+            apps = conf.get("apps", [])
+            app_names = [a.get("name", "?") for a in apps]
+            logger.debug(
+                "[channel.feishu.get_conf] ok, req_id=%s, apps=%d, names=%s",
+                req_id, len(apps), app_names,
+            )
             await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
         except Exception as e:  # noqa: BLE001
-            logger.exception("[channel.feishu.get_conf] %s", e)
+            logger.exception("[channel.feishu.get_conf] 异常, req_id=%s: %s", req_id, e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _channel_feishu_set_conf(ws, req_id, params, session_id):
-        """更新 FeishuChannel 的配置，并按新配置重新实例化通道。"""
+        """更新 FeishuChannel 的配置，并按新配置重新实例化通道。
+
+        ``params`` 必须含 ``apps`` 键，保存到 channels.feishu.apps。
+        """
         cm = _resolve(channel_manager)
         if cm is None:
+            logger.warning("[channel.feishu.set_conf] channel_manager not available, req_id=%s", req_id)
             await channel.send_response(
                 ws,
                 req_id,
@@ -2671,27 +2898,40 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            await cm.set_conf("feishu", params)
-            conf = cm.get_conf("feishu")
+            # 多应用模式：params 必须含 apps 键
+            apps = params["apps"]
+            app_names = [a.get("name", "?") for a in apps]
+            logger.debug(
+                "[channel.feishu.set_conf] req_id=%s, apps=%d, names=%s",
+                req_id, len(apps), app_names,
+            )
+            # 先归一化（用 _FEISHU_APP_DEFAULTS 补充前端未发送的字段），再持久化
+            normalized_apps = _normalize_feishu_conf({"apps": apps})["apps"]
+            # 从 cm 读取已有 apps，按 app_id 合并保留未发送的敏感字段
+            existing_feishu = cm.get_conf("feishu")
+            existing_apps = existing_feishu.get("apps", []) if isinstance(existing_feishu, dict) else []
+            merged_apps = _merge_apps_by_id(normalized_apps, existing_apps)
+            await cm.set_conf("feishu", {"apps": merged_apps})
             should_clear_agent_config_cache = False
             try:
-                update_channel_in_config("feishu", conf)
+                replace_channel_subsection_with_cleanup("feishu", "apps", merged_apps, {"apps", "send_file_allowed"})
                 should_clear_agent_config_cache = True
             except Exception as e:  # noqa: BLE001
-                logger.warning("[channel.feishu.set_conf] 写回 config.yaml 失败: %s", e)
+                logger.warning("[channel.feishu.set_conf] 写回 config.yaml apps 失败: %s", e)
             try:
-                await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+                await channel.send_response(ws, req_id, ok=True, payload={"config": {"apps": merged_apps}})
             finally:
                 if should_clear_agent_config_cache:
                     _schedule_clear_agent_config_cache("channel.feishu.set_conf")
         except Exception as e:  # noqa: BLE001
-            logger.exception("[channel.feishu.set_conf] %s", e)
+            logger.exception("[channel.feishu.set_conf] 异常, req_id=%s: %s", req_id, e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _channel_xiaoyi_get_conf(ws, req_id, params, session_id):
         """返回 XiaoyiChannel 的当前配置（由 ChannelManager 管理）。"""
         cm = _resolve(channel_manager)
         if cm is None:
+            logger.warning("[channel.xiaoyi.get_conf] channel_manager not available, req_id=%s", req_id)
             await channel.send_response(
                 ws,
                 req_id,
@@ -2701,16 +2941,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            conf = cm.get_conf("xiaoyi")
+            raw = cm.get_conf("xiaoyi")
+            conf = _normalize_xiaoyi_conf(raw)
+            apps = conf.get("apps", [])
+            app_names = [a.get("name", "?") for a in apps]
+            logger.debug(
+                "[channel.xiaoyi.get_conf] ok, req_id=%s, apps=%d, names=%s",
+                req_id, len(apps), app_names,
+            )
             await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
         except Exception as e:  # noqa: BLE001
-            logger.exception("[channel.xiaoyi.get_conf] %s", e)
+            logger.exception("[channel.xiaoyi.get_conf] 异常, req_id=%s: %s", req_id, e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _channel_xiaoyi_set_conf(ws, req_id, params, session_id):
-        """更新 XiaoyiChannel 的配置，并按新配置重新实例化通道。"""
+        """更新 XiaoyiChannel 的配置，并按新配置重新实例化通道。
+
+        ``params`` 必须含 ``apps`` 键，保存到 channels.xiaoyi.apps。
+        """
         cm = _resolve(channel_manager)
         if cm is None:
+            logger.warning("[channel.xiaoyi.set_conf] channel_manager not available, req_id=%s", req_id)
             await channel.send_response(
                 ws,
                 req_id,
@@ -2729,16 +2980,28 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            await cm.set_conf("xiaoyi", params)
-            conf = cm.get_conf("xiaoyi")
+            # 多应用模式：params 必须含 apps 键
+            apps = params["apps"]
+            app_names = [a.get("name", "?") for a in apps]
+            logger.debug(
+                "[channel.xiaoyi.set_conf] req_id=%s, apps=%d, names=%s",
+                req_id, len(apps), app_names,
+            )
+            # 先归一化（用 _XIAOYI_APP_DEFAULTS 补充前端未发送的字段），再持久化
+            normalized_apps = _normalize_xiaoyi_conf({"apps": apps})["apps"]
+            # 从 cm 读取已有 apps，按 app_id 合并保留未发送的敏感字段
+            existing_xiaoyi = cm.get_conf("xiaoyi")
+            existing_apps = existing_xiaoyi.get("apps", []) if isinstance(existing_xiaoyi, dict) else []
+            merged_apps = _merge_apps_by_id(normalized_apps, existing_apps)
+            await cm.set_conf("xiaoyi", {"apps": merged_apps})
             try:
-                update_channel_in_config("xiaoyi", conf)
+                replace_channel_subsection_with_cleanup("xiaoyi", "apps", merged_apps, {"apps", "send_file_allowed"})
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
-                logger.warning("[channel.xiaoyi.set_conf] 写回 config.yaml 失败: %s", e)
-            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+                logger.warning("[channel.xiaoyi.set_conf] 写回 config.yaml apps 失败: %s", e)
+            await channel.send_response(ws, req_id, ok=True, payload={"config": {"apps": merged_apps}})
         except Exception as e:  # noqa: BLE001
-            logger.exception("[channel.xiaoyi.set_conf] %s", e)
+            logger.exception("[channel.xiaoyi.set_conf] 异常, req_id=%s: %s", req_id, e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _channel_telegram_get_conf(ws, req_id, params, session_id):
