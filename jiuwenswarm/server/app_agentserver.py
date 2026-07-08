@@ -18,7 +18,6 @@ import asyncio
 import logging
 import logging.handlers
 import os
-import sys
 
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import LogManager
@@ -172,12 +171,73 @@ async def _run(host: str, port: int) -> None:
 
     stop_event = asyncio.Event()
     teammate_bootstrap_task: asyncio.Task | None = None
+    evolution_task: asyncio.Task | None = None
 
     # Distributed teammate can receive bootstrap before any team-mode request arrives.
     # Keep a lightweight daemon alive so remote member bootstrap is consumed proactively.
     teammate_bootstrap_task = asyncio.create_task(
         run_teammate_bootstrap_daemon(stop_event=stop_event)
     )
+
+    # ---- Evolution Scheduler (offline self-evolution) ----
+    # Starts only when evolve.enabled and evolve.trigger.periodic.enabled are both true.
+    try:
+        from jiuwenswarm.evolve import get_evolve_config
+
+        _evolve_cfg = get_evolve_config()
+        if _evolve_cfg.get("enabled") and _evolve_cfg.get("trigger", {}).get(
+            "periodic", {}
+        ).get("enabled"):
+            from jiuwenswarm.evolve.storage import create_evolution_store
+            from jiuwenswarm.evolve.trigger.sampler import LatestNSampler
+            from jiuwenswarm.evolve.trigger.scheduler import (
+                run_evolution_scheduler,
+            )
+
+            from jiuwenswarm.common.config import get_config
+
+            _main_config = get_config()
+
+            # Build pipeline from config
+            _store = create_evolution_store(_main_config)
+            _periodic_cfg = _evolve_cfg["trigger"]["periodic"]
+            _limits = _evolve_cfg.get("pipeline", {}).get("limits", {})
+            _max_traces = _limits.get("max_traces_per_batch", 10)
+
+            _sampler = LatestNSampler(
+                trace_reader=_store._sqlite,
+                max_traces=_max_traces,
+                source="periodic",
+            )
+
+            # Build pipeline lazily using the factory
+            from jiuwenswarm.evolve.cli import _build_pipeline_from_config
+
+            _pipeline = _build_pipeline_from_config(_config)
+            # Wire the store into training_writer
+            for _w in _pipeline._writers:
+                if getattr(_w, "name", "") == "training_writer":
+                    _w._store = _store
+
+            _interval = _periodic_cfg.get("interval_seconds", 3600)
+            evolution_task = asyncio.create_task(
+                run_evolution_scheduler(
+                    stop_event=stop_event,
+                    pipeline=_pipeline,
+                    sampler=_sampler,
+                    interval_seconds=_interval,
+                )
+            )
+            logger.info(
+                "[AgentServer] evolution scheduler started (interval=%ds, "
+                "max_traces=%d)",
+                _interval,
+                _max_traces,
+            )
+    except Exception as _exc:
+        logger.warning(
+            "[AgentServer] evolution scheduler failed to start: %s", _exc
+        )
 
     def _on_signal() -> None:
         stop_event.set()
@@ -202,6 +262,14 @@ async def _run(host: str, port: int) -> None:
                 await trace_http_server.stop()
             except Exception as exc:
                 logger.warning("[AgentServer] TraceHttpServer stop failed: %s", exc)
+        if evolution_task is not None:
+            evolution_task.cancel()
+            try:
+                await evolution_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning("[AgentServer] evolution scheduler stop failed: %s", exc)
         if teammate_bootstrap_task is not None:
             teammate_bootstrap_task.cancel()
             try:

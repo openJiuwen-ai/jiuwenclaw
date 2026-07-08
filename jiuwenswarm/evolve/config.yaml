@@ -1,0 +1,83 @@
+# ============================================================
+# 自演进（离线）配置
+# ============================================================
+# 基于 OTEL trace 的组件/模型双轨自演进。
+# 此文件由 jiuwenswarm/evolve/config.py 加载，可与主 config.yaml
+# 的 evolve: 段合并（主 config 中的 evolve 键优先级更高）。
+# ============================================================
+
+evolve:
+  enabled: false                    # 总开关，默认关闭
+  log_level: ${EVOLVE_LOG_LEVEL:-INFO}  # evolve 模块统一日志级别（支持环境变量覆盖）
+
+  pipeline:
+    # Proposal 生成器列表（按列表顺序执行）
+    proposal_generators:
+      # - rule_proposer             # Rule-based（已禁用，误报多且 target 解析不准）
+      - llm_proposer                # LLM-based（使用默认 LLM 分析 trace）
+
+    # 决策策略列表（按列表顺序执行）
+    decision_policies:
+      - rule_policy                 # 规则验证（字段完整性、去重）
+      - eval_policy                 # 启发式评估（证据强度、根因质量）
+
+    # Apply 写回器列表
+    apply_writers:
+      - skill_writer                # 写入 Skill Store（evolutions.json）
+      - memory_writer               # 写入 Memory Policy Store
+      - training_writer             # 写入 training_candidates 表
+
+    # 数量限制
+    limits:
+      max_proposals_per_batch: 3    # 每批最多 Proposal 数（含 Behavior + Data）
+      max_behavior_proposals: 2     # 每批最多 Behavior Proposal（Skill/Memory）
+      max_traces_per_batch: 10      # 每批最多 trace 数
+
+  # 触发与采样
+  trigger:
+    periodic:
+      interval_seconds: 3600        # 周期性触发间隔（秒）
+      enabled: false                # 周期性触发开关
+    sampler:
+      strategy: latest_n            # latest_n | time_window
+
+  # 存储
+  storage:
+    sqlite_path: "evolution.db"     # SQLite 路径（相对于 data_dir）
+    file_path: "evolution"          # 文件系统路径（相对于 workspace）
+
+  # 演进专用 LLM
+  llm:
+    model_name: "qwen3.6-plus"             # 模型名称
+    api_key: "${EVOLVE_API_KEY}"    # 支持环境变量替换，也可直接填写（不推荐）
+    api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"  # API base URL（DeepSeek 需要 /v1 路径）
+    temperature: 0.1                # 生成温度
+    max_tokens: 2000                # 最大 token 数
+    verify_ssl: false                # SSL 验证开关
+
+  # PDA-style AHE 算法配置 (pluggable, added in Phase 1)
+  ahe:
+    proposer:
+      max_proposals_per_batch: 3
+      max_skill_proposals: 2
+      max_per_skill_per_batch: 1
+    decision:
+      llm_decision_enabled: true
+      rule_gate_strict: true
+    governor:
+      max_per_skill: 10
+      deprecate_threshold_days: 30
+
+  # DiagnosisAgent 配置
+  diagnosis:
+    max_iterations: 20
+    temperature: 0.4
+    max_tokens: 20000
+    max_context_tokens: 200000
+    context:
+      compact_threshold: 0.75
+      keep_iterations: 3
+    tool_output:
+      max_chars: 10000
+      head_lines: 50
+      tail_lines: 30

@@ -520,17 +520,21 @@ def build_code_skill_use(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
     from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
     try:
+        from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+
         inp = CodeSkillUseInput.resolve(params, ctx)
         skill_mode = (
             SkillUseRail.SKILL_MODE_AUTO_LIST
             if is_skill_retrieval_enabled()
             else inp.skill_mode
         )
+        skills_dir = str(get_agent_skills_dir())
         return SkillUseRail(
-            skills_dir=str(get_agent_skills_dir()),
+            skills_dir=skills_dir,
             skill_mode=skill_mode,
             include_tools=inp.include_tools,
             disabled_skills=load_execution_disabled_skills(),
+            evolution_store=EvolutionStore(skills_dir),
         )
     except Exception as exc:
         logger.warning("[swarm.code_skill_use] create failed: %s", exc)

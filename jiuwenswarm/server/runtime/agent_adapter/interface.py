@@ -1214,6 +1214,7 @@ class JiuWenSwarm:
                 "handle_skills_skillnet_install",
                 "handle_skills_clawhub_download",
                 "handle_skills_team_skills_hub_install",
+                "handle_skills_evolution_save",
             ]
             if handler_name == "handle_skills_skillnet_install" and payload.get("pending"):
                 _reload_after_skills = False
