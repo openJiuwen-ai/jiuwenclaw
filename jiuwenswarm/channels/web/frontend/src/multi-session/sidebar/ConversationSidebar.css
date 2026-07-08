@@ -30,12 +30,11 @@
 
 .conversation-sidebar__new {
   display: flex;
-  width: calc(100% - 20px);
   flex: 0 0 auto;
   height: 34px;
   line-height: 34px;
   align-items: center;
-  padding: 0 10px;
+  padding: 0 8px;
   gap: 0 4px;
   border: 0;
   border-radius: 8px;
@@ -215,8 +214,11 @@
 
 .conversation-sidebar__pagination {
   display: flex;
-  gap: 4px;
-  padding: 2px 0 4px 8px;
+  padding: 2px 0 4px;
+}
+
+.conversation-sidebar__pagination--nested {
+  padding-left: 24px;
 }
 
 .conversation-sidebar__pagination-button {
@@ -266,6 +268,11 @@
 
 .conversation-list-item {
   position: relative;
+  display: flex;
+  height: 32px;
+  align-items: center;
+  gap: 2px;
+  padding-right: 6px;
   border-radius: 8px;
 }
 
@@ -412,11 +419,12 @@
 
 .conversation-list-item__main {
   display: flex;
-  width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
   height: 32px;
   align-items: center;
   gap: 8px;
-  padding: 0 12px 0 32px;
+  padding: 0 6px 0 8px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -425,22 +433,26 @@
   text-align: left;
 }
 
-.conversation-list-item:hover .conversation-list-item__main {
+.conversation-list-item--nested .conversation-list-item__main {
+  padding-left: 32px;
+}
+
+.conversation-list-item:hover {
   background: var(--bg-hover);
 }
 
-.conversation-list-item.is-active:hover .conversation-list-item__main {
+.conversation-list-item.is-active:hover {
   background: var(--panel-hover);
 }
 
-:root[data-theme="light"] .conversation-list-item:hover .conversation-list-item__main,
-:root[data-theme="light"] .conversation-list-item.is-active:hover .conversation-list-item__main {
+:root[data-theme="light"] .conversation-list-item:hover,
+:root[data-theme="light"] .conversation-list-item.is-active:hover {
   background: #E8E8E8;
 }
 
 .conversation-list-item__title {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -449,6 +461,7 @@
 
 .conversation-list-item__meta {
   display: flex;
+  flex: 0 0 auto;
   min-width: 14px;
   align-items: center;
   justify-content: flex-end;
@@ -514,25 +527,7 @@
   color: var(--danger);
 }
 
-.conversation-list-item__actions {
-  position: absolute;
-  top: 4px;
-  right: 6px;
-  z-index: 2;
-  display: flex;
-  width: 24px;
-  height: 24px;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-}
-
+.conversation-list-item__actions,
 .conversation-list-item__pin-action {
   position: absolute;
   top: 4px;
@@ -552,14 +547,25 @@
   pointer-events: none;
 }
 
-.conversation-list-item .conversation-list-item__actions {
-  right: 32px;
+/* 在 conversation-list-item 中改为 flex 流式布局，覆盖上方绝对定位默认值 */
+.conversation-list-item > .conversation-list-item__actions {
+  position: static;
+  display: none;
+  flex: 0 0 auto;
+}
+
+.conversation-list-item > .conversation-list-item__pin-action {
+  position: relative;
+  top: auto;
+  right: auto;
+  display: none;
+  flex: 0 0 auto;
 }
 
 .conversation-list-item:hover .conversation-list-item__meta,
 .conversation-list-item:focus-within .conversation-list-item__meta,
 .conversation-list-item.is-menu-open .conversation-list-item__meta {
-  visibility: hidden;
+  display: none;
 }
 
 .conversation-list-item:hover .conversation-list-item__actions,
@@ -568,6 +574,7 @@
 .conversation-list-item:focus-within .conversation-list-item__pin-action,
 .conversation-list-item.is-menu-open .conversation-list-item__actions,
 .conversation-list-item.is-menu-open .conversation-list-item__pin-action {
+  display: flex;
   opacity: 1;
   pointer-events: auto;
 }

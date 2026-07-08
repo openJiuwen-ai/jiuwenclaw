@@ -61,6 +61,7 @@ interface ConversationListItemProps {
   session: Session;
   runtime?: ChatRuntime;
   active: boolean;
+  nested: boolean;
   unread: boolean;
   now: number;
   onSelect: () => void;
@@ -160,6 +161,7 @@ function ConversationListItem({
   session,
   runtime,
   active,
+  nested,
   unread,
   now,
   onSelect,
@@ -224,7 +226,7 @@ function ConversationListItem({
   }, [menuOpen]);
 
   return (
-    <div ref={itemRef} className={`conversation-list-item${active ? ' is-active' : ''}${menuOpen ? ' is-menu-open' : ''}`}>
+    <div ref={itemRef} className={`conversation-list-item${active ? ' is-active' : ''}${menuOpen ? ' is-menu-open' : ''}${nested ? ' conversation-list-item--nested' : ''}`}>
       <button type="button" className="conversation-list-item__main" onClick={onSelect} title={title}>
         <span className="conversation-list-item__title">{title}</span>
         <span className="conversation-list-item__meta">{status}</span>
@@ -786,19 +788,22 @@ export function ConversationSidebar({
     }
   }
 
-  function renderSession(session: Session, inProject = false) {
+  function renderSession(session: Session, options: { nested?: boolean; projectMenu?: boolean } = {}) {
+    const nested = options.nested === true;
+    const projectMenu = options.projectMenu === true;
     return (
       <ConversationListItem
         key={session.session_id}
         session={session}
         runtime={runtimes[session.session_id]}
         active={activeSessionId === session.session_id}
+        nested={nested}
         unread={unreadSessions.has(session.session_id)}
         now={relativeTimeNow}
         onSelect={() => onSelect(session)}
         onDelete={() => onDelete(session)}
         onPin={() => void handlePinSession(session)}
-        menuItems={inProject
+        menuItems={projectMenu
           ? getProjectSessionMenuItems(Boolean(session.pinned), t)
           : getConversationMenuItems(Boolean(session.pinned), t)}
         onRename={() => setRenameTarget({
@@ -815,16 +820,17 @@ export function ConversationSidebar({
     return session.project_dir ? projectByDir.get(session.project_dir) : undefined;
   }
 
-  function renderSessionPagination(projectId: string) {
+  function renderSessionPagination(projectId: string, nested = false) {
     const visibleCount = sessionVisibility[projectId]?.visibleCount ?? PROJECT_SESSION_PAGE_SIZE;
+    const renderedCount = projectSessions[projectId]?.length ?? 0;
     const total = projectSessionTotals[projectId] ?? projectSessions[projectId]?.length ?? 0;
-    const canShowMore = total > visibleCount;
+    const canShowMore = total > renderedCount;
     const canCollapse = visibleCount > PROJECT_SESSION_PAGE_SIZE;
 
     if (!canShowMore && !canCollapse) return null;
 
     return (
-      <div className="conversation-sidebar__pagination">
+      <div className={`conversation-sidebar__pagination${nested ? ' conversation-sidebar__pagination--nested' : ''}`}>
         {canShowMore ? (
           <button
             type="button"
@@ -880,10 +886,10 @@ export function ConversationSidebar({
         />
         {expanded ? (
           <div className="conversation-sidebar__group-list">
-            {sessionsForProject.length > 0 ? sessionsForProject.map((session) => renderSession(session, true)) : (
+            {sessionsForProject.length > 0 ? sessionsForProject.map((session) => renderSession(session, { nested: true, projectMenu: true })) : (
               <div className="conversation-sidebar__empty">{t('multiSession.project.noConversations')}</div>
             )}
-            {renderSessionPagination(project.project_id)}
+            {renderSessionPagination(project.project_id, true)}
           </div>
         ) : null}
       </div>
@@ -912,7 +918,7 @@ export function ConversationSidebar({
             <div className="conversation-sidebar__pinned-list">
               {orderedPinnedSessions.map((session) => {
                 const project = getSessionProject(session);
-                return renderSession(session, Boolean(project));
+                return renderSession(session, { projectMenu: Boolean(project && !isDefaultProject(project)) });
               })}
               {pinnedProjects.map((project) => renderProject(project))}
             </div>
@@ -986,10 +992,10 @@ export function ConversationSidebar({
             </button>
           </div>
           <div className="conversation-sidebar__group-list">
-            {conversationSessions.length > 0 ? conversationSessions.map((session) => renderSession(session, false)) : (
+            {conversationSessions.length > 0 ? conversationSessions.map((session) => renderSession(session)) : (
               <div className="conversation-sidebar__empty">{t('multiSession.project.noConversations')}</div>
             )}
-            {defaultProject ? renderSessionPagination(defaultProject.project_id) : null}
+            {defaultProject ? renderSessionPagination(defaultProject.project_id, false) : null}
           </div>
         </div>
       </div>

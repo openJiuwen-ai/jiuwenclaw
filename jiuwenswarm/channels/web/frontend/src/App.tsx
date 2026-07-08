@@ -455,6 +455,7 @@ function AppContent() {
   const prependMessages = useChatStore((s) => s.prependMessages);
   const isProcessing = useChatStore((s) => s.runtimes[sessionId]?.isProcessing ?? false);
   const isPaused = useChatStore((s) => s.runtimes[sessionId]?.isPaused ?? false);
+  const hasPendingQuestion = useChatStore((s) => Boolean(s.runtimes[sessionId]?.pendingQuestion));
   const setProcessing = useChatStore((s) => s.setProcessing);
   const setThinking = useChatStore((s) => s.setThinking);
   const setLoadingHistory = useChatStore((s) => s.setLoadingHistory);
@@ -1147,7 +1148,7 @@ function AppContent() {
     void loadSessionMetadata(routeSessionId);
   }, [isConnected, loadSessionMetadata, routeSessionId]);
 
-  // 聊天处理完成后刷新会话列表，以便拾取自动生成的标题等元数据更新
+  // 聊天处理完成后更新本地会话元数据，以便拾取自动生成的标题等更新。
   const prevProcessingBySessionRef = useRef(new Map<string, boolean>());
   useEffect(() => {
     if (!sessionId || sessionId === NEW_CONVERSATION_ID) {
@@ -1156,13 +1157,18 @@ function AppContent() {
 
     const prevProcessing = prevProcessingBySessionRef.current.get(sessionId) ?? false;
     if (prevProcessing && !isProcessing) {
+      if (hasPendingQuestion) {
+        return;
+      }
       void (async () => {
         const session = await loadSessionMetadata(sessionId);
-        await useWorkspaceStore.getState().refreshSessionWorkspace(session);
+        if (session) {
+          useWorkspaceStore.getState().upsertSession(session);
+        }
       })();
     }
     prevProcessingBySessionRef.current.set(sessionId, isProcessing);
-  }, [sessionId, isProcessing, loadSessionMetadata]);
+  }, [sessionId, isProcessing, hasPendingQuestion, loadSessionMetadata]);
 
   // 连接成功后从 config.yaml 同步 preferred_language 到前端显示
   useEffect(() => {
@@ -1492,19 +1498,13 @@ function AppContent() {
         const pendingSkills = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.selectedSkills ?? [];
         pendingSkills.forEach((skill) => useSessionStore.getState().addSelectedSkill(newSid, skill));
         useSessionStore.getState().clearSelectedSkills(NEW_CONVERSATION_ID);
-        useWorkspaceStore.getState().upsertSession(createdSession);
+        useWorkspaceStore.getState().upsertSession(createdSession, { isNew: true });
         promotedFromNewSessionIdsRef.current.add(newSid);
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
         sessionIdRef.current = newSid;
         setSessionId(newSid);
         navigate({ kind: 'chat-session', sessionId: newSid }, { replace: true });
-        const createdSessionProject = {
-          project_id: workContext.project_id || '',
-          project_dir: workContext.project_dir || '',
-          pinned: false,
-        };
         const sent = await sendMessage(content, newSid);
-        await useWorkspaceStore.getState().refreshSessionWorkspace(createdSessionProject);
         newConversationProjectRef.current = null;
         if (!sent) {
           useChatStore.getState().setInputValue(newSid, content);

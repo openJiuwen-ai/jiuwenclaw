@@ -7,6 +7,10 @@ import { useSessionStore } from './sessionStore';
 export const PROJECT_SESSION_PAGE_SIZE = 10;
 const DEFAULT_PROJECT_ID = 'default';
 
+interface UpsertSessionOptions {
+  isNew?: boolean;
+}
+
 interface WorkspaceState {
   projects: ProjectInfo[];
   projectSessions: Record<string, Session[]>;
@@ -28,7 +32,7 @@ interface WorkspaceState {
   renameProject: (projectId: string, name: string) => Promise<void>;
   pinProject: (projectId: string, pinned: boolean) => Promise<void>;
   removeProject: (projectId: string) => Promise<void>;
-  upsertSession: (session: Session) => void;
+  upsertSession: (session: Session, options?: UpsertSessionOptions) => void;
   pinSession: (sessionId: string, pinned: boolean) => Promise<void>;
   renameSession: (sessionId: string, title: string) => Promise<void>;
   patchSession: (sessionId: string, patch: Partial<Session>) => void;
@@ -263,10 +267,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   showMoreSessions: async (projectId) => {
     const state = get();
     const currentVisibleCount = getVisibleCount(state, projectId);
-    const total = state.projectSessionTotals[projectId];
-    const nextVisibleCount = total
-      ? Math.min(currentVisibleCount + PROJECT_SESSION_PAGE_SIZE, total)
-      : currentVisibleCount + PROJECT_SESSION_PAGE_SIZE;
+    const nextVisibleCount = currentVisibleCount + PROJECT_SESSION_PAGE_SIZE;
     await get().loadProjectSessions(projectId, nextVisibleCount);
   },
 
@@ -318,23 +319,25 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       .map((project) => state.loadProjectSessions(project.project_id)));
   },
 
-  upsertSession: (session) => {
+  upsertSession: (session, options = {}) => {
     const state = get();
     const projectId = findProjectIdForSession(state.projects, session);
     if (!projectId) return;
     set((current) => {
       const currentProjectSessions = current.projectSessions[projectId] || [];
-      const sessionWasInProject = currentProjectSessions.some((item) => item.session_id === session.session_id);
+      const sessionWasVisible = currentProjectSessions.some((item) => item.session_id === session.session_id);
       const pinnedSessions = session.pinned
         ? upsertSessionByActivity(current.pinnedSessions, session)
         : current.pinnedSessions.filter((item) => item.session_id !== session.session_id);
+      const visibleCount = getVisibleCount(current, projectId);
       const projectSessions = session.pinned
         ? currentProjectSessions.filter((item) => item.session_id !== session.session_id)
-        : upsertSessionByActivity(currentProjectSessions, session);
+        : upsertSessionByActivity(currentProjectSessions, session).slice(0, visibleCount);
       const currentTotal = current.projectSessionTotals[projectId] ?? currentProjectSessions.length;
-      const nextTotal = session.pinned
-        ? currentTotal - Number(sessionWasInProject)
-        : currentTotal + Number(!sessionWasInProject);
+      const nextTotal = options.isNew && !sessionWasVisible
+        ? currentTotal + 1
+        : currentTotal;
+
       return {
         pinnedSessions,
         projectSessions: {
