@@ -291,11 +291,12 @@ def persist_permission_allow_rule(
         data = _load_yaml_round_trip(_current_config_yaml_path())
         permissions = data.get("permissions")
         if permissions is None:
-            logger.warning(
-                "[PermissionEngine] permission.persist.abort tool=%s reason=no_permissions_section",
+            permissions = {}
+            data["permissions"] = permissions
+            logger.info(
+                "[PermissionEngine] permission.persist.auto_create_permissions tool=%s",
                 tool_name,
             )
-            return False
         current_permission, current_matched_rule = evaluate_tiered_policy(
             permissions, tool_name, tool_args,
         )
