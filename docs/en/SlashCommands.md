@@ -324,30 +324,58 @@ These commands are registered and parsed by the TUI, then forwarded as slash tex
 ### `/memory` (Memory Management)
 
 - Alias: `/mem`.
-- Function: View and manage memory system status, memory files, toggle settings, and directory paths.
+- Function: View and manage memory system status, memory files, toggle settings, and directory paths via a tabbed console.
 - Subcommands:
 
 | Command | Description |
 |---|---|
-| `/memory` or `/memory edit` | Interactively select and edit a memory file (lists available files when no path is given) |
-| `/memory list` | List all memory files (with size, line count, modification time) |
-| `/memory edit <path>` | Open the specified memory file for editing (via `$EDITOR`) |
-| `/memory status` | Show detailed memory system status |
-| `/memory toggle [key]` | Toggle memory system switches (lists togglable items when no key is given) |
-| `/memory open` | Show memory system directory paths |
+| `/memory` or `/memory edit` | Open the tabbed console and select the edit tab |
+| `/memory edit <path>` | Directly edit the specified memory file (via `$EDITOR`) |
+| `/memory status` | Open the tabbed console and select the status tab |
+| `/memory toggle` | Open the tabbed console and select the toggle tab |
+| `/memory toggle <key>` | Directly toggle the specified memory system switch |
+| `/memory open` | Open the tabbed console and select the open tab |
 
+- Tabbed console: The console has 4 tabs — edit / status / toggle / open. Interaction keys:
+  - `←`/`→` — Switch tabs;
+  - `↑`/`↓` — Navigate within the current tab;
+  - `Enter` — Execute the selected item;
+  - `Ctrl+O` — Toggle full path display (edit / open tabs); resets to default (relative path) when switching tabs;
+  - `Esc` — Close the console.
+- `edit` display contents:
+  - Lists memory files in priority order: Project memory (Checked in at `<path>`), Local memory (Saved in `<path>`), User memory (Saved in `<path>`), plus any rule files;
+  - `Enter` opens the selected file with `$EDITOR`.
 - `status` display contents:
-  - Current mode, storage engine, enabled status, proactive status, forbidden filter status;
-  - Index status (FTS5, Vector, Cache), file count, chunk count;
-  - Statistics for Project Memory, Coding Memory, Auto Memory, and External Memory.
-- `toggle` available keys:
-  - `memory_enabled` — Master memory switch;
-  - `memory_proactive` — Proactive memory switch;
-  - `memory_forbidden_enabled` — Forbidden filter switch.
+  - Engine (format `builtin (local)`, combining the storage engine and storage mode);
+  - Switch row — mode-adaptive (mirrors the current mode's toggle set), shown as `✓ on` / `✗ off`:
+    - agent mode: `memory_enabled` (Memory), `memory_proactive` (Proactive memory), `memory_forbidden_enabled` (Forbidden filter);
+    - code mode: `memory_enabled` (Memory), `auto_coding_memory` (Auto coding memory), `memory_forbidden_enabled` (Forbidden filter).
+  - Runtime memory statistics — mode-adaptive: agent mode shows "Auto Memory" (files / chars / dir); code mode shows "Coding Memory" (files / chars / dir);
+  - Project Memory statistics (files / chars / project dir);
+  - External Memory (provider + enabled status), shown only if configured.
+- `toggle` display contents:
+  - Each row shows the toggle **key** (padded to equal width), a `✓ on` / `✗ off` status marker, and a Chinese description. Only the key is shown (no English label); columns are separated by spaces, not `·`. Example (code mode):
+    ```
+    → memory_enabled            ✓ on   记忆功能总开关
+      auto_coding_memory        ✓ on   每轮对话后自动提取记忆（需总开关开启）
+      memory_forbidden_enabled  ✗ off  过滤敏感信息
+    ```
+  - Available keys (mode-adaptive):
+    - agent mode: `memory_enabled` (Master memory switch), `memory_proactive` (Proactive memory), `memory_forbidden_enabled` (Forbidden filter);
+    - code mode: `memory_enabled` (Master memory switch), `auto_coding_memory` (Auto coding memory), `memory_forbidden_enabled` (Forbidden filter).
   - After toggling, a prompt is shown if a session restart is required for the change to take effect.
+- `open` display contents:
+  - Lists memory directory paths — mode-adaptive:
+    - agent mode: Memory Dir / Project Dir / User Project Dir;
+    - code mode: Coding Memory Dir / Project Dir / User Project Dir.
+  - `Enter` opens the selected directory in the system file manager directly.
+- Tab completion:
+  - `/memory ` — Suggests subcommands (`edit`, `status`, `toggle`, `open`);
+  - `/memory edit ` — Suggests memory file paths (via `getDisplayPath`, relative/tilde-shortened, deduplicated, only existing rule files);
+  - `/memory toggle ` — Suggests toggle keys (mode-adaptive, mirrors the current mode's toggle set);
+  - All completions support prefix filtering.
 - Examples:
-  - `/memory` — Interactively edit a memory file
-  - `/memory list` — List memory files
+  - `/memory` — Open the tabbed console (edit tab)
   - `/memory edit memory/MEMORY.md` — Edit a specific memory file
   - `/memory status` — View detailed status
   - `/memory toggle memory_enabled` — Toggle the master memory switch

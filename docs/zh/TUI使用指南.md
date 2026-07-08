@@ -369,13 +369,24 @@
 #### `/memory`（记忆管理）
 
 - 别名：`/mem`。
+- 无参数时打开**页签控制台**（仿 StatusView），含 4 个页签：`edit` / `status` / `toggle` / `open`，默认停在 `edit` 页签。
 - 子命令：
-  - `list` — 列出所有记忆文件（大小、行数、修改时间）。
-  - `edit [path]` — 编辑记忆文件；无参数时交互式选择。
-  - `status` — 显示记忆系统详细状态（引擎、索引、Project/Coding/Auto/External Memory 统计）。
-  - `toggle [key]` — 切换记忆开关；无参数时列出可切换项（`memory_enabled`、`memory_proactive`、`memory_forbidden_enabled`）。
-  - `open` — 显示记忆系统各目录路径。
-- 示例：`/memory status`、`/memory toggle memory_enabled`、`/memory edit memory/MEMORY.md`。
+  - `edit [path]` — 编辑记忆文件；无参数时进入 `edit` 页签（展示 Project memory（Checked in at）/ Local memory（Saved in）/ User memory（Saved in），Enter 用 `$EDITOR` 打开），带路径时直接用 `$EDITOR` 打开（不打开页签控制台）。
+  - `status` — 打开 `status` 页签，展示：Engine（`builtin (local)`）、按模式自适应的开关行（`✓ on` / `✗ off`）、运行时记忆统计（agent 模式 "Auto Memory"、code 模式 "Coding Memory"）、Project Memory 统计、External Memory（如果有）；不展示 Current Mode、Index/FTS5/Vector/Cache。
+  - `toggle [key]` — 切换记忆开关；无参数时进入 `toggle` 页签列出可切换项，带 key 时直接切换（不打开页签控制台）。
+  - `open` — 打开 `open` 页签，按模式自适应展示目录（agent 模式：Memory Dir / Project Dir / User Project Dir；code 模式：Coding Memory Dir / Project Dir / User Project Dir），Enter 直接打开系统文件管理器。
+- 页签控制台交互：
+  - `←` / `→` — 切换页签（循环）。
+  - `↑` / `↓` — 在列表项间移动光标。
+  - `Enter` — 执行当前页签操作（edit 编辑文件、toggle 切换开关、open 打开目录）。
+  - `Ctrl+O` — 在 `edit` / `open` 页签切换显示完整路径与相对路径，切换页签时重置为默认（相对路径）。
+  - `Esc` — 关闭页签控制台。
+- `toggle` 页签展示格式（只显示 key，不显示英文 label，有 `✓ on` / `✗ off` 状态标记和中文描述，无 `·` 分隔符）。可切换项按当前 mode 过滤：
+  - agent mode：`memory_enabled`（记忆功能总开关）、`memory_proactive`（对话中自动搜索和记录）、`memory_forbidden_enabled`（过滤敏感信息）；
+  - code mode：`memory_enabled`（记忆功能总开关）、`auto_coding_memory`（每轮对话后自动提取记忆（需总开关开启））、`memory_forbidden_enabled`（过滤敏感信息）。
+  - 切换后若需重启会话生效会给出提示。
+- Tab 补全：`/memory edit ` 后显示文件列表（路径用 `getDisplayPath` 展示，去重）；`/memory toggle ` 后显示当前 mode 的 key 列表；均支持前缀过滤。
+- 示例：`/memory`（打开控制台）、`/memory status`、`/memory toggle memory_enabled`、`/memory edit memory/MEMORY.md`。
 
 #### `/sandbox`（沙箱模式管理）
 

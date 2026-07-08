@@ -27,7 +27,7 @@ from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     create_adapter,
     resolve_sdk_choice,
 )
-from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_memory_enabled
+from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_auto_memory_enabled, is_memory_enabled
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
     append_history_record,
@@ -35,7 +35,7 @@ from jiuwenswarm.server.runtime.session.session_history import (
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.utils.utils import is_team_params
-from jiuwenswarm.common.config import get_config, is_auto_memory_enabled
+from jiuwenswarm.common.config import get_config
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
@@ -1628,7 +1628,7 @@ class JiuWenSwarm:
             # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
             mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
             config = get_config()
-            if is_auto_memory_enabled() and is_memory_enabled(mode, config):
+            if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
                 _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
 
         return result
@@ -2191,7 +2191,7 @@ class JiuWenSwarm:
         # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
         mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
         config = get_config()
-        if is_auto_memory_enabled() and is_memory_enabled(mode, config):
+        if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
         yield AgentResponseChunk(
