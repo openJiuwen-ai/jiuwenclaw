@@ -96,7 +96,7 @@ def repack_skill_dir(
 
     # 嵌套结构下：子目录名与 skill_name 不一致时重命名
     renamed_to: str | None = None
-    if pack_root != skill_dir and pack_root.name != skill_name:
+    if skill_name and pack_root != skill_dir and pack_root.name != skill_name:
         new_pack_root = pack_root.parent / skill_name
         if new_pack_root.exists():
             shutil.rmtree(new_pack_root)
