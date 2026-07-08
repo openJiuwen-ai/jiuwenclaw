@@ -228,11 +228,20 @@ async def skill_turbo(query: str) -> dict[str, Any]:
     if effective_project_dir:
         inputs["effective_project_dir"] = effective_project_dir
 
-    # output_dir：避免 pipeline 从 effective_project_dir 重建路径时因 user_id/chat_id
-    # 来源不一致导致路径分叉（interface.py 的 prepare_files_for_agent 已创建正确路径）
-    output_dir = get_effective_request_output_dir()
-    if output_dir:
-        inputs["output_dir"] = output_dir
+    # 不再直接传入 output_dir，让 pipeline 自行调用 generate-timestamp-dir
+    # 为每次任务创建独立的时间戳子目录，避免同一 session 连续任务共用 output 目录导致产物串扰
+    # 但需要确保 pipeline 能正确获取 output 的父目录（用于生成时间戳子目录）
+    # 方案：从 metadata 的 output_dir 提取父目录，作为 workspace_base 传入
+    if isinstance(request_metadata, dict):
+        output_dir = request_metadata.get("output_dir")
+        if output_dir and isinstance(output_dir, str) and output_dir.strip():
+            # output_dir 格式：.../files/user_id/chat_id/output
+            # 需要将其作为 workspace_base，让 pipeline 在此目录下生成时间戳子目录
+            inputs["workspace_base"] = output_dir.strip()
+            logger.debug(
+                "[SkillTurboTool] workspace_base 设置为 output_dir: %s",
+                output_dir.strip()
+            )
 
     if isinstance(request_metadata, dict):
         inputs["metadata"] = request_metadata
