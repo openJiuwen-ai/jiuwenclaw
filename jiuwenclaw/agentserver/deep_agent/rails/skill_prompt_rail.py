@@ -41,6 +41,8 @@ def _build_skill_protocol_section_text(language: str) -> str:
 
 1. **声明步骤**：每次行动前，必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`。**无需调用任何工具来"开始"步骤**——声明本身即代表进入该步。
 2. **必须使用 todo**：在执行skill步骤前，必须先创建 todo 列表。创建后，必须在执行过程中持续更新（如打勾已完成项、添加遗漏项等），确保 todo 与实际执行状态始终保持一致。
+   放弃、跳过或决定不再执行某步骤时（如用户说「不生成 PPT 了」），**必须**立即 `todo_modify` 将该条标为 `cancelled`；
+   禁止仅用口头回复收尾而仍保留 `in_progress`/`pending` 项。
 3. **严格顺序**：按 SKILL.md 定义的顺序逐步执行，**禁止跳过、合并或重排步骤**，除非 SKILL.md 或用户明确允许。
 4. **闸门等待**：遇到需要用户确认/审批的步骤时，**必须等待用户回复，禁止自行假设用户同意**。
 5. **不确定时重读**：只能再次调用 `skill_tool`，**不得**用其它工具获取 SKILL.md。
@@ -49,7 +51,8 @@ def _build_skill_protocol_section_text(language: str) -> str:
 8. **工具降级**：SKILL.md 中提到的工具如果在当前环境中不存在，必须先告知用户该工具不可用并说明你打算如何替代，获得用户同意后再继续。不要花时间反复检查工具列表。
 9. **用户打断后的处置**：按用户**原话**判定意图，**禁止自己猜**：
    - 原话含"继续"/"接着做"/"刚才那个继续" → 继续当前技能流程。
-   - 其他情况 → 先调用 `skill_complete(skill_name="<当前技能>")` 释放技能上下文，再回应新请求。
+   - 其他情况 → 若仍有 active todo，先用 `todo_modify` 将相关项标为 `cancelled`，
+     再调用 `skill_complete(skill_name="<当前技能>")` 释放技能上下文，然后回应新请求。
 
 ⚠️ 用户发 N 条消息 ≠ N 个并发任务；新消息**默认覆盖**旧任务，**不追加**。禁止措辞："让我先完成之前的"/"先把之前的收尾"/"两个都做"/"先 X 再 Y"（除非用户原话已明示并列）。仅凭 history 有两条任务消息就推断"用户想做两个"是错误推理。
 """
@@ -70,7 +73,12 @@ When the user's intent clearly matches a skill already supported by `skill_turbo
 Then execute the workflow; the rules below govern execution.
 
 1. **Declare step**: Before each action, state your current step at the start of your reply: `[Current Step: <step name>]`. **You do NOT call any tool to "start" a step** — the declaration itself enters the step.
-2. **Use todo (mandatory)**: For skills, you MUST create a todo list before executing the skill steps. Once created, you MUST continuously update it throughout execution (e.g. check off completed items, add missing steps) to ensure the todo always reflects the actual execution state.
+2. **Use todo (mandatory)**: For skills, you MUST create a todo list before executing the skill steps.
+   Once created, you MUST continuously update it throughout execution (e.g. check off completed items,
+   add missing steps) to ensure the todo always reflects the actual execution state.
+   When abandoning or skipping a step (e.g. the user says not to generate the PPT), you **must** call
+   `todo_modify` to mark it `cancelled` immediately; never end with text only while items stay
+   `in_progress` or `pending`.
 3. **Strict order**: Execute steps in the order defined by SKILL.md. **Do not skip, merge, or reorder steps** unless SKILL.md or the user explicitly allows it.
 4. **Gate enforcement**: When a step requires user confirmation/approval, **you MUST wait for the user's response. Never assume approval.**
 5. **Re-read when unsure**: Refresh the SKILL.md body **only** by calling `skill_tool` again — **never** use any other tool to obtain SKILL.md.
@@ -79,7 +87,9 @@ Then execute the workflow; the rules below govern execution.
 8. **Tool fallback**: If a tool mentioned in SKILL.md does not exist in your current environment, you MUST first inform the user that the tool is unavailable and explain how you plan to substitute it. Only proceed after the user agrees. Do not spend time repeatedly checking the tool list.
 9. **Handling user interruption**: Decide intent strictly from the user's **literal words**, **never guess**:
    - Words include "continue" / "go on" / "resume the previous one" → continue the current skill flow.
-   - Otherwise → call `skill_complete(skill_name="<current skill>")` to release the skill context, then respond to the new request.
+   - Otherwise → if active todos remain, call `todo_modify` to mark them `cancelled` first,
+     then call `skill_complete(skill_name="<current skill>")` to release the skill context,
+     then respond to the new request.
 
 ⚠️ N user messages ≠ N parallel tasks; a new substantive message **replaces** the prior request by default — it does NOT stack. Forbidden phrasing: "let me finish the previous task first" / "let me wrap that up" / "let me do both" / "first X then Y" (unless the user's own words explicitly stated parallel intent). Inferring multiple parallel tasks purely from history is a **wrong inference** that MUST be avoided.
 """

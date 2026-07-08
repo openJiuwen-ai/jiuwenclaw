@@ -27,6 +27,10 @@ from jiuwenclaw.agentserver.deep_agent.artifact_body_scan import (
     _path_identity,
     scan_body_text_for_paths,
 )
+from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
+    clear_skip_invoke_task_update_sync,
+    is_skip_invoke_task_update_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -469,9 +473,20 @@ class TaskExecutionRail(DeepAgentRail):
                 t.get("status") in ("pending", "in_progress")
                 for t in self._todo_map.values()
             )
-            if has_active_tasks:
+            if has_active_tasks and self._should_emit_invoke_task_update(ctx):
                 parent_request_id = self._extract_request_id(ctx)
                 await self._emit_task_update_event(ctx.session, parent_request_id)
+
+    def _should_emit_invoke_task_update(self, ctx: AgentCallbackContext) -> bool:
+        """Whether before_invoke should broadcast todo snapshot to the frontend."""
+        session = ctx.session
+        if session is not None and is_skip_invoke_task_update_sync(session):
+            logger.info(
+                "[TaskExecutionRail] skip before_invoke task.update: "
+                "fresh user turn after stale todo cleanup"
+            )
+            return False
+        return True
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         setattr(ctx, '_tool_start_time', time.time())
@@ -628,6 +643,8 @@ class TaskExecutionRail(DeepAgentRail):
         )
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
+        if ctx.session is not None:
+            clear_skip_invoke_task_update_sync(ctx.session)
         self._todo_map_before_tool = {}
         self._bind_context_to_in_progress_task()
 

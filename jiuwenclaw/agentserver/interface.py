@@ -1180,6 +1180,12 @@ class JiuWenClaw:
         if callable(prepare_interrupt_artifacts):
             await prepare_interrupt_artifacts(request)
 
+        prepare_stale_todo_cleanup = getattr(
+            adapter, "prepare_stale_todo_cleanup_for_new_request", None
+        )
+        if callable(prepare_stale_todo_cleanup):
+            await prepare_stale_todo_cleanup(request)
+
         inputs, memory_mode, raw_query = self._build_inputs(request)
         self._apply_effective_project_dir_to_request(request, session_id, inputs)
 
@@ -1348,6 +1354,12 @@ class JiuWenClaw:
         prepare_interrupt_artifacts = getattr(adapter, "prepare_interrupt_artifacts_for_request", None)
         if callable(prepare_interrupt_artifacts):
             await prepare_interrupt_artifacts(request)
+
+        prepare_stale_todo_cleanup = getattr(
+            adapter, "prepare_stale_todo_cleanup_for_new_request", None
+        )
+        if callable(prepare_stale_todo_cleanup):
+            await prepare_stale_todo_cleanup(request)
 
         inputs, memory_mode, raw_query = self._build_inputs(request)
         logger.info(
