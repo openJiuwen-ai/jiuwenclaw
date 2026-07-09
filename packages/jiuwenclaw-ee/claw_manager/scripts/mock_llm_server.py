@@ -610,6 +610,17 @@ def _plan_novel_response(
     )
 
 
+def _mock_usage(*, completion_chars: int, prompt_tokens: int = 10) -> dict[str, int]:
+    """与 OpenAI usage 字段对齐，供 AgentServer 汇总为 chat.usage_summary。"""
+    prompt = max(1, prompt_tokens)
+    completion = max(20, completion_chars // 4)
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+    }
+
+
 async def _write_sse_headers(writer: asyncio.StreamWriter) -> None:
     headers = (
         "HTTP/1.1 200 OK\r\n"
@@ -627,7 +638,10 @@ async def _write_sse_finish(
     model: str,
     *,
     finish_reason: str = "stop",
+    completion_chars: int = 0,
+    prompt_tokens: int = 10,
 ) -> None:
+    usage = _mock_usage(completion_chars=completion_chars, prompt_tokens=prompt_tokens)
     final_chunk = {
         "id": "mock-chatcmpl-stream",
         "object": "chat.completion.chunk",
@@ -640,8 +654,20 @@ async def _write_sse_finish(
                 "finish_reason": finish_reason,
             }
         ],
+        "usage": usage,
     }
     writer.write(_sse_event(final_chunk))
+    await writer.drain()
+    # stream_options.include_usage 风格：额外发一帧仅含 usage 的 chunk，便于 SDK 聚合。
+    usage_only_chunk = {
+        "id": "mock-chatcmpl-stream",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [],
+        "usage": usage,
+    }
+    writer.write(_sse_event(usage_only_chunk))
     writer.write(_sse_event("[DONE]"))
     await writer.drain()
 
@@ -686,7 +712,7 @@ async def _stream_text_content(
             )
         if chunk_no < total_chunks and token_interval_s > 0:
             await asyncio.sleep(token_interval_s)
-    await _write_sse_finish(writer, model, finish_reason="stop")
+    await _write_sse_finish(writer, model, finish_reason="stop", completion_chars=len(text))
 
 
 async def _emit_tool_call_sse(
@@ -778,7 +804,12 @@ async def _stream_tool_call(
         tool_args,
         token_interval_s=token_interval_s,
     )
-    await _write_sse_finish(writer, model, finish_reason="tool_calls")
+    await _write_sse_finish(
+        writer,
+        model,
+        finish_reason="tool_calls",
+        completion_chars=len(tool_name) + len(json.dumps(tool_args, ensure_ascii=False)),
+    )
 
 
 async def _stream_content_and_tool_call(
@@ -819,7 +850,13 @@ async def _stream_content_and_tool_call(
         tool_args,
         token_interval_s=token_interval_s,
     )
-    await _write_sse_finish(writer, model, finish_reason="tool_calls")
+    tool_args_json = json.dumps(tool_args, ensure_ascii=False)
+    await _write_sse_finish(
+        writer,
+        model,
+        finish_reason="tool_calls",
+        completion_chars=len(intro) + len(tool_name) + len(tool_args_json),
+    )
 
 
 async def _stream_chat_completion(
@@ -843,8 +880,10 @@ async def _stream_chat_completion(
         return
 
     await _write_sse_headers(writer)
+    completion_chars = 0
     for i in range(1, token_count + 1):
         token = f"mock token{i}"
+        completion_chars += len(token)
         chunk = {
             "id": "mock-chatcmpl-stream",
             "object": "chat.completion.chunk",
@@ -863,7 +902,12 @@ async def _stream_chat_completion(
         logger.info("Streamed token: %s", token)
         if i < token_count and token_interval_s > 0:
             await asyncio.sleep(token_interval_s)
-    await _write_sse_finish(writer, model, finish_reason="stop")
+    await _write_sse_finish(
+        writer,
+        model,
+        finish_reason="stop",
+        completion_chars=completion_chars,
+    )
 
 
 def _non_stream_completion(
@@ -878,6 +922,10 @@ def _non_stream_completion(
         message["tool_calls"] = [tool_call]
         message["content"] = content
         finish_reason = "tool_calls"
+    completion_chars = len(content or "")
+    if tool_call is not None:
+        fn = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+        completion_chars += len(str(fn.get("name") or "")) + len(str(fn.get("arguments") or ""))
     return {
         "id": "mock-chatcmpl-123",
         "object": "chat.completion",
@@ -890,7 +938,7 @@ def _non_stream_completion(
                 "finish_reason": finish_reason,
             }
         ],
-        "usage": {"prompt_tokens": 10, "completion_tokens": max(20, len(content or "") // 4), "total_tokens": 30},
+        "usage": _mock_usage(completion_chars=completion_chars),
     }
 
 

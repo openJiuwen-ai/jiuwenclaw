@@ -9,7 +9,12 @@ Gateway Runtime 联调/压测工具，前者读库校验 ``service_config`` 槽�
 默认发起 30 路并发（``--concurrency 30``），均匀分布到 3 个 AgentServer（``--shards 3``），
 即每个 AgentServer 10 路；**同一分片内共用同一个 ``group_id``**
 （默认 ``loadtest_s0`` / ``loadtest_s1`` / ``loadtest_s2``），以便经 Gateway 路由
-均匀打到 3 个 AgentServer 实例上。``session_id`` / ``user_id`` / ``req_id`` 仍每路唯一。
+均匀打到 3 个 AgentServer 实例上。
+
+可选 ``--shards2 N``：在同一 AgentServer（同一 ``group_id``）内，再按 ``user_id`` 打到
+N 个 Agent 实例（``user_id`` 形如 ``{prefix}_s{shard}_a{j}``，同桶多路共用同一 ``user_id``）。
+不要求 ``concurrency`` 与 ``shards`` / ``shards2`` 整除，余数路由由靠前的分片/实例多承接。
+``shards2=1``（默认）时仍每路独立 ``user_id``（``{prefix}_{idx:02d}``）。``session_id`` / ``req_id`` 始终每路唯一。
 
 依赖：主仓库已安装 ``websockets``（``uv sync`` 或 ``pip install websockets``）。
 
@@ -38,11 +43,17 @@ Gateway Runtime 联调/压测工具，前者读库校验 ``service_config`` 槽�
     uv run python .../enterprise_runtime_concurrent_test.py \\
         --web-port 19234 --concurrency 60 --shards 6
 
-默认等待整轮 Agent 任务结束（``chat.usage_summary``、带正文的 ``chat.final``，或
-``chat.processing_status`` 且 ``is_processing=false``，与 web_enterprise 一致）；
+    # 每个 AgentServer 内再均匀打到 2 个 Agent 实例（user_id 分桶）
+    uv run python .../enterprise_runtime_concurrent_test.py \\
+        --ws-url ws://host:30105/ws --concurrency 6 --shards 3 --shards2 2
+
+默认等待整轮 Agent 任务结束。loadtest 小说场景须先收到 ``chat.file``（交付物），
+再收到 stage 8 收尾文本（``chat.delta`` / 带正文 ``chat.final``），之后才采纳
+``chat.processing_status idle`` / ``chat.usage_summary`` 等终态信号。
 DeepAgent 在流式文本 iteration 结束时可能发出 **content 为空** 的 ``chat.final`` 标记，
 该帧仅表示当前 LLM 轮次结束，**不是**整轮任务完成，脚本会忽略并继续等待。
-权限中断（``chat.invocation_paused``）后须等 Agent 恢复并再次 idle 才视为完成。
+权限放行（``auto-allow``）后，忽略紧随其后的假 idle / 子流 ``usage_summary``，
+直至新一轮 ``chat.delta`` 表明 Agent 已继续执行。
 每路真正完成时打印 ``[done]`` 行（含 idx / session_id / 耗时）。Agent 弹出权限/追问（``chat.ask_user_question``）
 时自动全部允许（权限类选「总是允许」）。长任务可通过 ``--final-timeout`` 调整上限。
 若仅需验证 Gateway 接受请求、不等 Agent 跑完，加 ``--accept-only``；禁用自动放行加 ``--no-auto-allow``。
@@ -75,10 +86,21 @@ _DEFAULT_CONTENT = (
 )
 
 
+@dataclass(frozen=True)
+class RoutePlan:
+    """单路 chat.send 的 Gateway 路由参数（shard→AgentServer，shard2→Agent 实例）。"""
+
+    shard: int
+    shard2: int
+    group_id: str
+    user_id: str
+
+
 @dataclass
 class RequestResult:
     index: int
     shard: int
+    shard2: int
     session_id: str
     req_id: str
     group_id: str
@@ -321,25 +343,47 @@ def _browser_origin_header(ws_url: str) -> dict[str, str]:
     return {"Origin": origin}
 
 
-def _build_shard_plan(concurrency: int, shards: int, prefix: str) -> list[tuple[int, str]]:
-    """返回 (shard_index, group_id) 列表；同一 shard 内所有请求共用同一 group_id。"""
+def _build_route_plan(
+    concurrency: int,
+    shards: int,
+    shards2: int,
+    group_prefix: str,
+    user_id_prefix: str,
+) -> list[RoutePlan]:
+    """返回每路路由计划：group_id 按 shard 分 AgentServer，user_id 按 shard2 分 Agent 实例。
+
+    按全局序号轮询分配 shard / shard2，不要求 concurrency 与 shards、shards2 整除；
+    不能均分时，序号靠前的分片/实例多承接余数路由。
+    """
     if shards <= 0:
         raise ValueError("--shards 须 > 0")
+    if shards2 <= 0:
+        raise ValueError("--shards2 须 > 0")
     if concurrency <= 0:
         raise ValueError("--concurrency 须 > 0")
-    if concurrency % shards != 0:
-        raise ValueError(
-            f"--concurrency ({concurrency}) 须能被 --shards ({shards}) 整除，"
-            f"以便每个 AgentServer 接收相同数量请求"
+
+    plans: list[RoutePlan] = []
+    shard_route_counts = [0] * shards
+    for global_idx in range(concurrency):
+        shard = global_idx % shards
+        group_id = f"{group_prefix}_s{shard}"
+        if shards2 == 1:
+            user_id = f"{user_id_prefix}_{global_idx:02d}"
+            plan_shard2 = 0
+        else:
+            shard2 = shard_route_counts[shard] % shards2
+            user_id = f"{user_id_prefix}_s{shard}_a{shard2}"
+            plan_shard2 = shard2
+            shard_route_counts[shard] += 1
+        plans.append(
+            RoutePlan(
+                shard=shard,
+                shard2=plan_shard2,
+                group_id=group_id,
+                user_id=user_id,
+            )
         )
-    per_shard = concurrency // shards
-    shard_group_ids = [f"{prefix}_s{shard}" for shard in range(shards)]
-    out: list[tuple[int, str]] = []
-    for shard in range(shards):
-        group_id = shard_group_ids[shard]
-        for _ in range(per_shard):
-            out.append((shard, group_id))
-    return out
+    return plans
 
 
 async def _recv_json(ws: Any, timeout: float) -> dict[str, Any]:
@@ -377,13 +421,46 @@ def _is_intra_turn_chat_final(event: str | None, payload: dict[str, Any]) -> boo
     return event == "chat.final" and not _final_content(payload)
 
 
-def _is_invoke_complete_event(event: str | None, payload: dict[str, Any]) -> bool:
-    """判断 WS event 是否表示整轮 chat.send 任务已结束（可安全退出监听）。"""
+def _is_invoke_terminal_event(event: str | None, payload: dict[str, Any]) -> bool:
+    """可能是整轮结束的 WS event（仍需结合 HITL 状态判断是否采纳）。"""
     if event == "chat.usage_summary":
         return True
     if event == "chat.final" and not _is_intra_turn_chat_final(event, payload):
         return True
     return False
+
+
+def _loadtest_terminal_ready(
+    *,
+    saw_deliverable_file: bool,
+    saw_post_deliverable_text: bool,
+) -> bool:
+    """loadtest 小说场景：文件已交付且 stage 8 收尾文本已出现。"""
+    return saw_deliverable_file and saw_post_deliverable_text
+
+
+def _should_complete_invoke(
+    *,
+    accepted: bool,
+    saw_agent_output: bool,
+    hitl_paused: bool,
+    hitl_await_agent_resume: bool,
+    saw_deliverable_file: bool,
+    saw_post_deliverable_text: bool,
+    event: str | None,
+    payload: dict[str, Any],
+) -> bool:
+    """usage_summary / chat.final 完成判定。"""
+    if not accepted or not saw_agent_output:
+        return False
+    if hitl_paused or hitl_await_agent_resume:
+        return False
+    if not _loadtest_terminal_ready(
+        saw_deliverable_file=saw_deliverable_file,
+        saw_post_deliverable_text=saw_post_deliverable_text,
+    ):
+        return False
+    return _is_invoke_terminal_event(event, payload)
 
 
 def _is_processing_idle(payload: dict[str, Any]) -> bool:
@@ -398,9 +475,20 @@ def _should_complete_on_processing_idle(
     accepted: bool,
     saw_agent_output: bool,
     hitl_paused: bool,
+    hitl_suppress_next_idle: bool,
+    hitl_await_agent_resume: bool,
+    saw_deliverable_file: bool,
+    saw_post_deliverable_text: bool,
     payload: dict[str, Any],
 ) -> bool:
-    if not accepted or not saw_agent_output or hitl_paused:
+    if not accepted or not saw_agent_output:
+        return False
+    if hitl_paused or hitl_suppress_next_idle or hitl_await_agent_resume:
+        return False
+    if not _loadtest_terminal_ready(
+        saw_deliverable_file=saw_deliverable_file,
+        saw_post_deliverable_text=saw_post_deliverable_text,
+    ):
         return False
     return _is_processing_idle(payload)
 
@@ -414,6 +502,11 @@ _AGENT_ACTIVITY_EVENTS = frozenset({
     "todo.updated",
     "chat.file",
     "chat.final",
+})
+
+# 权限放行后仅 chat.delta 表示新一轮 LLM 文本输出已开始；tool_call 可能仍是同一子流尾部。
+_HITL_RESUME_CLEAR_EVENTS = frozenset({
+    "chat.delta",
 })
 
 
@@ -570,6 +663,7 @@ async def _run_single_request(
     ws_headers: dict[str, str],
     index: int,
     shard: int,
+    shard2: int,
     group_id: str,
     bot_id: str,
     user_id: str,
@@ -590,6 +684,7 @@ async def _run_single_request(
     result = RequestResult(
         index=index,
         shard=shard,
+        shard2=shard2,
         session_id=session_id,
         req_id=req_id,
         group_id=group_id,
@@ -599,9 +694,10 @@ async def _run_single_request(
         accepted=False,
     )
     logger.info(
-        "[send] idx=%d shard=%d session_id=%s req_id=%s group_id=%s bot_id=%s user_id=%s",
+        "[send] idx=%d shard=%d shard2=%d session_id=%s req_id=%s group_id=%s bot_id=%s user_id=%s",
         index,
         shard,
+        shard2,
         session_id,
         req_id,
         group_id,
@@ -632,13 +728,14 @@ async def _run_single_request(
         done_n = await progress.mark_done()
         level = logger.info if success else logger.error
         level(
-            "[%s] %d/%d idx=%d shard=%d total_ms=%.0f session_id=%s req_id=%s "
+            "[%s] %d/%d idx=%d shard=%d shard2=%d total_ms=%.0f session_id=%s req_id=%s "
             "group_id=%s user_id=%s%s",
             event,
             done_n,
             progress.total,
             index,
             shard,
+            shard2,
             result.total_ms,
             session_id,
             req_id,
@@ -659,7 +756,11 @@ async def _run_single_request(
                 accepted = False
                 answered_interrupt_ids: set[str] = set()
                 hitl_paused = False
+                hitl_suppress_next_idle = False
+                hitl_await_agent_resume = False
                 saw_agent_output = False
+                saw_deliverable_file = False
+                saw_post_deliverable_text = False
 
                 while time.perf_counter() < deadline:
                     remaining = max(0.1, deadline - time.perf_counter())
@@ -720,8 +821,7 @@ async def _run_single_request(
                                 payload=payload,
                             )
                         if auto_allow and event == "chat.ask_user_question":
-                            hitl_paused = True
-                            await _send_auto_allow(
+                            allowed = await _send_auto_allow(
                                 ws,
                                 index=index,
                                 session_id=session_id,
@@ -732,25 +832,53 @@ async def _run_single_request(
                                 mode=mode,
                                 answered_ids=answered_interrupt_ids,
                             )
+                            if allowed:
+                                # 放行后当前子流结束；忽略紧随其后的假 idle / usage_summary。
+                                hitl_suppress_next_idle = True
+                                hitl_await_agent_resume = True
+                                hitl_paused = False
+                            continue
+                        if event == "chat.ask_user_question":
+                            hitl_paused = True
                             continue
                         if event == "chat.invocation_paused":
                             hitl_paused = True
+                            hitl_suppress_next_idle = True
+                            hitl_await_agent_resume = True
                             continue
                         if event in _AGENT_ACTIVITY_EVENTS:
                             saw_agent_output = True
+                            hitl_suppress_next_idle = False
+                            if event in _HITL_RESUME_CLEAR_EVENTS:
+                                hitl_await_agent_resume = False
+                            if event == "chat.file":
+                                hitl_paused = False
+                                saw_deliverable_file = True
+                            elif event == "chat.delta" and saw_deliverable_file:
+                                saw_post_deliverable_text = True
+                            elif (
+                                event == "chat.final"
+                                and saw_deliverable_file
+                                and not _is_intra_turn_chat_final(event, payload)
+                            ):
+                                saw_post_deliverable_text = True
                         if event == "chat.processing_status":
                             if payload.get("is_processing") is True:
                                 hitl_paused = False
-                            else:
-                                # is_processing=false 表示 Agent 已停止处理；
-                                # 清除可能残留的 hitl_paused（某些权限中断只发
-                                # invocation_paused 不发 ask_user_question，客户端
-                                # 未放行时 hitl_paused 会卡 True，导致完成帧被挡）
-                                hitl_paused = False
+                                hitl_suppress_next_idle = False
+                            elif _is_processing_idle(payload):
+                                if hitl_suppress_next_idle:
+                                    hitl_suppress_next_idle = False
+                                    hitl_paused = False
+                                    continue
                                 if _should_complete_on_processing_idle(
                                     accepted=accepted,
                                     saw_agent_output=saw_agent_output,
                                     hitl_paused=hitl_paused,
+                                    hitl_suppress_next_idle=False,
+                                    hitl_await_agent_resume=hitl_await_agent_resume,
+                                    saw_deliverable_file=saw_deliverable_file,
+                                    saw_post_deliverable_text=saw_post_deliverable_text,
                                     payload=payload,
                                 ):
                                     result.final_received = True
@@ -768,12 +896,21 @@ async def _run_single_request(
                             if ws_event_log:
                                 logger.info(
                                     "[ws-event] idx=%d session_id=%s skip intra-turn chat.final "
-                                    "(empty content; waiting for usage_summary / final chat.final / idle)",
+                                    "(empty content; waiting for terminal usage_summary / chat.final / idle)",
                                     index,
                                     session_id,
                                 )
                             continue
-                        if _is_invoke_complete_event(event, payload):
+                        if _should_complete_invoke(
+                            accepted=accepted,
+                            saw_agent_output=saw_agent_output,
+                            hitl_paused=hitl_paused,
+                            hitl_await_agent_resume=hitl_await_agent_resume,
+                            saw_deliverable_file=saw_deliverable_file,
+                            saw_post_deliverable_text=saw_post_deliverable_text,
+                            event=event,
+                            payload=payload,
+                        ):
                             result.final_received = True
                             result.ok = True
                             result.accepted = True
@@ -795,7 +932,7 @@ async def _run_single_request(
                     result.error = "超时：未收到 chat.send 确认"
                 elif not accept_only:
                     result.error = (
-                        "超时：已接受但未收到 chat.usage_summary / 带正文的 chat.final / processing idle"
+                        "超时：已接受但未收到交付文件+收尾文本后的 processing idle / usage_summary / chat.final"
                     )
                 result.total_ms = (time.perf_counter() - t0) * 1000
                 await _log_terminal(success=False, event="timeout", detail=result.error)
@@ -822,15 +959,20 @@ async def _run_single_request(
 async def _run_loadtest(args: argparse.Namespace) -> int:
     ws_url = _resolve_ws_url(args)
     ws_headers = _browser_origin_header(ws_url)
-    group_plan = _build_shard_plan(args.concurrency, args.shards, args.group_prefix)
+    route_plan = _build_route_plan(
+        args.concurrency,
+        args.shards,
+        args.shards2,
+        args.group_prefix,
+        args.user_id_prefix,
+    )
 
-    per_shard = args.concurrency // args.shards
     logger.info(
-        "[plan] ws=%s concurrency=%d shards=%d per_shard=%d",
+        "[plan] ws=%s concurrency=%d shards=%d shards2=%d",
         ws_url,
         args.concurrency,
         args.shards,
-        per_shard,
+        args.shards2,
     )
     logger.info("[plan] content=%r", args.content)
     logger.info(
@@ -842,15 +984,32 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
         args.final_timeout,
     )
     for shard in range(args.shards):
-        group_id = next(gid for s, gid in group_plan if s == shard)
+        indices = [i for i, plan in enumerate(route_plan) if plan.shard == shard]
+        if not indices:
+            continue
+        group_id = route_plan[indices[0]].group_id
         logger.info(
             "[plan] shard=%d group_id=%s requests=%d (idx %d..%d)",
             shard,
             group_id,
-            per_shard,
-            shard * per_shard,
-            shard * per_shard + per_shard - 1,
+            len(indices),
+            indices[0],
+            indices[-1],
         )
+        if args.shards2 > 1:
+            for shard2 in range(args.shards2):
+                sub = [i for i in indices if route_plan[i].shard2 == shard2]
+                if not sub:
+                    continue
+                logger.info(
+                    "[plan] shard=%d shard2=%d user_id=%s requests=%d (idx %d..%d)",
+                    shard,
+                    shard2,
+                    route_plan[sub[0]].user_id,
+                    len(sub),
+                    sub[0],
+                    sub[-1],
+                )
 
     progress = _ProgressTracker(total=args.concurrency)
     registry = _ActiveSessionRegistry()
@@ -861,10 +1020,11 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
                 ws_url=ws_url,
                 ws_headers=ws_headers,
                 index=idx,
-                shard=shard,
-                group_id=group_id,
+                shard=plan.shard,
+                shard2=plan.shard2,
+                group_id=plan.group_id,
                 bot_id=args.bot_id,
-                user_id=f"{args.user_id_prefix}_{idx:02d}",
+                user_id=plan.user_id,
                 content=args.content,
                 mode=args.mode,
                 accept_timeout=args.accept_timeout,
@@ -876,7 +1036,7 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
                 registry=registry,
             )
         )
-        for idx, (shard, group_id) in enumerate(group_plan)
+        for idx, plan in enumerate(route_plan)
     ]
     try:
         raw_results = await asyncio.gather(*task_objs, return_exceptions=True)
@@ -893,28 +1053,30 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
     results: list[RequestResult] = []
     for idx, item in enumerate(raw_results):
         if isinstance(item, Exception):
-            shard, group_id = group_plan[idx]
+            plan = route_plan[idx]
             fail_result = RequestResult(
                 index=idx,
-                shard=shard,
+                shard=plan.shard,
+                shard2=plan.shard2,
                 session_id="",
                 req_id="",
-                group_id=group_id,
+                group_id=plan.group_id,
                 bot_id=args.bot_id,
-                user_id=f"{args.user_id_prefix}_{idx:02d}",
+                user_id=plan.user_id,
                 ok=False,
                 accepted=False,
                 error=str(item),
             )
             done_n = await progress.mark_done()
             logger.error(
-                "[fail] %d/%d idx=%d shard=%d session_id= req_id= group_id=%s user_id=%s "
+                "[fail] %d/%d idx=%d shard=%d shard2=%d session_id= req_id= group_id=%s user_id=%s "
                 "exception=%s",
                 done_n,
                 progress.total,
                 idx,
-                shard,
-                group_id,
+                plan.shard,
+                plan.shard2,
+                plan.group_id,
                 fail_result.user_id,
                 fail_result.error,
             )
@@ -944,10 +1106,11 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
     for r in sorted(results, key=lambda x: x.index):
         status = "ok" if _is_success(r) else "fail"
         logger.info(
-            "[requests] idx=%02d shard=%d status=%s final=%s total_ms=%.0f accept_ms=%.0f "
+            "[requests] idx=%02d shard=%d shard2=%d status=%s final=%s total_ms=%.0f accept_ms=%.0f "
             "session_id=%s req_id=%s group_id=%s bot_id=%s user_id=%s",
             r.index,
             r.shard,
+            r.shard2,
             status,
             r.final_received,
             r.total_ms,
@@ -965,6 +1128,21 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
     for shard in range(args.shards):
         shard_ok = sum(1 for r in shard_counts[shard] if _is_success(r))
         logger.info("[shard] shard=%d completed=%d/%d", shard, shard_ok, len(shard_counts[shard]))
+
+    if args.shards2 > 1:
+        agent_buckets: dict[tuple[int, int], list[RequestResult]] = {}
+        for r in results:
+            agent_buckets.setdefault((r.shard, r.shard2), []).append(r)
+        for (shard, shard2), bucket in sorted(agent_buckets.items()):
+            ok_n = sum(1 for r in bucket if _is_success(r))
+            logger.info(
+                "[shard2] shard=%d shard2=%d user_id=%s completed=%d/%d",
+                shard,
+                shard2,
+                bucket[0].user_id if bucket else "",
+                ok_n,
+                len(bucket),
+            )
 
     return 0 if failed == 0 else 1
 
@@ -990,7 +1168,7 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=30,
         metavar="N",
-        help="总并发请求数，默认 30（须能被 --shards 整除）",
+        help="总并发请求数，默认 30（按 shards / shards2 轮询分发，不要求整除）",
     )
     p.add_argument(
         "--shards",
@@ -999,7 +1177,20 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         metavar="K",
-        help="均匀分布到的 AgentServer 数量，默认 3（每个接收 concurrency/shards 个请求）",
+        help="轮询分布到的 AgentServer 数量，默认 3",
+    )
+    p.add_argument(
+        "--shards2",
+        "--agent-instance-shards",
+        dest="shards2",
+        type=int,
+        default=1,
+        metavar="M",
+        help=(
+            "同一 AgentServer 内按 user_id 轮询分布到的 Agent 实例数，默认 1；"
+            "M>1 时 user_id 为 {user_id_prefix}_s{shard}_a{j}，同桶多路共用；"
+            "不要求整除，余数由序号靠前的实例多承接"
+        ),
     )
     p.add_argument(
         "--group-prefix",
