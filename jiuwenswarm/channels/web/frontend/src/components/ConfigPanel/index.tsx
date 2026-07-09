@@ -980,7 +980,6 @@ const OPENAI_ACCOUNT_DEFAULT_API_BASE = "https://chatgpt.com/backend-api/codex";
 const OPENAI_ACCOUNT_LOGIN_POLL_COOLDOWN_MS = 15_000;
 const OPENAI_ACCOUNT_STATUS_REFRESH_COOLDOWN_MS = 5_000;
 const OPENAI_ACCOUNT_LOGIN_REFRESH_COOLDOWN_MS = 15_000;
-const OPENAI_ACCOUNT_DEFAULT_MODEL = "gpt-5.4-mini";
 
 const MODEL_PROVIDER_OPTIONS = [
   "OpenAI",
@@ -1002,11 +1001,18 @@ function buildOpenAIAccountModelDefaults(
   baseUrl = OPENAI_ACCOUNT_DEFAULT_API_BASE,
   modelIds?: string[],
 ): Partial<ModelEntry> {
+  const currentModelName = (model.model_name || "").trim();
+  const normalizedModelIds = modelIds
+    ? Array.from(new Set(modelIds.map((name) => name.trim()).filter(Boolean)))
+    : undefined;
+  const modelName = normalizedModelIds
+    ? (normalizedModelIds.includes(currentModelName) ? currentModelName : normalizedModelIds[0] ?? "")
+    : currentModelName;
   return {
     model_provider: OPENAI_ACCOUNT_PROVIDER,
     api_base: baseUrl,
     api_key: "",
-    model_name: (model.model_name || "").trim() || modelIds?.[0] || OPENAI_ACCOUNT_DEFAULT_MODEL,
+    model_name: modelName,
   };
 }
 
@@ -1135,13 +1141,18 @@ function OpenAIAccountAuthPanel({
       baseUrl || status?.base_url || OPENAI_ACCOUNT_DEFAULT_API_BASE,
       modelIds,
     );
+    const shouldAutoSave = Boolean(options?.autoSave && String(patch.model_name || "").trim());
     try {
-      if (options?.autoSave) {
+      if (options?.autoSave && !shouldAutoSave) {
+        setAutoSaveState("idle");
+        setModelsError(t("config.openaiAccount.noModelsAvailable"));
+      }
+      if (shouldAutoSave) {
         setAutoSaveState("saving");
       }
       latestModelRef.current = { ...latestModelRef.current, ...patch };
-      await onModelPatch(patch, options);
-      if (options?.autoSave) {
+      await onModelPatch(patch, shouldAutoSave ? options : undefined);
+      if (shouldAutoSave) {
         setAutoSaveState("saved");
         if (autoSaveTimerRef.current !== undefined) {
           window.clearTimeout(autoSaveTimerRef.current);
@@ -1172,10 +1183,12 @@ function OpenAIAccountAuthPanel({
         ? payload.models.filter((name): name is string => typeof name === "string" && name.trim().length > 0)
         : [];
       setModelOptions(nextModels);
+      if (nextModels.length === 0) {
+        setModelsError(t("config.openaiAccount.noModelsAvailable"));
+      }
       await applyDefaults(nextModels, payload.base_url || baseUrl, options);
     } catch (error) {
       setModelsError(openAIAccountErrorMessage(error, t("config.openaiAccount.modelsLoadFailed")));
-      await applyDefaults(undefined, baseUrl, options);
     } finally {
       setLoadingModels(false);
     }
@@ -1478,19 +1491,18 @@ function OpenAIAccountAuthPanel({
     }
   };
 
+  const visibleModelOptions = useMemo(() => {
+    return Array.from(new Set(modelOptions.map((name) => name.trim()).filter(Boolean)));
+  }, [modelOptions]);
+  const currentModelName = (model.model_name || "").trim();
+  const selectedModelName = visibleModelOptions.includes(currentModelName) ? currentModelName : "";
+  const hasUnavailableConfiguredModel = Boolean(currentModelName && !selectedModelName && !loadingModels);
+
   const handleModelSelectChange = (modelName: string) => {
+    if (!visibleModelOptions.includes(modelName)) return;
     latestModelRef.current = { ...latestModelRef.current, model_name: modelName };
     void onModelPatch({ model_name: modelName });
   };
-
-  const visibleModelOptions = useMemo(() => {
-    const currentModelName = (model.model_name || "").trim();
-    const deduped = Array.from(new Set(modelOptions));
-    if (currentModelName && !deduped.includes(currentModelName)) {
-      return [currentModelName, ...deduped];
-    }
-    return deduped;
-  }, [model.model_name, modelOptions]);
 
   const authenticated = Boolean(status?.authenticated && !status?.needs_refresh);
   const statusLabel = authenticated
@@ -1587,18 +1599,23 @@ function OpenAIAccountAuthPanel({
           </button>
         </div>
         <select
-          value={model.model_name || ""}
+          value={selectedModelName}
           onChange={(event) => handleModelSelectChange(event.target.value)}
           disabled={loadingModels || visibleModelOptions.length === 0}
           className="mt-2 w-full rounded border border-border bg-card px-2 py-1 text-xs text-text disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
         >
-          {!model.model_name ? (
+          {!selectedModelName ? (
             <option value="" disabled>{t("config.openaiAccount.modelSelectPlaceholder")}</option>
           ) : null}
           {visibleModelOptions.map((modelId) => (
             <option key={modelId} value={modelId}>{modelId}</option>
           ))}
         </select>
+        {hasUnavailableConfiguredModel ? (
+          <div className="mt-1 text-[11px] text-warn">
+            {t("config.openaiAccount.configuredModelUnavailable", { model: currentModelName })}
+          </div>
+        ) : null}
         {modelsError ? (
           <div className="mt-1 text-[11px] text-danger">{modelsError}</div>
         ) : null}
@@ -3759,6 +3776,10 @@ export function ConfigPanel({
     () => draftModels.some((m) => !isOpenAIAccountProvider(m.model_provider) && !m.api_key.trim()),
     [draftModels],
   );
+  const hasMissingModelName = useMemo(
+    () => draftModels.some((m) => !m.model_name.trim()),
+    [draftModels],
+  );
   const hasMissingModelApiBase = useMemo(
     () => draftModels.some((m) => !m.api_base.trim()),
     [draftModels],
@@ -3956,6 +3977,11 @@ export function ConfigPanel({
       setModelError(t('config.modelList.apiKeyRequired'));
       return;
     }
+    if (hasMissingModelName) {
+      setConfigTab("model");
+      setModelError(t('config.modelList.modelNameRequired'));
+      return;
+    }
     if (hasMissingModelApiBase) {
       setConfigTab("model");
       setModelError(t('config.modelList.apiBaseRequired'));
@@ -4110,7 +4136,7 @@ export function ConfigPanel({
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || ((isProcessing || globalTaskRunning) && mode !== 'team')}
+              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelName || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || ((isProcessing || globalTaskRunning) && mode !== 'team')}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? t('common.saving') : t('common.save')}
@@ -4130,6 +4156,11 @@ export function ConfigPanel({
         {!error && hasMissingModelApiBase ? (
           <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.modelList.apiBaseRequired')}
+          </div>
+        ) : null}
+        {!error && hasMissingModelName ? (
+          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+            {t('config.modelList.modelNameRequired')}
           </div>
         ) : null}
         {!error && hasDuplicateAgentNames ? (
@@ -4193,6 +4224,11 @@ export function ConfigPanel({
                   {!modelError && hasMissingModelApiBase ? (
                     <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.modelList.apiBaseRequired')}
+                    </div>
+                  ) : null}
+                  {!modelError && hasMissingModelName ? (
+                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                      {t('config.modelList.modelNameRequired')}
                     </div>
                   ) : null}
                   <div

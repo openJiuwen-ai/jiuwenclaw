@@ -33,7 +33,11 @@ import yaml
 from dotenv import load_dotenv
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
-from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
+try:
+    from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
+except ImportError:
+    def is_openai_account_provider(provider: str) -> bool:
+        return str(provider or "").strip().lower() == "openaiaccount"
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.runner import Runner
