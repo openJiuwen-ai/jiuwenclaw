@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 
 from openjiuwen.core.foundation.tool import tool
 
@@ -23,7 +23,7 @@ from .utils import execute_device_command, raise_if_device_error
         "注意:操作超时时间为60秒,请勿重复调用此工具,如果超时或失败,最多重试一次。"
     ),
 )
-async def get_user_location() -> Dict[str, Any]:
+async def get_user_location(request_type: Literal["current_location"], ) -> Dict[str, Any]:
     """获取用户当前地理位置.
 
     Returns:

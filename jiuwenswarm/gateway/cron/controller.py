@@ -10,13 +10,16 @@ from jiuwenswarm.gateway.cron.cron_expr import normalize_cron_expr
 from jiuwenswarm.gateway.cron.models import (
     CRON_JOB_DESCRIPTION_MAX_LENGTH,
     CRON_JOB_NAME_MAX_LENGTH,
+    CRON_JOB_DEFAULT_MODE,
     CronTargetChannel,
     cron_job_metadata,
     cron_job_modes_for_tools,
+    is_team_cron_mode,
     is_valid_target_channel_id,
     normalize_cron_job_mode,
     normalize_target_channel_id,
     validate_cron_model,
+    normalize_required_device_intents,
 )
 from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService, _cron_next_push_dt
 from jiuwenswarm.gateway.cron.store import CronJobStore
@@ -189,6 +192,15 @@ class CronController:
         resolved_project_id = binding.project_id
         work_mode = binding.work_mode
         app_id = str(params.get("app_id") or "").strip()
+        required_device_intents = normalize_required_device_intents(
+            params.get("required_device_intents")
+        )
+        xiaoyi_push_id = str(params.get("xiaoyi_push_id") or "").strip() or None
+        if required_device_intents and not xiaoyi_push_id:
+            raise ValueError("xiaoyi_push_id is required for device cron jobs")
+        effective_mode = mode or CRON_JOB_DEFAULT_MODE
+        if required_device_intents and is_team_cron_mode(effective_mode):
+            raise ValueError("Xiaoyi device cron jobs do not support team mode")
         job = await self._store.create_job(
             job_id=str(params.get("id") or "").strip() or None,
             name=name,
@@ -207,6 +219,8 @@ class CronController:
             model_name=model_name,
             app_id=app_id,
             work_mode=work_mode,
+            required_device_intents=required_device_intents,
+            xiaoyi_push_id=xiaoyi_push_id,
         )
         await self._scheduler.reload()
         return job.to_dict()
@@ -222,6 +236,17 @@ class CronController:
         existing = await self._store.get_job(job_id)
         if existing is None:
             raise KeyError("job not found")
+        immutable_device_fields = {
+            "description",
+            "required_device_intents",
+            "xiaoyi_push_id",
+        }
+        if existing.required_device_intents and immutable_device_fields.intersection(
+            patch
+        ):
+            raise ValueError(
+                "Device cron task content cannot be updated; delete and recreate it"
+            )
         if "cron_expr" in patch:
             patch["cron_expr"] = normalize_cron_expr(str(patch["cron_expr"]).strip())
         if "cron_expr" in patch or "timezone" in patch:
@@ -313,6 +338,7 @@ class CronController:
         project_dir: str | None = None,
         project_id: str | None = None,
         work_mode: str | None = None,
+        required_device_intents: list[str] | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "name": name,
@@ -336,6 +362,8 @@ class CronController:
             params["project_id"] = str(project_id).strip()
         if work_mode is not None and str(work_mode).strip():
             params["work_mode"] = str(work_mode).strip()
+        if required_device_intents is not None:
+            params["required_device_intents"] = required_device_intents
         return await self.create_job(params)
 
     async def _update_job_tool(
@@ -523,6 +551,15 @@ class CronController:
                                 "Defaults to current channel default (tui->code, web->work). "
                                 "Only used when project_id is not provided; ignored if project_id "
                                 "is provided (work_mode inherited from the project)."
+                            ),
+                        },
+                        "required_device_intents": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Device intent names needed when this cron runs. "
+                                "For Xiaoyi device cron jobs, call check_plugin_privilege "
+                                "for each intent before creating the job."
                             ),
                         },
                     },

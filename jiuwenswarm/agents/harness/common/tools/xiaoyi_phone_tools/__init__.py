@@ -38,6 +38,7 @@ from .push_result_tool import view_push_result
 from .timestamp_tool import convert_timestamp_to_utc8_time
 from .xiaoyi_gui_tool import xiaoyi_gui_agent
 from .image_reading_tool import image_reading
+from .check_plugin_privilege_tool import check_plugin_privilege
 
 __all__ = [
     "get_user_location",
@@ -67,4 +68,5 @@ __all__ = [
     "convert_timestamp_to_utc8_time",
     "xiaoyi_gui_agent",
     "image_reading",
+    "check_plugin_privilege",
 ]
