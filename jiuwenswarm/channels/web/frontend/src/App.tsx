@@ -528,16 +528,15 @@ function AppContent() {
 
   const toolPanelHasContent = useMemo(() => {
     const hasMessages = messages.length > 0;
-    const hasHeartbeat = Boolean(heartbeatMessage);
     switch (mode) {
       case 'auto_harness':
-        return Boolean(extensionReady?.runtimePath) || hasMessages || hasHeartbeat;
+        return Boolean(extensionReady?.runtimePath) || hasMessages;
       case 'team':
-        return isRestoringTeamHistory || teamTaskEvents.length > 0 || teamTasks.length > 0 || teamMembers.length > 0 || hasMessages || hasHeartbeat;
+        return isRestoringTeamHistory || teamTaskEvents.length > 0 || teamTasks.length > 0 || teamMembers.length > 0 || hasMessages;
       default:
-        return todos.length > 0 || hasMessages || hasHeartbeat;
+        return todos.length > 0 || hasMessages;
     }
-  }, [mode, todos.length, teamTaskEvents.length, teamTasks.length, teamMembers.length, extensionReady?.runtimePath, messages.length, heartbeatMessage, isRestoringTeamHistory]);
+  }, [mode, todos.length, teamTaskEvents.length, teamTasks.length, teamMembers.length, extensionReady?.runtimePath, messages.length, isRestoringTeamHistory]);
   const isTeamAreaExpanded = mode === 'team' && teamAreaExpanded && toolPanelHasContent;
 
   // WebSocket 连接 - provider 由后端配置决定 - provider 由后端配置决定，前端默认不在 URL query 传递

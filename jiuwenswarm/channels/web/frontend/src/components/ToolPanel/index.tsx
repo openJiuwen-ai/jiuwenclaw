@@ -458,6 +458,7 @@ export function ToolPanel({
               members={teamMembers}
               totalTasks={todos.length}
               completedTasks={todoCompletedTasks}
+              hideBorder
               onExpand={() => {
                 setTeamAreaActiveTab('planning');
                 setTeamAreaExpanded(true);

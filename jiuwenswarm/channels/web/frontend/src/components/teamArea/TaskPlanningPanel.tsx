@@ -27,6 +27,8 @@ type TaskPlanningPanelProps = {
   hideExpandButton?: boolean;
   /** 紧凑态下隐藏任务行负责人头像（用于非集群模式复用本面板时） */
   hideAssignee?: boolean;
+  /** 紧凑态下隐藏底部边框（用于非集群模式复用本面板时） */
+  hideBorder?: boolean;
   /** 自定义标题（不传则默认用 team.taskOverview） */
   title?: string;
 };
@@ -40,6 +42,7 @@ export function TaskPlanningPanel({
   onExpand,
   hideExpandButton = false,
   hideAssignee = false,
+  hideBorder = false,
   title,
 }: TaskPlanningPanelProps) {
   const { t } = useTranslation();
@@ -80,7 +83,7 @@ export function TaskPlanningPanel({
     };
 
     return (
-      <div className="flex flex-[2] flex-col overflow-hidden min-h-0 border-b border-border px-3 pb-3">
+      <div className={`flex flex-[2] flex-col overflow-hidden min-h-0 px-3 pb-3${hideBorder ? '' : ' border-b border-border'}`}>
         <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3">
           <div className="flex items-center gap-2">
             <img src={teamProcessIcon} width={16} height={16} />            <span className="text-sm font-medium text-text">{title ?? t('team.taskOverview')}</span>
