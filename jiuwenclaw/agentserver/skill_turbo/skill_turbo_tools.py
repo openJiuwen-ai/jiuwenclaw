@@ -24,11 +24,11 @@ logger = logging.getLogger(__name__)
 
 # ── 停止提示：追加到工具返回值，引导 LLM 总结并结束 ──
 _SKILL_TURBO_STOP_HINT = (
-    "\n\n[SYSTEM] The skill_turbo task is complete and the artifact has already been "
+    "\n\n[SYSTEM] The skill_acceleration_exec task is complete and the artifact has already been "
     "generated. The file(s) have ALREADY been sent to the user by the internal "
     "delivery pipeline — do NOT call send_file_to_user again. You should now "
     "summarize this result to the user and finish your turn. Do NOT call "
-    "skill_turbo, skill_tool, or send_file_to_user again for this task — the "
+    "skill_acceleration_exec, skill_tool, or send_file_to_user again for this task — the "
     "work is already done; calling any of them again would duplicate the work."
 )
 
@@ -172,7 +172,7 @@ def _wrap_skill_turbo_result(
 
 
 @tool(
-    name="skill_turbo",
+    name="skill_acceleration_exec",
     description=(
         "技能加速模块。当用户意图涉及技能类任务（如生成 PPT、文档转换等结构化产出）时，"
         "可优先尝试调用此工具以获得更快的生成流程。工具内部会二次判断是否真正匹配已支持的技能，"

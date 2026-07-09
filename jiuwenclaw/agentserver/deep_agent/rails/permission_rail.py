@@ -1420,7 +1420,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         result: PermissionResult,
     ) -> str:
         tool_name = tool_call.name if tool_call else ""
-        if tool_name == "skill_turbo":
+        if tool_name == "skill_acceleration_exec":
             return self._build_skill_turbo_message(tool_call, result)
         tool_args = self._parse_tool_args(tool_call)
         preview = self._build_persist_preview(tool_name, tool_args, result)
