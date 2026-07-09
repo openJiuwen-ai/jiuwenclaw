@@ -58,6 +58,10 @@ def _build_commands(mode: str) -> list[tuple[str, list[str], Path]]:
             )
         commands.append(("web-enterprise", _enterprise_web_cmd(), DATA_ROOT))
 
+    elif mode == "web-enterprise-relay":
+        # broker only (relay-only): WS + /file-api, no static/dist. Static is served by webui.
+        commands.append(("enterprise-web-relay", _enterprise_web_cmd(relay_only=True), DATA_ROOT))
+
     if mode in ("all", "app", "dev", "dev-enterprise", "enterprise"):
         commands.append(("app", [python_cmd, "-m", "jiuwenclaw.app"], DATA_ROOT))
     if mode == "all":
@@ -166,11 +170,13 @@ def _parse_args() -> argparse.Namespace:
         "mode",
         nargs="?",
         default="all",
-        choices=["all", "dev", "web", "app", "enterprise", "dev-enterprise", "web-enterprise"],
+        choices=["all", "dev", "web", "app", "enterprise", "dev-enterprise",
+                 "web-enterprise", "web-enterprise-relay"],
         help=(
             "Start mode: all (default, app + web static), dev (app + web Vite), web, app, "
-            "enterprise (app + web_enterprise static), dev-enterprise (app + web_enterprise Vite) "
-            "or web-enterprise (web_enterprise static)."
+            "enterprise (app + web_enterprise static), dev-enterprise (app + web_enterprise Vite), "
+            "web-enterprise (web_enterprise static) or "
+            "web-enterprise-relay (broker only: WS + /file-api, no static/dist)."
         ),
     )
     return parser.parse_args()

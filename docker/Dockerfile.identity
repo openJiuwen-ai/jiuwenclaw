@@ -1,23 +1,27 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-# 复用 manager 基础镜像,它结尾切到了非 root 的 app 用户;先切回 root 才能建用户/改属主/装包
-USER root
+ARG AGENT_RUNTIME_REPOS
+ARG AGENT_RUNTIME_BRANCH
 
-# base 可能已自带 app 用户,幂等处理
-RUN id app >/dev/null 2>&1 || useradd --create-home --shell /bin/bash app
+RUN useradd --create-home --shell /bin/bash app
 
 WORKDIR /app/jiuwenclaw
 COPY . /app/jiuwenclaw/
 RUN chown -R app:app /app/jiuwenclaw
 
-# 用 root 执行 pip install → 安装到系统全局
-RUN pip install -e "./packages/jiuwenclaw-ee/identity_service" -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN sed -i '/openjiuwen_runtime_foundation/d' pyproject.toml
+RUN sed -i '/openjiuwen_runtime_foundation/d' packages/jiuwenclaw-ee/claw_manager/pyproject.toml
+RUN sed -i '/openjiuwen_runtime_management/d' packages/jiuwenclaw-ee/gateway/extensions/runtime_management_extension/pyproject.toml
+
+RUN pip install -e "./packages/jiuwenclaw-ee/identity_service" \
+    git+${AGENT_RUNTIME_REPOS}@${AGENT_RUNTIME_BRANCH}#subdirectory=foundation \
+    --no-cache-dir \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 USER app
 WORKDIR /app/jiuwenclaw
 ENV PATH=$PATH:/home/app/.local/bin
 
-# 认证中心 REST(JWT 签名密钥落身份库,无需挂 Secret/卷)
 EXPOSE 8770
 CMD ["jiuwenclaw-identity"]
