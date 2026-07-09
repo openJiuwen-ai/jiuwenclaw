@@ -2623,14 +2623,18 @@
 }
 
 .chat-input-btn--add-file {
-  width: 30px;
-  height: 30px;
+  width: 24px;
+  height: 24px;
   flex: 0 0 auto;
+  border-radius: 4px;
   color: var(--muted-strong);
-  background: color-mix(in srgb, var(--card) 88%, transparent);
+  background: transparent;
 }
 
-
+.chat-input-btn--add-file:hover:not(:disabled) {
+  background: #E6E6E6;
+  color: var(--text);
+}
 
 .chat-input-btn--recording {
   background: var(--danger) !important;

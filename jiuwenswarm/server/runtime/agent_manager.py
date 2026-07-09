@@ -227,6 +227,31 @@ class AgentManager:
                 except Exception:
                     logger.exception("[AgentManager] cancel_inflight_work failed")
 
+    async def cleanup_session_runtime(self, *, channel_id: str = "", session_id: str) -> bool:
+        """Release in-memory runtime for one session across existing channel agents."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return False
+        channel_key = _normalize_channel_id(channel_id)
+        channel_agents = self.agents.get(channel_key, {})
+        if not isinstance(channel_agents, dict):
+            return False
+
+        cleaned = False
+        for agent in list(channel_agents.values()):
+            cleanup_fn = getattr(agent, "cleanup_session_runtime", None)
+            if not callable(cleanup_fn):
+                continue
+            try:
+                cleaned = bool(await cleanup_fn(sid)) or cleaned
+            except Exception:
+                logger.exception(
+                    "[AgentManager] cleanup_session_runtime failed: channel_id=%s session_id=%s",
+                    channel_key,
+                    sid,
+                )
+        return cleaned
+
     def get_client_capabilities(self, channel_id: str = "") -> dict[str, Any]:
         channel_key = str(channel_id or "").strip()
         caps = self._client_capabilities_by_channel.get(channel_key)

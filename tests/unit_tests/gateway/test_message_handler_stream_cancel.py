@@ -76,6 +76,9 @@ class _TestMessageHandler(MessageHandler):
     async def cancel_stream_tasks_for_channel(self, msg: Message) -> int:
         return await getattr(self, "_cancel_stream_tasks_for_channel")(msg)
 
+    async def cancel_agent_work_for_session(self, msg: Message, session_id: str) -> None:
+        await getattr(self, "_cancel_agent_work_for_session")(msg, session_id)
+
 
 def _chat_send_message(
     *,
@@ -480,6 +483,50 @@ async def test_disconnect_recovers_session_from_stale_request_keys() -> None:
     await asyncio.sleep(0)
     # Exactly one chat.interrupt must have been emitted for the recovered session.
     assert len(_FakeAgentClient.sent_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancel_marks_request_as_client_disconnect() -> None:
+    handler = _TestMessageHandler.create()
+    _seed_stream_task(
+        handler, rid="rid-disconnect", channel_id="tui", session_id="sess_exit",
+    )
+
+    await handler.cancel_agent_sessions_on_disconnect(
+        [],
+        stale_request_keys=[("tui", "rid-disconnect")],
+    )
+
+    assert len(_FakeAgentClient.sent_requests) == 1
+    assert _FakeAgentClient.sent_requests[0].channel_context["_jiuwenswarm_cancel_source"] == "client_disconnect"
+    assert "cancel_source" not in _FakeAgentClient.sent_requests[0].params
+
+
+@pytest.mark.asyncio
+async def test_manual_cancel_does_not_forward_client_disconnect_source() -> None:
+    handler = _TestMessageHandler.create()
+    msg = Message(
+        id="manual-cancel",
+        type="req",
+        channel_id="tui",
+        session_id="sess_manual",
+        params={
+            "intent": "cancel",
+            "session_id": "sess_manual",
+            "cancel_source": "client_disconnect",
+        },
+        timestamp=0.0,
+        ok=True,
+        req_method=ReqMethod.CHAT_CANCEL,
+        is_stream=False,
+        metadata={"_jiuwenswarm_cancel_source": "client_disconnect"},
+    )
+
+    await handler.cancel_agent_work_for_session(msg, "sess_manual")
+
+    assert len(_FakeAgentClient.sent_requests) == 1
+    assert "cancel_source" not in _FakeAgentClient.sent_requests[0].params
+    assert "_jiuwenswarm_cancel_source" not in _FakeAgentClient.sent_requests[0].channel_context
 
 
 @pytest.mark.asyncio

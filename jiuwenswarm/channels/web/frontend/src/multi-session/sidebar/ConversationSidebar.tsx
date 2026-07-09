@@ -25,10 +25,10 @@ import {
 } from '../../features/workspace/projectDirectoryPicker';
 import './ConversationSidebar.css';
 import addProjectIcon from '../../assets/work-mode/add-project.svg';
+import arrowRightIcon from '../../assets/work-mode/arrow-right.svg';
 import collapseIcon from '../../assets/work-mode/collapse.svg';
 import deleteIcon from '../../assets/work-mode/delete.svg';
 import editIcon from '../../assets/work-mode/edit.svg';
-import expandIcon from '../../assets/work-mode/expand.svg';
 import folderFoldIcon from '../../assets/work-mode/folder-fold.svg';
 import folderIcon from '../../assets/work-mode/folder.svg';
 import moreIcon from '../../assets/work-mode/more-rimless.svg';
@@ -334,7 +334,7 @@ function ProjectEntityRow({
         <span className="conversation-entity-row__text">
           <span className="conversation-entity-row__title">{title}</span>
         </span>
-        <img className="conversation-entity-row__chevron" src={isExpanded ? collapseIcon : expandIcon} alt="" aria-hidden="true" />
+        <img className="conversation-entity-row__chevron" src={isExpanded ? collapseIcon : arrowRightIcon} alt="" aria-hidden="true" />
         {isPinned ? <img src={pinIcon} className="conversation-entity-row__pin" alt="" aria-hidden="true" /> : null}
       </button>
       <button
@@ -901,21 +901,23 @@ export function ConversationSidebar({
   return (
     <aside className="conversation-sidebar" aria-label={t('multiSession.conversations')}>
       <div className="conversation-sidebar__title">{t('multiSession.title')}</div>
-      <button type="button" className="conversation-sidebar__new" onClick={() => {
-        setSelectedProject(null);
-        setPinError(null);
-        onNew();
-      }}>
-        <img src={newTaskIcon} alt="" aria-hidden="true" />
-        <span>{t('multiSession.newConversation')}</span>
-      </button>
+      <div className="conversation-sidebar__operations">
+        <button type="button" className="conversation-sidebar__new" onClick={() => {
+          setSelectedProject(null);
+          setPinError(null);
+          onNew();
+        }}>
+          <img src={newTaskIcon} alt="" aria-hidden="true" />
+          <span>{t('multiSession.newConversation')}</span>
+        </button>
+      </div>
       <div className="conversation-sidebar__body">
         {hasPinnedSection ? (
-          <div className="conversation-sidebar__pinned-block">
-            <div className="conversation-sidebar__section-heading conversation-sidebar__section-heading--pinned">
+          <div className="conversation-sidebar__group conversation-sidebar__group--pinned">
+            <div className="conversation-sidebar__section-heading">
               <span className="conversation-sidebar__label">{t('multiSession.project.pinned')}</span>
             </div>
-            <div className="conversation-sidebar__pinned-list">
+            <div className="conversation-sidebar__group-list">
               {orderedPinnedSessions.map((session) => {
                 const project = getSessionProject(session);
                 return renderSession(session, { projectMenu: Boolean(project && !isDefaultProject(project)) });
@@ -934,9 +936,10 @@ export function ConversationSidebar({
             {pathDialogError}
           </div>
         ) : null}
-        <div className="conversation-sidebar__section-heading" ref={addMenuRef}>
-          <span className="conversation-sidebar__label">{t('multiSession.project.projects')}</span>
-          <div className="conversation-sidebar__section-actions">
+        <div className="conversation-sidebar__group conversation-sidebar__project-add" ref={addMenuRef}>
+          <div className="conversation-sidebar__section-heading">
+            <span className="conversation-sidebar__label">{t('multiSession.project.projects')}</span>
+            <div className="conversation-sidebar__section-actions">
             <button
               type="button"
               className="conversation-sidebar__section-action"
@@ -950,6 +953,7 @@ export function ConversationSidebar({
             >
               <img src={plusIcon} alt="" aria-hidden="true" />
             </button>
+            </div>
           </div>
           {projectAddMenuOpen ? (
             <ProjectAddMenu
@@ -966,12 +970,12 @@ export function ConversationSidebar({
               }}
             />
           ) : null}
-        </div>
-        <div className="conversation-sidebar__list">
-          {regularProjects.length === 0 ? (
-            <div className="conversation-sidebar__empty">{t('multiSession.project.noProjects')}</div>
-          ) : null}
-          {regularProjects.map((project) => renderProject(project))}
+          <div className="conversation-sidebar__group-list">
+            {regularProjects.length === 0 ? (
+              <div className="conversation-sidebar__empty">{t('multiSession.project.noProjects')}</div>
+            ) : null}
+            {regularProjects.map((project) => renderProject(project))}
+          </div>
         </div>
         <div className="conversation-sidebar__group">
           <div className="conversation-sidebar__section-heading">

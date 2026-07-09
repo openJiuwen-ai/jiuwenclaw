@@ -183,8 +183,8 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Auto Update</strong></td>
-      <td width="28%"><a href="en/WindowsAutoUpdateDesign.md">Windows Auto-Update Design</a></td>
-      <td width="50%">Windows client auto-update design, flow, and key modules.</td>
+      <td width="28%"><a href="en/WindowsAutoUpdateDesign.md">Desktop Auto-Update Design</a></td>
+      <td width="50%">Windows and macOS desktop auto-update design, flow, and key modules (including pre-release pushes).</td>
     </tr>
     <tr>
       <td width="22%"><strong>Developer Documentation</strong></td>

@@ -550,16 +550,12 @@
 /* Logo in collapsed mode — SVG handles gradient + mark */
 .collapsed-logo {
   width: 28px;
-  height: 28px;
-  margin-top: 16px;
-  margin-bottom: 16px;
-  border-radius: 7px;
+  height: 68px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: opacity 0.15s ease;
   overflow: hidden;
 }
 
@@ -580,8 +576,7 @@
   gap: 2px;
   width: 48px;
   min-height: 48px;
-  margin-bottom: 6px;
-  padding: 4px 2px;
+  margin-bottom: 8px;
   border-radius: 8px;
   background: transparent;
   border: none;
@@ -625,7 +620,7 @@
 }
 
 .collapsed-nav-item--active {
-  background: #EAEAEB;
+  background: #E6E6E6;
 }
 
 .collapsed-nav-item--active:hover {
@@ -640,9 +635,7 @@
   z-index: 1200;
   width: 240px;
   padding: 24px 8px;
-  border-right: 1px solid #E5E7EB;
   background: var(--shell-surface-light);
-  box-shadow: none;
 }
 
 .collapsed-more-panel__title {
@@ -677,7 +670,7 @@
 
 .collapsed-more-panel__item:hover,
 .collapsed-more-panel__item--active {
-  background: #F5F5F5;
+  background: #EAEAEB;
 }
 
 .collapsed-more-panel__item--active {

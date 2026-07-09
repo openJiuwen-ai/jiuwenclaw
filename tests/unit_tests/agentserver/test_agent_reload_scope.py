@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -316,6 +317,271 @@ async def test_deep_adapter_global_reload_marks_sessions_stale_without_fanout(mo
 
     assert session_a.reload_calls == []
     assert session_b.reload_calls == []
+
+
+def _fake_deep_reload_model():
+    return SimpleNamespace(
+        model_client_config={"api_base": "https://example.test/v1", "api_key": "secret"},
+        model_config={"model_name": "glm-5", "temperature": 0.95},
+    )
+
+
+def _real_deep_reload_model(api_base: str, model_name: str):
+    from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+
+    return Model(
+        model_client_config=ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="secret",
+            api_base=api_base,
+            verify_ssl=False,
+        ),
+        model_config=ModelRequestConfig(model_name=model_name),
+    )
+
+
+async def _reload_deep_adapter_config_for_test(previous_config, deep_config_factory):
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    def _create_model(self, config_base):
+        return _fake_deep_reload_model()
+
+    async def _async_noop(*args, **kwargs):
+        return None
+
+    def _make_config(self, *, model, config, config_base, agent_card, tool_cards, rails):
+        return deep_config_factory(model, agent_card, tool_cards, rails)
+
+    configured_fields = []
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = MagicMock()
+    adapter._instance._deep_config = previous_config
+
+    def _configure(cfg):
+        configured_fields.append((cfg.model, cfg.system_prompt))
+        adapter._instance._deep_config = cfg
+
+    adapter._instance.configure = MagicMock(side_effect=_configure)
+
+    with (
+        patch.object(interface_module, "clear_config_cache", MagicMock()),
+        patch.object(interface_module, "clear_memory_manager_cache", MagicMock()),
+        patch.object(
+            interface_module.JiuWenSwarmDeepAdapter,
+            "_refresh_multimodal_configs",
+            MagicMock(),
+        ),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_model", _create_model),
+        patch.object(
+            interface_module.JiuWenSwarmDeepAdapter,
+            "_sync_multimodal_tools_for_runtime",
+            MagicMock(),
+        ),
+        patch.object(
+            interface_module.JiuWenSwarmDeepAdapter,
+            "_sync_paid_search_tool_for_runtime",
+            MagicMock(),
+        ),
+        patch.object(
+            interface_module.JiuWenSwarmDeepAdapter,
+            "_sync_symphony_tools_for_runtime",
+            MagicMock(),
+        ),
+        patch.object(
+            interface_module.JiuWenSwarmDeepAdapter,
+            "_sync_skill_retrieval_tools_for_runtime",
+            MagicMock(),
+        ),
+        patch.object(
+            interface_module.JiuWenSwarmDeepAdapter,
+            "_sync_skill_retrieval_prompt_rail_for_runtime",
+            AsyncMock(),
+        ),
+        patch.object(
+            interface_module.JiuWenSwarmDeepAdapter,
+            "_filesystem_rail_enabled_for_profile",
+            MagicMock(return_value=True),
+        ),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "load_user_rails", AsyncMock()),
+        patch.object(
+            interface_module.JiuWenSwarmDeepAdapter,
+            "_get_current_agent_rails",
+            MagicMock(return_value=[]),
+        ),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_make_deep_agent_config", _make_config),
+        patch.object(
+            interface_module.JiuWenSwarmDeepAdapter,
+            "_sync_active_evolution_review_agent_after_reload",
+            MagicMock(),
+        ),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_sync_mcp_servers_for_runtime", _async_noop),
+    ):
+        await adapter.reload_agent_config(
+            {"react": {"agent_name": "main_agent"}, "browser": {"headless": True}},
+            {},
+        )
+
+    return adapter, configured_fields
+
+
+def test_deep_adapter_rejects_invalid_default_model_even_when_other_cached_model_is_valid():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    adapter = JiuWenSwarmDeepAdapter()
+    invalid_default = _real_deep_reload_model("https://api.example.com/v1", "bad-default")
+    valid_other = _real_deep_reload_model("https://real.provider.test/v1", "good-model")
+    adapter._model = invalid_default
+    adapter._model_cache = {
+        "bad-default#0": invalid_default,
+        "good-model#0": valid_other,
+    }
+    adapter._model_name_to_keys = {
+        "bad-default": ["bad-default#0"],
+        "good-model": ["good-model#0"],
+    }
+
+    assert adapter._has_valid_model_config("") is False
+
+
+def test_deep_adapter_resolve_model_for_request_fails_when_no_model_is_available():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        AgentRequest,
+        JiuWenSwarmDeepAdapter,
+    )
+
+    adapter = JiuWenSwarmDeepAdapter()
+    request = AgentRequest(
+        request_id="req-no-model",
+        channel_id="test",
+        params={"model_name": "missing"},
+    )
+
+    with pytest.raises(RuntimeError, match="No model configured"):
+        adapter._resolve_model_for_request(request)
+
+
+def test_deep_adapter_model_config_fingerprint_includes_legacy_react_model_fields():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    old_config = {
+        "react": {
+            "model_client_config": {
+                "api_base": "https://real.provider.test/v1",
+                "api_key": "secret",
+            },
+            "model_name": "old-model",
+            "model_config_obj": {"temperature": 0.1},
+        }
+    }
+    new_config = {
+        "react": {
+            "model_client_config": {
+                "api_base": "https://real.provider.test/v1",
+                "api_key": "secret",
+            },
+            "model_name": "new-model",
+            "model_config_obj": {"temperature": 0.9},
+        }
+    }
+
+    assert (
+        JiuWenSwarmDeepAdapter._models_config_fingerprint(old_config)
+        != JiuWenSwarmDeepAdapter._models_config_fingerprint(new_config)
+    )
+
+
+@pytest.mark.asyncio
+async def test_deep_adapter_reload_omits_unchanged_model_and_system_prompt():
+    from openjiuwen.harness import DeepAgentConfig
+
+    def _new_config(model, agent_card, tool_cards, rails):
+        return DeepAgentConfig(
+            model=model,
+            card=agent_card,
+            system_prompt="identity prompt",
+            tools=tool_cards,
+            rails=rails,
+        )
+
+    adapter, configured_fields = await _reload_deep_adapter_config_for_test(
+        DeepAgentConfig(
+            model=_fake_deep_reload_model(),
+            system_prompt="identity prompt",
+        ),
+        _new_config,
+    )
+
+    assert configured_fields == [(None, None)]
+    assert adapter._instance._deep_config.model is not None
+    assert adapter._instance._deep_config.system_prompt == "identity prompt"
+
+
+@pytest.mark.asyncio
+async def test_deep_adapter_reload_restores_omitted_fields_to_stored_config_object():
+    from openjiuwen.harness import DeepAgentConfig
+
+    def _new_config(model, agent_card, tool_cards, rails):
+        return DeepAgentConfig(
+            model=model,
+            card=agent_card,
+            system_prompt="identity prompt",
+            tools=tool_cards,
+            rails=rails,
+        )
+
+    previous_config = DeepAgentConfig(
+        model=_fake_deep_reload_model(),
+        system_prompt="identity prompt",
+    )
+    adapter, configured_fields = await _reload_deep_adapter_config_for_test(
+        previous_config,
+        _new_config,
+    )
+
+    assert configured_fields == [(None, None)]
+    assert adapter._instance._deep_config.model is not None
+    assert adapter._instance._deep_config.system_prompt == "identity prompt"
+
+
+@pytest.mark.asyncio
+async def test_deep_adapter_reload_keeps_fields_when_dependent_reload_inputs_change():
+    from openjiuwen.harness import DeepAgentConfig
+
+    def _new_config(model, agent_card, tool_cards, rails):
+        return DeepAgentConfig(
+            model=model,
+            card=agent_card,
+            system_prompt="identity prompt",
+            context_engine_config={"changed": True},
+            max_iterations=20,
+            language="en",
+            prompt_mode="code",
+            tools=tool_cards,
+            rails=rails,
+        )
+
+    _, configured_fields = await _reload_deep_adapter_config_for_test(
+        DeepAgentConfig(
+            model=_fake_deep_reload_model(),
+            system_prompt="identity prompt",
+            context_engine_config={"changed": False},
+            max_iterations=15,
+            language="cn",
+            prompt_mode=None,
+        ),
+        _new_config,
+    )
+
+    assert len(configured_fields) == 1
+    assert configured_fields[0][0] is not None
+    assert configured_fields[0][1] == "identity prompt"
 
 
 @pytest.mark.asyncio

@@ -187,6 +187,8 @@ class RuntimePromptRail(DeepAgentRail):
             logger.warning("Failed to read runtime state file %s: %s", state_path, e)
 
         model = (runtime_state.get("model") or self._model_name or "unknown").strip()
+        available_models: list[str] = runtime_state.get("available_models") or []
+        available_models_str = ", ".join(available_models) if available_models else model
         mode = (runtime_state.get("mode") or self._mode or "unknown").strip()
         language_val = (
             "en"
@@ -199,6 +201,7 @@ class RuntimePromptRail(DeepAgentRail):
             runtime_content = (
                 "# 运行时状态\n\n"
                 f"- 当前模型：{model}\n"
+                f"- 可用模型：{available_models_str}\n"
                 f"- 当前模式：{mode}\n"
                 f"- 当前语言：{language_val}\n"
                 f"- 当前渠道：{channel}"
@@ -206,12 +209,15 @@ class RuntimePromptRail(DeepAgentRail):
             model_answer_policy = (
                 "# 模型名称回答策略\n\n"
                 "- 当用户询问「你是什么模型」「当前用的是哪个模型」等问题时，"
-                "直接使用 `runtime.setting` 中的当前模型值回答，只说模型名称，不要介绍身份或列出能力。"
+                "直接使用 `runtime.setting` 中的当前模型值回答，只说模型名称，不要介绍身份或列出能力。\n"
+                "- 当用户询问「你支持/配置了哪些模型」「有哪些模型可用」等问题时，"
+                "直接使用 `runtime.setting` 中的可用模型列表回答，列出所有已配置的模型名称。"
             )
         else:
             runtime_content = (
                 "# Runtime State\n\n"
                 f"- Current model: {model}\n"
+                f"- Available models: {available_models_str}\n"
                 f"- Current mode: {mode}\n"
                 f"- Current language: {language_val}\n"
                 f"- Current channel: {channel}"
@@ -219,7 +225,9 @@ class RuntimePromptRail(DeepAgentRail):
             model_answer_policy = (
                 "# Model Name Answer Policy\n\n"
                 "- When the user asks what model you are using, answer with only the current model "
-                "value from `runtime.setting`. Do not introduce yourself or list capabilities."
+                "value from `runtime.setting`. Do not introduce yourself or list capabilities.\n"
+                "- When the user asks what models are available or configured, list all available "
+                "models from the `runtime.setting` available_models list."
             )
 
         self.system_prompt_builder.add_section(PromptSection(

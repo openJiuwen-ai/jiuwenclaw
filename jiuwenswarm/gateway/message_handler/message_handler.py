@@ -17,7 +17,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Dict, Literal
 from jiuwenswarm.gateway.channel_manager.base import ChannelType
-from jiuwenswarm.common.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS
+from jiuwenswarm.common.e2a.constants import (
+    E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
+    E2A_INTERNAL_CANCEL_SOURCE_KEY,
+    E2A_WIRE_INTERNAL_METADATA_KEYS,
+)
 from jiuwenswarm.common.config import get_evolution_auto_save_enabled
 from jiuwenswarm.gateway.routing.session_map import SessionMap
 from jiuwenswarm.gateway.routing.agent_request_timeout import (
@@ -765,6 +769,7 @@ class MessageHandler(ABC):
         channel_id: str | None = None,
         cancel_gateway_tasks: bool = True,
         agent_notify: Literal["await", "fire_and_forget"] = "await",
+        cancel_source: str | None = None,
     ) -> None:
         """Cancel gateway and AgentServer work for a session.
 
@@ -840,6 +845,11 @@ class MessageHandler(ABC):
             cancel_params["team"] = msg.params["team"]
         if isinstance(msg.params, dict) and msg.params.get("trusted_dirs"):
             cancel_params["trusted_dirs"] = msg.params["trusted_dirs"]
+        cancel_metadata = dict(msg.metadata or {})
+        cancel_metadata.pop(E2A_INTERNAL_CANCEL_SOURCE_KEY, None)
+        cancel_source_value = (
+            cancel_source.strip() if isinstance(cancel_source, str) else ""
+        )
 
         cancel_req = Message(
             id=f"interrupt_{int(time.time() * 1000):x}_{secrets.token_hex(3)}",
@@ -850,7 +860,7 @@ class MessageHandler(ABC):
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.CHAT_CANCEL,
-            metadata=msg.metadata,
+            metadata=cancel_metadata or None,
             provider=getattr(msg, "provider", None),
             chat_id=getattr(msg, "chat_id", None),
             user_id=getattr(msg, "user_id", None),
@@ -858,6 +868,8 @@ class MessageHandler(ABC):
         )
         agent_msg = await self._prepare_agent_dispatch_message(cancel_req)
         env_interrupt = self.message_to_e2a(agent_msg)
+        if cancel_source_value:
+            env_interrupt.channel_context[E2A_INTERNAL_CANCEL_SOURCE_KEY] = cancel_source_value
 
         if cancel_gateway_tasks:
             await _cancel_tasks(tasks_to_cancel)
@@ -1069,7 +1081,10 @@ class MessageHandler(ABC):
     def _build_disconnect_cancel_message(self, channel_id: str, session_id: str) -> "Message":
         from jiuwenswarm.common.schema.message import Message, ReqMethod
 
-        disconnect_params = {"intent": "cancel", "session_id": session_id}
+        disconnect_params = {
+            "intent": "cancel",
+            "session_id": session_id,
+        }
         disconnect_state = self._channel_states.get(
             self._get_channel_state_key(channel_id, session_id)
         ) or self._channel_states.get(channel_id)
@@ -1094,7 +1109,11 @@ class MessageHandler(ABC):
     async def _cancel_disconnect_session(self, channel_id: str, session_id: str) -> None:
         stub = self._build_disconnect_cancel_message(channel_id, session_id)
         try:
-            await self._cancel_agent_work_for_session(stub, session_id)
+            await self._cancel_agent_work_for_session(
+                stub,
+                session_id,
+                cancel_source=E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
+            )
         except Exception:
             logger.warning(
                 "[MessageHandler] disconnect cancel failed: channel_id=%s session_id=%s",

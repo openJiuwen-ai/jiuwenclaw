@@ -799,19 +799,23 @@ function AppContent() {
   }, [request, t, setAvailableModels]);
 
   useEffect(() => {
-    if (!FEATURE_APP_UPDATER_UI || !isConnected || !initialDataLoaded || startupUpdateCheckRef.current) {
+    if (!FEATURE_APP_UPDATER_UI || !isConnected || startupUpdateCheckRef.current) {
       return;
     }
     startupUpdateCheckRef.current = true;
     const timeoutId = window.setTimeout(() => {
-      void request('updater.check', { manual: false }).catch((updateError) => {
-        console.warn('Startup updater check failed:', updateError);
-      });
-    }, 30000);
+      void request('updater.check', { manual: false })
+        .then((payload) => {
+          window.dispatchEvent(new CustomEvent('jiuwenswarm:updater-status', { detail: payload }));
+        })
+        .catch((updateError) => {
+          console.warn('Startup updater check failed:', updateError);
+        });
+    }, 5000);
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [initialDataLoaded, isConnected, request]);
+  }, [isConnected, request]);
 
   const clearRestartAutoCloseTimer = useCallback(() => {
     if (restartAutoCloseTimerRef.current != null) {

@@ -6,6 +6,7 @@ import binascii
 import http.client
 import logging
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -34,6 +35,16 @@ STARTUP_TIMEOUT_SECONDS = 45.0
 PNG_DATA_URL_PREFIX = "data:image/png;base64,"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 DesktopSaveResult = dict[str, bool]
+UPDATE_CLEANUP_PATTERNS = (
+    "JiuwenSwarm-setup-*.exe",
+    "JiuwenSwarm-*.dmg",
+    "JiuwenSwarm-*.tar.gz",
+    "JiuwenSwarm-*.exe.part",
+    "JiuwenSwarm-*.dmg.part",
+    "JiuwenSwarm-*.tar.gz.part",
+    "_install_helper.ps1",
+    "_install_helper.sh",
+)
 
 
 def _setup_logger() -> logging.Logger:
@@ -70,6 +81,27 @@ def _setup_logger() -> logging.Logger:
 
 
 logger = _setup_logger()
+
+
+def _cleanup_stale_update_artifacts() -> None:
+    updates_dir = get_user_workspace_dir() / ".updates"
+    if not updates_dir.is_dir():
+        return
+
+    removed = 0
+    for pattern in UPDATE_CLEANUP_PATTERNS:
+        for path in updates_dir.glob(pattern):
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink(missing_ok=True)
+                removed += 1
+            except OSError as exc:
+                logger.warning("[desktop] failed to remove stale update artifact %s: %s", path, exc)
+
+    if removed:
+        logger.info("[desktop] cleaned %d stale update artifact(s) from %s", removed, updates_dir)
 
 
 def _desktop_save_result(ok: bool, cancelled: bool = False) -> DesktopSaveResult:
@@ -495,7 +527,7 @@ class DesktopRuntime:
         if os.name == "nt":
             ok = self._launch_windows_install_helper(target, app_executable)
         elif sys.platform == "darwin":
-            ok = self._launch_macos_install_helper(target)
+            ok = self._launch_macos_install_helper(target, app_executable)
         else:
             ok = self._launch_linux_install_helper(target, app_executable)
 
@@ -508,7 +540,7 @@ class DesktopRuntime:
         return True
 
     @staticmethod
-    def _launch_macos_install_helper(target: Path) -> bool:
+    def _launch_macos_install_helper(target: Path, app_executable: Path) -> bool:
         parent_pid = os.getpid()
         updates_dir = get_user_workspace_dir() / ".updates"
         updates_dir.mkdir(parents=True, exist_ok=True)
@@ -517,13 +549,139 @@ class DesktopRuntime:
             logger.error("[desktop] no write permission for updates directory: %s", updates_dir)
             return False
 
+        # Derive the .app bundle path from the frozen executable.
+        # sys.executable is typically:
+        #   /Applications/JiuwenSwarm.app/Contents/MacOS/jiuwenswarm
+        # so the bundle is three levels up. Prefer replacing the exact bundle
+        # the user launched, but fall back to /Applications when running from a
+        # read-only DMG mount or from a non-bundled development executable.
+        app_bundle = app_executable.parent.parent.parent
+        if app_bundle.suffix == ".app" and not str(app_bundle).startswith("/Volumes/"):
+            install_target = str(app_bundle)
+        elif app_bundle.suffix == ".app":
+            install_target = f"/Applications/{app_bundle.name}"
+        else:
+            install_target = "/Applications/JiuwenSwarm.app"
+
+        log_file = get_logs_dir() / "update_helper.log"
+
+        # shlex.quote all external paths to prevent shell injection if the
+        # release API serves a malicious asset name.
+        q_target = shlex.quote(str(target))
+        q_install_target = shlex.quote(install_target)
+        q_log_file = shlex.quote(str(log_file))
+        q_temp_target = shlex.quote(f"{install_target}.new")
+        q_old_target = shlex.quote(f"{install_target}.old")
+
         helper_content = f"""#!/bin/bash
 set -e
-PARENT_PID={parent_pid}
-while kill -0 "$PARENT_PID" 2>/dev/null; do
+
+LOG_FILE={q_log_file}
+exec >>"$LOG_FILE" 2>&1
+
+echo "=== JiuwenSwarm macOS install helper: $(date) ==="
+echo "[helper] dmg={q_target}"
+echo "[helper] install_target={q_install_target}"
+echo "[helper] parent_pid={parent_pid}"
+
+# Wait for parent process to exit
+echo "[helper] waiting for parent pid {parent_pid} to exit"
+while kill -0 "{parent_pid}" 2>/dev/null; do
     sleep 1
 done
-open "{target}"
+echo "[helper] parent process exited"
+
+# Wait for backend/frontend ports to release
+wait_port_release() {{
+    local port=$1
+    local name=$2
+    local deadline=$(( SECONDS + 15 ))
+    while [ $SECONDS -lt $deadline ]; do
+        if ! lsof -iTCP:"$port" -sTCP:LISTEN -P -n >/dev/null 2>&1; then
+            echo "[helper] port $port ($name) released"
+            return 0
+        fi
+        sleep 0.5
+    done
+    echo "[helper] warning: port $port ($name) still in use after 15s, proceeding anyway"
+}}
+wait_port_release {BACKEND_PORT} backend
+wait_port_release {FRONTEND_PORT} frontend
+
+# Mount the DMG at a controlled mount point
+MOUNT_POINT="/tmp/jiuwenswarm_dmg_{parent_pid}"
+rm -rf "$MOUNT_POINT" 2>/dev/null || true
+mkdir -p "$MOUNT_POINT"
+echo "[helper] attaching DMG at $MOUNT_POINT"
+if ! hdiutil attach {q_target} -mountpoint "$MOUNT_POINT" -nobrowse -noautoopen -quiet; then
+    echo "[helper] ERROR: hdiutil attach failed"
+    rm -rf "$MOUNT_POINT" 2>/dev/null || true
+    exit 1
+fi
+
+# Find the .app bundle inside the mounted DMG
+APP_BUNDLE=$(find "$MOUNT_POINT" -maxdepth 1 -name "*.app" -print -quit)
+if [ -z "$APP_BUNDLE" ]; then
+    echo "[helper] ERROR: no .app bundle found in DMG"
+    hdiutil detach "$MOUNT_POINT" -quiet || true
+    rm -rf "$MOUNT_POINT" 2>/dev/null || true
+    exit 1
+fi
+echo "[helper] found app bundle: $APP_BUNDLE"
+
+# Copy to a temp target first. During the final swap, keep the previous bundle
+# as OLD_TARGET so a failed install can be rolled back.
+TEMP_TARGET={q_temp_target}
+OLD_TARGET={q_old_target}
+rm -rf "$TEMP_TARGET" 2>/dev/null || true
+rm -rf "$OLD_TARGET" 2>/dev/null || true
+
+echo "[helper] copying app to $TEMP_TARGET"
+if ! ditto "$APP_BUNDLE" "$TEMP_TARGET"; then
+    echo "[helper] ERROR: ditto copy failed"
+    rm -rf "$TEMP_TARGET" 2>/dev/null || true
+    hdiutil detach "$MOUNT_POINT" -quiet || true
+    rm -rf "$MOUNT_POINT" 2>/dev/null || true
+    exit 1
+fi
+
+restore_old_target() {{
+    status=$?
+    if [ $status -ne 0 ] && [ -d "$OLD_TARGET" ]; then
+        echo "[helper] install failed, restoring previous app bundle"
+        rm -rf {q_install_target} 2>/dev/null || true
+        mv "$OLD_TARGET" {q_install_target} || true
+    fi
+    rm -rf "$TEMP_TARGET" 2>/dev/null || true
+    hdiutil detach "$MOUNT_POINT" -quiet || true
+    rm -rf "$MOUNT_POINT" 2>/dev/null || true
+    exit $status
+}}
+trap restore_old_target EXIT
+
+# Install: move the old app aside, move the verified new bundle into place,
+# and let the EXIT trap restore OLD_TARGET if a step fails.
+if [ -d {q_install_target} ]; then
+    echo "[helper] backing up existing app bundle to $OLD_TARGET"
+    mv {q_install_target} "$OLD_TARGET"
+fi
+mv "$TEMP_TARGET" {q_install_target}
+
+trap - EXIT
+rm -rf "$OLD_TARGET" 2>/dev/null || true
+echo "[helper] install complete: {q_install_target}"
+
+# Detach DMG and clean up mount point
+hdiutil detach "$MOUNT_POINT" -quiet || true
+rm -rf "$MOUNT_POINT" 2>/dev/null || true
+
+# Remove quarantine attribute from downloaded DMG contents
+xattr -dr com.apple.quarantine {q_install_target} 2>/dev/null || true
+
+# Launch the new app
+echo "[helper] launching {q_install_target}"
+open {q_install_target} || echo "[helper] WARNING: failed to launch app"
+echo "=== install helper finished: $(date) ==="
 """
         helper_path = updates_dir / "_install_helper.sh"
         helper_path.write_text(helper_content, encoding="utf-8")
@@ -535,7 +693,10 @@ open "{target}"
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        logger.info("[desktop] macOS install helper launched, target=%s", target)
+        logger.info(
+            "[desktop] macOS install helper launched, target=%s, install_target=%s",
+            target, install_target,
+        )
         return True
 
     @staticmethod
@@ -551,6 +712,13 @@ open "{target}"
         install_dir = str(app_executable.parent.resolve())
         backup_dir = f"{install_dir}.bak.$RANDOM"
 
+        # shlex.quote all external paths to prevent shell injection if the
+        # release API serves a malicious asset name.
+        q_target = shlex.quote(str(target))
+        q_install_dir = shlex.quote(install_dir)
+        q_backup_dir = shlex.quote(backup_dir)
+        q_executable = shlex.quote(f"{install_dir}/jiuwenswarm")
+
         helper_content = f"""#!/bin/bash
 set -e
 PARENT_PID={parent_pid}
@@ -558,14 +726,14 @@ while kill -0 "$PARENT_PID" 2>/dev/null; do
     sleep 1
 done
 
-BACKUP="{backup_dir}"
-if [ -d "{install_dir}" ]; then
-    mv "{install_dir}" "$BACKUP"
+BACKUP={q_backup_dir}
+if [ -d {q_install_dir} ]; then
+    mv {q_install_dir} "$BACKUP"
 fi
-mkdir -p "{install_dir}"
-tar xzf "{target}" -C "{install_dir}"
+mkdir -p {q_install_dir}
+tar xzf {q_target} -C {q_install_dir}
 rm -rf "$BACKUP" 2>/dev/null || true
-nohup "{install_dir}/jiuwenswarm" >/dev/null 2>&1 &
+nohup {q_executable} >/dev/null 2>&1 &
 """
         helper_path = updates_dir / "_install_helper.sh"
         helper_path.write_text(helper_content, encoding="utf-8")
@@ -909,6 +1077,7 @@ def main() -> None:
         _launch_windows_installer_helper(args.installer_path, args.app_executable, args.parent_pid)
         return
 
+    _cleanup_stale_update_artifacts()
     _setup_tui_path()
 
     runtime = DesktopRuntime(

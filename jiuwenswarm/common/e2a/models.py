@@ -18,6 +18,7 @@ from jiuwenswarm.common.e2a.constants import (
     E2A_SOURCE_PROTOCOL_A2A,
     E2A_SOURCE_PROTOCOL_ACP,
     E2A_SOURCE_PROTOCOL_E2A,
+    E2A_WIRE_INTERNAL_METADATA_KEYS,
 )
 
 
@@ -356,6 +357,8 @@ def _envelope_from_dict(data: dict[str, Any]) -> E2AEnvelope:
     meta_top = data.get("metadata")
     if isinstance(meta_top, dict) and meta_top:
         for k, v in meta_top.items():
+            if k in E2A_WIRE_INTERNAL_METADATA_KEYS:
+                continue
             if k not in channel_context:
                 channel_context[k] = v
 

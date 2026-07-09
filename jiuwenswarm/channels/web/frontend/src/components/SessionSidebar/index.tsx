@@ -518,19 +518,16 @@ export function SessionSidebar({
         <div className="collapsed-spacer" />
 
         {/* Settings icon */}
-        <Tooltip text={t('sessionSidebar.advancedConfig')} targetRef={settingsRef} visible={hoveredNav === 'settings'} />
         <button
           ref={settingsRef}
           className="collapsed-nav-item"
           onClick={toggleAdvancedConfig}
           onMouseEnter={() => handleMouseEnter('settings')}
           onMouseLeave={() => setHoveredNav(null)}
-          title={t('sessionSidebar.advancedConfig')}
         >
           <span className="collapsed-nav-item__icon">
             <img src={advancedConfigIcon} alt="" width="16" height="16" />
           </span>
-          <span className="collapsed-nav-item__label">{t('sessionSidebar.advancedConfig')}</span>
         </button>
 
         <AdvancedConfigPanel
@@ -621,7 +618,6 @@ export function SessionSidebar({
           ref={advancedBtnRef}
           className="advanced-config-btn"
           onClick={toggleAdvancedConfig}
-          title={t('sessionSidebar.advancedConfig')}
         >
           <img src={advancedConfigIcon} alt="" />
         </button>

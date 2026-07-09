@@ -111,6 +111,57 @@ async def test_handle_command_add_dir_returns_path_and_remember(
 
 
 @pytest.mark.asyncio
+async def test_handle_command_add_dir_does_not_wait_for_agent_reload(
+    server, fake_ws, monkeypatch
+):
+    persist_stub = {
+        "ok": True,
+        "normalized": "/tmp/demo",
+    }
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "persist_cli_trusted_directory",
+        lambda _raw: persist_stub,
+    )
+    monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {})
+    reload_started = asyncio.Event()
+
+    async def _blocking_reload(_config, _env):
+        reload_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        server.get_agent_manager(),
+        "reload_agents_config",
+        _blocking_reload,
+    )
+    request = AgentRequest(
+        request_id="req-add-dir-no-reload-wait",
+        channel_id="tui",
+        req_method=ReqMethod.COMMAND_ADD_DIR,
+        params={"path": "/tmp/demo", "remember": True},
+    )
+
+    await asyncio.wait_for(
+        server.handle_command_add_dir_for_test(fake_ws, request, asyncio.Lock()),
+        timeout=0.5,
+    )
+
+    assert not reload_started.is_set()
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-add-dir-no-reload-wait",
+            "payload": {
+                "path": "/tmp/demo",
+                "remember": True,
+                "persist": persist_stub,
+            },
+            "ok": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_handle_command_compact_returns_custom_instructions(server, fake_ws, monkeypatch):
     request = AgentRequest(
         request_id="req-compact",

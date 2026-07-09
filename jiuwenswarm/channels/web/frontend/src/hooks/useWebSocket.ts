@@ -66,22 +66,6 @@ function isCompletedResumeResult(interruptResult: unknown): boolean {
   return result.intent === 'resume' && result.success === true && result.has_active_task === false;
 }
 
-function isTerminalInterruptResult(interruptResult: unknown): boolean {
-  if (!interruptResult || typeof interruptResult !== 'object') {
-    return false;
-  }
-  const result = interruptResult as {
-    intent?: unknown;
-    success?: unknown;
-    has_active_task?: unknown;
-  };
-  return (
-    result.success === true &&
-    (result.intent === 'cancel' ||
-      (result.intent === 'resume' && result.has_active_task === false))
-  );
-}
-
 function getConnectSignature(options: WebConnectOptions): string {
   return JSON.stringify({
     provider: options.provider || '',
@@ -627,39 +611,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     []
   );
 
-  const applyInterruptAcceptedState = useCallback(
-    (sessionId: string, intent: InterruptIntent, payload: Record<string, unknown>) => {
-      const accepted = payload.accepted !== false && payload.success !== false;
-      if (!accepted || (intent !== 'pause' && intent !== 'cancel')) return;
-
-      const resultPayload: InterruptResultPayload = {
-        ...payload,
-        session_id: sessionId,
-        intent,
-        success: true,
-        message: pickString(payload.message) ?? '',
-      } as InterruptResultPayload;
-      useChatStore.getState().setInterruptResult(sessionId, resultPayload);
-
-      const isPause = intent === 'pause';
-      useChatStore.getState().setPaused(sessionId, isPause);
-      useChatStore.getState().setProcessing(sessionId, false);
-      useChatStore.getState().setThinking(sessionId, false);
-      if (!isPause) {
-        useChatStore.getState().clearSubtasks(sessionId);
-        useChatStore.getState().stopStreaming(sessionId);
-      }
-
-      const sessionPatch: Partial<Session> = {
-        is_processing: false,
-        updated_at: new Date().toISOString(),
-      };
-      updateSession(sessionId, sessionPatch);
-      useWorkspaceStore.getState().patchSession(sessionId, sessionPatch);
-    },
-    [updateSession]
-  );
-
   const handleTtsPlayback = useCallback(
     (sessionId: string, messageId: string, content: string) => {
       const sanitized = sanitizeTtsText(content);
@@ -1175,8 +1126,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const selectedModel = useSessionStore.getState().getRuntime(sessionId)?.selectedModelName;
           if (selectedModel) params.model_name = selectedModel;
         }
-        const response = await request<Record<string, unknown>>('chat.interrupt', params);
-        applyInterruptAcceptedState(sessionId, intent, response);
+        await request('chat.interrupt', params);
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
@@ -1185,7 +1135,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     },
     [
       closeActiveTeamLeaderMessages,
-      applyInterruptAcceptedState,
       request,
       resetContextCompressionTurn,
       setConnectionStats,
@@ -2136,8 +2085,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 如果 interrupt_result 指示任务已完成，忽略 processing_status=true
         const interruptResult = useChatStore.getState().getRuntime(sessionId)?.interruptResult;
         const resumeAlreadyCompleted = isCompletedResumeResult(interruptResult);
-        const terminalInterruptResult = isTerminalInterruptResult(interruptResult);
-        if (isProcessingNow && terminalInterruptResult) {
+        if (isProcessingNow && resumeAlreadyCompleted) {
           return;
         }
         if (isProcessingNow && useChatStore.getState().getRuntime(sessionId)?.isPaused) {

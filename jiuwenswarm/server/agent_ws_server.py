@@ -22,6 +22,11 @@ from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
 from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
+from jiuwenswarm.common.e2a.constants import (
+    E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
+    E2A_INTERNAL_CANCEL_SOURCE_KEY,
+    E2A_WIRE_INTERNAL_METADATA_KEYS,
+)
 from jiuwenswarm.common.e2a.gateway_normalize import (
     E2A_FALLBACK_FAILED_KEY,
     E2A_INTERNAL_CONTEXT_KEY,
@@ -33,6 +38,7 @@ from jiuwenswarm.common.e2a.wire_codec import (
     encode_agent_response_for_wire,
     encode_json_parse_error_wire,
 )
+from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.ws_diagnostics import (
@@ -527,6 +533,11 @@ When done, briefly summarize what was fixed (or confirm the code was already cle
 """
 
 
+def _is_env_api_base_placeholder(env_updates: dict) -> bool:
+    """检查 env_updates 中的 API_BASE 是否指向 example.* 等占位域名。"""
+    return is_placeholder_api_base(str(env_updates.get("API_BASE", "") or "").strip())
+
+
 def _build_simplify_prompt(target: str = "") -> str:
     """Build the prompt for the /simplify command.
 
@@ -744,6 +755,13 @@ def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
     req_method = data.get("req_method")
     if req_method is not None and isinstance(req_method, str):
         req_method = ReqMethod(req_method)
+    metadata = data.get("metadata")
+    if isinstance(metadata, dict):
+        metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key not in E2A_WIRE_INTERNAL_METADATA_KEYS
+        } or None
 
     return AgentRequest(
         request_id=data["request_id"],
@@ -753,7 +771,7 @@ def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
         params=data.get("params", {}),
         is_stream=data.get("is_stream", False),
         timestamp=data.get("timestamp", 0.0),
-        metadata=data.get("metadata"),
+        metadata=metadata,
     )
 
 
@@ -1622,6 +1640,7 @@ class AgentWebSocketServer:
                 # 中断请求：根据 intent 决定是否取消流式任务
                 sid = request.session_id or "default"
                 intent = request.params.get("intent", "cancel") if isinstance(request.params, dict) else "cancel"
+                cleanup_after_cancel = self._is_client_disconnect_cancel_request(request)
 
                 # 只有 cancel/supplement 才取消流式任务
                 # pause/resume 不取消，因为任务仍在运行（pause 在 checkpoint 阻塞，resume 解除阻塞）
@@ -1636,16 +1655,32 @@ class AgentWebSocketServer:
                         )
                         stream_task.cancel()
 
-                # 专门处理 cancel，复用已有 agent（不再 fallthrough 到 _handle_unary）
-                await self._handle_cancel(ws, request, send_lock)
-
-                # 等待被取消的 stream task 完成清理（finally 块中的 heartbeat 取消、
-                # _session_stream_tasks 清理、plan mode exit 检查等），避免僵尸调用。
-                if stream_task is not None and not stream_task.done():
-                    try:
-                        await stream_task
-                    except asyncio.CancelledError:
-                        pass
+                try:
+                    # 专门处理 cancel，复用已有 agent（不再 fallthrough 到 _handle_unary）
+                    await self._handle_cancel(
+                        ws,
+                        request,
+                        send_lock,
+                        allow_create=not cleanup_after_cancel,
+                    )
+                finally:
+                    # 等待被取消的 stream task 完成清理（finally 块中的 heartbeat 取消、
+                    # _session_stream_tasks 清理、plan mode exit 检查等），避免僵尸调用。
+                    if stream_task is not None and not stream_task.done():
+                        try:
+                            await stream_task
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as exc:
+                            logger.warning(
+                                "[AgentWebSocketServer] cancel: stream task cleanup failed: "
+                                "session_id=%s intent=%s error=%s",
+                                sid,
+                                intent,
+                                exc,
+                            )
+                    if cleanup_after_cancel and intent in ("cancel", "supplement"):
+                        await self._cleanup_client_disconnect_session_runtime(request)
                 return
             if request.is_stream:
                 await self._handle_stream(ws, request, send_lock)
@@ -1713,6 +1748,41 @@ class AgentWebSocketServer:
             ReqMethod.CHAT_ANSWER,
         )
 
+    @staticmethod
+    def _is_client_disconnect_cancel_request(request: AgentRequest) -> bool:
+        metadata = request.metadata if isinstance(request.metadata, dict) else {}
+        return (
+            str(metadata.get(E2A_INTERNAL_CANCEL_SOURCE_KEY) or "").strip()
+            == E2A_CANCEL_SOURCE_CLIENT_DISCONNECT
+        )
+
+    async def _cleanup_client_disconnect_session_runtime(self, request: AgentRequest) -> None:
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = str(request.session_id or params.get("session_id") or "").strip()
+        if not session_id:
+            return
+        channel_id = request.channel_id or "default"
+        try:
+            cleaned = await self._agent_manager.cleanup_session_runtime(
+                channel_id=channel_id,
+                session_id=session_id,
+            )
+            logger.info(
+                "[AgentWebSocketServer] client disconnect session runtime cleanup: "
+                "channel_id=%s session_id=%s cleaned=%s",
+                channel_id,
+                session_id,
+                cleaned,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[AgentWebSocketServer] client disconnect session runtime cleanup failed: "
+                "channel_id=%s session_id=%s error=%s",
+                channel_id,
+                session_id,
+                exc,
+            )
+
     async def _trigger_before_chat_request_hook(self, request: AgentRequest) -> None:
         if not self._should_trigger_before_chat_request_hook(request):
             return
@@ -1732,7 +1802,14 @@ class AgentWebSocketServer:
 
         await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.BEFORE_CHAT_REQUEST, ctx)
 
-    async def _handle_cancel(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+    async def _handle_cancel(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+        *,
+        allow_create: bool = True,
+    ) -> None:
         """处理 CHAT_CANCEL 中断请求：复用已有 agent 实例，避免创建新实例。
 
         cancel 请求的 params 中可能没有 mode 信息，如果走 _handle_unary 的 get_agent(mode) 路径
@@ -1760,8 +1837,28 @@ class AgentWebSocketServer:
         if agent is None:
             agent = self._agent_manager.get_agent_nowait(channel_id, project_dir=project_dir)
 
+        resp: AgentResponse | None = None
+
+        if agent is None and not allow_create:
+            logger.info(
+                "[AgentWebSocketServer] cancel: no existing agent, skip create: "
+                "channel_id=%s session_id=%s",
+                channel_id,
+                request.session_id,
+            )
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "event_type": "chat.interrupt_result",
+                    "success": True,
+                    "message": "No active agent runtime",
+                },
+            )
+
         # 3. 仍然没找到时 fallback 到 get_agent（异常场景）
-        if agent is None:
+        if agent is None and resp is None:
             logger.warning(
                 "[AgentWebSocketServer] cancel: 未找到已有 agent，fallback 创建: channel_id=%s",
                 channel_id,
@@ -1775,10 +1872,12 @@ class AgentWebSocketServer:
                 sub_mode=sub_mode,
             )
 
-        if agent is None:
+        if agent is None and resp is None:
             raise ValueError("Failed to get agent for cancel request")
 
-        resp = await agent.process_message(request)
+        if resp is None:
+            resp = await agent.process_message(request)
+
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
@@ -3322,14 +3421,6 @@ class AgentWebSocketServer:
                 persist = {"ok": False, "error": "path is required"}
             else:
                 persist = persist_cli_trusted_directory(str(directory_path))
-                if persist.get("ok", False):
-                    try:
-                        await self._agent_manager.reload_agents_config(get_config(), None)
-                    except Exception:
-                        logger.debug(
-                            "[AgentWebSocketServer] command.add_dir reload failed (non-critical)",
-                            exc_info=True,
-                        )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -3792,6 +3883,20 @@ class AgentWebSocketServer:
                         channel_id=request.channel_id,
                         ok=False,
                         payload={"error": "No env_updates provided"},
+                    )
+                elif _is_env_api_base_placeholder(env_updates):
+                    api_base_val = str(env_updates.get("API_BASE", ""))
+                    logger.warning(
+                        "[command.model] switch_model rejected: API_BASE is a placeholder domain: %s",
+                        api_base_val,
+                    )
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload={
+                            "error": f"API_BASE '{api_base_val}' 指向占位域名，无法实际提供服务，请配置有效的 API 地址",
+                        },
                     )
                 else:
                     for k, v in env_updates.items():

@@ -2360,6 +2360,16 @@ class JiuWenSwarm:
 
     # ---------- 资源清理 ----------
 
+    async def cleanup_session_runtime(self, session_id: str) -> bool:
+        """Release in-memory runtime owned by one session while keeping persisted history."""
+        adapter = self._adapter
+        if adapter is None:
+            return False
+        cleanup_fn = getattr(adapter, "cleanup_session_adapter", None)
+        if not callable(cleanup_fn):
+            return False
+        return bool(await cleanup_fn(session_id))
+
     async def cancel_inflight_work(self, log_prefix: str = "[gateway disconnect] ") -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时调用：取消 session 流式任务并中止 adapter 内层循环。"""
         await self._session_manager.cancel_all_session_tasks(log_prefix)

@@ -552,6 +552,48 @@ class XiaoyiChannel(BaseChannel):
                 )
             return
 
+        # 处理错误消息：发送 failed 状态 + 错误文本 + 结束会话
+        if msg.event_type == EventType.CHAT_ERROR:
+            error_text = get_status_text_for_event(msg.event_type, msg.payload)
+            # 优先从 payload.error 提取详细错误信息
+            if isinstance(msg.payload, dict):
+                error_detail = msg.payload.get("error", "")
+                if error_detail:
+                    error_text = str(error_detail)
+
+            # 发送 failed 状态更新
+            for url_key in list(self._ws_connections.keys()):
+                await self._send_status_update_with_state(
+                    task_id, session_id, error_text, "failed", url_key
+                )
+
+            # 发送错误文本消息（is_final=True）
+            for url_key, ws in self._ws_connections.items():
+                if ws:
+                    try:
+                        await self._send_text_response(
+                            session_id,
+                            task_id,
+                            error_text,
+                            url_key,
+                            append=True,
+                            last_chunk=True,
+                            is_final=True,
+                        )
+                    except Exception as e:
+                        logger.warning(f"XiaoyiChannel 发送错误消息失败 ({url_key}): {e}")
+
+            # 清理 session 状态
+            if session_id:
+                await self._stop_session_heartbeat(session_id)
+                self._clear_task_timeout(session_id)
+                self._clear_session_timeout(session_id)
+                self._mark_session_completed(session_id)
+                self._accumulated_texts.pop(session_id, None)
+
+            logger.warning(f"XiaoyiChannel 发送错误消息: session={session_id}, error={error_text}")
+            return
+
         content = ""
         cron_job_name = ""
         if isinstance(msg.payload, dict):
