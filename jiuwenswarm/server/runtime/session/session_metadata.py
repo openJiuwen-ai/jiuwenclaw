@@ -17,7 +17,7 @@ from jiuwenswarm.common.utils import get_agent_sessions_dir
 logger = logging.getLogger(__name__)
 
 # ---------- 异步写入队列(与 session_history 保持一致的模式) ----------
-_METADATA_QUEUE: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue(maxsize=5000)
+_METADATA_QUEUE: queue.Queue[tuple[str, dict[str, Any], bool]] = queue.Queue(maxsize=5000)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 _FILE_LOCK = threading.Lock()
@@ -102,7 +102,11 @@ def _read_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
     return {}
 
 
-def _write_metadata_sync(session_id: str, metadata: dict[str, Any]) -> None:
+def _write_metadata_sync(
+    session_id: str,
+    metadata: dict[str, Any],
+    preserve_pin_fields: bool = False,
+) -> dict[str, Any]:
     """同步写入会话元数据(由后台 worker 或 fallback 调用)
 
     注意: 不更新 _METADATA_CACHE。缓存仅由 _enqueue_write 维护,
@@ -110,11 +114,46 @@ def _write_metadata_sync(session_id: str, metadata: dict[str, Any]) -> None:
     读取不到 agentserver 进程写入的最新数据。
     """
     fpath = _metadata_file(session_id)
+    to_write = metadata
     with _FILE_LOCK:
+        if preserve_pin_fields and fpath.exists():
+            try:
+                current = json.loads(fpath.read_text(encoding="utf-8") or "{}")
+                if isinstance(current, dict):
+                    to_write = _merge_pin_fields(current, metadata)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("读取 metadata.json 置顶字段失败: %s", exc)
         fpath.write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2),
+            json.dumps(to_write, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+    return to_write
+
+
+def _merge_pin_fields(current: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    merged = metadata.copy()
+    if "pinned" in current:
+        merged["pinned"] = bool(current.get("pinned"))
+    if "pin_order" in current:
+        merged["pin_order"] = int(current.get("pin_order") or 0)
+    return merged
+
+
+def _merge_pin_fields_from_disk(session_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    """Preserve latest disk pin state for async writes that do not own pin fields."""
+    fpath = get_agent_sessions_dir() / session_id / "metadata.json"
+    if not fpath.exists():
+        return metadata
+    try:
+        with _FILE_LOCK:
+            current = json.loads(fpath.read_text(encoding="utf-8") or "{}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("读取 metadata.json 置顶字段失败: %s", exc)
+        return metadata
+    if not isinstance(current, dict):
+        return metadata
+
+    return _merge_pin_fields(current, metadata)
 
 
 def _ensure_worker_started() -> None:
@@ -127,9 +166,16 @@ def _ensure_worker_started() -> None:
 
         def _worker() -> None:
             while True:
-                sid, metadata = _METADATA_QUEUE.get()
+                sid, metadata, preserve_pin_fields = _METADATA_QUEUE.get()
                 try:
-                    _write_metadata_sync(sid, metadata)
+                    written = _write_metadata_sync(
+                        sid,
+                        metadata,
+                        preserve_pin_fields=preserve_pin_fields,
+                    )
+                    if preserve_pin_fields:
+                        with _CACHE_LOCK:
+                            _METADATA_CACHE[sid] = written.copy()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("metadata 异步写入失败: %s", exc)
                 finally:
@@ -140,16 +186,52 @@ def _ensure_worker_started() -> None:
         _WORKER_STARTED = True
 
 
-def _enqueue_write(session_id: str, metadata: dict[str, Any]) -> None:
-    """将写入操作放入异步队列,队列满时退化为同步写"""
+def _enqueue_write(
+    session_id: str,
+    metadata: dict[str, Any],
+    sync_write: bool = False,
+    preserve_pin_fields: bool = False,
+) -> None:
+    """将写入操作放入异步队列,队列满时退化为同步写。
+
+    ``sync_write=True`` 时跳过异步队列,在更新缓存后直接同步落盘。
+    用于跨进程敏感写入(如 ``set_session_pinned``):返回前必须落盘,
+    否则只读磁盘的另一进程(AgentServer)会读到陈旧数据。
+
+    注意: ``_write_metadata_sync`` 本身不更新缓存,缓存更新统一在此函数
+    顶部完成,与异步路径行为一致,避免 ``init_session_metadata`` 污染缓存。
+    """
     # 立即更新缓存,确保后续读取能看到最新状态
+    if preserve_pin_fields:
+        metadata = _merge_pin_fields_from_disk(session_id, metadata)
     with _CACHE_LOCK:
         _METADATA_CACHE[session_id] = metadata.copy()
+    if sync_write:
+        written = _write_metadata_sync(
+            session_id,
+            metadata,
+            preserve_pin_fields=preserve_pin_fields,
+        )
+        if preserve_pin_fields:
+            with _CACHE_LOCK:
+                _METADATA_CACHE[session_id] = written.copy()
+        return
     _ensure_worker_started()
     try:
-        _METADATA_QUEUE.put_nowait((session_id, metadata))
+        _METADATA_QUEUE.put_nowait((session_id, metadata, preserve_pin_fields))
     except queue.Full:
-        _write_metadata_sync(session_id, metadata)
+        if preserve_pin_fields:
+            metadata = _merge_pin_fields_from_disk(session_id, metadata)
+            with _CACHE_LOCK:
+                _METADATA_CACHE[session_id] = metadata.copy()
+        written = _write_metadata_sync(
+            session_id,
+            metadata,
+            preserve_pin_fields=preserve_pin_fields,
+        )
+        if preserve_pin_fields:
+            with _CACHE_LOCK:
+                _METADATA_CACHE[session_id] = written.copy()
 
 
 def _auto_title(content: str) -> str:
@@ -222,6 +304,7 @@ def update_session_metadata(
     pin_order: int | None = None,
     touch_last_message_at: bool = True,
     cache_bust: bool = False,
+    sync_write: bool = False,
 ) -> None:
     """更新会话元数据(异步写入,不阻塞调用方)
 
@@ -241,6 +324,11 @@ def update_session_metadata(
     cache_bust：是否强制读盘(跳过内存缓存)。默认 ``False``。
     跨进程同步场景(如 ``set_session_pinned`` 的重编号)应传 ``True``,
     避免 Gateway 缓存中的陈旧数据覆盖 AgentServer 的并发更新。
+
+    sync_write：是否在返回前同步落盘。默认 ``False``(走异步队列)。
+    跨进程敏感写入(如 ``set_session_pinned`` 的置顶/取消置顶/重编号)应传
+    ``True``:返回成功前落盘,否则只读磁盘的另一进程(AgentServer)在窗口期
+    内会读到陈旧数据,后续整份 metadata 回写会覆盖刚写入的 ``pinned`` 状态。
     """
     metadata = _read_metadata(session_id, cache_bust=cache_bust)
 
@@ -324,7 +412,12 @@ def update_session_metadata(
         if touch_last_message_at:
             metadata["last_message_at"] = _current_timestamp()
 
-    _enqueue_write(session_id, metadata)
+    _enqueue_write(
+        session_id,
+        metadata,
+        sync_write=sync_write,
+        preserve_pin_fields=pinned is None and pin_order is None,
+    )
 
 
 def sync_session_request_metadata(
@@ -358,12 +451,18 @@ def sync_session_request_metadata(
     Returns:
         本会话**生效**的 project_dir：磁盘已锁定则返回锁定值，否则返回请求候选值
         （首次锁定后即为该值）；无 session_id 或无候选值时返回 None。
+
+    读盘策略：始终 ``cache_bust=True`` 强制读磁盘。本接口由 AgentServer 进程
+    调用,而 ``pinned``/``pin_order`` 由 Gateway 进程写入;AgentServer 的内存
+    缓存可能陈旧(上一轮聊天留下的 ``pinned=False``)。若用缓存值整份回写,
+    会覆盖 Gateway 刚落盘的置顶状态。强制读盘确保本进程只保留磁盘最新值,
+    不主动改 ``pinned``/``pin_order``(仅写请求级字段)。
     """
     session_id = (session_id or "").strip()
     if not session_id:
         return None
 
-    metadata = _read_metadata(session_id)
+    metadata = _read_metadata(session_id, cache_bust=True)
     effective_project_dir: str | None = None
 
     if not metadata:
@@ -384,6 +483,8 @@ def sync_session_request_metadata(
             "project_id": project_id or "",
             "model": model or "",
             "last_user_message_at": last_user_message_at if last_user_message_at is not None else now,
+            "pinned": False,
+            "pin_order": 0,
             "status": "idle",
         }
         effective_project_dir = project_dir or None
@@ -421,7 +522,7 @@ def sync_session_request_metadata(
             metadata["channel_id"] = channel_id
         metadata["last_message_at"] = _current_timestamp()
 
-    _enqueue_write(session_id, metadata)
+    _enqueue_write(session_id, metadata, preserve_pin_fields=True)
     return effective_project_dir
 
 
@@ -484,15 +585,17 @@ def set_session_pinned(session_id: str, pinned: bool) -> tuple[bool, int] | None
         if not meta:
             return None
         # 1. 设置目标会话 pinned 状态(保留原 pin_order 供重编号排序,取消时清零)
+        #    全部 sync_write=True:跨进程敏感写入,返回前必须落盘,否则只读磁盘的
+        #    AgentServer 在窗口期内读到旧值,后续整份 metadata 回写会覆盖 pinned 状态。
         if pinned:
             update_session_metadata(
                 session_id=session_id, pinned=True,
-                touch_last_message_at=False, cache_bust=True,
+                touch_last_message_at=False, cache_bust=True, sync_write=True,
             )
         else:
             update_session_metadata(
                 session_id=session_id, pinned=False, pin_order=0,
-                touch_last_message_at=False, cache_bust=True,
+                touch_last_message_at=False, cache_bust=True, sync_write=True,
             )
 
         # 2. 收集所有置顶会话(读缓存:步骤 1 刚把新状态写入缓存,cache_bust=False
@@ -520,7 +623,7 @@ def set_session_pinned(session_id: str, pinned: bool) -> tuple[bool, int] | None
         for idx, (sid, _old) in enumerate(pinned_list, start=1):
             update_session_metadata(
                 session_id=sid, pinned=True, pin_order=idx,
-                touch_last_message_at=False, cache_bust=True,
+                touch_last_message_at=False, cache_bust=True, sync_write=True,
             )
             new_orders[sid] = idx
 
@@ -538,7 +641,7 @@ def increment_session_round_count(session_id: str) -> int:
     new_round = current_round + 1
     metadata["round_id"] = new_round
     metadata["last_message_at"] = _current_timestamp()
-    _enqueue_write(session_id, metadata)
+    _enqueue_write(session_id, metadata, preserve_pin_fields=True)
     return new_round
 
 
@@ -621,7 +724,7 @@ def set_session_delivery_context(
         delivery_context["route_metadata"] = normalized_route_metadata
 
     metadata["delivery_context"] = delivery_context
-    _enqueue_write(session_id, metadata)
+    _enqueue_write(session_id, metadata, preserve_pin_fields=True)
     return copy.deepcopy(delivery_context)
 
 

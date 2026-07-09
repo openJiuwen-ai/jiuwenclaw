@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -1173,6 +1174,65 @@ class TestSyncSessionRequestMetadata:
         assert meta["status"] == "idle"
         assert meta["last_user_message_at"] > 0
 
+    @staticmethod
+    def test_sync_preserves_disk_pinned_over_stale_cache(sessions_dir):
+        """跨进程缓存覆盖回归：AgentServer 缓存里残留 pinned=False,
+        但磁盘已被 Gateway 置顶为 pinned=True。sync 必须强制读盘,
+        保留磁盘的 pinned=True/pin_order,不被本进程旧缓存覆盖。
+        """
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            _METADATA_CACHE,
+            _write_metadata_sync,
+            init_session_metadata,
+            sync_session_request_metadata,
+        )
+
+        init_session_metadata(session_id="s_pin")  # 初始 pinned=False
+        # 模拟 Gateway 跨进程把磁盘置顶(pinned=True, pin_order=1):
+        # _write_metadata_sync 不碰缓存,正好模拟另一进程的落盘。
+        _write_metadata_sync("s_pin", {
+            **_read_json(sessions_dir / "s_pin" / "metadata.json"),
+            "pinned": True,
+            "pin_order": 1,
+        })
+        # 投毒 AgentServer 本进程缓存为旧值 pinned=False(上一轮聊天残留)
+        _METADATA_CACHE["s_pin"] = {
+            **_read_json(sessions_dir / "s_pin" / "metadata.json"),
+            "pinned": False,
+            "pin_order": 0,
+        }
+
+        # AgentServer 收到一次聊天请求 → 调 sync 写 model/mode 等请求级字段
+        sync_session_request_metadata(
+            session_id="s_pin", model="glm-5", mode="code",
+            last_user_message_at=9999.0,
+        )
+        _drain_queue()
+
+        # 断言:磁盘仍是 Gateway 写入的置顶状态,未被旧缓存覆盖
+        data = _read_json(sessions_dir / "s_pin" / "metadata.json")
+        assert data["pinned"] is True, "置顶状态被 AgentServer 旧缓存回写覆盖"
+        assert data["pin_order"] == 1, "pin_order 不应丢失"
+        # 请求级字段仍按语义写入
+        assert data["model"] == "glm-5"
+        assert data["mode"] == "code"
+        assert data["last_user_message_at"] == 9999.0
+
+    @staticmethod
+    def test_sync_new_branch_includes_pinned_fields(sessions_dir):
+        """兜底新建分支写入 pinned/pin_order 默认值,磁盘 schema 齐全。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            sync_session_request_metadata,
+        )
+
+        sync_session_request_metadata(
+            session_id="s_new_pin", channel_id="web", model="glm-5",
+        )
+        _drain_queue()
+        data = _read_json(sessions_dir / "s_new_pin" / "metadata.json")
+        assert data["pinned"] is False
+        assert data["pin_order"] == 0
+
 
 # ===========================================================================
 # _sync_chat_request_metadata —— AgentServer 进程层薄封装（模块级函数）
@@ -1682,3 +1742,92 @@ class TestMigrateLegacySessionMetadata:
 
         migrate_legacy_session_metadata_at_startup()
         assert _read_json(sdir / "metadata.json")["project_id"] == ""
+
+
+# ===========================================================================
+# set_session_pinned —— 跨进程同步落盘(sync_write)回归
+# ===========================================================================
+class TestSetSessionPinnedSyncWrite:
+    """set_session_pinned 的所有写入必须 sync_write=True:返回前已落盘。
+
+    场景:Gateway 置顶后立即返回成功,AgentServer(只读磁盘)若在异步写入
+    落盘前读盘会拿到旧值。本测试不等 _METADATA_QUEUE.join(),立即读盘,
+    断言置顶/取消置顶状态已同步落盘。
+    """
+
+    @staticmethod
+    def test_pin_lands_on_disk_before_return(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            set_session_pinned,
+        )
+
+        init_session_metadata(session_id="s_pw")  # pinned=False
+
+        result = set_session_pinned("s_pw", True)
+        # 不调 _drain_queue():验证返回前已落盘
+        assert result is not None
+        assert result[0] is True  # pinned=True
+
+        data = _read_json(sessions_dir / "s_pw" / "metadata.json")
+        assert data["pinned"] is True, "置顶未在返回前同步落盘"
+        assert data["pin_order"] >= 1
+
+    @staticmethod
+    def test_unpin_lands_on_disk_before_return(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            set_session_pinned,
+        )
+
+        init_session_metadata(session_id="s_unpw")
+        set_session_pinned("s_unpw", True)  # 先置顶(同步落盘)
+
+        result = set_session_pinned("s_unpw", False)  # 再取消置顶
+        # 不调 _drain_queue():取消置顶也必须落盘(重编号不再写非置顶会话)
+        assert result is not None
+        assert result[0] is False
+
+        data = _read_json(sessions_dir / "s_unpw" / "metadata.json")
+        assert data["pinned"] is False, "取消置顶未在返回前同步落盘"
+        assert data["pin_order"] == 0
+
+
+class TestSetSessionPinnedQueuedWriteRace:
+    """运行中已有旧异步 metadata 写入时,置顶状态不能被旧快照回滚。"""
+
+    @staticmethod
+    def test_old_async_write_does_not_overwrite_pin_after_return(sessions_dir, monkeypatch):
+        from jiuwenswarm.server.runtime.session import session_metadata as sm
+
+        original_write = sm._write_metadata_sync
+        old_write_started = threading.Event()
+        release_old_write = threading.Event()
+
+        def _delayed_write(session_id, metadata, preserve_pin_fields=False):
+            if session_id == "s_async_pin" and metadata.get("model") == "old-queued-write":
+                old_write_started.set()
+                assert release_old_write.wait(5), "old queued write was not released"
+            return original_write(
+                session_id,
+                metadata,
+                preserve_pin_fields=preserve_pin_fields,
+            )
+
+        monkeypatch.setattr(sm, "_write_metadata_sync", _delayed_write)
+
+        sm.init_session_metadata(session_id="s_async_pin")
+        sm.update_session_metadata(session_id="s_async_pin", model="old-queued-write")
+        assert old_write_started.wait(5), "old queued write did not start"
+
+        result = sm.set_session_pinned("s_async_pin", True)
+        assert result == (True, 1)
+        assert _read_json(sessions_dir / "s_async_pin" / "metadata.json")["pinned"] is True
+
+        release_old_write.set()
+        _drain_queue()
+
+        data = _read_json(sessions_dir / "s_async_pin" / "metadata.json")
+        assert data["model"] == "old-queued-write"
+        assert data["pinned"] is True
+        assert data["pin_order"] == 1
