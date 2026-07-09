@@ -6101,7 +6101,7 @@ class JiuWenClawDeepAdapter:
         summaries = JiuWenClawDeepAdapter._build_skill_turbo_artifacts_summary(nodes)
         if not summaries:
             return None
-        lines = [f"[SkillTurbo ({skill}) 已完成节点产物]"] + summaries
+        lines = [f"[SkillAccelerationExec ({skill}) 已完成节点产物]"] + summaries
         logger.info(
             "[JiuWenClawDeepAdapter] SkillTurbo node artifacts found session=%s nodes=%d",
             getattr(session, "session_id", "?"),

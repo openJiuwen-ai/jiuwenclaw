@@ -126,7 +126,7 @@ def _build_artifact_summary(holder: dict[str, Any]) -> str:
     """
     if not holder:
         return ""
-    lines = ["[SkillTurbo 产物摘要]"]
+    lines = ["[SkillAccelerationExec 产物摘要]"]
     for plan_name, node_info in holder.items():
         if not isinstance(node_info, dict):
             continue
@@ -177,16 +177,21 @@ def _wrap_skill_turbo_result(
         "技能加速模块。当用户意图涉及技能类任务（如生成 PPT、文档转换等结构化产出）时，"
         "可优先尝试调用此工具以获得更快的生成流程。工具内部会二次判断是否真正匹配已支持的技能，"
         "不匹配时自动降级为普通对话。当前内部支持 ppt-craft 技能（PPT 演示文稿制作）。"
+        "【重要】每次调用仅处理一个独立任务。若用户要求生成多个同类产物（如多份不同主题的 PPT），"
+        "必须为每个产物分别发起独立调用，且严格串行：等待前一次调用完全结束并收到返回结果后，"
+        "才能发起下一次调用。严禁在同一轮对话中并行发起多次调用。"
     ),
 )
 async def skill_turbo(query: str) -> dict[str, Any]:
-    """执行 SkillTurbo 规划化任务。
+    """执行 SkillAccelerationExec 任务。
 
     Args:
-        query: 对用户本轮诉求的忠实总结，须严格基于用户原话与历史上下文中已有的信息，
+        query: 对单个任务的忠实总结，须严格基于用户原话与历史上下文中已有的信息，
             不得自行扩写、脑补或补充用户未提及的内容细节（如擅自罗列章节大纲、
             技术要点、子主题等）。仅在用户表达零散时做必要的凝练与指代消解，
             确保任务目标、产物与约束完整可执行，但不新增任何信息。
+            每次调用只处理一个任务；若用户要求多个任务，必须串行调用：
+            等待前一次调用完成并收到返回结果后，再发起下一次调用。
     """
     from jiuwenclaw.agentserver.skill_turbo.agent import SkillTurbo, SkillTurboNotHandled
     from jiuwenclaw.agentserver.tools.subagent_executor import get_subagent_parent_session
@@ -200,7 +205,7 @@ async def skill_turbo(query: str) -> dict[str, Any]:
     adapter = get_current_skill_turbo_adapter()
     if adapter is None:
         return _wrap_skill_turbo_result(
-            {"success": False, "error": "SkillTurbo adapter not initialized"}
+            {"success": False, "error": "SkillAccelerationExec 未初始化"}
         )
 
     parent_session: Session | None = get_subagent_parent_session()
@@ -310,7 +315,7 @@ async def skill_turbo(query: str) -> dict[str, Any]:
     except SkillTurboNotHandled as exc:
         logger.info("[SkillTurboTool] SkillTurbo 未处理: %s", exc)
         return _wrap_skill_turbo_result(
-            {"success": False, "error": f"SkillTurbo 未处理: {exc}"},
+            {"success": False, "error": f"SkillAccelerationExec 未处理: {exc}"},
             artifact_holder=skill_turbo_inst.artifact_holder,
         )
     except Exception as exc:
