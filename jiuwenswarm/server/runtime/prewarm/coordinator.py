@@ -94,7 +94,7 @@ class PrewarmCoordinator:
     async def _fire_request(self, client: Any, body: Dict[str, Any]) -> None:
         """Issue a single aiohttp POST; swallow all errors."""
         cfg = client.model_client_config
-        url = f"{cfg.api_base.rstrip('/')}/chat/completions"
+        url = _chat_completions_url(cfg.api_base)
         headers = {"Content-Type": "application/json"}
         custom = getattr(cfg, "custom_headers", None) or {}
         headers.update(custom)
@@ -155,7 +155,27 @@ class PrewarmCoordinator:
             return
 
         asyncio.create_task(self._fire_request(client, body))
-        
+
+
+def _chat_completions_url(api_base: str) -> str:
+    """Resolve the chat-completions endpoint from an api_base that may or may
+    not include the /v1 segment.
+
+    Two real-client conventions exist: InferenceAffinity appends
+    ``/v1/chat/completions`` to a bare host, while OpenAI/SiliconFlow pass a
+    base already ending in ``/v1`` and append only ``/chat/completions``.
+    Normalize so the prewarm request hits the same path the real request uses
+    regardless of convention (avoids both double-``/v1`` and missing-``/v1``
+    404s).
+    """
+    base = (api_base or "").rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    if not base.endswith("/v1"):
+        base = f"{base}/v1"
+    return f"{base}/chat/completions"
+
+
 def _approx_input_tokens(body: Dict[str, Any]) -> int:
     """Rough token estimate for logging only."""
     msgs = body.get("messages") or []

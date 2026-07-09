@@ -197,7 +197,39 @@ class TestPrewarmCoordinatorBody:
         assert captured["body"]["max_tokens"] == 1
         assert captured["body"]["stream"] is False
         assert captured["body"]["temperature"] == 0
-        assert captured["url"] == "http://vllm.local/chat/completions"
+        assert captured["url"] == "http://vllm.local/v1/chat/completions"
+
+    async def test_chat_url_normalizes_api_base(self):
+        """The chat-completions URL is correct whether or not api_base
+        already includes the /v1 segment (the two real-client conventions)."""
+        from jiuwenswarm.server.runtime.prewarm.coordinator import _chat_completions_url
+
+        # Direct unit checks of the resolver.
+        assert _chat_completions_url("http://vllm.local") == "http://vllm.local/v1/chat/completions"
+        assert _chat_completions_url("http://vllm.local/v1") == "http://vllm.local/v1/chat/completions"
+        assert _chat_completions_url("http://vllm.local/v1/chat/completions") == "http://vllm.local/v1/chat/completions"
+        # Trailing slash is tolerated.
+        assert _chat_completions_url("http://vllm.local/v1/") == "http://vllm.local/v1/chat/completions"
+
+        # End-to-end: a base that already has /v1 must not produce double /v1.
+        captured = {}
+
+        class _CapSession(_FakeSessionCtx):
+            def post(self, url, headers=None, json=None):
+                captured["url"] = url
+                return super().post(url, headers=headers, json=json)
+
+        import jiuwenswarm.server.runtime.prewarm.coordinator as coord_mod
+        with patch.object(coord_mod.aiohttp, "ClientSession", lambda timeout=None: _CapSession()):
+            coord = PrewarmCoordinator(PrewarmConfig(enabled=True))
+            client = _FakeModelClient(api_base="http://vllm.local/v1")
+            await coord.prewarm(
+                client, messages=[{"role": "user", "content": "x"}],
+                tools=None, model_name="m", session_id="s",
+                enable_cache_sharing=False, scenario="A",
+            )
+            await asyncio.sleep(0.05)
+        assert captured["url"] == "http://vllm.local/v1/chat/completions"
 
     async def test_build_body_cache_sharing_when_enabled(self):
         cfg = PrewarmConfig(enabled=True)
