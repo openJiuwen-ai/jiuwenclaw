@@ -415,7 +415,7 @@ class CronController:
                             "enum": cron_job_modes_for_tools(),
                             "description": (
                                 "Agent runtime mode when the job runs. "
-                                "Default agent.fast. Use team for multi-agent team execution."
+                                "Default agent. Use team for multi-agent team execution."
                             ),
                         },
                         "timeout_seconds": {
@@ -457,7 +457,7 @@ class CronController:
                                 "mode": {
                                     "type": "string",
                                     "enum": cron_job_modes_for_tools(),
-                                    "description": "Agent runtime mode (agent, team, agent.plan, ...)",
+                                    "description": "Agent runtime mode (agent, team, ...)",
                                 },
                             },
                         },

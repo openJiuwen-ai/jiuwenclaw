@@ -101,6 +101,8 @@ def apply_a2ui_text_fallback_to_gateway_payload(
 
 
 class ChannelMode(str, Enum):
+    AGENT = "agent"
+    # 历史值：plan / fast 已合并为 agent，保留以兼容旧持久化 channel state。
     AGENT_PLAN = "agent.plan"
     AGENT_FAST = "agent.fast"
     CODE_PLAN = "code.plan"
@@ -118,7 +120,7 @@ class ChannelMode(str, Enum):
 @dataclass
 class ChannelControlState:
     session_id: str | None = None
-    mode: ChannelMode = ChannelMode.AGENT_PLAN
+    mode: ChannelMode = ChannelMode.AGENT
 
 
 @dataclass
@@ -499,17 +501,19 @@ class MessageHandler(ABC):
         # 若未在 config 中指定默认 session_id，为该 channel 生成一个带时间戳的新 session_id
         if not sid:
             sid = self._generate_channel_session_id(channel_id)
-        mode_raw = str(ch_cfg.get("default_mode") or "agent.plan").strip().lower()
+        mode_raw = str(ch_cfg.get("default_mode") or "agent").strip().lower()
         mode_map = {
-            "agent.plan": ChannelMode.AGENT_PLAN,
-            "agent.fast": ChannelMode.AGENT_FAST,
+            "agent": ChannelMode.AGENT,
+            # plan / fast 已合并：历史 default_mode 归一到 agent。
+            "agent.plan": ChannelMode.AGENT,
+            "agent.fast": ChannelMode.AGENT,
             "code.plan": ChannelMode.CODE_PLAN,
             "code.normal": ChannelMode.CODE_NORMAL,
             "code.team": ChannelMode.CODE_TEAM,
             "team": ChannelMode.TEAM,
             "team.plan": ChannelMode.TEAM_PLAN,
         }
-        mode = mode_map.get(mode_raw, ChannelMode.AGENT_PLAN)
+        mode = mode_map.get(mode_raw, ChannelMode.AGENT)
         return ChannelControlState(session_id=sid, mode=mode)
 
     def _get_channel_state_key(self, channel_id: str, conversation_id: str | None) -> str:
@@ -1320,15 +1324,15 @@ class MessageHandler(ABC):
             old_mode = state.mode
             old_sid = state.session_id
             if mode_str == "agent":
-                state.mode = ChannelMode.AGENT_PLAN
+                state.mode = ChannelMode.AGENT
             elif mode_str == "code":
                 state.mode = ChannelMode.CODE_NORMAL
             elif mode_str == "team":
                 state.mode = ChannelMode.TEAM
             elif mode_str == "agent.plan":
-                state.mode = ChannelMode.AGENT_PLAN
+                state.mode = ChannelMode.AGENT
             elif mode_str == "agent.fast":
-                state.mode = ChannelMode.AGENT_FAST
+                state.mode = ChannelMode.AGENT
             elif mode_str == "code.plan":
                 state.mode = ChannelMode.CODE_PLAN
             elif mode_str == "code.normal":
@@ -1365,8 +1369,13 @@ class MessageHandler(ABC):
             switch_str = parsed.switch_subcommand or ""
             target_mode: ChannelMode | None = None
             if switch_str == "plan":
-                if state.mode in (ChannelMode.AGENT_PLAN, ChannelMode.AGENT_FAST):
-                    target_mode = ChannelMode.AGENT_PLAN
+                # agent 下 plan / fast 已合并：/switch plan 保持 agent 。
+                if state.mode in (
+                    ChannelMode.AGENT,
+                    ChannelMode.AGENT_PLAN,
+                    ChannelMode.AGENT_FAST,
+                ):
+                    target_mode = ChannelMode.AGENT
                 elif state.mode in (
                     ChannelMode.CODE_PLAN,
                     ChannelMode.CODE_NORMAL,
@@ -1374,8 +1383,13 @@ class MessageHandler(ABC):
                 ):
                     target_mode = ChannelMode.CODE_PLAN
             elif switch_str == "fast":
-                if state.mode in (ChannelMode.AGENT_PLAN, ChannelMode.AGENT_FAST):
-                    target_mode = ChannelMode.AGENT_FAST
+                # agent 下 plan / fast 已合并：/switch fast 保持 agent 。
+                if state.mode in (
+                    ChannelMode.AGENT,
+                    ChannelMode.AGENT_PLAN,
+                    ChannelMode.AGENT_FAST,
+                ):
+                    target_mode = ChannelMode.AGENT
             elif switch_str == "normal":
                 if state.mode in (
                     ChannelMode.CODE_PLAN,

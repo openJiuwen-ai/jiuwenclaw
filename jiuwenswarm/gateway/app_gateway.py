@@ -1033,7 +1033,7 @@ class GatewayServer:
             if session_key is not None:
                 await self._bind_route_session_client(route, session_id, ws)
 
-            default_mode = Mode.CODE_NORMAL if route.channel_id == "tui" else Mode.AGENT_PLAN
+            default_mode = Mode.CODE_NORMAL if route.channel_id == "tui" else Mode.AGENT
             mode = Mode.from_raw(params.get("mode"), default=default_mode)
 
             # 确保 mode 被设置到 params 中，以便后续转发到 AgentServer

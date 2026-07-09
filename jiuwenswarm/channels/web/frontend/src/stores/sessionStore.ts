@@ -58,15 +58,15 @@ function saveModeToStorage(mode: AgentMode) {
   }
 }
 
-const DEFAULT_MODE: AgentMode = 'agent.plan';
+const DEFAULT_MODE: AgentMode = 'agent';
 
 function normalizeAgentMode(mode: unknown): AgentMode {
   if (typeof mode !== 'string') return DEFAULT_MODE;
   const normalized = mode.trim().toLowerCase();
-  if (normalized === 'agent.fast') return 'agent.fast';
   if (normalized === 'team') return 'team';
   if (normalized === 'auto_harness') return 'auto_harness';
-  return 'agent.plan';
+  // plan / fast 已合并为单一 agent（历史 agent.plan / agent.fast 归一）。
+  return 'agent';
 }
 
 function normalizeSession(session: Session): Session {

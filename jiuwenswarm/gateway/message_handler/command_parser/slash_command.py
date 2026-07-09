@@ -354,15 +354,15 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
                        f"code.normal|code.team|team.plan",
         scope="gateway",
         req_method=None,
-        notes="受控通道切换模式：一级模式 agent/code/team（映射到默认子模式）或直达 agent.plan/agent.fast/code.plan/code.normal；"
-              "写入 params.mode。",
+        notes="受控通道切换模式：一级模式 agent/code/team（映射到默认子模式）；"
+              "agent 的 plan/fast 已合并为单一 agent（agent.plan/agent.fast 作为历史别名仍可接受）；写入 params.mode。",
     ),
     SlashCommandEntry(
         id="switch",
         canonical_text=f"{GatewaySlashCommand.SWITCH.value} plan|fast|normal|team",
         scope="gateway",
         req_method=None,
-        notes="受控通道切换二级模式：agent 下 plan/fast，code 下 plan/normal。",
+        notes="受控通道切换二级模式：agent 下 plan/fast 已合并；code 下 plan/normal。",
     ),
     SlashCommandEntry(
         id="skills",

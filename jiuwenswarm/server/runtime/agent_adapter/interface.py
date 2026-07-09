@@ -508,7 +508,7 @@ The command receives this JSON via stdin every 2 seconds:
 | session_id | Current session ID |
 | session_name | Session title (set via /rename) |
 | cwd | Current working directory |
-| mode | Current mode (agent.plan / agent.fast / code.normal / code.team / team) |
+| mode | Current mode (agent / code.normal / code.team / team) |
 | model | Current model name |
 | provider | Model provider |
 | version | jiuwenswarm version |

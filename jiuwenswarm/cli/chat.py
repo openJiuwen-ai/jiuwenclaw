@@ -206,12 +206,14 @@ def _prompt_and_cleanup_dirs() -> None:
                 write_stderr(f"Failed to remove trusted directory: {d}\n")
 
 MODE_ALIASES: dict[str, str] = {
-    "agent": "agent.plan",
+    "plan": "agent",
+    "fast": "agent",
     "code": "code.normal",
 }
 
+# plan / fast 已合并为单一 agent 模式；agent.plan / agent.fast 作为历史别名仍可接受，归一到 agent。
 VALID_MODES = frozenset({
-    "agent.plan", "agent.fast", "code.plan", "code.normal", "code.team", "team",
+    "agent", "agent.plan", "agent.fast", "code.plan", "code.normal", "code.team", "team",
 })
 
 # Sources that require the answer to be sent via ``chat.send`` (streaming) to
@@ -228,6 +230,8 @@ def resolve_mode(raw: str) -> str:
     normalized = raw.strip().lower()
     if normalized in MODE_ALIASES:
         normalized = MODE_ALIASES[normalized]
+    if normalized in ("agent.plan", "agent.fast"):
+        normalized = "agent"
     if normalized in VALID_MODES:
         return normalized
     raise ValueError(
@@ -258,7 +262,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--mode", default="code.normal",
-        help="Execution mode: agent|code|team|agent.plan|agent.fast|code.plan|code.normal|code.team"
+        help="Execution mode: agent|code|team|code.plan|code.normal|code.team"
              " (default: code.normal).",
     )
     p.add_argument(
@@ -415,7 +419,7 @@ async def _run_interactive_loop(
     # We track plan_exited (set when plan.mode_exited is received) to
     # distinguish "agent finished implementing after approval" from "agent
     # ended turn with text, waiting for user follow-up".
-    plan_mode = request.get("params", {}).get("mode", "") in ("code.plan", "agent.plan")
+    plan_mode = request.get("params", {}).get("mode", "") in ("code.plan", "agent", "agent.plan")
     plan_exited = False
     # When we send an interrupt-resume answer (chat.send with source), the
     # previous stream's trailing chat.final / processing_status(False) may

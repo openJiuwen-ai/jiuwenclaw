@@ -23,7 +23,7 @@ memory:
   #
   # 外接 rail 的启用 = (engine ∈ {external, both}) AND (external.provider 非空)
   # 内置 rail 的启用 = (engine ∈ {builtin, both})  AND (mode=local)
-  #                    AND modes.agent.<当前 mode>.memory.enabled=true
+  #                    AND modes.agent.memory.enabled=true
   # ============================================================
 
   mode: ${MEMORY_MODE:-local}            # 内置记忆存储位置：local | cloud
@@ -73,7 +73,7 @@ memory:
   #   └─────────────┴───────────────┴──────────────────────────────────────┘
   #
   # 说明：
-  # - 外接记忆 mode-independent：配置一次，plan / fast 模式全程生效，
+  # - 外接记忆 mode-independent：配置一次，agent 模式全程生效，
   #   跨 config 热重载持久存活（保留 prefetch 缓存、电路断路器、会话状态）
   # - 单 provider 策略：同一时刻 provider 只能选一个
   # - 失败降级：provider 构建失败或网络异常不阻塞主流程
@@ -703,19 +703,11 @@ mcp:
 modes:
   # 一级模式 agent / code / team
   agent:
-    # agent 模式支持 性能/规划/集群
-    fast:
-      memory:
-        enabled: true
-        is_proactive: false
-      rails:
-      tools:
-    plan:
-      memory:
-        enabled: true
-        is_proactive: true
-      rails:
-      tools:
+    # plan / fast 已合并为单一 agent 模式：记忆固定被动（is_proactive 开关已下线）。
+    memory:
+      enabled: true
+    rails:
+    tools:
   code:
     # 动态 Rails — 列表中出现的 = 启用；不出现的 = 不启用
     # 固定 Rails（以下 Rails 已在代码中固定挂载，无需在此配置）：

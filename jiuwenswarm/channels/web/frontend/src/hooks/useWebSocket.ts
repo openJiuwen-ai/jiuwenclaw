@@ -382,12 +382,12 @@ interface PendingContextCompressionStart {
 }
 
 function normalizeAgentMode(rawMode: unknown): AgentMode {
-  if (typeof rawMode !== 'string') return 'agent.plan';
+  if (typeof rawMode !== 'string') return 'agent';
   const normalized = rawMode.trim().toLowerCase();
-  if (normalized === 'agent.fast') return 'agent.fast';
   if (normalized === 'team') return 'team';
   if (normalized === 'auto_harness') return 'auto_harness';
-  return 'agent.plan';
+  // plan / fast 已合并为单一 agent（历史 agent.plan / agent.fast 归一）。
+  return 'agent';
 }
 
 function unsupportedEvolutionModeMessage(content: string, mode: AgentMode): string | null {
@@ -397,7 +397,7 @@ function unsupportedEvolutionModeMessage(content: string, mode: AgentMode): stri
     trimmed.startsWith('/evolve ') ||
     trimmed === '/evolve_simplify' ||
     trimmed.startsWith('/evolve_simplify ');
-  if (!isEvolutionCommand || mode === 'agent.plan' || mode === 'team') {
+  if (!isEvolutionCommand || mode === 'agent' || mode === 'team') {
     return null;
   }
   return `${mode} 模式下演进功能不可用。`;
@@ -2125,7 +2125,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const currentMode = useSessionStore.getState().mode;
           const { taskQueue } = useChatStore.getState();
           if (
-            currentMode === 'agent.fast' &&
+            currentMode === 'agent' &&
             !resumeAlreadyCompleted &&
             taskQueue.length > 0
           ) {
@@ -2352,7 +2352,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               // 任务已完成时，检查并触发队列中的下一个任务
               const currentMode = useSessionStore.getState().mode;
               const { taskQueue } = useChatStore.getState();
-              if (currentMode === 'agent.fast' && taskQueue.length > 0) {
+              if (currentMode === 'agent' && taskQueue.length > 0) {
                 const nextTask = taskQueue[0];
                 if (nextTask && activeSessionIdRef.current && sendMessageRef.current) {
                   removeFromTaskQueue(nextTask.id);

@@ -69,7 +69,8 @@ async def handle_evolution_slash_command(
     command = _command_name(stripped)
     if command is None:
         return None
-    if context.mode not in {"agent.plan", "team"}:
+    # 合并后演进能力在 agent 模式可用（兼容历史 agent.plan token）。
+    if context.mode not in {"agent", "agent.plan", "team"}:
         display_mode = str(context.mode or "当前").strip() or "当前"
         return _error(f"{display_mode} 模式下演进功能不可用。")
     if not context.evolution_enabled:

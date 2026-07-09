@@ -107,7 +107,7 @@ async def trigger_main_agent(server, session_id: str, channel_id: str | None,
         # proactive_type/target 给 assistant 写 history 时透传用（待通用流程支持）。
         params={
             "query": query,
-            "mode": "agent.plan",
+            "mode": "agent",
             "source": "proactive_recommendation",
             "proactive_type": decision.type,
             "proactive_target": decision.target,

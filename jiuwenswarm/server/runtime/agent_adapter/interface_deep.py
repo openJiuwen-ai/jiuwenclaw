@@ -214,7 +214,6 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
-from jiuwenswarm.agents.harness.common.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     get_user_location,
@@ -460,7 +459,7 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
             session_memory=session_memory_cfg,
         )
         logger.info(
-            "[JiuWenSwarmDeepAdapter] ContextProcessorRail create success for agent.plan mode, "
+            "[JiuWenSwarmDeepAdapter] ContextProcessorRail create success for agent mode, "
             "user_processors=%s session_memory=%s",
             [p[0] for p in user_processors] if user_processors else "none",
             "enabled" if isinstance(session_memory_cfg, dict) else "disabled",
@@ -506,8 +505,10 @@ async def ensure_persistent_checkpointer() -> None:
 
 
 _MODE_DISPLAY_MAP: dict[str, dict[str, str]] = {
-    "agent.plan": {"cn": "规划模式", "en": "Planning Mode"},
-    "agent.fast": {"cn": "性能模式", "en": "Performance Mode"},
+    "agent": {"cn": "智能体模式", "en": "Agent Mode"},
+    # 历史 token 归一到合并后的 agent 显示名（兼容旧会话 / 旧请求）。
+    "agent.plan": {"cn": "智能体模式", "en": "Agent Mode"},
+    "agent.fast": {"cn": "智能体模式", "en": "Agent Mode"},
     "team": {"cn": "集群模式", "en": "Cluster Mode"},
 }
 
@@ -666,7 +667,7 @@ class JiuWenSwarmDeepAdapter:
         self._pending_session_reload_config_base: dict[str, Any] | None = None
         self._pending_session_reload_env_overrides: dict[str, Any] | None = None
         self._session_instance_config: dict[str, Any] | None = None
-        self._session_instance_mode: str = "agent.plan"
+        self._session_instance_mode: str = "agent"
         self._session_instance_sub_mode: str | None = None
         self._xiaoyi_phone_tools_registered: bool = False
         self._paid_search_registered: bool = False
@@ -3455,7 +3456,7 @@ class JiuWenSwarmDeepAdapter:
         return subagent_rail
 
     def _build_structured_ask_user_rail(self) -> StructuredAskUserRail | None:
-        """Build StructuredAskUserRail for agent.plan clarification."""
+        """Build StructuredAskUserRail for agent mode clarification."""
         try:
             return StructuredAskUserRail(language=self._resolve_runtime_language())
         except Exception as exc:
@@ -3732,7 +3733,7 @@ class JiuWenSwarmDeepAdapter:
             return None
 
     def _build_agent_rails(
-        self, config: dict[str, Any], config_base: dict[str, Any], *, mode: str = "agent.plan"
+        self, config: dict[str, Any], config_base: dict[str, Any], *, mode: str = "agent"
     ) -> list[Any]:
         """Build DeepAgent rails consistently for cold start and hot reload."""
 
@@ -4235,7 +4236,7 @@ class JiuWenSwarmDeepAdapter:
         return None
 
     async def create_instance(
-        self, config: dict[str, Any] | None = None, *, mode: str = "agent.plan", sub_mode: str = None
+        self, config: dict[str, Any] | None = None, *, mode: str = "agent", sub_mode: str = None
     ) -> None:
         """初始化 DeepAgent 实例.
 
@@ -4244,7 +4245,7 @@ class JiuWenSwarmDeepAdapter:
                 - agent_name: Agent 名称，默认 "main_agent"。
                 - workspace_dir: 工作区目录，默认 "workspace/agent"。
                 - 其余字段透传给 DeepAgentConfig。
-            mode: 实例化模式，默认 "agent.plan"，使用 create_deep_agent。
+            mode: 实例化模式，默认 "agent"，使用 create_deep_agent。
             sub_mode: 子模式
         """
         self._session_instance_config = dict(config or {}) if isinstance(config, dict) else None
@@ -4617,9 +4618,9 @@ class JiuWenSwarmDeepAdapter:
 
         # 主动刷新 memory rail（不等下次请求的 _update_rails_for_mode）：
         # 让 embedding 配置变更立即走指纹检测 + 重建 rail + 延时重索引。
-        # 若从未处理过请求（_last_mode 为 None），退化为下次请求自然触发。
+        # 若从未处理过请求（_last_mode 为 None，如冷启动后首次 reload），退化为默认 agent。
         try:
-            mode = self._last_mode or "agent.plan"
+            mode = self._last_mode or "agent"
             await self._handle_memory_rail_by_config(mode)
         except Exception as e:
             logger.warning(
@@ -4674,48 +4675,49 @@ class JiuWenSwarmDeepAdapter:
         _CRON_TOOL_CHANNEL_ID.reset(channel_token)
 
     async def _update_rails_for_mode(self, mode: str) -> None:
-        """按 mode 注册或卸载 rails。"""
-        # 记录最近一次请求的 mode，供 reload_agent_config 主动刷新 memory rail 时使用
-        self._last_mode = mode
-        if mode == "agent.plan":
-            await self._update_plan_mode_rails()
-        else:
-            await self._update_agent_mode_rails(mode)  # 透传 mode
+        """装配 agent 模式 rails。
 
-    async def _update_plan_mode_rails(self) -> None:
-        """plan 模式：注册 plan 专属 rails，卸载 agent 专属资源。"""
+        plan / fast 已合并为单一 ``agent`` 模式：统一挂载 plan 档能力
+        （TaskPlanning / Subagent / 演进 rail 等），记忆固定为被动模式，
+        不再按子模式分叉。历史 ``agent.plan`` / ``agent.fast`` 归一到此路径。
+        """
+        self._last_mode = mode
+        await self._update_agent_rails()
+
+    async def _update_agent_rails(self) -> None:
+        """agent 模式：注册 agent 专属 rails（原 plan 档能力并集）。"""
         if self._task_planning_rail is None:
             self._task_planning_rail = self._build_task_planning_rail()
             if self._task_planning_rail is not None:
                 await self._instance.register_rail(self._task_planning_rail)
-                logger.info("[JiuWenSwarmDeepAdapter] TaskPlanningRail registered for plan mode")
+                logger.info("[JiuWenSwarmDeepAdapter] TaskPlanningRail registered for agent mode")
         if self._ask_user_rail is None:
             self._ask_user_rail = self._build_structured_ask_user_rail()
             if self._ask_user_rail is not None:
                 await self._instance.register_rail(self._ask_user_rail)
-                logger.info("[JiuWenSwarmDeepAdapter] StructuredAskUserRail registered for plan mode")
+                logger.info("[JiuWenSwarmDeepAdapter] StructuredAskUserRail registered for agent mode")
         # 卸载 multi-session 工具
         for existing in list(self._instance.ability_manager.list() or []):
             if getattr(existing, "name", "").startswith(
                 ("session_new", "session_cancel", "session_list")
             ):
                 self._instance.ability_manager.remove(existing.name)
-        # plan 模式，根据config选择是否注册或者卸载memory rail
-        await self._handle_memory_rail_by_config("plan")
+        # agent 模式，根据config选择是否注册或者卸载memory rail（固定被动记忆）
+        await self._handle_memory_rail_by_config("agent")
         # 外接记忆 rail（mode-independent，注册一次，跨 reload 持久）
         await self._handle_external_memory_rail_by_config()
-        # 上下文 rail（仅 plan 模式）
+        # 上下文 rail
         context_enabled = self._config_cache.get("context_engine_config", {}).get("enabled", False)
 
-        if self._context_assemble_rail is None or self._context_assemble_mode != "agent.plan":
+        if self._context_assemble_rail is None or self._context_assemble_mode != "agent":
             if self._context_assemble_rail is not None:
                 await self._instance.unregister_rail(self._context_assemble_rail)
                 self._context_assemble_rail = None
             self._context_assemble_rail = _build_context_assemble_rail()
-            self._context_assemble_mode = "agent.plan"
+            self._context_assemble_mode = "agent"
             await self._instance.register_rail(self._context_assemble_rail)
             logger.info(
-                "[JiuWenSwarmDeepAdapter] %s registered for plan mode", "ContextAssembleRail"
+                "[JiuWenSwarmDeepAdapter] %s registered for agent mode", "ContextAssembleRail"
             )
 
         # ContextProcessorRail
@@ -4725,14 +4727,14 @@ class JiuWenSwarmDeepAdapter:
                 if self._context_processor_rail is not None:
                     await self._instance.register_rail(self._context_processor_rail)
                     logger.info(
-                        "[JiuWenSwarmDeepAdapter] ContextProcessorRail registered for plan mode"
+                        "[JiuWenSwarmDeepAdapter] ContextProcessorRail registered for agent mode"
                     )
         else:
             if self._context_processor_rail is not None:
                 await self._instance.unregister_rail(self._context_processor_rail)
                 self._context_processor_rail = None
                 logger.info(
-                    "[JiuWenSwarmDeepAdapter] ContextProcessorRail unregistered for plan mode (disabled)"
+                    "[JiuWenSwarmDeepAdapter] ContextProcessorRail unregistered for agent mode (disabled)"
                 )
 
         # SkillEvolutionRail runtime configure creates/reuses and registers its rail set.
@@ -4761,66 +4763,13 @@ class JiuWenSwarmDeepAdapter:
                 self._skill_create_rail = self._build_skill_create_rail(self._config_cache)
             if self._skill_create_rail is not None:
                 await self._instance.register_rail(self._skill_create_rail)
-                logger.info("[JiuWenSwarmDeepAdapter] SkillCreateRail registered for plan mode")
+                logger.info("[JiuWenSwarmDeepAdapter] SkillCreateRail registered for agent mode")
         else:
             # skill_create disabled: unregister if exists
             if self._skill_create_rail is not None:
                 await self._instance.unregister_rail(self._skill_create_rail)
                 self._skill_create_rail = None
                 logger.info("[JiuWenSwarmDeepAdapter] SkillCreateRail unregistered (skill_create=false)")
-
-    async def _update_agent_mode_rails(self, mode: str | None = None) -> None:
-        """agent 模式：卸载 plan 专属 rails，按需注册 agent 专属 rails。"""
-        # 卸载 plan 专属 rails
-        rail_specs = (
-            ("_task_planning_rail", "TaskPlanningRail"),
-            ("_skill_evolution_rail", "SkillEvolutionRail"),
-            ("_evolution_interrupt_rail", "EvolutionInterruptRail"),
-            ("_skill_create_rail", "SkillCreateRail"),
-            ("_subagent_rail", "SubagentRail"),
-        )
-
-        for attr, label in rail_specs:
-            rail = getattr(self, attr)
-            if rail is not None:
-                await self._instance.unregister_rail(rail)
-                setattr(self, attr, None)
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] %s unregistered for %s mode",
-                    label,
-                    mode or "agent",
-                )
-
-        if self._ask_user_rail is None:
-            self._ask_user_rail = self._build_structured_ask_user_rail()
-            if self._ask_user_rail is not None:
-                await self._instance.register_rail(self._ask_user_rail)
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] StructuredAskUserRail registered for %s mode",
-                    mode or "agent",
-                )
-
-        # agent 模式，根据 config 选择是否注册或者卸载 memory rail
-        await self._handle_memory_rail_by_config("fast")
-        # 外接记忆 rail（mode-independent，注册一次，跨 reload 持久）
-        await self._handle_external_memory_rail_by_config()
-        # agent/智能模式：恢复上下文 rail（仅配置启用时）
-        if self._context_assemble_rail is None or self._context_assemble_mode == "agent.plan":
-            if self._context_assemble_rail is not None:
-                await self._instance.unregister_rail(self._context_assemble_rail)
-                self._context_assemble_rail = None
-            self._context_assemble_rail = _build_context_assemble_rail()
-            self._context_assemble_mode = "agent.fast"
-            await self._instance.register_rail(self._context_assemble_rail)
-
-        if self._context_processor_rail is None:
-            self._context_processor_rail = _build_context_processor_rail(self._config_cache)
-            if self._context_processor_rail is not None:
-                await self._instance.register_rail(self._context_processor_rail)
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] ContextProcessorRail registered for %s mode",
-                    mode or "agent.fast",
-                )
 
     @staticmethod
     def _acp_runtime_tools_enabled(
@@ -4863,35 +4812,21 @@ class JiuWenSwarmDeepAdapter:
     async def _update_tools_for_mode(
         self, mode: str, session_id: str | None, request_id: str | None
     ) -> None:
-        """按 mode 注册或卸载 multi-session 工具。"""
-        if mode != "agent.fast":
-            return
-        if not (request_id and session_id and self._model_client_config is not None):
-            return
+        """multi-session 工具装配。
+
+        plan / fast 合并为单一 ``agent`` 模式后，多会话工具
+        （session_new / session_cancel / session_list）不再注册：
+        清理任何遗留的 session_* 工具后返回。
+        """
+        # 清理历史遗留的 multi-session 工具（旧 agent.fast 会话切换而来）
         try:
             for existing in list(self._instance.ability_manager.list() or []):
                 if getattr(existing, "name", "").startswith(
                     ("session_new", "session_cancel", "session_list")
                 ):
                     self._instance.ability_manager.remove(existing.name)
-            sub_agent_config = ReActAgentConfig(
-                model_client_config=self._model_client_config,
-                model_config_obj=self._model_request_config,
-            )
-            multi_session_toolkit = MultiSessionToolkit(
-                session_id=session_id,
-                channel_id=_CRON_TOOL_CHANNEL_ID.get(),
-                request_id=request_id,
-                sub_agent_config=sub_agent_config,
-                max_concurrent_tasks=20,  # 最多同时运行20个子任务
-                task_timeout=600.0,  # 每个子任务超时时间10分钟
-            )
-            for ms_tool in multi_session_toolkit.get_tools():
-                Runner.resource_mgr.add_tool(ms_tool)
-                self._instance.ability_manager.add(ms_tool.card)
-            logger.info("[JiuWenSwarmDeepAdapter] MultiSessionToolkit registered for agent mode")
         except Exception as exc:
-            logger.error("[JiuWenSwarmDeepAdapter] MultiSessionToolkit 注册失败: %s", exc)
+            logger.debug("[JiuWenSwarmDeepAdapter] 清理 multi-session 工具失败: %s", exc)
 
     async def _update_session_tools(
         self,
@@ -5054,7 +4989,7 @@ class JiuWenSwarmDeepAdapter:
         """Per-request runtime config bundle for _update_runtime_config."""
 
         session_id: str | None = None
-        mode: str = "agent.plan"
+        mode: str = "agent"
         request_id: str | None = None
         channel_id: str | None = None
         request_metadata: dict[str, Any] | None = None
@@ -6067,7 +6002,8 @@ class JiuWenSwarmDeepAdapter:
 
         Returns None when the rail is (or becomes) available, or an error message string.
         """
-        if mode != "agent.plan":
+        # 合并后演进能力在 agent 模式可用（兼容历史 agent.plan token）。
+        if mode not in ("agent", "agent.plan"):
             display_mode = str(mode or "当前").strip() or "当前"
             return f"{display_mode} 模式下演进功能不可用。"
         if not self._config_cache.get("evolution", {}).get("enabled", False):
@@ -6086,7 +6022,7 @@ class JiuWenSwarmDeepAdapter:
         self,
         query: Any,
         session_id: str = "default",
-        mode: str = "agent.plan",
+        mode: str = "agent",
     ) -> dict[str, Any] | None:
         """Intercept slash commands before agent invocation.
 
@@ -6210,7 +6146,7 @@ class JiuWenSwarmDeepAdapter:
 
         session_id = request.session_id or "default"
         query = request.params.get("query", "")
-        mode = request.params.get("mode", "agent.plan")
+        mode = request.params.get("mode", "agent")
 
         slash_result = await self._handle_slash_command(query, session_id, mode)
         if slash_result is not None:
@@ -6364,7 +6300,7 @@ class JiuWenSwarmDeepAdapter:
         rid = request.request_id
         cid = request.channel_id
         query = request.params.get("query", "")
-        mode = request.params.get("mode", "agent.plan")
+        mode = request.params.get("mode", "agent")
 
         # Team 模式处理
         if mode in ("team", "team.plan", "code.team"):
@@ -7311,9 +7247,9 @@ class JiuWenSwarmDeepAdapter:
     async def _handle_external_memory_rail_by_config(self):
         """Register / unregister ExternalMemoryRail based on config.
 
-        External memory is mode-independent — configured once and active for
-        both plan and fast modes. `_external_memory_rail_registered` dedups
-        calls from both _update_plan_mode_rails() and _update_agent_mode_rails().
+        External memory is mode-independent — configured once and active in
+        the merged agent mode. `_external_memory_rail_registered` dedups
+        repeated calls from `_update_agent_rails()`.
         Not part of `_get_current_agent_rails()`, so it is not torn down on
         config hot-reload (preserves prefetch cache + circuit breaker state).
         """

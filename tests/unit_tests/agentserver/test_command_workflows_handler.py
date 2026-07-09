@@ -2,7 +2,7 @@
 
 """Tests for _handle_command_workflows handler in AgentWebSocketServer."""
 
-# pylint: disable=protected-access
+
 
 from __future__ import annotations
 
@@ -99,6 +99,9 @@ class TestHandleCommandWorkflows:
         with patch(
             "jiuwenswarm.agents.harness.team.get_team_manager",
             return_value=fake_tm,
+        ), patch(
+            "jiuwenswarm.server.runtime.agent_adapter.team_helpers.restore_workflow_runs",
+            return_value={},
         ):
             await server._handle_command_workflows(ws, request, send_lock)
 
