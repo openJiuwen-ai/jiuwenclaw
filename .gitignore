@@ -6,6 +6,7 @@ __pycache__/
 *.so
 .Python
 .venv/
+.venv-intel/
 venv/
 env/
 ENV/
@@ -21,7 +22,9 @@ htmlcov/
 # Node.js / Frontend
 **/node_modules/
 dist/
+dist-intel/
 build/
+build-intel/
 coverage/
 jiuwenswarm/channels/web/frontend/logs/
 jiuwenswarm/channels/web/frontend/cd
