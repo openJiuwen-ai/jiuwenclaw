@@ -438,7 +438,13 @@
 }
 
 .conversation-list-item:hover {
+  z-index: 10;
   background: var(--bg-hover);
+}
+
+.conversation-list-item:focus-within,
+.conversation-list-item.is-menu-open {
+  z-index: 10;
 }
 
 .conversation-list-item.is-active:hover {
@@ -605,6 +611,12 @@
   line-height: 40px;
   text-align: center;
   white-space: nowrap;
+}
+
+.conversation-sidebar__pinned-list > .conversation-list-item:first-child .conversation-list-item__pin-action[data-tooltip]:hover::after,
+.conversation-sidebar__pinned-list > .conversation-list-item:first-child .conversation-list-item__pin-action[data-tooltip]:focus-visible::after {
+  top: 30px;
+  bottom: auto;
 }
 
 .conversation-list-item__actions:focus-visible,

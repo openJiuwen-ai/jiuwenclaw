@@ -1052,40 +1052,16 @@ class TestSessionCreateProjectIdValidation:
 
 
 # ===========================================================================
-<<<<<<< HEAD
-<<<<<<< HEAD
 # session.create + project_id / project_dir 一致性校验
 # ===========================================================================
 class TestSessionCreateProjectDirConsistency:
     """session.create 的 project_id / project_dir 绑定规则:
-=======
-# session.create + project_id / project_path 一致性校验
-# ===========================================================================
-class TestSessionCreateProjectPathConsistency:
-    """session.create 的 project_id / project_path 绑定规则:
->>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
-=======
-# session.create + project_id / project_dir 一致性校验
-# ===========================================================================
-class TestSessionCreateProjectDirConsistency:
-    """session.create 的 project_id / project_dir 绑定规则:
->>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
     仅 project_id 自动补齐、同时传校验一致性、仅 path 拒绝。"""
 
     @staticmethod
     @pytest.mark.asyncio
-<<<<<<< HEAD
-<<<<<<< HEAD
     async def test_project_id_only_auto_fills_project_dir(registered_channel, tmp_path, sessions_dir):
         """仅传 project_id(无 project_dir)→ 按项目记录自动补齐 project_dir。"""
-=======
-    async def test_project_id_only_auto_fills_project_path(registered_channel, tmp_path, sessions_dir):
-        """仅传 project_id(无 project_path)→ 按项目记录自动补齐 project_path。"""
->>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
-=======
-    async def test_project_id_only_auto_fills_project_dir(registered_channel, tmp_path, sessions_dir):
-        """仅传 project_id(无 project_dir)→ 按项目记录自动补齐 project_dir。"""
->>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
         pa = _abspath(tmp_path, "app")
         proj = _make_project("P", pa)
         resp = await _call(
@@ -1096,70 +1072,30 @@ class TestSessionCreateProjectDirConsistency:
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         meta = get_session_metadata("s_autofill", cache_bust=True)
         assert meta.get("project_id") == proj.project_id
-<<<<<<< HEAD
-<<<<<<< HEAD
         assert meta.get("project_dir") == pa
-=======
-        assert meta.get("project_path") == pa
->>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
-=======
-        assert meta.get("project_dir") == pa
->>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_project_id_with_matching_path_ok(registered_channel, tmp_path, sessions_dir):
-<<<<<<< HEAD
-<<<<<<< HEAD
         """同时传 project_id + 一致的 project_dir(含尾部分隔符差异)→ 创建成功。"""
-=======
-        """同时传 project_id + 一致的 project_path(含尾部分隔符差异)→ 创建成功。"""
->>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
-=======
-        """同时传 project_id + 一致的 project_dir(含尾部分隔符差异)→ 创建成功。"""
->>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
         pa = _abspath(tmp_path, "app")
         proj = _make_project("P", pa)
         resp = await _call(
             registered_channel, "session.create",
-<<<<<<< HEAD
-<<<<<<< HEAD
             {"session_id": "s_match", "project_id": proj.project_id, "project_dir": pa},
-=======
-            {"session_id": "s_match", "project_id": proj.project_id, "project_path": pa},
->>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
-=======
-            {"session_id": "s_match", "project_id": proj.project_id, "project_dir": pa},
->>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
         )
         assert resp["ok"] is True
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_project_id_with_mismatching_path_rejected(registered_channel, tmp_path, sessions_dir):
-<<<<<<< HEAD
-<<<<<<< HEAD
         """同时传 project_id + 不一致的 project_dir → BAD_REQUEST,不创建会话。"""
-=======
-        """同时传 project_id + 不一致的 project_path → BAD_REQUEST,不创建会话。"""
->>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
-=======
-        """同时传 project_id + 不一致的 project_dir → BAD_REQUEST,不创建会话。"""
->>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
         pa = _abspath(tmp_path, "app")
         proj = _make_project("P", pa)
         other = _abspath(tmp_path, "other")
         resp = await _call(
             registered_channel, "session.create",
-<<<<<<< HEAD
-<<<<<<< HEAD
             {"session_id": "s_mismatch", "project_id": proj.project_id, "project_dir": other},
-=======
-            {"session_id": "s_mismatch", "project_id": proj.project_id, "project_path": other},
->>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
-=======
-            {"session_id": "s_mismatch", "project_id": proj.project_id, "project_dir": other},
->>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
         )
         assert resp["ok"] is False
         assert resp["code"] == "BAD_REQUEST"
@@ -1169,27 +1105,11 @@ class TestSessionCreateProjectDirConsistency:
     @staticmethod
     @pytest.mark.asyncio
     async def test_path_only_without_project_id_rejected(registered_channel, tmp_path, sessions_dir):
-<<<<<<< HEAD
-<<<<<<< HEAD
         """仅传 project_dir 而无 project_id → BAD_REQUEST。"""
         pa = _abspath(tmp_path, "app")
         resp = await _call(
             registered_channel, "session.create",
             {"session_id": "s_pathonly", "project_dir": pa},
-=======
-        """仅传 project_path 而无 project_id → BAD_REQUEST。"""
-        pa = _abspath(tmp_path, "app")
-        resp = await _call(
-            registered_channel, "session.create",
-            {"session_id": "s_pathonly", "project_path": pa},
->>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
-=======
-        """仅传 project_dir 而无 project_id → BAD_REQUEST。"""
-        pa = _abspath(tmp_path, "app")
-        resp = await _call(
-            registered_channel, "session.create",
-            {"session_id": "s_pathonly", "project_dir": pa},
->>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
         )
         assert resp["ok"] is False
         assert resp["code"] == "BAD_REQUEST"
@@ -1197,27 +1117,11 @@ class TestSessionCreateProjectDirConsistency:
     @staticmethod
     @pytest.mark.asyncio
     async def test_default_project_id_with_path_rejected(registered_channel, tmp_path, sessions_dir):
-<<<<<<< HEAD
-<<<<<<< HEAD
         """project_id="default" + 非空 project_dir → 视为无有效项目却带 path,拒绝。"""
         pa = _abspath(tmp_path, "app")
         resp = await _call(
             registered_channel, "session.create",
             {"session_id": "s_def_path", "project_id": "default", "project_dir": pa},
-=======
-        """project_id="default" + 非空 project_path → 视为无有效项目却带 path,拒绝。"""
-        pa = _abspath(tmp_path, "app")
-        resp = await _call(
-            registered_channel, "session.create",
-            {"session_id": "s_def_path", "project_id": "default", "project_path": pa},
->>>>>>> 86f2de5d (feat(aipc): project_id与project_path添加校验并写入metadata)
-=======
-        """project_id="default" + 非空 project_dir → 视为无有效项目却带 path,拒绝。"""
-        pa = _abspath(tmp_path, "app")
-        resp = await _call(
-            registered_channel, "session.create",
-            {"session_id": "s_def_path", "project_id": "default", "project_dir": pa},
->>>>>>> 3d1b56f0 (feat(aipc): project中的project_path字段修改为project_dir,与jiuwenswarm原始使用一致)
         )
         assert resp["ok"] is False
         assert resp["code"] == "BAD_REQUEST"
