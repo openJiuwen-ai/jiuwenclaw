@@ -72,6 +72,13 @@ from openjiuwen.harness.tools import (
 )
 from openjiuwen.harness.tools.todo import TodoStatus, TodoModifyTool
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
+from openjiuwen_runtime.foundation.db.engine_options import (
+    get_max_overflow,
+    get_pool_size,
+    get_pool_timeout,
+)
+from openjiuwen_runtime.foundation.db.mysql_handler import MySQLHandler
+from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandler
 
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
 from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
@@ -209,8 +216,6 @@ from jiuwenclaw.utils import (
     get_tenant_agent_skills_dirs,
 )
 from jiuwenclaw.local_env_config import set_local_config
-from openjiuwen_runtime.foundation.db.mysql_handler import MySQLHandler
-from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandler
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -691,8 +696,14 @@ async def _build_mysql_handler_engine():
         await handler.connect()
         engine = handler.get_engine()
         logger.info(
-            "[JiuWenClawDeepAdapter] checkpoint MySQL engine created via SDK: %s:%s/%s",
-            db_host, db_port, db_name,
+            "[JiuWenClawDeepAdapter] checkpoint MySQL engine created via SDK: %s:%s/%s "
+            "pool_size=%s max_overflow=%s pool_timeout=%s",
+            db_host,
+            db_port,
+            db_name,
+            get_pool_size(),
+            get_max_overflow(),
+            get_pool_timeout(),
         )
 
         # 确保 kv_store.value 列为 LONGTEXT，避免 checkpoint 序列化数据被截断
@@ -758,8 +769,15 @@ async def _build_postgresql_handler_engine():
         await handler.connect()
         engine = handler.get_engine()
         logger.info(
-            "[JiuWenClawDeepAdapter] checkpoint PostgreSQL engine created via SDK: %s:%s/%s schema=%s",
-            db_host, db_port, db_name, db_schema,
+            "[JiuWenClawDeepAdapter] checkpoint PostgreSQL engine created via SDK: %s:%s/%s schema=%s "
+            "pool_size=%s max_overflow=%s pool_timeout=%s",
+            db_host,
+            db_port,
+            db_name,
+            db_schema,
+            get_pool_size(),
+            get_max_overflow(),
+            get_pool_timeout(),
         )
         # 确保 kv_store.value 列为 TEXT，避免 checkpoint 序列化数据被截断
         async with engine.begin() as conn:
