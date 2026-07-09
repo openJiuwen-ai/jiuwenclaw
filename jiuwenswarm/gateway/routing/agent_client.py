@@ -137,6 +137,7 @@ class WebSocketAgentServerClient(AgentServerClient):
         self._running = False
         # AgentServer send_push：旁路投递，勿进入与 request_id 绑定的 RPC 等待队列
         self._on_server_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        self._server_push_tasks: set[asyncio.Task[Any]] = set()
 
     def set_server_push_handler(
         self, handler: Callable[[dict[str, Any]], Awaitable[None]] | None
@@ -227,8 +228,25 @@ class WebSocketAgentServerClient(AgentServerClient):
                     data = json.loads(raw)
                     meta = data.get("metadata")
                     if isinstance(meta, dict) and meta.get(E2A_WIRE_SERVER_PUSH_KEY):
+                        response_kind = str(data.get("response_kind") or "")
+                        if response_kind.startswith("xiaoyi.gui_rpc."):
+                            body = data.get("body")
+                            rpc_id = (
+                                str(body.get("rpc_id") or "")
+                                if isinstance(body, dict)
+                                else ""
+                            )
+                            logger.info(
+                                "[GUI_RPC_TRACE] phase=GATEWAY_WS_PUSH_RECEIVED "
+                                "rpc_id=%s response_kind=%s handler_registered=%s",
+                                rpc_id,
+                                response_kind,
+                                self._on_server_push is not None,
+                            )
                         if self._on_server_push is not None:
-                            asyncio.create_task(self._on_server_push(data))
+                            task = asyncio.create_task(self._on_server_push(data))
+                            self._server_push_tasks.add(task)
+                            task.add_done_callback(self._server_push_tasks.discard)
                         else:
                             logger.warning(
                                 "[WebSocketAgentServerClient] 收到 server_push 但未注册 handler，已丢弃: "
@@ -286,8 +304,17 @@ class WebSocketAgentServerClient(AgentServerClient):
                             describe_ws_exception(e),
                         ),
                     )
+                    if (
+                        not self._running
+                        or self._ws is None
+                        or type(e).__name__.startswith("ConnectionClosed")
+                    ):
+                        self._running = False
+                        break
                     await asyncio.sleep(0.1)  # 避免快速循环
         finally:
+            self._server_ready = False
+            await self._cancel_server_push_tasks()
             logger.info("[WebSocketAgentServerClient] 消息接收任务已停止")
 
     async def _stop_receiver_after_fatal_error(self, exc: BaseException) -> None:
@@ -335,6 +362,18 @@ class WebSocketAgentServerClient(AgentServerClient):
             self._ws = None
             self._uri = None
         logger.info("[WebSocketAgentServerClient] 已断开")
+
+    async def _cancel_server_push_tasks(self) -> None:
+        tasks = [
+            task
+            for task in self._server_push_tasks
+            if not task.done() and task is not asyncio.current_task()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._server_push_tasks.clear()
 
     def _ensure_connected(self) -> None:
         if self._ws is None:
@@ -387,10 +426,17 @@ class WebSocketAgentServerClient(AgentServerClient):
             envelope.method,
             envelope.is_stream,
         )
-        logger.debug(
-            "[WebSocketAgentServerClient] 发送请求(非流式) E2A: %s",
-            _to_json(envelope.to_dict()),
-        )
+        is_gui_rpc_response = envelope.method == "xiaoyi.gui_rpc.response"
+        if is_gui_rpc_response:
+            logger.debug(
+                "[WebSocketAgentServerClient] 发送 GUI RPC 响应: request_id=%s",
+                rid,
+            )
+        else:
+            logger.debug(
+                "[WebSocketAgentServerClient] 发送请求(非流式) E2A: %s",
+                _to_json(envelope.to_dict()),
+            )
 
         if rid in self._message_queues:
             raise RuntimeError(
@@ -406,7 +452,16 @@ class WebSocketAgentServerClient(AgentServerClient):
             # 发送请求
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
-                logger.info("[WebSocketAgentServerClient] 发送请求(非流式) payload: %s", _to_json(payload))
+                if is_gui_rpc_response:
+                    logger.info(
+                        "[WebSocketAgentServerClient] 发送 GUI RPC 响应: request_id=%s",
+                        rid,
+                    )
+                else:
+                    logger.info(
+                        "[WebSocketAgentServerClient] 发送请求(非流式) payload: %s",
+                        _to_json(payload),
+                    )
                 await self._send_wire_payload(payload)
 
             try:
@@ -434,6 +489,15 @@ class WebSocketAgentServerClient(AgentServerClient):
         await self._ensure_connected_for_request()
         envelope.is_stream = True
         rid = _wire_request_id_key(envelope.request_id)
+        is_xiaoyi_request = str(envelope.channel or "").strip().lower() == "xiaoyi"
+        if is_xiaoyi_request:
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=GATEWAY_AGENT_STREAM_BEGIN "
+                "request_id=%s session_id=%s envelope=%r",
+                rid,
+                envelope.session_id,
+                envelope.to_dict(),
+            )
         logger.info(
             "[E2A][out][stream] request_id=%s channel=%s method=%s is_stream=%s",
             rid,
@@ -481,9 +545,33 @@ class WebSocketAgentServerClient(AgentServerClient):
                     raise RuntimeError("AgentServer WebSocket connection closed") from data.exc
                 chunk = parse_agent_server_wire_chunk(data)
                 chunk_count += 1
+                if is_xiaoyi_request:
+                    logger.info(
+                        "[GUI_AGENT_DIAG] phase=GATEWAY_AGENT_CHUNK_RECEIVED "
+                        "request_id=%s sequence=%s event_type=%s "
+                        "is_complete=%s payload=%r wire=%r",
+                        rid,
+                        chunk_count - 1,
+                        (
+                            chunk.payload.get("event_type")
+                            if isinstance(chunk.payload, dict)
+                            else None
+                        ),
+                        chunk.is_complete,
+                        chunk.payload,
+                        data,
+                    )
                 yield chunk
                 if chunk.is_complete:
                     saw_complete = True
+            if is_xiaoyi_request:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=GATEWAY_AGENT_STREAM_END "
+                    "request_id=%s chunk_count=%s saw_complete=%s",
+                    rid,
+                    chunk_count,
+                    saw_complete,
+                )
             logger.info("[WebSocketAgentServerClient] 流式响应结束: request_id=%s 共 %s 个 chunk", rid, chunk_count)
         except asyncio.CancelledError:
             logger.info("[WebSocketAgentServerClient] 流式接收被取消: request_id=%s", rid)

@@ -903,7 +903,12 @@ class TestTeamModeWake:
     @pytest.mark.asyncio
     async def test_agent_wake_uses_unary_cron_channel(self, tmp_path):
         store = CronJobStore(path=tmp_path / "cron_jobs.json")
-        job = _make_job(description="simple reminder", targets="tui")
+        job = _make_job(
+            description="simple reminder",
+            targets="xiaoyi",
+            required_device_intents=["CreateNote"],
+            xiaoyi_push_id="push-1",
+        )
 
         agent = FakeAgentClient()
         handler = FakeMessageHandler()
@@ -921,6 +926,10 @@ class TestTeamModeWake:
         assert env.is_stream is False
         assert env.channel == "__cron__"
         assert env.session_id.startswith("cron_") and env.session_id.endswith(f"_{job.id}")
+        assert env.channel_context["scheduled_device"] == {
+            "push_id": "push-1",
+            "required_intents": ["CreateNote"],
+        }
 
         state = svc.runs[run_id]
         assert state.status == "succeeded"

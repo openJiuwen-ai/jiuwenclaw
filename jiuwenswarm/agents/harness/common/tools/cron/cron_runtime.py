@@ -15,6 +15,14 @@ from jiuwenswarm.gateway.cron.models import (
     normalize_target_channel_id,
 )
 from jiuwenswarm.agents.harness.common.tools.cron.cron_tools import CronToolRoute, CronTools
+from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools.check_plugin_privilege_tool import (
+    INTENT_PERMISSION_MAP,
+    ensure_plugin_privilege_granted,
+    execute_plugin_privilege_check,
+)
+from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools.device_tool_planner import (
+    CronDeviceToolPlanner,
+)
 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 from jiuwenswarm.common.schema.message import Message, ReqMethod
 from jiuwenswarm.common.utils import logger
@@ -23,9 +31,17 @@ from jiuwenswarm.common.utils import logger
 class _CronToolsCronBackend(CronToolBackend):
     """Adapt AgentServer CronTools to the DeepAgents CronToolBackend interface."""
 
-    def __init__(self, cron_tools: CronTools, message_handler: MessageHandler | None = None) -> None:
+    def __init__(
+        self,
+        cron_tools: CronTools,
+        message_handler: MessageHandler | None = None,
+        device_tool_planner: CronDeviceToolPlanner | None = None,
+    ) -> None:
         self._cron_tools = cron_tools
         self._message_handler = message_handler
+        self._device_tool_planner = (
+            device_tool_planner or CronDeviceToolPlanner()
+        )
 
     @staticmethod
     def _route_from_context(context: CronToolContext | None) -> CronToolRoute:
@@ -80,6 +96,11 @@ class _CronToolsCronBackend(CronToolBackend):
             sorted(list((params or {}).keys())),
         )
         payload = _extract_legacy_params(dict(params or {}), context=context, require_schedule=True)
+        await _run_xiaoyi_privilege_preflight(
+            payload,
+            context=context,
+            planner=self._device_tool_planner,
+        )
         logger.info(
             "[CronRuntimeBridge] create_job mapped payload.targets=%s payload.id=%s payload.name=%s",
             payload.get("targets"),
@@ -310,6 +331,13 @@ def _extract_legacy_params(
             out["wake_offset_seconds"] = data.get("wake_offset_seconds")
         if "deleteAfterRun" in data:
             out["delete_after_run"] = bool(data.get("deleteAfterRun"))
+        required_device_intents = (
+            data.get("required_device_intents")
+            if "required_device_intents" in data
+            else payload_block.get("required_device_intents")
+        )
+        if required_device_intents is not None:
+            out["required_device_intents"] = required_device_intents
 
         context_session_id = getattr(context, "session_id", None)
         if isinstance(context_session_id, str) and context_session_id.strip():
@@ -322,9 +350,134 @@ def _extract_legacy_params(
         context_mode = getattr(context, "mode", None)
         mode_resolved = context_mode or data.get("mode") or CRON_JOB_DEFAULT_MODE
         out["mode"] = coerce_cron_job_mode(mode_resolved, default=CRON_JOB_DEFAULT_MODE)
+        return _attach_xiaoyi_device_route(out, context=context)
+
+    return _attach_xiaoyi_device_route(data, context=context)
+
+
+def _attach_xiaoyi_device_route(
+    payload: dict[str, Any],
+    *,
+    context: CronToolContext | None,
+) -> dict[str, Any]:
+    out = dict(payload or {})
+    raw_intents = out.get("required_device_intents")
+    has_device_intents = isinstance(raw_intents, list) and any(
+        str(item or "").strip() for item in raw_intents
+    )
+    context_channel = str((context.channel_id if context else "") or "").strip()
+    if not has_device_intents:
+        out.pop("xiaoyi_push_id", None)
         return out
 
-    return data
+    if context_channel != "xiaoyi":
+        raise ValueError(
+            "Xiaoyi device cron jobs must be created from an active Xiaoyi request"
+        )
+
+    metadata = context.metadata if context and isinstance(context.metadata, dict) else {}
+    push_id = str(metadata.get("xiaoyi_push_id") or "").strip()
+    if not push_id:
+        raise ValueError(
+            "Current Xiaoyi request does not contain push_id; "
+            "cannot create a device cron job"
+        )
+    out["xiaoyi_push_id"] = push_id
+    logger.info(
+        "[CRON_DEVICE] phase=CRON_ROUTE_ATTACHED intent_count=%s push_id_present=true",
+        len(raw_intents) if isinstance(raw_intents, list) else 0,
+    )
+    return out
+
+
+async def _run_xiaoyi_privilege_preflight(
+    payload: dict[str, Any],
+    *,
+    context: CronToolContext | None,
+    planner: CronDeviceToolPlanner,
+) -> None:
+    context_channel = str((context.channel_id if context else "") or "").strip()
+    if context_channel != "xiaoyi":
+        payload.pop("required_device_intents", None)
+        payload.pop("xiaoyi_push_id", None)
+        return
+
+    metadata = context.metadata if context and isinstance(context.metadata, dict) else {}
+    request_id = str(metadata.get("request_id") or "").strip()
+    job_key = str(payload.get("id") or payload.get("name") or "").strip()
+    plan = await planner.plan(
+        name=str(payload.get("name") or ""),
+        description=str(payload.get("description") or ""),
+        privilege_intents=frozenset(INTENT_PERMISSION_MAP),
+        request_id=request_id,
+        job_key=job_key,
+    )
+    payload["required_device_intents"] = list(plan.allowed_intents)
+    if not plan.is_device_task:
+        payload.pop("xiaoyi_push_id", None)
+        return
+
+    routed_payload = _attach_xiaoyi_device_route(payload, context=context)
+    payload.clear()
+    payload.update(routed_payload)
+    logger.info(
+        "[CRON_DEVICE] phase=DEVICE_TOOL_MAPPED request_id=%s job_key=%s "
+        "tool_names=%s allowed_intents=%s privilege_intents=%s",
+        request_id,
+        job_key,
+        list(plan.tool_names),
+        list(plan.allowed_intents),
+        list(plan.privilege_intents),
+    )
+    if plan.privilege_intents:
+        logger.info(
+            "[CRON_DEVICE] phase=PRIVILEGE_PREFLIGHT_BEGIN request_id=%s "
+            "job_key=%s intent_count=%s",
+            request_id,
+            job_key,
+            len(plan.privilege_intents),
+        )
+    for intent in plan.privilege_intents:
+        logger.info(
+            "[CRON_DEVICE] phase=PRIVILEGE_INTENT_BEGIN request_id=%s "
+            "job_key=%s intent_name=%s",
+            request_id,
+            job_key,
+            intent,
+        )
+        try:
+            outputs = await execute_plugin_privilege_check(intent)
+            ensure_plugin_privilege_granted(intent, outputs)
+        except Exception as exc:
+            logger.warning(
+                "[CRON_DEVICE] phase=PRIVILEGE_INTENT_DENIED request_id=%s "
+                "job_key=%s intent_name=%s error_type=%s error=%s",
+                request_id,
+                job_key,
+                intent,
+                type(exc).__name__,
+                exc,
+            )
+            raise
+        logger.info(
+            "[CRON_DEVICE] phase=PRIVILEGE_INTENT_DONE request_id=%s "
+            "job_key=%s intent_name=%s",
+            request_id,
+            job_key,
+            intent,
+        )
+    logger.info(
+        "[CRON_DEVICE] phase=CRON_CREATE_AFTER_PRIVILEGE request_id=%s "
+        "job_key=%s intent_count=%s",
+        request_id,
+        job_key,
+        len(plan.allowed_intents),
+    )
+
+
+def _add_xiaoyi_device_fields_to_cron_tools(tools: list[Any]) -> None:
+    """Compatibility hook retained after restoring the upstream Cron schema."""
+    _ = tools
 
 
 class CronRuntimeBridge:
@@ -390,6 +543,7 @@ class CronRuntimeBridge:
             agent_id=agent_id,
             language=language,
         )
+        _add_xiaoyi_device_fields_to_cron_tools(tools)
         logger.info("[CronRuntimeBridge] Built %d cron tools: %s", 
                     len(tools), 
                     [tool.card.name if hasattr(tool, 'card') else str(tool) for tool in tools])

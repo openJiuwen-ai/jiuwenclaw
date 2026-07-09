@@ -10,6 +10,8 @@ import time
 from abc import ABC
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from jiuwenswarm.gateway.channel_manager.spec import ChannelSpec
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -43,6 +45,9 @@ class ChannelManager(ABC):
         self._on_config_updated = on_config_updated
         # 下一次 on_config_updated 时强制重启的 channel_id（例如微信解绑：YAML 中 bot_token 本就为空时配置 dict 对比不会变，但内存里仍有旧凭据）
         self._pending_channel_restart: set[str] = set()
+        self._channel_specs: dict[str, ChannelSpec] = {}
+        self._config_lock = asyncio.Lock()
+        self._persist_channel_config: Callable[[str, dict[str, Any]], Any] | None = None
 
     def mark_channel_restart_pending(self, channel_id: str) -> None:
         """请求在下次 set_conf / set_config 触发配置应用时，无论配置快照是否变化都重启该 channel。"""
@@ -100,6 +105,25 @@ class ChannelManager(ABC):
         """根据 channel_id 获取 Channel."""
         return self._channels.get(channel_id)
 
+    def register_spec(self, spec: ChannelSpec) -> None:
+        """Register construction, validation, and capability metadata."""
+        self._channel_specs[spec.channel_id] = spec
+
+    def get_spec(self, channel_id: str) -> ChannelSpec | None:
+        return self._channel_specs.get(channel_id)
+
+    def build_channel(self, channel_id: str, config: dict[str, Any]) -> "BaseChannel":
+        spec = self.get_spec(channel_id)
+        if spec is None:
+            raise KeyError(f"channel spec is not registered: {channel_id}")
+        return spec.create(config)
+
+    def set_config_persister(
+        self,
+        callback: Callable[[str, dict[str, Any]], Any] | None,
+    ) -> None:
+        self._persist_channel_config = callback
+
     @property
     def enabled_channels(self) -> list[str]:
         """当前已注册的 Channel 标识列表."""
@@ -113,17 +137,55 @@ class ChannelManager(ABC):
         return dict(conf) if isinstance(conf, dict) else {}
 
     async def set_conf(self, channel_id: str, new_conf: dict[str, Any]) -> None:
-        """更新指定 channel_id 的配置，并在必要时触发重新实例化回调.
+        """Atomically validate, apply, persist, and health-check one channel."""
+        async with self._config_lock:
+            spec = self.get_spec(channel_id)
+            candidate = dict(new_conf or {})
+            if spec is not None:
+                spec.validate(candidate)
 
-        内部仍维护完整的 Channel 配置字典，并将其整体传给 on_config_updated，
-        以兼容现有回调实现（如根据 channels.feishu 重建 FeishuChannel）。
-        """
-        merged = dict(self._config)
-        merged[channel_id] = dict(new_conf or {})
-        self._config = merged
-        cb = self._on_config_updated
-        if cb is not None:
-            await cb(self._config)
+            previous = dict(self._config)
+            merged = dict(previous)
+            merged[channel_id] = candidate
+            self._config = merged
+            cb = self._on_config_updated
+            try:
+                if cb is not None:
+                    await cb(self._config)
+                await self._assert_channel_healthy(channel_id, candidate, spec)
+                if self._persist_channel_config is not None:
+                    result = self._persist_channel_config(channel_id, candidate)
+                    if asyncio.iscoroutine(result):
+                        await result
+            except Exception:
+                logger.exception("[ChannelManager] channel config failed; rolling back: %s", channel_id)
+                self._config = previous
+                if cb is not None:
+                    try:
+                        await cb(self._config)
+                    except Exception:
+                        logger.exception("[ChannelManager] channel rollback failed: %s", channel_id)
+                raise
+
+    async def _assert_channel_healthy(
+        self,
+        channel_id: str,
+        config: dict[str, Any],
+        spec: ChannelSpec | None,
+    ) -> None:
+        if not bool(config.get("enabled", False)) or spec is None:
+            return
+        deadline = time.monotonic() + max(spec.startup_grace_seconds, 0.05)
+        while True:
+            channel = self.get_channel(channel_id)
+            healthy = channel is not None and channel.is_running
+            if healthy and spec.healthcheck is not None:
+                healthy = bool(spec.healthcheck(channel))
+            if healthy:
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"channel failed to start: {channel_id}")
+            await asyncio.sleep(0.05)
 
     async def set_config(self, new_conf: dict[str, Any]) -> None:
         """兼容保留：整体替换配置的旧接口（不推荐新调用方使用）."""
@@ -154,7 +216,26 @@ class ChannelManager(ABC):
                 channel = self._channels.get(msg.channel_id)
                 if channel:
                     try:
+                        if str(msg.channel_id or "").strip().lower() == "xiaoyi":
+                            logger.info(
+                                "[GUI_AGENT_DIAG] phase=CHANNEL_DISPATCH_BEGIN "
+                                "message_id=%s session_id=%s event_type=%s "
+                                "payload=%r channel_type=%s",
+                                msg.id,
+                                msg.session_id,
+                                getattr(msg.event_type, "value", msg.event_type),
+                                msg.payload,
+                                type(channel).__name__,
+                            )
                         await channel.send(msg)
+                        if str(msg.channel_id or "").strip().lower() == "xiaoyi":
+                            logger.info(
+                                "[GUI_AGENT_DIAG] phase=CHANNEL_DISPATCH_DONE "
+                                "message_id=%s session_id=%s event_type=%s",
+                                msg.id,
+                                msg.session_id,
+                                getattr(msg.event_type, "value", msg.event_type),
+                            )
                     except Exception as e:
                         logger.error("send to channel %s: %s", msg.channel_id, e, exc_info=True)
                         if msg.id and msg.id.startswith("cron-push-"):

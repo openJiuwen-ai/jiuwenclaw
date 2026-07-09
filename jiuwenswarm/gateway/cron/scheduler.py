@@ -657,6 +657,14 @@ class CronSchedulerService:
                     "push_at": state.push_at_iso,
                     "wake_at": state.wake_at_iso,
                 }
+                request_metadata: dict[str, Any] = {
+                    "cron": {"job_id": job.id, "run_id": run_id}
+                }
+                if job.xiaoyi_push_id:
+                    request_metadata["scheduled_device"] = {
+                        "push_id": job.xiaoyi_push_id,
+                        "required_intents": list(job.required_device_intents),
+                    }
                 envelope = e2a_from_agent_fields(
                     request_id=f"cron-{run_id}",
                     channel_id=channel_id,
@@ -670,7 +678,7 @@ class CronSchedulerService:
                     },
                     is_stream=is_team_cron_mode(mode),
                     timestamp=self._now_fn(),
-                    metadata={"cron": {"job_id": job.id, "run_id": run_id}},
+                    metadata=request_metadata,
                 )
                 if is_team_cron_mode(mode):
                     timeout_seconds = resolve_cron_job_timeout_seconds(job)

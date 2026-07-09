@@ -128,7 +128,7 @@ export const DEFAULT_WECHAT_CONF: WechatConfig = {
   long_poll_timeout_sec: 45,
   backoff_base_sec: 1.0,
   backoff_max_sec: 30.0,
-  credential_file: '~/.wx-ai-bridge/credentials.json',
+  credential_file: './wechat/credentials.json',
 };
 
 function normalizeAllowFromLines(text: string): string[] {
@@ -161,7 +161,7 @@ export function normalizeWechatConfig(input: unknown): WechatConfig {
     backoff_base_sec: Number(data.backoff_base_sec ?? 1.0) || 1.0,
     backoff_max_sec: Number(data.backoff_max_sec ?? 30.0) || 30.0,
     credential_file:
-      String(data.credential_file ?? '').trim() || '~/.wx-ai-bridge/credentials.json',
+      String(data.credential_file ?? '').trim() || './wechat/credentials.json',
   };
 }
 
@@ -197,7 +197,7 @@ export function buildWechatPayload(draft: WechatDraft): Record<string, unknown> 
     long_poll_timeout_sec: Number(draft.long_poll_timeout_sec) || 45,
     backoff_base_sec: Number(draft.backoff_base_sec) || 1.0,
     backoff_max_sec: Number(draft.backoff_max_sec) || 30.0,
-    credential_file: draft.credential_file.trim() || '~/.wx-ai-bridge/credentials.json',
+    credential_file: draft.credential_file.trim() || './wechat/credentials.json',
   };
 }
 

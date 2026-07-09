@@ -186,7 +186,7 @@ async def _connect_with_retry(
             await client.connect(uri)
             logger.info("[App] connected to AgentServer: %s", uri)
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if attempt >= max_retries:
                 logger.error(
                     "[App] connect AgentServer failed after %d tries: %s  last=%s",
@@ -1052,7 +1052,19 @@ async def _run(
     from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_connect import FeishuChannel, FeishuConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.whatsapp.whatsapp_connect import WhatsAppChannel, \
         WhatsAppChannelConfig
-    from jiuwenswarm.gateway.channel_manager.im_platforms.wechat.wechat_connect import WechatChannel, WechatConfig
+    from jiuwenswarm.gateway.channel_manager.im_platforms.wechat.wechat_connect import (
+        WechatChannel,
+        WechatConfig,
+        snapshot_wechat_login_ui_state,
+    )
+    from jiuwenswarm.gateway.channel_manager.im_platforms.wechat.login_service import (
+        wechat_login_service,
+    )
+    from jiuwenswarm.gateway.channel_manager.im_platforms.wechat.qr_delivery import (
+        build_wechat_login_qr_delivery,
+        wechat_delivery_payload,
+    )
+    from jiuwenswarm.gateway.im_pipeline.outbound_artifacts import outbound_artifact_store
     from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel, WebChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_connect import (
         XiaoyiChannel, XiaoyiChannelConfig,
@@ -1062,10 +1074,22 @@ async def _run(
     from jiuwenswarm.gateway.channel_manager.im_platforms.discord.discord_connect import DiscordChannel, \
         DiscordChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
-    from jiuwenswarm.common.config import get_config
+    from jiuwenswarm.gateway.channel_manager.im_platforms.qq.qq_connect import QQChannel, QQChannelConfig
+    from jiuwenswarm.gateway.channel_manager.im_platforms.weibo.weibo_connect import WeiboChannel, WeiboChannelConfig
+    from jiuwenswarm.common.channel_config_registry import (
+        is_configurable_third_party_channel,
+        normalize_configurable_channel_id,
+    )
+    from jiuwenswarm.common.config import get_config, update_channel_in_config
     from jiuwenswarm.common.cleanup import start_background_cleanup
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
+    from jiuwenswarm.gateway.channel_manager.spec import (
+        ChannelCapabilities,
+        ChannelConfigError,
+        ChannelSpec,
+        require_fields,
+    )
     from jiuwenswarm.gateway.cron import CronController, CronJobStore, CronSchedulerService
     from jiuwenswarm.gateway.heartbeat.heartbeat import GatewayHeartbeatService, HeartbeatConfig
     from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
@@ -1195,7 +1219,128 @@ async def _run(
 
     initial_channels_conf: dict = channels_cfg if isinstance(channels_cfg, dict) else {}
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
+    channel_manager.set_config_persister(update_channel_in_config)
     updater_service = UpdaterService()
+
+    def _model_config(model: type[Any], raw: dict[str, Any]) -> Any:
+        field_names = set(getattr(model, "model_fields", {}) or {})
+        if not field_names:
+            field_names = set(getattr(model, "__dataclass_fields__", {}) or {})
+        values = {
+            key: value
+            for key, value in raw.items()
+            if key in field_names and value is not None
+        }
+        values["enabled"] = bool(raw.get("enabled", True))
+        return model(**values)
+
+    def _validate_xiaoyi(raw: dict[str, Any]) -> None:
+        if not bool(raw.get("enabled", False)):
+            return
+        if str(raw.get("mode") or "xiaoyi_channel") == "xiaoyi_claw":
+            required = ("agent_id", "uid", "api_key")
+        else:
+            required = ("ak", "sk", "agent_id")
+        missing = [name for name in required if not str(raw.get(name) or "").strip()]
+        if missing:
+            raise ChannelConfigError(
+                f"channel enabled but required fields are missing: {', '.join(missing)}"
+            )
+
+    def _build_feishu(raw: dict[str, Any]) -> FeishuChannel:
+        values = dict(raw)
+        values.setdefault("my_user_id", raw.get("my_open_id") or "")
+        config = _model_config(FeishuConfig, values)
+        adapter = None
+        if config.group_digital_avatar:
+            from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_im_adapter import (
+                FeishuIMPlatformAdapter,
+            )
+
+            adapter = FeishuIMPlatformAdapter(
+                my_open_id=config.my_user_id,
+                bot_name=config.bot_name,
+            )
+            im_inbound.register_adapter("feishu", adapter)
+            im_outbound.register_adapter("feishu", adapter)
+        return FeishuChannel(config, _DummyBus(), im_platform_adapter=adapter)
+
+    def _build_wecom(raw: dict[str, Any]) -> WecomChannel:
+        config = _model_config(WecomConfig, raw)
+        adapter = None
+        if config.group_digital_avatar:
+            from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_im_adapter import (
+                WecomIMPlatformAdapter,
+            )
+
+            adapter = WecomIMPlatformAdapter(
+                my_user_id=config.my_user_id,
+                bot_name=config.bot_name,
+            )
+            im_inbound.register_adapter("wecom", adapter)
+            im_outbound.register_adapter("wecom", adapter)
+        return WecomChannel(config, _DummyBus(), im_platform_adapter=adapter)
+
+    channel_manager.register_spec(ChannelSpec(
+        "feishu", FeishuConfig,
+        _build_feishu,
+        ChannelCapabilities(streaming=True, images=True, files=True, rich_text=True),
+        require_fields("app_id", "app_secret"),
+    ))
+    channel_manager.register_spec(ChannelSpec(
+        "xiaoyi", XiaoyiChannelConfig,
+        lambda raw: XiaoyiChannel(_model_config(XiaoyiChannelConfig, raw), _DummyBus()),
+        ChannelCapabilities(streaming=True, images=True, files=True),
+        _validate_xiaoyi,
+    ))
+    channel_manager.register_spec(ChannelSpec(
+        "dingtalk", DingTalkConfig,
+        lambda raw: DingTalkChannel(_model_config(DingTalkConfig, raw), _DummyBus()),
+        ChannelCapabilities(files=True, rich_text=True),
+        require_fields("client_id", "client_secret"),
+    ))
+    channel_manager.register_spec(ChannelSpec(
+        "telegram", TelegramChannelConfig,
+        lambda raw: TelegramChannel(_model_config(TelegramChannelConfig, raw), _DummyBus()),
+        ChannelCapabilities(images=True, files=True, rich_text=True),
+        require_fields("bot_token"),
+    ))
+    channel_manager.register_spec(ChannelSpec(
+        "discord", DiscordChannelConfig,
+        lambda raw: DiscordChannel(_model_config(DiscordChannelConfig, raw), _DummyBus()),
+        ChannelCapabilities(images=True, files=True, rich_text=True),
+        require_fields("bot_token"),
+    ))
+    channel_manager.register_spec(ChannelSpec(
+        "whatsapp", WhatsAppChannelConfig,
+        lambda raw: WhatsAppChannel(_model_config(WhatsAppChannelConfig, raw), _DummyBus()),
+        ChannelCapabilities(streaming=True, images=True, files=True),
+    ))
+    channel_manager.register_spec(ChannelSpec(
+        "wecom", WecomConfig,
+        _build_wecom,
+        ChannelCapabilities(streaming=True, images=True, files=True, rich_text=True),
+        require_fields("bot_id", "secret"),
+    ))
+    channel_manager.register_spec(ChannelSpec(
+        "wechat", WechatConfig,
+        lambda raw: WechatChannel(_model_config(WechatConfig, raw), _DummyBus()),
+        ChannelCapabilities(streaming=True),
+    ))
+    channel_manager.register_spec(ChannelSpec(
+        "qq", QQChannelConfig,
+        lambda raw: QQChannel(_model_config(QQChannelConfig, raw), _DummyBus()),
+        ChannelCapabilities(streaming=True, images=True, rich_text=True),
+        require_fields("app_id", "app_secret"),
+        startup_grace_seconds=5.0,
+        healthcheck=lambda channel: bool(getattr(channel, "is_connected", False)),
+    ))
+    channel_manager.register_spec(ChannelSpec(
+        "weibo", WeiboChannelConfig,
+        lambda raw: WeiboChannel(_model_config(WeiboChannelConfig, raw), _DummyBus()),
+        ChannelCapabilities(streaming=True),
+        require_fields("app_id", "app_secret"),
+    ))
 
     async def _on_config_saved(
             updated_env_keys: set[str] | None = None,
@@ -1343,6 +1488,149 @@ async def _run(
     )
     gateway_server = GatewayServer(gateway_server_config, _DummyBus())
     gateway_server.message_handler_ref = message_handler
+
+    async def _wechat_login_status_payload(
+        *,
+        wait_for_qr: bool = False,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        state = await snapshot_wechat_login_ui_state(operation_id)
+        if wait_for_qr:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if state.get("phase") in {"awaiting_scan", "scanned", "success", "error"}:
+                    break
+                await asyncio.sleep(0.25)
+                state = await snapshot_wechat_login_ui_state(operation_id)
+        return {
+            "channel_id": "wechat",
+            "login": state,
+        }
+
+    def _requester_from_params(params: dict[str, Any]) -> tuple[str, str]:
+        requester = params.get("requester") if isinstance(params.get("requester"), dict) else {}
+        return (
+            str(requester.get("channel_id") or "").strip(),
+            str(requester.get("session_id") or "").strip(),
+        )
+
+    async def _register_wechat_delivery(
+        state: dict[str, Any],
+        requester_channel_id: str,
+        requester_session_id: str,
+    ) -> None:
+        delivery = build_wechat_login_qr_delivery(state)
+        if delivery is None:
+            return
+        await outbound_artifact_store.register(
+            requester_channel_id,
+            requester_session_id,
+            wechat_delivery_payload(delivery),
+        )
+
+    async def _configure_channel_from_model(ws, req_id, params, session_id):
+        channel_id = normalize_configurable_channel_id(params.get("channel_id"))
+        settings = params.get("settings")
+        if not is_configurable_third_party_channel(channel_id):
+            await gateway_server.send_response(
+                ws, req_id, ok=False, error="unsupported channel_id", code="BAD_REQUEST"
+            )
+            return
+        if not isinstance(settings, dict):
+            await gateway_server.send_response(
+                ws, req_id, ok=False, error="settings must be an object", code="BAD_REQUEST"
+            )
+            return
+
+        try:
+            settings = dict(settings)
+            requester_channel_id, requester_session_id = _requester_from_params(params)
+            operation_id: str | None = None
+            wechat_refresh_qr_requested = False
+            if channel_id == "wechat":
+                wechat_refresh_qr_requested = any(
+                    bool(settings.pop(key, False))
+                    for key in ("refresh_qr", "force_refresh_qr", "rebind")
+                )
+            merged = channel_manager.get_conf(channel_id)
+            merged.update(settings)
+            if channel_id == "wechat":
+                login_state = await snapshot_wechat_login_ui_state()
+                scan_in_progress = login_state.get("phase") in {"awaiting_scan", "scanned"}
+                settings_only_keep_scan_alive = (
+                    set(settings).issubset({"enabled", "auto_login"})
+                    and ("enabled" not in settings or bool(settings.get("enabled")))
+                    and ("auto_login" not in settings or bool(settings.get("auto_login")))
+                )
+                should_restart = wechat_refresh_qr_requested or not (
+                    scan_in_progress and settings_only_keep_scan_alive
+                )
+                if scan_in_progress and not should_restart:
+                    owner = (
+                        str(login_state.get("requester_channel_id") or ""),
+                        str(login_state.get("requester_session_id") or ""),
+                    )
+                    requester = (requester_channel_id, requester_session_id)
+                    if all(owner) and all(requester) and owner != requester:
+                        raise RuntimeError("微信扫码登录正在由另一个会话处理，请稍后再试")
+                    operation_id = str(login_state.get("operation_id") or "") or None
+                else:
+                    operation_id = await wechat_login_service.begin(
+                        requester_channel_id=requester_channel_id,
+                        requester_session_id=requester_session_id,
+                    )
+                if should_restart:
+                    channel_manager.mark_channel_restart_pending(channel_id)
+                else:
+                    logger.info(
+                        "[channel.configure] wechat scan is in progress; keep current QR without restart"
+                    )
+            await channel_manager.set_conf(channel_id, merged)
+            configured = channel_manager.get_conf(channel_id)
+            payload: dict[str, Any] = {"channel_id": channel_id, "config": configured}
+            if channel_id == "wechat":
+                login_payload = await _wechat_login_status_payload(
+                    wait_for_qr=True,
+                    operation_id=operation_id,
+                )
+                payload.update(login_payload)
+                await _register_wechat_delivery(
+                    login_payload["login"], requester_channel_id, requester_session_id
+                )
+            await gateway_server.send_response(
+                ws, req_id, ok=True, payload=payload
+            )
+        except Exception as exc:
+            logger.exception("[channel.configure] failed for %s", channel_id)
+            await gateway_server.send_response(
+                ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
+            )
+
+    async def _wechat_login_status_from_model(ws, req_id, params, session_id):
+        try:
+            requester_channel_id, requester_session_id = _requester_from_params(params)
+            operation_id = await wechat_login_service.find_operation_id(
+                requester_channel_id, requester_session_id
+            )
+            payload = await _wechat_login_status_payload(operation_id=operation_id)
+            await _register_wechat_delivery(
+                payload["login"], requester_channel_id, requester_session_id
+            )
+            await gateway_server.send_response(
+                ws, req_id, ok=True, payload=payload
+            )
+        except Exception as exc:
+            logger.exception("[wechat.login_status] failed")
+            await gateway_server.send_response(
+                ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
+            )
+
+    gateway_server.register_local_handler(
+        "/channel-config", "channel.configure", _configure_channel_from_model
+    )
+    gateway_server.register_local_handler(
+        "/channel-config", "wechat.login_status", _wechat_login_status_from_model
+    )
     for binding in route_bindings:
         route_config = gateway_server_config.routes[binding.path]
         channel_manager.register_external_channel(route_config.channel_id, gateway_server)
@@ -1423,6 +1711,10 @@ async def _run(
     wecom_task = None
     wechat_channel = None
     wechat_task = None
+    qq_channel = None
+    qq_task = None
+    weibo_channel = None
+    weibo_task = None
 
     _last_channels_conf: dict = {}
 
@@ -1478,15 +1770,20 @@ async def _run(
             except Exception as e:  # noqa: BLE001
                 logger.warning("[App] failed to stop previous %sChannel: %s", channel_name.capitalize(), e)
             channel_manager.unregister_channel(channel.channel_id)
+            im_inbound.unregister_adapter(channel.channel_id)
+            im_outbound.unregister_adapter(channel.channel_id)
 
     def _is_channel_enabled(conf: dict | None, required_fields: list[str]) -> tuple[bool, str]:
         if conf is None:
             return False, "missing or invalid config"
         enabled_raw = conf.get("enabled", None)
-        if enabled_raw is None:
-            all_fields_present = all(conf.get(f) for f in required_fields)
-            return all_fields_present, f"missing {','.join(required_fields)}" if not all_fields_present else ""
-        return bool(enabled_raw), "enabled = false" if not enabled_raw else ""
+        enabled = bool(enabled_raw) if enabled_raw is not None else all(conf.get(f) for f in required_fields)
+        if not enabled:
+            return False, "enabled = false"
+        missing = [field_name for field_name in required_fields if not conf.get(field_name)]
+        if missing:
+            return False, f"missing {','.join(missing)}"
+        return True, ""
 
     async def _apply_channel_config(conf: dict) -> None:
         nonlocal feishu_channel, feishu_task, xiaoyi_channel, xiaoyi_task
@@ -1495,6 +1792,8 @@ async def _run(
         nonlocal whatsapp_channel, whatsapp_task
         nonlocal wecom_channel, wecom_task
         nonlocal wechat_channel, wechat_task
+        nonlocal qq_channel, qq_task
+        nonlocal weibo_channel, weibo_task
         nonlocal _last_channels_conf
         nonlocal feishu_enterprise_channels, feishu_enterprise_tasks
 
@@ -1510,6 +1809,8 @@ async def _run(
             "discord",
             "wecom",
             "wechat",
+            "qq",
+            "weibo",
         ]:
             if _should_restart_channel(channel_name, _last_channels_conf, conf) or channel_name in restart_pending:
                 if channel_name in restart_pending and not _should_restart_channel(
@@ -1532,35 +1833,7 @@ async def _run(
                 if not enabled:
                     logger.info("[App] channels.feishu.%s, FeishuChannel disabled", reason)
                 else:
-                    feishu_config = FeishuConfig(
-                        enabled=True,
-                        app_id=str(feishu_conf.get("app_id") or "").strip(),
-                        app_secret=str(feishu_conf.get("app_secret") or "").strip(),
-                        encrypt_key=str(feishu_conf.get("encrypt_key") or "").strip(),
-                        verification_token=str(feishu_conf.get("verification_token") or "").strip(),
-                        allow_from=feishu_conf.get("allow_from") or [],
-                        enable_streaming=bool(feishu_conf.get("enable_streaming", True)),
-                        chat_id=str(feishu_conf.get("chat_id") or "").strip(),
-                        last_chat_id=str(feishu_conf.get("last_chat_id") or "").strip(),
-                        last_open_id=str(feishu_conf.get("last_open_id") or "").strip(),
-                        group_digital_avatar=bool(feishu_conf.get("group_digital_avatar", False)),
-                        my_user_id=str(feishu_conf.get("my_user_id") or feishu_conf.get("my_open_id") or "").strip(),
-                        bot_name=str(feishu_conf.get("bot_name") or "").strip(),
-                        enable_memory=bool(feishu_conf.get("enable_memory", False)),
-                        message_merge_window_ms=int(feishu_conf.get("message_merge_window_ms", 15000)),
-                    )
-                    # 数字分身：创建 adapter 并注册到 pipeline
-                    feishu_adapter = None
-                    if feishu_config.group_digital_avatar:
-                        from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_im_adapter import \
-                            FeishuIMPlatformAdapter
-                        feishu_adapter = FeishuIMPlatformAdapter(
-                            my_open_id=feishu_config.my_user_id,
-                            bot_name=feishu_config.bot_name,
-                        )
-                        im_inbound.register_adapter("feishu", feishu_adapter)
-                        im_outbound.register_adapter("feishu", feishu_adapter)
-                    feishu_channel = FeishuChannel(feishu_config, _DummyBus(), im_platform_adapter=feishu_adapter)
+                    feishu_channel = channel_manager.build_channel("feishu", feishu_conf)
                     channel_manager.register_channel(feishu_channel)
                     feishu_task = asyncio.create_task(feishu_channel.start(), name="feishu")
                     logger.info("[App] FeishuChannel registered from config.yaml.channels.feishu")
@@ -1653,42 +1926,16 @@ async def _run(
             xiaoyi_channel, xiaoyi_task = None, None
 
             if isinstance(xiaoyi_conf, dict):
-                enabled, reason = _is_channel_enabled(xiaoyi_conf, ["ak", "sk", "agent_id"])
+                required = (
+                    ["agent_id", "uid", "api_key"]
+                    if xiaoyi_conf.get("mode") == "xiaoyi_claw"
+                    else ["ak", "sk", "agent_id"]
+                )
+                enabled, reason = _is_channel_enabled(xiaoyi_conf, required)
                 if not enabled:
                     logger.info("[App] channels.xiaoyi.%s, XiaoyiChannel disabled", reason)
                 else:
-                    if xiaoyi_conf.get("mode") == "xiaoyi_claw":
-                        xiaoyi_config = XiaoyiChannelConfig(
-                            enabled=True,
-                            mode=str(xiaoyi_conf.get("mode") or "xiaoyi_claw").strip(),
-                            api_id=str(xiaoyi_conf.get("api_id") or "").strip(),
-                            push_id=str(xiaoyi_conf.get("push_id") or "").strip(),
-                            push_url=str(xiaoyi_conf.get("push_url") or "").strip(),
-                            agent_id=str(xiaoyi_conf.get("agent_id") or "").strip(),
-                            uid=str(xiaoyi_conf.get("uid") or "").strip(),
-                            api_key=str(xiaoyi_conf.get("api_key") or "").strip(),
-                            file_upload_url=str(xiaoyi_conf.get("file_upload_url") or "").strip(),
-                            ws_url1=str(xiaoyi_conf.get("ws_url1")).strip(),
-                            ws_url2=str(xiaoyi_conf.get("ws_url2")).strip(),
-                            enable_streaming=bool(xiaoyi_conf.get("enable_streaming", True)),
-                        )
-                    else:
-                        xiaoyi_config = XiaoyiChannelConfig(
-                            enabled=True,
-                            mode=str(xiaoyi_conf.get("mode") or "xiaoyi_channel").strip(),
-                            ak=str(xiaoyi_conf.get("ak") or "").strip(),
-                            sk=str(xiaoyi_conf.get("sk") or "").strip(),
-                            api_id=str(xiaoyi_conf.get("api_id") or "").strip(),
-                            push_id=str(xiaoyi_conf.get("push_id") or "").strip(),
-                            push_url=str(xiaoyi_conf.get("push_url") or "").strip(),
-                            agent_id=str(xiaoyi_conf.get("agent_id") or "").strip(),
-                            ws_url1=str(xiaoyi_conf.get("ws_url1") or "").strip()
-                                    or "wss://hag.cloud.huawei.com/openclaw/v1/ws/link",
-                            ws_url2=str(xiaoyi_conf.get("ws_url2") or "").strip()
-                                    or "wss://116.63.174.231/openclaw/v1/ws/link",
-                            enable_streaming=bool(xiaoyi_conf.get("enable_streaming", True)),
-                        )
-                    xiaoyi_channel = XiaoyiChannel(xiaoyi_config, _DummyBus())
+                    xiaoyi_channel = channel_manager.build_channel("xiaoyi", xiaoyi_conf)
                     channel_manager.register_channel(xiaoyi_channel)
                     xiaoyi_task = asyncio.create_task(xiaoyi_channel.start(), name="xiaoyi")
                     logger.info("[App] XiaoyiChannel registered from config.yaml.channels.xiaoyi")
@@ -1705,13 +1952,7 @@ async def _run(
                 if not enabled:
                     logger.info("[App] channels.dingtalk.%s, DingTalkChannel disabled", reason)
                 else:
-                    dingtalk_config = DingTalkConfig(
-                        enabled=True,
-                        client_id=str(dingtalk_conf.get("client_id") or "").strip(),
-                        client_secret=str(dingtalk_conf.get("client_secret") or "").strip(),
-                        allow_from=dingtalk_conf.get("allow_from") or [],
-                    )
-                    dingtalk_channel = DingTalkChannel(dingtalk_config, _DummyBus())
+                    dingtalk_channel = channel_manager.build_channel("dingtalk", dingtalk_conf)
                     channel_manager.register_channel(dingtalk_channel)
                     dingtalk_task = asyncio.create_task(dingtalk_channel.start(), name="dingtalk")
                     logger.info("[App] DingTalkChannel registered from config.yaml.channels.dingtalk")
@@ -1728,14 +1969,7 @@ async def _run(
                 if not enabled:
                     logger.info("[App] channels.telegram.%s, TelegramChannel disabled", reason)
                 else:
-                    telegram_config = TelegramChannelConfig(
-                        enabled=True,
-                        bot_token=str(telegram_conf.get("bot_token") or "").strip(),
-                        allow_from=telegram_conf.get("allow_from") or [],
-                        parse_mode=str(telegram_conf.get("parse_mode") or "Markdown").strip(),
-                        group_chat_mode=str(telegram_conf.get("group_chat_mode") or "mention").strip(),
-                    )
-                    telegram_channel = TelegramChannel(telegram_config, _DummyBus())
+                    telegram_channel = channel_manager.build_channel("telegram", telegram_conf)
                     channel_manager.register_channel(telegram_channel)
                     telegram_task = asyncio.create_task(telegram_channel.start(), name="telegram")
                     logger.info("[App] TelegramChannel registered from config.yaml.channels.telegram")
@@ -1752,16 +1986,7 @@ async def _run(
                 if not enabled:
                     logger.info("[App] channels.discord.%s, DiscordChannel disabled", reason)
                 else:
-                    discord_config = DiscordChannelConfig(
-                        enabled=True,
-                        bot_token=str(discord_conf.get("bot_token") or "").strip(),
-                        application_id=str(discord_conf.get("application_id") or "").strip(),
-                        guild_id=str(discord_conf.get("guild_id") or "").strip(),
-                        channel_id=str(discord_conf.get("channel_id") or "").strip(),
-                        allow_from=discord_conf.get("allow_from") or [],
-                        block_dm=(str(discord_conf.get("block_dm")).lower() in ["true", "1"]) or False,
-                    )
-                    discord_channel = DiscordChannel(discord_config, _DummyBus())
+                    discord_channel = channel_manager.build_channel("discord", discord_conf)
                     channel_manager.register_channel(discord_channel)
                     discord_task = asyncio.create_task(discord_channel.start(), name="discord")
                     logger.info("[App] DiscordChannel registered from config.yaml.channels.discord")
@@ -1797,18 +2022,21 @@ async def _run(
                 elif not bridge_ws_url:
                     logger.info("[App] channels.whatsapp missing bridge_ws_url, WhatsAppChannel disabled")
                 else:
-                    whatsapp_config = WhatsAppChannelConfig(
-                        enabled=True,
-                        enable_streaming=enable_streaming,
-                        bridge_ws_url=bridge_ws_url,
-                        allow_from=allow_from,
-                        default_jid=default_jid,
-                        auto_start_bridge=auto_start_bridge,
-                        bridge_command=bridge_command,
-                        bridge_workdir=bridge_workdir,
-                        bridge_env={str(k): str(v) for k, v in bridge_env.items()},
+                    normalized_whatsapp_conf = dict(whatsapp_conf)
+                    normalized_whatsapp_conf.update({
+                        "enabled": True,
+                        "enable_streaming": enable_streaming,
+                        "bridge_ws_url": bridge_ws_url,
+                        "allow_from": allow_from,
+                        "default_jid": default_jid,
+                        "auto_start_bridge": auto_start_bridge,
+                        "bridge_command": bridge_command,
+                        "bridge_workdir": bridge_workdir,
+                        "bridge_env": {str(k): str(v) for k, v in bridge_env.items()},
+                    })
+                    whatsapp_channel = channel_manager.build_channel(
+                        "whatsapp", normalized_whatsapp_conf
                     )
-                    whatsapp_channel = WhatsAppChannel(whatsapp_config, _DummyBus())
                     channel_manager.register_channel(whatsapp_channel)
                     whatsapp_task = asyncio.create_task(whatsapp_channel.start(), name="whatsapp")
                     logger.info("[App] WhatsAppChannel registered from config.yaml.channels.whatsapp")
@@ -1825,31 +2053,7 @@ async def _run(
                 if not enabled:
                     logger.info("[App] channels.wecom.%s, WecomChannel disabled", reason)
                 else:
-                    wecom_config = WecomConfig(
-                        enabled=True,
-                        bot_id=str(wecom_conf.get("bot_id") or "").strip(),
-                        secret=str(wecom_conf.get("secret") or "").strip(),
-                        ws_url=str(wecom_conf.get("ws_url") or "wss://openws.work.weixin.qq.com").strip(),
-                        allow_from=wecom_conf.get("allow_from") or [],
-                        enable_streaming=bool(wecom_conf.get("enable_streaming", True)),
-                        send_thinking_message=bool(wecom_conf.get("send_thinking_message", True)),
-                        group_digital_avatar=bool(wecom_conf.get("group_digital_avatar", False)),
-                        my_user_id=str(wecom_conf.get("my_user_id") or "").strip(),
-                        bot_name=str(wecom_conf.get("bot_name") or "").strip(),
-                        enable_memory=bool(wecom_conf.get("enable_memory", False)),
-                    )
-                    # 数字分身：创建 adapter 并注册到 pipeline
-                    wecom_adapter = None
-                    if wecom_config.group_digital_avatar:
-                        from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_im_adapter import \
-                            WecomIMPlatformAdapter
-                        wecom_adapter = WecomIMPlatformAdapter(
-                            my_user_id=wecom_config.my_user_id,
-                            bot_name=wecom_config.bot_name,
-                        )
-                        im_inbound.register_adapter("wecom", wecom_adapter)
-                        im_outbound.register_adapter("wecom", wecom_adapter)
-                    wecom_channel = WecomChannel(wecom_config, _DummyBus(), im_platform_adapter=wecom_adapter)
+                    wecom_channel = channel_manager.build_channel("wecom", wecom_conf)
                     channel_manager.register_channel(wecom_channel)
                     wecom_task = asyncio.create_task(wecom_channel.start(), name="wecom")
                     logger.info("[App] WecomChannel registered from config.yaml.channels.wecom")
@@ -1866,29 +2070,44 @@ async def _run(
                 if not enabled:
                     logger.info("[App] channels.wechat.%s, WechatChannel disabled", reason)
                 else:
-                    wechat_config = WechatConfig(
-                        enabled=True,
-                        base_url=str(wechat_conf.get("base_url") or "https://ilinkai.weixin.qq.com").strip(),
-                        bot_token=str(wechat_conf.get("bot_token") or "").strip(),
-                        ilink_bot_id=str(wechat_conf.get("ilink_bot_id") or "").strip(),
-                        ilink_user_id=str(wechat_conf.get("ilink_user_id") or "").strip(),
-                        allow_from=wechat_conf.get("allow_from") or [],
-                        auto_login=bool(wechat_conf.get("auto_login", True)),
-                        qrcode_poll_interval_sec=float(wechat_conf.get("qrcode_poll_interval_sec", 2.0)),
-                        long_poll_timeout_sec=int(wechat_conf.get("long_poll_timeout_sec", 45)),
-                        backoff_base_sec=float(wechat_conf.get("backoff_base_sec", 1.0)),
-                        backoff_max_sec=float(wechat_conf.get("backoff_max_sec", 30.0)),
-                        credential_file=str(
-                            wechat_conf.get("credential_file") or "~/.wx-ai-bridge/credentials.json"
-                        ).strip(),
-                        enable_streaming=bool(wechat_conf.get("enable_streaming", True)),
-                    )
-                    wechat_channel = WechatChannel(wechat_config, _DummyBus())
+                    wechat_channel = channel_manager.build_channel("wechat", wechat_conf)
                     channel_manager.register_channel(wechat_channel)
                     wechat_task = asyncio.create_task(wechat_channel.start(), name="wechat")
                     logger.info("[App] WechatChannel registered from config.yaml.channels.wechat")
             else:
                 logger.info("[App] channels.wechat missing or invalid, WechatChannel disabled")
+
+        if "qq" in changed_channels:
+            qq_conf = conf.get("qq") if isinstance(conf, dict) else None
+            await _stop_channel(qq_channel, qq_task, "qq")
+            qq_channel, qq_task = None, None
+            if isinstance(qq_conf, dict):
+                enabled, reason = _is_channel_enabled(qq_conf, ["app_id", "app_secret"])
+                if not enabled:
+                    logger.info("[App] channels.qq.%s, QQChannel disabled", reason)
+                else:
+                    qq_channel = channel_manager.build_channel("qq", qq_conf)
+                    channel_manager.register_channel(qq_channel)
+                    qq_task = asyncio.create_task(qq_channel.start(), name="qq")
+                    logger.info("[App] QQChannel registered from config.yaml.channels.qq")
+            else:
+                logger.info("[App] channels.qq missing or invalid, QQChannel disabled")
+
+        if "weibo" in changed_channels:
+            weibo_conf = conf.get("weibo") if isinstance(conf, dict) else None
+            await _stop_channel(weibo_channel, weibo_task, "weibo")
+            weibo_channel, weibo_task = None, None
+            if isinstance(weibo_conf, dict):
+                enabled, reason = _is_channel_enabled(weibo_conf, ["app_id", "app_secret"])
+                if not enabled:
+                    logger.info("[App] channels.weibo.%s, WeiboChannel disabled", reason)
+                else:
+                    weibo_channel = channel_manager.build_channel("weibo", weibo_conf)
+                    channel_manager.register_channel(weibo_channel)
+                    weibo_task = asyncio.create_task(weibo_channel.start(), name="weibo")
+                    logger.info("[App] WeiboChannel registered from config.yaml.channels.weibo")
+            else:
+                logger.info("[App] channels.weibo missing or invalid, WeiboChannel disabled")
 
     channel_manager.set_config_callback(_apply_channel_config)
     await channel_manager.set_config(initial_channels_conf)
@@ -2018,6 +2237,20 @@ async def _run(
             except asyncio.CancelledError:
                 pass
             await wechat_channel.stop()
+        if qq_channel is not None and qq_task is not None:
+            qq_task.cancel()
+            try:
+                await qq_task
+            except asyncio.CancelledError:
+                pass
+            await qq_channel.stop()
+        if weibo_channel is not None and weibo_task is not None:
+            weibo_task.cancel()
+            try:
+                await weibo_task
+            except asyncio.CancelledError:
+                pass
+            await weibo_channel.stop()
 
         await cron_scheduler.stop()
         await channel_manager.stop_dispatch()

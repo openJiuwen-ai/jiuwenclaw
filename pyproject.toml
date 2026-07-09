@@ -27,6 +27,8 @@ dependencies = [
     "discord.py>=2.4.0",
     "dingtalk-stream>=0.24.3",
     "wecom-aibot-sdk>=1.0.5",
+    "qq-botpy>=1.2.1",
+    "qrcode[pil]>=7.4.2",
     "python-socks>=2.8.1",
     "greenlet>=3.3.2",
     "skillnet-ai==0.0.16",
@@ -127,6 +129,10 @@ default-groups = ['dev']
 
 [tool.uv.sources]
 jiuwenswarm-tui = { path = "./packages/jiuwenswarm-tui" }
+
+[[tool.mypy.overrides]]
+module = ["botpy", "botpy.*"]
+ignore_missing_imports = true
 
 [dependency-groups]
 # Testing (keep in sync with optional-dependencies.test)

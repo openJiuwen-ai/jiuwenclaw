@@ -131,3 +131,79 @@ class XiaoYiPushService:
         except Exception as e:
             logger.error(f"[PUSH] Error: {e}")
             return False
+
+    async def send_push_with_directives(
+        self,
+        push_id: str,
+        session_id: str,
+        directives: list[dict[str, Any]],
+    ) -> bool:
+        try:
+            timestamp = str(int(time.time() * 1000))
+            payload = {
+                "jsonrpc": "2.0",
+                "id": self._generate_uuid(),
+                "result": {
+                    "id": self._generate_uuid(),
+                    "apiId": self.config.api_id,
+                    "pushId": push_id,
+                    "pushText": "",
+                    "pushType": 101,
+                    "kind": "task",
+                    "sessionId": session_id,
+                    "artifacts": [
+                        {
+                            "artifactId": self._generate_uuid(),
+                            "parts": [
+                                {
+                                    "kind": "data",
+                                    "data": {"directives": directives},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+            if self.config.mode == "xiaoyi_claw":
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "x-hag-trace-id": self._generate_uuid(),
+                    "x-uid": self.config.uid,
+                    "x-api-key": self.config.api_key,
+                    "x-request-from": "openclaw",
+                }
+            else:
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "x-hag-trace-id": self._generate_uuid(),
+                    "X-Access-Key": self.config.ak,
+                    "X-Sign": self._generate_signature(timestamp),
+                    "X-Ts": timestamp,
+                }
+
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.config.push_url or PUSH_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout,
+                ) as response:
+                    if response.status == 200:
+                        logger.info("[PUSH] Directive push sent successfully")
+                        return True
+                    error_text = await response.text()
+                    logger.error(
+                        "[PUSH] Directive push failed: HTTP %s body=%s",
+                        response.status,
+                        error_text,
+                    )
+                    return False
+        except aiohttp.ClientError as exc:
+            logger.error("[PUSH] Directive push network error: %s", exc)
+            return False
+        except Exception as exc:
+            logger.error("[PUSH] Directive push error: %s", exc)
+            return False

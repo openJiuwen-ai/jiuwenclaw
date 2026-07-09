@@ -21,16 +21,49 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from jiuwenswarm.common.device_rpc.models import DeviceCommandRequest
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.push import XiaoYiPushService, PushConfig
 from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.formatter import (
     get_status_state_for_event,
     get_status_text_for_event,
+    should_send_as_reasoning_text,
     should_send_as_status_update,
+    should_send_as_text,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_data_event_status_success(status: Any) -> bool:
+    if status is True:
+        return True
+    if status is None or status is False:
+        return False
+    return str(status).strip().lower() in ("success", "succeed", "successful", "ok")
+
+
+def _gui_response_session_id(message: dict[str, Any]) -> str:
+    session_id = str(message.get("sessionId") or "").strip()
+    if session_id:
+        return session_id
+    params = message.get("params")
+    if isinstance(params, dict):
+        session_id = str(params.get("sessionId") or "").strip()
+        if session_id:
+            return session_id
+    detail = message.get("msgDetail")
+    if isinstance(detail, str):
+        try:
+            parsed = json.loads(detail)
+        except json.JSONDecodeError:
+            return ""
+        detail_params = parsed.get("params")
+        if isinstance(detail_params, dict):
+            return str(detail_params.get("sessionId") or "").strip()
+    return ""
+
 
 FILE_TYPE_TO_MIME_TYPE: dict[str, str] = {
     "txt": "text/plain",
@@ -262,6 +295,9 @@ class XiaoyiChannel(BaseChannel):
         self._gui_agent_handlers: List[Callable[[dict[str, Any]], Any]] = []
         # GUI 工具互斥：避免并发注册多个 handler 导致回包串单；不影响其他工具并发
         self._gui_tool_lock = asyncio.Lock()
+        self._device_command_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._privilege_check_lock = asyncio.Lock()
+        self._scheduled_device_command_lock = asyncio.Lock()
 
     @property
     def channel_id(self) -> str:
@@ -271,6 +307,11 @@ class XiaoyiChannel(BaseChannel):
     def gui_tool_lock(self) -> asyncio.Lock:
         """供 xiaoyi_gui_agent 串行执行，避免多路 GUI 回包互相唤醒。"""
         return self._gui_tool_lock
+
+    @property
+    def is_ready(self) -> bool:
+        """当前 Channel 是否至少持有一条可发送的小艺连接."""
+        return self._running and any(self._ws_connections.values())
 
     @property
     def clients(self) -> set[Any]:
@@ -376,7 +417,23 @@ class XiaoyiChannel(BaseChannel):
     async def send(self, msg: Message) -> None:
         """发送消息到小艺服务端（A2A 格式，双通道发送）."""
         if not self._ws_connections:
+            if str(msg.channel_id or "").strip().lower() == "xiaoyi":
+                logger.warning(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_SEND_SKIPPED "
+                    "message_id=%s reason=no_ws_connections payload=%r",
+                    msg.id,
+                    msg.payload,
+                )
             return
+        logger.info(
+            "[GUI_AGENT_DIAG] phase=XIAOYI_SEND_MESSAGE message_id=%s "
+            "session_id=%s event_type=%s payload=%r enable_streaming=%s",
+            msg.id,
+            msg.session_id,
+            getattr(msg.event_type, "value", msg.event_type),
+            msg.payload,
+            self.config.enable_streaming,
+        )
         logger.info(f"XiaoyiChannel 发送消息: {msg}")
         session_id, task_id = self._extract_platform_receive_info(msg)
         # Handle chat.file event
@@ -408,12 +465,49 @@ class XiaoyiChannel(BaseChannel):
             return
 
         if should_send_as_status_update(msg.event_type):
+            is_processing = (
+                msg.payload.get("is_processing", True)
+                if isinstance(msg.payload, dict)
+                else True
+            )
+            if not is_processing and not self._is_session_active(session_id):
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_STATUS_SKIPPED "
+                    "message_id=%s session_id=%s event_type=%s "
+                    "reason=terminal_text_already_sent payload=%r",
+                    msg.id,
+                    session_id,
+                    getattr(msg.event_type, "value", msg.event_type),
+                    msg.payload,
+                )
+                return
             status_text = get_status_text_for_event(msg.event_type, msg.payload)
             status_state = get_status_state_for_event(msg.event_type, msg.payload)
             for url_key in list(self._ws_connections.keys()):
                 await self._send_status_update_with_state(
                     task_id, session_id, status_text, status_state, url_key
                 )
+            if status_state in {"completed", "failed", "canceled"} and session_id:
+                await self._stop_session_heartbeat(session_id)
+                self._clear_task_timeout(session_id)
+                self._clear_session_timeout(session_id)
+                self._mark_session_completed(session_id)
+                self._accumulated_texts.pop(session_id, None)
+            return
+
+        if not (
+            should_send_as_reasoning_text(msg.event_type)
+            or should_send_as_text(msg.event_type)
+        ):
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=XIAOYI_EVENT_SKIPPED message_id=%s "
+                "session_id=%s event_type=%s reason=non_user_visible_event "
+                "payload=%r",
+                msg.id,
+                session_id,
+                getattr(msg.event_type, "value", msg.event_type),
+                msg.payload,
+            )
             return
 
         content = ""
@@ -440,9 +534,8 @@ class XiaoyiChannel(BaseChannel):
         else:
             # 流式模式：按事件类型计算增量与是否结束
             is_delta = msg.event_type == EventType.CHAT_DELTA
-            last_chunk = msg.event_type == EventType.CHAT_FINAL
-            is_final = msg.payload.get("is_complete", False)
-            last_chunk = True if is_final else last_chunk
+            is_chat_final = msg.event_type == EventType.CHAT_FINAL
+            is_final = bool(msg.payload.get("is_complete", False))
 
             # 获取之前发送的文本
             previous_text = self._accumulated_texts.get(session_id, "")
@@ -456,11 +549,36 @@ class XiaoyiChannel(BaseChannel):
             else:
                 incremental_text = content
 
-            # 在消息流中，总是使用 append=true, isFinal=false
-            append = True
-            final = False
-            last_chunk = last_chunk
-            final = is_final
+            # chat.final 携带完整正文，直接作为独立终帧发送，避免客户端
+            # 等待后续空 status 帧提交正文。
+            if is_chat_final:
+                append = False
+                last_chunk = True
+                final = True
+            else:
+                append = True
+                last_chunk = is_final
+                final = is_final
+
+        logger.info(
+            "[GUI_AGENT_DIAG] phase=XIAOYI_TEXT_FLAGS message_id=%s "
+            "platform_session_id=%s platform_task_id=%s event_type=%s "
+            "payload_is_complete=%r append=%s last_chunk=%s final=%s "
+            "content=%r",
+            msg.id,
+            session_id,
+            task_id,
+            getattr(msg.event_type, "value", msg.event_type),
+            (
+                msg.payload.get("is_complete")
+                if isinstance(msg.payload, dict)
+                else None
+            ),
+            append,
+            last_chunk,
+            final,
+            content,
+        )
 
         # Get accumulated text for this session (for push notification)
         accumulated_text = self._accumulated_texts.get(session_id, "")
@@ -488,7 +606,6 @@ class XiaoyiChannel(BaseChannel):
             self._clear_task_timeout(session_id)
             self._clear_session_timeout(session_id)
             self._mark_session_completed(session_id)
-
             # Check if session was waiting for push and send notification
             if self._is_session_waiting_for_push(session_id, task_id) and accumulated_text:
                 summary = accumulated_text[:30] + "..." if len(accumulated_text) > 30 else accumulated_text
@@ -541,7 +658,7 @@ class XiaoyiChannel(BaseChannel):
         async with websockets.connect(
                 url,
                 additional_headers=headers,
-                ssl=ssl_context,
+                # ssl=ssl_context,
                 ping_interval=15,
                 ping_timeout=15,
                 close_timeout=5,
@@ -611,6 +728,7 @@ class XiaoyiChannel(BaseChannel):
         try:
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
+            is_gui_response_frame = "InvokeJarvisGUIAgentResponse" in raw
             message = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.warning(f"XiaoyiChannel JSON 解析失败: {e}")
@@ -618,6 +736,20 @@ class XiaoyiChannel(BaseChannel):
 
         msg_type = message.get("msgType")
         method = message.get("method")
+        if is_gui_response_frame:
+            logger.info(
+                "[GUI_RPC_TRACE] phase=CHANNEL_RAW_GUI_FRAME "
+                "msg_type=%s method=%s session_id=%s has_msg_detail=%s",
+                msg_type,
+                method,
+                str(message.get("sessionId") or ""),
+                isinstance(message.get("msgDetail"), str),
+            )
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=XIAOYI_RAW_GUI_FRAME raw=%s parsed=%r",
+                raw,
+                message,
+            )
 
         # 添加详细日志用于诊断工具消息
         if method or (msg_type and msg_type != "heartbeat"):
@@ -648,6 +780,18 @@ class XiaoyiChannel(BaseChannel):
             await self._handle_data_event(data_event)
             return
 
+        # Direct A2A GUI responses also use method=message/stream. They have
+        # already been consumed by the GUI handler and must not become a new
+        # empty user request, which would cancel the active Agent stream.
+        if is_gui_response_frame:
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=XIAOYI_GUI_FRAME_CONSUMED "
+                "session_id=%s method=%s reason=handled_by_gui_rpc",
+                str(message.get("sessionId") or ""),
+                method,
+            )
+            return
+
         # GUI / UploadExeResult 等已在 _dispatch_gui_agent_events 与 _extract_data_event 中处理，勿再落 unknown method。
         if msg_type == "data":
             return
@@ -669,7 +813,9 @@ class XiaoyiChannel(BaseChannel):
 
     async def _handle_message_stream(self, message: dict[str, Any]) -> None:
         """处理 message/stream 消息，转换为 JiuwenSwarm Message."""
-        session_id = message.get("sessionId") or message.get("params", {}).get("sessionId", "")
+        # 优先用 params.sessionId（= conversationId，真·对话 id），跨多轮稳定、与 task 解耦；
+        # 缺失时回退到顶层 sessionId。
+        session_id = message.get("params", {}).get("sessionId") or message.get("sessionId", "")
         task_id = message.get("params", {}).get("id", ) or ""
         user_message = message.get("params", {}).get("message", {})
         parts = user_message.get("parts", [])
@@ -780,7 +926,11 @@ class XiaoyiChannel(BaseChannel):
         metadata = {
             "method": "message/stream",
             "xiaoyi_session_id": session_id,
+            "xiaoyi_root_session_id": session_id,
+            "xiaoyi_params_session_id": message.get("params", {}).get("sessionId", ""),
             "xiaoyi_task_id": task_id,
+            "xiaoyi_rpc_id": str(message.get("id") or ""),
+            "xiaoyi_push_id": str(self.config.push_id or ""),
         }
         # Add media payload to metadata
         params = {"query": text, "task_id": task_id}
@@ -921,13 +1071,14 @@ class XiaoyiChannel(BaseChannel):
             self, task_id: str, session_id: str, message: str, state: str, url_key: str
     ) -> None:
         """发送状态更新消息（A2A 格式），支持自定义状态."""
+        is_final = state in {"completed", "failed", "canceled"}
         response = {
             "jsonrpc": "2.0",
             "id": f"msg_{int(time.time() * 1000)}",
             "result": {
                 "taskId": task_id,
                 "kind": "status-update",
-                "final": False,
+                "final": is_final,
                 "status": {
                     "message": {
                         "role": "agent",
@@ -937,6 +1088,18 @@ class XiaoyiChannel(BaseChannel):
                 },
             },
         }
+        logger.info(
+            "[GUI_AGENT_DIAG] phase=XIAOYI_STATUS_RESPONSE_BUILT "
+            "session_id=%s task_id=%s connection=%s state=%s "
+            "final=%s text=%r response=%r",
+            session_id,
+            task_id,
+            url_key,
+            state,
+            is_final,
+            message,
+            response,
+        )
         await self._send_agent_response(session_id, task_id, response, url_key)
 
     def _is_session_active(self, session_id: str) -> bool:
@@ -1057,6 +1220,19 @@ class XiaoyiChannel(BaseChannel):
                 },
             },
         }
+        logger.info(
+            "[GUI_AGENT_DIAG] phase=XIAOYI_TEXT_RESPONSE_BUILT "
+            "session_id=%s task_id=%s connection=%s append=%s "
+            "last_chunk=%s final=%s text=%r response=%r",
+            session_id,
+            task_id,
+            url_key,
+            append,
+            last_chunk,
+            is_final,
+            text,
+            response,
+        )
         await self._send_agent_response(session_id, task_id, response, url_key)
 
     async def _send_agent_response(self, session_id: str, task_id: str, response: dict[str, Any], url_key: str) -> None:
@@ -1068,9 +1244,75 @@ class XiaoyiChannel(BaseChannel):
             "taskId": task_id,
             "msgDetail": json.dumps(response),
         }
+        result = response.get("result")
+        is_status_response = (
+            isinstance(result, dict) and result.get("kind") == "status-update"
+        )
+        artifact = result.get("artifact") if isinstance(result, dict) else None
+        parts = artifact.get("parts") if isinstance(artifact, dict) else None
+        is_text_response = bool(
+            isinstance(parts, list)
+            and any(
+                isinstance(part, dict)
+                and part.get("kind") in ("text", "reasoningText")
+                for part in parts
+            )
+        )
         try:
+            if is_text_response:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_WS_TEXT_SEND_BEGIN "
+                    "session_id=%s task_id=%s connection=%s wrapper=%r",
+                    session_id,
+                    task_id,
+                    url_key,
+                    wrapper,
+                )
+            elif is_status_response:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_WS_STATUS_SEND_BEGIN "
+                    "session_id=%s task_id=%s connection=%s wrapper=%r",
+                    session_id,
+                    task_id,
+                    url_key,
+                    wrapper,
+                )
             await self._safe_ws_send(url_key, wrapper)
+            if is_text_response:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_WS_TEXT_SEND_DONE "
+                    "session_id=%s task_id=%s connection=%s",
+                    session_id,
+                    task_id,
+                    url_key,
+                )
+            elif is_status_response:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_WS_STATUS_SEND_DONE "
+                    "session_id=%s task_id=%s connection=%s",
+                    session_id,
+                    task_id,
+                    url_key,
+                )
         except Exception as e:
+            if is_text_response:
+                logger.exception(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_WS_TEXT_SEND_FAILED "
+                    "session_id=%s task_id=%s connection=%s error_type=%s",
+                    session_id,
+                    task_id,
+                    url_key,
+                    type(e).__name__,
+                )
+            elif is_status_response:
+                logger.exception(
+                    "[GUI_AGENT_DIAG] phase=XIAOYI_WS_STATUS_SEND_FAILED "
+                    "session_id=%s task_id=%s connection=%s error_type=%s",
+                    session_id,
+                    task_id,
+                    url_key,
+                    type(e).__name__,
+                )
             logger.warning(f"XiaoyiChannel 发送响应失败 ({url_key}): {e}")
 
     async def _send_file_response_base64(self, session_id: str, task_id: str, file_info: dict, url_key: str) -> None:
@@ -1268,20 +1510,310 @@ class XiaoyiChannel(BaseChannel):
         }
 
         # 发送到所有活跃连接
+        privilege_intent = (
+            command.get("payload", {})
+            .get("executeParam", {})
+            .get("intentName")
+        )
+        if privilege_intent == "CheckPlugInPrivilege":
+            logger.info(
+                "[CRON_DEVICE] phase=PRIVILEGE_WIRE_SEND "
+                "agent_id=%s session_id=%s task_id=%s message_id=%s "
+                "wrapper=%r",
+                self.config.agent_id,
+                session_id,
+                task_id,
+                message_id,
+                wrapper,
+            )
+
         sent = False
+        is_gui_command = (
+            command.get("header", {}).get("namespace") == "ClawAgent"
+            and command.get("header", {}).get("name")
+            == "InvokeJarvisGUIAgentRequest"
+        )
+        if is_gui_command:
+            logger.info(
+                "[GUI_RPC_TRACE] phase=CHANNEL_SEND_ENTER session_id=%s "
+                "task_id=%s message_id=%s active_connection_count=%s",
+                session_id,
+                task_id,
+                message_id,
+                sum(bool(ws) for ws in self._ws_connections.values()),
+            )
         for url_key, ws in self._ws_connections.items():
             if ws:
                 try:
+                    if is_gui_command:
+                        logger.info(
+                            "[GUI_RPC_TRACE] phase=CHANNEL_WS_SEND_BEGIN "
+                            "session_id=%s task_id=%s message_id=%s "
+                            "connection=%s",
+                            session_id,
+                            task_id,
+                            message_id,
+                            url_key,
+                        )
                     await self._safe_ws_send(url_key, wrapper)
+                    if is_gui_command:
+                        logger.info(
+                            "[GUI_RPC_TRACE] phase=CHANNEL_WS_SEND_DONE "
+                            "session_id=%s task_id=%s message_id=%s "
+                            "connection=%s success=true",
+                            session_id,
+                            task_id,
+                            message_id,
+                            url_key,
+                        )
                     intent_name = command.get("payload", {}).get("executeParam", {}).get("intentName") or command.get(
                         "header", {}
                     ).get("name", "unknown")
                     logger.info(f"XiaoyiChannel 发送 command 成功 ({url_key}):intent={intent_name}")
                     sent = True
                 except Exception as e:
+                    if is_gui_command:
+                        logger.warning(
+                            "[GUI_RPC_TRACE] phase=CHANNEL_WS_SEND_DONE "
+                            "session_id=%s task_id=%s message_id=%s "
+                            "connection=%s success=false error_type=%s",
+                            session_id,
+                            task_id,
+                            message_id,
+                            url_key,
+                            type(e).__name__,
+                        )
                     logger.warning(f"XiaoyiChannel 发送 command 失败 ({url_key}): {e}")
 
+        if is_gui_command:
+            logger.info(
+                "[GUI_RPC_TRACE] phase=CHANNEL_SEND_EXIT session_id=%s "
+                "task_id=%s message_id=%s sent=%s",
+                session_id,
+                task_id,
+                message_id,
+                sent,
+            )
         return sent
+
+    async def execute_phone_tool_command(
+        self,
+        request: DeviceCommandRequest,
+    ) -> dict[str, Any]:
+        context = request.context
+        session_id = (
+            context.xiaoyi_root_session_id
+            or context.xiaoyi_params_session_id
+            or context.jiuwen_session_id
+            or ""
+        )
+        if not session_id:
+            raise RuntimeError("Xiaoyi session_id is missing")
+        task_id = context.xiaoyi_task_id or session_id
+        message_id = (
+            context.xiaoyi_rpc_id
+            if request.intent_name == "CheckPlugInPrivilege"
+            and context.xiaoyi_rpc_id
+            else f"cmd_{request.operation_id}"
+        )
+        if request.intent_name == "CheckPlugInPrivilege":
+            lock = self._privilege_check_lock
+        else:
+            lock_key = (session_id, request.intent_name)
+            lock = self._device_command_locks.setdefault(lock_key, asyncio.Lock())
+        async with lock:
+            return await self._execute_phone_tool_command_locked(
+                request=request,
+                session_id=session_id,
+                task_id=task_id,
+                message_id=message_id,
+            )
+
+    async def _execute_phone_tool_command_locked(
+        self,
+        *,
+        request: DeviceCommandRequest,
+        session_id: str,
+        task_id: str,
+        message_id: str,
+    ) -> dict[str, Any]:
+        result_event = asyncio.Event()
+        result_data: dict[str, Any] | None = None
+        error: Exception | None = None
+        started_at = time.monotonic()
+
+        def on_data_event(event: DataEvent) -> None:
+            nonlocal result_data, error
+            if event.intent_name != request.intent_name:
+                return
+            if request.intent_name == "CheckPlugInPrivilege":
+                result_data = {} if event.outputs is None else event.outputs
+            elif _is_data_event_status_success(event.status):
+                result_data = {} if event.outputs is None else event.outputs
+            else:
+                error = RuntimeError(f"Device execution failed: {event.status}")
+            result_event.set()
+
+        self.register_data_event_handler(request.intent_name, on_data_event)
+        try:
+            logger.info(
+                "[XiaoyiChannel] device command send: rpc_id=%s operation_id=%s source_request_id=%s "
+                "session_id=%s task_id=%s intent_name=%s pid=%s",
+                request.rpc_id,
+                request.operation_id,
+                request.context.source_request_id,
+                session_id,
+                task_id,
+                request.intent_name,
+                os.getpid(),
+            )
+            sent = await self.send_xiaoyi_phone_tools_command(
+                session_id=session_id,
+                task_id=task_id,
+                message_id=message_id,
+                command=request.command,
+            )
+            if not sent:
+                raise RuntimeError("Xiaoyi WebSocket is not connected")
+
+            await asyncio.wait_for(
+                result_event.wait(),
+                timeout=request.timeout_seconds,
+            )
+            if error is not None:
+                raise error
+            return {} if result_data is None else result_data
+        finally:
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            logger.info(
+                "[XiaoyiChannel] device command finished: rpc_id=%s operation_id=%s source_request_id=%s "
+                "session_id=%s task_id=%s intent_name=%s pid=%s elapsed_ms=%s",
+                request.rpc_id,
+                request.operation_id,
+                request.context.source_request_id,
+                session_id,
+                task_id,
+                request.intent_name,
+                os.getpid(),
+                elapsed_ms,
+            )
+            self.unregister_data_event_handler(request.intent_name, on_data_event)
+
+    async def execute_scheduled_phone_tool_command(
+        self,
+        request: DeviceCommandRequest,
+    ) -> dict[str, Any]:
+        scheduled_device = request.context.metadata.get("scheduled_device")
+        if not isinstance(scheduled_device, dict):
+            logger.warning(
+                "[CRON_DEVICE] phase=SCHEDULED_INTENT_REJECTED rpc_id=%s "
+                "operation_id=%s intent_name=%s reason=missing_scheduled_device",
+                request.rpc_id,
+                request.operation_id,
+                request.intent_name,
+            )
+            raise RuntimeError(
+                "Scheduled Xiaoyi device permissions are missing; "
+                "recreate the cron job"
+            )
+        push_id = str(scheduled_device.get("push_id") or "").strip()
+        required_intents = scheduled_device.get("required_intents")
+        allowed_intents = {
+            str(item or "").strip()
+            for item in required_intents
+            if str(item or "").strip()
+        } if isinstance(required_intents, list) else set()
+        if not push_id:
+            raise RuntimeError("Scheduled Xiaoyi push_id is missing")
+        if not allowed_intents:
+            logger.warning(
+                "[CRON_DEVICE] phase=SCHEDULED_INTENT_REJECTED rpc_id=%s "
+                "operation_id=%s intent_name=%s reason=empty_required_intents",
+                request.rpc_id,
+                request.operation_id,
+                request.intent_name,
+            )
+            raise RuntimeError(
+                "Scheduled Xiaoyi device intents are missing; "
+                "recreate the cron job"
+            )
+        if request.intent_name not in allowed_intents:
+            logger.warning(
+                "[CRON_DEVICE] phase=SCHEDULED_INTENT_REJECTED rpc_id=%s "
+                "operation_id=%s intent_name=%s reason=intent_not_allowed",
+                request.rpc_id,
+                request.operation_id,
+                request.intent_name,
+            )
+            raise RuntimeError(
+                f"Intent {request.intent_name} is not allowed by the scheduled device context"
+            )
+
+        async with self._scheduled_device_command_lock:
+            result_event = asyncio.Event()
+            result_data: dict[str, Any] | None = None
+            error: Exception | None = None
+            started_at = time.monotonic()
+
+            def on_data_event(event: DataEvent) -> None:
+                nonlocal result_data, error
+                if event.intent_name != request.intent_name:
+                    return
+                if _is_data_event_status_success(event.status):
+                    result_data = {} if event.outputs is None else event.outputs
+                else:
+                    error = RuntimeError(
+                        f"Device execution failed: {event.status}"
+                    )
+                result_event.set()
+
+            self.register_data_event_handler(request.intent_name, on_data_event)
+            try:
+                push_config = PushConfig(
+                    mode=self.config.mode,
+                    api_id=self.config.api_id,
+                    push_id=push_id,
+                    push_url=self.config.push_url,
+                    ak=self.config.ak,
+                    sk=self.config.sk,
+                    uid=self.config.uid,
+                    api_key=self.config.api_key,
+                )
+                push_service = XiaoYiPushService(push_config)
+                logger.info(
+                    "[CRON_DEVICE] phase=DIRECTIVE_SEND_BEGIN rpc_id=%s "
+                    "operation_id=%s intent_name=%s",
+                    request.rpc_id,
+                    request.operation_id,
+                    request.intent_name,
+                )
+                sent = await push_service.send_push_with_directives(
+                    push_id=push_id,
+                    session_id=str(uuid.uuid4()),
+                    directives=[request.command],
+                )
+                if not sent:
+                    raise RuntimeError("Failed to send Xiaoyi directive push")
+                await asyncio.wait_for(
+                    result_event.wait(),
+                    timeout=request.timeout_seconds,
+                )
+                if error is not None:
+                    raise error
+                return {} if result_data is None else result_data
+            finally:
+                self.unregister_data_event_handler(
+                    request.intent_name,
+                    on_data_event,
+                )
+                logger.info(
+                    "[CRON_DEVICE] phase=DIRECTIVE_SEND_DONE rpc_id=%s "
+                    "operation_id=%s intent_name=%s elapsed_ms=%s",
+                    request.rpc_id,
+                    request.operation_id,
+                    request.intent_name,
+                    int((time.monotonic() - started_at) * 1000),
+                )
 
     def _get_a2a_parts(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         """从直连或 Wrapped A2A 消息中取出 message.parts."""
@@ -1319,12 +1851,40 @@ class XiaoyiChannel(BaseChannel):
                         item.get("header", {}).get("namespace") == "ClawAgent"
                         and item.get("header", {}).get("name") == "InvokeJarvisGUIAgentResponse"
                 ):
+                    dispatch_item = dict(item)
+                    dispatch_item["_xiaoyi_session_id"] = _gui_response_session_id(message)
+                    payload = item.get("payload")
+                    payload = payload if isinstance(payload, dict) else {}
+                    stream_info = payload.get("streamInfo")
+                    stream_info = stream_info if isinstance(stream_info, dict) else {}
+                    content = stream_info.get("streamContent")
+                    logger.info(
+                        "[GUI_RPC_TRACE] phase=CHANNEL_GUI_FRAME_DISPATCH "
+                        "session_id=%s interaction_id=%s is_final=%s "
+                        "content_len=%s handler_count=%s",
+                        dispatch_item["_xiaoyi_session_id"],
+                        str(payload.get("interactionId") or ""),
+                        payload.get("isFinal"),
+                        len(str(content)) if content is not None else 0,
+                        len(self._gui_agent_handlers),
+                    )
+                    logger.info(
+                        "[GUI_AGENT_DIAG] phase=XIAOYI_GUI_EVENT_DISPATCH "
+                        "session_id=%s interaction_id=%s raw_is_final=%r "
+                        "stream_content=%r payload=%r event=%r",
+                        dispatch_item["_xiaoyi_session_id"],
+                        str(payload.get("interactionId") or ""),
+                        payload.get("isFinal"),
+                        content,
+                        payload,
+                        item,
+                    )
                     for h in list(self._gui_agent_handlers):
                         try:
                             if asyncio.iscoroutinefunction(h):
-                                await h(item)
+                                await h(dispatch_item)
                             else:
-                                h(item)
+                                h(dispatch_item)
                         except Exception as e:
                             logger.warning(
                                 "XiaoyiChannel GUI agent 处理器异常（已隔离）: %s",

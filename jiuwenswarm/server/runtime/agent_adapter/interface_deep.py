@@ -129,6 +129,7 @@ from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
     CircuitBreakerConfig,
 )
+from jiuwenswarm.agents.harness.common.rails.cspl import CsplConfig, CsplSentinelRail
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
 from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
@@ -144,7 +145,10 @@ from jiuwenswarm.agents.harness.common.memory.config import (
     is_proactive_memory,
 )
 from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
-from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
+from jiuwenswarm.agents.harness.common.channel_runtime_context import (
+    CURRENT_CHANNEL_ID,
+    CURRENT_SESSION_ID,
+)
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
@@ -208,6 +212,10 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
+from jiuwenswarm.agents.harness.common.tools.channel_config_tools import (
+    configure_channel,
+    get_wechat_login_status,
+)
 from jiuwenswarm.agents.harness.common.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
@@ -3102,6 +3110,19 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] CircuitBreakerRail create failed: %s", exc)
             return None
 
+    def _build_cspl_sentinel_rail(self) -> CsplSentinelRail | None:
+        try:
+            cspl_cfg = CsplConfig.load()
+            if not cspl_cfg.enabled:
+                logger.info("[JiuWenSwarmDeepAdapter] CsplSentinelRail disabled by config")
+                return None
+            rail = CsplSentinelRail(cspl_cfg)
+            logger.info("[JiuWenSwarmDeepAdapter] CsplSentinelRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] CsplSentinelRail create failed: %s", exc)
+            return None
+
     def _build_runtime_prompt_rail(self) -> RuntimePromptRail | None:
         """Build RuntimePromptRail for per-model-call time/channel/runtime injection."""
         try:
@@ -3155,6 +3176,7 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
+            _RailBuildInfo("_cspl_sentinel_rail", self._build_cspl_sentinel_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
             _RailBuildInfo(
@@ -3408,6 +3430,11 @@ class JiuWenSwarmDeepAdapter:
             if not Runner.resource_mgr.get_tool(wtool.card.id):
                 Runner.resource_mgr.add_tool(wtool)
             tool_cards.append(wtool.card)
+
+        for channel_tool in (configure_channel, get_wechat_login_status):
+            if not Runner.resource_mgr.get_tool(channel_tool.card.id):
+                Runner.resource_mgr.add_tool(channel_tool)
+            tool_cards.append(channel_tool.card)
 
         # 付费搜索工具：有任意一个付费 key 就注册
         if is_paid_search_enabled():
@@ -5614,7 +5641,8 @@ class JiuWenSwarmDeepAdapter:
             request_id=request.request_id,
             mode=mode,
         )
-        token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_cid = CURRENT_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_sid = CURRENT_SESSION_ID.set((request.session_id or "").strip())
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
@@ -5652,7 +5680,8 @@ class JiuWenSwarmDeepAdapter:
             raise
         finally:
             self._unregister_session_agent_task(session_id)
-            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+            CURRENT_CHANNEL_ID.reset(token_cid)
+            CURRENT_SESSION_ID.reset(token_sid)
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
             self._unmark_session_active(session_id)
@@ -5706,6 +5735,23 @@ class JiuWenSwarmDeepAdapter:
         cid = request.channel_id
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
+        request_metadata = request.metadata if isinstance(request.metadata, dict) else {}
+        is_xiaoyi_request = (
+            str(cid or "").strip().lower() == "xiaoyi"
+            or bool(request_metadata.get("xiaoyi_session_id"))
+            or bool(request_metadata.get("xiaoyi_task_id"))
+        )
+        if is_xiaoyi_request:
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=RUNNER_STREAM_BEGIN request_id=%s "
+                "session_id=%s channel_id=%s query=%r mode=%s metadata=%r",
+                rid,
+                session_id,
+                cid,
+                query,
+                mode,
+                request_metadata,
+            )
 
         # Team 模式处理
         if mode in ("team", "team.plan", "code.team"):
@@ -5856,7 +5902,8 @@ class JiuWenSwarmDeepAdapter:
             request_id=request.request_id,
             mode=mode,
         )
-        token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_cid = CURRENT_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_sid = CURRENT_SESSION_ID.set((request.session_id or "").strip())
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
@@ -5883,6 +5930,16 @@ class JiuWenSwarmDeepAdapter:
             inputs = dict(inputs)
             await self._sync_prompt_attachments_for_request(session_id)
             async for chunk in Runner.run_agent_streaming(self._instance, inputs):
+                if is_xiaoyi_request:
+                    logger.info(
+                        "[GUI_AGENT_DIAG] phase=RUNNER_RAW_EVENT request_id=%s "
+                        "session_id=%s chunk_type=%s payload=%r raw_chunk=%r",
+                        rid,
+                        session_id,
+                        getattr(chunk, "type", type(chunk).__name__),
+                        getattr(chunk, "payload", None),
+                        chunk,
+                    )
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                     parsed = self._parse_stream_chunk(chunk)
                     if parsed is not None:
@@ -6056,6 +6113,17 @@ class JiuWenSwarmDeepAdapter:
                         is_complete=False,
                     )
 
+            if is_xiaoyi_request:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=RUNNER_STREAM_END request_id=%s "
+                    "session_id=%s has_streamed_content=%s "
+                    "accumulated_text=%r accumulated_reasoning=%r",
+                    rid,
+                    session_id,
+                    has_streamed_content,
+                    accumulated_text,
+                    accumulated_reasoning,
+                )
             if accumulated_text:
                 yield AgentResponseChunk(
                     request_id=rid,
@@ -6106,7 +6174,8 @@ class JiuWenSwarmDeepAdapter:
             )
         finally:
             self._unregister_session_agent_task(session_id)
-            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+            CURRENT_CHANNEL_ID.reset(token_cid)
+            CURRENT_SESSION_ID.reset(token_sid)
             cleanup_permission_context(token_perm)
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)
@@ -7735,3 +7804,65 @@ def _load_custom_subagents(
         result.append(custom_spec)
         _logger.info("loaded custom agent '%s' from %s", agent_def.name, agent_def.source)
     return result
+
+
+# === [JiuWenSwarm patch] widen general-purpose subagent sandbox =============
+# core 的 DeepAgent.create_subagent 会给 general-purpose 子 agent 生成窄目录
+# sub_agents/<id> 作为 CWD，并把 sandbox 边界(回退到 [workspace, project_root]) 也
+# 锁成该窄目录；叠加从父继承的 restrict_to_work_dir(openJiuwen #987) 后，子 agent
+# 读不到共享 skills/、也无法落盘到主工作区。
+#
+# 这里在不改 core 源码的前提下，运行时包一层 create_subagent：保留窄目录当 CWD(每次
+# 调用独立工位)，仅把该子 agent 的 sandbox_root 显式放宽到主 agent 的共享 workspace 根，
+# 并保持 restrict_to_sandbox=True —— 于是 skills/ 可读、工作区可落盘，而 /tmp 及外部路径
+# 仍被沙箱拒绝(#987 的隔离不变)。
+#
+# 影响面：仅当 subagent_type == "general-purpose" 时才改写 sandbox_root；其它子 agent
+# (research/browser/code 以及 team 成员各自派生的子 agent) 原样返回，不受影响。
+def _jws_install_subagent_sandbox_widen_patch() -> None:
+    # DeepAgent 已在模块级导入(顶部 `from openjiuwen.harness import DeepAgent`),
+    # 此处直接复用,避免函数内重复 import 造成同名遮蔽(huawei-redefined-outer-name)。
+    if getattr(DeepAgent, "_jws_subagent_sandbox_widen", False):
+        return
+    _orig_create_subagent = DeepAgent.create_subagent
+
+    # pylint: disable=protected-access
+    # 此处为运行时 monkey-patch:必须在 DeepAgent 类外访问其受保护成员
+    # (_deep_config / _run_config) 才能改写子 agent 沙箱边界,G.CLS.11 在此不适用。
+    def _create_subagent_widen_sandbox(self, subagent_type, subsession_id, *args, **kwargs):
+        sub = _orig_create_subagent(self, subagent_type, subsession_id, *args, **kwargs)
+        try:
+            if subagent_type == "general-purpose":
+                parent_ws = getattr(self._deep_config, "workspace", None)
+                shared_root = getattr(parent_ws, "root_path", None) if parent_ws else None
+                if shared_root:
+                    shared_root = str(shared_root)
+                    sysop = getattr(getattr(sub, "_deep_config", None), "sys_operation", None)
+                    wc = getattr(sysop, "_run_config", None)
+                    if wc is not None and hasattr(wc, "sandbox_root"):
+                        wc.sandbox_root = [shared_root]
+                        wc.restrict_to_sandbox = True
+                        sub_ws = getattr(sub._deep_config, "workspace", None)
+                        cwd_root = getattr(sub_ws, "root_path", None) if sub_ws else None
+                        logger.info(
+                            "[JiuWenSwarm] widened general-purpose subagent sandbox to "
+                            "%s (cwd stays %s)",
+                            shared_root,
+                            cwd_root,
+                        )
+        except Exception:
+            logger.warning(
+                "[JiuWenSwarm] widen subagent sandbox failed", exc_info=True
+            )
+        return sub
+
+    # pylint: enable=protected-access
+    DeepAgent.create_subagent = _create_subagent_widen_sandbox
+    DeepAgent._jws_subagent_sandbox_widen = True  # pylint: disable=protected-access
+    logger.info(
+        "[JiuWenSwarm] installed general-purpose subagent sandbox-widen patch"
+    )
+
+
+_jws_install_subagent_sandbox_widen_patch()
+# === [JiuWenSwarm patch end] ================================================

@@ -17,8 +17,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Dict, Literal
 from jiuwenswarm.gateway.channel_manager.base import ChannelType
-from jiuwenswarm.common.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS
+from jiuwenswarm.common.e2a.constants import (
+    E2A_RESPONSE_KIND_XIAOYI_DEVICE_COMMAND_REQUEST,
+    E2A_RESPONSE_KIND_XIAOYI_GUI_RPC_CANCEL,
+    E2A_RESPONSE_KIND_XIAOYI_GUI_RPC_REQUEST,
+    E2A_WIRE_INTERNAL_METADATA_KEYS,
+)
+from jiuwenswarm.gateway.gateway_push.xiaoyi_device_command_handler import (
+    XiaoyiDeviceCommandHandler,
+)
+from jiuwenswarm.gateway.gui_rpc import XiaoyiGuiRpcDispatcher
 from jiuwenswarm.common.config import get_evolution_auto_save_enabled
+
 from jiuwenswarm.gateway.routing.session_map import SessionMap
 from jiuwenswarm.gateway.routing.agent_request_timeout import (
     send_agent_request_with_timeout,
@@ -191,6 +201,8 @@ class MessageHandler(ABC):
             ChannelType.WHATSAPP.value,
             ChannelType.WECOM.value,
             ChannelType.WECHAT.value,
+            ChannelType.QQ.value,
+            ChannelType.WEIBO.value,
         }
         # 使用 SessionMap 的 channel 族（由 config 中 gateway.session_map_scope 决定是否在 key 中含 user）
         self._session_map_channel_types = frozenset({
@@ -199,6 +211,8 @@ class MessageHandler(ABC):
         self._channel_states: Dict[str, ChannelControlState] = {}
         self._session_map = SessionMap()
         self._cron_controller = None
+        self._xiaoyi_device_handler = XiaoyiDeviceCommandHandler(self._agent_client)
+        self._xiaoyi_gui_rpc_dispatcher = XiaoyiGuiRpcDispatcher(self._agent_client)
 
         # IM Pipeline（数字分身）— None 时不执行，不影响原有逻辑
         self._inbound_pipeline = None   # type: Any  # IMInboundPipeline | None
@@ -1674,6 +1688,17 @@ class MessageHandler(ABC):
 
     async def publish_robot_messages(self, msg: "Message") -> None:
         """将 Agent 响应放入 robot_messages 队列."""
+        is_xiaoyi_message = str(msg.channel_id or "").strip().lower() == "xiaoyi"
+        if is_xiaoyi_message:
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=ROBOT_QUEUE_PUT_BEGIN message_id=%s "
+                "session_id=%s event_type=%s payload=%r queue_size=%s",
+                msg.id,
+                msg.session_id,
+                getattr(msg.event_type, "value", msg.event_type),
+                msg.payload,
+                self._robot_messages.qsize(),
+            )
         # Outbound Pipeline（数字分身出站路由）— 在入队前运行
         if self._outbound_pipeline is not None:
             try:
@@ -1681,6 +1706,16 @@ class MessageHandler(ABC):
             except Exception:
                 logger.exception("Outbound pipeline error, message queued without routing")
         await self._robot_messages.put(msg)
+        if is_xiaoyi_message:
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=ROBOT_QUEUE_PUT_DONE message_id=%s "
+                "session_id=%s event_type=%s payload=%r queue_size=%s",
+                msg.id,
+                msg.session_id,
+                getattr(msg.event_type, "value", msg.event_type),
+                msg.payload,
+                self._robot_messages.qsize(),
+            )
 
     def publish_robot_messages_nowait(self, msg: "Message") -> None:
         """将 Agent 响应放入 robot_messages 队列（同步）."""
@@ -2098,6 +2133,28 @@ class MessageHandler(ABC):
     async def _handle_agent_server_push(self, wire: dict[str, Any]) -> None:
         """AgentServer ``send_push`` 下行：与 RPC 共用连接但不得占用 unary/stream 等待队列。"""
         from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_chunk
+
+        response_kind = str(wire.get("response_kind") or "")
+        if response_kind in (
+            E2A_RESPONSE_KIND_XIAOYI_GUI_RPC_REQUEST,
+            E2A_RESPONSE_KIND_XIAOYI_GUI_RPC_CANCEL,
+        ):
+            body = wire.get("body")
+            logger.info(
+                "[GUI_RPC_TRACE] phase=GATEWAY_MESSAGE_ROUTED rpc_id=%s "
+                "response_kind=%s",
+                (
+                    str(body.get("rpc_id") or "")
+                    if isinstance(body, dict)
+                    else ""
+                ),
+                response_kind,
+            )
+            await self._xiaoyi_gui_rpc_dispatcher.handle(wire)
+            return
+        if response_kind == E2A_RESPONSE_KIND_XIAOYI_DEVICE_COMMAND_REQUEST:
+            await self._xiaoyi_device_handler.handle(wire)
+            return
 
         try:
             chunk = parse_agent_server_wire_chunk(wire)
@@ -3216,10 +3273,32 @@ class MessageHandler(ABC):
         """
         rid = env.request_id or ""
         channel_id = env.channel or ""
+        is_xiaoyi_request = str(channel_id).strip().lower() == "xiaoyi"
+        if is_xiaoyi_request:
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=GATEWAY_STREAM_PROCESS_BEGIN "
+                "request_id=%s session_id=%s metadata=%r",
+                rid,
+                session_id,
+                request_metadata,
+            )
         cancelled = False
         has_processing_status_false = False  # 追踪 AgentServer 是否已发送 processing_status=false
         try:
             async for chunk in self._agent_client.send_request_stream(env):
+                if is_xiaoyi_request:
+                    logger.info(
+                        "[GUI_AGENT_DIAG] phase=GATEWAY_STREAM_CHUNK_PROCESS "
+                        "request_id=%s event_type=%s is_complete=%s payload=%r",
+                        rid,
+                        (
+                            chunk.payload.get("event_type")
+                            if isinstance(chunk.payload, dict)
+                            else None
+                        ),
+                        chunk.is_complete,
+                        chunk.payload,
+                    )
                 if self._is_terminal_stream_chunk(chunk):
                     logger.debug(
                         "[MessageHandler] 跳过终止 chunk: request_id=%s",
@@ -3259,6 +3338,12 @@ class MessageHandler(ABC):
                 "[MessageHandler] Stream 正常完成: request_id=%s",
                 rid,
             )
+            if is_xiaoyi_request:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=GATEWAY_STREAM_PROCESS_END "
+                    "request_id=%s cancelled=false",
+                    rid,
+                )
         except asyncio.CancelledError:
             cancelled = True
             logger.info(
@@ -3328,6 +3413,15 @@ class MessageHandler(ABC):
                         "[MessageHandler] 该 session 流式任务已完成，已发送 is_processing=false: session_id=%s",
                         session_id,
                     )
+            if is_xiaoyi_request:
+                logger.info(
+                    "[GUI_AGENT_DIAG] phase=GATEWAY_STREAM_PROCESS_EXIT "
+                    "request_id=%s cancelled=%s "
+                    "has_processing_status_false=%s",
+                    rid,
+                    cancelled,
+                    has_processing_status_false,
+                )
 
     async def _send_stream_cancelled_notification(
         self, request_id: str | None, channel_id: str, session_id: str | None

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import copy
 import json
 import logging
 import random
@@ -18,6 +17,10 @@ from pydantic import BaseModel, Field
 
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
+from jiuwenswarm.gateway.channel_manager.im_platforms.message_text import (
+    extract_human_text,
+    should_skip_intermediate_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,23 +130,10 @@ class WechatConfig(BaseModel):
     backoff_max_sec: float = 30.0
 
     # 可选：本地凭据持久化
-    credential_file: str = "~/.wx-ai-bridge/credentials.json"
+    credential_file: str = "./wechat/credentials.json"
 
     # 是否下发过程消息（工具调用/结果、delta 在工具边界的冲刷）；False 时仅在下发 chat.final（及 interrupt 等完结类事件）时合并发送
     enable_streaming: bool = True
-
-
-# 供前端轮询展示扫码登录进度（与 Logger 输出互补）
-_login_ui_lock = asyncio.Lock()
-_login_ui_state: dict[str, Any] = {
-    "phase": "idle",
-    "message": "",
-    "qr": None,
-    "credentials": None,
-    "credentials_source": None,
-    "error": None,
-    "updated_at": 0.0,
-}
 
 
 def _guess_image_mime_from_bytes(head: bytes) -> str | None:
@@ -249,6 +239,10 @@ def _as_qr_img_content_string(v: Any) -> str:
     return ""
 
 
+def _is_weixin_hosted_qr_page_url(value: str) -> bool:
+    return value.startswith(("https://liteapp.weixin.qq.com/q/", "http://liteapp.weixin.qq.com/q/"))
+
+
 def build_wechat_qr_display(qr_data: dict[str, Any]) -> dict[str, Any] | None:
     """将 get_bot_qrcode 响应整理为前端可展示结构。
 
@@ -274,6 +268,8 @@ def build_wechat_qr_display(qr_data: dict[str, Any]) -> dict[str, Any] | None:
 
     if img:
         if img.startswith("http://") or img.startswith("https://"):
+            if _is_weixin_hosted_qr_page_url(img):
+                return {"kind": "encode", "value": img}
             return {"kind": "url", "value": img}
         data_url = _coerce_base64_image_to_data_url(img)
         if data_url:
@@ -283,6 +279,8 @@ def build_wechat_qr_display(qr_data: dict[str, Any]) -> dict[str, Any] | None:
         return {"kind": "encode", "value": to_encode}
 
     if qc.startswith("http://") or qc.startswith("https://"):
+        if _is_weixin_hosted_qr_page_url(qc):
+            return {"kind": "encode", "value": qc}
         return {"kind": "url", "value": qc}
     if qc:
         return {"kind": "text", "value": qc}
@@ -290,46 +288,27 @@ def build_wechat_qr_display(qr_data: dict[str, Any]) -> dict[str, Any] | None:
 
 
 async def push_wechat_login_ui(**kwargs: Any) -> None:
-    async with _login_ui_lock:
-        for key, value in kwargs.items():
-            if key == "credentials_source":
-                continue
-            if key in _login_ui_state:
-                _login_ui_state[key] = value
-        if "credentials" in kwargs:
-            if kwargs["credentials"] is None:
-                _login_ui_state["credentials_source"] = None
-            elif kwargs.get("credentials_source") in ("scan", "local_file"):
-                _login_ui_state["credentials_source"] = kwargs["credentials_source"]
-            else:
-                _login_ui_state["credentials_source"] = "scan"
-        _login_ui_state["updated_at"] = time.time()
+    from .login_service import wechat_login_service
+
+    await wechat_login_service.update(**kwargs)
 
 
-async def snapshot_wechat_login_ui_state() -> dict[str, Any]:
-    async with _login_ui_lock:
-        return copy.deepcopy(_login_ui_state)
+async def snapshot_wechat_login_ui_state(operation_id: str | None = None) -> dict[str, Any]:
+    from .login_service import wechat_login_service
+
+    return await wechat_login_service.snapshot(operation_id)
 
 
 async def reset_wechat_login_ui_state() -> None:
-    async with _login_ui_lock:
-        _login_ui_state.update(
-            {
-                "phase": "idle",
-                "message": "",
-                "qr": None,
-                "credentials": None,
-                "credentials_source": None,
-                "error": None,
-                "updated_at": time.time(),
-            }
-        )
+    from .login_service import wechat_login_service
+
+    await wechat_login_service.reset()
 
 
 def clear_wechat_bound_session(conf: dict[str, Any]) -> dict[str, Any]:
     """删除 credential_file 指向的本地 JSON（若存在），并返回去掉 bot_token / ilink 绑定字段后的配置副本，用于写回 ChannelManager 与 config.yaml。"""
     out = dict(conf)
-    cred_default = "~/.wx-ai-bridge/credentials.json"
+    cred_default = "./wechat/credentials.json"
     cred_path = str(out.get("credential_file") or "").strip() or cred_default
     path = Path(cred_path).expanduser()
     if path.is_file():
@@ -421,6 +400,10 @@ class WechatChannel(BaseChannel):
             await self._load_or_login_credentials()
         except Exception as e:
             logger.exception("WechatChannel 登录阶段失败: %s", e)
+            self._running = False
+            if self._http is not None:
+                await self._http.close()
+                self._http = None
             raise
 
         self._poll_task = asyncio.create_task(
@@ -473,8 +456,6 @@ class WechatChannel(BaseChannel):
             logger.warning("WechatChannel 未就绪，跳过发送")
             return
 
-        streaming = bool(self.config.enable_streaming)
-
         if msg.event_type == EventType.CHAT_PROCESSING_STATUS:
             return
 
@@ -493,19 +474,10 @@ class WechatChannel(BaseChannel):
                 await self._send_text_chunks_to_user(msg, content)
             return
 
+        if msg.event_type != EventType.CHAT_DELTA and should_skip_intermediate_message(msg):
+            return
+
         if msg.event_type == EventType.CHAT_TOOL_CALL:
-            if not streaming:
-                return
-            flushed = self._take_accumulated_delta(msg)
-            payload = msg.payload if isinstance(msg.payload, dict) else {}
-            tool_call_str = format_tool_call_message(payload)
-            content = (
-                f"{flushed}\n\n{tool_call_str}" if flushed else f"\n{tool_call_str}"
-            )
-            if await self._should_skip_due_to_send_limit(msg):
-                self._stash_overflow_content(msg, content)
-                return
-            await self._send_text_chunks_to_user(msg, content)
             return
 
         if msg.event_type == EventType.CHAT_TOOL_RESULT:
@@ -567,6 +539,8 @@ class WechatChannel(BaseChannel):
             return
 
         content_str = self._strip_think_tags(self._extract_content(msg)).strip()
+        if not content_str and msg.event_type == EventType.CHAT_FINAL:
+            content_str = self._strip_think_tags(self._take_accumulated_delta(msg) or "").strip()
         if not content_str or self._is_thinking_only_content(content_str):
             logger.debug("WechatChannel 消息内容为空或仅为思考占位，跳过发送")
             return
@@ -1000,11 +974,17 @@ class WechatChannel(BaseChannel):
             logger.info("请使用微信扫描二维码登录：%s", qr_content)
 
             deadline = time.time() + 5 * 60
+            last_status = ""
+            last_status_payload: dict[str, Any] = {}
             while time.time() < deadline:
                 await asyncio.sleep(self.config.qrcode_poll_interval_sec)
                 status = await self._get_qrcode_status(qrcode)
                 st = str(status.get("status") or "").strip().lower()
-                if st == "scaned":
+                if st != last_status:
+                    logger.info("WechatChannel 二维码状态更新: status=%s payload=%s", st or "<empty>", status)
+                    last_status = st
+                    last_status_payload = status
+                if st in {"scaned", "scanned"}:
                     logger.info("已扫码，请在手机上确认")
                     await push_wechat_login_ui(
                         phase="scanned",
@@ -1039,8 +1019,18 @@ class WechatChannel(BaseChannel):
                     )
                     return
                 elif st == "expired":
+                    logger.warning(
+                        "WechatChannel 二维码已过期: last_status=%s last_payload=%s",
+                        last_status or "<empty>",
+                        last_status_payload,
+                    )
                     raise RuntimeError("二维码已过期，请重试")
 
+            logger.warning(
+                "WechatChannel 二维码登录超时: last_status=%s last_payload=%s",
+                last_status or "<empty>",
+                last_status_payload,
+            )
             raise RuntimeError("登录超时，请重试")
         except Exception as e:
             await push_wechat_login_ui(
@@ -1373,32 +1363,33 @@ class WechatChannel(BaseChannel):
 
     @staticmethod
     def _extract_content(msg: Message) -> str:
-        if msg.event_type == EventType.CHAT_ERROR:
-            payload = msg.payload if isinstance(msg.payload, dict) else {}
-            err = payload.get("error", "处理出错")
-            return f"⚠️ {err}"
-
         if msg.event_type == EventType.HEARTBEAT_RELAY:
             payload = msg.payload if isinstance(msg.payload, dict) else {}
             hb = payload.get("heartbeat")
             return str(hb or "").strip()
-
-        params = msg.params if isinstance(msg.params, dict) else {}
-        payload = msg.payload if isinstance(msg.payload, dict) else {}
-        content = params.get("content") or payload.get("content") or ""
-        if isinstance(content, dict):
-            content = content.get("output", str(content))
-        return str(content or "").strip()
+        return extract_human_text(msg)
 
     def _save_credentials(self) -> None:
         path = Path(self.config.credential_file).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "botToken": self.config.bot_token,
             "baseUrl": self.config.base_url,
             "ilinkBotId": self.config.ilink_bot_id,
             "ilinkUserId": self.config.ilink_user_id,
         }
-        path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            logger.info("WechatChannel 已保存本地凭据: %s", path)
+        except OSError as e:
+            logger.error(
+                "WechatChannel 保存本地凭据失败: credential_file=%s resolved_path=%s cwd=%s error=%s",
+                self.config.credential_file,
+                path.resolve(strict=False),
+                Path.cwd(),
+                e,
+                exc_info=True,
+            )
+            raise

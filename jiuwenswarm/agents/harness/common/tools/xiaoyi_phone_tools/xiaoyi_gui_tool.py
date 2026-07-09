@@ -5,14 +5,18 @@
 from __future__ import annotations
 
 import asyncio
-import time
-import uuid
 from typing import Any, Dict
 
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenswarm.common.utils import logger
-from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_connect import get_xiaoyi_channel
+from jiuwenswarm.server.gui_rpc import get_gui_rpc_client
+from jiuwenswarm.server.gui_rpc.client import (
+    GUI_RPC_DEFAULT_TIMEOUT_SECONDS,
+    GuiRpcClientError,
+    GuiRpcContextError,
+)
+from jiuwenswarm.server.request_context import get_current_agent_request
 
 from .utils import ToolInputError, format_success_response
 
@@ -54,114 +58,101 @@ async def xiaoyi_gui_agent(query: str) -> Dict[str, Any]:
         raise ToolInputError("缺少有效参数 query（非空字符串）")
 
     query = query.strip()
-    channel = get_xiaoyi_channel()
-    if channel is None:
-        raise RuntimeError(
-            "无活跃小艺会话，xiaoyi_gui_agent 仅能在小艺会话活跃时使用。"
+    request = get_current_agent_request()
+    if request is None:
+        logger.error(
+            "[GUI_RPC_TRACE] phase=TOOL_CONTEXT_MISSING query_len=%s",
+            len(query),
         )
-
-    session_id = ""
-    task_id = ""
-    last_message_id = ""
-    try:
-        from jiuwenswarm.common.config import get_config
-
-        cfg = get_config()
-        xiaoyi_conf = cfg.get("channels", {}).get("xiaoyi", {})
-        session_id = (xiaoyi_conf.get("last_session_id") or "").strip()
-        task_id = (xiaoyi_conf.get("last_task_id") or "").strip()
-        last_message_id = (xiaoyi_conf.get("last_message_id") or "").strip()
-    except Exception as e:
-        logger.warning("[XIAOYI_GUI_TOOL] 读取会话配置失败: %s", e)
-
-    if not session_id:
         raise RuntimeError(
-            "无活跃小艺会话，xiaoyi_gui_agent 仅能在小艺会话活跃时使用。"
+            "GUI Agent 调用失败 [INVALID_CONTEXT]: 当前请求上下文不可用"
         )
-
-    # 与 TS xiaoyi-gui-tool 一致：优先 taskId；空则回退 sessionId，避免 interactionId 为空
-    interaction_id = task_id if task_id else session_id
-    # JSON-RPC id 与当前用户轮次对齐（见 XiaoyiChannel message/stream 写入的配置）
-    message_id = last_message_id or f"gui_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
-
     logger.info(
-        "[XIAOYI_GUI_TOOL] call session_id=%s interaction_id=%s rpc_id=%s",
-        session_id[:12] + "..." if len(session_id) > 12 else session_id,
-        interaction_id[:12] + "..." if len(interaction_id) > 12 else interaction_id,
-        message_id[:32] + "..." if len(message_id) > 32 else message_id,
+        "[GUI_RPC_TRACE] phase=TOOL_CALL_BEGIN source_request_id=%s "
+        "jiuwen_session_id=%s channel_id=%s query_len=%s",
+        request.request_id,
+        request.session_id,
+        request.channel_id,
+        len(query),
     )
+    try:
+        response = await get_gui_rpc_client().call(
+            query=query,
+            request=request,
+            timeout=GUI_RPC_DEFAULT_TIMEOUT_SECONDS,
+        )
+    except GuiRpcContextError as exc:
+        logger.error(
+            "[GUI_RPC_TRACE] phase=TOOL_CALL_FAILED source_request_id=%s "
+            "error_code=%s error_type=%s",
+            request.request_id,
+            exc.error_code,
+            type(exc).__name__,
+        )
+        raise RuntimeError(
+            f"GUI Agent 调用失败 [{exc.error_code}]: {exc}"
+        ) from exc
+    except GuiRpcClientError as exc:
+        logger.error(
+            "[GUI_RPC_TRACE] phase=TOOL_CALL_FAILED source_request_id=%s "
+            "error_code=%s error_type=%s",
+            request.request_id,
+            exc.error_code,
+            type(exc).__name__,
+        )
+        raise RuntimeError(
+            f"GUI Agent 调用失败 [{exc.error_code}]: {exc}"
+        ) from exc
+    except asyncio.TimeoutError as exc:
+        logger.error(
+            "[GUI_RPC_TRACE] phase=TOOL_CALL_FAILED source_request_id=%s "
+            "error_code=GUI_TIMEOUT error_type=%s",
+            request.request_id,
+            type(exc).__name__,
+        )
+        raise RuntimeError(
+            "GUI Agent 调用失败 [GUI_TIMEOUT]: 小艺 GUI Agent 操作超时（3 分钟）"
+        ) from exc
+    except Exception as exc:
+        logger.exception(
+            "[GUI_RPC_TRACE] phase=TOOL_CALL_FAILED source_request_id=%s "
+            "error_code=INTERNAL_ERROR error_type=%s",
+            request.request_id,
+            type(exc).__name__,
+        )
+        raise RuntimeError(
+            f"GUI Agent 调用失败 [INTERNAL_ERROR]: {exc}"
+        ) from exc
 
-    done = asyncio.Event()
-    result_holder: Dict[str, Any] = {}
-
-    def on_gui(item: dict[str, Any]) -> None:
-        try:
-            payload = item.get("payload") or {}
-            riid = payload.get("interactionId")
-            if riid is not None and str(riid).strip() != "":
-                if str(riid).strip() != str(interaction_id).strip():
-                    logger.debug(
-                        "[XIAOYI_GUI_TOOL] 忽略非本单回包 interactionId=%r expected=%r",
-                        riid,
-                        interaction_id,
-                    )
-                    return
-            if not _payload_is_gui_final(payload):
-                logger.debug("[XIAOYI_GUI_TOOL] 非终帧，继续等待 isFinal")
-                return
-            sc = (payload.get("streamInfo") or {}).get("streamContent")
-            if sc:
-                result_holder["streamContent"] = sc
-            else:
-                result_holder["error"] = "GUI 响应缺少 streamContent"
-            done.set()
-        except Exception as ex:
-            logger.warning("[XIAOYI_GUI_TOOL] on_gui 异常（已隔离）: %s", ex, exc_info=True)
-            result_holder["error"] = f"GUI 回调异常: {ex}"
-            done.set()
-
-    # 与 channel 层锁配合：同一时间仅一单 GUI，避免多 handler 共收同一 WS 帧
-    async with _get_gui_tool_async_lock(channel):
-        channel.register_gui_agent_handler(on_gui)
-        try:
-            command = {
-                "header": {
-                    "namespace": "ClawAgent",
-                    "name": "InvokeJarvisGUIAgentRequest",
-                },
-                "payload": {
-                    "query": query,
-                    "sessionId": session_id,
-                    "interactionId": interaction_id,
-                },
-            }
-            logger.info("[XIAOYI_GUI_TOOL] sending InvokeJarvisGUIAgentRequest")
-            sent = await channel.send_xiaoyi_phone_tools_command(
-                session_id=session_id,
-                task_id=task_id or session_id,
-                message_id=message_id,
-                command=command,
-            )
-            if not sent:
-                raise RuntimeError("发送 GUI 指令失败，WebSocket 未连接")
-
-            await asyncio.wait_for(done.wait(), timeout=180.0)
-
-            err = result_holder.get("error")
-            if err:
-                raise RuntimeError(str(err))
-            text = result_holder.get("streamContent", "")
-            return format_success_response(
-                {"success": True, "result": text},
-                "GUI 操作完成",
-            )
-        except asyncio.TimeoutError as e:
-            raise RuntimeError("小艺 GUI Agent 操作超时（3 分钟）") from e
-        finally:
-            try:
-                channel.unregister_gui_agent_handler(on_gui)
-            except Exception as unreg_err:
-                logger.warning(
-                    "[XIAOYI_GUI_TOOL] unregister_gui_agent_handler: %s",
-                    unreg_err,
-                )
+    if not response.success:
+        error_code = response.error_code or "INTERNAL_ERROR"
+        error_message = response.error_message or "GUI RPC execution failed"
+        logger.error(
+            "[GUI_RPC_TRACE] phase=TOOL_RESPONSE_FAILED source_request_id=%s "
+            "rpc_id=%s error_code=%s",
+            request.request_id,
+            response.rpc_id,
+            error_code,
+        )
+        raise RuntimeError(
+            f"GUI Agent 调用失败 [{error_code}]: {error_message}"
+        )
+    text = response.result or ""
+    logger.info(
+        "[GUI_RPC_TRACE] phase=TOOL_CALL_COMPLETED source_request_id=%s "
+        "rpc_id=%s result_len=%s",
+        request.request_id,
+        response.rpc_id,
+        len(text),
+    )
+    logger.info(
+        "[GUI_AGENT_DIAG] phase=TOOL_RESULT_RETURNED "
+        "source_request_id=%s rpc_id=%s result=%r",
+        request.request_id,
+        response.rpc_id,
+        text,
+    )
+    return format_success_response(
+        {"success": True, "result": text},
+        "GUI 操作完成",
+    )

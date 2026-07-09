@@ -8,12 +8,15 @@ from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 from jiuwenswarm.gateway.cron.cron_expr import normalize_cron_expr
 from jiuwenswarm.gateway.cron.models import (
+    CRON_JOB_DEFAULT_MODE,
     CronTargetChannel,
     cron_job_metadata,
     cron_job_modes_for_tools,
+    is_team_cron_mode,
     is_valid_target_channel_id,
     normalize_cron_job_mode,
     normalize_target_channel_id,
+    normalize_required_device_intents,
 )
 from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService, _cron_next_push_dt
 from jiuwenswarm.gateway.cron.store import CronJobStore
@@ -153,6 +156,15 @@ class CronController:
         chat_type = params.get("chat_type")
         delete_after_run = params.get("delete_after_run")
         timeout_seconds = params.get("timeout_seconds")
+        required_device_intents = normalize_required_device_intents(
+            params.get("required_device_intents")
+        )
+        xiaoyi_push_id = str(params.get("xiaoyi_push_id") or "").strip() or None
+        if required_device_intents and not xiaoyi_push_id:
+            raise ValueError("xiaoyi_push_id is required for device cron jobs")
+        effective_mode = mode or CRON_JOB_DEFAULT_MODE
+        if required_device_intents and is_team_cron_mode(effective_mode):
+            raise ValueError("Xiaoyi device cron jobs do not support team mode")
         job = await self._store.create_job(
             job_id=str(params.get("id") or "").strip() or None,
             name=name,
@@ -167,6 +179,8 @@ class CronController:
             mode=mode,
             delete_after_run=delete_after_run,
             timeout_seconds=timeout_seconds,
+            required_device_intents=required_device_intents,
+            xiaoyi_push_id=xiaoyi_push_id,
         )
         await self._scheduler.reload()
         return job.to_dict()
@@ -180,6 +194,17 @@ class CronController:
         existing = await self._store.get_job(job_id)
         if existing is None:
             raise KeyError("job not found")
+        immutable_device_fields = {
+            "description",
+            "required_device_intents",
+            "xiaoyi_push_id",
+        }
+        if existing.required_device_intents and immutable_device_fields.intersection(
+            patch
+        ):
+            raise ValueError(
+                "Device cron task content cannot be updated; delete and recreate it"
+            )
         if "cron_expr" in patch:
             patch["cron_expr"] = normalize_cron_expr(str(patch["cron_expr"]).strip())
         if "cron_expr" in patch or "timezone" in patch:
@@ -254,6 +279,7 @@ class CronController:
         wake_offset_seconds: int | None = None,
         mode: str | None = None,
         timeout_seconds: int | None = None,
+        required_device_intents: list[str] | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "name": name,
@@ -269,6 +295,8 @@ class CronController:
             params["mode"] = mode
         if timeout_seconds is not None:
             params["timeout_seconds"] = timeout_seconds
+        if required_device_intents is not None:
+            params["required_device_intents"] = required_device_intents
         return await self.create_job(params)
 
     async def _update_job_tool(
@@ -421,6 +449,15 @@ class CronController:
                             "description": (
                                 "Execution timeout in seconds (60-259200). "
                                 "Default 600 for normal modes and 1200 for team modes."
+                            ),
+                        },
+                        "required_device_intents": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Device intent names needed when this cron runs. "
+                                "For Xiaoyi device cron jobs, call check_plugin_privilege "
+                                "for each intent before creating the job."
                             ),
                         },
                     },
