@@ -1143,6 +1143,14 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
                 ok_n,
                 len(bucket),
             )
+    if stats.total_ms:
+        logger.info(
+            "[total_ms] min=%.0f avg=%.0f max=%.0f (n=%d)",
+            min(stats.total_ms),
+            statistics.mean(stats.total_ms),
+            max(stats.total_ms),
+            len(stats.total_ms),
+        )
 
     return 0 if failed == 0 else 1
 
