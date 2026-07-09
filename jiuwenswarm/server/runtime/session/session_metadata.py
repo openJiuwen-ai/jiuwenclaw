@@ -429,6 +429,8 @@ def sync_session_request_metadata(
     project_dir: str | None = None,
     project_id: str | None = None,
     last_user_message_at: float | None = None,
+    explicit_mode_provided: bool = False,
+    explicit_model_provided: bool = False,
 ) -> str | None:
     """校验请求带来的参数与磁盘 metadata.json 是否需要更新，并按字段语义写入。
 
@@ -439,14 +441,21 @@ def sync_session_request_metadata(
     字段语义：
       - project_dir：**首次锁定，不可改**。磁盘为空则写入请求值（首次锁定）；
         磁盘已有值且与请求值不一致 → 记 warning（说明会话被换项目目录了，有问题），**不覆盖**。
-      - model：**覆盖式**，每次请求刷新为本次模型。
+      - model：**显式覆盖式**——仅当请求方显式携带 model（explicit_model_provided=True）
+        时才覆盖磁盘值；未显式携带（如只读 RPC）则保持磁盘原值，不把进程 MODEL_NAME
+        默认值回写覆盖用户在该会话用 /model 切换过的模型。
       - last_user_message_at：**覆盖式**，调用方传入则刷新。
-      - mode：**覆盖式**（与 append_history_record 联动一致，重复无副作用）。
+      - mode：**显式覆盖式**——仅当请求方显式携带 mode（explicit_mode_provided=True）
+        时才覆盖磁盘值；未显式携带（如只读 RPC 用默认推断值）则保持磁盘原值，不腐蚀
+        已锁定的会话 mode（如 team 会话被只读 RPC 默认推断成 agent）。调用方应传入
+        canonical mode（"agent.plan"/"team"）。与 append_history_record 联动一致。
 
     Args:
         session_id: 会话 ID（空则直接返回 None，不做任何操作）
         channel_id / mode / model / last_user_message_at: 请求级参数，按上述语义写入
         project_dir: 请求携带的项目目录候选值，用于首次锁定
+        explicit_mode_provided: 请求是否「显式」携带了 mode；False 时 mode 字段不写盘
+        explicit_model_provided: 请求是否「显式」携带了 model；False 时 model 字段不写盘
 
     Returns:
         本会话**生效**的 project_dir：磁盘已锁定则返回锁定值，否则返回请求候选值
@@ -476,12 +485,12 @@ def sync_session_request_metadata(
             "last_message_at": now,
             "title": "",
             "message_count": 0,
-            "mode": mode if mode is not None else "unknown",
+            "mode": mode if (mode is not None and explicit_mode_provided) else "unknown",
             "team_name": "",
             "round_id": 0,
             "project_dir": project_dir or "",
             "project_id": project_id or "",
-            "model": model or "",
+            "model": model if (model is not None and explicit_model_provided) else "",
             "last_user_message_at": last_user_message_at if last_user_message_at is not None else now,
             "pinned": False,
             "pin_order": 0,
@@ -509,14 +518,17 @@ def sync_session_request_metadata(
         if project_id and not (isinstance(metadata.get("project_id"), str) and metadata.get("project_id", "").strip()):
             metadata["project_id"] = project_id
 
-        # model：覆盖式
-        if model is not None:
+        # model：显式覆盖式——仅当请求方显式携带 model 才覆盖；
+        # 未显式携带（如只读 RPC 回退到进程 MODEL_NAME）则保持磁盘原值，
+        # 不覆盖用户在该会话用 /model 切换过的模型
+        if model is not None and explicit_model_provided:
             metadata["model"] = model
         # last_user_message_at：覆盖式
         if last_user_message_at is not None:
             metadata["last_user_message_at"] = last_user_message_at
-        # mode：覆盖式
-        if mode is not None:
+        # mode：显式覆盖式——仅当请求方显式携带 mode 才覆盖；
+        # 未显式携带（如只读 RPC 默认推断）则保持磁盘原值，不腐蚀已锁定的会话 mode
+        if mode is not None and explicit_mode_provided:
             metadata["mode"] = mode
         if channel_id is not None:
             metadata["channel_id"] = channel_id

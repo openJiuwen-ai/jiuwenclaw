@@ -1056,7 +1056,7 @@ class TestSyncSessionRequestMetadata:
 
     @staticmethod
     def test_sync_model_overwritten_each_call(sessions_dir):
-        """model：覆盖式，每次请求刷新"""
+        """model：显式覆盖式——仅当 explicit_model_provided=True 时才覆盖磁盘值"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             sync_session_request_metadata,
@@ -1064,12 +1064,39 @@ class TestSyncSessionRequestMetadata:
         )
 
         init_session_metadata(session_id="s1", model="glm-5")
-        sync_session_request_metadata(session_id="s1", model="glm-5.1")
+        # 显式携带 model → 覆盖磁盘值
+        sync_session_request_metadata(
+            session_id="s1", model="glm-5.1", explicit_model_provided=True
+        )
         _drain_queue()
         assert get_session_metadata("s1")["model"] == "glm-5.1"
-        sync_session_request_metadata(session_id="s1", model="deepseek-v4")
+        sync_session_request_metadata(
+            session_id="s1", model="deepseek-v4", explicit_model_provided=True
+        )
         _drain_queue()
         assert get_session_metadata("s1")["model"] == "deepseek-v4"
+
+    @staticmethod
+    def test_sync_model_not_overwritten_when_implicit(sessions_dir):
+        """model：请求未显式携带（如只读 RPC 回退到进程 MODEL_NAME）→ 不覆盖磁盘。
+
+        回归保护：只读 RPC 不带 model_name，不应把进程默认模型回写覆盖
+        用户在该会话用 /model 切换过的模型。
+        """
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="s_m", model="user-picked-model")
+        # 模拟只读 RPC：传了 model（进程默认回退值）但 explicit_model_provided=False
+        sync_session_request_metadata(
+            session_id="s_m", model="your-model-name", explicit_model_provided=False
+        )
+        _drain_queue()
+        assert get_session_metadata("s_m")["model"] == "user-picked-model", \
+            "未显式携带 model 时不得覆盖磁盘已锁定的用户选择"
 
     @staticmethod
     def test_sync_model_none_keeps_existing(sessions_dir):
@@ -1119,7 +1146,7 @@ class TestSyncSessionRequestMetadata:
 
     @staticmethod
     def test_sync_mode_overwritten(sessions_dir):
-        """mode：覆盖式"""
+        """mode：显式覆盖式——仅当 explicit_mode_provided=True 时才覆盖磁盘值"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             sync_session_request_metadata,
@@ -1127,9 +1154,59 @@ class TestSyncSessionRequestMetadata:
         )
 
         init_session_metadata(session_id="s1", mode="code")
-        sync_session_request_metadata(session_id="s1", mode="agent")
+        # 显式携带 mode → 覆盖磁盘值
+        sync_session_request_metadata(
+            session_id="s1", mode="agent.plan", explicit_mode_provided=True
+        )
         _drain_queue()
-        assert get_session_metadata("s1")["mode"] == "agent"
+        assert get_session_metadata("s1")["mode"] == "agent.plan"
+
+    @staticmethod
+    def test_sync_mode_not_overwritten_when_implicit(sessions_dir):
+        """mode：请求未显式携带（如只读 RPC 默认推断）→ 不覆盖磁盘已锁定的 mode。
+
+        回归保护：只读 RPC（skills.retrieval.status 等）不带 mode，不应把 team 会话
+        的 mode 腐蚀成默认推断的 agent。
+        """
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="s_team", mode="team")
+        # 模拟只读 RPC：传了 mode（默认推断值）但 explicit_mode_provided=False
+        sync_session_request_metadata(
+            session_id="s_team", mode="agent.plan", explicit_mode_provided=False
+        )
+        _drain_queue()
+        assert get_session_metadata("s_team")["mode"] == "team", \
+            "未显式携带 mode 时不得覆盖磁盘已锁定的 team"
+
+    @staticmethod
+    def test_sync_whitespace_mode_not_treated_as_explicit(sessions_dir):
+        """回归保护：纯空白 mode 字符串不应被误判为「显式提供」。
+
+        上游 _prepare_code_mode_chat_turn 用 isinstance(x, str) and bool(x.strip())
+        判断是否显式携带 mode。若退化为裸 bool()，bool("   ") 为 True，会把空白 mode
+        当显式提供 → 经 resolve 默认推断成 agent.plan → 写盘腐蚀已锁定的 team。
+        本用例守存储层契约：即使调用方误传 explicit_mode_provided=False（与严格判断一致），
+        磁盘 team 不得被覆盖；同时验证空白串不应让 mode 写盘。
+        """
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="s_ws", mode="team")
+        # 空白 mode 不算显式携带 → 守卫生效，不写盘
+        sync_session_request_metadata(
+            session_id="s_ws", mode="agent.plan", explicit_mode_provided=False
+        )
+        _drain_queue()
+        assert get_session_metadata("s_ws")["mode"] == "team", \
+            "空白/未显式 mode 不得覆盖磁盘已锁定的 team"
 
     @staticmethod
     def test_sync_creates_when_missing(sessions_dir):
@@ -1146,6 +1223,8 @@ class TestSyncSessionRequestMetadata:
             model="glm-5",
             project_dir="E:\\newproj",
             last_user_message_at=1234.0,
+            explicit_mode_provided=True,
+            explicit_model_provided=True,
         )
         _drain_queue()
         assert effective == "E:\\newproj"
@@ -1206,6 +1285,8 @@ class TestSyncSessionRequestMetadata:
         sync_session_request_metadata(
             session_id="s_pin", model="glm-5", mode="code",
             last_user_message_at=9999.0,
+            explicit_mode_provided=True,
+            explicit_model_provided=True,
         )
         _drain_queue()
 
@@ -1275,7 +1356,10 @@ class TestSyncChatRequestMetadata:
         req = _make_agent_request(
             params={"model_name": "glm-5", "mode": "code", "project_dir": "E:\\projA"},
         )
-        effective = _sync_chat_request_metadata(req, "E:\\projA", "code")
+        # params 显式带了 mode → explicit_mode_provided=True；model_name 内部判断为显式
+        effective = _sync_chat_request_metadata(
+            req, "E:\\projA", "code", explicit_mode_provided=True
+        )
         _drain_queue()
 
         assert effective == "E:\\projA"
@@ -1308,25 +1392,30 @@ class TestSyncChatRequestMetadata:
         assert effective == "E:\\locked"
 
     @staticmethod
-    def test_falls_back_to_env_model_name(sessions_dir, monkeypatch):
-        """params 不带 model_name → 用 os.getenv("MODEL_NAME")"""
+    def test_no_model_name_keeps_existing(sessions_dir, monkeypatch):
+        """params 不带 model_name → 未显式携带，不写盘，保持磁盘原值。
+
+        回归保护：只读 RPC 不带 model_name，不应把进程 MODEL_NAME 默认值回写覆盖
+        用户在该会话用 /model 切换过的模型。model_name 未带 → explicit_model_provided=False。
+        """
         from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
         )
 
-        monkeypatch.setenv("MODEL_NAME", "env-glm-5")
-        init_session_metadata(session_id="sess_1")
+        monkeypatch.setenv("MODEL_NAME", "env-glm-5")  # 进程默认值，不应被写盘
+        init_session_metadata(session_id="sess_1", model="user-picked-model")
         req = _make_agent_request(params={})  # 不带 model_name
         _sync_chat_request_metadata(req, None, "agent")
         _drain_queue()
 
-        assert get_session_metadata("sess_1")["model"] == "env-glm-5"
+        assert get_session_metadata("sess_1")["model"] == "user-picked-model", \
+            "未显式携带 model_name 时不得用进程默认值覆盖磁盘已选模型"
 
     @staticmethod
-    def test_empty_model_name_falls_back_to_env(sessions_dir, monkeypatch):
-        """params.model_name 为空字符串 → 也回退 env"""
+    def test_empty_model_name_keeps_existing(sessions_dir, monkeypatch):
+        """params.model_name 为空白 → 同未显式携带，不写盘，保持磁盘原值"""
         from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
@@ -1334,12 +1423,12 @@ class TestSyncChatRequestMetadata:
         )
 
         monkeypatch.setenv("MODEL_NAME", "env-glm-5")
-        init_session_metadata(session_id="sess_1")
+        init_session_metadata(session_id="sess_1", model="user-picked-model")
         req = _make_agent_request(params={"model_name": "   "})
         _sync_chat_request_metadata(req, None, "agent")
         _drain_queue()
 
-        assert get_session_metadata("sess_1")["model"] == "env-glm-5"
+        assert get_session_metadata("sess_1")["model"] == "user-picked-model"
 
     @staticmethod
     def test_no_model_no_env_keeps_existing(sessions_dir, clean_model_env):
@@ -1418,10 +1507,12 @@ class TestSyncChatRequestMetadata:
         )
 
         req = _make_agent_request(
-            params={"model_name": "glm-5", "project_dir": "E:\\newproj"},
+            params={"model_name": "glm-5", "mode": "code", "project_dir": "E:\\newproj"},
             session_id="s_new",
         )
-        effective = _sync_chat_request_metadata(req, "E:\\newproj", "code")
+        effective = _sync_chat_request_metadata(
+            req, "E:\\newproj", "code", explicit_mode_provided=True
+        )
         _drain_queue()
 
         assert effective == "E:\\newproj"

@@ -643,6 +643,7 @@ def _sync_chat_request_metadata(
     request: AgentRequest,
     project_dir: str | None,
     mode: str,
+    explicit_mode_provided: bool = False,
 ) -> str | None:
     """将本次 chat 请求的参数同步到会话元数据，返回生效的 project_dir。
 
@@ -653,9 +654,16 @@ def _sync_chat_request_metadata(
 
     - project_dir：首次锁定，已锁定则忽略不一致的请求值（仅告警），返回锁定值
     - project_id：首次锁定，已锁定则忽略请求值（与 project_dir 一致，不可改）
-    - model：覆盖式（未显式指定时回退到进程 MODEL_NAME）
+    - model：**显式覆盖式**——仅当请求显式携带非空 model_name 时才覆盖磁盘值；
+      未显式携带（如只读 RPC）则保持磁盘原值，不把进程 MODEL_NAME 默认值回写覆盖
+      用户在该会话用 /model 切换过的模型。是否显式由本函数内部从 params 判断
+      （model_name 不会被规范化改写，可安全在本函数内取），无需调用方传入。
     - last_user_message_at：覆盖式（每次请求刷新为当前时刻）
-    - mode：覆盖式（与 append_history_record 联动一致）
+    - mode：**显式覆盖式**——仅当请求显式携带 mode（explicit_mode_provided=True）时
+      才覆盖磁盘值；未显式携带（如只读 RPC 默认推断）则保持磁盘原值，不腐蚀已
+      锁定的会话 mode（如 team）。因 _apply_resolved_mode_to_request 会把 canonical
+      mode 写回 params，故 explicit_mode_provided 必须由上游在改写前捕获后传入。
+      调用方应传入 canonical mode（"agent.plan"/"team"）。
 
     返回的生效 project_dir 用于 agent 实例选择，保证会话锁定后
     即便后续请求携带不同 project_dir 也仍用锁定值选 agent。
@@ -664,11 +672,16 @@ def _sync_chat_request_metadata(
     if not session_id:
         return project_dir
     params = request.params if isinstance(request.params, dict) else {}
-    model_name = params.get("model_name")
-    if not (isinstance(model_name, str) and model_name.strip()):
+    raw_model_name = params.get("model_name")
+    explicit_model_provided = (
+        isinstance(raw_model_name, str) and bool(raw_model_name.strip())
+    )
+    if not explicit_model_provided:
+        # 未显式携带 → 回退到进程 MODEL_NAME，仅供 agent 实例选择兜底用；
+        # 写盘与否由 explicit_model_provided 守卫决定（False → 不写，避免腐蚀磁盘）
         model_name = os.getenv("MODEL_NAME", "") or None
     else:
-        model_name = model_name.strip()
+        model_name = raw_model_name.strip()
 
     request_project_id = params.get("project_id")
     request_project_id = (
@@ -689,6 +702,8 @@ def _sync_chat_request_metadata(
             project_dir=str(project_dir) if project_dir else None,
             project_id=request_project_id,
             last_user_message_at=_dt.datetime.now(_dt.timezone.utc).timestamp(),
+            explicit_mode_provided=explicit_mode_provided,
+            explicit_model_provided=explicit_model_provided,
         )
     except (OSError, ValueError) as exc:
         logger.warning("[AgentWebSocketServer] 同步 chat 请求元数据失败: %s", exc)
@@ -1987,10 +2002,30 @@ class AgentWebSocketServer:
         channel_id: str,
     ) -> tuple[str, str | None, Any]:
         """Mode resolution and correct agent instance selection."""
+        # [新增] 在 _apply_resolved_mode_to_request 把 canonical mode 写回 params 之前，
+        # 先记录请求是否「显式」携带了 mode。下游 sync 用它做守卫：未显式携带则不覆盖
+        # 磁盘已锁定的会话 mode（避免只读 RPC 用默认推断值腐蚀 team 等已锁定 mode）。
+        # model 的显式与否由 _sync_chat_request_request_metadata 内部从 params 判断
+        # （model_name 不会被规范化改写），故此处只捕获 mode 标志。
+        # 注意：用与下游一致的严格判断——纯空白串 "   " 不算显式携带（bool("   ") 为 True
+        # 会误判，导致空白 mode 走默认推断 agent.plan 并写盘腐蚀已锁定 mode）。
+        params = request.params if isinstance(request.params, dict) else {}
+        _raw_mode = params.get("mode")
+        explicit_mode_provided = isinstance(_raw_mode, str) and bool(_raw_mode.strip())
         mode, sub_mode = _apply_resolved_mode_to_request(request)
         agent_mode = "agent" if mode == "auto_harness" else mode
         requested_project_dir = resolve_request_project_dir(request)
-        project_dir = _sync_chat_request_metadata(request, requested_project_dir, mode)
+        # [改动] 写盘用 canonical mode（request.params["mode"]，已被规范化为
+        # "agent.plan"/"team" 等），而非一级 mode（"agent"），使磁盘出现你期望的两类值。
+        canonical_mode = (
+            request.params.get("mode") if isinstance(request.params, dict) else None
+        )
+        project_dir = _sync_chat_request_metadata(
+            request,
+            requested_project_dir,
+            canonical_mode if canonical_mode else mode,
+            explicit_mode_provided=explicit_mode_provided,
+        )
 
         agent = await self._agent_manager.get_agent(
             channel_id=channel_id,
