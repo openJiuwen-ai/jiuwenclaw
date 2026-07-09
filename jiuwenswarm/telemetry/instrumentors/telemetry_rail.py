@@ -626,14 +626,35 @@ class TelemetryRail(DeepAgentRail):
         result_str = str(result)[:4096] if result is not None else ""
         span.set_attribute(GEN_AI_TOOL_RESULT, result_str[:4096] if result_str else "")
 
-        # Error detection
+        # Error detection: prefer structured fields over substring matching.
+        # Naive substring matching on str(result) is a false-positive trap:
+        # a successful result repr like "success=True data={...} error=None"
+        # contains the substring "error" and would be mis-flagged as ERROR.
         is_error = False
-        if result_str:
+        success = None
+        err = None
+        if isinstance(result, dict):
+            success = result.get("success")
+            err = result.get("error")
+        else:
+            success = getattr(result, "success", None)
+            err = getattr(result, "error", None)
+
+        if success is False:
+            is_error = True
+        elif err not in (None, "", "None"):
+            is_error = True
+
+        # Fallback heuristic only when structured fields are unavailable.
+        if success is None and err is None and result_str:
             lower = result_str.lower()
-            is_error = "error" in lower or "exception" in lower or "traceback" in lower
+            # Avoid bare "error"/"exception" substrings — they appear in
+            # successful reprs (e.g. "error=None"). Match explicit markers.
+            is_error = "traceback" in lower or "exception:" in lower
 
         if is_error:
-            span.set_status(StatusCode.ERROR, result_str[:256])
+            status_msg = (str(err) if err not in (None, "", "None") else result_str)[:256]
+            span.set_status(StatusCode.ERROR, status_msg)
             tool_error_count.add(1, _with_resource_labels({
                 GEN_AI_TOOL_NAME: span_tool_name,
                 JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],

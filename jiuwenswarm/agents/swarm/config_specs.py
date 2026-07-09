@@ -31,6 +31,7 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import (
     RailSpec,
     SubAgentSpec,
 )
+from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness.prompts import resolve_language
@@ -225,6 +226,25 @@ def _retrieval_enabled(config: dict[str, Any] | None = None) -> bool:
     return False
 
 
+def _normalize_skill_use_rails_for_agentic_retrieval(rails: list[RailSpec]) -> list[RailSpec]:
+    """Normalize skill-use rails to auto-list mode and remove duplicates."""
+    skill_rail_types = {CORE_SKILL_USE, "skill_use", "SkillUseRail", registry.CODE_SKILL_USE}
+    has_skill_rail = False
+    normalized: list[RailSpec] = []
+    for rail in rails:
+        if rail.type in skill_rail_types:
+            if has_skill_rail:
+                continue
+            has_skill_rail = True
+            params = dict(rail.params or {})
+            params["skill_mode"] = SkillUseRail.SKILL_MODE_AUTO_LIST
+            params["include_tools"] = False
+            normalized.append(rail.model_copy(update={"params": params}))
+            continue
+        normalized.append(rail)
+    return normalized
+
+
 def _additional_directories(config: dict[str, Any]) -> list[str]:
     """Resolve project-memory additional directories from config + env."""
     react = _config_section(config, "react")
@@ -377,6 +397,19 @@ def _build_team_capability_specs(
         RailSpec(type=name, params=_rail_params(name, config))
         for name in _COMMON_RAIL_NAMES
     ]
+    if role == "leader":
+        rails_specs.append(RailSpec(type=registry.STRUCTURED_ASK_USER))
+
+    if _retrieval_enabled(config):
+        rails_specs.append(
+            RailSpec(
+                type=CORE_SKILL_USE,
+                params={
+                    "skill_mode": SkillUseRail.SKILL_MODE_AUTO_LIST,
+                    "include_tools": False,
+                },
+            )
+        )
     rails_specs.append(
         RailSpec(
             type=registry.MEMBER_SKILL_TOOLKIT,
@@ -642,13 +675,17 @@ def build_member_deep_agent_spec(
     merged_tools.extend(tool_specs)
     merged_mcps = _merge_mcp_configs(base_spec.mcps, mcp_configs)
 
+    retrieval_enabled = _retrieval_enabled(config)
+    if retrieval_enabled:
+        merged_rails = _normalize_skill_use_rails_for_agentic_retrieval(merged_rails)
+
     update: dict[str, Any] = {
         "rails": merged_rails,
         "tools": merged_tools,
         "mcps": merged_mcps,
     }
     if not _is_code_mode(mode):
-        update["enable_skill_discovery"] = True
+        update["enable_skill_discovery"] = not retrieval_enabled
 
     subagent_specs = build_member_subagent_specs(config, mode, role)
 

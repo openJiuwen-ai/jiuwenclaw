@@ -22,7 +22,7 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 
 from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenswarm.agents.harness.common.prompt.shell_environment import build_shell_environment_prompt
-from jiuwenswarm.common.utils import get_config_dir, logger
+from jiuwenswarm.common.utils import get_runtime_state_path, logger
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
@@ -52,6 +52,7 @@ class RuntimePromptRail(DeepAgentRail):
         self._project_dir: str | None = None
         self._model_name: str = ""
         self._mode: str = ""
+        self._session_id: str | None = None
         self._force_english: bool = False
 
     def init(self, agent) -> None:
@@ -68,6 +69,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("env")
             self.system_prompt_builder.remove_section("browser_tool_policy")
             self.system_prompt_builder.remove_section("tui_current_project_policy")
+            self.system_prompt_builder.remove_section("trusted_dirs_policy")
         self.system_prompt_builder = None
         self.attachment_manager = None
 
@@ -99,6 +101,14 @@ class RuntimePromptRail(DeepAgentRail):
     def set_mode(self, mode: str) -> None:
         """per-request 更新运行模式，作为文件读取失败时的兜底。"""
         self._mode = mode or ""
+
+    def set_session_id(self, session_id: str | None) -> None:
+        """per-request 更新 session id，用于读取按 session 隔离的 runtime_state 文件。"""
+        self._session_id = (
+            session_id.strip()
+            if isinstance(session_id, str) and session_id.strip()
+            else None
+        )
 
     def set_force_english(self, force: bool) -> None:
         """Force English-only injected sections regardless of language (code mode)."""
@@ -141,7 +151,8 @@ class RuntimePromptRail(DeepAgentRail):
             "language_output",
             "env",
             "browser_tool_policy",
-            "tui_current_project_policy"):
+            "tui_current_project_policy",
+            "trusted_dirs_policy"):
             self.system_prompt_builder.remove_section(name)
 
         # ── time ──
@@ -166,13 +177,14 @@ class RuntimePromptRail(DeepAgentRail):
 
         # ── runtime ──
         runtime_state: dict[str, Any] = {}
+        state_path = get_runtime_state_path(self._session_id)
         try:
-            with open(get_config_dir() / "runtime_state.yaml", encoding="utf-8") as f:
+            with open(state_path, encoding="utf-8") as f:
                 runtime_state = yaml.safe_load(f) or {}
         except FileNotFoundError:
             pass
         except Exception as e:
-            logger.warning("Failed to read runtime_state.yaml: %s", e)
+            logger.warning("Failed to read runtime state file %s: %s", state_path, e)
 
         model = (runtime_state.get("model") or self._model_name or "unknown").strip()
         mode = (runtime_state.get("mode") or self._mode or "unknown").strip()
@@ -509,17 +521,11 @@ class RuntimePromptRail(DeepAgentRail):
                     content={"cn": current_project_policy, "en": current_project_policy},
                     priority=99,
                 ))
-                await self._upsert_prompt_attachment(
-                    ctx,
-                    section="trusted_dirs_policy",
-                    content=trusted_dirs_content,
-                    kind=PromptAttachmentKind.WORKSPACE_DELTA,
+                self.system_prompt_builder.add_section(PromptSection(
+                    name="trusted_dirs_policy",
+                    content={"cn": trusted_dirs_content, "en": trusted_dirs_content},
                     priority=90,
-                )
-            else:
-                await self._clear_prompt_attachment(ctx, section="trusted_dirs_policy")
-        else:
-            await self._clear_prompt_attachment(ctx, section="trusted_dirs_policy")
+                ))
 
     async def _upsert_prompt_attachment(
         self,

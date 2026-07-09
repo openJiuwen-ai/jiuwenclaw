@@ -184,7 +184,8 @@ class OwnershipStore:
             )
 
     def _save_to_disk(self) -> None:
-        assert self._file_path is not None
+        if self._file_path is None:
+            raise RuntimeError("_save_to_disk called without a file_path")
         path = self._file_path
         with _file_lock(path):
             existing = self._read_existing_locked(path)

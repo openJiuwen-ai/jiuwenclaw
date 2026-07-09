@@ -17,7 +17,40 @@ from jiuwenswarm.telemetry.sqlite_exporter import (
     query_spans,
     get_trace_tree,
     get_span_statistics,
+    read_flat_span,
 )
+
+
+def deep_decode_json_strings(data):
+    """Recursively decode any JSON-encoded string values in the data structure.
+
+    Handles double-encoding cases where attributes/events/links/resource
+    are stored as JSON strings inside an already-JSON structure.
+    Only parses strings that decode to dicts or lists; scalar strings are kept.
+    """
+    if isinstance(data, list):
+        return [deep_decode_json_strings(item) for item in data]
+    if isinstance(data, dict):
+        result = {}
+        for key, value in data.items():
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, (dict, list)):
+                        result[key] = deep_decode_json_strings(parsed)
+                    else:
+                        # Scalar value (int, bool, null, plain string) — keep original
+                        result[key] = value
+                except (json.JSONDecodeError, ValueError):
+                    result[key] = value
+            elif isinstance(value, dict):
+                result[key] = deep_decode_json_strings(value)
+            elif isinstance(value, list):
+                result[key] = deep_decode_json_strings(value)
+            else:
+                result[key] = value
+        return result
+    return data
 
 
 def cmd_stats(args):
@@ -61,7 +94,7 @@ def cmd_traces(args):
     print(f"=== Recent Traces (limit {args.limit}) ===\n")
 
     for row in rows:
-        trace_id_short = row['trace_id'][:16] + "..."
+        trace_id_short = row['trace_id']
         duration = row['max_duration_ms'] or 0
         print(f"{trace_id_short}")
         print(f"  Spans: {row['span_count']}, Duration: {duration:.2f}ms")
@@ -72,8 +105,9 @@ def cmd_traces(args):
 def cmd_trace(args):
     """Show single trace tree."""
     tree = get_trace_tree(args.db_path, args.trace_id)
+    tree = deep_decode_json_strings(tree)
 
-    trace_id_short = args.trace_id[:16] + "..."
+    trace_id_short = args.trace_id
     print(f"=== Trace Tree: {trace_id_short} ===\n")
 
     def print_node(node: dict, indent: str = ""):
@@ -109,7 +143,7 @@ def cmd_search(args):
     print(f"=== Search Results: '{args.name}' (limit {args.limit}) ===\n")
 
     for span in spans:
-        trace_id_short = span['trace_id'][:16] + "..."
+        trace_id_short = span['trace_id']
         duration_ms = (span['duration_ns'] or 0) / 1e6
 
         print(f"{span['name']} [{duration_ms:.2f}ms]")
@@ -142,7 +176,7 @@ def cmd_slow(args):
     print(f"=== Slowest Spans (limit {args.limit}) ===\n")
 
     for i, row in enumerate(rows, 1):
-        trace_id_short = row['trace_id'][:16] + "..."
+        trace_id_short = row['trace_id']
         print(f"{i}. {row['name']} [{row['duration_ms']:.2f}ms]")
         print(f"   Trace: {trace_id_short} at {row['created_at']}")
         print()
@@ -155,12 +189,18 @@ def cmd_export(args):
     if args.type == "trace":
         tree = get_trace_tree(args.db_path, args.id)
         data = tree
+    elif args.type == "flat":
+        # Export flat span list (same format as otel_adapter._read_flat_spans)
+        data = read_flat_span(args.db_path, args.id)
     else:  # all
         spans = query_spans(args.db_path, limit=args.limit)
         data = spans
 
-    with open(args.output, 'w') as f:
-        json.dump(data, f, indent=2)
+    # Recursively decode any nested JSON strings (handles double-encoding)
+    data = deep_decode_json_strings(data)
+
+    with open(args.output, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
     print(f"Exported {len(data)} items to {args.output}")
 
@@ -193,8 +233,8 @@ def main():
 
     # export
     export_parser = subparsers.add_parser("export", help="Export to JSON")
-    export_parser.add_argument("type", choices=["trace", "all"], help="Export type")
-    export_parser.add_argument("id", nargs="?", help="Trace ID (for trace export)")
+    export_parser.add_argument("type", choices=["trace", "flat", "all"], help="Export type: trace (tree), flat (list like otel_adapter), all")
+    export_parser.add_argument("id", nargs="?", help="Trace ID (for trace/flat export)")
     export_parser.add_argument("-o", "--output", required=True, help="Output file")
     export_parser.add_argument("--limit", type=int, default=1000, help="Limit (for all)")
 

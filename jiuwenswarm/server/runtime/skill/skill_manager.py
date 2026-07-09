@@ -124,6 +124,42 @@ class SkillNetEmptyDownloadError(Exception):
         super().__init__(self.github_context or "empty download path")
 
 
+class SkillNetInstallError(Exception):
+    """安装失败，携带 i18n detail_key 供前端本地化。"""
+
+    def __init__(
+        self,
+        detail_key: str,
+        *,
+        detail: str = "",
+        detail_params: dict[str, Any] | None = None,
+    ) -> None:
+        self.detail_key = detail_key
+        self.detail = (detail or "").strip()
+        self.detail_params = detail_params or {}
+        super().__init__(self.detail or detail_key)
+
+
+def _map_github_api_error(exc: Exception) -> SkillNetInstallError:
+    """将 GitHubAPIError 按状态码映射为可本地化的 detail_key，原始报错留在 detail。"""
+    status = getattr(exc, "status_code", None)
+    raw = str(exc).strip()
+    if status == 404:
+        return SkillNetInstallError("skills.skillNet.errors.githubNotFound", detail=raw)
+    if status == 403:
+        return SkillNetInstallError("skills.skillNet.errors.githubRateLimited", detail=raw)
+    if status == 401:
+        return SkillNetInstallError("skills.skillNet.errors.githubUnauthorized", detail=raw)
+    if status in (0, None):
+        return SkillNetInstallError("skills.skillNet.errors.githubNetwork", detail=raw)
+    message = getattr(exc, "message", "") or raw
+    return SkillNetInstallError(
+        "skills.skillNet.errors.githubApiError",
+        detail=raw,
+        detail_params={"status": str(status), "message": message},
+    )
+
+
 def _is_valid_http_mirror_url(url: str) -> bool:
     """Return True if url is a plausible http(s) mirror base (for SkillDownloader)."""
     s = url.strip()
@@ -1948,6 +1984,16 @@ class SkillManager:
             }
             out["detail_params"] = exc.detail_params
             return out
+        except SkillNetInstallError as exc:
+            logger.error("SkillNet 安装失败: %s", exc.detail or exc.detail_key)
+            out2: dict[str, Any] = {
+                "ok": False,
+                "detail_key": exc.detail_key,
+                "detail": exc.detail,
+            }
+            if exc.detail_params:
+                out2["detail_params"] = exc.detail_params
+            return out2
         except Exception as exc:
             logger.error("SkillNet 下载失败: %s", exc)
             raw = str(exc).strip()
@@ -3450,8 +3496,8 @@ class SkillManager:
             _configure_skillnet_requests_session(downloader.session)
             try:
                 local_path = downloader.download(folder_url=skill_url, target_dir=target_dir)
-            except GitHubAPIError:
-                raise
+            except GitHubAPIError as exc:
+                raise _map_github_api_error(exc) from exc
             except Exception as exc:
                 ctx = SkillManager._github_skillnet_install_error_context(skill_url)
                 if ctx:

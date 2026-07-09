@@ -105,6 +105,20 @@ async def test_build_member_rails_syncs_response_prompt_channel_for_a2ui(monkeyp
     assert LocalSectionName.A2UI in prompt_builder.sections
 
 
+def test_build_member_rails_adds_structured_ask_user_rail_for_leader_only():
+    leader_rails = build_member_rails(
+        member_info=MemberInfo(role="leader"),
+        runtime=RuntimeInfo(language="cn"),
+    )
+    teammate_rails = build_member_rails(
+        member_info=MemberInfo(role="teammate"),
+        runtime=RuntimeInfo(language="cn"),
+    )
+
+    assert any(type(rail).__name__ == "StructuredAskUserRail" for rail in leader_rails)
+    assert all(type(rail).__name__ != "StructuredAskUserRail" for rail in teammate_rails)
+
+
 # -- resolve_model_config tests --
 
 def test_resolve_model_config_from_default():

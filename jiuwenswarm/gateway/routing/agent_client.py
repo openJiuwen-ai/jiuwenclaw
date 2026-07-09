@@ -13,6 +13,8 @@ from dataclasses import asdict
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
+from websockets.exceptions import ConnectionClosed, PayloadTooBig
+
 from jiuwenswarm.common.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.e2a.wire_codec import (
@@ -20,6 +22,11 @@ from jiuwenswarm.common.e2a.wire_codec import (
     parse_agent_server_wire_unary,
 )
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.ws_diagnostics import (
+    describe_ws_exception,
+    describe_ws_peer,
+    format_ws_diagnostics,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +34,11 @@ _STREAM_TRAILING_MESSAGE_GRACE_SECONDS = 0.7
 AGENT_REQUEST_TIMEOUT_SECONDS: float = 600.0
 _UNARY_REQUEST_TIMEOUT_SECONDS = AGENT_REQUEST_TIMEOUT_SECONDS
 _WS_MAX_SIZE = 8 * 2**20
+
+
+class _ReceiverFailure:
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
 
 
 def _wire_request_id_key(request_id: Any) -> str:
@@ -113,6 +125,7 @@ class WebSocketAgentServerClient(AgentServerClient):
         self._uri: str | None = None
         self._ws: Any = None
         self._lock = asyncio.Lock()
+        self._reconnect_lock = asyncio.Lock()
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._server_ready: bool = False
@@ -130,6 +143,19 @@ class WebSocketAgentServerClient(AgentServerClient):
     ) -> None:
         """注册 Agent 主动推送处理回调（metadata 含 ``E2A_WIRE_SERVER_PUSH_KEY`` 的帧）。"""
         self._on_server_push = handler
+
+    def _diagnostic_state(self, ws: Any | None = None) -> dict[str, Any]:
+        target_ws = self._ws if ws is None else ws
+        return {
+            "uri": self._uri,
+            "running": self._running,
+            "server_ready": self._server_ready,
+            "pending_requests": len(self._message_queues),
+            "cancelled_requests": len(self._cancelled_request_ids),
+            "ping_interval": self._ping_interval,
+            "ping_timeout": self._ping_timeout,
+            **describe_ws_peer(target_ws),
+        }
 
     def set_or_update_server_config(
         self,
@@ -232,11 +258,51 @@ class WebSocketAgentServerClient(AgentServerClient):
                             )
                 except asyncio.CancelledError:
                     break
+                except PayloadTooBig as e:
+                    logger.error(
+                        "[WebSocketAgentServerClient] AgentServer 消息超过 WebSocket 限制: %s",
+                        format_ws_diagnostics(
+                            self._diagnostic_state(),
+                            describe_ws_exception(e),
+                        ),
+                    )
+                    await self._stop_receiver_after_fatal_error(e)
+                    break
+                except ConnectionClosed as e:
+                    logger.info(
+                        "[WebSocketAgentServerClient] AgentServer WebSocket 已关闭: %s",
+                        format_ws_diagnostics(
+                            self._diagnostic_state(),
+                            describe_ws_exception(e),
+                        ),
+                    )
+                    await self._stop_receiver_after_fatal_error(e)
+                    break
                 except Exception as e:
-                    logger.exception("[WebSocketAgentServerClient] 消息接收循环异常: %s", e)
+                    logger.exception(
+                        "[WebSocketAgentServerClient] 消息接收循环异常: %s",
+                        format_ws_diagnostics(
+                            self._diagnostic_state(),
+                            describe_ws_exception(e),
+                        ),
+                    )
                     await asyncio.sleep(0.1)  # 避免快速循环
         finally:
             logger.info("[WebSocketAgentServerClient] 消息接收任务已停止")
+
+    async def _stop_receiver_after_fatal_error(self, exc: BaseException) -> None:
+        detail = format_ws_diagnostics(
+            self._diagnostic_state(),
+            describe_ws_exception(exc),
+        )
+        self._running = False
+        self._server_ready = False
+        self._ws = None
+        failure = _ReceiverFailure(exc)
+        async with self._queue_lock:
+            for queue in self._message_queues.values():
+                queue.put_nowait(failure)
+        logger.info("[WebSocketAgentServerClient] 接收任务已停止并通知等待队列: %s", detail)
 
     async def disconnect(self) -> None:
         # 停止接收任务
@@ -258,7 +324,13 @@ class WebSocketAgentServerClient(AgentServerClient):
         try:
             await self._ws.close()
         except Exception as e:
-            logger.warning("关闭 AgentServer WebSocket 时异常: %s", e)
+            logger.warning(
+                "关闭 AgentServer WebSocket 时异常: %s",
+                format_ws_diagnostics(
+                    self._diagnostic_state(),
+                    describe_ws_exception(e),
+                ),
+            )
         finally:
             self._ws = None
             self._uri = None
@@ -268,8 +340,43 @@ class WebSocketAgentServerClient(AgentServerClient):
         if self._ws is None:
             raise RuntimeError("未连接 AgentServer，请先调用 connect(uri)")
 
+    async def _ensure_connected_for_request(self) -> None:
+        if self._ws is not None:
+            return
+        uri = self._uri
+        if not uri:
+            raise RuntimeError("未连接 AgentServer，请先调用 connect(uri)")
+        async with self._reconnect_lock:
+            if self._ws is not None:
+                return
+            logger.info(
+                "[WebSocketAgentServerClient] WebSocket 已断开，准备按需重连: %s",
+                format_ws_diagnostics(self._diagnostic_state(), uri=uri),
+            )
+            await self.connect(uri)
+
+    async def _send_wire_payload(self, payload: dict[str, Any]) -> None:
+        ws = self._ws
+        if ws is None:
+            raise RuntimeError("未连接 AgentServer，请先调用 connect(uri)")
+        try:
+            await ws.send(json.dumps(payload, ensure_ascii=False))
+        except (ConnectionClosed, OSError) as exc:
+            logger.info(
+                "[WebSocketAgentServerClient] AgentServer WebSocket 发送失败，连接将重置: %s",
+                format_ws_diagnostics(
+                    self._diagnostic_state(ws),
+                    describe_ws_exception(exc),
+                    request_id=_wire_request_id_key(payload.get("request_id")),
+                    channel=payload.get("channel"),
+                    method=payload.get("method"),
+                ),
+            )
+            await self._stop_receiver_after_fatal_error(exc)
+            raise RuntimeError("AgentServer WebSocket connection closed") from exc
+
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
-        self._ensure_connected()
+        await self._ensure_connected_for_request()
         # 非流式 API 必须与 AgentServer 的 unary 路径一致；忽略信封上误带的 is_stream=True。
         envelope.is_stream = False
         rid = _wire_request_id_key(envelope.request_id)
@@ -300,10 +407,12 @@ class WebSocketAgentServerClient(AgentServerClient):
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
                 logger.info("[WebSocketAgentServerClient] 发送请求(非流式) payload: %s", _to_json(payload))
-                await self._ws.send(json.dumps(payload, ensure_ascii=False))
+                await self._send_wire_payload(payload)
 
             try:
                 data = await asyncio.wait_for(queue.get(), timeout=_UNARY_REQUEST_TIMEOUT_SECONDS)
+                if isinstance(data, _ReceiverFailure):
+                    raise RuntimeError("AgentServer WebSocket connection closed") from data.exc
             except asyncio.TimeoutError as e:
                 logger.warning(
                     "[WebSocketAgentServerClient] 非流式请求超时: request_id=%s timeout=%ss",
@@ -322,7 +431,7 @@ class WebSocketAgentServerClient(AgentServerClient):
     async def send_request_stream(
         self, envelope: E2AEnvelope
     ) -> AsyncIterator[AgentResponseChunk]:
-        self._ensure_connected()
+        await self._ensure_connected_for_request()
         envelope.is_stream = True
         rid = _wire_request_id_key(envelope.request_id)
         logger.info(
@@ -352,7 +461,7 @@ class WebSocketAgentServerClient(AgentServerClient):
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
                 logger.info("[WebSocketAgentServerClient] 发送请求(流式) payload: %s", _to_json(payload))
-                await self._ws.send(json.dumps(payload, ensure_ascii=False))
+                await self._send_wire_payload(payload)
 
             # 从队列中接收流式响应
             chunk_count = 0
@@ -368,6 +477,8 @@ class WebSocketAgentServerClient(AgentServerClient):
                         break
                 else:
                     data = await queue.get()
+                if isinstance(data, _ReceiverFailure):
+                    raise RuntimeError("AgentServer WebSocket connection closed") from data.exc
                 chunk = parse_agent_server_wire_chunk(data)
                 chunk_count += 1
                 yield chunk

@@ -1136,7 +1136,14 @@ class JiuWenSwarm:
 
         if value in ("approve", "本次允许", "Approve", "Proceed", "批准", "开始执行"):
             confirm_payload = {"approved": True, "auto_confirm": False, "feedback": ""}
-        elif value in ("always_allow", "总是允许", "Always Allow"):
+        elif value in ("session_allow", "会话内记住", "Session Allow"):
+            confirm_payload = {
+                "approved": True,
+                "auto_confirm": True,
+                "persist_allow": False,
+                "feedback": "",
+            }
+        elif value in ("always_allow", "永久记住", "Always Allow"):
             confirm_payload = {
                 "approved": True,
                 "auto_confirm": True,
@@ -1207,6 +1214,7 @@ class JiuWenSwarm:
                 "handle_skills_skillnet_install",
                 "handle_skills_clawhub_download",
                 "handle_skills_team_skills_hub_install",
+                "handle_skills_evolution_save",
             ]
             if handler_name == "handle_skills_skillnet_install" and payload.get("pending"):
                 _reload_after_skills = False

@@ -8,8 +8,11 @@ yet declared (e.g. ``status``, ``endpoint``).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field, fields
 from typing import Any, TypeVar
+
+logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T", bound="_FromDictMixin")
 
@@ -136,7 +139,12 @@ class Reservation:
         try:
             self._client.release_reservation(self)
         except Exception:
-            pass  # best-effort; lease will TTL-expire anyway
+            logger.warning(
+                "Reservation release on __exit__ failed for holder_id=%s; "
+                "lease will TTL-expire",
+                self.holder_id,
+                exc_info=True,
+            )
         finally:
             self._released = True
 
@@ -150,6 +158,11 @@ class Reservation:
         try:
             await self._client.release_reservation(self)
         except Exception:
-            pass
+            logger.warning(
+                "Reservation release on __aexit__ failed for holder_id=%s; "
+                "lease will TTL-expire",
+                self.holder_id,
+                exc_info=True,
+            )
         finally:
             self._released = True

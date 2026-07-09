@@ -54,7 +54,7 @@ class _FakeMonitor:
         tasks: list[_FakeTask] | None = None,
         messages: list[_FakeMessage] | None = None,
     ):
-        self.team_id = "team-1"
+        self.team_name = "team-1"
         self._members = members
         self._leader_member_name = leader_member_name
         self._events = events or []

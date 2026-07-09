@@ -348,6 +348,46 @@ async def test_plan_from_score_fast_uses_input_candidates_and_neighbors(
     assert result["skill_retrieval"]["candidate_skill_ids"] == ["skill-b"]
 
 
+async def test_plan_from_score_filters_disabled_skills_from_prompt(
+    monkeypatch,
+    tmp_path,
+):
+    artifacts = _artifacts(tmp_path)
+    llm = _FakeLLMClient(
+        {
+            "title": "Enabled-only plan",
+            "status": "ready",
+            "steps": [{"skill_id": "skill-a", "reason": "Enabled seed."}],
+            "can_feed_edges": [],
+        }
+    )
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    result = await service.plan_from_score(
+        tmp_path,
+        "use beta",
+        llm_client=llm,
+        orchestration_config=SymphonyOrchestrationConfig(
+            mode="fast",
+            min_edge_confidence=0.7,
+        ),
+        candidate_skill_ids=["skill-b"],
+        disabled_skill_names=["Beta Skill"],
+    )
+
+    prompt_payload = json.loads(llm.calls[0]["user_content"])
+    prompt_skill_ids = {skill["id"] for skill in prompt_payload["skills"]}
+    assert prompt_skill_ids == {"skill-a", "skill-c"}
+    assert prompt_payload["can_feed_edges"] == []
+    assert result["skill_retrieval"] == {
+        "source": "input",
+        "used": False,
+        "candidate_skill_ids": [],
+        "candidate_count": 0,
+        "fallback_reason": "candidate_skill_ids did not match current score",
+    }
+
+
 async def test_plan_from_score_fast_without_candidates_uses_default_subgraph(
     monkeypatch,
     tmp_path,

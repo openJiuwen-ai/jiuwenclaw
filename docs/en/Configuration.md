@@ -423,7 +423,7 @@ These are **conceptual** paths in the main configuration for cross-reference wit
 | `models.*.model_config_obj.temperature` | Temperature | `0.95` |
 | `heartbeat.every` | Heartbeat interval (seconds) | `3600` |
 | `react.context_engine_config.dialogue_compressor_config.tokens_threshold` | Dialogue compression token threshold | `100000` |
-| `react.context_engine_config.round_level_compressor_config.tokens_threshold` | Round-level compression token threshold | `230000` |
+| `react.context_engine_config.round_level_compressor_config.trigger_context_ratio` | Round-level compression trigger ratio of the effective context budget | `0.9` |
 
 <a id="dotenv-configuration"></a>
 

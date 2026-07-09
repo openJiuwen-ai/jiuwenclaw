@@ -87,6 +87,13 @@ def code_runtime_language(ctx: SwarmBuildContext) -> str:
     return "en"
 
 
+def structured_ask_user_language(ctx: SwarmBuildContext) -> str:
+    """Resolve the StructuredAskUserRail language for team/code profiles."""
+    if ctx.role == "leader" and ctx.mode in {"team", "team.plan"}:
+        return resolve_language((ctx.config or {}).get("preferred_language", "zh"))
+    return code_runtime_language(ctx)
+
+
 def _project_dir(ctx: SwarmBuildContext) -> str:
     """Resolve the code project directory from the build context."""
     workspace_root = (
@@ -383,9 +390,9 @@ class StructuredAskUserInput(ConstructionInput):
     """Construction inputs for the structured ask-user rail."""
 
     language: str = context_field(
-        resolver=code_runtime_language,
+        resolver=structured_ask_user_language,
         default="en",
-        description="Code runtime language.",
+        description="Structured ask-user language.",
     )
 
 
@@ -513,17 +520,21 @@ def build_code_skill_use(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
     from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
     try:
+        from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+
         inp = CodeSkillUseInput.resolve(params, ctx)
         skill_mode = (
             SkillUseRail.SKILL_MODE_AUTO_LIST
             if is_skill_retrieval_enabled()
             else inp.skill_mode
         )
+        skills_dir = str(get_agent_skills_dir())
         return SkillUseRail(
-            skills_dir=str(get_agent_skills_dir()),
+            skills_dir=skills_dir,
             skill_mode=skill_mode,
             include_tools=inp.include_tools,
             disabled_skills=load_execution_disabled_skills(),
+            evolution_store=EvolutionStore(skills_dir),
         )
     except Exception as exc:
         logger.warning("[swarm.code_skill_use] create failed: %s", exc)
@@ -544,4 +555,5 @@ __all__ = [
     "CODE_SKILL_USE",
     "CODING_MEMORY_EXTRAS_KEY",
     "code_runtime_language",
+    "structured_ask_user_language",
 ]

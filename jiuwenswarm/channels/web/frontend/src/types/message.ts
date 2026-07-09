@@ -44,6 +44,11 @@ export interface ContextCompressionSummary {
   summaries: string[];
 }
 
+export interface TeamMemberContextCompressionState {
+  runtime?: ContextCompressionRuntime;
+  summary?: ContextCompressionSummary;
+}
+
 export interface Message {
   id: string;
   role: MessageRole;

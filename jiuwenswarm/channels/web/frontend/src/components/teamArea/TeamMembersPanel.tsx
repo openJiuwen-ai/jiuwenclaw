@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
-import type { Message } from '../../types';
+import type { Message, TeamMemberContextCompressionState } from '../../types';
 import type {
   TeamMemberExecutionEvent,
   TeamTask as SessionTeamTask,
@@ -28,7 +28,7 @@ import {
   type TeamDetailTab,
   type TeamMember,
 } from './shared';
-import { Users, Wrench, MessageSquare } from 'lucide-react';
+import { AlertTriangle, CircleAlert, LoaderCircle, MessageSquare, Users, Wrench, X } from 'lucide-react';
 
 type TeamMembersPanelProps = {
   variant: 'compact' | 'expanded';
@@ -468,7 +468,12 @@ function MemberTaskDetail({
   const [taskListExpanded, setTaskListExpanded] = useState(false);
   const [expandedProcessIds, setExpandedProcessIds] = useState<Set<string>>(new Set());
   const { todos } = useTodoStore();
-  const { teamTaskEvents, teamMemberExecutionEvents } = useSessionStore();
+  const {
+    teamTaskEvents,
+    teamMemberExecutionEvents,
+    teamMemberContextCompression,
+    clearTeamMemberContextCompressionStatus,
+  } = useSessionStore();
   const { messages } = useChatStore();
   const processMessages = useMemo(
     () => mergeUniqueMessages([...historyMessages, ...messages]),
@@ -495,6 +500,7 @@ function MemberTaskDetail({
   );
   const completedCount = memberTasks.filter((task) => task.status === 'completed').length;
   const displayName = getMemberDisplayName(member);
+  const contextCompressionState = teamMemberContextCompression[member.member_id];
 
   useEffect(() => {
     setTaskListExpanded(false);
@@ -527,7 +533,11 @@ function MemberTaskDetail({
         <FinalSummaryList events={finalEvents} />
       </div>
 
-      <div className="shrink-0 border-t border-border bg-card">
+      <div className="shrink-0 border-border bg-card">
+        <TeamMemberContextCompressionBar
+          state={contextCompressionState}
+          onClose={() => clearTeamMemberContextCompressionStatus(member.member_id)}
+        />
         <TaskListBar
           tasks={memberTasks}
           expanded={taskListExpanded}
@@ -569,6 +579,88 @@ function MemberTaskDetail({
         )}
       </div>
     </section>
+  );
+}
+
+function TeamMemberContextCompressionBar({
+  state,
+  onClose,
+}: {
+  state?: TeamMemberContextCompressionState;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const runtime = state?.runtime;
+  const summary = state?.summary;
+  const summaryItems = (summary?.summaries ?? []).filter(Boolean);
+  const showSummaryDetails = summaryItems.length > 0;
+
+  if (!runtime?.summary && !showSummaryDetails) {
+    return null;
+  }
+
+  const status = runtime?.status;
+  const isRunning = status === 'running';
+  const isFailed = status === 'failed';
+  let statusTitle = t('team.contextCompression.completed', { count: summary?.count || 1 });
+  if (isRunning) {
+    statusTitle = t('team.contextCompression.running');
+  } else if (isFailed) {
+    statusTitle = t('team.contextCompression.failed');
+  }
+  const detailsTitle = showSummaryDetails
+    ? summaryItems.map((item, index) => `${index + 1}. ${item}`).join('\n')
+    : undefined;
+
+  const isComplete = !isRunning && !isFailed;
+  let stateClass = 'is-complete';
+  if (isFailed) {
+    stateClass = 'is-failed';
+  } else if (isRunning) {
+    stateClass = 'is-running';
+  }
+  const statusIcon = isFailed ? <AlertTriangle size={14} /> : <CircleAlert size={14} />;
+  const statusIconTitle = showSummaryDetails && !isRunning ? detailsTitle : undefined;
+  const activityClassName = isRunning
+    ? 'team-event-group-summary__activity context-compression-running-text'
+    : 'team-event-group-summary__activity';
+
+  return (
+    <div className="team-event-group team-event-group--context-compression w-[auto]">
+      <div className={`team-event-group-summary team-event-group-summary--context-compression ${stateClass}`}>
+        <span className="team-event-group-summary__main">
+          <span
+            className="team-event-group-summary__icon team-event-group-summary__icon--status"
+            title={statusIconTitle}
+            aria-hidden="true"
+          >
+            {statusIcon}
+          </span>
+          <span className="team-event-group-summary__title">{statusTitle}</span>
+          {isRunning && (
+            <span className="team-event-group-summary__icon team-event-group-summary__icon--status" aria-hidden="true">
+              <LoaderCircle size={14} className="animate-spin" />
+            </span>
+          )}
+        </span>
+        {runtime?.summary && !isComplete && (
+          <span className={activityClassName}>
+            {runtime.summary}
+          </span>
+        )}
+        {!isRunning && (
+          <button
+            type="button"
+            className="team-event-group-summary__icon team-event-group-summary__icon--close"
+            onClick={onClose}
+            title={t('team.contextCompression.close')}
+            aria-label={t('team.contextCompression.close')}
+          >
+            <X size={14} />
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -701,7 +793,7 @@ function TaskListBar({
     <button
       type="button"
       onClick={onToggle}
-      className="flex w-full h-[54px] items-center justify-between px-5 text-left transition-colors hover:bg-secondary"
+      className="flex w-full h-[54px] items-center justify-between px-5 text-left transition-colors hover:bg-secondary border-t"
     >
       <div className="flex min-w-0 items-center gap-2">
         <span className="text-sm font-medium text-text">{t('team.memberTasks')}</span>

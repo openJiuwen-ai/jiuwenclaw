@@ -6,7 +6,7 @@ import json
 import logging
 import sqlite3
 import threading
-from typing import Any, Optional
+from typing import Any
 
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
@@ -147,10 +147,10 @@ class SQLiteSpanExporter(SpanExporter):
         if span.end_time and span.start_time:
             duration_ns = span.end_time - span.start_time
 
-        # Serialize attributes to JSON
-        attributes_json = json.dumps(dict(span.attributes)) if span.attributes else None
+        # Serialize attributes to JSON (preserve Chinese characters as-is)
+        attributes_json = json.dumps(dict(span.attributes), ensure_ascii=False) if span.attributes else None
 
-        # Serialize events to JSON
+        # Serialize events to JSON (preserve Chinese characters as-is)
         events_json = None
         if span.events:
             events_data = [
@@ -161,9 +161,9 @@ class SQLiteSpanExporter(SpanExporter):
                 }
                 for event in span.events
             ]
-            events_json = json.dumps(events_data)
+            events_json = json.dumps(events_data, ensure_ascii=False)
 
-        # Serialize links to JSON
+        # Serialize links to JSON (preserve Chinese characters as-is)
         links_json = None
         if span.links:
             links_data = [
@@ -174,10 +174,10 @@ class SQLiteSpanExporter(SpanExporter):
                 }
                 for link in span.links
             ]
-            links_json = json.dumps(links_data)
+            links_json = json.dumps(links_data, ensure_ascii=False)
 
-        # Serialize resource to JSON
-        resource_json = json.dumps(dict(span.resource.attributes)) if span.resource else None
+        # Serialize resource to JSON (preserve Chinese characters as-is)
+        resource_json = json.dumps(dict(span.resource.attributes), ensure_ascii=False) if span.resource else None
 
         # Extract scope info
         scope_name = None
@@ -300,6 +300,27 @@ def query_spans(
     conn.close()
     return results
 
+def read_flat_span(db_path: str, trace_id: str) -> list[dict[str, Any]]:
+    """Read all spans for trace_id from SQLite, sorted by start_time_ns.
+
+    Returns flat list of span dicts (no children, no depth).
+    Compatible with otel_adapter._read_flat_spans format.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        spans = cursor.execute(
+            "SELECT * FROM spans WHERE trace_id = ? ORDER BY start_time_ns",
+            (trace_id,),
+        ).fetchall()
+        result = [dict(r) for r in spans]
+        conn.close()
+        return result
+    except Exception as exc:
+        logger.warning("read_flat_span failed: %s", exc)
+        return []
 
 def get_trace_tree(db_path: str, trace_id: str) -> list[dict[str, Any]]:
     """Get complete trace tree with depth information.
@@ -320,9 +341,9 @@ def get_trace_tree(db_path: str, trace_id: str) -> list[dict[str, Any]]:
         (trace_id,)
     )
     rows = cursor.fetchall()
-    conn.close()
 
-    # Build span map
+    # Build span map (process rows before closing connection
+    # so dict(row) can reliably access column names)
     span_map: dict[str, dict[str, Any]] = {}
     for row in rows:
         span = dict(row)
@@ -337,6 +358,8 @@ def get_trace_tree(db_path: str, trace_id: str) -> list[dict[str, Any]]:
             span["resource"] = json.loads(span["resource"])
         span["children"] = []
         span_map[span["span_id"]] = span
+
+    conn.close()
 
     # Build tree
     roots: list[dict[str, Any]] = []

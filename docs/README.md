@@ -92,7 +92,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>技能交响乐</strong></td>
-      <td width="28%"><a href="zh/symphony-技能编排与分发.md">技能交响乐</a></td>
+      <td width="28%"><a href="zh/Symphony-技能编排与分发.md">技能交响乐</a></td>
       <td width="50%">技能编排与分发系统。</td>
     </tr>
     <tr>
