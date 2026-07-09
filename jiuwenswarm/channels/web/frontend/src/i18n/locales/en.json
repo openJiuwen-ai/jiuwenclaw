@@ -463,7 +463,8 @@
     "collapseSidebar": "Collapse Sidebar",
     "connectionStatus": "Connection Status",
     "language": "Language",
-    "appearance": "Appearance"
+    "appearance": "Appearance",
+    "moreSettings": "More Settings"
   },
   "heartbeat": {
     "title": "Heartbeat Management",

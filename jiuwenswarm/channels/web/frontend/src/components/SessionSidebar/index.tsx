@@ -44,6 +44,7 @@ interface SessionSidebarProps {
   onExpand?: () => void;
   showNewSession?: boolean;
   hiddenNavItems?: MainNavKey[];
+  onMorePanelOpenChange?: (open: boolean) => void;
 }
 
 interface NavItem {
@@ -297,6 +298,7 @@ export function SessionSidebar({
   onExpand,
   showNewSession = true,
   hiddenNavItems = [],
+  onMorePanelOpenChange,
 }: SessionSidebarProps) {
   const { t } = useTranslation();
   const [advancedConfigOpen, setAdvancedConfigOpen] = useState(false);
@@ -358,11 +360,27 @@ export function SessionSidebar({
   };
 
   const toggleMore = () => {
-    setMoreOpen((open) => !open);
+    setMoreOpen((open) => {
+      const nextOpen = !open;
+      if (nextOpen) {
+        const defaultMoreNav = visibleMoreNavItems[0]?.key;
+        if (defaultMoreNav) {
+          onNavigate(defaultMoreNav);
+        }
+        if (!collapsed) {
+          onCollapse?.();
+        }
+      }
+      return nextOpen;
+    });
   };
 
   const handleNavClick = (nav: MainNavKey) => {
     setMoreOpen(false);
+    onNavigate(nav);
+  };
+
+  const handleMoreNavClick = (nav: MainNavKey) => {
     onNavigate(nav);
   };
 
@@ -391,6 +409,11 @@ export function SessionSidebar({
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [moreOpen]);
+
+  useEffect(() => {
+    onMorePanelOpenChange?.(moreOpen);
+    return () => onMorePanelOpenChange?.(false);
+  }, [moreOpen, onMorePanelOpenChange]);
 
   // Collapsed mode: 48px icon-only sidebar
   if (collapsed) {
@@ -454,35 +477,37 @@ export function SessionSidebar({
         {visibleMoreNavItems.length > 0 && (
           <>
             <Tooltip text={t('nav.more')} targetRef={moreBtnRef} visible={hoveredNav === 'more' && !moreOpen} />
-            <div className="collapsed-more-anchor">
-              <button
-                ref={moreBtnRef}
-                className={`collapsed-nav-item${isMoreActive ? ' collapsed-nav-item--active' : ''}`}
-                onClick={toggleMore}
-                onMouseEnter={() => handleMouseEnter('more')}
-                onMouseLeave={() => setHoveredNav(null)}
-                title={t('nav.more')}
-              >
-                <span className="collapsed-nav-item__icon">
-                  <img src={moreDesignIcon} alt="" />
-                </span>
-                <span className="collapsed-nav-item__label">{t('nav.more')}</span>
-              </button>
-              {moreOpen && (
-                <div ref={morePanelRef} className="collapsed-more-menu">
+            <button
+              ref={moreBtnRef}
+              className={`collapsed-nav-item${(moreOpen || isMoreActive) ? ' collapsed-nav-item--active' : ''}`}
+              onClick={toggleMore}
+              onMouseEnter={() => handleMouseEnter('more')}
+              onMouseLeave={() => setHoveredNav(null)}
+              title={t('nav.more')}
+              aria-expanded={moreOpen}
+            >
+              <span className="collapsed-nav-item__icon">
+                <img src={moreDesignIcon} alt="" />
+              </span>
+              <span className="collapsed-nav-item__label">{t('nav.more')}</span>
+            </button>
+            {moreOpen && (
+              <div ref={morePanelRef} className="collapsed-more-panel">
+                <div className="collapsed-more-panel__title">{t('sessionSidebar.moreSettings')}</div>
+                <nav className="collapsed-more-panel__list" aria-label={t('sessionSidebar.moreSettings')}>
                   {visibleMoreNavItems.map((item) => (
                     <button
                       key={item.key}
-                      className={`collapsed-more-menu__item${activeNav === item.key ? ' collapsed-more-menu__item--active' : ''}`}
-                      onClick={() => handleNavClick(item.key)}
+                      className={`collapsed-more-panel__item${activeNav === item.key ? ' collapsed-more-panel__item--active' : ''}`}
+                      onClick={() => handleMoreNavClick(item.key)}
                     >
-                      <span className="collapsed-more-menu__icon">{item.icon}</span>
-                      <span className="collapsed-more-menu__text">{getNavItemLabel(item)}</span>
+                      <span className="collapsed-more-panel__icon">{item.icon}</span>
+                      <span className="collapsed-more-panel__text">{getNavItemLabel(item)}</span>
                     </button>
                   ))}
-                </div>
-              )}
-            </div>
+                </nav>
+              </div>
+            )}
           </>
         )}
 

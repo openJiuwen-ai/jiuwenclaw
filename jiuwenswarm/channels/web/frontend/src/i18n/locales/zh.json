@@ -174,7 +174,7 @@
     }
   },
   "artifacts": {
-    "title": "产物",
+    "title": "所有产物",
     "tab": "产物",
     "count": "{{count}} 个产物",
     "empty": "暂无产物",
@@ -464,7 +464,8 @@
     "collapseSidebar": "收起侧边栏",
     "connectionStatus": "连接状态",
     "language": "语言",
-    "appearance": "外观"
+    "appearance": "外观",
+    "moreSettings": "更多设置"
   },
   "heartbeat": {
     "title": "心跳管理",

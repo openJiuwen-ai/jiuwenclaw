@@ -440,6 +440,10 @@ select {
     --tool-panel-width: 300px;
   }
 
+  .shell--collapsed.shell--more-panel-open {
+    grid-template-columns: 304px minmax(0, 1fr);
+  }
+
   /* Topbar */
   .topbar {
     grid-area: topbar;

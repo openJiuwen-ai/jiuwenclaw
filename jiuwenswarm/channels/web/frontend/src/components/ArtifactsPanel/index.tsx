@@ -363,7 +363,7 @@ export function ArtifactsPanel({ className }: { className?: string }) {
         className="flex shrink-0 flex-col overflow-hidden border-r border-border bg-card"
         style={{ width: listWidth }}
       >
-        <div className="shrink-0 border-b border-border px-4 py-3">
+        <div className="shrink-0 px-4 py-3">
           <div className="text-sm font-semibold text-text">{t('artifacts.title')}</div>
           <div className="mt-1 text-xs text-text-muted">
             {t('artifacts.count', { count: artifacts.length })}

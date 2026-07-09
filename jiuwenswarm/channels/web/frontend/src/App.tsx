@@ -276,6 +276,7 @@ function AppContent() {
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) !== 'false');
+  const [sidebarMorePanelOpen, setSidebarMorePanelOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [dialogBusy, setDialogBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
@@ -1822,7 +1823,11 @@ function AppContent() {
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
 
   return (
-    <div className={`shell ${sidebarCollapsed ? 'shell--collapsed' : ''}`} data-testid="app-shell" data-session-id={sessionId}>
+    <div
+      className={`shell ${sidebarCollapsed ? 'shell--collapsed' : ''} ${sidebarMorePanelOpen ? 'shell--more-panel-open' : ''}`}
+      data-testid="app-shell"
+      data-session-id={sessionId}
+    >
       {/* Navigation Sidebar - always rendered, 48px icon strip when collapsed */}
       <SessionSidebar
         activeNav={activeNav}
@@ -1836,6 +1841,7 @@ function AppContent() {
         onExpand={() => setSidebarCollapsed(false)}
         showNewSession={false}
         hiddenNavItems={['sessions']}
+        onMorePanelOpenChange={setSidebarMorePanelOpen}
       />
 
       {/* Main Content */}
