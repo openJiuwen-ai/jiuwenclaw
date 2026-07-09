@@ -148,9 +148,12 @@ _EXTENDED_DESCRIPTION_CN: str = (
 class StructuredAskUserPayload(BaseModel):
     """Payload for structured user answers."""
 
-    answers: dict[str, str] = Field(
+    answers: dict[str, str | list[str]] = Field(
         default_factory=dict,
-        description="Mapping of question text to selected option label.",
+        description=(
+            "Mapping of question text to selected option label(s). "
+            "Value is a str for single-select, or list[str] for multi-select."
+        ),
     )
 
 
@@ -302,9 +305,10 @@ class StructuredAskUserRail(AskUserRail):
                 answer_parts = []
                 for q_text, selected in payload.answers.items():
                     if q_text == "__free_text__":
-                        answer_parts.append(selected)
+                        answer_parts.append(selected if isinstance(selected, str) else ", ".join(selected))
                     else:
-                        answer_parts.append(f"{q_text}: {selected}")
+                        value_text = selected if isinstance(selected, str) else ", ".join(selected)
+                        answer_parts.append(f"{q_text}: {value_text}")
                 answer_text = "\n".join(answer_parts) if answer_parts else ""
                 logger.info(
                     "[StructuredAskUserRail] Resolved structured answer: %s",

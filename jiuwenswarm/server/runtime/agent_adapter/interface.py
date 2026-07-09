@@ -1164,15 +1164,36 @@ class JiuWenSwarm:
                     question_text = str(answer.get("question", "") or "").strip()
                     selected_options = answer.get("selected_options", [])
                     custom_input = str(answer.get("custom_input", "") or "").strip()
-                    answer_value = ""
-                    if selected_options:
-                        answer_value = str(selected_options[0] or "").strip()
+                    if selected_options and isinstance(selected_options, list):
+                        # Normalize each option to a stripped string, drop empties.
+                        opts = [
+                            str(o or "").strip()
+                            for o in selected_options
+                            if str(o or "").strip()
+                        ]
+                        # When the only selection is "Other", prefer the free-text
+                        # custom_input (single-select free-text path).
+                        if len(opts) == 1 and opts[0] == "Other" and custom_input:
+                            answer_value: Any = custom_input
+                        elif len(opts) == 1:
+                            answer_value = opts[0]
+                        elif opts:
+                            # Multi-select: preserve the full list of selections.
+                            answer_value = opts
+                        else:
+                            answer_value = ""
                     elif custom_input:
                         answer_value = custom_input
+                    else:
+                        answer_value = ""
                     if question_text and answer_value:
                         answers_dict[question_text] = answer_value
                     elif answer_value:
-                        free_text_answer = answer_value
+                        free_text_answer = (
+                            answer_value
+                            if isinstance(answer_value, str)
+                            else ", ".join(answer_value)
+                        )
             if not answers_dict and free_text_answer:
                 answers_dict["__free_text__"] = free_text_answer
             payload: dict[str, Any] = {"answers": answers_dict}

@@ -1253,7 +1253,9 @@ export class AppScreen implements Component, Focusable {
   private draftBeforeQuestion = "";
   private syncingComposerInput = false;
   private pendingQuestionAnswers = new Map<number, string>();
+  private pendingMultiSelectAnswers = new Map<number, string[]>();
   private questionList: SelectList | null = null;
+  private questionCheckboxList: CheckboxList | null = null;
   private questionDetailsMap: Map<string, string[]> | null = null;
   private questionOptionRows: QuestionOptionRowHit[] = [];
   private otherInputMode = false;
@@ -2191,6 +2193,26 @@ export class AppScreen implements Component, Focusable {
       }
       this.ctrlCPendingForQuestion = true;
       this.transientNotice = "Press Ctrl+C again to exit";
+      this.ctrlCPendingForQuestionTimer = setTimeout(() => {
+        this.ctrlCPendingForQuestion = false;
+        this.ctrlCPendingForQuestionTimer = null;
+        this.transientNotice = null;
+        this.tui.requestRender();
+      }, 3000);
+      this.tui.requestRender();
+      return;
+    }
+
+    // Ctrl+D during pending question: same double-press mechanism as Ctrl+C
+    if (pendingQuestion && matchesKey(data, "ctrl+d")) {
+      if (this.ctrlCPendingForQuestion) {
+        this.clearCtrlCPendingForQuestion();
+        this.transientNotice = null;
+        this.interruptTask();
+        return;
+      }
+      this.ctrlCPendingForQuestion = true;
+      this.transientNotice = "Press Ctrl+D again to cancel";
       this.ctrlCPendingForQuestionTimer = setTimeout(() => {
         this.ctrlCPendingForQuestion = false;
         this.ctrlCPendingForQuestionTimer = null;
@@ -3141,6 +3163,7 @@ export class AppScreen implements Component, Focusable {
       this.activeQuestionId = questionId;
       this.activeQuestionIndex = 0;
       this.pendingQuestionAnswers.clear();
+      this.pendingMultiSelectAnswers.clear();
       this.draftBeforeQuestion = this.editor.getText();
       this.editor.setText("");
       const pendingQuestion = snapshot.pendingQuestion;
@@ -3158,7 +3181,9 @@ export class AppScreen implements Component, Focusable {
       this.activeQuestionIndex = 0;
       this.otherInputMode = false;
       this.pendingQuestionAnswers.clear();
+      this.pendingMultiSelectAnswers.clear();
       this.questionList = null;
+      this.questionCheckboxList = null;
       this.questionDetailsMap = null;
       this.setMouseTrackingEnabled(false);
       if (!this.editor.getText() && this.draftBeforeQuestion) {
@@ -6939,7 +6964,10 @@ export class AppScreen implements Component, Focusable {
       );
     }
 
-    if (this.questionList !== null) {
+    if (this.questionCheckboxList !== null) {
+      const checkboxLines = this.questionCheckboxList.render(width);
+      lines.push(...checkboxLines);
+    } else if (this.questionList !== null) {
       const listLines = this.questionList.render(width);
 
       // Insert details sub-lines right after the currently selected item
@@ -6997,6 +7025,12 @@ export class AppScreen implements Component, Focusable {
   ): boolean {
     if (!snapshot.pendingQuestion) {
       return false;
+    }
+
+    if (this.questionCheckboxList !== null) {
+      this.questionCheckboxList.handleInput(data);
+      this.tui.requestRender();
+      return true;
     }
 
     if (this.questionList !== null) {
@@ -7098,7 +7132,7 @@ export class AppScreen implements Component, Focusable {
       !!pendingQuestion &&
       !this.otherInputMode &&
       !this.isEditingInlinePlanReject(snapshot) &&
-      (this.questionList !== null || (pendingQuestion.questions[0]?.options.length ?? 0) > 0);
+      (this.questionList !== null || this.questionCheckboxList !== null || (pendingQuestion.questions[0]?.options.length ?? 0) > 0);
   }
 
   private isEditingInlinePlanReject(snapshot: ReturnType<CliPiAppState["getSnapshot"]>): boolean {
@@ -7141,6 +7175,7 @@ export class AppScreen implements Component, Focusable {
     const pendingQuestion = snapshot.pendingQuestion;
     if (!pendingQuestion) {
       this.questionList = null;
+      this.questionCheckboxList = null;
       this.questionDetailsMap = null;
       this.setMouseTrackingEnabled(false);
       return;
@@ -7153,10 +7188,46 @@ export class AppScreen implements Component, Focusable {
     );
     if (!question || question.options.length === 0) {
       this.questionList = null;
+      this.questionCheckboxList = null;
       this.questionDetailsMap = null;
       this.setMouseTrackingEnabled(false);
       return;
     }
+
+    // --- Multi-select: use CheckboxList ---
+    if (question.multiSelect) {
+      this.questionList = null;
+      this.questionDetailsMap = null;
+
+      const groups: CheckboxGroupType[] = [
+        {
+          name: question.header || question.question,
+          items: question.options.map((option) => ({
+            label: option.label,
+            value: option.label,
+            checked: false,
+            description: option.description,
+          })),
+        },
+      ];
+
+      const checkboxList = new CheckboxList(
+        groups,
+        Math.min(Math.max(question.options.length, 1), 20),
+      );
+      checkboxList.onSelect = (selectedValues: string[]) => {
+        this.handleMultiSelectConfirm(selectedValues);
+      };
+      checkboxList.onCancel = () => {
+        this.handleQuestionSelection("");
+      };
+      this.questionCheckboxList = checkboxList;
+      this.setMouseTrackingEnabled(true);
+      return;
+    }
+
+    // --- Single-select: use SelectList ---
+    this.questionCheckboxList = null;
 
     const currentSelectedValue = this.questionList?.getSelectedItem()?.value;
     const showRejectCursor =
@@ -7246,6 +7317,37 @@ export class AppScreen implements Component, Focusable {
     }
     this.questionList = list;
     this.setMouseTrackingEnabled(true);
+  }
+
+  private handleMultiSelectConfirm(selectedValues: string[]): void {
+    const snapshot = this.state.getSnapshot();
+    const pendingQuestion = snapshot.pendingQuestion;
+    if (!pendingQuestion) {
+      return;
+    }
+
+    if (this.activeQuestionIndex < pendingQuestion.questions.length - 1) {
+      // Multiple questions: advance to the next one
+      this.pendingMultiSelectAnswers.set(this.activeQuestionIndex, selectedValues);
+      this.activeQuestionIndex += 1;
+      this.syncQuestionList(this.state.getSnapshot());
+      this.tui.requestRender();
+      return;
+    }
+
+    const answers = pendingQuestion.questions.map((question, index) => {
+      // Current multi-select question uses the just-confirmed selectedValues;
+      // earlier multi-select questions use their stored arrays.
+      const multi =
+        index === this.activeQuestionIndex
+          ? selectedValues
+          : this.pendingMultiSelectAnswers.get(index);
+      return {
+        question: question.question,
+        selected_options: multi ?? [this.pendingQuestionAnswers.get(index) ?? ""],
+      };
+    });
+    this.state.submitQuestionAnswers(answers);
   }
 
   private handleQuestionSelection(label: string): void {
