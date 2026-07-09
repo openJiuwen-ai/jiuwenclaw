@@ -69,6 +69,17 @@ _QUESTIONS_ITEM_SCHEMA: dict[str, Any] = {
                         "type": "string",
                         "description": "Explanation of what this option means.",
                     },
+                    "preview": {
+                        "type": "string",
+                        "description": (
+                            "Optional preview content rendered beside this option when "
+                            "comparing concrete artifacts the user should visually compare "
+                            "(e.g. ASCII mockups, code snippets). Markdown is supported; "
+                            "use fenced code blocks for monospace mockups so alignment is "
+                            "preserved. Only rendered for single-select questions; ignored "
+                            "for multi-select."
+                        ),
+                    },
                 },
                 "required": ["label"],
             },
@@ -129,7 +140,10 @@ _EXTENDED_DESCRIPTION_EN: str = (
     "2. Structured questions (multi-choice): pass `query` + `questions` — "
     "the user selects from predefined options. "
     "Use `questions` when you want the user to choose between specific options "
-    "(e.g., 'Apply update' vs 'Skip'). Each question can have 2-4 options."
+    "(e.g., 'Apply update' vs 'Skip'). Each question can have 2-4 options. "
+    "For single-select questions, an option may carry a `preview` (markdown, "
+    "e.g. fenced code block ASCII mockup) shown beside it to compare concrete "
+    "artifacts; use it only when a visual comparison helps the user decide."
 )
 
 _EXTENDED_DESCRIPTION_CN: str = (
@@ -137,7 +151,9 @@ _EXTENDED_DESCRIPTION_CN: str = (
     "1. 纯文本查询：只传 `query` —— 用户自由输入回答。\n"
     "2. 结构化选项：传 `query` + `questions` —— 用户从预定义选项中选择。"
     "当你希望用户在特定选项间做选择时（如「应用更新」vs「跳过」）使用 `questions`。"
-    "每个问题可提供 2-4 个选项。"
+    "每个问题可提供 2-4 个选项。对于单选问题，选项可携带 `preview`（markdown，"
+    "如带围栏代码块的 ASCII mockup）展示在选项旁，用于对比具体产物；"
+    "仅在视觉对比有助于用户决策时使用。"
 )
 
 # ---------------------------------------------------------------------------

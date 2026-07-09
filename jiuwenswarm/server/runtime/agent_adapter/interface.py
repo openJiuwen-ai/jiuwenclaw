@@ -1166,20 +1166,20 @@ class JiuWenSwarm:
                     custom_input = str(answer.get("custom_input", "") or "").strip()
                     if selected_options and isinstance(selected_options, list):
                         # Normalize each option to a stripped string, drop empties.
-                        opts = [
-                            str(o or "").strip()
-                            for o in selected_options
-                            if str(o or "").strip()
+                        cleaned_options = [
+                            str(raw_option or "").strip()
+                            for raw_option in selected_options
+                            if str(raw_option or "").strip()
                         ]
                         # When the only selection is "Other", prefer the free-text
                         # custom_input (single-select free-text path).
-                        if len(opts) == 1 and opts[0] == "Other" and custom_input:
+                        if len(cleaned_options) == 1 and cleaned_options[0] == "Other" and custom_input:
                             answer_value: Any = custom_input
-                        elif len(opts) == 1:
-                            answer_value = opts[0]
-                        elif opts:
+                        elif len(cleaned_options) == 1:
+                            answer_value = cleaned_options[0]
+                        elif cleaned_options:
                             # Multi-select: preserve the full list of selections.
-                            answer_value = opts
+                            answer_value = cleaned_options
                         else:
                             answer_value = ""
                     elif custom_input:

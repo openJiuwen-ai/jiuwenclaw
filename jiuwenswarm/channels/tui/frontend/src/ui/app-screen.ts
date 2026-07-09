@@ -90,7 +90,7 @@ import {
   orderedMemberIds,
   teamWorkingStartedAtMs,
 } from "./components/team-shared.js";
-import { padToWidth, prefixedLines, renderStyledMarkdownLines, renderWrappedText } from "./rendering/text.js";
+import { padToWidth, prefixedLines, renderMarkdownLines, renderStyledMarkdownLines, renderWrappedText } from "./rendering/text.js";
 import { chalk, editorTheme, palette, selectListTheme, setCurrentThemeName } from "./theme.js";
 import type { Hunk, GitDiffData, GitDiffStats, TurnDiff } from "../core/types.js";
 
@@ -1257,6 +1257,7 @@ export class AppScreen implements Component, Focusable {
   private questionList: SelectList | null = null;
   private questionCheckboxList: CheckboxList | null = null;
   private questionDetailsMap: Map<string, string[]> | null = null;
+  private questionPreviewMap: Map<string, string> | null = null;
   private questionOptionRows: QuestionOptionRowHit[] = [];
   private otherInputMode = false;
   private ctrlCPendingForQuestion = false;
@@ -3185,6 +3186,7 @@ export class AppScreen implements Component, Focusable {
       this.questionList = null;
       this.questionCheckboxList = null;
       this.questionDetailsMap = null;
+      this.questionPreviewMap = null;
       this.setMouseTrackingEnabled(false);
       if (!this.editor.getText() && this.draftBeforeQuestion) {
         this.editor.setText(this.draftBeforeQuestion);
@@ -6970,23 +6972,40 @@ export class AppScreen implements Component, Focusable {
     } else if (this.questionList !== null) {
       const listLines = this.questionList.render(width);
 
-      // Insert details sub-lines right after the currently selected item
+      // Insert preview / details sub-lines right after the currently selected item
       // instead of appending them after the entire list.
       const selectedItem = this.questionList.getSelectedItem();
-      if (selectedItem && this.questionDetailsMap) {
-        const details = this.questionDetailsMap.get(selectedItem.value);
-        if (details && details.length > 0) {
-          const indent = "              ";
-          const detailLines: string[] = [];
-          for (const d of details) {
-            // Wrap indented text to full terminal width, so long paths auto-break into multiple lines
-            detailLines.push(
-              ...renderWrappedText(Math.max(1, width), `${indent}${d}`, palette.text.dim),
+      if (selectedItem) {
+        const previewText = this.questionPreviewMap?.get(selectedItem.value);
+        const details = this.questionDetailsMap?.get(selectedItem.value);
+        const hasPreview = !!previewText;
+        const hasDetails = !!(details && details.length > 0);
+        if (hasPreview || hasDetails) {
+          const previewIndent = "  ";
+          const detailIndent = "              ";
+          const subLines: string[] = [];
+          // Markdown preview (ASCII mockups / code snippets) rendered with the
+          // same renderer as assistant messages so monospace alignment survives.
+          if (hasPreview) {
+            const mdLines = renderMarkdownLines(
+              Math.max(1, width - previewIndent.length),
+              previewText!,
             );
+            for (const l of mdLines) {
+              subLines.push(previewIndent + l);
+            }
+          }
+          // Plain-text detail lines (e.g. rewind file-change summaries).
+          if (hasDetails) {
+            for (const d of details!) {
+              subLines.push(
+                ...renderWrappedText(Math.max(1, width), `${detailIndent}${d}`, palette.text.dim),
+              );
+            }
           }
           // SelectList.render() layout: [visible item 0..N-1, (scroll indicator?)]
           // Replicate its scroll-window calculation to find where the selected
-          // item sits, then splice detail lines right after it.
+          // item sits, then splice sub-lines right after it.
           const filteredLen: number = this.questionList["filteredItems"]?.length ?? 0;
           const selectedIdx: number = this.questionList["selectedIndex"] ?? 0;
           const maxVis: number = this.questionList["maxVisible"] ?? 6;
@@ -6995,7 +7014,7 @@ export class AppScreen implements Component, Focusable {
             Math.min(selectedIdx - Math.floor(maxVis / 2), filteredLen - maxVis),
           );
           const insertAt = Math.max(0, Math.min(selectedIdx - scrollStart + 1, listLines.length));
-          listLines.splice(insertAt, 0, ...detailLines);
+          listLines.splice(insertAt, 0, ...subLines);
         }
       }
 
@@ -7177,6 +7196,7 @@ export class AppScreen implements Component, Focusable {
       this.questionList = null;
       this.questionCheckboxList = null;
       this.questionDetailsMap = null;
+      this.questionPreviewMap = null;
       this.setMouseTrackingEnabled(false);
       return;
     }
@@ -7190,6 +7210,7 @@ export class AppScreen implements Component, Focusable {
       this.questionList = null;
       this.questionCheckboxList = null;
       this.questionDetailsMap = null;
+      this.questionPreviewMap = null;
       this.setMouseTrackingEnabled(false);
       return;
     }
@@ -7198,6 +7219,7 @@ export class AppScreen implements Component, Focusable {
     if (question.multiSelect) {
       this.questionList = null;
       this.questionDetailsMap = null;
+      this.questionPreviewMap = null;
 
       const groups: CheckboxGroupType[] = [
         {
@@ -7264,6 +7286,16 @@ export class AppScreen implements Component, Focusable {
       }
     }
     this.questionDetailsMap = detailsMap;
+
+    // Build preview map for options that carry markdown preview content
+    // (LLM-supplied ASCII mockups / code snippets). Rendered only for single-select.
+    const previewMap = new Map<string, string>();
+    for (const option of question.options) {
+      if (option.preview && option.preview.trim()) {
+        previewMap.set(option.label, option.preview);
+      }
+    }
+    this.questionPreviewMap = previewMap;
 
     const maxVisible =
       pendingQuestion.source === "permission_interrupt" ||
@@ -7389,10 +7421,11 @@ export class AppScreen implements Component, Focusable {
     }
 
     const answers = pendingQuestion.questions.map((question, index) => {
+      const multi = this.pendingMultiSelectAnswers.get(index);
       const answerValue = this.pendingQuestionAnswers.get(index) ?? question.options[0]?.label ?? "";
       const answer = {
         question: question.question,
-        selected_options: [answerValue],
+        selected_options: multi ?? [answerValue],
       };
       if (
         index === this.activeQuestionIndex &&
