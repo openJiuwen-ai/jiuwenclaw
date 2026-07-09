@@ -33,6 +33,7 @@ import yaml
 from dotenv import load_dotenv
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
+from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.runner import Runner
@@ -361,13 +362,17 @@ def init_permission_engine(*_args: Any, **_kwargs: Any) -> None:
 
 def _mcc_looks_usable(mcc: dict) -> bool:
     """检查 model_client_config 是否包含有效的 API 凭据。"""
-    api_key = str(mcc.get("api_key", "") or "").strip()
     api_base = str(mcc.get("api_base", "") or "").strip()
-    if not api_key or not api_base:
+    if not api_base or is_placeholder_api_base(api_base):
         return False
-    if is_placeholder_api_base(api_base):
-        return False
-    return True
+
+    provider = mcc.get("client_provider", "")
+    provider = getattr(provider, "value", provider)
+    if is_openai_account_provider(str(provider or "")):
+        return True
+
+    api_key = str(mcc.get("api_key", "") or "").strip()
+    return bool(api_key)
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -5546,6 +5551,7 @@ class JiuWenSwarmDeepAdapter:
         return _mcc_looks_usable({
             "api_key": mcc_obj.api_key,
             "api_base": getattr(mcc_obj, "api_base", None),
+            "client_provider": getattr(mcc_obj, "client_provider", None),
         })
 
     def _has_valid_model_config(self, requested_model_name: str = "") -> bool:

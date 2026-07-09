@@ -63,6 +63,11 @@ docs/ai/
 # logs
 logs/
 
+# Browser automation runtime artifacts
+.browser/
+.browser-profiles/
+.playwright-mcp/
+
 # workspace
 workspace/session
 workspace/agent/memory/*.db

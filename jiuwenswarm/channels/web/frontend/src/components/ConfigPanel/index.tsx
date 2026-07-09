@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Music2, Workflow } from "lucide-react";
+import { AlertCircle, CheckCircle2, Copy, ExternalLink, KeyRound, Loader2, LogOut, Music2, RefreshCw, Workflow } from "lucide-react";
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore } from '../../stores';
 import type { ModelEntry } from '../../types';
@@ -231,6 +231,10 @@ interface ConfigSaveAllPayload {
   models?: ModelEntry[];
   agents?: AgentsTeamsPayload["agents"];
   team?: AgentsTeamsPayload["team"];
+}
+
+interface ModelPatchOptions {
+  autoSave?: boolean;
 }
 
 interface ConfigGroup {
@@ -971,8 +975,44 @@ function GroupSection({
   );
 }
 
-const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "DeepSeek"] as const;
+const OPENAI_ACCOUNT_PROVIDER = "OpenAIAccount";
+const OPENAI_ACCOUNT_DEFAULT_API_BASE = "https://chatgpt.com/backend-api/codex";
+const OPENAI_ACCOUNT_LOGIN_POLL_COOLDOWN_MS = 15_000;
+const OPENAI_ACCOUNT_STATUS_REFRESH_COOLDOWN_MS = 5_000;
+const OPENAI_ACCOUNT_LOGIN_REFRESH_COOLDOWN_MS = 15_000;
+const OPENAI_ACCOUNT_DEFAULT_MODEL = "gpt-5.4-mini";
+
+const MODEL_PROVIDER_OPTIONS = [
+  "OpenAI",
+  OPENAI_ACCOUNT_PROVIDER,
+  "OpenRouter",
+  "DashScope",
+  "SiliconFlow",
+  "InferenceAffinity",
+  "DeepSeek",
+] as const;
 const REASONING_LEVEL_OPTIONS = ["off", "low", "medium", "high"] as const;
+
+function isOpenAIAccountProvider(provider?: string): boolean {
+  return (provider || "").trim().toLowerCase() === OPENAI_ACCOUNT_PROVIDER.toLowerCase();
+}
+
+function buildOpenAIAccountModelDefaults(
+  model: Partial<ModelEntry>,
+  baseUrl = OPENAI_ACCOUNT_DEFAULT_API_BASE,
+  modelIds?: string[],
+): Partial<ModelEntry> {
+  return {
+    model_provider: OPENAI_ACCOUNT_PROVIDER,
+    api_base: baseUrl,
+    api_key: "",
+    model_name: (model.model_name || "").trim() || modelIds?.[0] || OPENAI_ACCOUNT_DEFAULT_MODEL,
+  };
+}
+
+function openAIAccountErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
 
 function getModelValidationKey(model: ModelEntry): string {
   return [
@@ -984,6 +1024,627 @@ function getModelValidationKey(model: ModelEntry): string {
   ].join("\u0000");
 }
 
+interface OpenAIAccountAuthStatus {
+  authenticated: boolean;
+  auth_path?: string;
+  has_refresh_token?: boolean;
+  expires_at?: number | null;
+  needs_refresh?: boolean;
+  error?: string | null;
+  base_url?: string;
+}
+
+interface OpenAIAccountLoginPayload {
+  status: "pending";
+  login_id: string;
+  user_code: string;
+  verification_uri: string;
+  interval: number;
+  expires_in?: number;
+  expires_at?: number;
+  auth?: OpenAIAccountAuthStatus;
+}
+
+interface OpenAIAccountNoPendingLoginPayload {
+  status: "none";
+  auth?: OpenAIAccountAuthStatus;
+}
+
+type OpenAIAccountPendingLoginPayload = OpenAIAccountLoginPayload | OpenAIAccountNoPendingLoginPayload;
+
+interface OpenAIAccountPollPayload {
+  status: "pending" | "authenticated" | "expired" | "error";
+  authenticated?: boolean;
+  expires_at?: number;
+  auth?: OpenAIAccountAuthStatus;
+  error?: string;
+}
+
+interface OpenAIAccountModelsPayload {
+  models?: string[];
+  base_url?: string;
+}
+
+function OpenAIAccountMark() {
+  return (
+    <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-md border border-border bg-bg px-1.5 text-[10px] font-semibold text-text shadow-sm">
+      OpenAI
+    </span>
+  );
+}
+
+function OpenAIAccountAuthPanel({
+  model,
+  isConnected,
+  onModelPatch,
+  t,
+}: {
+  model: ModelEntry;
+  isConnected: boolean;
+  onModelPatch: (patch: Partial<ModelEntry>, options?: ModelPatchOptions) => Promise<void> | void;
+  t: (key: string, options?: Record<string, unknown>) => string;
+}) {
+  const [status, setStatus] = useState<OpenAIAccountAuthStatus | null>(null);
+  const [login, setLogin] = useState<OpenAIAccountLoginPayload | null>(null);
+  const [loadingStatus, setLoadingStatus] = useState(false);
+  const [startingLogin, setStartingLogin] = useState(false);
+  const [pollingLogin, setPollingLogin] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [modelsLoadedOnce, setModelsLoadedOnce] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [autoSaveState, setAutoSaveState] = useState<"idle" | "saving" | "saved">("idle");
+  const [refreshCoolingDown, setRefreshCoolingDown] = useState(false);
+  const [loginPollResetToken, setLoginPollResetToken] = useState(0);
+  const pollingLoginRef = useRef(false);
+  const loginRef = useRef<OpenAIAccountLoginPayload | null>(null);
+  const pollLoginOnceRef = useRef<(activeLogin: OpenAIAccountLoginPayload) => Promise<boolean>>(
+    async () => true,
+  );
+  const latestModelRef = useRef(model);
+  const autoSaveTimerRef = useRef<number | undefined>(undefined);
+  const refreshCooldownTimerRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    latestModelRef.current = model;
+  }, [model]);
+
+  useEffect(() => {
+    loginRef.current = login;
+  }, [login]);
+
+  useEffect(() => () => {
+    if (autoSaveTimerRef.current !== undefined) {
+      window.clearTimeout(autoSaveTimerRef.current);
+    }
+    if (refreshCooldownTimerRef.current !== undefined) {
+      window.clearTimeout(refreshCooldownTimerRef.current);
+    }
+  }, []);
+
+  const applyDefaults = useCallback(async (
+    modelIds?: string[],
+    baseUrl?: string,
+    options?: ModelPatchOptions,
+  ) => {
+    const patch = buildOpenAIAccountModelDefaults(
+      latestModelRef.current,
+      baseUrl || status?.base_url || OPENAI_ACCOUNT_DEFAULT_API_BASE,
+      modelIds,
+    );
+    try {
+      if (options?.autoSave) {
+        setAutoSaveState("saving");
+      }
+      latestModelRef.current = { ...latestModelRef.current, ...patch };
+      await onModelPatch(patch, options);
+      if (options?.autoSave) {
+        setAutoSaveState("saved");
+        if (autoSaveTimerRef.current !== undefined) {
+          window.clearTimeout(autoSaveTimerRef.current);
+        }
+        autoSaveTimerRef.current = window.setTimeout(() => {
+          setAutoSaveState("idle");
+          autoSaveTimerRef.current = undefined;
+        }, 3000);
+      }
+    } catch (error) {
+      setAutoSaveState("idle");
+      setAuthError(t("config.openaiAccount.autoSaveFailed", {
+        error: openAIAccountErrorMessage(error, t("config.errors.saveFailed")),
+      }));
+    }
+  }, [onModelPatch, status?.base_url, t]);
+
+  const refreshModelDefaults = useCallback(async (baseUrl?: string, options?: ModelPatchOptions) => {
+    setLoadingModels(true);
+    setModelsError(null);
+    try {
+      const payload = await webRequest<OpenAIAccountModelsPayload>(
+        "openai_account.models.list",
+        {},
+        { timeoutMs: 20000 },
+      );
+      const nextModels = Array.isArray(payload.models)
+        ? payload.models.filter((name): name is string => typeof name === "string" && name.trim().length > 0)
+        : [];
+      setModelOptions(nextModels);
+      await applyDefaults(nextModels, payload.base_url || baseUrl, options);
+    } catch (error) {
+      setModelsError(openAIAccountErrorMessage(error, t("config.openaiAccount.modelsLoadFailed")));
+      await applyDefaults(undefined, baseUrl, options);
+    } finally {
+      setLoadingModels(false);
+    }
+  }, [applyDefaults, t]);
+
+  const refreshStatus = useCallback(async () => {
+    if (!isConnected) return null;
+    setLoadingStatus(true);
+    setAuthError(null);
+    try {
+      const nextStatus = await webRequest<OpenAIAccountAuthStatus>(
+        "openai_account.auth.status",
+        {},
+        { timeoutMs: 10000 },
+      );
+      setStatus(nextStatus);
+      if (nextStatus.authenticated && !nextStatus.needs_refresh) {
+        setLogin(null);
+      }
+      return nextStatus;
+    } catch (error) {
+      setAuthError(openAIAccountErrorMessage(error, t("config.openaiAccount.statusFailed")));
+      return null;
+    } finally {
+      setLoadingStatus(false);
+    }
+  }, [isConnected, t]);
+
+  const restorePendingLogin = useCallback(async () => {
+    if (!isConnected) {
+      setLogin(null);
+      return null;
+    }
+    setLoadingStatus(true);
+    setAuthError(null);
+    try {
+      const payload = await webRequest<OpenAIAccountPendingLoginPayload>(
+        "openai_account.auth.pending_login",
+        {},
+        { timeoutMs: 10000 },
+      );
+      const nextStatus = payload.auth || null;
+      setStatus(nextStatus);
+      if (payload.status === "pending") {
+        setLoginPollResetToken(0);
+        setLogin(payload);
+      } else {
+        setLogin(null);
+      }
+      return payload;
+    } catch (error) {
+      setAuthError(openAIAccountErrorMessage(error, t("config.openaiAccount.statusFailed")));
+      return null;
+    } finally {
+      setLoadingStatus(false);
+    }
+  }, [isConnected, t]);
+
+  useEffect(() => {
+    void restorePendingLogin();
+  }, [restorePendingLogin]);
+
+  useEffect(() => {
+    if (!isConnected || modelsLoadedOnce) return;
+    setModelsLoadedOnce(true);
+    void refreshModelDefaults(status?.base_url);
+  }, [isConnected, modelsLoadedOnce, refreshModelDefaults, status?.base_url]);
+
+  const pollLoginOnce = useCallback(async (activeLogin: OpenAIAccountLoginPayload) => {
+    if (!isConnected) return true;
+    if (pollingLoginRef.current) return false;
+    pollingLoginRef.current = true;
+    setPollingLogin(true);
+    setAuthError(null);
+    try {
+      const result = await webRequest<OpenAIAccountPollPayload>(
+        "openai_account.auth.poll_login",
+        { login_id: activeLogin.login_id },
+        { timeoutMs: 30000 },
+      );
+      if (result.status === "authenticated") {
+        const nextStatus = result.auth || null;
+        setStatus(nextStatus);
+        setLogin(null);
+        setAuthError(null);
+        await refreshModelDefaults(nextStatus?.base_url, { autoSave: true });
+        return true;
+      }
+      if (result.status === "expired") {
+        setLogin(null);
+        setAuthError(t("config.openaiAccount.loginExpired"));
+        return true;
+      }
+      if (result.auth?.authenticated && !result.auth.needs_refresh) {
+        setStatus(result.auth);
+        setLogin(null);
+        setAuthError(null);
+        await refreshModelDefaults(result.auth.base_url, { autoSave: true });
+        return true;
+      }
+      return false;
+    } catch (error) {
+      setLogin(null);
+      setAuthError(openAIAccountErrorMessage(error, t("config.openaiAccount.loginFailed")));
+      return true;
+    } finally {
+      pollingLoginRef.current = false;
+      setPollingLogin(false);
+    }
+  }, [isConnected, refreshModelDefaults, t]);
+
+  useEffect(() => {
+    pollLoginOnceRef.current = pollLoginOnce;
+  }, [pollLoginOnce]);
+
+  const resetLoginPollDelay = useCallback(() => {
+    setLoginPollResetToken((value) => value + 1);
+  }, []);
+
+  useEffect(() => {
+    if (!login || !isConnected) return undefined;
+
+    let cancelled = false;
+    let timer: number | undefined;
+    let resumeTimers: number[] = [];
+    let pendingPoll = false;
+    let nextPollAt = 0;
+    const delayMs = Math.max(OPENAI_ACCOUNT_LOGIN_POLL_COOLDOWN_MS, (login.interval || 0) * 1000);
+
+    const canPoll = () => document.visibilityState === "visible" && document.hasFocus();
+    const canResumePoll = () => document.visibilityState === "visible" && document.hasFocus();
+
+    const clearTimer = () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+    };
+
+    const clearResumeTimers = () => {
+      resumeTimers.forEach((timerId) => window.clearTimeout(timerId));
+      resumeTimers = [];
+    };
+
+    const scheduleNextPoll = (delay = delayMs) => {
+      clearTimer();
+      pendingPoll = false;
+      nextPollAt = Date.now() + delay;
+      timer = window.setTimeout(onPollDue, delay);
+    };
+
+    const runPoll = async () => {
+      clearTimer();
+      pendingPoll = false;
+      nextPollAt = 0;
+      const activeLogin = loginRef.current;
+      if (!activeLogin) return;
+      const finished = await pollLoginOnceRef.current(activeLogin);
+      if (cancelled || finished) return;
+      scheduleNextPoll();
+    };
+
+    const onPollDue = () => {
+      timer = undefined;
+      nextPollAt = 0;
+      if (!canPoll()) {
+        pendingPoll = true;
+        return;
+      }
+      void runPoll();
+    };
+
+    const tryResumePoll = () => {
+      if (cancelled || !canResumePoll()) return;
+      if (pendingPoll) {
+        void runPoll();
+        return;
+      }
+      if (timer !== undefined && nextPollAt > 0 && Date.now() >= nextPollAt) {
+        void runPoll();
+      }
+      if (timer === undefined && nextPollAt > 0 && Date.now() < nextPollAt) {
+        scheduleNextPoll(nextPollAt - Date.now());
+      }
+    };
+
+    const resumeWhenFocused = () => {
+      clearResumeTimers();
+      tryResumePoll();
+      [100, 500].forEach((delay) => {
+        const timerId = window.setTimeout(() => {
+          tryResumePoll();
+        }, delay);
+        resumeTimers.push(timerId);
+      });
+    };
+
+    scheduleNextPoll(delayMs);
+    window.addEventListener("focus", resumeWhenFocused);
+    window.addEventListener("pageshow", resumeWhenFocused);
+    document.addEventListener("focusin", resumeWhenFocused);
+    document.addEventListener("visibilitychange", resumeWhenFocused);
+    document.addEventListener("pointerdown", resumeWhenFocused);
+    document.addEventListener("keydown", resumeWhenFocused);
+    return () => {
+      cancelled = true;
+      clearTimer();
+      clearResumeTimers();
+      window.removeEventListener("focus", resumeWhenFocused);
+      window.removeEventListener("pageshow", resumeWhenFocused);
+      document.removeEventListener("focusin", resumeWhenFocused);
+      document.removeEventListener("visibilitychange", resumeWhenFocused);
+      document.removeEventListener("pointerdown", resumeWhenFocused);
+      document.removeEventListener("keydown", resumeWhenFocused);
+    };
+  }, [isConnected, login?.interval, login?.login_id, loginPollResetToken]);
+
+  const beginRefreshCooldown = useCallback((cooldownMs: number) => {
+    setRefreshCoolingDown(true);
+    if (refreshCooldownTimerRef.current !== undefined) {
+      window.clearTimeout(refreshCooldownTimerRef.current);
+    }
+    refreshCooldownTimerRef.current = window.setTimeout(() => {
+      setRefreshCoolingDown(false);
+      refreshCooldownTimerRef.current = undefined;
+    }, cooldownMs);
+  }, []);
+
+  const handleRefreshAuth = async () => {
+    if (refreshCoolingDown) return;
+    if (login) {
+      beginRefreshCooldown(OPENAI_ACCOUNT_LOGIN_REFRESH_COOLDOWN_MS);
+      resetLoginPollDelay();
+      const finished = await pollLoginOnce(login);
+      if (!finished) {
+        resetLoginPollDelay();
+      }
+      return;
+    }
+    beginRefreshCooldown(OPENAI_ACCOUNT_STATUS_REFRESH_COOLDOWN_MS);
+    const nextStatus = await refreshStatus();
+    if (nextStatus?.authenticated && !nextStatus.needs_refresh) {
+      await refreshModelDefaults(nextStatus.base_url);
+    }
+  };
+
+  const handleStartLogin = async () => {
+    if (!isConnected) {
+      setAuthError(t("config.openaiAccount.needConnection"));
+      return;
+    }
+    setStartingLogin(true);
+    setAuthError(null);
+    setCopied(false);
+    void applyDefaults(undefined, status?.base_url);
+    try {
+      const started = await webRequest<OpenAIAccountLoginPayload>(
+        "openai_account.auth.start_login",
+        {},
+        { timeoutMs: 30000 },
+      );
+      setLoginPollResetToken(0);
+      setLogin(started);
+      setStatus(started.auth || status);
+      window.open(started.verification_uri, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      setAuthError(openAIAccountErrorMessage(error, t("config.openaiAccount.loginFailed")));
+    } finally {
+      setStartingLogin(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    if (!isConnected) return;
+    setLoggingOut(true);
+    setAuthError(null);
+    try {
+      const result = await webRequest<{ auth?: OpenAIAccountAuthStatus }>(
+        "openai_account.auth.logout",
+        {},
+        { timeoutMs: 10000 },
+      );
+      setStatus(result.auth || null);
+      setLogin(null);
+    } catch (error) {
+      setAuthError(openAIAccountErrorMessage(error, t("config.openaiAccount.logoutFailed")));
+    } finally {
+      setLoggingOut(false);
+    }
+  };
+
+  const handleCopyCode = async () => {
+    if (!login?.user_code) return;
+    try {
+      await navigator.clipboard.writeText(login.user_code);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  const handleModelSelectChange = (modelName: string) => {
+    latestModelRef.current = { ...latestModelRef.current, model_name: modelName };
+    void onModelPatch({ model_name: modelName });
+  };
+
+  const visibleModelOptions = useMemo(() => {
+    const currentModelName = (model.model_name || "").trim();
+    const deduped = Array.from(new Set(modelOptions));
+    if (currentModelName && !deduped.includes(currentModelName)) {
+      return [currentModelName, ...deduped];
+    }
+    return deduped;
+  }, [model.model_name, modelOptions]);
+
+  const authenticated = Boolean(status?.authenticated && !status?.needs_refresh);
+  const statusLabel = authenticated
+    ? t("config.openaiAccount.connected")
+    : status?.needs_refresh
+      ? t("config.openaiAccount.refreshNeeded")
+      : t("config.openaiAccount.notConnected");
+  const statusClass = authenticated
+    ? "border-ok/30 bg-ok-subtle text-ok"
+    : status?.needs_refresh
+      ? "border-warn/30 bg-warn-subtle text-warn"
+      : "border-border bg-bg text-text-muted";
+
+  return (
+    <div className="rounded-md border border-accent/20 bg-accent/5 px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <OpenAIAccountMark />
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-text">{t("config.openaiAccount.title")}</span>
+              <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] ${statusClass}`}>
+                {authenticated ? <CheckCircle2 className="h-3 w-3" /> : <KeyRound className="h-3 w-3" />}
+                {statusLabel}
+              </span>
+            </div>
+            <div className="mt-0.5 truncate text-[11px] text-text-muted">
+              {autoSaveState === "saving"
+                ? t("config.openaiAccount.autoSaving")
+                : autoSaveState === "saved"
+                  ? t("config.openaiAccount.autoSaved")
+                  : status?.auth_path
+                    ? t("config.openaiAccount.statusAuthPath", { path: status.auth_path })
+                    : t("config.openaiAccount.description")}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => void handleRefreshAuth()}
+            disabled={!isConnected || (login ? pollingLogin : loadingStatus) || refreshCoolingDown}
+            className="rounded border border-border bg-bg px-2 py-1 text-[11px] text-text hover:bg-secondary/60 disabled:opacity-40"
+            title={refreshCoolingDown ? t("config.openaiAccount.refreshCoolingDown") : t("config.openaiAccount.refresh")}
+          >
+            {(login ? pollingLogin : loadingStatus) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+          </button>
+          {authenticated ? (
+            <button
+              type="button"
+              onClick={() => void handleLogout()}
+              disabled={!isConnected || loggingOut}
+              className="inline-flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 text-[11px] text-text hover:bg-danger-subtle hover:text-danger disabled:opacity-40"
+            >
+              {loggingOut ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <LogOut className="h-3.5 w-3.5" />}
+              {t("config.openaiAccount.logout")}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void handleStartLogin()}
+              disabled={!isConnected || startingLogin || Boolean(login)}
+              className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-medium text-white shadow-sm hover:bg-accent-hover disabled:opacity-40"
+            >
+              {startingLogin ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
+              {startingLogin
+                ? t("config.openaiAccount.connecting")
+                : login
+                  ? t("config.openaiAccount.waitingAuth")
+                  : t("config.openaiAccount.connect")}
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-2 rounded-md border border-border bg-bg px-3 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="text-[11px] font-medium text-text">{t("config.openaiAccount.modelSelectLabel")}</div>
+            <div className="mt-0.5 text-[10px] text-text-muted">
+              {loadingModels
+                ? t("config.openaiAccount.loadingModels")
+                : t("config.openaiAccount.modelsLoaded", { count: visibleModelOptions.length })}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void refreshModelDefaults(status?.base_url)}
+            disabled={!isConnected || loadingModels}
+            className="inline-flex items-center gap-1 rounded border border-border bg-card px-2 py-1 text-[11px] text-text hover:bg-secondary/60 disabled:opacity-40"
+          >
+            {loadingModels ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            {t("config.openaiAccount.refreshModels")}
+          </button>
+        </div>
+        <select
+          value={model.model_name || ""}
+          onChange={(event) => handleModelSelectChange(event.target.value)}
+          disabled={loadingModels || visibleModelOptions.length === 0}
+          className="mt-2 w-full rounded border border-border bg-card px-2 py-1 text-xs text-text disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
+        >
+          {!model.model_name ? (
+            <option value="" disabled>{t("config.openaiAccount.modelSelectPlaceholder")}</option>
+          ) : null}
+          {visibleModelOptions.map((modelId) => (
+            <option key={modelId} value={modelId}>{modelId}</option>
+          ))}
+        </select>
+        {modelsError ? (
+          <div className="mt-1 text-[11px] text-danger">{modelsError}</div>
+        ) : null}
+      </div>
+
+      {login ? (
+        <div className="mt-2 rounded-md border border-border bg-bg px-3 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <div className="text-[11px] text-text-muted">{t("config.openaiAccount.authCodeLabel")}</div>
+              <div className="mt-1 font-mono text-lg font-semibold tracking-wide text-text">{login.user_code}</div>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => window.open(login.verification_uri, "_blank", "noopener,noreferrer")}
+                className="inline-flex items-center gap-1 rounded border border-border bg-card px-2 py-1 text-[11px] text-text hover:bg-secondary/60"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                {t("config.openaiAccount.openAuthPage")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleCopyCode()}
+                className="inline-flex items-center gap-1 rounded border border-border bg-card px-2 py-1 text-[11px] text-text hover:bg-secondary/60"
+              >
+                <Copy className="h-3.5 w-3.5" />
+                {copied ? t("config.openaiAccount.copied") : t("config.openaiAccount.copyCode")}
+              </button>
+            </div>
+          </div>
+          <div className="mt-1 text-[11px] text-text-muted">{t("config.openaiAccount.waiting")}</div>
+          <div className="mt-0.5 text-[11px] text-text-muted">{t("config.openaiAccount.loginTimeHint")}</div>
+        </div>
+      ) : null}
+
+      {authError ? (
+        <div className="mt-2 flex items-start gap-1.5 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-2 py-1.5 text-[11px] text-danger">
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{authError}</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** 多默认模型管理（受控组件，编辑状态由父组件持有） */
 function MultiModelSection({
   models,
@@ -993,6 +1654,7 @@ function MultiModelSection({
   agents,
   onDeleteModel,
   onClearExternalError,
+  onModelsAutoSave,
   t,
 }: {
   models: ModelEntry[];
@@ -1002,6 +1664,7 @@ function MultiModelSection({
   agents?: AgentEntry[];
   onDeleteModel?: (idx: number, modelName: string, references: string[]) => void;
   onClearExternalError?: () => void;
+  onModelsAutoSave?: (models: ModelEntry[]) => Promise<void>;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const [validatingModel, setValidatingModel] = useState<number | null>(null);
@@ -1034,7 +1697,16 @@ function MultiModelSection({
   const handleNewModelChange = (field: keyof ModelEntry, value: string) => {
     setLocalError(null);
     onClearExternalError?.();
-    setNewModel((prev) => ({ ...prev, [field]: value }));
+    setNewModel((prev) => {
+      if (field === "model_provider" && isOpenAIAccountProvider(value)) {
+        return {
+          ...prev,
+          ...buildOpenAIAccountModelDefaults(prev),
+          model_name: "",
+        };
+      }
+      return { ...prev, [field]: value };
+    });
   };
 
   const getModelAgentReferences = (modelName: string, modelProvider: string, modelApiBase: string): string[] => {
@@ -1107,7 +1779,15 @@ function MultiModelSection({
     // api_base URL 格式校验（仅在保存时校验，实时校验会导致用户输入过程中不断报错）
 
     const copy = [...models];
-    copy[idx] = { ...copy[idx], [field]: value };
+    if (field === "model_provider" && isOpenAIAccountProvider(value)) {
+      copy[idx] = {
+        ...copy[idx],
+        ...buildOpenAIAccountModelDefaults(copy[idx]),
+        model_name: "",
+      };
+    } else {
+      copy[idx] = { ...copy[idx], [field]: value };
+    }
     if (field === "model_name" && value !== models[idx].model_name) {
       if (idx === 0) {
         // 主对话默认换组：成为新组的组内默认，新组原默认让位
@@ -1123,6 +1803,17 @@ function MultiModelSection({
       }
     }
     onModelsChange(copy);
+  };
+
+  const patchModel = async (idx: number, patch: Partial<ModelEntry>, options?: ModelPatchOptions) => {
+    onClearExternalError?.();
+    setLocalError(null);
+    const copy = [...models];
+    copy[idx] = { ...copy[idx], ...patch };
+    onModelsChange(copy);
+    if (options?.autoSave) {
+      await onModelsAutoSave?.(copy);
+    }
   };
 
   const removeModel = (idx: number) => {
@@ -1206,6 +1897,7 @@ function MultiModelSection({
   const handleAddNew = () => {
     const name = newModel.model_name.trim();
     if (!name) return;
+    const isNewOpenAIAccount = isOpenAIAccountProvider(newModel.model_provider);
 
     // 字段长度校验
     if (name.length > MAX_MODEL_NAME_LENGTH) {
@@ -1225,7 +1917,7 @@ function MultiModelSection({
       return;
     }
 
-    if (!newModel.api_key.trim()) {
+    if (!isNewOpenAIAccount && !newModel.api_key.trim()) {
       setLocalError(t("config.modelList.apiKeyRequired"));
       return;
     }
@@ -1247,12 +1939,19 @@ function MultiModelSection({
     setLocalError(null);
     // 新增条目：同名组已有条目时 is_default=false，否则 is_default=true
     const sameNameExists = models.some((m) => m.model_name === name);
-    const entry: ModelEntry = { ...newModel, model_name: name, is_default: !sameNameExists };
+    const entry: ModelEntry = {
+      ...newModel,
+      ...(isNewOpenAIAccount ? buildOpenAIAccountModelDefaults(newModel) : {}),
+      model_name: name,
+      is_default: !sameNameExists,
+    };
     onModelsChange([...models, entry]);
     setExpandedIdx(models.length); // 自动展开新增的条目
     setAddingNew(false);
     setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "", reasoning_level: "" });
   };
+
+  const newModelIsOpenAIAccount = isOpenAIAccountProvider(newModel.model_provider);
 
   return (
     <>
@@ -1284,6 +1983,7 @@ function MultiModelSection({
           const vr = validateResults[getModelValidationKey(model)];
           const isDefault = model.is_default !== false;
           const isPrimaryDefault = idx === 0;
+          const modelIsOpenAIAccount = isOpenAIAccountProvider(model.model_provider);
           // 同名模型计数，用于区分显示
           const sameNameIndices = models.reduce<number[]>((acc, m, i) => {
             if (m.model_name === model.model_name) acc.push(i);
@@ -1360,7 +2060,7 @@ function MultiModelSection({
                   {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
                     <div key={field} className="flex items-center gap-2 text-xs">
                       <label className="w-28 text-text-muted shrink-0">
-                        {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
+                        {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && !(field === "api_key" && modelIsOpenAIAccount) && <span className="text-danger ml-0.5">*</span>}
                       </label>
                       {field === "model_provider" ? (
                         <select
@@ -1383,14 +2083,33 @@ function MultiModelSection({
                       ) : (
                         <input
                           type={field === "api_key" ? "password" : "text"}
-                          value={models[idx]?.[field] ?? ""}
+                          value={field === "model_name" && modelIsOpenAIAccount ? "" : models[idx]?.[field] ?? ""}
                           onChange={(e) => updateModel(idx, field, e.target.value)}
-                          className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
-                          placeholder={field === "api_key" ? t("config.modelList.apiKeyPlaceholder") : ""}
+                          disabled={(field === "api_key" || field === "api_base" || field === "model_name") && modelIsOpenAIAccount}
+                          className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
+                          placeholder={
+                            field === "model_name" && modelIsOpenAIAccount
+                              ? t("config.openaiAccount.modelNameUseDropdown")
+                              : field === "api_base" && modelIsOpenAIAccount
+                                ? t("config.openaiAccount.apiBaseManaged")
+                              : field === "api_key" ? (
+                                modelIsOpenAIAccount
+                                  ? t("config.openaiAccount.apiKeyNotNeeded")
+                                  : t("config.modelList.apiKeyPlaceholder")
+                              ) : ""
+                          }
                         />
                       )}
                     </div>
                   ))}
+                  {modelIsOpenAIAccount ? (
+                    <OpenAIAccountAuthPanel
+                      model={model}
+                      isConnected={isConnected}
+                      onModelPatch={(patch, options) => patchModel(idx, patch, options)}
+                      t={t}
+                    />
+                  ) : null}
                   {/* is_default 勾选框 */}
                   <div className="flex items-center gap-2 text-xs">
                     <label className="w-28 text-text-muted shrink-0">{t("config.modelList.isDefault")}</label>
@@ -1416,7 +2135,7 @@ function MultiModelSection({
             {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
               <div key={field} className="flex items-center gap-2 text-xs">
                 <label className="w-28 text-text-muted shrink-0">
-                  {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
+                  {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && !(field === "api_key" && newModelIsOpenAIAccount) && <span className="text-danger ml-0.5">*</span>}
                 </label>
                 {field === "model_provider" ? (
                   <select
@@ -1439,20 +2158,41 @@ function MultiModelSection({
                 ) : (
                   <input
                     type={field === "api_key" ? "password" : "text"}
-                    value={newModel[field] ?? ""}
+                    value={field === "model_name" && newModelIsOpenAIAccount ? "" : newModel[field] ?? ""}
                     onChange={(e) => handleNewModelChange(field, e.target.value)}
-                    className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
-                    placeholder={field === "model_name" ? "e.g. gpt-4o" : field === "api_key" ? t("config.modelList.apiKeyPlaceholder") : ""}
+                    disabled={(field === "api_key" || field === "api_base" || field === "model_name") && newModelIsOpenAIAccount}
+                    className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
+                    placeholder={
+                      field === "model_name"
+                        ? newModelIsOpenAIAccount
+                          ? t("config.openaiAccount.modelNameUseDropdown")
+                          : "e.g. gpt-4o"
+                        : field === "api_base" && newModelIsOpenAIAccount
+                          ? t("config.openaiAccount.apiBaseManaged")
+                        : field === "api_key" ? (
+                          newModelIsOpenAIAccount
+                            ? t("config.openaiAccount.apiKeyNotNeeded")
+                            : t("config.modelList.apiKeyPlaceholder")
+                        ) : ""
+                    }
                   />
                 )}
               </div>
             ))}
+            {newModelIsOpenAIAccount ? (
+              <OpenAIAccountAuthPanel
+                model={newModel}
+                isConnected={isConnected}
+                onModelPatch={(patch) => setNewModel((prev) => ({ ...prev, ...patch }))}
+                t={t}
+              />
+            ) : null}
             <div className="flex justify-end gap-2 pt-1">
               <button type="button" onClick={handleCancelAddNew} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
               <button
                 type="button"
                 onClick={handleAddNew}
-                disabled={!newModel.model_name.trim() || !newModel.api_base.trim() || !newModel.api_key.trim() || !newModel.model_provider.trim()}
+                disabled={!newModel.model_name.trim() || !newModel.api_base.trim() || (!newModelIsOpenAIAccount && !newModel.api_key.trim()) || !newModel.model_provider.trim()}
                 className="btn primary !px-3 !py-1 text-xs"
               >
                 {t("common.confirm")}
@@ -2999,7 +3739,12 @@ export function ConfigPanel({
     onHasChangesChange?.(hasChanges);
   }, [hasChanges, onHasChangesChange]);
   const missingRequiredModelFields = useMemo(
-    () => REQUIRED_MODEL_FIELDS.filter((key) => !(draftValues[key] ?? "").trim()),
+    () => REQUIRED_MODEL_FIELDS.filter((key) => {
+      if (key === "api_key" && isOpenAIAccountProvider(draftValues.model_provider)) {
+        return false;
+      }
+      return !(draftValues[key] ?? "").trim();
+    }),
     [draftValues],
   );
   const hasMissingRequiredModelFields = missingRequiredModelFields.length > 0;
@@ -3011,7 +3756,7 @@ export function ConfigPanel({
     [draftAgents],
   );
   const hasMissingModelApiKey = useMemo(
-    () => draftModels.some((m) => !m.api_key.trim()),
+    () => draftModels.some((m) => !isOpenAIAccountProvider(m.model_provider) && !m.api_key.trim()),
     [draftModels],
   );
   const hasMissingModelApiBase = useMemo(
@@ -3024,7 +3769,7 @@ export function ConfigPanel({
       if (!agent.name.trim()) return t('config.validation.agentNameRequired');
       if (!agent.model.provider.trim()) return t('config.validation.agentModelProviderRequired');
       if (!agent.model.api_base.trim()) return t('config.validation.agentModelApiBaseRequired');
-      if (!agent.model.api_key.trim()) return t('config.validation.agentModelApiKeyRequired');
+      if (!isOpenAIAccountProvider(agent.model.provider) && !agent.model.api_key.trim()) return t('config.validation.agentModelApiKeyRequired');
       if (!agent.model.model.trim()) return t('config.validation.agentModelNameRequired');
     }
     if (draftAgents.length > 0 && draftTeams.length === 0) {
@@ -3120,6 +3865,33 @@ export function ConfigPanel({
     if (hasAgentModelUpdated) {
       setDraftAgents(updatedAgents);
       setAgentsTeamsEdited(true);
+    }
+  };
+
+  const handleModelsAutoSave = async (models: ModelEntry[]) => {
+    if (saving) {
+      throw new Error(t("config.openaiAccount.autoSaveBusy"));
+    }
+    setSaving(true);
+    setError(null);
+    setModelError(null);
+    try {
+      if (onSaveAllConfig) {
+        await onSaveAllConfig({ models });
+      } else if (onModelsReplaceAll) {
+        await onModelsReplaceAll(models);
+      } else {
+        throw new Error(t("config.errors.saveFailed"));
+      }
+      if (onModelsRefresh) {
+        await onModelsRefresh();
+      }
+    } catch (saveError) {
+      const message = saveError instanceof Error ? saveError.message : t("config.errors.saveFailed");
+      setModelError(message);
+      throw new Error(message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -3440,6 +4212,7 @@ export function ConfigPanel({
                         agents={draftAgents}
                         onDeleteModel={handleDeleteModel}
                         onClearExternalError={() => setModelError(null)}
+                        onModelsAutoSave={handleModelsAutoSave}
                         t={t}
                       />
                     </div>

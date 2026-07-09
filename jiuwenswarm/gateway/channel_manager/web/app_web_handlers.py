@@ -23,6 +23,15 @@ import psutil
 from openjiuwen.core.common.logging import LogManager
 from openjiuwen.core.foundation.llm import Model, ProviderType
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
+from openjiuwen.extensions.external_provider.openai_auth.openai_account_auth import (
+    OpenAIAccountAuthError,
+    OpenAIAccountAuthManager,
+    OpenAIAccountDeviceCode,
+)
+from openjiuwen.extensions.external_provider.openai_auth.openai_account_models import (
+    OpenAIAccountModelCatalog,
+)
 
 from jiuwenswarm.common.config import (
     DEFAULT_SWARMFLOW_ENABLED,
@@ -151,6 +160,96 @@ load_dotenv(dotenv_path=_ENV_FILE, override=True)
 
 
 _ENV_VAR_PLACEHOLDER_RE = re.compile(r"^\$\{([^:}]+)(?::-([^}]*))?\}$")
+_OPENAI_ACCOUNT_LOGIN_MAX_TTL_SECONDS = 5 * 60
+_OPENAI_ACCOUNT_LOGIN_JOBS: dict[str, "_OpenAIAccountLoginJob"] = {}
+
+
+@dataclass
+class _OpenAIAccountLoginJob:
+    device_code: OpenAIAccountDeviceCode
+    created_at: float
+    expires_at: float
+
+
+def _cleanup_openai_account_login_jobs(now: float | None = None) -> None:
+    current = time.time() if now is None else now
+    expired = [
+        login_id
+        for login_id, job in _OPENAI_ACCOUNT_LOGIN_JOBS.items()
+        if job.expires_at <= current
+    ]
+    for login_id in expired:
+        _OPENAI_ACCOUNT_LOGIN_JOBS.pop(login_id, None)
+
+
+def _latest_openai_account_login_job(
+        now: float | None = None,
+) -> tuple[str, "_OpenAIAccountLoginJob"] | None:
+    current = time.time() if now is None else now
+    _cleanup_openai_account_login_jobs(current)
+    if not _OPENAI_ACCOUNT_LOGIN_JOBS:
+        return None
+    return max(_OPENAI_ACCOUNT_LOGIN_JOBS.items(), key=lambda item: item[1].created_at)
+
+
+def _openai_account_auth_status_payload(
+        manager: OpenAIAccountAuthManager | None = None,
+) -> dict[str, Any]:
+    auth_manager = manager or OpenAIAccountAuthManager()
+    status = auth_manager.status()
+    return {
+        "authenticated": status.authenticated,
+        "auth_path": str(status.auth_path),
+        "has_refresh_token": status.has_refresh_token,
+        "expires_at": status.expires_at,
+        "needs_refresh": status.needs_refresh,
+        "error": status.error,
+        "base_url": auth_manager.base_url,
+    }
+
+
+def _openai_account_login_payload(
+        login_id: str,
+        job: "_OpenAIAccountLoginJob",
+        manager: OpenAIAccountAuthManager | None = None,
+        now: float | None = None,
+) -> dict[str, Any]:
+    current = time.time() if now is None else now
+    device_code = job.device_code
+    return {
+        "status": "pending",
+        "login_id": login_id,
+        "user_code": device_code.user_code,
+        "verification_uri": device_code.verification_uri,
+        "interval": device_code.interval,
+        "expires_in": max(0, int(job.expires_at - current)),
+        "expires_at": job.expires_at,
+        "auth": _openai_account_auth_status_payload(manager),
+    }
+
+
+def _openai_account_pending_login_payload(
+        manager: OpenAIAccountAuthManager | None = None,
+) -> dict[str, Any]:
+    current = time.time()
+    latest_job = _latest_openai_account_login_job(current)
+    if latest_job is None:
+        return {
+            "status": "none",
+            "auth": _openai_account_auth_status_payload(manager),
+        }
+    login_id, job = latest_job
+    return _openai_account_login_payload(login_id, job, manager, current)
+
+
+def _openai_account_auth_error_payload(exc: OpenAIAccountAuthError) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "error": str(exc),
+        "code": exc.code,
+        "status_code": exc.status_code,
+        "relogin_required": exc.relogin_required,
+    }
 
 
 def _is_env_var_placeholder(value: Any) -> bool:
@@ -1441,13 +1540,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 except (TypeError, ValueError):
                     origin_index = None
             api_key = str(item.get("api_key") or "").strip()
-            # New entries must carry a non-empty api_key. Existing entries may legitimately
-            # be empty when the source is ``${API_KEY:-}`` and the env var is unset; in that
-            # case origin_index lets replace_all preserve the original placeholder.
-            if not api_key and origin_index is None:
-                raise _ConfigBadRequest(f"models[{idx}].api_key is required")
             api_base = str(item.get("api_base") or "").strip()
             model_provider = str(item.get("model_provider") or "").strip()
+            # OpenAIAccount uses the token store managed by core OAuth, so it does not
+            # carry a user-entered api_key in config.
+            if not api_key and origin_index is None and not is_openai_account_provider(model_provider):
+                raise _ConfigBadRequest(f"models[{idx}].api_key is required")
             if model_provider and model_provider not in available_model_providers:
                 raise _ConfigBadRequest(f"models[{idx}].model_provider must be one of: {available_model_providers}")
             try:
@@ -1559,10 +1657,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         api_key = str(params.get("api_key") or "").strip()
         model = str(params.get("model") or "").strip()
         model_provider = str(params.get("model_provider") or "").strip()
-        if not all([api_base, api_key, model, model_provider]):
+        needs_api_key = not is_openai_account_provider(model_provider)
+        if not all([api_base, model, model_provider]) or (needs_api_key and not api_key):
             await channel.send_response(
                 ws, req_id, ok=False,
-                error="api_base, api_key, model, and model_provider are required",
+                error="api_base, model, model_provider, and api_key for non-OAuth providers are required",
                 code="BAD_REQUEST",
             )
             return
@@ -1824,6 +1923,169 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         else:
             channels = []
         await channel.send_response(ws, req_id, ok=True, payload={"channels": channels})
+
+    async def _openai_account_auth_status(ws, req_id, params, session_id):
+        del params, session_id
+        try:
+            payload = await asyncio.to_thread(_openai_account_auth_status_payload)
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[openai_account.auth.status] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _openai_account_auth_start_login(ws, req_id, params, session_id):
+        del params, session_id
+        try:
+            manager = OpenAIAccountAuthManager()
+            now = time.time()
+            latest_job = _latest_openai_account_login_job(now)
+            if latest_job is not None:
+                login_id, job = latest_job
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=True,
+                    payload=_openai_account_login_payload(login_id, job, manager, now),
+                )
+                return
+            device_code = await asyncio.to_thread(manager.start_device_login)
+            now = time.time()
+            raw_expires_in = device_code.expires_in or _OPENAI_ACCOUNT_LOGIN_MAX_TTL_SECONDS
+            expires_in = min(int(raw_expires_in), _OPENAI_ACCOUNT_LOGIN_MAX_TTL_SECONDS)
+            expires_at = now + expires_in
+            login_id = uuid.uuid4().hex
+            _cleanup_openai_account_login_jobs(now)
+            job = _OpenAIAccountLoginJob(
+                device_code=device_code,
+                created_at=now,
+                expires_at=expires_at,
+            )
+            _OPENAI_ACCOUNT_LOGIN_JOBS[login_id] = job
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload=_openai_account_login_payload(login_id, job, manager, now),
+            )
+        except OpenAIAccountAuthError as exc:
+            logger.warning("[openai_account.auth.start_login] %s", exc)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code=exc.code,
+                payload=_openai_account_auth_error_payload(exc),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[openai_account.auth.start_login] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _openai_account_auth_pending_login(ws, req_id, params, session_id):
+        del params, session_id
+        try:
+            manager = OpenAIAccountAuthManager()
+            payload = await asyncio.to_thread(_openai_account_pending_login_payload, manager)
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[openai_account.auth.pending_login] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _openai_account_auth_poll_login(ws, req_id, params, session_id):
+        del session_id
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        login_id = str(params.get("login_id") or "").strip()
+        if not login_id:
+            await channel.send_response(ws, req_id, ok=False, error="login_id is required", code="BAD_REQUEST")
+            return
+        now = time.time()
+        _cleanup_openai_account_login_jobs(now)
+        job = _OPENAI_ACCOUNT_LOGIN_JOBS.get(login_id)
+        if job is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={"status": "expired", "authenticated": False},
+            )
+            return
+        try:
+            manager = OpenAIAccountAuthManager()
+            tokens = await asyncio.to_thread(manager.poll_device_login, job.device_code)
+            if tokens is None:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=True,
+                    payload={
+                        "status": "pending",
+                        "authenticated": False,
+                        "expires_at": job.expires_at,
+                    },
+                )
+                return
+            _OPENAI_ACCOUNT_LOGIN_JOBS.pop(login_id, None)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={
+                    "status": "authenticated",
+                    "authenticated": True,
+                    "auth": _openai_account_auth_status_payload(manager),
+                },
+            )
+        except OpenAIAccountAuthError as exc:
+            logger.warning("[openai_account.auth.poll_login] %s", exc)
+            if exc.relogin_required:
+                _OPENAI_ACCOUNT_LOGIN_JOBS.pop(login_id, None)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code=exc.code,
+                payload=_openai_account_auth_error_payload(exc),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[openai_account.auth.poll_login] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _openai_account_auth_logout(ws, req_id, params, session_id):
+        del params, session_id
+        try:
+            manager = OpenAIAccountAuthManager()
+            logged_out = await asyncio.to_thread(manager.logout)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={
+                    "logged_out": logged_out,
+                    "auth": _openai_account_auth_status_payload(manager),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[openai_account.auth.logout] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _openai_account_models_list(ws, req_id, params, session_id):
+        del params, session_id
+        try:
+            manager = OpenAIAccountAuthManager()
+            catalog = OpenAIAccountModelCatalog(base_url=manager.base_url)
+            models = await asyncio.to_thread(catalog.list_model_ids, auth_manager=manager)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={"models": models, "base_url": manager.base_url},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[openai_account.models.list] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
     async def _updater_get_status(ws, req_id, params, session_id):
         service = updater_service or UpdaterService()
@@ -3827,6 +4089,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("models.replace_all", _models_replace_all)
     channel.register_method("models.validate", _models_validate)
     channel.register_method("channel.get", _channel_get)
+    channel.register_method("openai_account.auth.status", _openai_account_auth_status)
+    channel.register_method("openai_account.auth.start_login", _openai_account_auth_start_login)
+    channel.register_method("openai_account.auth.pending_login", _openai_account_auth_pending_login)
+    channel.register_method("openai_account.auth.poll_login", _openai_account_auth_poll_login)
+    channel.register_method("openai_account.auth.logout", _openai_account_auth_logout)
+    channel.register_method("openai_account.models.list", _openai_account_models_list)
 
     channel.register_method("session.list", _session_list)
     channel.register_method("session.create", _session_create)
