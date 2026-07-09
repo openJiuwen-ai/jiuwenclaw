@@ -62,7 +62,7 @@ CREDENTIAL_PATTERNS: list[CredentialPattern] = [
     # password is often short and may contain special characters, so check it explicitly
     (
         re.compile(
-            r"(?i)\bpassword\b\s*[:=]\s*(?P<val>(?:['\"][^'\"\n]{6,}['\"]|[^\s#]{6,}))"
+            r"(?i)\bpassword\b\s*[:=：]\s*(?P<val>(?:['\"][^'\"\n]{6,}['\"]|[^\s#]{6,}))"
         ),
         "password_assignment",
         "val",

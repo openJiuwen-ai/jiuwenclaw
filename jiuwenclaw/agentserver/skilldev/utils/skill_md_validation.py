@@ -35,7 +35,7 @@ CREDENTIAL_PATTERNS: list[CredentialPattern] = [
     (re.compile(r"(?i)\b(postgresql|mongodb|mysql|redis)://[^:\s]+:[^@\s]+@"), "db_url_with_credentials", None),
     (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"), "jwt_token", None),
     (
-        re.compile(r"(?i)\bpassword\b\s*[:=]\s*(?P<val>(?:['\"][^'\"\n]{6,}['\"]|[^\s#]{6,}))"),
+        re.compile(r"(?i)\bpassword\b\s*[:=：]\s*(?P<val>(?:['\"][^'\"\n]{6,}['\"]|[^\s#]{6,}))"),
         "password_assignment",
         "val",
     ),
