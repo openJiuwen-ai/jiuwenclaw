@@ -12,8 +12,8 @@ It connects to a remote/local AgentServer WebSocket endpoint.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
+import argparse
 import json
 import logging
 import os
@@ -24,6 +24,10 @@ import uuid as uuid_module
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
+
+if sys.platform != "win32":
+    import uvloop
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import LogManager
