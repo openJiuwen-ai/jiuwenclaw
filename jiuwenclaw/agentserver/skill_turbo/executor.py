@@ -1226,17 +1226,6 @@ class SkillTurboExecutor:
                 )
 
         try:
-            # resume 重放时，对已执行过的工具（非 pending_tool_call_id）跳过权限检查，
-            # 直接执行。否则重放会再次触发权限中断，形成"执行→中断→resume→又执行→又中断"死循环。
-            # pending_tool_call_id 由 set_pending_resume 设置，是当前等待用户审批的那个工具。
-            # 其它工具在之前的执行中已经通过权限检查（或已执行完成），重放时应直接放行。
-            is_replay_of_completed_tool = (
-                self._pending_resume is not None
-                and resume_input is None
-                and self._pending_resume.get("expected_tool_call_id") is not None
-                and tool_call_id != self._pending_resume["expected_tool_call_id"]
-            )
-
             ctx = build_tool_ctx(
                 session=session,
                 tool_name=tool_name,
@@ -1245,54 +1234,21 @@ class SkillTurboExecutor:
                 resume_user_input=resume_input,
             )
 
-            if is_replay_of_completed_tool:
-                logger.debug(
-                    "[SkillTurboExecutor] use_tool replay-skip-permission name=%s tcid=%s"
-                    " (already executed before interrupt)",
-                    tool_name,
-                    tool_call_id,
-                )
-                # 仅跳过权限检查（PermissionInterruptRail），仍执行事件发射类 rail
-                # （stream_event_rail 等）的 before_tool_call，以补发
-                # chat.tool_call / chat.tool_update 事件，避免前端工具结果凭空出现、
-                # 缺调用上下文。
-                await self._run_rail_hook(
-                    "before_tool_call",
-                    ctx,
-                    skip_rails=(
-                        {self._permission_rail}
-                        if self._permission_rail is not None
-                        else None
-                    ),
-                )
-            else:
-                try:
-                    await self._run_rail_hook("before_tool_call", ctx)
-                except AbortError as e:
-                    # HITL 中断：保存断点上下文（resume_ctx + 节点产物），再向上抛。
-                    tic = extract_tool_interrupt(e)
-                    logger.info(
-                        "[SkillTurboExecutor] permission interrupt tool=%s tcid=%s has_request=%s",
-                        tool_name,
-                        tool_call_id,
-                        tic is not None,
-                    )
-                    # 落盘节点产物 + resume_ctx（skip_post_run 合并一次 post_run）
-                    await self._persist_node_artifacts(session, skip_post_run=True)
-                    try:
-                        await save_resume_ctx(
-                            session,
-                            plan_code=self._current_plan_code,
-                            inputs=self._execution_inputs,
-                            pending_tool_call_id=tool_call_id,
-                        )
-                    except Exception as save_exc:
-                        logger.warning(
-                            "[SkillTurboExecutor] save_resume_ctx failed: %s", save_exc
-                        )
-                    trace_status = "interrupted"
-                    trace_error = repr(e)
-                    raise
+            # skill_turbo 外层统一审批：审批已在 deepagent 层对 skill_turbo 工具
+            # 整体完成（config: skill_turbo: ask），内部工具调用不再逐个审批，
+            # 始终跳过 PermissionInterruptRail，直接放行。
+            # 仍执行事件发射类 rail（stream_event_rail 等）的 before_tool_call，
+            # 以补发 chat.tool_call / chat.tool_update 事件，避免前端工具结果
+            # 凭空出现、缺调用上下文。
+            await self._run_rail_hook(
+                "before_tool_call",
+                ctx,
+                skip_rails=(
+                    {self._permission_rail}
+                    if self._permission_rail is not None
+                    else None
+                ),
+            )
 
             # rail 通过 _skip_tool 标记 reject，已经在 ctx.inputs.tool_result 写入结果
             if ctx.extra.get("_skip_tool"):
