@@ -890,10 +890,16 @@ select {
     margin: 0.2em 0;
   }
 
+  .chat-text :where(strong) {
+    color: var(--text-strong);
+    font-weight: 600;
+  }
+
   .chat-text :where(h1, h2, h3, h4, h5, h6) {
     margin: 0.8em 0 0.4em;
     font-weight: 600;
     line-height: 1.35;
+    color: var(--text-strong);
   }
 
   .chat-text :where(h1) { font-size: 1.15em; }

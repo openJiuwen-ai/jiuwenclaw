@@ -151,13 +151,13 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
           <div className="flex-1 min-w-0">
             <h2
               className="text-base font-semibold truncate"
-              style={{ color: 'var(--fg)' }}
+              style={{ color: 'var(--text-strong)' }}
             >
               {t('extSettings.title')}
             </h2>
             <p
               className="text-xs mt-0.5 truncate"
-              style={{ color: 'var(--fg-muted)' }}
+              style={{ color: 'var(--muted)' }}
             >
               {t('extSettings.subtitle')}
             </p>
@@ -166,7 +166,7 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
             type="button"
             onClick={onClose}
             className="p-1.5 rounded-md transition-colors"
-            style={{ color: 'var(--fg-muted)' }}
+            style={{ color: 'var(--muted)' }}
             title={t('common.close')}
             aria-label={t('common.close')}
           >
@@ -185,14 +185,14 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
         {/* 正文 */}
         <div
           className="flex-1 overflow-y-auto px-6 py-5 space-y-5"
-          style={{ color: 'var(--fg)' }}
+          style={{ color: 'var(--text-strong)' }}
         >
           {/* 固定字段 */}
           <div className="space-y-3">
             <div>
               <label
                 className="block text-xs font-medium mb-1.5"
-                style={{ color: 'var(--fg-muted)' }}
+                style={{ color: 'var(--muted)' }}
               >
                 {t('extSettings.userIdLabel')}
               </label>
@@ -205,14 +205,14 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
                 style={{
                   backgroundColor: 'var(--input-bg)',
                   border: '1px solid var(--border)',
-                  color: 'var(--fg)',
+                  color: 'var(--text-strong)',
                 }}
               />
             </div>
             <div>
               <label
                 className="block text-xs font-medium mb-1.5"
-                style={{ color: 'var(--fg-muted)' }}
+                style={{ color: 'var(--muted)' }}
               >
                 {t('extSettings.groupIdLabel')}
               </label>
@@ -225,14 +225,14 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
                 style={{
                   backgroundColor: 'var(--input-bg)',
                   border: '1px solid var(--border)',
-                  color: 'var(--fg)',
+                  color: 'var(--text-strong)',
                 }}
               />
             </div>
             <div>
               <label
                 className="block text-xs font-medium mb-1.5"
-                style={{ color: 'var(--fg-muted)' }}
+                style={{ color: 'var(--muted)' }}
               >
                 {t('extSettings.botIdLabel')}
               </label>
@@ -245,7 +245,7 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
                 style={{
                   backgroundColor: 'var(--input-bg)',
                   border: '1px solid var(--border)',
-                  color: 'var(--fg)',
+                  color: 'var(--text-strong)',
                 }}
               />
             </div>
@@ -259,11 +259,11 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
             <div className="flex items-baseline justify-between">
               <label
                 className="text-sm font-medium"
-                style={{ color: 'var(--fg)' }}
+                style={{ color: 'var(--text-strong)' }}
               >
                 {t('extSettings.customKvLabel')}
               </label>
-              <span className="text-xs" style={{ color: 'var(--fg-muted)' }}>
+              <span className="text-xs" style={{ color: 'var(--muted)' }}>
                 {t('extSettings.customKvHint')}
               </span>
             </div>
@@ -272,7 +272,7 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
               <div
                 className="text-center py-4 text-xs rounded-md"
                 style={{
-                  color: 'var(--fg-muted)',
+                  color: 'var(--muted)',
                   border: '1px dashed var(--border)',
                 }}
               >
@@ -289,7 +289,7 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
                       style={{
                         backgroundColor: 'var(--input-bg)',
                         border: '1px solid var(--border)',
-                        color: 'var(--fg)',
+                        color: 'var(--text-strong)',
                       }}
                     >
                       {EXT_CUSTOM_KEY_WHITELIST.map((k) => (
@@ -307,14 +307,14 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
                       style={{
                         backgroundColor: 'var(--input-bg)',
                         border: '1px solid var(--border)',
-                        color: 'var(--fg)',
+                        color: 'var(--text-strong)',
                       }}
                     />
                     <button
                       type="button"
                       onClick={() => handleRemoveRow(index)}
                       className="p-1.5 rounded-md transition-colors flex-shrink-0"
-                      style={{ color: 'var(--fg-muted)' }}
+                      style={{ color: 'var(--muted)' }}
                       title={t('common.delete')}
                       aria-label={t('common.delete')}
                     >
@@ -345,7 +345,7 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
               )}
               style={{
                 backgroundColor: 'var(--panel-strong)',
-                color: 'var(--fg)',
+                color: 'var(--text-strong)',
                 border: '1px solid var(--border)',
               }}
             >
@@ -373,7 +373,7 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
         >
           <span
             className="text-xs mr-auto"
-            style={{ color: 'var(--fg-muted)' }}
+            style={{ color: 'var(--muted)' }}
           >
             {t('extSettings.saveHint')}
           </span>
@@ -383,7 +383,7 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
             className="px-4 py-1.5 rounded-md text-sm transition-colors"
             style={{
               backgroundColor: 'transparent',
-              color: 'var(--fg)',
+              color: 'var(--text-strong)',
               border: '1px solid var(--border)',
             }}
           >
