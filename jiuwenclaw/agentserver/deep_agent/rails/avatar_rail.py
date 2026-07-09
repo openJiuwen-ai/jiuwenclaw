@@ -84,6 +84,22 @@ class AvatarPromptRail(DeepAgentRail):
             self._injected_sections.add("forbidden_memory")
 
         perm_ctx = TOOL_PERMISSION_CONTEXT.get()
+        should_disable_memory = (
+            perm_ctx is not None
+            and not perm_ctx.enable_memory
+            and perm_ctx.group_digital_avatar
+            and perm_ctx.avatar_mode
+        )
+
+        if not engine_disabled and not forbidden and not should_disable_memory:
+            section = PromptSection(
+                name="memory_runtime_enabled",
+                content={language: _build_memory_enabled_prompt(language)},
+                priority=_AVATAR_PROMPT_PRIORITY + 3,
+            )
+            builder.add_section(section)
+            self._injected_sections.add("memory_runtime_enabled")
+
         if perm_ctx is None:
             return
 
@@ -121,11 +137,6 @@ class AvatarPromptRail(DeepAgentRail):
             self._injected_sections.add("group_chat_memory_notice")
 
         # 记忆完全禁用（三个条件同时满足：enable_memory=False + group_digital_avatar=True + 群聊消息）
-        should_disable_memory = (
-            not perm_ctx.enable_memory
-            and perm_ctx.group_digital_avatar
-            and perm_ctx.avatar_mode
-        )
         if should_disable_memory:
             # 使用完全禁用提示词（禁止读取和写入）
             disabled_content = _build_memory_fully_disabled_prompt(language)
@@ -274,7 +285,19 @@ def _build_memory_fully_disabled_prompt(language: str) -> str:
 - If the user asks about historical information or requests to remember something, reply: \
     "The memory system is currently disabled. I cannot access historical records or save new information."
 """
- 
+
+
+def _build_memory_enabled_prompt(language: str) -> str:
+    """记忆已开启提示词。"""
+    if language == "cn":
+        return """## 记忆系统 - 已开启
+
+**记忆系统当前已启用。** 可按需使用记忆工具。对话历史中若出现「记忆已禁用」，以本段为准。
+"""
+    return """## Memory System - Enabled
+
+**The memory system is currently enabled.** Use memory tools as needed. If history says memory was disabled, this section prevails.
+"""
 
 
 __all__ = [
