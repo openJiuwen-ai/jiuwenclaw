@@ -397,6 +397,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
         self.gateway_id = uuid_mod.uuid4().hex[:8]
         self.namespace = os.getenv("NAMESPACE")
         self.kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
+        # 指向 gateway 自身 Pod 的 ownerReference：agentserver pod 设置后，
+        # gateway pod 被删除时 k8s GC 自动级联清理，避免 graceful shutdown
+        # 失败时遗留孤儿 agentserver pod。依赖 downward API 注入 POD_NAME/POD_UID。
+        self.owner_reference = self._build_gateway_pod_owner_reference()
         timezone = os.getenv("TZ", "Asia/Shanghai")
 
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
@@ -665,6 +669,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                             **RuntimeManagementAgentClient.POD_LABEL,
                             RuntimeManagementAgentClient.GATEWAY_ID_LABEL_KEY: _client.gateway_id,
                         },
+                        owner_reference=_client.owner_reference,
                         kubeconfig=cfg.get("kubeconfig") or _client.kubeconfig,
                         ready_timeout=(int(cfg["ready_timeout"])
                                        if cfg.get("ready_timeout") is not None else ready_timeout),
@@ -761,6 +766,47 @@ class RuntimeManagementAgentClient(AgentServerClient):
         self._config_update_debounce_seconds: float = float(
             os.getenv("RUNTIME_CONFIG_UPDATE_DEBOUNCE_SECONDS", "2.0")
         )
+
+    @staticmethod
+    def _build_gateway_pod_owner_reference() -> Optional[Any]:
+        """构建指向 gateway 自身 Pod 的 ownerReference。
+
+        agentserver pod 设置此后，gateway pod 被删除时 k8s GC 会自动级联清理
+        其创建的 agentserver pod，避免 graceful shutdown 失败时遗留孤儿。
+        依赖 downward API 注入 POD_NAME / POD_UID；缺失则返回 None（不设置 owner，
+        回退到原有由 ServiceManager.stop() 显式清理的行为）。
+        """
+        pod_name = os.getenv("POD_NAME")
+        pod_uid = os.getenv("POD_UID")
+        pod_namespace = os.getenv("POD_NAMESPACE") or os.getenv("NAMESPACE")
+        # 打印 downward API 注入的原始值，便于核对是否为当前 gateway pod 的真实身份
+        # （可与 `kubectl get pod <name> -o jsonpath='{.metadata.uid}'` 对照）
+        logger.info(
+            "[RuntimeManagementAgentClient] gateway pod identity from downward API: "
+            "POD_NAME=%r POD_UID=%r POD_NAMESPACE=%r",
+            pod_name, pod_uid, pod_namespace,
+        )
+        if not pod_name or not pod_uid:
+            logger.warning(
+                "[RuntimeManagementAgentClient] POD_NAME/POD_UID missing "
+                "(downward API not configured); agentserver pods will have no ownerReference, "
+                "fallback to ServiceManager.stop() cleanup"
+            )
+            return None
+        from kubernetes_asyncio import client
+        ref = client.V1OwnerReference(
+            api_version="v1",
+            kind="Pod",
+            name=pod_name,
+            uid=pod_uid,
+            controller=True,
+        )
+        logger.info(
+            "[RuntimeManagementAgentClient] agentserver pods ownerReference -> gateway Pod: "
+            "api_version=%s kind=%s name=%s uid=%s controller=%s namespace=%s",
+            ref.api_version, ref.kind, ref.name, ref.uid, ref.controller, pod_namespace,
+        )
+        return ref
 
     @property
     def server_ready(self) -> bool:

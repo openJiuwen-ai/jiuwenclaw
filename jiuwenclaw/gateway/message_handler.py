@@ -3368,14 +3368,24 @@ class MessageHandler(ABC):
             await self._file_transfer_handler.stop_cleanup_task()
 
         # 取消所有流式任务
+        # 注意：原实现 ``await task`` 无超时。流式任务在 ``async for chunk`` 循环中
+        # 持续消费 AgentServer 推送的 LLM chunk，若 AgentServer 未及时停止推送，
+        # task 不会在 grace period 内结束 → shutdown 阻塞 → 被 SIGKILL，
+        # 来不及执行 ServiceManager.stop() 清理 agentserver pod。
+        # 此处加 3s 超时兜底：cancel 后最多等 3s，超时则放弃等待，让 shutdown 继续推进。
         for rid, task in list(self._stream_tasks.items()):
             if not task.done():
                 logger.info("[MessageHandler] 停止时取消流式任务: request_id=%s", rid)
                 task.cancel()
                 try:
-                    await task
+                    await asyncio.wait_for(task, timeout=3)
                 except asyncio.CancelledError:
                     pass
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[MessageHandler] 流式任务取消等待超时(>3s)，放弃等待以推进停机: request_id=%s",
+                        rid,
+                    )
         self._stream_tasks.clear()
         self._stream_sessions.clear()
         self._stream_metadata.clear()

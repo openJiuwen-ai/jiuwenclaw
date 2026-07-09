@@ -89,6 +89,21 @@ spec:
             # 密码密钥变量
             - secretRef:
                 name: <<GATEWAY_NAME>>-secret
+          env:
+            # downward API：注入当前 Pod 身份，供 RuntimeManagementAgentClient
+            # 构建 agentserver pod 的 ownerReference（指向本 Pod），实现级联清理。
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           volumeMounts:
             - name: gateway-config
               mountPath: /root/.jiuwenclaw/config/config.yaml
