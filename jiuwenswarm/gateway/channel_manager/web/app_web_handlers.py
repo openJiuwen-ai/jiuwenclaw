@@ -23,52 +23,16 @@ import psutil
 from openjiuwen.core.common.logging import LogManager
 from openjiuwen.core.foundation.llm import Model, ProviderType
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
-try:
-    from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
-except ImportError:
-    def is_openai_account_provider(provider: str) -> bool:
-        return str(provider or "").strip().lower() == "openaiaccount"
-
-try:
-    from openjiuwen.extensions.external_provider.openai_auth.openai_account_auth import (
-        OpenAIAccountAuthError,
-        OpenAIAccountAuthManager,
-        OpenAIAccountDeviceCode,
-    )
-    from openjiuwen.extensions.external_provider.openai_auth.openai_account_models import (
-        OpenAIAccountModelCatalog,
-        OpenAIAccountModelListError,
-    )
-    _OPENAI_ACCOUNT_IMPORT_ERROR: ImportError | None = None
-except ImportError as _openai_account_import_error:
-    _OPENAI_ACCOUNT_IMPORT_ERROR = _openai_account_import_error
-
-    class OpenAIAccountAuthError(Exception):
-        def __init__(
-                self,
-                message: str,
-                *,
-                code: str,
-                relogin_required: bool = False,
-                status_code: int | None = None,
-        ):
-            super().__init__(message)
-            self.message = message
-            self.code = code
-            self.relogin_required = relogin_required
-            self.status_code = status_code
-
-        def __str__(self) -> str:
-            return self.message
-
-    class OpenAIAccountDeviceCode:
-        pass
-
-    class OpenAIAccountModelListError(Exception):
-        pass
-
-    OpenAIAccountAuthManager = None
-    OpenAIAccountModelCatalog = None
+from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
+from openjiuwen.extensions.external_provider.openai_auth.openai_account_auth import (
+    OpenAIAccountAuthError,
+    OpenAIAccountAuthManager,
+    OpenAIAccountDeviceCode,
+)
+from openjiuwen.extensions.external_provider.openai_auth.openai_account_models import (
+    OpenAIAccountModelCatalog,
+    OpenAIAccountModelListError,
+)
 
 from jiuwenswarm.common.config import (
     DEFAULT_SWARMFLOW_ENABLED,
@@ -202,24 +166,6 @@ _OPENAI_ACCOUNT_LOGIN_JOBS: dict[str, "_OpenAIAccountLoginJob"] = {}
 _OPENAI_ACCOUNT_LOCAL_ERRORS = (OSError, TypeError, ValueError)
 
 
-def _require_openai_account_core() -> None:
-    if (
-            _OPENAI_ACCOUNT_IMPORT_ERROR is not None
-            or OpenAIAccountAuthManager is None
-            or OpenAIAccountModelCatalog is None
-    ):
-        detail = (
-            str(_OPENAI_ACCOUNT_IMPORT_ERROR)
-            if _OPENAI_ACCOUNT_IMPORT_ERROR is not None
-            else "unknown import error"
-        )
-        raise OpenAIAccountAuthError(
-            "OpenAI Account OAuth requires an openjiuwen version with openai_auth support: "
-            f"{detail}",
-            code="OPENAI_ACCOUNT_UNAVAILABLE",
-        )
-
-
 @dataclass
 class _OpenAIAccountLoginJob:
     device_code: OpenAIAccountDeviceCode
@@ -251,7 +197,6 @@ def _latest_openai_account_login_job(
 def _openai_account_auth_status_payload(
         manager: OpenAIAccountAuthManager | None = None,
 ) -> dict[str, Any]:
-    _require_openai_account_core()
     auth_manager = manager or OpenAIAccountAuthManager()
     status = auth_manager.status()
     return {
@@ -2003,7 +1948,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _openai_account_auth_start_login(ws, req_id, params, session_id):
         del params, session_id
         try:
-            _require_openai_account_core()
             manager = OpenAIAccountAuthManager()
             now = time.time()
             latest_job = _latest_openai_account_login_job(now)
@@ -2052,7 +1996,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _openai_account_auth_pending_login(ws, req_id, params, session_id):
         del params, session_id
         try:
-            _require_openai_account_core()
             manager = OpenAIAccountAuthManager()
             payload = await asyncio.to_thread(_openai_account_pending_login_payload, manager)
             await channel.send_response(ws, req_id, ok=True, payload=payload)
@@ -2091,7 +2034,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            _require_openai_account_core()
             manager = OpenAIAccountAuthManager()
             tokens = await asyncio.to_thread(manager.poll_device_login, job.device_code)
             if tokens is None:
@@ -2136,7 +2078,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _openai_account_auth_logout(ws, req_id, params, session_id):
         del params, session_id
         try:
-            _require_openai_account_core()
             manager = OpenAIAccountAuthManager()
             logged_out = await asyncio.to_thread(manager.logout)
             await channel.send_response(
@@ -2165,7 +2106,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _openai_account_models_list(ws, req_id, params, session_id):
         del params, session_id
         try:
-            _require_openai_account_core()
             manager = OpenAIAccountAuthManager()
             catalog = OpenAIAccountModelCatalog(base_url=manager.base_url)
             models = await asyncio.to_thread(catalog.list_model_ids, auth_manager=manager)
