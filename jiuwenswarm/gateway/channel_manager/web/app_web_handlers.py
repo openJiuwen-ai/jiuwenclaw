@@ -31,6 +31,7 @@ from openjiuwen.extensions.external_provider.openai_auth.openai_account_auth imp
 )
 from openjiuwen.extensions.external_provider.openai_auth.openai_account_models import (
     OpenAIAccountModelCatalog,
+    OpenAIAccountModelListError,
 )
 
 from jiuwenswarm.common.config import (
@@ -162,6 +163,7 @@ load_dotenv(dotenv_path=_ENV_FILE, override=True)
 _ENV_VAR_PLACEHOLDER_RE = re.compile(r"^\$\{([^:}]+)(?::-([^}]*))?\}$")
 _OPENAI_ACCOUNT_LOGIN_MAX_TTL_SECONDS = 5 * 60
 _OPENAI_ACCOUNT_LOGIN_JOBS: dict[str, "_OpenAIAccountLoginJob"] = {}
+_OPENAI_ACCOUNT_LOCAL_ERRORS = (OSError, TypeError, ValueError)
 
 
 @dataclass
@@ -1929,7 +1931,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         try:
             payload = await asyncio.to_thread(_openai_account_auth_status_payload)
             await channel.send_response(ws, req_id, ok=True, payload=payload)
-        except Exception as exc:  # noqa: BLE001
+        except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.status] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
@@ -1977,7 +1979,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code=exc.code,
                 payload=_openai_account_auth_error_payload(exc),
             )
-        except Exception as exc:  # noqa: BLE001
+        except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.start_login] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
@@ -1987,7 +1989,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             manager = OpenAIAccountAuthManager()
             payload = await asyncio.to_thread(_openai_account_pending_login_payload, manager)
             await channel.send_response(ws, req_id, ok=True, payload=payload)
-        except Exception as exc:  # noqa: BLE001
+        except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.pending_login] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
@@ -2049,7 +2051,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code=exc.code,
                 payload=_openai_account_auth_error_payload(exc),
             )
-        except Exception as exc:  # noqa: BLE001
+        except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.poll_login] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
@@ -2067,7 +2069,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "auth": _openai_account_auth_status_payload(manager),
                 },
             )
-        except Exception as exc:  # noqa: BLE001
+        except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.logout] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
@@ -2083,7 +2085,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ok=True,
                 payload={"models": models, "base_url": manager.base_url},
             )
-        except Exception as exc:  # noqa: BLE001
+        except OpenAIAccountAuthError as exc:
+            logger.warning("[openai_account.models.list] %s", exc)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code=exc.code,
+                payload=_openai_account_auth_error_payload(exc),
+            )
+        except OpenAIAccountModelListError as exc:
+            logger.warning("[openai_account.models.list] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="MODEL_LIST_ERROR")
+        except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.models.list] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
