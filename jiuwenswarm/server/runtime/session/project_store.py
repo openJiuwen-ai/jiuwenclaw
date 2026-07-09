@@ -323,6 +323,50 @@ def list_projects(
     return result
 
 
+def resolve_cron_project_id(project_dir: str) -> str:
+    """cron 侧独立实现的 project_dir → project_id 解析。
+
+    与 ``resolve_session_project_binding`` 的路径规范化一致(容忍尾部分隔符 /
+    大小写差异)，但仅按 ``project_dir`` 匹配可见项目，不接收 ``project_id`` 入参。
+
+    规则(设计文档 §6.1):
+      1. ``project_dir`` 为空 → 返回 ``""``(默认项目)。
+      2. ``project_dir`` 非空且非绝对路径 → 抛 ``ValueError``(调用方转 BAD_REQUEST)。
+      3. ``project_dir`` 非空绝对路径 → 规范化后遍历全部项目(含隐藏)，
+         命中可见项目返回其 ``project_id``；命中隐藏项目 / 无命中返回 ``""``(默认项目兜底)。
+
+    不使用 ``get_project_by_dir``(精确字符串匹配、不规范化、不限 hidden)。
+    """
+    project_dir = str(project_dir or "").strip()
+    if not project_dir:
+        return ""
+    if not os.path.isabs(project_dir):
+        raise ValueError("project_dir must be an absolute path")
+    norm = os.path.normcase(os.path.normpath(project_dir))
+    for p in list_projects(include_hidden=True, cache_bust=True):
+        pdir = p.project_dir or ""
+        if not pdir:
+            continue
+        if os.path.normcase(os.path.normpath(pdir)) == norm and not p.hidden:
+            return p.project_id
+    return ""
+
+
+def get_project_dir_by_id(project_id: str) -> str:
+    """根据 project_id 反查 project_dir(调度器构造执行请求时用)。
+
+    ``project_id`` 为空 → 返回 ``""``(默认项目)；非空 → 从全部项目(含隐藏)查
+    ``project_id`` 命中项的 ``project_dir``；无命中返回 ``""``。
+    """
+    pid = str(project_id or "").strip()
+    if not pid:
+        return ""
+    for p in list_projects(include_hidden=True, cache_bust=True):
+        if p.project_id == pid:
+            return p.project_dir or ""
+    return ""
+
+
 class ProjectDirConflict(Exception):
     """``project_dir`` 与已有可见项目重复(由 ``create_or_restore_project`` 在锁内抛出)。"""
 

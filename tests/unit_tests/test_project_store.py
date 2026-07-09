@@ -167,6 +167,38 @@ class TestListProjects:
 # ===========================================================================
 # 隐藏恢复: hidden=true 不被默认查询返回;取消 hidden 后恢复可见
 # ===========================================================================
+class TestCronProjectResolution:
+    @staticmethod
+    def test_resolve_cron_project_id_bypasses_stale_cache(project_store_dir, tmp_path):
+        from jiuwenswarm.server.runtime.session.project_store import (
+            list_projects,
+            resolve_cron_project_id,
+        )
+
+        # Seed the module cache with an empty list, then simulate another process
+        # writing a visible project directly to disk.
+        assert list_projects() == []
+        project_dir = str(tmp_path / "project-a")
+        projects_file = project_store_dir / "projects.json"
+        projects_file.write_text(
+            json.dumps(
+                {
+                    "projects": [
+                        {
+                            "project_id": "proj_external",
+                            "name": "external",
+                            "project_dir": project_dir,
+                            "hidden": False,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        assert resolve_cron_project_id(project_dir) == "proj_external"
+
+
 class TestHiddenRestore:
     @staticmethod
     def test_hidden_then_restore_visibility(project_store_dir):

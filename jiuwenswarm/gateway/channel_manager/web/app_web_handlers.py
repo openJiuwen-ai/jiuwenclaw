@@ -2012,8 +2012,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             仅 ``"all"`` / ``"unpinned"`` 生效;``"pinned"`` 模式自动排除隐藏项目。
 
         统计口径: ``session_count`` / ``last_message_at`` / ``last_user_message_at``
-        仅统计该项目的**非置顶**会话。置顶会话不计入任何项目统计。
-        隐藏项目统计恒为 0/null(其非置顶会话已临时归属默认项目)。
+        仅统计该项目的非置顶**普通**会话(``cron_id`` 为空)。置顶会话与 cron 会话
+        不计入任何项目统计。隐藏项目统计恒为 0/null(其非置顶会话已临时归属默认项目)。
         """
         if not isinstance(params, dict):
             params = {}
@@ -2044,6 +2044,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         for s in sessions:
             # 置顶会话已从项目分组剥离,不计入任何项目统计
             if s.get("pinned"):
+                continue
+            # cron 会话不计入项目统计(由 project.get_cron_sessions 独立获取)
+            if s.get("cron_id"):
                 continue
             # 归属: 仅按 project_id 匹配,不命中归默认项目
             key = _attribute_session_project(s, visible_by_id)
@@ -2132,17 +2135,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "pin_order": int(meta.get("pin_order", 0)),
             "project_dir": str(meta.get("project_dir", "")),
             "project_id": str(meta.get("project_id", "")),
+            "cron_id": str(meta.get("cron_id", "")),
             "last_user_message_at": lum if isinstance(lum, (int, float)) and not isinstance(lum, bool) else None,
             "model": str(meta.get("model", "")),
         }
 
     async def _project_get_sessions(ws, req_id, params, session_id):
-        """获取项目下的非置顶会话列表,按 last_user_message_at 倒序。
+        """获取项目下的非置顶普通会话列表,按 last_user_message_at 倒序。
 
         会话仅按 ``project_id`` 匹配可见项目。``project_id`` 传 ``"default"`` 时,
-        返回不属于任何可见项目的非置顶会话(含命中已隐藏项目的会话、孤立会话),
+        返回不属于任何可见项目的非置顶普通会话(含命中已隐藏项目的会话、孤立会话),
         这些会话临时归属默认项目,与 ``project.list`` 统计口径一致。
         置顶会话不出现(由 ``project.pinned_sessions`` 获取)。
+        定时任务会话(``cron_id`` 非空)不出现(由 ``project.get_cron_sessions`` 获取)。
         """
         if not isinstance(params, dict):
             params = {}
@@ -2196,8 +2201,91 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return _attribute_session_project(meta, visible_by_id) == project_id
 
         sessions = collect_all_sessions_metadata()
-        # 仅非置顶会话 + 归属匹配
-        matched = [s for s in sessions if not s.get("pinned") and _belongs(s)]
+        # 仅非置顶普通会话(cron_id 为空) + 归属匹配；cron 会话由 get_cron_sessions 返回
+        matched = [s for s in sessions if not s.get("pinned") and _belongs(s) and not s.get("cron_id")]
+
+        def _lum(s: dict[str, Any]) -> float:
+            v = s.get("last_user_message_at")
+            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+        matched.sort(key=_lum, reverse=True)
+
+        total = len(matched)
+        page = matched[offset: offset + limit] if limit is not None else matched[offset:]
+
+        await channel.send_response(ws, req_id, ok=True, payload={
+            "sessions": [_to_session_info(s) for s in page],
+            "total": total,
+        })
+
+    async def _project_get_cron_sessions(ws, req_id, params, session_id):
+        """获取项目下的定时任务会话列表(cron_id 非空的非置顶会话),按 last_user_message_at 倒序。
+
+        与 ``project.get_sessions`` 互斥分工:本接口仅返回 cron 会话,
+        ``project.get_sessions`` 仅返回普通会话。支持按 ``cron_id`` 过滤某任务的历史执行会话。
+        归属校验同 ``project.get_sessions``:``project_id != "default"`` 时校验项目存在且可见。
+        """
+        if not isinstance(params, dict):
+            params = {}
+        project_id = str(params.get("project_id") or "").strip()
+        if not project_id:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project_id is required", code="BAD_REQUEST",
+            )
+            return
+        cron_id_filter = str(params.get("cron_id") or "").strip()
+
+        # limit 不传则不限;offset 默认 0
+        raw_limit = params.get("limit")
+        limit: int | None = None
+        if isinstance(raw_limit, int) and not isinstance(raw_limit, bool):
+            limit = raw_limit
+        elif isinstance(raw_limit, float) and raw_limit.is_integer():
+            limit = int(raw_limit)
+        elif isinstance(raw_limit, str) and raw_limit.strip().isdigit():
+            limit = int(raw_limit.strip())
+        raw_offset = params.get("offset")
+        offset = 0
+        if isinstance(raw_offset, int) and not isinstance(raw_offset, bool):
+            offset = raw_offset
+        elif isinstance(raw_offset, float) and raw_offset.is_integer():
+            offset = int(raw_offset)
+        elif isinstance(raw_offset, str) and raw_offset.strip().isdigit():
+            offset = int(raw_offset.strip())
+        offset = max(0, offset)
+        if limit is not None:
+            limit = max(1, limit)
+
+        from jiuwenswarm.server.runtime.session import project_store
+        from jiuwenswarm.server.runtime.session.session_metadata import collect_all_sessions_metadata
+
+        all_projects = project_store.list_projects(include_hidden=True, cache_bust=True)
+        visible_by_id = {p.project_id for p in all_projects if not p.hidden}
+
+        if project_id != "default":
+            proj = project_store.get_project_by_id(project_id, cache_bust=True)
+            if proj is None or proj.hidden:
+                await channel.send_response(
+                    ws, req_id, ok=False, error="project not found", code="NOT_FOUND",
+                )
+                return
+
+        def _belongs(meta: dict[str, Any]) -> bool:
+            return _attribute_session_project(meta, visible_by_id) == project_id
+
+        sessions = collect_all_sessions_metadata()
+        # 仅非置顶 cron 会话(cron_id 非空) + 归属匹配 + 可选按 cron_id 过滤
+        matched = []
+        for s in sessions:
+            if s.get("pinned"):
+                continue
+            if not _belongs(s):
+                continue
+            if not s.get("cron_id"):
+                continue
+            if cron_id_filter and s.get("cron_id") != cron_id_filter:
+                continue
+            matched.append(s)
 
         def _lum(s: dict[str, Any]) -> float:
             v = s.get("last_user_message_at")
@@ -3412,6 +3500,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         try:
             if session_id:
                 params["session_id"] = session_id
+            # project_dir 默认值：仅当前端「未传」时从当前 WebSocket 会话 metadata 读取
+            # （cache_bust=True 强制读盘，跨进程拿最新值；见设计文档 §5.1）
+            # 注意：显式传空串 "" 等价于归默认项目，不可覆盖——用 key presence 区分
+            if "project_dir" not in params and session_id:
+                try:
+                    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+                    meta = get_session_metadata(session_id, cache_bust=True)
+                    if isinstance(meta, dict):
+                        pd = meta.get("project_dir")
+                        if isinstance(pd, str) and pd.strip():
+                            params["project_dir"] = pd.strip()
+                except Exception:  # noqa: BLE001
+                    pass
             job = await cc.create_job(params)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except Exception as e:  # noqa: BLE001
@@ -3515,8 +3616,22 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
         try:
-            run_id = await cc.run_now(job_id)
-            await channel.send_response(ws, req_id, ok=True, payload={"run_id": run_id})
+            # 先取 job 拿 last_session_id（回退值），再触发 run_now 取 run_id
+            # 对齐 chat.send 的 {accepted, session_id} 语义；首次执行 last_session_id
+            # 为 None → session_id 空串（会话尚未就绪，前端轮询 cron.job.get 获取）
+            job = await cc.get_job(job_id)
+            if job is None:
+                await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+                return
+            run_info = await cc.run_now_info(job_id)
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={
+                    "accepted": True,
+                    "run_id": run_info.get("run_id", ""),
+                    "session_id": run_info.get("session_id", ""),
+                },
+            )
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
         except Exception as e:  # noqa: BLE001
@@ -3540,6 +3655,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     channel.register_method("project.list", _project_list)
     channel.register_method("project.get_sessions", _project_get_sessions)
+    channel.register_method("project.get_cron_sessions", _project_get_cron_sessions)
     channel.register_method("project.create", _project_create)
     channel.register_method("project.rename", _project_rename)
     channel.register_method("project.pin", _project_pin)

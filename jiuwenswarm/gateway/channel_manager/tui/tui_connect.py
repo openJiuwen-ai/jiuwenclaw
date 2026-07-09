@@ -2812,6 +2812,18 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         try:
             if session_id:
                 params["session_id"] = session_id
+            # project_dir 默认值：TUI 前端已自动注入；仅当「未传」时从当前会话 metadata 兜底
+            # 注意：显式传空串 "" 等价于归默认项目，不可覆盖——用 key presence 区分
+            if "project_dir" not in params and session_id:
+                try:
+                    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+                    meta = get_session_metadata(session_id, cache_bust=True)
+                    if isinstance(meta, dict):
+                        pd = meta.get("project_dir")
+                        if isinstance(pd, str) and pd.strip():
+                            params["project_dir"] = pd.strip()
+                except Exception:  # noqa: BLE001
+                    pass
             job = await cc.create_job(params)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except Exception as exc:
@@ -2932,8 +2944,21 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
         try:
-            run_id = await cc.run_now(job_id)
-            await channel.send_response(ws, req_id, ok=True, payload={"run_id": run_id})
+            # 先取 job 拿 last_session_id（回退值），再触发 run_now 取 run_id
+            # 对齐 chat.send 的 {accepted, session_id} 语义
+            job = await cc.get_job(job_id)
+            if job is None:
+                await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+                return
+            run_info = await cc.run_now_info(job_id)
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={
+                    "accepted": True,
+                    "run_id": run_info.get("run_id", ""),
+                    "session_id": run_info.get("session_id", ""),
+                },
+            )
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
         except Exception as exc:

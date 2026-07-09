@@ -14,6 +14,7 @@ from jiuwenswarm.gateway.cron.models import (
     is_valid_target_channel_id,
     normalize_cron_job_mode,
     normalize_target_channel_id,
+    validate_cron_model,
 )
 from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService, _cron_next_push_dt
 from jiuwenswarm.gateway.cron.store import CronJobStore
@@ -144,6 +145,8 @@ class CronController:
             mode = normalize_cron_job_mode(mode)
         else:
             mode = None
+        model_name = validate_cron_model(params.get("model_name"))
+
         targets = self._normalize_targets(raw_targets)
 
         self._validate_schedule(cron_expr=cron_expr, timezone=timezone)
@@ -153,6 +156,16 @@ class CronController:
         chat_type = params.get("chat_type")
         delete_after_run = params.get("delete_after_run")
         timeout_seconds = params.get("timeout_seconds")
+        # project_dir → project_id 解析（设计文档 §6.1）：仅按 dir 匹配可见项目，
+        # 匹配不到（含命中隐藏项目 / 无命中）归默认项目；非绝对路径抛 ValueError → BAD_REQUEST
+        project_dir_raw = params.get("project_dir")
+        project_dir_val = (
+            str(project_dir_raw).strip()
+            if isinstance(project_dir_raw, str) and project_dir_raw.strip()
+            else ""
+        )
+        from jiuwenswarm.server.runtime.session.project_store import resolve_cron_project_id
+        resolved_project_id = resolve_cron_project_id(project_dir_val)
         job = await self._store.create_job(
             job_id=str(params.get("id") or "").strip() or None,
             name=name,
@@ -167,6 +180,8 @@ class CronController:
             mode=mode,
             delete_after_run=delete_after_run,
             timeout_seconds=timeout_seconds,
+            project_id=resolved_project_id,
+            model_name=model_name,
         )
         await self._scheduler.reload()
         return job.to_dict()
@@ -175,6 +190,8 @@ class CronController:
         patch = dict(patch or {})
         if "mode" in patch:
             patch["mode"] = normalize_cron_job_mode(patch.get("mode"))
+        if "model_name" in patch:
+            patch["model_name"] = validate_cron_model(patch.get("model_name"))
         if "targets" in patch:
             patch["targets"] = self._normalize_targets(patch["targets"])
         existing = await self._store.get_job(job_id)
@@ -189,6 +206,23 @@ class CronController:
         if "description" in patch:
             name = str(patch.get("name") or existing.name or "").strip()
             patch["description"] = self._normalize_description(str(patch.get("description") or ""), name)
+
+        # project_dir → project_id 重解析（设计文档 §5.3）：patch 不接收 project_id，
+        # 仅按 project_dir 重新匹配可见项目；非绝对路径抛 ValueError → BAD_REQUEST。
+        # 变更 project_dir 仅影响后续新执行会话归属，历史会话不变。
+        # 防御性剥离调用方直接传入的 project_id（设计文档明确 patch 不接收该字段），
+        # 确保仅由 project_dir 解析产生，覆盖 Web/TUI/AgentTool 三条路径。
+        patch.pop("project_id", None)
+        if "project_dir" in patch:
+            pd_raw = patch.get("project_dir")
+            pd_val = (
+                str(pd_raw).strip()
+                if isinstance(pd_raw, str) and pd_raw.strip()
+                else ""
+            )
+            from jiuwenswarm.server.runtime.session.project_store import resolve_cron_project_id
+            patch["project_id"] = resolve_cron_project_id(pd_val)
+            del patch["project_dir"]
 
         final_targets = str(patch.get("targets") or existing.targets).strip()
         if "session_id" in patch:
@@ -243,6 +277,9 @@ class CronController:
         run_id = await self._scheduler.trigger_run_now(job_id)
         return run_id
 
+    async def run_now_info(self, job_id: str) -> dict[str, str]:
+        return await self._scheduler.trigger_run_now_info(job_id)
+
     async def _create_job_tool(
         self,
         name: str,
@@ -254,6 +291,8 @@ class CronController:
         wake_offset_seconds: int | None = None,
         mode: str | None = None,
         timeout_seconds: int | None = None,
+        model_name: str | None = None,
+        project_dir: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "name": name,
@@ -269,6 +308,10 @@ class CronController:
             params["mode"] = mode
         if timeout_seconds is not None:
             params["timeout_seconds"] = timeout_seconds
+        if model_name is not None and str(model_name).strip():
+            params["model_name"] = validate_cron_model(model_name)
+        if project_dir is not None:
+            params["project_dir"] = str(project_dir).strip()
         return await self.create_job(params)
 
     async def _update_job_tool(
@@ -423,6 +466,20 @@ class CronController:
                                 "Default 600 for normal modes and 1200 for team modes."
                             ),
                         },
+                        "model_name": {
+                            "type": "string",
+                            "description": (
+                                "Model name or alias to use when the job runs. "
+                                "If omitted, uses the AgentServer default model."
+                            ),
+                        },
+                        "project_dir": {
+                            "type": "string",
+                            "description": (
+                                "Absolute path to the project directory this job belongs to. "
+                                "If omitted, uses the current session's project."
+                            ),
+                        },
                     },
                     "required": ["name", "cron_expr", "timezone", "description"],
                 },
@@ -432,7 +489,8 @@ class CronController:
                 name="cron_update_job",
                 description=(
                     "Update an existing cron job. Pass job_id and a patch dict with fields to update "
-                    "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, targets, mode)."
+                    "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, "
+                    "targets, mode, model_name, project_dir)."
                 ),
                 input_params={
                     "type": "object",
@@ -442,7 +500,7 @@ class CronController:
                             "type": "object",
                             "description": (
                                 "Fields to update (name, enabled, cron_expr, timezone, "
-                                "description, wake_offset_seconds, targets, mode)"
+                                "description, wake_offset_seconds, targets, mode, model_name, project_dir)"
                             ),
                             "properties": {
                                 "targets": {
@@ -456,6 +514,16 @@ class CronController:
                                     "type": "string",
                                     "enum": cron_job_modes_for_tools(),
                                     "description": "Agent runtime mode (agent, team, agent.plan, ...)",
+                                },
+                                "model_name": {
+                                    "type": "string",
+                                    "description": "Model to use when the job runs. \
+                                        Set to empty string to reset to default.",
+                                },
+                                "project_dir": {
+                                    "type": "string",
+                                    "description": "Absolute path to the project directory. \
+                                        Set to empty string for default project.",
                                 },
                             },
                         },

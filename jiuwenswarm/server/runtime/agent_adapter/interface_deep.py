@@ -4342,6 +4342,7 @@ class JiuWenSwarmDeepAdapter:
         metadata: dict[str, Any] | None,
         request_id: str | None,
         mode: str | None,
+        project_dir: str | None = None,
     ) -> tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None], Token[str | None]]:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             set_shell_session_id,
@@ -4354,6 +4355,9 @@ class JiuWenSwarmDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+        # 注入 project_dir 供 cron tool 路由解析任务归属项目（设计文档 §5.1）
+        if isinstance(project_dir, str) and project_dir.strip():
+            normalized_metadata.setdefault("project_dir", project_dir.strip())
         return (
             _CRON_TOOL_CHANNEL_ID.set(normalized_channel),
             _CRON_TOOL_SESSION_ID.set(session_id),
@@ -5944,6 +5948,7 @@ class JiuWenSwarmDeepAdapter:
             metadata=request.metadata,
             request_id=request.request_id,
             mode=mode,
+            project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
@@ -6204,6 +6209,7 @@ class JiuWenSwarmDeepAdapter:
             metadata=request.metadata,
             request_id=request.request_id,
             mode=mode,
+            project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
