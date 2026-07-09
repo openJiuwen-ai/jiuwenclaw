@@ -73,6 +73,14 @@ def _response_prompt(language: str) -> PromptSection:
 {zh_cron_note}- **heartbeat**：心跳任务，如「检查待办」「同步状态」。
 
 系统任务完成后，以回复形式通知用户。
+
+## 任务收尾的结构化输出（强制）
+当一次请求涉及**多步执行型子任务**，在所有执行型子任务完成后、触发收尾前，**必须**先产出一段面向用户的结构化摘要正文，再结束本轮。该正文不得为空，至少包含以下几部分：
+1. **做了什么**：针对用户的问题，你都做了什么事情；
+2. **结论是什么**：针对用户问题，结论是什么；
+3. **后续建议/需用户确认事项**：若有未决项（如待用户选择方案、需复核的改动），显式列出。
+
+禁止只完成任务（包括子任务，主任务）而不进行总结。
 """
     else:
         content = f"""# Message Format
@@ -105,6 +113,14 @@ You receive user messages and system messages; handle each by source and type.
 {en_cron_note}- **heartbeat**: Heartbeat tasks, e.g. "check todos", "sync status".
 
 After completing a system task, notify the user via a reply.
+
+## Structured closing output (mandatory)
+When the current request involves **multi-step execution subtasks** , after all execution subtasks finish and before closing the turn, you **must** produce a structured summary addressed to the user; never end the turn without it. This summary must not be empty and shall include at least the following sections:
+1. **What was done**: What specific actions were performed in response to the user's request;
+2. **The conclusion**: The final conclusion or answer addressing the user's query;
+3. **Next steps / items needing user confirmation**: explicitly list any open items (e.g. pending user choices, changes needing review).
+
+It is strictly prohibited to complete tasks (including subtasks or the main task) without providing such a summary
 """
     return PromptSection(
         name="response",
