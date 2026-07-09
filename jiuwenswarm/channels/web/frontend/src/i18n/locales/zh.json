@@ -173,6 +173,11 @@
       }
     }
   },
+  "singleAgent": {
+    "taskBoard": {
+      "tab": "任务进度"
+    }
+  },
   "artifacts": {
     "title": "所有产物",
     "tab": "产物",

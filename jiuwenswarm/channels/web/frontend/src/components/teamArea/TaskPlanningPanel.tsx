@@ -1,10 +1,14 @@
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CircleCheck, File, Puzzle, XCircle } from 'lucide-react';
+import { File, Puzzle } from 'lucide-react';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import type { TeamTask as SessionTeamTask } from '../../stores/sessionStore';
-import teamProcessIcon from '../../assets/team-process.svg';
+import recentTasksIcon from '../../assets/work-mode/recent-tasks.svg';
+import statusProcessingIcon from '../../assets/work-mode/status-processing.svg';
+import statusSuccessIcon from '../../assets/work-mode/status-success.svg';
+import statusWaitingIcon from '../../assets/work-mode/status-waiting.svg';
+import statusWarningIcon from '../../assets/work-mode/status-warning.svg';
 import {
   BOARD_COLUMNS,
   ExpandIcon,
@@ -31,6 +35,13 @@ type TaskPlanningPanelProps = {
   hideBorder?: boolean;
   /** 自定义标题（不传则默认用 team.taskOverview） */
   title?: string;
+};
+
+const compactStatusIcons: Record<TaskColumnKey, string> = {
+  completed: statusSuccessIcon,
+  running: statusProcessingIcon,
+  waiting: statusWaitingIcon,
+  cancelled: statusWarningIcon,
 };
 
 export function TaskPlanningPanel({
@@ -86,7 +97,8 @@ export function TaskPlanningPanel({
       <div className={`flex flex-[2] flex-col overflow-hidden min-h-0 px-3 pb-3${hideBorder ? '' : ' border-b border-border'}`}>
         <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3">
           <div className="flex items-center gap-2">
-            <img src={teamProcessIcon} width={16} height={16} />            <span className="text-sm font-medium text-text">{title ?? t('team.taskOverview')}</span>
+            <img src={recentTasksIcon} width={16} height={16} aria-hidden="true" />
+            <span className="text-sm font-medium text-text">{title ?? t('team.taskOverview')}</span>
           </div>
           {hideExpandButton ? null : (
             <button
@@ -157,23 +169,11 @@ export function TaskPlanningPanel({
                       )
                     )}
                     <span className="flex-1 text-xs text-text truncate">{title}</span>
-                    {columnKey === 'completed' && <CircleCheck className="w-4 h-4 text-ok shrink-0" />}
-                    {columnKey === 'running' && (
-                      <svg width="16" height="16" className="w-4 h-4 text-info animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 2v4" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m16.2 7.8 2.9-2.9" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 12h4" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m16.2 16.2 2.9 2.9" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18v4" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m4.9 19.1 2.9-2.9" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2 12h4" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m4.9 4.9 2.9 2.9" />
-                      </svg>
-                    )}
-                    {columnKey === 'waiting' && (
-                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-clock4-icon lucide-clock-4"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-                    )}
-                    {columnKey === 'cancelled' && <XCircle className="w-4 h-4 text-danger shrink-0" />}
+                    <img
+                      src={compactStatusIcons[columnKey]}
+                      className={`h-4 w-4 shrink-0 ${columnKey === 'running' ? 'animate-spin' : ''}`}
+                      aria-hidden="true"
+                    />
                   </div>
                 );
               })}
@@ -203,6 +203,7 @@ export function TaskPlanningPanel({
                 column={column}
                 tasks={groupedTasks[column.key]}
                 members={members}
+                hideAssignee={hideAssignee}
               />
             ))}
           </div>
@@ -216,10 +217,12 @@ function BoardColumn({
   column,
   tasks,
   members,
+  hideAssignee,
 }: {
   column: typeof BOARD_COLUMNS[number];
   tasks: SessionTeamTask[];
   members: TeamMember[];
+  hideAssignee: boolean;
 }) {
   const { t } = useTranslation();
 
@@ -230,8 +233,14 @@ function BoardColumn({
         {t(column.labelKey)} {tasks.length}
       </div>
       <div className="space-y-3">
-        {tasks.map((task) => (
-          <BoardTaskCard key={task.task_id} task={task} members={members} />
+        {tasks.map((task, index) => (
+          <BoardTaskCard
+            key={task.task_id}
+            task={task}
+            members={members}
+            hideAssignee={hideAssignee}
+            index={index}
+          />
         ))}
       </div>
     </section>
@@ -241,9 +250,13 @@ function BoardColumn({
 function BoardTaskCard({
   task,
   members,
+  hideAssignee,
+  index,
 }: {
   task: SessionTeamTask;
   members: TeamMember[];
+  hideAssignee: boolean;
+  index: number;
 }) {
   const assigneeExists = Boolean(task.assignee && members.some(member => member.member_id === task.assignee));
   const assigneeName = getMemberDisplayName(task.assignee || '');
@@ -264,7 +277,11 @@ function BoardTaskCard({
         <TaskResourcePanel skills={task.skills} files={task.files} />
       </div>
       <div className="mt-3 flex h-8 items-center bg-[#fafafa] px-1 pb-1">
-        {assigneeExists ? (
+        {hideAssignee ? (
+          <span className="inline-flex h-[20px] w-[20px] items-center justify-center rounded-[16px] bg-[#F2F2F2] text-xs font-medium text-muted">
+            {String(index + 1).padStart(2, '0')}
+          </span>
+        ) : assigneeExists ? (
           <div title={assigneeName}>
             <TeamMemberAvatar
               member={task.assignee}
