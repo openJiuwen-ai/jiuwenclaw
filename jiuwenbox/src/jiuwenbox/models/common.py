@@ -21,7 +21,6 @@ class AuditEventType(str, enum.Enum):
     # only" event was dropped because it doubled the JSONL volume
     # without adding information.
     EXEC_COMMAND = "exec_command"
-    KILL_BACKGROUND_JOB = "kill_background_job"
     FILE_TRANSFER = "file_transfer"
 
 

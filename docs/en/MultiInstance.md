@@ -1,14 +1,12 @@
-# Multi-Instance Operation
+﻿# Multi-Instance Operation
 
-Run multiple independent JiuwenSwarm instances on the same machine, each with isolated workspace, configuration, and ports.
+Run multiple independent JiuwenAvatar instances on the same machine, each with isolated workspace, configuration, and ports.
 
 ## Use Cases
 
 - **Dev/Prod isolation**: Run test and production instances simultaneously on a development machine
 - **Multi-tenant environment**: Create independent Agent instances for different users or projects
 - **Parallel modes**: Run Agents with different configurations (models, permission policies) concurrently
-
-> **Not the same as multi-window TUI**: This page covers **separate backend instances** (different workspaces and ports). To open several TUI terminals against one Gateway, see [TUI Usage Guide (zh) — Multi-window TUI](../zh/TUI使用指南.md#多窗口-tui); you do not need extra instances for that.
 
 ---
 
@@ -31,7 +29,7 @@ Each instance has independent:
 - Length: 1-64 characters
 - Allowed characters: letters, digits, underscore, hyphen
 - Cannot start with `.`
-- Reserved names: `default`, `config`, `tmp`, `jiuwenswarm`, `all`
+- Reserved names: `default`, `config`, `tmp`, `jiuwenavatar`, `all`
 
 ---
 
@@ -39,19 +37,19 @@ Each instance has independent:
 
 ### instances.yaml
 
-Location: `~/.jiuwenswarm/instances.yaml` (or repository root)
+Location: `~/.jiuwenavatar/instances.yaml` (or repository root)
 
 ```yaml
 instances:
   dev:
-    workspace: ~/.jiuwenswarm_dev
+    workspace: ~/.jiuwenavatar_dev
     ports:
-      agent_server: 19092
-      web: 20000
-      gateway: 20001
-      frontend: 6173
+      agent_server: 29092
+      web: 30000
+      gateway: 30001
+      frontend: 30173
   prod:
-    workspace: ~/.jiuwenswarm_prod
+    workspace: ~/.jiuwenavatar_prod
     ports:
       agent_server: 20092
       web: 21000
@@ -65,25 +63,25 @@ Default port = base port + instance index × 1000
 
 | Service Type | Base Port | Default Instance (index=0) | First Named Instance (index=1) |
 |--------------|-----------|---------------------------|-------------------------------|
-| agent_server | 18092 | 18092 | 19092 |
-| web | 19000 | 19000 | 20000 |
-| gateway | 19001 | 19001 | 20001 |
-| frontend | 5173 | 5173 | 6173 |
+| agent_server | 28092 | 28092 | 29092 |
+| web | 29000 | 29000 | 30000 |
+| gateway | 29001 | 29001 | 30001 |
+| frontend | 29173 | 29173 | 30173 |
 
 ---
 
 ## Commands
 
-### jiuwenswarm-init --name
+### jiuwenavatar-init --name
 
 Create a named instance:
 
 ```bash
 # Create dev instance
-jiuwenswarm-init --name dev
+jiuwenavatar-init --name dev
 
 # Create prod instance with specified workspace
-jiuwenswarm-init --name prod --workspace ~/.jiuwenswarm_prod
+jiuwenavatar-init --name prod --workspace ~/.jiuwenavatar_prod
 ```
 
 This will:
@@ -92,33 +90,33 @@ This will:
 3. Update `instances.yaml` configuration
 4. Allocate ports (auto or manual)
 
-### jiuwenswarm-start Management Commands
+### jiuwenavatar-start Management Commands
 
 ```bash
 # List all instance statuses
-jiuwenswarm-start --list
+jiuwenavatar-start --list
 
 # Output example:
 # INSTANCE     STATUS     PID     WORKSPACE                               PORTS
 # --------------------------------------------------------------------------------
-# default      running    12345   ~/.jiuwenswarm                           as:18092,w:19000,g:19001,f:5173
-# dev          stopped    -       ~/.jiuwenswarm_dev                       as:19092,w:20000,g:20001,f:6173
-# prod         stopped    -       ~/.jiuwenswarm_prod                      as:20092,w:21000,g:21001,f:7173
+# default      running    12345   ~/.jiuwenavatar                           as:28092,w:29000,g:29001,f:29173
+# dev          stopped    -       ~/.jiuwenavatar_dev                       as:29092,w:30000,g:30001,f:30173
+# prod         stopped    -       ~/.jiuwenavatar_prod                      as:20092,w:21000,g:21001,f:7173
 
 # Show specific instance details
-jiuwenswarm-start --status dev
+jiuwenavatar-start --status dev
 
 # Start named instance
-jiuwenswarm-start --name dev
-jiuwenswarm-start --name dev app    # Start backend only
-jiuwenswarm-start --name dev web    # Start web service only
+jiuwenavatar-start --name dev
+jiuwenavatar-start --name dev app    # Start backend only
+jiuwenavatar-start --name dev web    # Start web service only
 
 # Stop instance
-jiuwenswarm-start --stop dev
+jiuwenavatar-start --stop dev
 
 # Restart instance
-jiuwenswarm-start --restart dev
-jiuwenswarm-start --restart dev --mode app
+jiuwenavatar-start --restart dev
+jiuwenavatar-start --restart dev --mode app
 ```
 
 ---
@@ -146,15 +144,15 @@ If lock conflict occurs during startup:
 
 | Variable | Description |
 |----------|-------------|
-| `JIUWENSWARM_DATA_DIR` | Override data root directory (affects instances.yaml location) |
-| `JIUWENSWARM_CONFIG_DIR` | Override configuration directory |
+| `JIUWENAVATAR_DATA_DIR` | Override data root directory (affects instances.yaml location) |
+| `JIUWENAVATAR_CONFIG_DIR` | Override configuration directory |
 
 Use `--dotenv` at startup to specify instance-specific config:
 
 ```bash
 # Internal mechanism: bootstrap .env is auto-loaded when starting named instance
-jiuwenswarm-start --name dev
-# Equivalent to loading ~/.jiuwenswarm_dev/.env
+jiuwenavatar-start --name dev
+# Equivalent to loading ~/.jiuwenavatar_dev/.env
 ```
 
 ---
@@ -179,7 +177,7 @@ Avoid port conflicts:
 
 ```bash
 # Check port usage
-jiuwenswarm-start --status dev
+jiuwenavatar-start --status dev
 # System auto-detects and reports conflicts
 ```
 
@@ -202,7 +200,7 @@ MODEL_NAME="gpt-4"
 Instance workspace contains all Agent runtime data:
 
 ```
-~/.jiuwenswarm_dev/
+~/.jiuwenavatar_dev/
 ├── .env                # Instance config
 ├── .instance.pid       # Process management
 ├── .instance.lock      # Startup lock
@@ -223,13 +221,13 @@ Instance workspace contains all Agent runtime data:
 Manually remove workspace directory and instances.yaml entry:
 
 ```bash
-rm -rf ~/.jiuwenswarm_dev
-# Edit ~/.jiuwenswarm/instances.yaml to remove corresponding entry
+rm -rf ~/.jiuwenavatar_dev
+# Edit ~/.jiuwenavatar/instances.yaml to remove corresponding entry
 ```
 
 ### Q: Difference between default and named instances?
 
-- **Default instance**: Started without `--name`, uses `~/.jiuwenswarm/` workspace
+- **Default instance**: Started without `--name`, uses `~/.jiuwenavatar/` workspace
 - **Named instance**: Specified via `--name`, uses independent workspace and ports
 
 ### Q: Can instances share configuration?
@@ -237,7 +235,7 @@ rm -rf ~/.jiuwenswarm_dev
 Yes. Reference shared config in instance `.env`:
 
 ```bash
-# ~/.jiuwenswarm_dev/.env
-source ~/.jiuwenswarm/.env  # Shared base config
+# ~/.jiuwenavatar_dev/.env
+source ~/.jiuwenavatar/.env  # Shared base config
 MODEL_NAME="special-model" # Instance-specific override
 ```

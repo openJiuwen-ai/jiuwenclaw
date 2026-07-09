@@ -27,8 +27,6 @@ import socket
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,16 +34,9 @@ import yaml
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import NetworkMode, SecurityPolicy
-from jiuwenbox.models.sandbox import (
-    BackgroundExecResult,
-    BackgroundJobStatus,
-    BackgroundJobSummary,
-    ExecResult,
-    KillBackgroundJobResult,
-)
+from jiuwenbox.models.sandbox import BackgroundExecResult, ExecResult
 from jiuwenbox.server.runtime.base import (
     RuntimeAdapter,
-    RuntimeBackgroundExecRequest,
     RuntimeExecRequest,
     RuntimeFileOpResult,
 )
@@ -166,11 +157,6 @@ DAEMON_STARTUP_LOG_MAX_BYTES = 16 * 1024
 # is just an open/read/write or scandir call. Cap the IPC roundtrip at a
 # short upper bound so a wedged daemon does not stall HTTP requests.
 DAEMON_FILE_OP_TIMEOUT_SECONDS = 30.0
-# When the caller omits an exec timeout the daemon still waits for the
-# child to finish before responding. Cap the IPC read at the common
-# agent-core default (300s) plus the same +5s cushion used for explicit
-# timeouts so a wedged daemon cannot hang HTTP requests forever.
-DEFAULT_EXEC_IPC_READ_TIMEOUT_SECONDS = 305.0
 
 # OS-level errors that mean the daemon is actually gone or its control
 # socket is permanently broken. When we see one of these, ``_daemon_socket_ready``
@@ -309,26 +295,6 @@ PR_SET_CHILD_SUBREAPER = 36  # Linux prctl(2)
 _subreaper_enabled: bool = False
 ZOMBIE_REAPER_INTERVAL_ENV = "JIUWENBOX_ZOMBIE_REAPER_INTERVAL"
 ZOMBIE_REAPER_DEFAULT_INTERVAL_SECONDS = 2.0
-
-
-@dataclass
-class BackgroundJob:
-    job_id: str
-    sandbox_id: str
-    command: list[str]
-    pid: int
-    proc: subprocess.Popen
-    capture_output: bool
-    stdout_path: Path | None
-    stderr_path: Path | None
-    workdir: str | None
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    finished_at: datetime | None = None
-    exit_code: int | None = None
-
-
-class BackgroundJobNotFoundError(Exception):
-    """Raised when a background job id is unknown for a sandbox."""
 
 
 def _resolve_zombie_reaper_interval() -> float:
@@ -544,7 +510,6 @@ class ProcessRuntime(RuntimeAdapter):
         self._policy_binds: dict[str, list[dict[str, str]]] = {}
         self._network_modes: dict[str, NetworkMode] = {}
         self._netns_names: dict[str, str] = {}
-        self._uplink_handles: dict[str, network_module.UplinkHandle] = {}
         self._directory_roots: dict[str, Path] = {}
         self._file_roots: dict[str, Path] = {}
         self._launcher_dirs: dict[str, Path] = {}
@@ -552,7 +517,7 @@ class ProcessRuntime(RuntimeAdapter):
         self._daemon_socket_ready: dict[str, bool] = {}
         self._seccomp_bpf: dict[str, bytes] = {}
         self._landlock_payloads: dict[str, str] = {}
-        self._background_processes: dict[str, dict[str, BackgroundJob]] = {}
+        self._background_processes: dict[str, list[subprocess.Popen]] = {}
         self._host_firewall_refcounts: dict[tuple[int, int], int] = {}
         self._sandbox_host_firewall_rules: dict[str, list[tuple[int, int]]] = {}
         self._cgroup_handles: dict[str, cgroup_module.CgroupHandle] = {}
@@ -647,73 +612,6 @@ class ProcessRuntime(RuntimeAdapter):
             )
         self._control_dirs[sandbox_id] = control_dir
         return control_dir
-
-    def _ensure_bg_logs_dir(self, sandbox_id: str) -> Path:
-        control_dir = self._ensure_control_dir(sandbox_id)
-        logs_dir = control_dir / "bg-logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        return logs_dir
-
-    def _background_jobs_for_sandbox(self, sandbox_id: str) -> dict[str, BackgroundJob]:
-        return self._background_processes.setdefault(sandbox_id, {})
-
-    @staticmethod
-    def _sync_background_job(job: BackgroundJob) -> None:
-        if job.exit_code is not None:
-            return
-        returncode = job.proc.poll()
-        if returncode is None:
-            return
-        job.exit_code = returncode
-        job.finished_at = datetime.now(timezone.utc)
-
-    @staticmethod
-    def _read_job_stream(path: Path | None) -> str:
-        if path is None or not path.exists():
-            return ""
-        return path.read_text(encoding="utf-8", errors="replace")
-
-    def _job_status(self, job: BackgroundJob) -> BackgroundJobStatus:
-        self._sync_background_job(job)
-        return BackgroundJobStatus(
-            job_id=job.job_id,
-            sandbox_id=job.sandbox_id,
-            command=list(job.command),
-            pid=job.pid,
-            running=job.exit_code is None,
-            exit_code=job.exit_code,
-            started_at=job.started_at,
-            finished_at=job.finished_at,
-            capture_output=job.capture_output,
-            stdout=self._read_job_stream(job.stdout_path),
-            stderr=self._read_job_stream(job.stderr_path),
-            workdir=job.workdir,
-        )
-
-    def _job_summary(self, job: BackgroundJob) -> BackgroundJobSummary:
-        self._sync_background_job(job)
-        return BackgroundJobSummary(
-            job_id=job.job_id,
-            pid=job.pid,
-            command=list(job.command),
-            running=job.exit_code is None,
-            exit_code=job.exit_code,
-            started_at=job.started_at,
-            finished_at=job.finished_at,
-            capture_output=job.capture_output,
-        )
-
-    def _get_background_job_record(
-        self,
-        sandbox_id: str,
-        job_id: str,
-    ) -> BackgroundJob:
-        job = self._background_jobs_for_sandbox(sandbox_id).get(job_id)
-        if job is None:
-            raise BackgroundJobNotFoundError(
-                f"Background job '{job_id}' not found in sandbox '{sandbox_id}'",
-            )
-        return job
 
     def _control_socket_host_path(self, sandbox_id: str) -> Path | None:
         control_dir = self._control_dirs.get(sandbox_id)
@@ -935,22 +833,12 @@ class ProcessRuntime(RuntimeAdapter):
 
         namespace = self._get_netns_name(sandbox_id)
         if network_module.namespace_exists(namespace):
-            network_module.delete_named_namespace(namespace)
+            return namespace
 
         network_module.create_named_namespace(namespace)
-        uplink_handle: network_module.UplinkHandle | None = None
         try:
-            uplink_handle = network_module.setup_network_uplink(
-                namespace,
-                sandbox_id,
-                policy.network.uplink,
-                management_ports=self._server_protect_ports(),
-            )
             network_module.setup_network_isolation(policy.network, namespace=namespace)
-            self._uplink_handles[sandbox_id] = uplink_handle
         except Exception:
-            if uplink_handle is not None:
-                network_module.teardown_network_uplink(uplink_handle)
             try:
                 network_module.delete_named_namespace(namespace)
             except Exception:
@@ -1385,8 +1273,14 @@ class ProcessRuntime(RuntimeAdapter):
         return policy_binds
 
     def _reap_background_processes(self, sandbox_id: str) -> None:
-        for job in self._background_jobs_for_sandbox(sandbox_id).values():
-            self._sync_background_job(job)
+        processes = self._background_processes.get(sandbox_id)
+        if not processes:
+            return
+        running = [proc for proc in processes if proc.poll() is None]
+        if running:
+            self._background_processes[sandbox_id] = running
+        else:
+            self._background_processes.pop(sandbox_id, None)
 
     # ------------------------------------------------------------------
     # SIGCHLD-driven zombie reaper.
@@ -1412,9 +1306,8 @@ class ProcessRuntime(RuntimeAdapter):
         """Snapshot of all ``Popen`` objects tracked by this runtime."""
         result: list[subprocess.Popen] = []
         result.extend(self._processes.values())
-        for jobs in self._background_processes.values():
-            for job in jobs.values():
-                result.append(job.proc)
+        for proc_list in self._background_processes.values():
+            result.extend(proc_list)
         return result
 
     def _reap_zombies(self) -> None:
@@ -1663,20 +1556,19 @@ class ProcessRuntime(RuntimeAdapter):
         task.cancel()
 
     async def _stop_background_processes(self, sandbox_id: str, timeout: float = 5.0) -> None:
-        jobs = self._background_processes.pop(sandbox_id, {})
-        if not jobs:
+        processes = self._background_processes.pop(sandbox_id, [])
+        if not processes:
             return
 
-        running = [job for job in jobs.values() if job.proc.poll() is None]
-        for job in running:
+        running = [proc for proc in processes if proc.poll() is None]
+        for proc in running:
             try:
-                os.killpg(job.proc.pid, signal.SIGTERM)
+                os.killpg(proc.pid, signal.SIGTERM)
             except ProcessLookupError:
                 continue
 
         loop = asyncio.get_running_loop()
-        for job in running:
-            proc = job.proc
+        for proc in running:
             try:
                 await loop.run_in_executor(None, proc.wait, timeout)
             except subprocess.TimeoutExpired:
@@ -1685,7 +1577,6 @@ class ProcessRuntime(RuntimeAdapter):
                 except ProcessLookupError:
                     continue
                 await loop.run_in_executor(None, proc.wait, 5.0)
-            self._sync_background_job(job)
 
     async def create(
         self,
@@ -1947,7 +1838,8 @@ class ProcessRuntime(RuntimeAdapter):
             # ``exit(1)`` before printing anything).
             message = (
                 f"{message} No stdout/stderr was captured before the "
-                f"daemon exited."
+                f"daemon exited; re-run with the container attached "
+                f"(``docker run -it``) to see live bwrap output."
             )
         raise RuntimeError(message)
 
@@ -1994,9 +1886,6 @@ class ProcessRuntime(RuntimeAdapter):
         if control_dir is not None:
             shutil.rmtree(control_dir, ignore_errors=True)
         self._daemon_socket_ready.pop(sandbox_id, None)
-        uplink_handle = self._uplink_handles.pop(sandbox_id, None)
-        if uplink_handle is not None:
-            network_module.teardown_network_uplink(uplink_handle)
         if netns_name and network_module.namespace_exists(netns_name):
             network_module.delete_named_namespace(netns_name)
         self._network_modes.pop(sandbox_id, None)
@@ -2231,12 +2120,12 @@ class ProcessRuntime(RuntimeAdapter):
         try:
             # The daemon waits for the user command to finish before
             # responding, so the receive timeout has to outlive the request
-            # timeout. When no exec timeout is configured, use a bounded
-            # default instead of waiting forever on the socket.
+            # timeout. ``None`` means "wait forever" which matches the
+            # legacy bwrap path when no timeout is configured.
             if call.timeout is not None:
                 sock.settimeout(call.timeout + 5.0)
             else:
-                sock.settimeout(DEFAULT_EXEC_IPC_READ_TIMEOUT_SECONDS)
+                sock.settimeout(None)
             self._send_request_blob(sock, header_blob, call.stdin_bytes)
             try:
                 sock.shutdown(socket.SHUT_WR)
@@ -2719,55 +2608,35 @@ class ProcessRuntime(RuntimeAdapter):
     async def exec_background(
         self,
         sandbox_id: str,
-        request: RuntimeBackgroundExecRequest,
+        request: RuntimeExecRequest,
     ) -> BackgroundExecResult:
-        prepared = self._prepare_exec_invocation(
-            sandbox_id,
-            RuntimeExecRequest(
-                command=request.command,
-                workdir=request.workdir,
-                env=request.env,
-                stdin_data=request.stdin_data,
-            ),
-        )
+        """Start a command and return after the process is created."""
+        prepared = self._prepare_exec_invocation(sandbox_id, request)
         if prepared is None:
             return BackgroundExecResult(
                 started=False,
                 command=list(request.command),
                 error_message="No policy found for sandbox",
-                capture_output=request.capture_output,
             )
-
-        jobs = self._background_jobs_for_sandbox(sandbox_id)
         bwrap_cmd, seccomp_fd = prepared
+
         process_env = {**os.environ, **(request.env or {})}
-        stdin_target = (
-            subprocess.PIPE if request.stdin_data is not None else subprocess.DEVNULL
-        )
+
+        self._reap_background_processes(sandbox_id)
+        stdin_target = subprocess.PIPE if request.stdin_data is not None else subprocess.DEVNULL
         pass_fds = (seccomp_fd,) if seccomp_fd is not None else ()
-
-        stdout_path: Path | None = None
-        stderr_path: Path | None = None
-        stdout_file = None
-        stderr_file = None
-        if request.capture_output:
-            logs_dir = self._ensure_bg_logs_dir(sandbox_id)
-            stdout_path = logs_dir / f"{request.job_id}.out"
-            stderr_path = logs_dir / f"{request.job_id}.err"
-            stdout_file = open(stdout_path, "wb")
-            stderr_file = open(stderr_path, "wb")
-            stdout_target = stdout_file
-            stderr_target = stderr_file
-        else:
-            stdout_target = subprocess.DEVNULL
-            stderr_target = subprocess.DEVNULL
-
         try:
+            # Background exec stdout/stderr is unconditionally dropped
+            # at the kernel level. The historical per-process
+            # ``runtime.bg-N.log`` files were removed together with the
+            # daemon ``runtime.log``; the only persistent record of a
+            # background command lives in ``audit.log`` (one row carrying
+            # ``started`` / ``pid`` / ``error_message`` / ``duration_ms``).
             proc = subprocess.Popen(
                 bwrap_cmd,
                 stdin=stdin_target,
-                stdout=stdout_target,
-                stderr=stderr_target,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 env=process_env,
                 pass_fds=pass_fds,
                 start_new_session=True,
@@ -2780,113 +2649,40 @@ class ProcessRuntime(RuntimeAdapter):
                 started=False,
                 command=list(request.command),
                 error_message=str(exc),
-                capture_output=request.capture_output,
             )
         finally:
             if seccomp_fd is not None:
                 _safe_close_fd(seccomp_fd)
-            if stdout_file is not None:
-                stdout_file.close()
-            if stderr_file is not None:
-                stderr_file.close()
 
-        job = BackgroundJob(
-            job_id=request.job_id,
-            sandbox_id=sandbox_id,
-            command=list(request.command),
-            pid=proc.pid,
-            proc=proc,
-            capture_output=request.capture_output,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            workdir=request.workdir,
-        )
-        jobs[request.job_id] = job
-        self._sync_background_job(job)
+        await asyncio.sleep(0.2)
+        if proc.poll() is not None:
+            return BackgroundExecResult(
+                started=False,
+                pid=proc.pid,
+                command=list(request.command),
+                error_message=(
+                    f"Background command exited during startup with code "
+                    f"{proc.returncode}; runtime stdout/stderr is not "
+                    f"persisted (only audit.log is written)."
+                ),
+            )
 
+        self._background_processes.setdefault(sandbox_id, []).append(proc)
         logger.info(
-            "Started background command in sandbox %s (job=%s pid=%d): %s",
+            "Started background command in sandbox %s (pid=%d): %s",
             sandbox_id,
-            request.job_id,
             proc.pid,
             _summarize_command(list(request.command)),
         )
+        logger.debug(
+            "Background bwrap command for sandbox %s: %s",
+            sandbox_id,
+            bwrap_cmd,
+        )
         return BackgroundExecResult(
             started=True,
-            job_id=request.job_id,
             pid=proc.pid,
             command=list(request.command),
-            running=job.exit_code is None,
-            exit_code=job.exit_code,
-            capture_output=request.capture_output,
-        )
-
-    async def get_background_job(
-        self,
-        sandbox_id: str,
-        job_id: str,
-    ) -> BackgroundJobStatus:
-        return self._job_status(self._get_background_job_record(sandbox_id, job_id))
-
-    async def list_background_jobs(
-        self,
-        sandbox_id: str,
-        *,
-        running_only: bool = False,
-    ) -> list[BackgroundJobSummary]:
-        jobs = list(self._background_jobs_for_sandbox(sandbox_id).values())
-        summaries = [self._job_summary(job) for job in jobs]
-        if running_only:
-            summaries = [item for item in summaries if item.running]
-        summaries.sort(key=lambda item: item.started_at, reverse=True)
-        return summaries
-
-    async def kill_background_job(
-        self,
-        sandbox_id: str,
-        job_id: str,
-        signum: int = 15,
-    ) -> KillBackgroundJobResult:
-        job = self._get_background_job_record(sandbox_id, job_id)
-        self._sync_background_job(job)
-        if job.exit_code is not None:
-            return KillBackgroundJobResult(
-                job_id=job_id,
-                killed=False,
-                reason="already_exited",
-                exit_code=job.exit_code,
-            )
-        try:
-            job.proc.send_signal(signum)
-        except ProcessLookupError:
-            self._sync_background_job(job)
-            return KillBackgroundJobResult(
-                job_id=job_id,
-                killed=False,
-                reason="already_exited",
-                exit_code=job.exit_code,
-            )
-        except PermissionError:
-            return KillBackgroundJobResult(
-                job_id=job_id,
-                killed=False,
-                reason="permission_denied",
-                exit_code=job.exit_code,
-            )
-        except OSError:
-            return KillBackgroundJobResult(
-                job_id=job_id,
-                killed=False,
-                reason="permission_denied",
-                exit_code=job.exit_code,
-            )
-
-        self._sync_background_job(job)
-        return KillBackgroundJobResult(
-            job_id=job_id,
-            killed=True,
-            reason="ok",
-            exit_code=job.exit_code,
         )
 
     async def cleanup(self, sandbox_id: str) -> None:
@@ -2913,14 +2709,10 @@ class ProcessRuntime(RuntimeAdapter):
                 sandbox_id,
                 network_module.netns_name_for_sandbox(sandbox_id),
             )
-            uplink_handle = self._uplink_handles.pop(sandbox_id, None)
-            if uplink_handle is not None:
-                network_module.teardown_network_uplink(uplink_handle)
             if network_module.namespace_exists(namespace):
                 network_module.delete_named_namespace(namespace)
         else:
             self._netns_names.pop(sandbox_id, None)
-            self._uplink_handles.pop(sandbox_id, None)
         self._remove_sandbox_host_firewall_rules(sandbox_id)
 
         directory_root = self._directory_roots.pop(sandbox_id, None)
@@ -2935,7 +2727,6 @@ class ProcessRuntime(RuntimeAdapter):
         control_dir = self._control_dirs.pop(sandbox_id, None)
         if control_dir is not None and control_dir.exists():
             shutil.rmtree(control_dir, ignore_errors=True)
-        self._background_processes.pop(sandbox_id, None)
         self._daemon_socket_ready.pop(sandbox_id, None)
         # Runtime log files used to live here too; they were removed in
         # favour of the single ``audit.log`` written by ``AuditLogger``.

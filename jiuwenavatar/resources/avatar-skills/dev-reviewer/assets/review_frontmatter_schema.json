@@ -1,0 +1,87 @@
+{
+  "_comment": "Schema for review/result.json. See SKILL.md for details.",
+  "schema_version": 1,
+  "verdict": "PASS or FAIL",
+  "gate_verdict": "PASS or REWORK or HOLD",
+  "verdict_reason": "clear reason",
+  "layer_alignment": "PASS or FAIL",
+  "patch_risk": "none or suspected or confirmed",
+  "risk_rating": "Low, Medium, High, or Unknown",
+  "summary": {
+    "change_intent": "what the PR appears to do",
+    "affected_files": ["path"],
+    "scope": "what was reviewed"
+  },
+  "pass_fail_reasons": ["specific reasons"],
+  "findings": {
+    "_location_rule": "⚠️ MANDATORY: Every finding MUST have a valid location. Format: 'file:line' (e.g. src/foo.py:42) or 'file:start-end' (e.g. src/utils.py:10-25). Empty, unknown, N/A, or vague values are FORBIDDEN. Only architecture/documentation issues may use '(architecture)' or '(documentation)' with explanation in issue field.",
+    "must_fix": [
+      {
+        "id": "CR-001",
+        "severity": "critical/high/medium/low",
+        "dimension": "Code or Clean or Spec or Security or Performance (optional; matches comment tag)",
+        "category": "correctness/security/data-consistency/concurrency/performance/maintainability/testing",
+        "location": "REQUIRED: file:line (e.g. src/foo.py:42) - MUST be precise line number, not empty/unknown/vague",
+        "issue": "what is wrong",
+        "risk": "why it matters",
+        "recommendation": "specific fix",
+        "minimal_patch_example": "optional diff or code",
+        "comment": {
+          "title": "short PR inline comment title; defaults to issue first line",
+          "scenario": "specific trigger condition or input that exposes the issue",
+          "examples": ["optional example inputs/outputs or bullets"],
+          "impact": "user/system impact; defaults to risk",
+          "fix": "specific repair direction; defaults to recommendation",
+          "verification": "test or manual verification expected after the fix",
+          "code_language": "optional fenced-code language, e.g. python/diff/json/markdown",
+          "code": "optional code snippet or diff for the PR comment"
+        }
+      }
+    ],
+    "should_fix": [
+      {
+        "id": "CR-010",
+        "severity": "medium/low",
+        "dimension": "Code or Clean or Spec or Security or Performance (optional)",
+        "category": "maintainability/testing/performance",
+        "location": "REQUIRED: file:line (e.g. src/foo.py:42) - MUST be precise line number, not empty/unknown/vague",
+        "issue": "what could be better",
+        "risk": "why it matters if deferred",
+        "recommendation": "specific improvement",
+        "leader_escalate": false,
+        "minimal_patch_example": "optional",
+        "comment": {
+          "title": "short PR inline comment title; defaults to issue first line",
+          "scenario": "specific trigger condition or maintainability scenario",
+          "examples": ["optional examples"],
+          "impact": "why it matters if deferred; defaults to risk",
+          "fix": "specific improvement direction; defaults to recommendation",
+          "verification": "test or manual verification expected after the change",
+          "code_language": "optional fenced-code language, e.g. python/diff/json/markdown",
+          "code": "optional code snippet or diff for the PR comment"
+        }
+      }
+    ],
+    "nice_to_have": []
+  },
+  "security_review": {
+    "status": "PASS or FAIL or not_applicable",
+    "items": [
+      {
+        "category": "secrets/input-validation/auth/logging/dependencies/sandbox",
+        "status": "PASS or FAIL",
+        "evidence": "what was checked"
+      }
+    ]
+  },
+  "testing_and_verification": [
+    {
+      "item": "recommended check",
+      "command": "command or manual review",
+      "reason": "why this matters"
+    }
+  ],
+  "assumptions": ["assumptions made"],
+  "limitations": ["evidence gaps"],
+  "reviewer": "agent"
+}

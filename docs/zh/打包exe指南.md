@@ -1,6 +1,6 @@
-# JiuwenSwarm 桌面打包指南
+﻿# JiuwenAvatar 桌面打包指南
 
-本文档说明如何使用 uv + PyInstaller + pywebview 将 JiuwenSwarm 打包成桌面应用。当前支持 Windows `onedir` 分发目录和 macOS `.app + .dmg`。
+本文档说明如何使用 uv + PyInstaller + pywebview 将 JiuwenAvatar 打包成桌面应用。当前支持 Windows `onedir` 分发目录和 macOS `.app + .dmg`。
 
 ## 前置要求
 
@@ -15,9 +15,9 @@
 
 | 文件 | 说明 |
 |------|------|
-| `scripts/jiuwenswarm.spec` | PyInstaller 打包配置 |
-| `scripts/jiuwenswarm_exe_entry.py` | exe 入口脚本（桌面模式 + 子命令分发） |
-| `jiuwenswarm/channels/desktop/desktop_app.py` | pywebview 桌面窗口与本地服务编排 |
+| `scripts/jiuwenavatar.spec` | PyInstaller 打包配置 |
+| `scripts/jiuwenavatar_exe_entry.py` | exe 入口脚本（桌面模式 + 子命令分发） |
+| `jiuwenavatar/channels/desktop/desktop_app.py` | pywebview 桌面窗口与本地服务编排 |
 | `scripts/build-exe.ps1` | 一键打包脚本（PowerShell） |
 | `scripts/build-exe.bat` | 一键打包脚本（批处理） |
 | `scripts/build-macos.sh` | macOS `.app + .dmg` 构建脚本 |
@@ -46,7 +46,7 @@
 # Windows (PowerShell): irm https://astral.sh/uv/install.ps1 | iex
 
 # 进入项目目录
-cd e:\Projects\jiuwenswarm_9980
+cd e:\Projects\jiuwenavatar_9980
 
 # 安装项目依赖（含 PyInstaller 开发依赖）
 uv sync --extra dev --upgrade-package openjiuwen
@@ -59,21 +59,21 @@ uv sync --extra dev --upgrade-package openjiuwen
 前端为 React 应用，需先构建为静态文件，打包进 exe：
 
 ```bash
-cd jiuwenswarm/channels/web/frontend
+cd jiuwenavatar/channels/web/frontend
 npm install
 npm run build
 cd ../..
 ```
 
-构建完成后，`jiuwenswarm/channels/web/frontend/dist` 下会有静态文件。
+构建完成后，`jiuwenavatar/channels/web/frontend/dist` 下会有静态文件。
 
 #### 3. 执行打包
 
 ```bash
-uv run pyinstaller scripts/jiuwenswarm.spec
+uv run pyinstaller scripts/jiuwenavatar.spec
 ```
 
-成功后，桌面版位于 `dist/jiuwenswarm/`，主程序为 `dist/jiuwenswarm/jiuwenswarm.exe`。
+成功后，桌面版位于 `dist/jiuwenavatar/`，主程序为 `dist/jiuwenavatar/jiuwenavatar.exe`。
 
 ## 使用打包后的 Windows 桌面版
 
@@ -81,35 +81,35 @@ uv run pyinstaller scripts/jiuwenswarm.spec
 
 1. **初始化工作区**（首次必须执行）：
    ```bash
-   jiuwenswarm.exe init
+   jiuwenavatar.exe init
    ```
-   会在 `~/.jiuwenswarm` 创建配置和工作区。
+   会在 `~/.jiuwenavatar` 创建配置和工作区。
 
 2. **编辑配置**：
-   - 打开 `%USERPROFILE%\.jiuwenswarm\.env`
+   - 打开 `%USERPROFILE%\.jiuwenavatar\.env`
    - 填写 `API_KEY`、`MODEL_PROVIDER` 等
 
 3. **启动应用**：
    ```bash
-   jiuwenswarm.exe
+   jiuwenavatar.exe
    ```
 
 4. 应用会启动本地后端与静态前端，并由 pywebview 直接打开桌面窗口；默认不需要再手动打开浏览器。
 
 ## 给 Inno Setup 的产物约定
 
-- 安装源目录使用整个 `dist/jiuwenswarm/`
-- 主程序入口使用 `dist/jiuwenswarm/jiuwenswarm.exe`
-- 首次初始化可由安装完成页触发 `jiuwenswarm.exe init`
-- 用户配置与运行数据位于 `%USERPROFILE%\.jiuwenswarm`，卸载时通常不建议默认删除
-- 若后续增加应用图标，请同时给 `scripts/jiuwenswarm.spec` 和 Inno Setup 脚本引用同一份 `.ico`
+- 安装源目录使用整个 `dist/jiuwenavatar/`
+- 主程序入口使用 `dist/jiuwenavatar/jiuwenavatar.exe`
+- 首次初始化可由安装完成页触发 `jiuwenavatar.exe init`
+- 用户配置与运行数据位于 `%USERPROFILE%\.jiuwenavatar`，卸载时通常不建议默认删除
+- 若后续增加应用图标，请同时给 `scripts/jiuwenavatar.spec` 和 Inno Setup 脚本引用同一份 `.ico`
 
 ### 子命令
 
 | 命令 | 说明 |
 |------|------|
-| `jiuwenswarm.exe` | 启动桌面应用 |
-| `jiuwenswarm.exe init` | 初始化工作区（首次使用） |
+| `jiuwenavatar.exe` | 启动桌面应用 |
+| `jiuwenavatar.exe init` | 初始化工作区（首次使用） |
 
 ## macOS 打包步骤
 
@@ -120,18 +120,18 @@ chmod +x scripts/build-macos.sh
 ./scripts/build-macos.sh
 ```
 
-脚本会自动完成：安装依赖 → 构建前端 → 使用 PyInstaller 生成 `JiuwenSwarm.app` → 生成 `JiuwenSwarm-<version>.dmg`。
+脚本会自动完成：安装依赖 → 构建前端 → 使用 PyInstaller 生成 `JiuwenAvatar.app` → 生成 `JiuwenAvatar-<version>.dmg`。
 
 生成后的产物：
 
-- `dist/JiuwenSwarm.app`
-- `dist/JiuwenSwarm-<version>.dmg`
+- `dist/JiuwenAvatar.app`
+- `dist/JiuwenAvatar-<version>.dmg`
 
 验证方式：
 
-1. 双击 `dist/JiuwenSwarm.app`
-2. 或挂载 `dist/JiuwenSwarm-<version>.dmg`
-3. 将 `JiuwenSwarm.app` 拖到 `Applications`
+1. 双击 `dist/JiuwenAvatar.app`
+2. 或挂载 `dist/JiuwenAvatar-<version>.dmg`
+3. 将 `JiuwenAvatar.app` 拖到 `Applications`
 
 注意事项：
 
@@ -142,25 +142,25 @@ chmod +x scripts/build-macos.sh
 ## 技术说明
 
 - **Python 运行时**：PyInstaller 将 Python 解释器及依赖打包进桌面分发目录，目标机器无需安装 Python。
-- **桌面窗口**：pywebview 负责加载本地 `http://127.0.0.1:5173` 页面。
+- **桌面窗口**：pywebview 负责加载本地 `http://127.0.0.1:29173` 页面。
 - **Node.js**：前端在构建阶段用 Node 编译，运行时只使用静态文件。
-- **工作区路径**：与 pip 安装一致，使用 `~/.jiuwenswarm` 作为配置与工作区根目录。
-- **安装包制作**：后续使用 Inno Setup 时，请将整个 `dist/jiuwenswarm/` 目录作为安装源，而不是只取单个 exe。
+- **工作区路径**：与 pip 安装一致，使用 `~/.jiuwenavatar` 作为配置与工作区根目录。
+- **安装包制作**：后续使用 Inno Setup 时，请将整个 `dist/jiuwenavatar/` 目录作为安装源，而不是只取单个 exe。
 - **macOS DMG**：当前脚本会在 DMG 中附带 `Applications` 快捷方式，方便拖拽安装。
 
 ## 常见问题
 
 ### 1. 打包失败：找不到 web/dist
 
-先执行 `cd jiuwenswarm/channels/web/frontend && npm run build`，确保 `jiuwenswarm/channels/web/frontend/dist` 存在。
+先执行 `cd jiuwenavatar/channels/web/frontend && npm run build`，确保 `jiuwenavatar/channels/web/frontend/dist` 存在。
 
 ### 2. 运行 exe 报错 ModuleNotFoundError
 
-在 `scripts/jiuwenswarm.spec` 的 `hiddenimports` 中补充缺失模块，然后重新打包。
+在 `scripts/jiuwenavatar.spec` 的 `hiddenimports` 中补充缺失模块，然后重新打包。
 
 ### 3. exe 体积过大
 
-当前已经使用 `onedir` 模式，便于桌面应用拉起子进程并方便 Inno Setup 安装。若仍需继续缩减体积，可在 `scripts/jiuwenswarm.spec` 的 `excludes` 中排除未用模块。
+当前已经使用 `onedir` 模式，便于桌面应用拉起子进程并方便 Inno Setup 安装。若仍需继续缩减体积，可在 `scripts/jiuwenavatar.spec` 的 `excludes` 中排除未用模块。
 
 ### 4. 杀毒软件误报
 

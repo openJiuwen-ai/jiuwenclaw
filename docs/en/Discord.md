@@ -1,10 +1,10 @@
 # Discord Channel Setup
 
-This guide walks through creating a Discord application and bot in the [Discord Developer Portal](https://discord.com/developers/applications), enabling the intents and install options JiuwenSwarm needs, and wiring the bot into **Channel Management** in JiuwenSwarm.
+This guide walks through creating a Discord application and bot in the [Discord Developer Portal](https://discord.com/developers/applications), enabling the intents and install options JiuwenAvatar needs, and wiring the bot into **Channel Management** in JiuwenAvatar.
 
 ## What This Repo Uses
 
-- Python channel: `jiuwenswarm/channel/discord_channel.py` (discord.py)
+- Python channel: `jiuwenavatar/channel/discord_channel.py` (discord.py)
 - Runtime config: `channels/discord` in your `config.yaml` (or the web UI **Channel Management** → Discord)
 
 The bot connects with your **Bot Token**, receives messages in configured guild channels and/or DMs (unless you turn off DMs), and can add a 👀 reaction while processing, similar to other channels.
@@ -38,16 +38,16 @@ You will use this application for both **OAuth2 / installation** and the **Bot**
 **Security**
 
 - Treat the token like a password. Anyone with it can control your bot.
-- Paste it into JiuwenSwarm’s Discord settings or `config.yaml`; do not commit it to git.
+- Paste it into JiuwenAvatar’s Discord settings or `config.yaml`; do not commit it to git.
 - If it leaks, reset the token again in the same place.
 
-You will map this value to **`bot_token`** in JiuwenSwarm.
+You will map this value to **`bot_token`** in JiuwenAvatar.
 
 ---
 
 ## 3. Enable Message Content Intent
 
-JiuwenSwarm reads the text of messages your bot receives. Discord requires an explicit privileged intent for that.
+JiuwenAvatar reads the text of messages your bot receives. Discord requires an explicit privileged intent for that.
 
 1. Stay on the **Bot** page.
 2. Under **Privileged Gateway Intents**, turn on **MESSAGE CONTENT INTENT**.
@@ -61,7 +61,7 @@ Without this, the bot may connect but will not see normal message text content.
 
 ## 4. Guild install: scopes and bot permissions
 
-Configure how the bot is installed into servers and what it can do there. Typical needs for JiuwenSwarm:
+Configure how the bot is installed into servers and what it can do there. Typical needs for JiuwenAvatar:
 
 - **Read** messages in the channels you care about
 - **Send** messages (replies)
@@ -94,12 +94,12 @@ Copy the **generated URL** or **Install link** from the portal and open it in a 
 
 After installation:
 
-- For **server** use: place the bot in a channel JiuwenSwarm will listen to (see `guild_id` / `channel_id` below).
-- For **DM** use: users can open a private message with the bot (if not blocked by **`block_dm`** in JiuwenSwarm).
+- For **server** use: place the bot in a channel JiuwenAvatar will listen to (see `guild_id` / `channel_id` below).
+- For **DM** use: users can open a private message with the bot (if not blocked by **`block_dm`** in JiuwenAvatar).
 
 ---
 
-## 6. IDs you need for JiuwenSwarm
+## 6. IDs you need for JiuwenAvatar
 
 | Value | Where to find it |
 |--------|------------------|
@@ -116,11 +116,11 @@ https://discord.com/channels/<guild_id>/<channel_id>
 
 ---
 
-## 7. Configure Discord in JiuwenSwarm (Channel Management)
+## 7. Configure Discord in JiuwenAvatar (Channel Management)
 
-Open the JiuwenSwarm web UI → **Channel Management** → **Discord**, or edit:
+Open the JiuwenAvatar web UI → **Channel Management** → **Discord**, or edit:
 
-`~/.jiuwenswarm/config/config.yaml` (path may differ on your machine)
+`~/.jiuwenavatar/config/config.yaml` (path may differ on your machine)
 
 Example:
 
@@ -172,7 +172,7 @@ channels:
 ### DMs not working
 
 - Perform **User install** in Discord.
-- In JiuwenSwarm, ensure **`block_dm`** is `false`.
+- In JiuwenAvatar, ensure **`block_dm`** is `false`.
 - Users may need to open the bot’s profile and **Message** after installing.
 
 ### LLM or downstream errors

@@ -4,7 +4,7 @@ import zipfile
 
 import pytest
 
-from jiuwenswarm.server.runtime.skill.skill_manager import (
+from jiuwenavatar.server.runtime.skill.skill_manager import (
     SkillManager,
     _safe_child_path,
     _safe_path_name,
@@ -107,7 +107,7 @@ async def test_clawhub_download_rejects_zip_slip_archive(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.skill.skill_manager.httpx.AsyncClient",
+        "jiuwenavatar.server.runtime.skill.skill_manager.httpx.AsyncClient",
         lambda timeout: _FakeClawHubClient(zip_content),
     )
 

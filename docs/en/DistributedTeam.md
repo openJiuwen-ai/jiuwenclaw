@@ -1,8 +1,8 @@
-# Distributed Team
+﻿# Distributed Team
 
 This guide is for **development and integration testing**: how distributed Team (`team.runtime.mode=distributed` + `pyzmq`) maps to AgentServer / `TeamManager`, where config and code live, and how to run leader and teammate from two separate config roots for end-to-end verification. There is no separate runtime binary; the entry point remains the unified AgentServer.
 
-The main config file is usually `~/.jiuwenswarm/config/config.yaml`. Override the directory with `JIUWENSWARM_CONFIG_DIR` (same as [Configuration](Configuration.md)).
+The main config file is usually `~/.jiuwenavatar/config/config.yaml`. Override the directory with `JIUWENAVATAR_CONFIG_DIR` (same as [Configuration](Configuration.md)).
 
 [中文版（Chinese）](../zh/分布式Team.md)
 
@@ -15,13 +15,11 @@ The main config file is usually `~/.jiuwenswarm/config/config.yaml`. Override th
 | **Mode** | `team.runtime.mode`: `local \| distributed` |
 | **Role** | `team.runtime.role`: `leader \| teammate` |
 | **Transport** | `team.transport.type`: `inprocess \| pyzmq`; distributed setups typically use `pyzmq` |
-| **Entry** | `TeamManager` (`jiuwenswarm/agents/harness/team/team_manager.py`): normalizes transport / identity before building `TeamAgentSpec` |
-| **Loading** | `load_team_spec_dict()` (`jiuwenswarm/agents/harness/team/config_loader.py`): `name` / `display_name` compatibility for leader and `predefined_members` |
-| **Sample** | `jiuwenswarm/resources/config.team.distributed.leader.yaml` / `config.team.distributed.teammate.yaml` (current role-specific templates) |
+| **Entry** | `TeamManager` (`jiuwenavatar/agents/harness/team/team_manager.py`): normalizes transport / identity before building `TeamAgentSpec` |
+| **Loading** | `load_team_spec_dict()` (`jiuwenavatar/agents/harness/team/config_loader.py`): `name` / `display_name` compatibility for leader and `predefined_members` |
+| **Sample** | `jiuwenavatar/resources/config.team.distributed.leader.yaml` / `config.team.distributed.teammate.yaml` (current role-specific templates) |
 
-**Session semantics**: distributed mode retains **single active session** per channel — creating or switching to a Team for a new session first tears down other active or pending session Teams in the same channel, so remote member bootstrap, transport connections, and runtime resources are not reused across sessions. **Local mode** instead allows multiple Team sessions to run concurrently in the same channel and does not apply this single-session switch policy.
-
-> **⚠️ Multi-TUI-window limitation**: Multiple TUI windows cannot run Team tasks concurrently under distributed mode — starting a Team session in a new window will automatically stop the existing Team session. 
+**Session semantics**: aligned with regular Team—**single active session** per process: creating a Team for a new session tears down other session Teams first. This document does not add a multi-session routing layer for distributed mode.
 
 ---
 
@@ -35,7 +33,7 @@ Typical keys for distributed integration (templates: `config.team.distributed.le
 | `team.runtime.role` | Whether this process is `leader` or `teammate` |
 | `team.runtime.member_name` | Default teammate identity; after bootstrap it adopts the member name dynamically requested by the leader |
 | `team.transport.type` | `pyzmq` |
-| `react.a2x_registry` | Teammates register idle nodes at startup; leaders reserve idle teammates from the registry before teaming. **The registry is not bundled with jiuwenswarm**: clone upstream [agent-protocol (`feature/Agentregistry`)](https://gitcode.com/openJiuwen/agent-protocol/tree/feature/Agentregistry) and deploy it as a separate service per that repo's instructions |
+| `react.a2x_registry` | Teammates register idle nodes at startup; leaders reserve idle teammates from the registry before teaming. **The registry is not bundled with jiuwenavatar**: clone upstream [agent-protocol (`feature/Agentregistry`)](https://gitcode.com/openJiuwen/agent-protocol/tree/feature/Agentregistry) and deploy it as a separate service per that repo's instructions |
 | `team.transport.params` | This process' `direct_addr` / `bootstrap_direct_addr`, `pubsub_*`, etc.; leaders do not need static teammate `known_peers` |
 | `team.predefined_members` | Backward-compatible static member declaration; not required for current blank-teammate integration |
 | `team.storage` | For multi-process setups, `connection_string` must point to a **shared** DB (e.g. the same sqlite path visible to all nodes) |
@@ -139,12 +137,12 @@ The current implementation is explicitly split:
 
 The role templates in the repo are now **complete `config.yaml` files**. They include the base agent/model config, A2X registry config, the top-level `team` runtime marker, and the actual `modes.team.jiuwen_team` TeamAgentSpec config. For deployment, copy one template directly into the matching HOME config path; no manual merge with the default `config.yaml` is required.
 
-- `jiuwenswarm/resources/config.team.distributed.leader.yaml`
-- `jiuwenswarm/resources/config.team.distributed.teammate.yaml`
+- `jiuwenavatar/resources/config.team.distributed.leader.yaml`
+- `jiuwenavatar/resources/config.team.distributed.teammate.yaml`
 
 Suggested workflow:
 
-1. Copy each complete template into the matching config root (`<LEADER_HOME>/.jiuwenswarm/config/config.yaml` and `<TEAMMATE_HOME>/.jiuwenswarm/config/config.yaml`).
+1. Copy each complete template into the matching config root (`<LEADER_HOME>/.jiuwenavatar/config/config.yaml` and `<TEAMMATE_HOME>/.jiuwenavatar/config/config.yaml`).
 2. Adjust:
    - `react.a2x_registry.base_url` / `dataset` so leader and teammate use the same registry dataset.
    - teammate `team.transport.params.bootstrap_direct_addr` or `react.a2x_registry.endpoint` so the registry advertises a reachable address.
@@ -157,26 +155,26 @@ Minimal ready-to-use copy commands for the complete templates:
 
 ```bash
 # leader
-mkdir -p "<LEADER_HOME>/.jiuwenswarm/config"
-cp "<REPO_ROOT>/jiuwenswarm/resources/config.team.distributed.leader.yaml" \
-  "<LEADER_HOME>/.jiuwenswarm/config/config.yaml"
+mkdir -p "<LEADER_HOME>/.jiuwenavatar/config"
+cp "<REPO_ROOT>/jiuwenavatar/resources/config.team.distributed.leader.yaml" \
+  "<LEADER_HOME>/.jiuwenavatar/config/config.yaml"
 
 # teammate
-mkdir -p "<TEAMMATE_HOME>/.jiuwenswarm/config"
-cp "<REPO_ROOT>/jiuwenswarm/resources/config.team.distributed.teammate.yaml" \
-  "<TEAMMATE_HOME>/.jiuwenswarm/config/config.yaml"
+mkdir -p "<TEAMMATE_HOME>/.jiuwenavatar/config"
+cp "<REPO_ROOT>/jiuwenavatar/resources/config.team.distributed.teammate.yaml" \
+  "<TEAMMATE_HOME>/.jiuwenavatar/config/config.yaml"
 ```
 
 ---
 
 ## 5. Two config directories (recommended layout)
 
-Use **two separate HOME trees** (or two `JIUWENSWARM_CONFIG_DIR` values) for leader and teammate so configs do not overwrite each other.
+Use **two separate HOME trees** (or two `JIUWENAVATAR_CONFIG_DIR` values) for leader and teammate so configs do not overwrite each other.
 
 Placeholders:
 
-- **Leader config dir**: `<LEADER_HOME>/.jiuwenswarm/config`
-- **Teammate config dir**: `<TEAMMATE_HOME>/.jiuwenswarm/config`
+- **Leader config dir**: `<LEADER_HOME>/.jiuwenavatar/config`
+- **Teammate config dir**: `<TEAMMATE_HOME>/.jiuwenavatar/config`
 
 Both sides must agree on:
 
@@ -192,7 +190,7 @@ Note: the distributed templates explicitly configure the team workspace root:
 team:
   workspace:
     enabled: true
-    root_path: ${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}
+    root_path: ${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenavatar/shared_workspace/jiuwen_team}
     version_control: false
 ```
 
@@ -202,8 +200,8 @@ NFS scripts, checks, and teardown: see `scripts/nfs/README.md`.
 
 Unless both sides explicitly configure a jointly visible workspace root, leader and teammate create local directories under their own HOME:
 
-- `<LEADER_HOME>/.jiuwenswarm/.agent_teams/<team_name>/team-workspace`
-- `<TEAMMATE_HOME>/.jiuwenswarm/.agent_teams/<team_name>/team-workspace`
+- `<LEADER_HOME>/.jiuwenavatar/.agent_teams/<team_name>/team-workspace`
+- `<TEAMMATE_HOME>/.jiuwenavatar/.agent_teams/<team_name>/team-workspace`
 
 These paths have the same shape but are not the same physical directory. If the leader must directly read files written by a teammate, configure a shared `team.workspace.root_path` or return results through messages, DB state, or file transfer tooling.
 
@@ -219,7 +217,7 @@ Replace `<REPO_ROOT>`, `<LEADER_HOME>`, `<TEAMMATE_HOME>` with paths on your mac
 
 Run the registry **as its own process**, separate from leader/teammate:
 
-Follow the [agent-protocol Agent Team quick start](https://gitcode.com/openJiuwen/agent-protocol/blob/feature/Agentregistry/README_forAgentTeam.md). Since `0.1.6`, the default install is the lightweight Agent Team build: SDK, FastAPI, uvicorn, and a few small runtime dependencies only. The registry backend starts empty; it does not need preloaded data or LLM config. Teammate registration, leader lookup/reservation, and reservation leases are handled by the `jiuwenswarm` client-side integration.
+Follow the [agent-protocol Agent Team quick start](https://gitcode.com/openJiuwen/agent-protocol/blob/feature/Agentregistry/README_forAgentTeam.md). Since `0.1.6`, the default install is the lightweight Agent Team build: SDK, FastAPI, uvicorn, and a few small runtime dependencies only. The registry backend starts empty; it does not need preloaded data or LLM config. Teammate registration, leader lookup/reservation, and reservation leases are handled by the `jiuwenavatar` client-side integration.
 
 Install (Python >= 3.10):
 
@@ -261,7 +259,7 @@ GIT_AUTHOR_EMAIL="teambot@example.com" \
 GIT_COMMITTER_NAME="teambot" \
 GIT_COMMITTER_EMAIL="teambot@example.com" \
 AGENT_SERVER_PORT=28193 \
-uv run python -m jiuwenswarm.server.app_agentserver
+uv run python -m jiuwenavatar.server.app_agentserver
 ```
 
 After startup, the teammate registers its `bootstrap_direct_addr` as a blank agent, for example `endpoint=tcp://127.0.0.1:28610`.
@@ -277,7 +275,7 @@ GIT_COMMITTER_EMAIL="teambot@example.com" \
 AGENT_SERVER_PORT=28192 \
 GATEWAY_PORT=29101 \
 WEB_PORT=29100 \
-uv run python -m jiuwenswarm.app
+uv run python -m jiuwenavatar.app
 ```
 
 Leader does not need a static teammate endpoint; `spawn_member` obtains an idle teammate through registry `reserve_blank_agents`.
@@ -285,8 +283,8 @@ Leader does not need a static teammate endpoint; `spawn_member` obtains an idle 
 ### 6.4 Web UI (optional)
 
 ```bash
-cd "<REPO_ROOT>/jiuwenswarm/channels/web/frontend"
-VITE_WS_BASE="ws://localhost:29100" npm run dev -- --host 0.0.0.0 --port 5173
+cd "<REPO_ROOT>/jiuwenavatar/channels/web/frontend"
+VITE_WS_BASE="ws://localhost:29100" npm run dev -- --host 0.0.0.0 --port 29173
 ```
 
 If Git user identity is not configured for the workspace, set `GIT_AUTHOR_*` / `GIT_COMMITTER_*` so Git-based tooling does not fail.

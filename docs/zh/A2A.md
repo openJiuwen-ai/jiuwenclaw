@@ -2,7 +2,7 @@
 
 本文说明 Gateway 侧 **A2A Server**（`A2AChannel`）的实现位置、配置方式、与内部 `Message`/E2A 的对应关系及本地验证命令；出站 A2A（Agent 调外部）见 §7。
 
-> **实现**：`jiuwenswarm/gateway/channel_manager/protocol/a2a/a2a_connect.py`（`A2AChannel` + `a2a-sdk`）。**入口进程**：`python -m jiuwenswarm.gateway.app_gateway`（`jiuwenswarm/gateway/app_gateway.py` 中注册并启动）。**冲突时**：以源码为准，并回头修正本文。
+> **实现**：`jiuwenavatar/gateway/channel_manager/protocol/a2a/a2a_connect.py`（`A2AChannel` + `a2a-sdk`）。**入口进程**：`python -m jiuwenavatar.gateway.app_gateway`（`jiuwenavatar/gateway/app_gateway.py` 中注册并启动）。**冲突时**：以源码为准，并回头修正本文。
 
 ---
 
@@ -11,10 +11,10 @@
 | 位置 | 角色 |
 |------|------|
 | **docs/zh/A2A.md**（本文） | 接入与开发联调：模块、配置、映射、验证 |
-| `jiuwenswarm/gateway/channel_manager/protocol/a2a/a2a_connect.py` | A2A HTTP 服务、`AgentCard`、请求/响应与 `Message` 互转 |
-| `jiuwenswarm/gateway/app_gateway.py` | 环境变量读取、`A2AChannel` 构造与 `channel_manager.register_channel` |
-| `jiuwenswarm/gateway/message_handler/message_handler.py` | 与 AgentServer 的 E2A 收发、内部 `Message` 编排 |
-| `jiuwenswarm/gateway/channel_manager/channel_manager.py` | 频道注册与 `robot_messages` → `Channel.send` 派发 |
+| `jiuwenavatar/gateway/channel_manager/protocol/a2a/a2a_connect.py` | A2A HTTP 服务、`AgentCard`、请求/响应与 `Message` 互转 |
+| `jiuwenavatar/gateway/app_gateway.py` | 环境变量读取、`A2AChannel` 构造与 `channel_manager.register_channel` |
+| `jiuwenavatar/gateway/message_handler/message_handler.py` | 与 AgentServer 的 E2A 收发、内部 `Message` 编排 |
+| `jiuwenavatar/gateway/channel_manager/channel_manager.py` | 频道注册与 `robot_messages` → `Channel.send` 派发 |
 | [E2A-protocol.md](E2A-protocol.md) | Gateway↔AgentServer 内层协议 |
 
 ---
@@ -32,18 +32,18 @@
 |------|-----|-----|-------------|
 | 绑定 | `WEB_HOST` / `WEB_PORT` / `WEB_PATH` | `ACP_GATEWAY_*` | `A2A_SERVER_*` |
 | 配置来源 | 环境变量 + CLI（`--host` 等） | 仅环境变量 | 仅环境变量 |
-| `.env` | `app_gateway` 启动时 `load_dotenv(get_env_file())`，即 `~/.jiuwenswarm/config/.env` | 同上 | 同上 |
+| `.env` | `app_gateway` 启动时 `load_dotenv(get_env_file())`，即 `~/.jiuwenavatar/config/.env` | 同上 | 同上 |
 
 ---
 
 ## 3. 环境变量（Gateway）
 
-在 `~/.jiuwenswarm/config/.env` 或进程环境中设置（`app_gateway.py` 读取）：
+在 `~/.jiuwenavatar/config/.env` 或进程环境中设置（`app_gateway.py` 读取）：
 
 启用 A2A 前请先安装可选依赖：
 
 ```bash
-pip install "jiuwenswarm[a2a]"
+pip install "jiuwenavatar[a2a]"
 # 或（仓库/开发环境）
 uv sync --extra a2a
 ```
@@ -57,13 +57,13 @@ uv sync --extra a2a
 | `A2A_SERVER_PROTOCOL_VERSION` | `1.0.0` | 写入 `AgentCard` 的 `AgentInterface.protocol_version` |
 | `A2A_SERVER_CARD_PATH` | `/.well-known/agent-card.json` | Agent Card 对外路径 |
 | `A2A_SERVER_EXTENDED_CARD_PATH` | `/agent/authenticatedExtendedCard` | Extended Card 对外路径 |
-| `A2A_SERVER_APP_NAME` | `JiuwenSwarm Gateway A2A Server` | Agent Card `name` |
-| `A2A_SERVER_APP_DESCRIPTION` | `A2A ingress for JiuwenSwarm Gateway` | Agent Card `description` |
+| `A2A_SERVER_APP_NAME` | `JiuwenAvatar Gateway A2A Server` | Agent Card `name` |
+| `A2A_SERVER_APP_DESCRIPTION` | `A2A ingress for JiuwenAvatar Gateway` | Agent Card `description` |
 | `A2A_SERVER_APP_VERSION` | `0.1.0` | Agent Card `version` |
 
 AgentServer 连接仍由网关既有逻辑配置（例如 `AGENT_SERVER_URL` 等），与 A2A 监听端口独立。
 
-当 `A2A_SERVER_ENABLED=true` 且未安装 `jiuwenswarm[a2a]`（或 `uv sync --extra a2a`）时，Gateway 主流程仍会继续启动；A2A 通道启动失败会在日志中输出明确安装指引。
+当 `A2A_SERVER_ENABLED=true` 且未安装 `jiuwenavatar[a2a]`（或 `uv sync --extra a2a`）时，Gateway 主流程仍会继续启动；A2A 通道启动失败会在日志中输出明确安装指引。
 
 ---
 
@@ -152,4 +152,4 @@ curl -sS -N -X POST "http://127.0.0.1:${A2A_SERVER_PORT:-19100}${A2A_SERVER_PATH
 ## 9. 已知扩展点
 
 - 鉴权、限流、超时与观测指标：由网关或前置代理统一补强时，保持 `A2AChannel` 只做协议与消息映射为宜。
-- `jiuwenswarm/resources/.env.template` 未预置 A2A/ACP 键时，可在本地 `.env` 手工追加（与 §2 一致）。
+- `jiuwenavatar/resources/.env.template` 未预置 A2A/ACP 键时，可在本地 `.env` 手工追加（与 §2 一致）。

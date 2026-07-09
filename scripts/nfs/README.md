@@ -1,6 +1,6 @@
 # Linux 跨节点 NFS 使用说明
 
-这两个脚本用于在 Linux 节点之间共享 `jiuwenswarm` 团队共享工作空间。
+这两个脚本用于在 Linux 节点之间共享 `jiuwenavatar` 团队共享工作空间。
 
 适用场景：
 
@@ -12,13 +12,13 @@
 默认共享目录：
 
 ```text
-${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}
+${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenavatar/shared_workspace/jiuwen_team}
 ```
 
 建议：
 
 - 优先使用内网 IP
-- 所有节点都先完成一次 `jiuwenswarm` 初始化
+- 所有节点都先完成一次 `jiuwenavatar` 初始化
 - 尽量使用同一个用户运行
 - 如果要使用自定义挂载点，在所有节点设置相同的 `JIUWEN_TEAM_WORKSPACE_ROOT`
 
@@ -40,8 +40,8 @@ sudo bash scripts/nfs/setup_nfs_server.sh \
 sudo bash scripts/nfs/setup_nfs_server.sh \
   --client-ip <客户端1内网IP> \
   --client-ip <客户端2内网IP> \
-  --export-dir /mnt/jiuwenswarm/shared_workspace/jiuwen_team \
-  --mount-point /mnt/jiuwenswarm/shared_workspace/jiuwen_team
+  --export-dir /mnt/jiuwenavatar/shared_workspace/jiuwen_team \
+  --mount-point /mnt/jiuwenavatar/shared_workspace/jiuwen_team
 ```
 
 如果只有一个客户端，保留单个 `--client-ip` 也可以。
@@ -52,10 +52,10 @@ sudo bash scripts/nfs/setup_nfs_server.sh \
 sudo bash scripts/nfs/setup_nfs_server.sh \
   --client-ip <客户端1内网IP> \
   --client-ip <客户端2内网IP> \
-  --export-dir /mnt/jiuwenswarm/shared_workspace/jiuwen_team \
-  --mount-point /mnt/jiuwenswarm/shared_workspace/jiuwen_team \
-  --export-dir /mnt/jiuwenswarm/shared_artifacts \
-  --mount-point /mnt/jiuwenswarm/shared_artifacts
+  --export-dir /mnt/jiuwenavatar/shared_workspace/jiuwen_team \
+  --mount-point /mnt/jiuwenavatar/shared_workspace/jiuwen_team \
+  --export-dir /mnt/jiuwenavatar/shared_artifacts \
+  --mount-point /mnt/jiuwenavatar/shared_artifacts
 ```
 
 ## 2. 客户端执行
@@ -73,8 +73,8 @@ sudo bash scripts/nfs/setup_nfs_client.sh --server-ip <服务端内网IP>
 ```bash
 sudo bash scripts/nfs/setup_nfs_client.sh \
   --server-ip <服务端内网IP> \
-  --export-dir /mnt/jiuwenswarm/shared_workspace/jiuwen_team \
-  --mount-point /mnt/jiuwenswarm/shared_workspace/jiuwen_team
+  --export-dir /mnt/jiuwenavatar/shared_workspace/jiuwen_team \
+  --mount-point /mnt/jiuwenavatar/shared_workspace/jiuwen_team
 ```
 
 如果要挂载多个目录（参数成对出现）：
@@ -82,10 +82,10 @@ sudo bash scripts/nfs/setup_nfs_client.sh \
 ```bash
 sudo bash scripts/nfs/setup_nfs_client.sh \
   --server-ip <服务端内网IP> \
-  --export-dir /mnt/jiuwenswarm/shared_workspace/jiuwen_team \
-  --mount-point /mnt/jiuwenswarm/shared_workspace/jiuwen_team \
-  --export-dir /mnt/jiuwenswarm/shared_artifacts \
-  --mount-point /mnt/jiuwenswarm/shared_artifacts
+  --export-dir /mnt/jiuwenavatar/shared_workspace/jiuwen_team \
+  --mount-point /mnt/jiuwenavatar/shared_workspace/jiuwen_team \
+  --export-dir /mnt/jiuwenavatar/shared_artifacts \
+  --mount-point /mnt/jiuwenavatar/shared_artifacts
 ```
 
 ## 3. 连通性检查
@@ -113,25 +113,25 @@ df -h | grep jiuwen_team
 在服务端执行：
 
 ```bash
-echo hello > "${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}/hello.txt"
+echo hello > "${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenavatar/shared_workspace/jiuwen_team}/hello.txt"
 ```
 
 在客户端执行：
 
 ```bash
-cat "${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}/hello.txt"
+cat "${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenavatar/shared_workspace/jiuwen_team}/hello.txt"
 ```
 
 再在客户端追加：
 
 ```bash
-echo world >> "${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}/hello.txt"
+echo world >> "${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenavatar/shared_workspace/jiuwen_team}/hello.txt"
 ```
 
 回到服务端查看：
 
 ```bash
-cat "${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}/hello.txt"
+cat "${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenavatar/shared_workspace/jiuwen_team}/hello.txt"
 ```
 
 如果两边都能看到相同内容，就说明同步成功。
@@ -163,7 +163,7 @@ sudo bash scripts/nfs/teardown_nfs_server.sh --stop-service --disable-service
 ```bash
 sudo bash scripts/nfs/teardown_nfs_client.sh \
   --server-ip <服务端内网IP> \
-  --mount-point "${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}"
+  --mount-point "${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenavatar/shared_workspace/jiuwen_team}"
 ```
 
 如果要清理该服务端在 `/etc/fstab` 的全部 nfs4 记录：

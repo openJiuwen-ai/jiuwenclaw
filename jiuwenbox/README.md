@@ -12,7 +12,7 @@ isolation policy in-process by spawning `bubblewrap` directly for each sandbox
 
 - Process isolation with `bubblewrap`
 - Static policy-based filesystem access rules
-- Server-managed sandbox backing storage (`~/.jiuwenbox/workspace`)
+- Configurable sandbox backing workspace through `sandbox_workspace`
 - Optional network isolation with Linux network namespaces and firewall rules
 - Namespace and Linux capability controls
 - Landlock filesystem enforcement when supported by the kernel
@@ -51,8 +51,6 @@ isolation policy in-process by spawning `bubblewrap` directly for each sandbox
 - Python 3.11+
 - `bubblewrap`
 - `iproute2`, `iptables`, and `nftables` when `network.mode: isolated` is used
-- `NET_ADMIN` capability and `net.ipv4.ip_forward=1` on the host when isolated
-  mode uses uplink egress
 - Kernel support for Landlock and seccomp when those features are enabled
 - `nodejs` if JavaScript execution is needed
 
@@ -66,7 +64,7 @@ sudo apt-get install -y bubblewrap iproute2 iptables nftables python3-pip python
 ## Install From Source
 
 ```bash
-cd jiuwenswarm/jiuwenbox
+cd jiuwenavatar/jiuwenbox
 uv venv
 source .venv/bin/activate
 uv sync
@@ -105,7 +103,7 @@ sudo env \
 Build the image:
 
 ```bash
-cd jiuwenswarm/jiuwenbox/scripts
+cd jiuwenavatar/jiuwenbox/scripts
 sudo ./build_docker.sh
 ```
 
@@ -249,7 +247,7 @@ present:
 # CLI flag (recommended)
 sudo ./run_docker.sh --save-logs /tmp/jiuwenbox-logs
 
-# Equivalent env-var form
+# Equivalent env-var form (kept for backward compatibility)
 sudo env JIUWENBOX_SAVE_LOGS_HOST_DIR=/tmp/jiuwenbox-logs ./run_docker.sh
 
 ls /tmp/jiuwenbox-logs
@@ -267,157 +265,34 @@ ls /tmp/jiuwenbox-logs
 The server loads one static default policy at startup. Policy dynamic update is
 not enabled.
 
-### Field Reference
+Important fields:
 
-#### Top-level fields
+- `sandbox_workspace`
+  - Host directory used for server-managed sandbox backing storage.
+  - The value must be absolute after `~` and environment variables are expanded.
+- `filesystem_policy.directories`
+  - Directories created by the server and bound into each sandbox for its
+    lifecycle.
+- `filesystem_policy.read_only`
+  - Sandbox-visible paths granted read-only access. These entries do not mount
+    host paths by themselves.
+- `filesystem_policy.read_write`
+  - Sandbox-visible paths granted read-write access. Use `directories` or
+    `bind_mounts` to make the paths exist inside the sandbox.
+- `filesystem_policy.bind_mounts`
+  - Explicit host-to-sandbox bind mounts.
+- `filesystem_policy.device`
+  - Explicit device nodes exposed inside the sandbox with `bwrap --dev-bind`.
 
-| Field | Default | Notes |
-| --- | --- | --- |
-| `version` | `1` | Policy schema version. Only `1` is supported today. |
-| `name` | `"default"` | Human-readable name shown by the policy API. |
-| `environment` | `{}` | Environment variables injected into every process inside the sandbox. |
+Path fields support shell-style expansion such as `~` and environment
+variables.
 
-#### `filesystem_policy`
-
-| Field | Notes |
-| --- | --- |
-| `directories` | Directories created by the server and bound into the sandbox for its lifecycle. Each entry may be a `"/path"` string or a `{ path, permissions }` object (`permissions` is octal, e.g. `"0755"`). |
-| `files` | Empty files created by the server and bound into the sandbox. Same shape as `directories`, with optional `permissions`. |
-| `read_only` | Sandbox-visible paths granted read-only access. These entries do not mount host paths by themselves; pair them with `bind_mounts` / `directories`. |
-| `read_write` | Sandbox-visible paths granted read-write access. Use `directories` or `bind_mounts` to make the paths exist inside the sandbox. |
-| `bind_mounts` | Explicit host-to-sandbox bind mounts with `host_path`, `sandbox_path`, and `mode` (`ro` / `rw`). `host_path` cannot be the literal `"*"`. |
-| `bind_root_entries` | Bind every **first-level** child under `host_root` to `sandbox_path/{name}`. Supports `mode`, `include_hidden` (hidden entries excluded by default), and `exclude` (fnmatch globs). Useful for bulk-mounting immediate children of `/usr` and similar trees. |
-| `device` | Device nodes exposed inside the sandbox with `bwrap --dev-bind`; each item has `host_path` and `sandbox_path`. |
-
-#### `process`
-
-| Field | Default | Notes |
-| --- | --- | --- |
-| `run_as_user` | `sandbox` | User name for sandbox processes. Falls back to nobody-style UIDs when unresolved. |
-| `run_as_group` | `sandbox` | Group name for sandbox processes. Falls back to nobody-style GIDs when unresolved. |
-
-#### `namespace`
-
-Controls Linux namespaces created by `bubblewrap`. Each field is `true` (create new) or `false` (reuse current):
-
-| Field | Default | Notes |
-| --- | --- | --- |
-| `user` | `true` | User namespace. |
-| `pid` | `true` | PID namespace. |
-| `ipc` | `true` | IPC namespace. |
-| `cgroup` | `true` | Cgroup namespace. |
-| `uts` | `true` | UTS (hostname) namespace. |
-
-#### `capabilities`
-
-| Field | Default | Notes |
-| --- | --- | --- |
-| `add` | `[]` | Extra capabilities to grant, e.g. `["CAP_NET_RAW"]` or `["NET_RAW"]`. |
-| `drop` | `[]` | Capabilities to drop. `"ALL"` drops every capability when bubblewrap supports it. |
-
-#### `landlock`
-
-| Field | Default | Notes |
-| --- | --- | --- |
-| `compatibility` | `best_effort` | `disabled`: do not apply Landlock; `best_effort`: apply when supported, otherwise continue; `hard_requirement`: fail sandbox startup if Landlock is unavailable. |
-
-#### `syscall`
-
-Per-architecture seccomp syscall block lists:
-
-| Field | Notes |
-| --- | --- |
-| `x86_64.blocked` | Syscall names blocked on x86_64, e.g. `ptrace`, `mount`, `bpf`. Empty means no extra blocking. |
-| `arm64.blocked` | Syscall names blocked on arm64/aarch64. |
-
-#### `network`
-
-Outbound (`egress`) and inbound (`ingress`) traffic rules. **Only enforced when `mode` is `isolated`**; in `host` mode these rules are not installed inside the sandbox.
-
-**`mode`**
-
-| Mode | Behavior |
-| --- | --- |
-| `isolated` (default) | Creates a dedicated network namespace per sandbox (`jbx-{sandbox_id}`), connects it to the host default route via a veth uplink, and installs `egress` / `ingress` iptables rules inside the sandbox netns. |
-| `host` | Sandbox processes share the host network namespace. **No** egress/ingress firewall rules are installed inside the sandbox, so `blocked_ips`, `blocked_domains`, and similar fields have no effect. In host mode, only the jiuwenbox management port (default 8321) is protected via `uid-owner` iptables rules. |
-
-For intranet deployments that need egress restrictions (for example `blocked_ips` to block RFC1918 addresses), use `isolated` mode with `uplink` configured. Do not rely on `host` mode for egress enforcement.
-
-**`uplink`** (`isolated` mode only)
-
-Each sandbox gets a veth pair (`jwbH{hash}` / `jwbS{hash}`), an address, a default route, and optional NAT through the host.
-
-| Field | Default | Notes |
-| --- | --- | --- |
-| `subnet` | `""` (auto-select) | IPv4 CIDR pool for the uplink. When empty, jiuwenbox scans private pools (`100.64.0.0/10`, focused `10.200.x/16` ranges, `172.30.0.0/16`, `172.31.0.0/16`, `192.168.240.0/20`, then `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) and allocates a `/30` block that does not overlap any IPv4 route (`ip route show table all`). When set, the value is treated as an address pool and a free `/30` is chosen inside it. |
-| `nat` | `true` | Whether to MASQUERADE uplink traffic on the host side. Usually required in intranet deployments so sandboxes can reach external destinations through the host default route. |
-| `interface` | `""` (auto-detect) | Egress interface name. When empty, jiuwenbox auto-detects the interface used by the host default route. |
-
-**`egress` / `ingress`**
-
-| Field | Notes |
-| --- | --- |
-| `default` | `allow`: permit traffic unless it matches a `blocked_*` rule; `deny`: block traffic unless it matches an `allowed_*` rule. |
-| `blocked_ips` / `allowed_ips` | CIDR-based IP rules applied to the sandbox netns OUTPUT / INPUT chains. `blocked_*` takes precedence over `allowed_*`. |
-| `blocked_domains` / `allowed_domains` | Domain rules resolved via DNS and applied to the resolved IPs. |
-| `blocked_ports` / `allowed_ports` | TCP port rules. |
-
-iptables rules live in the sandbox netns (`jbx-{sandbox_id}`), not in the container or host default netns. When debugging egress blocks, inspect rules inside the corresponding netns:
-
-```bash
-ip netns list
-ip netns exec jbx-<sandbox_id> iptables -L OUTPUT -n
-```
-
-Docker deployments using `isolated` + uplink need `net.ipv4.ip_forward=1` and
-`NET_ADMIN`; `run_docker.sh` already passes both. Grant the same privileges if
-you run `docker run` manually.
-
-#### `cgroup`
-
-Optional per-sandbox cgroup resource limits. All three fields default to `null`
-(no limit). When every field is empty or the `cgroup` block is omitted,
-jiuwenbox skips cgroup setup so the default policy still runs on hosts without
-a writable cgroup tree.
-
-| Field | Format | Notes |
-| --- | --- | --- |
-| `memory_max` | Integer bytes or a unit string (e.g. `"256M"`, `"1G"`) | Memory cap. |
-| `cpu_max` | Fractional cores (e.g. `0.5`) or a `"quota_us period_us"` pair (e.g. `"50000 100000"`) | CPU quota. |
-| `pids_max` | Positive integer | Process/thread cap. |
-
-Cgroup v2 is preferred; v1 is used as a fallback. If at least one field is
-non-null and neither backend is writable, sandbox creation fails.
-
-#### `timeout`
-
-jiuwenbox **server-side** idle sandbox reaping. **Only the root policy loaded
-at server startup takes effect**; the same fields on per-sandbox policies do
-not affect isolation and are returned for display only.
-
-| Field | Default | Notes |
-| --- | --- | --- |
-| `idle_timeout` | `null` (disabled) | Maximum idle duration in seconds. `null` / `0` / negative disables reaping. Idle means time since the last exec / file IO / list-dir API call; `get_sandbox` / `list_sandboxes` / `get_logs` do not refresh the timer. |
-| `idle_check_interval` | `60` | Reaper poll interval in seconds. Must be `> 0`. |
-
-#### `inference_privacy_proxies`
-
-Inference privacy proxy settings. `listen_port: 0` (default) disables the
-proxy; when enabled, set both `listen_host` (IP address) and
-`listen_port > 0`. `routes` defines per-`path_prefix` forwarding targets and
-API key injection. See [Inference Privacy Proxy](#inference-privacy-proxy)
-below.
-
-If the policy contains only `version` / `name` /
-`inference_privacy_proxies` and `listen_port > 0`, jiuwenbox enters
-proxy-only mode (skips the sandbox subsystem). See
-[`src/jiuwenbox/configs/inference-policy.yaml`](src/jiuwenbox/configs/inference-policy.yaml).
-
-### Minimal example
+Minimal example:
 
 ```yaml
 version: 1
 name: "example"
+sandbox_workspace: "/sandbox"
 
 filesystem_policy:
   directories:
@@ -506,9 +381,6 @@ syscall:
 
 network:
   mode: isolated
-  uplink:
-    nat: true
-    interface: ""
   egress:
     default: allow
     allowed_domains: []
@@ -535,9 +407,9 @@ network:
       - 22
 ```
 
-## Enabling jiuwenbox from jiuwenswarm's config file
+## Enabling jiuwenbox from jiuwenavatar's config file
 
-jiuwenswarm decides **whether the sandbox is on, which jiuwenbox to talk to, whether to spawn its own jiuwenbox subprocess, and which policy file to use** via the `sandbox` section of its `config.yaml`. The TUI's `/sandbox` command writes back to the same section, so you can also pre-populate it by hand.
+jiuwenavatar decides **whether the sandbox is on, which jiuwenbox to talk to, whether to spawn its own jiuwenbox subprocess, and which policy file to use** via the `sandbox` section of its `config.yaml`. The TUI's `/sandbox` command writes back to the same section, so you can also pre-populate it by hand.
 
 ### Configuration schema
 
@@ -566,7 +438,7 @@ Field reference:
 | Field | Values | Default | Notes |
 | --- | --- | --- | --- |
 | `sandbox.url` | URL string | `http://127.0.0.1:8321` | jiuwenbox management API endpoint. TCP: `http://host:port`; UDS: `unix:///abs/socket/path` (mirrors `JIUWENBOX_LISTEN`). |
-| `sandbox.type` | string | `jiuwenbox` | Sandbox provider name. Currently jiuwenswarm only wires up `jiuwenbox`. |
+| `sandbox.type` | string | `jiuwenbox` | Sandbox provider name. Currently jiuwenavatar only wires up `jiuwenbox`. |
 | `sandbox.startup_mode` | `internal` / `external` | `internal` | `internal`: agent-server spawns `jiuwenbox-server` at boot and persists the effective `url` (auto-picks a free port if the configured one is busy). `external`: agent-server never touches jiuwenbox; you must start it yourself per the top of this README. |
 | `sandbox.policy_file` | filename or path | `code-agent-policy.yaml` | Bare filename → resolved relative to `jiuwenbox/configs/`; otherwise expanded (`~`, `$VAR`) and used verbatim. **Only honored under `startup_mode=internal`**; in `external` mode the policy is chosen by whoever started jiuwenbox-server (via `JIUWENBOX_DEFAULT_POLICY_PATH`). |
 | `sandbox.preserve_file_sharing_mode` | `mount` | `mount` | Intrinsic files (`AGENT.md` etc.) and `project_dir` are bind-mounted, with `project_dir/config/config.yaml` auto-added to `deny_write`. Writing any other value is rejected. |
@@ -597,7 +469,7 @@ At boot the agent-server will:
 
 #### Shape B: `startup_mode: external` (you start jiuwenbox-server yourself)
 
-Good when jiuwenbox lives on a different host / container, or when jiuwenswarm should never escalate to root. Example:
+Good when jiuwenbox lives on a different host / container, or when jiuwenavatar should never escalate to root. Example:
 
 ```yaml
 sandbox:
@@ -609,56 +481,7 @@ sandbox:
 
 Under this mode agent-server **does not** try to spawn jiuwenbox, and `sandbox.policy_file` has **no effect** (the policy is whatever you passed to `jiuwenbox-server` via `JIUWENBOX_DEFAULT_POLICY_PATH`). See [`Start The Server`](#start-the-server) and [`Unix Domain Socket Deployment`](#unix-domain-socket-deployment) above for how to start jiuwenbox-server in TCP or UDS mode.
 
-For cross-host setups, the jiuwenbox host has to be able to reach jiuwenswarm's intrinsic agent files on the same host paths: `preserve_file_sharing_mode` is now fixed to `mount`, so jiuwenswarm bind-mounts the intrinsic files (`AGENT.md`, `HEARTBEAT.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, `memory/daily_memory/`) and `project_dir` into the sandbox. Make the relevant directories visible on the jiuwenbox machine (via shared filesystem, container volume, etc.) and confirm the policy allows writes into them (the bundled `jiuwenbox/configs/code-agent-policy.yaml` already does).
-
-
-## Remote MCP
-
-JiuwenBox supports three access modes: **REST API**, **CLI**, and **remote MCP**.
-
-The MCP endpoint is `/mcp` (Streamable HTTP transport). The current MCP tool is
-`sandbox_run_command`, which executes a command inside a JiuwenBox sandbox and
-returns the result.
-
-### Quick start
-
-```bash
-JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
-python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
-```
-
-### OpenCode configuration
-
-```json
-{
-  "mcpServers": {
-    "jiuwenbox": {
-      "url": "http://YOUR_HOST:8321/mcp",
-      "type": "remote",
-      "enabled": true
-    }
-  }
-}
-```
-
-### External IP deployment
-
-When JiuwenBox is deployed on an external IP (not `localhost` / `127.0.0.1`),
-set `JIUWENBOX_MCP_ALLOWED_HOSTS` to allow the client host:
-
-```bash
-JIUWENBOX_MCP_ALLOWED_HOSTS=10.0.0.5,10.0.0.5:8321 \
-JIUWENBOX_POLICY_PATH=/path/to/default-policy.yaml \
-python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
-```
-
-### Notes
-
-- A plain `GET /mcp` may return **406 Not Acceptable** because the endpoint
-  expects MCP Streamable HTTP protocol frames. Use a proper MCP client to
-  interact with it.
-- MCP enables clients to call JiuwenBox, but does **not** mean all commands
-  must go through a sandbox. Clients decide which commands to route via MCP.
+For cross-host setups, the jiuwenbox host has to be able to reach jiuwenavatar's intrinsic agent files on the same host paths: `preserve_file_sharing_mode` is now fixed to `mount`, so jiuwenavatar bind-mounts the intrinsic files (`AGENT.md`, `HEARTBEAT.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, `memory/daily_memory/`) and `project_dir` into the sandbox. Make the relevant directories visible on the jiuwenbox machine (via shared filesystem, container volume, etc.) and confirm the policy allows writes into them (the bundled `jiuwenbox/configs/code-agent-policy.yaml` already does).
 
 
 ## Inference Privacy Proxy
@@ -748,7 +571,7 @@ Client request:  POST http://127.0.0.1:8322/custom/v1/chat/completions -H "Autho
 Proxy forwards:  POST http://192.168.1.100:9000/v1/chat/completions    -H "Authorization: Bearer sk_sandbox_managed_custom_key"
 ```
 
-#### jiuwenswarm Configuration Example
+#### jiuwenavatar Configuration Example
 
 | Config    | Old Value                     | New Value                          |
 | --------- | ----------------------------- | ---------------------------------- |
@@ -781,30 +604,11 @@ flag to maintain in sync:
 selected transport (TCP with `JIUWENBOX_LISTEN=http://0.0.0.0:8321` or a
 custom port, UDS with `JIUWENBOX_LISTEN=unix:///...`).
 
-Run specific test cases:
+Run specific test-case:
 
 ```bash
-python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_allows_external_http_requests -s --server-endpoint 127.0.0.1:8321
-python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_blocked_ip_rejects_egress -s --server-endpoint 127.0.0.1:8321
+python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_blocks_http_requests -s --server-endpoint 127.0.0.1:8321
 ```
-
-### MCP Integration Tests
-
-`test_mcp_default.py` exercises the `/mcp` Streamable HTTP endpoint and the
-`sandbox_run_command` MCP tool. It is included automatically when running
-`./tests/test.sh default`, or can be run standalone:
-
-```bash
-# TCP
-python3 -m pytest tests/integration/test_mcp_default.py -v --server-endpoint 127.0.0.1:8321
-
-# UDS
-python3 -m pytest tests/integration/test_mcp_default.py -v --server-endpoint=unix:///tmp/jiuwenbox.sock
-```
-
-The MCP tests open a real MCP client session, run commands inside sandboxes,
-and verify sandbox auto-creation/reuse/deletion, stdin/env/workdir forwarding,
-command failure propagation, timeout clamping, and concurrent sessions.
 
 ### Performance Tests
 
@@ -865,15 +669,11 @@ you can also run it as `python -m jiuwenbox.cli.jiuwenbox`.
 jiuwenbox health
 
 # Sandbox lifecycle
-ID=$(jiuwenbox sandbox create | jq -r .id)
+ID=$(jiuwenbox sandbox create --output plain)
 jiuwenbox sandbox exec "$ID" -- python3 -c 'print("hi")'
-JOB=$(jiuwenbox sandbox bg-exec "$ID" --job-id http-srv -- python3 -m http.server 18080 | jq -r .job_id)
-jiuwenbox sandbox bg-get "$ID" "$JOB"
-jiuwenbox sandbox bg-list "$ID"
-jiuwenbox sandbox bg-kill "$ID" "$JOB"
 jiuwenbox sandbox upload "$ID" ./data.csv /tmp/data.csv
 jiuwenbox sandbox download "$ID" /tmp/result.json - | jq .
-jiuwenbox sandbox ls
+jiuwenbox sandbox ls --output table
 jiuwenbox sandbox rm "$ID" --yes
 
 # Policy
@@ -890,14 +690,14 @@ Global flags:
 | --- | --- | --- | --- |
 | `--base-url` | `http://127.0.0.1:8321` | `JIUWENBOX_URL` | Server endpoint. Accepts `http://host:port` or `unix:///abs/socket/path` |
 | `--timeout` | `30` | `JIUWENBOX_TIMEOUT` | HTTP timeout seconds |
+| `--output / -o` | `json` | – | `json` \| `table` \| `plain` |
 | `--verbose / -v` | off | – | Debug logging on stderr |
 | `--no-color` | off | `NO_COLOR` | Disable ANSI colors on stderr |
 
 Exit codes: `0` success / sandbox exec returned 0, `1` HTTP 4xx/5xx, `2`
-connection failure, `3` local argument or file error, or `sandbox bg-get` /
-`sandbox bg-kill` when the job is missing (404), `130` Ctrl+C; the
+connection failure, `3` local argument or file error, `130` Ctrl+C; the
 `sandbox exec` subcommand transparently propagates the in-sandbox process
-exit code; `sandbox bg-exec` returns `3` when `started=false`.
+exit code.
 
 ## License
 

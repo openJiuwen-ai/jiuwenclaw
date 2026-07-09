@@ -1,19 +1,18 @@
 import json
 import time
 
-from jiuwenswarm.server.runtime.session import session_history
+from jiuwenavatar.server.runtime.session import session_history
 
 
-def _read_history_file(session_id):
+def _read_history_file(path):
     deadline = time.time() + 5
     while time.time() < deadline:
-        path = session_history.get_write_history_path(session_id)
         if path.exists():
-            data = session_history.load_history_records(session_id)
+            data = json.loads(path.read_text(encoding="utf-8"))
             if len(data) >= 2:
                 return data
         time.sleep(0.05)
-    raise AssertionError(f"history file was not written for session: {session_id}")
+    raise AssertionError(f"history file was not written: {path}")
 
 
 def test_append_compact_history_records_writes_boundary_and_transcript_summary(tmp_path, monkeypatch):
@@ -30,7 +29,7 @@ def test_append_compact_history_records_writes_boundary_and_transcript_summary(t
         mode="agent.plan",
     )
 
-    data = _read_history_file("s1")
+    data = _read_history_file(tmp_path / "s1" / "history.json")
 
     assert [item["event_type"] for item in data] == [
         "context.compact_boundary",

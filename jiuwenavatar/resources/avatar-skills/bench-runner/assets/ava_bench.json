@@ -1,0 +1,259 @@
+{
+  "schema_version": "1.5.0",
+  "schema_id": "agent_pr_relative_score.six_stage.v2",
+  "description": "以基准 Agent PR 为 1.0，对比另一 Agent PR；适用于 Aidlc 流水线产出（含 doc/<module>/ 与 review）。若提供 shared_context.issue_url，表示两侧 PR 旨在解决该 Issue，评测须将 Issue 实际内容（标题、描述、验收标准等）纳入需求参照，并与 requirements.md 对照。",
+
+  "placeholders": {
+    "_note": "由 scripts/resolve_bench_context.py 或 Agent 替换；勿手写反斜杠转义",
+    "{repo_root}": "解析后的 Git 仓库根（inputs.repo_root）",
+    "{skills_root}": "Aidlc skills 目录（inputs.paths.skills_root 或自动推断）",
+    "{module}": "baseline/candidate.module（按评测侧）",
+    "{analysis_type}": "shared_context.analysis_type；Bug|Feature|Refactor|Docs"
+  },
+
+  "inputs": {
+    "baseline": {
+      "label": "agent_a",
+      "pr_url": "",
+      "head_ref": "",
+      "module": "",
+      "analysis_type": ""
+    },
+    "candidate": {
+      "label": "agent_b",
+      "pr_url": "",
+      "head_ref": "",
+      "module": "",
+      "analysis_type": ""
+    },
+    "repo_root": {
+      "_note": "name 与 path 至少填其一。仅 name：经 gitcode-repo 配置解析 local_repo.path（查找顺序同 gitcode-repo/config_loader）。两者同填时以 path 为准并记录 notes。解析：python scripts/resolve_repo_root.py --bench <file>",
+      "name": "",
+      "path": "",
+      "gitcode_config": ""
+    },
+    "paths": {
+      "_note": "留空则自动推断：skills_root 为 bench-runner 的上级 skills/；bench_runner_root 为本 skill 目录",
+      "skills_root": "",
+      "bench_runner_root": ""
+    },
+    "shared_context": {
+      "issue_url": "",
+      "issue_summary": "可选；人工需求摘要，非评分文件。与 issue_url 同时存在时，以 Issue 原文为主、本字段为辅",
+      "analysis_type": "",
+      "_note_analysis_type": "G1 必填；与 requirements.md 中「本次分析类型：…」一致。若填写则覆盖 baseline/candidate.analysis_type",
+      "same_issue_scope": true,
+      "_note_same_issue_scope": "为 true 时表示两侧 PR 针对同一 Issue，评分时须对照 issue_url 与实现范围"
+    }
+  },
+
+  "scoring_policy": {
+    "baseline": 1.0,
+    "scale": { "min": 0, "max": 10 },
+    "major_weight": "1/6 per stage (S1–S6)",
+    "sub_relative": "candidate_absolute / baseline_absolute",
+    "sub_relative_cap": 2.0,
+    "edge_cases": {
+      "both_zero": 1.0,
+      "baseline_zero_candidate_positive": 2.0,
+      "baseline_positive_candidate_zero": 0.0
+    },
+    "major_relative": "sum(sub.weight * sub.relative)",
+    "overall_relative": "sum(major.weight * major.relative)"
+  },
+
+  "doc_artifacts": {
+    "requirements": "doc/<module>/requirements.md",
+    "design": "doc/<module>/design.md",
+    "dev_plan": "doc/<module>/dev_plan.md",
+    "test_plan": "doc/<module>/test_plan.md",
+    "review": "doc/<module>/review.md"
+  },
+
+  "dimensions": [
+    {
+      "id": "S1",
+      "name": "需求分析",
+      "weight": 0.1666666667,
+      "aligns_to": ["G1", "dev-analyzer"],
+      "evidence": ["requirements.md", "Issue 正文（issue_url 所指向，若已提供）", "Issue/PR 描述", "check_requirements.py"],
+      "subpoints": [
+        {
+          "id": "S1.1",
+          "name": "需求文档质量",
+          "weight": 0.35,
+          "rubric": "requirements 结构合规、类型一致、验收标准清晰可测"
+        },
+        {
+          "id": "S1.2",
+          "name": "需求覆盖与理解",
+          "weight": 0.40,
+          "rubric": "覆盖 Issue 要点；代码/测试与 requirements 验收项一致；根因层级判断与证据一致"
+        },
+        {
+          "id": "S1.3",
+          "name": "边界与风险识别",
+          "weight": 0.25,
+          "rubric": "异常/边界/非功能需求在 requirements 与实现中均有体现；机制类风险有识别"
+        }
+      ]
+    },
+    {
+      "id": "S2",
+      "name": "功能设计",
+      "weight": 0.1666666667,
+      "aligns_to": ["G2", "dev-designer"],
+      "evidence": ["design.md", "check_design.py", "diff 架构"],
+      "subpoints": [
+        {
+          "id": "S2.1",
+          "name": "设计文档质量",
+          "weight": 0.30,
+          "rubric": "design 章节合规、与 requirements 追溯清晰"
+        },
+        {
+          "id": "S2.2",
+          "name": "方案合理性",
+          "weight": 0.40,
+          "rubric": "方案能覆盖需求；模块/接口/数据模型合理；方案深度与根因层级匹配"
+        },
+        {
+          "id": "S2.3",
+          "name": "实现与设计一致",
+          "weight": 0.30,
+          "rubric": "代码 diff 符合 design；偏离有说明且可接受；无 L2/L3 根因被 L0 修补替代"
+        }
+      ]
+    },
+    {
+      "id": "S3",
+      "name": "任务规划",
+      "weight": 0.1666666667,
+      "aligns_to": ["G3", "dev-planner"],
+      "evidence": ["dev_plan.md", "test_plan.md", "check_plan.py"],
+      "subpoints": [
+        {
+          "id": "S3.1",
+          "name": "计划文档质量",
+          "weight": 0.30,
+          "rubric": "dev/test plan 结构合规、任务可执行、与 design 对齐；基础设施任务顺序合理"
+        },
+        {
+          "id": "S3.2",
+          "name": "计划执行完成度",
+          "weight": 0.45,
+          "rubric": "scope 内 checklist 真实勾选；coder/tester verify 可过；机制测试任务非空"
+        },
+        {
+          "id": "S3.3",
+          "name": "变更组织与粒度",
+          "weight": 0.25,
+          "rubric": "提交与 diff 便于审查；交付步骤完整"
+        }
+      ]
+    },
+    {
+      "id": "S4",
+      "name": "代码编写",
+      "weight": 0.1666666667,
+      "aligns_to": ["G4", "dev-coder"],
+      "evidence": ["源码 diff", "dev_plan 勾选", "review must_fix"],
+      "subpoints": [
+        {
+          "id": "S4.1",
+          "name": "正确性与鲁棒性",
+          "weight": 0.40,
+          "rubric": "逻辑正确；无未关闭 must_fix 级缺陷；机制行为修复不被字段补丁掩盖"
+        },
+        {
+          "id": "S4.2",
+          "name": "可维护性",
+          "weight": 0.30,
+          "rubric": "结构清晰、符合仓库惯例、改动必要且克制"
+        },
+        {
+          "id": "S4.3",
+          "name": "安全与性能",
+          "weight": 0.30,
+          "rubric": "review security 无阻塞；热路径无明显问题"
+        }
+      ]
+    },
+    {
+      "id": "S5",
+      "name": "代码测试",
+      "weight": 0.1666666667,
+      "aligns_to": ["G5", "dev-tester"],
+      "evidence": ["test_plan.md", "测试 diff", "CI", "tester_plan_check.py"],
+      "subpoints": [
+        {
+          "id": "S5.1",
+          "name": "测试计划执行",
+          "weight": 0.35,
+          "rubric": "test_plan scope 完成；关键/异常路径有覆盖"
+        },
+        {
+          "id": "S5.2",
+          "name": "测试质量",
+          "weight": 0.35,
+          "rubric": "断言有效、能暴露回归；含机制测试证据而非仅字段/字符串断言"
+        },
+        {
+          "id": "S5.3",
+          "name": "可复现验证",
+          "weight": 0.30,
+          "rubric": "CI/命令可复现；MUST-FIX 后回归闭环"
+        }
+      ]
+    },
+    {
+      "id": "S6",
+      "name": "检视合规",
+      "weight": 0.1666666667,
+      "aligns_to": ["G6", "G7", "dev-reviewer"],
+      "evidence": ["review.md", "PR body"],
+      "subpoints": [
+        {
+          "id": "S6.1",
+          "name": "审查结论与闭环",
+          "weight": 0.40,
+          "rubric": "gate_verdict 可合并；must_fix 已关闭或风险已披露"
+        },
+        {
+          "id": "S6.2",
+          "name": "PR 交付规范",
+          "weight": 0.30,
+          "rubric": "摘要/验证/审查要点完整；head/base 合规"
+        },
+        {
+          "id": "S6.3",
+          "name": "文档与代码一致",
+          "weight": 0.30,
+          "rubric": "doc 链与 diff/测试一致；layer_alignment 与 patch_risk 结论可追溯"
+        }
+      ]
+    }
+  ],
+
+  "optional_gate_checks": {
+    "G1": "python {skills_root}/dev-analyzer/scripts/check_requirements.py --module {module} --type {analysis_type} --repo-root {repo_root}",
+    "G2": "python {skills_root}/dev-designer/scripts/check_design.py --module {module} --repo-root {repo_root}",
+    "G3_dev": "python {skills_root}/dev-planner/scripts/check_plan.py --module {module} --plan dev --repo-root {repo_root}",
+    "G3_test": "python {skills_root}/dev-planner/scripts/check_plan.py --module {module} --plan test --repo-root {repo_root}",
+    "plan_status": "python {skills_root}/dev-reviewer/scripts/reviewer_plan_check.py --module {module} --repo-root {repo_root} status --plan both --format json",
+    "layer_alignment": "python {skills_root}/dev-reviewer/scripts/layer_alignment_check.py --module {module} --repo-root {repo_root}",
+    "mechanism_coverage": "python {skills_root}/dev-tester/scripts/mechanism_coverage_check.py --module {module} --repo-root {repo_root}"
+  },
+
+  "result_template": {
+    "evaluated_at": "",
+    "scores": {
+      "baseline": { "by_sub": {}, "majors": {}, "overall_absolute": null },
+      "candidate": { "by_sub": {}, "majors": {}, "overall_absolute": null },
+      "relative": { "by_sub": {}, "majors": {}, "overall": null }
+    },
+    "verdict": "better|equal|worse",
+    "_note_verdict": "相对基准侧（baseline=1.0）：better=候选更好，worse=候选更差",
+    "one_line_summary": ""
+  }
+}

@@ -2,7 +2,7 @@
 
 ## 背景
 
-JiuwenSwarm 的 A2UI 是 Web-only 的生成式界面能力。Web channel 具备受控前端运行时：可以解析 `<a2ui-json>` block、通过 `@a2ui/react` 渲染组件、维护 surface/data model/component state，并把点击、选择、表单提交等交互包装为 `a2ui.client_event` 发回后端。
+JiuwenAvatar 的 A2UI 是 Web-only 的生成式界面能力。Web channel 具备受控前端运行时：可以解析 `<a2ui-json>` block、通过 `@a2ui/react` 渲染组件、维护 surface/data model/component state，并把点击、选择、表单提交等交互包装为 `a2ui.client_event` 发回后端。
 
 非 Web channel 不进入 A2UI 链路：不注入 A2UI prompt，不处理 A2UI client event，不执行 A2UI response finalizer，也不做 A2UI 文本 fallback。微信、飞书等 IM channel 继续走普通文本/Markdown 对话流程。
 
@@ -23,7 +23,7 @@ Web channel 具备上述完整客户端能力；IM channel 当前只具备平台
 
 | 方案 | 可行性 | 说明 |
 | --- | --- | --- |
-| 把 `@a2ui/react` renderer 原样运行在微信/飞书客户端内 | 基本不可行 | 微信、飞书原生聊天窗口不会执行 JiuwenSwarm 自带 React bundle，也不会开放任意 DOM/JS 渲染能力。 |
+| 把 `@a2ui/react` renderer 原样运行在微信/飞书客户端内 | 基本不可行 | 微信、飞书原生聊天窗口不会执行 JiuwenAvatar 自带 React bundle，也不会开放任意 DOM/JS 渲染能力。 |
 | 服务端把 A2UI 渲染成图片或 HTML 链接再发到 IM | 局部可行 | 可做只读展示，但交互能力弱；点击、输入、组件状态回传仍要走平台能力或跳转 Web。 |
 | 把 A2UI 语义映射为 IM 平台原生卡片/消息 | 可行但不是搬 renderer | 需要为飞书、微信分别写 adapter，将 A2UI 组件转换成飞书卡片、微信文本/图文/可用消息形态。 |
 
@@ -37,9 +37,9 @@ Web A2UI renderer 依赖浏览器运行环境：
 - action bridge 把用户操作转换成结构化 `a2ui.client_event`。
 - WebSocket hook 把结构化 content 发送回后端。
 
-IM 客户端不是 JiuwenSwarm 可控的浏览器容器。飞书、微信聊天窗口只渲染平台定义的消息类型，例如文本、图片、文件、音视频、飞书 interactive card、微信/iLink 文本 item 等。它们不会加载 JiuwenSwarm Web 前端，也不会执行 `@a2ui/react`。
+IM 客户端不是 JiuwenAvatar 可控的浏览器容器。飞书、微信聊天窗口只渲染平台定义的消息类型，例如文本、图片、文件、音视频、飞书 interactive card、微信/iLink 文本 item 等。它们不会加载 JiuwenAvatar Web 前端，也不会执行 `@a2ui/react`。
 
-所以，“把 Web A2UI renderer 搬到 IM channel”如果指原样复用 React renderer，本质上需要 IM 客户端提供一个可嵌入 Web runtime 的宿主，并允许 JiuwenSwarm 控制渲染和事件回传。普通聊天消息不满足这个条件。
+所以，“把 Web A2UI renderer 搬到 IM channel”如果指原样复用 React renderer，本质上需要 IM 客户端提供一个可嵌入 Web runtime 的宿主，并允许 JiuwenAvatar 控制渲染和事件回传。普通聊天消息不满足这个条件。
 
 ### 优势
 
@@ -50,7 +50,7 @@ IM 客户端不是 JiuwenSwarm 可控的浏览器容器。飞书、微信聊天�
 - 组件能力完整：表单、多选、卡片、数据模型、组件状态、action context 都可按 A2UI 原语运行。
 - 后端链路改动较小：后端仍只产出 A2UI block，客户端承担渲染。
 
-这些收益依赖一个前提：IM 客户端必须能运行 JiuwenSwarm 控制的前端 runtime。现实中这个前提通常不成立。
+这些收益依赖一个前提：IM 客户端必须能运行 JiuwenAvatar 控制的前端 runtime。现实中这个前提通常不成立。
 
 ### 劣势
 
@@ -77,8 +77,8 @@ IM 客户端不是 JiuwenSwarm 可控的浏览器容器。飞书、微信聊天�
 如果目标是“完整支持 A2UI”，需要 IM 客户端支持。这里的“客户端支持”不一定是修改微信/飞书官方客户端源码，这通常不现实；但必须满足以下任一条件：
 
 1. IM 官方客户端原生支持足够表达 A2UI 的消息组件和交互回调。
-2. IM 平台允许在消息中嵌入 JiuwenSwarm 可控的 WebView/小程序/应用页面，并能可靠回传事件。
-3. JiuwenSwarm 提供独立 companion Web 页面，IM 消息只负责打开链接，交互在 Web 页面完成。
+2. IM 平台允许在消息中嵌入 JiuwenAvatar 可控的 WebView/小程序/应用页面，并能可靠回传事件。
+3. JiuwenAvatar 提供独立 companion Web 页面，IM 消息只负责打开链接，交互在 Web 页面完成。
 
 否则，IM channel 只能发送文本、图片、文件或平台有限卡片，不能承载完整 A2UI renderer。
 
@@ -117,6 +117,6 @@ A2UI 的核心在客户端，而不是消息文本。
 2. Feishu channel：保持普通文本/Markdown 流程；如果未来要做平台卡片，应作为独立 Feishu card adapter 设计，不宣称完整 A2UI。
 3. WeChat channel：保持普通文本/Markdown 流程；可增强为编号选择、确认/取消、字段模板回复等“结构化文本交互”，不宣称完整 A2UI。
 4. 其他 IM channel：默认不感知 A2UI；只有当平台原生组件和回调能力足够成熟时，再按平台 adapter 模式局部支持。
-5. 如确需完整 A2UI：在 IM 内发送链接，跳转 JiuwenSwarm Web companion 页面完成交互；IM channel 只承担通知和入口。
+5. 如确需完整 A2UI：在 IM 内发送链接，跳转 JiuwenAvatar Web companion 页面完成交互；IM channel 只承担通知和入口。
 
 这个方向能保留 A2UI 的核心价值，同时避免把第三方 IM 客户端当作可控 Web runtime 使用。

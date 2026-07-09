@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import argparse
-import logging
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TUI_ENTRY = ROOT / "jiuwenswarm" / "channels" / "tui" / "frontend" / "src" / "index.ts"
-OUTPUT_ROOT = ROOT / "packages" / "jiuwenswarm-tui" / "jiuwenswarm_tui" / "resources" / "tui-bin"
+TUI_ENTRY = ROOT / "jiuwenavatar" / "channels" / "tui" / "frontend" / "src" / "index.ts"
+OUTPUT_ROOT = ROOT / "packages" / "jiuwenavatar-tui" / "jiuwenavatar_tui" / "resources" / "tui-bin"
 
 TARGETS = {
     "linux-x64": "bun-linux-x64",
@@ -35,11 +35,11 @@ def current_platform_key() -> str:
         return f"macos-{machine}"
     if system == "windows":
         return f"windows-{machine}"
-    raise ValueError(f"unsupported platform for current target: {system}-{machine}")
+    raise SystemExit(f"unsupported platform for current target: {system}-{machine}")
 
 
 def output_binary_name(platform_key: str) -> str:
-    return "jiuwenswarm-tui.exe" if platform_key.startswith("windows-") else "jiuwenswarm-tui"
+    return "jiuwenavatar-tui.exe" if platform_key.startswith("windows-") else "jiuwenavatar-tui"
 
 
 def resolve_requested_targets(raw: str) -> list[str]:
@@ -51,7 +51,7 @@ def resolve_requested_targets(raw: str) -> list[str]:
     unknown = [value for value in values if value not in TARGETS]
     if unknown:
         valid = ", ".join(["current", "all", *TARGETS.keys()])
-        raise ValueError(f"unknown target(s): {', '.join(unknown)}; valid: {valid}")
+        raise SystemExit(f"unknown target(s): {', '.join(unknown)}; valid: {valid}")
     return values
 
 
@@ -96,7 +96,7 @@ def build_target(platform_key: str) -> Path:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build jiuwenswarm-tui native binaries with Bun.")
+    parser = argparse.ArgumentParser(description="Build jiuwenavatar-tui native binaries with Bun.")
     parser.add_argument(
         "--target",
         default="current",
@@ -110,7 +110,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if shutil.which("bun") is None:
-        raise SystemExit("bun is required to build jiuwenswarm-tui binaries")
+        raise SystemExit("bun is required to build jiuwenavatar-tui binaries")
     if not TUI_ENTRY.exists():
         raise SystemExit(f"CLI entry not found: {TUI_ENTRY}")
 
@@ -123,7 +123,7 @@ def main() -> None:
         built.append(build_target(target))
 
     for path in built:
-        logging.info(path.relative_to(ROOT))
+        print(path.relative_to(ROOT))
 
 
 if __name__ == "__main__":
@@ -131,5 +131,3 @@ if __name__ == "__main__":
         main()
     except subprocess.CalledProcessError as exc:
         raise SystemExit(exc.returncode) from exc
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc

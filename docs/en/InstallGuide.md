@@ -1,12 +1,12 @@
-# JiuwenSwarm install guide
+﻿# JiuwenAvatar install guide
 
-> **Important:** Finishing installation does not mean the app is ready to use. You must complete model configuration first. See [Configuration](https://gitcode.com/openJiuwen/jiuwenswarm/blob/develop/docs/en/Configuration.md) ([Chinese](https://gitcode.com/openJiuwen/jiuwenswarm/blob/develop/docs/zh/%E9%85%8D%E7%BD%AE%E4%BF%A1%E6%81%AF.md)) for model setup.
+> **Important:** Finishing installation does not mean the app is ready to use. You must complete model configuration first. See [Configuration](https://gitcode.com/openJiuwen/jiuwenavatar/blob/develop/docs/en/Configuration.md) ([Chinese](https://gitcode.com/openJiuwen/jiuwenavatar/blob/develop/docs/zh/%E9%85%8D%E7%BD%AE%E4%BF%A1%E6%81%AF.md)) for model setup.
 
 ---
 
 ## Prerequisites
 
-Before installing JiuwenSwarm, make sure your system meets the following requirements:
+Before installing JiuwenAvatar, make sure your system meets the following requirements:
 
 | Dependency | Version | Notes |
 |------------|---------|-------|
@@ -37,80 +37,40 @@ git --version
 
 ## First-time installation
 
-### Option 1: Desktop installer (dmg / exe)
-
-For Windows and macOS users who want a ready-to-run app without setting up Python / Node.js themselves. Download the installer for your platform from the gitcode [Release](https://gitcode.com/openJiuwen/jiuwenswarm/releases) page.
-
-| Platform | Artifact |
-|----------|----------|
-| Windows | `JiuwenSwarm-setup-<version>.exe` |
-| macOS | `JiuwenSwarm-<version>.dmg` |
-
-Releases: https://gitcode.com/openJiuwen/jiuwenswarm/releases
-
-#### 1. macOS: download the dmg with curl (recommended)
-
-> ⚠️ **Important:** A `.dmg` downloaded through a browser gets a macOS quarantine flag (`com.apple.quarantine`). When opened it triggers a Gatekeeper check and may report "damaged and can't be opened" or "can't be verified developer". Downloading from the terminal with `curl` does not add the quarantine flag, so the dmg mounts and installs normally.
-
-```bash
-# Replace <version> with the target version
-curl -L --fail -o JiuwenSwarm-<version>.dmg \
-  https://gitcode.com/openJiuwen/jiuwenswarm/releases/download/JiuwenSwarm<version>/JiuwenSwarm-<version>.dmg
-```
-
-#### 2. Install and first launch
-
-- **macOS**: double-click to mount the dmg, then drag `JiuwenSwarm.app` into `Applications`. You may right-click it in Finder and choose "Open".
-- **Windows**: double-click the downloaded installer (`.exe`) and follow the prompts; it initializes the workspace automatically. For the portable onedir build, run `jiuwenswarm.exe init` once manually.
-
-On first launch the app creates `~/.jiuwenswarm/`. Then follow [Post-start verification](#3-post-start-verification) to finish model configuration.
-
-> Match the version to the actual download link on the Release page. For Windows auto-update behavior, see [Windows auto-update design](WindowsAutoUpdateDesign.md).
-
----
-
-### Option 2: pip install
+### Option 1: pip install
 
 #### 1. Installation steps
 
 ```bash
 # Create a virtual environment (recommended)
-python -m venv jiuwenswarm-env
+python -m venv jiuwenavatar-env
 
 # Activate the virtual environment
 # Windows:
-jiuwenswarm-env\Scripts\activate
+jiuwenavatar-env\Scripts\activate
 # macOS/Linux:
-source jiuwenswarm-env/bin/activate
+source jiuwenavatar-env/bin/activate
 
-# Install JiuwenSwarm
-## Option 1: default install
-pip install jiuwenswarm
-
-## Option 2: use a China mirror (recommended)
-# Tsinghua mirror
-pip install jiuwenswarm -i https://pypi.tuna.tsinghua.edu.cn/simple
-
-# Aliyun mirror
-pip install jiuwenswarm -i https://mirrors.aliyun.com/pypi/simple/
+# Install JiuwenAvatar
+pip install jiuwenavatar
 ```
 
 #### 2. First launch
 
 ```bash
-# Initialize JiuwenSwarm (first run)
-jiuwenswarm-init
-# Start JiuwenSwarm
-jiuwenswarm-start
+# Initialize JiuwenAvatar (first run)
+jiuwenavatar-init
+# Start JiuwenAvatar
+jiuwenavatar-start
 ```
 
-After the first start, the app creates the config directory `~/.jiuwenswarm/`.
+After the first start, the app creates the config directory `~/.jiuwenavatar/`.
 
 #### 3. Post-start verification
 
 After a successful start, verify the installation:
 
-1. **Open the Web UI**: in your browser go to `http://localhost:5173`
+1. **Open the Web UI**: in your browser go to `http://localhost:29173`
 2. **Open configuration**: in the left sidebar choose **Configuration**
 3. **Configure the model**: follow [Configuration](Configuration.md) to set up your model API
 4. **Confirm it works**:
@@ -119,20 +79,20 @@ After a successful start, verify the installation:
 
 ![Example: Web UI connected with a successful verification chat](../assets/images/天气.png)
 
-> 💡 **Tip:** If the Web UI does not load, check `~/.jiuwenswarm/logs/` for errors.
+> 💡 **Tip:** If the Web UI does not load, check `~/.jiuwenavatar/logs/` for errors.
 
 #### 4. Restarting the service
 
-If you closed JiuwenSwarm and want to run it again:
+If you closed JiuwenAvatar and want to run it again:
 
 ```bash
 # Start again
-jiuwenswarm-start
+jiuwenavatar-start
 ```
 
 ---
 
-### Option 3: Install from source (uv)
+### Option 2: Install from source (uv)
 
 #### 1. Environment setup
 
@@ -148,10 +108,10 @@ uv --version
 
 ```bash
 # Clone the repository
-git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
+git clone https://gitcode.com/openJiuwen/jiuwenavatar.git
 
 # Enter project directory
-cd jiuwenswarm
+cd jiuwenavatar
 
 # Create venv and install dependencies with uv
 uv venv
@@ -163,8 +123,8 @@ uv pip install -e .
 > ⚠️ **Important:** With a source (editable) install you must build the front end manually, or startup will fail with `dist directory not found`.
 
 ```bash
-# Enter front-end directory (repo root is jiuwenswarm)
-cd jiuwenswarm/channels/web
+# Enter front-end directory (repo root is jiuwenavatar)
+cd jiuwenavatar/channels/web
 
 # Install front-end dependencies
 npm install
@@ -174,9 +134,9 @@ npm run build
 
 # Copy build output into the user workspace
 # Windows:
-xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
+xcopy /E /I dist %USERPROFILE%\.jiuwenavatar\channels\web\frontend\dist
 # macOS/Linux:
-cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
+cp -r dist ~/.jiuwenavatar/channels/web/frontend/dist
 
 # Back to repo root
 cd ..
@@ -186,7 +146,7 @@ cd ..
 
 - `uv pip install -e .` is an editable install that points at your source tree.
 - `web/dist` is ignored by `.gitignore` and is not shipped in the repo.
-- You must build and copy artifacts to `~/.jiuwenswarm/channels/web/frontend/dist`.
+- You must build and copy artifacts to `~/.jiuwenavatar/channels/web/frontend/dist`.
 
 #### 4. First launch
 
@@ -197,13 +157,13 @@ cd ..
 # macOS/Linux:
 source .venv/bin/activate
 
-# Initialize JiuwenSwarm (first run)
-jiuwenswarm-init
+# Initialize JiuwenAvatar (first run)
+jiuwenavatar-init
 # Start
-jiuwenswarm-start
+jiuwenavatar-start
 ```
 
-#### 5. Post-start verification (same as Option 2)
+#### 5. Post-start verification (same as Option 1)
 
 Use the checklist under [Post-start verification](#3-post-start-verification).
 
@@ -211,12 +171,12 @@ Use the checklist under [Post-start verification](#3-post-start-verification).
 
 ```bash
 # After activating the virtual environment
-jiuwenswarm-start
+jiuwenavatar-start
 ```
 
 ---
 
-### Option 4: Install from source (conda)
+### Option 3: Install from source (conda)
 
 #### 1. Environment setup
 
@@ -232,24 +192,24 @@ conda --version
 
 ```bash
 # Create environment
-conda create -n jiuwenswarm python=3.11
+conda create -n jiuwenavatar python=3.11
 
 # Initialize conda (first time)
 conda init
 # After init, close the window and open a new session before activate
 
 # Activate environment
-conda activate jiuwenswarm
+conda activate jiuwenavatar
 ```
 
 #### 3. Clone and install
 
 ```bash
 # Clone the repository
-git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
+git clone https://gitcode.com/openJiuwen/jiuwenavatar.git
 
 # Enter project directory
-cd jiuwenswarm
+cd jiuwenavatar
 
 # Install dependencies
 pip install -e .
@@ -260,8 +220,8 @@ pip install -e .
 > ⚠️ **Important:** With a source (editable) install you must build the front end manually, or startup will fail with `dist directory not found`.
 
 ```bash
-# Enter front-end directory (repo root is jiuwenswarm)
-cd jiuwenswarm/channels/web
+# Enter front-end directory (repo root is jiuwenavatar)
+cd jiuwenavatar/channels/web
 
 # Install front-end dependencies
 npm install
@@ -271,9 +231,9 @@ npm run build
 
 # Copy build output into the user workspace
 # Windows:
-xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
+xcopy /E /I dist %USERPROFILE%\.jiuwenavatar\channels\web\frontend\dist
 # macOS/Linux:
-cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
+cp -r dist ~/.jiuwenavatar/channels/web/frontend/dist
 
 # Back to repo root
 cd ..
@@ -283,18 +243,18 @@ cd ..
 
 - `pip install -e .` is an editable install that points at your source tree.
 - `web/dist` is ignored by `.gitignore` and is not shipped in the repo.
-- You must build and copy artifacts to `~/.jiuwenswarm/channels/web/frontend/dist`.
+- You must build and copy artifacts to `~/.jiuwenavatar/channels/web/frontend/dist`.
 
 #### 5. First launch
 
 ```bash
-# Initialize JiuwenSwarm (first run)
-jiuwenswarm-init
+# Initialize JiuwenAvatar (first run)
+jiuwenavatar-init
 # Start
-jiuwenswarm-start
+jiuwenavatar-start
 ```
 
-#### 6. Post-start verification (same as Option 2)
+#### 6. Post-start verification (same as Option 1)
 
 Use the checklist under [Post-start verification](#3-post-start-verification).
 
@@ -302,8 +262,8 @@ Use the checklist under [Post-start verification](#3-post-start-verification).
 
 ```bash
 # Activate environment, then start
-conda activate jiuwenswarm
-jiuwenswarm-start
+conda activate jiuwenavatar
+jiuwenavatar-start
 ```
 
 ---
@@ -324,14 +284,14 @@ jiuwenswarm-start
 ```bash
 # Activate your virtual environment
 # Then upgrade
-pip install --upgrade jiuwenswarm
+pip install --upgrade jiuwenavatar
 ```
 
 #### Source install upgrade
 
 ```bash
 # Enter project directory
-cd jiuwenswarm
+cd jiuwenavatar
 
 # Pull latest
 git pull
@@ -340,15 +300,15 @@ git pull
 pip install -e .
 
 # Rebuild the front end (if it was updated)
-cd jiuwenswarm/channels/web
+cd jiuwenavatar/channels/web
 npm install
 npm run build
 
 # Copy build output
 # Windows:
-xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
+xcopy /E /I dist %USERPROFILE%\.jiuwenavatar\channels\web\frontend\dist
 # macOS/Linux:
-cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
+cp -r dist ~/.jiuwenavatar/channels/web/frontend/dist
 
 cd ..
 ```
@@ -365,20 +325,20 @@ cd ..
 
 ```bash
 # Back up the whole config and data directory
-xcopy "%USERPROFILE%\.jiuwenswarm" "%USERPROFILE%\.jiuwenswarm_backup" /E /I
+xcopy "%USERPROFILE%\.jiuwenavatar" "%USERPROFILE%\.jiuwenavatar_backup" /E /I
 
 # Or with PowerShell (recommended)
-Copy-Item -Path "$env:USERPROFILE\.jiuwenswarm" -Destination "$env:USERPROFILE\.jiuwenswarm_backup" -Recurse
+Copy-Item -Path "$env:USERPROFILE\.jiuwenavatar" -Destination "$env:USERPROFILE\.jiuwenavatar_backup" -Recurse
 ```
 
 **macOS/Linux:**
 
 ```bash
 # Back up the whole config and data directory
-cp -r ~/.jiuwenswarm ~/.jiuwenswarm_backup
+cp -r ~/.jiuwenavatar ~/.jiuwenavatar_backup
 
 # Or with rsync (recommended; preserves permissions)
-rsync -av ~/.jiuwenswarm ~/.jiuwenswarm_backup
+rsync -av ~/.jiuwenavatar ~/.jiuwenavatar_backup
 ```
 
 **What to back up:**
@@ -394,11 +354,11 @@ rsync -av ~/.jiuwenswarm ~/.jiuwenswarm_backup
 
 #### 2. Perform the upgrade
 
-Pick the steps that match how you installed JiuwenSwarm:
+Pick the steps that match how you installed JiuwenAvatar:
 
 ##### pip install upgrade
 
-Follow the same steps as [Routine version upgrade – pip install upgrade](#pip-install-upgrade) (activate your virtual environment, then run `pip install --upgrade jiuwenswarm`).
+Follow the same steps as [Routine version upgrade – pip install upgrade](#pip-install-upgrade) (activate your virtual environment, then run `pip install --upgrade jiuwenavatar`).
 
 ##### Source install upgrade
 
@@ -415,7 +375,7 @@ After upgrading, migrate data so config and stores match the new version.
 cat docs/config_template.yaml
 
 # Or read the changelog
-# https://gitcode.com/openJiuwen/jiuwenswarm/blob/develop/docs/CHANGELOG.md
+# https://gitcode.com/openJiuwen/jiuwenavatar/blob/develop/docs/CHANGELOG.md
 ```
 
 ##### Step 2: Migrate configuration
@@ -431,7 +391,7 @@ cat docs/config_template.yaml
 
    ```bash
    # Back up the new default config
-   cp ~/.jiuwenswarm/config/config.yaml ~/.jiuwenswarm/config/config.yaml.new
+   cp ~/.jiuwenavatar/config/config.yaml ~/.jiuwenavatar/config/config.yaml.new
 
    # Restore from backup (use with care)
    # Prefer diff/merge in an editor instead of blind overwrite
@@ -452,20 +412,20 @@ Memory is usually backward compatible; still verify:
 
 ```bash
 # Inspect memory layout
-ls ~/.jiuwenswarm/agent/memory/
+ls ~/.jiuwenavatar/agent/memory/
 
 # If something looks wrong, restore from backup
-cp -r ~/.jiuwenswarm_backup/agent/memory/* ~/.jiuwenswarm/agent/memory/
+cp -r ~/.jiuwenavatar_backup/agent/memory/* ~/.jiuwenavatar/agent/memory/
 ```
 
 ##### Step 4: Verify migration
 
 ```bash
 # Start the service
-jiuwenswarm-start
+jiuwenavatar-start
 
 # Watch logs for config errors
-# Logs: ~/.jiuwenswarm/logs/
+# Logs: ~/.jiuwenavatar/logs/
 ```
 
 **Migration checklist:**
@@ -491,22 +451,22 @@ Install Node.js 18.x or newer.
 ### Q: How do I check the installed version?
 
 ```bash
-jiuwenswarm --version
+jiuwenavatar --version
 ```
 
 ### Q: How do I uninstall?
 
 ```bash
-pip uninstall jiuwenswarm
+pip uninstall jiuwenavatar
 ```
 
 ---
 
 ## Related links
 
-- **Repository:** https://gitcode.com/openJiuwen/jiuwenswarm
-- **Issues:** https://gitcode.com/openJiuwen/jiuwenswarm/issues
-- **Docs:** https://gitcode.com/openJiuwen/jiuwenswarm/tree/develop/docs
+- **Repository:** https://gitcode.com/openJiuwen/jiuwenavatar
+- **Issues:** https://gitcode.com/openJiuwen/jiuwenavatar/issues
+- **Docs:** https://gitcode.com/openJiuwen/jiuwenavatar/tree/develop/docs
 
 ---
 

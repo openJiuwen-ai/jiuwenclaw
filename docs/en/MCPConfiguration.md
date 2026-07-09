@@ -1,6 +1,6 @@
 # MCP Server Configuration
 
-JiuwenSwarm supports connecting to external tool services via MCP (Model Context Protocol). MCP lets the Agent call tools provided by third-party services, extending its capabilities.
+JiuwenAvatar supports connecting to external tool services via MCP (Model Context Protocol). MCP lets the Agent call tools provided by third-party services, extending its capabilities.
 
 ---
 

@@ -38,14 +38,12 @@ cannot reach (or delete) the listener.
 
 Important security notes:
 
-* Sandboxed payloads share the daemon's UID (typically ``nobody``).  The
-  kernel's PID-1 signal protections are not sufficient on every platform,
-  so seccomp additionally blocks ``kill``/``tkill``/``tgkill`` targeting
-  infrastructure PIDs (1/2, process group, or broadcast).  Each user exec
-  also runs in its own session so ``kill(0)`` cannot reach the daemon.
-
-* Box-server shuts the daemon down via the ``shutdown`` IPC command
-  (graceful) or ``SIGKILL`` from outside the namespace (forced).
+* The daemon does **not** install signal handlers. Inside the sandbox's
+  PID namespace the daemon runs as PID 1; the kernel drops signals from
+  other namespace members targeting an init that has not registered a
+  handler, so a sandboxed payload cannot kill the daemon. Box-server
+  shuts the daemon down via the ``shutdown`` IPC command (graceful) or
+  ``SIGKILL`` from outside the namespace (forced).
 
 * Children are spawned via :func:`subprocess.Popen` so the kernel does
   the standard ``fork``/``execve`` pair. The seccomp BPF filter and
@@ -248,9 +246,6 @@ def _handle_exec(conn: socket.socket, header: dict[str, Any], state: DaemonState
             "stderr": subprocess.PIPE,
             "env": merged_env,
             "close_fds": True,
-            # Isolate each exec in its own session so kill(0) from user
-            # code cannot reach the long-running daemon process group.
-            "start_new_session": True,
         }
         if workdir:
             proc_kwargs["cwd"] = workdir

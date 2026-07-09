@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SERVER_IP="${SERVER_IP:-}"
-DEFAULT_TEAM_WORKSPACE="${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}"
+DEFAULT_TEAM_WORKSPACE="${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenavatar/shared_workspace/jiuwen_team}"
 EXPORT_DIR="${EXPORT_DIR:-${DEFAULT_TEAM_WORKSPACE}}"
 MOUNT_POINT="${MOUNT_POINT:-${DEFAULT_TEAM_WORKSPACE}}"
 EXPORT_DIRS=()
@@ -34,7 +34,7 @@ Options:
   --mount-point <path>   Local mount path. Repeatable and must match --export-dir count
 
 Defaults:
-  export/mount path: ${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}
+  export/mount path: ${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenavatar/shared_workspace/jiuwen_team}
 EOF
       exit 0
       ;;

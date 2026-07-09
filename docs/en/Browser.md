@@ -2,7 +2,7 @@
 
 ## 1. Conceptual Overview
 
-Browser tools in JiuwenSwarm enable driving a real Chrome instance for form filling, clicks, uploads, and web tasks. Users first configure Chrome path in the web UI and start the browser service; the system launches an attachable Chrome instance. When needed, the agent connects to and controls this browser.
+Browser tools in JiuwenAvatar enable driving a real Chrome instance for form filling, clicks, uploads, and web tasks. Users first configure Chrome path in the web UI and start the browser service; the system launches an attachable Chrome instance. When needed, the agent connects to and controls this browser.
 
 ### 1.1 Key Capabilities
 
@@ -42,7 +42,7 @@ Where:
 
 ### 2.2 Step 2: Open the browser service panel
 
-1. Open the JiuwenSwarm web UI.
+1. Open the JiuwenAvatar web UI.
 
    ![Browser panel](../assets/images/browser1.png)
 
@@ -237,13 +237,13 @@ The core flow of the current browser tools is as follows:
 In simple terms:
 
 ### Frontend
-- `jiuwenswarm/channels/web/frontend/src/components/BrowserPanel/index.tsx` — path, save, start service.
+- `jiuwenavatar/channels/web/frontend/src/components/BrowserPanel/index.tsx` — path, save, start service.
 
 ### Backend
 - `app.py` — `path.get`, `path.set`, `browser.start`, etc.
-- `jiuwenswarm/agents/harness/common/tools/browser_start_client.py` — Chrome launch from `config.yaml`.
-- `jiuwenswarm/agents/harness/common/tools/browser_tools.py` — MCP client, auto-start wrapper.
-- `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime_mcp_server.py` — MCP server.
+- `jiuwenavatar/agents/harness/common/tools/browser_start_client.py` — Chrome launch from `config.yaml`.
+- `jiuwenavatar/agents/harness/common/tools/browser_tools.py` — MCP client, auto-start wrapper.
+- `jiuwenavatar/agents/harness/common/tools/browser-move/src/playwright_runtime_mcp_server.py` — MCP server.
 - `.../playwright_runtime/runtime.py`, `service.py`, `agents.py`, `config.py` — runtime orchestration.
 
 `UI config → start Chrome → runtime attaches → agent runs tasks`
@@ -252,14 +252,14 @@ In simple terms:
 
 The core code of the browser tools is mainly distributed in the following modules:
 
-- **Tool Management Module**: `jiuwenswarm/agents/harness/common/tools/` is the underlying module that manages all tools in the system. Browser-related tools are mainly implemented under this module.
-- **Frontend Interface Module**: `jiuwenswarm/channels/web/frontend/` is responsible for user interface interaction.
+- **Tool Management Module**: `jiuwenavatar/agents/harness/common/tools/` is the underlying module that manages all tools in the system. Browser-related tools are mainly implemented under this module.
+- **Frontend Interface Module**: `jiuwenavatar/channels/web/frontend/` is responsible for user interface interaction.
 
 Specific file descriptions:
 
 | Module | File Path | Function Description |
 |--------|-----------|----------------------|
-| Frontend Browser Service Panel | `jiuwenswarm/channels/web/frontend/src/components/BrowserPanel/index.tsx` | Responsible for reading path, saving path, triggering "Start browser service" |
+| Frontend Browser Service Panel | `jiuwenavatar/channels/web/frontend/src/components/BrowserPanel/index.tsx` | Responsible for reading path, saving path, triggering "Start browser service" |
 | Backend Application Entry | `app.py` | Provides frontend call entries like `path.get`, `path.set`, `browser.start` |
 | Chrome Startup Script | `tools/browser_start_client.py` | Reads `browser.*` configuration from `config/config.yaml`, starts Chrome with remote debugging capabilities |
 | Browser MCP Access | `tools/browser_tools.py` | Browser MCP wrapper access, automatic startup, client patch, configuration building |

@@ -4,11 +4,10 @@
 
 from pathlib import Path
 
-import pytest
 import yaml
 
-from jiuwenswarm.common.config import resolve_env_vars
-from jiuwenswarm.agents.harness.team.config_loader import load_team_spec_dict, resolve_team_sqlite_db_path
+from jiuwenavatar.common.config import resolve_env_vars
+from jiuwenavatar.agents.harness.team.config_loader import load_team_spec_dict, resolve_team_sqlite_db_path
 
 
 def _wrap_modes_team(team_mapping: dict[str, dict]) -> dict:
@@ -17,7 +16,7 @@ def _wrap_modes_team(team_mapping: dict[str, dict]) -> dict:
 
 def test_load_team_spec_dict_reads_models_defaults_from_repository_config(monkeypatch):
     """Repository config template should provide the default team model from models.defaults."""
-    repo_config = Path(__file__).resolve().parents[3] / "jiuwenswarm" / "resources" / "config.yaml"
+    repo_config = Path(__file__).resolve().parents[3] / "jiuwenavatar" / "resources" / "config.yaml"
     monkeypatch.setenv("API_BASE", "https://example.test/v1")
     monkeypatch.setenv("API_KEY", "sk-test")
     monkeypatch.setenv("MODEL_NAME", "gpt-template")
@@ -144,11 +143,11 @@ def test_load_team_spec_dict_supports_member_specific_agents(monkeypatch, tmp_pa
     }
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_config",
+        "jiuwenavatar.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        "jiuwenavatar.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: fake_agent_teams_home,
     )
 
@@ -213,11 +212,11 @@ def test_load_team_spec_dict_uses_first_team_from_modes_team(monkeypatch, tmp_pa
     }
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_config",
+        "jiuwenavatar.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        "jiuwenavatar.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 
@@ -254,11 +253,11 @@ def test_load_team_spec_dict_fills_default_transport_and_workspace(monkeypatch, 
     }
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_config",
+        "jiuwenavatar.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        "jiuwenavatar.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 
@@ -298,11 +297,11 @@ def test_load_team_spec_dict_defaults_enable_hitt_to_true(monkeypatch, tmp_path)
     }
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_config",
+        "jiuwenavatar.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        "jiuwenavatar.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 
@@ -337,138 +336,17 @@ def test_load_team_spec_dict_preserves_explicit_enable_hitt_false(monkeypatch, t
     }
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_config",
+        "jiuwenavatar.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        "jiuwenavatar.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 
     spec = load_team_spec_dict()
 
     assert spec["enable_hitt"] is False
-
-
-@pytest.mark.skip(reason="enable_swarmflow default injection has been removed")
-def test_load_team_spec_dict_defaults_enable_swarmflow_to_true(monkeypatch, tmp_path):
-    """Missing enable_swarmflow should default to enabled for team mode."""
-    config = {
-        "models": {
-            "default": {
-                "model_client_config": {
-                    "model_name": "gpt-swarmflow-default",
-                    "client_provider": "openai",
-                },
-                "model_config_obj": {},
-            }
-        },
-        **_wrap_modes_team(
-            {
-                "demo_team": {
-                    "team_name": "demo_team",
-                    "agents": {
-                        "leader": {},
-                    },
-                }
-            }
-        ),
-    }
-
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_config",
-        lambda: config,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
-        lambda: tmp_path / ".agent_teams",
-    )
-
-    spec = load_team_spec_dict()
-
-    assert spec["enable_swarmflow"] is True
-
-
-@pytest.mark.skip(reason="enable_swarmflow loader behavior is no longer validated")
-def test_load_team_spec_dict_preserves_explicit_enable_swarmflow_false(monkeypatch, tmp_path):
-    """Explicit enable_swarmflow false should not be overwritten by defaults."""
-    config = {
-        "models": {
-            "default": {
-                "model_client_config": {
-                    "model_name": "gpt-swarmflow-disabled",
-                    "client_provider": "openai",
-                },
-                "model_config_obj": {},
-            }
-        },
-        **_wrap_modes_team(
-            {
-                "demo_team": {
-                    "team_name": "demo_team",
-                    "enable_swarmflow": False,
-                    "agents": {
-                        "leader": {},
-                    },
-                }
-            }
-        ),
-    }
-
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_config",
-        lambda: config,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
-        lambda: tmp_path / ".agent_teams",
-    )
-
-    spec = load_team_spec_dict()
-
-    assert spec["enable_swarmflow"] is False
-
-
-def test_load_team_spec_dict_adds_default_teammate_when_only_leader_configured(monkeypatch, tmp_path):
-    """A leader-only team config still needs a teammate template for dynamic spawns."""
-    config = {
-        "models": {
-            "default": {
-                "model_client_config": {
-                    "model_name": "gpt-role-default",
-                    "client_provider": "openai",
-                },
-                "model_config_obj": {},
-            }
-        },
-        **_wrap_modes_team(
-            {
-                "demo_team": {
-                    "team_name": "demo_team",
-                    "agents": {
-                        "leader": {
-                            "skills": ["team-management"],
-                        },
-                    },
-                }
-            }
-        ),
-    }
-
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_config",
-        lambda: config,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
-        lambda: tmp_path / ".agent_teams",
-    )
-
-    spec = load_team_spec_dict()
-
-    assert set(spec["agents"]) == {"leader", "teammate"}
-    assert spec["agents"]["leader"]["skills"] == ["team-management"]
-    assert "skills" not in spec["agents"]["teammate"]
 
 
 def test_load_team_spec_dict_keeps_role_defaults_when_member_alias_is_added(monkeypatch, tmp_path):
@@ -502,11 +380,11 @@ def test_load_team_spec_dict_keeps_role_defaults_when_member_alias_is_added(monk
     }
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_config",
+        "jiuwenavatar.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        "jiuwenavatar.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 
@@ -547,11 +425,11 @@ def test_load_team_spec_dict_preserves_explicit_empty_skills(monkeypatch, tmp_pa
     }
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_config",
+        "jiuwenavatar.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        "jiuwenavatar.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 
@@ -594,11 +472,11 @@ def test_load_team_spec_dict_no_auto_fill_skills_when_missing(monkeypatch, tmp_p
     }
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_config",
+        "jiuwenavatar.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        "jiuwenavatar.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 
@@ -624,11 +502,11 @@ def test_resolve_team_sqlite_db_path_defaults_to_agent_teams_home(monkeypatch, t
     )
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_config",
+        "jiuwenavatar.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        "jiuwenavatar.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 
@@ -667,11 +545,11 @@ def test_load_team_spec_dict_preserves_arbitrary_team_top_level_fields(monkeypat
     }
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_config",
+        "jiuwenavatar.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
+        "jiuwenavatar.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 

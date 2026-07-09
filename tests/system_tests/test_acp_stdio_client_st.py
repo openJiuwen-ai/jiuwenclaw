@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""System tests for jiuwenswarm.acp (stdio client + CLI smoke entry).
+"""System tests for jiuwenavatar.acp (stdio client + CLI smoke entry).
 
 Writes an inline fake ACP agent script to *tmp_path* per test (no Codex CLI / API keys).
 Modes: echo | error | permission | fs_read
@@ -14,8 +14,8 @@ from textwrap import dedent
 
 import pytest
 
-from jiuwenswarm.acp.cli import _get_spec, _run_once
-from jiuwenswarm.acp.stdio_client import AcpStdioClient
+from jiuwenavatar.acp.cli import _get_spec, _run_once
+from jiuwenavatar.acp.stdio_client import AcpStdioClient
 
 pytestmark = pytest.mark.system
 
@@ -238,7 +238,7 @@ async def test_stdio_client_fs_read_text_file_via_peer_request(
 @pytest.mark.asyncio
 async def test_cli_run_once_uses_config_profile(monkeypatch: pytest.MonkeyPatch, fake_acp_profile: dict) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.acp.cli.get_config",
+        "jiuwenavatar.acp.cli.get_config",
         lambda: {"acp_agents": {"fake": fake_acp_profile}},
     )
 
@@ -254,7 +254,7 @@ async def test_cli_run_once_returns_1_on_chat_failure(
 ) -> None:
     prof = _profile(fake_agent_script, "error")
     monkeypatch.setattr(
-        "jiuwenswarm.acp.cli.get_config",
+        "jiuwenavatar.acp.cli.get_config",
         lambda: {"acp_agents": {"fake": prof}},
     )
 
@@ -263,7 +263,7 @@ async def test_cli_run_once_returns_1_on_chat_failure(
 
 def test_get_spec_returns_none_when_profile_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.acp.cli.get_config",
+        "jiuwenavatar.acp.cli.get_config",
         lambda: {"acp_agents": {}},
     )
 

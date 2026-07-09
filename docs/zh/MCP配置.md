@@ -1,6 +1,6 @@
 # MCP 服务配置
 
-JiuwenSwarm 支持通过 MCP（Model Context Protocol）接入外部工具服务。MCP 使 Agent 可以调用由第三方提供的工具，扩展能力范围。
+JiuwenAvatar 支持通过 MCP（Model Context Protocol）接入外部工具服务。MCP 使 Agent 可以调用由第三方提供的工具，扩展能力范围。
 
 ---
 

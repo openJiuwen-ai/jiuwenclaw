@@ -13,7 +13,7 @@ from unittest import mock
 import pytest
 
 
-# Copy of functions from jiuwenswarm.agentserver.memory.config
+# Copy of functions from jiuwenavatar.agentserver.memory.config
 # to avoid importing modules that trigger logger initialization
 
 def _resolve_env_vars(value: Any) -> Any:

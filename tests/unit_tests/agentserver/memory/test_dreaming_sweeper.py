@@ -27,7 +27,7 @@ from unittest import mock
 import pytest
 
 try:
-    from jiuwenswarm.agents.harness.common.memory.dreaming.sweeper import Sweeper  # noqa: F401
+    from jiuwenavatar.agents.harness.common.memory.dreaming.sweeper import Sweeper  # noqa: F401
     _DREAMING_AVAILABLE = True
 except ImportError:
     _DREAMING_AVAILABLE = False
@@ -35,7 +35,7 @@ except ImportError:
 
 # ===========================================================================
 # Inline copy of the unit under test (pure functions only)
-# Avoid importing jiuwenswarm to dodge import-time side effects
+# Avoid importing jiuwenclaw to dodge import-time side effects
 # ===========================================================================
 
 _MIN_SESSION_ROUNDS = 4
@@ -50,26 +50,15 @@ _MIN_SESSION_AGE_BYPASS_DAYS = 7
 
 # ── parse_history ──
 def _parse_history(session_dir: Path) -> list[dict]:
-    path_jsonl = session_dir / "history.jsonl"
-    path_json = session_dir / "history.json"
-    if path_jsonl.exists():
-        try:
-            data = [
-                json.loads(line)
-                for line in path_jsonl.read_text(encoding="utf-8", errors="replace").splitlines()
-                if line.strip()
-            ]
-        except (OSError, json.JSONDecodeError):
+    path = session_dir / "history.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        if not isinstance(data, list):
             return []
-    else:
-        if not path_json.exists():
-            return []
-        try:
-            data = json.loads(path_json.read_text(encoding="utf-8", errors="replace"))
-            if not isinstance(data, list):
-                return []
-        except (OSError, json.JSONDecodeError):
-            return []
+    except (OSError, json.JSONDecodeError):
+        return []
     
     def _should_keep(entry: dict) -> bool:
         if entry.get("role") == "user":
@@ -158,20 +147,15 @@ def _make_history_entry(role: str, content: str, event_type: str | None = None) 
     return entry
 
 
-def _write_history_json(path: Path, entries) -> None:
+def _write_history_json(path: Path, entries: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.suffix == ".jsonl":
-        payload = "\n".join(json.dumps(item, ensure_ascii=False) for item in entries)
-        if payload:
-            payload += "\n"
-        path.write_text(payload, encoding="utf-8")
-        return
     path.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
 
 
 # ===========================================================================
 # DreamingConfig.load()
 # ===========================================================================
+
 class TestDreamingConfigLoad:
     """Test DreamingConfig.load() with mock config."""
 
@@ -554,12 +538,12 @@ class TestScanNewSessions:
     def _make_session(sessions_root: Path, sid: str, entries: list[dict], age_delta: float = 0):
         session_dir = sessions_root / sid
         session_dir.mkdir(parents=True)
-        _write_history_json(session_dir / "history.jsonl", entries)
+        _write_history_json(session_dir / "history.json", entries)
         metadata = {"mode": "code.normal", "session_id": sid, "created_at": time.time()}
         _write_history_json(session_dir / "metadata.json", metadata)
         mtime = time.time() - age_delta
         os.utime(session_dir, (mtime, mtime))
-        os.utime(session_dir / "history.jsonl", (mtime, mtime))
+        os.utime(session_dir / "history.json", (mtime, mtime))
 
     @staticmethod
     def test_no_sessions_dir(tmp_path):
@@ -637,7 +621,7 @@ class TestScanNewSessions:
         for i in range(3):
             sid = f"sess_00{i+1}"
             sweeper.scanned_sessions[sid] = {
-                "history_mtime": (sessions_root / sid / "history.jsonl").stat().st_mtime,
+                "history_mtime": (sessions_root / sid / "history.json").stat().st_mtime,
                 "round_count": 4,
             }
         result2 = sweeper.scan_new_sessions()
@@ -657,7 +641,7 @@ class TestScanNewSessions:
         sweeper.init()
         # mark sess_001 as already scanned (with 4 rounds), sess_002 and sess_003 as new
         sweeper.scanned_sessions["sess_001"] = {
-            "history_mtime": (sessions_root / "sess_001" / "history.jsonl").stat().st_mtime - 1,
+            "history_mtime": (sessions_root / "sess_001" / "history.json").stat().st_mtime - 1,
             "round_count": 4,
         }
 
@@ -669,12 +653,9 @@ class TestScanNewSessions:
             _make_history_entry("user", "q7"), _make_history_entry("assistant", "a7", "chat.final"),
             _make_history_entry("user", "q8"), _make_history_entry("assistant", "a8", "chat.final"),
         ]
-        existing = []
-        for line in (sessions_root / "sess_001" / "history.jsonl").read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                existing.append(json.loads(line))
+        existing = json.loads((sessions_root / "sess_001" / "history.json").read_text(encoding="utf-8"))
         existing.extend(more_entries)
-        _write_history_json(sessions_root / "sess_001" / "history.jsonl", existing)
+        (sessions_root / "sess_001" / "history.json").write_text(json.dumps(existing), encoding="utf-8")
 
         result = sweeper.scan_new_sessions()
         assert len(result) == 3  # sess_001 updated + sess_002 & sess_003 new
@@ -740,14 +721,14 @@ class TestLoadExistingSummary:
 class TestSessionManagerHasActiveTasks:
     @staticmethod
     def test_no_tasks():
-        from jiuwenswarm.server.runtime.session.session_manager import SessionManager
+        from jiuwenavatar.server.runtime.session.session_manager import SessionManager
         sm = SessionManager()
         assert sm.has_active_tasks() is False
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_with_active_task():
-        from jiuwenswarm.server.runtime.session.session_manager import SessionManager
+        from jiuwenavatar.server.runtime.session.session_manager import SessionManager
         import asyncio
         sm = SessionManager()
 
@@ -764,7 +745,7 @@ class TestSessionManagerHasActiveTasks:
     @staticmethod
     @pytest.mark.asyncio
     async def test_ignores_none_tasks():
-        from jiuwenswarm.server.runtime.session.session_manager import SessionManager
+        from jiuwenavatar.server.runtime.session.session_manager import SessionManager
         import asyncio
         sm = SessionManager()
 

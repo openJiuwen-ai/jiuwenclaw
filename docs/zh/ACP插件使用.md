@@ -1,6 +1,6 @@
 # ACP 快速启动
 
-本文将介绍如何在本机启动 `jiuwenswarm` 主进程，并通过 VS Code ACP Client 连接使用。
+本文将介绍如何在本机启动 `jiuwenavatar` 主进程，并通过 VS Code ACP Client 连接使用。
 
 ## 前置要求
 
@@ -17,8 +17,8 @@ ACP 依赖本地 Gateway，**必须先启动主进程，再在 VS Code 中连接
 
 顺序如下：
 
-1. 安装 `jiuwenswarm`
-2. 执行 `jiuwenswarm-init`
+1. 安装 `jiuwenavatar`
+2. 执行 `jiuwenavatar-init`
 3. 配置大模型相关信息
 4. 启动主进程
 5. 在 VS Code 中配置 ACP Agent
@@ -50,24 +50,24 @@ uv sync
 ### 2. 初始化
 
 ```bash
-jiuwenswarm-init
+jiuwenavatar-init
 ```
 
 ### 3. 配置大模型信息
 
-执行 `jiuwenswarm-init` 后，需要按项目要求**配置大模型相关信息**，否则 Agent 无法正常推理。配置方法参考: [配置方法](配置信息.md)
+执行 `jiuwenavatar-init` 后，需要按项目要求**配置大模型相关信息**，否则 Agent 无法正常推理。配置方法参考: [配置方法](配置信息.md)
 
 ### 4. 启动主进程
 
 ```bash
-python -m jiuwenswarm.app
+python -m jiuwenavatar.app
 ```
 
 ### 5. 在 VS Code 中配置 ACP
 
 在 ACP Client 插件中执行 **ACP: Add Agent Configuration**，然后填写：
 
-* **Name**：`jiuwenswarm`
+* **Name**：`jiuwenavatar`
 * **Command**：
 
   * Windows：`<repo>/scripts/run_gateway_acp.cmd`
@@ -81,7 +81,7 @@ python -m jiuwenswarm.app
 
 ### 6. 建立连接
 
-完成上述配置后，在 ACP Client 中连接 jiuwenswarm Agent 即可开始使用。
+完成上述配置后，在 ACP Client 中连接 jiuwenavatar Agent 即可开始使用。
 
 ![ACP配置完成](../assets/images/ACP配置完成.png)
 
@@ -102,40 +102,40 @@ python -m venv .venv
 # Linux / macOS
 source .venv/bin/activate
 
-pip install jiuwenswarm
+pip install jiuwenavatar
 ```
 
 ### 2. 初始化
 
 ```bash
-jiuwenswarm-init
+jiuwenavatar-init
 ```
 
 ### 3. 配置大模型信息
 
-执行 `jiuwenswarm-init` 后，需要按项目要求**配置大模型相关信息**，否则 Agent 无法正常推理。配置方法参考: [配置方法](配置信息.md)
+执行 `jiuwenavatar-init` 后，需要按项目要求**配置大模型相关信息**，否则 Agent 无法正常推理。配置方法参考: [配置方法](配置信息.md)
 
 ### 4. 启动主进程
 
 ```bash
-python -m jiuwenswarm.app
+python -m jiuwenavatar.app
 ```
 
 ### 5. 在 VS Code 中配置 ACP
 
 在 ACP Client 插件中执行 **ACP: Add Agent Configuration**，然后填写：
 
-* **Name**：`jiuwenswarm`
-* **Command**：`jiuwenswarm-acp`
+* **Name**：`jiuwenavatar`
+* **Command**：`jiuwenavatar-acp`
 * **Config / Arguments**：留空
 
-> 说明：`jiuwenswarm-acp` 是 pip install 后自动生成的命令，与 `jiuwenswarm-init`、`jiuwenswarm-start` 同级。需确保 VS Code 在已安装 jiuwenswarm 的虚拟环境中运行，否则需填写完整路径，例如 Windows：`C:\path\to\venv\Scripts\jiuwenswarm-acp.exe`，Linux / macOS：`/path/to/venv/bin/jiuwenswarm-acp`。
+> 说明：`jiuwenavatar-acp` 是 pip install 后自动生成的命令，与 `jiuwenavatar-init`、`jiuwenavatar-start` 同级。需确保 VS Code 在已安装 jiuwenavatar 的虚拟环境中运行，否则需填写完整路径，例如 Windows：`C:\path\to\venv\Scripts\jiuwenavatar-acp.exe`，Linux / macOS：`/path/to/venv/bin/jiuwenavatar-acp`。
 
 ![ACP配置](../assets/images/ACP插件添加agent.png)
 
 ### 6. 建立连接
 
-完成上述配置后，在 ACP Client 中连接 jiuwenswarm Agent 即可开始使用。
+完成上述配置后，在 ACP Client 中连接 jiuwenavatar Agent 即可开始使用。
 
 ![ACP配置完成](../assets/images/ACP配置完成.png)
 

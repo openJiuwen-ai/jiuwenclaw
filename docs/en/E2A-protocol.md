@@ -1,6 +1,6 @@
 # E2A (Everything-to-Agent) Protocol
 
-> **Implementation**: `jiuwenswarm/common/e2a/` (`models.py`, `adapters.py`, `constants.py`, `__init__.py`). **Version**: `E2A_PROTOCOL_VERSION` (default `1.0`). **On conflict**: treat the dataclass fields in `models.py` as the source of truth and update this document accordingly. Requests: `E2AEnvelope`; responses: `E2AResponse`.  
+> **Implementation**: `jiuwenavatar/common/e2a/` (`models.py`, `adapters.py`, `constants.py`, `__init__.py`). **Version**: `E2A_PROTOCOL_VERSION` (default `1.0`). **On conflict**: treat the dataclass fields in `models.py` as the source of truth and update this document accordingly. Requests: `E2AEnvelope`; responses: `E2AResponse`.  
 > **中文版**：[../zh/E2A-protocol.md](../zh/E2A-protocol.md)
 
 ---
@@ -11,10 +11,10 @@
 |----------|------|
 | **docs/zh/E2A-protocol.md** | Same specification in Chinese |
 | **docs/en/E2A-protocol.md** (this file) | Normative description, pitfalls, examples (English) |
-| `jiuwenswarm/common/e2a/models.py` | Request `E2AEnvelope`, response `E2AResponse`, nested types; `from_dict` / `to_dict` |
-| `jiuwenswarm/common/e2a/constants.py` | **`E2A_SOURCE_PROTOCOL_*`**, **`E2A_RESPONSE_KINDS`**, **`E2A_RESPONSE_STATUS_*`**, ACP method names and SessionUpdate strings (runtime: use tuples in code) |
-| `jiuwenswarm/common/e2a/adapters.py` | ACP / A2A → E2A; E2A → ACP JSON-RPC; **`E2AResponse` → ACP / A2A projections** (§8) |
-| `jiuwenswarm/common/e2a/__init__.py` | Public exports |
+| `jiuwenavatar/common/e2a/models.py` | Request `E2AEnvelope`, response `E2AResponse`, nested types; `from_dict` / `to_dict` |
+| `jiuwenavatar/common/e2a/constants.py` | **`E2A_SOURCE_PROTOCOL_*`**, **`E2A_RESPONSE_KINDS`**, **`E2A_RESPONSE_STATUS_*`**, ACP method names and SessionUpdate strings (runtime: use tuples in code) |
+| `jiuwenavatar/common/e2a/adapters.py` | ACP / A2A → E2A; E2A → ACP JSON-RPC; **`E2AResponse` → ACP / A2A projections** (§8) |
+| `jiuwenavatar/common/e2a/__init__.py` | Public exports |
 
 ---
 
@@ -125,7 +125,7 @@ Hand-built defaults use `source_protocol` = `e2a`. Legacy `binding` migrates to 
 
 ## 6. ACP strings in `constants.py` (bridge reference)
 
-For ACP bridging and doc cross-check only; **at runtime** use tuples in `jiuwenswarm.common.e2a.constants`:
+For ACP bridging and doc cross-check only; **at runtime** use tuples in `jiuwenavatar.common.e2a.constants`:
 
 - **`ACP_CLIENT_TO_AGENT_METHODS`**: client → Agent JSON-RPC method names
 - **`ACP_AGENT_TO_CLIENT_METHODS`**, **`ACP_NOTIFICATION_NAMES`**: downstream / notifications
@@ -138,7 +138,7 @@ For ACP bridging and doc cross-check only; **at runtime** use tuples in `jiuwens
 
 ## 7. `merge_params_to_acp_prompt`
 
-Python: `jiuwenswarm.common.e2a.merge_params_to_acp_prompt(envelope)`.
+Python: `jiuwenavatar.common.e2a.merge_params_to_acp_prompt(envelope)`.
 
 If and only if **`method == "session/prompt"`**:
 
@@ -280,52 +280,6 @@ After parse: `channel`=`feishu`, `method`=`chat.send`, `timestamp` normalized to
 
 After `merge_params_to_acp_prompt`, `params` gains a `prompt` equivalent to `content_blocks` if there was no `prompt` before.
 
-### 11.6 `session/prompt` + per-request `workspace_dir`
-
-External clients (IDE plugins, headless evaluators, MCP drivers) can
-scope one prompt's filesystem root to a per-invocation directory by
-passing `workspace_dir` in `params`. The AgentServer resolves the path,
-creates it on demand (`mkdir -p`), and threads the absolute path through
-to `init_cwd(cwd=workspace_dir, workspace=workspace_dir)` so openjiuwen's
-per-task `CwdState` ContextVar is reseeded for the duration of the
-prompt. Both layers get the override:
-
-- **`get_cwd()`** returns the scratch dir, so tools resolving relative
-  paths land there.
-- **`get_workspace()`** also returns the scratch dir, so
-  `fs_operation`'s sandbox enforcement (which gates absolute-path writes
-  by workspace membership) accepts writes anywhere under it.
-
-Memory files, `.workspace`, and other artifact-root consumers therefore
-land under the scratch dir for that request — useful for hermetic
-evaluators that want one fresh slate per task. Long-lived agents whose
-memory must persist should *not* pass `workspace_dir`; they fall back to
-the agent's instance-level workspace as before.
-
-Precedence and behavior:
-
-- **Precedence:** when `workspace_dir` is set and `mkdir` succeeds, it
-  wins over `params.cwd`. When `workspace_dir` is set but `mkdir` fails
-  (e.g. permission denied), the request degrades to `params.cwd` (if
-  any), then to the agent's global default; a warning is logged.
-- **Path form:** absolute paths are recommended. Relative paths are
-  resolved against the AgentServer process cwd, not the client's.
-
-```json
-{
-  "method": "session/prompt",
-  "session_id": "s1",
-  "jsonrpc_id": 1,
-  "params": {
-    "content": "Create the project under datautils-project/",
-    "workspace_dir": "/tmp/eval-task-42"
-  }
-}
-```
-
-`jiuwenswarm-tui` (the ACP stdio bridge) exposes this as
-`--workspace-dir <path>`.
-
 ---
 
 ## 12. E2A response protocol (`E2AResponse`)
@@ -422,21 +376,6 @@ Runtime list: **`constants.E2A_RESPONSE_KINDS`**; **`body`** is a **dict**. Norm
 
 Cross-reference: request log normalization in **`E2A-AgentRequest-log-migration.md`**; response logging can adopt the same single-line JSON convention later.
 
-### 12.9 Streaming `chat.error` carries `error_type`
-
-When the inner agent loop raises, the streaming aggregator emits a
-`chat.error` event whose payload carries the originating exception class.
-Consumers can group failures structurally instead of regexing the message
-string.
-
-```json
-{"event_type":"chat.error","error":"rate limited (429)","error_type":"RateLimitError"}
-```
-
-The same `error_type` field appears at the top level of the persisted
-`history.json` record. Cancellation (`asyncio.CancelledError`) propagates
-as cancellation rather than being classified as a `chat.error`.
-
 ---
 
 ## 13. Security notes
@@ -446,4 +385,4 @@ as cancellation rather than being classified as a `chat.error`.
 
 ---
 
-*Maintained in sync with `jiuwenswarm/common/e2a/models.py` (`E2AEnvelope`, `E2AResponse`).*
+*Maintained in sync with `jiuwenavatar/common/e2a/models.py` (`E2AEnvelope`, `E2AResponse`).*

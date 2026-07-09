@@ -1,0 +1,23 @@
+{
+    "gitcode_token": "",
+    "workspaces": [
+        {
+            "name": "<workspace_name>",
+            "upstream": {
+                "owner": "<upstream_owner>",
+                "repo": "<upstream_repo>",
+                "base_branch": "<base_branch>"
+            },
+            "fork": {
+                "owner": "<fork_owner>",
+                "repo": "<fork_repo>",
+                "remote_name": "origin"
+            },
+            "local_repo": {
+                "path": "<absolute_path_to_local_repo>",
+                "auto_clone": false,
+                "auto_update": true
+            }
+        }
+    ]
+}

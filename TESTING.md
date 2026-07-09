@@ -4,7 +4,7 @@
 ### 1. 测试配置文件
 
 ```
-jiuwenswarm/
+jiuwenavatar/
 ├── pytest.ini                           # Pytest 配置
 ├── pyproject.toml                       # 已更新，添加了测试依赖
 ├── run_tests.sh                         # 测试运行脚本（可执行）
@@ -36,7 +36,7 @@ jiuwenswarm/
 ### 方式 1: 使用测试脚本（推荐）
 
 ```bash
-cd /Users/gawa/Desktop/pr/jiuwenswarm
+cd /Users/gawa/Desktop/pr/jiuwenavatar
 
 # 运行所有测试
 ./run_tests.sh
@@ -73,7 +73,7 @@ pytest tests/unit_tests/test_config.py -v
 pytest tests/unit_tests/test_config.py::TestResolveEnvVars::test_resolve_string_with_env_var -v
 
 # 生成覆盖率报告
-pytest --cov=jiuwenswarm --cov-report=html --cov-report=term-missing
+pytest --cov=jiuwenavatar --cov-report=html --cov-report=term-missing
 ```
 
 ---
@@ -259,7 +259,7 @@ open htmlcov/index.html  # macOS
 pytest tests/unit_tests/test_new_feature.py -v
 
 # 3. 查看覆盖率
-pytest --cov=jiuwenswarm.new_feature --cov-report=term-missing
+pytest --cov=jiuwenavatar.new_feature --cov-report=term-missing
 
 # 4. 运行所有测试确保没有破坏
 pytest tests/
@@ -307,7 +307,7 @@ addopts =
     -v                              # 详细输出
     --strict-markers                # 严格标记检查
     --tb=short                      # 简短的错误堆栈
-    --cov=jiuwenswarm                # 覆盖率
+    --cov=jiuwenavatar                # 覆盖率
     --cov-report=term-missing       # 终端报告
     --cov-report=html               # HTML 报告
     --cov-report=xml                # XML 报告（CI）

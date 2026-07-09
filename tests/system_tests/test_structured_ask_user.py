@@ -23,19 +23,15 @@ from openjiuwen.core.single_agent.interrupt.response import (
 )
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload
 
-from jiuwenswarm.agents.harness.common.rails.ask_user_rail import (
+from jiuwenavatar.agents.harness.common.rails.ask_user_rail import (
     EXTENDED_INPUT_PARAMS_CN,
     EXTENDED_INPUT_PARAMS_EN,
     StructuredAskUserRail,
     StructuredAskUserTool,
 )
-from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+from jiuwenavatar.agents.harness.common.rails.interrupt.interrupt_helpers import (
     _extract_questions_from_value,
     convert_interactions_to_ask_user_question,
-    extract_question_from_interaction,
-)
-from jiuwenswarm.agents.harness.code.rails.code_confirm_interrupt_rail import (
-    build_confirm_interrupt_message,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.system]
@@ -117,7 +113,7 @@ class TestStructuredAskUserToolSchema:
         `header`, `options`, `multi_select`.
         """
 
-        from jiuwenswarm.agents.harness.common.rails.ask_user_rail import (
+        from jiuwenavatar.agents.harness.common.rails.ask_user_rail import (
             _QUESTIONS_ITEM_SCHEMA,
         )
         props = _QUESTIONS_ITEM_SCHEMA["properties"]
@@ -162,8 +158,8 @@ class TestStructuredAskUserRailLifecycle:
         with patch("openjiuwen.harness.rails.interrupt.ask_user_rail.resolve_language", return_value="en"):
             rail.init(agent)
 
-        agent.ability_manager.add_ability.assert_called_once()
-        added_card = agent.ability_manager.add_ability.call_args[0][0]
+        agent.ability_manager.add.assert_called_once()
+        added_card = agent.ability_manager.add.call_args[0][0]
         assert added_card.name == "ask_user"
 
     @staticmethod
@@ -176,7 +172,7 @@ class TestStructuredAskUserRailLifecycle:
             rail.init(agent)
             rail.uninit(agent)
 
-        agent.ability_manager.remove_ability.assert_called_once_with("ask_user")
+        agent.ability_manager.remove.assert_called_once_with("ask_user")
 
     @staticmethod
     def test_init_uninit_clears_structured_tools():
@@ -383,8 +379,8 @@ class TestConvertInteractionsToAskUserQuestion:
         assert q["options"][2]["label"] == "Other"
 
     @staticmethod
-    def test_plain_query_produce_ask_user_interrupt():
-        """Plain query (no questions) should produce source=ask_user_interrupt."""
+    def test_plain_query_produce_permission_interrupt():
+        """Plain query (no questions) should produce source=permission_interrupt."""
         tcir = _make_tcir(tool_args={"query": "What is your role?"})
 
         interaction = MagicMock()
@@ -393,34 +389,13 @@ class TestConvertInteractionsToAskUserQuestion:
 
         result = convert_interactions_to_ask_user_question([interaction])
         assert result is not None
-        assert result["source"] == "ask_user_interrupt"
-        assert result["questions"][0]["question"] == "What is your role?"
-        assert result["questions"][0]["options"] == []
+        assert result["source"] == "permission_interrupt"
 
     @staticmethod
     def test_empty_state_outputs_returns_none():
         """Empty state_outputs should return None."""
         result = convert_interactions_to_ask_user_question([])
         assert result is None
-
-    @staticmethod
-    def test_ask_user_request_without_tool_args_uses_query_from_tool_args():
-        """AskUserRequest shells should still resolve as ask_user_interrupt."""
-        result = convert_interactions_to_ask_user_question([
-            {
-                "id": "req_004",
-                "value": {
-                    "tool_name": "ask_user",
-                    "tool_args": {"query": "Choose a language"},
-                    "message": "Choose a language",
-                    "questions": [],
-                    "payload_schema": {},
-                },
-            }
-        ])
-        assert result is not None
-        assert result["source"] == "ask_user_interrupt"
-        assert result["questions"][0]["question"] == "Choose a language"
 
     @staticmethod
     def test_dict_interaction_with_questions_in_value():
@@ -437,104 +412,6 @@ class TestConvertInteractionsToAskUserQuestion:
         ])
         assert result is not None
         assert result["source"] == "ask_user_interrupt"
-
-
-# =====================================================================
-# 5b. Confirm vs permission interrupt classification
-# =====================================================================
-
-class TestConfirmAndPermissionInterrupts:
-    @staticmethod
-    def test_confirm_interrupt_message_is_classified():
-        message = build_confirm_interrupt_message("switch_mode", {"mode": "plan"})
-        result = convert_interactions_to_ask_user_question([
-            {
-                "id": "req_confirm",
-                "value": {
-                    "tool_name": "switch_mode",
-                    "message": message,
-                    "tool_args": {"mode": "plan"},
-                },
-            }
-        ])
-        assert result is not None
-        assert result["source"] == "confirm_interrupt"
-        assert "switch_mode" in result["questions"][0]["question"]
-        assert result["questions"][0]["header"].startswith("操作确认")
-
-    @staticmethod
-    def test_permission_interrupt_message_is_classified():
-        message = "**工具 `write_file` 需要授权才能执行**\n\n请确认是否允许该操作。"
-        result = convert_interactions_to_ask_user_question([
-            {
-                "id": "req_perm",
-                "value": {
-                    "tool_name": "write_file",
-                    "message": message,
-                    "tool_args": {"file_path": "foo.py"},
-                },
-            }
-        ])
-        assert result is not None
-        assert result["source"] == "permission_interrupt"
-        assert "write_file" in result["questions"][0]["question"]
-        assert result["questions"][0]["header"].startswith("权限审批")
-
-    @staticmethod
-    def test_extract_question_falls_back_for_generic_confirm_copy():
-        question = extract_question_from_interaction({
-            "id": "req_generic",
-            "value": {
-                "tool_name": "switch_mode",
-                "message": "Please approve or reject?",
-                "tool_args": {"mode": "normal"},
-            },
-        })
-        assert question is not None
-        assert "switch_mode" in question["question"]
-        assert question["header"] == "操作确认: switch_mode"
-
-    @staticmethod
-    def test_exit_plan_mode_interrupt_uses_confirm_interrupt():
-        result = convert_interactions_to_ask_user_question([
-            {
-                "id": "req_plan_exit",
-                "value": {
-                    "tool_name": "exit_plan_mode",
-                    "message": "Please approve or reject?",
-                    "tool_args": {},
-                },
-            }
-        ])
-        assert result is not None
-        assert result["source"] == "confirm_interrupt"
-
-    @staticmethod
-    def test_plan_approval_message_falls_back_to_approve_reject_options():
-        result = convert_interactions_to_ask_user_question([
-            {
-                "id": "req_plan_approval",
-                "value": {
-                    "tool_name": "exit_plan_mode",
-                    "message": "**计划审批**\n\nAgent 已完成计划制定，等待你审批：\n\n计划内容",
-                    "tool_args": {},
-                },
-            }
-        ])
-
-        assert result is not None
-        assert result["source"] == "confirm_interrupt"
-        assert result["plan_approval_kind"] == "plan_approval"
-        assert result["plan_content"] == "计划内容"
-        assert result["plan_language"] == "cn"
-        assert result["questions"][0]["header"] == "Exit Plan and Execute"
-        assert "请选择：" not in result["questions"][0]["question"]
-        assert "- **批准**" not in result["questions"][0]["question"]
-        assert result["questions"][0]["question"].endswith("计划内容")
-        assert [option["label"] for option in result["questions"][0]["options"]] == [
-            "批准",
-            "拒绝",
-        ]
 
 
 # =====================================================================
@@ -655,7 +532,7 @@ class TestStructuredAskUserRailResolveInterrupt:
 
 _INIT_PROMPTS_TS_PATH = (
     Path(__file__).parent.parent.parent
-    / "jiuwenswarm"
+    / "jiuwenavatar"
     / "cli"
     / "src"
     / "core"

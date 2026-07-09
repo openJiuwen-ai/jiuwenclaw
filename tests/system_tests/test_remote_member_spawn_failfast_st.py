@@ -4,7 +4,7 @@
 
 Covers commit ``fix(teams): add a fail-fast check when distributed team member does not exist``:
 - A2X blank reservation before roster DB write
-- spawn_teammate wrapper: UNSTARTED after insert, READY only after MESSAGE ACK
+- spawn_member wrapper: UNSTARTED after insert, READY only after MESSAGE ACK
 - bootstrap delivery failure marks roster row ``error`` instead of silent success
 """
 
@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.system]
 
 _BOOTSTRAP_PATH = (
     Path(__file__).resolve().parents[2]
-    / "jiuwenswarm"
+    / "jiuwenavatar"
     / "agents"
     / "harness"
     / "team"
@@ -62,7 +62,7 @@ def _mock_a2x_reservation(
         close=AsyncMock(),
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime.reserve_blank_teammate_agent",
+        "jiuwenavatar.agents.harness.team.a2x.a2x_registry_runtime.reserve_blank_teammate_agent",
         AsyncMock(return_value=hold),
     )
     return hold
@@ -77,7 +77,6 @@ def _leader_team_agent(
 
     db = MagicMock()
     db.update_member_status = AsyncMock(return_value=True)
-    db.member = SimpleNamespace(update_member_status=db.update_member_status)
     db.get_message = AsyncMock()
     team_backend = SimpleNamespace(
         db=db,
@@ -88,7 +87,7 @@ def _leader_team_agent(
         role=TeamRole.LEADER,
         deep_agent=SimpleNamespace(
             ability_manager=SimpleNamespace(
-                list=lambda: [SimpleNamespace(id="team.spawn_teammate", name="spawn_teammate")]
+                list=lambda: [SimpleNamespace(id="team.spawn_member", name="spawn_member")]
             ),
             card=SimpleNamespace(id="leader-card-st"),
         ),
@@ -104,14 +103,14 @@ def _install_spawn_tool(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     from openjiuwen.core.runner import Runner
     from openjiuwen.harness.tools.base_tool import ToolOutput
 
-    class _SpawnTeammateTool:
+    class _SpawnMemberTool:
         async def invoke(self, inputs, **kwargs):
             return ToolOutput(
                 success=True,
                 data={"member_name": (inputs or {}).get("member_name")},
             )
 
-    tool = _SpawnTeammateTool()
+    tool = _SpawnMemberTool()
     monkeypatch.setattr(
         Runner,
         "resource_mgr",
@@ -145,34 +144,34 @@ async def test_leader_precheck_reserves_blank_before_spawn(monkeypatch: pytest.M
 
 @pytest.mark.asyncio
 async def test_leader_spawn_blocked_when_no_blank_teammate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail-fast: no idle blank in registry → spawn_teammate never hits DB tool."""
+    """Fail-fast: no idle blank in registry → spawn_member never hits DB tool."""
     from openjiuwen.harness.tools.base_tool import ToolOutput
 
     monkeypatch.setattr(
-        "jiuwenswarm.common.config.get_config",
+        "jiuwenavatar.common.config.get_config",
         lambda: _distributed_leader_cfg(remote_names=["teammate-st-1"]),
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime.reserve_blank_teammate_agent",
+        "jiuwenavatar.agents.harness.team.a2x.a2x_registry_runtime.reserve_blank_teammate_agent",
         AsyncMock(return_value=None),
     )
     orig_calls: list[str] = []
 
-    class _SpawnTeammateTool:
+    class _SpawnMemberTool:
         async def invoke(self, inputs, **kwargs):
             orig_calls.append(str((inputs or {}).get("member_name")))
             return ToolOutput(success=True)
 
     from openjiuwen.core.runner import Runner
 
-    tool = _SpawnTeammateTool()
+    tool = _SpawnMemberTool()
     monkeypatch.setattr(
         Runner,
         "resource_mgr",
         SimpleNamespace(get_tool=lambda *_a, **_k: tool),
     )
     team_agent = _leader_team_agent()
-    bootstrap.attach_spawn_teammate_remote_bootstrap_wrapper(
+    bootstrap.attach_spawn_member_remote_bootstrap_wrapper(
         team_agent, session_id="sess-no-blank", channel_id="web"
     )
 
@@ -197,20 +196,20 @@ async def test_leader_spawn_blocked_when_member_already_exists(monkeypatch: pyte
     from openjiuwen.harness.tools.base_tool import ToolOutput
 
     monkeypatch.setattr(
-        "jiuwenswarm.common.config.get_config",
+        "jiuwenavatar.common.config.get_config",
         lambda: _distributed_leader_cfg(remote_names=["teammate-st-1"]),
     )
     _mock_a2x_reservation(monkeypatch)
     orig_calls: list[str] = []
 
-    class _SpawnTeammateTool:
+    class _SpawnMemberTool:
         async def invoke(self, inputs, **kwargs):
             orig_calls.append("db-write")
             return ToolOutput(success=True)
 
     from openjiuwen.core.runner import Runner
 
-    tool = _SpawnTeammateTool()
+    tool = _SpawnMemberTool()
     monkeypatch.setattr(
         Runner,
         "resource_mgr",
@@ -219,7 +218,7 @@ async def test_leader_spawn_blocked_when_member_already_exists(monkeypatch: pyte
     team_agent = _leader_team_agent(
         get_member_return=SimpleNamespace(member_name="teammate-st-1", status="ready"),
     )
-    bootstrap.attach_spawn_teammate_remote_bootstrap_wrapper(
+    bootstrap.attach_spawn_member_remote_bootstrap_wrapper(
         team_agent, session_id="sess-dup", channel_id="web"
     )
 
@@ -243,7 +242,7 @@ async def test_leader_spawn_unstarted_then_ack_sets_ready(monkeypatch: pytest.Mo
     from openjiuwen.agent_teams.schema.status import MemberStatus
 
     monkeypatch.setattr(
-        "jiuwenswarm.common.config.get_config",
+        "jiuwenavatar.common.config.get_config",
         lambda: _distributed_leader_cfg(remote_names=["teammate-st-1"]),
     )
     _mock_a2x_reservation(monkeypatch)
@@ -282,7 +281,7 @@ async def test_leader_spawn_unstarted_then_ack_sets_ready(monkeypatch: pytest.Mo
         ]
     )
 
-    bootstrap.attach_spawn_teammate_remote_bootstrap_wrapper(
+    bootstrap.attach_spawn_member_remote_bootstrap_wrapper(
         team_agent, session_id="sess-scheme-b", channel_id="web"
     )
     bootstrap.attach_remote_bootstrap_ack_listener(
@@ -292,7 +291,7 @@ async def test_leader_spawn_unstarted_then_ack_sets_ready(monkeypatch: pytest.Mo
 
     from openjiuwen.core.runner import Runner
 
-    tool = Runner.resource_mgr.get_tool("team.spawn_teammate")
+    tool = Runner.resource_mgr.get_tool("team.spawn_member")
     result = await tool.invoke(
         {
             "member_name": "teammate-st-1",
@@ -328,7 +327,7 @@ async def test_leader_spawn_fail_fast_when_bootstrap_not_delivered(monkeypatch: 
     from openjiuwen.harness.tools.base_tool import ToolOutput
 
     monkeypatch.setattr(
-        "jiuwenswarm.common.config.get_config",
+        "jiuwenavatar.common.config.get_config",
         lambda: _distributed_leader_cfg(remote_names=["teammate-st-2"]),
     )
     _mock_a2x_reservation(monkeypatch)
@@ -336,13 +335,13 @@ async def test_leader_spawn_fail_fast_when_bootstrap_not_delivered(monkeypatch: 
     monkeypatch.setattr(bootstrap, "send_bootstrap_message", AsyncMock(return_value=False))
 
     team_agent = _leader_team_agent(team_name="team-fail-deliver")
-    bootstrap.attach_spawn_teammate_remote_bootstrap_wrapper(
+    bootstrap.attach_spawn_member_remote_bootstrap_wrapper(
         team_agent, session_id="sess-fail-deliver", channel_id="web"
     )
 
     from openjiuwen.core.runner import Runner
 
-    tool = Runner.resource_mgr.get_tool("team.spawn_teammate")
+    tool = Runner.resource_mgr.get_tool("team.spawn_member")
     result = await tool.invoke(
         {
             "member_name": "teammate-st-2",
@@ -370,7 +369,7 @@ async def test_leader_spawn_post_hook_exception_marks_error(monkeypatch: pytest.
     from openjiuwen.harness.tools.base_tool import ToolOutput
 
     monkeypatch.setattr(
-        "jiuwenswarm.common.config.get_config",
+        "jiuwenavatar.common.config.get_config",
         lambda: _distributed_leader_cfg(remote_names=["teammate-st-3"]),
     )
     _mock_a2x_reservation(monkeypatch)
@@ -382,13 +381,13 @@ async def test_leader_spawn_post_hook_exception_marks_error(monkeypatch: pytest.
     )
 
     team_agent = _leader_team_agent(team_name="team-hook-exc")
-    bootstrap.attach_spawn_teammate_remote_bootstrap_wrapper(
+    bootstrap.attach_spawn_member_remote_bootstrap_wrapper(
         team_agent, session_id="sess-hook-exc", channel_id="web"
     )
 
     from openjiuwen.core.runner import Runner
 
-    tool = Runner.resource_mgr.get_tool("team.spawn_teammate")
+    tool = Runner.resource_mgr.get_tool("team.spawn_member")
     result = await tool.invoke(
         {
             "member_name": "teammate-st-3",

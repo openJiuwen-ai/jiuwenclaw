@@ -1,3 +1,11 @@
+# Local venv accidentally created under jiuwenavatar/
+jiuwenavatar/bin/
+jiuwenavatar/lib/
+jiuwenavatar/.lock
+jiuwenavatar/pyvenv.cfg
+.browser/
+.browser-profiles/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -23,11 +31,11 @@ htmlcov/
 dist/
 build/
 coverage/
-jiuwenswarm/channels/web/frontend/logs/
-jiuwenswarm/channels/web/frontend/cd
-jiuwenswarm/channels/web/frontend/tsc
-jiuwenswarm/channels/web/frontend/openjiuwen-web@0.1.0
-jiuwenswarm/channels/tui/frontend/bun.lock
+jiuwenavatar/channels/web/frontend/logs/
+jiuwenavatar/channels/web/frontend/cd
+jiuwenavatar/channels/web/frontend/tsc
+jiuwenavatar/channels/web/frontend/openjiuwen-web@0.1.0
+jiuwenavatar/channels/tui/frontend/bun.lock
 *.tsbuildinfo
 npm-debug.log*
 yarn-debug.log*
@@ -48,6 +56,9 @@ pnpm-debug.log*
 .claude
 **/CLAUDE.md
 **/CLAUDE.local.md
+!jiuwenavatar/resources/avatar-skills/CLAUDE.md
+jiuwenavatar/resources/avatar-skills/openjiuwen-community-stats/community-config.json
+jiuwenavatar/resources/avatar-skills/openjiuwen-community-stats/data/community.db
 **/JIUWENCLAW.local.md
 **/JIUWENCLAW.md
 .jiuwen/settings.local.json
@@ -67,15 +78,17 @@ workspace/agent/memory/*.db
 workspace/agent/memory/*.db-shm
 workspace/agent/memory/*.db-wal
 
-jiuwenswarm/agentserver/tools/browser-move/.browser
-jiuwenswarm/agentserver/tools/browser-move/.browser-profiles
-jiuwenswarm/agentserver/tools/browser-move/screenshots
+jiuwenavatar/agentserver/tools/browser-move/.browser
+jiuwenavatar/agentserver/tools/browser-move/.browser-profiles
+jiuwenavatar/agentserver/tools/browser-move/screenshots
 
-jiuwenswarm/workspace/.whatsapp-auth/
-jiuwenswarm/resources/agent/workspace/
-jiuwenswarm/resources/tui/bin/
-packages/jiuwenswarm-tui/jiuwenswarm_tui/resources/tui/bin/
-packages/jiuwenswarm-tui/jiuwenswarm_tui/resources/tui-bin/
+jiuwenavatar/workspace/.whatsapp-auth/
+# 开发/构建产物（模板 markdown 需纳入版本库供 jiuwenavatar-init 使用）
+jiuwenavatar/resources/agent/workspace/skills/
+jiuwenavatar/resources/agent/workspace/agent-data.json
+jiuwenavatar/resources/tui/bin/
+packages/jiuwenavatar-tui/jiuwenavatar_tui/resources/tui/bin/
+packages/jiuwenavatar-tui/jiuwenavatar_tui/resources/tui-bin/
 
 .crossnote/
 .trae/

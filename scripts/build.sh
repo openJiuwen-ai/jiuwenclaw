@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# JiuwenSwarm 打包脚本
-# 1. 编译前端 (jiuwenswarm/channels/web/frontend)
+# JiuwenClaw 打包脚本
+# 1. 编译前端 (jiuwenavatar/channels/web/frontend)
 # 2. 构建 wheel 包（包含前端 dist）
 
 set -e
@@ -9,7 +9,7 @@ PROJECT_ROOT="$(cd "$(dirname "$(dirname "$0")")" && pwd)"
 echo "[build] 项目根目录: $PROJECT_ROOT"
 
 # 1. 编译前端
-WEB_DIR="$PROJECT_ROOT/jiuwenswarm/channels/web/frontend"
+WEB_DIR="$PROJECT_ROOT/jiuwenavatar/channels/web/frontend"
 if [[ ! -d "$WEB_DIR" ]]; then
     echo "[build] 错误: 前端目录不存在: $WEB_DIR" >&2
     exit 1

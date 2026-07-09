@@ -2,9 +2,9 @@ import json
 import sys
 from types import SimpleNamespace
 
-from jiuwenswarm.channels.acp.app_acp import run_acp
-from jiuwenswarm.common.e2a.constants import E2A_RESPONSE_KIND_ACP_PROMPT_RESULT
-from jiuwenswarm.common.e2a.models import E2AProvenance, E2AResponse, utc_now_iso
+from jiuwenavatar.channels.acp.app_acp import run_acp
+from jiuwenavatar.common.e2a.constants import E2A_RESPONSE_KIND_ACP_PROMPT_RESULT
+from jiuwenavatar.common.e2a.models import E2AProvenance, E2AResponse, utc_now_iso
 
 
 class FakeStdin:
@@ -79,7 +79,7 @@ def test_run_acp_starts_gateway_and_prints_final_jsonrpc(monkeypatch):
 
     monkeypatch.setattr("subprocess.Popen", _fake_popen)
     monkeypatch.setattr(
-        "jiuwenswarm.channels.acp.app_acp.write_json_stdout",
+        "jiuwenavatar.channels.acp.app_acp.write_json_stdout",
         lambda payload: captured.setdefault("output", payload),
     )
 
@@ -92,7 +92,7 @@ def test_run_acp_starts_gateway_and_prints_final_jsonrpc(monkeypatch):
     )
 
     assert exit_code == 0
-    assert captured.get("cmd") == [sys.executable, "-m", "jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect"]
+    assert captured.get("cmd") == [sys.executable, "-m", "jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect"]
     proc = captured.get("proc")
     assert proc is not None
     outbound = json.loads("".join(proc.stdin.writes).strip())
@@ -116,11 +116,11 @@ def test_run_acp_passes_agent_server_url(monkeypatch):
         return FakeProc([json.dumps(response.to_dict()) + "\n"])
 
     monkeypatch.setattr("subprocess.Popen", _fake_popen)
-    monkeypatch.setattr("jiuwenswarm.channels.acp.app_acp.write_json_stdout", lambda payload: None)
+    monkeypatch.setattr("jiuwenavatar.channels.acp.app_acp.write_json_stdout", lambda payload: None)
 
     exit_code = run_acp(
         SimpleNamespace(
-            agent_server_url="ws://127.0.0.1:18092",
+            agent_server_url="ws://127.0.0.1:28092",
             session_id="sess-2",
             args=["hello"],
         )
@@ -130,7 +130,7 @@ def test_run_acp_passes_agent_server_url(monkeypatch):
     assert captured.get("cmd") == [
         sys.executable,
         "-m",
-        "jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect",
+        "jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect",
         "--gateway-url",
-        "ws://127.0.0.1:18092",
+        "ws://127.0.0.1:28092",
     ]

@@ -10,24 +10,24 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
-from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
-from jiuwenswarm.agents.harness.common.rails.project_memory import (
+from jiuwenavatar.server.runtime.agent_adapter.interface_code import JiuwenClawCodeAdapter
+from jiuwenavatar.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenavatar.agents.harness.common.rails.project_memory import (
+    SECTION_NAME,
     clear_project_memory_cache,
     discover_and_load_memory_files,
     merge_memory_content,
 )
-from jiuwenswarm.agents.harness.common.rails.project_memory.files import (
+from jiuwenavatar.agents.harness.common.rails.project_memory.files import (
     GitWorktreeInfo,
     LoadedMemoryFile,
     PRIORITY,
 )
-from jiuwenswarm.agents.harness.common.rails import (
+from jiuwenavatar.agents.harness.common.rails import (
     ProjectMemoryRail,
 )
 
@@ -62,29 +62,6 @@ def _make_agent_with_builder() -> MagicMock:
     return agent
 
 
-def _make_ctx(agent: MagicMock, session_id: str = "sess1") -> SimpleNamespace:
-    return SimpleNamespace(
-        agent=agent,
-        session=SimpleNamespace(session_id=session_id),
-        inputs=SimpleNamespace(),
-        extra={},
-    )
-
-
-async def _project_memory_section(agent: MagicMock):
-    for section in reversed(agent.system_prompt_builder.added_sections):
-        if section.name == "project_memory":
-            return section
-    return None
-
-
-async def _project_memory_body(agent: MagicMock, language: str = "en") -> str:
-    for section in reversed(agent.system_prompt_builder.added_sections):
-        if section.name == "project_memory":
-            return section.render(language)
-    return ""
-
-
 @pytest.fixture(autouse=True)
 def _clear_cache():
     clear_project_memory_cache()
@@ -100,41 +77,63 @@ class TestProjectMemoryRailEndToEnd:
     """Full rail lifecycle with real filesystem."""
 
     @pytest.mark.asyncio
-    async def test_rail_loads_jiuwenswarm_md_and_injects_section(self):
+    async def test_rail_loads_jiuwenavatar_md_and_injects_section(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENSWARM.md", "# test\nPROJECT-RULE-1\n")
+            _touch(root, "JIUWENAVATAR.md", "# test\nPROJECT-RULE-1\n")
 
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
             rail.init(agent)
-            await rail.before_model_call(ctx=_make_ctx(agent))
+            await rail.before_model_call(ctx=MagicMock())
 
-            section = await _project_memory_section(agent)
-            assert section is not None
-            assert "PROJECT-RULE-1" in section.render("en")
+            sections = agent.system_prompt_builder.added_sections
+            assert sections
+            section = sections[-1]
+            assert section.name == SECTION_NAME
+            assert "PROJECT-RULE-1" in section.content["en"]
+            assert "PROJECT-RULE-1" in section.content["cn"]
 
     @pytest.mark.asyncio
     async def test_rail_reloads_after_file_change(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENSWARM.md", "VERSION-1")
+            _touch(root, "JIUWENAVATAR.md", "VERSION-1")
 
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
             rail.init(agent)
-            await rail.before_model_call(ctx=_make_ctx(agent))
-            body1 = await _project_memory_body(agent)
+            await rail.before_model_call(ctx=MagicMock())
+            body1 = agent.system_prompt_builder.added_sections[-1].content["en"]
             assert "VERSION-1" in body1
 
-            _touch(root, "JIUWENSWARM.md", "VERSION-2")
+            _touch(root, "JIUWENAVATAR.md", "VERSION-2")
             clear_project_memory_cache(str(root))
-            await rail.before_model_call(ctx=_make_ctx(agent))
-            body2 = await _project_memory_body(agent)
+            await rail.before_model_call(ctx=MagicMock())
+            body2 = agent.system_prompt_builder.added_sections[-1].content["en"]
             assert "VERSION-2" in body2
             assert "VERSION-1" not in body2
+
+    @pytest.mark.asyncio
+    async def test_rail_removes_section_on_uninit(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _touch(root, ".git/HEAD", "")
+            _touch(root, "JIUWENAVATAR.md", "BEFORE-UNINIT")
+
+            rail = ProjectMemoryRail(workspace=str(root), language="en")
+            agent = _make_agent_with_builder()
+            rail.init(agent)
+            await rail.before_model_call(ctx=MagicMock())
+            assert agent.system_prompt_builder.added_sections
+
+            rail.uninit(agent)
+            assert [
+                s for s in agent.system_prompt_builder.added_sections
+                if s.name == SECTION_NAME
+            ] == []
 
     @pytest.mark.asyncio
     async def test_rail_no_section_when_workspace_empty(self):
@@ -145,9 +144,13 @@ class TestProjectMemoryRailEndToEnd:
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
             rail.init(agent)
-            await rail.before_model_call(ctx=_make_ctx(agent))
+            await rail.before_model_call(ctx=MagicMock())
 
-            assert await _project_memory_section(agent) is None
+            project_sections = [
+                s for s in agent.system_prompt_builder.added_sections
+                if s.name == SECTION_NAME
+            ]
+            assert project_sections == []
 
     @pytest.mark.asyncio
     async def test_rail_additional_directories_via_env(self, monkeypatch):
@@ -158,9 +161,9 @@ class TestProjectMemoryRailEndToEnd:
             root = Path(td)
             extra = Path(extra_td)
             _touch(root, ".git/HEAD", "")
-            _touch(extra, "JIUWENSWARM.md", "EXTRA-PROJECT-RULE")
+            _touch(extra, "JIUWENAVATAR.md", "EXTRA-PROJECT-RULE")
 
-            monkeypatch.setenv("JIUWENSWARM_ADDITIONAL_DIRECTORIES", str(extra))
+            monkeypatch.setenv("JIUWENAVATAR_ADDITIONAL_DIRECTORIES", str(extra))
             clear_project_memory_cache()
 
             rail = ProjectMemoryRail(
@@ -170,9 +173,9 @@ class TestProjectMemoryRailEndToEnd:
             )
             agent = _make_agent_with_builder()
             rail.init(agent)
-            await rail.before_model_call(ctx=_make_ctx(agent))
+            await rail.before_model_call(ctx=MagicMock())
 
-            body = await _project_memory_body(agent)
+            body = agent.system_prompt_builder.added_sections[-1].content["en"]
             assert "EXTRA-PROJECT-RULE" in body
 
 
@@ -183,11 +186,11 @@ class TestProjectMemoryRailEndToEnd:
 class TestProjectMemoryFileDiscovery:
     """Core discover_and_load_memory_files with real filesystem."""
 
-    def test_discovery_finds_jiuwenswarm_md(self):
+    def test_discovery_finds_jiuwenavatar_md(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENSWARM.md", "DISCOVERY-CONTENT")
+            _touch(root, "JIUWENAVATAR.md", "DISCOVERY-CONTENT")
 
             files = discover_and_load_memory_files(workspace=str(root))
             assert any("DISCOVERY-CONTENT" in f.content for f in files)
@@ -196,7 +199,7 @@ class TestProjectMemoryFileDiscovery:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENSWARM.md", "ROOT-RULE")
+            _touch(root, "JIUWENAVATAR.md", "ROOT-RULE")
             sub = root / "src" / "feature"
             sub.mkdir(parents=True)
 
@@ -210,8 +213,8 @@ class TestProjectMemoryFileDiscovery:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENSWARM.md", "PROJECT-LINE")
-            _touch(root, "JIUWENSWARM.local.md", "LOCAL-LINE")
+            _touch(root, "JIUWENAVATAR.md", "PROJECT-LINE")
+            _touch(root, "JIUWENAVATAR.local.md", "LOCAL-LINE")
 
             files = discover_and_load_memory_files(workspace=str(root))
             merged = merge_memory_content(files)
@@ -236,7 +239,7 @@ class TestProjectMemoryFileDiscovery:
             _touch(root, ".jiuwen/rules/shared.md", "SHARED-RULE")
             _touch(
                 root,
-                "JIUWENSWARM.md",
+                "JIUWENAVATAR.md",
                 "ROOT-LINE\n@include .jiuwen/rules/shared.md\nTAIL-LINE\n",
             )
 
@@ -295,7 +298,7 @@ class TestCodeModeIntegration:
 
     def test_build_project_memory_rail_creates_rail(self):
         with tempfile.TemporaryDirectory() as td:
-            adapter = JiuwenSwarmCodeAdapter()
+            adapter = JiuwenClawCodeAdapter()
             adapter._workspace_dir = td
             adapter._project_dir = td
             adapter._instance_overrides = {}
@@ -314,11 +317,11 @@ class TestCodeModeIntegration:
             tempfile.TemporaryDirectory() as extra2,
         ):
             monkeypatch.setenv(
-                "JIUWENSWARM_ADDITIONAL_DIRECTORIES",
+                "JIUWENAVATAR_ADDITIONAL_DIRECTORIES",
                 str(extra1) + os.pathsep + str(extra2),
             )
 
-            adapter = JiuwenSwarmCodeAdapter()
+            adapter = JiuwenClawCodeAdapter()
             adapter._workspace_dir = td
             adapter._project_dir = td
             adapter._instance_overrides = {}
@@ -332,13 +335,13 @@ class TestCodeModeIntegration:
     @staticmethod
     def test_is_subagent_default_enabled_logic():
         # None → default enabled (no config means enabled)
-        assert JiuWenSwarmDeepAdapter._is_subagent_default_enabled(None) is True
+        assert JiuWenClawDeepAdapter._is_subagent_default_enabled(None) is True
         # dict without "enabled" → default enabled
-        assert JiuWenSwarmDeepAdapter._is_subagent_default_enabled({"max_iterations": 5}) is True
+        assert JiuWenClawDeepAdapter._is_subagent_default_enabled({"max_iterations": 5}) is True
         # dict with enabled=True → still enabled
-        assert JiuWenSwarmDeepAdapter._is_subagent_default_enabled({"enabled": True}) is True
+        assert JiuWenClawDeepAdapter._is_subagent_default_enabled({"enabled": True}) is True
         # dict with enabled=False → explicitly disabled
-        assert JiuWenSwarmDeepAdapter._is_subagent_default_enabled({"enabled": False}) is False
+        assert JiuWenClawDeepAdapter._is_subagent_default_enabled({"enabled": False}) is False
 
     def test_git_worktree_info_is_public_dataclass(self):
         info = GitWorktreeInfo(
@@ -372,11 +375,11 @@ class TestExploreAgentSubagentIntegration:
             ModelRequestConfig,
         )
 
-        adapter = JiuwenSwarmCodeAdapter()
+        adapter = JiuwenClawCodeAdapter()
         adapter._workspace_dir = "/tmp/test-workspace"
         adapter._project_dir = "/tmp/test-workspace"
         monkeypatch.setattr(
-            JiuwenSwarmCodeAdapter,
+            JiuwenClawCodeAdapter,
             "_browser_runtime_enabled",
             staticmethod(lambda: False),
         )
@@ -405,11 +408,11 @@ class TestExploreAgentSubagentIntegration:
             ModelRequestConfig,
         )
 
-        adapter = JiuwenSwarmCodeAdapter()
+        adapter = JiuwenClawCodeAdapter()
         adapter._workspace_dir = "/tmp/test-workspace"
         adapter._project_dir = "/tmp/test-workspace"
         monkeypatch.setattr(
-            JiuwenSwarmCodeAdapter,
+            JiuwenClawCodeAdapter,
             "_browser_runtime_enabled",
             staticmethod(lambda: False),
         )
@@ -441,11 +444,11 @@ class TestExploreAgentSubagentIntegration:
             ModelRequestConfig,
         )
 
-        adapter = JiuwenSwarmCodeAdapter()
+        adapter = JiuwenClawCodeAdapter()
         adapter._workspace_dir = "/tmp/test-workspace"
         adapter._project_dir = "/tmp/test-workspace"
         monkeypatch.setattr(
-            JiuwenSwarmCodeAdapter,
+            JiuwenClawCodeAdapter,
             "_browser_runtime_enabled",
             staticmethod(lambda: False),
         )
@@ -531,11 +534,11 @@ class TestProjectMemoryMergeContent:
         # it appends per-file headers. Two different paths produce two sections.
         files = [
             LoadedMemoryFile(
-                path="/a/JIUWENSWARM.md", kind="project", content="SAME-CONTENT",
+                path="/a/JIUWENAVATAR.md", kind="project", content="SAME-CONTENT",
                 priority=PRIORITY["project"],
             ),
             LoadedMemoryFile(
-                path="/b/JIUWENSWARM.md", kind="project", content="SAME-CONTENT",
+                path="/b/JIUWENAVATAR.md", kind="project", content="SAME-CONTENT",
                 priority=PRIORITY["project"],
             ),
         ]
@@ -543,8 +546,8 @@ class TestProjectMemoryMergeContent:
         merged = merge_memory_content(files)
         # Both files appear in merge with their own headers
         assert "SAME-CONTENT" in merged
-        assert "/a/JIUWENSWARM.md" in merged
-        assert "/b/JIUWENSWARM.md" in merged
+        assert "/a/JIUWENAVATAR.md" in merged
+        assert "/b/JIUWENAVATAR.md" in merged
 
 
 # =====================================================================
@@ -561,7 +564,7 @@ class TestProjectMemoryRailModeSwitching:
 
     def test_rail_built_for_code_mode(self):
         with tempfile.TemporaryDirectory() as td:
-            adapter = JiuwenSwarmCodeAdapter()
+            adapter = JiuwenClawCodeAdapter()
             adapter._workspace_dir = td
             adapter._project_dir = td
             adapter._instance_overrides = {}
@@ -584,7 +587,7 @@ class TestProjectMemoryRailModeSwitching:
         # CodeAdapter always builds and registers ProjectMemoryRail
         # regardless of mode variant (code, code.normal, code.plan)
         for _ in ("code", "code.normal", "code.plan"):
-            # All code variants use JiuwenSwarmCodeAdapter, which always mounts the rail
+            # All code variants use JiuwenClawCodeAdapter, which always mounts the rail
             assert True
 
 
@@ -600,15 +603,15 @@ class TestProjectMemoryRailCacheInvalidation:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENSWARM.md", "ORIGINAL-CONTENT")
+            _touch(root, "JIUWENAVATAR.md", "ORIGINAL-CONTENT")
 
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
             rail.init(agent)
 
             # First load
-            await rail.before_model_call(ctx=_make_ctx(agent))
-            body1 = await _project_memory_body(agent)
+            await rail.before_model_call(ctx=MagicMock())
+            body1 = agent.system_prompt_builder.added_sections[-1].content["en"]
             assert "ORIGINAL-CONTENT" in body1
 
             # Simulate write tool call — should invalidate cache
@@ -618,11 +621,11 @@ class TestProjectMemoryRailCacheInvalidation:
             await rail.after_tool_call(ctx)
 
             # Modify file on disk
-            _touch(root, "JIUWENSWARM.md", "UPDATED-CONTENT")
+            _touch(root, "JIUWENAVATAR.md", "UPDATED-CONTENT")
 
             # Reload after invalidation
-            await rail.before_model_call(ctx=_make_ctx(agent))
-            body2 = await _project_memory_body(agent)
+            await rail.before_model_call(ctx=MagicMock())
+            body2 = agent.system_prompt_builder.added_sections[-1].content["en"]
             assert "UPDATED-CONTENT" in body2
             assert "ORIGINAL-CONTENT" not in body2
 
@@ -631,15 +634,15 @@ class TestProjectMemoryRailCacheInvalidation:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENSWARM.md", "STABLE-CONTENT")
+            _touch(root, "JIUWENAVATAR.md", "STABLE-CONTENT")
 
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
             rail.init(agent)
 
             # First load
-            await rail.before_model_call(ctx=_make_ctx(agent))
-            body1 = await _project_memory_body(agent)
+            await rail.before_model_call(ctx=MagicMock())
+            body1 = agent.system_prompt_builder.added_sections[-1].content["en"]
             assert "STABLE-CONTENT" in body1
 
             # Simulate read tool call — should NOT invalidate
@@ -649,7 +652,7 @@ class TestProjectMemoryRailCacheInvalidation:
             await rail.after_tool_call(ctx)
 
             # Modify file on disk (this happens outside the tool call)
-            _touch(root, "JIUWENSWARM.md", "CHANGED-CONTENT")
+            _touch(root, "JIUWENAVATAR.md", "CHANGED-CONTENT")
 
             # The cache snapshot check may still pick up the change,
             # but the explicit after_tool_call for read_file should not have
@@ -676,24 +679,27 @@ class TestProjectMemoryRailLanguagePropagation:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENSWARM.md", "BODY-CONTENT")
+            _touch(root, "JIUWENAVATAR.md", "BODY-CONTENT")
 
             # Start with Chinese
             rail = ProjectMemoryRail(workspace=str(root), language="cn")
             agent = _make_agent_with_builder()
             rail.init(agent)
-            await rail.before_model_call(ctx=_make_ctx(agent))
+            await rail.before_model_call(ctx=MagicMock())
 
-            cn_body = await _project_memory_body(agent, "cn")
-            assert "项目记忆" in cn_body
+            section = agent.system_prompt_builder.added_sections[-1]
+            assert "项目记忆" in section.content["cn"]
+            assert "Project Memory" in section.content["en"]
 
             # Switch to English
             rail.set_language("en")
             assert rail.get_language() == "en"
 
-            await rail.before_model_call(ctx=_make_ctx(agent))
-            en_body = await _project_memory_body(agent, "en")
-            assert "Project Memory" in en_body
+            # Reload — section content keys stay bilingual (both cn+en always populated)
+            await rail.before_model_call(ctx=MagicMock())
+            section2 = agent.system_prompt_builder.added_sections[-1]
+            assert "项目记忆" in section2.content["cn"]
+            assert "Project Memory" in section2.content["en"]
 
     @pytest.mark.asyncio
     async def test_get_language_returns_initial_language(self):

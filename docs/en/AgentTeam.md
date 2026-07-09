@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Agent Team is a core collaboration feature of the JiuwenSwarm platform. It lets multiple agents form a team around one goal and complete complex work together. Unlike boosting a single agent’s capability, Agent Team emphasizes teamwork, division of labor, and continuous delivery.
+Agent Team is a core collaboration feature of the JiuwenAvatar platform. It lets multiple agents form a team around one goal and complete complex work together. Unlike boosting a single agent’s capability, Agent Team emphasizes teamwork, division of labor, and continuous delivery.
 
 ---
 
@@ -188,11 +188,11 @@ Example for “research → report”:
 
 ### 2.3 Starting Agent Team mode
 
-Agent Team mode is a dedicated collaboration mode on JiuwenSwarm. You can start it as follows:
+Agent Team mode is a dedicated collaboration mode on JiuwenAvatar. You can start it as follows:
 
 **Method 1: Switch from the chat UI**
 
-On the JiuwenSwarm chat page, switch to **cluster mode** (Agent Team mode). This is the simplest path—pick the mode in the conversation UI.
+On the JiuwenAvatar chat page, switch to **cluster mode** (Agent Team mode). This is the simplest path—pick the mode in the conversation UI.
 
 ![Mode switch control](../assets/images/切换到集群模式.png)
 
@@ -238,38 +238,12 @@ In Agent Team mode you can still use and develop **Skills**. Each agent can conf
 
 ### 2.5 Team Memory
 
-**Round definition**: In Agent Team, a round is one complete team collaboration cycle, typically including task assignment, execution, reporting, and consolidation.
+Each Agent Team has two memory layers: **personal memory** (each member reads/writes its own) and a shared **`TEAM_MEMORY.md`** (read-only to members; the Leader writes it via an extractor agent at the end of each round).
 
-In Agent Team mode, each team has two-layer memory: each member's own **personal memory** (independent read/write) and a shared **`TEAM_MEMORY.md`** (read-only to all members; the Leader writes it via an extractor agent at the end of each round).
+- **Temporary team** — members read-only access the parent agent's workspace memory; nothing persists once the team is torn down
+- **Persistent team** — each member has isolated personal memory plus team memory that accumulates across rounds; predefined members keep their existing workspace via symlink
 
-**Team lifecycle and memory behavior:**
-
-| Lifecycle | Personal Memory | Team Memory | Applicable Scenarios |
-|-----------|-----------------|-------------|----------------------|
-| **Temporary team** | Read-only access to parent agent's workspace memory | None | One-off tasks, use-and-discard |
-| **Persistent team** | Each member reads/writes independently | Auto-extracted + accumulated across rounds | Long-term collaboration, experience accumulation |
-
-**Detailed explanation:**
-
-- **Temporary team**:
-  - Members have read-only access to the parent agent's workspace memory and cannot pollute the source memory
-  - No team memory; nothing persists after the team is destroyed
-  - Suitable for one-off tasks and use-and-discard scenarios
-
-- **Persistent team**:
-  - Each member has independent personal memory with read/write support
-  - Team memory is auto-extracted by the Leader at the end of each round and accumulates across rounds
-  - Predefined members' existing workspaces are continued via symlink
-  - Suitable for long-term collaboration and scenarios requiring experience accumulation
-
-**Memory hierarchy and access permissions:**
-
-| Layer | Access Permission | Writer |
-|-------|-------------------|--------|
-| Personal memory | Exclusive to the member | The member itself (via memory tool calls in session) |
-| Team memory | Read-only to all members | Leader writes via extractor agent at the end of each round |
-
-For the full storage layout, extraction categories (`[decision]` / `[lesson]` / `[member]` / `[context]`), and cross-team / cross-member isolation, see [Memory → Agent Team Memory](Memory.md#advanced-agent-swarm-team-memory).
+For the full layout, extraction categories (`[decision]` / `[lesson]` / `[member]` / `[context]`), and cross-team / cross-member isolation, see [Memory → Agent Team Memory](Memory.md#agent-team-memory).
 
 ---
 
@@ -417,6 +391,8 @@ Full path layout:
     │   │   ├── docs/                  ← document artifacts
     │   │   └── reports/               ← report artifacts
     │   └── skills/                    ← team-shared skills
+    ├── team-memory/                   ← shared team memory (auto-extracted by leader)
+    │   └── TEAM_MEMORY.md
     └── workspaces/                    ← per-member workspaces
         └── <agent_name>_workspace/    ← each agent’s private space
             ├── AGENT.md               ← agent configuration
@@ -504,12 +480,6 @@ Yes. Users can observe:
 - Task progress  
 - Agent member status  
 - Intermediate artifacts and consolidated results  
-
-### Q6: Can multiple Team sessions run in the same channel at the same time?
-
-Local runtime supports multiple concurrent Team sessions in the same channel. Switching the currently viewed session only affects the UI display and does not stop background tasks of other sessions; pause, cancel, and delete operations act on the specified session only.
-
-Distributed runtime keeps single-active-session semantics per channel. Creating or switching to another Team session first stops the existing active or pending session in that channel, so remote member bootstrap, transport connections, and runtime resources are not reused across sessions.
 
 ---
 

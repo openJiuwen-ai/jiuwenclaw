@@ -22,9 +22,9 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentRail,
     ToolCallInputs,
 )
-from jiuwenswarm.server.runtime.agent_adapter import interface_deep as deep_interface_module
-from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
-from jiuwenswarm.common.schema.agent import AgentRequest
+from jiuwenavatar.server.runtime.agent_adapter import interface_deep as deep_interface_module
+from jiuwenavatar.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenavatar.common.schema.agent import AgentRequest
 
 
 class MockLLMModel:
@@ -67,7 +67,7 @@ class ToolTraceRail(AgentRail):
             self.tool_calls.append(ctx.inputs.tool_name)
 
 
-class _TestableJiuWenSwarmDeepAdapter(JiuWenSwarmDeepAdapter):
+class _TestableJiuWenClawDeepAdapter(JiuWenClawDeepAdapter):
     def set_workspace_dir(self, workspace_dir: str) -> None:
         self._workspace_dir = workspace_dir
 
@@ -137,10 +137,10 @@ def _make_fake_runtime() -> MagicMock:
 def test_deep_adapter_subagents_defaults_to_none_when_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapter = _TestableJiuWenSwarmDeepAdapter()
+    adapter = _TestableJiuWenClawDeepAdapter()
     model = _build_model()
     monkeypatch.setattr(
-        JiuWenSwarmDeepAdapter,
+        JiuWenClawDeepAdapter,
         "_browser_runtime_enabled",
         staticmethod(lambda: False),
     )
@@ -157,7 +157,7 @@ def test_deep_adapter_subagents_defaults_to_none_when_unconfigured(
 def test_deep_adapter_subagents_includes_browser_by_default_when_runtime_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapter = _TestableJiuWenSwarmDeepAdapter()
+    adapter = _TestableJiuWenClawDeepAdapter()
     adapter.set_workspace_dir("/tmp/test-workspace")
     model = _build_model()
 
@@ -167,7 +167,7 @@ def test_deep_adapter_subagents_includes_browser_by_default_when_runtime_enabled
         lambda *args, **kwargs: {"name": "browser_agent", "kwargs": kwargs},
     )
     monkeypatch.setattr(
-        JiuWenSwarmDeepAdapter,
+        JiuWenClawDeepAdapter,
         "_browser_runtime_enabled",
         staticmethod(lambda: True),
     )
@@ -187,7 +187,7 @@ def test_deep_adapter_subagents_includes_browser_by_default_when_runtime_enabled
 def test_deep_adapter_subagents_only_includes_explicitly_enabled_agents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapter = _TestableJiuWenSwarmDeepAdapter()
+    adapter = _TestableJiuWenClawDeepAdapter()
     adapter.set_workspace_dir("/tmp/test-workspace")
     model = _build_model()
 
@@ -202,7 +202,7 @@ def test_deep_adapter_subagents_only_includes_explicitly_enabled_agents(
         lambda *args, **kwargs: {"name": "browser_agent", "kwargs": kwargs},
     )
     monkeypatch.setattr(
-        JiuWenSwarmDeepAdapter,
+        JiuWenClawDeepAdapter,
         "_browser_runtime_enabled",
         staticmethod(lambda: True),
     )
@@ -229,11 +229,11 @@ def test_deep_adapter_subagents_only_includes_explicitly_enabled_agents(
 def test_deep_adapter_subagents_skips_browser_without_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapter = _TestableJiuWenSwarmDeepAdapter()
+    adapter = _TestableJiuWenClawDeepAdapter()
     model = _build_model()
 
     monkeypatch.setattr(
-        JiuWenSwarmDeepAdapter,
+        JiuWenClawDeepAdapter,
         "_browser_runtime_enabled",
         staticmethod(lambda: False),
     )
@@ -311,18 +311,18 @@ async def test_interface_deep_browser_subagent_task_tool_chain(
         "error": None,
     }
     tool_trace = ToolTraceRail()
-    adapter = _TestableJiuWenSwarmDeepAdapter()
+    adapter = _TestableJiuWenClawDeepAdapter()
     adapter.set_workspace_dir(str(temp_workspace / "workspace" / "agent"))
 
     with (
-        patch.object(JiuWenSwarmDeepAdapter, "set_checkpoint", AsyncMock()),
-        patch.object(JiuWenSwarmDeepAdapter, "_create_model", return_value=model),
-        patch.object(JiuWenSwarmDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
-        patch.object(JiuWenSwarmDeepAdapter, "_build_agent_rails", return_value=[tool_trace]),
-        patch.object(JiuWenSwarmDeepAdapter, "_create_sys_operation", return_value=MagicMock()),
-        patch.object(JiuWenSwarmDeepAdapter, "_proc_context_compaction", AsyncMock()),
-        patch.object(JiuWenSwarmDeepAdapter, "_register_runtime_tools", AsyncMock()),
-        patch.object(JiuWenSwarmDeepAdapter, "_refresh_multimodal_configs", return_value=None),
+        patch.object(JiuWenClawDeepAdapter, "set_checkpoint", AsyncMock()),
+        patch.object(JiuWenClawDeepAdapter, "_create_model", return_value=model),
+        patch.object(JiuWenClawDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
+        patch.object(JiuWenClawDeepAdapter, "_build_agent_rails", return_value=[tool_trace]),
+        patch.object(JiuWenClawDeepAdapter, "_create_sys_operation", return_value=MagicMock()),
+        patch.object(JiuWenClawDeepAdapter, "_proc_context_compaction", AsyncMock()),
+        patch.object(JiuWenClawDeepAdapter, "_register_runtime_tools", AsyncMock()),
+        patch.object(JiuWenClawDeepAdapter, "_refresh_multimodal_configs", return_value=None),
         patch(
             "openjiuwen.harness.subagents.browser_agent.BrowserAgentRuntime",
             return_value=runtime,

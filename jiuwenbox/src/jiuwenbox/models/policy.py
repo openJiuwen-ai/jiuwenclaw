@@ -584,32 +584,8 @@ class InferencePrivacyProxyPolicy(BaseModel):
         return value.strip()
 
 
-class NetworkUplinkPolicy(BaseModel):
-    subnet: str = ""
-    nat: bool = True
-    interface: str = ""
-
-    @field_validator("subnet", mode="after")
-    @classmethod
-    def validate_subnet(cls, value: str) -> str:
-        import ipaddress
-
-        if not value.strip():
-            return ""
-        try:
-            network = ipaddress.ip_network(value, strict=False)
-        except ValueError as exc:
-            raise ValueError(f"uplink.subnet must be a valid CIDR: {value}") from exc
-        if network.version != 4:
-            raise ValueError("uplink.subnet must be an IPv4 CIDR")
-        if network.prefixlen > 24:
-            raise ValueError("uplink.subnet prefix must be /24 or shorter")
-        return str(network)
-
-
 class NetworkPolicy(BaseModel):
     mode: NetworkMode = NetworkMode.ISOLATED
-    uplink: NetworkUplinkPolicy = Field(default_factory=NetworkUplinkPolicy)
     egress: NetworkRulePolicy = Field(default_factory=NetworkRulePolicy)
     ingress: NetworkRulePolicy = Field(default_factory=NetworkRulePolicy)
 

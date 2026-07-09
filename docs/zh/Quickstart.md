@@ -1,4 +1,4 @@
-# 快速开始
+﻿# 快速开始
 
 > **⚠️ 版本同步**: 本文档应与英文版 [`docs/en/Quickstart.md`](../en/Quickstart.md) 保持同步。更新一版时请同时更新另一版。
 
@@ -6,7 +6,7 @@
 
 ### 环境要求
 
-在安装 JiuwenSwarm 之前，请确保您的系统满足以下要求：
+在安装 JiuwenAvatar 之前，请确保您的系统满足以下要求：
 
 | 依赖项 | 版本要求 | 说明 |
 |--------|----------|------|
@@ -26,55 +26,39 @@ node --version
 
 ```bash
 # 创建虚拟环境
-python -m venv jiuwenswarm
+python -m venv jiuwenavatar
 
 # 激活虚拟环境
 # Windows:
-jiuwenswarm\Scripts\activate
+jiuwenavatar\Scripts\activate
 # Linux/Mac:
-source jiuwenswarm/bin/activate
+source jiuwenavatar/bin/activate
 
-# 安装 JiuwenSwarm
-pip install jiuwenswarm
+# 安装 JiuwenAvatar
+pip install jiuwenavatar
 ```
 
 ## 启动服务
 
 ```bash
 # 初始化（首次运行）
-jiuwenswarm-init
+jiuwenavatar-init
 
 # 启动服务
-jiuwenswarm-start
+jiuwenavatar-start
 ```
 
 启动成功后，终端会显示后端服务运行状态：
 
 ```
-[INFO] Starting JiuwenSwarm server...
+[INFO] Starting JiuwenAvatar server...
 [INFO] API server running at http://localhost:8000
-[INFO] Web server running at http://localhost:5173
+[INFO] Web server running at http://localhost:29173
 ```
 
-当看到类似上述提示时，表示服务已启动，在浏览器中访问 `http://localhost:5173` 即可使用。
+当看到类似上述提示时，表示服务已启动，在浏览器中访问 `http://localhost:29173` 即可使用。
 
-### 终端 CLI
-
-也可以直接在终端中与 JiuwenSwarm 对话：
-
-```bash
-jiuwenswarm chat "你好，介绍一下你自己"
-```
-
-详情见 [命令行指令 / 终端 CLI](命令行指令.md#终端-clijiuwenswarm-chat)。
-
-**配置目录自动创建**：
-首次启动服务后，系统会自动创建配置目录：
-- **Windows**：`C:\Users\<你的用户名>\.jiuwenswarm`
-- **Linux/Mac**：`~/.jiuwenswarm/`
-
-配置文件、记忆文件等数据将存储在该目录下。
-​适合基于JiuwenSwarm进行二次开发适配的用户。
+适合基于JiuwenAvatar进行二次开发适配的用户。
 
 ### `uv`方式安装
 - 使用`uv`新建虚拟环境
@@ -87,16 +71,16 @@ jiuwenswarm chat "你好，介绍一下你自己"
 
 - 执行uv同步操作
 
-  进入项目根目录`jiuwenswarm/`执行：
+  进入项目根目录`jiuwenavatar/`执行：
   ```bash
   uv sync
   ```
 
 - 安装前端依赖
 
-  进入前端目录 jiuwenswarm/channels/web/frontend 安装依赖：
+  进入前端目录 jiuwenavatar/channels/web/frontend 安装依赖：
   ```bash
-  cd jiuwenswarm/channels/web/frontend
+  cd jiuwenavatar/channels/web/frontend
   npm install
   ```
 
@@ -107,30 +91,30 @@ jiuwenswarm chat "你好，介绍一下你自己"
     ```bash
     npm run build
     cd ../../
-    uv run jiuwenswarm-init
-    uv run jiuwenswarm-start
+    uv run jiuwenavatar-init
+    uv run jiuwenavatar-start
     ```
 
   - 动态运行前端服务（适合开发调试）
     ```bash
     cd ../../
-    uv run jiuwenswarm-init
-    uv run jiuwenswarm-start dev
+    uv run jiuwenavatar-init
+    uv run jiuwenavatar-start dev
     ```
 
-  运行完成后即可在网页前端访问JiuwenSwarm服务。
+  运行完成后即可在网页前端访问JiuwenAvatar服务。
 
 ### `conda`方式安装
 - 使用`conda`新建虚拟环境
   ```bash
   # 使用Anaconda新建虚拟环境（支持 3.11、3.12、3.13 任一版本）
-  conda create -n JiuwenSwarm python=3.11
-  # 或 conda create -n JiuwenSwarm python=3.12
-  # 或 conda create -n JiuwenSwarm python=3.13
+  conda create -n JiuwenAvatar python=3.11
+  # 或 conda create -n JiuwenAvatar python=3.12
+  # 或 conda create -n JiuwenAvatar python=3.13
   ```
 - 安装python依赖
 
-  进入项目根目录`jiuwenswarm/`执行：
+  进入项目根目录`jiuwenavatar/`执行：
   ```bash
   # 模式1：开发模式安装（推荐，便于修改代码）
   pip install -e .
@@ -138,13 +122,13 @@ jiuwenswarm chat "你好，介绍一下你自己"
   # 模式2：普通安装
   pip install .
   ```
-  **注意：** 该安装方式依赖项目的可安装包（pyproject.toml），同时会默认安装`jiuwenswarm`自己。
+  **注意：** 该安装方式依赖项目的可安装包（pyproject.toml），同时会默认安装`jiuwenavatar`自己。
 
 - 安装前端依赖
 
-  进入前端目录 jiuwenswarm/channels/web/frontend 安装依赖：
+  进入前端目录 jiuwenavatar/channels/web/frontend 安装依赖：
   ```bash
-  cd jiuwenswarm/channels/web/frontend
+  cd jiuwenavatar/channels/web/frontend
   npm install
   ```
 
@@ -155,19 +139,19 @@ jiuwenswarm chat "你好，介绍一下你自己"
     ```bash
     npm run build
     cd ../../
-    jiuwenswarm-init
-    jiuwenswarm-start
+    jiuwenavatar-init
+    jiuwenavatar-start
     ```
 
   - 动态运行前端服务（适合开发调试）
     ```bash
     cd ../../
     # 直接启动（不使用 uv run）
-    jiuwenswarm-init
-    jiuwenswarm-start dev
+    jiuwenavatar-init
+    jiuwenavatar-start dev
     ```
 
-  运行完成后即可在网页前端访问JiuwenSwarm服务。
+  运行完成后即可在网页前端访问JiuwenAvatar服务。
 
 ---
 
@@ -177,9 +161,9 @@ jiuwenswarm chat "你好，介绍一下你自己"
 
 | 方式 | 说明                                        |
 |------|-------------------------------------------|
-| **Web前端** | 启动服务后访问 `http://localhost:5173`，通过浏览器直接对话 |
-| **小艺频道** | 华为手机用户可直接唤醒小艺，与JiuwenSwarm对话               |
-| **飞书频道** | 完成渠道配置后，在飞书中与JiuwenSwarm畅聊                 |
+| **Web前端** | 启动服务后访问 `http://localhost:29173`，通过浏览器直接对话 |
+| **小艺频道** | 华为手机用户可直接唤醒小艺，与JiuwenAvatar对话               |
+| **飞书频道** | 完成渠道配置后，在飞书中与JiuwenAvatar畅聊                 |
 
 #### 2️⃣ 配置模型
 
@@ -189,21 +173,21 @@ jiuwenswarm chat "你好，介绍一下你自己"
 
 ```bash
 # 启动 Web 服务
-jiuwenswarm-web --host 0.0.0.0 --port <custom-port>
+jiuwenavatar-web --host 0.0.0.0 --port <custom-port>
 
 # 启动后端服务
-jiuwenswarm-app
+jiuwenavatar-app
 ```
 
 ## 配置模型
 
 在 Web 页面左侧找到「配置信息」，进入配置页面：
 
-![](../assets/images/jiuwenswarm_configuration_Info.png)
+![](../assets/images/jiuwenavatar_configuration_Info.png)
 
 完善以下基本配置，完成后点击右上角「保存」：
 
-![](../assets/images/jiuwenswarm_config_api.png)
+![](../assets/images/jiuwenavatar_config_api.png)
 
 **配置项说明：**
 
@@ -231,17 +215,17 @@ jiuwenswarm-app
 
 在 Web 页面左侧找到「对话」，输入问题即可开始：
 
-![](../assets/images/jiuwenswarm_example.png)
+![](../assets/images/jiuwenavatar_example.png)
 
 ## 会话管理
 
 点击下方的「+」号，可清空当前会话并开启新会话：
 
-![](../assets/images/jiuwenswarm_new_session.png)
+![](../assets/images/jiuwenavatar_new_session.png)
 
 清理后页面显示：
 
-![](../assets/images/jiuwenswarm_clear_session.png)
+![](../assets/images/jiuwenavatar_clear_session.png)
 
 **什么时候需要清空会话？**
 
@@ -263,7 +247,7 @@ jiuwenswarm-app
 
 ## 清空记忆
 
-当你需要让 JiuwenSwarm 忘记之前的所有对话历史和用户信息时，可以清空记忆文件。
+当你需要让 JiuwenAvatar 忘记之前的所有对话历史和用户信息时，可以清空记忆文件。
 
 > **⚠️ 风险提示：** 清空记忆是**永久性操作**，删除的记忆文件**无法恢复**。操作前请确认：
 > - 重要记忆是否已备份
@@ -284,16 +268,14 @@ jiuwenswarm-app
 
 **清空记忆操作步骤：**
 
-记忆文件存储路径：
-- **Windows**：`C:\Users\<你的用户名>\.jiuwenswarm\agent\workspace\memory\`
-- **Linux/Mac**：`~/.jiuwenswarm/agent/workspace/memory/`
+记忆文件存储在 `{workspace_dir}/memory/` 目录下：
 
 **方式一：通过 Agent 删除**
-直接告诉 JiuwenSwarm："请删除所有记忆文件" 或 "清空我的记忆"，Agent 会调用文件工具删除 memory 目录下的文件。
-![](../assets/images/jiuwenswarm_delete_memory.png)
+直接告诉 JiuwenAvatar："请删除所有记忆文件" 或 "清空我的记忆"，Agent 会调用文件工具删除 memory 目录下的文件。
+![](../assets/images/jiuwenavatar_delete_memory.png)
 
 **方式二：手动删除**
-停止 JiuwenSwarm 服务后，直接删除 `memory/` 目录下的所有 Markdown 文件即可。
-![](../assets/images/jiuwenswarm_memory.png)
+停止 JiuwenAvatar 服务后，直接删除 `memory/` 目录下的所有 Markdown 文件即可。
+![](../assets/images/jiuwenavatar_memory.png)
 
 > ⚠️ **注意**：清空记忆后无法恢复，请谨慎操作。建议定期备份重要的记忆文件。

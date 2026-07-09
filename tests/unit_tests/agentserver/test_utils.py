@@ -2,9 +2,9 @@
 
 """Tests for agentserver utility functions."""
 
-from jiuwenswarm.server.utils.utils import get_chat_id
-from jiuwenswarm.common.schema.agent import AgentRequest
-from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenavatar.server.utils.utils import get_chat_id
+from jiuwenavatar.common.schema.agent import AgentRequest
+from jiuwenavatar.common.schema.message import ReqMethod
 
 
 def test_get_chat_id_from_top_level_field() -> None:

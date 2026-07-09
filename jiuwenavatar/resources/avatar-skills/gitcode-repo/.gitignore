@@ -1,0 +1,10 @@
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 临时正文（--body-file / --comment-file 草稿，勿提交）
+pr-body.md
+pr_body.md
+issue-body.md
+comment.md
+pr-comment.md

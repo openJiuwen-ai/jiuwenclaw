@@ -100,20 +100,20 @@ pytest -m "not slow"
 
 ```bash
 # 生成终端报告
-pytest --cov=jiuwenswarm --cov-report=term-missing
+pytest --cov=jiuwenavatar --cov-report=term-missing
 
 # 生成 HTML 报告
-pytest --cov=jiuwenswarm --cov-report=html
+pytest --cov=jiuwenavatar --cov-report=html
 
 # 生成 XML 报告（用于 CI）
-pytest --cov=jiuwenswarm --cov-report=xml
+pytest --cov=jiuwenavatar --cov-report=xml
 ```
 
 ### 查看覆盖率报告
 
 ```bash
 # 生成 HTML 报告后在浏览器中打开
-pytest --cov=jiuwenswarm --cov-report=html
+pytest --cov=jiuwenavatar --cov-report=html
 open htmlcov/index.html  # macOS
 xdg-open htmlcov/index.html  # Linux
 ```

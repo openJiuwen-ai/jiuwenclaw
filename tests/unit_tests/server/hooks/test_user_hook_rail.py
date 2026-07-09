@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Unit tests for jiuwenswarm.server.hooks.user_hook_rail."""
+"""Unit tests for jiuwenavatar.server.hooks.user_hook_rail."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 from typing import Any
 import pytest
 
-from jiuwenswarm.common.hooks_config import HooksConfig, HookMatcher
-from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
+from jiuwenavatar.common.hooks_config import HooksConfig, HookMatcher
+from jiuwenavatar.server.hooks.user_hook_rail import UserHookRail
 
 
 # ============================================================

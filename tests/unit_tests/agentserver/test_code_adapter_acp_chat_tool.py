@@ -4,8 +4,8 @@
 
 from types import SimpleNamespace
 
-from jiuwenswarm.server.runtime.agent_adapter import interface_code
-from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
+from jiuwenavatar.server.runtime.agent_adapter import interface_code
+from jiuwenavatar.server.runtime.agent_adapter.interface_code import JiuwenClawCodeAdapter
 
 
 class _FakeResourceMgr:
@@ -21,36 +21,36 @@ class _FakeResourceMgr:
 
 def test_code_adapter_builds_acp_chat_when_profile_configured(monkeypatch):
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_code.get_config",
+        "jiuwenavatar.server.runtime.agent_adapter.interface_code.get_config",
         lambda: {
             "acp_agents": {"codex": {"command": "npx", "args": []}},
             "modes": {"code": {"tools": ["acp_chat"]}},
         },
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_code.Runner",
+        "jiuwenavatar.server.runtime.agent_adapter.interface_code.Runner",
         SimpleNamespace(resource_mgr=_FakeResourceMgr()),
     )
 
-    cards = JiuwenSwarmCodeAdapter().build_code_tool_cards("agent-id")
+    cards = JiuwenClawCodeAdapter().build_code_tool_cards("agent-id")
 
     assert [card.name for card in cards] == ["acp_chat"]
 
 
 def test_code_adapter_skips_acp_chat_without_profiles(monkeypatch):
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_code.get_config",
+        "jiuwenavatar.server.runtime.agent_adapter.interface_code.get_config",
         lambda: {
             "acp_agents": {},
             "modes": {"code": {"tools": ["acp_chat"]}},
         },
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_code.Runner",
+        "jiuwenavatar.server.runtime.agent_adapter.interface_code.Runner",
         SimpleNamespace(resource_mgr=_FakeResourceMgr()),
     )
 
-    cards = JiuwenSwarmCodeAdapter().build_code_tool_cards("agent-id")
+    cards = JiuwenClawCodeAdapter().build_code_tool_cards("agent-id")
 
     assert cards == []
 

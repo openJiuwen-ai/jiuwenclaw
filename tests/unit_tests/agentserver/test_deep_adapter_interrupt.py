@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Tests for JiuWenSwarmDeepAdapter interrupt when stream consumer already unwound."""
+"""Tests for JiuWenClawDeepAdapter interrupt when stream consumer already unwound."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from jiuwenswarm.common.schema.agent import AgentRequest
-from jiuwenswarm.common.schema.message import ReqMethod
-from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+from jiuwenavatar.common.schema.agent import AgentRequest
+from jiuwenavatar.common.schema.message import ReqMethod
+from jiuwenavatar.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
 
 
 def _build_cancel_request(session_id: str = "tui_sess_1") -> AgentRequest:
@@ -23,11 +23,9 @@ def _build_cancel_request(session_id: str = "tui_sess_1") -> AgentRequest:
     )
 
 
-def _make_adapter(**state: object) -> JiuWenSwarmDeepAdapter:
+def _make_adapter(**state: object) -> JiuWenClawDeepAdapter:
     """Create a bare adapter with internal state set via setattr."""
-    adapter = object.__new__(JiuWenSwarmDeepAdapter)
-    adapter._is_session_scoped_adapter = True  # pylint: disable=protected-access
-    adapter._parent_session_id = None  # pylint: disable=protected-access
+    adapter = object.__new__(JiuWenClawDeepAdapter)
     for name, value in state.items():
         setattr(adapter, name, value)
     return adapter
@@ -164,12 +162,12 @@ def test_reset_runtime_cron_context_resets_shell_session(
         "_CRON_TOOL_CHANNEL_ID",
     ):
         monkeypatch.setattr(
-            f"jiuwenswarm.server.runtime.agent_adapter.interface_deep.{var_name}",
+            f"jiuwenavatar.server.runtime.agent_adapter.interface_deep.{var_name}",
             MagicMock(),
         )
 
     shell_token = set_shell_session_id("sess_reset")
-    getattr(JiuWenSwarmDeepAdapter, "_reset_runtime_cron_context")(
+    getattr(JiuWenClawDeepAdapter, "_reset_runtime_cron_context")(
         (
             MagicMock(),
             MagicMock(),

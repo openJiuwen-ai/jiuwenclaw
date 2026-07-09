@@ -7,19 +7,7 @@ from types import SimpleNamespace
 import pytest
 from openjiuwen.agent_teams.monitor.models import MonitorEvent, MonitorEventType
 
-from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMonitorHandler
-
-
-class _FakeMessage:
-    def __init__(
-        self,
-        message_id: str,
-        content: str,
-        protocol: str = "plain",
-    ) -> None:
-        self.message_id = message_id
-        self.content = content
-        self.protocol = protocol
+from jiuwenavatar.agents.harness.team.monitor_handler import TeamMonitorHandler
 
 
 class _FakeMember:
@@ -52,14 +40,12 @@ class _FakeMonitor:
         leader_member_name: str | None,
         events: list[MonitorEvent] | None = None,
         tasks: list[_FakeTask] | None = None,
-        messages: list[_FakeMessage] | None = None,
     ):
-        self.team_name = "team-1"
+        self.team_id = "team-1"
         self._members = members
         self._leader_member_name = leader_member_name
         self._events = events or []
         self._tasks = tasks or []
-        self._messages = messages or []
 
     async def start(self) -> None:
         pass
@@ -81,9 +67,6 @@ class _FakeMonitor:
 
     async def get_tasks(self) -> list[_FakeTask]:
         return list(self._tasks)
-
-    async def get_messages(self) -> list[_FakeMessage]:
-        return list(self._messages)
 
 
 @pytest.mark.anyio
@@ -190,82 +173,5 @@ async def test_convert_event_includes_session_id() -> None:
                 "status": "created",
             },
         }
-    finally:
-        await handler.stop()
-
-
-@pytest.mark.anyio
-async def test_convert_json_protocol_message_decodes_unicode_escapes() -> None:
-    event = MonitorEvent(
-        event_type=MonitorEventType.MESSAGE,
-        team_name="team-1",
-        timestamp=123,
-        message_id="msg-approval",
-        from_member_name="team_leader",
-        to_member_name="worker-1",
-    )
-    handler = TeamMonitorHandler(
-        _FakeMonitor(
-            members=[],
-            leader_member_name=None,
-            events=[event],
-            messages=[
-                _FakeMessage(
-                    message_id="msg-approval",
-                    content=(
-                        '{"type": "tool_approval_result", "approved": true, '
-                        '"feedback": "\\u597d\\u8bd7"}'
-                    ),
-                    protocol="json",
-                ),
-            ],
-        ),
-        "sess-monitor",
-    )
-
-    await handler.start()
-    try:
-        converted = await anext(handler.events())
-
-        assert converted["event"]["protocol"] == "json"
-        assert converted["event"]["content"] == (
-            '{"type": "tool_approval_result", "approved": true, "feedback": "好诗"}'
-        )
-    finally:
-        await handler.stop()
-
-
-@pytest.mark.anyio
-async def test_convert_plain_protocol_message_keeps_json_like_text_unchanged() -> None:
-    raw_content = '{"feedback": "\\u597d\\u8bd7"}'
-    event = MonitorEvent(
-        event_type=MonitorEventType.BROADCAST,
-        team_name="team-1",
-        timestamp=123,
-        message_id="msg-plain",
-        from_member_name="team_leader",
-    )
-    handler = TeamMonitorHandler(
-        _FakeMonitor(
-            members=[],
-            leader_member_name=None,
-            events=[event],
-            messages=[
-                _FakeMessage(
-                    message_id="msg-plain",
-                    content=raw_content,
-                    protocol="plain",
-                ),
-            ],
-        ),
-        "sess-monitor",
-    )
-
-    await handler.start()
-    try:
-        converted = await anext(handler.events())
-
-        assert converted["event"]["protocol"] == "plain"
-        assert converted["event"]["content"] == raw_content
     finally:
         await handler.stop()

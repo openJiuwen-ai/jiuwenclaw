@@ -1,6 +1,6 @@
 # Developer Guide
 
-This document is intended for developers of the JiuwenSwarm project, covering how to set up a development environment from source and run tests.
+This document is intended for developers of the JiuwenAvatar project, covering how to set up a development environment from source and run tests.
 
 ## Prerequisites
 
@@ -15,8 +15,8 @@ This document is intended for developers of the JiuwenSwarm project, covering ho
 ## 1. Clone the Repository
 
 ```bash
-git clone <repository-url> jiuwenswarm
-cd jiuwenswarm
+git clone <repository-url> jiuwenavatar
+cd jiuwenavatar
 ```
 
 ## 2. Set Up Development Environment with `uv`
@@ -53,7 +53,7 @@ source .venv/bin/activate
 
 ### Run uv Sync
 
-Run the following command in the project root directory `jiuwenswarm/`:
+Run the following command in the project root directory `jiuwenavatar/`:
 
 ```bash
 uv sync
@@ -89,8 +89,8 @@ Once the environment is set up, you can start developing the source code and tes
 ### Project Structure Overview
 
 ```
-jiuwenswarm/
-├── jiuwenswarm/           # Project source code
+jiuwenavatar/
+├── jiuwenavatar/           # Project source code
 ├── tests/
 │   ├── unit_tests/       # Unit tests
 │   ├── system_tests/     # System tests
@@ -121,8 +121,8 @@ After modifying code, you need to build and verify according to the type of chan
 After modifying backend Python code, run the following commands to reinitialize and start the service:
 
 ```bash
-uv run jiuwenswarm-init
-uv run jiuwenswarm-start
+uv run jiuwenavatar-init
+uv run jiuwenavatar-start
 ```
 
 #### Frontend Code Changes
@@ -230,8 +230,8 @@ The project contains two independent wheel packages:
 
 | Package | Description | Config File |
 |---------|-------------|-------------|
-| `jiuwenswarm` | Backend service main package (includes Web frontend build artifacts) | `pyproject.toml` |
-| `jiuwenswarm-tui` | TUI terminal interface sidecar package (includes Bun-compiled native binaries) | `packages/jiuwenswarm-tui/pyproject.toml` |
+| `jiuwenavatar` | Backend service main package (includes Web frontend build artifacts) | `pyproject.toml` |
+| `jiuwenavatar-tui` | TUI terminal interface sidecar package (includes Bun-compiled native binaries) | `packages/jiuwenavatar-tui/pyproject.toml` |
 
 #### 6.1.1 Build All (Recommended)
 
@@ -243,32 +243,13 @@ bash scripts/build.sh
 ```
 
 The script will execute the following steps in order:
-1. Build the Web frontend (runs `npm run build` in `jiuwenswarm/channels/web/frontend`)
-2. Build the main package `jiuwenswarm.whl`
-3. If `bun` is detected, continue to build the TUI native binary and `jiuwenswarm-tui.whl`
+1. Build the Web frontend (runs `npm run build` in `jiuwenavatar/channels/web/frontend`)
+2. Build the main package `jiuwenavatar.whl`
+3. If `bun` is detected, continue to build the TUI native binary and `jiuwenavatar-tui.whl`
 
 Artifacts are output to two directories:
-- `./dist/jiuwenswarm-<version>-py3-none-any.whl` (main package)
-- `./packages/jiuwenswarm-tui/dist/jiuwenswarm_tui-<version>-<platform>.whl` (TUI sidecar package)
-
-#### 6.1.2 Build the jiuwenbox Package Alone
-
-`jiuwenbox` is a standalone sandbox system package (config file: `jiuwenbox/pyproject.toml`). You can skip the main package and TUI sidecar via `scripts/build_python_packages.py` to build only the jiuwenbox wheel:
-
-```bash
-python scripts/build_python_packages.py --skip-root --skip-sidecar --clean
-```
-
-This command will:
-
-1. Clean `dist/`, `build/`, and `jiuwenbox.egg-info` under `jiuwenbox/` (triggered by `--clean`)
-2. Run `uv build --wheel` in the `jiuwenbox/` directory, outputting artifacts to `jiuwenbox/dist/`
-
-Artifact: `./jiuwenbox/dist/jiuwenbox-<version>-py3-none-any.whl`
-
-> Note: `build_python_packages.py` builds the main package, TUI sidecar, and jiuwenbox by default. Use `--skip-root --skip-sidecar` only when you need to produce the jiuwenbox package alone. If all three are skipped (passing `--skip-root --skip-sidecar --skip-jiuwenbox` together), the script exits with an error.
-
-> Note: `jiuwenbox` requires Python `>=3.11`. If the build machine's system Python is below this version, explicitly invoke the script with a 3.11 interpreter (e.g. `python3.11 scripts/build_python_packages.py --skip-root --skip-sidecar --clean`); otherwise the build fails due to dependency resolution errors.
+- `./dist/jiuwenavatar-<version>-py3-none-any.whl` (main package)
+- `./packages/jiuwenavatar-tui/dist/jiuwenavatar_tui-<version>-<platform>.whl` (TUI sidecar package)
 
 ### 6.2 Desktop EXE / DMG Packaging
 
@@ -293,7 +274,7 @@ scripts\build-exe.bat
 .\scripts\build-exe.ps1
 ```
 
-Output: `dist\jiuwenswarm\jiuwenswarm.exe`
+Output: `dist\jiuwenavatar\jiuwenavatar.exe`
 
 #### 6.2.3 macOS Packaging (DMG)
 
@@ -304,7 +285,7 @@ bash scripts/build-macos.sh
 The script will execute the following steps in order:
 1. Install Python dependencies (`uv sync --extra dev`)
 2. Build the Web frontend (`npm run build`)
-3. Package with PyInstaller to generate `JiuwenSwarm.app`
+3. Package with PyInstaller to generate `JiuwenAvatar.app`
 4. Create a DMG installer image using `hdiutil`
 
-Output: `dist/JiuwenSwarm-<version>.dmg`
+Output: `dist/JiuwenAvatar-<version>.dmg`

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Unit tests for jiuwenswarm.server.hooks.executor."""
+"""Unit tests for jiuwenavatar.server.hooks.executor."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from jiuwenswarm.server.hooks.executor import HookExecutor, HookResult, HookOutcome
+from jiuwenavatar.server.hooks.executor import HookExecutor, HookResult, HookOutcome
 
 
 # ============================================================

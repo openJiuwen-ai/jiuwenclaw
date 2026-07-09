@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 
 import pytest
-from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
-    JiuSwarmStreamEventRail,
+from jiuwenavatar.agents.harness.common.rails.stream_event_rail import (
+    JiuClawStreamEventRail,
 )
 
 
@@ -20,7 +20,7 @@ class _FakeSession:
         self.outputs.append(output)
 
 
-class _TestRail(JiuSwarmStreamEventRail):
+class _TestRail(JiuClawStreamEventRail):
     def install_todo_tool(self, tool):
         self._main_todo_tool = tool
 
@@ -73,7 +73,7 @@ async def test_context_usage_reports_input_tokens_instead_of_reply_total(monkeyp
             }
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.rails.stream_event_rail.ContextUtils.resolve_context_max",
+        "jiuwenavatar.agents.harness.common.rails.stream_event_rail.ContextUtils.resolve_context_max",
         lambda **_kwargs: 10000,
     )
     session = _FakeSession()
@@ -109,7 +109,7 @@ async def test_context_usage_keeps_zero_input_tokens_instead_of_falling_back(mon
             }
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.rails.stream_event_rail.ContextUtils.resolve_context_max",
+        "jiuwenavatar.agents.harness.common.rails.stream_event_rail.ContextUtils.resolve_context_max",
         lambda **_kwargs: 10000,
     )
     session = _FakeSession()
@@ -136,7 +136,7 @@ async def test_context_usage_keeps_runtime_context_limit_fallback(monkeypatch):
         return 1000000
 
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.rails.stream_event_rail.ContextUtils.resolve_context_max",
+        "jiuwenavatar.agents.harness.common.rails.stream_event_rail.ContextUtils.resolve_context_max",
         _resolve_context_max,
     )
     session = _FakeSession()

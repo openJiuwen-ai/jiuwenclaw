@@ -1,165 +1,110 @@
 # Heartbeat
 
-[简体中文](../zh/心跳.md)
+**Heartbeat** is a periodic probe from the gateway to AgentServer to verify connectivity and agent health. If **`workspace/HEARTBEAT.md`** (under the agent workspace) is configured, the agent can also run listed tasks on each beat. You can choose which channel receives results (default: web).
 
 ---
 
-## Concept Overview
+## 1. Overview
 
-### What is Heartbeat
-
-Heartbeat is a periodic liveness probe sent by the Gateway to AgentServer at fixed intervals, used to verify connectivity and agent availability. If **`workspace/HEARTBEAT.md`** is configured, it can also drive the Agent to periodically execute tasks listed in the file. Results can be relayed to a chosen channel (default: web).
-
-### Heartbeat vs Scheduled Tasks
-
-| Feature | Heartbeat | Scheduled Tasks |
-|---------|-----------|-----------------|
-| **Trigger Mode** | Fixed time interval (seconds), e.g., hourly | Cron expression with complex scheduling rules |
-| **Initiator** | Gateway actively sends probe requests to AgentServer | Independent Scheduler module |
-| **Task Definition** | Task list defined in `workspace/HEARTBEAT.md` file | Tasks created via web UI with query, interval_hours, etc. |
-| **Execution Mechanism** | HEARTBEAT.md content injected into chat request, following normal conversation flow | Independent execution sessions with history and status management |
-| **Primary Use** | Service liveness, periodic task execution, status monitoring | Schedule specific tasks with one-time/periodic execution |
-| **Result Relay** | Pushed to specified Channel via `heartbeat.relay` event | Stored in task execution history, viewable in web UI |
-
-### Heartbeat Workflow
-
-1. **Startup**: Gateway initializes `GatewayHeartbeatService` at startup, creating a periodic task based on configured `interval_seconds`.
-
-2. **Periodic Scheduling**: After startup, the service enters a main loop, executing a heartbeat (`_tick`) every `interval_seconds`.
-
-3. **Time Check**: Before executing the heartbeat, the service checks if the current time falls within the `active_hours` window; if not, the heartbeat is skipped.
-
-4. **Request Construction**: Constructs an E2A protocol request containing heartbeat identification and HEARTBEAT.md read instructions, sending it to AgentServer.
-
-5. **Agent Processing**: AgentServer identifies the heartbeat request, reads `workspace/HEARTBEAT.md` content, injects the task list into the query, and executes tasks following the normal conversation flow.
-
-6. **Result Relay**: After execution, if `relay_channel_id` is configured (e.g., `web`), the heartbeat response is pushed to the frontend via the `heartbeat.relay` event, updating heartbeat status and history.
-
-```
-Gateway ──(E2A heartbeat request)──→ AgentServer ──(read HEARTBEAT.md)──→ Agent ──(execute tasks)──→ Return results
-   │                                                                                              │
-   └────────────────────────────────(heartbeat.relay event)────────────────────────────────────────┘
-```
+- **Liveness**: Sends on a fixed interval to confirm the service is up.
+- **Optional tasks**: If `HEARTBEAT.md` exists under the workspace, the agent runs “active task items” in order and writes results back; otherwise the response is `HEARTBEAT_OK`.
+- **Relay**: Heartbeat responses can be forwarded to a configured channel (e.g. web) for UI display.
 
 ---
 
-## Configuration
+## 2. Configuration
 
-Three configuration methods are available: web UI, config file, or environment variables.
+Three ways: config file, environment variables, or the web UI.
 
-### 1. Web UI Heartbeat Panel
-
-Open **Heartbeat** in the left sidebar to view and modify heartbeat configuration:
-
-![](../assets/images/heartbeat1.png)
-
-**Configuration Options:**
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| **Interval** | Heartbeat interval in seconds, must be > 0 | 3600 |
-| **Relay Target** | Channel for relaying heartbeat results, typically `web` | web |
-| **Active Window** | Heartbeat only fires within this time range (`HH:MM` 24-hour format) | Always active if not configured |
-
-After modifying configuration, click save to write back to `config/config.yaml` and automatically restart the heartbeat service.
-
-![](../assets/images/heartbeat2.png)
-
-### 2. Config file `config/config.yaml`
-
-Configure the `heartbeat` section in `config/config.yaml`:
+### 2.1 `config/config.yaml`
 
 ```yaml
 heartbeat:
-  # Interval in seconds; default 3600
+  # Interval in seconds, default 3600
   every: 3600
-  # Channel for relaying results (e.g., "web" = web UI)
+  # Relay target channel (e.g. "web" for the web UI)
   target: web
-  # Active window in local time; heartbeat only within this range; omit for 24/7
+  # Active window in local time; omit for 24/7
   active_hours:
     start: 08:00
     end: 22:00
 ```
 
-| Field | Meaning | Notes |
-|-------|---------|-------|
-| `every` | Interval (seconds) | Must be > 0; e.g., 60 = every minute, 3600 = hourly |
-| `target` | Relay channel | Usually `web`, which pushes heartbeat responses to the web UI; empty or omitted = no relay |
-| `active_hours` | Active window | `start`/`end` in `HH:MM` (24-hour format). Heartbeat only fires within `[start, end]`. Supports cross-midnight windows (e.g., 22:00–06:00). |
 
-### 3. Environment variables (override YAML)
+| Field | Meaning | Notes |
+| ----- | ------- | ----- |
+| `every` | Interval (seconds) | Must be &gt; 0. `60` = every minute, `3600` = hourly. |
+| `target` | Relay channel | Often `web` to push to the web client; empty = no relay. |
+| `active_hours` | Time window | `start` / `end` as `HH:MM` (24h). Heartbeat only fires when local time is in `[start, end]`. Omit for always on. Supports windows past midnight (e.g. 22:00–06:00). |
+
+
+### 2.2 Environment variables (override YAML)
+
 
 | Variable | Meaning | Example |
-|----------|---------|---------|
+| -------- | ------- | ------- |
 | `HEARTBEAT_INTERVAL` | Interval (seconds) | `3600` |
 | `HEARTBEAT_RELAY_CHANNEL_ID` | Relay channel | `web` |
 | `HEARTBEAT_TIMEOUT` | Single heartbeat timeout (seconds) | `30` |
 
-Environment variables take precedence over the `heartbeat` section in `config/config.yaml`.
+
+Env vars override the `heartbeat` section in `config/config.yaml`.
+
+### 2.3 Web UI — Heartbeat panel
+
+Open **Heartbeat** in the sidebar to:
+
+- View current interval, relay target, and active window  
+![](../assets/images/heartbeat1.png)
+- Edit and save (writes `config.yaml` and restarts the heartbeat service)  
+![](../assets/images/heartbeat2.png)
+- See the last 20 heartbeat messages (status, body, time)  
+![](../assets/images/heartbeat3.png)
 
 ---
 
-## Viewing Heartbeat
+## 3. `HEARTBEAT.md` and periodic tasks
 
-### Heartbeat History
+### 3.1 Location and role
 
-View the last 20 heartbeat records in the Heartbeat panel, including status (normal / warning), content, and timestamps.
+- **Path**: `workspace/HEARTBEAT.md` at the workspace root (same file as in the UI; you can click **Edit** in the panel).  
+![](../assets/images/heartbeat5.png)
+- **Role**: If the file exists and lists tasks, each heartbeat run parses and executes them; otherwise only `HEARTBEAT_OK` is returned.
 
-![](../assets/images/heartbeat3.png)
+### 3.2 Agent behavior
 
-### Popup Notifications
+- Each heartbeat includes instructions to read active items from `HEARTBEAT.md` and complete them; otherwise reply `HEARTBEAT_OK`.
+- The server reads `workspace/HEARTBEAT.md`, builds a chat request, and runs the normal flow; on empty/parse failure, returns `HEARTBEAT_OK`.
 
-When `target` is set to `web`, each heartbeat response is pushed to the frontend via the `heartbeat.relay` event. If content is not `HEARTBEAT_OK`, a popup notification appears for viewing task results or error information.
+---
 
+## 4. Web UI and events
+
+- **Status**: The heartbeat panel/toolbar shows last status (“OK” / alert), last body, and time.
+- **Events**: When `target` is `web`, responses are pushed via `heartbeat.relay`; non-`HEARTBEAT_OK` content may trigger a popup.  
 ![](../assets/images/heartbeat4.png)
 
 ---
 
-## Examples
+## 5. FAQ
 
-### Example: Hello World
+**Q: I edited `heartbeat` in `config.yaml` but nothing changed.**  
+A: Config is read at startup. If you use the web panel, it rewrites YAML and restarts the heartbeat service. If you edit YAML by hand, restart the app (e.g. `jiuwenavatar-web`).
 
-Add the following content to `HEARTBEAT.md`:
+**Q: Heartbeats only during work hours?**  
+A: Set `heartbeat.active_hours.start` / `end`, e.g. `09:00`–`18:00`.
 
-```markdown
-Please output "Hello Heartbeat!"
-```
+**Q: Heartbeat timeout?**  
+A: Set `HEARTBEAT_TIMEOUT` (seconds). On timeout the beat is marked failed and a WARNING is logged.
 
-When heartbeat executes, the Agent reads this content and outputs `Hello Heartbeat!`. Results are relayed to the frontend via the `heartbeat.relay` event.
-![Execute heartbeat task](../assets/images/heartbeat6.png)
-
----
-
-## FAQ
-
-**Q: I changed the heartbeat section in `config/config.yaml` but nothing happened.**  
-A: Config is read at startup. If you use the web UI Heartbeat panel, it rewrites YAML and automatically restarts the heartbeat service. If you edit YAML directly, restart the entire application (e.g., `jiuwenswarm-web`) for changes to take effect.
-
-**Q: How do I send heartbeats only during work hours?**  
-A: Set `heartbeat.active_hours.start` / `end`, e.g., `start: 09:00`, `end: 18:00`. Heartbeats only fire within this window.
-
-**Q: What if a heartbeat request times out?**  
-A: Set the `HEARTBEAT_TIMEOUT` environment variable (seconds). On timeout, the beat is marked failed and a WARNING is logged.
-
-**Q: Where must `HEARTBEAT.md` live?**  
-A: At the DeepAgent workspace root: `~/.jiuwenswarm/agent/workspace/HEARTBEAT.md`. Otherwise, it is treated as "no custom tasks" and only `HEARTBEAT_OK` is returned.
+**Q: Where must `HEARTBEAT.md` live?**
+A: At the DeepAgent workspace root: `~/.jiuwenavatar/agent/workspace/HEARTBEAT.md` (in installed mode) or `jiuwenavatar/resources/agent/workspace/HEARTBEAT_ZH.md` / `HEARTBEAT_EN.md` (source templates copied by language at init). Otherwise it is treated as no custom tasks.
 
 ---
 
-## Mechanism Introduction and Key Code
+## 6. Code index
 
-### Agent Behavior Under Heartbeat
-
-The server reads `HEARTBEAT.md`, parses the task list, and sends a chat request to the agent following the normal conversation flow. If parsing fails or the task list is empty, `HEARTBEAT_OK` is returned directly. Otherwise, tasks are executed and responses returned. Heartbeat results are pushed to the frontend via the `heartbeat.relay` event for status updates and history logging; if content is not `HEARTBEAT_OK`, a popup notification is displayed.
-
-### Code and Config Index
-
-| Code Path | Function |
-|-----------|----------|
-| `jiuwenswarm/gateway/heartbeat/heartbeat.py` | Heartbeat service implementation, including periodic scheduling and E2A request construction |
-| `jiuwenswarm/common/config.py` | Config reading and writing, `update_heartbeat_in_config` function |
-| `jiuwenswarm/app.py` | Builds `HeartbeatConfig` from config file and environment variables at startup |
-| `jiuwenswarm/server/runtime/agent_adapter/interface_deep.py` | Agent-side HEARTBEAT.md handling, detects heartbeat sessions and triggers tasks |
-| `jiuwenswarm/channels/web/frontend/src/components/HeartbeatPanel/` | Frontend heartbeat panel components |
-| `heartbeat.get_conf` / `heartbeat.set_conf` | Frontend config read/write API |
-| `heartbeat.relay` | Heartbeat response relay event |
+- Service: `jiuwenavatar/gateway/heartbeat.py` (`GatewayHeartbeatService`, `HeartbeatConfig`).
+- Config: `config/config.py` (`update_heartbeat_in_config`); `app.py` builds `HeartbeatConfig` from YAML + env.
+- Agent: `jiuwenavatar/server/runtime/agent_adapter/interface.py` reads `HEARTBEAT.md` when `request.params` indicates heartbeat.
+- Web: `jiuwenavatar/channels/web/frontend/src/components/HeartbeatPanel/`, `heartbeat.get_conf` / `heartbeat.set_conf`, `heartbeat.relay`.

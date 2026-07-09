@@ -1,10 +1,10 @@
 from types import SimpleNamespace
 
-from jiuwenswarm.common.e2a.acp.session_updates import (
+from jiuwenavatar.common.e2a.acp.session_updates import (
     build_acp_final_text_update,
     build_acp_session_update,
 )
-from jiuwenswarm.common.schema.message import EventType, Message
+from jiuwenavatar.common.schema.message import EventType, Message
 
 
 def _build_message(event_type: EventType) -> Message:
@@ -77,24 +77,6 @@ def test_build_acp_session_update_maps_chat_reasoning_to_agent_thought_chunk():
         "content": {"type": "text", "text": "Reasoning chunk"},
     }
     assert isinstance(state.thought_message_id, str)
-
-
-def test_build_acp_session_update_ignores_symphony_status():
-    state = _build_state()
-    update = build_acp_session_update(
-        _build_message(EventType.CHAT_SYMPHONY_STATUS),
-        {
-            "source": "symphony_compose_score",
-            "operation_id": "call-1",
-            "phase": "checking_score",
-            "content": "Symphony status",
-            "status": "in_progress",
-        },
-        state,
-    )
-
-    assert update is None
-    assert state.assistant_message_id is None
 
 
 def test_build_acp_session_update_keeps_reasoning_consistent_between_delta_and_reasoning():

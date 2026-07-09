@@ -34,9 +34,9 @@ except ImportError:
 
 UI_E2E_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WEB_DIR = REPO_ROOT / "jiuwenswarm" / "channels" / "web"
+WEB_DIR = REPO_ROOT / "jiuwenavatar" / "channels" / "web"
 WEB_DIST_DIR = WEB_DIR / "dist"
-APP_WEB = REPO_ROOT / "jiuwenswarm" / "channels" / "web" / "app_web.py"
+APP_WEB = REPO_ROOT / "jiuwenavatar" / "channels" / "web" / "app_web.py"
 DEFAULT_HOME = Path.home()
 
 
@@ -61,7 +61,7 @@ class ReportContext:
     report_dir: str
     legacy_job_id: str | None = None
     structured_job_id: str | None = None
-    jiuwenswarm_head: str | None = None
+    jiuwenavatar_head: str | None = None
     agent_core_head: str | None = None
     agent_core_source: str | None = None
 
@@ -316,7 +316,7 @@ def _write_report(report_dir: Path, context: ReportContext, cases: list[CaseResu
         f"- Backend WS: `ws://127.0.0.1:{context.backend_port}/ws`",
         f"- Static UI: `http://127.0.0.1:{context.ui_port}`",
         f"- Session ID: `{context.session_id}`",
-        f"- jiuwenswarm HEAD: `{context.jiuwenswarm_head}`",
+        f"- jiuwenavatar HEAD: `{context.jiuwenavatar_head}`",
         f"- agent-core HEAD: `{context.agent_core_head}`",
         f"- agent-core source: `{context.agent_core_source}`",
         f"- Backend log: `{context.backend_log}`",
@@ -453,7 +453,7 @@ async def async_main() -> int:
     parser = argparse.ArgumentParser(description="Run cron Web UI smoke tests and write a report with screenshots.")
     parser.add_argument(
         "--home", default=str(DEFAULT_HOME),
-        help="HOME used to run jiuwenswarm. Defaults to the real ~/.jiuwenswarm owner home.",
+        help="HOME used to run jiuwenavatar. Defaults to the real ~/.jiuwenavatar owner home.",
     )
     parser.add_argument("--build", action="store_true", help="Build the frontend before running the UI report.")
     parser.add_argument("--agent-port", type=int, default=0, help="Agent websocket server port. Default picks a free port.")
@@ -461,7 +461,7 @@ async def async_main() -> int:
     parser.add_argument("--ui-port", type=int, default=0, help="Static UI HTTP port. Default picks a free port.")
     parser.add_argument(
         "--runtime-python", default=_default_runtime_python(),
-        help="Python used to start jiuwenswarm.app and app_web.py.",
+        help="Python used to start jiuwenavatar.app and app_web.py.",
     )
     parser.add_argument("--report-dir", default="", help="Optional explicit report output directory.")
     args = parser.parse_args()
@@ -500,7 +500,7 @@ async def async_main() -> int:
         env.pop(key, None)
 
     backend_proc = _start_process(
-        [args.runtime_python, "-m", "jiuwenswarm.app"],
+        [args.runtime_python, "-m", "jiuwenavatar.app"],
         env=env,
         log_path=backend_log,
         cwd=REPO_ROOT,
@@ -583,7 +583,7 @@ async def async_main() -> int:
         report_dir=str(report_dir),
         legacy_job_id=legacy_job_id,
         structured_job_id=structured_job_id,
-        jiuwenswarm_head=_repo_head(REPO_ROOT),
+        jiuwenavatar_head=_repo_head(REPO_ROOT),
         agent_core_head=runtime_info.resolved_ref,
         agent_core_source=runtime_info.source_location,
     )

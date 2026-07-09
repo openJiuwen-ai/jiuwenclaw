@@ -1,4 +1,4 @@
-# Beyond Manual Code Review? Building an Automated Review Pipeline with JiuwenSwarm
+# Beyond Manual Code Review? Building an Automated Review Pipeline with JiuwenAvatar
 
 ## Introduction — When “code quality” becomes part of daily development
 
@@ -44,7 +44,7 @@ the following sections may offer a useful angle.
 
 | Item | Value |
 | --- | --- |
-| **Project path** | `D:\Download\jiuwenswarm` |
+| **Project path** | `D:\Download\jiuwenavatar` |
 | **OS** | Windows 10 |
 | **Python** | 3.10+ |
 | **Model service** | Zhipu AI (GLM-4.7) |
@@ -64,7 +64,7 @@ the following sections may offer a useful angle.
 ### Key file layout
 
 ```plain
-D:\Download\jiuwenswarm\
+D:\Download\jiuwenavatar\
 ├── .env                              # Environment variables
 ├── workspace/
 │   └── agent/
@@ -114,9 +114,9 @@ The worst misses are **security issues**: e.g. `os.system(user_input)` overlooke
 
 With the assistant, Ruff (lint), Radon (complexity), and Bandit (security) run automatically; the engine computes quality, security, complexity, and style scores and returns an overall grade with suggestions.
 
-### 1.3 Why JiuwenSwarm’s skill system fits
+### 1.3 Why JiuwenAvatar’s skill system fits
 
-JiuwenSwarm is an open Agent framework; its skill model fits code review tooling:
+JiuwenAvatar is an open Agent framework; its skill model fits code review tooling:
 
 | Capability | Description |
 | --- | --- |
@@ -131,7 +131,7 @@ The main idea is **composability**: collection, static analysis, and reporting a
 
 ### 2.1 Layered architecture
 
-The code review skill lives in JiuwenSwarm’s application layer and uses a classic three-tier layout:
+The code review skill lives in JiuwenAvatar’s application layer and uses a classic three-tier layout:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -288,13 +288,13 @@ Review code in arbitrary Git repositories across multiple languages; detect secu
 ### Review a remote Git repository
 
 ```bash
-cd D:/Download/jiuwenswarm && python workspace/agent/skills/code-review/run_review.py clone --url <repo-url>
+cd D:/Download/jiuwenavatar && python workspace/agent/skills/code-review/run_review.py clone --url <repo-url>
 ```
 
 ### Review local code
 
 ```bash
-cd D:/Download/jiuwenswarm && python workspace/agent/skills/code-review/run_review.py local --path <path>
+cd D:/Download/jiuwenavatar && python workspace/agent/skills/code-review/run_review.py local --path <path>
 ```
 
 ## Important limits
@@ -1353,8 +1353,8 @@ class ReportGenerator:
 ### 7.1 Environment variables
 
 > **This project uses the project-directory layout**: config lives under the repo:
-> - Env file: `D:\Download\jiuwenswarm\.env`
-> - Skills: `D:\Download\jiuwenswarm\workspace\agent\skills\`
+> - Env file: `D:\Download\jiuwenavatar\.env`
+> - Skills: `D:\Download\jiuwenavatar\workspace\agent\skills\`
 >
 > That keeps everything version-controlled for PRs.
 
@@ -1376,9 +1376,9 @@ FEISHU_REVIEW_CHAT_ID=oc_xxx
 ATOMGIT_TOKEN=xxx
 ```
 
-### 7.2 JiuwenSwarm `config.yaml`
+### 7.2 JiuwenAvatar `config.yaml`
 
-> Config path: `D:\Download\jiuwenswarm\config\config.yaml`
+> Config path: `D:\Download\jiuwenavatar\config\config.yaml`
 
 ```yaml
 react:
@@ -1452,11 +1452,11 @@ In `HEARTBEAT.md`, schedule periodic scans:
 | Method | Notes |
 |--------|------|
 | Feishu chat | Send review requests to the bot in private chat |
-| Web UI | Send requests through the JiuwenSwarm web app |
+| Web UI | Send requests through the JiuwenAvatar web app |
 
 ### 8.1 Feishu
 
-Prerequisites: JiuwenSwarm running, Feishu bot + WebSocket, `code-review` skill deployed.
+Prerequisites: JiuwenAvatar running, Feishu bot + WebSocket, `code-review` skill deployed.
 
 Example message:
 
@@ -1480,7 +1480,7 @@ You get streaming thought traces and intermediate steps — useful for debugging
 | Field | Value |
 |------|-------|
 | Review type | local |
-| Target | `./jiuwenswarm` |
+| Target | `./jiuwenavatar` |
 | Review time | 2026-03-07 21:53 |
 | Files scanned | 110 |
 
@@ -1546,7 +1546,7 @@ You get streaming thought traces and intermediate steps — useful for debugging
 1. **Windows encoding** — Use `input=code.encode("utf-8")` instead of `text=True` for Ruff stdin.
 2. **Bandit and stdin** — Write a temp file, analyze, delete.
 3. **No AtomGit API** — Use `git clone`.
-4. **Project-directory mode** — Default user workspace `C:\Users\<user>\.jiuwenswarm\` is awkward for VCS; point config at the repo instead.
+4. **Project-directory mode** — Default user workspace `C:\Users\<user>\.jiuwenavatar\` is awkward for VCS; point config at the repo instead.
 5. **Skill paths** — With project mode, skills live under `...\workspace\agent\skills\code-review\`.
 6. **Max iterations** — Complex repos can hit `max_iterations` if the agent opens files one-by-one; follow the skill and use the right tools.
 7. **WebSocket size** — Huge reports exceed ~1MB; forbid returning the full file in `SKILL.md` and return summaries only.
@@ -1570,4 +1570,4 @@ Building this review assistant clarified how to ship a practical analysis pipeli
 3. **Make reports actionable** — Say what to fix and how.
 4. **Keep architecture extensible** — New analyzers and formats plug in cleanly.
 
-**Paths**: `D:\Download\jiuwenswarm\workspace\agent\skills\code-review\` — `SKILL.md`, entry `run_review.py`.
+**Paths**: `D:\Download\jiuwenavatar\workspace\agent\skills\code-review\` — `SKILL.md`, entry `run_review.py`.

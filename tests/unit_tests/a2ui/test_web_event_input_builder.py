@@ -4,13 +4,13 @@
 
 from __future__ import annotations
 
-from jiuwenswarm.common.schema.agent import AgentRequest
-from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+from jiuwenavatar.common.schema.agent import AgentRequest
+from jiuwenavatar.server.runtime.agent_adapter import interface as interface_module
 
 
 def test_agent_input_builder_reads_a2ui_client_event_from_content(monkeypatch):
     """Web A2UI client events should not need a dict-valued query param."""
-    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
+    monkeypatch.setenv("JIUWENAVATAR_A2UI_ENABLED", "true")
     monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
     monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
 
@@ -33,7 +33,7 @@ def test_agent_input_builder_reads_a2ui_client_event_from_content(monkeypatch):
         params={"content": content, "mode": "agent"},
     )
 
-    inputs, _, raw_query = interface_module.JiuWenSwarm().build_inputs(request)
+    inputs, _, raw_query = interface_module.JiuWenClaw().build_inputs(request)
 
     assert raw_query == content
     assert "submit_form" in inputs["query"]
@@ -42,7 +42,7 @@ def test_agent_input_builder_reads_a2ui_client_event_from_content(monkeypatch):
 
 def test_agent_input_builder_uses_request_channel_id_for_a2ui(monkeypatch):
     """Web A2UI should not depend on session ids being prefixed with web_."""
-    monkeypatch.setenv("JIUWENSWARM_A2UI_ENABLED", "true")
+    monkeypatch.setenv("JIUWENAVATAR_A2UI_ENABLED", "true")
     monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
     monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
 
@@ -66,7 +66,7 @@ def test_agent_input_builder_uses_request_channel_id_for_a2ui(monkeypatch):
         },
     )
 
-    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+    inputs, _, _ = interface_module.JiuWenClaw().build_inputs(request)
 
     assert inputs["channel"] == "web"
     assert "submit_form" in inputs["query"]
@@ -74,9 +74,9 @@ def test_agent_input_builder_uses_request_channel_id_for_a2ui(monkeypatch):
 
 async def test_deep_adapter_slash_command_ignores_structured_query():
     """A stale client sending dict-valued query should not crash slash routing."""
-    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+    from jiuwenavatar.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
 
-    class SlashCommandProbe(JiuWenSwarmDeepAdapter):
+    class SlashCommandProbe(JiuWenClawDeepAdapter):
         async def handle_query(self, query):
             return await self._handle_slash_command(query)
 

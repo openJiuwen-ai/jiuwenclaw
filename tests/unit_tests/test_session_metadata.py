@@ -17,7 +17,7 @@ def sessions_dir(tmp_path, monkeypatch):
     d = tmp_path / "sessions"
     d.mkdir()
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
+        "jiuwenavatar.server.runtime.session.session_metadata.get_agent_sessions_dir",
         lambda: d,
     )
     return d
@@ -34,13 +34,13 @@ def _read_json(path: Path) -> dict:
 class TestAutoTitle:
     @staticmethod
     def test_normal():
-        from jiuwenswarm.server.runtime.session.session_metadata import _auto_title
+        from jiuwenavatar.server.runtime.session.session_metadata import _auto_title
 
         assert _auto_title("hello world") == "hello world"
 
     @staticmethod
     def test_truncate():
-        from jiuwenswarm.server.runtime.session.session_metadata import _auto_title, _TITLE_MAX_LEN
+        from jiuwenavatar.server.runtime.session.session_metadata import _auto_title, _TITLE_MAX_LEN
 
         long_text = "a" * 100
         result = _auto_title(long_text)
@@ -49,13 +49,13 @@ class TestAutoTitle:
 
     @staticmethod
     def test_strip_and_newline():
-        from jiuwenswarm.server.runtime.session.session_metadata import _auto_title
+        from jiuwenavatar.server.runtime.session.session_metadata import _auto_title
 
         assert _auto_title("  line1\nline2  ") == "line1 line2"
 
     @staticmethod
     def test_empty():
-        from jiuwenswarm.server.runtime.session.session_metadata import _auto_title
+        from jiuwenavatar.server.runtime.session.session_metadata import _auto_title
 
         assert _auto_title("") == ""
         assert _auto_title("   ") == ""
@@ -67,7 +67,7 @@ class TestAutoTitle:
 class TestInitSessionMetadata:
     @staticmethod
     def test_creates_metadata_file(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+        from jiuwenavatar.server.runtime.session.session_metadata import init_session_metadata
 
         init_session_metadata(
             session_id="sess_001",
@@ -91,7 +91,7 @@ class TestInitSessionMetadata:
 
     @staticmethod
     def test_default_empty_fields(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+        from jiuwenavatar.server.runtime.session.session_metadata import init_session_metadata
 
         init_session_metadata(session_id="sess_002")
         data = _read_json(sessions_dir / "sess_002" / "metadata.json")
@@ -108,7 +108,7 @@ class TestInitSessionMetadata:
 class TestUpdateSessionMetadata:
     @staticmethod
     def test_update_existing(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             update_session_metadata,
             _METADATA_QUEUE,
@@ -131,7 +131,7 @@ class TestUpdateSessionMetadata:
     @staticmethod
     def test_fallback_create_when_no_metadata(sessions_dir):
         """外部渠道隐式创建 session 时,metadata 不存在,应自动创建"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             update_session_metadata,
             _METADATA_QUEUE,
         )
@@ -153,7 +153,7 @@ class TestUpdateSessionMetadata:
 
     @staticmethod
     def test_auto_title_on_first_user_message(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             update_session_metadata,
             _METADATA_QUEUE,
@@ -172,7 +172,7 @@ class TestUpdateSessionMetadata:
 
     @staticmethod
     def test_no_overwrite_existing_title(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             update_session_metadata,
             _METADATA_QUEUE,
@@ -191,7 +191,7 @@ class TestUpdateSessionMetadata:
 
     @staticmethod
     def test_increment_message_count_multiple(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             update_session_metadata,
             _METADATA_QUEUE,
@@ -214,7 +214,7 @@ class TestUpdateSessionMetadata:
 class TestGetSessionMetadata:
     @staticmethod
     def test_returns_data(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
         )
@@ -225,7 +225,7 @@ class TestGetSessionMetadata:
 
     @staticmethod
     def test_returns_empty_when_missing(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+        from jiuwenavatar.server.runtime.session.session_metadata import get_session_metadata
 
         data = get_session_metadata("nonexistent")
         assert data == {}
@@ -237,7 +237,7 @@ class TestGetSessionMetadata:
 class TestIncrementSessionRoundCount:
     @staticmethod
     def test_first_increment_returns_1(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             increment_session_round_count,
             _METADATA_QUEUE,
@@ -253,7 +253,7 @@ class TestIncrementSessionRoundCount:
 
     @staticmethod
     def test_increments_sequentially(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             increment_session_round_count,
             _METADATA_QUEUE,
@@ -270,7 +270,7 @@ class TestIncrementSessionRoundCount:
 
     @staticmethod
     def test_defaults_to_0_when_no_metadata(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             increment_session_round_count,
             _METADATA_QUEUE,
         )
@@ -285,7 +285,7 @@ class TestIncrementSessionRoundCount:
 
     @staticmethod
     def test_persists_across_restarts(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             increment_session_round_count,
             _METADATA_QUEUE,
@@ -296,7 +296,7 @@ class TestIncrementSessionRoundCount:
         _METADATA_QUEUE.join()
 
         # Simulate restart: re-import and read from disk
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             increment_session_round_count,
         )
         result = increment_session_round_count("sess_persist")
@@ -311,7 +311,7 @@ class TestIncrementSessionRoundCount:
 class TestGetAllSessionsMetadata:
     @staticmethod
     def test_basic_list(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_all_sessions_metadata,
         )
@@ -327,7 +327,7 @@ class TestGetAllSessionsMetadata:
 
     @staticmethod
     def test_sorted_by_last_message_at(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             _write_metadata_sync,
             get_all_sessions_metadata,
         )
@@ -350,7 +350,7 @@ class TestGetAllSessionsMetadata:
 
     @staticmethod
     def test_pagination_limit(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_all_sessions_metadata,
         )
@@ -364,7 +364,7 @@ class TestGetAllSessionsMetadata:
 
     @staticmethod
     def test_pagination_offset(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             _write_metadata_sync,
             get_all_sessions_metadata,
         )
@@ -387,7 +387,7 @@ class TestGetAllSessionsMetadata:
     @staticmethod
     def test_fallback_for_old_sessions(sessions_dir):
         """没有 metadata.json 的旧会话应用目录时间戳构造最小信息"""
-        from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata
+        from jiuwenavatar.server.runtime.session.session_metadata import get_all_sessions_metadata
 
         (sessions_dir / "legacy_sess").mkdir()
         # 不写 metadata.json
@@ -401,7 +401,7 @@ class TestGetAllSessionsMetadata:
 
     @staticmethod
     def test_empty_dir(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata
+        from jiuwenavatar.server.runtime.session.session_metadata import get_all_sessions_metadata
 
         sessions, total = get_all_sessions_metadata()
         assert total == 0
@@ -409,7 +409,7 @@ class TestGetAllSessionsMetadata:
 
     @staticmethod
     def test_excludes_heartbeat_sessions(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_all_sessions_metadata,
         )
@@ -431,7 +431,7 @@ class TestGetAllSessionsMetadata:
 class TestReadMetadataRobustness:
     @staticmethod
     def test_corrupted_json(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+        from jiuwenavatar.server.runtime.session.session_metadata import get_session_metadata
 
         d = sessions_dir / "sess_bad"
         d.mkdir()
@@ -442,7 +442,7 @@ class TestReadMetadataRobustness:
 
     @staticmethod
     def test_non_dict_json(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+        from jiuwenavatar.server.runtime.session.session_metadata import get_session_metadata
 
         d = sessions_dir / "sess_list"
         d.mkdir()
@@ -459,7 +459,7 @@ class TestChannelMetadata:
     @staticmethod
     def test_first_request_metadata_stored(sessions_dir):
         """首次请求的 metadata 应写入 channel_metadata"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             update_session_metadata,
             _METADATA_QUEUE,
         )
@@ -478,7 +478,7 @@ class TestChannelMetadata:
     @staticmethod
     def test_no_overwrite_existing_metadata(sessions_dir):
         """已存在的 channel_metadata 不应被覆盖"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             _write_metadata_sync,
             update_session_metadata,
             _METADATA_QUEUE,
@@ -508,7 +508,7 @@ class TestChannelMetadata:
     @staticmethod
     def test_empty_metadata_not_stored(sessions_dir):
         """空 metadata 不写入字段"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             update_session_metadata,
             _METADATA_QUEUE,
         )
@@ -526,7 +526,7 @@ class TestChannelMetadata:
     @staticmethod
     def test_backfill_when_missing(sessions_dir):
         """首次未写入时，后续可补充"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             update_session_metadata,
             _METADATA_QUEUE,
         )
@@ -553,7 +553,7 @@ class TestChannelMetadata:
 class TestDeliveryContext:
     @staticmethod
     def test_delivery_context_can_refresh_route_metadata(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             _METADATA_QUEUE,
             get_session_delivery_context,
             set_session_delivery_context,
@@ -586,7 +586,7 @@ class TestDeliveryContext:
 
     @staticmethod
     def test_delivery_context_keeps_previous_route_metadata_when_new_request_has_none(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             _METADATA_QUEUE,
             get_session_delivery_context,
             set_session_delivery_context,
@@ -615,7 +615,7 @@ class TestDeliveryContext:
 
     @staticmethod
     def test_build_server_push_message_uses_saved_delivery_context(sessions_dir):
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             _METADATA_QUEUE,
             build_server_push_message,
             set_session_delivery_context,
@@ -653,7 +653,7 @@ class TestTitleStability:
     @staticmethod
     def test_req1_first_message_sets_title_second_does_not(sessions_dir):
         """需求1: 首条消息设置标题，第二条消息不改变标题"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             update_session_metadata,
             _METADATA_QUEUE,
@@ -701,7 +701,7 @@ class TestTitleStability:
     @staticmethod
     def test_req1_rapid_user_then_assistant_no_race(sessions_dir):
         """需求1(竞态): 用户消息和助手消息快速连续到达时，标题不被覆盖"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             update_session_metadata,
             _METADATA_QUEUE,
@@ -733,7 +733,7 @@ class TestTitleStability:
     @staticmethod
     def test_req2_title_immutable_after_creation(sessions_dir):
         """需求2: 标题一旦创建就不再改变，即使后续多轮对话"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             update_session_metadata,
             _METADATA_QUEUE,
@@ -782,7 +782,7 @@ class TestTitleStability:
     @staticmethod
     def test_req2_explicit_empty_title_does_not_clear(sessions_dir):
         """需求2: 即使传入空字符串 title 参数，也不应清除已有标题"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
+        from jiuwenavatar.server.runtime.session.session_metadata import (
             init_session_metadata,
             update_session_metadata,
             _METADATA_QUEUE,

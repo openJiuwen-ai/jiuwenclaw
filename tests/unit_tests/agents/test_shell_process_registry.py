@@ -15,7 +15,7 @@ from openjiuwen.core.sys_operation.shell_process_registry import (
     register_shell_process,
     SHELL_PROCESS_REGISTRY,
 )
-from jiuwenswarm.agents.harness.common.tools.command_tools import (
+from jiuwenavatar.agents.harness.common.tools.command_tools import (
     CommandCancelled,
     _run_command_sync,
 )

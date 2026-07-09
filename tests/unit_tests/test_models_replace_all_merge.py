@@ -2,11 +2,7 @@
 
 """Unit tests for the replace_all merge helper preserving YAML env-var placeholders."""
 
-from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
-    _is_env_var_placeholder,
-    _merge_models_for_replace_all,
-    _values_match,
-)
+from jiuwenavatar.gateway.channel_manager.web.app_web_handlers import _merge_models_for_replace_all, _values_match
 
 
 class _StubCrypto:
@@ -73,61 +69,6 @@ def test_values_match_normalizes_numeric_string_from_env_resolution():
 def test_values_match_treats_none_and_empty_as_equal():
     assert _values_match("", None)
     assert _values_match(None, None)
-
-
-def test_is_env_var_placeholder():
-    assert _is_env_var_placeholder("${MODEL_PROVIDER}")
-    assert _is_env_var_placeholder("${API_BASE:-https://api.example.com}")
-    assert not _is_env_var_placeholder("OpenAI")
-    assert not _is_env_var_placeholder("")
-
-
-def test_first_time_setup_materializes_client_provider_placeholder():
-    """Persist client_provider literally when YAML still uses ${MODEL_PROVIDER}."""
-    raw = {
-        "model_client_config": {
-            "api_base": "${API_BASE}",
-            "api_key": "${API_KEY}",
-            "model_name": "${MODEL_NAME:-xiaomi/mimo-v2-omni}",
-            "client_provider": "${MODEL_PROVIDER}",
-            "timeout": 1800,
-            "verify_ssl": False,
-        },
-        "model_config_obj": {"temperature": 0.95},
-        "is_default": True,
-    }
-    resolved = {
-        "model_client_config": {
-            "api_base": "https://api.example.com",
-            "api_key": "sk-template",
-            "model_name": "xiaomi/mimo-v2-omni",
-            "client_provider": "OpenAI",
-            "timeout": 1800,
-            "verify_ssl": False,
-        },
-        "model_config_obj": {"temperature": 0.95},
-        "is_default": True,
-    }
-    parsed = [{
-        "model_name": "gpt-4o",
-        "api_base": "https://api.openai.com/v1",
-        "api_key": "sk-user-secret",
-        "model_provider": "OpenAI",
-        "temperature": 0.95,
-        "timeout": 1800,
-        "verify_ssl": False,
-        "is_default": True,
-        "alias": "",
-        "origin_index": 0,
-    }]
-
-    out = _merge_models_for_replace_all(parsed, [raw], [resolved], crypto=_StubCrypto())
-
-    mcc = out[0]["model_client_config"]
-    assert mcc["client_provider"] == "OpenAI"
-    assert mcc["api_key"] == "enc:sk-user-secret"
-    assert mcc["api_base"] == "https://api.openai.com/v1"
-    assert mcc["model_name"] == "gpt-4o"
 
 
 def test_unchanged_entry_keeps_raw_placeholders_and_custom_headers():

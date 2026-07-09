@@ -1,6 +1,6 @@
 # 开发者指南
 
-本文档面向 JiuwenSwarm 项目的开发者，介绍如何从源码搭建开发环境并运行测试。
+本文档面向 JiuwenAvatar 项目的开发者，介绍如何从源码搭建开发环境并运行测试。
 
 ## 环境要求
 
@@ -15,8 +15,8 @@
 ## 1. 克隆项目
 
 ```bash
-git clone <repository-url> jiuwenswarm
-cd jiuwenswarm
+git clone <repository-url> jiuwenavatar
+cd jiuwenavatar
 ```
 
 ## 2. 使用 `uv` 搭建开发环境
@@ -53,7 +53,7 @@ source .venv/bin/activate
 
 ### 执行 uv 同步操作
 
-在项目根目录 `jiuwenswarm/` 执行：
+在项目根目录 `jiuwenavatar/` 执行：
 
 ```bash
 uv sync
@@ -89,8 +89,8 @@ bun --version
 ### 项目结构概览
 
 ```
-jiuwenswarm/
-├── jiuwenswarm/           # 项目源码
+jiuwenavatar/
+├── jiuwenavatar/           # 项目源码
 ├── tests/
 │   ├── unit_tests/       # 单元测试
 │   ├── system_tests/     # 系统测试
@@ -121,8 +121,8 @@ uv add --dev pytest-cov pytest-asyncio
 修改后端 Python 代码后，执行以下命令重新初始化并启动服务：
 
 ```bash
-uv run jiuwenswarm-init
-uv run jiuwenswarm-start
+uv run jiuwenavatar-init
+uv run jiuwenavatar-start
 ```
 
 #### 前端代码修改
@@ -230,8 +230,8 @@ node --version
 
 | 包名 | 说明 | 配置文件 |
 |------|------|----------|
-| `jiuwenswarm` | 后端服务主包（含 Web 前端构建产物） | `pyproject.toml` |
-| `jiuwenswarm-tui` | TUI 终端界面 sidecar 包（含 Bun 编译的原生二进制） | `packages/jiuwenswarm-tui/pyproject.toml` |
+| `jiuwenavatar` | 后端服务主包（含 Web 前端构建产物） | `pyproject.toml` |
+| `jiuwenavatar-tui` | TUI 终端界面 sidecar 包（含 Bun 编译的原生二进制） | `packages/jiuwenavatar-tui/pyproject.toml` |
 
 #### 6.1.1 一键构建全部（推荐）
 
@@ -243,32 +243,13 @@ bash scripts/build.sh
 ```
 
 该脚本会依次执行：
-1. 编译 Web 前端（`jiuwenswarm/channels/web/frontend` 目录下执行 `npm run build`）
-2. 构建主包 `jiuwenswarm.whl`
-3. 如果检测到 `bun` 命令，继续构建 TUI 原生二进制和 `jiuwenswarm-tui.whl`
+1. 编译 Web 前端（`jiuwenavatar/channels/web/frontend` 目录下执行 `npm run build`）
+2. 构建主包 `jiuwenavatar.whl`
+3. 如果检测到 `bun` 命令，继续构建 TUI 原生二进制和 `jiuwenavatar-tui.whl`
 
 产物输出到两个目录：
-- `./dist/jiuwenswarm-<version>-py3-none-any.whl`（主包）
-- `./packages/jiuwenswarm-tui/dist/jiuwenswarm_tui-<version>-<platform>.whl`（TUI sidecar 包）
-
-#### 6.1.2 单独构建 jiuwenbox 包
-
-`jiuwenbox` 是独立的沙箱系统包（配置文件 `jiuwenbox/pyproject.toml`），可通过 `scripts/build_python_packages.py` 跳过主包和 TUI sidecar，仅构建 jiuwenbox wheel：
-
-```bash
-python scripts/build_python_packages.py --skip-root --skip-sidecar --clean
-```
-
-该命令会：
-
-1. 清理 `jiuwenbox/` 下的 `dist/`、`build/`、`jiuwenbox.egg-info`（因 `--clean` 触发）
-2. 在 `jiuwenbox/` 目录下执行 `uv build --wheel`，产物输出到 `jiuwenbox/dist/`
-
-产物：`./jiuwenbox/dist/jiuwenbox-<version>-py3-none-any.whl`
-
-> 说明：`build_python_packages.py` 默认会构建主包、TUI sidecar 和 jiuwenbox 三者。仅当需要单独出 jiuwenbox 包时，才用 `--skip-root --skip-sidecar` 跳过另外两者。若三者全部跳过（同时传 `--skip-root --skip-sidecar --skip-jiuwenbox`），脚本会报错退出。
-
-> 注意：`jiuwenbox` 要求 Python `>=3.11`。若构建机器的系统 Python 低于该版本，请显式指定 3.11 解释器（例如 `python3.11 scripts/build_python_packages.py --skip-root --skip-sidecar --clean`），否则构建会因依赖解析失败而报错。
+- `./dist/jiuwenavatar-<version>-py3-none-any.whl`（主包）
+- `./packages/jiuwenavatar-tui/dist/jiuwenavatar_tui-<version>-<platform>.whl`（TUI sidecar 包）
 
 ### 6.2 桌面版 EXE / DMG 打包
 
@@ -293,7 +274,7 @@ scripts\build-exe.bat
 .\scripts\build-exe.ps1
 ```
 
-产物目录：`dist\jiuwenswarm\jiuwenswarm.exe`
+产物目录：`dist\jiuwenavatar\jiuwenavatar.exe`
 
 #### 6.2.3 macOS 平台打包（DMG）
 
@@ -304,7 +285,7 @@ bash scripts/build-macos.sh
 该脚本会依次执行：
 1. 安装 Python 依赖（`uv sync --extra dev`）
 2. 编译 Web 前端（`npm run build`）
-3. PyInstaller 打包生成 `JiuwenSwarm.app`
+3. PyInstaller 打包生成 `JiuwenAvatar.app`
 4. 使用 `hdiutil` 创建 DMG 安装镜像
 
-产物：`dist/JiuwenSwarm-<version>.dmg`
+产物：`dist/JiuwenAvatar-<version>.dmg`

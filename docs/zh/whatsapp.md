@@ -4,13 +4,13 @@
 
 ## 架构
 
-JiuwenSwarm 的 Python 代码不会直接连接 WhatsApp。
+JiuwenAvatar 的 Python 代码不会直接连接 WhatsApp。
 
 `WhatsApp 客户端` <-> `Baileys bridge（Node.js）` <-> `WhatsAppChannel（Python）`
 
 - Bridge WebSocket 默认地址：`ws://127.0.0.1:19600/ws`
-- Bridge 脚本：`jiuwenswarm/scripts/whatsapp-bridge.js`
-- Python 频道实现：`jiuwenswarm/channel/whatsapp_channel.py`
+- Bridge 脚本：`jiuwenavatar/scripts/whatsapp-bridge.js`
+- Python 频道实现：`jiuwenavatar/channel/whatsapp_channel.py`
 - 运行时配置位置：`config.yaml` 里的 `channels.whatsapp`
 
 ## 当前仓库已经实现的能力
@@ -80,16 +80,16 @@ Python 侧当前会追踪这些状态：
 
 ## 前置要求
 
-- 可运行 `python -m jiuwenswarm.app` 的 Python 环境
+- 可运行 `python -m jiuwenavatar.app` 的 Python 环境
 - Node.js 20+ 和 npm
 - 已开通 Linked Devices 的 WhatsApp 账号
 
 ## 1. 安装 Bridge 依赖
 
-在内层项目目录执行，也就是包含 `jiuwenswarm/package.json` 的目录：
+在内层项目目录执行，也就是包含 `jiuwenavatar/package.json` 的目录：
 
 ```powershell
-cd C:\Users\chiak\OneDrive\Desktop\jiuwenswarm\jiuwenswarm
+cd C:\Users\chiak\OneDrive\Desktop\jiuwenavatar\jiuwenavatar
 npm install
 ```
 
@@ -103,7 +103,7 @@ npm install @whiskeysockets/baileys ws pino qrcode-terminal
 
 编辑运行时配置文件：
 
-`C:\Users\chiak\.jiuwenswarm\config\config.yaml`
+`C:\Users\chiak\.jiuwenavatar\config\config.yaml`
 
 在 `channels:` 下添加或确认如下配置：
 
@@ -115,7 +115,7 @@ npm install @whiskeysockets/baileys ws pino qrcode-terminal
     enable_streaming: true
     auto_start_bridge: false
     bridge_command: node scripts/whatsapp-bridge.js
-    bridge_workdir: C:/Users/chiak/OneDrive/Desktop/jiuwenswarm/jiuwenswarm
+    bridge_workdir: C:/Users/chiak/OneDrive/Desktop/jiuwenavatar/jiuwenavatar
     enabled: true
 ```
 
@@ -134,7 +134,7 @@ npm install @whiskeysockets/baileys ws pino qrcode-terminal
 终端 A，启动 bridge：
 
 ```powershell
-cd C:\Users\chiak\OneDrive\Desktop\jiuwenswarm\jiuwenswarm
+cd C:\Users\chiak\OneDrive\Desktop\jiuwenavatar\jiuwenavatar
 npm run whatsapp:bridge
 ```
 
@@ -145,8 +145,8 @@ npm run whatsapp:bridge
 终端 B，启动应用：
 
 ```powershell
-cd C:\Users\chiak\OneDrive\Desktop\jiuwenswarm
-python -m jiuwenswarm.app
+cd C:\Users\chiak\OneDrive\Desktop\jiuwenavatar
+python -m jiuwenavatar.app
 ```
 
 预期行为：
@@ -167,7 +167,7 @@ python -m jiuwenswarm.app
 
 认证状态会保存在：
 
-`jiuwenswarm/jiuwenswarm/workspace/.whatsapp-auth`
+`jiuwenavatar/jiuwenavatar/workspace/.whatsapp-auth`
 
 如果账号已经绑定，可能不会再次出现二维码，这是正常现象。
 
@@ -197,7 +197,7 @@ API_BASE=https://your-real-openai-compatible-endpoint/v1
 API_KEY=your-real-key
 ```
 
-更新 `.env` 后重启 `python -m jiuwenswarm.app`。
+更新 `.env` 后重启 `python -m jiuwenavatar.app`。
 
 ## 故障排查
 
@@ -205,13 +205,13 @@ API_KEY=your-real-key
 
 说明你在错误目录执行了 `npm`。请使用：
 
-`C:\Users\chiak\OneDrive\Desktop\jiuwenswarm\jiuwenswarm`
+`C:\Users\chiak\OneDrive\Desktop\jiuwenavatar\jiuwenavatar`
 
 ### Bridge 启动了但没有二维码
 
 1. 先停止旧的 bridge 进程，避免端口或旧会话冲突。
 2. 删除认证目录，强制重新绑定：
-   `jiuwenswarm/jiuwenswarm/workspace/.whatsapp-auth`
+   `jiuwenavatar/jiuwenavatar/workspace/.whatsapp-auth`
 3. 重新启动 bridge，等待出现 `QR received`。
 
 ### App 能连上 bridge，但发不出消息

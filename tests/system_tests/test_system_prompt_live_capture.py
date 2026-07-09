@@ -5,7 +5,7 @@ Walks the full runtime path:
     create_instance() → process_message_impl() → Runner.run_agent()
     → rails before_model_call → LLM_INPUT callback captures messages
 
-Reads real ~/.jiuwenswarm/config/config.yaml for model configuration.
+Reads real ~/.jiuwenavatar/config/config.yaml for model configuration.
 Outputs:
     tests/system_tests/output/system_prompt_live_capture.json
     tests/system_tests/output/system_prompt_live_capture.txt
@@ -29,11 +29,11 @@ import pytest
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 
-from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
-from jiuwenswarm.server.runtime.agent_adapter.interface import build_user_prompt
-from jiuwenswarm.common.config import get_config
-from jiuwenswarm.common.schema.agent import AgentRequest
-from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenavatar.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenavatar.server.runtime.agent_adapter.interface import build_user_prompt
+from jiuwenavatar.common.config import get_config
+from jiuwenavatar.common.schema.agent import AgentRequest
+from jiuwenavatar.common.schema.message import ReqMethod
 
 OUTPUT_DIR = Path(__file__).parent / "output"
 logger = logging.getLogger(__name__)
@@ -70,13 +70,13 @@ def _sync_prompt_workspace_templates(language: str) -> None:
     if not str(home_dir).startswith("/tmp/"):
         return
 
-    workspace_dir = home_dir / ".jiuwenswarm" / "agent" / "workspace"
+    workspace_dir = home_dir / ".jiuwenavatar" / "agent" / "workspace"
     if not workspace_dir.exists():
         return
 
     template_root = (
         Path(__file__).resolve().parents[2]
-        / "jiuwenswarm"
+        / "jiuwenavatar"
         / "resources"
         / "agent"
         / "workspace"
@@ -242,16 +242,16 @@ async def _run_live_capture(
         pass
 
     with mock.patch.object(
-        JiuWenSwarmDeepAdapter, "set_checkpoint", staticmethod(_noop_checkpoint)
+        JiuWenClawDeepAdapter, "set_checkpoint", staticmethod(_noop_checkpoint)
     ), mock.patch.object(
-        JiuWenSwarmDeepAdapter, "load_user_rails", _noop_load_user_rails
+        JiuWenClawDeepAdapter, "load_user_rails", _noop_load_user_rails
     ), mock.patch.dict(
         "os.environ", {"BROWSER_RUNTIME_MCP_ENABLED": "true"}
     ), mock.patch(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_config",
+        "jiuwenavatar.server.runtime.agent_adapter.interface_deep.get_config",
         return_value=config_base,
     ):
-        adapter = JiuWenSwarmDeepAdapter()
+        adapter = JiuWenClawDeepAdapter()
         try:
             await adapter.create_instance()
             response = await adapter.process_message_impl(request, inputs)

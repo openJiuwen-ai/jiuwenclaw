@@ -4,26 +4,24 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict
 
 import pytest
-from openjiuwen.core.session.stream import OutputSchema
 
-from jiuwenswarm.common.e2a.constants import E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY
-from jiuwenswarm.common.e2a.gateway_normalize import (
+from jiuwenavatar.common.e2a.constants import E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY
+from jiuwenavatar.common.e2a.gateway_normalize import (
     e2a_response_from_agent_chunk,
     e2a_response_from_agent_response,
     e2a_response_to_agent_chunk,
     e2a_response_to_agent_response,
 )
-from jiuwenswarm.common.e2a.wire_codec import (
+from jiuwenavatar.common.e2a.wire_codec import (
     encode_agent_chunk_for_wire,
     encode_agent_response_for_wire,
     parse_agent_server_wire_chunk,
     parse_agent_server_wire_unary,
 )
-from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
+from jiuwenavatar.common.schema.agent import AgentResponse, AgentResponseChunk
 
 
 def test_roundtrip_unary_ok() -> None:
@@ -54,33 +52,6 @@ def test_roundtrip_unary_error() -> None:
     back = parse_agent_server_wire_unary(wire)
     assert back.ok is False
     assert back.payload == orig.payload
-
-
-def test_encode_unary_with_nested_output_schema_is_json_serializable() -> None:
-    orig = AgentResponse(
-        request_id="approval-answer",
-        channel_id="web",
-        ok=True,
-        payload={
-            "result": OutputSchema(
-                type="answer",
-                index=0,
-                payload={"output": "approval accepted", "result_type": "answer"},
-            )
-        },
-    )
-
-    wire = encode_agent_response_for_wire(orig, response_id="approval-answer")
-
-    json.dumps(wire, ensure_ascii=False)
-    back = parse_agent_server_wire_unary(wire)
-    assert back.payload == {
-        "result": {
-            "type": "answer",
-            "index": 0,
-            "payload": {"output": "approval accepted", "result_type": "answer"},
-        }
-    }
 
 
 def test_roundtrip_chunk_sentinel_complete() -> None:

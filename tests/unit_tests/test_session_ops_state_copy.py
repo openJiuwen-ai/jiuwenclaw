@@ -15,11 +15,11 @@ class TestCopySessionStateNoSource:
     @pytest.mark.asyncio
     async def test_no_source_state_returns_false(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
+            "jiuwenavatar.agents.harness.common.session_ops_service.get_agent_sessions_dir",
             lambda: tmp_path / "sessions",
         )
         monkeypatch.setattr(
-            "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_workspace_dir",
+            "jiuwenavatar.agents.harness.common.session_ops_service.get_agent_workspace_dir",
             lambda: tmp_path / "workspace",
         )
         mock_session = MagicMock()
@@ -31,7 +31,7 @@ class TestCopySessionStateNoSource:
             "openjiuwen.core.single_agent.create_agent_session",
             return_value=mock_session,
         ):
-            from jiuwenswarm.agents.harness.common.session_ops_service import copy_session_state
+            from jiuwenavatar.agents.harness.common.session_ops_service import copy_session_state
 
             result = await copy_session_state(
                 source_session_id="source_empty",
@@ -47,11 +47,11 @@ class TestCopySessionStateTransform:
     @pytest.mark.asyncio
     async def test_iteration_reset_to_zero(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
+            "jiuwenavatar.agents.harness.common.session_ops_service.get_agent_sessions_dir",
             lambda: tmp_path / "sessions",
         )
         monkeypatch.setattr(
-            "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_workspace_dir",
+            "jiuwenavatar.agents.harness.common.session_ops_service.get_agent_workspace_dir",
             lambda: tmp_path / "workspace",
         )
 
@@ -76,7 +76,7 @@ class TestCopySessionStateTransform:
             "openjiuwen.core.single_agent.create_agent_session",
             side_effect=[source_mock, target_mock],
         ):
-            from jiuwenswarm.agents.harness.common.session_ops_service import copy_session_state
+            from jiuwenavatar.agents.harness.common.session_ops_service import copy_session_state
 
             result = await copy_session_state(
                 source_session_id="source_1",
@@ -96,11 +96,11 @@ class TestCopySessionStateTransform:
     @pytest.mark.asyncio
     async def test_plan_slug_generates_new_and_copies_file(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
+            "jiuwenavatar.agents.harness.common.session_ops_service.get_agent_sessions_dir",
             lambda: tmp_path / "sessions",
         )
         monkeypatch.setattr(
-            "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_workspace_dir",
+            "jiuwenavatar.agents.harness.common.session_ops_service.get_agent_workspace_dir",
             lambda: tmp_path / "workspace",
         )
 
@@ -134,7 +134,7 @@ class TestCopySessionStateTransform:
             "openjiuwen.harness.tools.agent_mode_tools.get_or_create_plan_slug",
             return_value=new_slug,
         ):
-            from jiuwenswarm.agents.harness.common.session_ops_service import copy_session_state
+            from jiuwenavatar.agents.harness.common.session_ops_service import copy_session_state
 
             result = await copy_session_state(
                 source_session_id="source_plan",
@@ -158,11 +158,11 @@ class TestCopySessionStateDeepAgent:
     @pytest.mark.asyncio
     async def test_deep_agent_flush_before_read(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
+            "jiuwenavatar.agents.harness.common.session_ops_service.get_agent_sessions_dir",
             lambda: tmp_path / "sessions",
         )
         monkeypatch.setattr(
-            "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_workspace_dir",
+            "jiuwenavatar.agents.harness.common.session_ops_service.get_agent_workspace_dir",
             lambda: tmp_path / "workspace",
         )
 
@@ -190,9 +190,9 @@ class TestCopySessionStateDeepAgent:
             "openjiuwen.core.single_agent.create_agent_session",
             side_effect=[source_mock, target_mock],
         ), patch(
-            "jiuwenswarm.agents.harness.common.session_ops_service._flush_source_state",
+            "jiuwenavatar.agents.harness.common.session_ops_service._flush_source_state",
         ) as mock_flush:
-            from jiuwenswarm.agents.harness.common.session_ops_service import copy_session_state
+            from jiuwenavatar.agents.harness.common.session_ops_service import copy_session_state
 
             result = await copy_session_state(
                 source_session_id="source_da",

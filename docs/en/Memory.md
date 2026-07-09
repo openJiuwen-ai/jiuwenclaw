@@ -1,6 +1,6 @@
 # Memory
 
-Memory gives JiuwenSwarm **persistent, cross-session recall**: important facts are written to files and retrieved with semantic search (plus optional BM25).
+Memory gives JiuwenAvatar **persistent, cross-session recall**: important facts are written to files and retrieved with semantic search (plus optional BM25).
 
 **External Memory Providers**, supporting third-party memory services (OpenJiuwen LTM, Mem0, OpenViking) or custom plugins.
 
@@ -66,10 +66,10 @@ memory:
 
 | Provider | Description | Required Config |
 |----------|-------------|-----------------|
-| `openjiuwen` | Local long-term memory (KV + Vector + DB) | None (uses default ~/.jiuwenswarm/memory/ltm) |
+| `openjiuwen` | Local long-term memory (KV + Vector + DB) | None (uses default ~/.jiuwenavatar/memory/ltm) |
 | `mem0` | Cloud fact extraction & semantic retrieval | `api_key` (from mem0.ai) |
 | `openviking` | ByteDance context database | `endpoint`, `api_key` |
-| `<plugin-name>` | Custom plugin | ~/.jiuwenswarm/plugins/memory/<name>/ |
+| `<plugin-name>` | Custom plugin | ~/.jiuwenavatar/plugins/memory/<name>/ |
 
 #### External Memory Environment Variables
 
@@ -140,23 +140,18 @@ Memory is plain Markdown; the agent uses file tools:
 - **Use**: Day log, running context.
 - **Updates**: Append via `write` / `edit`; summarization may run when conversations are long.
 
-## Memory Write Triggers
+## When writes happen
 
-During interactions with users, JiuwenSwarm automatically triggers memory writes when needed, persisting key information to memory files for long-term storage.
-
-| Information Type | Target File | Operation | Example |
-|------------------|-------------|-----------|---------|
-| Decisions, preferences, persistent facts | `memory/MEMORY.md` | write / edit tools | "Project uses Python 3.12", "Prefers pytest framework" |
-| User personal information | `memory/USER.md` | write / edit tools | User name, occupation, hobbies |
-| Daily notes, runtime context | `memory/YYYY-MM-DD.md` | write / edit tools | "Fixed login bug today", "Deployed v2.1" |
-| User says "remember this" | `memory/YYYY-MM-DD.md` | write tool | "Remember I stored project files on D drive" |
-
-![Memory Write Triggers](../assets/images/记忆.png)
-![Memory Write](../assets/images/记忆写入.png)
+| Kind | Target | How | Example |
+|------|--------|-----|---------|
+| Decisions, preferences, facts | `memory/MEMORY.md` | write / edit | “Project uses Python 3.12” |
+| Profile | `memory/USER.md` | write / edit | User name, job, interests |
+| Daily notes | `memory/YYYY-MM-DD.md` | write / edit | “Shipped login fix today” |
+| “Remember this” | `memory/YYYY-MM-DD.md` | write | User asks to remember a fact |
 
 ## Dreaming: Sleep-Time Memory Consolidation
 
-In addition to in-session writes by the agent, JiuwenSwarm provides **Dreaming**: a sleep-time mechanism that periodically scans past sessions during idle time, calls an LLM to extract content worth keeping long-term, and writes the result to persistent memory files. Agent and Code modes share the same pipeline.
+In addition to in-session writes by the agent, JiuwenAvatar provides **Dreaming**: a sleep-time mechanism that periodically scans past sessions during idle time, calls an LLM to extract content worth keeping long-term, and writes the result to persistent memory files. Agent and Code modes share the same pipeline.
 
 | Mode | Extraction target | Output |
 |------|-------------------|--------|

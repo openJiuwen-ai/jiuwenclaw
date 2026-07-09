@@ -4,8 +4,8 @@
 
 import pytest
 
-from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-from jiuwenswarm.common.schema.message import ReqMethod, EventType, Mode, Message
+from jiuwenavatar.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenavatar.common.schema.message import ReqMethod, EventType, Mode, Message
 
 
 class TestReqMethod:
@@ -56,7 +56,6 @@ class TestEventType:
         assert EventType.CHAT_DELTA.value == "chat.delta"
         assert EventType.CHAT_FINAL.value == "chat.final"
         assert EventType.CHAT_TOOL_CALL.value == "chat.tool_call"
-        assert EventType.CHAT_SYMPHONY_STATUS.value == "chat.symphony_status"
         assert EventType.CHAT_ERROR.value == "chat.error"
 
 

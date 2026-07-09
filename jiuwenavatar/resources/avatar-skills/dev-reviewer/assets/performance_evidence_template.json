@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "generated_by": "performance-evidence",
+  "symptom_domains": [],
+  "measurements": [],
+  "suggested_commands": [],
+  "apm_queries": [],
+  "notes": [
+    "Fill measurements after running suggested commands; cite numbers in Performance findings."
+  ]
+}

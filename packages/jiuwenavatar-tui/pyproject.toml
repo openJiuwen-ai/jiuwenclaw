@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jiuwenavatar-tui"
+version = "0.0.4"
+description = "Native terminal UI launcher for JiuwenAvatar"
+requires-python = ">=3.11,<3.14"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+]
+
+[project.scripts]
+jiuwenavatar-tui = "jiuwenavatar_tui.app:main"
+
+[tool.setuptools]
+py-modules = []
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jiuwenavatar_tui*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+"*" = ["LICENSE"]
+jiuwenavatar_tui = [
+    "resources/**/*",
+    "resources/*",
+]

@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import pytest
 
-from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
-from jiuwenswarm.common.schema.agent import AgentRequest
-from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenavatar.server.runtime.agent_adapter.interface import JiuWenClaw
+from jiuwenavatar.common.schema.agent import AgentRequest
+from jiuwenavatar.common.schema.message import ReqMethod
 
 
-class _InterruptHarness(JiuWenSwarm):
+class _InterruptHarness(JiuWenClaw):
     @property
     def session_manager_for_test(self):
         return getattr(self, "_session_manager")
@@ -86,7 +86,7 @@ async def test_team_interrupt_pause_like_intents_use_team_manager(
 
     monkeypatch.setattr(claw, "_ensure_adapter", _unexpected_adapter)
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.get_team_manager",
+        "jiuwenavatar.agents.harness.team.get_team_manager",
         lambda channel_id=None: fake_manager,
     )
     monkeypatch.setattr(claw.session_manager_for_test, "cancel_session_task", _fake_cancel_session_task)
@@ -126,7 +126,7 @@ async def test_team_interrupt_resume_is_ack_only(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(claw, "_ensure_adapter", _unexpected_adapter)
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.get_team_manager",
+        "jiuwenavatar.agents.harness.team.get_team_manager",
         lambda channel_id=None: fake_manager,
     )
     monkeypatch.setattr(claw.session_manager_for_test, "cancel_session_task", _fake_cancel_session_task)
@@ -164,7 +164,7 @@ async def test_code_team_interrupt_uses_team_manager_without_team_flag(
 
     monkeypatch.setattr(claw, "_ensure_adapter", _unexpected_adapter)
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.get_team_manager",
+        "jiuwenavatar.agents.harness.team.get_team_manager",
         lambda channel_id=None: fake_manager,
     )
     monkeypatch.setattr(claw.session_manager_for_test, "cancel_session_task", _fake_cancel_session_task)

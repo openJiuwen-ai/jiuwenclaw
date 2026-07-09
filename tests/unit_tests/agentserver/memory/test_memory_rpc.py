@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.agents.harness.common import memory_rpc
+from jiuwenavatar.agents.harness.common import memory_rpc
 
 
 @pytest.mark.asyncio

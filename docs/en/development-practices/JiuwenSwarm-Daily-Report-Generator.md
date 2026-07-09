@@ -1,4 +1,4 @@
-# From Configuration to Architecture: Building the Advanced JiuwenSwarm Daily Report Generator
+# From Configuration to Architecture: Building the Advanced JiuwenAvatar Daily Report Generator
 
 ## Introduction — When “daily report automation” meets real office work
 
@@ -38,7 +38,7 @@ the sections below may help.
 
 | Item | Value |
 | --- | --- |
-| **Project path** | `D:\Download\jiuwenswarm` |
+| **Project path** | `D:\Download\jiuwenavatar` |
 | **OS** | Windows 10 |
 | **Python** | 3.10+ |
 | **Model** | ModelScope (`Qwen/Qwen3-235B-A22B-Instruct-2507`) |
@@ -47,7 +47,7 @@ the sections below may help.
 
 | Source | Value |
 | --- | --- |
-| **Git repo** | `D:\Download\jiuwenswarm` (this project) |
+| **Git repo** | `D:\Download\jiuwenavatar` (this project) |
 | **Email** | `zxworkem@163.com` (NetEase 163 Email) |
 | **Delivery** | Feishu (`cli_a92035b1823a9cd2`) |
 | **Heartbeat window** | Daily 18:00–18:30 |
@@ -55,7 +55,7 @@ the sections below may help.
 ### Key paths
 
 ```plain
-D:\Download\jiuwenswarm\
+D:\Download\jiuwenavatar\
 ├── .env
 ├── config/config.yaml                # App config (heartbeat, Feishu)
 ├── workspace/
@@ -101,7 +101,7 @@ The **advanced daily report** skill aggregates multiple sources, runs analysis, 
 
 With the advanced skill, Git, email stats, memory, and todos feed an engine that computes metrics and trends.
 
-### 1.3 JiuwenSwarm skills
+### 1.3 JiuwenAvatar skills
 
 | Capability | Description |
 | --- | --- |
@@ -114,7 +114,7 @@ The payoff is **extensibility**: collection, analysis, and reporting stay separa
 
 ## 2. Technical approach
 
-### 2.1 Layering in JiuwenSwarm
+### 2.1 Layering in JiuwenAvatar
 
 The advanced daily report skill sits in the application layer (see diagram in the original article).
 
@@ -257,7 +257,7 @@ This skill collects data by running Python scripts (Git, mailbox, memory, todos)
 
 **What the scripts collect automatically:**
 
-- **Git commits**: `git log` on repo `D:/Download/jiuwenswarm`
+- **Git commits**: `git log` on repo `D:/Download/jiuwenavatar`
 - **Mailbox stats**: IMAP to `zxworkem@163.com` (requires mailbox authorization code)
 - **Memory**: daily files under `workspace/agent/memory/`
 - **Todos**: `todo.md` under `workspace/session/`
@@ -268,19 +268,19 @@ When the user asks for a daily / weekly / monthly report, **run:**
 
 ```bash
 # Today’s daily report (Git + todos + memory)
-cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py daily --save
+cd D:/Download/jiuwenavatar && python workspace/agent/skills/daily-report/run_report.py daily --save
 
 # Daily report for a specific date
-cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py daily --date 2026-03-06 --save
+cd D:/Download/jiuwenavatar && python workspace/agent/skills/daily-report/run_report.py daily --date 2026-03-06 --save
 
 # Weekly report (aggregate one week)
-cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py weekly --save
+cd D:/Download/jiuwenavatar && python workspace/agent/skills/daily-report/run_report.py weekly --save
 
 # Monthly report (aggregate one month, incl. per-day Git stats)
-cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py monthly --save
+cd D:/Download/jiuwenavatar && python workspace/agent/skills/daily-report/run_report.py monthly --save
 
 # Monthly report for a given month
-cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py monthly --year 2026 --month 3 --save
+cd D:/Download/jiuwenavatar && python workspace/agent/skills/daily-report/run_report.py monthly --year 2026 --month 3 --save
 ```
 
 ### Execution steps
@@ -305,7 +305,7 @@ cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_rep
 
 | Source | How | Where to configure |
 |--------|-----|--------------------|
-| **Git** | `git log` | Repo path: `D:/Download/jiuwenswarm` |
+| **Git** | `git log` | Repo path: `D:/Download/jiuwenavatar` |
 | **NetEase** | IMAP | `.env`: `EMAIL_ADDRESS`, `EMAIL_TOKEN` |
 | **Memory** | Read Markdown | `workspace/agent/memory/YYYY-MM-DD.md` |
 | **Todos** | Parse `todo.md` | `workspace/session/*/todo.md` |
@@ -377,7 +377,7 @@ Configure periodic runs in `HEARTBEAT.md`:
 Monitored repository (read automatically by scripts):
 
 ```
-Repo path: D:/Download/jiuwenswarm
+Repo path: D:/Download/jiuwenavatar
 ```
 
 The script uses `git log` to collect:
@@ -1593,7 +1593,7 @@ This chapter integrates the complete implementation of the work analysis engine 
 
 | Data source | Collection method | Configuration location |
 | --- | --- | --- |
-| **Git repository** | `git log` command | Repository path: `D:/Download/jiuwenswarm` |
+| **Git repository** | `git log` command | Repository path: `D:/Download/jiuwenavatar` |
 | **NetEase email** | IMAP protocol | `.env`: `EMAIL_ADDRESS`, `EMAIL_TOKEN` |
 | **Memory system** | Read MD files | `workspace/agent/memory/YYYY-MM-DD.md` |
 | **To-do items** | Parse todo.md | `workspace/session/*/todo.md` |
@@ -1603,13 +1603,13 @@ This chapter integrates the complete implementation of the work analysis engine 
 
 ```bash
 # Generate daily report
-cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py daily --save
+cd D:/Download/jiuwenavatar && python workspace/agent/skills/daily-report/run_report.py daily --save
 
 # Generate weekly report
-cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py weekly --save
+cd D:/Download/jiuwenavatar && python workspace/agent/skills/daily-report/run_report.py weekly --save
 
 # Generate monthly report
-cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py monthly --save
+cd D:/Download/jiuwenavatar && python workspace/agent/skills/daily-report/run_report.py monthly --save
 ```
 
 ### 5.3 Efficiency Metrics Data Structure
@@ -2295,7 +2295,7 @@ PERPLEXITY_API_KEY=
 ```markdown
 # Heartbeat tasks
 
-In this file, configure tasks that JiuwenSwarm needs to execute periodically.
+In this file, configure tasks that JiuwenAvatar needs to execute periodically.
 
 ---
 
@@ -2359,7 +2359,7 @@ heartbeat:
 The Git repositories monitored by this project (the script will automatically read):
 
 ```plain
-Repository path: D:/Download/jiuwenswarm
+Repository path: D:/Download/jiuwenavatar
 ```
 
 **Collection method**：The script collects data through the `git log` command; no additional configuration is needed.
@@ -2375,7 +2375,7 @@ Repository path: D:/Download/jiuwenswarm
 
 ```bash
 # The git command executed internally by the script
-git -C D:/Download/jiuwenswarm log --since="2026-03-07 00:00:00" --until="2026-03-07 23:59:59" --format="%H|%s|%an|%ai" --numstat
+git -C D:/Download/jiuwenavatar log --since="2026-03-07 00:00:00" --until="2026-03-07 23:59:59" --format="%H|%s|%an|%ai" --numstat
 ```
 
 **Multi-repository support**：If you need to monitor multiple repositories, expand `DataAggregator`：
@@ -2383,8 +2383,8 @@ git -C D:/Download/jiuwenswarm log --since="2026-03-07 00:00:00" --until="2026-0
 ```python
 # Example of extending configuration (needs to be implemented by yourself)
 git_repos:
-  - path: "D:/Download/jiuwenswarm"
-    name: "jiuwenswarm"
+  - path: "D:/Download/jiuwenavatar"
+    name: "jiuwenavatar"
   - path: "D:/Projects/another-repo"
     name: "another-project"
 ```
@@ -2430,7 +2430,7 @@ channels:
 ### 7.1 Test Data Collector
 ```bash
 # Test Git collection (collect commit records for the specified date)
-cd D:\Download\jiuwenswarm
+cd D:\Download\jiuwenavatar
 python workspace/agent/skills/daily-report/run_report.py daily --date 2026-03-07
 
 # Test monthly report generation (collect data for the whole month)
@@ -2555,7 +2555,7 @@ If you are also trying to build similar AI Agent applications, I hope this artic
 
 > **Let the AI Agent truly become an intelligent work assistant, starting with the advanced daily report generator.**
 >
-> — JiuwenSwarm Advanced daily report generator development practice
+> — JiuwenAvatar Advanced daily report generator development practice
 
 ---
 

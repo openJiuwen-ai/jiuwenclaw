@@ -1,4 +1,4 @@
-# Desktop packaging (Windows & macOS)
+﻿# Desktop packaging (Windows & macOS)
 
 This guide explains how to build a desktop app with **uv**, **PyInstaller**, and **pywebview**. Supported outputs: Windows **`onedir`** layout (for Inno Setup) and macOS **`.app` + `.dmg`**.
 
@@ -13,9 +13,9 @@ This guide explains how to build a desktop app with **uv**, **PyInstaller**, and
 
 | Path | Role |
 |------|------|
-| `scripts/jiuwenswarm.spec` | PyInstaller spec |
-| `scripts/jiuwenswarm_exe_entry.py` | Exe entry (desktop mode + subcommands) |
-| `jiuwenswarm/channels/desktop/desktop_app.py` | pywebview window and local server |
+| `scripts/jiuwenavatar.spec` | PyInstaller spec |
+| `scripts/jiuwenavatar_exe_entry.py` | Exe entry (desktop mode + subcommands) |
+| `jiuwenavatar/channels/desktop/desktop_app.py` | pywebview window and local server |
 | `scripts/build-exe.ps1` | One-shot build (PowerShell) |
 | `scripts/build-exe.bat` | One-shot build (batch) |
 | `scripts/build-macos.sh` | macOS `.app` + `.dmg` |
@@ -49,21 +49,21 @@ uv sync --extra dev
 #### 2. Build the web UI
 
 ```bash
-cd jiuwenswarm/channels/web/frontend
+cd jiuwenavatar/channels/web/frontend
 npm install
 npm run build
 cd ../..
 ```
 
-Static files land in `jiuwenswarm/channels/web/frontend/dist`.
+Static files land in `jiuwenavatar/channels/web/frontend/dist`.
 
 #### 3. PyInstaller
 
 ```bash
-uv run pyinstaller scripts/jiuwenswarm.spec
+uv run pyinstaller scripts/jiuwenavatar.spec
 ```
 
-Output: `dist/jiuwenswarm/`, main binary `dist/jiuwenswarm/jiuwenswarm.exe`.
+Output: `dist/jiuwenavatar/`, main binary `dist/jiuwenavatar/jiuwenavatar.exe`.
 
 ## Using the Windows build
 
@@ -72,35 +72,35 @@ Output: `dist/jiuwenswarm/`, main binary `dist/jiuwenswarm/jiuwenswarm.exe`.
 1. **Initialize** (required once):
 
    ```bash
-   jiuwenswarm.exe init
+   jiuwenavatar.exe init
    ```
 
-   Creates `~/.jiuwenswarm` config and workspace.
+   Creates `~/.jiuwenavatar` config and workspace.
 
-2. **Configure**: edit `%USERPROFILE%\.jiuwenswarm\.env` (`API_KEY`, `MODEL_PROVIDER`, …).
+2. **Configure**: edit `%USERPROFILE%\.jiuwenavatar\.env` (`API_KEY`, `MODEL_PROVIDER`, …).
 
 3. **Start**:
 
    ```bash
-   jiuwenswarm.exe
+   jiuwenavatar.exe
    ```
 
-   Starts backend + static UI in a borderless pywebview window (default `http://127.0.0.1:5173`); you usually do not open a separate browser.
+   Starts backend + static UI in a borderless pywebview window (default `http://127.0.0.1:29173`); you usually do not open a separate browser.
 
 ## Inno Setup notes
 
-- Package the whole `dist/jiuwenswarm/` directory.
-- Entry point: `dist/jiuwenswarm/jiuwenswarm.exe`.
-- Run `jiuwenswarm.exe init` from the installer finish page if needed.
-- User data lives under `%USERPROFILE%\.jiuwenswarm` — do not delete on uninstall by default.
-- Share one `.ico` between `jiuwenswarm.spec` and Inno Setup if you add an icon.
+- Package the whole `dist/jiuwenavatar/` directory.
+- Entry point: `dist/jiuwenavatar/jiuwenavatar.exe`.
+- Run `jiuwenavatar.exe init` from the installer finish page if needed.
+- User data lives under `%USERPROFILE%\.jiuwenavatar` — do not delete on uninstall by default.
+- Share one `.ico` between `jiuwenavatar.spec` and Inno Setup if you add an icon.
 
 ### Subcommands
 
 | Command | Role |
 |---------|------|
-| `jiuwenswarm.exe` | Start desktop app |
-| `jiuwenswarm.exe init` | Initialize workspace |
+| `jiuwenavatar.exe` | Start desktop app |
+| `jiuwenavatar.exe init` | Initialize workspace |
 
 ## macOS
 
@@ -109,7 +109,7 @@ chmod +x scripts/build-macos.sh
 ./scripts/build-macos.sh
 ```
 
-Produces `dist/JiuwenSwarm.app` and `dist/JiuwenSwarm-<version>.dmg`.
+Produces `dist/JiuwenAvatar.app` and `dist/JiuwenAvatar-<version>.dmg`.
 
 - Open the `.app` or mount the `.dmg` and drag to **Applications**.
 - Not codesigned/notarized — fine for local testing; for distribution add `.icns`, signing, and notarization.
@@ -118,21 +118,21 @@ Produces `dist/JiuwenSwarm.app` and `dist/JiuwenSwarm-<version>.dmg`.
 ## Technical notes
 
 - **Python**: Bundled by PyInstaller; end users do not install Python.
-- **pywebview**: Loads local `http://127.0.0.1:5173`.
+- **pywebview**: Loads local `http://127.0.0.1:29173`.
 - **Node**: Only for building the React app; runtime uses static files.
-- **Workspace**: Same as pip install — `~/.jiuwenswarm`.
-- **Inno**: Ship the full `dist/jiuwenswarm/` tree, not a single exe only.
+- **Workspace**: Same as pip install — `~/.jiuwenavatar`.
+- **Inno**: Ship the full `dist/jiuwenavatar/` tree, not a single exe only.
 - **DMG**: Script may include an **Applications** shortcut for drag install.
 
 ## Troubleshooting
 
 ### Missing `web/dist`
 
-Run `cd jiuwenswarm/channels/web/frontend && npm run build`.
+Run `cd jiuwenavatar/channels/web/frontend && npm run build`.
 
 ### `ModuleNotFoundError` at runtime
 
-Add missing modules to `hiddenimports` in `scripts/jiuwenswarm.spec` and rebuild.
+Add missing modules to `hiddenimports` in `scripts/jiuwenavatar.spec` and rebuild.
 
 ### Large bundle
 

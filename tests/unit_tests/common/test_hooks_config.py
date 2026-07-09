@@ -1,10 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Unit tests for jiuwenswarm.common.hooks_config."""
+"""Unit tests for jiuwenavatar.common.hooks_config."""
 
 from __future__ import annotations
 
-from jiuwenswarm.common.hooks_config import (
+from jiuwenavatar.common.hooks_config import (
     HooksConfig,
     HookEvent,
     HookMatcher,

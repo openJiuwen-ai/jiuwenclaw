@@ -18,10 +18,7 @@ from pydantic import ValidationError
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox import __version__
 from jiuwenbox.server.audit_logger import AuditLogger
-from jiuwenbox.models.sandbox import InvalidJobIdError, InvalidSandboxIdError
-from jiuwenbox.server.runtime.process import BackgroundJobNotFoundError
 from jiuwenbox.server.sandbox_manager import (
-    SandboxConflictError,
     SandboxManager,
     SandboxNotFoundError,
     SandboxStateError,
@@ -303,22 +300,9 @@ async def lifespan(_application: FastAPI):
     # 经 bind 并 listen 完成, socket inode 必然存在; 改 mode 不会和首个请求
     # 抢时序。
     _chmod_uds_socket_if_any()
-
-    from jiuwenbox.server.routes.mcp import mcp_server
-    _mcp_session_cm = mcp_server.session_manager.run()
-    await _mcp_session_cm.__aenter__()
-    logger.info("MCP session manager started")
-
     try:
         yield
     finally:
-        # Stop accepting MCP requests before tearing down managed resources.
-        try:
-            await _mcp_session_cm.__aexit__(None, None, None)
-            logger.info("MCP session manager stopped")
-        except Exception:
-            logger.exception("MCP session manager shutdown failed")
-
         # Stop proxies first so any in-flight clients are torn down before we
         # wipe sandbox descriptors. All steps below are best-effort: a failure
         # here cannot abort uvicorn's shutdown sequence so we just log and
@@ -406,25 +390,6 @@ def create_app() -> FastAPI:
     async def state_error_handler(request: Request, exc: SandboxStateError):
         return JSONResponse(status_code=409, content={"error": str(exc)})
 
-    @application.exception_handler(SandboxConflictError)
-    async def conflict_error_handler(request: Request, exc: SandboxConflictError):
-        return JSONResponse(status_code=409, content={"error": str(exc)})
-
-    @application.exception_handler(InvalidSandboxIdError)
-    async def invalid_sandbox_id_handler(request: Request, exc: InvalidSandboxIdError):
-        return JSONResponse(status_code=400, content={"error": str(exc)})
-
-    @application.exception_handler(InvalidJobIdError)
-    async def invalid_job_id_handler(request: Request, exc: InvalidJobIdError):
-        return JSONResponse(status_code=400, content={"error": str(exc)})
-
-    @application.exception_handler(BackgroundJobNotFoundError)
-    async def background_job_not_found_handler(
-        request: Request,
-        exc: BackgroundJobNotFoundError,
-    ):
-        return JSONResponse(status_code=404, content={"error": str(exc)})
-
     @application.exception_handler(PolicyValidationError)
     async def policy_validation_error_handler(request: Request, exc: PolicyValidationError):
         return JSONResponse(status_code=400, content={"error": str(exc)})
@@ -477,6 +442,11 @@ def create_app() -> FastAPI:
         from jiuwenbox.models.common import HealthResponse
         from jiuwenbox.supervisor.landlock import detect_landlock_abi
 
+        # Proxy-only deployments never construct a SandboxManager. Reading
+        # the module global directly (instead of going through
+        # ``get_sandbox_manager``) avoids lazily spinning up
+        # ``ProcessRuntime`` from inside ``/health`` and lets us report
+        # zero active sandboxes truthfully.
         if _sandbox_manager is None:
             active = 0
         else:
@@ -488,9 +458,6 @@ def create_app() -> FastAPI:
             landlock_supported=detect_landlock_abi() > 0,
             sandboxes_active=active,
         )
-
-    from jiuwenbox.server.routes.mcp import mcp_server
-    application.mount("", mcp_server.streamable_http_app())
 
     return application
 

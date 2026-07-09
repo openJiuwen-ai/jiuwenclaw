@@ -1,7 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import build_code_system_prompt
-from jiuwenswarm.agents.harness.code.prompt.code_todo_tool_prompts import (
+from jiuwenavatar.agents.harness.code.prompt.code_prompt_builder import build_code_system_prompt
+from jiuwenavatar.agents.harness.code.prompt.code_todo_tool_prompts import (
     CODE_TODO_CREATE_DESCRIPTION_EN,
     CODE_TODO_MODIFY_DESCRIPTION_EN,
     CODE_TODO_TOOL_PROMPTS,

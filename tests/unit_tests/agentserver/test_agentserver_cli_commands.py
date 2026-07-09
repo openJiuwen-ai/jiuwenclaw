@@ -3,9 +3,9 @@ import json
 
 import pytest
 
-from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
-from jiuwenswarm.common.schema.agent import AgentRequest
-from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenavatar.server import agent_ws_server as agent_ws_server_module
+from jiuwenavatar.common.schema.agent import AgentRequest
+from jiuwenavatar.common.schema.message import ReqMethod
 
 
 class FakeWebSocket:
@@ -25,9 +25,6 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
 
     async def handle_command_diff_for_test(self, ws, request, send_lock):
         await self._handle_command_diff(ws, request, send_lock)
-
-    async def handle_command_simplify_for_test(self, ws, request, send_lock):
-        await self._handle_command_simplify(ws, request, send_lock)
 
     async def handle_command_model_for_test(self, ws, request, send_lock):
         await self._handle_command_model(ws, request, send_lock)
@@ -238,60 +235,6 @@ async def test_handle_command_diff_returns_summary_payload(server, fake_ws):
             "ok": True,
         }
     ]
-
-
-@pytest.mark.asyncio
-async def test_handle_command_simplify_returns_prompt(server, fake_ws):
-    """ /simplify 无 target 时返回包含三阶段审查结构的 prompt。"""
-    request = AgentRequest(
-        request_id="req-simplify",
-        channel_id="tui",
-        req_method=ReqMethod.COMMAND_SIMPLIFY,
-        params={},
-    )
-
-    await server.handle_command_simplify_for_test(fake_ws, request, asyncio.Lock())
-
-    assert len(fake_ws.sent) == 1
-    msg = fake_ws.sent[0]
-    assert msg["response_id"] == "req-simplify"
-    assert msg["ok"] is True
-    prompt = msg["payload"]["prompt"]
-    # prompt should contain three-phase structure keywords (English)
-    assert "Phase 1" in prompt
-    assert "Phase 2" in prompt
-    assert "Phase 3" in prompt
-    # All three review dimensions should be present
-    assert "Code Reuse Review" in prompt
-    assert "Code Quality Review" in prompt
-    assert "Efficiency Review" in prompt
-    # Parallel sub-agent review should be optional, not mandatory
-    assert "task_tool" in prompt or "Agent tool" in prompt
-    assert "perform all three reviews yourself directly" in prompt
-    # No Additional Focus section when no target is given
-    assert "Additional Focus" not in prompt
-    # Security is explicitly out of scope — must point to /security-review
-    assert "security" in prompt.lower()
-    assert "/security-review" in prompt
-
-
-@pytest.mark.asyncio
-async def test_handle_command_simplify_with_target_appends_focus(server, fake_ws):
-    """/simplify 带 target 时将关注点追加到 prompt 末尾。"""
-    request = AgentRequest(
-        request_id="req-simplify-target",
-        channel_id="tui",
-        req_method=ReqMethod.COMMAND_SIMPLIFY,
-        params={"target": "src/auth/ 模块的错误处理"},
-    )
-
-    await server.handle_command_simplify_for_test(fake_ws, request, asyncio.Lock())
-
-    msg = fake_ws.sent[0]
-    assert msg["ok"] is True
-    prompt = msg["payload"]["prompt"]
-    assert "Additional Focus" in prompt
-    assert "src/auth/ 模块的错误处理" in prompt
 
 
 @pytest.mark.asyncio

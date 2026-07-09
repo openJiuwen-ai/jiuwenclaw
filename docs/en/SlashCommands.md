@@ -18,26 +18,21 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/copy` | Copy last message |
 | `/exit` | Exit |
 | `/help` | Show available commands |
-| `/keybindings` | View, edit, or reset TUI keyboard shortcuts (alias `/keybind`) |
 | `/theme` | Switch theme |
 | `/config` | Modify configuration (currently local, planned to unify with Gateway) |
 | `/context` | Show context window usage and token breakdown (see below) |
 | `/workspace` | Manage trusted directories (see below) |
 | `/teamskills` | TeamSkills Hub publish/delete (`publish`/`delete`) |
 | `/export` | Export current conversation to file or clipboard (see below) |
-| `/status` | Show jiuwenswarm status overview, usage, config (see below) |
+| `/status` | Show jiuwenavatar status overview, usage, config (see below) |
 | `/statusline` | Configure the TUI footer status bar with a custom command (see below) |
 | `/permissions` | Manage tool permissions (`allow`/`ask`/`deny`) |
 | `/evolve` | Trigger skill self-evolution for one skill (see below) |
 | `/evolve_list` | Show one skill's evolution records (see below) |
 | `/evolve_simplify` | Simplify and consolidate one skill's evolution records (see below) |
 | `/evolve_rebuild` | Rebuild `SKILL.md` from archives and evolution records (see below) |
-| `/hooks` | Browse configured hooks (read-only, see below) |
-| `/simplify` | Code simplify review: checks reuse, quality, efficiency and auto-fixes (`code.*` only, see below) |
 | `/sandbox` | Set sandbox mode (see below) |
-| `/agents` | Manage Agent configs (list, get, create, update, enable, disable, delete, see below) |
-| `/auto-harness` | Auto-Harness task management (`run`/`schedule`/`issue`, see below) |
-| `/btw` | Ask a quick side question without interrupting the main conversation (see below) |
+| `/auto-harness` | Auto-Harness task management (`run`/`schedule`, see below) |
 
 > Note: `/mode` controlled switching logic is primarily on Gateway side, see "`/mode` and `/switch`" below. The TUI local command additionally supports `/mode plan` and `/mode team.normal`; see the TUI guide for details.
 
@@ -52,7 +47,7 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 | `/new_session` | Create new session (IM only) |
 | `/mode` | Mode switching (supports first-level entry and direct syntax) |
 | `/switch` | Switch second-level mode within current mode family |
-| `/skills` | Skills management (list, install, uninstall, marketplace, ClawHub, SkillNet) (see below) |
+| `/skills` | Skills management (list, install, uninstall, marketplace) (see below) |
 | `/model` | Model view, add, switch (see below) |
 | `/mcp` | MCP server management (see below) |
 | `/diff` | View session changes by turn (see below) |
@@ -62,8 +57,6 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 | `/rewind` | Rewind conversation to before a specific turn (see below) |
 | `/memory` | Memory management (see below) |
 | `/cron` | Scheduled task (cron job) management (see below) |
-| `/review` | Code review a pull request (see below) |
-| `/security-review` | Security review of pending changes on the current branch (see below) |
 
 ---
 
@@ -85,7 +78,7 @@ Manages directories AI can access for file read, edit, and execute operations.
 
 #### Concepts
 
-- **System default workspace**: Fixed path `~/.jiuwenswarm/agent/jiuwenswarm_workspace`, always available
+- **System default workspace**: Fixed path `~/.jiuwenavatar/agent/jiuwenavatar_workspace`, always available
 - **Trusted directories (`trusted_dirs`)**: User-authorized accessible directories, managed by TUI, passed to backend Agent
 
 #### Control Logic
@@ -129,30 +122,6 @@ Manages directories AI can access for file read, edit, and execute operations.
 - `/resume list`: List historical sessions.
 - `/resume <conversation_id>`: Resume specified session.
 
-#### Interactive picker (TUI)
-
-Entering **`/resume`** or **`/continue`** with **no arguments** opens an interactive session picker (instead of a plain `session.list` dump).
-
-| Key | Action |
-| --- | --- |
-| `↑` / `↓` | Move focus between sessions |
-| `Enter` | Resume the focused session |
-| type chars | Live search (filter by session ID / title / project dir) |
-| `Backspace` | Delete a search character |
-| `Space` | Preview the focused session info card (title, ID, project dir, branch, message count, last active / created). In preview: `Enter` resumes, `Space`/`Esc` goes back |
-| `Ctrl+R` | Rename the focused session. In edit mode: `Enter` saves, `Esc` cancels, empty value clears the title |
-| `Ctrl+A` | Toggle scope between "all projects" and "current project only" |
-| `Ctrl+B` | Toggle git branch filter (only show sessions whose `git_branch` strictly equals the current project's branch) |
-| `Esc` | Clear search if any; otherwise close the picker |
-
-> `Space` / `Ctrl+R` / `Ctrl+A` / `Ctrl+B` / `Esc` in the list can be rebound under the `ResumeList` context via `/keybindings` (preview/rename sub-states and search text entry stay hardcoded).
-
-Behavior:
-
-- **Defaults to listing all projects** (press `Ctrl+A` to narrow to the current project). When the current project has no sessions, an (empty) picker still opens so you can press `Ctrl+A`.
-- **Branch recording & filtering (`Ctrl+B`)**: a session's git branch is recorded (per its `project_dir`) on the first message (`HEAD` for non-git/detached). When the filter is on, sessions are matched by branch **name** strictly; legacy sessions without a recorded branch and `HEAD` sessions are filtered out. Note the match is by name only and not repo-aware — with "all projects + branch filter" enabled, same-named branches in different directories are shown together.
-- **Restore scope**: resume only restores the **conversation context** (history, session ID, accent color, workflow snapshot, window title); it does **not** switch the workspace / current working directory.
-
 ### `/model` (View / Add / Switch Model)
 
 - Usage:
@@ -165,27 +134,14 @@ Behavior:
   - Switching model validates config and environment variable placeholders, updates `MODEL_NAME` / `MODEL_PROVIDER` / `API_BASE` / `API_KEY`, writes back to `.env`.
 - Secure display: Sensitive fields like `api_key`, `token` are masked.
 
-### `/diff` (Interactive Change Review)
+### `/diff` (Session Change Review)
 
 - Usage: `/diff` (no subcommands).
-- Data source: TUI requests Agent diff service via `command.diff`, returns `turns` (change sets per turn) and `gitDiff` (uncommitted working tree changes) for current `session_id`.
-- Display mode: Opens a **full-screen interactive Diff viewer**:
-  - **List view**: Shows all changed files (working tree `working` and per-turn `Turn N`) with relative paths, source label, and added/removed line counts;
-  - **Detail view**: Press `Enter` on a selected file to view its full hunk-by-hunk diff with scrolling support.
-- List view keybindings:
-  - `↑` / `↓` — Move selection (auto-scrolls);
-  - `Enter` — View full diff for the selected file;
-  - `Home` / `g` — Jump to top;
-  - `End` / `Shift+g` — Jump to bottom;
-  - `Esc` / `Ctrl+C` — Close.
-- Detail view keybindings:
-  - `↑` / `↓` — Scroll line by line;
-  - `PgUp` / `PgDn` — Page up / down;
-  - `Home` / `g` — Go to file top;
-  - `End` / `Shift+g` — Go to file bottom;
-  - `←` / `Esc` — Return to list view.
-- Scope: Covers both the working tree (`git diff HEAD`) and per-turn change traces. Not a replacement for `git diff` full version control perspective.
-- Fallback: When the TUI does not provide the `enterDiffViewer` capability, falls back to inline display (file names, source, and line stats only).
+- Data source: TUI requests Agent diff service via `command.diff`, returns `turns` (change sets per turn) for current `session_id`.
+- Display rules:
+  - With changes: Shows `Found N turn(s) with file changes` with structured `turns`;
+  - Without changes: Shows `No file changes in this session`.
+- Scope: For viewing uncommitted per-turn change traces in current session, not a replacement for `git diff` full version control perspective.
 
 ### `/compact` (Context Compression)
 
@@ -213,10 +169,10 @@ Behavior:
 ### `/init` (Project Initialization)
 
 - Usage: `/init` (no parameters).
-- Function: Initialize project AI collaboration config, generates `JIUWENSWARM.md` and optionally `JIUWENSWARM.local.md`.
+- Function: Initialize project AI collaboration config, generates `JIUWENAVATAR.md` and optionally `JIUWENAVATAR.local.md`.
 - Scope: Only runs in `code` mode.
 - Flow:
-  1. Select scope: `Team-shared` (JIUWENSWARM.md), `Personal` (JIUWENSWARM.local.md), or `Both`.
+  1. Select scope: `Team-shared` (JIUWENAVATAR.md), `Personal` (JIUWENAVATAR.local.md), or `Both`.
   2. Detect existing configs: Auto-detect `CLAUDE.md`, `.cursorrules`, `copilot-instructions.md` etc.
   3. Generate configs: Create project config files based on selection.
 - Auto mode switch: Code initialization runs in `code.normal` for write permission.
@@ -378,58 +334,49 @@ Manage cron jobs via RPC calls to the backend `CronController`, sharing the same
 | `name` | Yes | Job name |
 | `cron_expr` | Yes | Cron expression, supports two formats: 5-field (min hour day month dow) or 7-field Quartz (sec min hour day month dow year). 5-field is auto-converted to 7-field (second=0, year=*). Examples: daily 9am = `0 9 * * *` (5-field) or `0 0 9 * * ? *` (7-field) |
 | `description` | Yes | Job description — the input prompt the Agent receives when executing |
-| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>`. With `targets=tui`, results broadcast to all connected TUI windows; see [Scheduled tasks — Push to TUI](ScheduledTasks.md#5-push-to-the-tui-channel) |
+| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>` |
 | `timezone` | No | IANA timezone, default `Asia/Shanghai` |
-| `mode` | No | Execution mode, default `agent.fast`. Options: `agent`, `agent.fast`, `agent.plan`, `plan`, `team`, `team.plan`, `code.team`. Team modes use streaming multi-agent execution; see [Scheduled tasks — Team mode](ScheduledTasks.md#6-team-mode-and-swarmflow-multi-agent-scheduled-jobs) |
-| `timeout_seconds` | No | Per-run timeout in seconds (60–259200). Default 600 for normal modes, 1200 for team modes |
+| `mode` | No | Execution mode: `agent` (default, suitable for simple reminder-type tasks) or `plan` (for more complex reasoning tasks, allowing the Agent to plan the steps first before executing) |
 | `wake_offset_seconds` | No | Wake-up offset in seconds, default 300 |
 | `delete_after_run` | No | Auto-delete after one run, default false |
 
 - `add` examples:
   - `/cron add name=minute-test cron_expr="0 * * * *" description="Tell me the current time" targets=tui`
-  - `/cron add name=morning-brief cron_expr="0 9 * * *" description="Generate today's morning briefing" targets=tui mode=agent.plan`
-  - `/cron add name=model-weekly cron_expr="0 9 * * 1" description="Compare GLM vs DeepSeek and output a report" targets=tui mode=team`
+  - `/cron add name=morning-brief cron_expr="0 9 * * *" description="Generate today's morning briefing" targets=tui mode=plan`
   - `/cron add name=reminder cron_expr="0 30 17 29 4 ? 2026" description="Don't forget the meeting" targets=tui delete_after_run=true`
   - `/cron add name=weekly-report cron_expr="0 9 * * 1" description="Generate weekly report" targets=web`
 
 - `update` usage: Only pass the fields you want to change, e.g., `/cron update <id> name=new-name enabled=false`
-- `show` display: full job details in key-value format (id, name, status, cron_expr, timezone, description, targets, mode, timeout_seconds, wake_offset_seconds, delete_after_run)
+- `show` display: full job details in key-value format (id, name, status, cron_expr, timezone, description, targets, mode, wake_offset_seconds, delete_after_run)
 - `list` display: sequence number, full job ID, name, cron expression, enabled status, description snippet
 - `preview` display: wake_at and push_at timestamps for each upcoming execution
 
 ### `/skills` (Skills Management)
 
-Manage skills lifecycle: listing, installing, uninstalling, marketplace source management, ClawHub and SkillNet online skill registries.
+Manage skills lifecycle: listing, installing, uninstalling, and marketplace source management.
 
 #### Subcommands
 
 | Command | Description |
 |---|---|
 | `/skills` or `/skills list` | List skills (grouped: Installed / Available to install) |
-| `/skills install <skill>` or `/skills install <slug@clawhub>` or `/skills install <name@skillnet>` or `/skills install <skill@marketplace>` or `/skills install <path_or_url>` | Install a skill: builtin accepts bare name, ClawHub uses `<slug>@clawhub`, SkillNet uses `<name>@skillnet` (auto-searches for URL), marketplace uses `<name>@<marketplace>`, local paths and URLs auto-detected |
+| `/skills install <skill>` or `/skills install <skill@marketplace>` or `/skills install <path_or_url>` | Install a skill: builtin skills accept bare name, marketplace skills use `<name>@<marketplace>` format, local paths and remote URLs are auto-detected |
 | `/skills uninstall <name>` | Uninstall a skill by name |
 | `/skills marketplace` or `/skills marketplace list` | List marketplace sources (name, URL, enabled status, last updated) |
 | `/skills marketplace add <name> <url>` | Add a new marketplace source |
 | `/skills marketplace remove <name>` | Remove a marketplace source (also clears its cache) |
 | `/skills marketplace toggle <name> <on or off>` | Enable or disable a marketplace source (`on`/`true`/`1` = enable, otherwise disable) |
-| `/skills marketplace clawhub` | View ClawHub token status (configured/not configured) |
-| `/skills marketplace clawhub token <value>` | Set ClawHub CLI token |
-| `/skills marketplace clawhub token` | View ClawHub token status |
-| `/skills skillnet` or `/skills skillnet search <query>` | Search SkillNet skill registry (shows name, description, author, stars, category, URL) |
-| `/skills skillnet install <skill_url>` | Install a skill from SkillNet by URL (async download, auto-polls progress) |
 | `/skills use <skill_name>, <query>` | Execute a query using a specific skill |
 
 #### Concepts
 
-- **Skill**: An extension capability that can be installed from marketplace sources, ClawHub, SkillNet, builtin directory, or local paths, providing additional functionality to the agent.
+- **Skill**: An extension capability that can be installed from marketplace sources, builtin directory, or local paths, providing additional functionality to the agent.
 - **Builtin skill**: A preset skill shipped with the software. Install using bare skill name (e.g., `/skills install advanced-daily-report`); no marketplace source needed.
-- **ClawHub**: An online skill registry ([clawhub.ai](https://clawhub.ai)) hosting community-published skills. Install using `<slug>@clawhub` format, where slug is the skill's unique identifier (not its display name). Requires a ClawHub CLI token to be configured first.
-- **SkillNet**: An academic skill registry. Two install methods: `<name>@skillnet` (auto-searches to find URL then installs) and `/skills skillnet install <url>` (direct URL install).
-- **Marketplace source**: A remote Git repository that hosts available skills. Each source has a name, URL, and enabled/disabled state.
-- **Spec**: The install identifier format supporting: `<skill>@builtin` (builtin), `<slug>@clawhub` (ClawHub), `<skill>@<marketplace>` (Git marketplace); bare names without `@` are auto-detected as builtin if applicable.
+- **Marketplace source**: A remote repository (typically a Git URL) that hosts available skills. Each source has a name, URL, and enabled/disabled state.
+- **Spec**: The install identifier format `<skill>@<marketplace>` used when installing from a marketplace; for builtin skills, omit `@` and the system auto-detects as `@builtin`.
 - **Local install**: Use `/skills install <path>` to install from a local directory (must contain `SKILL.md`) or remote archive URL; paths/URLs are auto-detected and routed to the local import flow.
-- **Install location**: The directory where a skill is stored after installation (`~/.jiuwenswarm/agent/jiuwenswarm_workspace/skills/`).
-- **Source tag**: Each skill in the list is tagged with its source: `[builtin]` = builtin, `[local]` = imported, `[clawhub]` = ClawHub, `[skillnet]` = SkillNet, `[project]` or marketplace name = other.
+- **Install location**: The directory where a skill is stored after installation (`~/.jiuwenavatar/agent/jiuwenavatar_workspace/skills/`).
+- **Source tag**: Each skill in the list is tagged with its source: `[builtin]` = builtin, `[local]` = imported, `[project]` or marketplace name = other.
 
 #### Grouped List Display
 
@@ -453,16 +400,7 @@ For other subcommands (`/skills install`, `/skills uninstall`, `/skills marketpl
 
 - **Timeout**: `install`, `uninstall`, and `marketplace toggle` requests have a 120-second timeout on the TUI side; other subcommands have no explicit timeout.
 - **Builtin auto-detection**: When installing with `/skills install <skill>` (no `@`), the system checks if it matches a builtin skill and redirects to the builtin install flow; if not, a format hint is returned.
-- **Path/URL auto-detection**: When installing with `/skills install <path_or_url>` (local path like `/path/to/skill` or `C:\skill`, or remote URL `https://...`), the system automatically routes to the local import flow (`skills.import_local`). All URLs go through import_local; SkillNet is not auto-routed from URLs.
-- **`@skillnet` search-install**: When using `/skills install <name>@skillnet`, the frontend first calls `skills.skillnet.search`. **Only auto-installs if an exact match by skill_name is found**; with no exact match, it only displays search results (with URLs and names) without auto-installing the first result — the user must choose one and install via `/skills skillnet install <url>` or `/skills install <exact_name>@skillnet`. This is because SkillNet search is semantic: searching "code" may return "taskflow", "coding-agent" etc. whose names don't contain "code".
-- **ClawHub token required**: A ClawHub CLI token must be configured before installing from ClawHub (via `/skills marketplace clawhub token <value>`). Without a token, `@clawhub` installs will fail with a message explaining how to set the token. Obtain your token at [clawhub.ai](https://clawhub.ai).
-- **ClawHub slug vs. display name**: ClawHub skills are identified by their unique **slug** (e.g., `code-review-security`), not their display name (e.g., "Code Review Assistant"). When a direct slug install fails, the system automatically searches ClawHub and displays matching results (with real slugs and summaries) to help you find the correct skill.
-- **ClawHub overwrite confirmation**: When the target slug already exists (same name from any source counts as installed), TUI presents an interactive prompt: "Skill xxx is already installed. Do you want to force overwrite?". Choosing "Yes" re-installs with `force: true`, replacing the old skill; choosing "No" or exiting keeps the existing skill unchanged. The Web UI bypasses confirmation and uses `force: true` directly.
-- **SkillNet async install**: SkillNet installation is asynchronous — it initiates a download task and returns an `install_id`, then TUI automatically polls `install_status` every 800ms until completion or failure (max wait: 15 minutes). Progress is shown as `Downloading... (install_id: xxx)`.
-- **SkillNet overwrite confirmation**: Same as ClawHub — TUI prompts the user interactively when a skill already exists. Web UI uses `force: true` directly.
-- **SkillNet accessible in China**: SkillNet search API is hosted at `http://api-skillnet.openkg.cn` (OpenKG platform) and is directly accessible in China without VPN. However, the skill content itself is hosted on GitHub, which may require VPN.
-- **Same-name skills cannot coexist**: Skills are stored as directories at `skills/{name}/`, and the filesystem does not allow two directories with the same name. Installing a skill with the same name from a different source will overwrite the previous one (with user confirmation). `/skills use` only uses the skill name and cannot distinguish between sources.
-- **ClawHub network access**: ClawHub API is hosted at `https://clawhub.ai`. VPN may be required in regions with restricted access to this domain.
+- **Path/URL auto-detection**: When installing with `/skills install <path>` (local path like `/path/to/skill` or `C:\skill`, or remote URL `https://...`), the system automatically routes to the local import flow.
 - **Cache cleanup**: `marketplace remove` sends `{ name, remove_cache: true }` to also clear the local cache for that source.
 - **Auto-refresh**: `marketplace add`, `marketplace remove`, and `marketplace toggle` automatically re-list marketplace sources after a successful operation.
 - **Offline handling**: `/skills use` checks connection status; if offline, shows `offline: waiting for reconnect before sending /skills use request`.
@@ -473,21 +411,15 @@ For other subcommands (`/skills install`, `/skills uninstall`, `/skills marketpl
 - `/skills list` — List skills (explicit subcommand)
 - `/skills install advanced-daily-report` — Install a builtin skill (bare name auto-detect)
 - `/skills install advanced-daily-report@builtin` — Install a builtin skill (explicit format)
-- `/skills install code-review@clawhub` — Install a skill from ClawHub (using slug)
-- `/skills install code-review@skillnet` — Install from SkillNet (auto-searches for URL)
-- `/skills skillnet search code-review` — Search SkillNet skill registry
-- `/skills skillnet install https://github.com/user/skill-repo` — Install via SkillNet subcommand (direct URL)
-- `/skills install my-skill@marketplace` — Install a skill from Git marketplace
+- `/skills install my-skill@marketplace` — Install a skill from marketplace
 - `/skills install /path/to/my-skill` — Install a skill from local directory
-- `/skills install https://example.com/skill.zip` — Install from remote URL (local import)
+- `/skills install https://example.com/skill.zip` — Install a skill from remote URL
 - `/skills uninstall my-skill` — Uninstall a skill
 - `/skills marketplace list` — List marketplace sources
 - `/skills marketplace add community https://github.com/user/skills-repo` — Add a marketplace source named "community"
 - `/skills marketplace remove community` — Remove the "community" marketplace source
 - `/skills marketplace toggle community on` — Enable the "community" marketplace source
 - `/skills marketplace toggle community off` — Disable the "community" marketplace source
-- `/skills marketplace clawhub` — View ClawHub token status
-- `/skills marketplace clawhub token abc123xyz` — Set ClawHub CLI token
 - `/skills use my-skill, Code and execute a Hello World program.` — Use a skill to execute a query
 
 ### `/export` (Export Conversation)
@@ -538,50 +470,6 @@ Timestamp format: `YYYY-MM-DD-HHmmss`.
 - `/export my-chat` — Save to `my-chat.txt` in workspace
 - `/export 2026-05-09-debug-session.txt` — Save with explicit timestamp name
 
-### `/simplify` (Code Simplify Review)
-
-Parsed **locally by the TUI**, this command sends a dedicated RPC `command.simplify` to get a server-generated three-phase review prompt, then injects it as an Agent message (`logAsUser: false`). The Agent automatically reviews changed code for reuse, quality, and efficiency, and directly fixes issues found.
-
-- **Scope**: reuse / quality / efficiency **only**. Security vulnerabilities (injection, XSS, hard-coded secrets, auth flaws, etc.) are **out of scope** — do not fix or report them here. Use `/security-review` for a read-only security report.
-- **Alias**: None.
-- **Applicable modes**: **`code.*` only**. Non-code mode shows an error prompting `Run /mode code first`.
-- **Parsing location**: TUI local (not a Gateway controlled channel); unavailable in IM.
-
-#### Usage
-
-| Command | Description |
-|---|---|
-| `/simplify` | Review current git changes (or recently edited files) and auto-fix issues |
-| `/simplify <target>` | Add focus: file path, module name, or specific review dimension |
-
-#### Execution Flow
-
-1. **TUI validates**: Confirms current mode starts with `code.`; errors otherwise.
-2. **RPC request**: Calls `command.simplify` (with optional `target`), 30-second timeout.
-3. **Server generates prompt**: Builds a three-phase review instruction from `_SIMPLIFY_PROMPT_TEMPLATE`; appends `## Additional Focus` section if `target` is provided.
-4. **Injects into Agent**: TUI calls `ctx.sendMessage(prompt, ..., { logAsUser: false })` to inject the prompt; the Agent begins execution.
-5. **Offline handling**: Shows a retry message if offline.
-
-#### Three-Phase Review
-
-**Phase 1 — Identify Changes**: Run `git diff` (or `git diff HEAD` for staged changes) to find changed files. If no git changes, review recently edited files from the conversation.
-
-**Phase 2 — Launch Three Review Agents in Parallel** (use sub-agent tools if available; otherwise perform all reviews directly):
-
-| Review Dimension | Focus Areas |
-|---|---|
-| **Code Reuse Review** | Existing utilities/helpers that could replace new code; duplicated functionality; hand-rolled logic that could use an existing utility |
-| **Code Quality Review** | Redundant state; parameter sprawl; copy-paste variations; leaky abstractions; stringly-typed code (use existing constants/enums); unnecessary JSX nesting; unnecessary comments (keep only non-obvious WHY) |
-| **Efficiency Review** | Unnecessary work (redundant computations, repeated I/O, N+1 patterns); missed concurrency; hot-path bloat; recurring no-op updates; TOCTOU anti-patterns; memory leaks / missing cleanup; overly broad operations |
-
-**Phase 3 — Fix Issues**: Aggregate all findings and fix each issue directly. Skip false positives without argument. Briefly summarize what was fixed (or confirm the code was already clean).
-
-#### Examples
-
-- `/simplify` — Review all changes
-- `/simplify src/auth/` — Focus on changes under `src/auth/`
-- `/simplify focus on error handling patterns` — Emphasize error handling
-
 ### `/sandbox` (Sandbox Mode Management)
 
 Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command.sandbox` on the agent server.
@@ -590,14 +478,14 @@ Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command
 
 | Command | Description |
 |---|---|
-| `/sandbox` or `/sandbox status` | Show current runtime (`enabled`, `landlock`, `excluded_commands`, `files.allow_write`, `files.deny_write`) |
+| `/sandbox` or `/sandbox status` | Show current runtime (`enabled`, `excluded_commands`, `files.allow_write`, `files.deny_write`) |
 | `/sandbox enable` | Enter sandbox mode (spawns jiuwenbox if needed, rebuilds agent) |
-| `/sandbox disable` | Leave sandbox mode (rebuilds agent; stops jiuwenbox only if jiuwenswarm started it) |
+| `/sandbox disable` | Leave sandbox mode (rebuilds agent; stops jiuwenbox only if jiuwenavatar started it) |
 | `/sandbox exclude add <pattern>` | Add a shell glob whose matches run locally instead of in the sandbox |
 | `/sandbox exclude remove <pattern>` | Remove a pattern |
 | `/sandbox exclude list` | List current `excluded_commands` |
-| `/sandbox files allow <path>` | Allow write access to `<path>` inside the sandbox (shown as rw) |
-| `/sandbox files deny <path>` | Deny write access to `<path>` inside the sandbox (read still allowed, shown as ro) |
+| `/sandbox files allow <path> [perm]` | Allow writing `<path>` inside the sandbox |
+| `/sandbox files deny <path>` | Deny writing `<path>` inside the sandbox |
 | `/sandbox files remove <path>` | Remove `<path>` from the user-configured allow & deny sets |
 | `/sandbox files list` | List effective `allow_write` / `deny_write` |
 | `/sandbox help` | Print usage |
@@ -605,10 +493,8 @@ Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command
 #### Concepts
 
 - **Platform support**: `/sandbox` is Linux-only (jiuwenbox depends on Linux kernel features such as bwrap, Landlock, and Linux namespaces). On a Windows or macOS agent-server, every `/sandbox` sub-command returns a `SANDBOX_BAD_REQUEST` error. If the TUI runs on Windows/macOS but the agent-server is on a Linux host, the command works — what matters is the agent-server's platform.
-- **Write policy semantics**: `allow` / `deny` control **write access** (rw/ro) inside the sandbox, not Unix octal modes. Enforcement uses bwrap bind mounts + `--remount-ro`; Landlock is defense-in-depth (when `landlock.compatibility=disabled`, bwrap is primary).
-- **Nested paths**: Supported: parent allow + child deny (e.g. allow `/tmp`, deny `/tmp/secret`). Not supported: child allow + parent deny (parent deny wins); the server rejects such configs.
-- **Effective write policy**: `files.allow_write` / `files.deny_write` in the status panel show the merged view of auto-managed and user-configured entries, each labeled `(rw)` or `(ro)`. Auto-managed entries are server-injected (intrinsic files such as `AGENT.md`, `HEARTBEAT.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, the `memory/daily_memory/` directory, and depending on the mode, `project_dir` and `config/config.yaml`) and cannot be removed via `/sandbox files remove`.
-- **preserve_file_sharing_mode**: Controlled by jiuwenswarm config, not by `/sandbox`. Only `mount` is supported: intrinsic files and `project_dir` are bind-mounted into the sandbox and `project_dir/config/config.yaml` is explicitly added to `deny_write`. Writing any other value into config.yaml is rejected by the server.
+- **Effective write policy**: `files.allow_write` / `files.deny_write` in the status panel show the merged view of auto-managed and user-configured entries. Auto-managed entries are server-injected (intrinsic files such as `AGENT.md`, `HEARTBEAT.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, the `memory/daily_memory/` directory, and depending on the mode, `project_dir` and `config/config.yaml`) and cannot be removed via `/sandbox files remove`.
+- **preserve_file_sharing_mode**: Controlled by jiuwenavatar config, not by `/sandbox`. Only `mount` is supported: intrinsic files and `project_dir` are bind-mounted into the sandbox and `project_dir/config/config.yaml` is explicitly added to `deny_write`. Writing any other value into config.yaml is rejected by the server.
 - **excluded_commands**: Match the full command string (not just `argv[0]`); a match makes that tool call run on the host, effectively granting the command's side effects to the local environment.
 - **Add / remove are strict**: `exclude add` rejects a pattern that is already in the list; `exclude remove` rejects a pattern that is not in the list. `files allow|deny` rejects a path that is already in the same bucket, and rejects a path that exists in the opposite bucket (allow vs deny conflict) — run `files remove` first if you want to flip it. `files remove` rejects paths that have no matching user-configured entry.
 - **enable / disable**: Triggers an agent rebuild. The response lists `rebuilt_modes` (typically `agent.*` / `code.*`) and the jiuwenbox endpoint.
@@ -617,235 +503,12 @@ Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command
 
 - `/sandbox enable` — turn on sandbox mode
 - `/sandbox status` — see runtime + effective files
-- `/sandbox files allow ./tmp/` — allow sandbox write access to `./tmp/` (rw)
-- `/sandbox files deny ./tmp/secret/` — deny write under an allowed parent (ro)
+- `/sandbox files allow ./tmp/ 0777` — let the sandbox write into `./tmp/` with mode 0777
 - `/sandbox exclude add "git *"` — let `git` run on the host instead of inside the sandbox
-
-### `/keybindings` (Keyboard Shortcuts)
-
-View, edit, or reset TUI keyboard shortcuts. Config file: `~/.jiuwenswarm-tui/keybindings.json`.
-
-#### Usage
-
-| Command | Action |
-|---------|--------|
-| `/keybindings` | Same as `/keybindings edit` |
-| `/keybindings edit` | Create or open the config file; reload after the external editor closes |
-| `/keybindings list` | List effective shortcuts grouped by context |
-| `/keybindings reset` | Delete user config and restore built-in defaults |
-
-Alias: `/keybind`.
-
-#### Notes
-
-- Built-in defaults are merged with user JSON per **context**; set a key to `null` to unbind a default.
-- Key ids must match pi-tui `matchesKey` format (`ctrl`/`shift`/`alt` + main key); chords are not supported.
-- **Unsupported keys**:
-  - **`win` / `cmd` / `super` / `meta`**: These modifiers require the Kitty keyboard protocol, which is not available in standard terminals (Windows CMD, VS Code integrated terminal, etc.). Bindings using these will never fire.
-  - **`ctrl+shift+letter`**: On legacy terminals like Windows CMD, `ctrl+shift+l` and `ctrl+l` produce the same byte — the terminal cannot distinguish them. This combination is not recommended. Use Windows Terminal, WezTerm, or another VT-mode capable terminal if you need these combos.
-  - **Chords** (space-separated multi-key sequences, e.g. `"ctrl+x ctrl+k"`): Not supported in the current version.
-- **Non-rebindable**: `ctrl+c`, `ctrl+d`, `ctrl+m` (reserved keys).
-- Select-list navigation, config editor text input, Resume preview/rename sub-states, etc. remain hardcoded.
-
-See the Chinese [TUI User Guide · Keyboard shortcuts](../zh/TUI使用指南.md#快捷键) for the full context/action reference.
-
-### `/hooks` (Browse Hooks Configuration)
-
-View a summary of all hooks configured in `config.yaml` (read-only).
-
-#### Usage
-
-- `/hooks` (no parameters, no subcommands)
-
-#### Data Source
-
-The TUI requests the Gateway via the `hooks.list` RPC, which loads the `hooks` section from `config.yaml` and returns a summary.
-
-#### Display Contents
-
-`/hooks` displays hooks configuration in three levels:
-
-1. **Event List (Level 1)**: All events sorted by hook count in descending order. Each row shows event name and hook count; the description column shows hook count distribution per matcher.
-2. **Status Panel**:
-   - `Source` — Configuration source (`config.yaml`)
-   - `Global Status` — Global toggle state (`enabled` / `DISABLED`)
-   - `Total Hooks` — Total hook count across all events
-   - `Active Events` — Events with at least 1 hook / total events (out of 17)
-3. **Hook Detail Cards (Level 2)**: Grouped by `Event > Matcher`, each hook shows:
-   - `Type` — `command` (shell command) or `prompt` (LLM review)
-   - `Command` / `Prompt` — The hook content
-   - `Timeout` — Timeout in seconds
-   - `Shell` — Execution shell (command hooks only)
-   - `Status` — Status message
-
-#### When No Hooks Are Configured
-
-If `config.yaml` has no hooks configured, displays `No hooks configured.` with a hint to use `/config edit` to configure them.
-
-#### Hooks Concept Overview
-
-Hooks are extension logic that executes automatically when specific events fire. 17 events are supported:
-
-| Event | Execution Layer | Trigger |
-|---|---|---|
-| `PreToolUse` | Agent Rail | Before a tool call |
-| `PostToolUse` | Agent Rail | After a successful tool call |
-| `PostToolUseFailure` | Agent Rail | After a failed tool call |
-| `Stop` | Agent Rail | After agent response completes |
-| `PermissionRequest` | Agent Rail | On permission request |
-| `PermissionDenied` | Agent Rail | On permission denied |
-| `SubagentStart` | Agent Rail | When a sub-agent starts |
-| `SubagentStop` | Agent Rail | When a sub-agent stops |
-| `BeforeModelCall` | Agent Rail | Before a model call |
-| `AfterModelCall` | Agent Rail | After a model call |
-| `UserPromptSubmit` | Gateway | User submits a message |
-| `SessionStart` | Gateway | Session starts |
-| `SessionEnd` | Gateway | Session ends |
-| `Notification` | Gateway | Notification is sent |
-| `ConfigChange` | Gateway | Configuration changes |
-| `InstructionsLoaded` | Gateway | Instructions are loaded |
-| `Setup` | Gateway | Initialization |
-
-Two hook types are supported:
-
-| Type | Description | Key Parameters |
-|---|---|---|
-| `command` | Executes a shell command (subprocess). Receives JSON context via `$ARGUMENTS` env var. Exit code 0 = success, 2 = block. | `command`, `timeout` (default 30s), `shell` (default bash) |
-| `prompt` | Invokes LLM review. `$ARGUMENTS` in the template is replaced with JSON context, `$TOOL_NAME` with the tool name. LLM response JSON with `decision: "block"` blocks the operation. | `prompt`, `timeout` (default 15s), `model` |
-
-- **Blocking**: Exit code 2 (command) or `decision: "block"` (prompt) blocks the current operation (e.g., skip tool call) and feeds the reason back to the model.
-- **Input Modification**: PreToolUse hooks can modify tool input parameters via `modifiedInput` in stdout JSON.
-- **Additional Context**: Extra information can be injected into tool results or model context via `additionalContext` in stdout JSON.
-- **Global Toggle**: `hooks.disable_all_hooks: true` in `config.yaml` disables all hooks.
-
-#### Configuration Example
-
-```yaml
-hooks:
-  PreToolUse:
-    - matcher: "write_file"
-      hooks:
-        - type: command
-          command: "echo 'write_file about to execute' >> /tmp/hooks.log"
-          timeout: 10
-    - matcher: "bash|run_command"
-      hooks:
-        - type: prompt
-          prompt: "Review if this command is safe: $ARGUMENTS"
-          timeout: 20
-  SessionStart:
-    - matcher: "*"
-      hooks:
-        - type: command
-          command: "echo 'Session started: $ARGUMENTS' >> /tmp/hooks.log"
-```
-
-#### Example
-
-- `/hooks` — Browse all current hooks configuration
-
-### `/agents` (Agent Management)
-
-Manage custom agents (subagents) throughout their full lifecycle: view, create, update, enable/disable, and delete. Agent definitions are stored as Markdown files and support four-level source priority merging.
-
-- **Parsing location**: TUI local parsing, calling backend `agents.*` endpoints via RPC.
-- **Applicable modes**: All.
-- **Note**: This command is registered as hidden (`hidden: true`) and does not appear in `/help` listings but can be used directly.
-
-#### Subcommands
-
-| Command | Description |
-|---|---|
-| `/agents` or `/agents list` | List all agents (name, source, enabled status, description summary) |
-| `/agents get <name>` | View full details of a specific agent (including System Prompt) |
-| `/agents create [--project\|--local] <name> <description>` | Create a custom agent; LLM auto-generates the prompt |
-| `/agents update <name> [--generate] <new description>` | Update agent description; add `--generate` to have LLM rewrite the prompt |
-| `/agents enable <name>` | Enable a custom agent (cannot operate on builtin agents) |
-| `/agents disable <name>` | Disable a custom agent (cannot operate on builtin agents) |
-| `/agents delete <name>` | Delete a custom agent (cannot operate on builtin agents) |
-
-#### Agent Sources & Storage
-
-| Source | Storage Location | Priority | Manageable |
-|--------|-----------------|----------|------------|
-| `builtin` | In-code builtins | Lowest | Cannot enable/disable/delete |
-| `local` | `<workspace>/.jiuwenswarm/agents-local/` | Local | Full lifecycle management |
-| `user` | `~/.jiuwenswarm/agents/` | User | Full lifecycle management (default `create` location) |
-| `project` | `<workspace>/.jiuwenswarm/agents/` | Highest | Full lifecycle management |
-
-Agents with the same name are resolved by `project > user > local > builtin` priority; shadowed agents are marked with `shadowed_by`.
-
-#### Agent Definition Fields
-
-| Field | Description |
-|------|------|
-| `name` | Agent name (unique identifier) |
-| `description` | Brief description |
-| `prompt` | System Prompt text |
-| `source` | Origin (`builtin` / `user` / `project` / `local`) |
-| `file_path` | Agent definition file path |
-| `model` | Specified model (`null` = use default) |
-| `tools` | Available tool list |
-| `disallowed_tools` | Disallowed tool list |
-| `color` | Display color |
-| `permission_mode` | Permission mode |
-| `memory_scope` | Memory scope |
-| `when_to_use` | When-to-use description |
-| `max_iterations` | Max iterations (default 200) |
-| `skills` | Associated skill list |
-| `enabled` | Enabled status (`true` / `false` / `null`) |
-| `shadowed_by` | Which source shadows this agent (`null` = active) |
-
-#### `/agents create` Behavior
-
-- **Argument parsing**: `--project` / `--local` are positional flags and must precede the name (e.g., `/agents create --project my-agent description`).
-- **LLM generation**: By default, the current model auto-generates `when_to_use` and `system_prompt`; falls back to a built-in template on failure.
-- **Auto-enable**: After creation, automatically writes `react.subagents.<name>.enabled = true` to `config.yaml` and hot-reloads the configuration.
-- **Timeout**: 60 seconds.
-- **Output**: Displays LLM generation marker, storage location, and file path.
-
-#### `/agents update` Behavior
-
-- **No description**: When no description is provided, shows current agent details (same as `get`) and prints usage.
-- **`--generate`**: Explicitly triggers LLM prompt rewriting; without this flag, the request's template values are used.
-- **Auto hot-reload**: Configuration is automatically reloaded after update.
-
-#### `/agents enable` / `disable` Constraints
-
-- Builtin agents (`source == "builtin"`) cannot be enabled/disabled; the backend returns an error.
-- The operation writes to `config.yaml`'s `react.subagents.<name>.enabled` and hot-reloads.
-
-#### `/agents delete` Constraints
-
-- Builtin agents cannot be deleted.
-- After deletion, the entry is automatically removed from `config.yaml`'s `react.subagents` and hot-reloaded.
-
-#### `/agents get` Display
-
-Displays all agent definition fields as key-value pairs, with the full System Prompt text appended at the end.
-
-#### Tab Completion
-
-The `get`, `update`, `enable`, `disable`, and `delete` subcommands support Tab completion on agent names (fetched via the `agents.list` RPC).
-
-#### Examples
-
-```bash
-/agents                            # List all agents
-/agents list                       # Same as above
-/agents get Explore                # View Explore agent details
-/agents create bug-hunter Root cause analysis expert     # Create user-level agent
-/agents create --project proj-agent Project-level        # Create project-level agent
-/agents create --local local-agent Local use only        # Create local agent
-/agents update bug-hunter --generate Better description  # Update with LLM prompt rewrite
-/agents enable bug-hunter           # Enable agent
-/agents disable bug-hunter          # Disable agent
-/agents delete my-agent             # Delete agent
-```
 
 ### `/status` (Show Status)
 
-Display jiuwenswarm runtime status: overview, usage statistics, or config editor.
+Display jiuwenavatar runtime status: overview, usage statistics, or config editor.
 
 #### Usage
 
@@ -934,7 +597,7 @@ The command receives the following JSON data on each execution:
 | `mode` | Current mode (`agent.plan` / `agent.fast` / `code.normal` / `code.team` / `team`) |
 | `model` | Current model name |
 | `provider` | Model provider |
-| `version` | jiuwenswarm version |
+| `version` | jiuwenavatar version |
 | `connection` | Connection status (`idle` / `connecting` / `connected` / `reconnecting` / `auth_failed`) |
 | `theme` | Current theme name |
 | `accent_color` | Current accent color name |
@@ -1018,7 +681,7 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 - **Timeout protection**: Individual executions timeout after 3 seconds; no impact on subsequent polls.
 - **Output limit**: Command output over 10KB is truncated; display width auto-fits the TUI terminal width.
 - **Failure silence**: Command execution failures don't show errors; previous successful output is kept or the bar hides.
-- **Persistence**: Configuration is saved in `~/.jiuwenswarm-tui/config.json` under the `statusLine` field; restored on TUI restart.
+- **Persistence**: Configuration is saved in `~/.jiuwenavatar-tui/config.json` under the `statusLine` field; restored on TUI restart.
 - **Alias**: `/sl`
 - **Windows adaptation**: The system automatically replaces `$(cat)` with reading from a temp file; the user's command format remains unchanged. Git Bash's `usr\bin` must be in the system PATH.
 
@@ -1067,10 +730,6 @@ If configuration is incomplete, the task creation will prompt the missing fields
 | `/auto-harness schedule logs <task_id> [--history <n>]` | View task execution logs |
 | `/auto-harness schedule cancel <task_id>` | Cancel a task |
 | `/auto-harness schedule delete <task_id>` | Delete a task |
-| `/auto-harness issue fix <issue_numbers>` | Create fix tasks for GitCode issues |
-| `/auto-harness issue scan [--repo <repo>] [--page <n>] [--labels <labels>] [--force-refresh]` | Scan repo GitCode issues |
-| `/auto-harness issue status` | View GitCode issue processing status |
-| `/auto-harness issue delete <issue_numbers>` | Delete issue processing records |
 
 #### `/auto-harness run` (One-time Execution)
 
@@ -1107,175 +766,13 @@ If configuration is incomplete, the task creation will prompt the missing fields
   - Default: Stream current running logs in real-time (`tail -f` mode); Ctrl+C to interrupt
   - `--history <n>`: View historical execution logs (`view` mode, `n` is the history index, 0 = most recent)
 
-### `/auto-harness issue` (GitCode Issue Auto-Fix)
-
-Manage GitCode issue auto-processing: scan issue matrix, create fix tasks, view status, clean up records.
-
-Requires `git.user_name`, `git.user_email` and `gitcode.access_token` (or `GITCODE_ACCESS_TOKEN` env var) to be configured.
-
-#### Subcommands
-
-| Command | Description |
-|---|---|
-| `/auto-harness issue fix <issue_numbers>` | Create fix tasks for GitCode issues |
-| `/auto-harness issue scan [--repo <repo>] [options]` | Scan repo issues |
-| `/auto-harness issue status` | View issue processing status |
-| `/auto-harness issue delete <issue_numbers>` | Delete issue processing records |
-
-#### `/auto-harness issue fix` (Create Fix Task)
-
-- Usage: `/auto-harness issue fix <issue_numbers>`
-- Parameters:
-  - `<issue_numbers>`: Issue number(s), comma-separated, e.g. `1272,1271,1270`
-  - `--repo <repo>`: Target repository (`jiuwenswarm` / `agent_core`); interactively selected if not specified
-- Issues with bound PRs (open or merged) are automatically skipped
-- Examples:
-  - `/auto-harness issue fix 1286`
-  - `/auto-harness issue fix 1272,1271,1270`
-
-#### `/auto-harness issue scan` (Scan Issue)
-
-- Usage: `/auto-harness issue scan`
-- Parameters:
-  - `--repo <repo>`: Target repository; interactively selected if not specified
-  - `--page <n>`: Page number, default 1
-  - `--labels <labels>`: Label filter, comma-separated; defaults to bug type only
-  - `--force-refresh`: Force refresh from GitCode API (uses cache by default)
-- Displays: issue number, title, labels, difficulty, last updated
-- Examples:
-  - `/auto-harness issue scan`
-  - `/auto-harness issue scan --repo jiuwenswarm --page 1`
-  - `/auto-harness issue scan --repo agent_core --force-refresh`
-
-#### `/auto-harness issue status` (View Status)
-
-- Usage: `/auto-harness issue status` (no parameters)
-- Lists all issue processing records in table format: number, status, stage, progress, details
-- Example: `/auto-harness issue status`
-
-#### `/auto-harness issue delete` (Delete Records)
-
-- Usage: `/auto-harness issue delete <issue_numbers>`
-- Parameters:
-  - `<issue_numbers>`: Issue number(s) to delete
-- Examples:
-  - `/auto-harness issue delete 123`
-  - `/auto-harness issue delete 123 456`
-
-### `/btw` (By-the-way Side Question)
-
-Parsed **locally by the TUI**, this command sends a dedicated RPC `command.btw` to AgentServer to run an isolated, tool-free, single-turn LLM query against the current conversation context. It answers a quick side question **without interrupting the main conversation**.
-
-- **Alias**: None.
-- **Applicable modes**: All.
-- **Constraint**: A question must be provided; returns `no_context` when no conversation context exists yet.
-
-#### Usage
-
-| Command | Description |
-|---|---|
-| `/btw <question>` | Ask a side question based on current conversation context |
-
-#### Behavior Details
-
-- **Required argument**: `/btw` must include a question; otherwise shows `Usage: /btw <your question>`.
-- **Thinking indicator**: Displays `💭 Answering: <question>` (dim style) while the request is in flight.
-- **RPC timeout**: 120 seconds.
-- **Server-side handling**:
-  - Backend receives the request via `command.btw` RPC and obtains the current Agent instance.
-  - Shares the main Agent's system prompt (project context, skills, CLAUDE.md, etc.) and retrieves recent conversation messages as context.
-  - Builds a dedicated btw prompt with a `<system-reminder>` telling the model: no tools available, single response only, main Agent is not interrupted.
-  - Calls the model directly (no tools, single-turn), without modifying conversation history (read-only).
-- **Return statuses**:
-  - `ok`: Displays `💡 /btw <question>` + answer content.
-  - `no_context`: Shows `No conversation context available yet — send a message first.`
-  - `failed`: Shows error message or `Couldn't answer the side question.`
-
-#### Examples
-
-- `/btw what does git status do?`
-- `/btw What is the time complexity of this code?`
-
-### `/review` (Code Review a Pull Request)
-
-When entered in the **TUI**, sends the raw `/review` text as a chat message to the Gateway. The Gateway recognizes it, injects a review prompt, and the Agent uses `gh` CLI to review the PR.
-
-In **IM controlled channels** (Feishu etc.), the Gateway intercepts `/review`, injects the prompt, and forwards to AgentServer for execution.
-
-- **Alias**: None.
-- **Applicable modes**: All (Agent, Code, Team).
-- **Parsing location**: Gateway controlled channel (`scope: "gateway"`); TUI sends as a chat message.
-
-#### Usage
-
-| Command | Description |
-|---|---|
-| `/review` | Without arguments, the Agent runs `gh pr list` to show open PRs |
-| `/review <PR number or URL>` | Review a specific PR: Agent runs `gh pr view/diff` and analyzes |
-
-#### Behavior Details
-
-- **TUI execution**: Sends `/review [args]` as a user message via `ctx.sendMessage()`; shows `offline: waiting for reconnect before sending review request` if offline.
-- **Gateway interception** (IM side):
-  - Matches exact `/review` or prefix `/review <arg>`.
-  - Argument max 2048 bytes; control characters rejected with an error notice.
-  - Injects the review prompt into `msg.params["query"]` and continues forwarding to AgentServer.
-- **Agent execution**: Upon receiving the review prompt, the Agent uses `gh` CLI:
-  1. Without arguments: runs `gh pr list` to display open PRs.
-  2. With arguments: runs `gh pr view <number>` for details and `gh pr diff <number>` for the diff.
-  3. Analyzes changes and provides a comprehensive review (correctness, conventions, performance, test coverage, security).
-- **No git/gh pre-check**: The Gateway does not check whether `git` or `gh` is installed; the Agent handles missing tools on its own.
-
-#### Examples
-
-- `/review` — List open PRs in the current repo
-- `/review 123` — Review PR #123
-
-### `/security-review` (Security Review)
-
-When entered in the **TUI**, sends the raw `/security-review` text as a chat message to the Gateway. The Gateway recognizes it, injects a security review prompt, and the Agent uses `git` commands to analyze pending changes on the current branch.
-
-In **IM controlled channels** (Feishu etc.), the Gateway intercepts `/security-review`, injects the prompt, and forwards to AgentServer for execution.
-
-- **Alias**: None.
-- **Applicable modes**: All (Agent, Code, Team).
-- **Parsing location**: Gateway controlled channel (`scope: "gateway"`); TUI sends as a chat message.
-
-#### Usage
-
-| Command | Description |
-|---|---|
-| `/security-review` | Review all pending changes on the current branch vs `origin/HEAD` |
-| `/security-review <additional instructions>` | Add focus instructions or constraints (e.g., "focus on auth module") |
-
-#### Behavior Details
-
-- **TUI execution**: Sends `/security-review [args]` as a user message via `ctx.sendMessage()`; shows `offline: waiting for reconnect before sending security review request` if offline.
-- **Gateway interception** (IM side):
-  - Matches exact `/security-review` or prefix `/security-review <arg>`.
-  - Argument max 2048 bytes; control characters rejected with an error notice.
-  - Injects the security review prompt into `msg.params["query"]` and continues forwarding to AgentServer.
-- **Agent execution**: Upon receiving the security review prompt, the Agent performs:
-  1. **Repository context research**: `git status`, `git diff --name-only origin/HEAD...`, `git log` to understand the change scope.
-  2. **Comparative analysis**: `git diff origin/HEAD...` to review diffs file by file.
-  3. **Vulnerability assessment** across these categories:
-     - Input validation vulnerabilities
-     - Authentication and authorization issues
-     - Cryptography and key management
-     - Injection and code execution
-     - Data exposure
-  4. Uses subtasks to identify vulnerabilities and parallel subtasks for false-positive filtering; only reports findings with >80% confidence.
-  5. Outputs a structured Markdown report: file, line number, severity, category, description, exploit scenario, fix recommendation.
-- **Hard exclusion list**: Does not report DoS, secret storage, rate limiting, race conditions, and similar issue types.
-- **No git pre-check**: The Gateway does not check whether `git` is installed; the Agent handles this on its own.
-
-#### Examples
-
-- `/security-review` — Review all pending changes on the current branch
-- `/security-review focus on authentication module security` — With additional focus instructions
-
 ---
 
 ## Planned Features
 
-(None currently)
+| Command | Description |
+|---|---|
+| `/btw` | Ask question |
+| `/memory` | Memory management |
+| `/export` | Export related files |
+| `/permissions` | Permission management |

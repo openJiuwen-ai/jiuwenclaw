@@ -223,7 +223,6 @@ print(resp.json())
 | `env` | object | 否 | 沙箱公共环境变量 |
 | `policy` | object/null | 否 | 覆盖或追加的 policy 数据 |
 | `policy_mode` | string | 否 | `override` 或 `append`，默认 `override` |
-| `sandbox_id` | string/null | 否 | 可选，指定沙箱 ID。长度 4~16，仅允许小写字母、数字、减号（`-`）和下划线（`_`）。省略或空字符串时服务端自动生成（形如 `6011f5ca-76a`）。格式非法返回 400；与已有 ID 冲突返回 409 |
 
 Python 请求示例：
 
@@ -233,7 +232,6 @@ import requests
 resp = requests.post(
     "http://127.0.0.1:8321/api/v1/sandboxes",
     json={
-        "sandbox_id": "my-sb_01",
         "env": {
             "DEMO_KEY": "demo-value"
         },
@@ -245,11 +243,11 @@ print(resp.status_code)
 print(resp.json())
 ```
 
-响应示例（指定 `sandbox_id` 时返回该值；省略时自动生成，形如 `6011f5ca-76a`）：
+响应示例：
 
 ```json
 {
-  "id": "my-sb_01",
+  "id": "abc123def456",
   "phase": "ready",
   "runtime": "process",
   "pid": 12345,
@@ -493,23 +491,9 @@ print(resp.json())
 
 接口：`POST /api/v1/sandboxes/{sandbox_id}/exec_background`
 
-用途：在沙箱内启动后台进程，进程创建后立即返回。`Popen` 成功即 `started=true`；**不**区分长任务与瞬时任务。
+用途：在沙箱内启动后台进程，进程创建后立即返回。
 
-`running`、`exit_code` 为**返回时刻的快照**：服务端在 spawn 后对跟踪的 bwrap 监控进程调用一次 `poll()`。命令本身可能很快结束，但 bwrap 清理/回收可能尚未完成，因此 `python3 --version` 这类瞬时命令在 `exec_background` 响应里 **`running` 仍常为 `true`**。要可靠判断结束并读取输出，请轮询 `GET .../background/{job_id}`。
-
-请求体（`BackgroundExecRequest`）：
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `command` | string[] | 是 | 要执行的命令 argv |
-| `job_id` | string | 否 | 自定义 job id（4–16 位，`[0-9a-z_-]`）；省略则服务端自动生成 |
-| `workdir` | string | 否 | 沙箱内工作目录 |
-| `env` | object | 否 | 额外环境变量 |
-| `stdin` | string | 否 | 标准输入文本 |
-| `timeout_seconds` | int | 否 | 预留字段 |
-| `capture_output` | bool | 否 | 默认 `true`；为 `true` 时将 stdout/stderr 写入 host `{control_dir}/bg-logs/{job_id}.out\|.err` |
-
-错误码：`job_id` 格式非法 → **400**；同 sandbox 内 `job_id` 已占用 → **409**；沙箱非 ready → **409**。
+请求字段与 `/exec` 相同。
 
 Python 请求示例：
 
@@ -520,10 +504,7 @@ sandbox_id = "abc123def456"
 resp = requests.post(
     f"http://127.0.0.1:8321/api/v1/sandboxes/{sandbox_id}/exec_background",
     json={
-        "job_id": "http-srv",
-        "command": ["python3", "-m", "http.server", "18080"],
-        "workdir": "/tmp",
-        "capture_output": True,
+        "command": ["python3", "-m", "http.server", "18080"]
     },
     timeout=30,
 )
@@ -531,88 +512,15 @@ print(resp.status_code)
 print(resp.json())
 ```
 
-响应示例（`exec_background` 返回时刻快照，进程通常仍在运行）：
+响应示例：
 
 ```json
 {
   "started": true,
-  "job_id": "http-srv",
   "pid": 23456,
   "command": ["python3", "-m", "http.server", "18080"],
-  "running": true,
-  "exit_code": null,
-  "error_message": null,
-  "capture_output": true
+  "error_message": null
 }
-```
-
-轮询 `GET .../background/{job_id}` 直至 `running=false` 后，可得到最终状态与输出（示例：`python3 --version` 结束后）：
-
-```json
-{
-  "job_id": "9284a4bf-870",
-  "sandbox_id": "abc123def456",
-  "command": ["python3", "--version"],
-  "pid": 23457,
-  "running": false,
-  "exit_code": 0,
-  "started_at": "2026-06-16T10:00:01.000000",
-  "finished_at": "2026-06-16T10:00:01.050000",
-  "capture_output": true,
-  "stdout": "Python 3.12.3\n",
-  "stderr": "",
-  "workdir": null
-}
-```
-
-### 查询后台任务
-
-接口：`GET /api/v1/sandboxes/{sandbox_id}/background/{job_id}`
-
-用途：查询单个后台任务状态，并返回**全量** stdout/stderr 快照（无 offset 参数）。
-
-响应体（`BackgroundJobStatus`）含：`job_id`、`sandbox_id`、`command`、`pid`、`running`、`exit_code`、`started_at`、`finished_at`、`capture_output`、`stdout`、`stderr`、`workdir`。
-
-沙箱或 job 不存在 → **404**。
-
-### 列出后台任务
-
-接口：`GET /api/v1/sandboxes/{sandbox_id}/background`
-
-查询参数：
-
-| 参数 | 类型 | 默认 | 说明 |
-| --- | --- | --- | --- |
-| `running_only` | bool | `false` | 为 `true` 时仅返回仍在运行的 job |
-
-响应：`{"items": [BackgroundJobSummary, ...]}`，按 `started_at` 降序排列。
-
-### 终止后台任务
-
-接口：`POST /api/v1/sandboxes/{sandbox_id}/background/{job_id}/kill`
-
-请求体（`KillBackgroundJobRequest`，可省略）：
-
-| 字段 | 类型 | 默认 | 说明 |
-| --- | --- | --- | --- |
-| `signal` | int | `15` | 发送的信号编号（如 `9` = SIGKILL） |
-
-响应体（`KillBackgroundJobResult`）：`job_id`、`killed`、`reason`（`ok` / `already_exited` / `permission_denied`）、`exit_code`。
-
-发信号后立即返回（非阻塞）；客户端可轮询 `GET .../background/{job_id}` 确认 `running=false`。
-
-#### CLI 对应命令
-
-```bash
-# 启动后台任务
-jiuwenbox sandbox bg-exec my-sb --job-id http-srv -- python3 -m http.server 18080
-
-# 查询 / 列出 / 终止（stdout 均为 JSON）
-jiuwenbox sandbox bg-get my-sb http-srv
-jiuwenbox sandbox bg-list my-sb
-jiuwenbox sandbox bg-list my-sb --running-only
-jiuwenbox sandbox bg-kill my-sb http-srv
-jiuwenbox sandbox bg-kill my-sb http-srv --signal 9
 ```
 
 ### 查看沙箱日志
@@ -1191,5 +1099,4 @@ print(resp.text)
 ## 说明
 
 - `sandbox.exec` 和 `sandbox.exec_background` 中的 `workdir`、`env`、`timeout_seconds` 仍然有效。
-- CLI 后台任务命令：`sandbox bg-exec`、`sandbox bg-get`、`sandbox bg-list`、`sandbox bg-kill`（除 `sandbox exec` 外，CLI 默认输出 JSON）
 - 文档示例中的时间、PID、ID 仅为示意。

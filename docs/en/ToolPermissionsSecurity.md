@@ -1,8 +1,8 @@
 # Tool Permissions & Security
 
-This document explains how JiuwenSwarm **tool call permissions** (`allow` / `ask` / `deny`) take effect, how they relate to **workspace-external paths**, **built-in security rules**, **user approval persistence**, and what the **CLI `/add-dir`** command changes in configuration.
+This document explains how JiuwenAvatar **tool call permissions** (`allow` / `ask` / `deny`) take effect, how they relate to **workspace-external paths**, **built-in security rules**, **user approval persistence**, and what the **CLI `/add-dir`** command changes in configuration.
 
-The main configuration file is typically `~/.jiuwenswarm/config/config.yaml`; you can override this via the `JIUWENSWARM_CONFIG_DIR` environment variable (consistent with [Configuration](Configuration.md)).
+The main configuration file is typically `~/.jiuwenavatar/config/config.yaml`; you can override this via the `JIUWENAVATAR_CONFIG_DIR` environment variable (consistent with [Configuration](Configuration.md)).
 
 ---
 
@@ -89,8 +89,8 @@ On the `check_permission` path, tiered results are typically computed **without*
 
 ## 3. Built-in Security Rules `builtin_rules.yaml`
 
-- **Package default**: `jiuwenswarm/resources/builtin_rules.yaml`.
-- **User override**: A `builtin_rules.yaml` in the **same directory** as `config.yaml` (i.e. `JIUWENSWARM_CONFIG_DIR` or default `~/.jiuwenswarm/config/`) takes **priority** if it exists.
+- **Package default**: `jiuwenavatar/resources/builtin_rules.yaml`.
+- **User override**: A `builtin_rules.yaml` in the **same directory** as `config.yaml` (i.e. `JIUWENAVATAR_CONFIG_DIR` or default `~/.jiuwenavatar/config/`) takes **priority** if it exists.
 
 Built-in rules mostly cover **shell high-risk commands** (deletion, formatting, download-and-execute, privilege escalation, etc.), some with explicit `action: deny`. User `rules` cannot override built-in denials (built-in deny returns first).
 
@@ -232,16 +232,16 @@ If not using `tiered_policy`, typically **only** `external_directory` is updated
 | Module | Path |
 |--------|------|
 | Tiered policy | `openjiuwen.harness.security` (harness SDK) |
-| Permissions persistence | `jiuwenswarm/agents/harness/common/rails/permissions/permissions_persist.py` |
-| Owner scopes | `jiuwenswarm/agents/harness/common/rails/permissions/owner_scopes.py` |
-| Tool permission RPC | `jiuwenswarm/agents/harness/common/rails/permissions/permissions_config_rpc.py` |
-| Tool permission context | `jiuwenswarm/agents/harness/common/rails/permissions/tool_permission_context.py` |
-| TUI `/permissions` | `jiuwenswarm/channels/tui/frontend/src/core/commands/builtins/permissions.ts` |
+| Permissions persistence | `jiuwenavatar/agents/harness/common/rails/permissions/permissions_persist.py` |
+| Owner scopes | `jiuwenavatar/agents/harness/common/rails/permissions/owner_scopes.py` |
+| Tool permission RPC | `jiuwenavatar/agents/harness/common/rails/permissions/permissions_config_rpc.py` |
+| Tool permission context | `jiuwenavatar/agents/harness/common/rails/permissions/tool_permission_context.py` |
+| TUI `/permissions` | `jiuwenavatar/channels/tui/frontend/src/core/commands/builtins/permissions.ts` |
 
 ---
 
 ## 9. See Also
 
-- [Configuration](Configuration.md): `JIUWENSWARM_CONFIG_DIR`, configuration file location.
+- [Configuration](Configuration.md): `JIUWENAVATAR_CONFIG_DIR`, configuration file location.
 - [CLI Commands](CLI.md): CLI/TUI entry points (including slash commands).
 - [Channels](Channels.md): `owner_scopes`, digital persona, and `ask` downgrade.

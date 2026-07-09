@@ -1,0 +1,30 @@
+{
+  "verdict": ["PASS", "FAIL"],
+  "gate_verdict": ["PASS", "REWORK", "HOLD"],
+  "risk_rating": ["Low", "Medium", "High", "Unknown"],
+  "layer_alignment": ["PASS", "FAIL"],
+  "patch_risk": ["none", "suspected", "confirmed"],
+  "severity": ["critical", "high", "medium", "low"],
+  "dimension": ["Code", "Clean", "Spec", "Security", "Performance"],
+  "category": [
+    "correctness",
+    "security",
+    "data-consistency",
+    "concurrency",
+    "performance",
+    "maintainability",
+    "testing"
+  ],
+  "security_review_status": ["PASS", "FAIL", "not_applicable"],
+  "security_item_category": [
+    "secrets",
+    "config-hardening",
+    "input-validation",
+    "auth",
+    "logging",
+    "dependencies",
+    "sandbox"
+  ],
+  "security_item_status": ["PASS", "FAIL"],
+  "position_type": ["text", "binary"]
+}

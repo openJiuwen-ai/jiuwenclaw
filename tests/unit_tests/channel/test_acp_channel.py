@@ -7,8 +7,8 @@ from collections import deque
 
 import pytest
 
-from jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect import AcpChannel, AcpChannelConfig
-from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect import AcpChannel, AcpChannelConfig
+from jiuwenavatar.common.schema.message import EventType, Message, ReqMethod
 
 
 class DummyBus:
@@ -75,15 +75,15 @@ def json_line(payload):
 
 
 def _import_acp_channel_entry(monkeypatch: pytest.MonkeyPatch):
-    import jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect as existing_module
+    import jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect as existing_module
 
-    fake_config_module = types.ModuleType("jiuwenswarm.common.config")
+    fake_config_module = types.ModuleType("jiuwenavatar.common.config")
 
     def get_default_config():
         return {}
 
     fake_config_module.get_config = get_default_config
-    monkeypatch.setitem(sys.modules, "jiuwenswarm.common.config", fake_config_module)
+    monkeypatch.setitem(sys.modules, "jiuwenavatar.common.config", fake_config_module)
     return existing_module
 
 
@@ -101,7 +101,7 @@ def test_load_acp_channel_config_uses_defaults(monkeypatch: pytest.MonkeyPatch):
 def test_load_acp_channel_config_reads_channels_acp(monkeypatch: pytest.MonkeyPatch):
     module = _import_acp_channel_entry(monkeypatch)
 
-    fake_config_module = types.ModuleType("jiuwenswarm.common.config")
+    fake_config_module = types.ModuleType("jiuwenavatar.common.config")
 
     def get_custom_config():
         return {
@@ -116,7 +116,7 @@ def test_load_acp_channel_config_reads_channels_acp(monkeypatch: pytest.MonkeyPa
         }
 
     fake_config_module.get_config = get_custom_config
-    monkeypatch.setitem(sys.modules, "jiuwenswarm.common.config", fake_config_module)
+    monkeypatch.setitem(sys.modules, "jiuwenavatar.common.config", fake_config_module)
 
     conf = module.load_acp_channel_config()
 
@@ -127,13 +127,13 @@ def test_load_acp_channel_config_reads_channels_acp(monkeypatch: pytest.MonkeyPa
 
 
 def test_main_passes_explicit_agent_server_url(monkeypatch: pytest.MonkeyPatch):
-    import jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect as module
+    import jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect as module
 
     captured = {}
     original_stdout = sys.stdout
 
     def parse_args(_self):
-        return Namespace(agent_server_url="ws://127.0.0.1:19001")
+        return Namespace(agent_server_url="ws://127.0.0.1:29001")
 
     def fake_run(url):
         captured["url"] = url
@@ -156,8 +156,8 @@ def test_main_passes_explicit_agent_server_url(monkeypatch: pytest.MonkeyPatch):
     finally:
         sys.stdout = original_stdout
 
-    assert captured["url"] == "ws://127.0.0.1:19001"
-    assert captured["result"] == "ws://127.0.0.1:19001"
+    assert captured["url"] == "ws://127.0.0.1:29001"
+    assert captured["result"] == "ws://127.0.0.1:29001"
 
 
 @pytest.mark.asyncio
@@ -173,7 +173,7 @@ async def test_jsonrpc_initialize_and_session_new(monkeypatch):
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     await channel.start()
 
@@ -186,7 +186,7 @@ async def test_jsonrpc_initialize_and_session_new(monkeypatch):
     assert init_result.get("protocolVersion") == 1
     agent_info = init_result.get("agentInfo")
     assert isinstance(agent_info, dict)
-    assert agent_info.get("name") == "jiuwenswarm"
+    assert agent_info.get("name") == "jiuwenavatar"
     capabilities = init_result.get("agentCapabilities")
     assert isinstance(capabilities, dict)
     assert capabilities.get("loadSession") is False
@@ -215,7 +215,7 @@ async def test_jsonrpc_session_list_returns_known_sessions(monkeypatch):
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     await channel.start()
 
@@ -239,7 +239,7 @@ async def test_jsonrpc_session_load_is_rejected_when_capability_is_disabled(monk
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     await channel.start()
 
@@ -278,7 +278,7 @@ async def test_jsonrpc_session_prompt_emits_updates_and_final_result(monkeypatch
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         seen.append(msg)
@@ -386,7 +386,7 @@ async def test_jsonrpc_session_prompt_echoes_user_message_id_in_result(monkeypat
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         await channel.send(
@@ -453,7 +453,7 @@ async def test_jsonrpc_session_prompt_accepts_text_param(monkeypatch):
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         seen.append(msg)
@@ -538,7 +538,7 @@ async def test_jsonrpc_session_prompt_emits_final_text_as_agent_message_chunk(mo
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         await channel.send(
@@ -625,8 +625,8 @@ async def test_jsonrpc_session_prompt_merges_session_context(monkeypatch):
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._STDIN_EOF_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._STDIN_EOF_GRACE_SECONDS", 0.01)
 
     async def _on_message(msg):
         seen.append(msg)
@@ -691,10 +691,10 @@ async def test_jsonrpc_session_prompt_does_not_end_turn_from_chat_final_before_l
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._PROMPT_IDLE_FINALIZE_SECONDS",
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._PROMPT_IDLE_FINALIZE_SECONDS",
                         0.01)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._STDIN_EOF_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._STDIN_EOF_GRACE_SECONDS", 0.01)
 
     async def _on_message(msg):
         await channel.send(
@@ -795,10 +795,10 @@ async def test_jsonrpc_session_prompt_does_not_auto_finalize_from_delta_only(mon
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._PROMPT_IDLE_FINALIZE_SECONDS",
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._PROMPT_IDLE_FINALIZE_SECONDS",
                         0.01)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._STDIN_EOF_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._STDIN_EOF_GRACE_SECONDS", 0.05)
 
     async def _on_message(msg):
         await channel.send(
@@ -860,8 +860,8 @@ async def test_jsonrpc_session_cancel_finalizes_active_prompt(monkeypatch):
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._STDIN_EOF_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._STDIN_EOF_GRACE_SECONDS", 0.01)
 
     async def _on_message(msg):
         if msg.req_method == ReqMethod.CHAT_SEND:
@@ -914,7 +914,7 @@ async def test_jsonrpc_response_is_forwarded_as_acp_tool_response(monkeypatch):
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         seen.append(msg)
@@ -949,7 +949,7 @@ async def test_jsonrpc_response_without_pending_mapping_is_ignored(monkeypatch):
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         seen.append(msg)
@@ -986,7 +986,7 @@ async def test_processing_idle_defers_end_turn_until_pending_client_rpc_resolves
     channel.set_pending_client_rpc_session_for_test("tool-pending-1", session_id)
 
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         seen.append(msg)
@@ -1072,7 +1072,7 @@ async def test_processing_idle_waits_for_late_chat_final_and_only_emits_missing_
     )
 
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     first_is_final = await channel.send_jsonrpc_message_for_test(
         Message(
@@ -1172,7 +1172,7 @@ async def test_gateway_jsonrpc_request_is_written_to_stdout(monkeypatch):
     channel = AcpChannelHarness(AcpChannelConfig(enabled=True), DummyBus())
 
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     await channel.handle_gateway_frame_for_test(
         {
@@ -1218,7 +1218,7 @@ async def test_gateway_jsonrpc_request_only_writes_raw_jsonrpc_for_active_prompt
     channel.set_active_prompt_request_for_test(session_id, request_id)
 
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     await channel.handle_gateway_frame_for_test(
         {
@@ -1262,7 +1262,7 @@ async def test_jsonrpc_session_prompt_emits_tool_call_update(monkeypatch):
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         # 发送工具调用
@@ -1366,7 +1366,7 @@ async def test_jsonrpc_session_prompt_emits_tool_result_update(monkeypatch):
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         # 发送工具结果
@@ -1464,7 +1464,7 @@ async def test_jsonrpc_session_prompt_emits_tool_in_progress_update(monkeypatch)
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         await channel.send(
@@ -1568,7 +1568,7 @@ async def test_jsonrpc_session_prompt_emits_plan_update(monkeypatch):
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         # 发送子任务更新
@@ -1664,7 +1664,7 @@ async def test_jsonrpc_session_prompt_emits_processing_status_update(monkeypatch
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         await channel.send(
@@ -1732,7 +1732,7 @@ async def test_jsonrpc_session_prompt_emits_usage_update_before_result(monkeypat
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         # 发送 usage 信息 (通过 CHAT_DELTA 携带 usage)
@@ -1811,7 +1811,7 @@ async def test_processing_status_true_does_not_schedule_idle_finalize(monkeypatc
     )
 
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     is_final = await channel.send_jsonrpc_message_for_test(
         Message(
@@ -1867,7 +1867,7 @@ async def test_tool_events_cancel_idle_finalize_instead_of_scheduling(monkeypatc
     )
 
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     is_final = await channel.send_jsonrpc_message_for_test(
         Message(
@@ -1917,7 +1917,7 @@ async def test_jsonrpc_session_prompt_emits_direct_reasoning_update(monkeypatch)
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         await channel.send(
@@ -1986,7 +1986,7 @@ async def test_jsonrpc_session_prompt_emits_todo_update(monkeypatch):
 
     monkeypatch.setattr("sys.stdin", fake_stdin)
     monkeypatch.setattr("sys.stdout", fake_stdout)
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+    monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
     async def _on_message(msg):
         await channel.send(
@@ -2073,7 +2073,7 @@ async def test_reasoning_and_todo_events_cancel_idle_finalize(monkeypatch):
         )
 
         monkeypatch.setattr("sys.stdout", fake_stdout)
-        monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
+        monkeypatch.setattr("jiuwenavatar.gateway.channel_manager.protocol.acp.acp_connect._ACP_STDOUT", fake_stdout)
 
         is_final = await channel.send_jsonrpc_message_for_test(message, ctx)
 

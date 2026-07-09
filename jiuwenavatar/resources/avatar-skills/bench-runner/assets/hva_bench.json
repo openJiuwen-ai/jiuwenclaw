@@ -1,0 +1,126 @@
+{
+  "schema_version": "1.5.0",
+  "schema_id": "pr_relative_score.six_stage.v2",
+  "description": "以人工 PR 为基准(1.0)对比 Agent PR；仅依据代码/测试/PR/CI/检视，不使用 doc 文档。若提供 shared_context.issue_url，表示两侧 PR 旨在解决该 Issue，评测须将 Issue 实际内容（标题、描述、验收标准等）纳入需求参照。",
+
+  "placeholders": {
+    "_note": "HVA 通常仅需 {repo_root}；见 scripts/resolve_bench_context.py",
+    "{repo_root}": "解析后的 Git 仓库根",
+    "{skills_root}": "可选，一般仅 AVA gate 使用"
+  },
+
+  "inputs": {
+    "baseline": { "label": "human", "pr_url": "", "head_ref": "" },
+    "candidate": { "label": "agent", "pr_url": "", "head_ref": "" },
+    "repo_root": {
+      "_note": "name 与 path 至少填其一；查找与解析规则同 AVA。python scripts/resolve_repo_root.py --bench <file>",
+      "name": "",
+      "path": "",
+      "gitcode_config": ""
+    },
+    "paths": {
+      "skills_root": "",
+      "bench_runner_root": ""
+    },
+    "shared_context": {
+      "issue_url": "",
+      "issue_summary": "可选；人工需求摘要，非评分文件。与 issue_url 同时存在时，以 Issue 原文为主、本字段为辅"
+    }
+  },
+
+  "scoring_policy": {
+    "baseline": 1.0,
+    "scale": { "min": 0, "max": 10 },
+    "major_weight": "1/6 per stage (S1–S6)",
+    "sub_relative": "agent_absolute / human_absolute",
+    "sub_relative_cap": 2.0,
+    "edge_cases": {
+      "both_zero": 1.0,
+      "human_zero_agent_positive": 2.0,
+      "human_positive_agent_zero": 0.0
+    },
+    "major_relative": "sum(sub.weight * sub.relative)",
+    "overall_relative": "sum(major.weight * major.relative)"
+  },
+
+  "dimensions": [
+    {
+      "id": "S1",
+      "name": "需求分析",
+      "weight": 0.1666666667,
+      "evidence": ["PR 标题/描述", "Issue 正文（issue_url 所指向，若已提供）", "Issue 关联说明", "代码变更范围", "测试所覆盖场景"],
+      "subpoints": [
+        { "id": "S1.1", "name": "需求理解准确度", "weight": 0.45, "rubric": "实现与 Issue/PR 描述一致，无明显漏做/误解" },
+        { "id": "S1.2", "name": "范围控制", "weight": 0.30, "rubric": "改动聚焦需求，无无关功能或大面积无关修改；不过度补丁化" },
+        { "id": "S1.3", "name": "边界与异常识别", "weight": 0.25, "rubric": "代码与测试体现对边界、失败路径、兼容性的考虑；机制风险有覆盖" }
+      ]
+    },
+    {
+      "id": "S2",
+      "name": "功能设计",
+      "weight": 0.1666666667,
+      "evidence": ["模块划分", "接口/数据结构", "扩展点与依赖关系", "diff 结构"],
+      "subpoints": [
+        { "id": "S2.1", "name": "方案合理性", "weight": 0.40, "rubric": "设计能解决问题，无明显过度设计或明显更差方案；根因层级与改动层级一致" },
+        { "id": "S2.2", "name": "结构与职责清晰", "weight": 0.35, "rubric": "分层/模块边界清楚，职责不混乱" },
+        { "id": "S2.3", "name": "接口与契约稳定", "weight": 0.25, "rubric": "对外接口清晰、破坏性变更有说明或规避" }
+      ]
+    },
+    {
+      "id": "S3",
+      "name": "任务规划",
+      "weight": 0.1666666667,
+      "evidence": ["提交历史", "diff 组织", "PR 可分 review 程度"],
+      "subpoints": [
+        { "id": "S3.1", "name": "变更粒度与节奏", "weight": 0.35, "rubric": "提交/step 逻辑清晰，便于审查与回滚" },
+        { "id": "S3.2", "name": "实施顺序合理", "weight": 0.30, "rubric": "先基础后业务、依赖顺序自然，无突兀跳跃；无呈现层前置掩盖机制层" },
+        { "id": "S3.3", "name": "交付完整性", "weight": 0.35, "rubric": "一次 PR 内功能闭环可运行，无半成品或遗漏关键步骤" }
+      ]
+    },
+    {
+      "id": "S4",
+      "name": "代码编写",
+      "weight": 0.1666666667,
+      "evidence": ["源码 diff", "风格与惯例", "错误处理", "日志与配置"],
+      "subpoints": [
+        { "id": "S4.1", "name": "正确性与鲁棒性", "weight": 0.40, "rubric": "逻辑正确，异常/空值/并发等处理到位；机制行为修复优于表层字段补丁" },
+        { "id": "S4.2", "name": "可读性与可维护性", "weight": 0.30, "rubric": "命名、结构、重复度符合仓库习惯" },
+        { "id": "S4.3", "name": "安全与性能", "weight": 0.30, "rubric": "无显式安全隐患；热路径无明显低效" }
+      ]
+    },
+    {
+      "id": "S5",
+      "name": "代码测试",
+      "weight": 0.1666666667,
+      "evidence": ["新增/修改测试", "CI 结果", "PR 验证说明"],
+      "subpoints": [
+        { "id": "S5.1", "name": "覆盖充分性", "weight": 0.40, "rubric": "主路径与关键异常/边界有测试" },
+        { "id": "S5.2", "name": "测试质量", "weight": 0.35, "rubric": "断言有效、可维护，非空测试或形式主义；机制测试非表层断言" },
+        { "id": "S5.3", "name": "可复现性", "weight": 0.25, "rubric": "CI 通过或验证步骤可复现，失败有说明" }
+      ]
+    },
+    {
+      "id": "S6",
+      "name": "检视合规",
+      "weight": 0.1666666667,
+      "evidence": ["Review 意见与处理", "PR 自检说明", "规范/许可证/敏感信息", "合并建议"],
+      "subpoints": [
+        { "id": "S6.1", "name": "审查问题处理", "weight": 0.35, "rubric": "Must/Block 类问题已修或合理解释" },
+        { "id": "S6.2", "name": "PR 说明与可追溯", "weight": 0.30, "rubric": "变更摘要、验证方式、风险说明清楚" },
+        { "id": "S6.3", "name": "工程规范合规", "weight": 0.35, "rubric": "符合仓库规范；无密钥/大文件噪音；层级对齐结论可追溯" }
+      ]
+    }
+  ],
+
+  "result_template": {
+    "evaluated_at": "",
+    "scores": {
+      "human": { "by_sub": {}, "majors": {}, "overall_absolute": null },
+      "agent": { "by_sub": {}, "majors": {}, "overall_absolute": null },
+      "relative": { "by_sub": {}, "majors": {}, "overall": null }
+    },
+    "verdict": "better|equal|worse",
+    "_note_verdict": "相对人工基准（human=1.0）：better=Agent 更好，worse=Agent 更差",
+    "one_line_summary": ""
+  }
+}

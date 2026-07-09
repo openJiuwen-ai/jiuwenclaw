@@ -1,10 +1,10 @@
 # Discord 频道接入说明
 
-本文说明如何在 [Discord 开发者平台](https://discord.com/developers/applications) 创建应用与 Bot、开启所需 Intent 与安装方式，并在 JiuwenSwarm 的**频道管理**中完成配置。
+本文说明如何在 [Discord 开发者平台](https://discord.com/developers/applications) 创建应用与 Bot、开启所需 Intent 与安装方式，并在 JiuwenAvatar 的**频道管理**中完成配置。
 
 ## 本仓库中的实现
 
-- Python 频道：`jiuwenswarm/channel/discord_channel.py`（基于 discord.py）
+- Python 频道：`jiuwenavatar/channel/discord_channel.py`（基于 discord.py）
 - 运行时配置：`config.yaml` 中的 `channels/discord`，或通过 Web 端 **频道管理** → Discord 保存
 
 Bot 使用 **Bot Token** 登录，可在配置的服务器频道与/或私信（DM）中收发消息（也可通过 `block_dm` 关闭私信）。处理过程中会对用户消息尝试添加 👀 反应，与其它频道行为一致。
@@ -38,16 +38,16 @@ Bot 使用 **Bot Token** 登录，可在配置的服务器频道与/或私信（
 **安全提示**
 
 - Token 等同于密码，泄露后他人可操控你的 Bot。
-- 仅填入 JiuwenSwarm 的 Discord 配置或 `config.yaml`，勿提交到代码仓。
+- 仅填入 JiuwenAvatar 的 Discord 配置或 `config.yaml`，勿提交到代码仓。
 - 若怀疑泄露，在同一位置再次 **Reset Token**。
 
-该值对应 JiuwenSwarm 中的 **`bot_token`**。
+该值对应 JiuwenAvatar 中的 **`bot_token`**。
 
 ---
 
 ## 3. 开启 Message Content Intent
 
-JiuwenSwarm 需要读取用户消息的**文本内容**。Discord 要求通过「特权网关 Intent」显式开启。
+JiuwenAvatar 需要读取用户消息的**文本内容**。Discord 要求通过「特权网关 Intent」显式开启。
 
 1. 仍在 **Bot** 页面。
 2. 在 **Privileged Gateway Intents** 中打开 **MESSAGE CONTENT INTENT**。
@@ -61,7 +61,7 @@ JiuwenSwarm 需要读取用户消息的**文本内容**。Discord 要求通过�
 
 ## 4. 服务器安装：权限范围与 Bot 权限
 
-配置 Bot 被安装进服务器后的能力。JiuwenSwarm 典型需要：
+配置 Bot 被安装进服务器后的能力。JiuwenAvatar 典型需要：
 
 - 在目标频道**读取**消息
 - **发送**消息（回复用户）
@@ -94,12 +94,12 @@ JiuwenSwarm 需要读取用户消息的**文本内容**。Discord 要求通过�
 
 安装完成后：
 
-- **服务器场景**：将 Bot 放入 JiuwenSwarm 要监听的频道（见下文 `guild_id` / `channel_id`）。
-- **私信场景**：用户可与 Bot 打开私聊（除非在 JiuwenSwarm 中开启 **`block_dm`**）。
+- **服务器场景**：将 Bot 放入 JiuwenAvatar 要监听的频道（见下文 `guild_id` / `channel_id`）。
+- **私信场景**：用户可与 Bot 打开私聊（除非在 JiuwenAvatar 中开启 **`block_dm`**）。
 
 ---
 
-## 6. JiuwenSwarm 需要的 ID
+## 6. JiuwenAvatar 需要的 ID
 
 | 配置项 | 获取方式 |
 |--------|----------|
@@ -116,11 +116,11 @@ https://discord.com/channels/<guild_id>/<channel_id>
 
 ---
 
-## 7. 在 JiuwenSwarm 频道管理中配置
+## 7. 在 JiuwenAvatar 频道管理中配置
 
 在 Web 端打开 **频道管理** → **Discord** 填写并保存，或直接编辑：
 
-`~/.jiuwenswarm/config/config.yaml`（路径因环境可能不同）
+`~/.jiuwenavatar/config/config.yaml`（路径因环境可能不同）
 
 示例：
 
@@ -172,7 +172,7 @@ channels:
 ### 私信不可用
 
 - 若需用户私信使用，需要在Discord进行 **User install**。
-- JiuwenSwarm 中确认 **`block_dm`** 为 `false`。
+- JiuwenAvatar 中确认 **`block_dm`** 为 `false`。
 - 用户安装后通常需在 Bot 资料页选择 **发消息** 打开 DM。
 
 ### 模型或下游 API 报错

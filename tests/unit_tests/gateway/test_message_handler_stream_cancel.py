@@ -1,5 +1,3 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-
 """Tests for gateway stream task cancellation before chat.send."""
 
 from __future__ import annotations
@@ -9,10 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwenswarm.common.schema import Message
-from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-from jiuwenswarm.common.schema.message import ReqMethod
-from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+from jiuwenavatar.common.schema import Message
+from jiuwenavatar.common.schema.message import ReqMethod
+from jiuwenavatar.gateway.message_handler.message_handler import MessageHandler
 
 
 class _FakeAgentClient:
@@ -35,30 +32,6 @@ class _FakeAgentClient:
             yield env
 
 
-class _DisconnectingStreamAgentClient:
-    @staticmethod
-    async def send_request(env: object) -> SimpleNamespace:
-        raise AssertionError("stream disconnect test should not call send_request")
-
-    @staticmethod
-    async def send_request_stream(env: object):
-        if False:  # pragma: no cover - keeps this an async generator
-            yield env
-        raise RuntimeError("AgentServer WebSocket connection closed")
-
-
-class _HangingAgentClient:
-    @staticmethod
-    async def send_request(env: object) -> SimpleNamespace:
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
-
-    @staticmethod
-    async def send_request_stream(env: object):
-        if False:  # pragma: no cover - keeps this an async generator
-            yield env
-
-
 class _TestMessageHandler(MessageHandler):
     @classmethod
     def create(cls) -> "_TestMessageHandler":
@@ -66,12 +39,6 @@ class _TestMessageHandler(MessageHandler):
         setattr(cls, "_instance", None)
         _FakeAgentClient.sent_requests = []
         return cls(_FakeAgentClient())
-
-    @classmethod
-    def create_with_client(cls, client: object) -> "_TestMessageHandler":
-        setattr(MessageHandler, "_instance", None)
-        setattr(cls, "_instance", None)
-        return cls(client)
 
     async def cancel_stream_tasks_for_channel(self, msg: Message) -> int:
         return await getattr(self, "_cancel_stream_tasks_for_channel")(msg)
@@ -81,14 +48,13 @@ def _chat_send_message(
     *,
     channel_id: str = "tui",
     session_id: str = "sess_new",
-    mode: str = "agent.plan",
 ) -> Message:
     return Message(
         id="req-new",
         type="req",
         channel_id=channel_id,
         session_id=session_id,
-        params={"mode": mode, "query": "hello"},
+        params={"mode": "agent.plan", "query": "hello"},
         timestamp=0.0,
         ok=True,
         req_method=ReqMethod.CHAT_SEND,
@@ -115,58 +81,6 @@ def _seed_stream_task(
     return task
 
 
-async def _drain_robot_messages(handler: _TestMessageHandler) -> list[Message]:
-    messages: list[Message] = []
-    while True:
-        msg = await handler.consume_robot_messages(timeout=0.01)
-        if msg is None:
-            return messages
-        messages.append(msg)
-
-
-@pytest.mark.asyncio
-async def test_tui_non_stream_request_times_out_before_frontend_request(monkeypatch) -> None:
-    handler = _TestMessageHandler.create_with_client(_HangingAgentClient())
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.routing.agent_request_timeout._TUI_DEFAULT_UNARY_TIMEOUT_SECONDS",
-        0.01,
-        raising=False,
-    )
-    msg = Message(
-        id="tui-timeout-request",
-        type="req",
-        channel_id="tui",
-        session_id="sess-tui-timeout",
-        params={"value": "check"},
-        timestamp=0.0,
-        ok=True,
-        req_method=ReqMethod.COMMAND_STATUS,
-        is_stream=False,
-    )
-    env = e2a_from_agent_fields(
-        request_id=msg.id,
-        channel_id=msg.channel_id,
-        session_id=msg.session_id,
-        req_method=ReqMethod.COMMAND_STATUS,
-        params=msg.params,
-        is_stream=False,
-        timestamp=0.0,
-    )
-
-    await asyncio.wait_for(
-        handler._process_non_stream_request(msg, env),  # pylint: disable=protected-access
-        timeout=0.2,
-    )
-
-    outputs = await _drain_robot_messages(handler)
-    assert len(outputs) == 1
-    assert outputs[0].ok is False
-    assert outputs[0].payload == {
-        "error": "AgentServer request timed out",
-        "code": "AGENT_SERVER_TIMEOUT",
-    }
-
-
 @pytest.mark.asyncio
 async def test_cancel_stream_tasks_only_affects_same_channel() -> None:
     handler = _TestMessageHandler.create()
@@ -177,55 +91,21 @@ async def test_cancel_stream_tasks_only_affects_same_channel() -> None:
         handler, rid="rid-web", channel_id="web", session_id="sess_web",
     )
 
-    # TUI is no longer single-user: different session on same channel does NOT cancel.
     cancelled = await handler.cancel_stream_tasks_for_channel(
         _chat_send_message(channel_id="tui", session_id="sess_new"),
     )
 
-    assert cancelled == 0
-    assert not tui_task.cancelled()
+    assert cancelled == 1
+    assert tui_task.cancelled()
     assert not web_task.cancelled()
-    assert "rid-tui" in getattr(handler, "_stream_tasks")
+    assert "rid-tui" not in getattr(handler, "_stream_tasks")
     assert "rid-web" in getattr(handler, "_stream_tasks")
     await asyncio.sleep(0)
-    assert len(_FakeAgentClient.sent_requests) == 0
+    assert len(_FakeAgentClient.sent_requests) == 1
 
 
 @pytest.mark.asyncio
-async def test_process_stream_publishes_error_and_stops_processing_on_connection_close() -> None:
-    handler = _TestMessageHandler.create_with_client(_DisconnectingStreamAgentClient())
-    env = SimpleNamespace(
-        request_id="rid-stream-close",
-        channel="web",
-        params={"content": "hello"},
-    )
-
-    await handler.process_stream(
-        env,
-        session_id="sess-stream-close",
-        request_metadata={"source": "test"},
-    )
-
-    outputs = await _drain_robot_messages(handler)
-    payloads = [msg.payload for msg in outputs]
-
-    assert any(
-        payload.get("event_type") == "chat.error"
-        and "AgentServer WebSocket connection closed" in payload.get("error", "")
-        for payload in payloads
-        if isinstance(payload, dict)
-    )
-    assert any(
-        payload.get("event_type") == "chat.processing_status"
-        and payload.get("is_processing") is False
-        for payload in payloads
-        if isinstance(payload, dict)
-    )
-
-
-@pytest.mark.asyncio
-async def test_tui_no_longer_cancels_orphan_session() -> None:
-    """TUI is no longer single-user: different session does not cancel orphan stream."""
+async def test_single_user_channel_cancels_orphan_session_on_same_channel() -> None:
     handler = _TestMessageHandler.create()
     orphan_task = _seed_stream_task(
         handler, rid="rid-orphan", channel_id="tui", session_id="sess_orphan",
@@ -235,10 +115,10 @@ async def test_tui_no_longer_cancels_orphan_session() -> None:
         _chat_send_message(channel_id="tui", session_id="sess_new"),
     )
 
-    assert cancelled == 0
-    assert not orphan_task.cancelled()
+    assert cancelled == 1
+    assert orphan_task.cancelled()
     await asyncio.sleep(0)
-    assert len(_FakeAgentClient.sent_requests) == 0
+    assert len(_FakeAgentClient.sent_requests) == 1
 
 
 @pytest.mark.asyncio
@@ -263,8 +143,8 @@ async def test_web_channel_only_cancels_matching_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tui_keeps_streams_on_different_session() -> None:
-    """TUI is no longer single-user: different session preserves all in-flight streams."""
+async def test_stream_without_session_id_still_notifies_agent() -> None:
+    """Streams missing session metadata must still send chat.interrupt."""
     handler = _TestMessageHandler.create()
     _seed_stream_task(
         handler, rid="rid-peer", channel_id="tui", session_id="sess_resolved",
@@ -284,174 +164,18 @@ async def test_tui_keeps_streams_on_different_session() -> None:
         _chat_send_message(channel_id="tui", session_id="sess_new"),
     )
 
-    assert cancelled == 0
-    assert not orphan_task.cancelled()
+    assert cancelled == 2
+    assert orphan_task.cancelled()
     await asyncio.sleep(0)
-    assert len(_FakeAgentClient.sent_requests) == 0
+    assert len(_FakeAgentClient.sent_requests) == 1
 
 
-def test_is_single_user_channel_acp_only() -> None:
+def test_is_single_user_channel_includes_cli_alias() -> None:
     _is_single_user_channel = getattr(MessageHandler, "_is_single_user_channel")
-    assert not _is_single_user_channel("tui")
+    assert _is_single_user_channel("tui")
     assert _is_single_user_channel("acp")
-    assert not _is_single_user_channel("cli")
+    assert _is_single_user_channel("cli")
     assert not _is_single_user_channel("web")
-
-
-def test_team_chat_send_keeps_existing_team_stream() -> None:
-    _should_cancel_existing_stream_before_chat_send = getattr(
-        MessageHandler,
-        "_should_cancel_existing_stream_before_chat_send",
-    )
-
-    assert not _should_cancel_existing_stream_before_chat_send(
-        _chat_send_message(channel_id="web", session_id="sess_team", mode="team"),
-    )
-    assert _should_cancel_existing_stream_before_chat_send(
-        _chat_send_message(channel_id="web", session_id="sess_agent", mode="agent.plan"),
-    )
-
-
-def test_ask_user_answer_chat_send_keeps_existing_stream() -> None:
-    _should_cancel_existing_stream_before_chat_send = getattr(
-        MessageHandler,
-        "_should_cancel_existing_stream_before_chat_send",
-    )
-    msg = _chat_send_message(
-        channel_id="tui",
-        session_id="sess_team",
-        mode="team.plan",
-    )
-    msg.params.update(
-        {
-            "query": "",
-            "source": "ask_user_interrupt",
-            "request_id": "call_ask_1",
-            "answers": [
-                {
-                    "question": "你希望用什么技术实现？",
-                    "selected_options": ["浏览器（HTML/CSS/JS）"],
-                }
-            ],
-        }
-    )
-
-    assert not _should_cancel_existing_stream_before_chat_send(msg)
-
-
-def test_confirm_interrupt_answer_chat_send_keeps_existing_stream() -> None:
-    _should_cancel_existing_stream_before_chat_send = getattr(
-        MessageHandler,
-        "_should_cancel_existing_stream_before_chat_send",
-    )
-    msg = _chat_send_message(
-        channel_id="tui",
-        session_id="sess_team",
-        mode="team.plan",
-    )
-    msg.params.update(
-        {
-            "query": "",
-            "source": "confirm_interrupt",
-            "request_id": "call_confirm_1",
-            "answers": [{"selected_options": ["批准"], "custom_input": ""}],
-            "plan_approval_kind": "plan_approval",
-            "plan_content": "# 团队计划",
-            "plan_language": "cn",
-        }
-    )
-
-    assert not _should_cancel_existing_stream_before_chat_send(msg)
-
-
-def test_permission_interrupt_answer_chat_send_keeps_existing_stream() -> None:
-    _should_cancel_existing_stream_before_chat_send = getattr(
-        MessageHandler,
-        "_should_cancel_existing_stream_before_chat_send",
-    )
-    msg = _chat_send_message(
-        channel_id="tui",
-        session_id="sess_perm",
-        mode="code.plan",
-    )
-    msg.params.update(
-        {
-            "query": "",
-            "source": "permission_interrupt",
-            "request_id": "call_perm_1",
-            "answers": [{"selected_options": ["allow_once"], "custom_input": ""}],
-        }
-    )
-
-    assert not _should_cancel_existing_stream_before_chat_send(msg)
-
-
-@pytest.mark.parametrize(
-    "params",
-    [
-        {
-            "query": "",
-            "source": "evolution_interrupt",
-            "request_id": "call_evolve_1",
-            "answers": [{"selected_options": ["allow_always"], "custom_input": ""}],
-            "approval_kind": "evolve",
-        },
-        {
-            "query": "",
-            "source": "skill_evolution_approval",
-            "request_id": "call_evolve_1",
-            "answers": [{"selected_options": ["allow_always"], "custom_input": ""}],
-            "approval_schema": "openjiuwen.skill_evolution_approval.v1",
-            "evolution_meta": {
-                "event_kind": "approval",
-                "rail_kind": "regular",
-                "approval_kind": "evolve",
-                "approval_transport": "interrupt",
-            },
-        },
-    ],
-)
-def test_evolution_interrupt_answer_chat_send_keeps_existing_stream(params) -> None:
-    _should_cancel_existing_stream_before_chat_send = getattr(
-        MessageHandler,
-        "_should_cancel_existing_stream_before_chat_send",
-    )
-    msg = _chat_send_message(
-        channel_id="web",
-        session_id="sess_evolve",
-        mode="agent.plan",
-    )
-    msg.params.update(params)
-
-    assert not _should_cancel_existing_stream_before_chat_send(msg)
-
-
-def test_passive_evolution_approval_chat_send_still_cancels_existing_stream() -> None:
-    _should_cancel_existing_stream_before_chat_send = getattr(
-        MessageHandler,
-        "_should_cancel_existing_stream_before_chat_send",
-    )
-    msg = _chat_send_message(
-        channel_id="web",
-        session_id="sess_evolve",
-        mode="agent.plan",
-    )
-    msg.params.update(
-        {
-            "query": "",
-            "source": "skill_evolution_approval",
-            "request_id": "regular_evolve_1",
-            "answers": [{"selected_options": ["allow_always"], "custom_input": ""}],
-            "approval_schema": "openjiuwen.skill_evolution_approval.v1",
-            "evolution_meta": {
-                "event_kind": "approval",
-                "rail_kind": "regular",
-                "approval_kind": "evolve",
-            },
-        }
-    )
-
-    assert _should_cancel_existing_stream_before_chat_send(msg)
 
 
 # ── cancel_agent_sessions_on_disconnect ─────────────────────────
@@ -480,45 +204,6 @@ async def test_disconnect_recovers_session_from_stale_request_keys() -> None:
     await asyncio.sleep(0)
     # Exactly one chat.interrupt must have been emitted for the recovered session.
     assert len(_FakeAgentClient.sent_requests) == 1
-
-
-@pytest.mark.asyncio
-async def test_disconnect_cancel_can_be_delayed_until_grace_expires() -> None:
-    handler = _TestMessageHandler.create()
-    _seed_stream_task(
-        handler, rid="rid-delayed", channel_id="tui", session_id="sess_delayed",
-    )
-
-    await handler.schedule_cancel_agent_sessions_on_disconnect(
-        [],
-        stale_request_keys=[("tui", "rid-delayed")],
-        delay_seconds=0.01,
-    )
-
-    await asyncio.sleep(0)
-    assert _FakeAgentClient.sent_requests == []
-
-    await asyncio.sleep(0.03)
-    assert len(_FakeAgentClient.sent_requests) == 1
-
-
-@pytest.mark.asyncio
-async def test_reconnect_cancels_scheduled_disconnect_cancel() -> None:
-    handler = _TestMessageHandler.create()
-    _seed_stream_task(
-        handler, rid="rid-reconnect", channel_id="tui", session_id="sess_reconnect",
-    )
-
-    await handler.schedule_cancel_agent_sessions_on_disconnect(
-        [],
-        stale_request_keys=[("tui", "rid-reconnect")],
-        delay_seconds=0.03,
-    )
-
-    assert handler.cancel_scheduled_disconnect_cancel("tui", "sess_reconnect") is True
-    await asyncio.sleep(0.05)
-
-    assert _FakeAgentClient.sent_requests == []
 
 
 @pytest.mark.asyncio

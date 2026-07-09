@@ -57,19 +57,6 @@ ARCH_ALIASES = {
 SECCOMP_DATA_NR_OFFSET = 0
 # offsetof(struct seccomp_data, arch)
 SECCOMP_DATA_ARCH_OFFSET = 4
-# offsetof(struct seccomp_data, args[0]) / args[1]
-SECCOMP_DATA_ARG0_OFFSET = 16
-SECCOMP_DATA_ARG1_OFFSET = 24
-
-# kill(2) pid arguments compared via BPF_W (lower 32 bits of seccomp args[0]).
-_DAEMON_PROTECTED_KILL_TARGETS = (
-    0,
-    1,
-    2,
-    0xFFFFFFFE,  # -2, kill process group 2
-    0xFFFFFFFF,  # -1, broadcast to same-UID processes
-)
-_DAEMON_PROTECTED_TGKILL_TARGETS = (1, 2)
 
 
 def _machine() -> str:
@@ -108,9 +95,6 @@ def _fallback_syscall_numbers() -> dict[str, int]:
             "delete_module": 106,
             "ptrace": 117,
             "reboot": 142,
-            "kill": 129,
-            "tkill": 130,
-            "tgkill": 131,
             "getpid": 172,
             "getppid": 173,
             "add_key": 217,
@@ -222,55 +206,6 @@ def _bpf_jump(code: int, k: int, jt: int, jf: int) -> bytes:
     return struct.pack("<HBBI", code, jt, jf, k)
 
 
-def _append_daemon_signal_guard(prog: bytearray, syscall_table: dict[str, int]) -> None:
-    """Deny kill-family syscalls that target sandbox infrastructure PIDs.
-
-    Appended after policy-driven syscall blocks and before the default
-    ALLOW.  Each guarded syscall uses an inline EPERM return so this
-    section does not share tail-jump offsets with the policy blocklist.
-    """
-    guarded = (
-        ("kill", _DAEMON_PROTECTED_KILL_TARGETS, ()),
-        ("tkill", _DAEMON_PROTECTED_KILL_TARGETS, ()),
-        ("tgkill", _DAEMON_PROTECTED_KILL_TARGETS, _DAEMON_PROTECTED_TGKILL_TARGETS),
-    )
-    for name, arg0_targets, arg1_targets in guarded:
-        nr = syscall_table.get(name)
-        if nr is None:
-            continue
-
-        body = bytearray()
-        body += _bpf_stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_ARG0_OFFSET)
-        eperm_index = (
-            1
-            + len(arg0_targets)
-            + (1 if arg1_targets else 0)
-            + len(arg1_targets)
-            + 1
-        )
-        for index, value in enumerate(arg0_targets):
-            remaining = eperm_index - (1 + index + 1)
-            body += _bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, value, remaining, 0)
-        if arg1_targets:
-            body += _bpf_stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_ARG1_OFFSET)
-            arg1_start = 1 + len(arg0_targets) + 1
-            for index, value in enumerate(arg1_targets):
-                remaining = eperm_index - (arg1_start + index + 1)
-                body += _bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, value, remaining, 0)
-        # ``BPF_JMP|BPF_K`` uses the immediate ``k`` field as the jump
-        # offset.  When no protected PID matched above, skip the EPERM RET
-        # below (``k=1``).  ``k=0`` incorrectly falls through to EPERM and
-        # blocks every other kill/tkill/tgkill target (e.g. user pid 18).
-        body += _bpf_jump(BPF_JMP | BPF_K, 1, 0, 0)
-        body += _bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ERRNO_EPERM)
-
-        skip_body = len(body) // 8
-        # Re-load nr before each guard: prior LD arg0/arg1 clobbers the accumulator.
-        prog += _bpf_stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR_OFFSET)
-        prog += _bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, nr, 0, skip_body)
-        prog.extend(body)
-
-
 def build_seccomp_filter(policy: SyscallPolicy) -> bytes:
     """Build a seccomp-bpf binary filter from a SyscallPolicy.
 
@@ -297,15 +232,19 @@ def _assemble_bpf(blocked_nrs: list[int]) -> bytes:
     Structure:
       1. Validate arch == current process architecture
       2. Load syscall number
-      3. For each blocked nr: if match -> inline return errno
-      4. Deny kill/tkill/tgkill that target sandbox infrastructure PIDs
-      5. Default: ALLOW
-
-    Policy blocks use inline RET actions instead of tail jumps so adding
-    the daemon signal guard cannot perturb blocked-syscall offsets.
+      3. For each blocked nr: if match -> return configured errno
+      4. Default: ALLOW
     """
     syscall_table = _get_syscall_numbers()
     clone3_nr = syscall_table.get("clone3")
+    errno_actions: dict[int, int] = {}
+    for nr in blocked_nrs:
+        # pthread_create in recent glibc probes clone3 first and only falls back
+        # to clone when clone3 looks unavailable. Return ENOSYS instead of EPERM
+        # so runtimes like Node.js can still create threads via clone.
+        errno_actions[nr] = ERRNO_ENOSYS if nr == clone3_nr else ERRNO_EPERM
+
+    action_values = list(dict.fromkeys(errno_actions.values()))
     prog = bytearray()
 
     # Load arch
@@ -317,19 +256,21 @@ def _assemble_bpf(blocked_nrs: list[int]) -> bytes:
     # Load syscall number
     prog += _bpf_stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR_OFFSET)
 
-    # For each blocked syscall: inline deny on match.
-    # On miss, skip only the inline RET (``jf=1``). A larger skip would
-    # jump over the next syscall's JEQ as well and leave the filter in an
-    # invalid state that makes bwrap crash with SIGSEGV during startup.
-    for nr in blocked_nrs:
-        prog += _bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, nr, 0, 1)
-        errno = ERRNO_ENOSYS if nr == clone3_nr else ERRNO_EPERM
-        prog += _bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | errno)
-
-    _append_daemon_signal_guard(prog, syscall_table)
+    # For each blocked syscall: jump to deny if match
+    n = len(blocked_nrs)
+    for i, nr in enumerate(blocked_nrs):
+        action_index = action_values.index(errno_actions[nr])
+        jump_offset = (n - i) + action_index
+        # If match -> jump to the errno block.
+        # If no match -> fall through to next check
+        prog += _bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, nr, jump_offset, 0)
 
     # Default: allow
     prog += _bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+
+    # Deny blocks.
+    for errno in action_values:
+        prog += _bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | errno)
 
     return bytes(prog)
 

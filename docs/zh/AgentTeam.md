@@ -2,7 +2,7 @@
 
 ## 简介
 
-Agent Team 是JiuwenSwarm 平台的核心协作功能，它让多个智能体（Agent）能够围绕同一目标形成协作团队，共同完成复杂任务。与单个 Agent 的能力增强不同，Agent Team 强调的是团队协作、分工执行和持续交付。
+Agent Team 是JiuwenAvatar 平台的核心协作功能，它让多个智能体（Agent）能够围绕同一目标形成协作团队，共同完成复杂任务。与单个 Agent 的能力增强不同，Agent Team 强调的是团队协作、分工执行和持续交付。
 
 
 ---
@@ -177,11 +177,11 @@ Leader Agent 收集所有 Teammate 的结果：
 
 ### 2.3 启动 Agent Team 模式
 
-Agent Team 模式是 JiuwenSwarm 平台的一种特殊协作模式，用户可以通过以下方式启动：
+Agent Team 模式是 JiuwenAvatar 平台的一种特殊协作模式，用户可以通过以下方式启动：
 
 **方式一：前端对话页面切换**
 
-在 JiuwenSwarm 的前端对话页面，可以直接切换到集群模式（Agent Team 模式）。这是最简单的启动方式，只需在对话界面选择对应的模式即可。
+在 JiuwenAvatar 的前端对话页面，可以直接切换到集群模式（Agent Team 模式）。这是最简单的启动方式，只需在对话界面选择对应的模式即可。
 
 ![模式切换按钮](../assets/images/切换到集群模式.png)
 
@@ -223,58 +223,32 @@ Agent Team 模式下同样支持技能（Skills）的使用和开发。团队中
 2. **共享工具资源**：团队共享技能可以让所有成员使用同一套工具，避免重复开发
 3. **协作效率提升**：技能可以让 Agent 更高效地完成分配的任务
 
-> 有关 Team Skills 的详细使用和开发教程，请参阅 [Team Skill 开发指南](TeamSkills.md)。
+> 有关 Team Skills 的详细使用和开发教程，请参阅 [Team Skill 开发指南](TeamSkill.md)。
 
 ### 2.5 Team Memory
 
-**Round 定义**：Agent Team 中一轮完整的团队协作周期，通常包含任务分配、执行、汇报和汇总等阶段。
-
 Agent Team 模式下，每个团队都有自己的双层记忆：成员各自的**个人记忆**（独立读写）和团队共享的 **`TEAM_MEMORY.md`**（所有成员只读，Leader 在 round 结束后由提取 agent 自动写入）。
 
-**团队生命周期与记忆行为：**
+- **临时团队**：成员只读访问父 agent 的 workspace 记忆，团队销毁后不留痕
+- **持久团队**：每个成员独立的个人记忆 + 跨 round 累积的团队记忆，预定义成员的原有 workspace 通过 symlink 自动延续
 
-| 生命周期 | 个人记忆 | 团队记忆 | 适用场景 |
-|----------|----------|----------|----------|
-| **临时团队（temporary）** | 只读访问父 agent 的 workspace 记忆 | 无 | 单次任务、即用即弃 |
-| **持久团队（persistent）** | 每个成员独立读写 | 自动提取 + 跨 round 累积 | 长期协作、需经验沉淀 |
-
-**详细说明：**
-
-- **临时团队**：
-  - 成员只读访问父 agent 的 workspace 记忆，无法污染源记忆
-  - 无团队记忆，团队销毁后不留痕
-  - 适合单次任务、即用即弃的场景
-
-- **持久团队**：
-  - 每个成员拥有独立的个人记忆，支持读写操作
-  - 团队记忆由 Leader 在每个 round 结束后自动提取，并跨 round 累积
-  - 预定义成员的原有 workspace 通过 symlink 自动延续
-  - 适合长期协作、需要经验沉淀的场景
-
-**记忆层级与访问权限：**
-
-| 层级 | 访问权限 | 写入方 |
-|------|----------|--------|
-| 个人记忆 | 该成员独占 | 成员自身（在会话中调用记忆工具） |
-| 团队记忆 | 所有成员只读 | Leader 在 round 结束后由提取 agent 自动写入 |
-
-完整的存储布局、提取分类（`[decision]` / `[lesson]` / `[member]` / `[context]`）、跨团队/跨成员隔离机制详见 [记忆系统 → Agent Team 团队记忆](记忆.md#进阶agent-swarm-团队记忆)。
+完整的存储布局、提取分类（`[decision]` / `[lesson]` / `[member]` / `[context]`）、跨团队/跨成员隔离机制详见 [记忆系统 → Agent Team 团队记忆](记忆.md#agent-team-团队记忆)。
 
 ---
 
-## 四、案例实践
+## 案例实践
 
-### 4.1 任务目标
+### 任务目标
 
 深度调研新能源汽车行业，生成一份分析报告。
 
-### 4.2 用户输入
+### 用户输入
 
 ```
 帮我调研新能源汽车行业的发展现状、主要厂商、技术趋势，并生成一份分析报告。
 ```
 
-### 4.3 协作过程
+### 协作过程
 
 **Leader 分析需求**
 
@@ -283,7 +257,7 @@ Leader Agent 接收目标后，分析任务：
 - 需要角色：行业分析师、竞争分析师、技术分析师、市场分析师、报告撰写专家
 - 执行计划：先调研，再分析，最后撰写
 
-![leader analysis](../assets/images/leader 分析需求.png)
+![leader analysis](../assets/images/leader分析需求.png)
 
 **Leader 组建团队**
 
@@ -294,7 +268,7 @@ Leader Agent 组建团队：
 - 市场分析师：负责市场前景预测
 - 报告撰写专家：负责报告整合与撰写
 
-![leader build teams](../assets/images/leader 组建团队.png)
+![leader build teams](../assets/images/leader组建团队.png)
 
 **Team Agent 执行**
 Team Agent 接收指派任务后，开始执行
@@ -308,9 +282,9 @@ Leader Agent 整合所有结果：
 - 整合最终报告
 - 向用户交付成果
 
-![Team execute tasks](../assets/images/leader 总结结果.png)
+![Team execute tasks](../assets/images/leader总结结果.png)
 
-### 4.4 产出结果
+### 产出结果
 
 最终交付物：一份完整的新能源汽车行业分析报告，包含：
 - 行业发展现状
@@ -318,14 +292,14 @@ Leader Agent 整合所有结果：
 - 技术趋势总结
 - 数据图表展示
 
-![Team execute tasks](../assets/images/team 结果.png)
+![Team execute tasks](../assets/images/team结果.png)
 
 
 ---
 
-## 五、协作方式
+## 三、协作方式
 
-### 5.1 角色分工
+### 3.1 角色分工
 
 **Leader Agent 的职责**
 
@@ -362,7 +336,7 @@ Agent Team 采用的是"分级自主协同"模式：
 
 > **关键理解**：Leader 负责统筹协调，Teammate 负责专业执行，两者协同完成任务。
 
-### 5.2 共享协作
+### 3.2 共享协作
 
 **团队共享工作区**
 
@@ -400,6 +374,8 @@ Agent Team 的文件结构分为两个层级：**团队共享工作区**和**成
     │   │   ├── docs/                   ← 文档产出
     │   │   └── reports/                ← 报告产出
     │   └── skills/                     ← 团队共享技能
+    ├── team-memory/                    ← 团队共享记忆（Leader 自动提取）
+    │   └── TEAM_MEMORY.md
     └── workspaces/                     ← 各成员独立工作空间
         └── <agent_name>_workspace/     ← 各 Agent 的独立空间
             ├── AGENT.md                ← 智能体配置
@@ -418,7 +394,7 @@ Agent Team 的文件结构分为两个层级：**团队共享工作区**和**成
 
 > **协作体验**：用户可以看到团队共享的中间产物，了解任务推进情况，而不需要手动传递文件。
 
-### 5.3 任务推进
+### 3.3 任务推进
 
 **事件驱动机制**
 
@@ -448,7 +424,7 @@ Agent Team 不是一次性分完工就结束，而是依靠事件驱动持续推
 
 ---
 
-## 六、常见问题
+## 常见问题
 
 ### Q1：Agent Team 和普通对话有什么区别？
 
@@ -486,17 +462,11 @@ Agent Team 采用事件驱动机制：
 - Agent 成员状态
 - 中间产物和结果汇总
 
-### Q6：同一频道可以同时运行多个 Team 会话吗？
-
-本地运行模式支持同一频道下的多个 Team 会话同时运行。切换当前查看的会话只影响界面展示，不会停止其他会话的后台任务；暂停、取消或删除操作只作用于指定会话。
-
-分布式运行模式保持单频道单活动会话语义。创建或切换到另一个 Team 会话时，系统会先停止该频道中原有的活动或待启动会话，以确保远程成员 bootstrap、传输连接和运行时资源不会跨会话复用。
-
 ---
 
-## 七、附录
+## 附录
 
-### 7.1 相关资源
+### 相关资源
 
 - [官网技术博客：Agent Team](https://openjiuwen.com/blogs/blog-artical?id=225)
 

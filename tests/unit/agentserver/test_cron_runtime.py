@@ -4,11 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import (
+from jiuwenavatar.agents.harness.common.tools.cron.cron_runtime import (
     _CronToolsCronBackend,
     _extract_legacy_params,
 )
-from jiuwenswarm.agents.harness.common.tools.cron.cron_tools import CronTools
 
 
 class _FakeCronTools:
@@ -84,66 +83,6 @@ def test_extract_legacy_params_delivery_channel_takes_priority_over_targets() ->
     out = _extract_legacy_params(payload, context=context, require_schedule=True)
 
     assert out["targets"] == "web"
-
-
-def test_extract_legacy_params_context_mode_takes_priority_over_payload() -> None:
-    context = SimpleNamespace(
-        channel_id="web",
-        session_id="sess-1",
-        mode="agent.fast",
-    )
-    payload = {
-        "schedule": {"kind": "cron", "expr": "0 9 * * *"},
-        "payload": {"kind": "agentTurn", "message": "daily report"},
-        "mode": "team",
-    }
-
-    out = _extract_legacy_params(payload, context=context, require_schedule=True)
-
-    assert out["mode"] == "agent.fast"
-
-
-def test_extract_legacy_params_inherits_context_mode_when_missing() -> None:
-    context = SimpleNamespace(channel_id="web", session_id="sess-1", mode="team")
-    payload = {
-        "schedule": {"kind": "cron", "expr": "0 9 * * *"},
-        "payload": {"kind": "agentTurn", "message": "daily report"},
-    }
-
-    out = _extract_legacy_params(payload, context=context, require_schedule=True)
-
-    assert out["mode"] == "team"
-
-
-def test_extract_legacy_params_defaults_to_agent_fast_without_context_mode() -> None:
-    context = SimpleNamespace(channel_id="web", session_id="sess-1")
-    payload = {
-        "schedule": {"kind": "cron", "expr": "0 9 * * *"},
-        "payload": {"kind": "agentTurn", "message": "daily report"},
-    }
-
-    out = _extract_legacy_params(payload, context=context, require_schedule=True)
-
-    assert out["mode"] == "agent.fast"
-
-
-def test_extract_legacy_params_passthrough_unknown_mode() -> None:
-    context = SimpleNamespace(channel_id="web", session_id="sess-1", mode="future.mode")
-    payload = {
-        "schedule": {"kind": "cron", "expr": "0 9 * * *"},
-        "payload": {"kind": "agentTurn", "message": "daily report"},
-    }
-
-    out = _extract_legacy_params(payload, context=context, require_schedule=True)
-
-    assert out["mode"] == "future.mode"
-
-
-@pytest.mark.asyncio
-async def test_ensure_scheduler_requires_message_handler() -> None:
-    tools = CronTools(agent_client=object(), message_handler=None)
-    scheduler = await tools.ensure_scheduler()
-    assert scheduler is None
 
 
 @pytest.mark.asyncio

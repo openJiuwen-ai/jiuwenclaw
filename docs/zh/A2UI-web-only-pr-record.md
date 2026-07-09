@@ -2,12 +2,12 @@
 
 ## 背景
 
-A2UI 的完整能力依赖 Web 前端 renderer、浏览器状态管理和 `a2ui.client_event` 回传。微信、飞书等 IM channel 当前不是 JiuwenSwarm 可控的 Web runtime，因此不应感知 A2UI，也不应承担 A2UI fallback 逻辑。
+A2UI 的完整能力依赖 Web 前端 renderer、浏览器状态管理和 `a2ui.client_event` 回传。微信、飞书等 IM channel 当前不是 JiuwenAvatar 可控的 Web runtime，因此不应感知 A2UI，也不应承担 A2UI fallback 逻辑。
 
 ## 本次变更
 
 - 保持 Web channel 的 A2UI 支持、特性和配置入口不变。
-- 将 A2UI channel 策略集中到 `jiuwenswarm.server.runtime.a2ui.integration.is_a2ui_channel`，当前只有 `web` 支持。
+- 将 A2UI channel 策略集中到 `jiuwenavatar.server.runtime.a2ui.integration.is_a2ui_channel`，当前只有 `web` 支持。
 - 非 Web channel 直接 bypass A2UI：
   - 不注入 A2UI prompt。
   - 不把 A2UI client event 转成模型 prompt。

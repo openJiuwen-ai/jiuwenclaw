@@ -1,0 +1,23 @@
+{
+  "gitcode_token": "",
+  "organizations": [
+    {
+      "name": "openJiuwen",
+      "display_name": "openJiuwen 社区",
+      "skip_repos": [
+        ".gitcode",
+        "relay",
+        "agent-builder",
+        "jiuwenclaw",
+        "jiuwencode",
+        "jiuwenbox",
+        "official-website",
+        "openJiuwen_template"
+      ]
+    }
+  ],
+  "sync": {
+    "interval_hours": 24,
+    "retention_days": 90
+  }
+}

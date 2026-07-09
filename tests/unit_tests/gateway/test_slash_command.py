@@ -1,17 +1,17 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""jiuwenswarm.gateway.slash_command 单元测试."""
+"""jiuwenavatar.gateway.slash_command 单元测试."""
 
 import importlib.util
 from pathlib import Path
 import sys
 import pytest
 
-# 避免 `import jiuwenswarm.gateway.slash_command` 触发 `jiuwenswarm.gateway.__init__`
+# 避免 `import jiuwenavatar.gateway.slash_command` 触发 `jiuwenavatar.gateway.__init__`
 # 进而级联导入 channel/wecom/lark_oapi，在开启 warning->error 的 CI 中导致 collection 失败。
 _MODULE_PATH = (
         Path(__file__).resolve().parents[
-            3] / "jiuwenswarm" / "gateway" / "message_handler" / "command_parser" / "slash_command.py"
+            3] / "jiuwenavatar" / "gateway" / "message_handler" / "command_parser" / "slash_command.py"
 )
 _SPEC = importlib.util.spec_from_file_location("ut_gateway_slash_command", _MODULE_PATH)
 assert _SPEC and _SPEC.loader
@@ -71,27 +71,6 @@ parse_channel_control_text = _MOD.parse_channel_control_text
         ("/rewind confirm 0", ParsedControlAction.REWIND_BAD, None, None, None),
         ("/rewind confirm abc", ParsedControlAction.REWIND_BAD, None, None, None),
         ("/rewind cancel", ParsedControlAction.REWIND_CANCEL, None, None, None),
-        ("/review", ParsedControlAction.REVIEW_OK, None, None, None),
-        ("/review 123", ParsedControlAction.REVIEW_OK, None, None, None),
-        (
-            "/review https://github.com/org/repo/pull/123",
-            ParsedControlAction.REVIEW_OK,
-            None,
-            None,
-            None,
-        ),
-        ("/review abc", ParsedControlAction.REVIEW_OK, None, None, None),
-        ("/review 123 focus on security", ParsedControlAction.REVIEW_OK, None, None, None),
-        ("/review bb37e71c33b87199", ParsedControlAction.REVIEW_OK, None, None, None),
-        ("/review bad-arg", ParsedControlAction.REVIEW_OK, None, None, None),
-        ("/security-review", ParsedControlAction.SECURITY_REVIEW_OK, None, None, None),
-        (
-            "/security-review focus on auth",
-            ParsedControlAction.SECURITY_REVIEW_OK,
-            None,
-            None,
-            None,
-        ),
     ],
 )
 def test_parse_channel_control_text(
@@ -111,38 +90,6 @@ def test_parse_channel_control_text(
         assert p.switch_subcommand is None
     assert p.branch_name == branch_name
     assert p.rewind_turn == rewind_turn
-    if action is ParsedControlAction.REVIEW_OK:
-        if text == "/review":
-            assert p.pr_arg == ""
-        elif text.startswith("/review "):
-            assert p.pr_arg == text[len("/review "):].strip()
-    elif action is ParsedControlAction.REVIEW_BAD:
-        assert p.pr_arg is None
-    elif action is ParsedControlAction.SECURITY_REVIEW_OK:
-        if text == "/security-review":
-            assert p.security_review_arg == ""
-        elif text.startswith("/security-review "):
-            assert p.security_review_arg == text[len("/security-review "):].strip()
-    elif action is ParsedControlAction.SECURITY_REVIEW_BAD:
-        assert p.security_review_arg is None
-
-
-def test_parse_channel_control_text_review_rejects_unsafe_args() -> None:
-    too_long = "x" * 2049
-    p = parse_channel_control_text(f"/review {too_long}")
-    assert p.action is ParsedControlAction.REVIEW_BAD
-
-    p = parse_channel_control_text("/review bad\x00arg")
-    assert p.action is ParsedControlAction.REVIEW_BAD
-
-
-def test_parse_channel_control_text_security_review_rejects_unsafe_args() -> None:
-    too_long = "x" * 2049
-    p = parse_channel_control_text(f"/security-review {too_long}")
-    assert p.action is ParsedControlAction.SECURITY_REVIEW_BAD
-
-    p = parse_channel_control_text("/security-review bad\x00arg")
-    assert p.action is ParsedControlAction.SECURITY_REVIEW_BAD
 
 
 def test_control_message_texts_contains_mode_variants_and_skills() -> None:
@@ -175,11 +122,6 @@ def test_is_control_like_for_im_batching() -> None:
     assert is_control_like_for_im_batching("/branch fix-login")
     assert is_control_like_for_im_batching("/rewind 3")
     assert is_control_like_for_im_batching("/rewind")
-    assert is_control_like_for_im_batching("/review")
-    assert is_control_like_for_im_batching("/review 123")
-    assert is_control_like_for_im_batching("/review bad-arg")
-    assert is_control_like_for_im_batching("/security-review")
-    assert is_control_like_for_im_batching("/security-review focus on auth")
     assert not is_control_like_for_im_batching("/skills")
     assert not is_control_like_for_im_batching("/skills extra")
     assert not is_control_like_for_im_batching("")
@@ -200,38 +142,10 @@ def test_format_skills_list_for_notice() -> None:
     assert "b" in out
 
 
-def test_format_skills_list_for_notice_im_invariants() -> None:
-    """IM 通道（微信等）仅从 payload.content 取文本，skills.list 载荷必须能渲染出非空 content。
-
-    /skills list 在 IM 端无返回的根因：skills.list 响应 ``{"skills": [...]}`` 不含
-    ``content``，被通道当作空消息丢弃。这里锁定 _skills_slash_notice 依赖的渲染入口
-    在成功/空/错误三态下都产出可下发文本。
-    """
-    # 成功：有技能
-    ok_text = format_skills_list_for_notice(
-        {"skills": [{"name": "a", "description": "d", "source": "local"}]}
-    )
-    assert ok_text and ok_text.strip()
-    assert "【技能列表】" in ok_text
-
-    # 空：无技能
-    empty_text = format_skills_list_for_notice({"skills": []})
-    assert empty_text and empty_text.strip()
-
-    # 错误：上游返回 error 字段
-    err_text = format_skills_list_for_notice({"error": "boom"})
-    assert err_text and err_text.strip()
-    assert "boom" in err_text
-
-    # 异常：载荷为 None / 非 dict
-    assert format_skills_list_for_notice(None).strip()
-    assert format_skills_list_for_notice({}).strip()
-
-
 def test_first_batch_registry_ids() -> None:
     ids = {e.id for e in FIRST_BATCH_REGISTRY}
     expected = {
         "new_session", "mode", "switch", "skills", "resume",
-        "workspace_dir", "branch", "rewind", "recap", "agents", "review", "security-review",
+        "workspace_dir", "branch", "rewind", "recap", "agents",
     }
     assert ids == expected

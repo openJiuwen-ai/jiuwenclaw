@@ -2,7 +2,7 @@
 """jiuwenbox HTTP API 命令行客户端 (单文件实现).
 
 入口: 通过 ``pyproject.toml`` 的 ``[project.scripts]`` 安装为可执行脚本 ``jiuwenbox``
-(行为类似 ``uvicorn``); 也支持 ``python -m jiuwenbox.cli.jiuwenbox`` 的用法。
+(行为类似 ``uvicorn``); 也兼容 ``python -m jiuwenbox.cli.jiuwenbox`` 兜底用法。
 
 安装 (在 ``code_agent/jiuwenbox/`` 目录下)::
 
@@ -16,7 +16,7 @@
   ``_JiuwenBoxClient`` 的请求语义, 同时覆盖 ``policies`` / ``proxies`` 端点。
 - ``build_parser``: argparse 嵌套子命令 ``health / sandbox / policy / proxy``。
 - ``cmd_<group>_<action>``: 每个 leaf 子命令的处理函数;
-  返回 ``dict`` / ``list`` 时主流程以 JSON 打印; ``sandbox exec`` 透传 stdout/stderr;
+  返回 ``dict`` / ``list`` 由 ``_format_output`` 统一格式化;
   返回 ``_ExecResult`` 时主流程直接透传退出码; 返回 ``None`` 表示已自行输出。
 - ``_handle_error``: 区分 HTTPStatusError / ConnectError / 本地错误, 映射退出码。
 
@@ -24,9 +24,9 @@
 - 0: 成功; 沙箱 exec exit_code=0
 - 1: HTTP 4xx/5xx 错误
 - 2: 网络不可达
-- 3: 本地参数错误 (env 解析、缺文件等); bg-get/bg-kill 404
+- 3: 本地参数错误 (env 解析、缺文件等)
 - 130: Ctrl+C
-- 其他正整数: 沙箱 exec 透传退出码; bg-exec started=false 时返回 3
+- 其他正整数: 沙箱 exec 透传退出码
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ import sys
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, IO, NoReturn, Optional
+from typing import Any, Callable, IO, Optional
 
 import httpx
 
@@ -122,6 +122,11 @@ _UDS_SCHEME = "unix://"
 # UDS transport 仍需要一个合法 absolute base_url 才能让 httpx 拼相对路径;
 # 这里给一个占位 host, 实际请求完全走 UDS 不读它。
 _UDS_PLACEHOLDER_BASE_URL = "http://jiuwenbox"
+
+# 输出格式枚举
+_OUTPUT_JSON = "json"
+_OUTPUT_TABLE = "table"
+_OUTPUT_PLAIN = "plain"
 
 # 退出码
 EXIT_OK = 0
@@ -293,7 +298,6 @@ class _CliClient:
         env: dict[str, str] | None = None,
         policy: Any = None,
         policy_mode: str | None = None,
-        sandbox_id: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {}
         if env is not None:
@@ -302,8 +306,6 @@ class _CliClient:
             body["policy"] = policy
         if policy_mode is not None:
             body["policy_mode"] = policy_mode
-        if sandbox_id is not None:
-            body["sandbox_id"] = sandbox_id
         return dict(self._post(f"{_API_PREFIX}/sandboxes", json=body).json())
 
     def sandbox_list(self) -> list[dict[str, Any]]:
@@ -355,18 +357,11 @@ class _CliClient:
         sandbox_id: str,
         command: list[str],
         *,
-        job_id: str | None = None,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         stdin: str | None = None,
-        capture_output: bool = True,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {
-            "command": command,
-            "capture_output": capture_output,
-        }
-        if job_id is not None:
-            body["job_id"] = job_id
+        body: dict[str, Any] = {"command": command}
         if cwd is not None:
             body["workdir"] = cwd
         if env is not None:
@@ -375,35 +370,6 @@ class _CliClient:
             body["stdin"] = stdin
         return dict(self._post(
             f"{_API_PREFIX}/sandboxes/{sandbox_id}/exec_background", json=body,
-        ).json())
-
-    def sandbox_bg_get(self, sandbox_id: str, job_id: str) -> dict[str, Any]:
-        return dict(self._get(
-            f"{_API_PREFIX}/sandboxes/{sandbox_id}/background/{job_id}",
-        ).json())
-
-    def sandbox_bg_list(
-        self,
-        sandbox_id: str,
-        *,
-        running_only: bool = False,
-    ) -> list[dict[str, Any]]:
-        payload = self._get(
-            f"{_API_PREFIX}/sandboxes/{sandbox_id}/background",
-            params={"running_only": str(bool(running_only)).lower()},
-        ).json()
-        return list(payload.get("items") or [])
-
-    def sandbox_bg_kill(
-        self,
-        sandbox_id: str,
-        job_id: str,
-        *,
-        signal: int = 15,
-    ) -> dict[str, Any]:
-        return dict(self._post(
-            f"{_API_PREFIX}/sandboxes/{sandbox_id}/background/{job_id}/kill",
-            json={"signal": signal},
         ).json())
 
     def sandbox_logs(self, sandbox_id: str) -> str:
@@ -588,8 +554,85 @@ def _resolve_stdin_input(value: Optional[str]) -> Optional[str]:
 # ────────────────────────────── output formatters ──────────────────────────────
 
 
+# 命令侧通过 cmd_xxx.COLUMNS / cmd_xxx.PLAIN_FIELD 声明列与 plain 字段
+_CMD_COLUMNS_ATTR = "COLUMNS"
+_CMD_PLAIN_FIELD_ATTR = "PLAIN_FIELD"
+
+
 def _print_json(result: Any) -> None:
     _write_stdout(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+
+
+def _print_table(rows: list[dict[str, Any]], columns: list[str]) -> None:
+    """简单 ASCII 表格 (无依赖)。"""
+    if not rows:
+        _write_stdout("(no items)\n")
+        return
+    # 列宽 = max(列名长度, 单元格 str 长度)
+    cells: list[list[str]] = []
+    for row in rows:
+        line: list[str] = []
+        for col in columns:
+            v = row.get(col)
+            line.append("" if v is None else str(v))
+        cells.append(line)
+    widths = [len(c) for c in columns]
+    for line in cells:
+        for i, cell in enumerate(line):
+            if len(cell) > widths[i]:
+                widths[i] = len(cell)
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    _write_stdout(fmt.format(*[c.upper() for c in columns]) + "\n")
+    for line in cells:
+        _write_stdout(fmt.format(*line) + "\n")
+
+
+def _print_plain(result: Any, plain_field: Optional[str]) -> None:
+    """plain 模式: 优先 plain_field, 否则智能展开。"""
+    if isinstance(result, dict):
+        if plain_field and plain_field in result:
+            value = result[plain_field]
+            _write_stdout(("" if value is None else str(value)) + "\n")
+            return
+        # 兜底: 每行 "key=value"
+        for key, value in result.items():
+            _write_stdout(f"{key}={value}\n")
+        return
+    if isinstance(result, list):
+        for item in result:
+            if isinstance(item, dict) and plain_field and plain_field in item:
+                value = item[plain_field]
+                _write_stdout(("" if value is None else str(value)) + "\n")
+            else:
+                _write_stdout(str(item) + "\n")
+        return
+    _write_stdout(("" if result is None else str(result)) + "\n")
+
+
+def _format_output(
+    result: Any,
+    fmt: str,
+    *,
+    columns: Optional[list[str]] = None,
+    plain_field: Optional[str] = None,
+) -> None:
+    if result is None:
+        return
+    if fmt == _OUTPUT_JSON:
+        _print_json(result)
+        return
+    if fmt == _OUTPUT_TABLE:
+        if isinstance(result, list) and all(isinstance(it, dict) for it in result) and columns:
+            _print_table(result, columns)
+            return
+        # 不能表格化时退化为 JSON
+        _print_json(result)
+        return
+    if fmt == _OUTPUT_PLAIN:
+        _print_plain(result, plain_field)
+        return
+    # 兜底
+    _print_json(result)
 
 
 # ────────────────────────────── stderr helpers ──────────────────────────────
@@ -620,6 +663,9 @@ def cmd_health(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.health()
 
 
+cmd_health.PLAIN_FIELD = "status"  # type: ignore[attr-defined]
+
+
 # ── sandbox ──
 
 def cmd_sandbox_create(args: argparse.Namespace, client: _CliClient) -> Any:
@@ -629,8 +675,10 @@ def cmd_sandbox_create(args: argparse.Namespace, client: _CliClient) -> Any:
         env=env,
         policy=policy,
         policy_mode=args.policy_mode,
-        sandbox_id=args.sandbox_id,
     )
+
+
+cmd_sandbox_create.PLAIN_FIELD = "id"  # type: ignore[attr-defined]
 
 
 def cmd_sandbox_ls(args: argparse.Namespace, client: _CliClient) -> Any:
@@ -640,8 +688,15 @@ def cmd_sandbox_ls(args: argparse.Namespace, client: _CliClient) -> Any:
     return sandboxes
 
 
+cmd_sandbox_ls.COLUMNS = ["id", "phase", "runtime", "pid", "created_at"]  # type: ignore[attr-defined]
+cmd_sandbox_ls.PLAIN_FIELD = "id"  # type: ignore[attr-defined]
+
+
 def cmd_sandbox_get(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.sandbox_get(args.sandbox_id)
+
+
+cmd_sandbox_get.PLAIN_FIELD = "phase"  # type: ignore[attr-defined]
 
 
 def cmd_sandbox_rm(args: argparse.Namespace, client: _CliClient) -> Any:
@@ -661,12 +716,21 @@ def cmd_sandbox_start(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.sandbox_start(args.sandbox_id)
 
 
+cmd_sandbox_start.PLAIN_FIELD = "phase"  # type: ignore[attr-defined]
+
+
 def cmd_sandbox_stop(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.sandbox_stop(args.sandbox_id)
 
 
+cmd_sandbox_stop.PLAIN_FIELD = "phase"  # type: ignore[attr-defined]
+
+
 def cmd_sandbox_restart(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.sandbox_restart(args.sandbox_id)
+
+
+cmd_sandbox_restart.PLAIN_FIELD = "phase"  # type: ignore[attr-defined]
 
 
 def _strip_command_separator(command: list[str]) -> list[str]:
@@ -690,65 +754,36 @@ def cmd_sandbox_exec(args: argparse.Namespace, client: _CliClient) -> Any:
         stdin=stdin_text,
         timeout_seconds=args.timeout_seconds,
     )
-    stdout_text = result.get("stdout") or ""
-    stderr_text = result.get("stderr") or ""
-    if stdout_text:
-        _write_stdout(stdout_text)
-    if stderr_text:
-        _write_stderr(stderr_text)
+    if args.output == _OUTPUT_JSON:
+        _print_json(result)
+    else:
+        # 默认 / plain / table 都走 "stdout→stdout, stderr→stderr" 透传
+        stdout_text = result.get("stdout") or ""
+        stderr_text = result.get("stderr") or ""
+        if stdout_text:
+            _write_stdout(stdout_text)
+        if stderr_text:
+            _write_stderr(stderr_text)
     exit_code = int(result.get("exit_code") or 0)
     return _ExecResult(exit_code=exit_code)
 
 
-def cmd_sandbox_bg_exec(args: argparse.Namespace, client: _CliClient) -> Any:
+def cmd_sandbox_exec_bg(args: argparse.Namespace, client: _CliClient) -> Any:
     command: list[str] = _strip_command_separator(list(args.command or []))
     if not command:
         raise _CliError("missing command after `--`")
     env = _parse_env_list(args.env)
     stdin_text = _resolve_stdin_input(args.stdin)
-    result = client.sandbox_exec_background(
+    return client.sandbox_exec_background(
         args.sandbox_id,
         command,
-        job_id=args.job_id,
         cwd=args.cwd,
         env=env,
         stdin=stdin_text,
-        capture_output=not args.no_capture,
     )
-    if not result.get("started"):
-        raise _CliError(result.get("error_message") or "background exec failed")
-    return result
 
 
-def _reraise_bg_http_error(exc: httpx.HTTPStatusError) -> NoReturn:
-    """Map background-job 404 responses to exit code 3."""
-    if exc.response.status_code == 404:
-        detail = _response_error_detail(exc.response)
-        raise _CliError(detail or "background job not found", exit_code=EXIT_LOCAL_ERROR) from exc
-    raise exc
-
-
-def cmd_sandbox_bg_get(args: argparse.Namespace, client: _CliClient) -> Any:
-    try:
-        return client.sandbox_bg_get(args.sandbox_id, args.job_id)
-    except httpx.HTTPStatusError as exc:
-        _reraise_bg_http_error(exc)
-
-
-def cmd_sandbox_bg_list(args: argparse.Namespace, client: _CliClient) -> Any:
-    items = client.sandbox_bg_list(args.sandbox_id, running_only=args.running_only)
-    return {"items": items}
-
-
-def cmd_sandbox_bg_kill(args: argparse.Namespace, client: _CliClient) -> Any:
-    try:
-        return client.sandbox_bg_kill(
-            args.sandbox_id,
-            args.job_id,
-            signal=args.signal,
-        )
-    except httpx.HTTPStatusError as exc:
-        _reraise_bg_http_error(exc)
+cmd_sandbox_exec_bg.PLAIN_FIELD = "pid"  # type: ignore[attr-defined]
 
 
 def cmd_sandbox_logs(args: argparse.Namespace, client: _CliClient) -> Any:
@@ -805,6 +840,18 @@ def cmd_sandbox_files(args: argparse.Namespace, client: _CliClient) -> Any:
     )
 
 
+def _files_columns_row(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "dir" if item.get("is_directory") else "file",
+        "size": item.get("size"),
+        "modified": item.get("modified_time"),
+        "path": item.get("path"),
+    }
+
+
+cmd_sandbox_files.COLUMNS = ["type", "size", "modified", "path"]  # type: ignore[attr-defined]
+
+
 def cmd_sandbox_find(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.sandbox_search(
         args.sandbox_id,
@@ -814,10 +861,16 @@ def cmd_sandbox_find(args: argparse.Namespace, client: _CliClient) -> Any:
     )
 
 
+cmd_sandbox_find.COLUMNS = ["type", "size", "modified", "path"]  # type: ignore[attr-defined]
+
+
 # ── policy ──
 
 def cmd_policy_get(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.policy_get(args.sandbox_id)
+
+
+cmd_policy_get.PLAIN_FIELD = "name"  # type: ignore[attr-defined]
 
 
 # ── proxy ──
@@ -831,12 +884,36 @@ def cmd_proxy_create(args: argparse.Namespace, client: _CliClient) -> Any:
     )
 
 
+cmd_proxy_create.PLAIN_FIELD = "name"  # type: ignore[attr-defined]
+
+
 def cmd_proxy_ls(args: argparse.Namespace, client: _CliClient) -> Any:
-    return client.proxy_list()
+    proxies = client.proxy_list()
+    # 把 nested route.target_endpoint 平铺到 table
+    rows: list[dict[str, Any]] = []
+    for proxy in proxies:
+        target = (proxy.get("route") or {}).get("target_endpoint")
+        rows.append({
+            "name": proxy.get("name"),
+            "state": proxy.get("state"),
+            "port": proxy.get("listen_port"),
+            "target": target,
+        })
+    if args.output == _OUTPUT_TABLE:
+        _print_table(rows, cmd_proxy_ls.COLUMNS)  # type: ignore[attr-defined]
+        return None
+    return proxies
+
+
+cmd_proxy_ls.COLUMNS = ["name", "state", "port", "target"]  # type: ignore[attr-defined]
+cmd_proxy_ls.PLAIN_FIELD = "name"  # type: ignore[attr-defined]
 
 
 def cmd_proxy_get(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.proxy_get(args.name)
+
+
+cmd_proxy_get.PLAIN_FIELD = "state"  # type: ignore[attr-defined]
 
 
 def cmd_proxy_rm(args: argparse.Namespace, client: _CliClient) -> Any:
@@ -854,8 +931,14 @@ def cmd_proxy_start(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.proxy_start(args.name)
 
 
+cmd_proxy_start.PLAIN_FIELD = "state"  # type: ignore[attr-defined]
+
+
 def cmd_proxy_stop(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.proxy_stop(args.name)
+
+
+cmd_proxy_stop.PLAIN_FIELD = "state"  # type: ignore[attr-defined]
 
 
 def cmd_proxy_update(args: argparse.Namespace, client: _CliClient) -> Any:
@@ -894,6 +977,15 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=float(os.environ.get(_ENV_TIMEOUT, _DEFAULT_TIMEOUT)),
         help=f"HTTP client timeout seconds (env {_ENV_TIMEOUT}, default {int(_DEFAULT_TIMEOUT)})",
+    )
+    parser.add_argument(
+        "--output", "-o",
+        choices=[_OUTPUT_JSON, _OUTPUT_TABLE, _OUTPUT_PLAIN],
+        default=None,
+        help=(
+            "output format (default: json for most commands; "
+            "`sandbox exec` defaults to stdout/stderr passthrough)"
+        ),
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -954,10 +1046,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--policy-mode", choices=["override", "append"], default=None,
         help="policy merge mode (default server-side 'override')",
     )
-    p.add_argument(
-        "--sandbox-id",
-        help="optional sandbox id (4-16 chars: lowercase letters, digits, -, _)",
-    )
     p.set_defaults(_handler=cmd_sandbox_create)
 
     p = sandbox_subs.add_parser("ls", help="list sandboxes")
@@ -1011,7 +1099,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(_handler=cmd_sandbox_exec)
 
     p = sandbox_subs.add_parser(
-        "bg-exec", help="execute command in background (non-blocking)",
+        "exec-bg", help="execute command in background (non-blocking)",
     )
     _add_sandbox_id(p)
     p.add_argument("--cwd", help="working directory inside sandbox")
@@ -1024,44 +1112,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="stdin text; use '-' to read from host stdin",
     )
     p.add_argument(
-        "--job-id",
-        help="optional background job id (4-16 chars, [0-9a-z_-])",
-    )
-    p.add_argument(
-        "--no-capture",
-        action="store_true",
-        help="do not capture stdout/stderr",
-    )
-    p.add_argument(
         "command", nargs="*",
         help="command to run; place after `--`",
     )
-    p.set_defaults(_handler=cmd_sandbox_bg_exec)
-
-    p = sandbox_subs.add_parser("bg-get", help="get background job status/output")
-    _add_sandbox_id(p)
-    p.add_argument("job_id", help="background job id")
-    p.set_defaults(_handler=cmd_sandbox_bg_get)
-
-    p = sandbox_subs.add_parser("bg-list", help="list background jobs")
-    _add_sandbox_id(p)
-    p.add_argument(
-        "--running-only",
-        action="store_true",
-        help="only show running jobs",
-    )
-    p.set_defaults(_handler=cmd_sandbox_bg_list)
-
-    p = sandbox_subs.add_parser("bg-kill", help="kill a background job")
-    _add_sandbox_id(p)
-    p.add_argument("job_id", help="background job id")
-    p.add_argument(
-        "--signal",
-        type=int,
-        default=15,
-        help="signal number (default 15 = SIGTERM)",
-    )
-    p.set_defaults(_handler=cmd_sandbox_bg_kill)
+    p.set_defaults(_handler=cmd_sandbox_exec_bg)
 
     p = sandbox_subs.add_parser("logs", help="get audit logs (text)")
     _add_sandbox_id(p)
@@ -1182,6 +1236,7 @@ def _handle_error(exc: BaseException, *, verbose: bool, base_url: str) -> int:
     if isinstance(exc, FileNotFoundError):
         _eprint(f"{exc}")
         return EXIT_LOCAL_ERROR
+    # 兜底
     _eprint(f"{type(exc).__name__}: {exc}")
     if verbose:
         import traceback
@@ -1203,7 +1258,7 @@ def _configure_logging(verbose: bool) -> None:
 
 _EXEC_SUBCOMMAND_SEQUENCES: tuple[tuple[str, str], ...] = (
     ("sandbox", "exec"),
-    ("sandbox", "bg-exec"),
+    ("sandbox", "exec-bg"),
 )
 
 
@@ -1217,7 +1272,7 @@ def _split_argv_on_command_separator(
     ``unrecognized arguments``)。我们在送入 argparse 之前手动切, 让 argparse
     完全看不到 ``--``, 也就不会触发这个坑。
 
-    只在 argv 中出现连续的 ``sandbox exec`` / ``sandbox bg-exec`` 子命令序列
+    只在 argv 中出现连续的 ``sandbox exec`` / ``sandbox exec-bg`` 子命令序列
     且 ``--`` 出现在该序列之后时才做预切分; 其余命令保留 argparse 标准的
     ``--`` 终止符语义 (比如允许用户写 ``sandbox rm -- --weird-id`` 删除以
     ``--`` 开头的 id)。
@@ -1249,7 +1304,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(head_argv)
-    # 仅 ``sandbox exec`` / ``sandbox bg-exec`` 会声明 ``command`` 属性。
+    # 仅 ``sandbox exec`` / ``sandbox exec-bg`` 会声明 ``command`` 属性。
     # 用户在 ``--`` 之后写的 token 一律拼到该 list 末尾。
     if tail_argv is not None and hasattr(args, "command"):
         existing = list(getattr(args, "command", None) or [])
@@ -1275,8 +1330,26 @@ def main(argv: list[str] | None = None) -> int:
                 raise
         if isinstance(result, _ExecResult):
             return result.exit_code
-        if result is not None:
-            _print_json(result)
+        # files / find 命令的 table 行需要平铺 → 处理一次
+        columns: Optional[list[str]] = getattr(handler, _CMD_COLUMNS_ATTR, None)
+        plain_field: Optional[str] = getattr(handler, _CMD_PLAIN_FIELD_ATTR, None)
+        # 全局 ``--output`` 未指定时 (None) 默认走 JSON; ``sandbox exec`` 自己在
+        # handler 里把 None 解释成 "stdout/stderr 透传", 走不到这里的 _format_output 兜底。
+        effective_output = args.output or _OUTPUT_JSON
+        if handler in (cmd_sandbox_files, cmd_sandbox_find) and isinstance(result, list):
+            display_rows = [_files_columns_row(it) for it in result if isinstance(it, dict)]
+            _format_output(
+                display_rows if effective_output == _OUTPUT_TABLE else result,
+                effective_output,
+                columns=columns,
+                plain_field=plain_field,
+            )
+        else:
+            _format_output(
+                result, effective_output,
+                columns=columns,
+                plain_field=plain_field,
+            )
         return EXIT_OK
     except BaseException as exc:
         return _handle_error(

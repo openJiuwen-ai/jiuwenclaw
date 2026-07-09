@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>SVG 转 PNG/ICO 工具</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 900px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 { color: #333; }
+        .file-input {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            border: 2px dashed #2C88FF;
+            text-align: center;
+            margin: 20px 0;
+            cursor: pointer;
+        }
+        .file-input:hover { background: #f0f7ff; }
+        .file-input input { display: none; }
+        .preview {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            margin: 20px 0;
+        }
+        .preview-item {
+            text-align: center;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .preview-item canvas {
+            border: 1px dashed #ccc;
+            background: repeating-conic-gradient(#eee 0% 25%, #fff 0% 50%) 50% / 20px 20px;
+        }
+        .preview-item p { margin: 8px 0 0; color: #666; font-size: 14px; }
+        button {
+            background: #2C88FF;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover { background: #1a6dd4; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .instructions {
+            background: #e8f4fd;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .success {
+            background: #d4edda;
+            color: #155724;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 10px 0;
+            display: none;
+        }
+        .original-preview {
+            max-width: 128px;
+            max-height: 128px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+        #status { color: #666; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>🎨 SVG 转 PNG 工具</h1>
+    
+    <div class="instructions">
+        <p><strong>使用说明：</strong></p>
+        <ol>
+            <li>点击下方区域选择 <code>user-in-team.svg</code> 文件</li>
+            <li>预览确认后点击 "下载所有 PNG"</li>
+            <li>将 <code>logo-256.png</code> 重命名为 <code>logo.png</code> 并复制到 <code>public/</code></li>
+            <li>用 <a href="https://cloudconvert.com/png-to-ico" target="_blank">cloudconvert.com</a> 把 logo-256.png 转为 logo.ico</li>
+        </ol>
+        <p style="color:#666; font-size:14px;">SVG 路径：<code>jiuwenavatar/channels/web/frontend/src/assets/user-in-team.svg</code></p>
+    </div>
+
+    <div class="file-input" onclick="document.getElementById('svgFile').click()">
+        <input type="file" id="svgFile" accept=".svg" onchange="handleFileSelect(event)">
+        <p style="font-size:18px; margin:0;">📁 点击选择 SVG 文件</p>
+        <p style="color:#666; margin:10px 0 0;">或拖拽文件到此处</p>
+    </div>
+
+    <div id="status"></div>
+    
+    <div id="originalPreview" style="display:none;">
+        <h3>原始 SVG 预览：</h3>
+        <img id="originalImg" class="original-preview" alt="Original SVG">
+    </div>
+
+    <div class="preview" id="preview"></div>
+    
+    <div id="buttons" style="display:none;">
+        <button onclick="downloadAll()">📥 下载所有 PNG</button>
+        <button onclick="downloadICO()" style="background:#28a745;">📥 下载 ICO（多尺寸）</button>
+    </div>
+    
+    <div class="success" id="success">✅ 下载完成！请将文件复制到 <code>public/</code> 目录。</div>
+
+    <script>
+        const sizes = [16, 32, 48, 64, 128, 256];
+        const canvases = {};
+        let svgDataUrl = null;
+
+        // Drag and drop support
+        const dropZone = document.querySelector('.file-input');
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.style.background = '#e0f0ff';
+        });
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.style.background = 'white';
+        });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.style.background = 'white';
+            const file = e.dataTransfer.files[0];
+            if (file && file.name.endsWith('.svg')) {
+                processFile(file);
+            }
+        });
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                processFile(file);
+            }
+        }
+
+        function processFile(file) {
+            document.getElementById('status').textContent = '正在加载 ' + file.name + '...';
+            
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                svgDataUrl = e.target.result;
+                
+                // Show original preview
+                document.getElementById('originalImg').src = svgDataUrl;
+                document.getElementById('originalPreview').style.display = 'block';
+                
+                // Generate previews
+                generatePreviews();
+                
+                document.getElementById('status').textContent = '✓ 已加载: ' + file.name;
+                document.getElementById('buttons').style.display = 'block';
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function generatePreviews() {
+            const preview = document.getElementById('preview');
+            preview.innerHTML = '';
+            
+            sizes.forEach(size => {
+                const div = document.createElement('div');
+                div.className = 'preview-item';
+                
+                const canvas = document.createElement('canvas');
+                canvas.width = size;
+                canvas.height = size;
+                canvas.id = `canvas-${size}`;
+                canvases[size] = canvas;
+                
+                div.appendChild(canvas);
+                div.innerHTML += `<p>${size}x${size}</p>`;
+                preview.appendChild(div);
+                
+                renderToCanvas(canvas, size);
+            });
+        }
+
+        function renderToCanvas(canvas, size) {
+            const ctx = canvas.getContext('2d');
+            const img = new Image();
+            
+            img.onload = () => {
+                ctx.clearRect(0, 0, size, size);
+                ctx.drawImage(img, 0, 0, size, size);
+            };
+            img.src = svgDataUrl;
+        }
+
+        function downloadPNG(size) {
+            const canvas = canvases[size];
+            const link = document.createElement('a');
+            link.download = `logo-${size}.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        }
+
+        function downloadAll() {
+            sizes.forEach((size, i) => {
+                setTimeout(() => downloadPNG(size), i * 200);
+            });
+            setTimeout(() => {
+                document.getElementById('success').style.display = 'block';
+            }, sizes.length * 200 + 500);
+        }
+
+        // Generate ICO with multiple sizes (using PNG data)
+        function downloadICO() {
+            // ICO file format header
+            const icoSizes = [16, 32, 48, 256];
+            const pngDatas = [];
+            
+            // Collect PNG data for each size
+            let loaded = 0;
+            icoSizes.forEach((size, index) => {
+                const canvas = canvases[size];
+                canvas.toBlob((blob) => {
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                        pngDatas[index] = new Uint8Array(reader.result);
+                        loaded++;
+                        if (loaded === icoSizes.length) {
+                            createICO(icoSizes, pngDatas);
+                        }
+                    };
+                    reader.readAsArrayBuffer(blob);
+                }, 'image/png');
+            });
+        }
+
+        function createICO(sizes, pngDatas) {
+            // ICO header: 6 bytes
+            // ICONDIR: type=1 (icon), count=number of images
+            const numImages = sizes.length;
+            let totalSize = 6 + (numImages * 16); // header + directory entries
+            
+            pngDatas.forEach(png => {
+                totalSize += png.length;
+            });
+            
+            const buffer = new ArrayBuffer(totalSize);
+            const view = new DataView(buffer);
+            const uint8 = new Uint8Array(buffer);
+            
+            // ICONDIR header
+            view.setUint16(0, 0, true);       // Reserved
+            view.setUint16(2, 1, true);       // Type: 1 = icon
+            view.setUint16(4, numImages, true); // Number of images
+            
+            // ICONDIRENTRY for each image
+            let offset = 6 + (numImages * 16);
+            
+            sizes.forEach((size, i) => {
+                const entryOffset = 6 + (i * 16);
+                const pngData = pngDatas[i];
+                
+                view.setUint8(entryOffset + 0, size === 256 ? 0 : size);  // Width
+                view.setUint8(entryOffset + 1, size === 256 ? 0 : size);  // Height
+                view.setUint8(entryOffset + 2, 0);     // Color palette
+                view.setUint8(entryOffset + 3, 0);     // Reserved
+                view.setUint16(entryOffset + 4, 1, true);  // Color planes
+                view.setUint16(entryOffset + 6, 32, true); // Bits per pixel
+                view.setUint32(entryOffset + 8, pngData.length, true);  // Size of image data
+                view.setUint32(entryOffset + 12, offset, true);  // Offset to image data
+                
+                // Copy PNG data
+                uint8.set(pngData, offset);
+                offset += pngData.length;
+            });
+            
+            // Download
+            const blob = new Blob([buffer], { type: 'image/x-icon' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = 'logo.ico';
+            link.click();
+            
+            document.getElementById('success').style.display = 'block';
+        }
+    </script>
+</body>
+</html>

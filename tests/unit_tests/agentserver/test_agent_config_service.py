@@ -11,15 +11,14 @@ import pytest
 
 import yaml
 
-from jiuwenswarm.server.runtime.agent_config_service import (
+from jiuwenavatar.server.runtime.agent_config_service import (
     BUILTIN_AGENTS,
     AgentConfigService,
     CreateAgentParams,
     UpdateAgentParams,
 )
-from jiuwenswarm.common.config import (
+from jiuwenavatar.common.config import (
     remove_subagent_from_config,
-    update_swarmflow_enabled_in_config,
     upsert_subagent_in_config,
 )
 
@@ -35,7 +34,7 @@ class TestAgentConfigService:
     @pytest.fixture
     def service(self, tmp_workspace):
         """Create AgentConfigService with mocked get_user_workspace_dir."""
-        import jiuwenswarm.server.runtime.agent_config_service as svc_mod
+        import jiuwenavatar.server.runtime.agent_config_service as svc_mod
         orig = svc_mod.get_user_workspace_dir
 
         def mock_get_user_workspace_dir():
@@ -59,7 +58,7 @@ class TestAgentConfigService:
 
     @staticmethod
     def test_list_agents_merges_custom_from_project_dir(service, tmp_workspace):
-        agents_dir = tmp_workspace / ".jiuwenswarm" / "agents"
+        agents_dir = tmp_workspace / ".jiuwenavatar" / "agents"
         agents_dir.mkdir(parents=True)
         (agents_dir / "my-agent.md").write_text(
             "---\nname: my-agent\ndescription: 测试 agent\n---\n\n这是一个测试 agent。\n",
@@ -79,14 +78,14 @@ class TestAgentConfigService:
     def test_list_agents_priority_project_overrides_user(tmp_workspace):
         """project 级同名 agent 覆盖 user 级，user 级标记 shadowed_by。"""
         # 在同一个 workspace 下同时创建 project 和 local 同名 agent
-        project_dir = tmp_workspace / ".jiuwenswarm" / "agents"
+        project_dir = tmp_workspace / ".jiuwenavatar" / "agents"
         project_dir.mkdir(parents=True)
         (project_dir / "my-agent.md").write_text(
             "---\nname: my-agent\ndescription: project 级\n---\n\nproject 级 prompt。\n",
             encoding="utf-8",
         )
 
-        local_dir = tmp_workspace / ".jiuwenswarm" / "agents-local"
+        local_dir = tmp_workspace / ".jiuwenavatar" / "agents-local"
         local_dir.mkdir(parents=True)
         (local_dir / "my-agent.md").write_text(
             "---\nname: my-agent\ndescription: local 级\n---\n\nlocal 级 prompt。\n",
@@ -155,7 +154,7 @@ class TestAgentConfigService:
         assert agent.skills == ["daily-report"]
 
         # 验证文件写入
-        md_file = tmp_workspace / ".jiuwenswarm" / "agents" / "test-agent.md"
+        md_file = tmp_workspace / ".jiuwenavatar" / "agents" / "test-agent.md"
         assert md_file.exists()
         content = md_file.read_text(encoding="utf-8")
         assert "name: test-agent" in content
@@ -177,7 +176,7 @@ class TestAgentConfigService:
     @staticmethod
     def test_create_agent_overwrites_existing_custom(service, tmp_workspace):
         """创建同名自定义 agent 时覆盖已有文件。"""
-        agents_dir = tmp_workspace / ".jiuwenswarm" / "agents"
+        agents_dir = tmp_workspace / ".jiuwenavatar" / "agents"
         agents_dir.mkdir(parents=True)
         (agents_dir / "my-agent.md").write_text(
             "---\nname: my-agent\ndescription: old\n---\n\nold prompt\n",
@@ -198,7 +197,7 @@ class TestAgentConfigService:
 
     @staticmethod
     def test_update_agent_modifies_fields(service, tmp_workspace):
-        agents_dir = tmp_workspace / ".jiuwenswarm" / "agents"
+        agents_dir = tmp_workspace / ".jiuwenavatar" / "agents"
         agents_dir.mkdir(parents=True)
         (agents_dir / "my-agent.md").write_text(
             "---\nname: my-agent\ndescription: original\n---\n\noriginal prompt\n",
@@ -227,7 +226,7 @@ class TestAgentConfigService:
 
     @staticmethod
     def test_delete_agent_removes_file(service, tmp_workspace):
-        agents_dir = tmp_workspace / ".jiuwenswarm" / "agents"
+        agents_dir = tmp_workspace / ".jiuwenavatar" / "agents"
         agents_dir.mkdir(parents=True)
         md_file = agents_dir / "my-agent.md"
         md_file.write_text(
@@ -251,7 +250,7 @@ class TestAgentConfigService:
 
     @staticmethod
     def test_parse_agent_file_with_full_frontmatter(service, tmp_workspace):
-        agents_dir = tmp_workspace / ".jiuwenswarm" / "agents"
+        agents_dir = tmp_workspace / ".jiuwenavatar" / "agents"
         agents_dir.mkdir(parents=True)
         (agents_dir / "full.md").write_text(
             "---\n"
@@ -281,7 +280,7 @@ class TestAgentConfigService:
 
     @staticmethod
     def test_parse_agent_file_with_minimal_frontmatter(service, tmp_workspace):
-        agents_dir = tmp_workspace / ".jiuwenswarm" / "agents"
+        agents_dir = tmp_workspace / ".jiuwenavatar" / "agents"
         agents_dir.mkdir(parents=True)
         (agents_dir / "minimal.md").write_text(
             "---\nname: minimal-agent\ndescription: 最小配置\n---\n\n只有必要字段。\n",
@@ -317,7 +316,7 @@ class TestSubagentConfigMutation:
     @pytest.fixture
     def tmp_config(self, tmp_path):
         """创建临时 config.yaml 用于测试 round-trip 读写."""
-        import jiuwenswarm.common.config as config_mod
+        import jiuwenavatar.common.config as config_mod
 
         config_file = tmp_path / "config.yaml"
         config_file.write_text("{}\n", encoding="utf-8")
@@ -345,7 +344,7 @@ class TestSubagentConfigMutation:
     def test_upsert_preserves_other_keys(tmp_config):
         upsert_subagent_in_config("my-agent", enabled=True)
         # 手动添加额外的 key 模拟已有配置
-        import jiuwenswarm.common.config as config_mod
+        import jiuwenavatar.common.config as config_mod
 
         roundtrip = config_mod.load_yaml_round_trip(config_mod.CONFIG_YAML_PATH)
         roundtrip["react"]["subagents"]["my-agent"]["max_iterations"] = 50
@@ -377,53 +376,6 @@ class TestSubagentConfigMutation:
     def test_remove_empty_name_raises():
         with pytest.raises(ValueError, match="subagent name is required"):
             remove_subagent_from_config("")
-
-
-class TestSwarmflowConfigMutation:
-    """update_swarmflow_enabled_in_config 测试."""
-
-    @pytest.fixture
-    def tmp_config(self, tmp_path, monkeypatch):
-        import jiuwenswarm.common.config as config_mod
-
-        config_file = tmp_path / "config.yaml"
-        config_file.write_text(
-            """
-modes:
-  team:
-    jiuwen_team:
-      team_name: jiuwen_team
-      enable_swarmflow: true
-    secondary_team:
-      team_name: secondary_team
-      enable_swarmflow: true
-""",
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(config_mod, "CONFIG_YAML_PATH", config_file)
-        return config_file
-
-    @staticmethod
-    def test_updates_modes_team_jiuwen_team_entry(tmp_config):
-        update_swarmflow_enabled_in_config(False)
-
-        data = yaml.safe_load(tmp_config.read_text(encoding="utf-8"))
-        teams = data["modes"]["team"]
-        assert teams["jiuwen_team"]["enable_swarmflow"] is False
-        assert teams["secondary_team"]["enable_swarmflow"] is True
-
-    @staticmethod
-    def test_creates_modes_team_jiuwen_team_entry(tmp_path, monkeypatch):
-        import jiuwenswarm.common.config as config_mod
-
-        config_file = tmp_path / "config.yaml"
-        config_file.write_text("{}\n", encoding="utf-8")
-        monkeypatch.setattr(config_mod, "CONFIG_YAML_PATH", config_file)
-
-        update_swarmflow_enabled_in_config(True)
-
-        data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-        assert data["modes"]["team"]["jiuwen_team"]["enable_swarmflow"] is True
 
 
 class TestAgentLLMGeneration:

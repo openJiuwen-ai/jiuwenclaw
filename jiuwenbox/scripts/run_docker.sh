@@ -226,7 +226,6 @@ echo
 docker run -itd \
     --name "$CONTAINER_NAME" \
     --restart=unless-stopped \
-    --sysctl net.ipv4.ip_forward=1 \
     --cap-add=SYS_ADMIN \
     --cap-add=NET_ADMIN \
     --security-opt seccomp=unconfined \

@@ -1,6 +1,6 @@
 ---
 name: ui_e2e
-description: 运行 JiuwenSwarm Web UI 端到端测试并收集截图、日志、report.md、report.json。用于验证 Todo 和 Cron Web UI 流程、复现浏览器交互问题、选择运行解释器、准备 Playwright 环境，或返回可操作的失败证据时。
+description: 运行 JiuwenClaw Web UI 端到端测试并收集截图、日志、report.md、report.json。用于验证 Todo 和 Cron Web UI 流程、复现浏览器交互问题、选择运行解释器、准备 Playwright 环境，或返回可操作的失败证据时。
 ---
 
 # UI E2E
@@ -15,23 +15,23 @@ description: 运行 JiuwenSwarm Web UI 端到端测试并收集截图、日志�
 
 ## 准备环境
 
-- 选择用于启动 `jiuwenswarm.app` 和 `jiuwenswarm.app_web` 的 Python 解释器。
+- 选择用于启动 `jiuwenclaw.app` 和 `jiuwenclaw.app_web` 的 Python 解释器。
 - 在该解释器里安装项目依赖和 `.[e2e]`。
-- 确保 `jiuwenswarm/channels/web/frontend` 已安装前端依赖。
+- 确保 `jiuwenclaw/channels/web/frontend` 已安装前端依赖。
 - 确保本机可用 Chrome/Chromium；没有时再安装 Playwright 浏览器。
 
 常用命令：
 
 ```bash
-export JIUWENSWARM_E2E_PYTHON=.venv/bin/python
-"$JIUWENSWARM_E2E_PYTHON" -m pip install -e ".[e2e]"
-"$JIUWENSWARM_E2E_PYTHON" -m playwright install chromium
+export JIUWENAVATAR_E2E_PYTHON=.venv/bin/python
+"$JIUWENAVATAR_E2E_PYTHON" -m pip install -e ".[e2e]"
+"$JIUWENAVATAR_E2E_PYTHON" -m playwright install chromium
 ```
 
 ## 解释器选择
 
 1. `--runtime-python`
-2. 环境变量 `JIUWENSWARM_E2E_PYTHON`
+2. 环境变量 `JIUWENAVATAR_E2E_PYTHON`
 3. `./.venv/bin/python`
 4. 当前解释器
 
@@ -57,14 +57,14 @@ python3 tests/ui_e2e/cron_ui_report.py --build
 ```bash
 python3 -m tests.ui_e2e.run_suite \
   --build \
-  --runtime-python "$JIUWENSWARM_E2E_PYTHON" \
+  --runtime-python "$JIUWENAVATAR_E2E_PYTHON" \
   --report-root /tmp/ui-e2e-suite
 ```
 
 ```bash
 python3 tests/ui_e2e/cron_ui_report.py \
   --build \
-  --runtime-python "$JIUWENSWARM_E2E_PYTHON" \
+  --runtime-python "$JIUWENAVATAR_E2E_PYTHON" \
   --report-dir /tmp/cron-ui-report
 ```
 
@@ -82,8 +82,8 @@ python3 tests/ui_e2e/cron_ui_report.py \
 
 ## 场景
 
-- `todo_ui_report.py`：启动真实 `jiuwenswarm.app`，验证待办工具链和 Tool Panel。
-- `cron_ui_report.py`：启动真实 `jiuwenswarm.app`，验证 Cron 面板和结构化提醒。
+- `todo_ui_report.py`：启动真实 `jiuwenclaw.app`，验证待办工具链和 Tool Panel。
+- `cron_ui_report.py`：启动真实 `jiuwenclaw.app`，验证 Cron 面板和结构化提醒。
 
 ## 输出结论
 

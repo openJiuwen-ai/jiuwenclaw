@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from jiuwenswarm.agents.harness.team.a2x import a2x_registry_runtime as _runtime
-from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
+from jiuwenavatar.agents.harness.team.a2x import a2x_registry_runtime as _runtime
+from jiuwenavatar.agents.harness.team.a2x.a2x_registry_runtime import (
     replace_teammate_agent_card_after_bootstrap,
     register_blank_agent_if_teammate,
 )

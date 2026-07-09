@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.foundation.tool import ToolCard
-from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import (
+from jiuwenavatar.server.runtime.agent_adapter.code_agent_rail import (
     AgentTool,
     CodeAgentRail,
     DISALLOWED_FOR_SUBAGENTS,
@@ -168,31 +168,42 @@ class TestCodeAgentRail:
         rail = CodeAgentRail(workspace_dir="/tmp")
         agent = MagicMock()
         agent_def = _make_agent_def(name="reviewer")
-        with patch.object(rail, "_load_custom_agents", return_value=[agent_def]):
+        with (
+            patch.object(rail, "_load_custom_agents", return_value=[agent_def]),
+            patch(
+                "jiuwenavatar.server.runtime.agent_adapter.code_agent_rail.Runner.resource_mgr"
+            ) as mock_mgr,
+        ):
             rail.init(agent)
         assert rail._agent_tool is not None
-        # Registration now goes through the unified ability_manager.add_ability.
-        agent.ability_manager.add_ability.assert_called_once()
 
     def test_uninit_removes_tool(self):
         rail = CodeAgentRail(workspace_dir="/tmp")
         agent = MagicMock()
         agent_def = _make_agent_def(name="reviewer")
-        with patch.object(rail, "_load_custom_agents", return_value=[agent_def]):
+        with (
+            patch.object(rail, "_load_custom_agents", return_value=[agent_def]),
+            patch(
+                "jiuwenavatar.server.runtime.agent_adapter.code_agent_rail.Runner.resource_mgr"
+            ) as mock_mgr,
+        ):
             rail.init(agent)
         assert rail._agent_tool is not None
         rail.uninit(agent)
         assert rail._agent_tool is None
         assert rail._agent is None
-        # Removal mirrors add_ability via ability_manager.remove_ability.
-        agent.ability_manager.remove_ability.assert_called_once()
 
     def test_init_twice_replaces_tool(self):
         """Initializing twice should create a new AgentTool each time."""
         rail = CodeAgentRail(workspace_dir="/tmp")
         agent = MagicMock()
         agent_def = _make_agent_def(name="reviewer")
-        with patch.object(rail, "_load_custom_agents", return_value=[agent_def]):
+        with (
+            patch.object(rail, "_load_custom_agents", return_value=[agent_def]),
+            patch(
+                "jiuwenavatar.server.runtime.agent_adapter.code_agent_rail.Runner.resource_mgr"
+            ),
+        ):
             rail.init(agent)
             first_tool = rail._agent_tool
             rail.init(agent)
@@ -200,7 +211,7 @@ class TestCodeAgentRail:
 
     def test_load_custom_agents_filters_builtin_and_disabled(self):
         """_load_custom agents should only include non-builtin enabled agents."""
-        from jiuwenswarm.server.runtime.agent_config_service import AgentDefinition
+        from jiuwenavatar.server.runtime.agent_config_service import AgentDefinition
 
         rail = CodeAgentRail(workspace_dir="/tmp")
         # Mock the AgentConfigService to return a mix of agents
@@ -218,7 +229,7 @@ class TestCodeAgentRail:
         )
 
         with patch(
-            "jiuwenswarm.server.runtime.agent_config_service.AgentConfigService"
+            "jiuwenavatar.server.runtime.agent_config_service.AgentConfigService"
         ) as mock_svc_cls:
             mock_svc = mock_svc_cls.return_value
             mock_svc.list_agents.return_value = [
@@ -243,7 +254,7 @@ class TestFilterToolCards:
         mapping = {"Read": "read_file", "Bash": "bash", "Edit": "edit_file",
                     "Grep": "grep", "Write": "write_file", "LS": "ls"}
         with patch(
-            "jiuwenswarm.server.runtime.agent_adapter.code_agent_rail._build_display_to_internal_mapping",
+            "jiuwenavatar.server.runtime.agent_adapter.code_agent_rail._build_display_to_internal_mapping",
             return_value=mapping,
         ):
             yield
@@ -378,7 +389,7 @@ def _make_agent_def(
     tools=None,
     prompt="You are a test agent.",
 ):
-    from jiuwenswarm.server.runtime.agent_config_service import AgentDefinition
+    from jiuwenavatar.server.runtime.agent_config_service import AgentDefinition
 
     return AgentDefinition(
         name=name,

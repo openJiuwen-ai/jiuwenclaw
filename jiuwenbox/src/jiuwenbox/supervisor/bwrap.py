@@ -96,7 +96,7 @@ class BwrapConfig:
     # process in the sandbox chain (outer monitor, inner pid-namespace init,
     # and the launched command). When jiuwenbox-server dies for *any* reason
     # -- clean lifespan shutdown, crash, SIGKILL by an operator, parent
-    # jiuwenswarm being SIGKILLed before its grace window expired -- the
+    # jiuwenavatar being SIGKILLed before its grace window expired -- the
     # kernel immediately SIGKILLs the bwrap monitor, which in turn cascades
     # the kill into the pid namespace via bwrap's own ``--die-with-parent``
     # propagation. Without this flag the sandbox-daemon.py + bwrap monitor
@@ -164,7 +164,7 @@ class BwrapConfig:
         # bind_root_entries is the "wildcard / generic" parent mount (e.g.
         # ``host_root="/"`` expanded into every immediate child of the host
         # rootfs), while ``bind_mounts`` are user-explicit per-path overrides
-        # (``/sandbox files allow|deny <path>`` lowered by jiuwenswarm's
+        # (``/sandbox files allow|deny <path>`` lowered by jiuwenclaw's
         # ``sysop_builder``). bwrap's later-overrides-earlier mount semantics
         # means whichever entry we ``append`` last wins on conflicting paths;
         # putting bind_root_entries first guarantees the explicit
@@ -383,7 +383,7 @@ class BwrapConfig:
         rw_binds = [(src, dst) for src, dst in rw_binds_in if dst != "/"]
         if root_rw_binds:
             # A read-write root bind already exposes every absolute child path.
-            # Re-binding private children such as /home/<user>/.jiuwenswarm can
+            # Re-binding private children such as /home/<user>/.jiuwenavatar can
             # fail because bwrap may open sources after entering userns.
             # Keep synthetic binds whose source differs from the sandbox path,
             # such as the Landlock launcher mounted into /run.
