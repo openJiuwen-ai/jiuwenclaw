@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { File, Puzzle } from 'lucide-react';
@@ -19,6 +19,7 @@ import {
   type TaskColumnKey,
   type TeamMember,
 } from './shared';
+import { getTotalTaskVisualProgressPercent } from './taskProgress';
 
 type TaskPlanningPanelProps = {
   variant: 'compact' | 'expanded';
@@ -57,6 +58,7 @@ export function TaskPlanningPanel({
   title,
 }: TaskPlanningPanelProps) {
   const { t } = useTranslation();
+  const [now, setNow] = useState(() => Date.now());
   const groupedTasks = useMemo(() => {
     const groups: Record<TaskColumnKey, SessionTeamTask[]> = {
       waiting: [],
@@ -72,9 +74,20 @@ export function TaskPlanningPanel({
     return groups;
   }, [tasks]);
 
-  const progressPercent = totalTasks > 0
+  useEffect(() => {
+    if (variant !== 'expanded') {
+      return undefined;
+    }
+    const timer = window.setInterval(() => setNow(Date.now()), 3_000);
+    return () => window.clearInterval(timer);
+  }, [variant]);
+
+  const completedProgressPercent = totalTasks > 0
     ? Math.round((completedTasks / totalTasks) * 100)
     : 0;
+  const progressPercent = variant === 'expanded'
+    ? getTotalTaskVisualProgressPercent(tasks, now)
+    : completedProgressPercent;
 
   if (variant === 'compact') {
     const allTasks = [...tasks].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
