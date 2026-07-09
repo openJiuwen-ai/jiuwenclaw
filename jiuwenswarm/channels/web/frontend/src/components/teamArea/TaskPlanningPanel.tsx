@@ -74,6 +74,16 @@ export function TaskPlanningPanel({
     return groups;
   }, [tasks]);
 
+  // 按后端 todos 数组顺序的全局序号：展开态与收起态共用同一份，保证同一任务在两种状态下序号一致。
+  // 后端在状态变更时保序，仅在显式新增/插入任务时改变顺序，序号稳定。
+  const globalIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    tasks.forEach((task, index) => {
+      map.set(task.task_id, index + 1);
+    });
+    return map;
+  }, [tasks]);
+
   useEffect(() => {
     if (variant !== 'expanded') {
       return undefined;
@@ -90,7 +100,7 @@ export function TaskPlanningPanel({
     : completedProgressPercent;
 
   if (variant === 'compact') {
-    const allTasks = [...tasks].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    const allTasks = tasks;
 
     const tabCounts = {
       completed: groupedTasks.completed.length,
@@ -159,15 +169,16 @@ export function TaskPlanningPanel({
             </div>
           ) : (
             <div className="space-y-2">
-              {allTasks.map((task, index) => {
+              {allTasks.map((task) => {
                 const assigneeExists = Boolean(task.assignee && members.some(member => member.member_id === task.assignee));
                 const assigneeName = getMemberDisplayName(task.assignee || '');
                 const title = getBoardTaskTitle(task);
                 const columnKey = getTaskColumnKey(task);
+                const seq = globalIndexMap.get(task.task_id) ?? 0;
                 return (
                   <div key={task.task_id} className="flex items-center gap-3 px-3 py-2 rounded-md">
                     <span className="inline-flex items-center justify-center w-[20px] h-[20px] text-xs font-medium text-muted rounded-[16px] bg-[#F2F2F2]">
-                      {String(index + 1).padStart(2, '0')}
+                      {String(seq).padStart(2, '0')}
                     </span>
                     {!hideAssignee && (
                       assigneeExists ? (
@@ -217,6 +228,7 @@ export function TaskPlanningPanel({
                 tasks={groupedTasks[column.key]}
                 members={members}
                 hideAssignee={hideAssignee}
+                globalIndexMap={globalIndexMap}
               />
             ))}
           </div>
@@ -231,11 +243,13 @@ function BoardColumn({
   tasks,
   members,
   hideAssignee,
+  globalIndexMap,
 }: {
   column: typeof BOARD_COLUMNS[number];
   tasks: SessionTeamTask[];
   members: TeamMember[];
   hideAssignee: boolean;
+  globalIndexMap: Map<string, number>;
 }) {
   const { t } = useTranslation();
 
@@ -246,15 +260,18 @@ function BoardColumn({
         {t(column.labelKey)} {tasks.length}
       </div>
       <div className="space-y-3">
-        {tasks.map((task, index) => (
-          <BoardTaskCard
-            key={task.task_id}
-            task={task}
-            members={members}
-            hideAssignee={hideAssignee}
-            index={index}
-          />
-        ))}
+        {tasks.map((task) => {
+          const seq = globalIndexMap.get(task.task_id) ?? 0;
+          return (
+            <BoardTaskCard
+              key={task.task_id}
+              task={task}
+              members={members}
+              hideAssignee={hideAssignee}
+              index={seq}
+            />
+          );
+        })}
       </div>
     </section>
   );
@@ -292,7 +309,7 @@ function BoardTaskCard({
       <div className="mt-3 flex h-8 items-center bg-[#fafafa] px-1 pb-1">
         {hideAssignee ? (
           <span className="inline-flex h-[20px] w-[20px] items-center justify-center rounded-[16px] bg-[#F2F2F2] text-xs font-medium text-muted">
-            {String(index + 1).padStart(2, '0')}
+            {String(index).padStart(2, '0')}
           </span>
         ) : assigneeExists ? (
           <div title={assigneeName}>

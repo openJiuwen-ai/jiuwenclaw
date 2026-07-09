@@ -686,39 +686,73 @@
 .conversation-path-dialog-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 80;
+  z-index: 90;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(15, 23, 42, .18);
+  background: transparent;
 }
 
 .conversation-path-dialog {
+  position: relative;
   display: flex;
-  width: min(360px, calc(100vw - 32px));
+  width: min(448px, calc(100vw - 32px));
+  min-height: 174px;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-  border: 1px solid var(--border);
+  gap: 16px;
+  padding: 24px 24px 16px;
+  border: 0;
   border-radius: 8px;
-  background: var(--card);
-  box-shadow: 0 18px 40px rgba(15, 23, 42, .22);
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .1608);
+}
+
+.conversation-path-dialog__close {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #808080;
+  cursor: pointer;
 }
 
 .conversation-path-dialog__title {
-  font-size: 14px;
+  padding-right: 28px;
+  color: #191919;
+  font-size: 18px;
+  line-height: 28px;
   font-weight: 600;
 }
 
 .conversation-path-dialog__input {
-  width: 100%;
-  height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
+  width: min(397px, 100%);
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid #D9D9D9;
   border-radius: 6px;
-  background: var(--background);
-  color: var(--text);
+  background: #fff;
+  color: #191919;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.conversation-path-dialog__input:focus {
+  border-color: #D9D9D9;
+  box-shadow: none;
+  outline: none;
+}
+
+.conversation-path-dialog__message {
+  color: #191919;
   font-size: 13px;
+  line-height: 1.5;
 }
 
 .conversation-path-dialog__error {
@@ -731,23 +765,26 @@
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+  margin-top: auto;
 }
 
 .conversation-path-dialog__actions button {
-  height: 30px;
-  padding: 0 12px;
+  width: 84px;
+  height: 28px;
+  padding: 0;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 999px;
   background: var(--card);
   color: var(--text);
   font-size: 12px;
+  line-height: 18px;
   cursor: pointer;
 }
 
 .conversation-path-dialog__actions button[type="submit"] {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--accent-foreground);
+  border-color: #191919;
+  background: #191919;
+  color: #FFFFFF;
 }
 
 .conversation-path-dialog__actions button:disabled {
