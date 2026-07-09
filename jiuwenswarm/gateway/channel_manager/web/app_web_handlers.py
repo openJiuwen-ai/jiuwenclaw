@@ -208,7 +208,11 @@ def _require_openai_account_core() -> None:
             or OpenAIAccountAuthManager is None
             or OpenAIAccountModelCatalog is None
     ):
-        detail = str(_OPENAI_ACCOUNT_IMPORT_ERROR) if _OPENAI_ACCOUNT_IMPORT_ERROR is not None else "unknown import error"
+        detail = (
+            str(_OPENAI_ACCOUNT_IMPORT_ERROR)
+            if _OPENAI_ACCOUNT_IMPORT_ERROR is not None
+            else "unknown import error"
+        )
         raise OpenAIAccountAuthError(
             "OpenAI Account OAuth requires an openjiuwen version with openai_auth support: "
             f"{detail}",
