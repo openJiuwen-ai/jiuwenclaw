@@ -813,7 +813,9 @@ class XiaoyiChannel(BaseChannel):
 
     async def _handle_message_stream(self, message: dict[str, Any]) -> None:
         """处理 message/stream 消息，转换为 JiuwenSwarm Message."""
-        session_id = message.get("sessionId") or message.get("params", {}).get("sessionId", "")
+        # 优先用 params.sessionId（= conversationId，真·对话 id），跨多轮稳定、与 task 解耦；
+        # 缺失时回退到顶层 sessionId。
+        session_id = message.get("params", {}).get("sessionId") or message.get("sessionId", "")
         task_id = message.get("params", {}).get("id", ) or ""
         user_message = message.get("params", {}).get("message", {})
         parts = user_message.get("parts", [])
