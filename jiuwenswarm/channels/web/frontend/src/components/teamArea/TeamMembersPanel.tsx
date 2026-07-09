@@ -231,7 +231,7 @@ export function TeamMembersPanel({
         <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3 border-border">
           <div className="flex items-center gap-2">
             <img src={teamIcon} alt="" className="h-4 w-4 text-text-muted" />
-            <span className="text-sm font-medium text-text">Subagents ({visibleMembers.length})</span>
+            <span className="text-sm font-medium text-text">{t('team.members')} ({visibleMembers.length})</span>
           </div>
         </div>
         <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3">

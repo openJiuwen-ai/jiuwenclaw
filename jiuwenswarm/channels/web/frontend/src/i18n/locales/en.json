@@ -37,7 +37,7 @@
   },
   "team": {
     "members": "Team Members",
-    "membersTab": "Subagents",
+    "membersTab": "Team",
     "statusTab": "Status",
     "filesTab": "Files",
     "taskEventLog": "Task Event Log",
