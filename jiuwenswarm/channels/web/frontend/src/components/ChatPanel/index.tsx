@@ -983,11 +983,11 @@ export function ChatPanel({
               >
                 {isExportingShare ? (
                   <>
-                    <LoaderCircle className="share-export-btn__spinner" size={16} strokeWidth={2} />
+                    <LoaderCircle className="share-export-btn__spinner" size={14} strokeWidth={2} />
                     <span className="share-export-btn__label">{t('share.generating')}</span>
                   </>
                 ) : (
-                  <Share2 size={16} strokeWidth={2} />
+                  <Share2 size={14} strokeWidth={2} />
                 )}
               </button>
             )}

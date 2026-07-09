@@ -2721,13 +2721,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 32px;
-  height: 32px;
-  gap: 6px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   border: 0;
-  border-radius: var(--radius-full);
+  border-radius: 4px;
   background: transparent;
-  padding: 0 8px;
   color: var(--muted-strong);
   cursor: pointer;
   transition:
@@ -2736,7 +2735,7 @@
 }
 
 .share-export-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: var(--secondary);
   color: var(--text);
 }
 
@@ -2752,7 +2751,10 @@
 }
 
 .share-export-btn--loading {
-  padding: 0 10px;
+  width: auto;
+  min-width: 24px;
+  padding: 0 8px;
+  gap: 4px;
   color: var(--accent);
   opacity: 1;
 }
