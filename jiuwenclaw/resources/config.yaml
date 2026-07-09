@@ -930,7 +930,7 @@ permissions:
     cron_delete_job: allow
     cron_toggle_job: allow
     cron_preview_job: allow
-    skill_turbo: allow
+    skill_turbo: ask
 
   rules:
     - id: shell_allow_dir

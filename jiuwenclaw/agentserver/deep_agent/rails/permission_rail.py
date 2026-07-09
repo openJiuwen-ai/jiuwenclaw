@@ -57,6 +57,27 @@ TOOL_NAME_ALIASES = {
 INTERRUPT_PENDING_PERMISSION_CONTEXT_KEY = "jiuwenclaw_pending_permission_contexts"
 _SHELL_PERMISSION_TOOLS = SHELL_PERMISSION_TOOLS
 
+# ── skill_turbo 外层统一审批：通用兜底描述 + 工具清单 ──
+# skill_turbo 审批通过后，内部所有工具调用直接放行（不再逐个审批）。
+# 当前采用通用兜底描述 + PPT 工具清单（PPT 场景工具最全，覆盖其他 skill 也通用）。
+# 后续若多 skill 并存且需 skill-specific 内容，可升级为注册表 + 预匹配机制。
+SKILL_TURBO_APPROVAL_DESCRIPTION = (
+    "即将调用 skill加速 执行技能任务，需要一次性授权下列工具。"
+    "确认后执行过程中不再逐个询问。"
+)
+
+SKILL_TURBO_APPROVAL_TOOLS: list[tuple[str, str]] = [
+    ("bash", "执行 shell 命令（依赖安装、PPT 导出等）"),
+    ("read_file", "读取文件内容"),
+    ("write_file", "写入文件"),
+    ("list_dir", "列出目录"),
+    ("glob", "搜索文件"),
+    ("image_ocr", "图片文字识别"),
+    ("visual_question_answering", "图片视觉理解"),
+    ("text_to_image", "生成图片"),
+    ("send_file_to_user", "发送最终产物"),
+]
+
 
 def clear_session_interrupt_state(session: Any) -> None:
     """Clear persisted interrupt-related state for one session.
@@ -1399,6 +1420,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         result: PermissionResult,
     ) -> str:
         tool_name = tool_call.name if tool_call else ""
+        if tool_name == "skill_turbo":
+            return self._build_skill_turbo_message(tool_call, result)
         tool_args = self._parse_tool_args(tool_call)
         preview = self._build_persist_preview(tool_name, tool_args, result)
         risk = self.build_risk_for_message(tool_name, tool_args, result, preview)
@@ -1441,6 +1464,31 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         # parts.append(self._build_always_allow_hint(tool_name, preview))
 
         return "".join(parts)
+
+    def _build_skill_turbo_message(
+        self,
+        tool_call: Optional[ToolCall],
+        result: PermissionResult,
+    ) -> str:
+        """skill_turbo 外层统一审批消息：通用兜底描述 + 工具清单。
+
+        skill_turbo 审批通过后内部所有工具直接放行，因此审批消息需提前展示
+        可能用到的工具，让用户一次性授权。
+        """
+        tool_name = tool_call.name if tool_call else ""
+        tool_args = self._parse_tool_args(tool_call)
+        preview = self._build_persist_preview(tool_name, tool_args, result)
+        risk = self.build_risk_for_message(tool_name, tool_args, result, preview)
+
+        tool_lines = "\n".join(
+            f"- `{name}` — {desc}" for name, desc in SKILL_TURBO_APPROVAL_TOOLS
+        )
+        return (
+            f"**即将调用 `skill加速`，需要授权后整体放行：**\n\n"
+            f"{SKILL_TURBO_APPROVAL_DESCRIPTION}\n\n"
+            f"**可能用到的工具：**\n\n{tool_lines}\n\n"
+            f"**风险等级：{risk.get('level', '')}风险**\n\n"
+        )
 
     @staticmethod
     def _render_file_operations_section(file_ops: list[FileOperation]) -> str:
