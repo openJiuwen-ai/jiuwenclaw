@@ -6,9 +6,8 @@ Tests cover:
   - PrewarmConfig.from_env() env-var parsing
   - PrewarmCoordinator body construction (reuses client._build_and_sanitize_params)
   - PrewarmCoordinator exception swallowing (HTTP / network errors never raise)
-  - PrewarmCoordinator non-InferenceAffinity client is skipped
-  - PrewarmRail scenario A (before_model_call, first call only)
-  - PrewarmRail scenario B/C (after_model_call, with/without tool_calls)
+  - PrewarmCoordinator non-supported client is skipped
+  - PrewarmRail scenario B (after_model_call, fires only when tool_calls present)
   - PrewarmRail cache_sharing flag matches enable_kv_cache_release
 """
 from __future__ import annotations
@@ -22,7 +21,7 @@ import pytest
 
 from jiuwenswarm.server.runtime.prewarm.config import PrewarmConfig
 from jiuwenswarm.server.runtime.prewarm.coordinator import PrewarmCoordinator
-from jiuwenswarm.server.runtime.prewarm.rail import PrewarmRail
+from jiuwenswarm.server.runtime.prewarm.prewarm_rail import PrewarmRail
 
 
 # --------------------------------------------------------------------------- #
@@ -76,7 +75,7 @@ class _FakeModelClient:
 
 
 class _OtherClient(_FakeModelClient):
-    __client_name__ = "OpenAI"
+    __client_name__ = "AnthropicModelClient"
 
 
 class _FakeResponse:
@@ -141,25 +140,21 @@ def _patch_aiohttp_session(monkeypatch, status=200, exc=None):
 class TestPrewarmConfig:
     def test_defaults_disabled(self, monkeypatch):
         for k in ("JIUWENSWARM_PREWARM_ENABLED",
-                  "JIUWENSWARM_PREWARM_SCENARIO_A",
-                  "JIUWENSWARM_PREWARM_SCENARIO_BC",
+                  "JIUWENSWARM_PREWARM_SCENARIO_B",
                   "JIUWENSWARM_PREWARM_TIMEOUT"):
             monkeypatch.delenv(k, raising=False)
         cfg = PrewarmConfig.from_env()
         assert cfg.enabled is False
-        assert cfg.scenario_a is True
-        assert cfg.scenario_bc is True
+        assert cfg.scenario_b is True
         assert cfg.timeout == 10.0
 
     def test_env_overrides(self, monkeypatch):
         monkeypatch.setenv("JIUWENSWARM_PREWARM_ENABLED", "true")
-        monkeypatch.setenv("JIUWENSWARM_PREWARM_SCENARIO_A", "0")
-        monkeypatch.setenv("JIUWENSWARM_PREWARM_SCENARIO_BC", "no")
+        monkeypatch.setenv("JIUWENSWARM_PREWARM_SCENARIO_B", "no")
         monkeypatch.setenv("JIUWENSWARM_PREWARM_TIMEOUT", "3.5")
         cfg = PrewarmConfig.from_env()
         assert cfg.enabled is True
-        assert cfg.scenario_a is False
-        assert cfg.scenario_bc is False
+        assert cfg.scenario_b is False
         assert cfg.timeout == 3.5
 
 
@@ -169,7 +164,7 @@ class TestPrewarmConfig:
 
 class TestPrewarmCoordinatorBody:
     async def test_build_body_max_tokens_one_stream_false(self):
-        cfg = PrewarmConfig(enabled=True, scenario_a=True, scenario_bc=True, timeout=5.0)
+        cfg = PrewarmConfig(enabled=True, scenario_b=True, timeout=5.0)
         coord = PrewarmCoordinator(cfg)
         client = _FakeModelClient()
 
@@ -202,7 +197,7 @@ class TestPrewarmCoordinatorBody:
         assert captured["body"]["max_tokens"] == 1
         assert captured["body"]["stream"] is False
         assert captured["body"]["temperature"] == 0
-        assert captured["url"] == "http://vllm.local/v1/chat/completions"
+        assert captured["url"] == "http://vllm.local/chat/completions"
 
     async def test_build_body_cache_sharing_when_enabled(self):
         cfg = PrewarmConfig(enabled=True)
@@ -305,12 +300,6 @@ class TestPrewarmCoordinatorSwallows:
 # PrewarmRail
 # --------------------------------------------------------------------------- #
 
-class _FakeUsageMetadata:
-    def __init__(self, cache_tokens: int = 0, input_tokens: int = 0):
-        self.cache_tokens = cache_tokens
-        self.input_tokens = input_tokens
-
-
 class _FakeAssistantMessage:
     def __init__(self, tool_calls=None, usage_metadata=None):
         self.tool_calls = tool_calls
@@ -367,40 +356,7 @@ class _FakeRailCtx:
         self.session = session or _FakeSession()
 
 
-class TestPrewarmRailScenarioA:
-    async def test_before_model_call_fires_once(self, monkeypatch):
-        coord = PrewarmCoordinator(PrewarmConfig(enabled=True))
-        rail = PrewarmRail(coord)
-        client = _FakeModelClient()
-        agent = _FakeReActAgent(client)
-        _patch_aiohttp_session(monkeypatch)
-
-        inputs = _FakeInputs(messages=[{"role": "system", "content": "s"}], tools=None)
-        ctx = _FakeRailCtx(agent, inputs)
-
-        await rail.before_model_call(ctx)
-        await asyncio.sleep(0.05)
-        assert len(client.calls) == 1
-        assert client.calls[0]["messages"] == inputs.messages
-
-        # Second call must not fire scenario A again.
-        await rail.before_model_call(ctx)
-        await asyncio.sleep(0.05)
-        assert len(client.calls) == 1
-
-    async def test_before_model_call_skipped_when_disabled(self, monkeypatch):
-        coord = PrewarmCoordinator(PrewarmConfig(enabled=False))
-        rail = PrewarmRail(coord)
-        client = _FakeModelClient()
-        agent = _FakeReActAgent(client)
-        _patch_aiohttp_session(monkeypatch)
-        ctx = _FakeRailCtx(agent, _FakeInputs(messages=[{"role": "system", "content": "s"}]))
-        await rail.before_model_call(ctx)
-        await asyncio.sleep(0.05)
-        assert client.calls == []
-
-
-class TestPrewarmRailScenarioBC:
+class TestPrewarmRailScenarioB:
     async def test_after_model_call_scenario_b_with_tool_calls(self, monkeypatch):
         coord = PrewarmCoordinator(PrewarmConfig(enabled=True))
         rail = PrewarmRail(coord)
@@ -422,22 +378,6 @@ class TestPrewarmRailScenarioBC:
         # Body should include the assistant response appended.
         sent_messages = client.calls[0]["messages"]
         assert sent_messages[-1] is response
-
-    async def test_after_model_call_scenario_c_no_tool_calls(self, monkeypatch):
-        coord = PrewarmCoordinator(PrewarmConfig(enabled=True))
-        rail = PrewarmRail(coord)
-        client = _FakeModelClient()
-        agent = _FakeReActAgent(client)
-        _patch_aiohttp_session(monkeypatch)
-
-        response = _FakeAssistantMessage(tool_calls=None)
-        inputs = _FakeInputs(messages=[{"role": "user", "content": "hi"}],
-                             tools=None, response=response)
-        ctx = _FakeRailCtx(agent, inputs)
-        await rail.after_model_call(ctx)
-        await asyncio.sleep(0.05)
-        assert len(client.calls) == 1
-        assert client.calls[0]["messages"][-1] is response
 
     async def test_after_model_call_no_response_skips(self, monkeypatch):
         coord = PrewarmCoordinator(PrewarmConfig(enabled=True))
@@ -462,7 +402,7 @@ class TestPrewarmRailCacheSharingFlag:
         _patch_aiohttp_session(monkeypatch)
         ctx = _FakeRailCtx(agent, _FakeInputs(
             messages=[{"role": "user", "content": "hi"}], tools=None,
-            response=_FakeAssistantMessage()))
+            response=_FakeAssistantMessage(tool_calls=[{"id": "t1", "function": {"name": "f"}}])))
         await rail.after_model_call(ctx)
         await asyncio.sleep(0.05)
         assert client.calls[0]["enable_cache_sharing"] is True
@@ -476,84 +416,7 @@ class TestPrewarmRailCacheSharingFlag:
         _patch_aiohttp_session(monkeypatch)
         ctx = _FakeRailCtx(agent, _FakeInputs(
             messages=[{"role": "user", "content": "hi"}], tools=None,
-            response=_FakeAssistantMessage()))
+            response=_FakeAssistantMessage(tool_calls=[{"id": "t1", "function": {"name": "f"}}])))
         await rail.after_model_call(ctx)
         await asyncio.sleep(0.05)
         assert client.calls[0]["enable_cache_sharing"] is False
-
-
-class TestPrewarmRailDebugLog:
-    @staticmethod
-    def _patch_stdlib_logger(monkeypatch):
-        """Force the rail module's logger to a stdlib logger so caplog can see it."""
-        import logging
-        import jiuwenswarm.server.runtime.prewarm.rail as rail_mod
-        stdlib_logger = logging.getLogger("prewarm_test")
-        monkeypatch.setattr(rail_mod, "logger", stdlib_logger)
-        return "prewarm_test"
-
-    async def test_debug_log_emits_cache_hit_ratio(self, monkeypatch, caplog):
-        import logging
-        log_name = self._patch_stdlib_logger(monkeypatch)
-        coord = PrewarmCoordinator(PrewarmConfig(enabled=True, debug=True))
-        rail = PrewarmRail(coord)
-        client = _FakeModelClient()
-        agent = _FakeReActAgent(client)
-        _patch_aiohttp_session(monkeypatch)
-
-        usage = _FakeUsageMetadata(cache_tokens=800, input_tokens=1000)
-        response = _FakeAssistantMessage(tool_calls=None, usage_metadata=usage)
-        ctx = _FakeRailCtx(agent, _FakeInputs(
-            messages=[{"role": "user", "content": "hi"}], tools=None,
-            response=response))
-
-        with caplog.at_level(logging.INFO, logger=log_name):
-            await rail.after_model_call(ctx)
-            await asyncio.sleep(0.05)
-
-        assert any(
-            "cache_read=800" in r.message and "input=1000" in r.message
-            and "hit_ratio=0.80" in r.message
-            for r in caplog.records
-        )
-
-    async def test_debug_log_silent_when_disabled(self, monkeypatch, caplog):
-        import logging
-        log_name = self._patch_stdlib_logger(monkeypatch)
-        coord = PrewarmCoordinator(PrewarmConfig(enabled=True, debug=False))
-        rail = PrewarmRail(coord)
-        client = _FakeModelClient()
-        agent = _FakeReActAgent(client)
-        _patch_aiohttp_session(monkeypatch)
-
-        usage = _FakeUsageMetadata(cache_tokens=800, input_tokens=1000)
-        response = _FakeAssistantMessage(usage_metadata=usage)
-        ctx = _FakeRailCtx(agent, _FakeInputs(
-            messages=[{"role": "user", "content": "hi"}], tools=None,
-            response=response))
-
-        with caplog.at_level(logging.INFO, logger=log_name):
-            await rail.after_model_call(ctx)
-            await asyncio.sleep(0.05)
-
-        assert not any("hit_ratio" in r.message for r in caplog.records)
-
-    async def test_debug_log_handles_missing_usage(self, monkeypatch, caplog):
-        import logging
-        log_name = self._patch_stdlib_logger(monkeypatch)
-        coord = PrewarmCoordinator(PrewarmConfig(enabled=True, debug=True))
-        rail = PrewarmRail(coord)
-        client = _FakeModelClient()
-        agent = _FakeReActAgent(client)
-        _patch_aiohttp_session(monkeypatch)
-
-        response = _FakeAssistantMessage(usage_metadata=None)
-        ctx = _FakeRailCtx(agent, _FakeInputs(
-            messages=[{"role": "user", "content": "hi"}], tools=None,
-            response=response))
-
-        with caplog.at_level(logging.INFO, logger=log_name):
-            await rail.after_model_call(ctx)
-            await asyncio.sleep(0.05)
-
-        assert any("usage=none" in r.message for r in caplog.records)

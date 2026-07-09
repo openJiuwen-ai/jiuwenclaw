@@ -3030,8 +3030,8 @@ class JiuWenSwarmDeepAdapter:
             coordinator = PrewarmCoordinator(config)
             rail = PrewarmRail(coordinator)
             logger.info(
-                "[JiuWenSwarmDeepAdapter] PrewarmRail built: scenario_a=%s scenario_bc=%s timeout=%s",
-                config.scenario_a, config.scenario_bc, config.timeout,
+                "[JiuWenSwarmDeepAdapter] PrewarmRail built: scenario_b=%s, timeout=%s",
+                config.scenario_b, config.timeout,
             )
             return rail
         except Exception as exc:

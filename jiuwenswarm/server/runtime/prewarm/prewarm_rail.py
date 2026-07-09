@@ -3,18 +3,17 @@
 """PrewarmRail — bridges KV-cache prewarming into the ReAct model-call lifecycle.
 
 Registered on the DeepAgent, bridged to the inner ReActAgent for
-BEFORE_MODEL_CALL / AFTER_MODEL_CALL. Uses the existing
-InferenceAffinityModelClient's param builder so the prewarm body shares
-the real request's token sequence (single construction path).
+AFTER_MODEL_CALL. Uses the existing InferenceAffinityModelClient's
+param builder so the prewarm body shares the real request's token
+sequence (single construction path).
 
-Scenarios:
-  - A (before_model_call, first call only): prewarm static prefix
-        messages + tools so the first real LLM call hits a warm cache.
+Scenario:
   - B (after_model_call, response has tool_calls): prewarm
         messages + [response] so the next round (after tool dispatch)
         hits a warm cache for the shared prefix.
-  - C (after_model_call, response has no tool_calls): prewarm
-        messages + [response] for the next user turn.
+
+Prewarm is fire-and-forget: the background HTTP task is not tracked, so
+a session closing mid-flight simply drops the in-progress prewarm.
 """
 from __future__ import annotations
 
@@ -71,33 +70,6 @@ def _resolve_enable_cache_sharing(agent: Any) -> bool:
         return False
     return bool(getattr(ce, "enable_kv_cache_release", False))
 
-
-def _log_cache_hit(response: Any, scenario: str, session_id: Optional[str],
-                   model_name: Optional[str]) -> None:
-    """Log cache-hit ratio for the real LLM response (debug only).
-
-    Reads ``response.usage_metadata.cache_tokens`` (populated by agent-core's
-    ``_extract_cache_tokens`` from vLLM's ``prompt_cache_hit_tokens`` /
-    ``prompt_tokens_details.cached_tokens``). ``input_tokens`` is the total
-    prompt tokens for this call; hit ratio = cache_read / input.
-    """
-    usage = getattr(response, "usage_metadata", None)
-    if usage is None:
-        logger.info(
-            "[PrewarmRail] after_model_call scenario=%s sid=%s model=%s "
-            "usage=none (no cache stats available)", scenario, session_id, model_name,
-        )
-        return
-    cache_read = int(getattr(usage, "cache_tokens", 0) or 0)
-    input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-    ratio = (cache_read / input_tokens) if input_tokens else 0.0
-    logger.info(
-        "[PrewarmRail] after_model_call scenario=%s sid=%s model=%s "
-        "cache_read=%d input=%d hit_ratio=%.2f",
-        scenario, session_id, model_name, cache_read, input_tokens, ratio,
-    )
-
-
 def _resolve_session_id(ctx: AgentCallbackContext) -> Optional[str]:
     session = getattr(ctx, "session", None)
     if session is None:
@@ -105,63 +77,54 @@ def _resolve_session_id(ctx: AgentCallbackContext) -> Optional[str]:
     getter = getattr(session, "get_session_id", None)
     if callable(getter):
         try:
-            return getter()
+            return getter() # type: ignore
         except Exception:  # noqa: BLE001
             return None
     return getattr(session, "session_id", None)
 
 
+_SYSTEM_REMINDER_PREFIX = "<system-reminder>"
+
+def _is_system_reminder_msg(message: Any) -> bool:
+    """Detect a system-reminder message (used to skip prewarm)."""
+    content = getattr(message, "content", "") if not isinstance(message, dict) else message.get("content", "")
+    if isinstance(content, str) and content.startswith(_SYSTEM_REMINDER_PREFIX):
+        return True
+    if isinstance(content, list):
+        for part in content:
+            text = part.get("text") if isinstance(part, dict) else ""
+            if isinstance(text, str) and text.startswith(_SYSTEM_REMINDER_PREFIX):
+                return True
+    return False
+
+def _strip_last_system_reminder(messages: List[Any]) -> List[Any]:
+    """Remove the last system-reminder message from a list of messages."""
+    if not messages:
+        return messages
+    last = messages[-1]
+    role = getattr(last, "role", "") if not isinstance(last, dict) else last.get("role", "")
+    if role == "user" and _is_system_reminder_msg(last):
+        return messages[:-1]
+    return messages
+
+
 class PrewarmRail(AgentRail):
-    """Rail that fires prewarm requests around model calls."""
+    """Rail that fires prewarm requests after model calls."""
 
     priority = 5  # run early so the prewarm body reflects pre-call state
 
     def __init__(self, coordinator: Optional[PrewarmCoordinator] = None):
         self._coordinator = coordinator or PrewarmCoordinator()
-        self._scenario_a_fired: bool = False
 
     @property
     def coordinator(self) -> PrewarmCoordinator:
         return self._coordinator
 
-    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Scenario A: on the first model call, prewarm the static prefix."""
-        if not self._coordinator.config.enabled:
-            return
-        if not self._coordinator.config.scenario_a:
-            return
-        if self._scenario_a_fired:
-            return
-        self._scenario_a_fired = True
-
-        client = _resolve_llm_client(ctx.agent)
-        if client is None:
-            return
-        if not self._coordinator.is_supported_client(client):
-            return
-
-        inputs = ctx.inputs
-        messages = list(getattr(inputs, "messages", []) or [])
-        tools = getattr(inputs, "tools", None)
-        model_name = _resolve_model_name(ctx.agent)
-        session_id = _resolve_session_id(ctx)
-        enable_sharing = _resolve_enable_cache_sharing(ctx.agent)
-
-        await self._coordinator.prewarm(
-            client,
-            messages=messages,
-            tools=tools,
-            model_name=model_name,
-            session_id=session_id,
-            enable_cache_sharing=enable_sharing,
-            scenario="A",
-        )
-
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         """Scenarios B/C: prewarm messages + [response] after the LLM responds."""
         if not self._coordinator.config.enabled:
             return
-        if not self._coordinator.config.scenario_bc:
+        if not self._coordinator.config.scenario_b:
             return
 
         client = _resolve_llm_client(ctx.agent)
@@ -171,22 +134,23 @@ class PrewarmRail(AgentRail):
             return
 
         inputs = ctx.inputs
-        base_messages: List[Any] = list(getattr(inputs, "messages", []) or [])
         response = getattr(inputs, "response", None)
         if response is None:
+            logger.debug("[PrewarmRail] after_model_call no response, skipping prewarm")
             return
+        
+        has_tool_calls = bool(getattr(response, "tool_calls", None))
+        if not has_tool_calls:
+            logger.debug("[PrewarmRail] after_model_call no tool_calls, skipping scenario-B prewarm")
+            return
+        
+        base_messages: List[Any] = list(getattr(inputs, "messages", []) or [])
         messages = base_messages + [response]
         tools = getattr(inputs, "tools", None)
         model_name = _resolve_model_name(ctx.agent)
         session_id = _resolve_session_id(ctx)
         enable_sharing = _resolve_enable_cache_sharing(ctx.agent)
 
-        has_tool_calls = bool(getattr(response, "tool_calls", None))
-        scenario = "B" if has_tool_calls else "C"
-
-        if self._coordinator.config.debug:
-            _log_cache_hit(response, scenario, session_id, model_name)
-
         await self._coordinator.prewarm(
             client,
             messages=messages,
@@ -194,15 +158,5 @@ class PrewarmRail(AgentRail):
             model_name=model_name,
             session_id=session_id,
             enable_cache_sharing=enable_sharing,
-            scenario=scenario,
+            scenario="B",
         )
-
-    async def after_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Best-effort: let scenario-C prewarms finish before the session closes."""
-        if not self._coordinator.config.enabled:
-            return
-        session_id = _resolve_session_id(ctx)
-        try:
-            await self._coordinator.await_pending(session_id)
-        except Exception:  # noqa: BLE001
-            pass
