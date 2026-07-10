@@ -852,6 +852,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!shouldHandleSessionEvent(payload)) return;
 
         const finishActiveStream = () => {
+          if (useChatStore.getState().pendingQuestion) {
+            return false;
+          }
           const { currentStreamId, isProcessing } = useChatStore.getState();
           if (currentStreamId) {
             stopStreaming();
@@ -907,9 +910,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (streamId && payloadSessionId) {
           updateMessage(streamId, { ...(content ? { content } : {}), isStreaming: false });
           stopStreaming();
-          setProcessing(false);
-          setThinking(false);
-          activeRequestIdRef.current = null;
+          if (!useChatStore.getState().pendingQuestion) {
+            setProcessing(false);
+            setThinking(false);
+            activeRequestIdRef.current = null;
+          }
           if (content && !content.includes('MEDIA:')) {
             handleTtsPlayback(streamId, content);
           }
@@ -1244,6 +1249,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         } else if (activeRequestIdRef.current && !shouldHandleCurrentRequestEvent(event)) {
           return;
         }
+        if (!isProcessingNow && useChatStore.getState().pendingQuestion) {
+          setThinking(false);
+          return;
+        }
         setProcessing(isProcessingNow);
         if (!isProcessingNow) {
           setThinking(false);
@@ -1351,6 +1360,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.ask_user_question', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         setPendingQuestion(payload as unknown as AskUserQuestionPayload);
+        setProcessing(true);
+        setThinking(false);
+      }),
+      webClient.on('chat.invocation_paused', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        setProcessing(true);
+        setThinking(false);
       }),
       // 同时监听 session_result 事件，以处理后端可能发送的不同格式
       webClient.on('session_result', ({ payload }) => {

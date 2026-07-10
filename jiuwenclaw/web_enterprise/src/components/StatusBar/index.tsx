@@ -17,8 +17,8 @@ interface StatusBarProps {
 
 export function StatusBar({ onPause, onCancel, onResume }: StatusBarProps) {
   const { t } = useTranslation();
-  const { isProcessing, isPaused, pausedTask, interruptResult } = useChatStore();
-  const showExec = isProcessing || isPaused;
+  const { isProcessing, isPaused, pausedTask, interruptResult, pendingQuestion } = useChatStore();
+  const showExec = isProcessing || isPaused || Boolean(pendingQuestion);
   /** 有中断结果文案时显示居中横条；暂停/处理中仍保留取消与暂停按钮 */
   const showInterruptBarOnly =
     Boolean(interruptResult?.message) && !isProcessing && !isPaused;
