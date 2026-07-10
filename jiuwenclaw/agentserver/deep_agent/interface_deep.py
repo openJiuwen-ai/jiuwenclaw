@@ -80,6 +80,10 @@ from openjiuwen_runtime.foundation.db.engine_options import (
 from openjiuwen_runtime.foundation.db.mysql_handler import MySQLHandler
 from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandler
 
+from jiuwenclaw.agentserver.deep_agent.rails.concurrent_safe_rails import (
+    ConcurrentSafeFileSystemRail,
+    ConcurrentSafeTaskPlanningRail,
+)
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
 from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     ASK_REQUEST_PREFIX,
@@ -850,6 +854,8 @@ class JiuWenClawDeepAdapter:
     - Deep interrupt / user_answer 处理
     """
 
+    _sysop_cache: dict[str, tuple[str, "SysOperation"]] = {}
+
     def __init__(
         self,
         workspace_dir: str | None = None,
@@ -1614,6 +1620,20 @@ class JiuWenClawDeepAdapter:
             if sysop_card is None:
                 logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: sysop_card is None")
                 return None
+
+            cache_key = self._agent_id or sysop_card.id
+            cached = JiuWenClawDeepAdapter._sysop_cache.get(cache_key)
+            if cached is not None:
+                cached_id, cached_sysop = cached
+                existing = Runner.resource_mgr.get_sys_operation(cached_id)
+                if existing is not None:
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] reuse cached sys_operation: id=%s agent_id=%s",
+                        cached_id, cache_key,
+                    )
+                    return existing
+                JiuWenClawDeepAdapter._sysop_cache.pop(cache_key, None)
+
             result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if result.is_err():
                 error_msg = result.msg()
@@ -1645,7 +1665,10 @@ class JiuWenClawDeepAdapter:
                             )
                 
                 return None
-            return Runner.resource_mgr.get_sys_operation(sysop_card.id)
+            sysop_obj = Runner.resource_mgr.get_sys_operation(sysop_card.id)
+            if sysop_obj is not None:
+                JiuWenClawDeepAdapter._sysop_cache[cache_key] = (sysop_card.id, sysop_obj)
+            return sysop_obj
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", exc)
             return None
@@ -1653,7 +1676,7 @@ class JiuWenClawDeepAdapter:
     def _build_filesystem_rail(self) -> FileSystemRail | None:
         """Build FileSystemRail."""
         try:
-            fs_rail = FileSystemRail()
+            fs_rail = ConcurrentSafeFileSystemRail()
             logger.info("[JiuWenClawDeepAdapter] FileSystemRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] FileSystemRail create failed: %s", exc)
@@ -1827,7 +1850,7 @@ class JiuWenClawDeepAdapter:
     def _build_task_planning_rail(self) -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
-            task_planning_rail = TaskPlanningRail()
+            task_planning_rail = ConcurrentSafeTaskPlanningRail()
             logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] TaskPlanningRail create failed: %s", exc)
