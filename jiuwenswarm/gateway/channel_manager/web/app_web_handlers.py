@@ -14,6 +14,7 @@ import secrets
 import shutil
 import time
 import base64
+import threading
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -163,6 +164,7 @@ load_dotenv(dotenv_path=_ENV_FILE, override=True)
 _ENV_VAR_PLACEHOLDER_RE = re.compile(r"^\$\{([^:}]+)(?::-([^}]*))?\}$")
 _OPENAI_ACCOUNT_LOGIN_MAX_TTL_SECONDS = 5 * 60
 _OPENAI_ACCOUNT_LOGIN_JOBS: dict[str, "_OpenAIAccountLoginJob"] = {}
+_OPENAI_ACCOUNT_LOGIN_JOBS_LOCK = threading.RLock()
 _OPENAI_ACCOUNT_LOCAL_ERRORS = (OSError, TypeError, ValueError)
 
 
@@ -175,23 +177,51 @@ class _OpenAIAccountLoginJob:
 
 def _cleanup_openai_account_login_jobs(now: float | None = None) -> None:
     current = time.time() if now is None else now
-    expired = [
-        login_id
-        for login_id, job in _OPENAI_ACCOUNT_LOGIN_JOBS.items()
-        if job.expires_at <= current
-    ]
-    for login_id in expired:
-        _OPENAI_ACCOUNT_LOGIN_JOBS.pop(login_id, None)
+    with _OPENAI_ACCOUNT_LOGIN_JOBS_LOCK:
+        expired = [
+            login_id
+            for login_id, job in _OPENAI_ACCOUNT_LOGIN_JOBS.items()
+            if job.expires_at <= current
+        ]
+        for login_id in expired:
+            _OPENAI_ACCOUNT_LOGIN_JOBS.pop(login_id, None)
 
 
 def _latest_openai_account_login_job(
         now: float | None = None,
 ) -> tuple[str, "_OpenAIAccountLoginJob"] | None:
     current = time.time() if now is None else now
-    _cleanup_openai_account_login_jobs(current)
-    if not _OPENAI_ACCOUNT_LOGIN_JOBS:
-        return None
-    return max(_OPENAI_ACCOUNT_LOGIN_JOBS.items(), key=lambda item: item[1].created_at)
+    with _OPENAI_ACCOUNT_LOGIN_JOBS_LOCK:
+        _cleanup_openai_account_login_jobs(current)
+        if not _OPENAI_ACCOUNT_LOGIN_JOBS:
+            return None
+        return max(_OPENAI_ACCOUNT_LOGIN_JOBS.items(), key=lambda item: item[1].created_at)
+
+
+def _get_openai_account_login_job(
+        login_id: str,
+        now: float | None = None,
+) -> "_OpenAIAccountLoginJob" | None:
+    current = time.time() if now is None else now
+    with _OPENAI_ACCOUNT_LOGIN_JOBS_LOCK:
+        _cleanup_openai_account_login_jobs(current)
+        return _OPENAI_ACCOUNT_LOGIN_JOBS.get(login_id)
+
+
+def _store_openai_account_login_job(
+        login_id: str,
+        job: "_OpenAIAccountLoginJob",
+        now: float | None = None,
+) -> None:
+    current = time.time() if now is None else now
+    with _OPENAI_ACCOUNT_LOGIN_JOBS_LOCK:
+        _cleanup_openai_account_login_jobs(current)
+        _OPENAI_ACCOUNT_LOGIN_JOBS[login_id] = job
+
+
+def _remove_openai_account_login_job(login_id: str) -> None:
+    with _OPENAI_ACCOUNT_LOGIN_JOBS_LOCK:
+        _OPENAI_ACCOUNT_LOGIN_JOBS.pop(login_id, None)
 
 
 def _openai_account_auth_status_payload(
@@ -1926,6 +1956,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             channels = []
         await channel.send_response(ws, req_id, ok=True, payload={"channels": channels})
 
+    async def _send_openai_account_unexpected_error(ws, req_id, method: str, exc: Exception) -> None:
+        logger.exception("[%s] unexpected error", method)
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=False,
+            error=str(exc) or "Unexpected OpenAI account error",
+            code="INTERNAL_ERROR",
+        )
+
     async def _openai_account_auth_status(ws, req_id, params, session_id):
         del params, session_id
         try:
@@ -1944,6 +1984,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.status] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+        except Exception as exc:  # noqa: BLE001
+            await _send_openai_account_unexpected_error(ws, req_id, "openai_account.auth.status", exc)
 
     async def _openai_account_auth_start_login(ws, req_id, params, session_id):
         del params, session_id
@@ -1966,13 +2008,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             expires_in = min(int(raw_expires_in), _OPENAI_ACCOUNT_LOGIN_MAX_TTL_SECONDS)
             expires_at = now + expires_in
             login_id = uuid.uuid4().hex
-            _cleanup_openai_account_login_jobs(now)
             job = _OpenAIAccountLoginJob(
                 device_code=device_code,
                 created_at=now,
                 expires_at=expires_at,
             )
-            _OPENAI_ACCOUNT_LOGIN_JOBS[login_id] = job
+            _store_openai_account_login_job(login_id, job, now)
             await channel.send_response(
                 ws,
                 req_id,
@@ -1992,6 +2033,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.start_login] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+        except Exception as exc:  # noqa: BLE001
+            await _send_openai_account_unexpected_error(ws, req_id, "openai_account.auth.start_login", exc)
 
     async def _openai_account_auth_pending_login(ws, req_id, params, session_id):
         del params, session_id
@@ -2012,6 +2055,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.pending_login] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+        except Exception as exc:  # noqa: BLE001
+            await _send_openai_account_unexpected_error(ws, req_id, "openai_account.auth.pending_login", exc)
 
     async def _openai_account_auth_poll_login(ws, req_id, params, session_id):
         del session_id
@@ -2023,8 +2068,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="login_id is required", code="BAD_REQUEST")
             return
         now = time.time()
-        _cleanup_openai_account_login_jobs(now)
-        job = _OPENAI_ACCOUNT_LOGIN_JOBS.get(login_id)
+        job = _get_openai_account_login_job(login_id, now)
         if job is None:
             await channel.send_response(
                 ws,
@@ -2048,7 +2092,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     },
                 )
                 return
-            _OPENAI_ACCOUNT_LOGIN_JOBS.pop(login_id, None)
+            _remove_openai_account_login_job(login_id)
             await channel.send_response(
                 ws,
                 req_id,
@@ -2062,7 +2106,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except OpenAIAccountAuthError as exc:
             logger.warning("[openai_account.auth.poll_login] %s", exc)
             if exc.relogin_required:
-                _OPENAI_ACCOUNT_LOGIN_JOBS.pop(login_id, None)
+                _remove_openai_account_login_job(login_id)
             await channel.send_response(
                 ws,
                 req_id,
@@ -2074,6 +2118,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.poll_login] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+        except Exception as exc:  # noqa: BLE001
+            await _send_openai_account_unexpected_error(ws, req_id, "openai_account.auth.poll_login", exc)
 
     async def _openai_account_auth_logout(ws, req_id, params, session_id):
         del params, session_id
@@ -2102,6 +2148,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.logout] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+        except Exception as exc:  # noqa: BLE001
+            await _send_openai_account_unexpected_error(ws, req_id, "openai_account.auth.logout", exc)
 
     async def _openai_account_models_list(ws, req_id, params, session_id):
         del params, session_id
@@ -2131,6 +2179,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.models.list] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+        except Exception as exc:  # noqa: BLE001
+            await _send_openai_account_unexpected_error(ws, req_id, "openai_account.models.list", exc)
 
     async def _updater_get_status(ws, req_id, params, session_id):
         service = updater_service or UpdaterService()

@@ -1098,6 +1098,7 @@ function OpenAIAccountAuthPanel({
   const [loggingOut, setLoggingOut] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [modelsLoadedOnce, setModelsLoadedOnce] = useState(false);
@@ -1443,6 +1444,7 @@ function OpenAIAccountAuthPanel({
     setStartingLogin(true);
     setAuthError(null);
     setCopied(false);
+    setCopyError(null);
     void applyDefaults(undefined, status?.base_url);
     try {
       const started = await webRequest<OpenAIAccountLoginPayload>(
@@ -1485,9 +1487,11 @@ function OpenAIAccountAuthPanel({
     try {
       await navigator.clipboard.writeText(login.user_code);
       setCopied(true);
+      setCopyError(null);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
       setCopied(false);
+      setCopyError(t("config.openaiAccount.copyFailed"));
     }
   };
 
@@ -1649,6 +1653,9 @@ function OpenAIAccountAuthPanel({
           </div>
           <div className="mt-1 text-[11px] text-text-muted">{t("config.openaiAccount.waiting")}</div>
           <div className="mt-0.5 text-[11px] text-text-muted">{t("config.openaiAccount.loginTimeHint")}</div>
+          {copyError ? (
+            <div className="mt-1 text-[11px] text-danger">{copyError}</div>
+          ) : null}
         </div>
       ) : null}
 

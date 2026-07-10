@@ -812,6 +812,7 @@
       "openAuthPage": "Open auth page",
       "copyCode": "Copy code",
       "copied": "Copied",
+      "copyFailed": "Failed to copy the authorization code. Copy it manually.",
       "waiting": "Waiting for authorization...",
       "loginTimeHint": "Complete OpenAI authorization within 5 minutes.",
       "loginExpired": "The authorization code expired. Connect again.",

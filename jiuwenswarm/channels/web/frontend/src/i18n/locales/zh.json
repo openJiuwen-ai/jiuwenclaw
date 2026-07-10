@@ -812,6 +812,7 @@
       "openAuthPage": "打开授权页面",
       "copyCode": "复制授权码",
       "copied": "已复制",
+      "copyFailed": "复制授权码失败，请手动复制。",
       "waiting": "等待授权完成...",
       "loginTimeHint": "请在 5 分钟内完成 OpenAI 授权。",
       "loginExpired": "授权码已过期，请重新连接。",
