@@ -28,6 +28,23 @@ logger = logging.getLogger(__name__)
 SKILL_TURBO_NODE_ARTIFACTS_KEY = "__skill_turbo_node_artifacts__"
 
 
+def _resolve_session_id(session: Any) -> str:
+    """统一获取 session ID,与 executor._session_id 逻辑一致。
+
+    Session 对象的 ID 通过 get_session_id() 方法获取,
+    而非 session_id 属性(后者不存在,导致日志中 sid=? )。
+    """
+    if session is not None and callable(getattr(session, "get_session_id", None)):
+        sid = session.get_session_id()
+        if sid:
+            return str(sid)
+    for attr in ("session_id", "_session_id"):
+        sid = getattr(session, attr, None)
+        if sid:
+            return str(sid)
+    return "?"
+
+
 async def save_node_artifacts(
     session: Any,
     *,
@@ -54,7 +71,7 @@ async def save_node_artifacts(
     if not nodes:
         logger.debug("[SkillTurboArtifacts] save_node_artifacts: empty nodes, skipping")
         return
-    sid = getattr(session, "session_id", "?")
+    sid = _resolve_session_id(session)
     logger.info(
         "[SkillTurboArtifacts] save_node_artifacts: sid=%s skill=%s nodes=%d",
         sid,
@@ -111,7 +128,7 @@ async def load_node_artifacts(session: Any) -> dict[str, Any] | None:
     if session is None:
         logger.warning("[SkillTurboArtifacts] load_node_artifacts: session is None")
         return None
-    sid = getattr(session, "session_id", "?")
+    sid = _resolve_session_id(session)
     try:
         state = session.get_state(SKILL_TURBO_NODE_ARTIFACTS_KEY)
         logger.debug(
@@ -153,7 +170,7 @@ async def clear_node_artifacts(session: Any) -> None:
         session.update_state({SKILL_TURBO_NODE_ARTIFACTS_KEY: None})
         logger.debug(
             "[SkillTurboArtifacts] clear_node_artifacts: persisted OK sid=%s",
-            getattr(session, "session_id", "?"),
+            _resolve_session_id(session),
         )
     except Exception as exc:
         logger.debug(

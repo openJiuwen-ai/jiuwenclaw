@@ -138,10 +138,12 @@ def _build_artifact_summary(holder: dict[str, Any]) -> str:
             ))
         files = node_info.get("files")
         if isinstance(files, list) and files:
-            parts.append("文件: " + ", ".join(
+            file_paths = [
                 f.get("path", "") for f in files
                 if isinstance(f, dict) and f.get("path")
-            ))
+            ]
+            if file_paths:
+                parts.append("文件: " + ", ".join(file_paths))
         if parts:
             lines.append(f"- {plan_name}: {' | '.join(parts)}")
     return "\n".join(lines) if len(lines) > 1 else ""

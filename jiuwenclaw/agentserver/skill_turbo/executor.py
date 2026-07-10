@@ -2616,6 +2616,11 @@ class SkillTurboExecutor:
 
         namespace = self._load_plan_namespace(plan_code)
         root = self._extract_root_node(namespace)
+        # 深拷贝:plan_code 通过 `from {module} import root` 导入的是模块级单例,
+        # 多个并发请求共享同一棵节点树。_bind_node_callbacks 会递归覆盖回调为
+        # 当前 executor 的绑定方法,若不拷贝,后启动的请求会覆盖先启动请求的回调,
+        # 导致先启动请求的节点产物(_after_subplan_execute)写入错误 executor 的 holder。
+        root = copy.deepcopy(root)
         self._bind_node_callbacks(root)
         return root
 
