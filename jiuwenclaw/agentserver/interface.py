@@ -53,6 +53,42 @@ def _truncate_for_log(text: str, max_len: int = 200) -> str:
     tail_len = 50
     truncated_count = len(text) - max_len
     return f"{text[:head_len]}...[truncated {truncated_count} chars]{text[-tail_len:]}"
+
+
+def _build_file_extra(params: dict) -> dict | None:
+    """从 request.params 提取上传文件信息，供 history 持久化使用。
+
+    兼容两种 files 格式：
+    - dict 格式（OfficeClaw）: {"uploaded": [{"name": "...", "path": "...", "type": "..."}]}
+    - list 格式（各 channel）: [{"name": "...", "path": "...", "type": "..."}]
+
+    返回格式：{"files": [{"name": "...", "path": "..."}]}
+    如果无文件上传，返回 None。
+    """
+    files_info = params.get("files")
+    if files_info is None:
+        return None
+
+    # 提取文件条目列表，兼容 dict 和 list 两种格式
+    if isinstance(files_info, dict):
+        entries = files_info.get("uploaded", [])
+    elif isinstance(files_info, list):
+        entries = files_info
+    else:
+        return None
+
+    if not isinstance(entries, list):
+        return None
+    result = []
+    for f in entries:
+        if isinstance(f, dict):
+            result.append({
+                "name": f.get("name", ""),
+                "path": f.get("path", ""),
+            })
+    return {"files": result} if result else None
+
+
 from jiuwenclaw.agentserver.session_history import append_history_record
 from jiuwenclaw.agentserver.session_manager import SessionManager
 from jiuwenclaw.agentserver.session_metadata import (
@@ -1159,6 +1195,7 @@ class JiuWenClaw:
             channel_metadata=request.metadata,
             mode=request.params.get("mode", "unknown"),
             sessions_root=self._sessions_dir,
+            extra=_build_file_extra(request.params),
         )
 
         logger.info(
@@ -1335,6 +1372,7 @@ class JiuWenClaw:
             channel_metadata=request.metadata,
             mode=request.params.get("mode", "unknown"),
             sessions_root=self._sessions_dir,
+            extra=_build_file_extra(request.params),
         )
 
         logger.info(
