@@ -14,7 +14,8 @@ Gateway Runtime 联调/压测工具，前者读库校验 ``service_config`` 槽�
 可选 ``--shards2 N``：在同一 AgentServer（同一 ``group_id``）内，再按 ``user_id`` 打到
 N 个 Agent 实例（``user_id`` 形如 ``{prefix}_s{shard}_a{j}``，同桶多路共用同一 ``user_id``）。
 不要求 ``concurrency`` 与 ``shards`` / ``shards2`` 整除，余数路由由靠前的分片/实例多承接。
-``shards2=1``（默认）时仍每路独立 ``user_id``（``{prefix}_{idx:02d}``）。``session_id`` / ``req_id`` 始终每路唯一。
+``shards2=0``（默认）时每路独立 ``user_id``（``{prefix}_{idx:02d}``）；``shards2=1`` 时同一
+AgentServer 内全部打到同一 Agent 实例；``shards2>=2`` 时在实例间轮询。``session_id`` / ``req_id`` 始终每路唯一。
 
 依赖：主仓库已安装 ``websockets``（``uv sync`` 或 ``pip install websockets``）。
 
@@ -357,8 +358,8 @@ def _build_route_plan(
     """
     if shards <= 0:
         raise ValueError("--shards 须 > 0")
-    if shards2 <= 0:
-        raise ValueError("--shards2 须 > 0")
+    if shards2 < 0:
+        raise ValueError("--shards2 须 >= 0")
     if concurrency <= 0:
         raise ValueError("--concurrency 须 > 0")
 
@@ -367,7 +368,7 @@ def _build_route_plan(
     for global_idx in range(concurrency):
         shard = global_idx % shards
         group_id = f"{group_prefix}_s{shard}"
-        if shards2 == 1:
+        if shards2 == 0:
             user_id = f"{user_id_prefix}_{global_idx:02d}"
             plan_shard2 = 0
         else:
@@ -996,7 +997,7 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
             indices[0],
             indices[-1],
         )
-        if args.shards2 > 1:
+        if args.shards2 > 0:
             for shard2 in range(args.shards2):
                 sub = [i for i in indices if route_plan[i].shard2 == shard2]
                 if not sub:
@@ -1129,7 +1130,7 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
         shard_ok = sum(1 for r in shard_counts[shard] if _is_success(r))
         logger.info("[shard] shard=%d completed=%d/%d", shard, shard_ok, len(shard_counts[shard]))
 
-    if args.shards2 > 1:
+    if args.shards2 > 0:
         agent_buckets: dict[tuple[int, int], list[RequestResult]] = {}
         for r in results:
             agent_buckets.setdefault((r.shard, r.shard2), []).append(r)
@@ -1192,11 +1193,12 @@ def _parse_args() -> argparse.Namespace:
         "--agent-instance-shards",
         dest="shards2",
         type=int,
-        default=1,
+        default=0,
         metavar="M",
         help=(
-            "同一 AgentServer 内按 user_id 轮询分布到的 Agent 实例数，默认 1；"
-            "M>1 时 user_id 为 {user_id_prefix}_s{shard}_a{j}，同桶多路共用；"
+            "同一 AgentServer 内按 user_id 轮询分布到的 Agent 实例数，默认 0（每路独立 "
+            "{user_id_prefix}_{idx:02d}）；M>=1 时 user_id 为 {user_id_prefix}_s{shard}_a{j}，"
+            "同桶多路共用；M=1 时同一 AgentServer 内全部打到同一 Agent 实例；"
             "不要求整除，余数由序号靠前的实例多承接"
         ),
     )

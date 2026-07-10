@@ -98,12 +98,28 @@ def test_build_route_plan_allows_uneven_shards_and_shards2():
     assert agent_counts[(2, 1)] == 1
 
 
+def test_build_route_plan_shards2_one_hits_same_agent_per_shard():
+    mod = _load_module()
+    plans = mod._build_route_plan(
+        concurrency=6,
+        shards=3,
+        shards2=1,
+        group_prefix="loadtest",
+        user_id_prefix="loadtest_user",
+    )
+    assert len(plans) == 6
+    assert plans[0].user_id == "loadtest_user_s0_a0"
+    assert plans[3].user_id == "loadtest_user_s0_a0"
+    assert plans[1].user_id == "loadtest_user_s1_a0"
+    assert plans[4].user_id == "loadtest_user_s1_a0"
+
+
 def test_build_route_plan_default_unique_user_per_idx():
     mod = _load_module()
     plans = mod._build_route_plan(
         concurrency=3,
         shards=3,
-        shards2=1,
+        shards2=0,
         group_prefix="loadtest",
         user_id_prefix="loadtest_user",
     )
