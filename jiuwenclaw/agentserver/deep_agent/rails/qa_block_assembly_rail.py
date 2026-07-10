@@ -30,6 +30,8 @@ from openjiuwen.core.context_engine.qa_block.selector import (
 from openjiuwen.core.context_engine.qa_block.store import QABlockStore
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
 
 from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     resolve_actual_session,
@@ -43,6 +45,27 @@ _WINDOW_QAS_KEY = "_window_qas"
 _LAYER_KEY = "_qa_block_layer"
 _CURRENT_QA_KEY = "_current_qa_id"
 _PRELOADED_QA_IDS_KEY = "_preloaded_qa_ids"
+
+
+def _is_task_continuation(ctx: AgentCallbackContext, next_query: str) -> bool:
+    resume_input = ctx.extra.get(RESUME_USER_INPUT_KEY)
+    if isinstance(resume_input, InteractiveInput):
+        return True
+    if resume_input is not None and not next_query.strip():
+        return True
+    return False
+
+
+def _last_n_history_qa_ids(registry: Any, n: int = 1) -> list[str]:
+    if n <= 0:
+        return []
+    entries = sorted(
+        (entry for entry in registry.blocks.values() if entry.is_history),
+        key=lambda entry: entry.qa_index,
+    )
+    if not entries:
+        return []
+    return [entry.qa_id for entry in entries[-n:]]
 
 
 class JiuClawQABlockAssemblyRail(DeepAgentRail):
@@ -135,6 +158,7 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
             next_query = extract_next_user_query(context.get_messages())
             model = resolve_selector_model(agent)
             selector = QABlockSelector(self._config)
+            is_continuation = _is_task_continuation(ctx, next_query)
             try:
                 selected_qa_ids = await selector.select(
                     next_query,
@@ -155,6 +179,16 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
                     next_query,
                     registry,
                     config=self._config,
+                )
+            if not selected_qa_ids and is_continuation:
+                selected_qa_ids = _last_n_history_qa_ids(
+                    registry, n=self._config.max_preload_blocks
+                )
+                logger.info(
+                    "[QABlockAssemblyRail] task continuation fallback "
+                    "session_id=%s preloaded=%s reason=no_query_history_required",
+                    session_id,
+                    selected_qa_ids,
                 )
             ctx.extra[_PRELOADED_QA_IDS_KEY] = list(selected_qa_ids or [])
             await layer.hydrate_history_into_window(context, selected_qa_ids=selected_qa_ids)
