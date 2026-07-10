@@ -107,8 +107,6 @@ channels:
 
 Discord channel integration is supported in the current version. Configure and enable the Discord Bot in **Channel Management**, or manually edit `config.yaml`.
 
-For step-by-step instructions (Developer Portal bot creation, intents, install link, channel management), see [Discord.md](Discord.md).
-
 ### Configuration fields
 
 - `bot_token`
@@ -151,3 +149,401 @@ channels:
 | `block_dm` | When `true`, DMs are not processed | `false` |
 | `allow_from` | Allowed Discord user ID list | `[]` |
 | `enabled` | Enable Discord channel | `false` |
+
+### Detailed Setup Steps
+
+#### What This Repo Uses
+
+- Python channel: `jiuwenswarm/channel/discord_channel.py` (discord.py)
+- Runtime config: `channels/discord` in your `config.yaml` (or the web UI **Channel Management** → Discord)
+
+The bot connects with your **Bot Token**, receives messages in configured guild channels and/or DMs (unless you turn off DMs), and can add a 👀 reaction while processing, similar to other channels.
+
+#### Prerequisites
+
+- A Discord account
+- Permission to add bots to a server (or users can install the app for DMs, depending on your install settings)
+
+#### 1. Create an application
+
+1. Open [https://discord.com/developers/applications](https://discord.com/developers/applications).
+2. Click **New Application**, choose a name, and create it.
+
+![Create a new Discord application](../assets/images/discord/1_create_new_app.png)
+
+You will use this application for both **OAuth2 / installation** and the **Bot** user.
+
+#### 2. Get the Bot Token (reset and copy)
+
+1. In the left sidebar, open **Bot**.
+2. Under **Token**, use **Reset Token** and confirm.
+3. **Copy the token immediately** and store it somewhere safe. Discord shows it only once after a reset.
+
+![Reset and copy Bot Token](../assets/images/discord/2_reset_bot_token.png)
+
+**Security**
+
+- Treat the token like a password. Anyone with it can control your bot.
+- Paste it into JiuwenSwarm’s Discord settings or `config.yaml`; do not commit it to git.
+- If it leaks, reset the token again in the same place.
+
+You will map this value to **`bot_token`** in JiuwenSwarm.
+
+#### 3. Enable Message Content Intent
+
+JiuwenSwarm reads the text of messages your bot receives. Discord requires an explicit privileged intent for that.
+
+1. Stay on the **Bot** page.
+2. Under **Privileged Gateway Intents**, turn on **MESSAGE CONTENT INTENT**.
+3. Save changes if the portal prompts you.
+
+![Enable Message Content Intent](../assets/images/discord/3_set_required_intent.png)
+
+Without this, the bot may connect but will not see normal message text content.
+
+#### 4. Guild install: scopes and bot permissions
+
+Configure how the bot is installed into servers and what it can do there. Typical needs for JiuwenSwarm:
+
+- **Read** messages in the channels you care about
+- **Send** messages (replies)
+- **Read message history** (context)
+- **Add reactions** (e.g. 👀 while processing)
+- **Use slash commands** (optional, if you use them elsewhere)
+
+In the Developer Portal, use the installation / OAuth2 tools (e.g. **Installation** or **OAuth2 → URL Generator**, depending on the current UI) to select:
+
+- Scopes such as **`bot`** (and **`applications.commands`** if you use application commands).
+- Bot permissions that match the list above.
+- Screenshot attached below shows the recommended permissions, the mandatory ones are marked.
+
+![Guild install scopes and bot permissions](../assets/images/discord/4_set_guild_install_scope_and_permissions.png)
+
+Exact labels may move between **Installation**, **OAuth2**, and **Bot** sections as Discord updates the portal; align your choices with the screenshot and the capabilities above.
+
+#### 5. Install methods and setup / invite link
+
+Choose how users or admins can add the app:
+
+- **Guild install** — add the bot to a server (you need a shareable install or invite URL).
+- **User install** — allows users to add the app for **direct messages** (useful if you want DM-only usage without a fixed guild channel).
+
+Copy the **generated URL** or **Install link** from the portal and open it in a browser to complete authorization.
+
+![Install methods and copy setup link](../assets/images/discord/5_select_install_methods_and_copy_setup_link.png)
+
+After installation:
+
+- For **server** use: place the bot in a channel JiuwenSwarm will listen to (see `guild_id` / `channel_id` below).
+- For **DM** use: users can open a private message with the bot (if not blocked by **`block_dm`** in JiuwenSwarm).
+
+#### 6. IDs you need for JiuwenSwarm
+
+| Value | Where to find it |
+|--------|------------------|
+| **Application ID** | **General Information** → **APPLICATION ID** (copy). Maps to **`application_id`** (optional but recommended). |
+| **Guild ID** | Discord: enable **Developer Mode** (Settings → App Settings → Advanced). Right‑click the **server icon** → **Copy Server ID**. Maps to **`guild_id`**. Leave empty if you only use DMs and do not restrict to one server. |
+| **Channel ID** | Right‑click the **text channel** → **Copy Channel ID**. Maps to **`channel_id`**. Leave empty to rely on DM-only or broader routing per your deployment. |
+
+If both **`guild_id`** and **`channel_id`** are set, the bot handles messages **only in that channel** on that server, while **DMs can still work** unless **`block_dm`** is enabled.
+
+A trick to get `guild_id` and `channel_id` easily is to check the url to a channel, since the format would be:
+```
+https://discord.com/channels/<guild_id>/<channel_id>
+```
+
+#### 7. Configure Discord in JiuwenSwarm (Channel Management)
+
+Open the JiuwenSwarm web UI → **Channel Management** → **Discord**, or edit:
+
+`~/.jiuwenswarm/config/config.yaml` (path may differ on your machine)
+
+Example:
+
+```yaml
+channels:
+  discord:
+    bot_token: "YOUR_BOT_TOKEN"
+    application_id: "YOUR_APPLICATION_ID"
+    guild_id: "YOUR_GUILD_ID"        # optional if DM-only
+    channel_id: "YOUR_CHANNEL_ID"    # optional if DM-only
+    block_dm: false                  # set true to ignore DMs
+    allow_from: []                   # empty = all users; else list Discord user IDs
+    enabled: true
+```
+
+| Field | Purpose |
+|--------|---------|
+| `bot_token` | **Required.** From step 2. |
+| `application_id` | Application ID from **General Information**. |
+| `guild_id` | Restrict handling to one server; optional for DM-focused setups. |
+| `channel_id` | Restrict handling to one channel in that server; optional with DMs. |
+| `block_dm` | If `true`, ignore direct messages. |
+| `allow_from` | Allow-list of Discord user IDs; empty allows everyone who can message the bot. |
+| `enabled` | Turn the Discord channel on. |
+
+#### 8. Verify
+
+1. Ensure the bot is online in the server or available in DMs.
+2. Send a short message in the configured channel or in DM.
+3. You should see a 👀 reaction on the user message (if the bot has **Add Reactions** in that context), then a reply from your agent pipeline when the model and tools are configured correctly.
+
+#### Troubleshooting
+
+**Bot online but no replies**
+
+- Confirm **MESSAGE CONTENT INTENT** is enabled.
+- Confirm **`enabled: true`** and **`bot_token`** are correct.
+- Check **`guild_id` / `channel_id`**: messages outside the configured channel are ignored when those are set.
+- If using **`allow_from`**, your Discord user ID must be listed (or leave the list empty).
+
+**Cannot add 👀 reaction**
+
+- Grant the bot **Add Reactions** in the channel (channel overrides or role permissions).
+
+**DMs not working**
+
+- Perform **User install** in Discord.
+- In JiuwenSwarm, ensure **`block_dm`** is `false`.
+- Users may need to open the bot’s profile and **Message** after installing.
+
+**LLM or downstream errors**
+
+Discord delivery is separate from model configuration. If you see HTTP errors from the model API, fix `.env` / model settings and restart the app (same idea as other channels).
+
+---
+
+## WhatsApp
+
+This guide describes the WhatsApp integration currently implemented in this repo.
+
+### Architecture
+
+JiuwenSwarm does not talk to WhatsApp directly from Python.
+
+`WhatsApp app` <-> `Baileys bridge (Node.js)` <-> `WhatsAppChannel (Python)`
+
+- Bridge WebSocket default: `ws://127.0.0.1:19600/ws`
+- Bridge script: `jiuwenswarm/scripts/whatsapp-bridge.js`
+- Python channel: `jiuwenswarm/channel/whatsapp_channel.py`
+- Runtime config: `channels.whatsapp` in `config.yaml`
+
+### What This Repo Implements
+
+- The Node bridge uses Baileys to log in to WhatsApp Web and send/receive messages.
+- The Python channel connects to the local bridge over WebSocket and exchanges JSON frames.
+- The Python side now tracks connection state from bridge events and only sends messages when WhatsApp is actually connected.
+- `allow_from` filters inbound WhatsApp senders by JID or by the number part.
+
+### What This Repo Does Not Implement
+
+- There is no Python-to-bridge auth handshake or shared-secret token.
+- The bridge is local-only by default because it binds to `127.0.0.1`.
+- Media download and attachment forwarding are not implemented.
+- Voice-message transcription is not implemented.
+- Python-side inbound message deduplication is not implemented.
+
+### WebSocket Protocol
+
+Python sends:
+
+```json
+{
+  "type": "send",
+  "jid": "123456789@s.whatsapp.net",
+  "text": "hello",
+  "request_id": "msg-123"
+}
+```
+
+Bridge sends:
+
+- `status`: bridge / WhatsApp connection state updates
+- `qr`: QR code is available for linking
+- `inbound`: inbound text message from WhatsApp
+- `send_result`: acknowledgement or error for a `send`
+- `pong`: reply to bridge ping
+
+### Connection States
+
+The Python channel tracks these states from bridge events:
+
+- `stopped`: channel is stopped
+- `bridge_connected`: Python is connected to the local bridge WebSocket, but WhatsApp may still be connecting
+- `connecting`: bridge is trying to connect Baileys to WhatsApp
+- `qr_pending`: a QR code is waiting to be scanned
+- `open`: WhatsApp is connected and sending is allowed
+- `close`: WhatsApp connection closed
+- `logged_out`: WhatsApp session was logged out and needs relinking
+- `bridge_disconnected`: Python lost the local bridge WebSocket connection
+
+The distinction matters:
+
+- `bridge_connected` only means Python can reach the local bridge.
+- `open` means the bridge is actually logged in to WhatsApp and can send messages.
+
+### Channel Metadata
+
+`WhatsAppChannel.get_metadata()` now exposes runtime state in `extra`:
+
+- `bridge_state`
+- `bridge_ws_connected`
+- `whatsapp_connected`
+- `qr_pending`
+- `last_status_ts_ms`
+- `last_status_code`
+
+### Prerequisites
+
+- Python environment that can run `python -m jiuwenswarm.app`
+- Node.js 20+ and npm
+- A WhatsApp account with Linked Devices enabled
+
+### 1. Install Bridge Dependencies
+
+Run inside the inner project folder that contains `jiuwenswarm/package.json`:
+
+```powershell
+cd C:\Users\chiak\OneDrive\Desktop\jiuwenswarm\jiuwenswarm
+npm install
+```
+
+If you only want the bridge dependencies:
+
+```powershell
+npm install @whiskeysockets/baileys ws pino qrcode-terminal
+```
+
+### 2. Configure WhatsApp
+
+Edit your runtime config file:
+
+`C:\Users\chiak\.jiuwenswarm\config\config.yaml`
+
+Under `channels:` use:
+
+```yaml
+  whatsapp:
+    bridge_ws_url: ws://127.0.0.1:19600/ws
+    default_jid:
+    allow_from: []
+    enable_streaming: true
+    auto_start_bridge: false
+    bridge_command: node scripts/whatsapp-bridge.js
+    bridge_workdir: C:/Users/chiak/OneDrive/Desktop/jiuwenswarm/jiuwenswarm
+    enabled: true
+```
+
+Notes:
+
+- `enable_streaming: true` forwards intermediate events such as token deltas and tool progress.
+- `enable_streaming: false` suppresses `chat.delta` events and keeps output more final-only.
+- `default_jid` is used as a fallback target for outbound sends.
+- `allow_from` accepts either a full sender JID or the number part before `@`.
+- `auto_start_bridge: true` lets Python start the Node bridge process automatically.
+
+### 3. Start the Services
+
+Open two terminals unless you use `auto_start_bridge: true`.
+
+Terminal A, bridge:
+
+```powershell
+cd C:\Users\chiak\OneDrive\Desktop\jiuwenswarm\jiuwenswarm
+npm run whatsapp:bridge
+```
+
+Expected line:
+
+`[whatsapp-bridge] ws://127.0.0.1:19600/ws`
+
+Terminal B, app:
+
+```powershell
+cd C:\Users\chiak\OneDrive\Desktop\jiuwenswarm
+python -m jiuwenswarm.app
+```
+
+Expected behavior:
+
+- The app logs that `WhatsAppChannel` was registered.
+- The channel first reaches `bridge_connected`.
+- It then moves to `connecting`, `qr_pending`, or `open` depending on login state.
+
+### 4. Link WhatsApp
+
+When the bridge has no valid auth state, it prints a QR code in the bridge terminal.
+
+In WhatsApp:
+
+`Settings` -> `Linked devices` -> `Link a device`
+
+Then scan the QR code from Terminal A.
+
+Auth state is stored at:
+
+`jiuwenswarm/jiuwenswarm/workspace/.whatsapp-auth`
+
+If the account is already linked, QR may not appear.
+
+### 5. Sending and Receiving
+
+- Inbound text messages are forwarded from the bridge to the Python channel as `inbound`.
+- Outbound messages are sent from Python as `send`.
+- Python now blocks sends unless channel state is `open`.
+- If the bridge replies with `send_result.ok=false`, the Python channel logs the failure.
+
+### 6. Security Notes
+
+- The bridge listens on `127.0.0.1` by default, which limits access to the local machine.
+- This repo currently does not implement bridge token auth.
+- Do not expose the bridge port directly to other hosts without adding authentication or a trusted tunnel boundary.
+
+### 7. LLM Config Still Matters
+
+If inbound WhatsApp messages fail downstream with errors such as `405 Not Allowed`, the model config is probably placeholder or invalid.
+
+Example `.env` values:
+
+```env
+MODEL_PROVIDER=OpenAI
+MODEL_NAME=your-real-model
+API_BASE=https://your-real-openai-compatible-endpoint/v1
+API_KEY=your-real-key
+```
+
+Restart `python -m jiuwenswarm.app` after updating `.env`.
+
+### Troubleshooting
+
+**`Missing script: "whatsapp:bridge"`**
+
+You ran `npm` in the wrong folder. Use:
+
+`C:\Users\chiak\OneDrive\Desktop\jiuwenswarm\jiuwenswarm`
+
+**Bridge starts but no QR**
+
+1. Stop any old bridge processes that may still be holding the port or auth session.
+2. Delete auth state to force relinking:
+   `jiuwenswarm/jiuwenswarm/workspace/.whatsapp-auth`
+3. Start the bridge again and wait for `QR received`.
+
+**App connects to bridge but cannot send**
+
+Check the connection state in logs:
+
+- If state is `bridge_connected` or `connecting`, the local bridge is reachable but WhatsApp is not ready yet.
+- If state is `qr_pending`, scan the QR code.
+- If state is `logged_out`, delete the auth directory and relink.
+- Only state `open` allows sends.
+
+**App says WhatsApp channel not configured**
+
+- Make sure the YAML key is `channels.whatsapp`.
+- Make sure `enabled: true` is set.
+- Make sure `bridge_ws_url` is not empty.
+
+**Bluestacks or emulator linking issues**
+
+Scanning from a physical phone is usually more reliable than emulator camera passthrough.
