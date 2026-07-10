@@ -7170,6 +7170,13 @@ class JiuWenClawDeepAdapter:
                     extra={"user_visible": "progress"},
                 )
 
+            if not accumulated_text and not hitl_pending_stream and not has_streamed_content:
+                accumulated_text = "处理完成，但未生成回复内容。请尝试重新发送消息。"
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] ReAct loop ended with no visible content — using fallback: request_id=%s",
+                    rid,
+                )
+
             if accumulated_text and not hitl_pending_stream:
                 log_chat_final(
                     session_id=session_id,
