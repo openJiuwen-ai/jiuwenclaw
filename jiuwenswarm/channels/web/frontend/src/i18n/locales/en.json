@@ -629,7 +629,9 @@
       "loadWecom": "Failed to load WeCom settings",
       "loadWechat": "Failed to load WeChat settings",
       "unbindWechat": "Failed to unlink WeChat",
-      "saveGeneric": "Save failed, please try again later"
+      "saveGeneric": "Save failed, please try again later",
+      "wechatNumericInvalid": "{{field}} must be a valid number between {{min}} and {{max}}",
+      "wechatBackoffOrder": "backoff_max_sec must not be less than backoff_base_sec"
     }
   },
   "config": {

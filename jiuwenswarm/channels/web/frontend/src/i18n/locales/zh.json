@@ -628,7 +628,9 @@
       "loadWecom": "获取企业微信配置失败",
       "loadWechat": "获取微信配置失败",
       "unbindWechat": "微信解绑失败",
-      "saveGeneric": "保存失败，请稍后重试"
+      "saveGeneric": "保存失败，请稍后重试",
+      "wechatNumericInvalid": "{{field}} 需为 {{min}}–{{max}} 之间的有效数值",
+      "wechatBackoffOrder": "backoff_max_sec 不得小于 backoff_base_sec"
     }
   },
   "config": {
