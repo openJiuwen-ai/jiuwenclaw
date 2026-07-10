@@ -29,6 +29,7 @@ from jiuwenclaw.agentserver.agent_adapters import (
 )
 from jiuwenclaw.agentserver.memory.config import get_memory_mode
 from jiuwenclaw.agentserver.reload_result import ReloadResult
+from jiuwenclaw.agentserver.utils import extract_uploaded_files
 
 
 logger = logging.getLogger(__name__)
@@ -65,19 +66,8 @@ def _build_file_extra(params: dict) -> dict | None:
     返回格式：{"files": [{"name": "...", "path": "..."}]}
     如果无文件上传，返回 None。
     """
-    files_info = params.get("files")
-    if files_info is None:
-        return None
-
-    # 提取文件条目列表，兼容 dict 和 list 两种格式
-    if isinstance(files_info, dict):
-        entries = files_info.get("uploaded", [])
-    elif isinstance(files_info, list):
-        entries = files_info
-    else:
-        return None
-
-    if not isinstance(entries, list):
+    entries = extract_uploaded_files(params)
+    if entries is None:
         return None
     result = []
     for f in entries:
