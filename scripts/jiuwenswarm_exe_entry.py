@@ -42,6 +42,21 @@ if getattr(sys, "frozen", False):
         except Exception:  # noqa: BLE001
             pass
 
+    # macOS：把 .app 内置的 node-runtime/bin 前置到 PATH，使 shutil.which("npx")
+    # 与 playwright_runtime 默认的 "npx" 命令命中内置 Node（> v18），
+    # 用户无需单独安装 Node。入口脚本是所有冻结进程（主进程 + --desktop-run-*
+    # 子进程）的共同入口，PATH 在每个进程启动时都会被前置，幂等且随子进程继承。
+    if sys.platform == "darwin":
+        _node_bin = (
+            Path(sys.executable).resolve().parent.parent
+            / "Resources" / "node-runtime" / "bin"
+        )
+        if _node_bin.is_dir():
+            _old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = (
+                f"{_node_bin}{os.pathsep}{_old_path}" if _old_path else str(_node_bin)
+            )
+
     # Windows: 防止 subprocess 弹出控制台窗口（console=False 编译时 git 等命令会弹出黑框）
     # Monkey-patch asyncio.create_subprocess_exec 和 subprocess.Popen，
     # 自动添加 CREATE_NO_WINDOW 标志
