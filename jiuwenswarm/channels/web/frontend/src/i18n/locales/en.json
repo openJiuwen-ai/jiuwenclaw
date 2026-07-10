@@ -458,9 +458,8 @@
   },
   "sessionSidebar": {
     "newSession": "New session",
-    "expandSidebar": "Expand Sidebar",
-    "collapseSidebar": "Collapse Sidebar",
     "connectionStatus": "Connection Status",
+    "version": "Version",
     "language": "Language",
     "appearance": "Appearance",
     "moreSettings": "More Settings"

@@ -582,7 +582,7 @@
 .conversation-list-item__actions:focus-visible,
 .conversation-list-item__pin-action:hover,
 .conversation-list-item__pin-action:focus-visible {
-  background: #EAEAEB;
+  background: #F5F5F5;
   color: var(--text);
 }
 

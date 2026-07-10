@@ -2653,19 +2653,19 @@
 }
 
 .chat-input-btn--send-active {
-  background: transparent;
-  color: inherit;
+  background: rgb(0, 102, 255);
+  color: white;
 }
 
 .chat-input-btn.chat-input-btn--send-active:hover:not(:disabled) {
-  background: transparent;
-  color: inherit;
+  background: rgb(0, 102, 255);
+  color: white;
   box-shadow: none;
 }
 
 .chat-input-btn--stop,
 .chat-input-btn.chat-input-btn--stop:hover:not(:disabled) {
-  background: var(--danger);
+  background: rgb(0, 102, 255);
   color: white;
 }
 
@@ -2795,7 +2795,6 @@
   height: 100%;
   width: 100%;
   padding: 2rem 1.5rem 6rem 1.5rem;
-  animation: rise 0.45s var(--ease-out) backwards;
 }
 
 .chat-welcome__banner {

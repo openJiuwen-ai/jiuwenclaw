@@ -48,7 +48,6 @@ interface ToolPanelProps {
   setTeamAreaActiveTab: (tab: TabType) => void;
   setTeamAreaActiveDetailTab: (detailTab: TeamDetailTab) => void;
   setTeamAreaSelectedMemberId: (memberId: string) => void;
-  sidebarCollapsed?: boolean;
 }
 
 function isEmptyValue(value: unknown): boolean {

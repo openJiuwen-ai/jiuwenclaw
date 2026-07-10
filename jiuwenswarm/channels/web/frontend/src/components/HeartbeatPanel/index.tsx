@@ -262,7 +262,7 @@ export function HeartbeatPanel() {
 
   return (
     <div className="flex-1 min-h-0 relative">
-      <div className="card w-full h-full flex flex-col">
+      <div className="card main-panel-card w-full h-full flex flex-col">
         {success ? (
           <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20">
             <div className="bg-ok text-white px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">

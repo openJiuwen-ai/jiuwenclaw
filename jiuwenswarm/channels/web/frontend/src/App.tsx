@@ -213,8 +213,6 @@ function ErrorFallback({ error }: { error: Error | null }) {
   );
 }
 
-const SIDEBAR_COLLAPSED_KEY = 'jiuwenswarm_sidebar_collapsed';
-
 function generateSessionId(): string {
   const ts = Date.now().toString(16);
   const rand = crypto.randomUUID().replaceAll('-', '').slice(0, 12);
@@ -275,7 +273,6 @@ function AppContent() {
   const [securityAlertContent, setSecurityAlertContent] = useState('');
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) !== 'false');
   const [sidebarMorePanelOpen, setSidebarMorePanelOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [dialogBusy, setDialogBusy] = useState(false);
@@ -382,8 +379,6 @@ function AppContent() {
       setTeamAreaExpanded(false);
     }
   }, [navigate, route, setTeamAreaExpanded]);
-
-  useEffect(() => { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(sidebarCollapsed)); }, [sidebarCollapsed]);
 
   useEffect(() => {
     ensureSessionRuntimes(sessionId);
@@ -1827,21 +1822,17 @@ function AppContent() {
 
   return (
     <div
-      className={`shell ${sidebarCollapsed ? 'shell--collapsed' : ''} ${sidebarMorePanelOpen ? 'shell--more-panel-open' : ''}`}
+      className={`shell shell--icon-rail ${sidebarMorePanelOpen ? 'shell--more-panel-open' : ''}`}
       data-testid="app-shell"
       data-session-id={sessionId}
     >
-      {/* Navigation Sidebar - always rendered, 48px icon strip when collapsed */}
+      {/* Navigation Sidebar */}
       <SessionSidebar
         activeNav={activeNav}
         onNavigate={handleNavigate}
-        sessionId={sessionId}
-        appVersion={typeof serverConfig?.app_version === 'string' ? serverConfig.app_version : '0.1.7'}
+        appVersion={typeof serverConfig?.app_version === 'string' ? serverConfig.app_version : ''}
         isConnected={isConnected}
         onNewSession={handleNewSession}
-        collapsed={sidebarCollapsed}
-        onCollapse={() => setSidebarCollapsed(true)}
-        onExpand={() => setSidebarCollapsed(false)}
         showNewSession={false}
         hiddenNavItems={['sessions']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}

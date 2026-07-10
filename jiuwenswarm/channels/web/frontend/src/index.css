@@ -422,7 +422,6 @@ select {
       "nav content";
     gap: 0;
     animation: rise 0.4s var(--ease-out);
-    transition: grid-template-columns var(--shell-focus-duration) var(--shell-focus-ease);
     overflow: hidden;
     background: var(--bg);
   }
@@ -433,14 +432,14 @@ select {
     }
   }
 
-  /* Shell collapsed - nav column shrinks to compact icon strip */
-  .shell--collapsed {
+  /* Shell icon rail */
+  .shell--icon-rail {
     grid-template-columns: 64px minmax(0, 1fr);
     grid-template-areas: "nav content";
     --tool-panel-width: 300px;
   }
 
-  .shell--collapsed.shell--more-panel-open {
+  .shell--icon-rail.shell--more-panel-open {
     grid-template-columns: 304px minmax(0, 1fr);
   }
 
@@ -586,6 +585,10 @@ select {
     background: var(--card);
     border-radius: var(--radius-lg);
     padding: 20px;
+  }
+
+  .main-panel-card {
+    border-radius: 0;
   }
 
   /* Horizontal sub-tabs (e.g. config page categories) */
