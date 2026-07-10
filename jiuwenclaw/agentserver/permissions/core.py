@@ -12,8 +12,10 @@ Phase-1 编排：
      **跳过**管线 A 的其余档位与 ``rules`` / subcommand，实质判定完全由管线 B（``file_guard``）承担。
    - 子线 B：``FileGuardChecker.evaluate_accesses`` + ``evaluate_command_intents``
      （三轴文件路径判定）。
-   - 通过 ``strictest`` 合并档位与 ``file_guard`` 结果（路径类工具在非 DENY 时仅由 B 侧抬升降）。
-   - ``file_operations`` 透传到 ``PermissionResult`` 供审批卡渲染。
+    - 通过 ``strictest`` 合并档位与 ``file_guard`` 结果（路径类工具在非 DENY 时仅由 B 侧抬升降）。
+      Shell 工具（``bash`` / ``mcp_exec_command`` / ``create_terminal``）在管线 A 得到显式
+      ``ALLOW`` 时**跳过**管线 B，``file_guard`` 不再抬升。
+    - ``file_operations`` 透传到 ``PermissionResult`` 供审批卡渲染。
 """
 from __future__ import annotations
 
@@ -206,7 +208,15 @@ class PermissionEngine:
             ]
 
         file_operations: list[FileOperation] | None = None
-        merged_file_guard = bool(include_external_directory and permission != PermissionLevel.DENY)
+        shell_explicit_allow = (
+            permission == PermissionLevel.ALLOW
+            and is_shell_permission_tool(tool_name)
+        )
+        merged_file_guard = bool(
+            include_external_directory
+            and permission != PermissionLevel.DENY
+            and not shell_explicit_allow
+        )
         if merged_file_guard:
             fg_result = self._evaluate_file_guard(tool_name, tool_args, extra_intents)
             if fg_result is not None:
