@@ -879,6 +879,10 @@ async def _run(
     # ---------- Telemetry 初始化 ----------
     init_telemetry()
 
+    from jiuwenclaw.perf.config import init_perf_summary_config
+
+    init_perf_summary_config()
+
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
 

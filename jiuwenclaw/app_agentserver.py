@@ -113,6 +113,10 @@ async def _run(host: str, port: int) -> None:
     # ---------- Telemetry 初始化 ----------
     init_telemetry()
 
+    from jiuwenclaw.perf.config import init_perf_summary_config
+
+    init_perf_summary_config()
+
     server = AgentWebSocketServer.get_instance(
         host=host,
         port=port,
@@ -144,6 +148,14 @@ async def _run(host: str, port: int) -> None:
     finally:
         logger.info("[AgentServer] stopping…")
         await server.stop()
+        from jiuwenclaw.perf.writer import flush_request_summary_writer
+        from jiuwenclaw.perf.guard import run_perf_safe
+
+        run_perf_safe(
+            "AgentServer",
+            "request summary flush",
+            lambda: flush_request_summary_writer(timeout=5.0),
+        )
         # jiuwenbox 服务端没有 idle TTL, 本进程退出后已创建的 sandbox 会在 jiuwenbox
         # 一侧持续占用直到 jiuwenbox 自己重启。在此处主动 DELETE 掉本进程缓存里的
         # sandbox 列表; 走线程是因为底层 httpx 是同步 API, 不能直接堵 event loop。

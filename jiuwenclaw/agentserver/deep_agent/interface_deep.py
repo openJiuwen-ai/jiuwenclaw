@@ -129,6 +129,12 @@ from jiuwenclaw.agentserver.llm_io_trace import (
     log_stream_input,
     log_stream_output,
 )
+from jiuwenclaw.perf.interface_hooks import (
+    clear_perf_summary_context,
+    finalize_perf_summary_request,
+    mark_request_first_byte,
+    set_perf_summary_context,
+)
 from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (
     build_permission_rail,
     convert_interactions_to_ask_user_question,
@@ -1171,6 +1177,8 @@ class JiuWenClawDeepAdapter:
         self._qualified_memory_tool_ids: list[str] = []
         self._qualified_runtime_tool_ids: list[str] = []
         self._stream_event_rail: JiuClawStreamEventRail | None = None
+        self._telemetry_rail: Any | None = None
+        self._request_summary_rail: Any | None = None
         self._context_overflow_recovery_rail: ContextOverflowRecoveryRail | None = None
         self._task_execution_rail: TaskExecutionRail | None = None
         self._task_planning_rail: TaskPlanningRail | None = None
@@ -2576,6 +2584,26 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
+    @staticmethod
+    def _build_request_summary_rail() -> Any | None:
+        """Build RequestSummaryRail for per-request performance summaries."""
+        try:
+            from jiuwenclaw.perf.request_summary_rail import RequestSummaryRail
+
+            rail = RequestSummaryRail(record_only=True)
+            logger.info(
+                "[JiuWenClawDeepAdapter] RequestSummaryRail create success",
+                extra={"user_visible": "progress"},
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] RequestSummaryRail create failed: %s",
+                exc,
+                extra={"user_visible": "progress"},
+            )
+            rail = None
+        return rail
+
 
     def _build_task_planning_rail(self, config: dict[str, Any] | None = None) -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
@@ -2976,6 +3004,7 @@ class JiuWenClawDeepAdapter:
         rail_infos = [
             # TelemetryRail - lowest priority, runs first for full coverage
             _RailBuildInfo("_telemetry_rail", self._build_telemetry_rail),
+            _RailBuildInfo("_request_summary_rail", self._build_request_summary_rail),
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail),
@@ -6666,16 +6695,26 @@ class JiuWenClawDeepAdapter:
                 request_id=request.request_id or "",
                 metadata=request.metadata,
             )
+        set_perf_summary_context(
+            self._request_summary_rail,
+            channel_id=request.channel_id or "",
+            session_id=request.session_id or "",
+            request_id=request.request_id or "",
+            mode=mode,
+        )
 
+        perf_summary_status = "ok"
         try:
             await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
 
             result = await Runner.run_agent(agent=self._instance, inputs=inputs)
         except asyncio.CancelledError:
+            perf_summary_status = "cancelled"
             logger.info("[JiuWenClawDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s", request.request_id,
                         session_id)
             raise
         except IrreducibleContextError as exc:
+            perf_summary_status = "error"
             logger.error(
                 "[JiuWenClawDeepAdapter] 上下文不可再压缩: request_id=%s session_id=%s",
                 request.request_id,
@@ -6690,6 +6729,7 @@ class JiuWenClawDeepAdapter:
                 metadata=request.metadata,
             )
         except Exception as e:
+            perf_summary_status = "error"
             logger.error("[JiuWenClawDeepAdapter] Agent 任务执行异常: %s", e, extra={'user_visible': 'critical'})
             raise
         finally:
@@ -6702,6 +6742,8 @@ class JiuWenClawDeepAdapter:
                 self._untrack_session_toolkit(request.request_id)
             self._cleanup_circuit_breaker_session(session_id)
             await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
+            finalize_perf_summary_request(request.request_id, status=perf_summary_status)
+            clear_perf_summary_context()
 
         content = result if isinstance(result, (str, dict)) else str(result)
 
@@ -6846,11 +6888,19 @@ class JiuWenClawDeepAdapter:
         has_streamed_content = False
         accumulated_text = ""
         accumulated_reasoning = ""
+        first_byte_marked = False
         evolution_status_started = False
         evolution_status_ended = False
         last_logged_iteration = -1  # 用于记录上次记录进度的迭代次数
         hitl_pending_stream = False
         suppress_stream_after_hitl = False
+
+        def _mark_first_byte_once() -> None:
+            nonlocal first_byte_marked
+            if first_byte_marked:
+                return
+            first_byte_marked = True
+            mark_request_first_byte()
 
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
@@ -6868,8 +6918,16 @@ class JiuWenClawDeepAdapter:
                 request_id=request.request_id or "",
                 metadata=request.metadata,
             )
+        set_perf_summary_context(
+            self._request_summary_rail,
+            channel_id=request.channel_id or "",
+            session_id=request.session_id or "",
+            request_id=request.request_id or "",
+            mode=mode,
+        )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
+        perf_summary_status = "ok"
         try:
             await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
 
@@ -6886,6 +6944,23 @@ class JiuWenClawDeepAdapter:
                     extra={'user_visible': 'critical'}
                 )
                 async for chunk in Runner.run_agent_streaming(self._instance, inputs):
+                    if not first_byte_marked:
+                        if hasattr(chunk, "type") and chunk.type in {
+                            "llm_output",
+                            "llm_reasoning",
+                            "answer",
+                        }:
+                            _mark_first_byte_once()
+                        elif not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
+                            parsed_probe = self._parse_stream_chunk_with_source(chunk)
+                            if isinstance(parsed_probe, dict) and parsed_probe.get("event_type") in {
+                                "chat.delta",
+                                "chat.reasoning",
+                                "chat.tool_call",
+                                "chat.tool_result",
+                                "chat.final",
+                            }:
+                                _mark_first_byte_once()
                     chunk_iteration = _extract_iteration_from_chunk(chunk)
                     if chunk_iteration is not None:
                         _LLM_TRACE_ITERATION.set(chunk_iteration)
@@ -7268,9 +7343,11 @@ class JiuWenClawDeepAdapter:
                 )
                 evolution_status_ended = True
         except asyncio.CancelledError:
+            perf_summary_status = "cancelled"
             logger.info("[JiuWenClawDeepAdapter] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
             raise
         except IrreducibleContextError as exc:
+            perf_summary_status = "error"
             logger.error(
                 "[JiuWenClawDeepAdapter] 上下文不可再压缩: request_id=%s session_id=%s",
                 request.request_id,
@@ -7292,6 +7369,7 @@ class JiuWenClawDeepAdapter:
                 is_complete=False,
             )
         except Exception as exc:
+            perf_summary_status = "error"
             logger.error(
                 f"[JiuWenClawDeepAdapter] Agent执行失败: request_id={request.request_id} error={str(exc)}",
                 extra={'user_visible': 'critical'}
@@ -7325,6 +7403,8 @@ class JiuWenClawDeepAdapter:
                 self._untrack_session_toolkit(rid)
             self._cleanup_circuit_breaker_session(session_id)
             await self._on_chat_request_end(chat_env_token, chat_fp_token, chat_skill_dirs_token)
+            finalize_perf_summary_request(request.request_id, status=perf_summary_status)
+            clear_perf_summary_context()
 
         summary = self._build_usage_summary(usage_accumulator)
 

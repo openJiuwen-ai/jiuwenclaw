@@ -299,6 +299,13 @@ telemetry:
     protocol:                       # metrics protocol，默认回退到 telemetry.protocol
     headers: {}                     # metrics headers，默认回退到 telemetry.headers
 
+perf:
+  summary:
+    enabled: true
+    bottleneck_top_n: 3
+    include_tasks: true
+    include_errors: false
+
 react:
   agent_name: main_agent
   max_iterations: 100

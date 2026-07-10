@@ -53,6 +53,7 @@ from jiuwenclaw.agentserver.tools.subagent_executor.rails import (
     SubagentContextRail,
 )
 from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
+from jiuwenclaw.perf.request_summary_rail import RequestSummaryRail
 from jiuwenclaw.agentserver.tools.subagent_executor.skill_use_rail_subagent import (
     SubagentSkillUseRail,
 )
@@ -970,7 +971,9 @@ Approach each task methodically and deliver high-quality results.
             rails.append(progressive_tool_rail)
 
         telemetry_rail = TelemetryRail()
+        request_summary_rail = RequestSummaryRail(record_only=True)
         rails.insert(0, telemetry_rail)
+        rails.insert(1, request_summary_rail)
 
         spawn_agent = create_deep_agent(
             model=model or self._model,
@@ -1154,7 +1157,9 @@ Execute the given task using inherited context and available tools.
             rails.append(progressive_tool_rail)
 
         telemetry_rail = TelemetryRail()
+        request_summary_rail = RequestSummaryRail(record_only=True)
         rails.insert(0, telemetry_rail)
+        rails.insert(1, request_summary_rail)
 
         fork_agent = create_deep_agent(
             model=model or self._model,

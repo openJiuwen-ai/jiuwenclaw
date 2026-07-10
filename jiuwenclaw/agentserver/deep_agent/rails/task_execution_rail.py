@@ -476,6 +476,11 @@ class TaskExecutionRail(DeepAgentRail):
             if has_active_tasks and self._should_emit_invoke_task_update(ctx):
                 parent_request_id = self._extract_request_id(ctx)
                 await self._emit_task_update_event(ctx.session, parent_request_id)
+        self._bind_context_to_in_progress_task()
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        """Bind task_id before LLM calls (tool path already binds in before_tool_call)."""
+        self._bind_context_to_in_progress_task()
 
     def _should_emit_invoke_task_update(self, ctx: AgentCallbackContext) -> bool:
         """Whether before_invoke should broadcast todo snapshot to the frontend."""
@@ -860,7 +865,12 @@ class TaskExecutionRail(DeepAgentRail):
                 completed_in_batch.append(task_id)
                 if prev_status == "in_progress":
                     await self._emit_task_complete_event(
-                        ctx.session, task_id, current, status="succeeded")
+                        ctx.session,
+                        task_id,
+                        current,
+                        status="succeeded",
+                        parent_request_id=parent_request_id,
+                    )
                 else:
                     logger.info(
                         "[TaskExecutionRail] skip task.complete (gate1): %s "
@@ -930,6 +940,7 @@ class TaskExecutionRail(DeepAgentRail):
         *,
         status: Literal["succeeded", "failed", "skipped"],
         error: str | None = None,
+        parent_request_id: str = "",
     ) -> None:
         full_task_id = f"todo:{task_id}"
         context = self._active_tasks.get(full_task_id)
@@ -940,12 +951,14 @@ class TaskExecutionRail(DeepAgentRail):
             payload_task_id = context.task_id
             task_content = context.task_content
             source = context.source
+            started_at = context.start_time
             self._active_tasks.pop(full_task_id, None)
         else:
             duration_ms = 0
             payload_task_id = full_task_id
             task_content = str(task.get("content", ""))
             source = "todo"
+            started_at = timestamp
 
         if get_current_task_id() == full_task_id:
             _ACTIVE_TASK_ID.set(None)
@@ -966,6 +979,24 @@ class TaskExecutionRail(DeepAgentRail):
                     "source": source,
                 },
             )
+        )
+
+        from jiuwenclaw.perf.task_hooks import notify_task_complete
+        from jiuwenclaw.perf.guard import run_perf_safe
+
+        run_perf_safe(
+            "TaskExecutionRail",
+            "perf task.complete record",
+            lambda: notify_task_complete(
+                task_id=payload_task_id,
+                task_content=task_content,
+                source=source,
+                started_at=started_at,
+                ended_at=timestamp,
+                duration_ms=float(duration_ms),
+                status=status,
+                request_id=parent_request_id,
+            ),
         )
 
     async def _emit_task_update_event(

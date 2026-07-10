@@ -25,6 +25,7 @@ from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
     set_current_agent_subagent_id,
     set_subagent_parent_session,
 )
+from jiuwenclaw.perf.context import set_inherited_task_id, reset_react_iteration
 from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import (
     JiuClawStreamEventRail,
 )
@@ -148,6 +149,26 @@ class SubagentContextRail(DeepAgentRail):
         self._subagent_id = subagent_id
         self._parent_session = parent_session  # Store parent session for event emission
         self._workspace = workspace
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Inherit parent todo task_id and bind subagent scope for perf attribution."""
+        set_inherited_task_id(get_global_task_id())
+        reset_react_iteration()
+        if self._subagent_id:
+            set_current_agent_subagent_id(self._subagent_id)
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        """Refresh inherited task/subagent binding before each LLM call in subagent."""
+        if get_global_task_id():
+            set_inherited_task_id(get_global_task_id())
+        if self._subagent_id:
+            set_current_agent_subagent_id(self._subagent_id)
+
+    async def after_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Clear subagent perf scope after subagent invoke completes."""
+        set_current_agent_subagent_id(None)
+        set_current_agent_context(None)
+        set_subagent_parent_session(None)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Set context variables for fork_agent to get correct messages and emit tool_call event."""
