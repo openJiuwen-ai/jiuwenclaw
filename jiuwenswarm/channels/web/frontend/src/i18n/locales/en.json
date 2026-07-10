@@ -173,11 +173,6 @@
       }
     }
   },
-  "singleAgent": {
-    "taskBoard": {
-      "tab": "Task Progress"
-    }
-  },
   "artifacts": {
     "title": "Artifacts",
     "tab": "Artifacts",

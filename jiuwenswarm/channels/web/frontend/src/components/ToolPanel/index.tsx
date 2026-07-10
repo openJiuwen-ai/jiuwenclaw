@@ -7,7 +7,7 @@
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
 import { useEffect, useMemo, useRef } from 'react';
-import { FileText } from 'lucide-react';
+import { FileText, Minimize2 } from 'lucide-react';
 import { webRequest } from '../../services/webClient';
 import { ArtifactsPanel, useSessionArtifactsCount } from '../ArtifactsPanel';
 import { TeamArea } from '../teamArea';
@@ -17,8 +17,7 @@ import { HarnessExtensionTree } from './HarnessExtensionTree';
 import { type TabType, type TeamDetailTab } from '../teamArea/shared';
 import type { TeamTask, TeamTaskStatus } from '../../stores/sessionStore';
 import type { TodoItem, TodoStatus } from '../../types';
-import collapseIcon from '../../assets/work-mode/fullscreen.svg';
-import currentTaskIcon from '../../assets/work-mode/current-task.svg';
+import teamProcessIcon from '../../assets/team-process.svg';
 import './ToolPanel.css';
 
 /** 规划/性能模式下把 TodoItem 降级映射为 TeamTask，复用 TaskPlanningPanel 紧凑态样式 */
@@ -104,9 +103,9 @@ function ExpandedSingleAgentArea({
   const tabs = [
     {
       key: 'planning',
-      label: t('singleAgent.taskBoard.tab'),
+      label: t('team.planning.tab'),
       count: `${completedTasks}/${totalTasks}`,
-      icon: <img src={currentTaskIcon} className="h-4 w-4" aria-hidden="true" />,
+      icon: <img src={teamProcessIcon} width={16} height={16} aria-hidden="true" />,
     },
     {
       key: 'artifacts',
@@ -118,7 +117,7 @@ function ExpandedSingleAgentArea({
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-card">
-      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-border">
+      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-b border-border">
         <div className="flex items-center gap-2">
           {tabs.map((tab) => (
             <button
@@ -141,7 +140,7 @@ function ExpandedSingleAgentArea({
           className="rounded p-2 text-text-muted transition-colors hover:bg-secondary hover:text-text"
           title={t('team.collapse')}
         >
-          <img src={collapseIcon} className="h-3 w-3" aria-hidden="true" />
+          <Minimize2 size={16} />
         </button>
       </div>
 
