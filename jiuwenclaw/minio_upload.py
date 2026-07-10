@@ -14,6 +14,23 @@ from typing import Any
 from urllib.parse import urlparse
 
 
+def _max_upload_filename_bytes() -> int:
+    """Return OS filename component limit (typically 255 bytes on Linux)."""
+    try:
+        return int(os.pathconf(tempfile.gettempdir(), "PC_NAME_MAX"))
+    except (OSError, ValueError):
+        return 255
+
+
+def _validate_upload_filename(filename: str) -> None:
+    max_bytes = _max_upload_filename_bytes()
+    name_bytes = filename.encode("utf-8")
+    if len(name_bytes) > max_bytes:
+        raise ValueError(
+            f"文件名过长（当前 {len(name_bytes)} 字节），最大长度为 {max_bytes} 字节，请缩短文件名后重试"
+        )
+
+
 @dataclass
 class MinioUploadConfig:
     """Self-hosted MinIO endpoint and bucket settings."""
@@ -151,11 +168,12 @@ def upload_local_file_to_minio(
 def upload_base64_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Upload a browser file payload (filename + content_base64) to MinIO."""
     filename = str(payload.get("filename") or "upload.bin")
+    _validate_upload_filename(filename)
     content_b64 = payload.get("content_base64")
     if not isinstance(content_b64, str) or not content_b64:
         raise RuntimeError("missing content_base64")
     content = base64.b64decode(content_b64)
-    fd, path = tempfile.mkstemp(prefix="minio_upload_", suffix=f"_{filename}")
+    fd, path = tempfile.mkstemp(prefix="minio_upload_", suffix=".bin")
     os.close(fd)
     try:
         with open(path, "wb") as handle:
