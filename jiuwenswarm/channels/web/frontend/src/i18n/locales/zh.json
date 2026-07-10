@@ -236,13 +236,15 @@
     "waitingTasks": "等待任务",
     "waitingTasksCount": "等待任务 ({{count}})",
     "removeTask": "移除任务",
+    "addImage": "添加图片",
+    "addImageDisabled": "处理中或录音中不可添加图片",
+    "removeImage": "移除图片",
     "holdToSpeak": "按住说话",
     "send": "发送 (Enter)",
     "stop": "停止",
     "modelSelector": {
       "tooltip": "切换对话使用的模型"
     },
-    "newSessionDisabled": "处理中或录音中不可新建",
     "modeSwitchTitle": "切换模式",
     "modeSwitchConfirm": "当前会话有历史消息，切换模式将新建会话。是否继续？",
     "teamPause": "暂停",
@@ -681,6 +683,7 @@
       "memoryForbiddenEnabled": "启用",
       "memoryForbiddenDescription": "禁止记忆内容描述",
       "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
+      "swarmflowEnabled": "启用 SwarmFlow",
       "skillRetrievalBuildRootCategoriesPlaceholder": "直接编辑 YAML/JSON 树根分层配置",
       "agentSkillsPlaceholder": "点击选择技能",
       "agentSkillsEmpty": "暂无已安装技能",
@@ -723,7 +726,7 @@
       "proactiveEnabled": "启用主动推荐",
       "proactiveTickInterval": "检查间隔（分钟）",
       "proactiveMaxPerDay": "每日推荐上限",
-      "proactiveMaxSessions": "每次检查会话数"
+      "proactiveMaxRounds": "每次检查对话轮数"
     },
     "keyHelp": {
       "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启",
@@ -815,6 +818,7 @@
       "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
       "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
       "a2ui": { "label": "A2UI", "hint": "开启或关闭生成式界面渲染与 A2UI 运行时提示词" },
+      "swarmflow": { "label": "SwarmFlow", "hint": "控制 Team 模式是否启用 SwarmFlow 流程视图与监控" },
       "symphony": { "label": "技能交响乐", "hint": "控制技能交响乐" },
       "skillRetrieval": { "label": "技能交响乐", "hint": "控制技能交响乐" },
       "memory": { "label": "记忆系统敏感信息过滤", "hint": "配置禁止写入记忆的敏感信息类型" },
@@ -861,8 +865,8 @@
       "tickIntervalDesc": "引擎扫描主动推荐机会的频率",
       "maxPerDay": "每日上限",
       "maxPerDayDesc": "每日主动推荐次数上限",
-      "maxSessions": "每次检查会话数",
-      "maxSessionsDesc": "每轮检查最多分析的会话数",
+      "maxRounds": "每次检查对话轮数",
+      "maxRoundsDesc": "每次检查最多读取的对话轮数",
       "notConnected": "请先连接服务器。",
       "disabledHint": "请先启用主动推荐，再使用此功能。",
       "typeLabel": {
@@ -1548,6 +1552,26 @@
     "generatedBy": "由 openJiuwen AI 生成",
     "website": "官网地址：{{url}}",
     "repository": "代码仓：{{url}}"
+  },
+  "humanShare": {
+    "trigger": "邀请成员",
+    "title": "邀请成员",
+    "cardTitle": "邀请成员",
+    "cardSummary": "待加入 {{pending}} 人，已加入 {{joined}}/{{total}}",
+    "shareButton": "邀请成员",
+    "waiting": "已加入 {{joined}}/{{total}}，不阻塞团队继续运行",
+    "allJoined": "{{count}} 个人类成员已全部加入",
+    "instructionHint": "成员将会通过配置有JiuwenSwarm的平台，以被分配的身份参与团队任务。",
+    "copy": "复制",
+    "copied": "已复制",
+    "joinedNote": "该成员已加入，无需再次发送加入指令",
+    "commandPending": "正在等待成员信息同步，加入指令生成后会显示",
+    "exitTitle": "退出指令",
+    "status": {
+      "pending": "待加入",
+      "joined": "已加入",
+      "left": "已离开"
+    }
   },
   "network": {
     "wsError": "WebSocket 连接异常",

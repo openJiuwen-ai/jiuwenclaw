@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f3fd8-2789-7cc0-b118-042e8bc89acc",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._session_mode_sync_lock",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._session_mode_sync_lock in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f3fd8-2789-7cc0-b118-042e8bc89acc",
+        "nickname": "Laplace",
+        "symbol_id": "AgentWebSocketServer._session_mode_sync_lock",
+        "completed": true,
+        "finding_count": 2
+      }
+    }
+  ]
+}

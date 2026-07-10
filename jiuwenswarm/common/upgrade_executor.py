@@ -42,9 +42,11 @@ class UpgradeExecutor(ABC):
     def install(self) -> None:
         ...
 
-    @abstractmethod
     def upgrade(self) -> None:
-        ...
+        """Default upgrade raises; overridden by executors that install."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement upgrade()"
+        )
 
     @staticmethod
     def _fetch_text(url: str, headers: dict[str, str], timeout: int) -> str:
@@ -117,131 +119,6 @@ class DesktopExecutor(UpgradeExecutor):
                 "error": f"Update download failed: {exc}",
                 "downloaded_bytes": 0,
             })
-
-    def upgrade(self) -> None:
-        installer_path = str(self._config.get("downloaded_path", ""))
-        if not installer_path or not Path(installer_path).is_file():
-            self._status_callback({
-                "state": "error",
-                "error": "Installer not found. Please download first.",
-            })
-            return
-
-        self._status_callback({"state": "installing", "installing": True, "error": ""})
-
-        platform = sys.platform
-        try:
-            if platform == "win32":
-                self._upgrade_windows(installer_path)
-            elif platform == "darwin":
-                self._upgrade_macos(installer_path)
-            else:
-                self._upgrade_linux(installer_path)
-        except Exception as exc:
-            self._status_callback({
-                "state": "error",
-                "error": f"Install failed: {exc}",
-            })
-
-    def _upgrade_windows(self, installer_path: str) -> None:
-        target = Path(installer_path).resolve()
-        parent_pid = os.getpid()
-        helper_content = f"""@echo off
-setlocal
-set "SELF_PID={parent_pid}"
-:WAIT_PARENT
-tasklist /fi "PID eq %SELF_PID%" 2>nul | find "%SELF_PID%" >nul
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
-    goto WAIT_PARENT
-)
-start "" "{target}"
-"""
-        helper_path = _updates_dir() / "_install_helper.cmd"
-        helper_path.write_text(helper_content, encoding="utf-8")
-
-        subprocess.Popen(
-            [str(helper_path)],
-            creationflags=(
-                getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            ),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-    def _upgrade_macos(self, installer_path: str) -> None:
-        target = Path(installer_path).resolve()
-        parent_pid = os.getpid()
-
-        helper_content = f"""#!/bin/bash
-set -e
-PARENT_PID={parent_pid}
-while kill -0 "$PARENT_PID" 2>/dev/null; do
-    sleep 1
-done
-open "{target}"
-"""
-        helper_path = _updates_dir() / "_install_helper.sh"
-        helper_path.write_text(helper_content, encoding="utf-8")
-        helper_path.chmod(0o755)
-
-        subprocess.Popen(
-            ["/bin/bash", str(helper_path)],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-    def _upgrade_linux(self, installer_path: str) -> None:
-        target = Path(installer_path).resolve()
-        parent_pid = os.getpid()
-
-        if getattr(sys, "frozen", False):
-            install_dir = str(Path(sys.executable).parent.resolve())
-            backup_dir = f"{install_dir}.bak.$RANDOM"
-
-            helper_content = f"""#!/bin/bash
-set -e
-PARENT_PID={parent_pid}
-while kill -0 "$PARENT_PID" 2>/dev/null; do
-    sleep 1
-done
-
-BACKUP="{backup_dir}"
-if [ -d "{install_dir}" ]; then
-    mv "{install_dir}" "$BACKUP"
-fi
-mkdir -p "{install_dir}"
-tar xzf "{target}" -C "{install_dir}"
-rm -rf "$BACKUP" 2>/dev/null || true
-nohup "{install_dir}/jiuwenswarm" >/dev/null 2>&1 &
-"""
-        else:
-            stored_argv = [sys.argv[0]] + sys.argv[1:]
-            restart_cmd = subprocess.list2cmdline(stored_argv)
-
-            helper_content = f"""#!/bin/bash
-set -e
-PARENT_PID={parent_pid}
-while kill -0 "$PARENT_PID" 2>/dev/null; do
-    sleep 1
-done
-
-tar xzf "{target}" -C /tmp/jiuwenswarm_update
-nohup {restart_cmd} >/dev/null 2>&1 &
-"""
-        helper_path = _updates_dir() / "_install_helper.sh"
-        helper_path.write_text(helper_content, encoding="utf-8")
-        helper_path.chmod(0o755)
-
-        subprocess.Popen(
-            ["/bin/bash", str(helper_path)],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
 
     def _download_file(
         self,

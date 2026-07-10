@@ -141,11 +141,13 @@ class _TestMessageHandler(MessageHandler):
         old_sid: str | None,
         *,
         publish_interrupt_result: bool = True,
+        agent_notify: str = "await",
     ) -> None:
         await self._cancel_agent_work_for_session(
             msg,
             old_sid,
             publish_interrupt_result=publish_interrupt_result,
+            agent_notify=agent_notify,  # type: ignore[arg-type]
         )
 
     def build_queued_chat_send_message(
@@ -852,3 +854,25 @@ async def test_default_cancel_publishes_interrupt_result() -> None:
     out = await handler.consume_robot_messages(timeout=0)
     assert out is not None
     assert out.payload == _FakeAgentClient.response_payload
+
+
+@pytest.mark.asyncio
+async def test_fire_and_forget_cancel_publishes_interrupt_result() -> None:
+    handler = _TestMessageHandler.create()
+
+    await handler.cancel_agent_work_for_session(
+        _control_message(),
+        "sess-1",
+        agent_notify="fire_and_forget",
+    )
+
+    out = await handler.consume_robot_messages(timeout=0)
+    assert out is not None
+    assert out.payload == {
+        "event_type": "chat.interrupt_result",
+        "intent": "cancel",
+        "success": True,
+        "message": "任务已取消",
+    }
+    await asyncio.sleep(0)
+    assert len(_FakeAgentClient.sent_requests) == 1

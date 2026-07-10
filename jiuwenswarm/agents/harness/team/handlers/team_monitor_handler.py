@@ -57,9 +57,19 @@ class TeamMonitorHandler(BaseMonitorHandler):
     # Event conversion
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _handle_member_spawned(base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
+    async def _handle_member_spawned(self, base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
         base["member_id"] = event.member_name
+        # 获取成员 role：human_agent → mode="human"，其他保留原 mode
+        try:
+            member_info = await self._monitor.get_member(event.member_name or "")
+            if member_info is not None:
+                base["mode"] = "human" if member_info.role == "human_agent" else member_info.role
+        except Exception as e:
+            logger.warning(
+                "[TeamMonitorHandler] 获取成员 role 失败: member=%s, error=%s",
+                event.member_name,
+                e,
+            )
         return base
 
     @staticmethod
@@ -255,7 +265,10 @@ class TeamMonitorHandler(BaseMonitorHandler):
                         "name": m.display_name,
                         "status": m.status,
                         "execution_status": m.execution_status,
+                        # MemberMode: build_mode/plan_mode（控制是否需要 leader 审批）
                         "mode": m.mode,
+                        # role 字段：区分人类/AI（human_agent/teammate/leader）
+                        "role": m.role,
                     }
                     for m in members
                 ],
@@ -276,6 +289,42 @@ class TeamMonitorHandler(BaseMonitorHandler):
         except Exception as e:
             logger.warning(
                 "[TeamMonitorHandler] get_team_snapshot failed: session_id=%s, error=%s",
+                self._session_id,
+                e,
+            )
+            return None
+
+    async def get_member_list(self) -> list[dict[str, Any]] | None:
+        """仅查询成员列表（不含 tasks）。
+
+        ``get_team_snapshot`` 把 members 与 tasks 绑在同一个 try 里，一旦
+        ``get_tasks()`` 抛错（如 team 任务表尚未建表/迁移，``no such table``），
+        整个 snapshot 返回 None，连 members 一起丢失。/join 成员校验只需要
+        members，不依赖 tasks，故提供此窄方法做降级：tasks 取不到不影响
+        成员名校验。字段形状与 ``get_team_snapshot`` 的 members 项保持一致。
+        """
+        if self._monitor is None:
+            return None
+        try:
+            members = await self._monitor.get_members()
+            team_info = await self._monitor.get_team_info()
+            leader_name = team_info.leader_member_name if team_info else None
+            if leader_name:
+                members = [m for m in members if m.member_name != leader_name]
+            return [
+                {
+                    "member_id": m.member_name,
+                    "name": m.display_name,
+                    "status": m.status,
+                    "execution_status": m.execution_status,
+                    "mode": m.mode,
+                    "role": m.role,
+                }
+                for m in members
+            ]
+        except Exception as e:
+            logger.warning(
+                "[TeamMonitorHandler] get_member_list failed: session_id=%s, error=%s",
                 self._session_id,
                 e,
             )

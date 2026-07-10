@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f4003-7d2d-7201-92cd-ba58a46b0190",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._handle_session_delete",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._handle_session_delete in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f4003-7d2d-7201-92cd-ba58a46b0190",
+        "nickname": "Mendel",
+        "symbol_id": "AgentWebSocketServer._handle_session_delete",
+        "completed": true,
+        "finding_count": 4
+      }
+    }
+  ]
+}

@@ -417,10 +417,15 @@ class CronSchedulerService:
             except Exception as exc:  # noqa: BLE001
                 if self._is_croniter_no_next_date(exc):
                     # 已过期的 one-shot：标记 expired 并停用，避免 UI 仍显示 enabled。
+                    # proactive job 的 enabled 由 ConfigPanel 开关管，scheduler 不碰。
                     try:
-                        job.enabled = False
+                        is_proactive = getattr(job, "mode", "") == "proactive.tick"
+                        patch = {"expired": True}
+                        if not is_proactive:
+                            patch["enabled"] = False
+                            job.enabled = False
                         job.expired = True
-                        await self._store.update_job(job.id, {"enabled": False, "expired": True})
+                        await self._store.update_job(job.id, patch)
                     except Exception as update_exc:  # noqa: BLE001
                         logger.warning(
                             "[Cron] mark expired failed job=%s: %s",
@@ -586,13 +591,17 @@ class CronSchedulerService:
                 push_dt, wake_dt, next_run_id = self._compute_next_run(job, now_ts=self._now_fn())
                 self._schedule_event(wake_dt, "wake", job.id, next_run_id)
                 self._schedule_event(push_dt, "push", job.id, next_run_id)
-            except Exception as exc:  # noqa: BLE001  # 兜底：reschedule 失败不阻断本次 tick 结果（下个 reload 会重排）
+            except Exception as exc:  # 兜底：reschedule 失败不阻断本次 tick 结果（下个 reload 会重排）
                 if self._is_croniter_no_next_date(exc):
                     try:
-                        job.enabled = False
+                        is_proactive = getattr(job, "mode", "") == "proactive.tick"
+                        patch = {"expired": True}
+                        if not is_proactive:
+                            patch["enabled"] = False
+                            job.enabled = False
                         job.expired = True
-                        await self._store.update_job(job.id, {"enabled": False, "expired": True})
-                    except Exception as update_exc:  # noqa: BLE001  # 兜底：标记过期失败仅告警，不影响主流程
+                        await self._store.update_job(job.id, patch)
+                    except Exception as update_exc:  # 兜底：标记过期失败仅告警，不影响主流程
                         logger.warning("[Cron] mark expired after proactive.tick failed job=%s: %s", job.id, update_exc)
                 else:
                     logger.warning("[Cron] reschedule after proactive.tick failed job=%s: %s", job.id, exc)
@@ -658,9 +667,13 @@ class CronSchedulerService:
                 # 不删除，改为标记过期（与自然过期的一次性任务行为一致）
                 logger.info("[Cron] delete_after_run job=%s, marking expired after push", job.id)
                 try:
-                    await self._store.update_job(job.id, {"enabled": False, "expired": True})
-                    job.enabled = False
+                    is_proactive = getattr(job, "mode", "") == "proactive.tick"
+                    patch = {"expired": True}
+                    if not is_proactive:
+                        patch["enabled"] = False
+                        job.enabled = False
                     job.expired = True
+                    await self._store.update_job(job.id, patch)
                 except Exception as update_exc:
                     logger.warning("[Cron] mark expired after push failed job=%s: %s", job.id, update_exc)
                 return
@@ -1103,11 +1116,12 @@ class CronSchedulerService:
 
         # 企业飞书：优先用作业里绑定的 SessionMap session_id（feishu::chat_id::bot_id::...），
         # 避免多群共用 bot 时误用 config 中的 last_*（最近一条消息的会话）。
-        # Web/TUI：不绑定 session_id，否则新会话或重启后 session_id 与旧不同，消息会被前端过滤。
+        # TUI：不绑定 session_id，否则 TUI 重启后新 session_id 与旧不同，消息会被前端过滤。
+        # Web：绑定 session_id，只投递到创建定时任务的会话，避免多窗口干扰。
         metadata: dict | None = None
         msg_session_id: str | None = None
         routing_sid = str(getattr(job, "session_id", None) or "").strip()
-        if routing_sid and channel_id not in ("web", "tui"):
+        if routing_sid and channel_id != "tui":
             msg_session_id = routing_sid
         if channel_id.startswith("feishu_enterprise:") and routing_sid and "::" in routing_sid:
             parts = routing_sid.split("::")
@@ -1132,14 +1146,38 @@ class CronSchedulerService:
                 cfg = get_config_raw() or {}
                 channels_cfg = cfg.get("channels") or {}
                 ch_cfg = channels_cfg.get(channel_id) or {}
-                if channel_id == "feishu":
-                    last_chat_id = str(ch_cfg.get("last_chat_id") or "").strip()
-                    last_open_id = str(ch_cfg.get("last_open_id") or "").strip()
-                    if last_chat_id or last_open_id:
-                        metadata = {
-                            "feishu_chat_id": last_chat_id,
-                            "feishu_open_id": last_open_id,
-                        }
+                if channel_id == "feishu" or channel_id.startswith("feishu:"):
+                    # V2 多应用：从 apps 列表取对应 app 的 last_*（而非平铺字段）
+                    target_app_id = str(getattr(job, "app_id", None) or "").strip()
+                    if not target_app_id:
+                        if channel_id.startswith("feishu:") and not channel_id.startswith("feishu_enterprise:"):
+                            target_app_id = channel_id.split(":", 1)[1].strip()
+                    apps = ch_cfg.get("apps") or []
+                    if isinstance(apps, list):
+                        for app in apps:
+                            if not isinstance(app, dict):
+                                continue
+                            if target_app_id and app.get("app_id") != target_app_id:
+                                continue
+                            if not target_app_id and not app.get("is_default", False):
+                                continue
+                            last_chat_id = str(app.get("last_chat_id") or "").strip()
+                            last_open_id = str(app.get("last_open_id") or "").strip()
+                            if last_chat_id or last_open_id:
+                                metadata = {
+                                    "feishu_chat_id": last_chat_id,
+                                    "feishu_open_id": last_open_id,
+                                }
+                            break
+                    # 兜底：如果 apps 列表为空或无匹配，回退到旧平铺字段
+                    if metadata is None:
+                        last_chat_id = str(ch_cfg.get("last_chat_id") or "").strip()
+                        last_open_id = str(ch_cfg.get("last_open_id") or "").strip()
+                        if last_chat_id or last_open_id:
+                            metadata = {
+                                "feishu_chat_id": last_chat_id,
+                                "feishu_open_id": last_open_id,
+                            }
                 elif channel_id.startswith("feishu_enterprise:"):
                     app_id = channel_id.split(":", 1)[1].strip()
                     enterprise_cfg = channels_cfg.get("feishu_enterprise") or {}
@@ -1272,6 +1310,7 @@ class CronSchedulerService:
                     job.chat_type, channel_id, job.id,
                 )
 
+        _msg_app_id = str(getattr(job, "app_id", None) or "").strip() or None
         msg = Message(
             id=f"cron-push-{state.run_id}-{channel_id}",
             type="event",
@@ -1284,5 +1323,6 @@ class CronSchedulerService:
             event_type=EventType.CHAT_FINAL,
             metadata=metadata,
             group_digital_avatar=_group_digital_avatar,
+            app_id=_msg_app_id,
         )
         await self._message_handler.publish_robot_messages(msg)

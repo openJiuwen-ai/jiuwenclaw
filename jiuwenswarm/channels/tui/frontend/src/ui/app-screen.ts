@@ -1304,6 +1304,7 @@ export class AppScreen implements Component, Focusable {
   private fileViewerState: FileViewerState | null = null;
   /** DiffViewer state for interactive diff browsing */
   private diffViewerState: DiffViewerState | null = null;
+  private mouseTrackingEnabled = false;
   /** Previous session title for terminal window title sync. */
   private previousSessionTitle: string = "";
 
@@ -1476,6 +1477,8 @@ export class AppScreen implements Component, Focusable {
   }
 
   private setMouseTrackingEnabled(enabled: boolean): void {
+    if (this.mouseTrackingEnabled === enabled) return;
+    this.mouseTrackingEnabled = enabled;
     if (enabled) {
       this.tui.terminal.write(ENABLE_MOUSE_TRACKING);
     } else {
@@ -2696,6 +2699,28 @@ export class AppScreen implements Component, Focusable {
       pendingInput,
       pendingInputBaseline,
     ).length;
+    const approximateFixedHeight =
+      questionLines.length + editorLines.length + composerPreviewLines.length + 2;
+    const transcriptMayScroll =
+      transcriptLineCount > Math.max(0, this.tui.terminal.rows - approximateFixedHeight);
+    const interactiveOverlayActive =
+      this.startupPromptList !== null ||
+      this.resumeSessionList !== null ||
+      this.statusViewState !== null ||
+      this.mcpDetail !== null ||
+      this.mcpList !== null ||
+      this.mcpTools !== null ||
+      this.modelList !== null ||
+      this.toolSelector !== null ||
+      this.themeList !== null ||
+      this.swarmWorkflowsViewState !== null ||
+      this.configEditorState !== null ||
+      this.questionList !== null;
+    this.setMouseTrackingEnabled(
+      transcriptMayScroll ||
+        snapshot.pendingQuestion !== null ||
+        interactiveOverlayActive,
+    );
     if (
       this.transcriptScrollOffset > 0 &&
       this.lastTranscriptLineWidth === width &&

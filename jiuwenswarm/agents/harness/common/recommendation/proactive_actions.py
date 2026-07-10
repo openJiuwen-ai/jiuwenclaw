@@ -258,7 +258,6 @@ from jiuwenswarm.agents.harness.common.recommendation.proactive_prompts import (
 @dataclass
 class AnalysisResult:
     """Output from the unified LLM analysis call."""
-    profile_delta: dict[str, Any] = field(default_factory=dict)
     decision: RecommendationDecision | None = None
 
 
@@ -284,7 +283,7 @@ async def _analyze_and_decide(
     duplicate them in the LLM context.
     """
     prompt = UNIFIED_ANALYSIS_PROMPT.format(
-        conversation_summary=report_text[:60000],
+        conversation_summary=report_text,
     )
 
     # conversation_id 每次 tick 用唯一值——若用固定 id，DeepAgent 的 context
@@ -310,14 +309,8 @@ async def _analyze_and_decide(
         if not isinstance(delta, dict):
             return AnalysisResult()
 
-        # Extract profile delta (only fields the LLM is allowed to change)
-        profile_delta: dict[str, Any] = {}
-        profile_keys = ("preferences", "goals", "interests", "commitments")
-        for key in profile_keys:
-            if key in delta and isinstance(delta[key], list):
-                profile_delta[key] = delta[key]
-
-        # Extract decision
+        # Extract decision (画像已废弃——所有推荐基于当前对话)
+        decision = None
         decision = None
         raw_decision = delta.get("decision")
         if isinstance(raw_decision, dict) and raw_decision.get("type") and raw_decision.get("target"):
@@ -350,13 +343,11 @@ async def _analyze_and_decide(
                 )
 
         logger.info(
-            "[ProactiveEngine] analysis: delta_keys=%s, decision=%s",
-            list(profile_delta.keys()),
+            "[ProactiveEngine] analysis: decision=%s",
             f"{decision.type}:{decision.target}" if decision else "null",
         )
 
         return AnalysisResult(
-            profile_delta=profile_delta,
             decision=decision,
         )
     except Exception as exc:

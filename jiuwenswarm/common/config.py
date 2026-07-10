@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import time
 import uuid
 from copy import deepcopy
 from pathlib import Path
@@ -20,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_MODULE_DIR = Path(__file__).parent
 CONFIG_YAML_PATH = get_config_file()
+SWARMFLOW_ENABLED_CONFIG_PATH = ("modes", "team", "jiuwen_team", "enable_swarmflow")
+DEFAULT_SWARMFLOW_ENABLED = False
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
 if _user_config:
@@ -101,15 +104,35 @@ def _normalize_config(config: dict[str, Any] | None) -> None:
         mcc = react.get("model_client_config")
         if isinstance(mcc, dict) and "custom_headers" in mcc:
             mcc["custom_headers"] = _parse_custom_headers(mcc["custom_headers"])
-    # web channel enable send file tool default
+    # send_file 工具默认开关：web/feishu/xiaoyi 顶层缺 send_file_allowed 时兜底 True。
     channels = config.get("channels", {})
-    if channels.get("web", {}).get("send_file_allowed") is None:
-        channels["web"] = {"send_file_allowed": True}
+    for _ch in ("web", "feishu", "xiaoyi"):
+        _ch_conf = channels.get(_ch)
+        if not isinstance(_ch_conf, dict):
+            _ch_conf = {}
+            channels[_ch] = _ch_conf
+        if _ch_conf.get("send_file_allowed") is None:
+            _ch_conf["send_file_allowed"] = True
+
+
+def _read_with_retry(filepath: Path, max_attempts: int = 3) -> dict[str, Any]:
+    """读取 YAML，遇解析错误重试（应对跨进程写竞态）。"""
+    for attempt in range(max_attempts):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        except yaml.YAMLError:
+            if attempt < max_attempts - 1:
+                time.sleep(0.05 * (attempt + 1))
+                continue
+            raise
+    return {}
 
 
 def get_config():
-    with open(get_config_file(), "r", encoding="utf-8") as f:
-        config_base = yaml.safe_load(f) or {}
+    """读取并解析 config.yaml（锁保护 + 跨进程降级重试）。"""
+    config_base = _read_with_retry(get_config_file())
+    # resolve_env_vars 和 _normalize_config 只操作内存数据，在锁外执行以缩短锁持有时间
     config_base = resolve_env_vars(config_base)
     _normalize_config(config_base)
 
@@ -118,8 +141,7 @@ def get_config():
 
 def get_config_raw():
     """读 config.yaml 原始内容（不解析环境变量），供局部更新后写回。"""
-    with open(CONFIG_YAML_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    return _read_with_retry(CONFIG_YAML_PATH)
 
 
 def set_config(config):
@@ -209,15 +231,24 @@ def load_yaml_round_trip(config_path: Path):
 
 
 def dump_yaml_round_trip(config_path: Path, data: Any) -> None:
-    """ruamel 写回 config，保留注释与格式。"""
+    """ruamel 写回 config，保留注释与格式（原子写入：临时文件 + os.replace）。"""
     rt = YAML()
     rt.preserve_quotes = True
     rt.default_flow_style = False
     # mapping 2 空格；list 用 sequence=4 + offset=2 保证 dash 前有 2 空格（tools: 下 - todo），否则 list 会变成无缩进
     rt.indent(mapping=2, sequence=4, offset=2)
     rt.width = 4096
-    with open(config_path, "w", encoding="utf-8") as f:
-        rt.dump(data, f)
+    tmp = config_path.with_name(f"{config_path.stem}.{uuid.uuid4().hex}.yaml.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            rt.dump(data, f)
+        os.replace(tmp, config_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 # Backward-compat aliases — downstream modules import the underscore-prefixed names
@@ -258,9 +289,13 @@ def update_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:
 def update_channel_subsection_in_config(
     channel_id: str,
     subsection_id: str,
-    conf: dict[str, Any],
+    conf: dict[str, Any] | list[Any] | Any,
 ) -> None:
-    """更新 channels[channel_id][subsection_id] 并写回。"""
+    """更新 channels[channel_id][subsection_id] 并写回。
+
+    若 ``conf`` 为 dict，则合并（partial update）到现有 subsection 中；
+    若为 list 或其他非 dict 类型，则整体替换 subsection。
+    """
     data = load_yaml_round_trip(CONFIG_YAML_PATH)
     if "channels" not in data:
         data["channels"] = {}
@@ -268,12 +303,78 @@ def update_channel_subsection_in_config(
     if channel_id not in channels:
         channels[channel_id] = {}
     section = channels[channel_id]
-    if subsection_id not in section:
-        section[subsection_id] = {}
-    subsection = section[subsection_id]
-    for k, v in conf.items():
-        subsection[k] = v
+
+    if isinstance(conf, dict):
+        # 合并（partial update）—— 用于 feishu_enterprise 按 bot 维度保存状态等场景
+        if subsection_id not in section:
+            section[subsection_id] = {}
+        for k, v in conf.items():
+            section[subsection_id][k] = v
+    else:
+        # 整体替换 —— 用于 apps 列表等非 dict 类型
+        section[subsection_id] = conf
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def replace_channel_subsection_with_cleanup(
+    channel_id: str,
+    subsection_id: str,
+    conf: dict[str, Any] | list[Any] | Any,
+    keep_keys: set[str],
+) -> None:
+    """整体替换 channels[channel_id][subsection_id] 并清理旧字段，一次 IO 完成。
+
+    写入 subsection 后，删除 channels[channel_id] 下不在 ``keep_keys`` 中的字段。
+    用于多应用模式下替换 apps 并清理旧平铺字段，避免两套数据源不一致。
+    """
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "channels" not in data:
+        data["channels"] = {}
+    channels = data["channels"]
+    if channel_id not in channels:
+        channels[channel_id] = {}
+    section = channels[channel_id]
+
+    section[subsection_id] = conf
+
+    for k in list(section.keys()):
+        if k not in keep_keys:
+            del section[k]
+
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_channel_app_field(
+    channel_id: str,
+    app_identifier: str,
+    field_values: dict[str, Any],
+    *,
+    app_id_key: str = "app_id",
+) -> bool:
+    """更新 ``channels[channel_id].apps`` 列表中某个 app 条目的字段。
+
+    用于多应用模式下运行时状态（如 ``last_chat_id``、``bot_open_id``）写回
+    对应 app 条目，避免所有 app 争抢同一个平铺字段。
+
+    Args:
+        channel_id: 通道 ID，如 ``"feishu"`` / ``"xiaoyi"``。
+        app_identifier: app 标识值，如 ``"cli_a"``。
+        field_values: 要更新的字段 dict，如 ``{"last_chat_id": "oc_xxx"}``。
+        app_id_key: 匹配 app 条目的键名，默认 ``"app_id"``。
+
+    Returns:
+        ``True`` 表示更新成功，``False`` 表示未找到匹配 app。
+    """
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    apps = data.get("channels", {}).get(channel_id, {}).get("apps", [])
+    if not isinstance(apps, list):
+        return False
+    for app in apps:
+        if isinstance(app, dict) and app.get(app_id_key) == app_identifier:
+            app.update(field_values)
+            dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+            return True
+    return False
 
 
 def update_preferred_language_in_config(lang: str) -> None:
@@ -1181,6 +1282,28 @@ def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
     if "modes" not in data or not isinstance(data["modes"], dict):
         data["modes"] = {}
     data["modes"]["team"] = team_mapping
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def _ensure_config_object(parent: dict[str, Any], key: str, path: str) -> dict[str, Any]:
+    value = parent.get(key)
+    if value is None:
+        value = {}
+        parent[key] = value
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} config must be an object")
+    return value
+
+
+def update_swarmflow_enabled_in_config(enabled: bool) -> None:
+    """Update ``modes.team.jiuwen_team.enable_swarmflow`` in config.yaml."""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    current = data
+    path_so_far: list[str] = []
+    for segment in SWARMFLOW_ENABLED_CONFIG_PATH[:-1]:
+        path_so_far.append(segment)
+        current = _ensure_config_object(current, segment, ".".join(path_so_far))
+    current[SWARMFLOW_ENABLED_CONFIG_PATH[-1]] = bool(enabled)
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 

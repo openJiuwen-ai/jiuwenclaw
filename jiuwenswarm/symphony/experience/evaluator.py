@@ -204,6 +204,7 @@ class TraceEvaluator:
                 ],
                 max_tokens=256,
                 stream=False,
+                extra_body={"enable_thinking": False, "thinking": {"type": "disabled"}},
             )
             content = response.choices[0].message.content
             if content:

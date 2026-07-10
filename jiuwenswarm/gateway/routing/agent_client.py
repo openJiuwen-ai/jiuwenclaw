@@ -481,6 +481,14 @@ class WebSocketAgentServerClient(AgentServerClient):
                     raise RuntimeError("AgentServer WebSocket connection closed") from data.exc
                 chunk = parse_agent_server_wire_chunk(data)
                 chunk_count += 1
+                if chunk_count <= 3:
+                    _pl = getattr(chunk, "payload", None) or {}
+                    _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                    logger.info(
+                        "[WebSocketAgentServerClient] stream chunk received:"
+                        " request_id=%s seq=%s event_type=%s",
+                        rid, chunk_count, _et,
+                    )
                 yield chunk
                 if chunk.is_complete:
                     saw_complete = True

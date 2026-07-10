@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f40b1-16c6-77d1-8408-95800e90f15f",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._handle_command_chrome",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._handle_command_chrome in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f40b1-16c6-77d1-8408-95800e90f15f",
+        "nickname": "Dalton",
+        "symbol_id": "AgentWebSocketServer._handle_command_chrome",
+        "completed": true,
+        "finding_count": 3
+      }
+    }
+  ]
+}

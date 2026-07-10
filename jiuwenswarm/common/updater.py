@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 import signal
 import sys
 import threading
@@ -19,8 +18,6 @@ from jiuwenswarm.common.version_source import (
     GitCodeReleasesSource,
     PyPIVersionSource,
     ReleaseInfo,
-    is_prerelease_version,
-    strip_prerelease_suffix,
 )
 
 DEFAULT_RELEASE_API_GITCODE = "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/releases/latest"
@@ -30,7 +27,7 @@ DEFAULT_ASSET_PATTERN_WINDOWS = "JiuwenSwarm-setup-{version}.exe"
 DEFAULT_ASSET_PATTERN_MACOS = "JiuwenSwarm-{version}.dmg"
 DEFAULT_ASSET_PATTERN_LINUX = "JiuwenSwarm-{version}.tar.gz"
 DEFAULT_TIMEOUT_SECONDS = 20
-DEFAULT_TEXT = "HzUzzbjzJNsWmfsdiy2GKcEg"
+DEFAULT_TEXT = "WbrW92Yn6jif-4Ks3kvzhWVv"
 DESKTOP_ENV_FLAG = "JIUWENSWARM_DESKTOP"
 
 
@@ -38,61 +35,20 @@ def get_access_token() -> str:
     return os.getenv("GITCODE_TOKEN", "").strip() or DEFAULT_TEXT
 
 
-def _normalize_version(raw: str) -> str:
-    return (raw or "").strip().lstrip("vV")
-
-
-def _version_key(version: str) -> tuple[int, ...]:
-    numbers = re.findall(r"\d+", _normalize_version(version))
-    return tuple(int(part) for part in numbers) or (0,)
-
-
-def _base_version_key(version: str) -> tuple[int, ...]:
-    """Numeric key for the *base* version with pre-release suffix removed.
-
-    ``0.2.0.beta1`` and ``0.2.0`` both yield ``(0, 2, 0)``.
-    """
-    return _version_key(strip_prerelease_suffix(version))
-
-
 def _is_newer_version(candidate: str, current: str) -> bool:
     """Return True when *candidate* is a newer release than *current*.
 
-    Pre-release rules:
-    - A stable release is always newer than a pre-release with the same base version.
-      e.g. 0.2.0 > 0.2.0.beta1
-    - A pre-release is *never* considered newer than a stable release with the same
-      base version.  e.g. 0.2.0.rc1 is NOT newer than 0.2.0
-    - Between two pre-releases (or two stables) the numeric components decide.
+    Pre-release rules (consistent with :func:`release_sort_key`):
+    - Base version compared numerically first (``0.2.3`` > ``0.2.2``).
+    - A stable release is always newer than a pre-release with the same base
+      version (``0.2.3`` > ``0.2.3.beta1``).
+    - Among pre-releases at the same base, the type decides first:
+      dev < alpha < beta < rc < pre.
+    - Within the same type, a larger pre-release number is newer
+      (``0.2.3.beta2`` > ``0.2.3.beta1``).
     """
-    candidate_base = _base_version_key(candidate)
-    current_base = _base_version_key(current)
-    max_len = max(len(candidate_base), len(current_base))
-    candidate_padded = candidate_base + (0,) * (max_len - len(candidate_base))
-    current_padded = current_base + (0,) * (max_len - len(current_base))
-
-    if candidate_padded > current_padded:
-        return True
-    if candidate_padded < current_padded:
-        return False
-
-    # Same base — pre-release vs stable decides
-    current_is_pre = is_prerelease_version(current)
-    candidate_is_pre = is_prerelease_version(candidate)
-    if current_is_pre and not candidate_is_pre:
-        return True   # stable > pre-release
-    if candidate_is_pre and not current_is_pre:
-        return False  # pre-release < stable
-
-    # Both pre-release (e.g. 0.2.0.beta2 vs 0.2.0.beta1) — full segments decide
-    if candidate_is_pre and current_is_pre:
-        candidate_full = _version_key(candidate)
-        current_full = _version_key(current)
-        max_full = max(len(candidate_full), len(current_full))
-        return (candidate_full + (0,) * (max_full - len(candidate_full))
-                > current_full + (0,) * (max_full - len(current_full)))
-
-    return False
+    from jiuwenswarm.common.version_source import release_sort_key
+    return release_sort_key(candidate) > release_sort_key(current)
 
 
 def _detect_install_mode() -> str:
@@ -205,6 +161,20 @@ class UpdaterService:
         if status["state"] in ("downloading", "upgrading"):
             return status
 
+        if not status.get("has_update"):
+            self._update_status(
+                state="error",
+                error="No update available. Please run an update check first.",
+            )
+            return self.get_status()
+
+        if install_mode == "desktop" and not status.get("download_url"):
+            self._update_status(
+                state="error",
+                error="No download URL resolved. Please run an update check first.",
+            )
+            return self.get_status()
+
         config = self._load_config()
         executor = create_executor(
             install_mode,
@@ -230,18 +200,23 @@ class UpdaterService:
         thread.start()
         return self.get_status()
 
-    def mark_installing(self, installer_path: str) -> dict[str, Any]:
-        self._update_status(
-            state="installing",
-            installing=True,
-            downloaded_path=installer_path,
-            error="",
-        )
-        return self.get_status()
-
     def start_upgrade(self) -> dict[str, Any]:
         status = self.get_status()
         install_mode = status.get("install_mode", "desktop")
+
+        # Desktop installs are driven by the desktop app via the pywebview
+        # install_update API (it owns the window and can close it).  This WS
+        # method only handles pip-mode restarts.
+        if install_mode != "pip":
+            self._update_status(
+                state="error",
+                error=(
+                    "Desktop upgrades are handled by the desktop app via "
+                    "install_update. This method is only for pip mode."
+                ),
+            )
+            return self.get_status()
+
         config = self._load_config()
         executor = create_executor(
             install_mode,
@@ -249,9 +224,8 @@ class UpdaterService:
             self._executor_callback,
         )
 
-        pip_state = "restarting" if install_mode == "pip" else "installing"
         self._update_status(
-            state=pip_state,
+            state="restarting",
             installing=True,
             error="",
         )
@@ -265,8 +239,7 @@ class UpdaterService:
             )
             return self.get_status()
 
-        if install_mode == "pip":
-            threading.Timer(3.0, os.kill, args=[os.getpid(), signal.SIGTERM]).start()
+        threading.Timer(3.0, os.kill, args=[os.getpid(), signal.SIGTERM]).start()
 
         return self.get_status()
 
@@ -346,8 +319,12 @@ class UpdaterService:
     def _resolve_desktop_asset(self, config: dict[str, Any], release: ReleaseInfo) -> None:
         platform_key = _platform_asset_key()
         pattern_key = f"asset_name_pattern_{platform_key}"
-        asset_name_pattern = config.get(pattern_key) or config.get("asset_name_pattern_windows",
-            DEFAULT_ASSET_PATTERN_WINDOWS)
+        default_pattern = {
+            "windows": DEFAULT_ASSET_PATTERN_WINDOWS,
+            "macos": DEFAULT_ASSET_PATTERN_MACOS,
+            "linux": DEFAULT_ASSET_PATTERN_LINUX,
+        }.get(platform_key, DEFAULT_ASSET_PATTERN_WINDOWS)
+        asset_name_pattern = config.get(pattern_key) or default_pattern
         asset_name = asset_name_pattern.format(version=release.version)
 
         matched = next((a for a in release.assets if a.name == asset_name), None)
@@ -423,6 +400,8 @@ class UpdaterService:
         except (TypeError, ValueError):
             timeout_seconds = DEFAULT_TIMEOUT_SECONDS
 
+        global_asset_name_pattern = updater.get("asset_name_pattern")
+
         return {
             "enabled": bool(updater.get("enabled", True)),
             "desktop_release_api_type": desktop_api_type,
@@ -432,15 +411,19 @@ class UpdaterService:
             "repo_name": repo,
             "release_api_url": release_api_url,
             "asset_name_pattern_windows": str(
-                updater.get("asset_name_pattern")
-                or updater.get("asset_name_pattern_windows")
+                updater.get("asset_name_pattern_windows")
+                or global_asset_name_pattern
                 or DEFAULT_ASSET_PATTERN_WINDOWS
             ),
             "asset_name_pattern_macos": str(
-                updater.get("asset_name_pattern_macos") or DEFAULT_ASSET_PATTERN_MACOS
+                updater.get("asset_name_pattern_macos")
+                or global_asset_name_pattern
+                or DEFAULT_ASSET_PATTERN_MACOS
             ),
             "asset_name_pattern_linux": str(
-                updater.get("asset_name_pattern_linux") or DEFAULT_ASSET_PATTERN_LINUX
+                updater.get("asset_name_pattern_linux")
+                or global_asset_name_pattern
+                or DEFAULT_ASSET_PATTERN_LINUX
             ),
             "timeout_seconds": timeout_seconds,
             "access_token": get_access_token(),

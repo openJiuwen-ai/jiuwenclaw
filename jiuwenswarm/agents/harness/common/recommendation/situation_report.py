@@ -38,9 +38,7 @@ class SituationReport:
     """Aggregated context for the proactive engine's LLM tick."""
 
     sessions: list[SessionSummary] = field(default_factory=list)
-    profile_summary: str = ""
     recommendation_history_summary: str = ""
-    pending_commitments: list[str] = field(default_factory=list)
     skills_summary: str = ""
     calendar_events: list[dict[str, Any]] = field(default_factory=list)
 
@@ -78,33 +76,20 @@ class SituationReport:
         """Render the full report as LLM-readable markdown."""
         parts: list[str] = []
 
-        parts.append("## 用户画像")
-        parts.append(self.profile_summary or "（尚无画像）")
-        parts.append("")
-
-        if self.sessions:
-            parts.append("## 最近对话摘要")
-            for s in self.sessions:
-                if not s.compressed_history:
-                    continue
-                channel_label = s.channel_id or "default"
-                parts.append(f"### 会话: {s.title or s.session_id[:16]} (channel: {channel_label})")
-                # Cap each session's contribution to avoid overwhelming the LLM.
-                # 截最后 8000 字符——最新消息（含用户撤销意图等关键信息）比早期
-                # 上下文更重要，从头截会丢失末尾的最新 user 消息。
-                # 8000 字符约 2-3 轮完整对话，够 LLM 理解最新意图。
-                hist = s.compressed_history
-                parts.append(hist[-8000:] if len(hist) > 8000 else hist)
-                parts.append("")
+        # sessions 按最近活跃排序（_scan_sessions 已排），第一个是当前对话
+        active_sessions = [s for s in self.sessions if s.compressed_history]
+        if active_sessions:
+            # 当前对话（最近活跃 1 个）——所有推荐都基于此
+            # 不额外截断——靠 max_rounds=20 + 每轮 user[:1000]/assistant[:3000] 控制长度
+            current = active_sessions[0]
+            channel_label = current.channel_id or "default"
+            parts.append("## 当前对话（所有推荐基于此）")
+            parts.append(f"### 会话: {current.title or current.session_id[:16]} (channel: {channel_label})")
+            parts.append(current.compressed_history)
+            parts.append("")
 
         parts.append("## 历史推荐记录（系统生成，非用户表达，禁止提取进画像）")
         parts.append(self.recommendation_history_summary or "（无推荐历史）")
-
-        if self.pending_commitments:
-            parts.append("")
-            parts.append("## 用户待办/承诺")
-            for c in self.pending_commitments:
-                parts.append(f"- {c}")
 
         if self.calendar_events:
             parts.append("")
@@ -151,6 +136,7 @@ def _match_session_mode(meta: dict[str, Any], mode_prefix: str | None) -> bool:
 
 def _scan_sessions(
     max_sessions: int = 10,
+    max_rounds: int = 20,
     mode_prefix: str | None = "agent",
 ) -> list[SessionSummary]:
     """Scan the sessions directory and build summaries for recent active sessions.
@@ -207,7 +193,7 @@ def _scan_sessions(
         if last_ts <= 0:
             continue
 
-        compressed = _compress_history_for_profile(session_id, max_rounds=10)
+        compressed = _compress_history_for_profile(session_id, max_rounds=max_rounds)
         if not compressed:
             continue
 
@@ -242,7 +228,7 @@ def _scan_sessions(
 
 def _compress_history_for_profile(
     session_id: str,
-    max_rounds: int = 10,
+    max_rounds: int = 20,
 ) -> str:
     """Read a session's history and compress into [User]/[Assistant] rounds.
 
@@ -303,86 +289,6 @@ def _compress_history_for_profile(
     return "\n\n".join(parts)
 
 
-# ── Commitment extraction (heuristic) ───────────────────────────
-
-
-_COMMITMENT_CUES: list[str] = [
-    "我要去做", "我要去", "帮我记住", "帮我记",
-    "提醒我", "别忘了", "待办", "我打算",
-    "我计划", "明天要", "下周要", "我需要完成",
-    "我需要做", "我还没做完", "还没完成",
-    "i need to", "i will", "i plan to",
-    "remind me", "don't forget", "i should",
-    "i have to", "i'm going to",
-]
-
-_COMMITMENT_SPLIT_RE = re.compile(r"[.!?;。\n]")
-
-
-def _extract_commitments_from_text(text: str) -> list[str]:
-    """Extract sentences that contain commitment cues from a text block."""
-    if not text:
-        return []
-    sentences = _COMMITMENT_SPLIT_RE.split(text)
-    commitments: list[str] = []
-    for s in sentences:
-        s = s.strip()
-        if len(s) < 8:
-            continue
-        lower = s.lower()
-        for cue in _COMMITMENT_CUES:
-            if cue in lower:
-                commitments.append(s)
-                break
-    return commitments
-
-
-def _extract_commitments(sessions: list[SessionSummary]) -> list[str]:
-    """Extract pending commitments from recent session histories."""
-    all_commitments: list[str] = []
-    for s in sessions:
-        if s.compressed_history:
-            all_commitments.extend(_extract_commitments_from_text(s.compressed_history))
-    # Deduplicate (case-insensitive)
-    seen: set[str] = set()
-    unique: list[str] = []
-    for c in all_commitments:
-        key = c.lower().strip()
-        if key not in seen:
-            seen.add(key)
-            unique.append(c)
-    return unique[:10]
-
-
-# ── Profile formatting ──────────────────────────────────────────
-
-
-def _format_existing_profile(profile: Any) -> str:
-    """Render UserProfile fields as readable text for LLM context."""
-    if not any([
-        getattr(profile, "preferences", []),
-        getattr(profile, "goals", []),
-        getattr(profile, "interests", []),
-        getattr(profile, "commitments", []),
-    ]):
-        return "（尚无画像）"
-
-    parts: list[str] = []
-    prefs = getattr(profile, "preferences", [])
-    if prefs:
-        parts.append("偏好: " + ", ".join(prefs))
-    goals = getattr(profile, "goals", [])
-    if goals:
-        parts.append("短期目标: " + ", ".join(goals))
-    interests = getattr(profile, "interests", [])
-    if interests:
-        parts.append("兴趣边界: " + ", ".join(interests))
-    commitments = getattr(profile, "commitments", [])
-    if commitments:
-        parts.append("待办: " + ", ".join(commitments))
-    return "\n".join(parts)
-
-
 # ── Skills formatting ───────────────────────────────────────────
 
 
@@ -425,7 +331,7 @@ def _format_recommendation_history(history: list[dict[str, Any]]) -> str:
 
 
 async def build_situation_report(
-    max_sessions: int = 10,
+    max_rounds: int = 20,
     skills: list[dict[str, Any]] | None = None,
     mode_prefix: str | None = "agent",
 ) -> SituationReport:
@@ -441,39 +347,29 @@ async def build_situation_report(
     推荐决策。传 ``None`` 扫全部会话。
     """
     from jiuwenswarm.agents.harness.common.recommendation.profile_extractor import (
-        load_user_profile,
+        load_recommendation_state,
     )
     from jiuwenswarm.agents.harness.common.recommendation.calendar_source import (
         fetch_calendar_events,
     )
 
     # 1. Scan sessions
-    sessions = _scan_sessions(max_sessions=max_sessions, mode_prefix=mode_prefix)
+    sessions = _scan_sessions(max_sessions=10, max_rounds=max_rounds, mode_prefix=mode_prefix)
 
-    # 2. Load profile
-    profile = load_user_profile()
-    profile_summary = _format_existing_profile(profile)
-
-    # 3. Recommendation history
-    rec_history = getattr(profile, "recommendation_history", [])
+    # 2. Recommendation history (from state, not profile)
+    state = load_recommendation_state()
+    rec_history = state.recommendation_history
     rec_summary = _format_recommendation_history(rec_history)
 
-    # 4. Commitments（每 tick 从最近会话重新提取；跨 tick 保留由 LLM 画像的
-    # commitments 字段承担——profile 持久化，引擎不另存一套）。
-    commitments = _extract_commitments(sessions)
-    commitments = commitments[:10]
-
-    # 5. Skills
+    # 3. Skills
     skills_summary = _format_skills_for_llm(skills) if skills else ""
 
-    # 6. Calendar events (MCP calendar server; [] if unconfigured/unreachable)
+    # 4. Calendar events (MCP calendar server; [] if unconfigured/unreachable)
     calendar_events = await fetch_calendar_events()
 
     return SituationReport(
         sessions=sessions,
-        profile_summary=profile_summary,
         recommendation_history_summary=rec_summary,
-        pending_commitments=commitments,
         skills_summary=skills_summary,
         calendar_events=calendar_events,
     )

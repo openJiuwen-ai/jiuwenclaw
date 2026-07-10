@@ -68,6 +68,8 @@ function formatPublishedAt(value: string, locale: string): string {
   }).format(date);
 }
 
+const UPDATER_STATUS_EVENT = 'jiuwenswarm:updater-status';
+
 export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
   const { t, i18n } = useTranslation();
   const [status, setStatus] = useState<UpdateStatusPayload | null>(null);
@@ -106,7 +108,27 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
   }, [refreshConfig, refreshStatus]);
 
   useEffect(() => {
-    if (normalizeString(status?.state) !== 'downloading' && normalizeString(status?.state) !== 'upgrading') {
+    const handleUpdaterStatus = (event: Event) => {
+      const payload = (event as CustomEvent<UpdateStatusPayload>).detail;
+      if (!payload || typeof payload !== 'object') {
+        return;
+      }
+      setStatus(payload);
+      setError(normalizeString(payload.error) || null);
+    };
+    window.addEventListener(UPDATER_STATUS_EVENT, handleUpdaterStatus);
+    return () => {
+      window.removeEventListener(UPDATER_STATUS_EVENT, handleUpdaterStatus);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      normalizeString(status?.state) !== 'checking' &&
+      normalizeString(status?.state) !== 'downloading' &&
+      normalizeString(status?.state) !== 'upgrading' &&
+      normalizeString(status?.state) !== 'installing'
+    ) {
       return;
     }
     const timer = window.setInterval(() => {
@@ -174,13 +196,18 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
       setError(t('updatePanel.errors.installUnavailable'));
       return;
     }
+    // Optimistically switch to "installing" so the UI reflects the in-progress
+    // state before the desktop app closes the window.
+    setStatus((prev) => ({ ...(prev ?? {}), state: 'installing', installing: true }));
     try {
       const ok = await api.install_update(installerPath);
       if (!ok) {
         setError(t('updatePanel.errors.installFailed'));
+        setStatus((prev) => ({ ...(prev ?? {}), state: 'downloaded', installing: false }));
       }
     } catch (installError) {
       setError(installError instanceof Error ? installError.message : t('updatePanel.errors.installFailed'));
+      setStatus((prev) => ({ ...(prev ?? {}), state: 'downloaded', installing: false }));
     }
   }, [status?.downloaded_path, t]);
 

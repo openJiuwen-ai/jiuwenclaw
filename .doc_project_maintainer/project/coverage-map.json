@@ -1,0 +1,76 @@
+{
+  "agentserver_method_queue": {
+    "documented_methods": 63,
+    "path": "audit-queues/server-method-audit-queue.json",
+    "status_counts": {
+      "agent_audited": 63,
+      "unaudited": 722
+    },
+    "total_methods": 785
+  },
+  "archived_full_json_gzip": "ledger-archive/coverage-map.full.json.gz",
+  "directory_summary_totals": {
+    "excluded_directories": 1,
+    "listing_source": "git ls-files",
+    "notes": 3,
+    "recorded_directories": 275,
+    "skipped_non_source_directories": 95,
+    "totals": {
+      "excluded_directories": 1,
+      "excluded_files": 1,
+      "recorded_directories": 275,
+      "recorded_source_files": 1236,
+      "skipped_non_source_directories": 95,
+      "skipped_non_source_files": 542
+    }
+  },
+  "generated_at": "2026-07-08T07:40:06.462755+00:00",
+  "generated_from_full_coverage_map": true,
+  "git": {
+    "head": "af779aa6742969e46005a2a94f49d42d7a3b443a",
+    "status_short": [
+      "?? .doc_project_maintainer/"
+    ],
+    "untracked_candidate_source_files": []
+  },
+  "notes": [
+    "Compact summary only; full coverage map is archived as gzip.",
+    "Coverage remains partial while required symbol entry docs and default health audits are pending."
+  ],
+  "recommended_mode": "multi-agent",
+  "repo_root": "E:\\Projects\\jiuwenswarm",
+  "schema": "project-maintainer.coverage-map.v1",
+  "suggested_audit_slices_count": 164,
+  "suggested_slices_count": 282,
+  "summary": {
+    "audit_scopes": {
+      "default_health_audit": 840,
+      "repository_coverage_only": 396
+    },
+    "default_health_audit_required_symbols": 8737,
+    "documented_default_health_audit_required_symbols": 66,
+    "documented_files": 1,
+    "documented_repository_coverage_only_required_symbols": 0,
+    "documented_required_symbols": 66,
+    "not_checked_files": 0,
+    "pending_default_health_audit_required_symbols": 8671,
+    "pending_files": 985,
+    "pending_repository_coverage_only_required_symbols": 6009,
+    "pending_required_symbols": 14680,
+    "pending_review_files": 250,
+    "removed_files": 0,
+    "repository_coverage_only_required_symbols": 6009,
+    "required_symbols": 14746,
+    "source_files": 1236,
+    "source_roles": {
+      "library_source": 494,
+      "package_metadata": 1,
+      "runtime_source": 346,
+      "script": 58,
+      "test_source": 214,
+      "tooling": 123
+    },
+    "stale_files": 0,
+    "untracked_candidate_source_files": 0
+  }
+}

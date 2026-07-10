@@ -1,32 +1,31 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-import logging
 import asyncio
 import concurrent.futures
-import os
-import types
 import json
+import logging
+import os
 import re
 import threading
 import time
+import types
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable
 
 import requests
 from pydantic import BaseModel, Field
-
-from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter, BaseChannel
-from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.message import MessageStore
 from jiuwenswarm.common.schema.message import Message, ReqMethod, EventType
+from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter, BaseChannel
 from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_file_service import (
     FeishuFileService,
     is_image_file,
     is_audio_file,
     is_video_file,
 )
-
-
+from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.message import MessageStore
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +46,7 @@ class FeishuConfig(BaseModel):
     # 收消息时写入 config.yaml，用于无 metadata 时的回发兜底（与 session_id 解耦）
     last_chat_id: str = ""
     last_open_id: str = ""
+    bot_open_id: str = ""  # 运行时自动发现：bot 自身的 open_id（从 mention 提取）
 
     # 文件处理配置
     max_download_size: int = 100 * 1024 * 1024  # 最大下载文件大小（默认100MB）
@@ -206,6 +206,11 @@ class FeishuChannel(BaseChannel):
         """返回通道唯一标识符，用于ChannelManager注册与消息派发。"""
         return self._channel_id
 
+    @property
+    def app_id(self) -> str:
+        """返回飞书应用ID，用于ChannelManager索引（ChannelKey.app_id）。"""
+        return self.config.app_id or "default"
+
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """
         注册消息回调函数，用于Gateway模式。
@@ -269,6 +274,7 @@ class FeishuChannel(BaseChannel):
                         chat_id=pi.origin_session_id,
                         user_id=principal_id,
                         bot_id=str(inbound.bot_id or self.config.app_id or ""),
+                        app_id=self.config.app_id,
                         req_method=ReqMethod.CHAT_SEND,
                         is_stream=False,
                         metadata=_meta,
@@ -294,6 +300,7 @@ class FeishuChannel(BaseChannel):
             chat_id=str(inbound.chat_id or ""),
             user_id=str(inbound.user_id or ""),
             bot_id=str(inbound.bot_id or self.config.app_id or ""),
+            app_id=self.config.app_id,
             req_method=ReqMethod.CHAT_SEND,
             is_stream=_is_stream,
             metadata=_meta,
@@ -357,6 +364,85 @@ class FeishuChannel(BaseChannel):
             config=self.config,
             workspace_dir=workspace_dir,
         )
+        # bot_open_id 改为懒加载，在需要时才获取（见 _replace_mentions_with_names）
+
+    def _fetch_bot_open_id(self) -> None:
+        """
+        获取机器人自身的 open_id（用于 @bot 识别）。
+
+        通过飞书 bot/v3/info API 获取机器人信息。
+        API: https://open.feishu.cn/open-apis/bot/v3/info
+        """
+        if self.config.bot_open_id:  # 已经有值，跳过
+            logger.debug("[_fetch_bot_open_id] bot_open_id 已配置: %s", self.config.bot_open_id)
+            return
+
+        try:
+            # 1. 获取 tenant_access_token
+            token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+            token_resp = requests.post(
+                token_url,
+                json={
+                    "app_id": self.config.app_id,
+                    "app_secret": self.config.app_secret,
+                },
+                timeout=10,
+            )
+            token_data = token_resp.json()
+            if token_data.get("code") != 0:
+                logger.warning(
+                    "[_fetch_bot_open_id] 获取 tenant_access_token 失败: code=%s msg=%s",
+                    token_data.get("code"), token_data.get("msg")
+                )
+                return
+
+            tenant_access_token = token_data.get("tenant_access_token")
+            if not tenant_access_token:
+                logger.warning("[_fetch_bot_open_id] tenant_access_token 为空")
+                return
+
+            # 2. 调用 bot/v3/info 获取机器人信息
+            bot_info_url = "https://open.feishu.cn/open-apis/bot/v3/info"
+            bot_resp = requests.get(
+                bot_info_url,
+                headers={"Authorization": f"Bearer {tenant_access_token}"},
+                timeout=10,
+            )
+            bot_data = bot_resp.json()
+            if bot_data.get("code") != 0:
+                logger.warning(
+                    "[_fetch_bot_open_id] 获取机器人信息失败: code=%s msg=%s",
+                    bot_data.get("code"), bot_data.get("msg")
+                )
+                return
+
+            bot_info = bot_data.get("bot", {})
+            bot_open_id = bot_info.get("open_id", "")
+            if bot_open_id:
+                self.config.bot_open_id = bot_open_id
+                logger.info(
+                    "[_fetch_bot_open_id] 成功获取机器人 open_id: %s (app_name=%s)",
+                    bot_open_id, bot_info.get("app_name", "")
+                )
+                # 持久化到配置文件（多应用模式下写入对应 app 条目）
+                try:
+                    from jiuwenswarm.common.config import update_channel_app_field
+                    ok = update_channel_app_field(
+                        "feishu", self.config.app_id,
+                        {"bot_open_id": bot_open_id},
+                    )
+                    if not ok:
+                        logger.debug(
+                            "[_fetch_bot_open_id] 未找到 app=%s 条目，bot_open_id 未持久化",
+                            self.config.app_id,
+                        )
+                except Exception as e:
+                    logger.debug("[_fetch_bot_open_id] 持久化 bot_open_id 失败（不影响运行）: %s", e)
+            else:
+                logger.warning("[_fetch_bot_open_id] 机器人 open_id 为空")
+
+        except Exception as e:
+            logger.warning("[_fetch_bot_open_id] 获取机器人 open_id 异常: %s", e)
 
     def _start_websocket_in_thread(self) -> None:
         """在独立线程中启动WebSocket客户端，避免事件循环冲突。"""
@@ -595,24 +681,50 @@ class FeishuChannel(BaseChannel):
         )
 
     @staticmethod
+    def _get_mention_open_id(mention: Any) -> str:
+        """从飞书 mention 对象中提取 open_id。
+
+        飞书 SDK 的 mention 对象结构可能因版本不同而有差异：
+        - mention.id.open_id (对象嵌套)
+        - mention.id["open_id"] (字典嵌套)
+        - mention.open_id (直接属性)
+        - mention.id (字符串形式)
+
+        Args:
+            mention: 飞书 mention 对象
+
+        Returns:
+            str: open_id，如果无法获取则返回空字符串
+        """
+        # 方式1: mention.id 是对象，有 open_id 属性
+        mention_id = getattr(mention, "id", None)
+        if mention_id is not None:
+            # 尝试从对象获取 open_id
+            open_id = getattr(mention_id, "open_id", None)
+            if open_id:
+                return str(open_id).strip()
+            # 尝试从字典获取 open_id
+            if isinstance(mention_id, dict):
+                return str(mention_id.get("open_id") or mention_id.get("id") or "").strip()
+            # mention.id 本身可能是字符串形式的 open_id
+            if isinstance(mention_id, str):
+                return mention_id.strip()
+
+        # 方式2: mention 直接有 open_id 属性
+        open_id = getattr(mention, "open_id", None)
+        if open_id:
+            return str(open_id).strip()
+
+        return ""
+
+    @staticmethod
     def _extract_mentioned_users(message: Any) -> list[dict[str, str]]:
         """从飞书消息事件中提取被 @ 用户的 open_id 和姓名。"""
         mentions = getattr(message, "mentions", None) or []
         users: list[dict[str, str]] = []
         for mention in mentions:
-            open_id = ""
+            open_id = FeishuChannel._get_mention_open_id(mention)
             name = str(getattr(mention, "name", "") or "").strip()
-            mention_id = getattr(mention, "id", None)
-            if isinstance(mention_id, dict):
-                open_id = str(mention_id.get("open_id") or mention_id.get("id") or "").strip()
-            elif isinstance(mention_id, str):
-                open_id = mention_id.strip()
-            elif mention_id is not None:
-                nested_open_id = getattr(mention_id, "open_id", None)
-                if nested_open_id:
-                    open_id = str(nested_open_id).strip()
-            else:
-                open_id = str(getattr(mention, "open_id", "") or "").strip()
             if open_id and all(user["open_id"] != open_id for user in users):
                 users.append({"open_id": open_id, "name": name})
         return users
@@ -629,54 +741,103 @@ class FeishuChannel(BaseChannel):
     def _replace_mentions_with_names(self, message: Any, text: str) -> str:
         """
         将消息中的 @mentions 占位符（如 @_user_1）替换为真实用户名。
-        当 @all 时，替换为数字分身用户本人的名字。
 
-        Args:
-            message: 飞书消息对象
-            text: 原始文本内容
+        处理规则：
+        - @all → 替换为 @all（保留标记，用于后续判断 mention_all）
+        - @机器人 → 剥除占位符/名字（便于后续命令解析，语义等同于 @team_leader）
+        - @其他用户 → 替换为真实用户名
 
-        Returns:
-            str: 替换后的文本内容
+        群聊中 @机器人的名字从本次消息的 mentions 列表实时获取（不缓存、不配置）。
+        私聊（p2p）中飞书 SDK 不在 mentions 列表包含机器人，不做 @bot 剥除。
         """
         mentions = getattr(message, "mentions", None) or []
+        chat_type = str(getattr(message, "chat_type", "") or "")
 
         result = text
         target_user_open_id = self._get_target_user_open_id()
-        target_user_name = ""
-        if target_user_open_id:
-            target_user_name = self._resolve_user_display_name(target_user_open_id, "")
 
-        if "@_all" in result and target_user_name:
-            result = result.replace("@_all", f"@{target_user_name}")
+        # 从本次消息的 mentions 列表实时提取 bot 名（局部变量，不缓存）
+        bot_name_in_msg = ""
 
-        if not mentions:
-            return result
+        # 懒加载：如果 bot_open_id 为空且有 mentions，尝试获取
+        if not self.config.bot_open_id and mentions:
+            self._fetch_bot_open_id()
 
-        for mention in mentions:
-            mention_key = getattr(mention, "key", None)
+        # 有效的 bot open_id: 仅使用运行时自动发现的 bot_open_id
+        # my_user_id（数字分身配置）不参与 bot 识别——bot 识别只靠 bot_open_id
+        _effective_bot_open_id = self.config.bot_open_id or ""
 
-            if not mention_key:
-                mention_id = getattr(mention, "id", None)
-                if isinstance(mention_id, dict):
-                    mention_key = mention_id.get("key", "")
-                elif isinstance(mention_id, str):
-                    if "_" in mention_id:
-                        mention_key = mention_id.split("_")[-1]
+        logger.debug(
+            "[_replace_mentions_with_names] chat_type=%s mentions_count=%d"
+            " bot_open_id=%s",
+            chat_type, len(mentions),
+            _effective_bot_open_id or "",
+        )
 
-            if not mention_key:
-                continue
+        # 处理 @_all：从 mentions 列表判断 @所有人，替换占位符为 @all 标记
+        # 飞书 @所有人 时 mentions 列表中有 key="_all" 的 mention 对象
+        mention_all = False
+        if mentions:
+            for mention in mentions:
+                mention_key = getattr(mention, "key", None)
+                if mention_key == "_all":
+                    mention_all = True
+                    break
+        # 兜底：mentions 列表可能不包含 @_all 的 mention 对象，从文本判断
+        if not mention_all and "@_all" in result:
+            mention_all = True
+        if mention_all:
+            result = result.replace("@_all", "@all")
 
-            name = str(getattr(mention, "name", "") or "").strip()
-            if not name:
-                bot_name = getattr(message, "bot_name", "") or ""
-                name = bot_name or mention_key
+        # 处理 mentions 列表
+        if mentions:
+            for mention in mentions:
+                mention_key = getattr(mention, "key", None)
 
-            if mention_key.startswith("@"):
-                old_pattern = mention_key
-            else:
-                old_pattern = f"@{mention_key}"
-            new_pattern = f"@{name}"
-            result = result.replace(old_pattern, new_pattern)
+                if not mention_key:
+                    mention_id = getattr(mention, "id", None)
+                    if isinstance(mention_id, dict):
+                        mention_key = mention_id.get("key", "")
+                    elif isinstance(mention_id, str):
+                        if "_" in mention_id:
+                            mention_key = mention_id.split("_")[-1]
+
+                if not mention_key:
+                    continue
+
+                mention_open_id = self._get_mention_open_id(mention)
+                mention_name = str(getattr(mention, "name", "") or "").strip()
+
+                if mention_key.startswith("@"):
+                    old_pattern = mention_key
+                else:
+                    old_pattern = f"@{mention_key}"
+
+                # 判断是否 @ 的是机器人：
+                # 仅靠 bot_open_id 精确匹配（运行时自动发现的值）。
+                # 如果 bot_open_id 还没记住，则无法识别 @bot，
+                # 占位符保留原样发给后端（由后端处理）。
+                is_bot = bool(
+                    mention_open_id and _effective_bot_open_id and mention_open_id == _effective_bot_open_id
+                )
+
+                if is_bot:
+                    result = result.replace(old_pattern, "").strip()
+                    if mention_name:
+                        bot_name_in_msg = mention_name
+                    continue
+
+                name = mention_name or mention_key
+                new_pattern = f"@{name}"
+                result = result.replace(old_pattern, new_pattern)
+
+        # 剥除文本开头的 @bot名（手动输入场景：文本中直接包含 @bot名 而非 @_user_X 占位符）
+        if bot_name_in_msg and result.startswith(f"@{bot_name_in_msg}"):
+            result = result[len(f"@{bot_name_in_msg}"):].strip()
+            logger.debug(
+                "[_replace_mentions_with_names] stripped manual @bot: bot_name=%s result=%s",
+                bot_name_in_msg, result[:200],
+            )
 
         return result
 
@@ -789,7 +950,7 @@ class FeishuChannel(BaseChannel):
             "- 更像'好的，我知道了，会准时参加会议''收到，我会跟进这件事'\n"
             "- 不要照搬原文，保留核心动作即可\n\n"
             "你私发给{name}的内容是：\n{content}"
-        ).format(   
+        ).format(
             name=target_name,
             content=content[:500],
         )
@@ -959,9 +1120,11 @@ class FeishuChannel(BaseChannel):
         except Exception:
             message_content = str(message.content or "")
 
-        mention_all = "@_all" in message_content
-        if mention_all and target_user_open_id and target_user_open_id not in mentioned_open_ids:
-            mentioned_open_ids.append(target_user_open_id)
+        mention_all = "@all" in message_content
+        if mention_all:
+            metadata["mention_all"] = True
+            if target_user_open_id and target_user_open_id not in mentioned_open_ids:
+                mentioned_open_ids.append(target_user_open_id)
 
         if mentioned_open_ids:
             metadata["mentioned_open_ids"] = mentioned_open_ids
@@ -1301,6 +1464,8 @@ class FeishuChannel(BaseChannel):
             # 处理引用块
             elif stripped.startswith('> '):
                 current_text.append(stripped[2:])
+            elif stripped == '>':
+                continue
             # 处理列表项
             elif stripped.startswith('- ') or stripped.startswith('* '):
                 current_text.append(f"• {stripped[2:]}")
@@ -1340,12 +1505,15 @@ class FeishuChannel(BaseChannel):
             }
         }
 
-    async def send(self, msg: Message) -> None:
-        """
-        通过飞书发送消息。
+    async def send(
+        self,
+        msg: Message,
+        *,
+        routing_target: RoutingTarget | None = None,
+    ) -> None:
+        """通过飞书发送消息。
 
-        Args:
-            msg: 要发送的消息对象
+        V2: routing_target 为 team 模式分发元数据（内含 delivery + mention_member_ids）。
         """
         if not self._api_client:
             logger.warning("飞书客户端未初始化")
@@ -1360,6 +1528,15 @@ class FeishuChannel(BaseChannel):
 
             meta = dict(getattr(msg, "metadata", None) or {})
 
+            # ── V2: routing_target 覆盖投递地址 ──
+            route_delivery: DeliveryTarget | None = None
+            route_mention_member_ids: list[str] = []
+            route_mention_all: bool = False
+            if routing_target is not None:
+                route_delivery = routing_target.delivery
+                route_mention_member_ids = list(routing_target.mention_member_ids or [])
+                route_mention_all = routing_target.mention_all
+
             # 跳过 reasoning 信息 
             if msg.event_type == EventType.CHAT_REASONING:
                 return
@@ -1367,18 +1544,23 @@ class FeishuChannel(BaseChannel):
             # 处理文件消息
             if msg.event_type == EventType.CHAT_FILE:
                 if self.config.enable_file_upload and self._file_service:
-                    await self._send_file_message(msg)
+                    await self._send_file_message(msg, delivery=route_delivery)
                 return
 
             # 处理媒体消息
             if msg.event_type == EventType.CHAT_MEDIA:
                 if self.config.enable_file_upload and self._file_service:
-                    await self._send_media_message(msg)
+                    await self._send_media_message(msg, delivery=route_delivery)
                 return
 
-            # 处理team message
+            # 处理team message — V2: 传入 routing_target 以提取 mention_member_ids
             if msg.event_type == EventType.TEAM_MESSAGE:
-                await self._send_team_message(msg)
+                await self._send_team_message(
+                    msg,
+                    delivery=route_delivery,
+                    mention_member_ids=route_mention_member_ids,
+                    mention_all=route_mention_all,
+                )
                 return
 
             # 处理用户询问消息（发送确认卡片）
@@ -1432,8 +1614,47 @@ class FeishuChannel(BaseChannel):
                         content_str,
                     )
 
-            receive_id, id_type = self._extract_receive_info(msg)
+            # ── V2: routing_target.delivery 优先 ──
+            if route_delivery is not None and route_delivery.chat_id:
+                receive_id = route_delivery.chat_id
+                id_type = route_delivery.id_type or "chat_id"
+            else:
+                receive_id, id_type = self._extract_receive_info(msg)
             payload = getattr(msg, "payload", None) or {}
+
+            # ── V2: private intent 的 teammate 输出，用卡片格式（不带 @mention）──
+            is_private_teammate_output = (
+                routing_target is not None
+                and routing_target.intent == "private"
+                and isinstance(payload, dict)
+                and payload.get("role") == "teammate"
+                and event_name in ("chat.final", "chat.tool_call", "chat.tool_result")
+            )
+            if is_private_teammate_output and content_str.strip():
+                member_name = str(payload.get("member_name") or "")
+                card = {
+                    "config": {"wide_screen_mode": True},
+                    "header": {
+                        "title": {"tag": "plain_text", "content": f"🤖 {member_name}"},
+                        "template": "teal",
+                    },
+                    "elements": self._build_feishu_card_elements(content_str),
+                }
+                card_json = json.dumps(card, ensure_ascii=False)
+                request_id = str(msg.id or "").strip()
+                if request_id and msg.event_type != EventType.HEARTBEAT_RELAY:
+                    self._clear_group_progress_state(request_id)
+                await self._create_and_send_message(
+                    FeishuMessageSendRequest(
+                        receive_id=receive_id,
+                        id_type=id_type,
+                        msg_type="interactive",
+                        content=card_json,
+                        log_label=f"teammate_private:{member_name}",
+                    )
+                )
+                return
+
             skills_card_content = self._build_skills_list_card_content(payload, event_name)
             if skills_card_content:
                 request_id = str(msg.id or "").strip()
@@ -1490,7 +1711,7 @@ class FeishuChannel(BaseChannel):
                                 await self._send_file_card(receive_id, id_type, fp, os.path.basename(fp))
                         except Exception as file_err:
                             logger.error("飞书兜底文件发送失败: %s %s", fp, file_err)
-            
+
             # 群聊数字分身回复到群聊时，@发送人
             if msg.group_digital_avatar and id_type == "chat_id":
                 mention_user_id = str(
@@ -1504,6 +1725,16 @@ class FeishuChannel(BaseChannel):
                 at_user_id = mention_user_id or sender_open_id
                 if at_user_id and not at_user_id.startswith("bot"):
                     content_str = f"<at id={at_user_id}></at>\n{content_str}"
+
+            # ── V2: routing_target.mention_member_ids 注入 @ 标签 ──
+            if id_type == "chat_id":
+                if route_mention_all:
+                    # @所有人：使用飞书 <at id=all></at> 标签
+                    content_str = f"<at id=all></at>\n{content_str}"
+                elif route_mention_member_ids:
+                    for uid in route_mention_member_ids:
+                        if uid and not uid.startswith("bot"):
+                            content_str = f"<at id={uid}></at> {content_str}"
 
             card_content = self._build_card_content(content_str)
             await self._send_feishu_message(receive_id, id_type, card_content, msg.id)
@@ -1928,6 +2159,35 @@ class FeishuChannel(BaseChannel):
             logger.error("飞书文件上传异常: %s path=%s", e, abs_path)
             return None
 
+    async def _send_non_stream_team_hint(self, sender: Any, message: Any) -> None:
+        """非流式模式下拦截 Team 相关指令（/mode team、/join）的统一提示。
+
+        与 /mode team 完全相同的校验与报错：当 self.config.enable_streaming 为 False 时，
+        向用户回发卡片提示并中止处理。/join 桥接 team session 同样依赖流式路径
+        （agent_server 端 team 桥接只存在于 process_message_stream），非流式下无法生效，
+        故在此一并拦截。
+        """
+        try:
+            # 提取发送者open_id
+            open_id = (
+                getattr(getattr(sender, "sender_id", None), "open_id", None) or ""
+            )
+            # 获取chat_id和判断ID类型
+            chat_id = getattr(message, "chat_id", None) or ""
+            if chat_id.startswith("oc_"):
+                receive_id = chat_id
+                id_type = "chat_id"
+            else:
+                # 私聊场景使用open_id
+                receive_id = open_id
+                id_type = "open_id"
+            hint_text = "⚠️ 非流式模式下不支持 Team 模式，已保持原有模式。\n\n" \
+                "如需使用 Team 模式，请在配置中开启流式输出 (enable_streaming: true)。"
+            card = self._build_card_content(hint_text)
+            await self._send_feishu_message(receive_id, id_type, card, message.message_id)
+        except Exception as e:
+            logger.warning(f"[FeishuChannel] 发送Team模式提示失败: {e}")
+
     def _build_card_content(self, content_str: str) -> str:
         """
         构建飞书卡片内容。
@@ -2063,13 +2323,7 @@ class FeishuChannel(BaseChannel):
             question = questions[0]
             question_text = question.get("question", "")
             if question_text:
-                elements.append({
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": question_text
-                    }
-                })
+                elements.extend(self._build_feishu_card_elements(question_text))
 
             # 添加分隔线
             elements.append({"tag": "hr"})
@@ -2198,28 +2452,17 @@ class FeishuChannel(BaseChannel):
 
             # 解析消息内容（支持文件类型）
             content, file_info = await self._parse_message_content_with_file(message)
-            if content == "/mode team" and self.config.enable_streaming == False:
-                # 非流式情况下不支持team模式，向用户发送提示
-                try:
-                    # 提取发送者open_id
-                    open_id = (
-                        getattr(getattr(sender, "sender_id", None), "open_id", None) or ""
-                    )
-                    # 获取chat_id和判断ID类型
-                    chat_id = getattr(message, "chat_id", None) or ""
-                    if chat_id.startswith("oc_"):
-                        receive_id = chat_id
-                        id_type = "chat_id"
-                    else:
-                        # 私聊场景使用open_id
-                        receive_id = open_id
-                        id_type = "open_id"
-                    hint_text = "⚠️ 非流式模式下不支持 Team 模式，已保持原有模式。\n\n" \
-                        "如需使用 Team 模式，请在配置中开启流式输出 (enable_streaming: true)。"
-                    card = self._build_card_content(hint_text)
-                    await self._send_feishu_message(receive_id, id_type, card, message.message_id)
-                except Exception as e:
-                    logger.warning(f"[FeishuChannel] 发送Team模式提示失败: {e}")
+            # 非流式情况下不支持 Team 模式：/mode team 与 /join（桥接 team session 同样依赖流式路径）
+            # 两者共用同一套校验与报错，拦截后直接回发提示并中止处理。
+            _content_stripped = (content or "").strip()
+            if (
+                self.config.enable_streaming == False
+                and (
+                    _content_stripped == "/mode team"
+                    or _content_stripped.startswith("/join ")
+                )
+            ):
+                await self._send_non_stream_team_hint(sender, message)
                 return
             if not content and not file_info:
                 return
@@ -2230,12 +2473,14 @@ class FeishuChannel(BaseChannel):
             )
 
             # 将最近一次可回发的飞书身份写入 config.yaml，供 cron 推送时使用
-            if self.channel_id == self.name:
+            # V2 多应用：写入对应 app 条目，避免多 app 争抢同一个平铺字段
+            if self.config.channel_id == "feishu" and not self.config.bot_key:
                 try:
-                    from jiuwenswarm.common.config import update_channel_in_config
+                    from jiuwenswarm.common.config import update_channel_app_field
 
-                    update_channel_in_config(
+                    update_channel_app_field(
                         "feishu",
+                        self.config.app_id,
                         {
                             "last_chat_id": getattr(message, "chat_id", None) or "",
                             "last_open_id": open_id or "",
@@ -2381,19 +2626,23 @@ class FeishuChannel(BaseChannel):
                     }
                 header = {}
             else:
-                card_data = self._user_question_card[request_id]
-                content = card_data["elements"][0].get("text", {}).get("content", "") \
-                    if "elements" in card_data and len(card_data["elements"]) > 0 else ""
-                header = card_data.get("header", {})
-                card_data = {
-                    "elements": [{
-                        "tag": "div",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": f"{content} <br> <br> 您已选择：**{selected_label}**"
-                            }
-                        }]
-                }
+                stored_card = self._user_question_card[request_id]
+                # 复用原卡片除按钮外的所有元素（保留问题文本的 markdown 渲染），
+                # 去掉 action 按钮区与分隔线，再追加"您已选择"提示。
+                old_elements = stored_card.get("elements", []) if isinstance(stored_card, dict) else []
+                kept_elements = [
+                    el for el in old_elements
+                    if isinstance(el, dict) and el.get("tag") not in ("action",)
+                ]
+                # 去掉尾部 hr，避免与提示紧挨出现双分隔线
+                while kept_elements and isinstance(kept_elements[-1], dict) and kept_elements[-1].get("tag") == "hr":
+                    kept_elements.pop()
+                kept_elements.append({
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"您已选择：**{selected_label}**"}
+                })
+                header = stored_card.get("header", {}) if isinstance(stored_card, dict) else {}
+                card_data = {"elements": kept_elements}
                 self._user_question_card.pop(request_id)
             # 获取用户和上下文信息
             operator_id = event.operator.open_id if event.operator and event.operator.open_id else ""
@@ -2735,12 +2984,18 @@ class FeishuChannel(BaseChannel):
 
     # ==================== 文件消息发送 ====================
 
-    async def _send_file_message(self, msg: Message) -> None:
+    async def _send_file_message(
+        self,
+        msg: Message,
+        *,
+        delivery: DeliveryTarget | None = None,
+    ) -> None:
         """
         发送文件消息（支持图片/音频/视频/普通文件）。
 
         Args:
             msg: 包含文件信息的消息对象
+            delivery: V2 分发时的投递地址（优先于 msg.metadata）。
         """
         payload = msg.payload if isinstance(msg.payload, dict) else {}
         files = payload.get("files", [])
@@ -2749,7 +3004,12 @@ class FeishuChannel(BaseChannel):
             logger.warning("飞书发送文件消息：无文件信息")
             return
 
-        receive_id, id_type = self._extract_receive_info(msg)
+        # team 模式优先用 delivery（与 _send_team_message / chat.final 路径一致）
+        if delivery is not None and getattr(delivery, "chat_id", ""):
+            receive_id = delivery.chat_id
+            id_type = getattr(delivery, "id_type", "") or "chat_id"
+        else:
+            receive_id, id_type = self._extract_receive_info(msg)
         logger.info(f"飞书发送文件消息: receive_id={receive_id}, id_type={id_type}")
 
         for file_info in files:
@@ -3008,12 +3268,22 @@ class FeishuChannel(BaseChannel):
         except Exception as e:
             logger.error(f"发送飞书文件消息异常: {e}")
 
-    async def _send_team_message(self, msg: Message) -> None:
+    async def _send_team_message(
+        self,
+        msg: Message,
+        *,
+        delivery: DeliveryTarget | None = None,
+        mention_member_ids: list[str] | None = None,
+        mention_all: bool = False,
+    ) -> None:
         """
         发送Agent Team消息卡片。
 
         Args:
             msg: 包含 team.message payload 的消息对象
+            delivery: V2 分发时的投递地址（优先于 msg.metadata）
+            mention_member_ids: V2 分发时的 @ 物理用户 ID 列表（飞书 open_id）
+            mention_all: True 时 @所有人，忽略 mention_member_ids
         """
         try:
             payload = msg.payload if isinstance(msg.payload, dict) else {}
@@ -3049,14 +3319,28 @@ class FeishuChannel(BaseChannel):
             # 添加分隔线
             elements.append({"tag": "hr"})
 
-            # 消息内容
-            elements.append({
-                "tag": "div",
-                "text": {
-                    "tag": "lark_md",
-                    "content": content
-                }
-            })
+            # 消息内容 — V2: 注入 @ 标签
+            # @ 前缀作为独立元素（lark_md 原生支持 <at> 标签），
+            # 正文走标准 markdown→飞书元素转换，避免 lark_md 不支持的语法以字面文本显示
+            if mention_all:
+                # @所有人：使用飞书 <at id=all></at> 标签
+                elements.append({
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": "<at id=all></at>"}
+                })
+            elif mention_member_ids:
+                at_prefix = " ".join(
+                    f"<at id={uid}></at>"
+                    for uid in mention_member_ids
+                    if uid and not uid.startswith("bot")
+                )
+                if at_prefix:
+                    elements.append({
+                        "tag": "div",
+                        "text": {"tag": "lark_md", "content": at_prefix}
+                    })
+
+            elements.extend(self._build_feishu_card_elements(content))
 
             # 构建卡片
             card = {
@@ -3071,8 +3355,12 @@ class FeishuChannel(BaseChannel):
                 "elements": elements,
             }
 
-            # 发送卡片
-            receive_id, id_type = self._extract_receive_info(msg)
+            # 发送卡片 — V2 delivery 优先
+            if delivery is not None and delivery.chat_id:
+                receive_id = delivery.chat_id
+                id_type = delivery.id_type or "chat_id"
+            else:
+                receive_id, id_type = self._extract_receive_info(msg)
             card_json = json.dumps(card, ensure_ascii=False)
 
             await self._create_and_send_message(
@@ -3086,20 +3374,26 @@ class FeishuChannel(BaseChannel):
             )
 
             logger.info(
-                "[FeishuChannel] 发送Team消息卡片: type=%s, from=%s, to=%s",
+                "[FeishuChannel] 发送Team消息卡片: type=%s, from=%s, to=%s receive_id=%s",
                 message_type,
                 from_member,
                 to_member if message_type == "team.message.p2p" else "broadcast",
+                receive_id,
             )
 
         except Exception as e:
             logger.error(f"发送Team消息卡片时发生异常: {e}", exc_info=True)
 
-    async def _send_media_message(self, msg: Message) -> None:
+    async def _send_media_message(
+        self,
+        msg: Message,
+        *,
+        delivery: DeliveryTarget | None = None,
+    ) -> None:
         """
         发送媒体消息（video/audio）入口，与文件消息统一处理。
         """
-        await self._send_file_message(msg)
+        await self._send_file_message(msg, delivery=delivery)
 
     def _filter_user_info_for_group(self, content: str, metadata: dict[str, Any]) -> str:
         """

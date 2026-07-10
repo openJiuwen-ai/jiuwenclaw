@@ -42,7 +42,7 @@ import {
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
 import { useTeamPanelState } from './features/teamPanelState';
-import { AgentMode, UserAnswer, ModelEntry } from './types';
+import { AgentMode, MediaItem, UserAnswer, ModelEntry } from './types';
 import { useSessionStore, useChatStore, useTodoStore, useHarnessStore } from './stores';
 import { useTranslation } from 'react-i18next';
 import {
@@ -105,6 +105,7 @@ function clearTeamRuntimeState(): void {
   sessionStore.setTeamMemberExecutionEvents([]);
   sessionStore.clearAllTeamMemberContextCompressionStatus();
   sessionStore.setTeamHistoryMessages([]);
+  sessionStore.setTeamHumanShareCommands([]);
 }
 
 // 错误边界组件
@@ -397,6 +398,7 @@ function AppContent() {
   const {
     isConnected,
     request,
+    persistMedia,
     sendMessage,
     sendStructuredChatContent,
     pause,
@@ -484,19 +486,23 @@ function AppContent() {
   }, [request, t, setAvailableModels]);
 
   useEffect(() => {
-    if (!FEATURE_APP_UPDATER_UI || !isConnected || !initialDataLoaded || startupUpdateCheckRef.current) {
+    if (!FEATURE_APP_UPDATER_UI || !isConnected || startupUpdateCheckRef.current) {
       return;
     }
     startupUpdateCheckRef.current = true;
     const timeoutId = window.setTimeout(() => {
-      void request('updater.check', { manual: false }).catch((updateError) => {
-        console.warn('Startup updater check failed:', updateError);
-      });
-    }, 30000);
+      void request('updater.check', { manual: false })
+        .then((payload) => {
+          window.dispatchEvent(new CustomEvent('jiuwenswarm:updater-status', { detail: payload }));
+        })
+        .catch((updateError) => {
+          console.warn('Startup updater check failed:', updateError);
+        });
+    }, 5000);
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [initialDataLoaded, isConnected, request]);
+  }, [isConnected, request]);
 
   const clearRestartAutoCloseTimer = useCallback(() => {
     if (restartAutoCloseTimerRef.current != null) {
@@ -1151,12 +1157,20 @@ function AppContent() {
     void switchMode(sessionId, mode);
   }, [sessionId, switchMode]);
 
-  const handleSendMessage = useCallback((content: string) => {
+  const handleSendMessage = useCallback((content: string, mediaItems?: MediaItem[]) => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId || currentSessionId === 'new') return;
     disposeInFlightHistoryHandles();
-    void sendMessage(content, currentSessionId);
+    void sendMessage(content, currentSessionId, mediaItems);
   }, [disposeInFlightHistoryHandles, sendMessage]);
+
+  const handlePersistMedia = useCallback((content: string, mediaItems: MediaItem[]) => {
+    const currentSessionId = sessionIdRef.current;
+    if (!currentSessionId || currentSessionId === 'new') {
+      return Promise.reject(new Error('会话未就绪，请稍后重试'));
+    }
+    return persistMedia(content, currentSessionId, mediaItems);
+  }, [persistMedia]);
 
   useEffect(() => {
     return setA2UIActionHandler((message) => {
@@ -1527,6 +1541,7 @@ function AppContent() {
                 <div className={`flex-1 min-h-0 ${isTeamAreaExpanded ? 'card rounded-l-lg rounded-r-none' : ''}`}>
                   <ChatPanel
                     onSendMessage={handleSendMessage}
+                    onPersistMedia={handlePersistMedia}
                     onInterrupt={handleInterrupt}
                     onCancel={handleCancel}
                     onSwitchMode={handleSwitchMode}

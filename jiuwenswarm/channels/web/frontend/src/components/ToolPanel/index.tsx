@@ -84,6 +84,7 @@ export function ToolPanel({
     setTeamMemberExecutionEvents,
     teamHistoryMessages,
     setTeamHistoryMessages,
+    setTeamHumanShareCommands,
   } = useSessionStore();
   const { isProcessing, messages } = useChatStore();
   const hydratedTeamHistorySessionRef = useRef<string | null>(null);
@@ -193,6 +194,15 @@ export function ToolPanel({
           setTeamMemberExecutionEvents(mergedExecutionEvents);
         }
 
+        const mergedHumanShareCommands = mergeById(
+          historyState.humanShareCommands,
+          current.teamHumanShareCommands,
+          (command) => `${command.sessionId}:${command.memberName}`
+        );
+        if (mergedHumanShareCommands.length > 0) {
+          setTeamHumanShareCommands(mergedHumanShareCommands);
+        }
+
         setTeamHistoryMessages(historyState.messages);
       })
       .catch((error) => {
@@ -206,7 +216,7 @@ export function ToolPanel({
     return () => {
       controller.abort();
     };
-  }, [isConnected, mode, sessionId, setTeamHistoryMessages, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
+  }, [isConnected, mode, sessionId, setTeamHistoryMessages, setTeamHumanShareCommands, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
 
   const memoryDisplay =
     memoryUsage.rssMb == null

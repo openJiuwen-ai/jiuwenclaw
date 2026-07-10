@@ -80,6 +80,21 @@ function decodeFileContent(raw: Buffer, requestedEncoding: string): { content: s
   throw new Error('Unable to decode file with any known encoding')
 }
 
+const RAW_FILE_CONTENT_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.bmp': 'image/bmp',
+  '.avif': 'image/avif',
+}
+
+function rawFileContentType(filePath: string): string {
+  return RAW_FILE_CONTENT_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream'
+}
+
 /** WS proxy 中常见的、可安全忽略的 socket 错误码（跨平台） */
 const WS_PROXY_IGNORABLE_CODES = new Set([
   'EPIPE',          // 对端已关闭
@@ -487,6 +502,53 @@ function devFileContentApi(): Plugin {
           res.statusCode = 200
           res.setHeader('content-type', 'application/json; charset=utf-8')
           res.end(JSON.stringify({ files }))
+        } catch (error) {
+          res.statusCode = 500
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.end(JSON.stringify({ error: (error as Error).message }))
+        }
+      })
+
+      server.middlewares.use('/file-api/raw-file', (req, res) => {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          res.statusCode = 405
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.end(JSON.stringify({ error: 'method_not_allowed' }))
+          return
+        }
+
+        const url = new URL(req.url || '/file-api/raw-file', 'http://localhost')
+        const filePath = url.searchParams.get('path')
+        if (!filePath) {
+          res.statusCode = 400
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.end(JSON.stringify({ error: '缺少文件路径' }))
+          return
+        }
+
+        try {
+          const fullPath = path.resolve(projectRootDir, filePath)
+          if (!isPathUnderAllowedRoot(fullPath)) {
+            res.statusCode = 403
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.end(JSON.stringify({ error: 'forbidden_path' }))
+            return
+          }
+          if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
+            res.statusCode = 404
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.end(JSON.stringify({ error: '文件不存在', fullPath }))
+            return
+          }
+
+          res.statusCode = 200
+          res.setHeader('content-type', rawFileContentType(fullPath))
+          res.setHeader('cache-control', 'no-store')
+          if (req.method === 'HEAD') {
+            res.end()
+            return
+          }
+          fs.createReadStream(fullPath).pipe(res)
         } catch (error) {
           res.statusCode = 500
           res.setHeader('content-type', 'application/json; charset=utf-8')

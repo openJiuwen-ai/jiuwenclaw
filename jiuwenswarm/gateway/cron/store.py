@@ -71,6 +71,7 @@ class CronJobStore:
         mode: str | None = None,
         delete_after_run: bool | None = None,
         timeout_seconds: int | None = None,
+        app_id: str = "",
     ) -> CronJob:
         now = time.time()
         sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
@@ -98,6 +99,7 @@ class CronJobStore:
             mode=m,
             delete_after_run=dar,
             timeout_seconds=timeout,
+            app_id=str(app_id or "").strip(),
         )
         # validate via round-trip
         CronJob.from_dict(job.to_dict())

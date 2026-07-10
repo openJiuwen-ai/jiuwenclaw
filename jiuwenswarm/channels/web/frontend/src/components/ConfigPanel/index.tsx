@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useState, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Music2 } from "lucide-react";
+import { Music2, Workflow } from "lucide-react";
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore } from '../../stores';
 import type { ModelEntry } from '../../types';
@@ -307,6 +307,7 @@ const HIDDEN_CONFIG_KEYS = new Set([
 ]);
 const MEMORY_KEYS = new Set(["memory_forbidden_enabled", "memory_forbidden_description"]);
 const A2UI_KEYS = new Set(["a2ui_enabled"]);
+const SWARMFLOW_KEYS = new Set(["swarmflow_enabled"]);
 const SYMPHONY_BOOLEAN_KEYS = new Set(["symphony_enabled"]);
 const SKILL_RETRIEVAL_BOOLEAN_KEYS = new Set([
   "skill_retrieval_enabled",
@@ -331,7 +332,7 @@ const PROACTIVE_BOOLEAN_KEYS = new Set(["proactive_recommendation_enabled"]);
 const PROACTIVE_KEYS = new Set([
   ...PROACTIVE_BOOLEAN_KEYS,
   "proactive_recommendation_max_recommend_per_day",
-  "proactive_recommendation_max_sessions_per_tick",
+  "proactive_recommendation_max_rounds_per_tick",
 ]);
 // 调度频率已交给定时任务面板，ConfigPanel 不再暴露 tick_interval。
 // 即便后端残留下发，也在比较/提交时跳过，避免误提交空值。
@@ -351,6 +352,7 @@ function classifyKey(key: string): string {
   if (FREE_SEARCH_KEYS.has(key)) return "free_search";
   if (MEMORY_KEYS.has(key)) return "memory";
   if (A2UI_KEYS.has(key)) return "a2ui";
+  if (SWARMFLOW_KEYS.has(key)) return "swarmflow";
   if (SYMPHONY_KEYS.has(key)) return "symphony";
   if (PROACTIVE_KEYS.has(key)) return "proactive";
   if (key === "context_engine_enabled" || key === "kv_cache_affinity_enabled") return "context_engine";
@@ -456,6 +458,9 @@ function getGroupIcon(tag: string) {
       </svg>
     );
   }
+  if (tag === "swarmflow") {
+    return <Workflow className="w-3.5 h-3.5" strokeWidth={1.8} />;
+  }
   if (tag === "symphony") {
     return <Music2 className="w-3.5 h-3.5" strokeWidth={1.8} />;
   }
@@ -496,6 +501,7 @@ function getGroupToneClass(tag: string): string {
   if (tag === "context_engine") return "text-sky-500 bg-sky-500/10 border-sky-500/20";
   if (tag === "permissions") return "text-rose-500 bg-rose-500/10 border-rose-500/20";
   if (tag === "a2ui") return "text-fuchsia-500 bg-fuchsia-500/10 border-fuchsia-500/20";
+  if (tag === "swarmflow") return "text-blue-500 bg-blue-500/10 border-blue-500/20";
   if (tag === "symphony") return "text-amber-500 bg-amber-500/10 border-amber-500/20";
   if (tag === "skill_retrieval") return "text-emerald-500 bg-emerald-500/10 border-emerald-500/20";
   if (tag === "proactive") return "text-sky-500 bg-sky-500/10 border-sky-500/20";
@@ -523,6 +529,7 @@ function isBooleanKey(key: string): boolean {
     key === "permissions_enabled" ||
     key === "memory_forbidden_enabled" ||
     key === "a2ui_enabled" ||
+    key === "swarmflow_enabled" ||
     SYMPHONY_BOOLEAN_KEYS.has(key) ||
     SKILL_RETRIEVAL_BOOLEAN_KEYS.has(key) ||
     PROACTIVE_BOOLEAN_KEYS.has(key)
@@ -544,6 +551,7 @@ function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
     permissions_enabled: t('config.booleanLabels.enabled'),
     memory_forbidden_enabled: t('config.booleanLabels.enabled'),
     a2ui_enabled: t('config.booleanLabels.enabled'),
+    swarmflow_enabled: t('config.booleanLabels.enabled'),
     symphony_enabled: t('config.booleanLabels.enabled'),
     skill_retrieval_enabled: t('config.booleanLabels.enabled'),
     proactive_recommendation_enabled: t('config.booleanLabels.enabled'),
@@ -593,6 +601,7 @@ function getGroupMeta(t: (key: string) => string): Record<string, { label: strin
     context_engine: { label: t('config.groups.contextEngine.label'), order: 8, hint: t('config.groups.contextEngine.hint') },
     permissions: { label: t('config.groups.permissions.label'), order: 9, hint: t('config.groups.permissions.hint') },
     a2ui: { label: t('config.groups.a2ui.label'), order: 10, hint: t('config.groups.a2ui.hint') },
+    swarmflow: { label: t('config.groups.swarmflow.label'), order: 10.2, hint: t('config.groups.swarmflow.hint') },
     symphony: { label: t('config.groups.symphony.label'), order: 10.4, hint: t('config.groups.symphony.hint') },
     skill_retrieval: { label: t('config.groups.skillRetrieval.label'), order: 10.5, hint: t('config.groups.skillRetrieval.hint') },
     proactive: { label: t('config.groups.proactive.label'), order: 10.6, hint: t('config.groups.proactive.hint') },
@@ -615,6 +624,7 @@ function isProviderKey(key: string): boolean {
 const KEY_DISPLAY_I18N: Record<string, string> = {
   memory_forbidden_enabled: "config.keys.memoryForbiddenEnabled",
   memory_forbidden_description: "config.keys.memoryForbiddenDescription",
+  swarmflow_enabled: "config.keys.swarmflowEnabled",
   name: "config.keys.agentName",
   model: "config.keys.agentModel",
   skills: "config.keys.agentSkills",
@@ -638,7 +648,7 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   skill_retrieval_retrieve_max_exposure_depth: "config.keys.skillRetrievalMaxExposureDepth",
   proactive_recommendation_enabled: "config.keys.proactiveEnabled",
   proactive_recommendation_max_recommend_per_day: "config.keys.proactiveMaxPerDay",
-  proactive_recommendation_max_sessions_per_tick: "config.keys.proactiveMaxSessions",
+  proactive_recommendation_max_rounds_per_tick: "config.keys.proactiveMaxRounds",
 };
 const KEY_PLACEHOLDER_I18N: Record<string, string> = {
   memory_forbidden_description: "config.keys.memoryForbiddenDescriptionPlaceholder",
@@ -659,7 +669,7 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   skill_retrieval_enabled: 1,
   proactive_recommendation_enabled: 0,
   proactive_recommendation_max_recommend_per_day: 2,
-  proactive_recommendation_max_sessions_per_tick: 3,
+  proactive_recommendation_max_rounds_per_tick: 3,
   skill_retrieval_retrieve_max_exposure_depth: 10,
   skill_retrieval_build_max_depth: 20,
   skill_retrieval_build_max_workers: 21,

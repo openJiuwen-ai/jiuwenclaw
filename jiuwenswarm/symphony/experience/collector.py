@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
 from collections import defaultdict
-from pathlib import Path
 from typing import Any
 
+from . import ExperienceBank
 from .bank import ExperienceBank
 from .cluster import ClusteredQuery, cluster_traces, _faiss_cluster, populate_cluster
 from .distiller import TraceDistiller
 from .embed import EmbeddingClient
-from .models import ExperienceItem, TraceRecord
+from .models import ExperienceBankBuildConfig, ExperienceItem, TraceRecord
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,27 +25,28 @@ class ExperienceBaseBuilder:
         self,
         kb: ExperienceBank,
         embedding_client: EmbeddingClient,
-        llm_client: Any | None = None,
-        llm_model: str = "",
+        llm_client: Any,
+        llm_model: str,
         *,
         skills_info: list[dict[str, str]] | None = None,
-        min_cluster_size: int = 1,
-        max_workers: int = 8,
-        max_success_examples: int = 20,
-        pending_flush_threshold: int = 20,
-        min_hits_for_pattern: int = 1,
+        build_config: ExperienceBankBuildConfig | None = None,
     ) -> None:
         self._kb = kb
         self._embedder = embedding_client
+        if not llm_client:
+            raise ValueError("ExperienceBaseBuilder requires llm_client for distillation.")
         self._llm = llm_client
-        self._llm_model = str(llm_model or "").strip()
+        if not llm_model:
+            raise ValueError("ExperienceBaseBuilder requires llm_model for distillation.")
+        self._llm_model = llm_model
         self._skills_info = skills_info
-        self._min_cluster_size = int(min_cluster_size)
-        self._max_workers = int(max_workers)
-        self._max_success_examples = int(max_success_examples)
+        self._config = build_config or ExperienceBankBuildConfig()
+        self._min_cluster_size = self._config.min_cluster_size
+        self._max_workers = self._config.max_workers
+        self._max_success_examples = self._config.max_success_examples
         self._pending: list[TraceRecord] = []
-        self._flush_threshold = int(pending_flush_threshold)
-        self._min_hits = int(min_hits_for_pattern)
+        self._flush_threshold = self._config.pending_flush_threshold
+        self._min_hits = self._config.min_hits_for_pattern
         self._lock = threading.Lock()
 
     def build(self, traces: list[TraceRecord]) -> int:
@@ -145,22 +145,6 @@ class ExperienceBaseBuilder:
         )
         return created
 
-    def build_from_file(self, traces_path: str | Path) -> int:
-        """Convenience: read a JSON file, parse into ``TraceRecord`` list,
-        then call :meth:`build`.
-
-        The JSON file should contain a list of trace dicts, or a top-level
-        dict with ``"traces"`` or ``"records"`` key.
-        """
-        data = json.loads(Path(traces_path).read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            data = data.get("traces", data.get("records", [data]))
-        traces = [TraceRecord.from_dict(d) for d in data]
-        LOGGER.info(
-            "TraceIndexBuilder: loaded %d traces from %s", len(traces), traces_path
-        )
-        return self.build(traces)
-
 
     def add(self, trace: TraceRecord) -> None:
         """Record a successful query-skill mapping.
@@ -170,11 +154,6 @@ class ExperienceBaseBuilder:
         with self._lock:
             self._pending.append(trace)
             pending_count = len(self._pending)
-
-        LOGGER.debug(
-            "ExperienceBaseBuilder: recorded pending record query='%s' skills=%s (total pending=%d)",
-            trace.query, trace.skills, pending_count,
-        )
 
         # Auto-flush if buffer is large enough (non-blocking)
         if pending_count >= self._flush_threshold:
@@ -319,7 +298,6 @@ class ExperienceBaseBuilder:
             skill_ids=skill_ids,
         )
         self._kb.add(item)
-        LOGGER.info("ExperienceBaseBuilder: created new item '%s' pattern='%s'", item.id, pattern)
         return item
 
 __all__ = ["ExperienceBaseBuilder"]
