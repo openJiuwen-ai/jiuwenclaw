@@ -648,7 +648,7 @@ react:
       - reload_original_context_messages
       - load_qa_index                 # 展开指定 QA 块内「概览+逐 round 目录」；非 Selector 选块
       - deepresearch_run_task
-      - skill_turbo
+      - skill_acceleration_exec
     subagents:
       enabled: true
       inherit_parent_eager_tools: true
@@ -938,7 +938,7 @@ permissions:
     cron_delete_job: allow
     cron_toggle_job: allow
     cron_preview_job: allow
-    skill_turbo: ask
+    skill_acceleration_exec: ask
 
   rules:
     - id: shell_allow_dir
