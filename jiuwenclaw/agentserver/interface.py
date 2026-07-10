@@ -29,6 +29,7 @@ from jiuwenclaw.agentserver.agent_adapters import (
 )
 from jiuwenclaw.agentserver.memory.config import get_memory_mode
 from jiuwenclaw.agentserver.reload_result import ReloadResult
+from jiuwenclaw.agentserver.utils import extract_uploaded_files
 
 
 logger = logging.getLogger(__name__)
@@ -56,28 +57,9 @@ def _truncate_for_log(text: str, max_len: int = 200) -> str:
 
 
 def _build_file_extra(params: dict) -> dict | None:
-    """从 request.params 提取上传文件信息，供 history 持久化使用。
-
-    兼容两种 files 格式：
-    - dict 格式（OfficeClaw）: {"uploaded": [{"name": "...", "path": "...", "type": "..."}]}
-    - list 格式（各 channel）: [{"name": "...", "path": "...", "type": "..."}]
-
-    返回格式：{"files": [{"name": "...", "path": "..."}]}
-    如果无文件上传，返回 None。
-    """
-    files_info = params.get("files")
-    if files_info is None:
-        return None
-
-    # 提取文件条目列表，兼容 dict 和 list 两种格式
-    if isinstance(files_info, dict):
-        entries = files_info.get("uploaded", [])
-    elif isinstance(files_info, list):
-        entries = files_info
-    else:
-        return None
-
-    if not isinstance(entries, list):
+    """从 request.params 提取上传文件信息，供 history 持久化使用。"""
+    entries = extract_uploaded_files(params)
+    if entries is None:
         return None
     result = []
     for f in entries:

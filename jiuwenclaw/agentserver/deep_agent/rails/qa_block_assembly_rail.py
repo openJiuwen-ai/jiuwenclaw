@@ -16,6 +16,8 @@ from openjiuwen.core.context_engine.qa_block.catalog import (
     build_catalog_text,
     maybe_compact_catalog_l1,
 )
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.rail.base import InvokeInputs
 from openjiuwen.core.context_engine.qa_block.config import QABlockConfig
 from openjiuwen.core.context_engine.qa_block.freezer import allocate_qa_id
 from openjiuwen.core.context_engine.qa_block.layer import QABlockLayer
@@ -37,6 +39,7 @@ from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     resolve_actual_session,
     resolve_context_engine,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.utils import is_ask_user_question_interrupt
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,17 @@ def _last_n_history_qa_ids(registry: Any, n: int = 1) -> list[str]:
     if not entries:
         return []
     return [entry.qa_id for entry in entries[-n:]]
+
+
+def _is_popup_confirmation_resume(ctx: AgentCallbackContext) -> bool:
+    """检测弹窗确认恢复场景(如工具权限"本次允许")。
+
+     仅当 resume 的 result 标记为 interrupt 且包含 interrupt_ids 时，
+     才认为是弹窗恢复，跳过QA组装。
+     普通 InteractiveInput resume（如 stale pointer 空上下文场景）
+     仍需要走正常组装流程。
+     """
+    return is_ask_user_question_interrupt(ctx)
 
 
 class JiuClawQABlockAssemblyRail(DeepAgentRail):
@@ -99,6 +113,14 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
 
         assembly_start = time.perf_counter()
         session_id = session.get_session_id() if hasattr(session, "get_session_id") else ""
+
+        # 弹窗确认恢复场景(如工具权限"本次允许")，跳过QA组装，沿用当前上下文
+        if _is_popup_confirmation_resume(ctx):
+            logger.info(
+                "[QABlockAssemblyRail] skip assembly for popup confirmation resume "
+                "session_id=%s", session_id,
+            )
+            return
         context = ctx.context
         clear_assembly_qa_artifact_state(context)
         registry = load_registry(session)

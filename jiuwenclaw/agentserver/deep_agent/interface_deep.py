@@ -333,6 +333,7 @@ from jiuwenclaw.agentserver.stream_utils import propagate_stream_source_id, tool
 from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.gateway.cron.models import CronTargetChannel
 from jiuwenclaw.agentserver.team import get_team_manager
+from jiuwenclaw.agentserver.utils import extract_uploaded_files
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import (
     deep_merge_dicts,
@@ -8229,24 +8230,8 @@ class JiuWenClawDeepAdapter:
 
 
 def _has_uploaded_file(params: dict) -> bool:
-    """检查 request.params.files 中是否有新上传的文件。
-
-     当用户中断后上传了新文件（任何类型），该函数返回 True，用于
-     plan_pause 提示中引导 LLM 选择"全新任务"而非"续跑旧计划"。
-
-     兼容两种 files 格式：
-     - dict 格式（OfficeClaw）: {"uploaded": [{"name": "...", "path": "...", "type": "..."}]}
-     - list 格式（各 channel）: [{"name": "...", "path": "...", "type": "..."}]
-     """
-    files = params.get("files")
-    if files is None:
+    """判断是否有新文件上传"""
+    entries = extract_uploaded_files(params)
+    if entries is None:
         return False
-    if isinstance(files, dict):
-        uploaded = files.get("uploaded", [])
-    elif isinstance(files, list):
-        uploaded = files
-    else:
-        return False
-    if not isinstance(uploaded, list):
-        return False
-    return len(uploaded) > 0
+    return len(entries) > 0
