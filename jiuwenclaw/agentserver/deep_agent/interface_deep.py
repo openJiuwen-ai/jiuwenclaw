@@ -6199,9 +6199,11 @@ class JiuWenClawDeepAdapter:
             if clear_task_plan_on_state(state):
                 self._instance.save_state(session, state)
 
+            has_new_file = _has_uploaded_file(params)
             decision = build_paused_plan_decision_prompt_from_session_snapshot(
                 self._resolve_runtime_language(),
                 snapshot,
+                has_new_file=has_new_file,
             )
             merge_supplementary_into_request_params(params, decision)
             clear_plan_pause_on_session(session)
@@ -8244,3 +8246,27 @@ class JiuWenClawDeepAdapter:
             pass
 
         return False
+
+
+def _has_uploaded_file(params: dict) -> bool:
+    """检查 request.params.files 中是否有新上传的文件。
+
+     当用户中断后上传了新文件（任何类型），该函数返回 True，用于
+     plan_pause 提示中引导 LLM 选择"全新任务"而非"续跑旧计划"。
+
+     兼容两种 files 格式：
+     - dict 格式（OfficeClaw）: {"uploaded": [{"name": "...", "path": "...", "type": "..."}]}
+     - list 格式（各 channel）: [{"name": "...", "path": "...", "type": "..."}]
+     """
+    files = params.get("files")
+    if files is None:
+        return False
+    if isinstance(files, dict):
+        uploaded = files.get("uploaded", [])
+    elif isinstance(files, list):
+        uploaded = files
+    else:
+        return False
+    if not isinstance(uploaded, list):
+        return False
+    return len(uploaded) > 0
