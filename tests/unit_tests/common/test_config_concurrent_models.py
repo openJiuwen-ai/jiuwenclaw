@@ -66,7 +66,7 @@ def patched_config(tmp_path: Path, monkeypatch):
 def test_concurrent_add_no_lost_update(patched_config):
     """N 线程并发 append model：最终所有 N+seed 条目都在 defaults 里。
 
-    用单事务 update_config（读最新 + 追加 + 写回）模拟正确用法，验证乐观锁
+    用单事务 update_config（读最新 + 追加 + 写回）模拟正确用法，验证文件锁
     在并发下不丢条目。对比：若用 ensure_defaults_list + update_default_models
     两步（中间无锁），会丢更新——这正是原 bug。
     """
@@ -115,27 +115,27 @@ def test_concurrent_add_no_lost_update(patched_config):
     )
 
 
-def test_ensure_defaults_no_placeholder_pollution(patched_config, monkeypatch):
-    """defaults 不存在时不再写入 ${API_BASE} 等模板占位符，返回空列表。"""
+def test_ensure_defaults_creates_placeholder_when_missing(patched_config):
+    """defaults 不存在时写入 ${API_BASE} 等模板占位符条目（保持原契约，供 _config_set 后续填充）。"""
     raw = cfg_mod.load_yaml_round_trip(patched_config)
     raw["models"].pop("defaults")
     raw["models"].pop("default", None)
     cfg_mod.dump_yaml_round_trip(patched_config, raw)
 
     defs = cfg_mod.ensure_defaults_list_in_config()
-    assert defs == []
+    assert isinstance(defs, list) and len(defs) == 1
+    mcc = defs[0].get("model_client_config", {})
+    assert mcc.get("api_base") == "${API_BASE}"
+    assert mcc.get("model_name") == "${MODEL_NAME}"
 
     data = cfg_mod.load_yaml_round_trip(patched_config)
     written = data["models"].get("defaults")
-    assert written == []
-    for entry in written:
-        mcc = entry.get("model_client_config", {})
-        for v in mcc.values():
-            assert not str(v).startswith("${"), "仍写入了模板占位符"
+    assert isinstance(written, list) and len(written) == 1
+    assert written[0].get("model_client_config", {}).get("api_key") == "${API_KEY}"
 
 
 def test_update_config_retries_on_concurrent_change(patched_config):
-    """_config_fp 变化时 update_config 重试而非丢弃。"""
+    """并发写同一字段时 update_config 不丢计数（文件锁串行化，无丢失更新）。"""
     barrier = threading.Barrier(2)
     results: dict[str, int] = {"ok": 0}
 
@@ -157,4 +157,4 @@ def test_update_config_retries_on_concurrent_change(patched_config):
         t.join()
 
     data = cfg_mod.load_yaml_round_trip(patched_config)
-    assert data.get("counter") == 20, f"乐观锁丢失计数: {data.get('counter')}"
+    assert data.get("counter") == 20, f"丢失计数: {data.get('counter')}"

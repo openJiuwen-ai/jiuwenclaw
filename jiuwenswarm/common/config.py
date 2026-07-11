@@ -261,12 +261,14 @@ def _atomic_replace(src: Path, dst: Path, max_retries: int = 10) -> None:
             if attempt == max_retries - 1:
                 raise
             time.sleep(0.002 * (attempt + 1))
-        except OSError:
-            raise
 
 
 _CONFIG_WRITE_LOCK = threading.Lock()
-_CONFIG_LOCK_PATH = CONFIG_YAML_PATH.with_name(f"{CONFIG_YAML_PATH.stem}.lock")
+
+
+def _config_lock_path(config_path: Path) -> Path:
+    """锁文件路径跟随当前 CONFIG_YAML_PATH，避免模块加载时静态绑定。"""
+    return config_path.with_name(f"{config_path.stem}.lock")
 
 
 def update_config(mutator, *, lock_timeout: float = 10.0) -> Any:
@@ -278,7 +280,7 @@ def update_config(mutator, *, lock_timeout: float = 10.0) -> Any:
     import portalocker
     with _CONFIG_WRITE_LOCK:
         with portalocker.Lock(
-            str(_CONFIG_LOCK_PATH),
+            str(_config_lock_path(CONFIG_YAML_PATH)),
             timeout=lock_timeout,
             fail_when_locked=False,
         ):
@@ -1043,14 +1045,26 @@ def ensure_defaults_list_in_config() -> list[dict[str, Any]]:
                 default_entry["is_default"] = True
             defaults_list = [default_entry]
         else:
-            defaults_list = []
+            defaults_list = [{
+                "model_client_config": {
+                    "api_base": "${API_BASE}",
+                    "api_key": "${API_KEY}",
+                    "model_name": "${MODEL_NAME}",
+                    "client_provider": "${MODEL_PROVIDER}",
+                },
+                "model_config_obj": {"temperature": 0.95},
+                "is_default": True,
+            }]
         models["defaults"] = defaults_list
         data["models"] = models
         if "default" in data["models"]:
             del data["models"]["default"]
         return data
 
-    update_config(_mutate)
+    result = update_config(_mutate)
+    if result is not None:
+        defs = (result.get("models") or {}).get("defaults")
+        return defs if isinstance(defs, list) else []
     data = load_yaml_round_trip(CONFIG_YAML_PATH) or {}
     defs = (data.get("models") or {}).get("defaults")
     return defs if isinstance(defs, list) else []
