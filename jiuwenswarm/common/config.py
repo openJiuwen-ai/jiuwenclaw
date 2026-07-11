@@ -261,7 +261,6 @@ def _atomic_replace(src: Path, dst: Path, max_retries: int = 10) -> None:
             if attempt == max(1, max_retries) - 1:
                 raise
             time.sleep(0.002 * (attempt + 1))
-    raise OSError(f"atomic replace failed without attempting: {src} -> {dst}")
 
 
 _CONFIG_WRITE_LOCK = threading.Lock()
