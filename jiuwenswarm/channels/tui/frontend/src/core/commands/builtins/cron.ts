@@ -14,6 +14,7 @@ interface CronJobPayload {
   mode: string;
   delete_after_run: boolean;
   timeout_seconds?: number | null;
+  model_name?: string | null;
   created_at: number | null;
   updated_at: number | null;
 }
@@ -107,12 +108,12 @@ const UPDATE_RESTRICTED_KEYS: Record<string, string> = {
 };
 
 // Keys allowed for /cron add (user-writable fields that make sense on creation)
-const ADD_ALLOWED_KEYS = new Set(["name", "cron_expr", "description", "targets", "timezone", "mode", "wake_offset_seconds", "delete_after_run", "timeout_seconds"]);
+const ADD_ALLOWED_KEYS = new Set(["name", "cron_expr", "description", "targets", "timezone", "mode", "wake_offset_seconds", "delete_after_run", "timeout_seconds", "model_name"]);
 
 // Keys allowed for /cron update (user-writable fields; includes enabled/expired for power-users)
 const UPDATE_ALLOWED_KEYS = new Set([
   "name", "cron_expr", "description", "targets", "timezone", "mode",
-  "wake_offset_seconds", "delete_after_run", "enabled", "expired", "timeout_seconds",
+  "wake_offset_seconds", "delete_after_run", "enabled", "expired", "timeout_seconds", "model_name",
 ]);
 
 /**
@@ -581,6 +582,7 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
       ...(kvPairs.timeout_seconds
         ? { timeout_seconds: parseInt(kvPairs.timeout_seconds, 10) }
         : {}),
+      ...(kvPairs.model_name ? { model_name: kvPairs.model_name } : {}),
     }) as { job: CronJobPayload };
 
     const job = payload.job;
@@ -596,6 +598,7 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
           { label: "timezone", value: job.timezone },
           { label: "targets", value: job.targets },
           { label: "mode", value: job.mode },
+          { label: "model_name", value: job.model_name || "-" },
           { label: "timeout_seconds", value: job.timeout_seconds == null ? "-" : String(job.timeout_seconds) },
           { label: "enabled", value: String(job.enabled) },
           { label: "delete_after_run", value: String(job.delete_after_run) },

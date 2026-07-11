@@ -258,6 +258,7 @@ def init_session_metadata(
     project_dir: str = "",
     project_id: str = "",
     model: str = "",
+    cron_id: str = "",
 ) -> None:
     """初始化会话元数据(同步写,确保创建后立即可读)"""
     metadata = {
@@ -274,6 +275,7 @@ def init_session_metadata(
         "project_dir": project_dir,
         "project_id": project_id,
         "model": model,
+        "cron_id": cron_id,
         "last_user_message_at": _current_timestamp(),
         "pinned": False,
         "pin_order": 0,
@@ -352,6 +354,7 @@ def update_session_metadata(
             "project_dir": project_dir or "",
             "project_id": project_id or "",
             "model": model or "",
+            "cron_id": "",
             "last_user_message_at": last_user_message_at if last_user_message_at is not None else _current_timestamp(),
             "pinned": bool(pinned),
             "pin_order": pin_order if pin_order is not None else 0,
@@ -428,6 +431,7 @@ def sync_session_request_metadata(
     model: str | None = None,
     project_dir: str | None = None,
     project_id: str | None = None,
+    cron_id: str | None = None,
     last_user_message_at: float | None = None,
     explicit_mode_provided: bool = False,
     explicit_model_provided: bool = False,
@@ -491,6 +495,7 @@ def sync_session_request_metadata(
             "project_dir": project_dir or "",
             "project_id": project_id or "",
             "model": model if (model is not None and explicit_model_provided) else "",
+            "cron_id": cron_id or "",
             "last_user_message_at": last_user_message_at if last_user_message_at is not None else now,
             "pinned": False,
             "pin_order": 0,
@@ -517,6 +522,9 @@ def sync_session_request_metadata(
         # project_id：首次锁定，已锁定则忽略请求值（与 project_dir 一致，不可改）
         if project_id and not (isinstance(metadata.get("project_id"), str) and metadata.get("project_id", "").strip()):
             metadata["project_id"] = project_id
+        # cron_id：首次锁定，已锁定则忽略请求值（会话来源标记，与 project_id 一致不可改）
+        if cron_id and not (isinstance(metadata.get("cron_id"), str) and metadata.get("cron_id", "").strip()):
+            metadata["cron_id"] = cron_id
 
         # model：显式覆盖式——仅当请求方显式携带 model 才覆盖；
         # 未显式携带（如只读 RPC 回退到进程 MODEL_NAME）则保持磁盘原值，
@@ -556,6 +564,7 @@ def get_session_metadata(session_id: str, cache_bust: bool = False) -> dict[str,
         metadata.setdefault("project_dir", "")
         metadata.setdefault("project_id", "")
         metadata.setdefault("model", "")
+        metadata.setdefault("cron_id", "")
         metadata.setdefault("last_user_message_at", metadata.get("created_at", 0.0))
         metadata.setdefault("pinned", False)
         metadata.setdefault("pin_order", 0)
@@ -811,13 +820,13 @@ def remove_team_mode_session_dirs_at_startup() -> None:
 def migrate_legacy_session_metadata_at_startup() -> None:
     """AgentServer 启动时给老会话的 metadata.json 补全新字段并写回磁盘。
 
-    升级后新增了 project_dir / model / last_user_message_at / status 四个字段，
+    升级后新增了 project_dir / model / last_user_message_at / status / cron_id 五个字段，
     老会话的 metadata.json 缺这些字段。本函数在启动时遍历所有会话目录，
     按字段语义补默认值并落盘，保证磁盘上 schema 统一、前端永远拿到稳定结构。
 
     各字段兜底值来源：
       - project_id：优先按 project_dir 从 project_store 解析;无法匹配则 ""
-      - project_dir / model / status：常量默认（""/""/"idle"），老会话本就没存过
+      - project_dir / model / status / cron_id：常量默认（""/""/"idle"/""），老会话本就没存过
       - last_user_message_at：从已有时间字段推算 ——
         last_message_at（agent 最后输出时间）→ created_at（创建时间）→ 目录 mtime
         不能给常量 0.0，否则老会话排序/时间显示错乱
@@ -872,6 +881,10 @@ def migrate_legacy_session_metadata_at_startup() -> None:
             changed = True
         if "status" not in raw:
             raw["status"] = "idle"
+            changed = True
+        # cron_id：定时任务会话来源标记，老会话本就不是 cron 创建，补空字符串
+        if "cron_id" not in raw:
+            raw["cron_id"] = ""
             changed = True
         # last_user_message_at：从已有时间字段推算，保证语义合理
         if "last_user_message_at" not in raw:
@@ -945,6 +958,7 @@ def get_all_sessions_metadata(
                 "mode": "unknown",
                 "project_id": "",
                 "project_dir": "",
+                "cron_id": "",
             }
 
         sessions.append(metadata)
@@ -955,6 +969,7 @@ def get_all_sessions_metadata(
             sanitized = _sanitize_title(s["title"])
             if sanitized != s["title"]:
                 s["title"] = sanitized
+        s.setdefault("cron_id", "")
 
     # 按最后消息时间倒序排序
     sessions.sort(key=lambda x: x.get("last_message_at", 0), reverse=True)
@@ -992,6 +1007,7 @@ def collect_all_sessions_metadata() -> list[dict[str, Any]]:
                 "session_id": sid,
                 "project_id": "",
                 "project_dir": "",
+                "cron_id": "",
                 "pinned": False,
                 "pin_order": 0,
                 "last_message_at": st.st_mtime,
@@ -1004,6 +1020,7 @@ def collect_all_sessions_metadata() -> list[dict[str, Any]]:
             # 兜底默认值,保证新增字段齐全(存量会话无需迁移)
             meta.setdefault("project_id", "")
             meta.setdefault("project_dir", "")
+            meta.setdefault("cron_id", "")
             meta.setdefault("pinned", False)
             meta.setdefault("pin_order", 0)
             meta.setdefault("last_user_message_at", meta.get("created_at", 0.0))

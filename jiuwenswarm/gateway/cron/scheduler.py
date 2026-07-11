@@ -437,6 +437,10 @@ class CronSchedulerService:
         self._reload_event.set()
 
     async def trigger_run_now(self, job_id: str) -> str:
+        info = await self.trigger_run_now_info(job_id)
+        return str(info["run_id"])
+
+    async def trigger_run_now_info(self, job_id: str) -> dict[str, str]:
         job_id = str(job_id or "").strip()
         job = self._jobs.get(job_id) or await self._store.get_job(job_id)
         if job is None:
@@ -445,10 +449,35 @@ class CronSchedulerService:
         push_dt = now
         wake_dt = now
         run_id = f"{job.id}:{int(push_dt.timestamp())}"
+        channel_id, exec_session_id = self._make_execution_context(job)
+        self._runs[run_id] = CronRunState(
+            run_id=run_id,
+            job_id=job.id,
+            wake_at_iso=wake_dt.isoformat(),
+            push_at_iso=push_dt.isoformat(),
+            job_name=job.name,
+            targets=job.targets,
+            session_id=job.session_id,
+            chat_type=job.chat_type,
+            timezone=job.timezone,
+            exec_channel_id=channel_id,
+            exec_session_id=exec_session_id,
+        )
         self._schedule_event(wake_dt, "wake", job.id, run_id)
         self._schedule_event(push_dt, "push", job.id, run_id)
         self._reload_event.set()
-        return run_id
+        return {"run_id": run_id, "session_id": exec_session_id}
+
+    def _make_execution_context(self, job: CronJob) -> tuple[str, str]:
+        ts = format(int(time.time() * 1000), "x")
+        mode = str(job.mode or CRON_JOB_DEFAULT_MODE).strip() or CRON_JOB_DEFAULT_MODE
+        if is_team_cron_mode(mode):
+            return _resolve_cron_execution_context(
+                job,
+                ts=ts,
+                message_handler=self._message_handler,
+            )
+        return "__cron__", f"cron_{ts}_{job.id}"
 
     def _schedule_event(self, at_dt: datetime, kind: str, job_id: str, run_id: str) -> None:
         at_ts = float(at_dt.timestamp())
@@ -724,17 +753,23 @@ class CronSchedulerService:
             state.status = "running"
             state.started_at = self._now_fn()
             try:
-                ts = format(int(time.time() * 1000), "x")
                 mode = str(job.mode or CRON_JOB_DEFAULT_MODE).strip() or CRON_JOB_DEFAULT_MODE
-                if is_team_cron_mode(mode):
-                    channel_id, exec_session_id = _resolve_cron_execution_context(
-                        job,
-                        ts=ts,
-                        message_handler=self._message_handler,
-                    )
+                if state.exec_channel_id and state.exec_session_id:
+                    channel_id = state.exec_channel_id
+                    exec_session_id = state.exec_session_id
                 else:
-                    channel_id = "__cron__"
-                    exec_session_id = f"cron_{ts}_{job.id}"
+                    channel_id, exec_session_id = self._make_execution_context(job)
+                    state.exec_channel_id = channel_id
+                    state.exec_session_id = exec_session_id
+                # 解析 project_dir 供 AgentServer 写入会话归属（与 project_id 联动）
+                try:
+                    from jiuwenswarm.server.runtime.session import project_store as _ps
+                    exec_project_dir = _ps.get_project_dir_by_id(job.project_id)
+                except Exception as pdir_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[Cron] resolve project_dir failed job=%s: %s", job.id, pdir_exc,
+                    )
+                    exec_project_dir = ""
                 cron_meta = {
                     "job_id": job.id,
                     "job_name": job.name,
@@ -742,17 +777,23 @@ class CronSchedulerService:
                     "push_at": state.push_at_iso,
                     "wake_at": state.wake_at_iso,
                 }
+                params: dict[str, Any] = {
+                    "content": job.description,
+                    "query": job.description,
+                    "mode": mode,
+                    "cron": cron_meta,
+                    "cron_id": job.id,
+                    "project_id": job.project_id or "",
+                    "project_dir": exec_project_dir,
+                }
+                if job.model_name:
+                    params["model_name"] = job.model_name
                 envelope = e2a_from_agent_fields(
                     request_id=f"cron-{run_id}",
                     channel_id=channel_id,
                     session_id=exec_session_id,
                     req_method=ReqMethod.CHAT_SEND,
-                    params={
-                        "content": job.description,
-                        "query": job.description,
-                        "mode": mode,
-                        "cron": cron_meta,
-                    },
+                    params=params,
                     is_stream=is_team_cron_mode(mode),
                     timestamp=self._now_fn(),
                     metadata={"cron": {"job_id": job.id, "run_id": run_id}},
@@ -772,6 +813,7 @@ class CronSchedulerService:
                         envelope=envelope,
                         timeout_seconds=timeout_seconds,
                     )
+                await self._mark_last_session_ready(job, exec_session_id)
                 if not text:
                     text = "[cron] 任务完成，但未返回可展示文本"
                 state.result_text = text
@@ -815,6 +857,16 @@ class CronSchedulerService:
 
         task = asyncio.create_task(_run_agent(), name=f"cron-run-{job.id}")
         self._run_tasks[run_id] = task
+
+    async def _mark_last_session_ready(self, job: CronJob, exec_session_id: str) -> None:
+        """Record the execution session after the agent request has accepted it."""
+        try:
+            await self._store.update_job(job.id, {"last_session_id": exec_session_id})
+            job.last_session_id = exec_session_id
+        except Exception as lsid_exc:  # noqa: BLE001
+            logger.warning(
+                "[Cron] update last_session_id failed job=%s: %s", job.id, lsid_exc,
+            )
 
     async def _cancel_cron_team_agent_session(
         self,

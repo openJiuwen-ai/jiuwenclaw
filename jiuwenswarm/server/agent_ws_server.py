@@ -689,6 +689,12 @@ def _sync_chat_request_metadata(
         if isinstance(request_project_id, str) and request_project_id.strip()
         else None
     )
+    request_cron_id = params.get("cron_id")
+    request_cron_id = (
+        request_cron_id.strip()
+        if isinstance(request_cron_id, str) and request_cron_id.strip()
+        else None
+    )
     try:
         from jiuwenswarm.server.runtime.session.session_metadata import (
             sync_session_request_metadata,
@@ -701,6 +707,7 @@ def _sync_chat_request_metadata(
             model=model_name,
             project_dir=str(project_dir) if project_dir else None,
             project_id=request_project_id,
+            cron_id=request_cron_id,
             last_user_message_at=_dt.datetime.now(_dt.timezone.utc).timestamp(),
             explicit_mode_provided=explicit_mode_provided,
             explicit_model_provided=explicit_model_provided,

@@ -45,6 +45,7 @@ interface CronJob {
   session_target?: string;
   wake_mode?: string;
   compat_mode?: string;
+  model_name?: string | null;
   created_at: number | string | null;
   updated_at: number | string | null;
 }
@@ -62,6 +63,7 @@ interface CronJobInput {
   wake_offset_seconds: number;
   description: string;
   targets: string;
+  model_name?: string;
 }
 
 interface UpdateCronJob extends CronJobInput {
@@ -83,6 +85,7 @@ function createEmptyJobInput(): CronJobInput {
     wake_offset_seconds: 300,
     description: '',
     targets: DEFAULT_CRON_TARGET,
+    model_name: '',
   };
 }
 
@@ -231,6 +234,7 @@ function normalizeJobForEdit(job: CronJob): UpdateCronJob {
     wake_offset_seconds: Number.isFinite(job.wake_offset_seconds) ? job.wake_offset_seconds : 300,
     description: resolveDescription(job),
     targets: resolveTargets(job),
+    model_name: (job.model_name || '').trim(),
     created_at: job.created_at,
     updated_at: job.updated_at,
   };
@@ -248,6 +252,9 @@ function buildLegacyJobInput(job: CronJobInput | UpdateCronJob, mode?: string): 
   };
   if (mode) {
     result['mode'] = mode;
+  }
+  if (job.model_name && job.model_name.trim()) {
+    result['model_name'] = job.model_name.trim();
   }
   return result;
 }
