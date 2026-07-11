@@ -1,11 +1,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""并发写 models.defaults 的回归测试：验证乐观锁不丢失条目。
+"""并发写 models.defaults 的回归测试：验证文件锁不丢失条目。
 
-复现原 bug 场景：多线程同时 add model，裸 load-modify-dump 会丢失更新，
-乐观锁（update_config）应保证全部条目最终都在配置里。
+复现原 bug 场景：多线程/多进程同时写 model 配置，裸 load-modify-dump 会丢失更新，
+update_config（threading.Lock + portalocker 文件锁）应保证全部条目最终都在配置里。
 """
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -158,3 +159,63 @@ def test_update_config_retries_on_concurrent_change(patched_config):
 
     data = cfg_mod.load_yaml_round_trip(patched_config)
     assert data.get("counter") == 20, f"丢失计数: {data.get('counter')}"
+
+
+def test_ensure_defaults_returns_locked_snapshot_without_write(patched_config):
+    """defaults 已存在时：mutator 返回 None→update_config 返回锁内读到的快照，
+    不触发磁盘写，调用方拿到锁内可信值（无锁外重读的 TOCTOU）。"""
+    before_mtime = patched_config.stat().st_mtime_ns
+    defs = cfg_mod.ensure_defaults_list_in_config()
+    after_mtime = patched_config.stat().st_mtime_ns
+
+    assert isinstance(defs, list) and len(defs) == 1
+    assert defs[0]["model_client_config"]["model_name"] == "seed-model"
+    assert before_mtime == after_mtime, "未变更却触发了磁盘写"
+
+
+def test_atomic_replace_retries_on_permission_error(patched_config, monkeypatch):
+    """_atomic_replace 对 PermissionError 自动重试，最终成功（不静默无操作）。"""
+    src = patched_config.parent / "tmp_src.yaml"
+    src.write_text("x: 1", encoding="utf-8")
+    call_count = {"n": 0}
+    real_replace = os.replace
+
+    def _flaky_replace(s, d):
+        call_count["n"] += 1
+        if call_count["n"] < 3:
+            raise PermissionError("simulated concurrent hold")
+        return real_replace(s, d)
+
+    dst = patched_config.parent / "tmp_dst.yaml"
+    monkeypatch.setattr(os, "replace", _flaky_replace)
+    try:
+        cfg_mod._atomic_replace(src, dst)
+        assert call_count["n"] == 3, f"应重试到第3次成功，实际 {call_count['n']}"
+        assert dst.read_text(encoding="utf-8") == "x: 1"
+    finally:
+        for p in (src, dst):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def test_atomic_replace_raises_when_exhausted(patched_config, monkeypatch):
+    """_atomic_replace 重试耗尽后抛 PermissionError，不静默返回。"""
+    src = patched_config.parent / "tmp_src2.yaml"
+    src.write_text("x: 1", encoding="utf-8")
+    dst = patched_config.parent / "tmp_dst2.yaml"
+
+    def _always_fail(s, d):
+        raise PermissionError("simulated persistent hold")
+
+    monkeypatch.setattr(os, "replace", _always_fail)
+    try:
+        with pytest.raises(PermissionError):
+            cfg_mod._atomic_replace(src, dst, max_retries=2)
+    finally:
+        for p in (src, dst):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass

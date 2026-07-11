@@ -253,14 +253,15 @@ def dump_yaml_round_trip(config_path: Path, data: Any) -> None:
 
 def _atomic_replace(src: Path, dst: Path, max_retries: int = 10) -> None:
     """os.replace 重试：应对 Windows 下目标文件被并发占用导致的 PermissionError。"""
-    for attempt in range(max_retries):
+    for attempt in range(max(1, max_retries)):
         try:
             os.replace(src, dst)
             return
         except PermissionError:
-            if attempt == max_retries - 1:
+            if attempt == max(1, max_retries) - 1:
                 raise
             time.sleep(0.002 * (attempt + 1))
+    raise OSError(f"atomic replace failed without attempting: {src} -> {dst}")
 
 
 _CONFIG_WRITE_LOCK = threading.Lock()
@@ -289,7 +290,7 @@ def update_config(mutator, *, lock_timeout: float = 10.0) -> Any:
                 data = {}
             new_data = mutator(data)
             if new_data is None:
-                return None
+                return data
             dump_yaml_round_trip(CONFIG_YAML_PATH, new_data)
             return new_data
 
@@ -1062,11 +1063,7 @@ def ensure_defaults_list_in_config() -> list[dict[str, Any]]:
         return data
 
     result = update_config(_mutate)
-    if result is not None:
-        defs = (result.get("models") or {}).get("defaults")
-        return defs if isinstance(defs, list) else []
-    data = load_yaml_round_trip(CONFIG_YAML_PATH) or {}
-    defs = (data.get("models") or {}).get("defaults")
+    defs = (result.get("models") or {}).get("defaults")
     return defs if isinstance(defs, list) else []
 
 
