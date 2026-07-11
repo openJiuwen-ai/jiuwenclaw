@@ -31,12 +31,12 @@ def test_build_route_plan_shards2_buckets_user_id():
     )
     assert len(plans) == 6
     assert plans == [
-        mod.RoutePlan(shard=0, shard2=0, group_id="loadtest_s0", user_id="loadtest_user_s0_a0"),
-        mod.RoutePlan(shard=1, shard2=0, group_id="loadtest_s1", user_id="loadtest_user_s1_a0"),
-        mod.RoutePlan(shard=2, shard2=0, group_id="loadtest_s2", user_id="loadtest_user_s2_a0"),
-        mod.RoutePlan(shard=0, shard2=1, group_id="loadtest_s0", user_id="loadtest_user_s0_a1"),
-        mod.RoutePlan(shard=1, shard2=1, group_id="loadtest_s1", user_id="loadtest_user_s1_a1"),
-        mod.RoutePlan(shard=2, shard2=1, group_id="loadtest_s2", user_id="loadtest_user_s2_a1"),
+        mod.RoutePlan(shard=0, shard2=0, group_id="loadtest_s0", bot_id="bot_main", user_id="loadtest_user_s0_a0"),
+        mod.RoutePlan(shard=1, shard2=0, group_id="loadtest_s1", bot_id="bot_main", user_id="loadtest_user_s1_a0"),
+        mod.RoutePlan(shard=2, shard2=0, group_id="loadtest_s2", bot_id="bot_main", user_id="loadtest_user_s2_a0"),
+        mod.RoutePlan(shard=0, shard2=1, group_id="loadtest_s0", bot_id="bot_main", user_id="loadtest_user_s0_a1"),
+        mod.RoutePlan(shard=1, shard2=1, group_id="loadtest_s1", bot_id="bot_main", user_id="loadtest_user_s1_a1"),
+        mod.RoutePlan(shard=2, shard2=1, group_id="loadtest_s2", bot_id="bot_main", user_id="loadtest_user_s2_a1"),
     ]
 
 
@@ -51,28 +51,28 @@ def test_build_route_plan_shards2_reuses_user_id_per_agent_bucket():
     )
     assert len(plans) == 12
     assert plans[0] == mod.RoutePlan(
-        shard=0, shard2=0, group_id="loadtest_s0", user_id="loadtest_user_s0_a0"
+        shard=0, shard2=0, group_id="loadtest_s0", bot_id="bot_main", user_id="loadtest_user_s0_a0"
     )
     assert plans[1] == mod.RoutePlan(
-        shard=1, shard2=0, group_id="loadtest_s1", user_id="loadtest_user_s1_a0"
+        shard=1, shard2=0, group_id="loadtest_s1", bot_id="bot_main", user_id="loadtest_user_s1_a0"
     )
     assert plans[2] == mod.RoutePlan(
-        shard=2, shard2=0, group_id="loadtest_s2", user_id="loadtest_user_s2_a0"
+        shard=2, shard2=0, group_id="loadtest_s2", bot_id="bot_main", user_id="loadtest_user_s2_a0"
     )
     assert plans[3] == mod.RoutePlan(
-        shard=0, shard2=1, group_id="loadtest_s0", user_id="loadtest_user_s0_a1"
+        shard=0, shard2=1, group_id="loadtest_s0", bot_id="bot_main", user_id="loadtest_user_s0_a1"
     )
     assert plans[4] == mod.RoutePlan(
-        shard=1, shard2=1, group_id="loadtest_s1", user_id="loadtest_user_s1_a1"
+        shard=1, shard2=1, group_id="loadtest_s1", bot_id="bot_main", user_id="loadtest_user_s1_a1"
     )
     assert plans[5] == mod.RoutePlan(
-        shard=2, shard2=1, group_id="loadtest_s2", user_id="loadtest_user_s2_a1"
+        shard=2, shard2=1, group_id="loadtest_s2", bot_id="bot_main", user_id="loadtest_user_s2_a1"
     )
     assert plans[6] == mod.RoutePlan(
-        shard=0, shard2=0, group_id="loadtest_s0", user_id="loadtest_user_s0_a0"
+        shard=0, shard2=0, group_id="loadtest_s0", bot_id="bot_main", user_id="loadtest_user_s0_a0"
     )
     assert plans[7] == mod.RoutePlan(
-        shard=1, shard2=0, group_id="loadtest_s1", user_id="loadtest_user_s1_a0"
+        shard=1, shard2=0, group_id="loadtest_s1", bot_id="bot_main", user_id="loadtest_user_s1_a0"
     )
 
 
@@ -112,6 +112,24 @@ def test_build_route_plan_shards2_one_hits_same_agent_per_shard():
     assert plans[3].user_id == "loadtest_user_s0_a0"
     assert plans[1].user_id == "loadtest_user_s1_a0"
     assert plans[4].user_id == "loadtest_user_s1_a0"
+
+
+def test_build_route_plan_service_shard_key_bot_id():
+    mod = _load_module()
+    plans = mod._build_route_plan(
+        concurrency=3,
+        shards=3,
+        shards2=0,
+        group_prefix="loadtest",
+        user_id_prefix="loadtest_user",
+        bot_id="bot_main",
+        service_shard_key="bot_id",
+    )
+    assert plans == [
+        mod.RoutePlan(shard=0, shard2=0, group_id="loadtest", bot_id="bot_main_s0", user_id="loadtest_user_00"),
+        mod.RoutePlan(shard=1, shard2=0, group_id="loadtest", bot_id="bot_main_s1", user_id="loadtest_user_01"),
+        mod.RoutePlan(shard=2, shard2=0, group_id="loadtest", bot_id="bot_main_s2", user_id="loadtest_user_02"),
+    ]
 
 
 def test_build_route_plan_default_unique_user_per_idx():

@@ -48,6 +48,10 @@ AgentServer 内全部打到同一 Agent 实例；``shards2>=2`` 时在实例间�
     uv run python .../enterprise_runtime_concurrent_test.py \\
         --ws-url ws://host:30105/ws --concurrency 6 --shards 3 --shards2 2
 
+    # 按 bot_id 分片路由（固定 group_id，每 shard 不同 bot_id），配合 Gateway AGENT_BOT_ID_GROUP_NUM 联调
+    uv run python .../enterprise_runtime_concurrent_test.py \\
+        --ws-url ws://host:30105/ws --concurrency 9 --shards 3 --service-shard-key bot_id
+
 默认等待整轮 Agent 任务结束。loadtest 小说场景须先收到 ``chat.file``（交付物），
 再收到 stage 8 收尾文本（``chat.delta`` / 带正文 ``chat.final``），之后才采纳
 ``chat.processing_status idle`` / ``chat.usage_summary`` 等终态信号。
@@ -82,9 +86,8 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CONTENT = (
-    " 帮我写一篇十万字的小说，主题是人生的意义，写完后保存到txt文件发给我。直接开始写，不要问我其他问题。"
-)
+_DEFAULT_BOT_ID = "bot_main"
+_SERVICE_SHARD_KEYS = frozenset({"group_id", "bot_id"})
 
 
 @dataclass(frozen=True)
@@ -94,7 +97,13 @@ class RoutePlan:
     shard: int
     shard2: int
     group_id: str
+    bot_id: str
     user_id: str
+
+
+_DEFAULT_CONTENT = (
+    " 帮我写一篇十万字的小说，主题是人生的意义，写完后保存到txt文件发给我。直接开始写，不要问我其他问题。"
+)
 
 
 @dataclass
@@ -350,8 +359,17 @@ def _build_route_plan(
     shards2: int,
     group_prefix: str,
     user_id_prefix: str,
+    *,
+    bot_id: str = _DEFAULT_BOT_ID,
+    service_shard_key: str = "group_id",
 ) -> list[RoutePlan]:
-    """返回每路路由计划：group_id 按 shard 分 AgentServer，user_id 按 shard2 分 Agent 实例。
+    """返回每路路由计划：按 shard 分 AgentServer，user_id 按 shard2 分 Agent 实例。
+
+    ``service_shard_key`` 控制默认 ``service_id`` 路由维度的分片方式（Gateway 默认
+    ``service_id = group_id + hash_bucket(bot_id)``）：
+
+    - ``group_id``（默认）：``group_id={prefix}_s{shard}``，``bot_id`` 固定；
+    - ``bot_id``：``group_id={prefix}`` 固定，``bot_id={bot_id}_s{shard}``（测 AGENT_BOT_ID_GROUP_NUM）。
 
     按全局序号轮询分配 shard / shard2，不要求 concurrency 与 shards、shards2 整除；
     不能均分时，序号靠前的分片/实例多承接余数路由。
@@ -362,12 +380,19 @@ def _build_route_plan(
         raise ValueError("--shards2 须 >= 0")
     if concurrency <= 0:
         raise ValueError("--concurrency 须 > 0")
+    if service_shard_key not in _SERVICE_SHARD_KEYS:
+        raise ValueError(f"--service-shard-key 须为 {sorted(_SERVICE_SHARD_KEYS)} 之一")
 
     plans: list[RoutePlan] = []
     shard_route_counts = [0] * shards
     for global_idx in range(concurrency):
         shard = global_idx % shards
-        group_id = f"{group_prefix}_s{shard}"
+        if service_shard_key == "group_id":
+            route_group_id = f"{group_prefix}_s{shard}"
+            route_bot_id = bot_id
+        else:
+            route_group_id = group_prefix
+            route_bot_id = f"{bot_id}_s{shard}"
         if shards2 == 0:
             user_id = f"{user_id_prefix}_{global_idx:02d}"
             plan_shard2 = 0
@@ -380,7 +405,8 @@ def _build_route_plan(
             RoutePlan(
                 shard=shard,
                 shard2=plan_shard2,
-                group_id=group_id,
+                group_id=route_group_id,
+                bot_id=route_bot_id,
                 user_id=user_id,
             )
         )
@@ -966,14 +992,17 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
         args.shards2,
         args.group_prefix,
         args.user_id_prefix,
+        bot_id=args.bot_id,
+        service_shard_key=args.service_shard_key,
     )
 
     logger.info(
-        "[plan] ws=%s concurrency=%d shards=%d shards2=%d",
+        "[plan] ws=%s concurrency=%d shards=%d shards2=%d service_shard_key=%s",
         ws_url,
         args.concurrency,
         args.shards,
         args.shards2,
+        args.service_shard_key,
     )
     logger.info("[plan] content=%r", args.content)
     logger.info(
@@ -989,10 +1018,12 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
         if not indices:
             continue
         group_id = route_plan[indices[0]].group_id
+        bot_id = route_plan[indices[0]].bot_id
         logger.info(
-            "[plan] shard=%d group_id=%s requests=%d (idx %d..%d)",
+            "[plan] shard=%d group_id=%s bot_id=%s requests=%d (idx %d..%d)",
             shard,
             group_id,
+            bot_id,
             len(indices),
             indices[0],
             indices[-1],
@@ -1024,7 +1055,7 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
                 shard=plan.shard,
                 shard2=plan.shard2,
                 group_id=plan.group_id,
-                bot_id=args.bot_id,
+                bot_id=plan.bot_id,
                 user_id=plan.user_id,
                 content=args.content,
                 mode=args.mode,
@@ -1062,7 +1093,7 @@ async def _run_loadtest(args: argparse.Namespace) -> int:
                 session_id="",
                 req_id="",
                 group_id=plan.group_id,
-                bot_id=args.bot_id,
+                bot_id=plan.bot_id,
                 user_id=plan.user_id,
                 ok=False,
                 accepted=False,
@@ -1167,7 +1198,13 @@ def _parse_args() -> argparse.Namespace:
         default=_DEFAULT_CONTENT,
         help="用户消息正文（同时写入 content 与 query）",
     )
-    p.add_argument("--bot-id", default="bot_main", help="企业策略 bot_id")
+    p.add_argument(
+        "--bot-id",
+        default=_DEFAULT_BOT_ID,
+        help=(
+            "企业策略 bot_id 基名；service-shard-key=bot_id 时为 {bot_id}_s{shard}"
+        ),
+    )
     p.add_argument("--user-id-prefix", default="loadtest_user", help="user_id 前缀，实际为 {prefix}_{idx:02d}")
     p.add_argument("--mode", default="agent.plan", help="运行模式，如 agent.plan")
     p.add_argument(
@@ -1205,7 +1242,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--group-prefix",
         default="loadtest",
-        help="group_id 前缀，分片 i 共用 {prefix}_s{i}（如 loadtest_s0 / loadtest_s1 / loadtest_s2）",
+        help="group_id 前缀；service-shard-key=group_id 时为 {prefix}_s{shard}，=bot_id 时固定为 {prefix}",
+    )
+    p.add_argument(
+        "--service-shard-key",
+        choices=sorted(_SERVICE_SHARD_KEYS),
+        default="group_id",
+        help=(
+            "默认 service_id 路由分片维度：group_id（每 shard 不同 group_id，bot_id 固定，默认）或 "
+            "bot_id（group_id 固定，每 shard 不同 bot_id，用于 AGENT_BOT_ID_GROUP_NUM 联调）"
+        ),
     )
     p.add_argument(
         "--accept-timeout",
