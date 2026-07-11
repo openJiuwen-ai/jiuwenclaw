@@ -98,7 +98,7 @@ _METHOD_DISPATCH = {
 }
 
 # 依次尝试的文本编码顺序。不包含 latin-1，以确保真正的二进制文件能被正确检测出来。
-_TEXT_ENCODINGS = ("utf-8", "gbk", "gb2312", "big5", "shift_jis", "euc-kr")
+_TEXT_ENCODINGS = ("utf-8-sig", "gbk", "gb2312", "big5", "shift_jis", "euc-kr")
 
 
 def _read_text_with_fallback(path: Path) -> tuple[str, str] | None:

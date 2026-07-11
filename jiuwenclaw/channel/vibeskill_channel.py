@@ -1520,6 +1520,31 @@ class VibeSkillChannel(BaseChannel):
             )
             return True
 
+        if not parts:
+            external_sid = (
+                session_id
+                or await self._resolve_external_session_id(session.session_id)
+                or session.session_id
+            )
+            error_text = "parts must not be empty"
+            for response in self._build_error_responses(
+                session.session_id,
+                external_sid,
+                error_text,
+            ):
+                await self._send_ws_json(
+                    ws,
+                    response,
+                    source="message.send.empty_parts",
+                )
+            await self._send_ws_res_error(
+                ws,
+                data,
+                error_text,
+                source="message.send.empty_parts_ack",
+            )
+            return True
+
         # Validate each file part (commit 73266ced: harden file endpoints)
         for part in parts:
             if not isinstance(part, dict):

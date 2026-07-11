@@ -155,7 +155,7 @@ def parse_skill_frontmatter(skill_md_path: Path) -> tuple[str, str, str]:
 
     轻量解析器，无 PyYAML 依赖。
     """
-    content = skill_md_path.read_text(encoding="utf-8")
+    content = skill_md_path.read_text(encoding="utf-8-sig")
     match = re.match(r"^---\n(.*?)\n---\n?(.*)", content, re.DOTALL)
     if not match:
         return "", "", content

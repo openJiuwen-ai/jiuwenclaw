@@ -66,6 +66,13 @@ With files (only when required or task-relevant):
 invoke(functionName:"agent_as_a_tool", arguments:{agentId:"aaabbbccc", query:"分析这份行程文件", filesInfo:<value matching parameters.properties.filesInfo>})
 ```
 
+Example (based on the example definition above):
+
+The parameter description table is a **required** section in the generated SKILL.md. Follow the rules strictly:
+
+1. **`agentId` is a fixed row** — it MUST always be present as the **first row** of the table, regardless of the agent's `parameters` JSON Schema. It is not derived from `parameters.properties`; it is an intrinsic routing parameter.
+2. **All other rows** are derived from `parameters.properties`. Fields listed in `parameters.required` are marked as "是" (required); all others are marked as "否" (optional).
+3. The table MUST NOT contain any row that is neither `agentId` nor present in `parameters.properties`.
 ```text
 参数说明：
 
@@ -104,7 +111,7 @@ From the example:
 
 | Field | How to use it | Hard rule |
 | --- | --- | --- |
-| `agentId` | Into `invoke.arguments.agentId` only. | Copy exactly; never use as the toolName identifier. |
+| `agentId` | Into `invoke.arguments.agentId` only; also the fixed first row of the parameter description table. | Copy exactly; never use as the toolName identifier. Always include as the first row in the parameter description table, even though it is not part of `parameters.properties`. |
 | `name` | Human-readable agent name only. | Never use as the call identifier or toolName. |
 | `description` | Decide when delegation is appropriate. | — |
 | `parameters` | JSON Schema for building `query`, `filesInfo`, and the `- **参数**` line. | Include all `required` fields. |

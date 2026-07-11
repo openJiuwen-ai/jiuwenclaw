@@ -68,9 +68,9 @@ Before writing `SKILL.md` or any skill body, determine which of these the skill 
 ```text
 skill-name/
 ├── SKILL.md       required — YAML frontmatter + instructions
-├── scripts/       optional — deterministic or repeated operations
-├── references/    optional — load-on-demand domain docs, schemas, API details
-└── assets/        optional — templates, icons, fonts used in outputs
+├── scripts/       optional(only if files exist) — deterministic or repeated operations
+├── references/    optional(only if files exist) — load-on-demand domain docs, schemas, API details
+└── assets/        optional(only if files exist) — templates, icons, fonts used in outputs
 ```
 
 ### Frontmatter — hard constraints
@@ -128,7 +128,7 @@ Local-execution skills must not generate `scripts/` by default. If a script is g
 - Security validation passes: no dangerous commands, hardcoded credentials, or path traversal in the skill body or scripts.
 - No stray files outside the skill folder.
 - No prohibited environment tools (`Read`, `Write`, `Edit`, `file_glob`, `file_grep`, `file_listdir`, `shell`, `code_execute`, `WebFetch`, `ask_user_question`, `upload_file`, `spawn_subagent`, `fork_agent`, `task_tool`, `skill_tool`, `skill_complete`, `todo_create`, `todo_start`, `todo_complete`, `todo_modify`, `todo_list`, `present_files`) appear in the skill body, `allowed-tools`, or `metadata`.
-
+- No empty optional directories (scripts/、references/、assets/) — if a directory has no files, it must not be created.
 ---
 
 ## Step 3: Verification gate
