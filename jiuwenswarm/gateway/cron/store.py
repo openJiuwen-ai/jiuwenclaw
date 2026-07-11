@@ -213,7 +213,10 @@ class CronJobStore:
         # force=True 仅供 proactive_cron_sync 在 config 开关关闭时合法删除用。
         if not force:
             existing = await self.get_job(job_id)
-            if existing is not None and str(getattr(existing, "mode", "") or "").strip().lower() == _PROACTIVE_TICK_MODE:
+            if (
+                    existing is not None
+                    and str(getattr(existing, "mode", "") or "").strip().lower() == _PROACTIVE_TICK_MODE
+            ):
                 raise _ProactiveJobProtected(
                     "主动推荐定时任务由设置→主动推荐开关控制，不能删除；请到设置关闭开关。"
                 )
