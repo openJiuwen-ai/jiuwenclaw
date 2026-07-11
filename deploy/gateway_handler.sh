@@ -4,7 +4,6 @@ set -euo >/dev/null 2>&1
 gen_gateway_env_file() {
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-    local mode="${DEPLOY_VARS["MODE"]}"
     local env_template_file="${CONFIG["GATEWAY_ENV_TEMPLATE_FILE"]}"
     local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
     local env_file="${CONFIG["GATEWAY_ENV_FILE"]}"
@@ -12,12 +11,6 @@ gen_gateway_env_file() {
 
     if [ "${client_type}" != "jiuwen" ]; then
         return
-    fi
-
-    if [ "${mode}" == "dev" ]; then
-        DEPLOY_VARS["CLAW_MOUNT_PATH"]="/root/.jiuwenclaw"
-    else
-        DEPLOY_VARS["CLAW_MOUNT_PATH"]="/home/app/.jiuwenclaw"
     fi
 
     if [ "${deploy_mode}" == "active-standby" ]; then
@@ -121,6 +114,13 @@ render_gateway_files() {
     local pvc_file="${CONFIG["CLAW_PVC_FILE"]}"
     local mount_type="${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}"
     local is_external_pvc="${DEPLOY_VARS["ENABLE_EXTERNAL_PVC"]}"
+    local mode="${DEPLOY_VARS["MODE"]}"
+
+    if [ "${mode}" == "dev" ]; then
+        DEPLOY_VARS["AGENT_SERVER_HOME"]="/root"
+    else
+        DEPLOY_VARS["AGENT_SERVER_HOME"]="/home/app"
+    fi
 
     gen_gateway_env_file
     gen_gateway_config_file

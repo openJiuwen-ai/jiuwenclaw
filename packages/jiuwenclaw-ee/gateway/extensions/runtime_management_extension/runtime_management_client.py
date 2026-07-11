@@ -28,6 +28,7 @@ from openjiuwen_runtime.management.session.interfaces import (
     ISessionRequest,
 )
 from openjiuwen_runtime.management.session.k8s_service_handler import (
+    ConfigMapMount,
     ContainerSpec,
     HostPathMount,
     K8sDeployController,
@@ -442,6 +443,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         agent_readiness_initial_delay = int(os.getenv("AGENT_SERVER_READINESS_INITIAL_DELAY", "10"))
         agent_readiness_period = int(os.getenv("AGENT_SERVER_READINESS_PERIOD", "5"))
         agent_custom_envs = os.getenv("AGENT_SERVER_CUSTOM_ENVS")
+        agent_server_home = os.getenv("AGENT_SERVER_HOME")
 
         container_name = os.getenv("AGENT_SERVER_CONTAINER_NAME", "agentserver")
         container_port = int(os.getenv("AGENT_SERVER_PORT", "8080"))
@@ -456,6 +458,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         claw_code_pod_path = os.getenv("CLAW_CODE_POD_PATH")
         runtime_code_path = os.getenv("RUNTIME_CODE_PATH")
         runtime_code_pod_path = os.getenv("RUNTIME_CODE_POD_PATH")
+        configmap_name = os.getenv("AGENT_SERVER_CONFIGMAP_NAME", "")
 
         agent_host_mounts: list[HostPathMount] = []
         mode = os.getenv("MODE")
@@ -489,6 +492,16 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     )
                 )
 
+        agent_configmap_mounts: list[ConfigMapMount] = []
+        if configmap_name:
+            agent_configmap_mounts.append(
+                ConfigMapMount(
+                    config_map_name=configmap_name,
+                    mount_path=agent_server_home+"/.jiuwenclaw/config/config.yaml",
+                    sub_path="config.yaml",
+                    items=[("config.yaml", "config.yaml")],
+                )
+            )
         node_name = os.getenv("NODE_NAME")
         ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT", "300"))
         ready_poll_interval = int(os.getenv("AGENT_SERVER_READY_POLL_INTERVAL", "5"))
@@ -533,10 +546,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
             base: dict[str, str] = {
                 "AGENT_SERVER_HOST": "0.0.0.0",
                 "TZ": timezone,
+                "HOME": agent_server_home,
             }
 
             for key, value in (
-                ("HOME", os.getenv("AGENT_SERVER_HOME")),
                 ("AGENT_RUNTIME", os.getenv("AGENT_RUNTIME")),
                 ("MODEL_PROVIDER", os.getenv("MODEL_PROVIDER")),
                 ("MODEL_NAME", os.getenv("MODEL_NAME")),
@@ -649,6 +662,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         image_pull_policy=cfg.get("image_pull_policy") or image_pull_policy,
                         env_vars=_agent_env_vars(),
                         host_path_mounts=agent_host_mounts,
+                        configmap_mounts=agent_configmap_mounts,
                         allow_privilege_escalation=True if mode == "dev" else None,
                         run_as_non_root=False if mode == "dev" else None,
                         run_as_user=0 if mode == "dev" else None,
@@ -713,7 +727,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         pvc=os.getenv("CLAW_PVC"),
                         nfs_server=cfg.get("nfs_server") or os.getenv("CLAW_NFS_SERVER", ""),
                         nfs_path=cfg.get("nfs_path") or os.getenv("CLAW_NFS_PATH", "/"),
-                        mount_path=cfg.get("nfs_mount_path") or os.getenv("CLAW_MOUNT_PATH"),
+                        mount_path=cfg.get("nfs_mount_path") or agent_server_home+"/.jiuwenclaw",
                         mode=cfg.get("mode") or mode,
                         node_name=cfg.get("node_name") or node_name,
                     )
