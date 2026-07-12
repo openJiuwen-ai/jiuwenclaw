@@ -138,6 +138,50 @@ class DeepAgentFallbackHandler(SkillTurboFallbackHandler):
         )
 
     @staticmethod
+    def _scan_balanced_json_objects(text: str) -> list[str]:
+        """对裸 JSON（无围栏）做括号平衡扫描，返回所有完整 {...} 子串。
+
+        从每个 `{` 起，按字符串/转义感知的括号计数找匹配的 `}`，收集深度归零的子串。
+        用于无围栏时定位契约声明。扫描全文（而非仅末尾片段），以兼容契约出现在
+        开头/中段等 off-spec 情况，避免漏检导致误判 failed。
+
+        复杂度：匹配成功的各 {...} 区间互不重叠，且至多存在一次扫描到末尾的失败
+        匹配，整体为 O(n)。fallback 产出为单次 LLM 响应、长度有界，无需额外截断。
+        """
+        results: list[str] = []
+        n = len(text)
+        i = 0
+        while i < n:
+            if text[i] != "{":
+                i += 1
+                continue
+            depth = 0
+            in_str = False
+            escape = False
+            j = i
+            while j < n:
+                ch = text[j]
+                if in_str:
+                    if escape:
+                        escape = False
+                    elif ch == "\\":
+                        escape = True
+                    elif ch == '"':
+                        in_str = False
+                elif ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        results.append(text[i:j + 1])
+                        break
+                j += 1
+            i = j + 1 if j < n else n
+        return results
+
+    @staticmethod
     def _parse_fallback_output(fallback_output: Any) -> tuple[bool, dict[str, Any]]:
         """解析 subagent 末尾的 JSON 契约声明。
 
@@ -149,26 +193,54 @@ class DeepAgentFallbackHandler(SkillTurboFallbackHandler):
         import re
 
         text = str(fallback_output or "")
-        # 优先匹配单行内联代码: `{"success": ...}`
-        inline_blocks = re.findall(r"`(\{.*?\})`", text)
-        # 兼容多行代码块: ```json ... ```
-        code_blocks = re.findall(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
-        blocks = inline_blocks or code_blocks
-        if not blocks:
+        stripped = text.strip()
+        if not stripped:
+            # 空产出（subagent 未返回任何内容）与"有产出无契约"区分，便于日志诊断。
+            logger.warning(
+                "[DeepAgentFallbackHandler] fallback output is empty, treat as failed"
+            )
+            return False, {"reason": "fallback subagent 未产出任何内容"}
+
+        # 收集候选 JSON 片段（按优先级）。解析靠 json.loads，正则只圈定范围，
+        # 不用 \{.*?\} 截断（嵌套对象会被首个 } 截断导致解析失败）。
+        candidates: list[str] = []
+        # 1. 单行内联代码: `{"success": ...}` （贪婪到反引号，保留嵌套）
+        candidates.extend(re.findall(r"`(\{.*\})`", text))
+        # 2. ```json ... ``` 多行代码块（围栏内全部内容）
+        candidates.extend(re.findall(r"```json\s*(\{[\s\S]*?\})\s*```", text))
+        # 3. ``` ... ``` 不带 language tag 的代码块
+        candidates.extend(re.findall(r"```\s*(\{[\s\S]*?\})\s*```", text))
+        # 4. 裸 JSON：从每个 { 起做括号平衡扫描，取最后一个完整且可解析的对象
+        candidates.extend(DeepAgentFallbackHandler._scan_balanced_json_objects(stripped))
+        # 去重：不同收集方式可能捕获到相同 JSON 片段（如内联代码与裸 JSON 扫描
+        # 都会得到 {"success": ...}），用 dict.fromkeys 保持顺序去重，避免重复解析。
+        candidates = list(dict.fromkeys(candidates))
+
+        if not candidates:
             logger.warning(
                 "[DeepAgentFallbackHandler] fallback output has no JSON contract block, "
                 "treat as failed"
             )
             return False, {"reason": "fallback 输出未包含 JSON 契约声明"}
 
-        try:
-            payload = json.loads(blocks[-1])
-        except json.JSONDecodeError as e:
+        payload = None
+        last_err: json.JSONDecodeError | None = None
+        for candidate in reversed(candidates):
+            try:
+                obj = json.loads(candidate)
+            except json.JSONDecodeError as e:
+                last_err = e
+                continue
+            if isinstance(obj, dict) and "success" in obj:
+                payload = obj
+                break
+        if payload is None:
+            # 所有候选都不可解析或不含 success 字段
             logger.warning(
                 "[DeepAgentFallbackHandler] fallback JSON parse failed: %s, treat as failed",
-                e,
+                last_err,
             )
-            return False, {"reason": f"fallback JSON 解析失败: {e}"}
+            return False, {"reason": f"fallback JSON 解析失败: {last_err}" if last_err else "fallback 输出未包含 JSON 契约声明"}
 
         success = bool(payload.get("success", False))
         result = payload.get("result") or {}
@@ -345,12 +417,16 @@ class DeepAgentFallbackHandler(SkillTurboFallbackHandler):
                 node_name,
                 e,
             )
-            yield {
-                "event_type": "chat.error",
-                "error": f"Fallback 执行失败: {e}",
-                "is_fallback": True,
-                "node_name": node_name,
-            }
+            # 与其他失败路径（spawn success=false、契约不达成）保持一致：raise
+            # FallbackContractError 将异常向上传播，让 executor 的 execute_plan_stream
+            # 捕获并终止 plan，最终由 tool 层返回 success=false 给 LLM 触发降级。
+            # 不 yield chat.error：会被 executor 透传并经 tool 转发到父会话，抢先于 tool
+            # result 到达前端终结会话，LLM 来不及转 skill_tool 降级。
+            raise FallbackContractError(
+                node_name=node_name,
+                reason=f"fallback spawn 执行异常: {e}",
+                original_error=error,
+            ) from e
         finally:
             yield {
                 "event_type": "fallback.finished",
@@ -364,13 +440,18 @@ class DeepAgentFallbackHandler(SkillTurboFallbackHandler):
         success = bool(getattr(result, "success", False))
         if not success:
             error_text = getattr(result, "error", "fallback subagent failed") or "fallback subagent failed"
-            yield {
-                "event_type": "chat.error",
-                "error": f"Fallback 执行失败: {error_text}",
-                "is_fallback": True,
-                "node_name": node_name,
-            }
-            return
+            logger.error(
+                "[DeepAgentFallbackHandler] node fallback_stream spawn reported failure node=%s error=%s, "
+                "degrading to DeepAgent",
+                node_name,
+                error_text,
+            )
+            # 不 yield chat.error：同上，避免抢先终结前端阻断 LLM 降级。
+            raise FallbackContractError(
+                node_name=node_name,
+                reason=f"fallback subagent 执行失败: {error_text}",
+                original_error=error,
+            )
 
         fallback_output = getattr(result, "result", None) or ""
         self._log_degraded_result(node_name, fallback_output, error)
@@ -386,12 +467,10 @@ class DeepAgentFallbackHandler(SkillTurboFallbackHandler):
                 node_name,
                 reason,
             )
-            yield {
-                "event_type": "chat.error",
-                "error": f"Fallback 未达成节点契约，降级到 DeepAgent: {reason}",
-                "is_fallback": True,
-                "node_name": node_name,
-            }
+            # 注意：此处不再 yield chat.error。该事件会被 executor 透传并经 tool 转发到父会话，
+            # 抢先于 tool result 到达前端，导致会话以错误态终结，LLM 来不及按系统提示
+            # （skill_prompt_rail）转 skill_tool 走标准降级流程。只 raise 异常，让 tool 层
+            # 把失败包成 tool result 返回 LLM，由 LLM 自主降级。
             raise FallbackContractError(
                 node_name=node_name,
                 reason=reason,
