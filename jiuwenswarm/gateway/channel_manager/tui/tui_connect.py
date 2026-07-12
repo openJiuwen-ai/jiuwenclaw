@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import yaml
+from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
 from openjiuwen.core.foundation.llm import Model, ProviderType
 from openjiuwen.core.foundation.llm.schema.config import (
@@ -2157,7 +2158,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 "model_client_config": client_cfg,
                 "model_config_obj": model_config_obj,
             }
-            new_entry["alias"] = effective_alias
+            # alias 带双引号写出，避免 yes/no/on/off 被 YAML 1.1 解析为布尔
+            new_entry["alias"] = DoubleQuotedScalarString(effective_alias) if effective_alias else ""
             try:
                 # 单事务读-校验-改：避免 ensure+update 两步间的 TOCTOU 窗口
                 def _add_mutate(data):
@@ -2281,7 +2283,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     for k, v in configs.items():
                         mapped_k = key_map.get(str(k).lower(), str(k))
                         if mapped_k == "alias":
-                            _entry["alias"] = str(v).strip()
+                            _alias_val = str(v).strip()
+                            _entry["alias"] = (
+                                DoubleQuotedScalarString(_alias_val) if _alias_val else ""
+                            )
                         elif mapped_k == "reasoning_level":
                             _rl = str(v).strip()
                             if _rl:
