@@ -127,6 +127,22 @@ _NOVEL_FINAL_MESSAGE = (
     "开篇章节约6000字，建立了主要人物、场景氛围与核心主题，"
     "并设置了陈远、苏菲、林晓各自的悬念。如需继续创作后续章节，请告诉我。"
 )
+_SESSION_MEMORY_SYSTEM_MARKERS = ("session memory updater",)
+_SESSION_MEMORY_USER_MARKERS = (
+    "Use the edit_file",
+    "<current_notes_content>",
+    "note-taking instruction",
+    "session notes file",
+)
+_SESSION_MEMORY_CURRENT_STATE_DESC = (
+    "_What is actively being worked on right now? "
+    "Pending tasks not yet completed. Immediate next steps._"
+)
+_MOCK_SESSION_MEMORY_CURRENT_STATE = (
+    "Mock loadtest session memory snapshot: inherited main-agent conversation "
+    "summarized for continuity after compaction."
+)
+_SESSION_MEMORY_DONE_MESSAGE = "Session memory notes updated."
 
 
 @dataclass
@@ -311,10 +327,148 @@ def _payload_contains_novel_markers(payload: dict[str, Any]) -> bool:
     return any(marker in blob for marker in _LOADTEST_NOVEL_MARKERS)
 
 
+def _payload_tool_names(payload: dict[str, Any]) -> set[str]:
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return set()
+    names: set[str] = set()
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        fn = tool.get("function")
+        if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+            names.add(fn["name"])
+    return names
+
+
+def _is_session_memory_request(payload: dict[str, Any]) -> bool:
+    """Session Memory 后台 ReActAgent：仅注册 edit_file，prompt 含 notes 提取指令。"""
+    tool_names = _payload_tool_names(payload)
+    if tool_names and tool_names <= {"edit_file"}:
+        return True
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return False
+
+    blob_parts: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") in {"system", "user"}:
+            blob_parts.append(_message_text(message))
+    blob = "\n".join(blob_parts)
+    if any(marker in blob for marker in _SESSION_MEMORY_SYSTEM_MARKERS):
+        return True
+    if "Use the edit_file" in blob and "<current_notes_content>" in blob:
+        return True
+    return any(marker in blob for marker in _SESSION_MEMORY_USER_MARKERS[2:])
+
+
+def _parse_session_memory_notes_path(messages: list[Any]) -> str | None:
+    path_patterns = (
+        re.compile(r"file_path:\s*(\S+\.md)"),
+        re.compile(r"(/\S+session_context(?:\.pending)?\.md)"),
+    )
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        text = _message_text(message)
+        for pattern in path_patterns:
+            match = pattern.search(text)
+            if match:
+                return match.group(1)
+    return None
+
+
+def _parse_current_notes_content(messages: list[Any]) -> str:
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        text = _message_text(message)
+        start = text.find("<current_notes_content>")
+        end = text.find("</current_notes_content>")
+        if start >= 0 and end > start:
+            return text[start + len("<current_notes_content>"):end].strip()
+    return ""
+
+
+def _session_memory_edit_already_done(messages: list[Any]) -> bool:
+    seen_session_memory_prompt = False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "user":
+            text = _message_text(message)
+            if "Use the edit_file" in text and "<current_notes_content>" in text:
+                seen_session_memory_prompt = True
+        if not seen_session_memory_prompt:
+            continue
+        if message.get("role") != "tool":
+            continue
+        if message.get("name") == "edit_file":
+            return True
+        if "edit_file" in _tool_message_text(message):
+            return True
+    return False
+
+
+def _build_session_memory_edit_args(messages: list[Any]) -> dict[str, Any]:
+    notes_path = _parse_session_memory_notes_path(messages) or "session_context.pending.md"
+    current_notes = _parse_current_notes_content(messages)
+    desc = _SESSION_MEMORY_CURRENT_STATE_DESC
+    body = _MOCK_SESSION_MEMORY_CURRENT_STATE
+
+    old_string = ""
+    new_string = ""
+    if f"# Current State\n{desc}" in current_notes:
+        old_string = f"# Current State\n{desc}"
+        new_string = f"# Current State\n{body}"
+    elif "# Current State\n" in current_notes:
+        match = re.search(r"(# Current State\n)(.*?)(?=\n# |\Z)", current_notes, re.S)
+        if match:
+            old_string = match.group(1) + match.group(2).rstrip("\n")
+            new_string = f"# Current State\n{body}"
+        else:
+            old_string = desc
+            new_string = body
+    elif desc in current_notes:
+        old_string = desc
+        new_string = body
+    else:
+        old_string = ""
+        new_string = (
+            "# Session Title\nMock loadtest session\n\n"
+            f"# Current State\n{body}\n"
+        )
+
+    return {
+        "file_path": notes_path,
+        "old_string": old_string,
+        "new_string": new_string,
+    }
+
+
+def _plan_session_memory_response(payload: dict[str, Any]) -> _AgentPlan:
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        messages = []
+    if _session_memory_edit_already_done(messages):
+        return _AgentPlan(kind="stream_text", text=_SESSION_MEMORY_DONE_MESSAGE)
+    return _AgentPlan(
+        kind="intro_and_tool_call",
+        text="Updating session memory notes.\n",
+        tool_name="edit_file",
+        tool_args=_build_session_memory_edit_args(messages),
+    )
+
+
 def _should_use_novel_scenario(profile: str, payload: dict[str, Any]) -> bool:
     """loadtest 压测 profile 默认走小说多轮场景（不依赖 user 消息格式）。"""
     if profile != "loadtest":
         return False
+    if _is_session_memory_request(payload):
+        return True
     messages = payload.get("messages")
     if isinstance(messages, list):
         if any(isinstance(m, dict) and m.get("role") == "tool" for m in messages):
@@ -603,6 +757,8 @@ def _plan_novel_response(
     novel_chars: int,
     excerpt_chars: int,
 ) -> _AgentPlan:
+    if _is_session_memory_request(payload):
+        return _plan_session_memory_response(payload)
     return _plan_agent_flow_response(
         payload,
         novel_chars=novel_chars,
@@ -988,13 +1144,21 @@ async def _handle_request(
                     novel_chars=novel_chars,
                     excerpt_chars=excerpt_chars,
                 )
-                logger.info(
-                    "Agent loadtest scenario kind=%s stage=%d novel_chars=%d excerpt_chars=%d",
-                    plan.kind,
-                    _agent_flow_stage(payload.get("messages") or []),
-                    novel_chars,
-                    excerpt_chars,
-                )
+                if _is_session_memory_request(payload):
+                    logger.info(
+                        "Session memory scenario kind=%s tool=%s notes_path=%s",
+                        plan.kind,
+                        plan.tool_name,
+                        _parse_session_memory_notes_path(payload.get("messages") or []),
+                    )
+                else:
+                    logger.info(
+                        "Agent loadtest scenario kind=%s stage=%d novel_chars=%d excerpt_chars=%d",
+                        plan.kind,
+                        _agent_flow_stage(payload.get("messages") or []),
+                        novel_chars,
+                        excerpt_chars,
+                    )
                 if stream:
                     if (
                         plan.kind == "intro_and_tool_call"
@@ -1170,7 +1334,7 @@ async def main(
             "loadtest profile active: agent-flow scenario "
             "(todo_create -> stream opening -> bash(permission ASK) -> write_file -> "
             "read_file -> todo_modify(permission ASK) -> todo_modify -> "
-            "send_file_to_user -> finalize)"
+            "send_file_to_user -> finalize); session-memory requests return edit_file only"
         )
     logger.info("Health: http://%s:%d/health", addr[0], addr[1])
 
