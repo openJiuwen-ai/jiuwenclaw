@@ -955,7 +955,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                                 if _param_key == "model_provider":
                                     _val = _normalize_provider_value(_val)
                                 _mcc[_mcc_key] = _val
-                        _yaml_sections_updated.append("models.defaults[0]")
                         logger.info(
                             "[cli config.set] synced models.defaults[0].model_client_config: %s",
                             list(_changed_main_params.keys()),
@@ -978,7 +977,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         if _mcc_key == "client_provider":
                             _val = _normalize_provider_value(_val)
                         _mcc[_mcc_key] = _val
-                    _yaml_sections_updated.append(f"models.{_section_name}")
                     logger.info(
                         "[cli config.set] synced models.%s.model_client_config: %s",
                         _section_name, list(_mm.keys()),
@@ -991,7 +989,6 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     for _pk, _yaml_key in _embed_param_key_map.items():
                         if _pk in _changed_embed_params:
                             _embed[_yaml_key] = str(_changed_embed_params[_pk]).strip()
-                    _yaml_sections_updated.append("embed")
                     logger.info(
                         "[cli config.set] synced embed section: %s",
                         list(_changed_embed_params.keys()),
@@ -999,6 +996,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 return data
             try:
                 update_config(_sync_models_embed)
+                # 仅在写盘成功后登记改动段，避免失败时误报"需要重启"与误清缓存
+                if _changed_main_params:
+                    _yaml_sections_updated.append("models.defaults[0]")
+                for _section_name in _changed_mm_by_section:
+                    _yaml_sections_updated.append(f"models.{_section_name}")
+                if _changed_embed_params:
+                    _yaml_sections_updated.append("embed")
             except Exception as e:
                 logger.warning("[cli config.set] failed to sync models/embed: %s", e)
 

@@ -251,14 +251,17 @@ def dump_yaml_round_trip(config_path: Path, data: Any) -> None:
         raise
 
 
-def _atomic_replace(src: Path, dst: Path, max_retries: int = 10) -> None:
-    """os.replace 重试：应对 Windows 下目标文件被并发占用导致的 PermissionError。"""
-    for attempt in range(max(1, max_retries)):
+def _atomic_replace(src: Path, dst: Path, max_attempts: int = 10) -> None:
+    """os.replace 重试：应对 Windows 下目标文件被并发占用导致的 PermissionError。
+
+    max_attempts 为总尝试次数（含首次），非重试次数；至少尝试 1 次。
+    """
+    for attempt in range(max(1, max_attempts)):
         try:
             os.replace(src, dst)
             return
         except PermissionError:
-            if attempt == max(1, max_retries) - 1:
+            if attempt == max(1, max_attempts) - 1:
                 raise
             time.sleep(0.002 * (attempt + 1))
 

@@ -201,7 +201,7 @@ def test_atomic_replace_retries_on_permission_error(patched_config, monkeypatch)
 
 
 def test_atomic_replace_raises_when_exhausted(patched_config, monkeypatch):
-    """_atomic_replace 重试耗尽后抛 PermissionError，不静默返回。"""
+    """_atomic_replace 总尝试次数耗尽后抛 PermissionError，不静默返回。"""
     src = patched_config.parent / "tmp_src2.yaml"
     src.write_text("x: 1", encoding="utf-8")
     dst = patched_config.parent / "tmp_dst2.yaml"
@@ -212,7 +212,7 @@ def test_atomic_replace_raises_when_exhausted(patched_config, monkeypatch):
     monkeypatch.setattr(os, "replace", _always_fail)
     try:
         with pytest.raises(PermissionError):
-            cfg_mod._atomic_replace(src, dst, max_retries=2)
+            cfg_mod._atomic_replace(src, dst, max_attempts=2)
     finally:
         for p in (src, dst):
             try:
