@@ -267,6 +267,10 @@ def _atomic_replace(src: Path, dst: Path, max_attempts: int = 10) -> None:
             time.sleep(0.002 * (attempt + 1))
 
 
+# 进程内不可重入锁。portalocker 文件锁同样不可同进程重入，
+# 因此 update_config 的 mutator 内禁止再调用任何走 update_config 的函数
+# （如 ensure_defaults_list_in_config / update_default_models_in_config），
+# 否则同进程二次获取锁会死锁。展示用数据请在事务外、另起独立事务读取。
 _CONFIG_WRITE_LOCK = threading.Lock()
 
 
@@ -280,6 +284,11 @@ def update_config(mutator, *, lock_timeout: float = 10.0) -> Any:
 
     portalocker 文件锁防跨进程并发（AgentServer+Gateway 两个 PID 同时写），
     threading.Lock 防同进程多线程。整个 load→mutate→dump 在锁内为原子临界区。
+
+    警告：双层锁均不可重入。mutator 内不得调用任何会再次进入 update_config
+    的函数（ensure_defaults_list_in_config、update_default_models_in_config 等），
+    否则同进程二次获取锁将死锁。如需在写盘后读取展示数据，请在 update_config
+    返回后另起一次独立调用（此时锁已释放，安全）。
     """
     with _CONFIG_WRITE_LOCK:
         with portalocker.Lock(

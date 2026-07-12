@@ -2148,7 +2148,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 client_cfg["model_name"] = target
             effective_name = client_cfg["model_name"]
 
-            # alias 为顶层字段，从 client_cfg 中提取；提前计算最终值确保唯一性校验基于实际存储值
+            # alias 为顶层字段，从 client_cfg 提取；提前算最终值，
+            # 确保唯一性校验基于实际存储值
             entry_alias = client_cfg.pop("alias", None)
             effective_alias = str(entry_alias).strip() if entry_alias else ""
 
@@ -2312,26 +2313,37 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         for _other_idx, _other in enumerate(_raw_defs):
                             if _other_idx == _idx or not isinstance(_other, dict):
                                 continue
-                            _other_mn = resolve_env_vars(str((_other.get("model_client_config") or {}).get("model_name", "")))
+                            _other_mcc = _other.get("model_client_config") or {}
+                            _other_mn = resolve_env_vars(str(_other_mcc.get("model_name", "")))
                             _other_alias = resolve_env_vars(str(_other.get("alias", ""))) if _other.get("alias") else ""
                             if _other_alias == _effective_alias:
-                                raise _ModelOpError(f"Alias '{_effective_alias}' is already used by model '{_other_mn}'")
+                                raise _ModelOpError(
+                                    f"Alias '{_effective_alias}' is already used by model '{_other_mn}'"
+                                )
                             if _other_mn == _effective_alias:
-                                raise _ModelOpError(f"Alias '{_effective_alias}' conflicts with model name '{_other_mn}'")
+                                raise _ModelOpError(
+                                    f"Alias '{_effective_alias}' conflicts with model name '{_other_mn}'"
+                                )
                     return data
                 update_config(_update_mutate)
-                # 事务后读最新 defaults 拿响应字段（锁外重读仅用于展示，不参与写决策）
-                _raw_defs_after = ensure_defaults_list_in_config()
-                _entry_after = _raw_defs_after[_idx] if _idx < len(_raw_defs_after) else {}
-                _mcc_after = (_entry_after.get("model_client_config") or {}) if isinstance(_entry_after, dict) else {}
-                _updated_name = resolve_env_vars(str(_mcc_after.get("model_name", "")))
-                _current_name = resolve_env_vars(str((_raw_defs_after[0].get("model_client_config") or {}).get("model_name", "")))
             except _ModelOpError as _op_err:
                 await channel.send_response(ws, req_id, ok=False, error=str(_op_err))
                 return
             except Exception as e:
                 await channel.send_response(ws, req_id, ok=False, error=str(e))
                 return
+            # 写盘已成功；以下仅取展示字段，读取失败用 fallback 不影响成功响应
+            _updated_name, _current_name = "", ""
+            try:
+                _raw_defs_after = ensure_defaults_list_in_config()
+                if _idx < len(_raw_defs_after) and isinstance(_raw_defs_after[_idx], dict):
+                    _mcc_after = _raw_defs_after[_idx].get("model_client_config") or {}
+                    _updated_name = resolve_env_vars(str(_mcc_after.get("model_name", "")))
+                if _raw_defs_after:
+                    _cur_mcc = _raw_defs_after[0].get("model_client_config") or {}
+                    _current_name = resolve_env_vars(str(_cur_mcc.get("model_name", "")))
+            except Exception as _disp_err:
+                logger.warning("[cli command.model] update 展示字段读取失败(写盘已成功): %s", _disp_err)
             _config_payload = get_config()
             await _reload_model_config_background(_config_payload, "model.update")
             await channel.send_response(ws, req_id, ok=True, payload={
@@ -2373,8 +2385,15 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 return
             _removed = _removed_holder.get("entry") or {}
             _removed_name = resolve_env_vars(str((_removed.get("model_client_config") or {}).get("model_name", "")))
-            _raw_defs_after = ensure_defaults_list_in_config()
-            _current_name = resolve_env_vars(str((_raw_defs_after[0].get("model_client_config") or {}).get("model_name", "")))
+            # 写盘已成功；current 仅展示用，读取失败用 fallback 不让异常传播
+            _current_name = ""
+            try:
+                _raw_defs_after = ensure_defaults_list_in_config()
+                if _raw_defs_after:
+                    _cur_mcc = _raw_defs_after[0].get("model_client_config") or {}
+                    _current_name = resolve_env_vars(str(_cur_mcc.get("model_name", "")))
+            except Exception as _disp_err:
+                logger.warning("[cli command.model] delete 展示字段读取失败(写盘已成功): %s", _disp_err)
             _config_payload = get_config()
             await _reload_model_config_background(_config_payload, "model.delete")
             await channel.send_response(ws, req_id, ok=True, payload={
@@ -2434,7 +2453,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             return
 
         target = str(model_name).strip()
-        logger.info("[cli command.model] 切换模型: target=%s, model_index=%s, params=%s", target, model_index, params)
+        logger.info(
+            "[cli command.model] 切换模型: target=%s, model_index=%s, params=%s",
+            target, model_index, params,
+        )
         _switch_result: dict = {}
         try:
             def _switch_mutate(data):
