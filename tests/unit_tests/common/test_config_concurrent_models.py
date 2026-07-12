@@ -219,3 +219,90 @@ def test_atomic_replace_raises_when_exhausted(patched_config, monkeypatch):
                 p.unlink()
             except FileNotFoundError:
                 pass
+
+
+def test_config_set_models_embed_in_one_transaction(patched_config):
+    """/config set 改主模型+多模态+embed 三段同改，单事务原子写、字段不丢。"""
+    def _mutate(data):
+        # 主模型 defaults[0]
+        models = data.get("models") or {}
+        if not isinstance(models, dict):
+            models = {}
+            data["models"] = models
+        defs = models.get("defaults")
+        if not (isinstance(defs, list) and defs):
+            defs = [{
+                "model_client_config": {"api_base": "${API_BASE}", "api_key": "${API_KEY}",
+                                        "model_name": "${MODEL_NAME}", "client_provider": "${MODEL_PROVIDER}"},
+                "model_config_obj": {"temperature": 0.95}, "is_default": True}]
+            models["defaults"] = defs
+        mcc = defs[0].setdefault("model_client_config", {})
+        mcc["api_base"] = "https://main-changed.example.com/v1"
+        mcc["model_name"] = "main-changed"
+        # 多模态 vision
+        vision = models.setdefault("vision", {})
+        vision.setdefault("model_client_config", {})["model_name"] = "vision-changed"
+        # embed
+        embed = data.setdefault("embed", {})
+        embed["embed_model"] = "embed-changed"
+        return data
+
+    cfg_mod.update_config(_mutate)
+    data = cfg_mod.load_yaml_round_trip(patched_config)
+    assert data["models"]["defaults"][0]["model_client_config"]["model_name"] == "main-changed"
+    assert data["models"]["defaults"][0]["model_client_config"]["api_base"] == "https://main-changed.example.com/v1"
+    assert data["models"]["vision"]["model_client_config"]["model_name"] == "vision-changed"
+    assert data["embed"]["embed_model"] == "embed-changed"
+    # 原主模型的其他字段未丢(只改了 name+api_base，api_key 仍在)
+    assert data["models"]["defaults"][0]["model_client_config"]["api_key"] == "seed-key"
+
+
+def test_config_set_and_model_add_concurrent(patched_config):
+    """/config set 改主模型 与 /model add 追加 并发交叉，互不丢失。"""
+    errors: list[BaseException] = []
+
+    def _config_set_main():
+        def _m(data):
+            models = data.get("models") or {}
+            defs = models.get("defaults")
+            if isinstance(defs, list) and defs and isinstance(defs[0], dict):
+                defs[0].setdefault("model_client_config", {})["api_base"] = "https://cfg-set.example.com/v1"
+            return data
+        try:
+            for _ in range(15):
+                cfg_mod.update_config(_m)
+        except BaseException as e:
+            errors.append(e)
+
+    def _model_add():
+        try:
+            for i in range(15):
+                entry = _make_entry(f"add-{i}")
+                def _m(data, e=entry):
+                    models = data.get("models") or {}
+                    defs = list(models.get("defaults") or [])
+                    defs.append(e)
+                    models["defaults"] = defs
+                    data["models"] = models
+                    return data
+                cfg_mod.update_config(_m)
+        except BaseException as e:
+            errors.append(e)
+
+    t1 = threading.Thread(target=_config_set_main)
+    t2 = threading.Thread(target=_model_add)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert not errors, f"并发异常: {errors}"
+    data = cfg_mod.load_yaml_round_trip(patched_config)
+    defs = data["models"]["defaults"]
+    names = {e["model_client_config"]["model_name"] for e in defs if isinstance(e, dict)}
+    # /config set 改的 api_base 不能被 /model add 覆盖回 seed
+    first_mcc = defs[0]["model_client_config"]
+    assert first_mcc["api_base"] == "https://cfg-set.example.com/v1", "主模型 api_base 被并发覆盖丢失"
+    # 15 个 add 全在
+    missing = {f"add-{i}" for i in range(15)} - names
+    assert not missing, f"/model add 的条目在并发 /config set 下丢失: {missing}"

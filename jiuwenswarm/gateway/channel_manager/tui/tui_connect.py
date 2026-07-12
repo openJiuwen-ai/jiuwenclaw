@@ -22,23 +22,19 @@ from openjiuwen.core.foundation.llm.schema.config import (
 from openjiuwen.auto_harness.schema import load_auto_harness_config
 
 from jiuwenswarm.common.config import (
-    CONFIG_YAML_PATH,
-    dump_yaml_round_trip,
     get_config,
     get_config_raw,
     get_default_models,
-    load_yaml_round_trip,
     resolve_env_vars,
     update_auto_recap_enabled_in_config,
     update_context_engine_enabled_in_config,
     update_memory_forbidden_enabled_in_config,
     update_permissions_enabled_in_config,
     get_model_names,
-    get_model_config,
-    add_or_update_model_in_config,
     update_default_models_in_config,
     ensure_defaults_list_in_config,
     update_preferred_language_in_config,
+    update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
@@ -907,20 +903,46 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         _yaml_sections_updated: list[str] = []
 
-        # ── 1) 主模型: models.defaults[0].model_client_config ──
+        # ── 收集本次要改的 models / embed 字段 ──
         _changed_main_params = {
             pk: params[pk] for mk, pk in _mcc_param_key_map.items()
             if pk in params
         }
-        if _changed_main_params:
-            try:
-                _raw = load_yaml_round_trip(CONFIG_YAML_PATH)
-                _defs = (_raw.get("models") or {}).get("defaults")
-                if not (isinstance(_defs, list) and _defs):
-                    _defs = ensure_defaults_list_in_config()
-                    _raw = load_yaml_round_trip(CONFIG_YAML_PATH)  # reload after ensure
-                    _defs = (_raw.get("models") or {}).get("defaults")
-                if isinstance(_defs, list) and _defs:
+        _changed_mm_by_section: dict[str, dict[str, str]] = {}
+        for _section_name, _prefix in _multimodal_mcc_prefix_map.items():
+            _mm = {}
+            for _mcc_key, _base_pk in _mcc_param_key_map.items():
+                _mm_pk = _prefix + _base_pk
+                if _mm_pk in params:
+                    _mm[_mcc_key] = params[_mm_pk]
+            if _mm:
+                _changed_mm_by_section[_section_name] = _mm
+        _changed_embed_params = {
+            pk: params[pk] for pk, _ in _embed_param_key_map.items()
+            if pk in params
+        }
+
+        # ── 单事务改 models.defaults[0] / 多模态 / embed，避免并发丢失更新 ──
+        if _changed_main_params or _changed_mm_by_section or _changed_embed_params:
+            def _sync_models_embed(data):
+                if _changed_main_params:
+                    _models = data.get("models")
+                    if not isinstance(_models, dict):
+                        _models = {}
+                        data["models"] = _models
+                    _defs = _models.get("defaults")
+                    if not (isinstance(_defs, list) and _defs):
+                        _defs = [{
+                            "model_client_config": {
+                                "api_base": "${API_BASE}",
+                                "api_key": "${API_KEY}",
+                                "model_name": "${MODEL_NAME}",
+                                "client_provider": "${MODEL_PROVIDER}",
+                            },
+                            "model_config_obj": {"temperature": 0.95},
+                            "is_default": True,
+                        }]
+                        _models["defaults"] = _defs
                     _first = _defs[0]
                     if isinstance(_first, dict):
                         _mcc = _first.get("model_client_config")
@@ -933,77 +955,52 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                                 if _param_key == "model_provider":
                                     _val = _normalize_provider_value(_val)
                                 _mcc[_mcc_key] = _val
-                        dump_yaml_round_trip(CONFIG_YAML_PATH, _raw)
                         _yaml_sections_updated.append("models.defaults[0]")
                         logger.info(
                             "[cli config.set] synced models.defaults[0].model_client_config: %s",
                             list(_changed_main_params.keys()),
                         )
-            except Exception as e:
-                logger.warning("[cli config.set] failed to sync models.defaults: %s", e)
-
-        # ── 2) 多模态: models.{vision,video,audio}.model_client_config ──
-        for _section_name, _prefix in _multimodal_mcc_prefix_map.items():
-            _changed_mm_params = {}
-            for _mcc_key, _base_pk in _mcc_param_key_map.items():
-                _mm_pk = _prefix + _base_pk  # e.g. "vision_model", "vision_provider"
-                if _mm_pk in params:
-                    _changed_mm_params[_mcc_key] = params[_mm_pk]
-            if not _changed_mm_params:
-                continue
+                for _section_name, _mm in _changed_mm_by_section.items():
+                    _models = data.get("models")
+                    if not isinstance(_models, dict):
+                        _models = {}
+                        data["models"] = _models
+                    _section = _models.get(_section_name)
+                    if not isinstance(_section, dict):
+                        _section = {}
+                        _models[_section_name] = _section
+                    _mcc = _section.get("model_client_config")
+                    if not isinstance(_mcc, dict):
+                        _mcc = {}
+                        _section["model_client_config"] = _mcc
+                    for _mcc_key, _val in _mm.items():
+                        _val = str(_val).strip()
+                        if _mcc_key == "client_provider":
+                            _val = _normalize_provider_value(_val)
+                        _mcc[_mcc_key] = _val
+                    _yaml_sections_updated.append(f"models.{_section_name}")
+                    logger.info(
+                        "[cli config.set] synced models.%s.model_client_config: %s",
+                        _section_name, list(_mm.keys()),
+                    )
+                if _changed_embed_params:
+                    _embed = data.get("embed")
+                    if not isinstance(_embed, dict):
+                        _embed = {}
+                        data["embed"] = _embed
+                    for _pk, _yaml_key in _embed_param_key_map.items():
+                        if _pk in _changed_embed_params:
+                            _embed[_yaml_key] = str(_changed_embed_params[_pk]).strip()
+                    _yaml_sections_updated.append("embed")
+                    logger.info(
+                        "[cli config.set] synced embed section: %s",
+                        list(_changed_embed_params.keys()),
+                    )
+                return data
             try:
-                _raw = load_yaml_round_trip(CONFIG_YAML_PATH)
-                _models = _raw.get("models")
-                if not isinstance(_models, dict):
-                    _models = {}
-                    _raw["models"] = _models
-                _section = _models.get(_section_name)
-                if not isinstance(_section, dict):
-                    _section = {}
-                    _models[_section_name] = _section
-                _mcc = _section.get("model_client_config")
-                if not isinstance(_mcc, dict):
-                    _mcc = {}
-                    _section["model_client_config"] = _mcc
-                for _mcc_key, _val in _changed_mm_params.items():
-                    _val = str(_val).strip()
-                    if _mcc_key == "client_provider":
-                        _val = _normalize_provider_value(_val)
-                    _mcc[_mcc_key] = _val
-                dump_yaml_round_trip(CONFIG_YAML_PATH, _raw)
-                _yaml_sections_updated.append(f"models.{_section_name}")
-                logger.info(
-                    "[cli config.set] synced models.%s.model_client_config: %s",
-                    _section_name, list(_changed_mm_params.keys()),
-                )
+                update_config(_sync_models_embed)
             except Exception as e:
-                logger.warning(
-                    "[cli config.set] failed to sync models.%s: %s", _section_name, e,
-                )
-
-        # ── 3) 嵌入: embed section ──
-        _changed_embed_params = {
-            pk: params[pk] for pk, _ in _embed_param_key_map.items()
-            if pk in params
-        }
-        if _changed_embed_params:
-            try:
-                _raw = load_yaml_round_trip(CONFIG_YAML_PATH)
-                _embed = _raw.get("embed")
-                if not isinstance(_embed, dict):
-                    _embed = {}
-                    _raw["embed"] = _embed
-                for _pk, _yaml_key in _embed_param_key_map.items():
-                    if _pk in _changed_embed_params:
-                        _embed[_yaml_key] = str(_changed_embed_params[_pk]).strip()
-                dump_yaml_round_trip(CONFIG_YAML_PATH, _raw)
-                _yaml_sections_updated.append("embed")
-                logger.info(
-                    "[cli config.set] synced embed section: %s",
-                    list(_changed_embed_params.keys()),
-                )
-            except Exception as e:
-                logger.warning("[cli config.set] failed to sync embed: %s", e)
+                logger.warning("[cli config.set] failed to sync models/embed: %s", e)
 
         if _yaml_sections_updated:
             applied_without_restart = False  # YAML 改动需要热重载才生效
