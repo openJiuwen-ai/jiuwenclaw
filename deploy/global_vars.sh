@@ -86,6 +86,7 @@ declare -A DEPLOY_VARS=(
     ["AGENT_SERVER_POD_NAME"]="jiuwenclaw-agentserver"
     ["AGENT_SERVER_SERVICE_CONCURRENCY"]="10"
     ["AGENT_SERVER_SESSION_CONCURRENCY"]="10"
+    ["AGENT_BOT_ID_GROUP_NUM"]="0"
     ["AGENT_SERVER_REACT_MAX_ITER"]="10"
     ["CLAW_CODE_PATH"]=""
     ["CLAW_CODE_POD_PATH"]="/app/jiuwenclaw"
