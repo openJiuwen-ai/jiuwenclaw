@@ -330,7 +330,7 @@ class TenantAgentPool:
 
         # 无指定时使用默认租户（单租户作为多租户的默认特例）
         agent_id = agent_id or "default"
-        service_id = service_id or "default"
+        service_id = service_id or getattr(request, 'session_id', None) or "default"
 
         return agent_id, service_id
 

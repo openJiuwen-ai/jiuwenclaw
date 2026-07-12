@@ -148,7 +148,7 @@ def build_skilldev_tools(
     separately by TaskPlanningRail and are NOT included here.
     """
     tools: list[Tool] = [
-        tool_cls(sys_operation, language=language)
+        tool_cls(sys_operation, language=language, agent_id=agent_id)
         for tool_cls in HARNESS_TOOL_CLASSES.values()
     ]
     tools.extend(

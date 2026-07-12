@@ -170,6 +170,9 @@ class JiuWenClaw:
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
         self._tool_manager = None
+        # 延迟初始化配置：create_instance 保存，_ensure_adapter 首次触发时消费
+        self._pending_config: dict[str, Any] | None = None
+        self._pending_mode: str = ""
 
     def _get_skilldev_service(self):
         """懒初始化并返回 SkillDevService 实例.
@@ -206,7 +209,7 @@ class JiuWenClaw:
         logger.info("[JiuWenClaw] SkillDevService 初始化完成")
         return self._skilldev_service
 
-    async def _ensure_adapter(self) -> AgentAdapter:
+    async def _ensure_adapter(self, create_instance=True) -> AgentAdapter:
         """确保 adapter 已初始化，如果未初始化则根据环境变量创建."""
         if self._adapter is None:
             self._sdk_name = resolve_sdk_choice()
@@ -221,6 +224,9 @@ class JiuWenClaw:
             self._skill_manager.set_skillnet_install_complete_hook(
                 self.create_instance
             )
+            # 若 create_instance 已保存 pending 配置，首次初始化时消费
+            if (self._pending_config is not None or self._pending_mode) and create_instance:
+                await self._adapter.create_instance(self._pending_config, mode=self._pending_mode)
             logger.info(
                 "[session=%s] [JiuWenClaw] Initialized adapter: sdk=%s, workspace_dir=%s",
                 self._service_id,
@@ -370,9 +376,10 @@ class JiuWenClaw:
             config: 可选配置，透传给底层 adapter.
             mode: 实例化模式，"claw"（默认）或 "code"，透传给底层 adapter.
         """
-        adapter = await self._ensure_adapter()
-        await adapter.create_instance(config, mode=mode)
-        logger.info("[JiuWenClaw] Agent instance created: sdk=%s", self._sdk_name)
+        # 保存配置供 _ensure_adapter 首次触发时消费，避免 SKILLDEV-only 场景下多余初始化 _adapter
+        self._pending_config = config
+        self._pending_mode = mode
+        logger.info("[JiuWenClaw] Agent instance base created, adapter deferred")
 
         project_mcp_names: set[str] = set()
         host_project_mcp_path = self._get_tool_manager().find_host_project_mcp_json()
@@ -715,6 +722,17 @@ class JiuWenClaw:
                 request.session_id,
             )
             await self._session_manager.cancel_session_task(session_id, "interrupt(supplement): ")
+            # SkillDev 场景下额外清理 adapter 资源
+            if is_skilldev and adapter is not None:
+                try:
+                    if hasattr(adapter, "cleanup_task_resources"):
+                        adapter.cleanup_task_resources()
+                except Exception as exc:
+                    logger.warning(
+                        "[session=%s] [interrupt] adapter cleanup_task_resources failed: %s",
+                        request.session_id,
+                        exc,
+                    )
             return response
 
         # cancel: 取消所有 session 的任务
@@ -724,6 +742,17 @@ class JiuWenClaw:
             intent,
         )
         await self._session_manager.cancel_all_session_tasks(f"interrupt(intent={intent}): ")
+        # SkillDev 场景下额外清理 adapter 资源
+        if is_skilldev and adapter is not None:
+            try:
+                if hasattr(adapter, "cleanup_task_resources"):
+                    adapter.cleanup_task_resources()
+            except Exception as exc:
+                logger.warning(
+                    "[session=%s] [interrupt] adapter cleanup_task_resources failed: %s",
+                    request.session_id,
+                    exc,
+                )
         return response
 
     async def process_message(self, request: AgentRequest) -> AgentResponse:
@@ -731,8 +760,6 @@ class JiuWenClaw:
 
         支持多 session 并发执行，同 session 内任务按先进后出顺序执行.
         """
-        adapter = await self._ensure_adapter()
-
         if request.req_method in (ReqMethod.CHAT_CANCEL, ReqMethod.SKILLDEV_CANCEL):
             return await self._process_interrupt(request)
 
@@ -741,11 +768,14 @@ class JiuWenClaw:
             return await skilldev_adapter.handle_user_answer(request)
 
         if request.req_method == ReqMethod.CHAT_ANSWER:
+            adapter = await self._ensure_adapter()
             return await adapter.handle_user_answer(request)
 
-        heartbeat_response = await adapter.handle_heartbeat(request)
-        if heartbeat_response is not None:
-            return heartbeat_response
+        if str(request.session_id or "").startswith("heartbeat"):
+            adapter = await self._ensure_adapter(create_instance=False)
+            heartbeat_response = await adapter.handle_heartbeat(request)
+            if heartbeat_response is not None:
+                return heartbeat_response
 
         skilldev_response = await self._handle_skilldev_request(request)
         if skilldev_response is not None:
@@ -758,7 +788,7 @@ class JiuWenClaw:
         tools_response = await self._handle_tools_request(request)
         if tools_response is not None:
             return tools_response
-
+        adapter = await self._ensure_adapter()
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
         append_history_record(
@@ -1127,6 +1157,8 @@ class JiuWenClaw:
     # ---------- 实例获取 ----------
 
     def get_instance(self):
+        if self._adapter is None:
+            return None
         return self._adapter._instance
 
     # ---------- 资源清理 ----------
@@ -1177,4 +1209,6 @@ class JiuWenClaw:
         """返回 Agent 是否正在工作."""
         task = self._session_manager.get_session_tasks()
         queue = self._session_manager.get_session_queues()
+        if self._adapter is None:
+            return False
         return self._adapter.is_working(task, queue)
