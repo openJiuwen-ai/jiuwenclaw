@@ -474,8 +474,6 @@ def get_all_sessions_metadata(
         if not metadata:
             # 没有 metadata.json 的旧会话: 只构造最小信息,不读取 history.json
             # (避免大量旧会话导致接口变慢,完整推断由启动迁移负责)
-            # model / model_selector / cron_id 等字段补默认值,与 get_session_metadata
-            # 的 setdefault 兜底保持 schema 一致,避免调用方读到 None。
             metadata = {
                 "session_id": session_id,
                 "channel_id": "",
@@ -485,28 +483,7 @@ def get_all_sessions_metadata(
                 "title": "",
                 "message_count": 0,
                 "mode": "unknown",
-                "project_id": "",
-                "project_dir": "",
-                "model": "",
-                "model_selector": "",
-                "cron_id": "",
-                "last_user_message_at": session_dir.stat().st_ctime,
-                "pinned": False,
-                "pin_order": 0,
             }
-
-        # 兜底：确保所有会话（含上面构造的最小 dict 与存量 metadata）字段齐全，
-        # 调用方永远能拿到稳定 schema（model/model_selector 等不为 None）。
-        for key, default in (
-            ("project_id", ""),
-            ("project_dir", ""),
-            ("model", ""),
-            ("model_selector", ""),
-            ("cron_id", ""),
-            ("pinned", False),
-            ("pin_order", 0),
-        ):
-            metadata.setdefault(key, default)
 
         sessions.append(metadata)
 
