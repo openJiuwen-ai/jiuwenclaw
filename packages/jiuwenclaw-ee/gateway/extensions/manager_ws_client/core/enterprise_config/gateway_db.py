@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""Gateway 本地库：企业配置读库（继承 ``Database``，进程内单例 + ``jiuwenclaw_id`` 隔离）。"""
+"""Gateway 本地库：企业配置读库（继承 ``Database``，按 ``jiuwenclaw_id`` 做实例隔离）。"""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ _DEFAULT_RELATIVE_ROOT = Path(__file__).resolve().parents[2]
 
 
 class GatewayDb(Database):
-    """Gateway 企业配置读库；进程内仅一个实例持有连接池，``bind`` 只切换 ``jiuwenclaw_id``。"""
+    """Gateway 企业配置读库；构造时绑定 ``jiuwenclaw_id``，并复用 ``Database`` 连接生命周期。"""
 
     _current: ClassVar[GatewayDb | None] = None
 
@@ -44,24 +44,13 @@ class GatewayDb(Database):
         *,
         cfg: Settings | None = None,
         relative_root: Path | None = None,
-        _with_connection: bool = False,
     ) -> None:
-        if _with_connection:
-            super().__init__(cfg=cfg, relative_root=relative_root or _DEFAULT_RELATIVE_ROOT)
-        self._jiuwenclaw_id = self._normalize_jiuwenclaw_id(jiuwenclaw_id)
-
-    @staticmethod
-    def _normalize_jiuwenclaw_id(jiuwenclaw_id: str | None) -> str | None:
+        super().__init__(cfg=cfg, relative_root=relative_root or _DEFAULT_RELATIVE_ROOT)
         if jiuwenclaw_id is None:
-            return None
-        normalized = str(jiuwenclaw_id).strip()
-        return normalized or None
-
-    @classmethod
-    def _ensure_singleton(cls) -> GatewayDb:
-        if cls._current is None:
-            cls._current = cls(None, _with_connection=True)
-        return cls._current
+            self._jiuwenclaw_id: str | None = None
+        else:
+            normalized = str(jiuwenclaw_id).strip()
+            self._jiuwenclaw_id = normalized or None
 
     @property
     def jiuwenclaw_id(self) -> str | None:
@@ -69,23 +58,28 @@ class GatewayDb(Database):
 
     @classmethod
     def bind(cls, jiuwenclaw_id: str | None) -> GatewayDb:
-        """设置当前进程 ``jiuwenclaw_id``（不新建连接池）。"""
-        db = cls._ensure_singleton()
-        normalized = cls._normalize_jiuwenclaw_id(jiuwenclaw_id)
-        if db._jiuwenclaw_id != normalized:
-            db._jiuwenclaw_id = normalized
-        return db
+        """设置当前进程使用的 ``GatewayDb`` 实例（Manager WS 注册或 AgentServer 启动时调用）。"""
+        if jiuwenclaw_id is None:
+            normalized = None
+        else:
+            normalized = str(jiuwenclaw_id).strip() or None
+        if cls._current is not None and cls._current.jiuwenclaw_id == normalized:
+            return cls._current
+        cls._current = cls(jiuwenclaw_id)
+        return cls._current
 
     @classmethod
     def current(cls) -> GatewayDb:
-        return cls._ensure_singleton()
+        if cls._current is None:
+            cls._current = cls(None)
+        return cls._current
 
     @classmethod
     async def release(cls) -> None:
-        """断连/注销时释放连接池，并清空 ``jiuwenclaw_id``。"""
+        """断连/注销时释放当前 DB handler，并清空 ``jiuwenclaw_id`` 绑定。"""
         if cls._current is not None:
             await cls._current.close()
-            cls._current._jiuwenclaw_id = None
+        cls._current = cls(None)
 
     def apply_instance_scope(self, table: str, filters: dict[str, Any]) -> dict[str, Any]:
         """为策略/映射表查询附加 ``jiuwenclaw_id`` 隔离条件。"""
@@ -124,22 +118,22 @@ class GatewayDb(Database):
         filters: dict[str, Any] | None = None,
         order_by: str | list[tuple[str, bool]] = "",
     ) -> list[dict[str, Any]]:
-        """列表查询；策略/映射表自动按 ``jiuwenclaw_id`` 隔离。"""
+        """列表查询；策略/映射表自动按构造时的 ``jiuwenclaw_id`` 隔离。"""
+        # 如果未绑定 jiuwenclaw_id，对于需要隔离的表直接返回空列表
         if table in _INSTANCE_SCOPED_TABLES and not self._jiuwenclaw_id:
             logger.warning(
                 "[enterprise_config] list_records skipped: jiuwenclaw_id not bound for table=%s",
                 table,
             )
             return []
-
+        
         query = self.apply_instance_scope(table, dict(filters or {}))
 
         try:
             handler = await self.ensure_ready(log_prefix="enterprise_config")
-            rows = await handler.list_records(
-                table, query, limit=10_000, offset=0, order_by=order_by,
-            )
-            return [_row_to_dict(r) for r in rows]
+            rows = await handler.list_records(table, query, limit=10_000, offset=0, order_by=order_by)
+            result = [_row_to_dict(r) for r in rows]
+            return result
         except Exception as exc:
             logger.warning("[enterprise_config] query %s failed: %s", table, exc)
             return []
@@ -181,6 +175,5 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
         elif hasattr(value, "to_dict") and callable(getattr(value, "to_dict")):
             out[key] = value.to_dict()
     return out
-
 
 __all__ = ("GatewayDb",)

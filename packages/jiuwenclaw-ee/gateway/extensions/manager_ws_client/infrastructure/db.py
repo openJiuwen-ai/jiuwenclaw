@@ -177,13 +177,9 @@ class Database:
             self.tables_registered = False
 
 
+_GATEWAY_DB = Database(relative_root=Path(__file__).resolve().parents[1])
+
+
 async def ensure_db_handler(*, log_prefix: str = "manager_ws_client") -> DBHandler:
-    """获取 Gateway 本地库 ``DBHandler``（委托 ``GatewayDb`` 单例）。"""
-    return await get_shared_gateway_database().ensure_ready(log_prefix=log_prefix)
-
-
-def get_shared_gateway_database() -> Database:
-    """进程内唯一的 Gateway 本地库（``GatewayDb`` 单例）。"""
-    from ..core.enterprise_config.gateway_db import GatewayDb
-
-    return GatewayDb.current()
+    """获取 Gateway 本地库 ``DBHandler``（进程内幂等）。"""
+    return await _GATEWAY_DB.ensure_ready(log_prefix=log_prefix)
