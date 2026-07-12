@@ -306,3 +306,66 @@ def test_config_set_and_model_add_concurrent(patched_config):
     # 15 个 add 全在
     missing = {f"add-{i}" for i in range(15)} - names
     assert not missing, f"/model add 的条目在并发 /config set 下丢失: {missing}"
+
+
+def test_mutation_validation_error_does_not_write(patched_config):
+    """mutator 抛校验异常时不写盘（_command_model add/switch TOCTOU 修复的关键保证）。
+
+    模拟 _command_model 的事务模式：mutator 在锁内做校验，校验失败抛异常，
+    update_config 不应执行 dump，文件内容不变。
+    """
+    class _ValidationError(Exception):
+        pass
+
+    before_mtime = patched_config.stat().st_mtime_ns
+    with pytest.raises(_ValidationError):
+        def _m(data):
+            models = data.get("models") or {}
+            defs = models.get("defaults") or []
+            if any(isinstance(d, dict) and d.get("model_client_config", {}).get("model_name") == "seed-model"
+                   for d in defs):
+                raise _ValidationError("duplicate")
+            return data
+        cfg_mod.update_config(_m)
+    after_mtime = patched_config.stat().st_mtime_ns
+    assert before_mtime == after_mtime, "校验失败时不应写盘"
+
+
+def test_concurrent_model_add_no_lost_update(patched_config):
+    """模拟 _command_model add 单事务：N 线程并发追加模型，全部条目最终都在。"""
+    names = [f"cmd-add-{i}" for i in range(20)]
+    errors: list[BaseException] = []
+
+    def _add(name: str) -> None:
+        entry = _make_entry(name)
+        try:
+            def _m(data):
+                models = data.get("models") or {}
+                if not isinstance(models, dict):
+                    models = {}
+                    data["models"] = models
+                defs = models.get("defaults")
+                defs = list(defs) if isinstance(defs, list) else []
+                if any(isinstance(d, dict) and d.get("model_client_config", {}).get("model_name") == name
+                       for d in defs):
+                    return None
+                defs.append(entry)
+                models["defaults"] = defs
+                if "default" in models:
+                    models.pop("default", None)
+                return data
+            cfg_mod.update_config(_m)
+        except BaseException as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=_add, args=(n,)) for n in names]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"并发 add 异常: {errors}"
+    data = cfg_mod.load_yaml_round_trip(patched_config)
+    got = {e["model_client_config"]["model_name"] for e in data["models"]["defaults"] if isinstance(e, dict)}
+    expected = set(names) | {"seed-model"}
+    assert got == expected, f"_command_model add 并发丢条目: 缺 {expected - got}"

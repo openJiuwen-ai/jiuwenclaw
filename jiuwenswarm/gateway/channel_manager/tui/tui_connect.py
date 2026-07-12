@@ -31,7 +31,6 @@ from jiuwenswarm.common.config import (
     update_memory_forbidden_enabled_in_config,
     update_permissions_enabled_in_config,
     get_model_names,
-    update_default_models_in_config,
     ensure_defaults_list_in_config,
     update_preferred_language_in_config,
     update_config,
@@ -49,6 +48,10 @@ from jiuwenswarm.gateway.routing.agent_request_timeout import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _ModelOpError(Exception):
+    """模型操作校验失败：在 update_config 事务内抛出，事务外转成 RPC 错误响应。"""
 
 # Auto-Harness config file path
 _DEFAULT_REPO_URL = "https://gitcode.com/openJiuwen/agent-core.git"
@@ -943,6 +946,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                             "is_default": True,
                         }]
                         _models["defaults"] = _defs
+                        # 旧格式迁移：建 defaults 后清理冗余的 models.default 单对象键
+                        _models.pop("default", None)
                     _first = _defs[0]
                     if isinstance(_first, dict):
                         _mcc = _first.get("model_client_config")
@@ -2153,81 +2158,76 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             }
             new_entry["alias"] = effective_alias
             try:
-                # 统一使用 defaults 列表格式（旧格式自动迁移）
-                _raw_defs = ensure_defaults_list_in_config()
-                # 与web端一致：允许同名 model_name 多条目（不同 api_key/api_base 即为不同配置），
-                # 仅拒绝完全相同的配置重复添加（model_name + api_base + api_key 全部一致）
-                _has_same_config = False
-                _effective_api_base = resolve_env_vars(str(client_cfg.get("api_base", "")))
-                _effective_api_key = resolve_env_vars(str(client_cfg.get("api_key", "")))
-                for _e in _raw_defs:
-                    if not isinstance(_e, dict):
-                        continue
-                    _emn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
-                    _eab = resolve_env_vars(str((_e.get("model_client_config") or {}).get("api_base", "")))
-                    _eak = resolve_env_vars(str((_e.get("model_client_config") or {}).get("api_key", "")))
-                    _same_config = _emn == effective_name and _eab == _effective_api_base and _eak == _effective_api_key
-                    if _same_config:
-                        _has_same_config = True
-                        break
-                # 完全重复时拒绝添加
-                if _has_same_config:
-                    await channel.send_response(
-                        ws, req_id, ok=False,
-                        error=f"Model '{effective_name}' with the same api_base and api_key already exists",
-                    )
-                    return
-                # 新增模型时校验四个必填字段
-                _required = {
-                    "api_key": "api_key",
-                    "api_base": "api_base",
-                    "model_name": "model_name",
-                    "client_provider": "model_provider",
-                }
-                _missing = []
-                for field, display in _required.items():
-                    _val = resolve_env_vars(str(client_cfg.get(field, "")))
-                    if not _val:
-                        _missing.append(display)
-                if _missing:
-                    _err_msg = (
-                        f"Failed to add model '{effective_name}'. "
-                        f"Required fields missing: {', '.join(_missing)}. "
-                        f"Usage: /model add <name> "
-                        f"api_base=xxx api_key=xxx "
-                        f"model=<name> model_provider=<provider>"
-                    )
-                    await channel.send_response(
-                        ws, req_id, ok=False,
-                        error=_err_msg,
-                    )
-                    return
-                # alias 唯一性校验（仅在 alias 非空时执行）
-                if effective_alias:
+                # 单事务读-校验-改：避免 ensure+update 两步间的 TOCTOU 窗口
+                def _add_mutate(data):
+                    models = data.get("models")
+                    if not isinstance(models, dict):
+                        models = {}
+                        data["models"] = models
+                    _raw_defs = models.get("defaults")
+                    if not (isinstance(_raw_defs, list) and _raw_defs):
+                        _raw_defs = [{
+                            "model_client_config": {
+                                "api_base": "${API_BASE}",
+                                "api_key": "${API_KEY}",
+                                "model_name": "${MODEL_NAME}",
+                                "client_provider": "${MODEL_PROVIDER}",
+                            },
+                            "model_config_obj": {"temperature": 0.95},
+                            "is_default": True,
+                        }]
+                        models["defaults"] = _raw_defs
+                        models.pop("default", None)
+                    _effective_api_base = resolve_env_vars(str(client_cfg.get("api_base", "")))
+                    _effective_api_key = resolve_env_vars(str(client_cfg.get("api_key", "")))
                     for _e in _raw_defs:
                         if not isinstance(_e, dict):
                             continue
                         _emn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
-                        _ea = resolve_env_vars(str(_e.get("alias", "")))
-                        if _ea == effective_alias:
-                            await channel.send_response(
-                                ws, req_id, ok=False,
-                                error=f"Alias '{effective_alias}' is already used by model '{_emn}'",
+                        _eab = resolve_env_vars(str((_e.get("model_client_config") or {}).get("api_base", "")))
+                        _eak = resolve_env_vars(str((_e.get("model_client_config") or {}).get("api_key", "")))
+                        if _emn == effective_name and _eab == _effective_api_base and _eak == _effective_api_key:
+                            raise _ModelOpError(
+                                f"Model '{effective_name}' with the same api_base and api_key already exists"
                             )
-                            return
-                        if _emn == effective_alias:
-                            await channel.send_response(
-                                ws, req_id, ok=False,
-                                error=f"Alias '{effective_alias}' conflicts with model name '{_emn}'",
-                            )
-                            return
-                _raw_defs.append(new_entry)
-                update_default_models_in_config(_raw_defs)
+                    _missing = []
+                    for field, display in {
+                        "api_key": "api_key",
+                        "api_base": "api_base",
+                        "model_name": "model_name",
+                        "client_provider": "model_provider",
+                    }.items():
+                        if not resolve_env_vars(str(client_cfg.get(field, ""))):
+                            _missing.append(display)
+                    if _missing:
+                        raise _ModelOpError(
+                            f"Failed to add model '{effective_name}'. "
+                            f"Required fields missing: {', '.join(_missing)}. "
+                            f"Usage: /model add <name> "
+                            f"api_base=xxx api_key=xxx "
+                            f"model=<name> model_provider=<provider>"
+                        )
+                    if effective_alias:
+                        for _e in _raw_defs:
+                            if not isinstance(_e, dict):
+                                continue
+                            _emn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
+                            _ea = resolve_env_vars(str(_e.get("alias", "")))
+                            if _ea == effective_alias:
+                                raise _ModelOpError(f"Alias '{effective_alias}' is already used by model '{_emn}'")
+                            if _emn == effective_alias:
+                                raise _ModelOpError(f"Alias '{effective_alias}' conflicts with model name '{_emn}'")
+                    _raw_defs.append(new_entry)
+                    return data
+                update_config(_add_mutate)
                 logger.info(
                     "[cli command.model] 新增模型: name=%s, "
                     "client_cfg=%s, model_config_obj=%s",
                     effective_name, client_cfg, model_config_obj,
                 )
+            except _ModelOpError as _op_err:
+                await channel.send_response(ws, req_id, ok=False, error=str(_op_err))
+                return
             except Exception as e:
                 await channel.send_response(ws, req_id, ok=False, error=str(e))
                 return
@@ -2249,105 +2249,89 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             except (ValueError, TypeError):
                 await channel.send_response(ws, req_id, ok=False, error="index is required")
                 return
-            _raw_defs = ensure_defaults_list_in_config()
-            if _idx < 0 or _idx >= len(_raw_defs) or not isinstance(_raw_defs[_idx], dict):
-                await channel.send_response(ws, req_id, ok=False, error="model index not found")
+            try:
+                def _update_mutate(data):
+                    models = data.get("models")
+                    if not isinstance(models, dict):
+                        models = {}
+                        data["models"] = models
+                    _raw_defs = models.get("defaults")
+                    if not (isinstance(_raw_defs, list) and _raw_defs):
+                        raise _ModelOpError("model index not found")
+                    if _idx < 0 or _idx >= len(_raw_defs) or not isinstance(_raw_defs[_idx], dict):
+                        raise _ModelOpError("model index not found")
+                    _entry = _raw_defs[_idx]
+                    _client_cfg = _entry.get("model_client_config")
+                    if not isinstance(_client_cfg, dict):
+                        _client_cfg = {}
+                        _entry["model_client_config"] = _client_cfg
+                    key_map = {
+                        "model": "model_name", "model_name": "model_name",
+                        "provider": "client_provider", "model_provider": "client_provider",
+                        "client_provider": "client_provider", "reasoning_level": "reasoning_level",
+                        "api_key": "api_key", "key": "api_key", "api_base": "api_base",
+                        "url": "api_base", "base_url": "api_base", "timeout": "timeout",
+                        "verify_ssl": "verify_ssl", "ssl_cert": "ssl_cert", "alias": "alias",
+                    }
+                    _model_cfg_obj = _entry.get("model_config_obj")
+                    if not isinstance(_model_cfg_obj, dict):
+                        _model_cfg_obj = {}
+                        _entry["model_config_obj"] = _model_cfg_obj
+                    for k, v in configs.items():
+                        mapped_k = key_map.get(str(k).lower(), str(k))
+                        if mapped_k == "alias":
+                            _entry["alias"] = str(v).strip()
+                        elif mapped_k == "reasoning_level":
+                            _rl = str(v).strip()
+                            if _rl:
+                                _model_cfg_obj["reasoning_level"] = _rl
+                            else:
+                                _model_cfg_obj.pop("reasoning_level", None)
+                        elif mapped_k == "model_config_obj":
+                            continue
+                        else:
+                            _client_cfg[mapped_k] = v
+                    _reasoning_level = str(_model_cfg_obj.get("reasoning_level", "")).strip()
+                    if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
+                        raise _ModelOpError("reasoning_level must be one of: off, low, medium, high")
+                    if "verify_ssl" not in _client_cfg:
+                        _client_cfg["verify_ssl"] = False
+                    if "timeout" not in _client_cfg:
+                        _client_cfg["timeout"] = 1800
+                    _missing_fields = []
+                    for _req_field, _display in [
+                        ("api_key", "api_key"), ("api_base", "api_base"),
+                        ("model_name", "model_name"), ("client_provider", "model_provider"),
+                    ]:
+                        if not resolve_env_vars(str(_client_cfg.get(_req_field, ""))):
+                            _missing_fields.append(_display)
+                    if _missing_fields:
+                        raise _ModelOpError(f"Model missing required config: {', '.join(_missing_fields)}")
+                    _effective_alias = resolve_env_vars(str(_entry.get("alias", ""))) if _entry.get("alias") else ""
+                    if _effective_alias:
+                        for _other_idx, _other in enumerate(_raw_defs):
+                            if _other_idx == _idx or not isinstance(_other, dict):
+                                continue
+                            _other_mn = resolve_env_vars(str((_other.get("model_client_config") or {}).get("model_name", "")))
+                            _other_alias = resolve_env_vars(str(_other.get("alias", ""))) if _other.get("alias") else ""
+                            if _other_alias == _effective_alias:
+                                raise _ModelOpError(f"Alias '{_effective_alias}' is already used by model '{_other_mn}'")
+                            if _other_mn == _effective_alias:
+                                raise _ModelOpError(f"Alias '{_effective_alias}' conflicts with model name '{_other_mn}'")
+                    return data
+                update_config(_update_mutate)
+                # 事务后读最新 defaults 拿响应字段（锁外重读仅用于展示，不参与写决策）
+                _raw_defs_after = ensure_defaults_list_in_config()
+                _entry_after = _raw_defs_after[_idx] if _idx < len(_raw_defs_after) else {}
+                _mcc_after = (_entry_after.get("model_client_config") or {}) if isinstance(_entry_after, dict) else {}
+                _updated_name = resolve_env_vars(str(_mcc_after.get("model_name", "")))
+                _current_name = resolve_env_vars(str((_raw_defs_after[0].get("model_client_config") or {}).get("model_name", "")))
+            except _ModelOpError as _op_err:
+                await channel.send_response(ws, req_id, ok=False, error=str(_op_err))
                 return
-
-            _entry = _raw_defs[_idx]
-            _client_cfg = _entry.get("model_client_config")
-            if not isinstance(_client_cfg, dict):
-                _client_cfg = {}
-                _entry["model_client_config"] = _client_cfg
-            key_map = {
-                "model": "model_name",
-                "model_name": "model_name",
-                "provider": "client_provider",
-                "model_provider": "client_provider",
-                "client_provider": "client_provider",
-                "reasoning_level": "reasoning_level",
-                "api_key": "api_key",
-                "key": "api_key",
-                "api_base": "api_base",
-                "url": "api_base",
-                "base_url": "api_base",
-                "timeout": "timeout",
-                "verify_ssl": "verify_ssl",
-                "ssl_cert": "ssl_cert",
-                "alias": "alias",
-            }
-            _model_cfg_obj = _entry.get("model_config_obj")
-            if not isinstance(_model_cfg_obj, dict):
-                _model_cfg_obj = {}
-                _entry["model_config_obj"] = _model_cfg_obj
-            for k, v in configs.items():
-                mapped_k = key_map.get(str(k).lower(), str(k))
-                if mapped_k == "alias":
-                    _entry["alias"] = str(v).strip()
-                elif mapped_k == "reasoning_level":
-                    _reasoning_level = str(v).strip()
-                    if _reasoning_level:
-                        _model_cfg_obj["reasoning_level"] = _reasoning_level
-                    else:
-                        _model_cfg_obj.pop("reasoning_level", None)
-                elif mapped_k == "model_config_obj":
-                    continue
-                else:
-                    _client_cfg[mapped_k] = v
-            _reasoning_level = str(_model_cfg_obj.get("reasoning_level", "")).strip()
-            if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
-                await channel.send_response(
-                    ws,
-                    req_id,
-                    ok=False,
-                    error="reasoning_level must be one of: off, low, medium, high",
-                )
+            except Exception as e:
+                await channel.send_response(ws, req_id, ok=False, error=str(e))
                 return
-            if "verify_ssl" not in _client_cfg:
-                _client_cfg["verify_ssl"] = False
-            if "timeout" not in _client_cfg:
-                _client_cfg["timeout"] = 1800
-
-            _missing_fields = []
-            for _req_field, _display in [
-                ("api_key", "api_key"),
-                ("api_base", "api_base"),
-                ("model_name", "model_name"),
-                ("client_provider", "model_provider"),
-            ]:
-                _val = resolve_env_vars(str(_client_cfg.get(_req_field, "")))
-                if not _val:
-                    _missing_fields.append(_display)
-            if _missing_fields:
-                await channel.send_response(
-                    ws, req_id, ok=False,
-                    error=f"Model missing required config: {', '.join(_missing_fields)}",
-                )
-                return
-
-            _effective_alias = resolve_env_vars(str(_entry.get("alias", ""))) if _entry.get("alias") else ""
-            if _effective_alias:
-                for _other_idx, _other in enumerate(_raw_defs):
-                    if _other_idx == _idx or not isinstance(_other, dict):
-                        continue
-                    _other_mn = resolve_env_vars(str((_other.get("model_client_config") or {}).get("model_name", "")))
-                    _other_alias = resolve_env_vars(str(_other.get("alias", ""))) if _other.get("alias") else ""
-                    if _other_alias == _effective_alias:
-                        await channel.send_response(
-                            ws, req_id, ok=False,
-                            error=f"Alias '{_effective_alias}' is already used by model '{_other_mn}'",
-                        )
-                        return
-                    if _other_mn == _effective_alias:
-                        await channel.send_response(
-                            ws, req_id, ok=False,
-                            error=f"Alias '{_effective_alias}' conflicts with model name '{_other_mn}'",
-                        )
-                        return
-
-            update_default_models_in_config(_raw_defs)
-            _updated_name = resolve_env_vars(str(_client_cfg.get("model_name", "")))
-            _current_name = resolve_env_vars(str((_raw_defs[0].get("model_client_config") or {}).get("model_name", "")))
             _config_payload = get_config()
             await _reload_model_config_background(_config_payload, "model.update")
             await channel.send_response(ws, req_id, ok=True, payload={
@@ -2364,17 +2348,33 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             except (ValueError, TypeError):
                 await channel.send_response(ws, req_id, ok=False, error="index is required")
                 return
-            _raw_defs = ensure_defaults_list_in_config()
-            if len(_raw_defs) <= 1:
-                await channel.send_response(ws, req_id, ok=False, error="Cannot delete the last model")
+            _removed_holder: dict = {}
+            try:
+                def _delete_mutate(data):
+                    models = data.get("models")
+                    if not isinstance(models, dict):
+                        models = {}
+                        data["models"] = models
+                    _raw_defs = models.get("defaults")
+                    if not (isinstance(_raw_defs, list) and _raw_defs):
+                        raise _ModelOpError("model index not found")
+                    if len(_raw_defs) <= 1:
+                        raise _ModelOpError("Cannot delete the last model")
+                    if _idx < 0 or _idx >= len(_raw_defs) or not isinstance(_raw_defs[_idx], dict):
+                        raise _ModelOpError("model index not found")
+                    _removed_holder["entry"] = _raw_defs.pop(_idx)
+                    return data
+                update_config(_delete_mutate)
+            except _ModelOpError as _op_err:
+                await channel.send_response(ws, req_id, ok=False, error=str(_op_err))
                 return
-            if _idx < 0 or _idx >= len(_raw_defs) or not isinstance(_raw_defs[_idx], dict):
-                await channel.send_response(ws, req_id, ok=False, error="model index not found")
+            except Exception as e:
+                await channel.send_response(ws, req_id, ok=False, error=str(e))
                 return
-            _removed = _raw_defs.pop(_idx)
-            update_default_models_in_config(_raw_defs)
+            _removed = _removed_holder.get("entry") or {}
             _removed_name = resolve_env_vars(str((_removed.get("model_client_config") or {}).get("model_name", "")))
-            _current_name = resolve_env_vars(str((_raw_defs[0].get("model_client_config") or {}).get("model_name", "")))
+            _raw_defs_after = ensure_defaults_list_in_config()
+            _current_name = resolve_env_vars(str((_raw_defs_after[0].get("model_client_config") or {}).get("model_name", "")))
             _config_payload = get_config()
             await _reload_model_config_background(_config_payload, "model.delete")
             await channel.send_response(ws, req_id, ok=True, payload={
@@ -2435,110 +2435,110 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         target = str(model_name).strip()
         logger.info("[cli command.model] 切换模型: target=%s, model_index=%s, params=%s", target, model_index, params)
-        _raw_defs_check = (get_config_raw().get("models") or {}).get("defaults") or []
-        _valid_names: set[str] = set()
-        for _e in _raw_defs_check:
-            if isinstance(_e, dict):
-                _mn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
-                _al = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
-                if _mn:
-                    _valid_names.add(_mn)
-                if _al:
-                    _valid_names.add(_al)
-        if not _valid_names:
-            _valid_names = set(get_model_names())
-        # 当有 model_index 时跳过名称验证（前端已通过列表选择，索引即可信）
-        _skip_name_check = model_index is not None
-        if not _skip_name_check and target not in _valid_names:
-            logger.warning(
-                "[cli command.model] 模型不存在: %s, 可用: %s",
-                target,
-                get_model_names(),
-            )
-            _avail_parts = []
-            for _e in _raw_defs_check:
-                if not isinstance(_e, dict):
-                    continue
-                _mn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
-                _al = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
-                if _al and _mn and _al != _mn:
-                    _avail_parts.append(f"{_al} ({_mn})")
-                elif _mn:
-                    _avail_parts.append(_mn)
-            await channel.send_response(
-                ws,
-                req_id,
-                ok=False,
-                error=(
-                    f"Model '{target}' not found. "
-                    f"Available: {', '.join(_avail_parts) or ', '.join(get_model_names())}"
-                ),
-            )
+        _switch_result: dict = {}
+        try:
+            def _switch_mutate(data):
+                models = data.get("models")
+                if not isinstance(models, dict):
+                    models = {}
+                    data["models"] = models
+                _raw_defaults = models.get("defaults")
+                if not (isinstance(_raw_defaults, list) and _raw_defaults):
+                    _raw_defaults = [{
+                        "model_client_config": {
+                            "api_base": "${API_BASE}", "api_key": "${API_KEY}",
+                            "model_name": "${MODEL_NAME}", "client_provider": "${MODEL_PROVIDER}",
+                        },
+                        "model_config_obj": {"temperature": 0.95}, "is_default": True,
+                    }]
+                    models["defaults"] = _raw_defaults
+                    models.pop("default", None)
+                _valid_names: set[str] = set()
+                for _e in _raw_defaults:
+                    if isinstance(_e, dict):
+                        _mn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
+                        _al = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
+                        if _mn:
+                            _valid_names.add(_mn)
+                        if _al:
+                            _valid_names.add(_al)
+                if not _valid_names:
+                    _valid_names = set(get_model_names())
+                _skip_name_check = model_index is not None
+                if not _skip_name_check and target not in _valid_names:
+                    logger.warning(
+                        "[cli command.model] 模型不存在: %s, 可用: %s",
+                        target, get_model_names(),
+                    )
+                    _avail_parts = []
+                    for _e in _raw_defaults:
+                        if not isinstance(_e, dict):
+                            continue
+                        _mn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
+                        _al = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
+                        if _al and _mn and _al != _mn:
+                            _avail_parts.append(f"{_al} ({_mn})")
+                        elif _mn:
+                            _avail_parts.append(_mn)
+                    raise _ModelOpError(
+                        f"Model '{target}' not found. "
+                        f"Available: {', '.join(_avail_parts) or ', '.join(get_model_names())}"
+                    )
+                _target_entry = None
+                _target_idx = None
+                if model_index is not None:
+                    try:
+                        _idx = int(model_index)
+                        if 0 <= _idx < len(_raw_defaults) and isinstance(_raw_defaults[_idx], dict):
+                            _target_entry = _raw_defaults[_idx]
+                            _target_idx = _idx
+                    except (ValueError, TypeError):
+                        pass
+                if _target_entry is None:
+                    for _i, _e in enumerate(_raw_defaults):
+                        if not isinstance(_e, dict):
+                            continue
+                        _ename = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
+                        _ealias = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
+                        if _ename == target or _ealias == target:
+                            _target_entry = _e
+                            _target_idx = _i
+                            break
+                if _target_entry is None:
+                    raise _ModelOpError(f"Model '{target}' config not found")
+                _target_mcc = _target_entry.get("model_client_config") or {}
+                _missing_fields = []
+                for _req_field, _display in [
+                    ("api_key", "api_key"), ("api_base", "api_base"),
+                    ("model_name", "model_name"), ("client_provider", "client_provider"),
+                ]:
+                    if not resolve_env_vars(str(_target_mcc.get(_req_field, ""))):
+                        _missing_fields.append(_display)
+                if _missing_fields:
+                    raise _ModelOpError(f"Model '{target}' missing required config: {', '.join(_missing_fields)}")
+                _target_model_name_resolved = resolve_env_vars(str(_target_mcc.get("model_name", "")))
+                _target_entry["is_default"] = True
+                for _i, _e in enumerate(_raw_defaults):
+                    if _i == _target_idx or not isinstance(_e, dict):
+                        continue
+                    _other_mcc = _e.get("model_client_config") or {}
+                    _other_name = resolve_env_vars(str(_other_mcc.get("model_name", "")))
+                    if _other_name == _target_model_name_resolved and _e.get("is_default") is True:
+                        _e["is_default"] = False
+                _others = [_e for _i, _e in enumerate(_raw_defaults) if _i != _target_idx]
+                models["defaults"] = [_target_entry] + _others
+                _switch_result["name"] = resolve_env_vars(
+                    str((_target_entry.get("model_client_config") or {}).get("model_name", target)))
+                return data
+            update_config(_switch_mutate)
+        except _ModelOpError as _op_err:
+            await channel.send_response(ws, req_id, ok=False, error=str(_op_err))
             return
-
-        # 统一使用 defaults 列表格式（旧格式自动迁移）
-        _raw_defaults = ensure_defaults_list_in_config()
-        _target_entry = None
-        _target_idx = None
-
-        # 如果前端传了 index，直接按索引定位（支持同名模型区分）
-        if model_index is not None:
-            try:
-                _idx = int(model_index)
-                if 0 <= _idx < len(_raw_defaults) and isinstance(_raw_defaults[_idx], dict):
-                    _target_entry = _raw_defaults[_idx]
-                    _target_idx = _idx
-            except (ValueError, TypeError):
-                pass
-
-        # 回退到按名称/alias查找
-        if _target_entry is None:
-            for _i, _e in enumerate(_raw_defaults):
-                if not isinstance(_e, dict):
-                    continue
-                _ename = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
-                _ealias = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
-                if _ename == target or _ealias == target:
-                    _target_entry = _e
-                    _target_idx = _i
-                    break
-        _other_entries = [_e for _i, _e in enumerate(_raw_defaults) if _i != _target_idx]
-        if _target_entry is None:
-            await channel.send_response(ws, req_id, ok=False, error=f"Model '{target}' config not found")
+        except Exception as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e))
             return
-        # 校验必填字段
-        _target_mcc = _target_entry.get("model_client_config") or {}
-        _missing_fields = []
-        for _req_field, _display in [
-            ("api_key", "api_key"),
-            ("api_base", "api_base"),
-            ("model_name", "model_name"),
-            ("client_provider", "client_provider"),
-        ]:
-            _val = resolve_env_vars(str(_target_mcc.get(_req_field, "")))
-            if not _val:
-                _missing_fields.append(_display)
-        if _missing_fields:
-            await channel.send_response(
-                ws, req_id, ok=False,
-                error=f"Model '{target}' missing required config: {', '.join(_missing_fields)}",
-            )
-            return
-        # 切换后确保目标条目 is_default=True，清除其他同名模型的 is_default
-        # AgentServer 用 is_default=True 确定默认模型，defaults[0] 位置不够——同名模型
-        # 需靠 is_default 标记来区分哪个是当前激活的
-        _target_model_name_resolved = resolve_env_vars(str(_target_mcc.get("model_name", "")))
-        _target_entry["is_default"] = True
-        for _e in _other_entries:
-            if isinstance(_e, dict):
-                _other_mcc = _e.get("model_client_config") or {}
-                _other_name = resolve_env_vars(str(_other_mcc.get("model_name", "")))
-                if _other_name == _target_model_name_resolved and _e.get("is_default") is True:
-                    _e["is_default"] = False
-        update_default_models_in_config([_target_entry] + _other_entries)
         logger.info("[cli command.model] 切换，已更新 models.defaults 首位: %s", target)
-        _target_model_name = resolve_env_vars(
-            str((_target_entry.get("model_client_config") or {}).get("model_name", target)))
+        _target_model_name = _switch_result.get("name", target)
 
         # 先回包再执行 Agent 热重载（与 config.set 保持一致），
         # 避免 WebSocket 长时间无响应、CLI 误以为无反馈 / 超时。

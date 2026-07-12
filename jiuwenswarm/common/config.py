@@ -15,6 +15,7 @@ from typing import Any, Optional
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 import yaml
+import portalocker
 
 from jiuwenswarm.common.utils import get_config_dir, get_config_file
 
@@ -280,12 +281,10 @@ def update_config(mutator, *, lock_timeout: float = 10.0) -> Any:
     portalocker 文件锁防跨进程并发（AgentServer+Gateway 两个 PID 同时写），
     threading.Lock 防同进程多线程。整个 load→mutate→dump 在锁内为原子临界区。
     """
-    import portalocker
     with _CONFIG_WRITE_LOCK:
         with portalocker.Lock(
             str(_config_lock_path(CONFIG_YAML_PATH)),
             timeout=lock_timeout,
-            fail_when_locked=False,
         ):
             data = load_yaml_round_trip(CONFIG_YAML_PATH)
             if data is None:
