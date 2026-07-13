@@ -10,6 +10,27 @@ from jiuwenclaw.agentserver.skill_turbo.plan_node import AbortError
 _JSON_FENCE_PATTERN = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 _CAT_N_PREFIX_RE = re.compile(r"^[ \t]*\d+[ \t]", re.MULTILINE)
 
+# ──────────────────────── 节点显示名映射 ────────────────────────
+# 将内部 plan_name（如 p0_pipeline_init）映射为界面上展示的中文名称。
+# 排序遵循 ppt_gen_root 节点 sub_plans 的执行顺序（Stage 1 → Stage N）。
+# 仅影响前端展示，不改变内部 plan_name 标识。
+NODE_DISPLAY_NAMES: dict[str, str] = {
+    "p0_pipeline_init": "Stage 1: 流水线初始化",
+    "p1_intent_classify": "Stage 2: 意图分类",
+    "p3_document_parse": "Stage 3: 文档解析",
+    "p2_requirement_collect": "Stage 4: 需求收集",
+    "p3_5_template_context": "Stage 5: 模板上下文预处理",
+    "p4_content_plan": "Stage 6: 内容策划",
+    "p5_outline_review": "Stage 7: 大纲审阅",
+    "p6_deep_research": "Stage 8: 深度研究",
+    "p7_style_prepare": "Stage 9: 风格准备",
+    "p6_5_image_prepare": "Stage 10: 图片准备",
+    "p8_ppt_page_gen": "Stage 11: 幻灯片生成",
+    "p9_ppt_export": "Stage 12: PPTX导出",
+    "p10_delivery": "Stage 13: 交付",
+    "ppt_gen_root": "PPT生成",
+}
+
 
 def _strip_line_numbers(text: str) -> str:
     return _CAT_N_PREFIX_RE.sub("", text)

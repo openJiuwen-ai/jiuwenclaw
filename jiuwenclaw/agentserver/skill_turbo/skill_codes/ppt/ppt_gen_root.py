@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from jiuwenclaw.agentserver.skill_turbo.plan_node import PlanNode
+from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.ppt_common import NODE_DISPLAY_NAMES
 from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.pipeline_init import PipelineInitNode
 from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.intent_classify import IntentClassifyNode
 from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.requirement_collect import RequirementCollectNode
@@ -46,6 +47,9 @@ def _result_status(result: Any) -> str:
 
 
 class PPTGenRootNode(PlanNode):
+    # 节点显示名映射：供 Executor 读取，将内部 plan_name 转为前端展示的中文名。
+    display_names: dict[str, str] = NODE_DISPLAY_NAMES
+
     def __init__(self) -> None:
         self._p0 = PipelineInitNode()
         self._p1 = IntentClassifyNode()

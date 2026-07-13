@@ -76,44 +76,6 @@ _SKILL_TURBO_STREAM_FLUSH_INTERVAL_SECONDS: float = 3.0
 # 需要缓冲的事件类型
 _BUFFERABLE_EVENT_TYPES: frozenset[str] = frozenset({"chat.delta", "chat.reasoning"})
 
-# ──────────────────────── 节点显示名映射 ────────────────────────
-# 将内部 plan_name（如 p0_pipeline_init）映射为界面上展示的中文名称。
-# 排序遵循 ppt_gen_root 节点 sub_plans 的执行顺序（Stage 1 → Stage N）。
-# 仅影响前端展示，不改变内部 plan_name 标识。
-_NODE_DISPLAY_NAMES: dict[str, str] = {
-    "p0_pipeline_init": "Stage 1: 流水线初始化",
-    "p1_intent_classify": "Stage 2: 意图分类",
-    "p3_document_parse": "Stage 3: 文档解析",
-    "p2_requirement_collect": "Stage 4: 需求收集",
-    "p3_5_template_context": "Stage 5: 模板上下文预处理",
-    "p4_content_plan": "Stage 6: 内容策划",
-    "p5_outline_review": "Stage 7: 大纲审阅",
-    "p6_deep_research": "Stage 8: 深度研究",
-    "p7_style_prepare": "Stage 9: 风格准备",
-    "p6_5_image_prepare": "Stage 10: 图片准备",
-    "p8_ppt_page_gen": "Stage 11: 幻灯片生成",
-    "p9_ppt_export": "Stage 12: PPTX导出",
-    "p10_delivery": "Stage 13: 交付",
-    "ppt_gen_root": "PPT生成",
-}
-
-
-def _display_name(plan_name: str) -> str:
-    """将内部 plan_name 转为界面上展示的中文名称，未映射时原样返回。"""
-    return _NODE_DISPLAY_NAMES.get(plan_name, plan_name)
-
-
-def _replace_plan_names_in_text(text: str) -> str:
-    """将文本中出现的已映射 plan_name 替换为对应的中文显示名。"""
-    if not text:
-        return text
-    result = text
-    for raw, display in _NODE_DISPLAY_NAMES.items():
-        if raw in result:
-            result = result.replace(raw, display)
-    return result
-
-
 # Request上下文
 _request_id_var: ContextVar[str] = ContextVar("skill_turbo_request_id", default="")
 _channel_id_var: ContextVar[str] = ContextVar("skill_turbo_channel_id", default="")
@@ -374,6 +336,25 @@ class SkillTurboExecutor:
         # 的事件循环（Executor 通常在 agent 初始化阶段构造，可能与 run 时事件循环不同）。
         self._llm_concurrency_limit: int = self._read_llm_concurrency_limit()
         self._llm_semaphore: asyncio.Semaphore | None = None
+
+        # 节点显示名映射：由 skill 的 root 节点通过 display_names 类属性提供。
+        # _prepare_root_node 时从 root 节点读取并填充此处。
+        # 缺省为空 dict，_display_name 将原样返回 plan_name。
+        self._display_names: dict[str, str] = {}
+
+    def _display_name(self, plan_name: str) -> str:
+        """将内部 plan_name 转为界面上展示的名称，未映射时原样返回。"""
+        return self._display_names.get(plan_name, plan_name)
+
+    def _replace_plan_names_in_text(self, text: str) -> str:
+        """将文本中出现的已映射 plan_name 替换为对应的显示名。"""
+        if not text or not self._display_names:
+            return text
+        result = text
+        for raw, display in self._display_names.items():
+            if raw in result:
+                result = result.replace(raw, display)
+        return result
 
     def validate(self, plan_code: str) -> list[str]:
         """校验规划代码。"""
@@ -1502,7 +1483,7 @@ class SkillTurboExecutor:
             if reasoning_content and session:
                 payload: dict[str, Any] = {
                     "content": str(reasoning_content),
-                    "plan_name": _display_name(node_name),
+                    "plan_name": self._display_name(node_name),
                 }
                 if source_id is not None:
                     payload[STREAM_SOURCE_ID_FIELD] = source_id
@@ -1523,7 +1504,7 @@ class SkillTurboExecutor:
             if result and session:
                 output_payload: dict[str, Any] = {
                     "content": str(result),
-                    "plan_name": _display_name(node_name),
+                    "plan_name": self._display_name(node_name),
                 }
                 if source_id is not None:
                     output_payload[STREAM_SOURCE_ID_FIELD] = source_id
@@ -1633,7 +1614,7 @@ class SkillTurboExecutor:
                         if session:
                             reasoning_payload: dict[str, Any] = {
                                 "content": str(reasoning_content),
-                                "plan_name": _display_name(node_name),
+                                "plan_name": self._display_name(node_name),
                             }
                             if source_id is not None:
                                 reasoning_payload[STREAM_SOURCE_ID_FIELD] = source_id
@@ -1661,7 +1642,7 @@ class SkillTurboExecutor:
                         if session:
                             output_payload: dict[str, Any] = {
                                 "content": str(text_chunk),
-                                "plan_name": _display_name(node_name),
+                                "plan_name": self._display_name(node_name),
                             }
                             if source_id is not None:
                                 output_payload[STREAM_SOURCE_ID_FIELD] = source_id
@@ -2089,7 +2070,7 @@ class SkillTurboExecutor:
         node: PlanNode,
         task_id: str | None,
     ) -> AgentResponseChunk:
-        display = _display_name(node.plan_name)
+        display = self._display_name(node.plan_name)
         payload = {
             "event_type": "node.started",
             "plan_name": display,
@@ -2108,7 +2089,7 @@ class SkillTurboExecutor:
     ) -> AgentResponseChunk:
         payload = {
             "event_type": "node.finished",
-            "plan_name": _display_name(node.plan_name),
+            "plan_name": self._display_name(node.plan_name),
         }
         if task_id:
             payload["task_id"] = task_id
@@ -2131,7 +2112,7 @@ class SkillTurboExecutor:
             # 从 chunk 中提取正确的 plan_name（如果存在），并转为显示名
             chunk_plan_name = content.get("node") or content.get("plan_name")
             if chunk_plan_name:
-                plan_name = _display_name(chunk_plan_name)
+                plan_name = self._display_name(chunk_plan_name)
 
             # 提取实际内容：优先 content 字段，其次 message 字段，最后空字符串
             # 不再把整个 dict 作为 content 回退，避免语义不清
@@ -2140,7 +2121,7 @@ class SkillTurboExecutor:
                 actual_content = content.get("message", "")
 
             # 将消息文本中出现的内部 plan_name 替换为中文显示名
-            actual_content = _replace_plan_names_in_text(actual_content)
+            actual_content = self._replace_plan_names_in_text(actual_content)
 
             # 进度/完成类消息（来自 message 字段）追加换行，避免前端拼接成一行
             chunk_status = content.get("status")
@@ -2150,7 +2131,7 @@ class SkillTurboExecutor:
             # 将 data_payload 中的 current_node 转为显示名（浅拷贝避免修改原始 chunk）
             if data_payload is not None and "current_node" in data_payload:
                 data_payload = dict(data_payload)
-                data_payload["current_node"] = _display_name(data_payload["current_node"])
+                data_payload["current_node"] = self._display_name(data_payload["current_node"])
         
         payload = {
             "event_type": "chat.delta",
@@ -2174,7 +2155,7 @@ class SkillTurboExecutor:
         payload = {
             "event_type": "chat.error",
             "error": error,
-            "plan_name": _display_name(node.plan_name),
+            "plan_name": self._display_name(node.plan_name),
         }
         if task_id:
             payload["task_id"] = task_id
@@ -2235,7 +2216,7 @@ class SkillTurboExecutor:
             task_id = f"task_{uuid.uuid4().hex[:8]}"
             task_state = {
                 "task_id": task_id,
-                "task_content": _display_name(subplan.plan_name),
+                "task_content": self._display_name(subplan.plan_name),
                 "task_index": idx,
                 "source": "skill_turbo",
                 "status": "pending",
@@ -2495,7 +2476,7 @@ class SkillTurboExecutor:
         task_id = f"task_{uuid.uuid4().hex[:8]}"
         task_state = {
             "task_id": task_id,
-            "task_content": _display_name(subplan.plan_name),
+            "task_content": self._display_name(subplan.plan_name),
             "task_index": len(task_states),
             "source": "skill_turbo",
             "status": "pending",
@@ -2510,12 +2491,12 @@ class SkillTurboExecutor:
         )
         return task_id, task_state
 
-    @staticmethod
     def _find_task_state_by_plan_name(
+        self,
         plan_name: str,
         task_states: dict[str, dict[str, Any]],
     ) -> tuple[str, dict[str, Any]] | None:
-        display = _display_name(plan_name)
+        display = self._display_name(plan_name)
         for task_id, state in task_states.items():
             if state.get("task_content") == display:
                 return task_id, state
@@ -2530,7 +2511,7 @@ class SkillTurboExecutor:
         _current_task_context_var.set(
             {
                 "task_id": task_id,
-                "task_name": _display_name(subplan.plan_name),
+                "task_name": self._display_name(subplan.plan_name),
                 "depth": subplan.depth,
                 "start_time": timestamp,
             }
@@ -2563,8 +2544,8 @@ class SkillTurboExecutor:
         if error is not None:
             task_state["error"] = str(error)
 
-    @staticmethod
     def _build_task_start_event(
+        self,
         subplan: PlanNode,
         task_id: str,
         task_state: dict[str, Any],
@@ -2577,7 +2558,7 @@ class SkillTurboExecutor:
             "channel_id": _channel_id_var.get(),
             "payload": {
                 "task_id": task_id,
-                "task_content": _display_name(subplan.plan_name),
+                "task_content": self._display_name(subplan.plan_name),
                 "task_index": task_state.get("task_index", 0),
                 "total_tasks": len(task_states),
                 "parent_request_id": request_id,
@@ -2587,8 +2568,8 @@ class SkillTurboExecutor:
             "is_complete": False,
         }
 
-    @staticmethod
     def _build_task_complete_event(
+        self,
         data: TaskCompleteEventData,
     ) -> dict[str, Any]:
         event = {
@@ -2596,7 +2577,7 @@ class SkillTurboExecutor:
             "channel_id": _channel_id_var.get(),
             "payload": {
                 "task_id": data.task_id,
-                "task_content": _display_name(data.subplan.plan_name),
+                "task_content": self._display_name(data.subplan.plan_name),
                 "status": data.status,
                 "duration_ms": data.duration_ms,
                 "timestamp": data.timestamp,
@@ -2622,6 +2603,8 @@ class SkillTurboExecutor:
         # 导致先启动请求的节点产物(_after_subplan_execute)写入错误 executor 的 holder。
         root = copy.deepcopy(root)
         self._bind_node_callbacks(root)
+        # 从 root 节点读取 skill 提供的显示名映射（可选，缺省为空 dict）。
+        self._display_names = getattr(root, "display_names", None) or {}
         return root
 
     def _load_plan_namespace(self, plan_code: str) -> dict[str, Any]:
