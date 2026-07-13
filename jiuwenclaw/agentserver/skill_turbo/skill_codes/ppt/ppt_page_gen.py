@@ -164,7 +164,7 @@ _DESIGN_RULES_DIGEST = (
     "17. 标题、正文、图表标签、数据来源和数据卡片必须完整显示，禁止裁切或隐藏\n"
     "18. 遮罩层≠底色：`bg-black/50`、`from-black/*`、`bg-gradient-*` 等是遮罩层(overlay)，"
     "必须配合底层 `<img>` 背景图使用以保证文字可读，不是页面/卡片底色；"
-    "页面底色仅用白名单值（商务经典：`bg-white`/`bg-gray4`），"
+    "页面底色仅用风格规范文件中定义的背景色，"
     "禁止用 `bg-black`、`from-black/*`、`bg-brandRedBg` 等作整页背景\n"
 )
 
@@ -200,7 +200,7 @@ _STRUCTURAL_DESIGN_RULES = (
     "4. 防溢出：单行文字不超容器宽度\n"
     "5. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体；"
     "所有页面背景色必须统一，从风格规范中取一致的背景色，禁止部分页面自行使用不同背景色；"
-    "页面背景色必须与风格规范一致（商务经典=白色 `bg-white`），禁止自行使用渐变或深色背景；"
+    "页面背景色必须与风格规范一致，禁止自行使用渐变或深色背景；"
     "封面/结束页如使用图片背景，`from-black/*` 渐变层是遮罩(overlay)非底色，"
     "商务经典风格封面/结束页优先白底方案，不推荐图片+黑色遮罩方案\n"
     "6. 布局：居中排列（`flex flex-col items-center justify-center`），"
@@ -355,7 +355,7 @@ _STRUCTURAL_DENSITY_CHECKLIST = (
 )
 
 _DENSITY_CHECKLIST_DIGEST = (
-    "### 内容密度检查（13 项，全部必须通过）\n"
+    "### 内容密度检查（12 项，全部必须通过）\n"
     "1. 数据可视化：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式且页面为'数据有限'时可降至 2 个数据卡片）\n"
     "2. 核心要点：6-10 个列表项或卡片\n"
     "3. 装饰图标：≥3 个 FontAwesome 图标（class 含 `fa-`）\n"
@@ -372,8 +372,6 @@ _DENSITY_CHECKLIST_DIGEST = (
     "且使用 `document.getElementById('xxx')` 直接传参，禁止变量赋值\n"
     "12. grid-cols 合法性：所有 `grid-cols-[...]` 必须为合法 CSS，不存在无单位裸数字"
     "（正确：`grid-cols-[3fr_2fr]` `grid-cols-[320px_1fr]`，错误：`grid-cols-[3_2]` `grid-cols-[1.2_1]`）\n"
-    "13. 页面底色检查：底色仅在风格白名单内（商务经典：`bg-white`/`bg-gray4`），"
-    "未使用 `bg-black`/`from-black/*`/`bg-gradient-*`/`bg-brandRed*` 作为整页底色\n"
 )
 
 
@@ -905,7 +903,7 @@ def _build_page_prompt(
         "## 5. 任务\n"
         f"你负责生成**第 {page_number} 页** HTML。仅生成该页，直接输出 HTML 原文。"
         "先产出可运行 HTML，再按密度检查清单做小步修正；禁止在写文件前反复做像素级完整规划。"
-        "生成时必须同时满足上述「内容密度检查（11 项）」全部要求，"
+        "生成时必须同时满足上述「内容密度检查（12 项）」全部要求，"
         "确保首次生成即通过密度检查，避免后续重写。"
     )
 
@@ -1114,7 +1112,7 @@ class PageWorkerNode(PlanNode):
                 "调 LLM 生成 HTML；剥 ```html 包裹 → 校验（含 <!DOCTYPE> + ppt-slide 容器）→ write_file 落盘\n"
                 "   - 失败按 gen_retry_round 重试（仅本页）\n"
                 "   - 重试后仍失败 → 进 missing_pages，该页闭环终止\n"
-                "2. 密度判定阶段：调 LLM 做 11 项密度检查（受控 JSON 输出），叠加程序化后置校验（echarts/card 计数）\n"
+                "2. 密度判定阶段：调 LLM 做 12 项密度检查（受控 JSON 输出），叠加程序化后置校验（echarts/card 计数）\n"
                 "   - 检查项：数据可视化 / 核心要点 / 装饰图标 / 空白率 / 数据来源 / 大段文字 / 视觉层级 / 布局正确 / 完整显示 / 内容完整\n"
                 "   - 数据可视化阈值：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式降至 2 个）\n"
                 "3. 不通过 → 修复阶段（按 density_retry_round 轮）：\n"
@@ -1418,7 +1416,7 @@ class PageWorkerNode(PlanNode):
             failed_enum = (
                 "缺数据可视化 / 核心要点不足 / 缺装饰图标 / 空白率过高 / "
                 "缺数据来源 / 大段文字 / 视觉层级混乱 / 布局错误 / "
-                "内容被隐藏 / 核心内容缺失 / grid-cols 非法 / 底色超白名单"
+                "内容被隐藏 / 核心内容缺失 / grid-cols 非法"
             )
 
         prompt = (
