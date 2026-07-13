@@ -292,18 +292,18 @@ check_if_db_up() {
             error "Please set up GATEWAY_DB_PASSWORD or DB_PASSWORD."
         fi
 
-        if [ -z "${DEPLOY_VARS["IDENTITY_DB_USER"]:-}" ]; then
-            DEPLOY_VARS["IDENTITY_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
+        if [ -z "${DEPLOY_VARS["AUTH_SRV_DB_USER"]:-}" ]; then
+            DEPLOY_VARS["AUTH_SRV_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
         fi
-        if [ -z "${DEPLOY_VARS["IDENTITY_DB_USER"]:-}" ]; then
-            error "Please set up IDENTITY_DB_USER or DB_USER."
+        if [ -z "${DEPLOY_VARS["AUTH_SRV_DB_USER"]:-}" ]; then
+            error "Please set up AUTH_SRV_DB_USER or DB_USER."
         fi
 
-        if [ -z "${DEPLOY_VARS["IDENTITY_DB_PASSWORD"]:-}" ]; then
-            DEPLOY_VARS["IDENTITY_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
+        if [ -z "${DEPLOY_VARS["AUTH_SRV_DB_PASSWORD"]:-}" ]; then
+            DEPLOY_VARS["AUTH_SRV_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
         fi
-        if [ -z "${DEPLOY_VARS["IDENTITY_DB_PASSWORD"]:-}" ]; then
-            error "Please set up IDENTITY_DB_PASSWORD or DB_PASSWORD."
+        if [ -z "${DEPLOY_VARS["AUTH_SRV_DB_PASSWORD"]:-}" ]; then
+            error "Please set up AUTH_SRV_DB_PASSWORD or DB_PASSWORD."
         fi
     fi
 }
@@ -507,5 +507,5 @@ check_manager_up_dependency(){
 check_webui_up_dependency() {
     # identity 走 DB（身份库），webui 仅依赖后端 Service DNS（由 ALL_MODULES 顺序保证）
     check_if_db_up
-    info "WEBUI: 统一前端依赖后端 Service DNS 可达；identity 依赖数据库"
+    info "WEB: 统一前端依赖后端 Service DNS 可达；identity 依赖数据库"
 }

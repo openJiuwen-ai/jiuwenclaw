@@ -244,7 +244,6 @@ FEISHU_BOTS="
 **参数说明：**
 - `-n`:  指定部署目标命名空间, 从而实现模块多实例隔离部署，不同命名空间的资源不冲突，默认值：`default`。需要注意的是：操作基础依赖模块时，该参数强制失效，固定部署于 `default` 命名空间。
 - `--web-port`: 自定义Web模块对外访问端口，按需适配环境端口规划（范围：30000-32767）。若未传入该参数，且 `.env.custom` 文件中未配置 WEB_NODE_PORT 环境变量，程序将自动选取可用空闲端口。
-- `--manager-web-port`: 自定义 `Manager Web UI` 对外访问端口（范围：30000-32767）。若未传入该参数，且 `.env.custom` 文件中未配置 `MANAGER_WEB_NODE_PORT` 环境变量，程序将自动选取可用空闲端口。
 - `--render-only`：只渲染模板输出文件至 conf 目录，不操作集群、不校验集群资源
 
 **参数使用示例：**
@@ -502,7 +501,7 @@ Manager 为平台管理模块，提供策略下发和配置、业务实例监控
 注意，这会启动 `jiuwenclaw-manager-server` 后端服务跟 `jiuwenclaw-manager-web` 前端组件，如果不需要 `jiuwenclaw-manager-web` 前端组件的，请在启动前，修改配置文件 `.env.custom` 如下参数：
 ```
 # 控制是否启动 Manager 前端模块
-IS_UP_MANAGER_WEB=false
+IS_UP_MGR_SRV=false
 ```
 
 ### 4.3 部署 Web（可选部署）

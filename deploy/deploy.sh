@@ -19,7 +19,6 @@ source "redis_handler.sh"
 source "postgresql_handler.sh"
 source "minio_handler.sh"
 source "manager_handler.sh"
-source "webui_handler.sh"
 source "ports_handler.sh"
 
 process_up() {

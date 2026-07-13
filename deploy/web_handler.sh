@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo >/dev/null 2>&1
 
-gen_web_file() {
+render_web_files() {
     local template_file="${CONFIG["WEB_TEMPLATE_FILE"]}"
     local file="${CONFIG["WEB_FILE"]}"
     local obs_type="${DEPLOY_VARS["OBS_TYPE"]}"
+
+    ensure_available_port "WEB_NODE_PORT"
 
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
     if [ "${obs_type}" == "minio" ]; then
@@ -47,28 +49,39 @@ gen_web_file() {
     fi
 
     add_resource_if_set "WEB" "${file}"
-}
-
-render_web_files() {
-    ensure_available_port "WEB_NODE_PORT"
-    gen_web_file
+    add_resource_if_set "AUTH_SRV" "${file}"
+    add_resource_if_set "MGR_SRV" "${file}"
+    add_resource_if_set "USER_SRV" "${file}"
 }
 
 deploy_web() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    local auth_name="${DEPLOY_VARS["AUTH_SRV_NAME"]}"
+    local usr_srv_name="${DEPLOY_VARS["USER_SRV_NAME"]}"
+    local mgr_srv_name="${DEPLOY_VARS["MGR_SRV_NAME"]}"
     local web_name="${DEPLOY_VARS["WEB_NAME"]}"
     local file="${CONFIG["WEB_FILE"]}"
 
     exec_cmd kubectl apply -f ${file}
+    wait_k8s_resource_ready "deployment" "${auth_name}" "${namespace}"
+    wait_k8s_resource_ready "deployment" "${usr_srv_name}" "${namespace}"
+    wait_k8s_resource_ready "deployment" "${mgr_srv_name}" "${namespace}"
     wait_k8s_resource_ready "deployment" "${web_name}" "${namespace}"
     success "WEB_NODE_PORT: ${DEPLOY_VARS["WEB_NODE_PORT"]}"
 }
 
+
 uninstall_web() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    local auth_name="${DEPLOY_VARS["AUTH_SRV_NAME"]}"
+    local usr_srv_name="${DEPLOY_VARS["USER_SRV_NAME"]}"
+    local mgr_srv_name="${DEPLOY_VARS["MGR_SRV_NAME"]}"
     local web_name="${DEPLOY_VARS["WEB_NAME"]}"
     local file="${CONFIG["WEB_FILE"]}"
 
     exec_cmd kubectl delete -f ${file} --ignore-not-found=true
     wait_pod_terminated "${web_name}" "${namespace}"
+    wait_pod_terminated "${mgr_srv_name}" "${namespace}"
+    wait_pod_terminated "${usr_srv_name}" "${namespace}"
+    wait_pod_terminated "${auth_name}" "${namespace}"
 }
