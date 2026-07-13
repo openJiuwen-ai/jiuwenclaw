@@ -2,7 +2,7 @@
 
 JiuwenClaw's **Team Skills** is a standardized capability package designed for multi-Agent collaboration. It is not a capability patch for a single Agent — rather, it captures a proven team collaboration workflow as a reusable, replicable, and evolvable team collaboration SOP, so that complex tasks no longer need to be improvised from scratch every time.
 
----
+***
 
 ## 1. Concept Overview
 
@@ -18,14 +18,14 @@ In traditional AI Agent usage, when facing complex tasks, users often need to ma
 
 ### 1.2 Team Skills vs. Agent Skills
 
-| Dimension | Agent Skill | Team Skill |
-|-----------|-------------|------------|
-| **Positioning** | Capability extension for a single Agent | Collaboration pattern encapsulation for a multi-Agent team |
-| **Focus** | How a single Agent does things | How a team of Agents works together |
-| **Structure** | Single `SKILL.md` file | Directory structure (SKILL.md + roles + workflow + bind + dependencies) |
-| **Use cases** | Single tasks that one Agent can complete | Complex tasks requiring multi-role collaboration and workflow reuse |
+| Dimension         | Agent Skill                                     | Team Skill                                                                   |
+| ----------------- | ----------------------------------------------- | ---------------------------------------------------------------------------- |
+| **Positioning**   | Capability extension for a single Agent         | Collaboration pattern encapsulation for a multi-Agent team                   |
+| **Focus**         | How a single Agent does things                  | How a team of Agents works together                                          |
+| **Structure**     | Single `SKILL.md` file                          | Directory structure (SKILL.md + roles + workflow + bind + dependencies)      |
+| **Use cases**     | Single tasks that one Agent can complete        | Complex tasks requiring multi-role collaboration and workflow reuse          |
 | **Collaboration** | No collaboration — Agent executes independently | Pre-defined role assignments, collaboration workflow, and exception handling |
-| **Reusability** | Capability is reusable | Collaboration workflow is reusable |
+| **Reusability**   | Capability is reusable                          | Collaboration workflow is reusable                                           |
 
 Simple analogy: An Agent Skill is like giving one person a professional skill (e.g., "can do data analysis"), while a Team Skill is like establishing a collaboration SOP for a team (e.g., "how a research team goes from investigation to writing to review to produce a report").
 
@@ -37,7 +37,7 @@ Team Skills are not limited to the JiuwenClaw platform. Their core design philos
 - The standardized 5-file structure provides a foundation for cross-framework interoperability.
 - Community-contributed Team Skills can be shared across different platforms, building a shared team skill ecosystem together.
 
----
+***
 
 ## 2. Structure
 
@@ -65,15 +65,17 @@ team-skill-name/
 
 ### 2.2 Key Files
 
-| File | Purpose | Required |
-|------|---------|----------|
-| `SKILL.md` | Team skill entry file; defines metadata such as skill name, description, applicable scenarios, role list, and file index | Yes |
-| `roles/*.md` | Role definition files; each file describes one Agent role's responsibilities, capabilities, and behavioral norms | Yes |
-| `workflow.md` | Collaboration workflow definition; describes interaction sequences, task flows, and decision nodes between roles (includes mermaid flowchart) | Yes |
-| `bind.md` | Boundary and exception handling rules; defines resource constraints, behavioral constraints, and failure handling strategies | Yes |
-| `dependencies.yaml` | External dependency declarations; lists tools, other skills, etc. required for the skill to run | Yes |
+| File                | Purpose                                                                                                                                       | Required |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| `SKILL.md`          | Team skill entry file; defines metadata such as skill name, description, applicable scenarios, role list, and file index                      | Yes      |
+| `roles/*.md`        | Role definition files; each file describes one Agent role's responsibilities, capabilities, and behavioral norms                              | Yes      |
+| `workflow.md`       | Collaboration workflow definition; describes interaction sequences, task flows, and decision nodes between roles (includes mermaid flowchart) | Yes      |
+| `bind.md`           | Boundary and exception handling rules; defines resource constraints, behavioral constraints, and failure handling strategies                  | Yes      |
+| `dependencies.yaml` | External dependency declarations; lists tools, other skills, etc. required for the skill to run                                               | Yes      |
 
 ### 2.3 Core File Details
+
+> This section uses the **medical consultation team scenario** as an example to walk through each file of a Swarm Skill. This skill's main function is to organize multi-disciplinary medical experts (internist, surgeon, radiologist) for parallel evaluation of complex cases via a coordinator, and to integrate their opinions into structured treatment recommendations.
 
 #### SKILL.md — Team Entry Point
 
@@ -148,7 +150,7 @@ This team skill uses a specialization pipeline pattern (Pattern C) to organize m
 - **`roles`**: Role list; **at least 2 roles required**, each role must include `id` (role identifier), `purpose` (one-line responsibility description, ≤150 characters), `skills` (dependent skill list), and `tools` (dependent tool list).
 - **`description`**: Skill description following conciseness principles (≤4 lines, ≤500 characters), using WHAT / WHEN / NOT three-line structure.
 
-#### roles/*.md — Role Definitions
+#### roles/\*.md — Role Definitions
 
 Each role file defines one Agent's responsibilities and behavior, containing 5 mandatory sections:
 
@@ -160,7 +162,7 @@ Each role file defines one Agent's responsibilities and behavior, containing 5 m
 
 Example:
 
-```markdown
+````markdown
 ---
 role_name: coordinator
 description: Consultation coordinator, responsible for organizing experts and consolidating opinions
@@ -217,9 +219,9 @@ You are a consultation coordinator. Your responsibilities are:
 6. Output a structured treatment recommendation report
 
 You do not provide direct medical diagnostic opinions; you ensure all expert opinions are fully expressed and integrated.
-```
+````
 
-#### workflow.md — Collaboration Workflow
+#### workflow\.md — Collaboration Workflow
 
 Defines interaction sequences and task flows between roles, containing 3 mandatory sections:
 
@@ -229,7 +231,7 @@ Defines interaction sequences and task flows between roles, containing 3 mandato
 
 Example:
 
-```markdown
+````markdown
 # Consultation Collaboration Workflow
 
 ## Overview
@@ -286,7 +288,7 @@ graph TD
 - All invited experts have submitted opinions (or missing opinions are noted)
 - Areas of disagreement have been identified and handled
 - The final report is structured and includes comprehensive treatment recommendations
-```
+````
 
 #### bind.md — Boundary and Exception Handling
 
@@ -360,16 +362,16 @@ tools:
 
 **Field Descriptions**:
 
-| Field | Segment | Required | Description | Example Values |
-|-------|---------|----------|-------------|----------------|
-| `name` | skills, tools | Yes | Skill/tool name | `web-research`, `readFile` |
-| `source` | skills | Yes | Skill source | `local` (local), `hub` (skill center) |
-| `required` | skills, tools | Yes | Whether required | `true` (required), `false` (optional) |
-| `purpose` | skills, tools | Yes | Purpose description (≤150 chars) | `Assist experts in searching latest medical literature` |
+| Field      | Segment       | Required | Description                      | Example Values                                          |
+| ---------- | ------------- | -------- | -------------------------------- | ------------------------------------------------------- |
+| `name`     | skills, tools | Yes      | Skill/tool name                  | `web-research`, `readFile`                              |
+| `source`   | skills        | Yes      | Skill source                     | `local` (local), `hub` (skill center)                   |
+| `required` | skills, tools | Yes      | Whether required                 | `true` (required), `false` (optional)                   |
+| `purpose`  | skills, tools | Yes      | Purpose description (≤150 chars) | `Assist experts in searching latest medical literature` |
 
 > **Note**: Even when there are no dependencies, you must explicitly write `skills: []` and `tools: []` (an empty list signals "checked, confirmed no dependency of this type" — different from omitting the segment, which is a spec violation).
 
----
+***
 
 ## 3. Usage Guide
 
@@ -388,13 +390,13 @@ You can also search and install via command line:
 
 ```
 # Search Team Skills
-/teamskills search "medical consultation"
+/swarmskills search "medical consultation"
 
 # View Team Skill details
-/teamskills info <asset_id> --version 1.0.0
+/swarmskills info <asset_id> --version 1.0.0
 
 # Install a Team Skill
-/teamskills install <asset_id> --version 1.0.0
+/swarmskills install <asset_id> --version 1.0.0
 ```
 
 > **Tip**: `<asset_id>` is the unique skill identifier on Team Skills Hub (e.g., `sk-123`), shown in search results.
@@ -412,22 +414,22 @@ After installation, the Team Skill automatically appears in the available skills
 
 Team Skills are particularly suited for the following scenarios:
 
-| Scenario Characteristic | Description | Example |
-|-------------------------|-------------|---------|
-| Long task chains | Complex tasks requiring multiple steps and stages | From research to writing to review to produce a research report |
-| Clear role division | Tasks decomposable into sub-tasks across different professional domains | Multi-disciplinary medical consultation requiring internal medicine, surgery, and radiology experts |
-| Desire to reuse proven workflows | Don't want to redesign collaboration every time | Regularly executed code reviews, security audits |
-| Structured output needed | Need standardized reports, proposals, or recommendations | Treatment recommendation reports, research reports, audit reports |
+| Scenario Characteristic          | Description                                                             | Example                                                                                             |
+| -------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Long task chains                 | Complex tasks requiring multiple steps and stages                       | From research to writing to review to produce a research report                                     |
+| Clear role division              | Tasks decomposable into sub-tasks across different professional domains | Multi-disciplinary medical consultation requiring internal medicine, surgery, and radiology experts |
+| Desire to reuse proven workflows | Don't want to redesign collaboration every time                         | Regularly executed code reviews, security audits                                                    |
+| Structured output needed         | Need standardized reports, proposals, or recommendations                | Treatment recommendation reports, research reports, audit reports                                   |
 
 **Comparison: When to use Agent Skill vs. Team Skill**
 
-| Situation | Recommended Choice | Reason |
-|-----------|-------------------|--------|
-| Single task, one Agent can complete | Agent Skill | No multi-role collaboration needed; Team Skill adds unnecessary overhead |
-| Multi-step reasoning needed, but no role division | Agent Skill + workflow | The process can be executed step-by-step by a single Agent |
-| Multiple professional roles need to collaborate | **Team Skill** | Different roles' professional perspectives are irreplaceable |
-| Fixed task workflow, needs reuse | **Team Skill** | Predefined workflows can be reused; quality is more stable |
-| Adversarial checking needed (e.g., code review) | **Team Skill** | Single Agent role-playing multiple perspectives tends to produce convergence bias |
+| Situation                                         | Recommended Choice     | Reason                                                                            |
+| ------------------------------------------------- | ---------------------- | --------------------------------------------------------------------------------- |
+| Single task, one Agent can complete               | Agent Skill            | No multi-role collaboration needed; Team Skill adds unnecessary overhead          |
+| Multi-step reasoning needed, but no role division | Agent Skill + workflow | The process can be executed step-by-step by a single Agent                        |
+| Multiple professional roles need to collaborate   | **Team Skill**         | Different roles' professional perspectives are irreplaceable                      |
+| Fixed task workflow, needs reuse                  | **Team Skill**         | Predefined workflows can be reused; quality is more stable                        |
+| Adversarial checking needed (e.g., code review)   | **Team Skill**         | Single Agent role-playing multiple perspectives tends to produce convergence bias |
 
 ### 3.3 Key Usage Principles
 
@@ -435,17 +437,17 @@ The core value of Team Skills lies in: **choosing the right Team Skill and letti
 
 Three key principles when using Team Skills:
 
-1. **Choose the right Team Skill**: Select a team skill that matches your task characteristics. If existing skills don't perfectly match, you can modify an existing skill or create a new one using `teamskill-creator`.
+1. **Choose the right Team Skill**: Select a team skill that matches your task characteristics. If existing skills don't perfectly match, you can modify an existing skill or create a new one using `swarmskill-creator`.
 2. **Provide clear input**: Provide complete task information as required by the skill. Clearer input leads to higher collaboration output quality.
 3. **Understand the output structure**: Know the skill's output format for easier downstream processing and usage.
 
 Three advantages of Team Skills over ad-hoc team assembly:
 
-| Advantage | Ad-hoc Assembly | Team Skill |
-|-----------|----------------|------------|
-| Role assignment rules | Need to reassign every time; may miss or confuse | Pre-defined, stable and reliable |
-| Collaboration sequence | May miss critical steps | workflow.md explicitly defines the sequence |
-| Exception handling | Ad-hoc decisions, inconsistent | bind.md provides unified strategies |
+| Advantage              | Ad-hoc Assembly                                  | Team Skill                                   |
+| ---------------------- | ------------------------------------------------ | -------------------------------------------- |
+| Role assignment rules  | Need to reassign every time; may miss or confuse | Pre-defined, stable and reliable             |
+| Collaboration sequence | May miss critical steps                          | workflow\.md explicitly defines the sequence |
+| Exception handling     | Ad-hoc decisions, inconsistent                   | bind.md provides unified strategies          |
 
 ### 3.4 Cross-Framework Reuse Potential
 
@@ -456,7 +458,7 @@ Team Skills use a standardized structure definition (5-file specification) with 
 - Facilitates migration and sharing of team collaboration experience across different frameworks
 - Team Skills Hub serves as a community sharing platform, promoting cross-framework skill ecosystem development
 
----
+***
 
 ## 4. Case Study
 
@@ -523,6 +525,10 @@ Please organize an expert consultation and provide treatment recommendations.
 
 **Phase 4: Output Results**
 
+The screenshot below shows the structured consultation report output by the medical consultation Team Skill in JiuwenClaw:
+
+![Medical Consultation Report](./medical_consultation_report.png)
+
 ```markdown
 # Consultation Report #2024-001
 
@@ -556,15 +562,19 @@ Consultation time: 2024-01-15 14:30
 Participating experts: Cardiology Dr. Zhang, Respiratory Dr. Li, Radiology Dr. Wang
 ```
 
+The screenshot below shows the actual execution result of the medical consultation Team Skill in JiuwenClaw, including the completed task list and generated consultation report file:
+
+![Medical Consultation Result](./medical-consultation-result.png)
+
 #### Team Skills Advantage Demonstration
 
-| Advantage | Ad-hoc Assembly | Team Skill |
-|-----------|----------------|------------|
-| Role assignment | Need to reassign who evaluates what every time | Pre-defined roles (cardiology/respiratory/radiology), stable and reliable |
-| Collaboration sequence | May miss steps (e.g., forgetting to integrate disagreements) | workflow.md explicitly defines: analyze → evaluate → integrate → output |
-| Exception handling | What if an expert times out? Ad-hoc decision | bind.md unified strategy: skip and note missing opinion |
-| Output format | Different format every time | Structured, standardized report |
-| Reusability | Next consultation starts from scratch again | Same Team Skill can be reused |
+| Advantage              | Ad-hoc Assembly                                              | Team Skill                                                                |
+| ---------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| Role assignment        | Need to reassign who evaluates what every time               | Pre-defined roles (cardiology/respiratory/radiology), stable and reliable |
+| Collaboration sequence | May miss steps (e.g., forgetting to integrate disagreements) | workflow\.md explicitly defines: analyze → evaluate → integrate → output  |
+| Exception handling     | What if an expert times out? Ad-hoc decision                 | bind.md unified strategy: skip and note missing opinion                   |
+| Output format          | Different format every time                                  | Structured, standardized report                                           |
+| Reusability            | Next consultation starts from scratch again                  | Same Team Skill can be reused                                             |
 
 ### 4.2 Case: Research and PPT Writing Team
 
@@ -616,31 +626,33 @@ including market data, technology trends, and future outlook.
 [coordinator] Outputs final PPT content
 ```
 
----
+***
 
 ## 5. Creation Guide
 
-### 5.1 Creating New Team Skills with teamskill-creator
+### 5.1 Creating New Team Skills with swarmskill-creator
 
-JiuwenClaw provides the `teamskill-creator` skill to help users create, convert, or modify Team Skills. It includes standardized templates, decision trees, and an automated validator to ensure created Team Skills comply with the specification.
+JiuwenClaw provides the `swarmskill-creator` skill to help users create, convert, or modify Team Skills. It includes standardized templates, decision trees, and an automated validator to ensure created Team Skills comply with the specification.
+
+![swarmskill-creator](./swarmskill.png)
 
 **Getting and Installing**:
 
-`teamskill-creator` is a built-in skill in JiuwenClaw and requires no additional installation. If the skill is not available in your environment, you can obtain it through:
+`swarmskill-creator` is a built-in skill in JiuwenClaw and requires no additional installation. If the skill is not available in your environment, you can obtain it through:
 
 ```bash
 # Search and install from skill center
-/skills search teamskill-creator
-/skills install teamskill-creator
+/skills search swarmskill-creator
+/skills install swarmskill-creator
 ```
 
 **Three modes**:
 
-| Mode | Use Case | Output |
-|------|----------|--------|
-| **CREATE** | Create a new team skill from scratch | New `<teamskill-name>/` directory with the complete 5-file set |
-| **CONVERT** | Convert an existing single-Agent Skill to a Team Skill | Transformed `<teamskill-name>/` directory + delta report |
-| **MODIFY** | Modify an existing Team Skill (add/remove roles, adjust workflow, etc.) | Updated files |
+| Mode        | Use Case                                                                | Output                                                          |
+| ----------- | ----------------------------------------------------------------------- | --------------------------------------------------------------- |
+| **CREATE**  | Create a new team skill from scratch                                    | New `<swarmskill-name>/` directory with the complete 5-file set |
+| **CONVERT** | Convert an existing single-Agent Skill to a Team Skill                  | Transformed `<swarmskill-name>/` directory + delta report       |
+| **MODIFY**  | Modify an existing Team Skill (add/remove roles, adjust workflow, etc.) | Updated files                                                   |
 
 #### Creation Workflow Example
 
@@ -660,12 +672,12 @@ If none apply → recommend using a single-Agent Skill instead.
 
 Choose a collaboration pattern based on task characteristics:
 
-| Pattern | Use Case | Role Count | Inter-role Visibility |
-|---------|----------|------------|----------------------|
-| A. Adversarial / Cross-check | Blind spot problems | 2-4 | Not visible (isolation is the value) |
-| B. Parallel decomposition | Independent sub-tasks | 2-N | Not visible until integration |
-| C. Specialization pipeline | Sequential expert stages | 3-5 | Each stage sees prior stage output |
-| Mixed | Multiple justifications stack | 4-6 | Pattern-by-stage |
+| Pattern                      | Use Case                      | Role Count | Inter-role Visibility                |
+| ---------------------------- | ----------------------------- | ---------- | ------------------------------------ |
+| A. Adversarial / Cross-check | Blind spot problems           | 2-4        | Not visible (isolation is the value) |
+| B. Parallel decomposition    | Independent sub-tasks         | 2-N        | Not visible until integration        |
+| C. Specialization pipeline   | Sequential expert stages      | 3-5        | Each stage sees prior stage output   |
+| Mixed                        | Multiple justifications stack | 4-6        | Pattern-by-stage                     |
 
 The Research and Report Writing Team fits **C. Specialization pipeline** pattern (research → writing → review, sequential stages with quality gates).
 
@@ -688,7 +700,7 @@ research-report-team/
 
 Write `workflow.md` with mermaid flowchart, detailed steps, and acceptance criteria:
 
-```markdown
+````markdown
 ## Overview
 
 ```mermaid
@@ -701,8 +713,7 @@ graph TD
     W --> RV[reviewer reviews]
     RV -->|Pass| OUT[Output final report]
     RV -->|Needs revision| W
-```
-```
+````
 
 **Step 5: Write boundary and exception handling**
 
@@ -744,19 +755,20 @@ Run the automated validator to ensure the Team Skill complies with the specifica
 
 ```bash
 # Method 1: Use TUI built-in command (recommended)
-/teamskills validate path/to/research-report-team/ --type teamskills
+/swarmskills validate path/to/research-report-team/ --type swarmskills
 
 # Method 2: Use standalone validation script
-python scripts/validate_teamskill.py path/to/research-report-team/
+python scripts/validate_swarmskill.py path/to/research-report-team/
 ```
 
 The validator checks:
+
 - All 5 files are present
 - Frontmatter required fields are complete (`name`, `kind`, `roles`)
 - `roles` has at least 2 entries, each with `id` and `purpose`, `id` must not repeat
 - Role file names match `roles[].id`
 - Each role file contains 5 mandatory sections
-- workflow.md contains a mermaid diagram
+- workflow\.md contains a mermaid diagram
 - bind.md contains 3 mandatory sections
 - dependencies.yaml contains `skills` and `tools` segments
 - Skills/tools declared in SKILL.md appear in dependencies.yaml
@@ -765,26 +777,26 @@ The validator checks:
 
 ### 5.2 Modifying an Existing Team Skill
 
-Use `teamskill-creator`'s MODIFY mode to modify existing Team Skills:
+Use `swarmskill-creator`'s MODIFY mode to modify existing Team Skills:
 
-| Change Type | Stages to Re-run | Files to Update |
-|-------------|-----------------|----------------|
-| Edit role Identity / Boundary / Schema | Stage 2 (affected role only) | `roles/<id>.md` |
-| Add or remove a role | Stage 1a + 2 + 3 + 4 + 5 | All 5 files |
-| Change workflow steps / topology | Stage 3 | `workflow.md` + `bind.md` (if constraints change) |
-| Change bind constraints | Stage 4 | `bind.md` |
-| Change dependencies | Stage 2 (auto-match) + 5 | `dependencies.yaml` + `SKILL.md` frontmatter |
+| Change Type                            | Stages to Re-run             | Files to Update                                   |
+| -------------------------------------- | ---------------------------- | ------------------------------------------------- |
+| Edit role Identity / Boundary / Schema | Stage 2 (affected role only) | `roles/<id>.md`                                   |
+| Add or remove a role                   | Stage 1a + 2 + 3 + 4 + 5     | All 5 files                                       |
+| Change workflow steps / topology       | Stage 3                      | `workflow.md` + `bind.md` (if constraints change) |
+| Change bind constraints                | Stage 4                      | `bind.md`                                         |
+| Change dependencies                    | Stage 2 (auto-match) + 5     | `dependencies.yaml` + `SKILL.md` frontmatter      |
 
 **Important**: Regardless of edit size, Stage 7 (validation) must always be executed.
 
 ### 5.3 Converting a Single-Agent Skill to a Team Skill
 
-Use `teamskill-creator`'s CONVERT mode to transform an existing single-Agent Skill into a Team Skill:
+Use `swarmskill-creator`'s CONVERT mode to transform an existing single-Agent Skill into a Team Skill:
 
 1. **Read the source SKILL.md** and identify natural role boundaries:
    - Find embedded multi-persona setups (e.g., "act as Persona 1 / Persona 2 / Persona 3")
    - Find sequential stages with quality gates (e.g., "first do X, then validate Y, then produce Z")
-   - Find checklists that branch by category (e.g., "[ ] security [ ] performance [ ] readability")
+   - Find checklists that branch by category (e.g., "\[ ] security \[ ] performance \[ ] readability")
 2. **Articulate the conversion value**: What is lost in single-Agent form? This becomes the Team Skill's "why"
 3. **Continue from Step 2** following the CREATE workflow
 
@@ -796,10 +808,10 @@ After creation, you can share your Team Skill with the community to build the te
 
 ```bash
 # Method 1: Use TUI built-in command (recommended)
-/teamskills validate path/to/<teamskill-name>/ --type teamskills
+/swarmskills validate path/to/<swarmskill-name>/ --type swarmskills
 
 # Method 2: Use standalone validation script
-python scripts/validate_teamskill.py path/to/<teamskill-name>/
+python scripts/validate_swarmskill.py path/to/<swarmskill-name>/
 ```
 
 Ensure exit code is 0 (compliant).
@@ -807,6 +819,7 @@ Ensure exit code is 0 (compliant).
 **Step 2: Upload and publish**
 
 In JiuwenClaw's "Skills" panel:
+
 1. Click "Team Skills Hub"
 2. Select the Team Skill to publish
 3. Click "Upload"
@@ -816,55 +829,56 @@ You can also publish via command line:
 
 ```
 # Publish to Team Skills Hub (requires authentication)
-/teamskills publish path/to/<teamskill-name> --version 1.0.0 --token <TOKEN>
+/swarmskills publish path/to/<swarmskill-name> --version 1.0.0 --token <TOKEN>
 
 # To overwrite an existing version, add --force
-/teamskills publish path/to/<teamskill-name> --version 1.0.1 --token <TOKEN> --force
+/swarmskills publish path/to/<swarmskill-name> --version 1.0.1 --token <TOKEN> --force
 ```
 
-> **Authentication note**: Publish and delete operations require `--token` (user Token) or `--system-token` (system Token), and you must choose exactly one. You can pre-configure your token via `/teamskills config --token <TOKEN>` to avoid entering it manually each time.
+> **Authentication note**: Publish and delete operations require `--token` (user Token) or `--system-token` (system Token), and you must choose exactly one. You can pre-configure your token via `/swarmskills config --token <TOKEN>` to avoid entering it manually each time.
 
 **Step 3: Maintain and update**
 
 After publishing, you can continuously iterate:
+
 - Re-validate after modifying roles, workflows, or constraints
 - Re-publish after updating the version number
 - Optimize collaboration workflows based on community feedback
 
 ### 5.5 Best Practices
 
-| Practice | Description |
-|----------|-------------|
-| Appropriate role granularity | Roles should not be too fine (increases coordination cost) or too coarse (loses division advantage) |
-| Clear and concise workflow | Avoid overly complex collaboration workflows; maintain understandability |
-| Explicit boundary conditions | Cover common exception scenarios in bind.md |
-| Provide examples | Include usage examples in examples/ to reduce learning cost |
-| Adversarial mottos | Each role's motto should reflect a unique perspective, preventing role convergence |
-| Validation is mandatory | Run the validator after every creation or modification |
-| Description follows conciseness principles | SKILL.md description ≤4 lines, ≤500 characters, using WHAT / WHEN / NOT structure |
+| Practice                                   | Description                                                                                         |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| Appropriate role granularity               | Roles should not be too fine (increases coordination cost) or too coarse (loses division advantage) |
+| Clear and concise workflow                 | Avoid overly complex collaboration workflows; maintain understandability                            |
+| Explicit boundary conditions               | Cover common exception scenarios in bind.md                                                         |
+| Provide examples                           | Include usage examples in examples/ to reduce learning cost                                         |
+| Adversarial mottos                         | Each role's motto should reflect a unique perspective, preventing role convergence                  |
+| Validation is mandatory                    | Run the validator after every creation or modification                                              |
+| Description follows conciseness principles | SKILL.md description ≤4 lines, ≤500 characters, using WHAT / WHEN / NOT structure                   |
 
----
+***
 
 ## Appendix
 
 ### Quick Reference
 
-| Operation | Command/Method |
-|-----------|---------------|
-| Search Team Skills | `/teamskills search <keyword>` |
-| View Team Skill details | `/teamskills info <asset_id> --version <x.y.z>` |
-| Install a Team Skill | `/teamskills install <asset_id> --version <x.y.z>` |
-| List installed skills | `/teamskills list` |
-| Uninstall a Team Skill | `/teamskills uninstall <name>` |
-| Create Team Skill scaffold | `/teamskills init <name> --type teamskills` |
-| Validate Team Skill | `/teamskills validate <path> --type teamskills` |
-| Pack Team Skill | `/teamskills pack <path> --output <dir>` |
-| Configure Hub URL and Token | `/teamskills config --market-url <url> --token <TOKEN>` |
-| Publish to Team Skills Hub | `/teamskills publish <path> --version <x.y.z> --token <TOKEN>` |
-| Delete skill from Hub | `/teamskills delete <skill_id> --version <x.y.z> --token <TOKEN>` |
-| Create with teamskill-creator | Use `teamskill-creator` skill's CREATE mode |
-| Modify with teamskill-creator | Use `teamskill-creator` skill's MODIFY mode |
-| Convert with teamskill-creator | Use `teamskill-creator` skill's CONVERT mode |
+| Operation                       | Command/Method                                                     |
+| ------------------------------- | ------------------------------------------------------------------ |
+| Search Team Skills              | `/swarmskills search <keyword>`                                    |
+| View Team Skill details         | `/swarmskills info <asset_id> --version <x.y.z>`                   |
+| Install a Team Skill            | `/swarmskills install <asset_id> --version <x.y.z>`                |
+| List installed skills           | `/swarmskills list`                                                |
+| Uninstall a Team Skill          | `/swarmskills uninstall <name>`                                    |
+| Create Team Skill scaffold      | `/swarmskills init <name> --type swarmskills`                      |
+| Validate Team Skill             | `/swarmskills validate <path> --type swarmskills`                  |
+| Pack Team Skill                 | `/swarmskills pack <path> --output <dir>`                          |
+| Configure Hub URL and Token     | `/swarmskills config --market-url <url> --token <TOKEN>`           |
+| Publish to Team Skills Hub      | `/swarmskills publish <path> --version <x.y.z> --token <TOKEN>`    |
+| Delete skill from Hub           | `/swarmskills delete <skill_id> --version <x.y.z> --token <TOKEN>` |
+| Create with swarmskill-creator  | Use `swarmskill-creator` skill's CREATE mode                       |
+| Modify with swarmskill-creator  | Use `swarmskill-creator` skill's MODIFY mode                       |
+| Convert with swarmskill-creator | Use `swarmskill-creator` skill's CONVERT mode                      |
 
 ### Frequently Asked Questions
 
@@ -878,17 +892,17 @@ A: A Team Skill is appropriate when: (1) a single Agent role-playing multiple pe
 
 **Q: Can I modify an installed Team Skill?**
 
-A: Yes. Use `teamskill-creator`'s MODIFY mode to edit the local copy. After modification, re-run the validator to confirm compliance.
+A: Yes. Use `swarmskill-creator`'s MODIFY mode to edit the local copy. After modification, re-run the validator to confirm compliance.
 
 **Q: Are all 5 files in the Team Skill structure mandatory?**
 
-A: Yes. SKILL.md, roles/, workflow.md, bind.md, and dependencies.yaml are all required files. The validator checks that all 5 files are present. Extension directories like `examples/`, `templates/`, and `assets/` are optional.
+A: Yes. SKILL.md, roles/, workflow\.md, bind.md, and dependencies.yaml are all required files. The validator checks that all 5 files are present. Extension directories like `examples/`, `templates/`, and `assets/` are optional.
 
 **Q: What is the default Team Skills Hub URL?**
 
-A: The default URL is `https://teamskills.openjiuwen.com`, which can be overridden via the `TEAM_SKILLS_HUB_BASE_URL` environment variable.
+A: The default URL is `https://swarmskills.openjiuwen.com`, which can be overridden via the `TEAM_SKILLS_HUB_BASE_URL` environment variable.
 
----
+***
 
 *Document version: v2.0*
 *Target audience: JiuwenClaw users, skill developers*
