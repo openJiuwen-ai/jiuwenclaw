@@ -956,6 +956,121 @@
     "autoManaged": "Auto-managed",
     "autoManagedHint": "This task is auto-created/deleted by the proactive recommendation toggle (Settings → Proactive Recommendation). Only the cron expression and timezone can be edited here; other fields (name/status/description/offset/channel) are read-only. To remove it, turn off the toggle in Settings.",
     "autoManagedToggleDisabled": "The toggle of an auto-managed task is controlled by Settings → Proactive Recommendation and cannot be switched here.",
+    "pageTitle": "Scheduled Tasks",
+    "pageSubtitle": "Configure automated tasks that Jiuwen runs on schedule.",
+    "actions": {
+      "confirm": "Confirm"
+    },
+    "createMenu": {
+      "trigger": "Create",
+      "manual": "Create manually",
+      "viaChat": "Create via chat",
+      "viaChatPlaceholder": "Create via chat: this flow is designed by another teammate. Coming soon."
+    },
+    "stats": {
+      "total": "Total tasks ({{count}})"
+    },
+    "tabs": {
+      "list": "Tasks",
+      "template": "Templates",
+      "history": "Run History"
+    },
+    "search": {
+      "placeholder": "Search"
+    },
+    "table": {
+      "name": "Name",
+      "project": "Project",
+      "schedule": "Scheduled",
+      "status": "Status",
+      "timezone": "Timezone",
+      "channel": "Channel",
+      "actions": "Actions",
+      "noProject": "–",
+      "stop": "Stop",
+      "edit": "Edit",
+      "more": "More",
+      "history": "Run history"
+    },
+    "empty": {
+      "createButton": "Create scheduled task",
+      "templateSectionTitle": "Templates",
+      "templateMore": "More"
+    },
+    "history": {
+      "comingSoon": "Coming soon"
+    },
+    "confirm": {
+      "deleteTitle": "Delete",
+      "deleteMessage": "Delete task \"{{name}}\"?",
+      "stopTitle": "Stop",
+      "stopMessage": "Stop task \"{{name}}\"?"
+    },
+    "drawer": {
+      "titleCreate": "Create scheduled task",
+      "titleEdit": "Edit",
+      "titleTemplate": "Create from template",
+      "switchToManual": "Create manually",
+      "switchToTemplate": "Create from template",
+      "fieldName": "Task name",
+      "fieldProject": "Project (optional)",
+      "fieldModel": "Model",
+      "fieldDescription": "Description",
+      "fieldChannel": "Channel",
+      "fieldTimezone": "Timezone",
+      "fieldEffectiveDate": "Effective date (optional)",
+      "effectiveDateComingSoon": "Coming soon — your selection does not take effect yet",
+      "fieldEnabled": "Enabled",
+      "placeholderInput": "Enter",
+      "placeholderSelect": "Select",
+      "placeholderEffectiveDate": "Select effective date"
+    },
+    "schedule": {
+      "title": "Schedule",
+      "help": "Choose how often this task runs",
+      "modePeriod": "Recurring",
+      "modeInterval": "Interval",
+      "modeOnce": "Once",
+      "modeCronExpr": "Cron expression",
+      "modeComingSoon": "Coming soon",
+      "cronExprPlaceholder": "e.g. 0 0 9 * * ? *",
+      "cronExprHelp": "7-field Quartz: second minute hour day month weekday year"
+    },
+    "modelPicker": {
+      "configured": "Configured",
+      "empty": "No models available yet, add one in the config panel first"
+    },
+    "datePicker": {
+      "prevYear": "Previous year",
+      "prevMonth": "Previous month",
+      "nextMonth": "Next month",
+      "nextYear": "Next year",
+      "yearMonthHeader": "{{month}}/{{year}}",
+      "monthItem": "{{month}}",
+      "weekday": {
+        "sun": "Su",
+        "mon": "Mo",
+        "tue": "Tu",
+        "wed": "We",
+        "thu": "Th",
+        "fri": "Fr",
+        "sat": "Sa"
+      }
+    },
+    "template": {
+      "trend": {
+        "title": "Daily industry news",
+        "description": "Every day at 8am, send me the latest industry news for [your industry, e.g. customer service / finance / new energy]"
+      },
+      "newspaper": {
+        "title": "Market sentiment tracking",
+        "description": "Every day at noon, search and summarize the latest news and sentiment about [a company or product] from the past 24 hours"
+      },
+      "briefcase": {
+        "title": "Weekly work report",
+        "description": "Every Friday at 6pm, generate my weekly report based on this week's chats, docs and sheets, including progress and next week's plan"
+      }
+    },
     "status": {
       "enabled": "Enabled",
       "disabled": "Disabled",

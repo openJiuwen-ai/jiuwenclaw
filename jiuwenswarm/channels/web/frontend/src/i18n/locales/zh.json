@@ -956,6 +956,121 @@
     "autoManaged": "自动维护",
     "autoManagedHint": "此任务由主动推荐开关自动创建/删除；开关在设置→主动推荐。仅 Cron 表达式与时区可在此面板编辑，其余字段（名称/状态/描述/偏移/频道）不可改；删除请到设置关闭开关。",
     "autoManagedToggleDisabled": "自动维护任务的开关由设置→主动推荐控制，不可在此切换。",
+    "pageTitle": "定时任务",
+    "pageSubtitle": "配置和管理自动化任务，Jiuwen 将按计划执行。",
+    "actions": {
+      "confirm": "确定"
+    },
+    "createMenu": {
+      "trigger": "创建",
+      "manual": "手动创建",
+      "viaChat": "通过聊天创建",
+      "viaChatPlaceholder": "通过聊天创建：后续流程由其他同事设计，此处仅占位。"
+    },
+    "stats": {
+      "total": "任务总数（{{count}}）"
+    },
+    "tabs": {
+      "list": "任务列表",
+      "template": "任务模板",
+      "history": "执行历史"
+    },
+    "search": {
+      "placeholder": "请输入搜索内容"
+    },
+    "table": {
+      "name": "名称",
+      "project": "项目",
+      "schedule": "计划于",
+      "status": "运行状态",
+      "timezone": "时区",
+      "channel": "推送频道",
+      "actions": "操作",
+      "noProject": "–",
+      "stop": "停止",
+      "edit": "编辑",
+      "more": "更多",
+      "history": "运行历史"
+    },
+    "empty": {
+      "createButton": "创建定时任务",
+      "templateSectionTitle": "任务模板",
+      "templateMore": "更多"
+    },
+    "history": {
+      "comingSoon": "该功能即将上线"
+    },
+    "confirm": {
+      "deleteTitle": "删除",
+      "deleteMessage": "确定要删除自动化任务\"{{name}}\"吗？",
+      "stopTitle": "停止",
+      "stopMessage": "确定要停止自动化任务\"{{name}}\"吗？"
+    },
+    "drawer": {
+      "titleCreate": "创建定时任务",
+      "titleEdit": "编辑",
+      "titleTemplate": "从模板创建",
+      "switchToManual": "手动创建",
+      "switchToTemplate": "从模板创建",
+      "fieldName": "任务名称",
+      "fieldProject": "项目（可选）",
+      "fieldModel": "模型",
+      "fieldDescription": "描述",
+      "fieldChannel": "推送频道",
+      "fieldTimezone": "时区",
+      "fieldEffectiveDate": "生效周期（可选）",
+      "effectiveDateComingSoon": "该功能即将上线，当前选择暂不影响任务生效",
+      "fieldEnabled": "启用",
+      "placeholderInput": "请输入",
+      "placeholderSelect": "请选择",
+      "placeholderEffectiveDate": "请选择生效日期"
+    },
+    "schedule": {
+      "title": "执行计划",
+      "help": "选择任务的执行频率",
+      "modePeriod": "周期",
+      "modeInterval": "按间隔",
+      "modeOnce": "单次",
+      "modeCronExpr": "Cron表达式",
+      "modeComingSoon": "即将上线",
+      "cronExprPlaceholder": "请输入 Cron 表达式，如 0 0 9 * * ? *",
+      "cronExprHelp": "7段式(Quartz)：秒 分 时 日 月 周 年"
+    },
+    "modelPicker": {
+      "configured": "已配置",
+      "empty": "暂无可用模型，请先在配置面板添加模型"
+    },
+    "datePicker": {
+      "prevYear": "上一年",
+      "prevMonth": "上一月",
+      "nextMonth": "下一月",
+      "nextYear": "下一年",
+      "yearMonthHeader": "{{year}}年 {{month}}月",
+      "monthItem": "{{month}}月",
+      "weekday": {
+        "sun": "日",
+        "mon": "一",
+        "tue": "二",
+        "wed": "三",
+        "thu": "四",
+        "fri": "五",
+        "sat": "六"
+      }
+    },
+    "template": {
+      "trend": {
+        "title": "每日行业资讯",
+        "description": "每天早上8点，给我推送当天【你所在行业，例如：人工客服/金融/新能源】点最新行业资讯动态"
+      },
+      "newspaper": {
+        "title": "市场舆情追踪",
+        "description": "每天中午12点，帮我搜索并汇总竞争对手【某公司或某某产品】过去24小时在全网点最新动态和舆情报道"
+      },
+      "briefcase": {
+        "title": "工作周报",
+        "description": "每周五下午6点，帮我根据本周聊天、文档、表格，生成我的周报，任务进度，下周事项工作安排"
+      }
+    },
     "status": {
       "enabled": "启用",
       "disabled": "禁用",
