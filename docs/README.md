@@ -183,8 +183,8 @@
     </tr>
     <tr>
       <td width="22%"><strong>自动更新</strong></td>
-      <td width="28%"><a href="zh/windows自动更新设计.md">Windows 自动更新设计</a></td>
-      <td width="50%">Windows 客户端自动更新方案、流程与关键模块。</td>
+      <td width="28%"><a href="zh/windows自动更新设计.md">桌面端自动更新设计</a></td>
+      <td width="50%">Windows 与 macOS 桌面端自动更新方案、流程与关键模块（含预发布版推送）。</td>
     </tr>
     <tr>
       <td width="22%"><strong>开发者文档</strong></td>

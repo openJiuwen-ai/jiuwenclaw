@@ -296,7 +296,8 @@ interface UseWebSocketReturn {
     params?: Record<string, unknown>,
     options?: WebRequestOptions
   ) => Promise<T>;
-  sendMessage: (content: string, sessionId: string) => Promise<void>;
+  persistMedia: (content: string, sessionId: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
+  sendMessage: (content: string, sessionId: string, mediaItems?: MediaItem[]) => Promise<void>;
   sendStructuredChatContent: (content: unknown, sessionId: string) => Promise<void>;
   interrupt: (
     sessionId: string,
@@ -322,6 +323,42 @@ interface UseWebSocketReturn {
     feedback?: string
   ) => Promise<void>;
   getInflightCount: () => number;
+}
+
+interface PersistMediaResponse {
+  content?: string;
+  query?: string;
+  media_items?: Record<string, unknown>[];
+  files?: Record<string, unknown>;
+}
+
+function isPersistedMediaItem(item: MediaItem): boolean {
+  return typeof item.path === 'string' && item.path.trim().length > 0;
+}
+
+function getMediaMimeType(item: MediaItem): string {
+  return item.mime_type || item.mimeType;
+}
+
+function toPersistedMediaRecord(item: MediaItem): Record<string, unknown> {
+  return {
+    type: item.type,
+    filename: item.filename,
+    mime_type: getMediaMimeType(item),
+    path: item.path,
+    size_bytes: item.size_bytes ?? item.sizeBytes,
+  };
+}
+
+function buildPersistedMediaFiles(mediaItems: MediaItem[]): Record<string, unknown> {
+  return {
+    uploaded_images: mediaItems.map((item) => ({
+      filename: item.filename,
+      path: item.path,
+      mime_type: getMediaMimeType(item),
+      size_bytes: item.size_bytes ?? item.sizeBytes,
+    })),
+  };
 }
 
 interface ContextCompressionStatePayload extends Record<string, unknown> {
@@ -417,6 +454,50 @@ function stableEventId(...parts: unknown[]): string {
     .join(':')
     .replace(/[^a-zA-Z0-9:_-]+/g, '-')
     .slice(0, 180);
+}
+
+function getAgentRefId(payload: Record<string, unknown>): string | undefined {
+  const direct = payload.agent_ref;
+  if (isRecord(direct)) {
+    const id = pickString(direct.id);
+    if (id) {
+      return id;
+    }
+  }
+  const nestedPayload = payload.payload;
+  if (isRecord(nestedPayload)) {
+    const nested = nestedPayload.agent_ref;
+    if (isRecord(nested)) {
+      return pickString(nested.id);
+    }
+  }
+  return undefined;
+}
+
+function upsertHumanShareCommandFromEvent(
+  payload: Record<string, unknown>,
+  event: { member_id?: string; name?: string; mode?: string; timestamp?: number }
+): void {
+  if (event.mode !== 'human' || !event.member_id) {
+    return;
+  }
+  const sessionId = getPayloadSessionId(payload);
+  if (!sessionId) {
+    return;
+  }
+  const teamName = getAgentRefId(payload) || 'unknown';
+  const sessionRef = `team_${teamName}_session_${sessionId}`;
+  useSessionStore.getState().upsertTeamHumanShareCommand({
+    memberName: event.member_id,
+    displayName: event.name,
+    sessionId,
+    teamName,
+    sessionRef,
+    joinCommand: `/join ${sessionRef} as ${event.member_id}`,
+    exitCommand: `/exit ${sessionRef}`,
+    status: 'pending',
+    updatedAt: event.timestamp || Date.now(),
+  });
 }
 
 function stringifyCompact(value: unknown): string {
@@ -857,10 +938,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     };
   }, [clearAllPendingTeamMemberContextCompressionStarts, clearPendingContextCompressionStart]);
 
+  const persistMedia = useCallback(
+    async (content: string, sessionId: string, mediaItems: MediaItem[]) => {
+      return request<PersistMediaResponse>('media.persist', {
+        session_id: sessionId,
+        content,
+        media_items: mediaItems as unknown as Record<string, unknown>[],
+      });
+    },
+    [request],
+  );
+
   // 发送聊天消息
   const sendMessage = useCallback(
-    async (content: string, sessionId: string) => {
-      if (!content.trim()) return;
+    async (content: string, sessionId: string, mediaItems: MediaItem[] = []) => {
+      const hasMedia = mediaItems.length > 0;
+      if (!content.trim() && !hasMedia) return;
 
       const currentMode = useSessionStore.getState().mode;
       const unsupportedEvolutionMode = unsupportedEvolutionModeMessage(content, currentMode);
@@ -897,6 +990,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         id: `user-${Date.now()}`,
         role: 'user',
         content,
+        mediaItems,
         timestamp: new Date().toISOString(),
       });
 
@@ -918,9 +1012,25 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         setPaused(false);
       }
       try {
+        let outgoingContent = content;
+        let outgoingMediaItems: Record<string, unknown>[] | undefined;
+        let outgoingFiles: Record<string, unknown> | undefined;
+        if (hasMedia) {
+          if (mediaItems.every(isPersistedMediaItem)) {
+            outgoingMediaItems = mediaItems.map(toPersistedMediaRecord);
+            outgoingFiles = buildPersistedMediaFiles(mediaItems);
+          } else {
+            const persisted = await persistMedia(content, sessionId, mediaItems);
+            outgoingContent = persisted.content ?? persisted.query ?? content;
+            outgoingMediaItems = persisted.media_items;
+            outgoingFiles = persisted.files;
+          }
+        }
         await request('chat.send', {
           session_id: sessionId,
-          content,
+          content: outgoingContent,
+          ...(outgoingMediaItems ? { media_items: outgoingMediaItems } : {}),
+          ...(outgoingFiles ? { files: outgoingFiles } : {}),
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
         });
@@ -941,6 +1051,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     },
     [
       addMessage,
+      persistMedia,
       request,
       resetContextCompressionTurn,
       setContextCompressionStats,
@@ -1024,10 +1135,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           session_id: sessionId,
           intent,
         };
-        if (useSessionStore.getState().mode === 'team'
-            && ['pause', 'resume', 'cancel', 'supplement'].includes(intent)) {
-          params.mode = 'team';
-          params.team = true;
+        const currentMode = useSessionStore.getState().mode;
+        if (['pause', 'resume', 'cancel', 'supplement'].includes(intent)) {
+          params.mode = currentMode;
+          if (currentMode === 'team') {
+            params.team = true;
+          }
         }
         if (intent === 'supplement') {
           params.new_input = newInput ?? '';
@@ -1434,6 +1547,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const currentSessionStore = useSessionStore.getState();
         currentSessionStore.setTeamMembers([]);
         currentSessionStore.setTeamTaskEvents([]);
+        currentSessionStore.setTeamHumanShareCommands([]);
         currentSessionStore.setTeamTasks([]);
         currentSessionStore.setTeamMemberExecutionEvents([]);
         currentSessionStore.clearAllTeamMemberContextCompressionStatus();
@@ -1526,6 +1640,39 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.final', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
 
+        const memberAction = pickString(payload.member_action);
+        const actionMemberName = pickString(payload.member_name);
+        if (
+          actionMemberName &&
+          (memberAction === 'joined' || memberAction === 'left')
+        ) {
+          const sessionId = pickString(payload.session_id) || activeSessionIdRef.current || '';
+          // 使用 upsert（若 spawned 事件尚未到达则创建占位，后续 spawned 事件会补全 teamName/sessionRef 等字段）
+          useSessionStore.getState().upsertTeamHumanShareCommand({
+            memberName: actionMemberName,
+            displayName: pickString(payload.display_name),
+            sessionId,
+            teamName: '',
+            sessionRef: '',
+            joinCommand: '',
+            exitCommand: '',
+            status: memberAction === 'joined' ? 'joined' : 'left',
+            sourceChannel: pickString(payload.source_channel),
+            userId: pickString(payload.user_id),
+            updatedAt: Date.now(),
+          });
+          const content = normalizeFinalContent(payload);
+          if (content) {
+            addMessage({
+              id: `team-human-${memberAction}-${Date.now()}`,
+              role: 'system',
+              content,
+              timestamp: normalizeEventTimestampIso(payload.timestamp),
+            });
+          }
+          return;
+        }
+
         const currentMode = useSessionStore.getState().mode;
         const content = normalizeFinalContent(payload);
 
@@ -1588,13 +1735,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const { currentStreamId, messages } = useChatStore.getState();
         const payloadSessionId =
           typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
+
+        // 检查是否为主动推荐消息
+        const source = typeof payload.source === 'string' ? payload.source : '';
+        const isProactiveRecommendation = source === 'proactive_recommendation';
+        const proactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
+
         // 仅当有明确会话绑定时才把 final 合并进当前流式气泡。
-        // 定时任务等广播的 session_id 为空/null，若仍走 currentStreamId 会写到错误气泡甚至“无可见更新”。
+        // 定时任务等广播的 session_id 为空/null，若仍走 currentStreamId 会写到错误气泡甚至”无可见更新”。
         const streamId = currentStreamId;
         if (streamId && payloadSessionId) {
           updateMessage(streamId, {
             ...(content ? { content } : {}),
             isStreaming: false,
+            ...(isProactiveRecommendation ? { isProactiveRecommendation, ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}) } : {}),
           });
           stopStreaming();
           if (content && !content.includes('MEDIA:')) {
@@ -1664,11 +1818,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           if (last?.role === 'assistant' && last.content === content) {
             return;
           }
+
+          // 检查是否为主动推荐消息
+          const source = typeof payload.source === 'string' ? payload.source : '';
+          const isProactiveRecommendation = source === 'proactive_recommendation';
+          const proactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
+
           addMessage({
             id: messageId,
             role: 'assistant',
             content,
             timestamp: new Date().toISOString(),
+            isProactiveRecommendation,
+            ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}),
           });
           if (!content.includes('MEDIA:')) {
             handleTtsPlayback(messageId, content);
@@ -1783,6 +1945,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           return;
         }
+        const toolRequestId = getPayloadRequestId(payload) || activeRequestIdRef.current;
         const { currentStreamId, messages } = useChatStore.getState();
         const currentStreamMessage =
           currentMode === 'team'
@@ -1793,8 +1956,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         addToolCall(
           toolCall,
           currentStreamMessage?.timestamp
-            ? { startedAt: currentStreamMessage.timestamp, requestId: activeRequestIdRef.current }
-            : { requestId: activeRequestIdRef.current }
+            ? { startedAt: currentStreamMessage.timestamp, requestId: toolRequestId }
+            : { requestId: toolRequestId }
         );
         if (currentMode === 'team' && !isTeamPanelClearedForPayload(payload)) {
           applyTeamTaskToolCall(toolCall);
@@ -2023,6 +2186,30 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('chat.evolution_status', payload)) return;
         setEvolutionStatus(payload as unknown as EvolutionStatusPayload);
+      }),
+      webClient.on('chat.notice', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        if (shouldDropDuplicatedEvent('chat.notice', payload)) return;
+        const content = pickString(payload.content, payload.message, payload.text);
+        if (!content) return;
+        const noticeType = pickString(payload.notice_type, payload.type) || 'notice';
+        const requestId = getPayloadRequestId(payload) || `${Date.now()}`;
+        const messageId = `notice-${noticeType}-${requestId}`;
+        const chatState = useChatStore.getState();
+        const existing = chatState.messages.find((message) => message.id === messageId);
+        if (existing) {
+          chatState.updateMessage(messageId, {
+            content,
+            timestamp: new Date().toISOString(),
+          });
+          return;
+        }
+        addMessage({
+          id: messageId,
+          role: 'system',
+          content,
+          timestamp: new Date().toISOString(),
+        });
       }),
       webClient.on('chat.error', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
@@ -2268,6 +2455,31 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         };
         addToolResult(sessionResult);
       }),
+      webClient.on('proactive_recommendation', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const content = typeof payload.content === 'string' ? payload.content : '';
+        if (!content) return;
+
+        const proactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
+        const proactiveTarget = typeof payload.proactive_target === 'string' ? payload.proactive_target : '';
+        const proactiveReason = typeof payload.proactive_reason === 'string' ? payload.proactive_reason : '';
+
+        const messageId = `proactive-${Date.now()}`;
+        addMessage({
+          id: messageId,
+          role: 'assistant',
+          content,
+          timestamp: new Date().toISOString(),
+          isProactiveRecommendation: true,
+          proactiveType: (proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration') || undefined,
+        });
+
+        console.debug('[ws] proactive_recommendation', {
+          type: proactiveType,
+          target: proactiveTarget,
+          reason: proactiveReason,
+        });
+      }),
       webClient.on('team.event', ({ payload }) => {
         if (shouldDropDuplicatedEvent('team.event', payload)) {
           return;
@@ -2359,6 +2571,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             mode?: string;
           };
           const activeSessionId = getPayloadSessionId(payload) || activeSessionIdRef.current || undefined;
+          upsertHumanShareCommandFromEvent(payload, e);
           if (e.type === 'team.member.shutdown' && e.member_id) {
             applyTeamMemberShutdown(e.member_id, activeSessionId);
           } else if (activeSessionId && clearedTeamPanelSessionRef.current === activeSessionId) {
@@ -2755,6 +2968,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     isConnected,
     connectionState,
     request,
+    persistMedia,
     sendMessage,
     sendStructuredChatContent,
     interrupt,

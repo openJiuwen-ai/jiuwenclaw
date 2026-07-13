@@ -389,7 +389,6 @@ def load_team_spec_dict(
     spec_dict["teammate_mode"] = team_raw.get("teammate_mode", "build_mode")
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)
-    spec_dict["enable_swarmflow"] = team_raw.get("enable_swarmflow", True)
     spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base, team_raw)
     spec_dict["leader"] = _build_leader_spec(team_raw)
     spec_dict["agents"] = agents

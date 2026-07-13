@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-import json
 import logging
+import random
 import threading
 import time
 from collections import defaultdict
-from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from .bank import ExperienceBank
 from .cluster import ClusteredQuery, cluster_traces, _faiss_cluster, populate_cluster
 from .distiller import TraceDistiller
 from .embed import EmbeddingClient
-from .models import ExperienceItem, TraceRecord
+from .models import ExperienceBankBuildConfig, DistilledPattern, ExperienceItem, TraceRecord
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,27 +27,32 @@ class ExperienceBaseBuilder:
         self,
         kb: ExperienceBank,
         embedding_client: EmbeddingClient,
-        llm_client: Any | None = None,
-        llm_model: str = "",
+        llm_client: Any,
+        llm_model: str,
         *,
         skills_info: list[dict[str, str]] | None = None,
-        min_cluster_size: int = 1,
-        max_workers: int = 8,
-        max_success_examples: int = 20,
-        pending_flush_threshold: int = 20,
-        min_hits_for_pattern: int = 1,
+        build_config: ExperienceBankBuildConfig | None = None,
     ) -> None:
         self._kb = kb
         self._embedder = embedding_client
+        if not llm_client:
+            raise ValueError("ExperienceBaseBuilder requires llm_client for distillation.")
         self._llm = llm_client
-        self._llm_model = str(llm_model or "").strip()
+        if not llm_model:
+            raise ValueError("ExperienceBaseBuilder requires llm_model for distillation.")
+        self._llm_model = llm_model
         self._skills_info = skills_info
-        self._min_cluster_size = int(min_cluster_size)
-        self._max_workers = int(max_workers)
-        self._max_success_examples = int(max_success_examples)
+        self._config = build_config or ExperienceBankBuildConfig()
+        self._min_cluster_size = self._config.min_cluster_size
+        self._max_workers = self._config.max_workers
+        self._max_success_examples = self._config.max_success_examples
         self._pending: list[TraceRecord] = []
-        self._flush_threshold = int(pending_flush_threshold)
-        self._min_hits = int(min_hits_for_pattern)
+        self._flush_threshold = self._config.pending_flush_threshold
+        self._min_hits = self._config.min_hits_for_pattern
+        self._pattern_merge_threshold = self._config.pattern_merge_threshold
+        self._query_examples_count = self._config.query_examples_count
+        self._skill_cluster_num = self._config.skill_cluster_num
+        self._cluster_max_examples = self._config.cluster_max_examples
         self._lock = threading.Lock()
 
     def build(self, traces: list[TraceRecord]) -> int:
@@ -84,7 +90,12 @@ class ExperienceBaseBuilder:
 
         # --- Cluster ---
         t1 = time.monotonic()
-        clusters = cluster_traces(traces, self._embedder, self._min_cluster_size)
+        clusters = cluster_traces(
+            traces, self._embedder,
+            n_clusters=self._skill_cluster_num,
+            min_cluster_size=self._min_cluster_size,
+            cluster_max_examples=self._cluster_max_examples,
+        )
         cluster_elapsed = time.monotonic() - t1
         LOGGER.info(
             "TraceIndexBuilder: clustering done: %d clusters in %.2fs",
@@ -114,20 +125,31 @@ class ExperienceBaseBuilder:
         # --- Write to KB ---
         t3 = time.monotonic()
         cluster_by_id = {c.cluster_id: c for c in clusters}
+
+        valid_patterns = [p for p in distilled if p.pattern_description]
+        merged_patterns = self._merge_similar_patterns(valid_patterns, cluster_by_id)
         batch_items = []
-
-        for pattern in distilled:
-            if not pattern.pattern_description:
-                continue
-
-            top_skills = pattern.effective_skills[0] if pattern.effective_skills else []
+        sample_n = max(0, self._query_examples_count)
+        rng = random.Random(42)
+        for pattern in merged_patterns:
+            top_skills = pattern.effective_skills if pattern.effective_skills else []
             cluster = cluster_by_id.get(pattern.cluster_id)
-            examples = [trace.query for trace in cluster.success_traces] if cluster else [pattern.pattern_description]
+            examples = (
+                [trace.query for trace in cluster.success_traces]
+                if cluster
+                else [pattern.pattern_description]
+            )
+            if sample_n == 0:
+                sampled = []
+            elif len(examples) > sample_n:
+                sampled = rng.sample(examples, sample_n)
+            else:
+                sampled = list(examples)
             item = self._kb.create_item(
                 query_pattern=pattern.pattern_description,
-                query_examples=examples[:5],
+                query_examples=sampled,
                 skill_ids=top_skills,
-                success_count=pattern.raw_trace_count,
+                success_count=len(cluster.success_traces) if cluster else 0,
             )
             batch_items.append(item)
 
@@ -145,22 +167,6 @@ class ExperienceBaseBuilder:
         )
         return created
 
-    def build_from_file(self, traces_path: str | Path) -> int:
-        """Convenience: read a JSON file, parse into ``TraceRecord`` list,
-        then call :meth:`build`.
-
-        The JSON file should contain a list of trace dicts, or a top-level
-        dict with ``"traces"`` or ``"records"`` key.
-        """
-        data = json.loads(Path(traces_path).read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            data = data.get("traces", data.get("records", [data]))
-        traces = [TraceRecord.from_dict(d) for d in data]
-        LOGGER.info(
-            "TraceIndexBuilder: loaded %d traces from %s", len(traces), traces_path
-        )
-        return self.build(traces)
-
 
     def add(self, trace: TraceRecord) -> None:
         """Record a successful query-skill mapping.
@@ -170,11 +176,6 @@ class ExperienceBaseBuilder:
         with self._lock:
             self._pending.append(trace)
             pending_count = len(self._pending)
-
-        LOGGER.debug(
-            "ExperienceBaseBuilder: recorded pending record query='%s' skills=%s (total pending=%d)",
-            trace.query, trace.skills, pending_count,
-        )
 
         # Auto-flush if buffer is large enough (non-blocking)
         if pending_count >= self._flush_threshold:
@@ -218,6 +219,106 @@ class ExperienceBaseBuilder:
         )
         return created
 
+    def _merge_similar_patterns(
+        self,
+        patterns: list[DistilledPattern],
+        cluster_by_id: dict[int, ClusteredQuery],
+    ) -> list[DistilledPattern]:
+        if len(patterns) <= 1 or self._pattern_merge_threshold >= 1.0:
+            return list(patterns)
+
+        threshold = float(self._pattern_merge_threshold)
+
+        def skill_bucket_key(p: DistilledPattern) -> frozenset:
+            return frozenset(p.effective_skills)
+
+        buckets: dict[frozenset, list[int]] = defaultdict(list)
+        for i, p in enumerate(patterns):
+            buckets[skill_bucket_key(p)].append(i)
+
+        def success_count(i: int) -> int:
+            c = cluster_by_id.get(patterns[i].cluster_id)
+            return len(c.success_traces) if c else 0
+
+        merged: list[DistilledPattern] = []
+        synthetic_counter = 1
+        for bucket_indices in buckets.values():
+            ordered = sorted(
+                bucket_indices,
+                key=success_count,
+                reverse=True,
+            )
+            if len(ordered) == 1:
+                merged.append(patterns[ordered[0]])
+                continue
+
+            descriptions = [patterns[i].pattern_description for i in ordered]
+            embeddings = self._embedder.embed_batch(descriptions)
+            arr = np.asarray(embeddings, dtype=np.float32)
+            norms = np.linalg.norm(arr, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            unit = arr / norms
+            local_sim = unit @ unit.T  # cosine similarity within bucket
+            n = len(ordered)
+            triu_mask = np.triu(np.ones((n, n), dtype=bool), k=1)
+
+            assigned = np.zeros(n, dtype=bool)
+            while True:
+                avail_mask = (~assigned)[:, None] & (~assigned)[None, :] & triu_mask
+                sim_view = np.where(avail_mask, local_sim, -np.inf)
+                if not np.isfinite(sim_view).any() or float(sim_view.max()) < threshold:
+                    for pos in np.nonzero(~assigned)[0]:
+                        merged.append(patterns[ordered[int(pos)]])
+                    break
+
+                flat = int(np.argmax(sim_view))
+                i, j = flat // n, flat % n
+
+                group: list[int] = [i, j]
+                assigned[i] = True
+                assigned[j] = True
+                while True:
+                    candidates = np.nonzero(~assigned)[0]
+                    if len(candidates) == 0:
+                        break
+                    sub = local_sim[np.ix_(group, candidates)]
+                    weakest = sub.min(axis=0)             # min sim vs group, per candidate
+                    score = np.where(
+                        np.all(sub >= threshold, axis=0), weakest, -np.inf,
+                    )
+                    if not np.isfinite(score).any():
+                        break
+                    pick = int(candidates[int(np.argmax(score))])
+                    group.append(pick)
+                    assigned[pick] = True
+
+                rep = patterns[ordered[group[0]]]
+                pooled: list[TraceRecord] = []
+                for pos in group:
+                    cluster = cluster_by_id.get(patterns[ordered[pos]].cluster_id)
+                    if cluster:
+                        pooled.extend(cluster.success_traces)
+                synthetic_id = -synthetic_counter
+                synthetic_counter += 1
+                cluster_by_id[synthetic_id] = ClusteredQuery(
+                    cluster_id=synthetic_id,
+                    centroid_query=rep.pattern_description,
+                    member_traces=list(pooled),
+                    success_traces=list(pooled),
+                    failure_traces=[],
+                )
+                merged.append(DistilledPattern(
+                    cluster_id=synthetic_id,
+                    effective_skills=rep.effective_skills,
+                    pattern_description=rep.pattern_description,
+                ))
+
+        LOGGER.info(
+            "TraceIndexBuilder: merged %d patterns (threshold=%.2f, similarity-first greedy, bucketed-by-skill)",
+            len(merged), threshold,
+        )
+        return merged
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -242,11 +343,11 @@ class ExperienceBaseBuilder:
         queries = [r.query for r in records]
         embeddings = self._embedder.embed_batch(queries)
 
-        cluster_labels = _faiss_cluster(embeddings, min_cluster_size=1)
+        cluster_labels = _faiss_cluster(embeddings, n_clusters=self._skill_cluster_num,
+                                        min_cluster_size=self._min_cluster_size)
 
         created = 0
-        from collections import defaultdict as _dd
-        clusters: dict[int, list[TraceRecord]] = _dd(list)
+        clusters: dict[int, list[TraceRecord]] = defaultdict(list)
         noise: list[TraceRecord] = []
         local_clusters: dict[int, list[int]] = {}
         for i, label in enumerate(cluster_labels):
@@ -295,7 +396,7 @@ class ExperienceBaseBuilder:
         examples = [trace.query for trace in cluster.member_traces]
 
         # 先做 embedding 去重
-        items = self._kb.search_by_embedding(distilled[0].pattern_description, threshold=0.75)
+        items = self._kb.search_by_embedding(distilled[0].pattern_description, threshold=self._pattern_merge_threshold)
         if items:
             # 检查是否有相同 skill 组合的 item
             for _, existing in items:
@@ -313,13 +414,13 @@ class ExperienceBaseBuilder:
         skill_ids: list[str],
     ) -> ExperienceItem:
         """Helper to create a new experience item."""
+        sample_n = max(0, self._query_examples_count)
         item = self._kb.create_item(
             query_pattern=pattern,
-            query_examples=query_examples[:5],
+            query_examples=query_examples[:sample_n],
             skill_ids=skill_ids,
         )
         self._kb.add(item)
-        LOGGER.info("ExperienceBaseBuilder: created new item '%s' pattern='%s'", item.id, pattern)
         return item
 
 __all__ = ["ExperienceBaseBuilder"]

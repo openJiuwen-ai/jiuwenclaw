@@ -187,6 +187,12 @@ memory:
       base_id: ${LAKEBASE_MEM_BASE_ID:-}
       database_id: ${LAKEBASE_DATABASE_ID:-}
 
+
+proactive_recommendation:
+  enabled: ${PROACTIVE_RECOMMENDATION_ENABLED:-false}                # 总开关
+  max_recommend_per_day: ${MAX_RECOMMEND_PER_DAY:-10}               # 每天最多推荐次数
+  max_rounds_per_tick: ${MAX_ROUNDS_PER_TICK:-20}                # 每次 Tick 读取最近几轮对话
+
 models:
   defaults:
     - model_client_config:
@@ -292,13 +298,13 @@ agents:
     workspace:
       stable_base: true
     max_iterations: 200
-    completion_timeout: 600.0
+    completion_timeout: 6000.0
 
   agent_teammate:
     workspace:
       stable_base: true
     max_iterations: 200
-    completion_timeout: 600.0
+    completion_timeout: 6000.0
 
 telemetry:
   enabled: true                     # 总开关（环境变量 OTEL_ENABLED 优先）
@@ -334,7 +340,7 @@ telemetry:
 #   2. 在用户配置中设置 team_observability.enabled: true
 # ============================================================
 team_observability:
-  enabled: false                    # Team observability 总开关
+  enabled: true                    # Team observability 总开关
   exporter: file                    # otlp_grpc / otlp_http / file
   endpoint: http://localhost:4317   # OTLP gRPC endpoint（file 模式不需要）
   service_name: jiuwenswarm         # 服务名称（OTel resource service.name）
@@ -500,6 +506,25 @@ heartbeat:
 
 # 执行护栏：工具循环检测与主动中断
 execution_guard:
+  # LLM 重试护栏：处理模型重复输出和流式帧超时，命中后重新发起模型请求
+  llm_retry_rail:
+    # 总开关。关闭后不注册 LLMRetryRail，也不会额外拦截重复输出/流式帧超时
+    enabled: true
+    # 单次 invoke 内同一类异常最多重试次数；超过后把异常继续抛给上层
+    max_retries: 2
+    # 重复片段检测的最短长度，单位：字符；用于检测短句/短片段循环输出
+    repeat_min_pattern_chars: 2
+    # 重复片段检测的最长长度，单位：字符；过长片段不作为循环模式检测
+    repeat_max_pattern_chars: 64
+    # 同一片段至少连续重复多少次才认为疑似死循环
+    repeat_min_count: 6
+    # 多字符重复输出的最小总长度，避免正常短文本重复误触发
+    repeat_min_total_chars: 160
+    # 滑动检测窗口大小，单位：字符；仅保留最近窗口内容用于重复判断
+    repeat_window_chars: 1024
+    # 单字符连续重复阈值，用于检测分隔线等场景，默认较高以减少误判
+    single_char_repeat_count: 90
+
   # 断路器：检测工具重复/交替/无进展循环，critical 级会强制结束当次回答
   circuit_breaker:
     # 总开关。断路器会主动中断 agent（force-finish），默认关闭，需显式开启
@@ -517,20 +542,22 @@ channels:
   web:
     send_file_allowed: true
   feishu:
-    # 飞书应用配置
-    app_id:
-    app_secret:
-    encrypt_key:
-    verification_token:
-    allow_from:
-    enable_streaming: false
-    enabled: false
     send_file_allowed: true
-    # 群聊数字分身（默认关闭）
-    group_digital_avatar: false
-    my_user_id: ""
-    bot_name: ""
-    enable_memory: false
+    apps:
+      - name: 飞书默认应用
+      # 飞书应用配置
+        app_id:
+        app_secret:
+        encrypt_key:
+        verification_token:
+        allow_from:
+        enable_streaming: false
+        enabled: false
+        # 群聊数字分身（默认关闭）
+        group_digital_avatar: false
+        my_user_id: ""
+        bot_name: ""
+        enable_memory: false
   feishu_enterprise:
     # 企业飞书多 Bot 配置（每个 bot 会注册为独立 channel: feishu_enterprise:<app_id>）
     # bot_a:
@@ -543,25 +570,28 @@ channels:
     #   chat_id:
     #   enabled: false
   xiaoyi:
-    # 华为小艺 A2A 配置
-    mode: xiaoyi_channel
-    ak:
-    sk:
-    api_id:
-    push_id:
-    agent_id:
-    ws_url1: wss://hag.cloud.huawei.com/openclaw/v1/ws/link
-    ws_url2: wss://116.63.174.231/openclaw/v1/ws/link
-    enable_streaming: true
-    enabled: false
-    # xiaoyi_claw配置
-    uid:
-    api_key:
-    push_url:
-    file_upload_url:
-    # 小艺手机端插件tools调用，会添加相关tools到系统提示词
-    phone_tools_enabled: false
     send_file_allowed: true
+    apps:
+      - name: 小艺默认应用
+        # 华为小艺 A2A 配置
+        app_id:
+        mode: xiaoyi_channel
+        ak:
+        sk:
+        api_id:
+        push_id:
+        agent_id:
+        ws_url1: wss://hag.cloud.huawei.com/openclaw/v1/ws/link
+        ws_url2: wss://116.63.174.231/openclaw/v1/ws/link
+        enable_streaming: true
+        enabled: false
+        # xiaoyi_claw配置
+        uid:
+        api_key:
+        push_url:
+        file_upload_url:
+        # 小艺手机端插件tools调用，会添加相关tools到系统提示词
+        phone_tools_enabled: false
   dingtalk:
     # 钉钉应用配置
     client_id:
@@ -940,6 +970,7 @@ mcp:
   #       Authorization: Bearer ${MCP_TOKEN}
   #     timeout_s: 30
 
+
 modes:
   # 一级模式 agent / code / team
   agent:
@@ -994,7 +1025,7 @@ modes:
       lifecycle: persistent
       teammate_mode: build_mode
       spawn_mode: inprocess
-      enable_swarmflow: true
+      enable_swarmflow: false
 
       # Team-specific permission control.
       enable_permissions: false

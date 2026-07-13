@@ -62,7 +62,7 @@ curl -L --fail -o JiuwenSwarm-<version>.dmg \
 
 On first launch the app creates `~/.jiuwenswarm/`. Then follow [Post-start verification](#3-post-start-verification) to finish model configuration.
 
-> Match the version to the actual download link on the Release page. For Windows auto-update behavior, see [Windows auto-update design](WindowsAutoUpdateDesign.md).
+> Match the version to the actual download link on the Release page. For desktop auto-update behavior (Windows and macOS), see [Desktop auto-update design](WindowsAutoUpdateDesign.md).
 
 ---
 

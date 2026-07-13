@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 from jiuwenswarm.gateway.cron.cron_expr import normalize_cron_expr
-from jiuwenswarm.gateway.cron.store import CronJobStore
+from jiuwenswarm.gateway.cron.store import CronJobStore, _PROACTIVE_TICK_MODE
 from jiuwenswarm.gateway.cron.scheduler import _cron_next_push_dt, CronSchedulerService
 from jiuwenswarm.gateway.cron.models import (
     CronTargetChannel,
@@ -35,12 +35,13 @@ _cron_route_ctx: contextvars.ContextVar[CronToolRoute | None] = contextvars.Cont
 
 @dataclass(frozen=True, slots=True)
 class CronToolRoute:
-    """当前请求同步到 Gateway 时使用的路由（request_id / channel / session / chat_type）。"""
+    """当前请求同步到 Gateway 时使用的路由（request_id / channel / session / chat_type / app_id）。"""
 
     request_id: str = ""
     channel_id: str = CronTargetChannel.WEB.value
     session_id: str | None = None
     chat_type: str | None = None  # "group" 表示群聊, "p2p" 或 None 表示私聊
+    app_id: str = ""
 
 
 class CronTools:
@@ -230,7 +231,18 @@ class CronTools:
 
     async def list_jobs(self) -> Any:
         jobs = await self._local_store.list_jobs()
-        return [j.to_dict() for j in jobs]
+        # 给受保护的 proactive.tick job 标记 protected，让 LLM 在批量操作时
+        # （如"删除所有定时任务"）能识别并优雅跳过，而不是删到一半才遇错。
+        out = []
+        for j in jobs:
+            d = j.to_dict()
+            if str(d.get("mode") or "").strip().lower() == _PROACTIVE_TICK_MODE:
+                d["protected"] = True
+                d["protected_reason"] = (
+                    "由主动推荐开关自动维护，不可删除/启停；如需关闭请到设置→主动推荐关闭开关。"
+                )
+            out.append(d)
+        return out
 
     async def get_job(self, job_id: str) -> Any:
         job = await self._local_store.get_job(job_id)
@@ -251,12 +263,16 @@ class CronTools:
             targets_str,
         )
         session_kw: dict[str, Any] = {}
-        sid = self._route().session_id
+        r = self._route()
+        sid = r.session_id
         if isinstance(sid, str) and sid.strip():
             session_kw["session_id"] = sid.strip()
-        chat_type = self._route().chat_type
+        chat_type = r.chat_type
         if chat_type:
             session_kw["chat_type"] = chat_type
+        app_id = str(getattr(r, "app_id", None) or "").strip()
+        if app_id:
+            session_kw["app_id"] = app_id
         mode_kw: dict[str, Any] = {}
         mode_raw = normalized.get("mode")
         if mode_raw is not None and str(mode_raw).strip():
@@ -326,6 +342,13 @@ class CronTools:
         return deleted
 
     async def toggle_job(self, job_id: str, enabled: bool) -> Any:
+        # proactive.tick job 的开关由 config 的 proactive_recommendation.enabled 驱动，
+        # 禁止手动 toggle——否则会与 config 开关不一致。引导用户去设置关开关。
+        existing = await self._local_store.get_job(job_id)
+        if existing is not None and str(getattr(existing, "mode", "") or "").strip().lower() == "proactive.tick":
+            raise RuntimeError(
+                "主动推荐定时任务由设置→主动推荐开关控制，不能手动启停；请到设置→主动推荐操作。"
+            )
         job = await self._local_store.update_job(job_id, {"enabled": bool(enabled)})
         try:
             await self._send("toggle", {"job_id": job_id, "enabled": bool(enabled)})
@@ -483,13 +506,22 @@ class CronTools:
             ),
             make_tool(
                 name="cron_delete_job",
-                description="Delete cron job by id.",
+                description=(
+                    "Delete cron job by id. "
+                    "Note: jobs with protected=true (from cron_list_jobs) are managed by "
+                    "system config and cannot be deleted here; tell the user to toggle the "
+                    "corresponding config switch instead."
+                ),
                 input_params={"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
                 func=self.delete_job,
             ),
             make_tool(
                 name="cron_toggle_job",
-                description="Enable or disable cron job.",
+                description=(
+                    "Enable or disable cron job. "
+                    "Note: jobs with protected=true cannot be toggled here; they are driven by "
+                    "system config."
+                ),
                 input_params={
                     "type": "object",
                     "properties": {

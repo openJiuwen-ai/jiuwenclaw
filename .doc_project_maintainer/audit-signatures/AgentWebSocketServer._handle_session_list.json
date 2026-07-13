@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f3feb-42d3-7921-953a-ad2f01aecee9",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._handle_session_list",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._handle_session_list in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f3feb-42d3-7921-953a-ad2f01aecee9",
+        "nickname": "Bernoulli",
+        "symbol_id": "AgentWebSocketServer._handle_session_list",
+        "completed": true,
+        "finding_count": 4
+      }
+    }
+  ]
+}

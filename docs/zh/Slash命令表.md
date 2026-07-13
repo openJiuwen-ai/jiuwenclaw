@@ -353,26 +353,47 @@
 
 | 命令 | 说明 |
 |---|---|
-| `/memory` 或 `/memory edit` | 交互式选择并编辑记忆文件（无参数时列出可选文件） |
-| `/memory list` | 列出所有记忆文件（含大小、行数、修改时间） |
-| `/memory edit <path>` | 打开指定记忆文件进行编辑（通过 `$EDITOR`） |
-| `/memory status` | 显示记忆系统详细状态 |
-| `/memory toggle [key]` | 切换记忆系统开关（无参数时列出可切换项） |
-| `/memory open` | 显示记忆系统各目录路径 |
+| `/memory` | 打开页签控制台，默认选中 edit 页签 |
+| `/memory edit` | 打开页签控制台并选中 edit 页签 |
+| `/memory edit <path>` | 直接编辑指定路径的记忆文件（通过 `$EDITOR`） |
+| `/memory status` | 打开页签控制台并选中 status 页签 |
+| `/memory toggle` | 打开页签控制台并选中 toggle 页签 |
+| `/memory toggle <key>` | 直接切换指定记忆系统开关 |
+| `/memory open` | 打开页签控制台并选中 open 页签 |
 
+- 页签控制台：无参数或仅指定子命令（不带操作对象）时打开，包含 edit / status / toggle / open 四个页签。
+  - ←/→ 切换页签；
+  - ↑/↓ 在当前页签列表中移动；
+  - Enter 执行当前选中项；
+  - Ctrl+O 切换全路径显示（edit/open 页签），切换页签时重置为默认（相对路径）；
+  - Esc 关闭控制台。
 - `status` 展示内容：
-  - 当前模式、存储引擎、启用状态、Proactive 状态、Forbidden Filter 状态；
-  - 索引状态（FTS5、Vector、Cache）、文件数、分块数；
-  - Project Memory、Coding Memory、Auto Memory、External Memory 的统计。
-- `toggle` 可切换项：
-  - `memory_enabled` — 记忆总开关；
-  - `memory_proactive` — 主动记忆开关；
-  - `memory_forbidden_enabled` — Forbidden Filter 开关。
+  - Engine（格式：`builtin (local)`）；
+  - 开关行（按模式自适应，`✓ on` / `✗ off`）；
+  - 运行时记忆统计（agent 模式显示 "Auto Memory"，code 模式显示 "Coding Memory"）；
+  - Project Memory 统计；
+  - External Memory（如果有）。
+  - 不展示 Current Mode、Index/FTS5/Vector/Cache 等字段。
+- `edit` 页签展示：Project memory（Checked in at）/ Local memory（Saved in）/ User memory（Saved in），Enter 用 `$EDITOR` 打开。
+- `open` 页签展示（按模式自适应）：agent 模式为 Memory Dir / Project Dir / User Project Dir；code 模式为 Coding Memory Dir / Project Dir / User Project Dir，Enter 直接打开系统文件管理器。
+- `toggle` 页签展示格式（只显示 key，不显示英文 label，有 `✓ on` / `✗ off` 状态标记和中文描述，无 `·` 分隔符）：
+
+  ```
+  → memory_enabled            ✓ on   记忆功能总开关
+    auto_coding_memory        ✓ on   每轮对话后自动提取记忆（需总开关开启）
+    memory_forbidden_enabled  ✗ off  过滤敏感信息
+  ```
+
+  - agent mode：`memory_enabled`（记忆功能总开关）、`memory_proactive`（对话中自动搜索和记录）、`memory_forbidden_enabled`（过滤敏感信息）；
+  - code mode：`memory_enabled`（记忆功能总开关）、`auto_coding_memory`（每轮对话后自动提取记忆（需总开关开启））、`memory_forbidden_enabled`（过滤敏感信息）。
   - 切换后若需要重启会话生效，会给出提示。
+- Tab 补全：
+  - `/memory edit ` 后显示文件列表（路径用 `getDisplayPath` 展示，去重）；
+  - `/memory toggle ` 后显示当前 mode 的 key 列表；
+  - 支持前缀过滤。
 - 示例：
-  - `/memory` — 交互式编辑记忆文件
-  - `/memory list` — 列出记忆文件
-  - `/memory edit memory/MEMORY.md` — 编辑指定记忆文件
+  - `/memory` — 打开页签控制台
+  - `/memory edit memory/MEMORY.md` — 直接编辑指定记忆文件
   - `/memory status` — 查看详细状态
   - `/memory toggle memory_enabled` — 切换记忆总开关
   - `/memory open` — 查看记忆目录路径

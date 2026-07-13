@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import sys
 import ctypes
+import subprocess
 import traceback
 from pathlib import Path
 
@@ -46,7 +47,6 @@ if getattr(sys, "frozen", False):
     # 自动添加 CREATE_NO_WINDOW 标志
     if os.name == "nt":
         import asyncio
-        import subprocess
 
         _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
 
@@ -188,7 +188,117 @@ def main() -> None:
         raise SystemExit(1) from None
 
 
+def _find_bundled_binary(name: str) -> str | None:
+    """Locate a bundled native binary (e.g. ruff) shipped with the frozen exe.
+
+    The ``ruff`` PyPI package is a thin Python wrapper around a native
+    binary; the wrapper module is not part of the frozen bundle, so
+    ``-m ruff`` would raise ImportError. The exe entry instead forwards
+    ``-m ruff`` to the binary found here.
+    """
+    suffix = ".exe" if os.name == "nt" else ""
+    rels = [name + suffix, os.path.join("Scripts", name + suffix)]
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        for rel in rels:
+            cand = os.path.join(meipass, rel)
+            if os.path.isfile(cand):
+                return cand
+    if sys.executable:
+        exe_dir = os.path.dirname(sys.executable)
+        for rel in rels:
+            cand = os.path.join(exe_dir, rel)
+            if os.path.isfile(cand):
+                return cand
+    if name == "ruff":
+        env_bin = os.environ.get("JIUWENSWARM_RUFF_BIN")
+        if env_bin and os.path.isfile(env_bin):
+            return env_bin
+    return None
+
+
+def _forward_to_ruff_binary(ruff_args: list[str]) -> int:
+    """Forward ``-m ruff ...`` to the bundled native ruff binary.
+
+    Returns the binary's exit code. Output is written to OS-level fds
+    (1/2) via ``os.write`` so it reaches PIPE-capturing callers
+    (auto-harness) and attached consoles without relying on
+    ``sys.stdout.write`` (the windowed exe's sys.stdout may be a
+    devnull-backed stream that swallows output).
+    """
+    ruff_bin = _find_bundled_binary("ruff")
+    if not ruff_bin:
+        os.write(2, b"ruff binary not bundled in this exe\n")
+        return 1
+    completed = subprocess.run(
+        [ruff_bin, *ruff_args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.stdout:
+        os.write(1, completed.stdout)
+    if completed.stderr:
+        os.write(2, completed.stderr)
+    return completed.returncode
+
+
+def _ensure_stdio() -> None:
+    """Rebind sys.stdout/stderr to real OS handles.
+
+    The exe is built with console=False (windowed). When launched from a
+    console (cmd) or captured via PIPE (auto-harness check_ruff), Python's
+    sys.stdout/stderr may still be None/inactive, so output from runpy
+    modules (pytest/mypy) and forwarded tools (ruff) would be lost. Rebind
+    them to the OS-level fds; for direct cmd use, also try attaching the
+    parent console.
+    """
+    def _rebind(fd: int, stream):
+        if stream is not None and not getattr(stream, "closed", False):
+            return stream
+        try:
+            return open(fd, "w", encoding="utf-8", errors="replace", buffering=1)
+        except Exception:
+            pass
+        try:
+            return open(os.devnull, "w", encoding="utf-8", errors="replace")
+        except Exception:
+            return stream
+    sys.stdout = _rebind(1, sys.stdout)
+    sys.stderr = _rebind(2, sys.stderr)
+    if os.name == "nt" and (
+        sys.stdout is None or getattr(sys.stdout, "closed", False)
+    ):
+        try:
+            ctypes.windll.kernel32.AttachConsole(-1)  # ATTACH_PARENT_PROCESS
+            # Close the previous (inactive) streams before replacing them.
+            for _prev in (sys.stdout, sys.stderr):
+                if _prev is not None and not getattr(_prev, "closed", False):
+                    try:
+                        _prev.close()
+                    except Exception:
+                        pass
+            # These streams back sys.stdout/stderr for the process lifetime;
+            # register close so the open/close pair stays balanced (G.PRM.03)
+            # without prematurely closing them (which would break stdout).
+            import atexit
+            _conout_out = open(
+                "CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1
+            )
+            _conout_err = open(
+                "CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1
+            )
+            atexit.register(_conout_out.close)
+            atexit.register(_conout_err.close)
+            sys.stdout = _conout_out
+            sys.stderr = _conout_err
+        except OSError:
+            pass
+
+
 def _dispatch() -> None:
+    # frozen exe (console=False) 主进程的 sys.stdout/stderr 可能为 None
+    if getattr(sys, "frozen", False):
+        _ensure_stdio()
     # 已知子命令分发（不检查单实例锁）
     if len(sys.argv) >= 2 and sys.argv[1].lower() == "init":
         sys.argv.pop(1)
@@ -244,6 +354,12 @@ def _dispatch() -> None:
                 raise SystemExit(0)
 
         if sys.argv[1] == "-m" and len(sys.argv) >= 3:
+            # ruff is a native binary; its Python wrapper module is not
+            # bundled in the frozen exe. Forward `-m ruff ...` to the
+            # bundled ruff binary, capturing its stdout/stderr and emitting
+            # via the rebound stdio so callers receive it.
+            if sys.argv[2] == "ruff":
+                raise SystemExit(_forward_to_ruff_binary(sys.argv[3:]))
             import runpy
             runpy.run_module(sys.argv[2], run_name="__main__", alter_sys=True)
             raise SystemExit(0)

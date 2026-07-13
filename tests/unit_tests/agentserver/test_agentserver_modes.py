@@ -1165,6 +1165,7 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
 
     adapter = JiuWenSwarmDeepAdapter()
     ask_user_rail = object()
+    orchestration_rail = object()
 
     monkeypatch.setattr(adapter, "_filesystem_rail_enabled_for_profile", lambda: False)
     monkeypatch.setattr(adapter, "_build_runtime_prompt_rail", lambda: None)
@@ -1178,6 +1179,7 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     monkeypatch.setattr(adapter, "_build_subagent_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_skill_rail", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_build_skill_retrieval_prompt_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_symphony_orchestration_prompt_rail", lambda: orchestration_rail)
     monkeypatch.setattr(adapter, "_build_structured_ask_user_rail", lambda: ask_user_rail)
     monkeypatch.setattr(interface_deep_module, "build_permission_rail", lambda **_kwargs: None)
     monkeypatch.setattr(interface_deep_module, "_build_context_processor_rail", lambda **_kwargs: None)
@@ -1186,6 +1188,8 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     plan_rails = adapter._build_agent_rails({}, {"models": {}}, mode="agent.plan")
     fast_rails = adapter._build_agent_rails({}, {"models": {}}, mode="agent.fast")
 
+    assert orchestration_rail in plan_rails
+    assert orchestration_rail in fast_rails
     assert ask_user_rail in plan_rails
     assert ask_user_rail in fast_rails
 

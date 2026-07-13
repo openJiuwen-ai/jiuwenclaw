@@ -893,6 +893,36 @@ select {
     line-height: 1.7142857;
   }
 
+  /* Proactive Recommendation Card */
+  .proactive-recommendation-card {
+    margin: 0.75rem 0;
+    max-width: 85%;
+  }
+
+  .proactive-card {
+    position: relative;
+    overflow: hidden;
+    transition: all 0.2s ease;
+  }
+
+  .proactive-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  }
+
+  .proactive-card-content {
+    color: var(--text);
+    line-height: 1.6;
+  }
+
+  .proactive-card-content p {
+    margin: 0;
+  }
+
+  .proactive-card-content p + p {
+    margin-top: 0.5rem;
+  }
+
   .context-compression-running-text {
     display: inline-block;
     color: var(--text);
@@ -1392,6 +1422,21 @@ select {
   .tool-tree {
     margin: 8px 0;
     padding: 2px 0;
+  }
+
+  .tool-tree__notices {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 4px;
+  }
+
+  .tool-tree__notice {
+    max-width: 100%;
+    color: var(--muted);
+    font-size: var(--font-size-xs);
+    line-height: 1.45;
+    overflow-wrap: anywhere;
   }
 
   .tool-tree__header {

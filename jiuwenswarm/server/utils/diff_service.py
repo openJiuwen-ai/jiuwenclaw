@@ -46,10 +46,11 @@ class DiffService:
     def _compute_turn_diffs(self, session_id: str, project_dir: str | None = None) -> list[dict[str, Any]]:
         """计算 turn-based diffs."""
         history = self._read_history(session_id)
-        agent_history = self._read_agent_history(session_id, project_dir)
 
         if not history:
             return []
+
+        agent_history = self._read_agent_history(session_id, project_dir)
 
         turns: list[dict[str, Any]] = []
 
@@ -589,6 +590,7 @@ class DiffService:
                 cwd=project_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=10,
             )
             if result.returncode != 0:
@@ -608,6 +610,7 @@ class DiffService:
                 cwd=project_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=5,
             )
             if result.returncode != 0:
@@ -632,6 +635,7 @@ class DiffService:
                 cwd=project_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=5,
             )
             if result.returncode != 0:
@@ -889,11 +893,7 @@ class DiffService:
         return files
 
     def get_git_diff(self, project_dir: str | None) -> dict[str, Any] | None:
-        """获取工作区相对于 HEAD 的 git diff.
-
-        包含两类改动：
-        1. 已跟踪文件的修改（git diff HEAD）
-        2. 未跟踪的新文件（git ls-files --others --exclude-standard）
+        """获取工作区相对于 HEAD 的 git diff（仅已跟踪文件的修改）.
 
         Args:
             project_dir: 项目目录路径.
@@ -904,7 +904,7 @@ class DiffService:
                 "files": { file_path: { "filePath": str, "hunks": [...],
                     "isNewFile": bool, "linesAdded": int, "linesRemoved": int } }
             }
-            如果不是 git 仓库或没有任何改动（含未跟踪文件），返回 None.
+            如果不是 git 仓库或没有任何改动，返回 None.
         """
         if not project_dir:
             return None
@@ -972,18 +972,6 @@ class DiffService:
                         "linesRemoved": lines_removed,
                         "lastEditTime": None,
                     }
-
-        # 2. 未跟踪的新文件: 仅填充剩余名额，避免无限加载
-        remaining_slots = max(0, MAX_FILES - len(files))
-        untracked = self._get_untracked_files(repo_dir, max_files=remaining_slots)
-        for abs_path, file_info in untracked.items():
-            if abs_path not in files:  # 避免重复（理论上不会）
-                file_info.setdefault("isBinary", False)
-                file_info.setdefault("isLargeFile", False)
-                file_info.setdefault("isTruncated", False)
-                files[abs_path] = file_info
-                total_files_changed += 1
-                total_added += file_info["linesAdded"]
 
         if not files:
             return None

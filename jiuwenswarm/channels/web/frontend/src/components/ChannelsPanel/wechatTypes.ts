@@ -201,6 +201,42 @@ export function buildWechatPayload(draft: WechatDraft): Record<string, unknown> 
   };
 }
 
+// 微信通道数值参数取值范围（秒），与后端 _WECHAT_NUMERIC_BOUNDS 保持一致。
+// 均须为有限正数；long_poll_timeout_sec 须为整数。用于保存前拦截负数/0/极大值/非法值。
+export const WECHAT_NUMERIC_BOUNDS: Record<
+  string,
+  { min: number; max: number; integer?: boolean }
+> = {
+  qrcode_poll_interval_sec: { min: 0.1, max: 3600 },
+  long_poll_timeout_sec: { min: 1, max: 600, integer: true },
+  backoff_base_sec: { min: 0.1, max: 3600 },
+  backoff_max_sec: { min: 0.1, max: 3600 },
+};
+
+export type WechatNumericError =
+  | { kind: 'range'; field: string; min: number; max: number }
+  | { kind: 'order' };
+
+/**
+ * 校验微信通道四个数值参数。合法返回 null；非法返回首个错误：
+ * - range：某字段非有限数 / 非整数 / 越界；
+ * - order：backoff_max_sec 小于 backoff_base_sec。
+ */
+export function validateWechatNumericDraft(draft: WechatDraft): WechatNumericError | null {
+  for (const [field, b] of Object.entries(WECHAT_NUMERIC_BOUNDS)) {
+    const v = Number(draft[field as keyof WechatDraft]);
+    const ok =
+      Number.isFinite(v) && (!b.integer || Number.isInteger(v)) && v >= b.min && v <= b.max;
+    if (!ok) return { kind: 'range', field, min: b.min, max: b.max };
+  }
+  const base = Number(draft.backoff_base_sec);
+  const mx = Number(draft.backoff_max_sec);
+  if (Number.isFinite(base) && Number.isFinite(mx) && mx < base) {
+    return { kind: 'order' };
+  }
+  return null;
+}
+
 export function isSensitiveWechatField(field: keyof WechatDraft): boolean {
   return field === 'bot_token';
 }

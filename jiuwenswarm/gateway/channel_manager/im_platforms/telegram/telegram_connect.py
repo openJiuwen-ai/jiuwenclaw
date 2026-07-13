@@ -13,6 +13,8 @@ import logging
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.common.schema.message import Message, ReqMethod
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +155,7 @@ class TelegramChannel(BaseChannel):
 
         logger.info("Telegram Bot 已停止")
 
-    async def send(self, msg: Message) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
         """通过 Telegram 发送消息."""
         if not self._application or not self._running:
             logger.warning("Telegram Bot not initialized or not running")

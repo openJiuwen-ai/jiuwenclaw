@@ -1,17 +1,21 @@
 import { type KeyId, matchesKey } from "@mariozechner/pi-tui";
 
 import type { KeybindingAction, KeybindingContextName } from "./actions.js";
-import { loadKeybindings, startKeybindingsWatcher } from "./store.js";
+import { getKeybindingsMtimeMs, loadKeybindings, startKeybindingsWatcher } from "./store.js";
 import type { KeybindingWarning, ResolvedBindings } from "./types.js";
 
 // Initialized at module load from defaults + user file. /keybindings triggers
 // reloadResolver() after the user edits the file.
 let current: ResolvedBindings = loadKeybindings().resolved;
+let lastMtimeMs: number | undefined = getKeybindingsMtimeMs();
 
 /** Reload bindings from disk. Returns any validation warnings. */
 export function reloadResolver(): KeybindingWarning[] {
+  const mtimeMs = getKeybindingsMtimeMs();
+  if (mtimeMs === lastMtimeMs) return [];
   const result = loadKeybindings();
   current = result.resolved;
+  lastMtimeMs = mtimeMs;
   return result.warnings;
 }
 

@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -24,6 +25,8 @@ from openjiuwen.core.foundation.llm import Model, ProviderType
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 
 from jiuwenswarm.common.config import (
+    DEFAULT_SWARMFLOW_ENABLED,
+    SWARMFLOW_ENABLED_CONFIG_PATH,
     get_config,
     get_config_raw,
     get_default_models,
@@ -31,6 +34,7 @@ from jiuwenswarm.common.config import (
     update_default_models_in_config,
     update_heartbeat_in_config,
     update_channel_in_config,
+    replace_channel_subsection_with_cleanup,
     update_browser_in_config,
     update_preferred_language_in_config,
     update_context_engine_enabled_in_config,
@@ -40,8 +44,10 @@ from jiuwenswarm.common.config import (
     update_permissions_enabled_in_config,
     update_memory_forbidden_enabled_in_config,
     update_memory_forbidden_description_in_config,
+    update_swarmflow_enabled_in_config,
     update_a2ui_in_config,
     update_updater_in_config,
+    update_proactive_recommendation_in_config,
 )
 from jiuwenswarm.server.runtime.a2ui.integration import (
     get_a2ui_config_payload,
@@ -59,6 +65,7 @@ from jiuwenswarm.common.utils import (
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
 from jiuwenswarm.common.version import __version__
+from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachments
 from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     coerce_root_categories_value,
     root_categories_to_text,
@@ -68,6 +75,75 @@ for _jiuwen_log in LogManager.get_all_loggers().values():
     _jiuwen_log.set_level(logging.INFO)
 
 logger = logging.getLogger(__name__)
+
+
+_WEB_CONFIG_RELOAD_CHANNEL_ID = "web"
+_MODEL_RELOAD_ENV_KEYS = {
+    "MODEL_PROVIDER",
+    "MODEL_NAME",
+    "API_BASE",
+    "API_KEY",
+    "VIDEO_PROVIDER",
+    "VIDEO_MODEL_NAME",
+    "VIDEO_API_BASE",
+    "VIDEO_API_KEY",
+    "AUDIO_PROVIDER",
+    "AUDIO_MODEL_NAME",
+    "AUDIO_API_BASE",
+    "AUDIO_API_KEY",
+    "VISION_PROVIDER",
+    "VISION_MODEL_NAME",
+    "VISION_API_BASE",
+    "VISION_API_KEY",
+}
+
+
+@dataclass(frozen=True)
+class _ConfigChangeSet:
+    env_updates: dict[str, str]
+    yaml_updated: list[str]
+    force: bool = False
+
+    @property
+    def changed(self) -> bool:
+        return self.force or bool(self.env_updates or self.yaml_updated)
+
+    @property
+    def updated_keys(self) -> set[str]:
+        return set(self.env_updates.keys()) | set(self.yaml_updated)
+
+    @property
+    def reload_scopes(self) -> set[str]:
+        scopes: set[str] = set()
+        if _MODEL_RELOAD_ENV_KEYS & set(self.env_updates):
+            scopes.add("model")
+        for key in self.yaml_updated:
+            key_text = str(key)
+            if key_text in {"models.defaults"} or key_text.startswith("models."):
+                scopes.add("model")
+            elif key_text in {"modes.team", "agents", "team"}:
+                scopes.add("team")
+            elif key_text.startswith("permissions"):
+                scopes.add("permissions")
+            elif key_text.startswith("proactive_recommendation"):
+                scopes.add("proactive")
+            elif key_text.startswith("symphony") or key_text.startswith("skill_retrieval"):
+                scopes.add("agent_runtime")
+            elif key_text.startswith("a2ui_"):
+                scopes.add("web_ui")
+            else:
+                scopes.add("agent_runtime")
+        if self.force and not scopes:
+            scopes.add("agent_runtime")
+        return scopes
+
+    @property
+    def reload_options(self) -> dict[str, Any]:
+        return {
+            "target_channel_id": _WEB_CONFIG_RELOAD_CHANNEL_ID,
+            "reload_scopes": sorted(self.reload_scopes),
+        }
+
 
 _PROJECT_ROOT = get_root_dir()
 _ENV_FILE = get_env_file()
@@ -446,7 +522,55 @@ _CONFIG_YAML_KEYS = frozenset({
     "memory_forbidden_enabled",
     "memory_forbidden_description",
     "a2ui_enabled",
+    "proactive_recommendation_enabled",
+    "proactive_recommendation_max_recommend_per_day",
+    "proactive_recommendation_max_rounds_per_tick",
+    "swarmflow_enabled",
 })
+
+# 微信通道数值参数的取值范围：(下限, 上限, 是否必须为整数)。均为秒，必须为有限正数。
+# 用于 channel.wechat.set_conf 写盘前校验，拒绝负数 / 0 / 极大值 / 浮点越界 / 非数字，
+# 避免非法值落盘后导致后台轮询忙循环轰炸接口或退避过久使通道僵死。
+_WECHAT_NUMERIC_BOUNDS: dict[str, tuple[float, float, bool]] = {
+    "qrcode_poll_interval_sec": (0.1, 3600.0, False),
+    "long_poll_timeout_sec": (1, 600, True),
+    "backoff_base_sec": (0.1, 3600.0, False),
+    "backoff_max_sec": (0.1, 3600.0, False),
+}
+
+
+def _validate_wechat_numeric_params(params: dict) -> str | None:
+    """校验微信通道四个数值参数。合法返回 None，非法返回中文错误描述。
+
+    规则：出现在 params 中的字段必须为有限正数并落在各自范围内；
+    ``long_poll_timeout_sec`` 必须为整数；且 ``backoff_max_sec`` 不得小于
+    ``backoff_base_sec``（两者同时出现时才校验此跨字段约束）。
+    仅校验存在的键，缺省字段交由默认值处理。
+    """
+    def _as_number(value: Any) -> float | None:
+        # bool 是 int 的子类，需显式排除，避免 True/False 被当作 1/0 通过。
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        val = float(value)
+        return val if math.isfinite(val) else None
+
+    for key, (lo, hi, is_int) in _WECHAT_NUMERIC_BOUNDS.items():
+        if key not in params:
+            continue
+        val = _as_number(params[key])
+        if val is None:
+            return f"{key} 需为有限数值"
+        if is_int and val != int(val):
+            return f"{key} 需为整数"
+        if not (lo <= val <= hi):
+            return f"{key} 需在 {lo}–{hi} 之间"
+
+    base = _as_number(params.get("backoff_base_sec"))
+    mx = _as_number(params.get("backoff_max_sec"))
+    if base is not None and mx is not None and mx < base:
+        return "backoff_max_sec 不得小于 backoff_base_sec"
+    return None
+
 
 _SYMPHONY_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
     "symphony_enabled": (("enabled",), "bool", False),
@@ -550,6 +674,15 @@ def _flatten_skill_retrieval_for_config_panel(raw: dict[str, Any]) -> dict[str, 
         else:
             flat[key] = str(value)
     return flat
+
+
+def _flatten_swarmflow_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
+    enabled = _get_nested_config_value(
+        raw,
+        SWARMFLOW_ENABLED_CONFIG_PATH,
+        DEFAULT_SWARMFLOW_ENABLED,
+    )
+    return {"swarmflow_enabled": "true" if enabled else "false"}
 
 
 def _build_symphony_config_update(params: dict[str, Any]) -> dict[str, Any]:
@@ -706,6 +839,200 @@ def _make_session_id() -> str:
     return f"sess_{ts}_{suffix}"
 
 
+# ---------------------------------------------------------------------------
+# 飞书 Feishu / 小艺 Xiaoyi 多应用配置 — 默认值 & 归一化函数
+# ---------------------------------------------------------------------------
+
+_FEISHU_APP_DEFAULTS: dict[str, Any] = {
+    "name": "默认应用",
+    "is_default": False,
+    "enabled": True,
+    "app_id": "",
+    "app_secret": "",
+    "encrypt_key": "",
+    "verification_token": "",
+    "allow_from": ["0.0.0.0/0"],
+    "enable_streaming": True,
+    "group_digital_avatar": False,
+    "my_user_id": "",
+    "bot_name": "",
+    "enable_memory": False,
+}
+
+
+def _merge_apps_by_id(
+    new_apps: list[dict],
+    existing_apps: list[dict],
+) -> list[dict]:
+    """将新 apps 与已有 apps 按 app_id 合并，保留前端未显式发送的字段。
+
+    各 channel 的 ``_normalize_*_conf`` 会用对应的 ``_*_APP_DEFAULTS`` 空值填充
+    前端未发的字段。合并以已有值为基座、新值覆盖，避免已配置的敏感字段（如
+    app_secret / sk 等）被默认空值覆盖丢失。
+
+    Parameters
+    ----------
+    new_apps : list[dict]
+        前端提交并经归一化的新 apps 列表。
+    existing_apps : list[dict]
+        从 cm.get_conf (或 config.yaml) 读出的已有 apps 列表。
+
+    Returns
+    -------
+    list[dict]
+        合并后的 apps 列表。
+    """
+    if not isinstance(existing_apps, list) or not existing_apps:
+        return new_apps
+
+    existing_by_app_id = {
+        a["app_id"]: a
+        for a in existing_apps
+        if isinstance(a, dict) and a.get("app_id")
+    }
+    if not existing_by_app_id:
+        return new_apps
+
+    return [
+        {**existing_by_app_id[app["app_id"]], **app}
+        if isinstance(app, dict) and app.get("app_id") in existing_by_app_id
+        else app
+        for app in new_apps
+    ]
+
+
+def _normalize_feishu_conf(raw: dict) -> dict:
+    """将 channels.feishu 统一为 apps 格式，并为每个 app 补充缺省字段。
+
+    输入可以是旧平铺格式（``{"app_id": "xxx", "app_secret": "yyy"}``）
+    或新多应用格式（``{"apps": [...]}``）。返回结果始终包含 ``apps`` 列表。
+    若输入为空或非 dict，返回 ``{"apps": []}``。
+    """
+    if not isinstance(raw, dict):
+        logger.debug("[normalize_feishu] 输入非 dict (%s), 返回空 apps", type(raw).__name__)
+        return {"apps": []}
+    if "apps" in raw:
+        apps_raw = raw["apps"]
+        app_names = [a.get("name", "?") for a in apps_raw] if isinstance(apps_raw, list) else []
+        logger.debug(
+            "[normalize_feishu] 多应用格式, apps=%d, names=%s",
+            len(apps_raw) if isinstance(apps_raw, list) else -1,
+            app_names,
+        )
+        apps = [
+            {**_FEISHU_APP_DEFAULTS, **app}
+            for app in apps_raw
+        ]
+        return {**raw, "apps": apps}
+    # 旧平铺格式 → 转为 apps
+    keys_present = [k for k in ("app_id", "app_secret", "encrypt_key", "verification_token") if k in raw]
+    logger.debug("[normalize_feishu] 旧平铺格式, keys=%s, 转为单 app", keys_present)
+    return {
+        **raw,
+        "apps": [_normalize_single_feishu_to_app(raw)],
+    }
+
+
+def _normalize_single_feishu_to_app(raw: dict) -> dict:
+    """将单个平铺飞书配置转为 apps 列表项。"""
+    return {
+        **_FEISHU_APP_DEFAULTS,
+        "is_default": True,
+        "name": raw.get("name", "默认应用"),
+        "enabled": bool(raw.get("enabled", True)),
+        "app_id": raw.get("app_id", ""),
+        "app_secret": raw.get("app_secret", ""),
+        "encrypt_key": raw.get("encrypt_key", ""),
+        "verification_token": raw.get("verification_token", ""),
+        "allow_from": raw.get("allow_from") or ["0.0.0.0/0"],
+        "enable_streaming": bool(raw.get("enable_streaming", True)),
+        "group_digital_avatar": bool(raw.get("group_digital_avatar", False)),
+        "my_user_id": raw.get("my_user_id", ""),
+        "bot_name": raw.get("bot_name", ""),
+        "enable_memory": bool(raw.get("enable_memory", False)),
+        **raw,
+    }
+
+
+_XIAOYI_APP_DEFAULTS: dict[str, Any] = {
+    "name": "默认应用",
+    "is_default": False,
+    "enabled": True,
+    "ak": "",
+    "sk": "",
+    "app_id": "",
+    "api_id": "",
+    "agent_id": "",
+    "enable_streaming": True,
+    "mode": "xiaoyi_channel",
+    "push_id": "",
+    "ws_url1": "wss://hag.cloud.huawei.com/openclaw/v1/ws/link",
+    "ws_url2": "wss://116.63.174.231/openclaw/v1/ws/link",
+    "phone_tools_enabled": False,
+    "uid": "",
+    "api_key": "",
+    "push_url": "",
+    "file_upload_url": "",
+}
+
+
+def _normalize_xiaoyi_conf(raw: dict) -> dict:
+    """将 channels.xiaoyi 统一为 apps 格式，并为每个 app 补充缺省字段。
+
+    输入可以是旧平铺格式或新多应用格式。返回结果始终包含 ``apps`` 列表。
+    若输入为空或非 dict，返回 ``{"apps": []}``。
+    """
+    if not isinstance(raw, dict):
+        logger.debug("[normalize_xiaoyi] 输入非 dict (%s), 返回空 apps", type(raw).__name__)
+        return {"apps": []}
+    if "apps" in raw:
+        apps_raw = raw["apps"]
+        app_names = [a.get("name", "?") for a in apps_raw] if isinstance(apps_raw, list) else []
+        logger.debug(
+            "[normalize_xiaoyi] 多应用格式, apps=%d, names=%s",
+            len(apps_raw) if isinstance(apps_raw, list) else -1,
+            app_names,
+        )
+        apps = [
+            {**_XIAOYI_APP_DEFAULTS, **app}
+            for app in apps_raw
+        ]
+        return {**raw, "apps": apps}
+    # 旧平铺格式 → 转为 apps
+    keys_present = [k for k in ("ak", "sk", "agent_id") if k in raw]
+    logger.debug("[normalize_xiaoyi] 旧平铺格式, keys=%s, 转为单 app", keys_present)
+    return {
+        **raw,
+        "apps": [_normalize_single_xiaoyi_to_app(raw)],
+    }
+
+
+def _normalize_single_xiaoyi_to_app(raw: dict) -> dict:
+    """将单个平铺小艺配置转为 apps 列表项。"""
+    return {
+        **_XIAOYI_APP_DEFAULTS,
+        "is_default": True,
+        "name": raw.get("name", "默认应用"),
+        "enabled": bool(raw.get("enabled", True)),
+        "ak": raw.get("ak", ""),
+        "sk": raw.get("sk", ""),
+        "app_id": raw.get("app_id", ""),
+        "api_id": str(raw.get("api_id") or ""),
+        "agent_id": raw.get("agent_id", ""),
+        "enable_streaming": bool(raw.get("enable_streaming", True)),
+        "mode": raw.get("mode", "xiaoyi_channel"),
+        "push_id": raw.get("push_id", ""),
+        "ws_url1": raw.get("ws_url1", "wss://hag.cloud.huawei.com/openclaw/v1/ws/link"),
+        "ws_url2": raw.get("ws_url2", "wss://116.63.174.231/openclaw/v1/ws/link"),
+        "phone_tools_enabled": bool(raw.get("phone_tools_enabled", False)),
+        "uid": raw.get("uid", ""),
+        "api_key": raw.get("api_key", ""),
+        "push_url": raw.get("push_url", ""),
+        "file_upload_url": raw.get("file_upload_url", ""),
+        **raw,
+    }
+
+
 @dataclass
 class WebHandlersBindParams:
     """Named bundle for :func:`_register_web_handlers` (avoids long positional / keyword lists)."""
@@ -775,7 +1102,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if ac is None or not getattr(ac, "server_ready", False):
             logger.debug("[_on_connect] Agent 未就绪，跳过 connection.ack")
             return
-        sid = _make_session_id()
+        # V2: 复用 ws 握手时注册的占位 session_id，而不是另 make 一个新 sid。
+        # 原实现凭空生成 sid_B 与 ws 在 _clients_by_key 中注册的 sid_A 不一致，
+        # 导致 send() 按 session_id 反查落空、ACK 被丢弃，前端收不到 connection.ack。
+        # 复用 sid_A 后，ACK 走标准 send 流程即可命中本 ws，无需特殊路由兜底。
+        sid = getattr(ws, "_jiuwen_initial_sid", None) or _make_session_id()
 
         ack_msg = Message(
             id=f"ack-{sid}",
@@ -840,12 +1171,21 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             memory_desc = memory_cfg.get("description") or {}
             payload["memory_forbidden_description"] = memory_desc
             payload.update(get_a2ui_config_payload(raw))
+            payload.update(_flatten_swarmflow_for_config_panel(raw))
             payload.update(_flatten_symphony_for_config_panel(raw))
             if not payload.get("free_search_ddg_enabled"):
                 payload["free_search_ddg_enabled"] = "false"
             if not payload.get("free_search_bing_enabled"):
                 payload["free_search_bing_enabled"] = "false"
             payload.update(_flatten_modes_team_for_config_panel(raw))
+            # Proactive recommendation — use resolved config (env vars expanded)
+            resolved = get_config()
+            proactive_cfg = resolved.get("proactive_recommendation") or {}
+            payload["proactive_recommendation_enabled"] = "true" if proactive_cfg.get("enabled", False) else "false"
+            payload["proactive_recommendation_max_recommend_per_day"] = str(
+                proactive_cfg.get("max_recommend_per_day", 10))
+            payload["proactive_recommendation_max_rounds_per_tick"] = str(
+                proactive_cfg.get("max_rounds_per_tick", 20))
         except Exception:  # noqa: BLE001
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
@@ -854,6 +1194,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("evolution_auto_scan", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("memory_forbidden_description", "")
+            payload.setdefault("swarmflow_enabled", "true" if DEFAULT_SWARMFLOW_ENABLED else "false")
             for key, value in get_default_a2ui_config_payload().items():
                 payload.setdefault(key, value)
             for key, (_, value_type, default) in {
@@ -869,6 +1210,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 payload.setdefault(key, default_text)
             payload.setdefault("free_search_ddg_enabled", "false")
             payload.setdefault("free_search_bing_enabled", "false")
+            payload.setdefault("proactive_recommendation_enabled", "false")
+            payload.setdefault("proactive_recommendation_max_recommend_per_day", "10")
+            payload.setdefault("proactive_recommendation_max_rounds_per_tick", "20")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     def _persist_env_updates(updates: dict[str, str]) -> None:
@@ -881,7 +1225,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if env_path.is_file():
                 with open(env_path, "r", encoding="utf-8") as f:
                     lines = f.readlines()
-            updated_keys = set(updates.keys())
             new_lines: list[str] = []
             for line in lines:
                 stripped = line.strip()
@@ -907,6 +1250,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     class _ConfigInternalError(RuntimeError):
         pass
+
+    def _validate_proactive_int(
+        val: Any, *, name: str, lo: int = 1, hi: int = 50,
+    ) -> int:
+        """校验 proactive 数值配置项：必须是 [lo, hi] 的正整数字符串。
+
+        挡住负数、零、浮点数(3.5)、字符串(abc)、科学计数(1e5)、空值。
+        校验失败抛 _ConfigBadRequest（携带中文提示），由外层返回前端。
+        """
+        raw = str(val if val is not None else "").strip()
+        if not raw:
+            raise _ConfigBadRequest(f"{name} 不能为空，需为 {lo}-{hi} 的正整数")
+        # 正则一次挡住浮点、负数、科学计数、非数字
+        if not re.fullmatch(r"[0-9]+", raw):
+            raise _ConfigBadRequest(
+                f"{name} 必须是正整数（{lo}-{hi}），当前值无效：{raw!r}"
+            )
+        n = int(raw)
+        if n < lo or n > hi:
+            raise _ConfigBadRequest(f"{name} 需为 {lo}-{hi} 的正整数，当前：{n}")
+        return n
 
     def _encrypt_config_params(params: dict[str, Any]) -> dict[str, Any]:
         encrypted = dict(params)
@@ -965,14 +1329,29 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 elif param_key == "memory_forbidden_description":
                     desc_val = str(val).strip()
                     update_memory_forbidden_description_in_config({preferred_lang: desc_val})
+                elif param_key == "swarmflow_enabled":
+                    update_swarmflow_enabled_in_config(parsed)
                 elif param_key.startswith("a2ui_"):
                     ok, update, error = validate_a2ui_config_update(param_key, val)
                     if not ok:
                         raise _ConfigBadRequest(error or "invalid A2UI config")
                     update_a2ui_in_config(update)
+                elif param_key == "proactive_recommendation_enabled":
+                    update_proactive_recommendation_in_config({"enabled": parsed})
+                elif param_key == "proactive_recommendation_max_recommend_per_day":
+                    n = _validate_proactive_int(val, name="每日推荐上限(max_recommend_per_day)")
+                    update_proactive_recommendation_in_config({"max_recommend_per_day": n})
+                elif param_key == "proactive_recommendation_max_rounds_per_tick":
+                    n = _validate_proactive_int(val, name="每次检查对话轮数(max_rounds_per_tick)")
+                    update_proactive_recommendation_in_config({"max_rounds_per_tick": n})
                 yaml_updated.append(param_key)
+            except _ConfigBadRequest:
+                # proactive 数值校验等：直接返回前端，不被外层吞成 warning
+                raise
             except Exception as e:  # noqa: BLE001
                 logger.warning("[config.set] 写回 config.yaml 失败 %s: %s", param_key, e)
+                if param_key == "swarmflow_enabled":
+                    raise _ConfigInternalError("failed to update enable_swarmflow") from e
 
         symphony_updates = _build_symphony_config_update(params)
         if symphony_updates:
@@ -1003,26 +1382,23 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         return env_updates, yaml_updated
 
-    async def _notify_config_saved_once(
-            env_updates: dict[str, str],
-            yaml_updated: list[str],
-            *,
-            force: bool = False,
-    ) -> None:
-        """Trigger at most one hot reload after all file writes are complete."""
-        if not force and not (env_updates or yaml_updated):
-            return
+    async def _apply_config_change_set(change_set: _ConfigChangeSet) -> bool:
+        """Synchronously apply only the runtime scope affected by a saved config change."""
+        if not change_set.changed:
+            return True
         if on_config_saved:
             config_payload = get_config()
             callback_result = on_config_saved(
-                set(env_updates.keys()) | set(yaml_updated),
-                env_updates=dict(env_updates),
+                change_set.updated_keys,
+                env_updates=dict(change_set.env_updates),
                 config_payload=config_payload,
+                reload_options=change_set.reload_options,
             )
             if inspect.isawaitable(callback_result):
-                await callback_result
-        else:
-            await _clear_agent_config_cache(_resolve(agent_client))
+                return bool(await callback_result)
+            return bool(callback_result)
+        await _clear_agent_config_cache(_resolve(agent_client))
+        return True
 
     def _build_models_defaults_from_frontend(raw_models: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_models, list) or not raw_models:
@@ -1125,19 +1501,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _ConfigInternalError as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
             return
-        applied_without_restart = True
+        change_set = _ConfigChangeSet(env_updates, yaml_updated)
+        try:
+            applied_without_restart = await _apply_config_change_set(change_set)
+        except Exception as exc:
+            logger.warning("[config.set] on_config_saved failed: %s", exc)
+            applied_without_restart = False
 
         updated_param_keys = [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated
         await channel.send_response(
             ws, req_id, ok=True,
             payload={"updated": updated_param_keys, "applied_without_restart": applied_without_restart},
         )
-
-        if env_updates or yaml_updated:
-            try:
-                await _notify_config_saved_once(env_updates, yaml_updated)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("[config.set] on_config_saved failed: %s", e)
 
     async def _config_validate_model(ws, req_id, params, session_id, max_tokens_bounds=None):
         """Send a minimal chat completion (user message \"Hi\") using draft default-model fields.
@@ -1340,10 +1715,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             new_models = _build_models_defaults_from_frontend(params.get("models"))
             update_default_models_in_config(new_models)
 
-            await _notify_config_saved_once({}, ["models.defaults"], force=True)
+            applied_without_restart = await _apply_config_change_set(
+                _ConfigChangeSet({}, ["models.defaults"], force=True)
+            )
 
             await channel.send_response(ws, req_id, ok=True, payload={
                 "count": len(new_models),
+                "applied_without_restart": applied_without_restart,
             })
         except _ConfigBadRequest as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
@@ -1394,22 +1772,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 yaml_updated.append("models.defaults")
                 models_count = len(new_models)
 
+            change_set = _ConfigChangeSet(env_updates, yaml_updated, force=bool(env_updates or yaml_updated))
+            applied_without_restart = await _apply_config_change_set(change_set)
+
             await channel.send_response(
                 ws,
                 req_id,
                 ok=True,
                 payload={
                     "updated": [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated,
-                    "applied_without_restart": True,
+                    "applied_without_restart": applied_without_restart,
                     "models_count": models_count,
                 },
             )
-
-            if env_updates or yaml_updated:
-                try:
-                    await _notify_config_saved_once(env_updates, yaml_updated, force=True)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("[config.save_all] on_config_saved failed: %s", e)
         except _ConfigBadRequest as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
         except _ConfigInternalError as exc:
@@ -1709,7 +2084,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         mem = psutil.virtual_memory()
         total_mb = mem.total / (1024 * 1024)
         available_mb = mem.available / (1024 * 1024)
-        used_percent = mem.percent
 
         await channel.send_response(ws, req_id, ok=True,
                                     payload={"rss_mb": rss_mb, "total_mb": total_mb,
@@ -1722,6 +2096,24 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             ok=True,
             payload={"accepted": True, "session_id": session_id},
         )
+
+    async def _media_persist(ws, req_id, params, session_id):
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        normalized = dict(params)
+        try:
+            normalize_chat_media_attachments(normalized, session_id)
+        except Exception as exc:
+            logger.exception("[media.persist] failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+            return
+        payload = {
+            key: normalized[key]
+            for key in ("content", "query", "media_items", "files")
+            if key in normalized
+        }
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     async def _chat_resume(ws, req_id, params, session_id):
         await channel.send_response(
@@ -1843,10 +2235,25 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 try:
                     raw = get_config_raw() or {}
                     ch_cfg = (raw.get("channels") or {}).get("feishu") or {}
-                    has_target = bool(
-                        str(ch_cfg.get("last_chat_id") or "").strip()
-                        or str(ch_cfg.get("chat_id") or "").strip()
-                    )
+                    # V2 多应用：心跳 relay 会 fan-out 到同 channel_id 的全部 app，每个 app 各走
+                    # 自己的 last_chat_id/chat_id 投递；故要求「每个 app 都有目标」才算可用，
+                    # 否则缺失目标的 app 每次 tick 都会静默投递失败。
+                    apps = ch_cfg.get("apps") or []
+                    if isinstance(apps, list) and apps:
+                        has_target = all(
+                            isinstance(app, dict)
+                            and (
+                                bool(str(app.get("last_chat_id") or "").strip())
+                                or bool(str(app.get("chat_id") or "").strip())
+                            )
+                            for app in apps
+                        )
+                    else:
+                        # 旧平铺格式（单应用）：兜底看顶层 last_chat_id/chat_id。
+                        has_target = bool(
+                            str(ch_cfg.get("last_chat_id") or "").strip()
+                            or str(ch_cfg.get("chat_id") or "").strip()
+                        )
                     if not has_target:
                         await channel.send_response(
                             ws, req_id, ok=False,
@@ -1901,10 +2308,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 error=str(e), code="INTERNAL_ERROR"
             )
 
+    def _mask_sensitive(params: dict | list, sensitive_keys: frozenset[str]) -> dict | list:
+        """递归脱敏，替换敏感字段值为 ``****``。"""
+        if isinstance(params, dict):
+            return {
+                k: (_mask_sensitive(v, sensitive_keys) if isinstance(v, (dict, list))
+                    else "****" if k in sensitive_keys else v)
+                for k, v in params.items()
+            }
+        if isinstance(params, list):
+            return [_mask_sensitive(item, sensitive_keys) if isinstance(item, (dict, list)) else item
+                    for item in params]
+        return params
+
+    _feishu_sensitive_keys: frozenset[str] = frozenset({"app_secret", "encrypt_key", "verification_token"})
+    _xiaoyi_sensitive_keys: frozenset[str] = frozenset({"sk", "api_key"})
+
     async def _channel_feishu_get_conf(ws, req_id, params, session_id):
         """返回 FeishuChannel 的当前配置（由 ChannelManager 管理）。"""
         cm = _resolve(channel_manager)
         if cm is None:
+            logger.warning("[channel.feishu.get_conf] channel_manager not available, req_id=%s", req_id)
             await channel.send_response(
                 ws,
                 req_id,
@@ -1914,16 +2338,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            conf = cm.get_conf("feishu")
+            raw = cm.get_conf("feishu")
+            conf = _normalize_feishu_conf(raw)
+            apps = conf.get("apps", [])
+            app_names = [a.get("name", "?") for a in apps]
+            logger.debug(
+                "[channel.feishu.get_conf] ok, req_id=%s, apps=%d, names=%s",
+                req_id, len(apps), app_names,
+            )
             await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
         except Exception as e:  # noqa: BLE001
-            logger.exception("[channel.feishu.get_conf] %s", e)
+            logger.exception("[channel.feishu.get_conf] 异常, req_id=%s: %s", req_id, e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _channel_feishu_set_conf(ws, req_id, params, session_id):
-        """更新 FeishuChannel 的配置，并按新配置重新实例化通道。"""
+        """更新 FeishuChannel 的配置，并按新配置重新实例化通道。
+
+        ``params`` 必须含 ``apps`` 键，保存到 channels.feishu.apps。
+        """
         cm = _resolve(channel_manager)
         if cm is None:
+            logger.warning("[channel.feishu.set_conf] channel_manager not available, req_id=%s", req_id)
             await channel.send_response(
                 ws,
                 req_id,
@@ -1942,27 +2377,40 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            await cm.set_conf("feishu", params)
-            conf = cm.get_conf("feishu")
+            # 多应用模式：params 必须含 apps 键
+            apps = params["apps"]
+            app_names = [a.get("name", "?") for a in apps]
+            logger.debug(
+                "[channel.feishu.set_conf] req_id=%s, apps=%d, names=%s",
+                req_id, len(apps), app_names,
+            )
+            # 先归一化（用 _FEISHU_APP_DEFAULTS 补充前端未发送的字段），再持久化
+            normalized_apps = _normalize_feishu_conf({"apps": apps})["apps"]
+            # 从 cm 读取已有 apps，按 app_id 合并保留未发送的敏感字段
+            existing_feishu = cm.get_conf("feishu")
+            existing_apps = existing_feishu.get("apps", []) if isinstance(existing_feishu, dict) else []
+            merged_apps = _merge_apps_by_id(normalized_apps, existing_apps)
+            await cm.set_conf("feishu", {"apps": merged_apps})
             should_clear_agent_config_cache = False
             try:
-                update_channel_in_config("feishu", conf)
+                replace_channel_subsection_with_cleanup("feishu", "apps", merged_apps, {"apps", "send_file_allowed"})
                 should_clear_agent_config_cache = True
             except Exception as e:  # noqa: BLE001
-                logger.warning("[channel.feishu.set_conf] 写回 config.yaml 失败: %s", e)
+                logger.warning("[channel.feishu.set_conf] 写回 config.yaml apps 失败: %s", e)
             try:
-                await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+                await channel.send_response(ws, req_id, ok=True, payload={"config": {"apps": merged_apps}})
             finally:
                 if should_clear_agent_config_cache:
                     _schedule_clear_agent_config_cache("channel.feishu.set_conf")
         except Exception as e:  # noqa: BLE001
-            logger.exception("[channel.feishu.set_conf] %s", e)
+            logger.exception("[channel.feishu.set_conf] 异常, req_id=%s: %s", req_id, e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _channel_xiaoyi_get_conf(ws, req_id, params, session_id):
         """返回 XiaoyiChannel 的当前配置（由 ChannelManager 管理）。"""
         cm = _resolve(channel_manager)
         if cm is None:
+            logger.warning("[channel.xiaoyi.get_conf] channel_manager not available, req_id=%s", req_id)
             await channel.send_response(
                 ws,
                 req_id,
@@ -1972,16 +2420,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            conf = cm.get_conf("xiaoyi")
+            raw = cm.get_conf("xiaoyi")
+            conf = _normalize_xiaoyi_conf(raw)
+            apps = conf.get("apps", [])
+            app_names = [a.get("name", "?") for a in apps]
+            logger.debug(
+                "[channel.xiaoyi.get_conf] ok, req_id=%s, apps=%d, names=%s",
+                req_id, len(apps), app_names,
+            )
             await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
         except Exception as e:  # noqa: BLE001
-            logger.exception("[channel.xiaoyi.get_conf] %s", e)
+            logger.exception("[channel.xiaoyi.get_conf] 异常, req_id=%s: %s", req_id, e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _channel_xiaoyi_set_conf(ws, req_id, params, session_id):
-        """更新 XiaoyiChannel 的配置，并按新配置重新实例化通道。"""
+        """更新 XiaoyiChannel 的配置，并按新配置重新实例化通道。
+
+        ``params`` 必须含 ``apps`` 键，保存到 channels.xiaoyi.apps。
+        """
         cm = _resolve(channel_manager)
         if cm is None:
+            logger.warning("[channel.xiaoyi.set_conf] channel_manager not available, req_id=%s", req_id)
             await channel.send_response(
                 ws,
                 req_id,
@@ -2000,16 +2459,28 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         try:
-            await cm.set_conf("xiaoyi", params)
-            conf = cm.get_conf("xiaoyi")
+            # 多应用模式：params 必须含 apps 键
+            apps = params["apps"]
+            app_names = [a.get("name", "?") for a in apps]
+            logger.debug(
+                "[channel.xiaoyi.set_conf] req_id=%s, apps=%d, names=%s",
+                req_id, len(apps), app_names,
+            )
+            # 先归一化（用 _XIAOYI_APP_DEFAULTS 补充前端未发送的字段），再持久化
+            normalized_apps = _normalize_xiaoyi_conf({"apps": apps})["apps"]
+            # 从 cm 读取已有 apps，按 app_id 合并保留未发送的敏感字段
+            existing_xiaoyi = cm.get_conf("xiaoyi")
+            existing_apps = existing_xiaoyi.get("apps", []) if isinstance(existing_xiaoyi, dict) else []
+            merged_apps = _merge_apps_by_id(normalized_apps, existing_apps)
+            await cm.set_conf("xiaoyi", {"apps": merged_apps})
             try:
-                update_channel_in_config("xiaoyi", conf)
+                replace_channel_subsection_with_cleanup("xiaoyi", "apps", merged_apps, {"apps", "send_file_allowed"})
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
-                logger.warning("[channel.xiaoyi.set_conf] 写回 config.yaml 失败: %s", e)
-            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+                logger.warning("[channel.xiaoyi.set_conf] 写回 config.yaml apps 失败: %s", e)
+            await channel.send_response(ws, req_id, ok=True, payload={"config": {"apps": merged_apps}})
         except Exception as e:  # noqa: BLE001
-            logger.exception("[channel.xiaoyi.set_conf] %s", e)
+            logger.exception("[channel.xiaoyi.set_conf] 异常, req_id=%s: %s", req_id, e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _channel_telegram_get_conf(ws, req_id, params, session_id):
@@ -2312,6 +2783,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        # 数值参数写盘前校验：拒绝负数 / 0 / 极大值 / 浮点越界 / 非数字，早于 set_conf 中断。
+        numeric_error = _validate_wechat_numeric_params(params)
+        if numeric_error is not None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=numeric_error,
+                code="BAD_REQUEST",
+            )
+            return
         try:
             await cm.set_conf("wechat", params)
             conf = cm.get_conf("wechat")
@@ -2461,6 +2943,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
+        # proactive.tick job 由主动推荐开关自动创建/删除，禁止面板删除。
+        existing = await cc.get_job(job_id)
+        if existing is not None and str(getattr(existing, "mode", "") or "").strip().lower() == "proactive.tick":
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="主动推荐定时任务由设置→主动推荐开关控制，不能在面板删除；请到设置关闭开关。",
+                code="BAD_REQUEST",
+            )
+            return
         deleted = await cc.delete_job(job_id)
         if not deleted:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
@@ -2482,6 +2973,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         if enabled is None:
             await channel.send_response(ws, req_id, ok=False, error="enabled is required", code="BAD_REQUEST")
+            return
+        # proactive.tick job 的 enabled 由 config 开关驱动，禁止面板手动切换。
+        existing = await cc.get_job(job_id)
+        if existing is not None and str(getattr(existing, "mode", "") or "").strip().lower() == "proactive.tick":
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="主动推荐定时任务由设置→主动推荐开关控制，不能在面板启停。",
+                code="BAD_REQUEST",
+            )
             return
         try:
             job = await cc.toggle_job(job_id, bool(enabled))
@@ -2565,6 +3065,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("hooks.list", _hooks_list)
 
     channel.register_method("chat.send", _chat_send)
+    channel.register_method("media.persist", _media_persist)
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)
     channel.register_method("chat.user_answer", _chat_user_answer)
@@ -2631,8 +3132,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             owner_scopes = params.get("owner_scopes", {})
             deny_guidance = params.get("deny_guidance_message")
             update_permissions_owner_scopes_in_config(owner_scopes, deny_guidance)
-            await _notify_config_saved_once({}, ["permissions"], force=True)
-            await channel.send_response(ws, req_id, ok=True, payload={"ok": True})
+            applied_without_restart = await _apply_config_change_set(
+                _ConfigChangeSet({}, ["permissions"], force=True)
+            )
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={"ok": True, "applied_without_restart": applied_without_restart},
+            )
         except Exception as e:
             logger.exception("[permissions.owner_scopes.set] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
@@ -2675,12 +3183,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 )
                 return
             out = resp.payload if isinstance(resp.payload, dict) else {}
-            if resp.ok and req_method not in (
+            should_schedule_reload = req_method not in (
                 ReqMethod.PERMISSIONS_TOOLS_GET,
                 ReqMethod.PERMISSIONS_RULES_GET,
                 ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_GET,
-            ):
-                await _notify_config_saved_once({}, ["permissions"], force=True)
+            )
+            if should_schedule_reload:
+                out = {
+                    **out,
+                    "applied_without_restart": await _apply_config_change_set(
+                        _ConfigChangeSet({}, ["permissions"], force=True)
+                    ),
+                }
             await channel.send_response(ws, req_id, ok=True, payload=out)
             return
 
@@ -2756,20 +3270,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _forward_harness_to_agent(ws, req_id, params, session_id, *, req_method):
         """harness.*：优先经 E2A 转发到 AgentServer；Agent 未就绪时本地执行（无 agent 实例）。"""
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.agent import AgentRequest
         from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(req_method, ReqMethod):
             await channel.send_response(ws, req_id, ok=False, error="invalid req_method", code="INTERNAL_ERROR")
             return
-
-        synthetic = AgentRequest(
-            request_id=str(req_id) if req_id else "",
-            channel_id="",
-            session_id=session_id,
-            req_method=req_method,
-            params=dict(params) if isinstance(params, dict) else {},
-        )
 
         ac = _resolve(agent_client)
         if ac is None or not getattr(ac, "server_ready", False):

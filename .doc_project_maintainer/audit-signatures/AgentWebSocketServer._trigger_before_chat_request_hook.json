@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f3fd8-2197-7f43-a4a3-3227faaeefff",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._trigger_before_chat_request_hook",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._trigger_before_chat_request_hook in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f3fd8-2197-7f43-a4a3-3227faaeefff",
+        "nickname": "Hubble",
+        "symbol_id": "AgentWebSocketServer._trigger_before_chat_request_hook",
+        "completed": true,
+        "finding_count": 2
+      }
+    }
+  ]
+}

@@ -4,6 +4,8 @@ import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
+
 import pytest
 
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
@@ -117,6 +119,26 @@ def _make_request(session_id: str = "web_a2x_system_test") -> tuple[AgentRequest
     return request, inputs
 
 
+def _make_fake_model() -> MagicMock:
+    """Create a fake Model with a valid ModelClientConfig for testing."""
+    fake_mcc = ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="system-test-key",
+        api_base="http://fake-a2x.local/v1",
+    )
+    fake_model = MagicMock()
+    fake_model.model_client_config = fake_mcc
+    fake_model.model_config = MagicMock()
+    return fake_model
+
+
+def _mock_create_model(self, config: dict) -> MagicMock:
+    """Mock _create_model that also sets self._model like the real method does."""
+    fake_model = _make_fake_model()
+    self._model = fake_model
+    return fake_model
+
+
 async def _create_adapter_and_run_chat(config_base: dict) -> AsyncMock:
     created_agent = SimpleNamespace(card=SimpleNamespace(id="jiuwenswarm", name="main_agent"), ensure_initialized=AsyncMock())
     request, inputs = _make_request()
@@ -124,7 +146,7 @@ async def _create_adapter_and_run_chat(config_base: dict) -> AsyncMock:
     with (
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "set_checkpoint", AsyncMock()),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_refresh_multimodal_configs", return_value=None),
-        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_model", return_value=object()),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_model", _mock_create_model),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_build_agent_rails", return_value=[]),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_sys_operation", return_value=MagicMock()),

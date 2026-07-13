@@ -697,6 +697,9 @@ def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
     value = option.get("value")
     if isinstance(value, str) and value:
         normalized["value"] = value
+    preview = option.get("preview")
+    if isinstance(preview, str) and preview.strip():
+        normalized["preview"] = preview
     return normalized
 
 

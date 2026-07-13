@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f3f64-a871-7f63-8f5f-cb6b4181bcf8",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer.send_push",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer.send_push in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f3f64-a871-7f63-8f5f-cb6b4181bcf8",
+        "nickname": "Russell",
+        "symbol_id": "AgentWebSocketServer.send_push",
+        "completed": true,
+        "finding_count": 3
+      }
+    }
+  ]
+}

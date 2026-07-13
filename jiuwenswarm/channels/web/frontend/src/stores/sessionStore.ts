@@ -191,6 +191,22 @@ interface TeamMember {
   mode?: string;
 }
 
+export type HumanShareStatus = 'pending' | 'joined' | 'left';
+
+export interface HumanShareCommand {
+  memberName: string;
+  displayName?: string;
+  sessionId: string;
+  teamName: string;
+  sessionRef: string;
+  joinCommand: string;
+  exitCommand: string;
+  status: HumanShareStatus;
+  sourceChannel?: string;
+  userId?: string;
+  updatedAt: number;
+}
+
 export type TeamMemberExecutionEventKind =
   | 'final'
   | 'tool_call'
@@ -233,6 +249,7 @@ interface SessionState {
   teamTasks: TeamTask[];
   teamMembers: TeamMember[];
   teamLeaderMemberIds: string[];
+  teamHumanShareCommands: HumanShareCommand[];
   teamMemberExecutionEvents: TeamMemberExecutionEvent[];
   teamMemberContextCompression: Record<string, TeamMemberContextCompressionState>;
   teamHistoryMessages: Message[];
@@ -269,6 +286,13 @@ interface SessionState {
   addTeamLeaderMemberId: (memberId: string) => void;
   addTeamMember: (member: TeamMember) => void;
   updateTeamMemberStatus: (memberId: string, newStatus: string, timestamp?: number) => void;
+  setTeamHumanShareCommands: (commands: HumanShareCommand[]) => void;
+  upsertTeamHumanShareCommand: (command: HumanShareCommand) => void;
+  updateTeamHumanShareStatus: (
+    memberName: string,
+    status: HumanShareStatus,
+    patch?: Partial<HumanShareCommand>
+  ) => void;
   setTeamMemberExecutionEvents: (events: TeamMemberExecutionEvent[]) => void;
   addTeamMemberExecutionEvent: (event: TeamMemberExecutionEvent) => void;
   setTeamMemberContextCompressionStatus: (
@@ -309,6 +333,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   teamTasks: [],
   teamMembers: [],
   teamLeaderMemberIds: [],
+  teamHumanShareCommands: [],
   teamMemberExecutionEvents: [],
   teamMemberContextCompression: {},
   teamHistoryMessages: [],
@@ -611,6 +636,51 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
       return state;
     });
+  },
+  setTeamHumanShareCommands: (commands) => {
+    set({ teamHumanShareCommands: commands });
+  },
+  upsertTeamHumanShareCommand: (command) => {
+    set((state) => {
+      const existingIndex = state.teamHumanShareCommands.findIndex(
+        (item) => item.memberName === command.memberName && item.sessionId === command.sessionId
+      );
+      if (existingIndex >= 0) {
+        const updated = [...state.teamHumanShareCommands];
+        const existing = updated[existingIndex];
+        updated[existingIndex] = {
+          ...existing,
+          ...command,
+          displayName: command.displayName || existing.displayName,
+          teamName: command.teamName || existing.teamName,
+          sessionRef: command.sessionRef || existing.sessionRef,
+          joinCommand: command.joinCommand || existing.joinCommand,
+          exitCommand: command.exitCommand || existing.exitCommand,
+          status:
+            command.status === 'pending' && existing.status !== 'pending'
+              ? existing.status
+              : command.status,
+        };
+        return { teamHumanShareCommands: updated };
+      }
+      return { teamHumanShareCommands: [...state.teamHumanShareCommands, command] };
+    });
+  },
+  updateTeamHumanShareStatus: (memberName, status, patch = {}) => {
+    const normalizedMemberName = memberName.trim();
+    if (!normalizedMemberName) return;
+    set((state) => ({
+      teamHumanShareCommands: state.teamHumanShareCommands.map((command) =>
+        command.memberName === normalizedMemberName
+          ? {
+              ...command,
+              ...patch,
+              status,
+              updatedAt: Date.now(),
+            }
+          : command
+      ),
+    }));
   },
   setTeamMemberExecutionEvents: (events) => {
     set({ teamMemberExecutionEvents: dedupeTeamMemberExecutionEvents(events).slice(0, 300) });

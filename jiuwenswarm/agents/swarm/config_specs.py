@@ -69,6 +69,7 @@ _COMMON_RAIL_NAMES: tuple[str, ...] = (
     registry.CONTEXT_PROCESSOR,
     registry.PLUGIN_RAILS,
     registry.SKILL_RETRIEVAL_PROMPT,
+    registry.SYMPHONY_ORCHESTRATION_PROMPT,
 )
 
 # Tools common to both roles. Each element self-gates on config, so all are
@@ -115,6 +116,7 @@ _CODE_RAIL_NAMES: tuple[str, ...] = (
     registry.USER_HOOKS,
     registry.CODE_SKILL_USE,
     registry.SKILL_RETRIEVAL_PROMPT,
+    registry.SYMPHONY_ORCHESTRATION_PROMPT,
 )
 
 # Rails shared with the team profile, appended to the code profile.
@@ -275,10 +277,16 @@ def _acp_enabled(config: dict[str, Any]) -> bool:
 
 
 def _context_processor_params(config: dict[str, Any]) -> dict[str, Any]:
-    """Attribute params for the context-compression rail."""
+    """Attribute params for the context-compression rail.
+
+    ``context_engine_config`` lives under ``react`` in config.yaml; reading it
+    at the top level returned ``{}``, leaving the rail with an empty config and
+    no compressors mounted.
+    """
+    react = _config_section(config, "react")
     return {
         "context_engine_enabled": get_context_engine_enabled(config),
-        "context_engine_config": _config_section(config, "context_engine_config"),
+        "context_engine_config": _config_section(react, "context_engine_config"),
     }
 
 

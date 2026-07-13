@@ -343,8 +343,16 @@ def build_member_rails(
             rails_list.append(evo_rail)
 
     # Context compression rail for all members (leader + teammates).
+    # ``config`` here is the full config.yaml mapping (hot-reload path passes
+    # ``get_config()``); strip the ``react`` outer key so the rail builder sees
+    # the same ``{"context_engine_config": ...}`` shape the swarm provider path
+    # passes (see member_rails._build_context_processor).
     if get_context_engine_enabled(config):
-        rail = _build_context_processor_rail(config)
+        react = config.get("react", {}) if isinstance(config, dict) else {}
+        react = react if isinstance(react, dict) else {}
+        rail = _build_context_processor_rail(
+            {"context_engine_config": react.get("context_engine_config", {})}
+        )
         if rail is not None:
             rails_list.append(rail)
 
@@ -567,9 +575,17 @@ def get_context_engine_enabled(config: dict[str, Any] | None) -> bool:
 def _build_context_processor_rail(config: dict[str, Any] | None) -> ContextProcessorRail | None:
     """Build a preset ContextProcessorRail for team members with user config thresholds.
 
-    Mirrors the logic in interface_deep._build_context_processor_rail:
-    reads processor configs from react.context_engine_config and passes
-    them as (name, dict) pairs to ContextProcessorRail.
+    Expects a pre-extracted mapping of shape ``{"context_engine_config": {...}}`` —
+    the ``react`` outer key must already be stripped by the caller. Both call sites
+    pass this shape:
+
+    * ``build_member_rails`` (hot-reload path, full config source) extracts
+      ``react.context_engine_config`` before calling;
+    * ``member_rails._build_context_processor`` (swarm provider) bakes the
+      section into ``ContextProcessorInput`` at spec-build time.
+
+    Mirrors :func:`interface_deep._build_context_processor_rail`, which takes the
+    same shape (the ``react`` section itself).
     """
     try:
         from typing import List, Tuple
@@ -577,11 +593,8 @@ def _build_context_processor_rail(config: dict[str, Any] | None) -> ContextProce
         user_processors: List[Tuple[str, dict]] = []
         ctx_cfg: dict[str, Any] = {}
         if isinstance(config, dict):
-            react = config.get("react", {})
-            if isinstance(react, dict):
-                ctx_cfg = react.get("context_engine_config", {})
-                if not isinstance(ctx_cfg, dict):
-                    ctx_cfg = {}
+            raw = config.get("context_engine_config", {})
+            ctx_cfg = raw if isinstance(raw, dict) else {}
 
         offloader_cfg = ctx_cfg.get("message_summary_offloader_config", {})
         if isinstance(offloader_cfg, dict) and offloader_cfg:

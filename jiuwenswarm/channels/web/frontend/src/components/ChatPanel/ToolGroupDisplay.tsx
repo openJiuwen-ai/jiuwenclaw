@@ -14,6 +14,7 @@ import { SkillTreePath } from './SkillTreePath';
 
 interface ToolGroupDisplayProps {
   executions: ToolExecution[];
+  notices?: string[];
   showAvatar?: boolean;
   teamLayout?: boolean;
   collapseSkillTreeWhenContentStarts?: boolean;
@@ -379,6 +380,7 @@ function ToolExecutionRow({ execution }: { execution: ToolExecution }) {
 
 export function ToolGroupDisplay({
   executions,
+  notices = [],
   showAvatar = true,
   teamLayout = false,
   collapseSkillTreeWhenContentStarts = false,
@@ -461,6 +463,15 @@ export function ToolGroupDisplay({
       </div>
       <div className="min-w-0">
         <div className="tool-tree">
+          {notices.length > 0 && (
+            <div className="tool-tree__notices">
+              {notices.map((notice) => (
+                <div key={notice} className="tool-tree__notice">
+                  {notice}
+                </div>
+              ))}
+            </div>
+          )}
           <button
             type="button"
             className="tool-tree__header"

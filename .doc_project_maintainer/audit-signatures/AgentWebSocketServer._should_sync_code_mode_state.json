@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f3fd8-246d-79d1-9ca3-cb8b2047e247",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._should_sync_code_mode_state",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._should_sync_code_mode_state in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f3fd8-246d-79d1-9ca3-cb8b2047e247",
+        "nickname": "McClintock",
+        "symbol_id": "AgentWebSocketServer._should_sync_code_mode_state",
+        "completed": true,
+        "finding_count": 1
+      }
+    }
+  ]
+}

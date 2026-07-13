@@ -16,6 +16,8 @@ from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter, BaseCha
 from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_file_service import DingTalkFileService
 from jiuwenswarm.common.schema.message import Message, ReqMethod
 from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -558,7 +560,10 @@ class DingTalkChannel(BaseChannel):
         except Exception as e:
             logger.error(f"发送钉钉消息时出错: {e}")
 
-    async def send(self, msg: Message) -> None:
+    async def send(
+        self, msg: Message,
+        *, routing_target: RoutingTarget | None = None,
+    ) -> None:
         """通过钉钉发送消息"""
         token = await self._get_access_token()
         if not token:

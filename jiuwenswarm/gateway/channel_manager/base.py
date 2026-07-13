@@ -9,6 +9,8 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 from jiuwenswarm.common.schema.message import Message
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 
 logger = logging.getLogger(__name__)
@@ -124,6 +126,7 @@ class BaseChannel(ABC):
         self.config = config
         self.bus = router
         self._running = False
+        self.start_task: Any = None
 
     @abstractmethod
     async def start(self) -> None:
@@ -142,12 +145,23 @@ class BaseChannel(ABC):
         """停止Channel并清理资源"""
         pass
 
-    @abstractmethod
-    async def send(self, msg: Message) -> None:
+    async def send(
+        self,
+        msg: Message,
+        *,
+        routing_target: RoutingTarget | None = None,
+    ) -> None:
+        """通过 Channel 发送消息。
+
+        V2 签名（2 参数）：
+          msg            — 消息内容
+          routing_target — RoutingTarget（自包含：intent + routing_keys + at_user_ids + delivery）
         """
-        通过Channel发送消息
-        """
-        pass
+        logger.warning(
+            "[%s] send() not implemented, message dropped: id=%s",
+            getattr(self, "channel_id", "unknown"),
+            getattr(msg, "id", ""),
+        )
 
     def is_allowed(self, sender_id: str) -> bool:
         """

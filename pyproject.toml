@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jiuwenswarm"
-version = "0.2.2"
+version = "0.2.3.beta1"
 description = "JiuwenSwarm"
 requires-python = ">=3.11,<3.14"
 license = { text = "Apache-2.0" }
@@ -17,7 +17,7 @@ dependencies = [
     "ruamel.yaml>=0.18.0",
     "lark-oapi>=1.5.3",
     "loguru>=0.7.3",
-    "openjiuwen @ git+https://gitcode.com/openJiuwen/agent-core.git@develop",
+    "openjiuwen==0.1.15.post3",
     "pgvector>=0.4.2",
     "websockets>=12.0",
     "psutil>=7.2.2",
@@ -32,10 +32,10 @@ dependencies = [
     "skillnet-ai==0.0.16",
     "mutagen>=1.47.0",
     "google-genai>=1.68.0",
-    "opentelemetry-api>=1.25.0",
-    "opentelemetry-sdk>=1.25.0",
-    "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
-    "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+    "opentelemetry-api>=1.28.0",
+    "opentelemetry-sdk>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.28.0",
     "sqlite-vec==0.1.6",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -47,18 +47,17 @@ dependencies = [
     "gitcode-api>=1.2.20",
     "faiss-cpu>=1.7.0",
     "numpy>=1.24.0",
+    "tree-sitter>=0.25.0,<0.26.0",
+    "tree-sitter-bash>=0.25.0,<0.26.0",
 ]
 
 [project.optional-dependencies]
 a2a = ["a2a-sdk[http-server]==1.0.0"]
 desktop = ["pywebview>=5.4"]
 dev = ["pyinstaller>=6.0.0", "pywebview>=5.4"]
-tui = ["jiuwenswarm-tui==0.2.2"]
+tui = ["jiuwenswarm-tui==0.2.3.beta1"]
 distribute = ["openjiuwen[postgres,zmq]"]
-shell-ast = [
-    "tree-sitter>=0.25.0,<0.26.0",
-    "tree-sitter-bash>=0.25.0,<0.26.0",
-]
+shell-ast = []
 # Same packages as [dependency-groups] test (pip install -e ".[test]")
 test = [
     "a2a-sdk[http-server]==1.0.0",
@@ -121,7 +120,12 @@ jiuwenbox = [
 ]
 
 [tool.setuptools.exclude-package-data]
-jiuwenswarm = ["channels/web/frontend/node_modules/**", "channels/web/frontend/node_modules/*"]
+jiuwenswarm = [
+    "channels/web/frontend/node_modules/**",
+    "channels/web/frontend/node_modules/*",
+    "resources/agent/workspace/skills/project-maintainer/**/*",
+    "resources/agent/workspace/skills/project-maintainer/*",
+]
 
 [tool.uv]
 default-groups = ['dev']

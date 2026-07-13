@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { watch } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -27,6 +27,14 @@ export function getKeybindingsPath(): string {
 
 export function keybindingsFileExists(): boolean {
   return existsSync(KEYBINDINGS_FILE);
+}
+
+export function getKeybindingsMtimeMs(): number | undefined {
+  try {
+    return statSync(KEYBINDINGS_FILE).mtimeMs;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Build a resolved map from a list of blocks (no validation). */
@@ -263,8 +271,12 @@ export function startKeybindingsWatcher(onReload: () => void): void {
 
   try {
     _watcher = watch(dirPath, { persistent: false }, (_eventType, filename) => {
-      // Ignore unrelated files in the same directory.
-      if (filename !== fileName) return;
+      // Node 在 Linux 下对 rename 事件回调的 filename 可能为 null/undefined
+      //（vi/nano 的「写临时文件→rename 覆盖」保存方式正会触发此语义）。
+      // 该目录可能还有其它配置文件，null filename 也会触发同目录其它文件的
+      // rename 事件，此处一并放行；reloadResolver 内部用 mtime 比对兜底，
+      // keybindings.json 未变时直接跳过，不会真正读盘。
+      if (filename != null && filename !== fileName) return;
       onReload();
     });
   } catch {
