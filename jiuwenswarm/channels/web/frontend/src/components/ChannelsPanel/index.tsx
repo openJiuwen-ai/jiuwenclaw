@@ -524,6 +524,11 @@ function normalizeXiaoyiAppsConfig(input: unknown): XiaoyiAppConfig[] {
   return sortXiaoyiApps([normalizeXiaoyiAppConfig(input, '默认小艺应用', true)]);
 }
 
+function normalizeSingleXiaoyiAppConfig(input: unknown): XiaoyiAppConfig {
+  const apps = normalizeXiaoyiAppsConfig(input);
+  return apps.find((app) => app.is_default) ?? apps[0] ?? normalizeXiaoyiAppConfig(DEFAULT_XIAOYI_CONF, '默认小艺应用', true);
+}
+
 function draftFromXiaoyiAppConfig(conf: XiaoyiAppConfig): XiaoyiAppDraft {
   return {
     ...draftFromXiaoyiConfig(conf),
@@ -855,13 +860,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [xiaoyiApps, setXiaoyiApps] = useState<XiaoyiAppConfig[]>(() =>
-    normalizeXiaoyiAppsConfig(DEFAULT_XIAOYI_CONF),
+  const [xiaoyiApp, setXiaoyiApp] = useState<XiaoyiAppConfig>(() =>
+    normalizeSingleXiaoyiAppConfig(DEFAULT_XIAOYI_CONF),
   );
-  const [xiaoyiDraftApps, setXiaoyiDraftApps] = useState<XiaoyiAppDraft[]>(() =>
-    normalizeXiaoyiAppsConfig(DEFAULT_XIAOYI_CONF).map(draftFromXiaoyiAppConfig),
+  const [xiaoyiDraft, setXiaoyiDraft] = useState<XiaoyiAppDraft>(() =>
+    draftFromXiaoyiAppConfig(normalizeSingleXiaoyiAppConfig(DEFAULT_XIAOYI_CONF)),
   );
-  const [expandedXiaoyiAppIndex, setExpandedXiaoyiAppIndex] = useState(0);
   const [xiaoyiVisibleFields, setXiaoyiVisibleFields] = useState<Record<string, boolean>>({});
   const [xiaoyiLoading, setXiaoyiLoading] = useState(false);
   const [xiaoyiSaving, setXiaoyiSaving] = useState(false);
@@ -957,10 +961,9 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     setXiaoyiSuccess(null);
     try {
       const payload = await webRequest<{ config?: unknown }>('channel.xiaoyi.get_conf');
-      const normalized = normalizeXiaoyiAppsConfig(payload?.config);
-      setXiaoyiApps(normalized);
-      setXiaoyiDraftApps(normalized.map(draftFromXiaoyiAppConfig));
-      setExpandedXiaoyiAppIndex(0);
+      const normalized = normalizeSingleXiaoyiAppConfig(payload?.config);
+      setXiaoyiApp(normalized);
+      setXiaoyiDraft(draftFromXiaoyiAppConfig(normalized));
       setXiaoyiVisibleFields({});
     } catch (err) {
       setXiaoyiSaveError(err instanceof Error ? err.message : t('channels.errors.loadXiaoyi'));
@@ -1184,8 +1187,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     return JSON.stringify(feishuApps) !== JSON.stringify(feishuDraftApps.map(buildFeishuAppConfig));
   }, [feishuApps, feishuDraftApps]);
   const hasXiaoyiConfigChanges = useMemo(() => {
-    return JSON.stringify(xiaoyiApps) !== JSON.stringify(xiaoyiDraftApps.map(buildXiaoyiAppConfig));
-  }, [xiaoyiApps, xiaoyiDraftApps]);
+    return JSON.stringify(xiaoyiApp) !== JSON.stringify(buildXiaoyiAppConfig(xiaoyiDraft));
+  }, [xiaoyiApp, xiaoyiDraft]);
   const hasDingtalkConfigChanges = useMemo(() => {
     const baseDraft = draftFromDingtalkConfig(dingtalkConfig);
     return (
@@ -1336,62 +1339,15 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     setVisibleFields((prev) => ({ ...prev, [field]: !prev[field] }));
   };
 
-  const handleXiaoyiAppFieldChange = <K extends keyof XiaoyiAppDraft>(
-    index: number,
-    key: K,
-    value: XiaoyiAppDraft[K],
-  ) => {
-    setXiaoyiDraftApps((prev) => prev.map((app, i) => (i === index ? { ...app, [key]: value } : app)));
-    if (xiaoyiSaveError) {
-      setXiaoyiSaveError(null);
-    }
-    if (xiaoyiSuccess) {
-      setXiaoyiSuccess(null);
-    }
+  const handleXiaoyiFieldChange = <K extends keyof XiaoyiAppDraft>(key: K, value: XiaoyiAppDraft[K]) => {
+    setXiaoyiDraft((prev) => ({ ...prev, [key]: value }));
+    setXiaoyiSaveError(null);
+    setXiaoyiSuccess(null);
   };
 
   const handleCancelXiaoyiConfig = () => {
     if (!hasXiaoyiConfigChanges) return;
-    setXiaoyiDraftApps(xiaoyiApps.map(draftFromXiaoyiAppConfig));
-    setXiaoyiSaveError(null);
-    setXiaoyiSuccess(null);
-  };
-
-  const handleAddXiaoyiApp = () => {
-    setXiaoyiDraftApps((prev) => {
-      const next = [
-        ...prev,
-        {
-          ...draftFromXiaoyiAppConfig({
-            ...DEFAULT_XIAOYI_CONF,
-            name: `小艺应用 ${prev.length + 1}`,
-            is_default: false,
-          }),
-        },
-      ];
-      setExpandedXiaoyiAppIndex(next.length - 1);
-      return next;
-    });
-    setXiaoyiSaveError(null);
-    setXiaoyiSuccess(null);
-  };
-
-  const handleDeleteXiaoyiApp = (index: number) => {
-    setXiaoyiDraftApps((prev) => {
-      if (prev.length <= 1) return prev;
-      const next = prev.filter((_, i) => i !== index);
-      if (!next.some((app) => app.is_default) && next.length > 0) {
-        next[0] = { ...next[0], is_default: true };
-      }
-      setExpandedXiaoyiAppIndex((current) => Math.max(0, Math.min(current >= index ? current - 1 : current, next.length - 1)));
-      return next;
-    });
-    setXiaoyiSaveError(null);
-    setXiaoyiSuccess(null);
-  };
-
-  const handleSetDefaultXiaoyiApp = (index: number) => {
-    setXiaoyiDraftApps((prev) => prev.map((app, i) => ({ ...app, is_default: i === index })));
+    setXiaoyiDraft(draftFromXiaoyiAppConfig(xiaoyiApp));
     setXiaoyiSaveError(null);
     setXiaoyiSuccess(null);
   };
@@ -1559,11 +1515,11 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     setXiaoyiSaving(true);
     setXiaoyiSaveError(null);
     try {
-      const apps = xiaoyiDraftApps.map(buildXiaoyiAppConfig);
+      const apps = [{ ...buildXiaoyiAppConfig(xiaoyiDraft), is_default: true }];
       const result = await webRequest<{ config?: unknown }>('channel.xiaoyi.set_conf', { apps });
-      const normalized = normalizeXiaoyiAppsConfig(result?.config);
-      setXiaoyiApps(normalized);
-      setXiaoyiDraftApps(normalized.map(draftFromXiaoyiAppConfig));
+      const normalized = normalizeSingleXiaoyiAppConfig(result?.config);
+      setXiaoyiApp(normalized);
+      setXiaoyiDraft(draftFromXiaoyiAppConfig(normalized));
       setXiaoyiSuccess(t('channels.saved.xiaoyi'));
       void fetchChannels();
     } catch (saveErr) {
@@ -1789,15 +1745,15 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     );
   };
 
-  const renderXiaoyiAppField = (app: XiaoyiAppDraft, appIndex: number, field: keyof XiaoyiAppDraft) => {
-    const visibilityKey = `${appIndex}.${String(field)}`;
+  const renderXiaoyiField = (app: XiaoyiAppDraft, field: keyof XiaoyiAppDraft) => {
+    const visibilityKey = String(field);
     const value = app[field];
     if (typeof value === 'boolean') {
       return (
         <tr key={String(field)} className="border-t border-border first:border-t-0 even:bg-secondary/10">
           <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{String(field)}</td>
           <td className="px-4 py-2.5 align-middle">
-            {renderToggle(value, () => handleXiaoyiAppFieldChange(appIndex, field, !value as XiaoyiAppDraft[typeof field]))}
+            {renderToggle(value, () => handleXiaoyiFieldChange(field, !value as XiaoyiAppDraft[typeof field]))}
           </td>
         </tr>
       );
@@ -1810,7 +1766,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
             <input
               type={isSensitiveXiaoyiField(field) && !xiaoyiVisibleFields[visibilityKey] ? 'password' : 'text'}
               value={String(value ?? '')}
-              onChange={(e) => handleXiaoyiAppFieldChange(appIndex, field, e.target.value as XiaoyiAppDraft[typeof field])}
+              onChange={(e) => handleXiaoyiFieldChange(field, e.target.value as XiaoyiAppDraft[typeof field])}
               placeholder={t('channels.placeholders.configValue')}
               className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
                 isSensitiveXiaoyiField(field) ? 'pr-10' : ''
@@ -1919,92 +1875,15 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     </div>
   );
 
-  const renderXiaoyiAppsEditor = () => (
-    <div className="space-y-3">
-      {xiaoyiDraftApps.map((app, index) => {
-        const expanded = expandedXiaoyiAppIndex === index;
-        const identifier = app.api_id.trim() || app.agent_id.trim() || '未配置 api_id';
-        return (
-          <div key={`xiaoyi-app-${index}`} className="rounded-xl border border-border bg-card overflow-hidden">
-            <div className="flex items-center gap-3 px-4 py-3">
-              <button
-                type="button"
-                onClick={() => setExpandedXiaoyiAppIndex(expanded ? -1 : index)}
-                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-secondary hover:text-text"
-                aria-label={expanded ? '收起应用配置' : '展开应用配置'}
-                title={expanded ? '收起应用配置' : '展开应用配置'}
-              >
-                <ChevronRight className={`h-4 w-4 transition-transform ${expanded ? 'rotate-90' : ''}`} />
-              </button>
-              <input
-                type="text"
-                value={app.name}
-                onChange={(e) => handleXiaoyiAppFieldChange(index, 'name', e.target.value)}
-                className="min-w-[160px] flex-1 rounded-md border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-accent"
-                placeholder="应用名称"
-              />
-              {app.is_default ? (
-                <span className="rounded-full border border-accent bg-accent-subtle px-2.5 py-1 text-xs text-accent">
-                  默认
-                </span>
-              ) : null}
-              {!app.is_default ? (
-                <button
-                  type="button"
-                  onClick={() => handleSetDefaultXiaoyiApp(index)}
-                  className="rounded-full border border-accent/50 bg-accent-subtle px-2.5 py-1 text-xs font-medium text-accent hover:border-accent hover:bg-accent/15"
-                  aria-label="设为默认应用"
-                  title="设为默认应用"
-                >
-                  设为默认
-                </button>
-              ) : null}
-              <span className="mono max-w-[220px] truncate rounded-md border border-border bg-secondary px-2.5 py-1 text-xs text-text-muted">
-                {identifier}
-              </span>
-              <span
-                className={`rounded-full border px-2.5 py-1 text-xs font-medium ${
-                  app.enabled ? 'border-ok bg-ok-subtle text-ok' : 'border-border bg-secondary text-text-muted'
-                }`}
-              >
-                {app.enabled ? t('channels.status.enabled') : t('channels.status.disabled')}
-              </span>
-              <button
-                type="button"
-                onClick={() => handleDeleteXiaoyiApp(index)}
-                disabled={xiaoyiDraftApps.length <= 1}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border text-text-muted hover:bg-danger-subtle hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
-                aria-label="删除应用"
-                title="删除应用"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
-            </div>
-            {expanded ? (
-              <div className="border-t border-border bg-bg/30">
-                <table className="w-full text-sm">
-                  <tbody>
-                    {(['enabled', 'enable_streaming', 'ak', 'sk', 'agent_id', 'api_id'] as const).map((field) =>
-                      renderXiaoyiAppField(app, index, field),
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
-          </div>
-        );
-      })}
-      <button
-        type="button"
-        onClick={handleAddXiaoyiApp}
-        className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border px-4 py-3 text-sm text-text-muted hover:border-accent hover:bg-accent-subtle hover:text-accent"
-      >
-        <Plus className="h-4 w-4" />
-        添加应用
-      </button>
-    </div>
+  const renderXiaoyiConfigEditor = () => (
+    <table className="w-full text-sm">
+      <tbody>
+        {(['enabled', 'enable_streaming', 'ak', 'sk', 'agent_id', 'api_id'] as const).map((field) =>
+          renderXiaoyiField(xiaoyiDraft, field),
+        )}
+      </tbody>
+    </table>
   );
-
   const configErrorNotice = useMemo(() => {
     return Array.from(
       new Set(
@@ -2235,7 +2114,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                       {xiaoyiLoading ? (
                         <div className="text-sm text-text-muted">{t('channels.loading.xiaoyi')}</div>
                       ) : (
-                        renderXiaoyiAppsEditor()
+                        renderXiaoyiConfigEditor()
                       )}
                     </div>
                   </div>
