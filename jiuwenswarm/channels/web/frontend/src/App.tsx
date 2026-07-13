@@ -1625,6 +1625,7 @@ function AppContent() {
             <ConfigPanel
               config={serverConfig}
               isConnected={isConnected}
+              sessionId={sessionId}
               onSaveConfig={saveConfigAndRestart}
               onSaveAllConfig={saveAllConfigAndRestart}
               onValidateModel={validateModelConfig}

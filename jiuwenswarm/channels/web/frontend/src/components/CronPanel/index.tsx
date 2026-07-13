@@ -309,7 +309,6 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
     { value: 'feishu', label: t('cron.targets.feishu'), disabled: !enabledChannels.has('feishu') },
     { value: 'dingtalk', label: t('cron.targets.dingtalk'), disabled: !enabledChannels.has('dingtalk') },
     { value: 'whatsapp', label: t('cron.targets.whatsapp'), disabled: !enabledChannels.has('whatsapp') },
-    { value: 'wechat', label: t('cron.targets.wechat'), disabled: !enabledChannels.has('wechat') },
   ], [t, enabledChannels]);
 
   // 加载任务列表
