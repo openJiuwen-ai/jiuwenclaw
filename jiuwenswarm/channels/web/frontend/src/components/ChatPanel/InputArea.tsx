@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
+﻿﻿﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { AtSign, CircleX, FileImage, Loader2, Plus, Square, X } from 'lucide-react';
@@ -2220,6 +2220,16 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
   const menuRef = useRef<HTMLDivElement>(null);
 
   const avatarColors = [
+    'bg-red-500',
+    'bg-orange-500',
+    'bg-amber-500',
+    'bg-yellow-500',
+    'bg-lime-500',
+    'bg-green-500',
+    'bg-emerald-500',
+    'bg-teal-500',
+    'bg-cyan-500',
+    'bg-sky-500',
     'bg-blue-500',
     'bg-indigo-500',
     'bg-violet-500',
@@ -2254,7 +2264,7 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
   );
 
   const installedSkills = useMemo(
-    () => skills.filter(isSkillInstalled),
+    () => skills.filter((s) => isSkillInstalled(s) && s.enabled !== false),
     [skills, isSkillInstalled],
   );
 

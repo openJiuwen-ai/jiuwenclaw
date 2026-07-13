@@ -1608,7 +1608,7 @@
     "groupChat": "群聊记录",
     "noGroupChat": "暂无群聊记录",
     "everyone": "所有人",
-    "generatedBy": "由 openJiuwen AI 生成",
+    "aiNotice": "内容由AI生成，仅供参考",
     "website": "官网地址：{{url}}",
     "repository": "代码仓：{{url}}"
   },

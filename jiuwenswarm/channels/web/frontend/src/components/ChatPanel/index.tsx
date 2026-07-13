@@ -1122,6 +1122,9 @@ export function ChatPanel({
           />
         </div>
       )}
+      <div className="chat-ai-disclaimer" data-testid="ai-disclaimer">
+        {t('share.aiNotice')}
+      </div>
     </div>
   );
 }

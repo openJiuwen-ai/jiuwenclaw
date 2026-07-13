@@ -1,10 +1,14 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CircleCheck, File, Puzzle, XCircle } from 'lucide-react';
+import { File, Puzzle } from 'lucide-react';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import type { TeamTask as SessionTeamTask } from '../../stores/sessionStore';
-import teamProcessIcon from '../../assets/team-process.svg';
+import recentTasksIcon from '../../assets/work-mode/recent-tasks.svg';
+import statusProcessingIcon from '../../assets/work-mode/status-processing.svg';
+import statusSuccessIcon from '../../assets/work-mode/status-success.svg';
+import statusWaitingIcon from '../../assets/work-mode/status-waiting.svg';
+import statusWarningIcon from '../../assets/work-mode/status-warning.svg';
 import {
   BOARD_COLUMNS,
   ExpandIcon,
@@ -15,6 +19,7 @@ import {
   type TaskColumnKey,
   type TeamMember,
 } from './shared';
+import { getTotalTaskVisualProgressPercent } from './taskProgress';
 
 type TaskPlanningPanelProps = {
   variant: 'compact' | 'expanded';
@@ -33,6 +38,13 @@ type TaskPlanningPanelProps = {
   title?: string;
 };
 
+const compactStatusIcons: Record<TaskColumnKey, string> = {
+  completed: statusSuccessIcon,
+  running: statusProcessingIcon,
+  waiting: statusWaitingIcon,
+  cancelled: statusWarningIcon,
+};
+
 export function TaskPlanningPanel({
   variant,
   tasks,
@@ -46,6 +58,7 @@ export function TaskPlanningPanel({
   title,
 }: TaskPlanningPanelProps) {
   const { t } = useTranslation();
+  const [now, setNow] = useState(() => Date.now());
   const groupedTasks = useMemo(() => {
     const groups: Record<TaskColumnKey, SessionTeamTask[]> = {
       waiting: [],
@@ -61,12 +74,33 @@ export function TaskPlanningPanel({
     return groups;
   }, [tasks]);
 
-  const progressPercent = totalTasks > 0
+  // 按后端 todos 数组顺序的全局序号：展开态与收起态共用同一份，保证同一任务在两种状态下序号一致。
+  // 后端在状态变更时保序，仅在显式新增/插入任务时改变顺序，序号稳定。
+  const globalIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    tasks.forEach((task, index) => {
+      map.set(task.task_id, index + 1);
+    });
+    return map;
+  }, [tasks]);
+
+  useEffect(() => {
+    if (variant !== 'expanded') {
+      return undefined;
+    }
+    const timer = window.setInterval(() => setNow(Date.now()), 3_000);
+    return () => window.clearInterval(timer);
+  }, [variant]);
+
+  const completedProgressPercent = totalTasks > 0
     ? Math.round((completedTasks / totalTasks) * 100)
     : 0;
+  const progressPercent = variant === 'expanded'
+    ? getTotalTaskVisualProgressPercent(tasks, now)
+    : completedProgressPercent;
 
   if (variant === 'compact') {
-    const allTasks = [...tasks].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    const allTasks = tasks;
 
     const tabCounts = {
       completed: groupedTasks.completed.length,
@@ -86,7 +120,8 @@ export function TaskPlanningPanel({
       <div className={`flex flex-[2] flex-col overflow-hidden min-h-0 px-3 pb-3${hideBorder ? '' : ' border-b border-border'}`}>
         <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3">
           <div className="flex items-center gap-2">
-            <img src={teamProcessIcon} width={16} height={16} />            <span className="text-sm font-medium text-text">{title ?? t('team.taskOverview')}</span>
+            <img src={recentTasksIcon} width={16} height={16} aria-hidden="true" />
+            <span className="text-sm font-medium text-text">{title ?? t('team.taskOverview')}</span>
           </div>
           {hideExpandButton ? null : (
             <button
@@ -134,15 +169,16 @@ export function TaskPlanningPanel({
             </div>
           ) : (
             <div className="space-y-2">
-              {allTasks.map((task, index) => {
+              {allTasks.map((task) => {
                 const assigneeExists = Boolean(task.assignee && members.some(member => member.member_id === task.assignee));
                 const assigneeName = getMemberDisplayName(task.assignee || '');
                 const title = getBoardTaskTitle(task);
                 const columnKey = getTaskColumnKey(task);
+                const seq = globalIndexMap.get(task.task_id) ?? 0;
                 return (
                   <div key={task.task_id} className="flex items-center gap-3 px-3 py-2 rounded-md">
                     <span className="inline-flex items-center justify-center w-[20px] h-[20px] text-xs font-medium text-muted rounded-[16px] bg-[#F2F2F2]">
-                      {String(index + 1).padStart(2, '0')}
+                      {String(seq).padStart(2, '0')}
                     </span>
                     {!hideAssignee && (
                       assigneeExists ? (
@@ -157,23 +193,11 @@ export function TaskPlanningPanel({
                       )
                     )}
                     <span className="flex-1 text-xs text-text truncate">{title}</span>
-                    {columnKey === 'completed' && <CircleCheck className="w-4 h-4 text-ok shrink-0" />}
-                    {columnKey === 'running' && (
-                      <svg width="16" height="16" className="w-4 h-4 text-info animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 2v4" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m16.2 7.8 2.9-2.9" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 12h4" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m16.2 16.2 2.9 2.9" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18v4" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m4.9 19.1 2.9-2.9" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2 12h4" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m4.9 4.9 2.9 2.9" />
-                      </svg>
-                    )}
-                    {columnKey === 'waiting' && (
-                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-clock4-icon lucide-clock-4"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-                    )}
-                    {columnKey === 'cancelled' && <XCircle className="w-4 h-4 text-danger shrink-0" />}
+                    <img
+                      src={compactStatusIcons[columnKey]}
+                      className={`h-4 w-4 shrink-0 ${columnKey === 'running' ? 'animate-spin' : ''}`}
+                      aria-hidden="true"
+                    />
                   </div>
                 );
               })}
@@ -203,6 +227,8 @@ export function TaskPlanningPanel({
                 column={column}
                 tasks={groupedTasks[column.key]}
                 members={members}
+                hideAssignee={hideAssignee}
+                globalIndexMap={globalIndexMap}
               />
             ))}
           </div>
@@ -216,10 +242,14 @@ function BoardColumn({
   column,
   tasks,
   members,
+  hideAssignee,
+  globalIndexMap,
 }: {
   column: typeof BOARD_COLUMNS[number];
   tasks: SessionTeamTask[];
   members: TeamMember[];
+  hideAssignee: boolean;
+  globalIndexMap: Map<string, number>;
 }) {
   const { t } = useTranslation();
 
@@ -230,9 +260,18 @@ function BoardColumn({
         {t(column.labelKey)} {tasks.length}
       </div>
       <div className="space-y-3">
-        {tasks.map((task) => (
-          <BoardTaskCard key={task.task_id} task={task} members={members} />
-        ))}
+        {tasks.map((task) => {
+          const seq = globalIndexMap.get(task.task_id) ?? 0;
+          return (
+            <BoardTaskCard
+              key={task.task_id}
+              task={task}
+              members={members}
+              hideAssignee={hideAssignee}
+              index={seq}
+            />
+          );
+        })}
       </div>
     </section>
   );
@@ -241,9 +280,13 @@ function BoardColumn({
 function BoardTaskCard({
   task,
   members,
+  hideAssignee,
+  index,
 }: {
   task: SessionTeamTask;
   members: TeamMember[];
+  hideAssignee: boolean;
+  index: number;
 }) {
   const assigneeExists = Boolean(task.assignee && members.some(member => member.member_id === task.assignee));
   const assigneeName = getMemberDisplayName(task.assignee || '');
@@ -264,7 +307,11 @@ function BoardTaskCard({
         <TaskResourcePanel skills={task.skills} files={task.files} />
       </div>
       <div className="mt-3 flex h-8 items-center bg-[#fafafa] px-1 pb-1">
-        {assigneeExists ? (
+        {hideAssignee ? (
+          <span className="inline-flex h-[20px] w-[20px] items-center justify-center rounded-[16px] bg-[#F2F2F2] text-xs font-medium text-muted">
+            {String(index).padStart(2, '0')}
+          </span>
+        ) : assigneeExists ? (
           <div title={assigneeName}>
             <TeamMemberAvatar
               member={task.assignee}
