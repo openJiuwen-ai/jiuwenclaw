@@ -647,7 +647,7 @@
 - **平台限制**：`/sandbox` 仅支持 Linux 平台（jiuwenbox 依赖 bwrap / Landlock / Linux namespace 等内核能力）。 在 Windows / macOS 上运行的 agent-server 收到任何 `/sandbox` 子命令都会返回 `SANDBOX_BAD_REQUEST` 错误；如果 TUI 在 Mac/Windows 上、agent-server 在 Linux 主机上，是支持的（看 agent-server 所在主机的平台）。
 - **写入策略语义**：`allow` / `deny` 控制的是沙箱内的**写访问**（rw/ro），不是 Unix 八进制权限；enforcement 由 bwrap bind mount + `--remount-ro` 实现，Landlock 为纵深防御（`landlock.compatibility=disabled` 时主要依赖 bwrap）。
 - **嵌套路径**：支持「父 allow + 子 deny」（例如 allow `/tmp`、deny `/tmp/secret`）；不支持「子 allow + 父 deny」（父 deny 会覆盖子 allow），服务端会拒绝此类配置。
-- **生效写入策略**：状态面板里的 `files.allow_write` / `files.deny_write` 是 auto-managed 与 user-configured 合并后的视图，每条路径显示 `(rw)` 或 `(ro)`。auto-managed 条目由服务端自动注入（intrinsic 文件 `AGENT.md`、`HEARTBEAT.md`、`IDENTITY.md`、`SOUL.md`、`USER.md`，`memory/daily_memory/` 目录，以及按 mode 决定的 `project_dir` 与 `config/config.yaml`），不能通过 `/sandbox files remove` 移除。
+- **生效写入策略**：状态面板里的 `files.allow_write` / `files.deny_write` 是 auto-managed 与 user-configured 合并后的视图，每条路径显示 `(rw)` 或 `(ro)`。
 - **preserve_file_sharing_mode**：由 jiuwenswarm 配置决定，不通过 `/sandbox` 切换。仅支持 `mount`：intrinsic 文件与 `project_dir` 通过 bind mount 注入沙箱，`project_dir/config/config.yaml` 会显式加进 `deny_write`；yaml 里写入其它值会被服务端拒绝。
 - **excluded_commands**：按完整命令字符串匹配（不是只看 `argv[0]`），命中后该次调用穿透到本地，相当于把对应命令的副作用授权给本地环境。
 - **add / remove 的去重与冲突**：`exclude add` 在已存在同名 pattern 时报错；`exclude remove` 在不存在该 pattern 时报错。`files allow|deny` 在同一 bucket 已有同 path 时报错，在对侧 bucket（allow vs deny）已登记同 path 时也报错，需要先 `files remove` 再 add；`files remove` 在用户配置里找不到该 path 时报错。

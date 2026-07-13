@@ -399,7 +399,7 @@
   - `excluded_commands` — 命中后穿透到本地执行的 shell glob 列表。
   - `landlock` — jiuwenbox Landlock 支持情况（`supported` + `compatibility`）。
   - `files.allow_write` / `files.deny_write` — 生效（auto-managed ∪ user-configured，去重）的写入策略，显示 `(rw)` / `(ro)`。
-- 自动配置路径：文件 `AGENT.md`、`HEARTBEAT.md`、`IDENTITY.md`、`SOUL.md`、`USER.md`，目录 `memory/daily_memory/`，以及 `project_dir`（allow_write）与 `project_dir/config/config.yaml`（deny_write）。`preserve_file_sharing_mode` 仅支持 `mount`。
+- 自动配置路径：当前工作路径。`preserve_file_sharing_mode` 仅支持 `mount`。
 - `excluded_commands` 的匹配：按完整命令字符串匹配，不仅看 `argv[0]`；写 glob 时要把参数也覆盖进去（例如 `"git *"` 而不是 `git`）。本质等同于沙箱穿透口，不要对 `rm -rf` / `curl` 这类高风险命令使用。
 - add / remove 严格校验：`exclude add` 已存在 pattern、`exclude remove` 不存在 pattern 都会报错；`files allow|deny` 在同 bucket 已有 path 或对侧 bucket 已有 path（allow/deny 冲突）会报错，先 `files remove` 再 add；`files remove` 没匹配到也会报错。避免"看起来执行了实际什么也没改"。
 - 写入策略：`allow` / `deny` 控制写访问（rw/ro），不是 Unix 八进制权限；支持「父 allow + 子 deny」，不支持「子 allow + 父 deny」。
