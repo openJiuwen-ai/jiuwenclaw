@@ -165,7 +165,6 @@ permissions:
   file_guard:
     workspace: { rw_enabled: true }
     global: {}
-    trusted_exec_directory: []
   external_directory: {...}    # 旧键，加载时迁移到 file_guard.global
 ```
 
@@ -179,7 +178,7 @@ Overlay **只含与 base 不同的字段**（由 `_extract_session_overlay` 提�
 | --- | --- | --- |
 | `tools` | 与 base 不同的工具档位 | 「总是允许」非 Shell 工具 → `{ "Write": "allow" }` |
 | `approval_overrides` | base 中不存在的新规则 | Shell「总是允许」→ `{ pattern: "git *", action: "allow" }` |
-| `file_guard` | 与 base 不同的文件策略 | 路径「总是允许」→ `global` 路径权限、`trusted_exec_directory` 新增目录 |
+| `file_guard` | 与 base 不同的文件策略 | 路径「总是允许」→ `global` 的 `read`/`write`/`exec` |
 
 **不会**进入 overlay：`enabled`、`defaults`、`rules`、`owner_scopes`、`command_intent` 等（仅 base 管理）。
 
@@ -192,8 +191,7 @@ Overlay **只含与 base 不同的字段**（由 `_extract_session_overlay` 提�
     { "id": "user_allow_git_...", "pattern": "git *", "action": "allow", "scope": "head" }
   ],
   "file_guard": {
-    "global": { "/tmp/project": { "read_enable": true, "write_enable": true } },
-    "trusted_exec_directory": ["/opt/tools"]
+    "global": { "/tmp/project": { "read": "allow", "write": "allow", "exec": "allow" } }
   }
 }
 ```
@@ -204,7 +202,7 @@ Overlay **只含与 base 不同的字段**（由 `_extract_session_overlay` 提�
 | --- | --- |
 | `tools` | overlay 同 key **覆盖** base |
 | `approval_overrides` | overlay 规则**追加**到 base 列表（按 pattern+action 去重） |
-| `file_guard` | deep merge（`global` 按路径合并，`trusted_exec_directory` 追加） |
+| `file_guard` | deep merge（`global` 按路径合并字段） |
 
 Manager / GDB 热更新只替换 **base**，**不清理**已有 session overlay；各 session 的 runtime 变更在 base 更新后仍保留（overlay 与 base 独立合并）。
 
@@ -299,7 +297,6 @@ Manager REST `PUT` 请求体或 GDB 中 `body` 列的 JSON 结构示例：
         "description": ""
       },
       "global": {},
-      "trusted_exec_directory": [],
       "tool_bindings": {}
     }
   }
@@ -432,11 +429,12 @@ flowchart LR
 
 ### 管线 B：file_guard
 
-- **read / write**：workspace 内默认放行 + `global` 最长前缀白名单
-- **exec**：`trusted_exec_directory` 白名单
+- **read / write / exec**：统一走 `global` 三态 `{read,write,exec}: allow|deny|ask`（缺省 ask）
+- **workspace**：仅影响 read/write 默认放行；`deny` 可穿透；**不影响 exec**
 - 路径来源：工具参数注册表 + `command_intent`（L1 shlex + L3 LLM）
+- 兼容：旧 `*_enable` bool（`true→allow`，`false→ask`）
 
-用户选「总是允许」后，路径类写入 overlay 的 `file_guard.global`；`exec` 写入 `trusted_exec_directory`（见 `persist_file_operations_allow`）。
+用户选「总是允许」后，路径类（含 ``exec``，但排除 ``source=llm`` 的 exec）写入 overlay 的 `file_guard.global`（见 `persist_file_operations_allow`）。
 
 ---
 
@@ -469,7 +467,7 @@ flowchart LR
 | `rules` | base | 管理员预置 Shell 规则 |
 | `approval_overrides` | base + overlay | base 预置 + session runtime 追加 |
 | `command_intent` | base | L1+L3 路径抽取开关 |
-| `file_guard.*` | base + overlay | 三轴；overlay 可追加 global / trusted_exec |
+| `file_guard.*` | base + overlay | workspace + global 三态；overlay 可追加/覆盖 `global` |
 | `owner_scopes` | base | 数字分身 owner 维度 |
 
 ### Shell 工具 vs 非 Shell 工具（「总是允许」写入 overlay 的字段）

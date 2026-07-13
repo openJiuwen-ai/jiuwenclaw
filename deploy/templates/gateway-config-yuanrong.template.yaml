@@ -450,13 +450,13 @@ permissions:
       thinking:
         type: disabled
 
-  # Phase-1: 文件路径三轴权限（read / write / exec）。
+  # Phase-1: 文件路径权限（read/write/exec 均在 global 三态）。
+  # global entry: {read,write,exec: allow|deny|ask}
   file_guard:
     workspace:
       rw_enabled: true
       description: "Agent workspace 内默认放行 read / write"
     global: {}
-    trusted_exec_directory: []
     tool_bindings: {}
 
   # 兼容键：旧 external_directory 在加载时会被自动迁移到 file_guard.global。

@@ -64,7 +64,6 @@ flowchart LR
     "file_guard": {
       "workspace": { "rw_enabled": true },
       "global": {},
-      "trusted_exec_directory": [],
       "tool_bindings": {}
     }
   }

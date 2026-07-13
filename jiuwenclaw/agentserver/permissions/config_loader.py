@@ -121,17 +121,8 @@ def _deep_merge_file_guard(dst: dict[str, Any], src: dict[str, Any]) -> None:
                 else:
                     global_dst[path] = copy.deepcopy(rules)
             continue
-        if key == "trusted_exec_directory" and isinstance(value, list):
-            existing = dst.setdefault("trusted_exec_directory", [])
-            if not isinstance(existing, list):
-                existing = []
-                dst["trusted_exec_directory"] = existing
-            seen = {str(x) for x in existing}
-            for item in value:
-                normalized = str(item)
-                if normalized not in seen:
-                    existing.append(copy.deepcopy(item))
-                    seen.add(normalized)
+        if key == "trusted_exec_directory":
+            # 已废弃：忽略旧键，避免写回 overlay / 生效配置。
             continue
         if key in dst and isinstance(dst[key], dict) and isinstance(value, dict):
             _deep_merge_file_guard(dst[key], value)
@@ -150,15 +141,6 @@ def _file_guard_delta(base_fg: dict[str, Any], effective_fg: dict[str, Any]) -> 
             global_delta[path] = copy.deepcopy(rules)
     if global_delta:
         delta["global"] = global_delta
-
-    base_ted_raw = base_fg.get("trusted_exec_directory")
-    base_ted = base_ted_raw if isinstance(base_ted_raw, list) else []
-    eff_ted_raw = effective_fg.get("trusted_exec_directory")
-    eff_ted = eff_ted_raw if isinstance(eff_ted_raw, list) else []
-    base_seen = {str(x) for x in base_ted}
-    ted_delta = [copy.deepcopy(x) for x in eff_ted if str(x) not in base_seen]
-    if ted_delta:
-        delta["trusted_exec_directory"] = ted_delta
 
     for key in ("workspace", "tool_bindings"):
         base_val = base_fg.get(key)
