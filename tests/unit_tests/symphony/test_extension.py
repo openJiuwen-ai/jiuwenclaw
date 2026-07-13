@@ -485,7 +485,6 @@ def test_plan_streams_beam_progress_events(monkeypatch, tmp_path):
             "language": "en",
             "sequence": 1,
             "round_index": 0,
-            "seed_skill_ids": ["skill-1"],
             "graph": {"nodes": [], "edges": []},
         }
     ]

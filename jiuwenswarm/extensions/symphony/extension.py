@@ -365,7 +365,7 @@ def _beam_display_event(event: dict[str, Any]) -> dict[str, Any]:
         "language": event.get("language") or "cn",
         "sequence": event.get("sequence") or 0,
         "round_index": event.get("round") or 0,
-        **payload,
+        "graph": payload.get("graph") or {"nodes": [], "edges": []},
     }
 
 

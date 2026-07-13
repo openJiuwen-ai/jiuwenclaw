@@ -100,8 +100,6 @@ def test_toolkit_calls_rpc_handler():
     result = asyncio.run(SymphonyToolkit(language="en").plan("use installed skills"))
 
     assert result["success"] is True
-    assert result["score_status"] == {"success": True, "exists": True, "stale": False}
-    assert result["score_build"] == {"rebuilt": False, "reason": "not_required"}
     assert result["content"].startswith("## Recommended Plan")
     assert "## Symphony score" not in result["content"]
     assert "Status: `fresh`" not in result["content"]
@@ -354,15 +352,8 @@ def test_toolkit_plan_succeeds_for_fresh_score(tmp_path):
     result = asyncio.run(SymphonyToolkit().plan("compose installed skills"))
 
     assert result["success"] is True
-    assert result["score_build"] == {
-        "rebuilt": False,
-        "reason": "not_required",
-        "version": "score-v1",
-        "score_created_at": "2026-06-13T10:00:00+00:00",
-    }
-    assert "build_progress" not in result["score_status"]
-    assert "llm_token_usage" not in result["score_status"]
-    assert "llm_total_tokens" not in result["score_build"]
+    assert "score_status" not in result
+    assert "score_build" not in result
     assert result["content"].startswith("## Recommended Plan")
     assert "Score created: `2026-06-13T10:00:00+00:00`" not in result["content"]
 
@@ -480,13 +471,18 @@ def test_toolkit_plan_preserves_display_content_after_score_summary():
     result = asyncio.run(SymphonyToolkit().plan("compose installed skills"))
 
     assert result["direct_display"] is True
-    assert result["display_format"] == "markdown"
     assert result["content"].startswith("## Recommended Plan")
     assert result["content"].endswith("是否按照上述编排结果执行？")
     assert "## Symphony score" not in result["content"]
     assert "Detail: up to date" not in result["content"]
-    assert result["mermaid"] == "flowchart LR\n  A --> B"
-    for key in ("result", "presentation", "markdown", "summary"):
+    for key in (
+        "result",
+        "presentation",
+        "markdown",
+        "summary",
+        "display_format",
+        "mermaid",
+    ):
         assert key not in result
 
 
@@ -523,7 +519,7 @@ def test_toolkit_complete_plan_defaults_to_force_finish_display():
     assert "followup_action" not in result
 
 
-def test_toolkit_plan_returns_compact_plan_and_skill_retrieval():
+def test_toolkit_plan_returns_compact_plan():
     registry = ExtensionRegistry.create_instance(
         callback_framework=_CallbackFramework(),
         config={},
@@ -631,16 +627,20 @@ def test_toolkit_plan_returns_compact_plan_and_skill_retrieval():
 
     assert result["success"] is True
     assert "## Compact Plan" in result["content"]
-    assert result["mermaid"] == "flowchart LR\n  A"
     for key in (
         "result",
         "presentation",
         "markdown",
         "summary",
+        "mermaid",
         "score_dir",
         "query",
         "execution_graph",
         "validation",
+        "metrics",
+        "skill_retrieval",
+        "score_status",
+        "score_build",
     ):
         assert key not in result
     assert result["plan"] == {
@@ -656,37 +656,12 @@ def test_toolkit_plan_returns_compact_plan_and_skill_retrieval():
             }
         ],
         "can_feed_edges": [
-            {"source_id": "skill-1", "target_id": "skill-2", "confidence": 0.91}
+            {"source_id": "skill-1", "target_id": "skill-2"}
         ],
         "missing_inputs": [
             {"skill_id": "skill-1", "name": "brief", "type": "text"}
         ],
     }
-    assert result["metrics"] == {
-        "planning_mode": "one_shot_fast",
-        "llm_call_count": 1,
-        "candidate_skill_count": 2,
-        "candidate_edge_count": 1,
-        "mode": "fast",
-    }
-    skill_retrieval = result["skill_retrieval"]
-    assert "build_progress" not in result["score_status"]
-    assert result["score_build"] == {"rebuilt": False, "reason": "not_required"}
-    assert skill_retrieval["source"] == "input"
-    assert skill_retrieval["candidate_skill_ids"] == ["skill-1", "skill-2"]
-    assert skill_retrieval["candidate_count"] == 2
-    assert len(skill_retrieval["candidate_records"]) == 10
-    assert skill_retrieval["candidate_records"][0] == {
-        "rank": 0,
-        "skill_id": "skill-0",
-        "skill_name": "Skill 0",
-        "score": 1.0,
-        "source": "structured_retrieval",
-    }
-    assert "worker_id" not in skill_retrieval["candidate_records"][0]
-    assert "resolved_payload" not in skill_retrieval["candidate_records"][0]
-
-
 def test_toolkit_compacts_inferred_edge_provenance():
     edge = SymphonyToolkit._compact_can_feed_edge(
         {
@@ -702,7 +677,6 @@ def test_toolkit_compacts_inferred_edge_provenance():
     assert edge == {
         "source_id": "skill-a",
         "target_id": "skill-b",
-        "confidence": None,
         "method": "fast_llm_inferred",
         "reason": "LLM connected retrieved candidates.",
     }
@@ -839,36 +813,24 @@ def test_toolkit_plan_returns_compact_beam_search():
     result = asyncio.run(SymphonyToolkit().plan("compose with beam", mode="beam"))
 
     assert result["success"] is True
-    assert result["beam_search"]["seed_skill_ids"] == ["skill-a"]
-    assert result["beam_search"]["round_index"] == 1
-    assert result["beam_search"]["graph"]["nodes"][2]["status"] == "rejected"
-    assert result["beam_search"]["graph"]["edges"][0] == {
-        "id": "skill-a->skill-b",
-        "source": "skill-a",
-        "target": "skill-b",
-        "status": "final",
-        "confidence": 0.9,
-        "direction": "forward",
-    }
-    assert result["beam_search"]["rounds"][0]["selected_count"] == 1
-    assert result["beam_search"]["rounds"][0]["rejected_count"] == 1
-    assert result["beam_search"]["rounds"][0]["candidates"][0] == {
-        "direction": "forward",
-        "current_skill_id": "skill-a",
-        "candidate_skill_id": "skill-b",
-        "candidate_label": "Skill B",
-        "status": "selected",
-        "edge": {
-            "id": "skill-a->skill-b",
-            "source": "skill-a",
-            "target": "skill-b",
-            "confidence": 0.9,
+    assert result["beam_search"] == {
+        "round_index": 1,
+        "graph": {
+            "nodes": [
+                {"id": "skill-a", "label": "Skill A", "status": "final"},
+                {"id": "skill-b", "label": "Skill B", "status": "final"},
+                {"id": "skill-c", "label": "Skill C", "status": "rejected"},
+            ],
+            "edges": [
+                {"source": "skill-a", "target": "skill-b", "status": "final"},
+                {
+                    "source": "skill-a",
+                    "target": "skill-c",
+                    "status": "rejected",
+                },
+            ],
         },
     }
-    assert result["beam_search"]["retained_paths"][0]["skill_ids"] == [
-        "skill-a",
-        "skill-b",
-    ]
 
 
 def test_toolkit_no_plan_continues_for_skill_discovery():

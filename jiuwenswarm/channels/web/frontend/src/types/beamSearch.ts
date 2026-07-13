@@ -4,17 +4,12 @@ export interface BeamSearchNode {
   id: string;
   label: string;
   status: BeamNodeStatus;
-  seed: boolean;
-  direction: string;
 }
 
 export interface BeamSearchEdge {
-  id: string;
   source: string;
   target: string;
   status: BeamNodeStatus;
-  confidence?: number | null;
-  direction?: string;
 }
 
 export interface BeamSearchGraph {

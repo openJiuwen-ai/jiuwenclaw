@@ -27,9 +27,6 @@ from jiuwenswarm.symphony.score_storage import (
 
 logger = logging.getLogger(__name__)
 
-_SKILL_RETRIEVAL_CANDIDATE_RECORD_LIMIT = 10
-
-
 class SymphonyToolkit:
     """Expose Symphony extension RPC methods as model-callable tools."""
 
@@ -203,11 +200,8 @@ class SymphonyToolkit:
         }
         for key in (
             "disabled",
-            "language",
             "content",
-            "mermaid",
             "direct_display",
-            "display_format",
             "continue_after_display",
             "followup_action",
         ):
@@ -224,20 +218,13 @@ class SymphonyToolkit:
                 compact["reason"] = reason
 
         score_status = payload.get("score_status")
-        if isinstance(score_status, dict):
-            compact["score_status"] = cls._compact_score_status(score_status)
-
         score_build = payload.get("score_build")
-        if isinstance(score_build, dict):
+        if not bool(compact["success"]) and isinstance(score_status, dict):
+            compact["score_status"] = cls._compact_score_status(score_status)
+        if isinstance(score_build, dict) and (
+            not bool(compact["success"]) or score_build.get("rebuilt") is True
+        ):
             compact["score_build"] = cls._compact_score_build(score_build)
-        elif isinstance(score_status, dict):
-            compact["score_build"] = cls._score_build_summary(score_status, None)
-
-        skill_retrieval = planning_payload.get("skill_retrieval")
-        if not isinstance(skill_retrieval, dict):
-            skill_retrieval = payload.get("skill_retrieval")
-        if isinstance(skill_retrieval, dict):
-            compact["skill_retrieval"] = cls._compact_skill_retrieval(skill_retrieval)
 
         beam_search = planning_payload.get("beam_search")
         if isinstance(beam_search, dict):
@@ -247,9 +234,6 @@ class SymphonyToolkit:
         if plan:
             compact["plan"] = plan
 
-        metrics = cls._compact_metrics(payload, planning_payload)
-        if metrics:
-            compact["metrics"] = metrics
         return compact
 
     @staticmethod
@@ -388,67 +372,17 @@ class SymphonyToolkit:
         )
 
     @classmethod
-    def _compact_skill_retrieval(cls, payload: dict[str, Any]) -> dict[str, Any]:
-        compact = _copy_compact_fields(
-            payload,
-            (
-                "enabled",
-                "source",
-                "used",
-                "candidate_skill_ids",
-                "candidate_count",
-                "fallback_reason",
-            ),
-            keep_empty=("fallback_reason",),
-        )
-        records = payload.get("candidate_records")
-        if isinstance(records, list):
-            compact["candidate_records"] = [
-                cls._compact_candidate_record(record)
-                for record in records[:_SKILL_RETRIEVAL_CANDIDATE_RECORD_LIMIT]
-                if isinstance(record, dict)
-            ]
-        return compact
-
-    @staticmethod
-    def _compact_candidate_record(record: dict[str, Any]) -> dict[str, Any]:
-        return _copy_compact_fields(
-            record,
-            ("rank", "skill_id", "skill_name", "score", "source"),
-        )
-
-    @classmethod
     def _compact_beam_search(cls, payload: dict[str, Any]) -> dict[str, Any]:
         compact = _copy_compact_fields(
             payload,
             (
-                "mode",
                 "language",
                 "round_index",
-                "top_k",
-                "max_depth",
-                "min_edge_confidence",
-                "max_concurrent_judges",
-                "seed_skill_ids",
             ),
         )
         graph = payload.get("graph")
         if isinstance(graph, dict):
             compact["graph"] = cls._compact_beam_graph(graph)
-        rounds = payload.get("rounds")
-        if isinstance(rounds, list):
-            compact["rounds"] = [
-                cls._compact_beam_round(item)
-                for item in rounds
-                if isinstance(item, dict)
-            ]
-        retained_paths = payload.get("retained_paths")
-        if isinstance(retained_paths, list):
-            compact["retained_paths"] = [
-                cls._compact_beam_path(item)
-                for item in retained_paths
-                if isinstance(item, dict)
-            ]
         return compact
 
     @classmethod
@@ -474,76 +408,14 @@ class SymphonyToolkit:
     def _compact_beam_node(node: dict[str, Any]) -> dict[str, Any]:
         return _copy_compact_fields(
             node,
-            ("id", "label", "status", "seed", "direction"),
+            ("id", "label", "status"),
         )
 
     @staticmethod
     def _compact_beam_edge(edge: dict[str, Any]) -> dict[str, Any]:
         return _copy_compact_fields(
             edge,
-            ("id", "source", "target", "status", "confidence", "direction"),
-        )
-
-    @classmethod
-    def _compact_beam_round(cls, item: dict[str, Any]) -> dict[str, Any]:
-        compact = _copy_compact_fields(
-            item,
-            (
-                "round",
-                "frontier_count",
-                "judge_request_count",
-                "fresh_candidate_count",
-                "cached_candidate_count",
-                "judged_candidate_count",
-                "candidate_count",
-                "selected_count",
-                "rejected_count",
-                "accepted_count",
-                "retained_count",
-            ),
-        )
-        candidates = item.get("candidates")
-        if isinstance(candidates, list):
-            compact["candidates"] = [
-                cls._compact_beam_candidate(candidate)
-                for candidate in candidates
-                if isinstance(candidate, dict)
-            ]
-        retained_paths = item.get("retained_paths")
-        if isinstance(retained_paths, list):
-            compact["retained_paths"] = [
-                cls._compact_beam_path(path)
-                for path in retained_paths
-                if isinstance(path, dict)
-            ]
-        return compact
-
-    @staticmethod
-    def _compact_beam_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
-        compact = _copy_compact_fields(
-            candidate,
-            (
-                "direction",
-                "current_skill_id",
-                "candidate_skill_id",
-                "candidate_label",
-                "status",
-                "path",
-            ),
-        )
-        edge = candidate.get("edge")
-        if isinstance(edge, dict):
-            compact["edge"] = _copy_compact_fields(
-                edge,
-                ("id", "source", "target", "confidence"),
-            )
-        return compact
-
-    @staticmethod
-    def _compact_beam_path(path: dict[str, Any]) -> dict[str, Any]:
-        return _copy_compact_fields(
-            path,
-            ("rank", "skill_ids", "edge_count", "directions"),
+            ("source", "target", "status"),
         )
 
     @classmethod
@@ -588,8 +460,6 @@ class SymphonyToolkit:
             compact["source_id"] = source
         if target not in (None, ""):
             compact["target_id"] = target
-        if "confidence" in edge:
-            compact["confidence"] = edge.get("confidence")
         method = edge.get("method")
         if method not in (None, ""):
             compact["method"] = method
@@ -597,25 +467,6 @@ class SymphonyToolkit:
         if reason not in (None, ""):
             compact["reason"] = reason
         return compact
-
-    @staticmethod
-    def _compact_metrics(
-        payload: dict[str, Any],
-        planning_payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        metrics = _copy_compact_fields(
-            planning_payload,
-            (
-                "planning_mode",
-                "llm_call_count",
-                "candidate_skill_count",
-                "candidate_edge_count",
-            ),
-        )
-        mode = payload.get("mode") or planning_payload.get("mode")
-        if mode not in (None, ""):
-            metrics["mode"] = mode
-        return metrics
 
     @staticmethod
     def _primary_plan(payload: dict[str, Any]) -> dict[str, Any]:
@@ -830,16 +681,13 @@ async def _return_value(value: Any) -> Any:
 def _copy_compact_fields(
     payload: dict[str, Any],
     keys: tuple[str, ...],
-    *,
-    keep_empty: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     compact: dict[str, Any] = {}
-    keep_empty_set = set(keep_empty)
     for key in keys:
         if key not in payload:
             continue
         value = payload[key]
-        if key not in keep_empty_set and value in (None, "", [], {}):
+        if value in (None, "", [], {}):
             continue
         compact[key] = value
     return compact
