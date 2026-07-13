@@ -202,6 +202,7 @@ from jiuwenclaw.agentserver.deep_agent.rails.execution_guard import (
     CircuitBreakerConfig,
     CircuitBreakerRail,
 )
+from jiuwenclaw.agentserver.utils import extract_uploaded_files
 from jiuwenclaw.agentserver.deep_agent.rails.disabled_tools_rail import DisabledToolsRail
 from jiuwenclaw.agentserver.deep_agent.rails.jiuwen_progressive_tool_rail import (
     JiuWenProgressiveToolRail,
@@ -6238,9 +6239,11 @@ class JiuWenClawDeepAdapter:
             if clear_task_plan_on_state(state):
                 self._instance.save_state(session, state)
 
+            has_new_file = _has_uploaded_file(params)
             decision = build_paused_plan_decision_prompt_from_session_snapshot(
                 self._resolve_runtime_language(),
                 snapshot,
+                has_new_file=has_new_file,
             )
             merge_supplementary_into_request_params(params, decision)
             clear_plan_pause_on_session(session)
@@ -8341,3 +8344,11 @@ class JiuWenClawDeepAdapter:
             pass
 
         return False
+
+
+def _has_uploaded_file(params: dict) -> bool:
+    """检查 request.params.files 中是否有新上传的文件"""
+    uploaded = extract_uploaded_files(params)
+    if uploaded is None:
+        return False
+    return len(uploaded) > 0

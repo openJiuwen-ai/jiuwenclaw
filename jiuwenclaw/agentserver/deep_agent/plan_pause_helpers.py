@@ -92,23 +92,34 @@ def _format_snapshot_block(language: str, snapshot: str) -> str:
     return f"\n取消时计划状态（参考）：\n{text}\n"
 
 
-def build_paused_plan_decision_prompt(language: str, *, snapshot: str = "") -> str:
+def build_paused_plan_decision_prompt(language: str, *, snapshot: str = "", has_new_file: bool = False) -> str:
     snapshot_block = _format_snapshot_block(language, snapshot)
     template = (
         PAUSED_PLAN_DECISION_PROMPT_EN
         if language in ("en", "english")
         else PAUSED_PLAN_DECISION_PROMPT_CN
     )
-    return template.format(snapshot_block=snapshot_block)
+    result = template.format(snapshot_block=snapshot_block)
+    if has_new_file:
+        if language in ("en", "english"):
+            result += ("\n\n⚠️ Note: The user uploaded a new file with this message. "
+                       "This is likely a new task (option 2), not a resume of the old plan (option 1). "
+                       "Unless the user explicitly says to continue the old task, prioritize the new file.")
+        else:
+            result += ("\n\n⚠️ 注意：用户本次上传了新文件，这很可能是一个全新任务（选项 2），而非续跑旧计划（选项 1）。"
+                       "除非用户明确表示要继续旧任务，否则应优先处理新上传的文件。")
+    return result
 
 
 def build_paused_plan_decision_prompt_from_session_snapshot(
     language: str,
     snapshot: dict[str, Any] | None,
+    has_new_file: bool = False,
 ) -> str:
     return build_paused_plan_decision_prompt(
         language,
         snapshot=format_plan_pause_handoff_snapshot(snapshot),
+        has_new_file=has_new_file,
     )
 
 
