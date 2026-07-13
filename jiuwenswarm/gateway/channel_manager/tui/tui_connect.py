@@ -32,7 +32,6 @@ from jiuwenswarm.common.config import (
     update_memory_forbidden_enabled_in_config,
     update_permissions_enabled_in_config,
     get_model_names,
-    ensure_defaults_list_in_config,
     update_preferred_language_in_config,
     update_config,
 )
@@ -2253,6 +2252,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 await channel.send_response(ws, req_id, ok=False, error="index is required")
                 return
             try:
+                _update_result: dict = {}
                 def _update_mutate(data):
                     models = data.get("models")
                     if not isinstance(models, dict):
@@ -2329,6 +2329,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                                 raise _ModelOpError(
                                     f"Alias '{_effective_alias}' conflicts with model name '{_other_mn}'"
                                 )
+                    # 展示字段从锁内 data 直接取，避免事务后再开锁读取
+                    _upd_mcc = _entry.get("model_client_config") or {}
+                    _update_result["updated_name"] = resolve_env_vars(str(_upd_mcc.get("model_name", "")))
+                    _cur_mcc = (_raw_defs[0].get("model_client_config") or {}) if _raw_defs else {}
+                    _update_result["current_name"] = resolve_env_vars(str(_cur_mcc.get("model_name", "")))
                     return data
                 update_config(_update_mutate)
             except _ModelOpError as _op_err:
@@ -2337,18 +2342,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             except Exception as e:
                 await channel.send_response(ws, req_id, ok=False, error=str(e))
                 return
-            # 写盘已成功；以下仅取展示字段，读取失败用 fallback 不影响成功响应
-            _updated_name, _current_name = "", ""
-            try:
-                _raw_defs_after = ensure_defaults_list_in_config()
-                if _idx < len(_raw_defs_after) and isinstance(_raw_defs_after[_idx], dict):
-                    _mcc_after = _raw_defs_after[_idx].get("model_client_config") or {}
-                    _updated_name = resolve_env_vars(str(_mcc_after.get("model_name", "")))
-                if _raw_defs_after:
-                    _cur_mcc = _raw_defs_after[0].get("model_client_config") or {}
-                    _current_name = resolve_env_vars(str(_cur_mcc.get("model_name", "")))
-            except Exception as _disp_err:
-                logger.warning("[cli command.model] update 展示字段读取失败(写盘已成功): %s", _disp_err)
+            _updated_name = _update_result.get("updated_name", "")
+            _current_name = _update_result.get("current_name", "")
             _config_payload = get_config()
             await _reload_model_config_background(_config_payload, "model.update")
             await channel.send_response(ws, req_id, ok=True, payload={
@@ -2380,6 +2375,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     if _idx < 0 or _idx >= len(_raw_defs) or not isinstance(_raw_defs[_idx], dict):
                         raise _ModelOpError("model index not found")
                     _removed_holder["entry"] = _raw_defs.pop(_idx)
+                    # 展示字段从锁内 data 直接取，避免事务后再开锁读取
+                    _cur_mcc = (_raw_defs[0].get("model_client_config") or {}) if _raw_defs else {}
+                    _removed_holder["current_name"] = resolve_env_vars(str(_cur_mcc.get("model_name", "")))
                     return data
                 update_config(_delete_mutate)
             except _ModelOpError as _op_err:
@@ -2390,15 +2388,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 return
             _removed = _removed_holder.get("entry") or {}
             _removed_name = resolve_env_vars(str((_removed.get("model_client_config") or {}).get("model_name", "")))
-            # 写盘已成功；current 仅展示用，读取失败用 fallback 不让异常传播
-            _current_name = ""
-            try:
-                _raw_defs_after = ensure_defaults_list_in_config()
-                if _raw_defs_after:
-                    _cur_mcc = _raw_defs_after[0].get("model_client_config") or {}
-                    _current_name = resolve_env_vars(str(_cur_mcc.get("model_name", "")))
-            except Exception as _disp_err:
-                logger.warning("[cli command.model] delete 展示字段读取失败(写盘已成功): %s", _disp_err)
+            _current_name = _removed_holder.get("current_name", "")
             _config_payload = get_config()
             await _reload_model_config_background(_config_payload, "model.delete")
             await channel.send_response(ws, req_id, ok=True, payload={
@@ -2481,35 +2471,29 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     models["defaults"] = _raw_defaults
                     models.pop("default", None)
                 _valid_names: set[str] = set()
+                _avail_parts: list[str] = []
                 for _e in _raw_defaults:
-                    if isinstance(_e, dict):
-                        _mn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
-                        _al = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
-                        if _mn:
-                            _valid_names.add(_mn)
-                        if _al:
-                            _valid_names.add(_al)
-                if not _valid_names:
-                    _valid_names = set(get_model_names())
+                    if not isinstance(_e, dict):
+                        continue
+                    _mn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
+                    _al = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
+                    if _mn:
+                        _valid_names.add(_mn)
+                    if _al:
+                        _valid_names.add(_al)
+                    if _al and _mn and _al != _mn:
+                        _avail_parts.append(f"{_al} ({_mn})")
+                    elif _mn:
+                        _avail_parts.append(_mn)
                 _skip_name_check = model_index is not None
                 if not _skip_name_check and target not in _valid_names:
                     logger.warning(
                         "[cli command.model] 模型不存在: %s, 可用: %s",
-                        target, get_model_names(),
+                        target, _avail_parts,
                     )
-                    _avail_parts = []
-                    for _e in _raw_defaults:
-                        if not isinstance(_e, dict):
-                            continue
-                        _mn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
-                        _al = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
-                        if _al and _mn and _al != _mn:
-                            _avail_parts.append(f"{_al} ({_mn})")
-                        elif _mn:
-                            _avail_parts.append(_mn)
                     raise _ModelOpError(
                         f"Model '{target}' not found. "
-                        f"Available: {', '.join(_avail_parts) or ', '.join(get_model_names())}"
+                        f"Available: {', '.join(_avail_parts) or ''}"
                     )
                 _target_entry = None
                 _target_idx = None
