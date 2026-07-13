@@ -2479,7 +2479,9 @@ async def _watch_team_evolution_and_push(
             fallback_sec=TEAM_EVOLUTION_EVENT_TIMEOUT_SEC,
         )
         while True:
-            if not getattr(rail, "auto_scan", True):
+            if not getattr(rail, "auto_scan", True) and not getattr(
+                rail, "completion_followup_enabled", False
+            ):
                 if active_cycle_request_id is not None:
                     await push_evolution_status(
                         push_context,

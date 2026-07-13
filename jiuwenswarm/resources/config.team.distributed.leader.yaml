@@ -258,7 +258,9 @@ react:
   # Skills 在线自演进配置
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进
-    auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
+    auto_scan: false           # 兼容开关：leader 触发 review
+    signal_trigger:            # leader 规则触发保持关闭；保留字段以对齐通用配置
+    review_trigger:            # true / false = 显式覆盖软触发；留空时回退 auto_scan
     auto_save: false           # true = 自演进审批无需用户点击自动通过（内部开关）
     skill_base_dir: "agent/skills"  # Skill 根目录
   a2x_registry:

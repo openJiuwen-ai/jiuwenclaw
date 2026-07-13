@@ -249,7 +249,9 @@ from jiuwenswarm.common.config import (
     get_config,
     get_default_models,
     get_evolution_auto_scan_enabled,
+    get_evolution_review_trigger_enabled,
     get_evolution_auto_save_enabled,
+    get_evolution_signal_trigger_enabled,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
     get_skill_create_enabled,
@@ -334,9 +336,14 @@ _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
 )
 
 
-def _set_skill_evolution_auto_scan(rail: Any, enabled: bool) -> None:
-    rail.auto_scan = enabled
-    rail.fuzzy_review = enabled
+def _set_skill_evolution_triggers(
+    rail: Any,
+    *,
+    signal_trigger: bool,
+    review_trigger: bool,
+) -> None:
+    rail.auto_scan = signal_trigger
+    rail.fuzzy_review = review_trigger
 
 
 def _clean_heartbeat_content(content: str) -> str:
@@ -3280,6 +3287,11 @@ class JiuWenSwarmDeepAdapter:
         """Build SkillEvolutionRail."""
         try:
             evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+            evolution_signal_trigger = get_evolution_signal_trigger_enabled(config)
+            evolution_review_trigger = get_evolution_review_trigger_enabled(
+                config,
+                fallback=evolution_auto_scan,
+            )
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
             skill_evolution_rail = SkillEvolutionRail(
@@ -3287,8 +3299,8 @@ class JiuWenSwarmDeepAdapter:
                 llm=self._model,
                 model=model_name,
                 review_runtime=EvolutionReviewRuntime(),
-                auto_scan=evolution_auto_scan,
-                fuzzy_review=evolution_auto_scan,
+                auto_scan=evolution_signal_trigger,
+                fuzzy_review=evolution_review_trigger,
                 auto_save=evolution_auto_save,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
             )
@@ -3306,6 +3318,11 @@ class JiuWenSwarmDeepAdapter:
 
         resolved_language = self._resolve_runtime_language()
         evolution_auto_scan = get_evolution_auto_scan_enabled(self._config_cache)
+        evolution_signal_trigger = get_evolution_signal_trigger_enabled(self._config_cache)
+        evolution_review_trigger = get_evolution_review_trigger_enabled(
+            self._config_cache,
+            fallback=evolution_auto_scan,
+        )
         evolution_auto_save = get_evolution_auto_save_enabled(self._config_cache)
         if (
             self._skill_evolution_rail is not None
@@ -3324,15 +3341,19 @@ class JiuWenSwarmDeepAdapter:
             llm=self._model,
             model=self._default_model_name
             or self._config_cache.get("model_name", "gpt-4"),
-            auto_scan=evolution_auto_scan,
-            fuzzy_review=evolution_auto_scan,
+            auto_scan=evolution_signal_trigger,
+            fuzzy_review=evolution_review_trigger,
             auto_save=evolution_auto_save,
             disabled_skills=disabled_skills,
             language=resolved_language,
         )
         self._refresh_active_evolution_rail_refs()
         if self._skill_evolution_rail is not None:
-            _set_skill_evolution_auto_scan(self._skill_evolution_rail, evolution_auto_scan)
+            _set_skill_evolution_triggers(
+                self._skill_evolution_rail,
+                signal_trigger=evolution_signal_trigger,
+                review_trigger=evolution_review_trigger,
+            )
 
     async def _unconfigure_active_evolution_rails(self) -> None:
         """Remove cached single-agent evolution rails before rebuilding them."""
@@ -3892,10 +3913,10 @@ class JiuWenSwarmDeepAdapter:
     ) -> bool:
         """Resolve enable_task_loop considering evolution rail requirements.
 
-        SkillCreateRail and auto-scan SkillEvolutionRail follow-ups require
+        SkillCreateRail and review-trigger SkillEvolutionRail follow-ups require
         task-loop mode (enable_task_loop=True) because they use
         AFTER_TASK_ITERATION events and enqueue_follow_up().
-        When skill_create=True or auto_scan=True, we force enable_task_loop=True
+        When skill_create=True or review_trigger=True, we force enable_task_loop=True
         regardless of user config.
 
         Args:
@@ -3907,7 +3928,10 @@ class JiuWenSwarmDeepAdapter:
         """
         config_base = config_base or get_config()
         skill_create_enabled = get_skill_create_enabled(config_base)
-        evolution_auto_scan_enabled = get_evolution_auto_scan_enabled(config_base)
+        evolution_review_trigger_enabled = get_evolution_review_trigger_enabled(
+            config_base,
+            fallback=get_evolution_auto_scan_enabled(config_base),
+        )
         configured_value = config.get("enable_task_loop", True)
 
         if skill_create_enabled:
@@ -3918,10 +3942,10 @@ class JiuWenSwarmDeepAdapter:
                     configured_value,
                 )
             return True
-        if evolution_auto_scan_enabled:
+        if evolution_review_trigger_enabled:
             if not configured_value:
                 logger.warning(
-                    "[JiuWenSwarmDeepAdapter] evolution.auto_scan=True requires "
+                    "[JiuWenSwarmDeepAdapter] evolution.review_trigger=True requires "
                     "enable_task_loop=True; overriding user config (enable_task_loop=%s -> True)",
                     configured_value,
                 )
@@ -4002,9 +4026,14 @@ class JiuWenSwarmDeepAdapter:
         # Apply in-place updates to skill_evolution_rail (no re-init needed).
         if self._skill_evolution_rail is not None:
             self._skill_evolution_rail.update_llm(self._model, self._default_model_name)
-            _set_skill_evolution_auto_scan(
+            evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+            _set_skill_evolution_triggers(
                 self._skill_evolution_rail,
-                get_evolution_auto_scan_enabled(config),
+                signal_trigger=get_evolution_signal_trigger_enabled(config),
+                review_trigger=get_evolution_review_trigger_enabled(
+                    config,
+                    fallback=evolution_auto_scan,
+                ),
             )
 
         # Reuse existing SkillUseRail to preserve dynamically loaded skills

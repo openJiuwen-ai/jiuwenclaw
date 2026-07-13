@@ -1147,7 +1147,11 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     )
 
     built = evolution_rails.build_team_skill_evolution_rail(
-        {"evolution_model_config": {}, "auto_scan": True, "auto_save": auto_save},
+        {
+            "evolution_model_config": {},
+            "completion_followup_enabled": True,
+            "auto_save": auto_save,
+        },
         ctx,
     )
 

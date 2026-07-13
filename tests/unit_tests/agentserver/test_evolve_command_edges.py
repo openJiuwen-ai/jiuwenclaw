@@ -178,7 +178,7 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
             "skills_dir": str(interface_deep_module.get_agent_skills_dir()),
             "llm": adapter._model,  # pylint: disable=protected-access
             "model": "default-model",
-            "auto_scan": True,
+            "auto_scan": False,
             "fuzzy_review": True,
             "auto_save": auto_save,
             "disabled_skills": ["disabled-demo"],

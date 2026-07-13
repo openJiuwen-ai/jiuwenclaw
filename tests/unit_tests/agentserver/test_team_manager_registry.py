@@ -125,11 +125,12 @@ async def test_update_evolution_config_updates_member_skill_evolution_auto_scan(
     manager.register_team_member_skill_evolution_rail("sess-1", rail)
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    await manager.update_evolution_config({"evolution": {"auto_scan": False}})
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
+    await manager.update_evolution_config({"evolution": {"signal_trigger": False}})
 
     assert rail.auto_scan is False
 
-    await manager.update_evolution_config({"evolution": {"auto_scan": True}})
+    await manager.update_evolution_config({"evolution": {"signal_trigger": True}})
 
     assert rail.auto_scan is True
 
@@ -144,11 +145,12 @@ async def test_update_evolution_config_enabled_false_keeps_team_skill_rail_and_w
     task = asyncio.create_task(asyncio.sleep(3600))
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
     manager.register_team_skill_rail("sess-1", rail)
     manager.register_team_live_rail("sess-1", agent, rail)
     manager.register_team_evolution_watcher("sess-1", task)
 
-    await manager.update_evolution_config({"evolution": {"enabled": False, "auto_scan": False}})
+    await manager.update_evolution_config({"evolution": {"enabled": False, "review_trigger": False}})
 
     assert manager.get_team_skill_rail("sess-1") is rail
     assert manager.get_team_evolution_watcher("sess-1") is task
@@ -168,7 +170,8 @@ async def test_update_evolution_config_keeps_team_skill_rail_when_only_auto_scan
     manager.register_team_skill_rail("sess-1", rail)
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    await manager.update_evolution_config({"evolution": {"enabled": True, "auto_scan": False}})
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    await manager.update_evolution_config({"evolution": {"enabled": True, "review_trigger": False}})
 
     assert manager.get_team_skill_rail("sess-1") is rail
     assert rail.auto_scan is True
@@ -184,7 +187,8 @@ async def test_update_evolution_config_enabled_false_does_not_override_auto_scan
     manager.register_team_skill_rail("sess-1", rail)
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    await manager.update_evolution_config({"evolution": {"enabled": False, "auto_scan": True}})
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    await manager.update_evolution_config({"evolution": {"enabled": False, "review_trigger": True}})
 
     assert manager.get_team_skill_rail("sess-1") is rail
     assert rail.auto_scan is False
@@ -196,18 +200,23 @@ async def test_update_evolution_config_auto_scan_only_updates_existing_rails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = TeamManager()
-    team_rail = _FakeTeamSkillEvolutionRail(auto_scan=True)
-    member_rail = _FakeSkillEvolutionRail(auto_scan=True)
+    team_rail = _FakeTeamSkillEvolutionRail(
+        auto_scan=False,
+        completion_followup_enabled=False,
+    )
+    member_rail = _FakeSkillEvolutionRail(auto_scan=False)
     manager.register_team_skill_rail("sess-1", team_rail)
     manager.register_team_member_skill_evolution_rail("sess-1", member_rail)
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
     monkeypatch.setenv("SKILL_CREATE", "false")
-    await manager.update_evolution_config({"evolution": {"auto_scan": False}})
+    await manager.update_evolution_config({"evolution": {"auto_scan": True}})
 
-    assert team_rail.auto_scan is True
-    assert team_rail.completion_followup_enabled is False
-    assert member_rail.auto_scan is False
+    assert team_rail.auto_scan is False
+    assert team_rail.completion_followup_enabled is True
+    assert member_rail.auto_scan is True
     assert manager.get_team_skill_rail("sess-1") is team_rail
     assert manager.get_team_skill_create_rail("sess-1") is None
 
@@ -255,7 +264,10 @@ def test_refresh_team_shared_skill_links_across_managers_uses_registered_session
 
 
 @pytest.mark.asyncio
-async def test_update_evolution_config_disables_team_skill_create_rail() -> None:
+async def test_update_evolution_config_disables_team_skill_create_rail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SKILL_CREATE", raising=False)
     manager = TeamManager()
     rail = _FakeRail()
     agent = _FakeAgent()

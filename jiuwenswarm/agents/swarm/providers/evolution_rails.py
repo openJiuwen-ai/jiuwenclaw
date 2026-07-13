@@ -393,8 +393,8 @@ class TeamSkillEvolutionInput(ConstructionInput):
         default_factory=dict,
         description="Serializable evolution model config (LLM built at build time).",
     )
-    auto_scan: bool = param_field(
-        default=False, description="Evolution auto-scan flag."
+    completion_followup_enabled: bool = param_field(
+        default=False, description="Evolution review trigger flag."
     )
     auto_save: bool = param_field(
         default=False, description="Evolution auto-save approval flag."
@@ -472,7 +472,7 @@ def build_team_skill_evolution_rail(
             auto_scan=False,
             auto_save=inp.auto_save,
             fuzzy_review=False,
-            completion_followup_enabled=inp.auto_scan,
+            completion_followup_enabled=inp.completion_followup_enabled,
             team_id=inp.team_id,
             disabled_skills=load_execution_disabled_skills(),
         )
@@ -491,7 +491,7 @@ def build_team_skill_evolution_rail(
             inp.team_skills_dir,
             actual_model_name,
             False,
-            inp.auto_scan,
+            inp.completion_followup_enabled,
         )
         return _build_evolution_approval_stack(
             rail,
@@ -599,7 +599,7 @@ class MemberSkillEvolutionInput(ConstructionInput):
         description="Serializable evolution model config (LLM built at build time).",
     )
     auto_scan: bool = param_field(
-        default=False, description="Evolution auto-scan flag."
+        default=False, description="Evolution signal trigger flag."
     )
     team_skills_dir: str | None = context_field(
         attr="team_skills_dir", description="Team shared skills directory."
