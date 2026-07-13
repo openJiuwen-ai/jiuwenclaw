@@ -106,6 +106,7 @@ declare -A DEPLOY_VARS=(
     ["FUNC_SVC_NAME"]="0@jiuwen@clawtest"
     ["GATEWAY_CLAW_WS_PING_INTERVAL"]="20.0"
     ["GATEWAY_CLAW_WS_PING_TIMEOUT"]="20.0"
+    ["TOOL_RESULT_DISPLAY_MAX_CHARS"]="500"
     ["GATEWAY_CONFIG_MAP_NAME"]="jiuwenclaw-gateway-config"
     ["GATEWAY_DB_NAME"]="gateway"
     ["GATEWAY_ENV_FILE_NAME"]="jiuwenclaw-gateway-env"
