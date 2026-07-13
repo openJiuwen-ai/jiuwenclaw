@@ -2,19 +2,21 @@
 
 import time
 
-from jiuwenclaw.e2a.agent_compat import e2a_to_agent_request
-from jiuwenclaw.e2a.gateway_normalize import (
+from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
+from jiuwenswarm.common.e2a.constants import E2A_RESPONSE_KIND_PLAN_APPROVAL_REQUIRED
+from jiuwenswarm.common.e2a.gateway_normalize import (
     E2A_FALLBACK_FAILED_KEY,
     E2A_INTERNAL_CONTEXT_KEY,
     E2A_LEGACY_AGENT_REQUEST_KEY,
     build_fallback_e2a,
     channel_context_for_channel_reply,
     e2a_from_agent_fields,
+    e2a_response_to_agent_chunk,
     message_to_e2a_or_fallback,
     message_to_legacy_agent_dict,
 )
-from jiuwenclaw.e2a.models import E2AEnvelope
-from jiuwenclaw.schema.message import Message, ReqMethod
+from jiuwenswarm.common.e2a.models import E2AEnvelope, E2AResponse
+from jiuwenswarm.common.schema.message import Message, ReqMethod
 
 
 def test_message_to_e2a_or_fallback_basic():
@@ -107,3 +109,26 @@ def test_build_fallback_and_legacy_keys():
     inner = env.channel_context[E2A_INTERNAL_CONTEXT_KEY]
     assert inner[E2A_FALLBACK_FAILED_KEY] is True
     assert inner[E2A_LEGACY_AGENT_REQUEST_KEY]["req_method"] == "history.get"
+
+
+def test_e2a_response_to_agent_chunk_plan_approval_required():
+    e2a = E2AResponse(
+        response_id="req-plan-1",
+        request_id="req-plan-1",
+        sequence=0,
+        is_final=True,
+        status="succeeded",
+        response_kind=E2A_RESPONSE_KIND_PLAN_APPROVAL_REQUIRED,
+        body={
+            "plan_content": "## Plan\nDo the thing",
+            "plan_slug": "bright-otter",
+            "plan_path": "/tmp/.plans/bright-otter.md",
+        },
+        channel="tui",
+        session_id="session-1",
+    )
+    chunk = e2a_response_to_agent_chunk(e2a)
+    assert chunk.payload["event_type"] == "plan.approval_required"
+    assert chunk.payload["plan_content"] == "## Plan\nDo the thing"
+    assert chunk.payload["plan_slug"] == "bright-otter"
+    assert chunk.is_complete is True

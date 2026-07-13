@@ -6,9 +6,9 @@ RUN whoami
 USER snuser
 ARG OLD_PYTHONPATH=${PYTHONPATH}
 ENV PYTHONPATH=
-ARG JIUWENCLAW_VERSION
+ARG JIUWENSWARM_VERSION
 RUN pip3.11 install -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    --user jiuwenclaw==${JIUWENCLAW_VERSION}
+    --user jiuwenswarm==${JIUWENSWARM_VERSION}
 
 RUN echo "revert python path: ${OLD_PYTHONPATH}"
 

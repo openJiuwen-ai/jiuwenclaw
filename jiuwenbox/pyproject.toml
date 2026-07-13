@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Jiuwen sandbox system"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = {text = "Apache-2.0"}
 dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
@@ -16,6 +16,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "python-multipart>=0.0.9",
+    "mcp>=1.27.2,<2",
 ]
 
 [project.optional-dependencies]
@@ -26,12 +27,27 @@ dev = [
     "ruff>=0.6",
 ]
 
+[project.scripts]
+jiuwenbox = "jiuwenbox.cli.jiuwenbox:main"
+jiuwenbox-server = "jiuwenbox.server.launcher:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["jiuwenbox*"]
 
+[tool.setuptools.package-data]
+jiuwenbox = ["configs/*.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "performance: Performance tests",
+    "system: System tests",
+    "slow: Slow running tests",
+    "async: Async tests",
+]
 
 [tool.ruff]
 src = ["src"]

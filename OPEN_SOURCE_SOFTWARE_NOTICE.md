@@ -126,4 +126,4 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 ---
 
-*This notice is generated for the JiuwenBot project. The list of software and versions may vary with the actual installation. You may regenerate the dependency list using `pip install pip-licenses; pip-licenses` from the project environment.*
+*This notice is generated for the JiuwenSwarm project. The list of software and versions may vary with the actual installation. You may regenerate the dependency list using `pip install pip-licenses; pip-licenses` from the project environment.*

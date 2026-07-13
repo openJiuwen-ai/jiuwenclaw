@@ -41,12 +41,12 @@ def clean_environment(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     Use this fixture when testing initialization to ensure tests are isolated.
     """
     # Import before monkeypatching to get reference
-    import jiuwenclaw.utils as utils_module
+    import jiuwenswarm.common.utils as utils_module
 
     # Override HOME to use temporary directory
     monkeypatch.setenv("HOME", str(temp_home))
     # Clear any cached configuration
-    monkeypatch.delenv("JIUWENCLAW_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_CONFIG_DIR", raising=False)
 
     # Use set_user_home to set custom home directory
     utils_module.set_user_home(temp_home)
@@ -67,7 +67,7 @@ def mock_package_resources(monkeypatch: pytest.MonkeyPatch, temp_home: Path) -> 
     to test file copying during initialization.
     """
     # Create mock package directory
-    package_dir = temp_home / "mock_jiuwenclaw"
+    package_dir = temp_home / "mock_jiuwenswarm"
     package_dir.mkdir(parents=True, exist_ok=True)
 
     resources_dir = package_dir / "resources"
@@ -112,7 +112,7 @@ MODEL_PROVIDER="OpenAI"
     def mock_find_package_root():
         return package_dir
 
-    monkeypatch.setattr("jiuwenclaw.utils._find_package_root", mock_find_package_root)
+    monkeypatch.setattr("jiuwenswarm.common.utils._find_package_root", mock_find_package_root)
 
 
 @pytest.fixture
@@ -138,7 +138,7 @@ def skip_if_no_resources():
     Use this fixture for tests that require the actual package resources
     to be available (e.g., when testing in development mode).
     """
-    from jiuwenclaw.utils import _find_package_root
+    from jiuwenswarm.common.utils import _find_package_root
 
     package_root = _find_package_root()
     resources_dir = package_root / "resources"
@@ -156,7 +156,7 @@ def verify_workspace_structure():
 
     Example:
         def test_something(verify_workspace_structure):
-            workspace = Path("~/.jiuwenclaw").expanduser()
+            workspace = Path("~/.jiuwenswarm").expanduser()
             verify_workspace_structure(workspace, language="zh")
     """
 
@@ -169,8 +169,8 @@ def verify_workspace_structure():
             workspace_dir / "agent" / "memory",
             workspace_dir / "agent" / "sessions",
             workspace_dir / "agent" / "workspace",
-            workspace_dir / ".checkpoint",
-            workspace_dir / ".logs",
+            workspace_dir / "agent" / ".checkpoint",
+            workspace_dir / "agent" / ".logs",
         ]
 
         for dir_path in expected_dirs:

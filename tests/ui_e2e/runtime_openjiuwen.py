@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_RUNTIME_ENV_VAR = "JIUWENCLAW_E2E_PYTHON"
+DEFAULT_RUNTIME_ENV_VAR = "JIUWENSWARM_E2E_PYTHON"
 
 
 @dataclass(frozen=True)

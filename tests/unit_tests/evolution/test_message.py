@@ -4,8 +4,8 @@
 
 import pytest
 
-from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-from jiuwenclaw.schema.message import ReqMethod, EventType, Mode, Message
+from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.schema.message import ReqMethod, EventType, Mode, Message
 
 
 class TestReqMethod:
@@ -31,6 +31,7 @@ class TestReqMethod:
         assert ReqMethod.SESSION_LIST.value == "session.list"
         assert ReqMethod.SESSION_CREATE.value == "session.create"
         assert ReqMethod.SESSION_DELETE.value == "session.delete"
+        assert ReqMethod.TEAM_DELETE.value == "team.delete"
 
     @staticmethod
     def test_skills_methods():
@@ -55,6 +56,7 @@ class TestEventType:
         assert EventType.CHAT_DELTA.value == "chat.delta"
         assert EventType.CHAT_FINAL.value == "chat.final"
         assert EventType.CHAT_TOOL_CALL.value == "chat.tool_call"
+        assert EventType.CHAT_SYMPHONY_STATUS.value == "chat.symphony_status"
         assert EventType.CHAT_ERROR.value == "chat.error"
 
 
@@ -68,6 +70,7 @@ class TestMode:
         assert Mode.AGENT_FAST.value == "agent.fast"
         assert Mode.CODE_PLAN.value == "code.plan"
         assert Mode.CODE_NORMAL.value == "code.normal"
+        assert Mode.CODE_TEAM.value == "code.team"
         assert Mode.TEAM.value == "team"
 
     @staticmethod
@@ -77,6 +80,7 @@ class TestMode:
         assert Mode.from_raw("agent.fast") == Mode.AGENT_FAST
         assert Mode.from_raw("code.plan") == Mode.CODE_PLAN
         assert Mode.from_raw("code.normal") == Mode.CODE_NORMAL
+        assert Mode.from_raw("code.team") == Mode.CODE_TEAM
         assert Mode.from_raw("team") == Mode.TEAM
         assert Mode.from_raw("invalid") == Mode.AGENT_PLAN
 
@@ -87,6 +91,7 @@ class TestMode:
         assert Mode.AGENT_FAST.to_runtime_mode() == "agent.fast"
         assert Mode.CODE_PLAN.to_runtime_mode() == "code.plan"
         assert Mode.CODE_NORMAL.to_runtime_mode() == "code.normal"
+        assert Mode.CODE_TEAM.to_runtime_mode() == "code.team"
         assert Mode.TEAM.to_runtime_mode() == "team"
 
 

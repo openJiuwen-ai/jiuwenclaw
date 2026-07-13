@@ -22,9 +22,9 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentRail,
     ToolCallInputs,
 )
-from jiuwenclaw.agentserver.deep_agent import interface_deep as interface_module
-from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
-from jiuwenclaw.schema.agent import AgentRequest
+from jiuwenswarm.server.runtime.agent_adapter import interface_deep as deep_interface_module
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+from jiuwenswarm.common.schema.agent import AgentRequest
 
 
 class MockLLMModel:
@@ -67,7 +67,7 @@ class ToolTraceRail(AgentRail):
             self.tool_calls.append(ctx.inputs.tool_name)
 
 
-class _TestableJiuWenClawDeepAdapter(JiuWenClawDeepAdapter):
+class _TestableJiuWenSwarmDeepAdapter(JiuWenSwarmDeepAdapter):
     def set_workspace_dir(self, workspace_dir: str) -> None:
         self._workspace_dir = workspace_dir
 
@@ -132,46 +132,48 @@ def _make_fake_runtime() -> MagicMock:
     return runtime
 
 
-def test_build_configured_subagents_defaults_to_none_when_unconfigured(
+# ─── DeepAdapter (agent mode): only research_agent + browser_agent ──────
+
+def test_deep_adapter_subagents_defaults_to_none_when_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapter = _TestableJiuWenClawDeepAdapter()
+    adapter = _TestableJiuWenSwarmDeepAdapter()
     model = _build_model()
     monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
+        JiuWenSwarmDeepAdapter,
         "_browser_runtime_enabled",
         staticmethod(lambda: False),
     )
-
-    subagents = adapter.build_configured_subagents(
+    # DeepAdapter: no subagents configured, no browser → None
+    subagents, _ = adapter.build_configured_subagents(
         model,
         {"max_iterations": 8},
-        {"react": {"max_iterations": 8}},
+        {},
     )
 
     assert subagents is None
 
 
-def test_build_configured_subagents_includes_browser_by_default_when_runtime_enabled(
+def test_deep_adapter_subagents_includes_browser_by_default_when_runtime_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapter = _TestableJiuWenClawDeepAdapter()
+    adapter = _TestableJiuWenSwarmDeepAdapter()
     adapter.set_workspace_dir("/tmp/test-workspace")
     model = _build_model()
 
     monkeypatch.setattr(
-        interface_module,
+        deep_interface_module,
         "build_browser_agent_config",
         lambda *args, **kwargs: {"name": "browser_agent", "kwargs": kwargs},
     )
     monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
+        JiuWenSwarmDeepAdapter,
         "_browser_runtime_enabled",
         staticmethod(lambda: True),
     )
     monkeypatch.setenv("BROWSER_DRIVER", "managed")
 
-    subagents = adapter.build_configured_subagents(
+    subagents, _ = adapter.build_configured_subagents(
         model,
         {"max_iterations": 8},
         {},
@@ -179,45 +181,39 @@ def test_build_configured_subagents_includes_browser_by_default_when_runtime_ena
 
     assert subagents is not None
     assert [item["name"] for item in subagents] == ["browser_agent"]
-    assert subagents[0]["kwargs"]["max_iterations"] == 8
+    assert subagents[-1]["kwargs"]["max_iterations"] == 8
 
 
-def test_build_configured_subagents_only_includes_explicitly_enabled_agents(
+def test_deep_adapter_subagents_only_includes_explicitly_enabled_agents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapter = _TestableJiuWenClawDeepAdapter()
+    adapter = _TestableJiuWenSwarmDeepAdapter()
     adapter.set_workspace_dir("/tmp/test-workspace")
     model = _build_model()
 
     monkeypatch.setattr(
-        interface_module,
-        "build_code_agent_config",
-        lambda *args, **kwargs: {"name": "code_agent", "kwargs": kwargs},
-    )
-    monkeypatch.setattr(
-        interface_module,
+        deep_interface_module,
         "build_research_agent_config",
         lambda *args, **kwargs: {"name": "research_agent", "kwargs": kwargs},
     )
     monkeypatch.setattr(
-        interface_module,
+        deep_interface_module,
         "build_browser_agent_config",
         lambda *args, **kwargs: {"name": "browser_agent", "kwargs": kwargs},
     )
     monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
+        JiuWenSwarmDeepAdapter,
         "_browser_runtime_enabled",
         staticmethod(lambda: True),
     )
     monkeypatch.setenv("BROWSER_DRIVER", "managed")
 
-    subagents = adapter.build_configured_subagents(
+    subagents, _ = adapter.build_configured_subagents(
         model,
         {
             "max_iterations": 8,
             "subagents": {
-                "code_agent": {"enabled": True, "max_iterations": 5},
-                "research_agent": {"enabled": False},
+                "research_agent": {"enabled": True, "max_iterations": 5},
                 "browser_agent": {"max_iterations": 7},
             },
         },
@@ -225,26 +221,28 @@ def test_build_configured_subagents_only_includes_explicitly_enabled_agents(
     )
 
     assert subagents is not None
-    assert [item["name"] for item in subagents] == ["code_agent", "browser_agent"]
+    assert [item["name"] for item in subagents] == ["research_agent", "browser_agent"]
     assert subagents[0]["kwargs"]["max_iterations"] == 5
     assert subagents[1]["kwargs"]["max_iterations"] == 7
 
 
-def test_build_configured_subagents_skips_browser_without_runtime(
+def test_deep_adapter_subagents_skips_browser_without_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapter = _TestableJiuWenClawDeepAdapter()
+    adapter = _TestableJiuWenSwarmDeepAdapter()
     model = _build_model()
 
     monkeypatch.setattr(
-        JiuWenClawDeepAdapter,
+        JiuWenSwarmDeepAdapter,
         "_browser_runtime_enabled",
         staticmethod(lambda: False),
     )
     browser_builder = MagicMock()
-    monkeypatch.setattr(interface_module, "build_browser_agent_config", browser_builder)
+    monkeypatch.setattr(deep_interface_module, "build_browser_agent_config", browser_builder)
 
-    subagents = adapter.build_configured_subagents(
+    # When browser runtime is disabled and no other subagents are configured,
+    # the result should be None
+    subagents, _ = adapter.build_configured_subagents(
         model,
         {
             "subagents": {
@@ -279,7 +277,7 @@ async def test_interface_deep_browser_subagent_task_tool_chain(
             "max_iterations": 8,
         },
     }
-    monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
+    monkeypatch.setattr(deep_interface_module, "get_config", lambda: config_base)
 
     mock_llm = MockLLMModel()
     mock_llm.set_responses([
@@ -313,18 +311,18 @@ async def test_interface_deep_browser_subagent_task_tool_chain(
         "error": None,
     }
     tool_trace = ToolTraceRail()
-    adapter = _TestableJiuWenClawDeepAdapter()
+    adapter = _TestableJiuWenSwarmDeepAdapter()
     adapter.set_workspace_dir(str(temp_workspace / "workspace" / "agent"))
 
     with (
-        patch.object(interface_module.JiuWenClawDeepAdapter, "set_checkpoint", AsyncMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_create_model", return_value=model),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_build_agent_rails", return_value=[tool_trace]),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_create_sys_operation", return_value=MagicMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_proc_context_compaction", AsyncMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_register_runtime_tools", AsyncMock()),
-        patch.object(interface_module.JiuWenClawDeepAdapter, "_refresh_multimodal_configs", return_value=None),
+        patch.object(JiuWenSwarmDeepAdapter, "set_checkpoint", AsyncMock()),
+        patch.object(JiuWenSwarmDeepAdapter, "_create_model", return_value=model),
+        patch.object(JiuWenSwarmDeepAdapter, "_get_tool_cards", AsyncMock(return_value=[])),
+        patch.object(JiuWenSwarmDeepAdapter, "_build_agent_rails", return_value=[tool_trace]),
+        patch.object(JiuWenSwarmDeepAdapter, "_create_sys_operation", return_value=MagicMock()),
+        patch.object(JiuWenSwarmDeepAdapter, "_proc_context_compaction", AsyncMock()),
+        patch.object(JiuWenSwarmDeepAdapter, "_register_runtime_tools", AsyncMock()),
+        patch.object(JiuWenSwarmDeepAdapter, "_refresh_multimodal_configs", return_value=None),
         patch(
             "openjiuwen.harness.subagents.browser_agent.BrowserAgentRuntime",
             return_value=runtime,

@@ -1,0 +1,1035 @@
+/**
+ * CronPanel 组件
+ *
+ * 定时任务面板，使用 cron 表达式管理定时任务
+ */
+
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
+import { webRequest } from '../../services/webClient';
+import { useSessionStore } from '../../stores/sessionStore';
+
+const DEFAULT_CRON_TIMEZONE = 'Asia/Shanghai';
+const DEFAULT_CRON_TARGET = 'web';
+// 由主动推荐配置自动维护的 job id（与后端 proactive_cron_sync.PROACTIVE_JOB_ID 一致）。
+// 该 job 的整体开关由 config 的 proactive_recommendation.enabled 驱动（关则删除，不在列表里），
+// 面板上禁用 启停/删除；编辑时仅 cron 表达式与时区可改，其余字段（名称/状态/描述/偏移/频道）只读。
+const PROACTIVE_AUTO_JOB_ID = 'proactive-tick-auto';
+
+interface CronJob {
+  id: string;
+  name: string;
+  enabled: boolean;
+  expired?: boolean;
+  cron_expr: string;
+  timezone: string;
+  wake_offset_seconds: number;
+  description?: string;
+  targets: string;
+  schedule?: {
+    kind: string;
+    expr?: string;
+    tz?: string;
+    at?: string;
+    everyMs?: number;
+  };
+  payload?: {
+    kind: string;
+    text?: string;
+    message?: string;
+  };
+  delivery?: {
+    mode: string;
+    channel?: string;
+  };
+  session_target?: string;
+  wake_mode?: string;
+  compat_mode?: string;
+  created_at: number | string | null;
+  updated_at: number | string | null;
+}
+
+interface CronPreviewItem {
+  wake_at: string;
+  push_at: string;
+}
+
+interface CronJobInput {
+  name: string;
+  enabled: boolean;
+  cron_expr: string;
+  timezone: string;
+  wake_offset_seconds: number;
+  description: string;
+  targets: string;
+}
+
+interface UpdateCronJob extends CronJobInput {
+  id: string;
+  created_at?: number | string | null;
+  updated_at?: number | string | null;
+}
+
+interface CronPanelProps {
+  sessionId: string;
+}
+
+function createEmptyJobInput(): CronJobInput {
+  return {
+    name: '',
+    enabled: true,
+    cron_expr: '',
+    timezone: DEFAULT_CRON_TIMEZONE,
+    wake_offset_seconds: 300,
+    description: '',
+    targets: DEFAULT_CRON_TARGET,
+  };
+}
+
+function renderScheduleSummary(job: CronJob): string {
+  if (!job.schedule) {
+    return job.cron_expr || '';
+  }
+  if (job.schedule.kind === 'cron') {
+    return job.schedule.expr || job.cron_expr || '';
+  }
+  if (job.schedule.kind === 'every') {
+    return `every ${job.schedule.everyMs || 0} ms`;
+  }
+  if (job.schedule.kind === 'at') {
+    return job.schedule.at || job.cron_expr || '';
+  }
+  return job.cron_expr || '';
+}
+
+function isValidCronField(value: string, min: number, max: number, stepDivisor: number | null, allowQuestion: boolean = false): { valid: boolean; error?: string } {
+  if (value === '*') return { valid: true };
+  if (allowQuestion && value === '?') return { valid: true };
+  const parts = value.split(',');
+  for (const part of parts) {
+    if (part.includes('/')) {
+      const [range, stepStr] = part.split('/');
+      const step = parseInt(stepStr, 10);
+      if (isNaN(step) || step <= 0) return { valid: false, error: getStepRangeError(min, max) };
+      if (stepDivisor !== null && stepDivisor % step !== 0) return { valid: false, error: getStepRangeError(min, max) };
+      if (range === '*') continue;
+      const rangeValid = isValidCronRange(range, min, max);
+      if (!rangeValid) return { valid: false, error: getFieldError(min, max) };
+    } else if (part.includes('-')) {
+      if (!isValidCronRange(part, min, max)) return { valid: false, error: getFieldError(min, max) };
+    } else {
+      const num = parseInt(part, 10);
+      if (isNaN(num) || num < min || num > max) return { valid: false, error: getFieldError(min, max) };
+    }
+  }
+  return { valid: true };
+}
+
+function getFieldError(min: number, max: number): string {
+  if (min === 0 && max === 59) return 'cron.errors.cronSecondOrMinute';
+  if (min === 0 && max === 23) return 'cron.errors.cronHour';
+  if (min === 1 && max === 31) return 'cron.errors.cronDay';
+  if (min === 1 && max === 12) return 'cron.errors.cronMonth';
+  if (min === 1 && max === 7) return 'cron.errors.cronWeek';
+  return 'cron.errors.cronFormat';
+}
+
+function getStepRangeError(min: number, max: number): string {
+  if (min === 0 && max === 59) return 'cron.errors.cronSecondOrMinuteStep';
+  if (min === 0 && max === 23) return 'cron.errors.cronHourStep';
+  return getFieldError(min, max);
+}
+
+function isValidCronRange(range: string, min: number, max: number): boolean {
+  const [startStr, endStr] = range.split('-');
+  if (!startStr || !endStr) return false;
+  const start = parseInt(startStr, 10);
+  const end = parseInt(endStr, 10);
+  if (isNaN(start) || isNaN(end)) return false;
+  if (start < min || end > max || start > end) return false;
+  return true;
+}
+
+function validateCronExpr(expr: string): { valid: boolean; error?: string } {
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 7) {
+    return { valid: false, error: 'cron.errors.cronFormat' };
+  }
+  const [second, minute, hour, day, month, week, year] = parts;
+  const secondResult = isValidCronField(second, 0, 59, 60);
+  if (!secondResult.valid) {
+    return { valid: false, error: secondResult.error };
+  }
+  const minuteResult = isValidCronField(minute, 0, 59, 60);
+  if (!minuteResult.valid) {
+    return { valid: false, error: minuteResult.error };
+  }
+  const hourResult = isValidCronField(hour, 0, 23, 24);
+  if (!hourResult.valid) {
+    return { valid: false, error: hourResult.error };
+  }
+  const dayResult = isValidCronField(day, 1, 31, null, true);
+  if (!dayResult.valid) {
+    return { valid: false, error: dayResult.error };
+  }
+  const monthResult = isValidCronField(month, 1, 12, null);
+  if (!monthResult.valid) {
+    return { valid: false, error: monthResult.error };
+  }
+  const weekResult = isValidCronField(week, 1, 7, null, true);
+  if (!weekResult.valid) {
+    return { valid: false, error: weekResult.error };
+  }
+  if (year !== '*') {
+    const yearNum = parseInt(year, 10);
+    if (isNaN(yearNum) || yearNum < 1970 || yearNum > 2099) {
+      return { valid: false, error: 'cron.errors.cronYear' };
+    }
+  }
+  return { valid: true };
+}
+
+function resolveCronExpr(job: CronJob): string {
+  if (job.schedule?.kind === 'cron') {
+    return (job.schedule.expr || job.cron_expr || '').trim();
+  }
+  return (job.cron_expr || '').trim();
+}
+
+function resolveTimezone(job: CronJob): string {
+  if (job.schedule?.kind === 'cron') {
+    return (job.schedule.tz || job.timezone || DEFAULT_CRON_TIMEZONE).trim() || DEFAULT_CRON_TIMEZONE;
+  }
+  return (job.timezone || DEFAULT_CRON_TIMEZONE).trim() || DEFAULT_CRON_TIMEZONE;
+}
+
+function resolveDescription(job: CronJob): string {
+  if (job.payload?.kind === 'agentTurn') {
+    return (job.payload.message || job.description || '').trim();
+  }
+  if (job.payload?.kind === 'systemEvent') {
+    return (job.payload.text || job.description || '').trim();
+  }
+  return (job.description || '').trim();
+}
+
+function resolveTargets(job: CronJob): string {
+  const deliveryChannel = (job.delivery?.channel || '').trim();
+  if (deliveryChannel && deliveryChannel !== 'last') {
+    return deliveryChannel;
+  }
+  return (job.targets || DEFAULT_CRON_TARGET).trim() || DEFAULT_CRON_TARGET;
+}
+
+function normalizeJobForEdit(job: CronJob): UpdateCronJob {
+  return {
+    id: job.id,
+    name: (job.name || '').trim(),
+    enabled: Boolean(job.enabled),
+    cron_expr: resolveCronExpr(job),
+    timezone: resolveTimezone(job),
+    wake_offset_seconds: Number.isFinite(job.wake_offset_seconds) ? job.wake_offset_seconds : 300,
+    description: resolveDescription(job),
+    targets: resolveTargets(job),
+    created_at: job.created_at,
+    updated_at: job.updated_at,
+  };
+}
+
+function buildLegacyJobInput(job: CronJobInput | UpdateCronJob, mode?: string): Record<string, unknown> {
+  const result: Record<string, unknown> = {
+    name: job.name.trim(),
+    enabled: job.enabled,
+    cron_expr: job.cron_expr.trim(),
+    timezone: job.timezone.trim() || DEFAULT_CRON_TIMEZONE,
+    wake_offset_seconds: Math.max(0, job.wake_offset_seconds || 0),
+    description: job.description.trim(),
+    targets: job.targets.trim() || DEFAULT_CRON_TARGET,
+  };
+  if (mode) {
+    result['mode'] = mode;
+  }
+  return result;
+}
+
+export default function CronPanel({ sessionId }: CronPanelProps) {
+  const { t } = useTranslation();
+  const { mode } = useSessionStore();
+  const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [newJob, setNewJob] = useState<CronJobInput>(createEmptyJobInput());
+  const [isCreating, setIsCreating] = useState(false);
+  const [editingJobs, setEditingJobs] = useState<Record<string, UpdateCronJob>>({});
+  const [previewJobId, setPreviewJobId] = useState<string | null>(null);
+  const [previewRuns, setPreviewRuns] = useState<CronPreviewItem[]>([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [enabledChannels, setEnabledChannels] = useState<Set<string>>(new Set());
+
+  // 时区选项
+  const timezoneOptions = [
+    { value: 'Asia/Shanghai', label: 'Asia/Shanghai' },
+    { value: 'Asia/Bangkok', label: 'Asia/Bangkok' },
+    { value: 'Asia/Tokyo', label: 'Asia/Tokyo' },
+    { value: 'Asia/Seoul', label: 'Asia/Seoul' },
+    { value: 'Asia/Singapore', label: 'Asia/Singapore' },
+    { value: 'Europe/London', label: 'Europe/London' },
+    { value: 'Europe/Paris', label: 'Europe/Paris' },
+    { value: 'America/New_York', label: 'America/New_York' },
+    { value: 'America/Los_Angeles', label: 'America/Los_Angeles' },
+    { value: 'America/Chicago', label: 'America/Chicago' },
+  ];
+
+  // 加载频道列表
+  const fetchChannels = useCallback(async () => {
+    try {
+      const payload = await webRequest<{ channels?: unknown[] }>('channel.get');
+      const channels = payload?.channels || [];
+      const enabled = new Set<string>();
+      for (const item of channels) {
+        if (item && typeof item === 'object' && 'channel_id' in item) {
+          const channelId = (item as { channel_id: unknown }).channel_id;
+          if (typeof channelId === 'string' && channelId.trim()) {
+            enabled.add(channelId.trim().toLowerCase());
+          }
+        }
+      }
+      setEnabledChannels(enabled);
+    } catch {
+      // ignore errors, keep empty set
+    }
+  }, []);
+
+  // 目标选项 - 动态根据启用状态
+  const targetOptions = useMemo(() => [
+    { value: 'web', label: t('cron.targets.web'), disabled: !enabledChannels.has('web') },
+    { value: 'tui', label: t('cron.targets.tui'), disabled: !enabledChannels.has('tui') },
+    { value: 'xiaoyi', label: t('cron.targets.xiaoyi'), disabled: !enabledChannels.has('xiaoyi') },
+    { value: 'feishu', label: t('cron.targets.feishu'), disabled: !enabledChannels.has('feishu') },
+    { value: 'dingtalk', label: t('cron.targets.dingtalk'), disabled: !enabledChannels.has('dingtalk') },
+    { value: 'whatsapp', label: t('cron.targets.whatsapp'), disabled: !enabledChannels.has('whatsapp') },
+    { value: 'wechat', label: t('cron.targets.wechat'), disabled: !enabledChannels.has('wechat') },
+  ], [t, enabledChannels]);
+
+  // 加载任务列表
+  const loadJobs = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const payload = await webRequest<{ jobs: CronJob[] }>('cron.job.list');
+      setCronJobs(payload.jobs || []);
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : t('cron.errors.loadJobs');
+      setError(message);
+      setCronJobs([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [t]);
+
+  // 初始化加载
+  useEffect(() => {
+    void loadJobs();
+    void fetchChannels();
+  }, [loadJobs, fetchChannels]);
+
+  // 成功消息自动消失
+  useEffect(() => {
+    if (!success) return;
+    const timer = window.setTimeout(() => {
+      setSuccess(null);
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [success]);
+
+  // 错误消息自动消失
+  useEffect(() => {
+    if (!error) return;
+    const timer = window.setTimeout(() => {
+      setError(null);
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [error]);
+
+  // 创建任务
+  const handleCreateJob = async () => {
+    if (!newJob.name) {
+      setError(t('cron.errors.nameRequired'));
+      return;
+    }
+    if (!newJob.cron_expr) {
+      setError(t('cron.errors.cronRequired'));
+      return;
+    }
+    const cronValidation = validateCronExpr(newJob.cron_expr);
+    if (!cronValidation.valid) {
+      setError(t(cronValidation.error || 'cron.errors.cronFormat'));
+      return;
+    }
+    if (!newJob.timezone) {
+      setError(t('cron.errors.timezoneRequired'));
+      return;
+    }
+    if (!newJob.targets) {
+      setError(t('cron.errors.targetRequired'));
+      return;
+    }
+    if (!newJob.description) {
+      setError(t('cron.errors.descriptionRequired'));
+      return;
+    }
+
+    try {
+      await webRequest<{ job: CronJob }>('cron.job.create', {
+        ...buildLegacyJobInput(newJob, mode),
+        session_id: sessionId,
+      });
+      setSuccess(t('cron.success.created'));
+      setIsCreating(false);
+      setNewJob(createEmptyJobInput());
+      await loadJobs();
+    } catch (createError) {
+      const message = createError instanceof Error ? createError.message : t('cron.errors.createFailed');
+      setError(message);
+    }
+  };
+
+  // 切换任务状态
+  const handleToggleJob = async (id: string, enabled: boolean, expired?: boolean) => {
+    if (expired && !enabled) {
+      setSuccess(null);
+      setError(t('cron.errors.expiredCannotEnable'));
+      return;
+    }
+    try {
+      await webRequest<{ job: CronJob }>('cron.job.toggle', {
+        id,
+        enabled: !enabled,
+      });
+      setSuccess(t('cron.success.statusUpdated'));
+      await loadJobs();
+    } catch (toggleError) {
+      const message = toggleError instanceof Error ? toggleError.message : t('cron.errors.toggleFailed');
+      setError(message);
+    }
+  };
+
+  // 删除任务
+  const handleDeleteJob = async (id: string) => {
+    if (!window.confirm(t('cron.deleteConfirm'))) return;
+
+    try {
+      await webRequest<{ deleted: boolean }>('cron.job.delete', { id });
+      setSuccess(t('cron.success.deleted'));
+      await loadJobs();
+    } catch (deleteError) {
+      const message = deleteError instanceof Error ? deleteError.message : t('cron.errors.deleteFailed');
+      setError(message);
+    }
+  };
+
+  const handleRunNow = async (id: string, expired?: boolean) => {
+    if (expired) {
+      setSuccess(null);
+      setError(t('cron.errors.expiredCannotRunNow'));
+      return;
+    }
+
+    try {
+      await webRequest<{ run_id: string }>('cron.job.run_now', { id, session_id: sessionId });
+      setSuccess(t('cron.success.runNow'));
+    } catch (runError) {
+      const message = runError instanceof Error ? runError.message : t('cron.errors.runNowFailed');
+      setError(message);
+    }
+  };
+
+  const handlePreviewRuns = async (id: string) => {
+    setPreviewJobId(id);
+    setPreviewLoading(true);
+    try {
+      const payload = await webRequest<{ next: CronPreviewItem[] }>('cron.job.preview', {
+        id,
+        count: 3,
+        session_id: sessionId,
+      });
+      setPreviewRuns(payload.next || []);
+    } catch (previewError) {
+      const message = previewError instanceof Error ? previewError.message : t('cron.errors.previewFailed');
+      setError(message);
+      setPreviewRuns([]);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const formatPreviewTime = (value: string) => {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      return value;
+    }
+    return parsed.toLocaleString();
+  };
+
+  // 准备更新任务
+  const handleUpdateJob = async (id: string) => {
+    try {
+      const payload = await webRequest<{ job: CronJob }>('cron.job.get', { id, session_id: sessionId });
+      setEditingJobs((prev) => ({
+        ...prev,
+        [id]: normalizeJobForEdit(payload.job),
+      }));
+    } catch (viewError) {
+      const message = viewError instanceof Error ? viewError.message : t('cron.errors.loadDetailFailed');
+      setError(message);
+    }
+  };
+
+  // 执行更新任务
+  const handleSubmitUpdate = async (jobId: string) => {
+    const editJob = editingJobs[jobId];
+    if (!editJob) return;
+
+    if (!editJob.name) {
+      setError(t('cron.errors.nameRequired'));
+      return;
+    }
+    if (!editJob.cron_expr) {
+      setError(t('cron.errors.cronRequired'));
+      return;
+    }
+    const cronValidationEdit = validateCronExpr(editJob.cron_expr);
+    if (!cronValidationEdit.valid) {
+      setError(t(cronValidationEdit.error || 'cron.errors.cronFormat'));
+      return;
+    }
+    if (!editJob.timezone) {
+      setError(t('cron.errors.timezoneRequired'));
+      return;
+    }
+    if (!editJob.targets) {
+      setError(t('cron.errors.targetRequired'));
+      return;
+    }
+    if (!editJob.description) {
+      setError(t('cron.errors.descriptionRequired'));
+      return;
+    }
+
+    try {
+      const patch = buildLegacyJobInput(editJob, mode);
+      // proactive 自动维护 job 的 enabled 由 ConfigPanel 开关驱动，
+      // 面板编辑提交时不带 enabled，避免与配置侧开关冲突。
+      // 同样不带 mode——proactive.tick 的 mode 必须保持 proactive.tick，
+      // 否则会被会话 mode（agent.plan）覆盖，导致走普通 cron 流程而非引擎。
+      // 不带 wake_offset_seconds——proactive.tick 到点就执行，偏移由后端强制 0。
+      if (jobId === PROACTIVE_AUTO_JOB_ID) {
+        // proactive job 只允许改 cron_expr 和 timezone，其余由 ConfigPanel/cron_sync 管
+        delete patch['enabled'];
+        delete patch['mode'];
+        delete patch['wake_offset_seconds'];
+        delete patch['name'];
+        delete patch['description'];
+        delete patch['targets'];
+      }
+      const updateData: Record<string, unknown> = {
+        id: editJob.id,
+        patch,
+      };
+
+      await webRequest<{ job: CronJob }>('cron.job.update', {
+        ...updateData,
+        session_id: sessionId,
+      });
+      setSuccess(t('cron.success.updated'));
+      setEditingJobs((prev) => {
+        const next = { ...prev };
+        delete next[jobId];
+        return next;
+      });
+      await loadJobs();
+    } catch (updateError) {
+      const message = updateError instanceof Error ? updateError.message : t('cron.errors.updateFailed');
+      setError(message);
+    }
+  };
+
+  return (
+    <div className="flex-1 min-h-0 relative" data-testid="cron-panel" data-session-id={sessionId}>
+      {success && (
+        <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20" data-testid="cron-success">
+          <div className="bg-ok text-white px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+            {success}
+          </div>
+        </div>
+      )}
+      {error && (
+        <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20" data-testid="cron-error">
+          <div className="bg-danger text-white px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+            {error}
+          </div>
+        </div>
+      )}
+
+      <div className="card w-full h-full flex flex-col">
+        <div className="flex items-center justify-between gap-4 mb-4">
+          <div>
+            <h2 className="text-lg font-semibold">{t('cron.title')}</h2>
+            <p className="text-sm text-text-muted mt-1">{t('cron.subtitle')}</p>
+          </div>
+          <button
+            onClick={() => setIsCreating(!isCreating)}
+            className="btn primary !px-4 !py-2"
+            data-testid="cron-create-toggle"
+          >
+            {isCreating ? t('cron.cancelCreate') : t('cron.createJob')}
+          </button>
+        </div>
+
+        <div className="flex-1 min-h-0">
+          {loading ? (
+            <div className="rounded-lg border border-border bg-secondary/30 px-3 py-4 flex items-center justify-center">
+              {t('cron.loading')}
+            </div>
+          ) : (
+            <div className="overflow-auto rounded-lg border border-border max-h-[750px]">
+              <table className="w-full border-collapse">
+                <thead>
+                  <tr className="border-b border-border sticky top-0 bg-bg">
+                    <th className="px-4 py-3 text-left text-sm font-medium text-text-muted w-[160px]">{t('cron.columns.name')}</th>
+                    <th className="px-4 py-3 text-left text-sm font-medium text-text-muted w-[200px]">{t('cron.columns.cron')}</th>
+                    <th className="px-4 py-3 text-left text-sm font-medium text-text-muted">{t('cron.columns.status')}</th>
+                    <th className="px-4 py-3 text-left text-sm font-medium text-text-muted w-[300px]">{t('cron.columns.description')}</th>
+                    <th className="px-4 py-3 text-left text-sm font-medium text-text-muted w-[120px]">{t('cron.columns.wakeOffset')}</th>
+                    <th className="px-4 py-3 text-left text-sm font-medium text-text-muted">{t('cron.columns.timezone')}</th>
+                    <th className="px-4 py-3 text-left text-sm font-medium text-text-muted">{t('cron.columns.target')}</th>
+                    <th className="px-4 py-3 text-left text-sm font-medium text-text-muted w-[160px]">{t('cron.columns.actions')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {/* 创建任务行 */}
+                  {isCreating && (
+                    <tr className="border-b border-border bg-secondary/10 sticky top-[41px] z-5">
+                      <td className="px-4 py-3">
+                        <input
+                          type="text"
+                          value={newJob.name}
+                          onChange={(e) => setNewJob({ ...newJob, name: e.target.value })}
+                          className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                          placeholder={t('cron.placeholders.name')}
+                          data-testid="cron-create-name"
+                        />
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="relative">
+                          <input
+                            type="text"
+                            value={newJob.cron_expr}
+                            onChange={(e) => setNewJob({ ...newJob, cron_expr: e.target.value })}
+                            className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent pr-8"
+                            placeholder={t('cron.placeholders.cronShort')}
+                            data-testid="cron-create-expr"
+                          />
+                          <span
+                            className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text cursor-help"
+                            title={t('cron.placeholders.cron')}
+                          >
+                            <svg width="16" height="16" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+                              <circle cx="20" cy="20" r="18" fill="transparent" stroke="currentColor" strokeWidth="2" />
+                              <text x="20" y="22" fontSize="24" fill="currentColor" textAnchor="middle" dominantBaseline="middle">?</text>
+                            </svg>
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center">
+                          <span className="text-sm mr-2">{newJob.enabled ? t('cron.status.enabled') : t('cron.status.disabled')}</span>
+                          <div
+                            className="relative inline-block w-10 h-6 align-middle select-none rounded-full cursor-pointer"
+                            onClick={() => setNewJob({ ...newJob, enabled: !newJob.enabled })}
+                            style={{ backgroundColor: newJob.enabled ? '#10b981' : '#d1d5db' }}
+                          >
+                            <div
+                              className="absolute left-1 top-1 h-4 w-4 rounded-full bg-white transition-transform"
+                              style={{ transform: newJob.enabled ? 'translateX(16px)' : 'none' }}
+                            />
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <input
+                          type="text"
+                          value={newJob.description}
+                          onChange={(e) => setNewJob({ ...newJob, description: e.target.value })}
+                          className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                          placeholder={t('cron.placeholders.description')}
+                          data-testid="cron-create-description"
+                        />
+                      </td>
+                      <td className="px-4 py-3">
+                        <input
+                          type="number"
+                          value={newJob.wake_offset_seconds}
+                          onChange={(e) => setNewJob({ ...newJob, wake_offset_seconds: parseInt(e.target.value, 10) || 0 })}
+                          className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                          placeholder={t('cron.placeholders.wakeOffset')}
+                          data-testid="cron-create-wake-offset"
+                        />
+                      </td>
+                      <td className="px-4 py-3">
+                        <select
+                          value={newJob.timezone}
+                          onChange={(e) => setNewJob({ ...newJob, timezone: e.target.value })}
+                          className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                          data-testid="cron-create-timezone"
+                        >
+                          {timezoneOptions.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="px-4 py-3">
+                        <select
+                          value={newJob.targets}
+                          onChange={(e) => setNewJob({ ...newJob, targets: e.target.value })}
+                          className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                          data-testid="cron-create-target"
+                        >
+                          {targetOptions.map((option) => (
+                            <option key={option.value} value={option.value} disabled={option.disabled}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <div className="flex items-enter gap-2">
+                          <button
+                            onClick={() => {
+                              setIsCreating(false);
+                              setNewJob({
+                                name: '',
+                                enabled: true,
+                                cron_expr: '',
+                                timezone: DEFAULT_CRON_TIMEZONE,
+                                wake_offset_seconds: 300,
+                                description: '',
+                                targets: DEFAULT_CRON_TARGET,
+                              });
+                            }}
+                            className="btn !px-3 !py-1.5"
+                          >
+                            {t('common.cancel')}
+                          </button>
+                          <button
+                            onClick={handleCreateJob}
+                            className="btn primary !px-3 !py-1.5"
+                            data-testid="cron-create-submit"
+                          >
+                            {t('cron.create')}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+
+                  {/* 任务列表 */}
+                  {cronJobs.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="px-4 py-8 text-center text-text-muted">
+                        {t('cron.empty')}
+                      </td>
+                    </tr>
+                  ) : (
+                    cronJobs.map((job) => {
+                      const isEditing = editingJobs[job.id] !== undefined;
+                      const editJob = editingJobs[job.id];
+                      const displayCron = renderScheduleSummary(job);
+                      const displayDescription = resolveDescription(job);
+                      const displayTimezone = resolveTimezone(job);
+                      const displayTarget = resolveTargets(job);
+
+                      return isEditing && editJob ? (
+                        <tr key={job.id} className="border-b border-border bg-secondary/10">
+                          <td className="px-4 py-3">
+                            <input
+                              type="text"
+                              value={editJob.name}
+                              onChange={(e) => setEditingJobs((prev) => ({
+                                ...prev,
+                                [job.id]: { ...prev[job.id], name: e.target.value },
+                              }))}
+                              disabled={job.id === PROACTIVE_AUTO_JOB_ID}
+                              className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent ${job.id === PROACTIVE_AUTO_JOB_ID ? 'opacity-50 cursor-not-allowed' : ''}`}
+                              placeholder={t('cron.placeholders.name')}
+                            />
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="relative">
+                              <input
+                                type="text"
+                                value={editJob.cron_expr}
+                                onChange={(e) => setEditingJobs((prev) => ({
+                                  ...prev,
+                                  [job.id]: { ...prev[job.id], cron_expr: e.target.value },
+                                }))}
+                                className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent pr-8"
+                                placeholder={t('cron.placeholders.cronShort')}
+                              />
+                              <span
+                                className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text cursor-help"
+                                title={t('cron.placeholders.cron')}
+                              >
+                                <svg width="16" height="16" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+                                  <circle cx="20" cy="20" r="18" fill="transparent" stroke="currentColor" strokeWidth="2" />
+                                  <text x="20" y="22" fontSize="24" fill="currentColor" textAnchor="middle" dominantBaseline="middle">?</text>
+                                </svg>
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center">
+                              <span className="text-sm mr-2">{editJob.enabled ? t('cron.status.enabled') : t('cron.status.disabled')}</span>
+                              <div
+                                className={`relative inline-block w-10 h-6 align-middle select-none rounded-full ${job.id === PROACTIVE_AUTO_JOB_ID ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                                onClick={job.id === PROACTIVE_AUTO_JOB_ID ? undefined : () => setEditingJobs((prev) => ({
+                                  ...prev,
+                                  [job.id]: { ...prev[job.id], enabled: !prev[job.id].enabled },
+                                }))}
+                                title={job.id === PROACTIVE_AUTO_JOB_ID ? t('cron.autoManagedToggleDisabled') : undefined}
+                                style={{ backgroundColor: editJob.enabled ? '#10b981' : '#d1d5db' }}
+                              >
+                                <div
+                                  className="absolute left-1 top-1 h-4 w-4 rounded-full bg-white transition-transform"
+                                  style={{ transform: editJob.enabled ? 'translateX(16px)' : 'none' }}
+                                />
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <input
+                              type="text"
+                              value={editJob.description || ''}
+                              onChange={(e) => setEditingJobs((prev) => ({
+                                ...prev,
+                                [job.id]: { ...prev[job.id], description: e.target.value },
+                              }))}
+                              disabled={job.id === PROACTIVE_AUTO_JOB_ID}
+                              className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent ${job.id === PROACTIVE_AUTO_JOB_ID ? 'opacity-50 cursor-not-allowed' : ''}`}
+                              placeholder={t('cron.placeholders.description')}
+                            />
+                          </td>
+                          <td className="px-4 py-3">
+                            <input
+                              type="number"
+                              value={job.id === PROACTIVE_AUTO_JOB_ID ? 0 : editJob.wake_offset_seconds}
+                              onChange={(e) => setEditingJobs((prev) => ({
+                                ...prev,
+                                [job.id]: { ...prev[job.id], wake_offset_seconds: parseInt(e.target.value, 10) || 0 },
+                              }))}
+                              disabled={job.id === PROACTIVE_AUTO_JOB_ID}
+                              className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent ${job.id === PROACTIVE_AUTO_JOB_ID ? 'opacity-50 cursor-not-allowed' : ''}`}
+                              placeholder={t('cron.placeholders.wakeOffset')}
+                            />
+                          </td>
+                          <td className="px-4 py-3">
+                            <select
+                              value={editJob.timezone}
+                              onChange={(e) => setEditingJobs((prev) => ({
+                                ...prev,
+                                [job.id]: { ...prev[job.id], timezone: e.target.value },
+                              }))}
+                              className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                            >
+                              {timezoneOptions.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="px-4 py-3">
+                            <select
+                              value={editJob.targets}
+                              onChange={(e) => setEditingJobs((prev) => ({
+                                ...prev,
+                                [job.id]: { ...prev[job.id], targets: e.target.value },
+                              }))}
+                              disabled={job.id === PROACTIVE_AUTO_JOB_ID}
+                              className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent ${job.id === PROACTIVE_AUTO_JOB_ID ? 'opacity-50 cursor-not-allowed' : ''}`}
+                            >
+                              {targetOptions.map((option) => (
+                                <option key={option.value} value={option.value} disabled={option.disabled}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="px-4 py-3 text-left">
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => setEditingJobs((prev) => {
+                                  const next = { ...prev };
+                                  delete next[job.id];
+                                  return next;
+                                })}
+                                className="btn !px-3 !py-1.5"
+                              >
+                                {t('common.cancel')}
+                              </button>
+                              <button
+                                onClick={() => handleSubmitUpdate(job.id)}
+                                className="btn primary !px-3 !py-1.5"
+                              >
+                                {t('cron.update')}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ) : (
+                        <tr
+                          key={job.id}
+                          className="border-b border-border hover:bg-secondary/10"
+                          data-testid={`cron-row-${job.id}`}
+                          data-cron-id={job.id}
+                          data-cron-name={job.name}
+                        >
+                          <td className="px-4 py-3 text-sm">
+                            <div className="flex items-center gap-1">
+                              <div className="max-w-[100px] overflow-hidden text-ellipsis whitespace-nowrap" title={job.name}>
+                                {job.name}
+                              </div>
+                              {job.id === PROACTIVE_AUTO_JOB_ID && (
+                                <span
+                                  className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-sky-100 text-sky-700"
+                                  title={t('cron.autoManagedHint')}
+                                >
+                                  {t('cron.autoManaged')}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-sm mono" data-testid={`cron-schedule-${job.id}`}>
+                            {displayCron}
+                          </td>
+                          <td className="px-4 py-3">
+                            {(() => {
+                              // proactive 自动维护 job 的整体开关由 config 控制（关了就删除，不在列表里），
+                              // 因此状态只有两态：cron 过期 → 过期；否则 → 启用。不显示"禁用"中间态。
+                              const isProactiveRow = job.id === PROACTIVE_AUTO_JOB_ID;
+                              const isExpired = Boolean(job.expired);
+                              const isEnabled = isProactiveRow ? !isExpired : Boolean(job.enabled);
+                              return (
+                                <span
+                                  className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
+                                    isExpired ? 'bg-amber-100 text-amber-700' : isEnabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
+                                  }`}
+                                >
+                                  {isExpired ? t('cron.status.expired') : isEnabled ? t('cron.status.enabled') : t('cron.status.disabled')}
+                                </span>
+                              );
+                            })()}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-text-muted">
+                            <div className="max-w-[300px] overflow-hidden text-ellipsis whitespace-nowrap" title={displayDescription || '-'}>
+                              {displayDescription || '-'}
+                            </div>
+                            {previewJobId === job.id && (
+                              <div className="mt-2 space-y-1 text-xs text-text-muted" data-testid={`cron-preview-${job.id}`}>
+                                {previewLoading ? (
+                                  <div>{t('cron.preview.loading')}</div>
+                                ) : previewRuns.length > 0 ? (
+                                  previewRuns.map((item, index) => (
+                                    <div key={`${job.id}-${index}`} data-testid={`cron-preview-${job.id}-${index}`}>
+                                      {t('cron.preview.label', { index: index + 1 })}: {formatPreviewTime(item.push_at)}
+                                    </div>
+                                  ))
+                                ) : (
+                                  <div>{t('cron.preview.empty')}</div>
+                                )}
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-text-muted">
+                            {job.wake_offset_seconds}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-text-muted">
+                            {displayTimezone}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-text-muted">
+                            {displayTarget || '-'}
+                          </td>
+                          <td className="px-4 py-3 text-left">
+                            <div className="flex items-center gap-4">
+                              <span
+                                onClick={() => handleRunNow(job.id, job.expired)}
+                                className="cursor-pointer text-sm text-accent"
+                                data-testid={`cron-run-${job.id}`}
+                              >
+                                {t('cron.runNow')}
+                              </span>
+                              <span
+                                onClick={() => handlePreviewRuns(job.id)}
+                                className="cursor-pointer text-sm text-accent"
+                                data-testid={`cron-preview-action-${job.id}`}
+                              >
+                                {t('cron.previewAction')}
+                              </span>
+                              {job.id === PROACTIVE_AUTO_JOB_ID ? (
+                                <span
+                                  className="text-sm text-text-muted/50 cursor-not-allowed select-none"
+                                  title={t('cron.autoManagedToggleDisabled')}
+                                  data-testid={`cron-toggle-${job.id}`}
+                                >
+                                  {job.enabled ? t('cron.disable') : t('cron.enable')}
+                                </span>
+                              ) : (
+                                <span
+                                  onClick={() => handleToggleJob(job.id, job.enabled, job.expired)}
+                                  className={`cursor-pointer text-sm ${job.enabled ? 'text-danger' : 'text-accent'}`}
+                                  data-testid={`cron-toggle-${job.id}`}
+                                >
+                                  {job.enabled ? t('cron.disable') : t('cron.enable')}
+                                </span>
+                              )}
+                              <span
+                                onClick={() => handleUpdateJob(job.id)}
+                                className="cursor-pointer text-sm text-accent"
+                              >
+                                {t('cron.update')}
+                              </span>
+                              {job.id === PROACTIVE_AUTO_JOB_ID ? (
+                                <span
+                                  className="text-sm text-text-muted/50 cursor-not-allowed select-none"
+                                  title={t('cron.autoManagedToggleDisabled')}
+                                  data-testid={`cron-delete-${job.id}`}
+                                >
+                                  {t('cron.delete')}
+                                </span>
+                              ) : (
+                                <span
+                                  onClick={() => handleDeleteJob(job.id)}
+                                  className="cursor-pointer text-sm text-accent"
+                                  data-testid={`cron-delete-${job.id}`}
+                                >
+                                  {t('cron.delete')}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

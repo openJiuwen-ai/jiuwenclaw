@@ -1,5 +1,5 @@
-# JiuwenClaw 打包脚本
-# 1. 编译前端 (jiuwenclaw/web)
+# JiuwenSwarm 打包脚本
+# 1. 编译前端 (jiuwenswarm/channels/web/frontend)
 # 2. 构建 wheel 包（包含前端 dist）
 
 $ErrorActionPreference = "Stop"
@@ -8,7 +8,7 @@ $ProjectRoot = Split-Path $PSScriptRoot -Parent
 Write-Host "[build] 项目根目录: $ProjectRoot" -ForegroundColor Cyan
 
 # 1. 编译前端
-$WebDir = Join-Path (Join-Path $ProjectRoot "jiuwenclaw") "web"
+$WebDir = Join-Path (Join-Path $ProjectRoot "jiuwenswarm\channels\web\frontend") ""
 if (-not (Test-Path $WebDir)) {
     Write-Error "前端目录不存在: $WebDir"
 }

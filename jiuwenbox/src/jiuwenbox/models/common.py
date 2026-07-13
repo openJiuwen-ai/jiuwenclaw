@@ -15,7 +15,13 @@ class AuditEventType(str, enum.Enum):
     SANDBOX_STOPPED = "sandbox_stopped"
     SANDBOX_DELETED = "sandbox_deleted"
     POLICY_APPLIED = "policy_applied"
+    # Single event per operation, emitted **after** the call returns so
+    # the payload carries both intent (command/workdir) and outcome
+    # (exit_code, stdout/stderr, duration, error). The earlier "intent
+    # only" event was dropped because it doubled the JSONL volume
+    # without adding information.
     EXEC_COMMAND = "exec_command"
+    KILL_BACKGROUND_JOB = "kill_background_job"
     FILE_TRANSFER = "file_transfer"
 
 

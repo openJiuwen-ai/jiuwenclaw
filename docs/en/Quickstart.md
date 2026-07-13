@@ -2,157 +2,181 @@
 
 > **⚠️ Version Sync**: This document should be kept in sync with [`docs/zh/Quickstart.md`](../zh/Quickstart.md). When updating one, please update the other.
 
-JiuwenClaw provides two installation methods: `pip install` or `install from source`.
+## Installation
 
-## Prerequisites
+### Prerequisites
 
-- Download JiuwenClaw code:
-  ```bash
-  git clone https://gitcode.com/openjiuwen/jiuwenclaw.git
-  ```
-- Environment dependencies:
-  - Python: >=3.11, <3.14
-  - Node.js: >=18.0.0 (only needed for building frontend from source or for browser-use functionality; 20 LTS recommended)
+Before installing JiuwenSwarm, ensure your system meets the following requirements:
 
-**Note: Users can choose any of the following installation methods based on their needs.**
+| Dependency | Version | Description |
+|------------|---------|-------------|
+| Operating System | Windows 10/11, macOS 10.15+, Linux | Supports mainstream operating systems |
+| Python | ≥3.11, <3.14 | Python 3.11 recommended |
+| Node.js | 18.x or higher | For frontend interface |
+| Git | Latest | For source code installation |
 
-## Method 1: pip Install
+Check Node.js version:
 
-Suitable for users who manage their own Python environment. Follow these steps:
+```bash
+node --version
+# Expected output: v18.x.x or higher
+```
 
-- Create a virtual environment & install JiuwenClaw
+### pip Install
 
-  ```bash
-  # Create a virtual environment named jiuwenclaw
-  python -m venv jiuwenclaw
+```bash
+# Create virtual environment
+python -m venv jiuwenswarm
 
-  # Activate the jiuwenclaw virtual environment
-  jiuwenclaw\Scripts\activate
+# Activate virtual environment
+# Windows:
+jiuwenswarm\Scripts\activate
+# Linux/Mac:
+source jiuwenswarm/bin/activate
 
-  # Install JiuwenClaw
-  pip install jiuwenclaw
-  ```
+# Install JiuwenSwarm
+pip install jiuwenswarm
+```
 
-- Initialize & start JiuwenClaw
+## Start Service
 
-  ```bash
-  # Initialize JiuwenClaw (first time setup)
-  jiuwenclaw-init
+```bash
+# Initialize (first run)
+jiuwenswarm-init
 
-  # Start JiuwenClaw
-  jiuwenclaw-start
-  ```
+# Start service
+jiuwenswarm-start
+```
 
-  After running, you can access the JiuwenClaw web UI. The default local access URL is `http://localhost:5173`.
+After successful startup, the terminal will display backend service status:
 
-  **Note:** For remote access, run the following commands:
+```
+[INFO] Starting JiuwenSwarm server...
+[INFO] API server running at http://localhost:8000
+[INFO] Web server running at http://localhost:5173
+```
 
-  ```bash
-  # Start web service
-  jiuwenclaw-web --host 0.0.0.0 --port <custom-port>
+When you see similar output, the service is ready. Open `http://localhost:5173` in your browser to use.
 
-  # Start backend service
-  jiuwenclaw-app
-  ```
+### Terminal CLI
 
-## Method 2: Install from Source
+You can also chat with JiuwenSwarm directly from the terminal:
 
-Suitable for users who perform custom development or adaptation based on JiuwenClaw.
+```bash
+jiuwenswarm chat "Hello, introduce yourself"
+```
 
-### uv Installation
+For details, see [CLI / Terminal Chat](CLI.md#terminal-cli-jiuwenswarm-chat).
 
-- Create a virtual environment with `uv`
-  ```bash
-  # Create a virtual environment with uv (supports any of 3.11, 3.12, 3.13)
-  uv venv --python=3.11
-  # or: uv venv --python=3.12
-  # or: uv venv --python=3.13
-  ```
+### Remote Access (Optional)
 
-- Run uv sync
+For remote access, run the following commands:
 
-  Navigate to the project root directory `jiuwenclaw/` and run:
-  ```bash
-  uv sync
-  ```
+```bash
+# Start web service
+jiuwenswarm-web --host 0.0.0.0 --port <custom-port>
 
-- Install frontend dependencies
+# Start backend service
+jiuwenswarm-app
+```
 
-  Navigate to the frontend directory `jiuwenclaw/web` and install dependencies:
-  ```bash
-  cd jiuwenclaw/web
-  npm install
-  ```
+## Configure Model
 
-- Run frontend service
+In the left sidebar of the Web UI, find "Configuration" and enter the configuration page:
 
-  Two methods are available for running the frontend service:
+![](../assets/images/jiuwenswarm_configuration_Info.png)
 
-  - Static frontend service (suitable for production deployment)
-    ```bash
-    npm run build
-    cd ../../
-    uv run jiuwenclaw-init
-    uv run jiuwenclaw-start
-    ```
+Complete the following basic configuration, then click "Save" in the top right:
 
-  - Dynamic frontend service (suitable for development and debugging)
-    ```bash
-    cd ../../
-    uv run jiuwenclaw-init
-    uv run jiuwenclaw-start dev
-    ```
+![](../assets/images/jiuwenswarm_config_api.png)
 
-  After running, you can access the JiuwenClaw web UI.
+**Configuration Items:**
 
-### conda Installation
+| Field | Environment variable | Description | Required |
+|--------|------------------------|-------------|----------|
+| `model_name` | `MODEL_NAME` | Model name, e.g., `deepseek-chat`, `gpt-4o` | ✅ Required |
+| `api_base` | `API_BASE` | Model API base URL, e.g., `https://api.deepseek.com` | ✅ Required |
+| `api_key` | `API_KEY` | Model API key | ✅ Required |
+| `model_provider` | `MODEL_PROVIDER` | Model provider, e.g., `OpenAI`, `DeepSeek`, `Anthropic` | ✅ Required |
 
-- Create a virtual environment with `conda`
-  ```bash
-  # Create a virtual environment with Anaconda (supports any of 3.11, 3.12, 3.13)
-  conda create -n JiuwenClaw python=3.11
-  # or: conda create -n JiuwenClaw python=3.12
-  # or: conda create -n JiuwenClaw python=3.13
-  ```
+**Test After Configuration:**
 
-- Install Python dependencies
+After filling in the configuration, click the "Test" button to verify model availability. A successful test shows ✅, if failed check:
+- Whether API Key is correct
+- Whether API Base URL is accessible
+- Whether model name and Provider match
 
-  Navigate to the project root directory `jiuwenclaw/` and run:
-  ```bash
-  # Mode 1: Development installation (recommended, facilitates code modification)
-  pip install -e .
+**Notes:**
 
-  # Mode 2: Regular installation
-  pip install .
-  ```
-  **Note:** This installation method relies on the project's installable package (pyproject.toml) and will install `jiuwenclaw` itself by default.
+- **Auto-restart after save**: Backend automatically restarts to load new configuration
+- **Required fields**: The four fields above are basic configuration required for normal operation
+- **Model Providers**: `OpenAI`, `DashScope`, `SiliconFlow`, `InferenceAffinity`
 
-- Install frontend dependencies
+## Start Conversation
 
-  Navigate to the frontend directory `jiuwenclaw/web` and install dependencies:
-  ```bash
-  cd jiuwenclaw/web
-  npm install
-  ```
+In the left sidebar of the Web UI, find "Chat" and enter your question to start:
 
-- Run frontend service
+![](../assets/images/jiuwenswarm_example.png)
 
-  Two methods are available for running the frontend service:
+## Session Management
 
-  - Static frontend service (suitable for production deployment)
-    ```bash
-    npm run build
-    cd ../../
-    jiuwenclaw-init
-    jiuwenclaw-start
-    ```
+Click the "+" button below to clear the current session and start a new one:
 
-  - Dynamic frontend service (suitable for development and debugging)
-    ```bash
-    cd ../../
-    # Start directly (without using uv run)
-    jiuwenclaw-init
-    jiuwenclaw-start dev
-    ```
+![](../assets/images/jiuwenswarm_new_session.png)
 
-  After running, you can access the JiuwenClaw web UI.
+Page display after clearing:
+
+![](../assets/images/jiuwenswarm_clear_session.png)
+
+**When to clear a session?**
+
+| Scenario | Description |
+|----------|-------------|
+| **Topic Switch** | Current conversation is complete, want to start a completely new topic |
+| **Context Confusion** | Too much content in current session, model understanding deviates |
+| **Repeated/Wrong Response** | Model falls into loop response or gives irrelevant answers |
+| **Privacy/Sensitive Info** | Current session contains temporary sensitive information that needs immediate clearing |
+
+**Comparison: Clear vs Not Clear Session:**
+
+| Comparison | Not Clear (Continue Session) | Clear (New Session) |
+|------------|------------------------------|---------------------|
+| **Context Retention** | ✅ Keep all history, model knows full context | ❌ No history retained, model starts from scratch |
+| **Token Consumption** | ⚠️ Grows with conversation, consumes more tokens | ✅ Initial tokens minimal, cost controllable |
+| **Answer Relevance** | Early topics may interfere with current understanding | Each question processed independently, no interference |
+| **Privacy Security** | History persists in current session | Sensitive info not carried to new session |
+
+## Clear Memory
+
+When you need JiuwenSwarm to forget all conversation history and user information, you can clear memory files.
+
+> **⚠️ Risk Warning:** Clearing memory is **permanent**, deleted memory files **cannot be recovered**. Before proceeding, confirm:
+> - Whether important memories are backed up
+> - Whether you really need to delete (or just want to start a new session)
+
+**Difference from Session Clearing:**
+
+| Operation | Scope | Impact | Use Case |
+|-----------|-------|--------|----------|
+| **New Session** | Current chat window | Does not delete any memory, only starts new thread | Want to switch topics but keep historical memory for reference |
+| **Clear Memory** | All memory files | Permanently deletes all history, user info, project memory | Completely clear all history, protect privacy, or reset to initial state |
+
+**Use Cases:**
+- **Privacy Protection**: Clear history containing sensitive information
+- **Fresh Start**: Start a completely different project or topic, avoid historical interference
+- **Debug Troubleshooting**: Reset when memory files are corrupted or content is abnormal
+- **User Switching**: Clear previous user info in multi-user environments
+
+**Steps to Clear Memory:**
+
+Memory files are stored in `{workspace_dir}/memory/` directory:
+
+**Method 1: Delete via Agent**
+Tell JiuwenSwarm: "Please delete all memory files" or "Clear my memory", Agent will call file tools to delete files in the memory directory.
+![](../assets/images/jiuwenswarm_delete_memory.png)
+
+**Method 2: Manual Delete**
+Stop JiuwenSwarm service, then directly delete all Markdown files in the `memory/` directory.
+![](../assets/images/jiuwenswarm_memory.png)
+
+> ⚠️ **Note**: Memory cannot be recovered after clearing, proceed with caution. Regularly backup important memory files.

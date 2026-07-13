@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f3feb-291a-7a40-83ee-8bd48e3e3a77",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._push_plan_mode_exited",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._push_plan_mode_exited in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f3feb-291a-7a40-83ee-8bd48e3e3a77",
+        "nickname": "Jason",
+        "symbol_id": "AgentWebSocketServer._push_plan_mode_exited",
+        "completed": true,
+        "finding_count": 2
+      }
+    }
+  ]
+}

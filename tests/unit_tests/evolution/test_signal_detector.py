@@ -1,15 +1,14 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Unit tests for SignalDetector."""
+"""Unit tests for SignalDetector (using openjiuwen core)."""
 
 import pytest
 
-from jiuwenclaw.evolution.signal_detector import SignalDetector
-from jiuwenclaw.evolution.schema import EvolutionType, EvolutionSignal
+from openjiuwen.agent_evolving.signal import SignalDetector
 
 
 class TestSignalDetector:
-    """Test SignalDetector class."""
+    """Test SignalDetector class from openjiuwen."""
 
     @staticmethod
     def test_detect_no_signals():
@@ -37,34 +36,55 @@ class TestSignalDetector:
         ]
         signals = detector.detect(messages)
         assert len(signals) == 1
-        assert signals[0].type == "execution_failure"
+        assert signals[0].signal_type == "execution_failure"
         assert signals[0].section == "Troubleshooting"
         assert "Command failed" in signals[0].excerpt
 
     @staticmethod
-    def test_detect_user_correction_chinese():
+    @pytest.mark.asyncio
+    async def test_detect_user_correction_chinese():
         """Test detecting user correction signals in Chinese."""
-        detector = SignalDetector()
+        detector = SignalDetector(existing_skills={"test-skill"})
         messages = [
-            {"role": "assistant", "content": "Here's the result"},
+            {
+                "role": "assistant",
+                "content": "Reading skill file",
+                "tool_calls": [
+                    {
+                        "name": "file.read",
+                        "arguments": '{"file_path": "/path/to/test-skill/SKILL.md"}',
+                    }
+                ],
+            },
             {"role": "user", "content": "不对，应该这样做"},
         ]
-        signals = detector.detect(messages)
+        signals = await detector.detect_user_message_feedback(messages)
         assert len(signals) == 1
-        assert signals[0].type == "user_correction"
-        assert signals[0].section == "Examples"
+        assert signals[0].signal_type == "user_intent"
+        assert signals[0].section == "Instructions"
 
     @staticmethod
-    def test_detect_user_correction_english():
+    @pytest.mark.asyncio
+    async def test_detect_user_correction_english():
         """Test detecting user correction signals in English."""
-        detector = SignalDetector()
+        detector = SignalDetector(existing_skills={"test-skill"})
         messages = [
-            {"role": "assistant", "content": "Here's the result"},
+            {
+                "role": "assistant",
+                "content": "Reading skill file",
+                "tool_calls": [
+                    {
+                        "name": "file.read",
+                        "arguments": '{"file_path": "/path/to/test-skill/SKILL.md"}',
+                    }
+                ],
+            },
             {"role": "user", "content": "That's wrong, you should use method X"},
         ]
-        signals = detector.detect(messages)
+        signals = await detector.detect_user_message_feedback(messages)
         assert len(signals) == 1
-        assert signals[0].type == "user_correction"
+        assert signals[0].signal_type == "user_intent"
+        assert signals[0].section == "Instructions"
 
     @staticmethod
     def test_detect_multiple_signals():
@@ -77,7 +97,6 @@ class TestSignalDetector:
                 "content": "Error: Connection timeout",
                 "name": "http.request",
             },
-            {"role": "user", "content": "不对，重新来"},
             {
                 "role": "tool",
                 "content": "TypeError: NoneType has no attribute",
@@ -85,7 +104,8 @@ class TestSignalDetector:
             },
         ]
         signals = detector.detect(messages)
-        assert len(signals) >= 2
+        # Two execution failure signals should be detected
+        assert len(signals) == 2
 
     @staticmethod
     def test_deduplicate_signals():
@@ -102,7 +122,7 @@ class TestSignalDetector:
     @staticmethod
     def test_detect_with_skill_from_tool_calls():
         """Test detecting skill name from tool calls."""
-        detector = SignalDetector(skill_dir_map={"test-skill": "/path/to/test-skill"})
+        detector = SignalDetector(existing_skills={"test-skill"})
         messages = [
             {
                 "role": "assistant",
@@ -207,6 +227,6 @@ class TestSignalDetector:
         assert len(signals) == 1
         signal_dict = signals[0].to_dict()
         assert "type" in signal_dict
-        assert "evolution_type" in signal_dict
         assert "section" in signal_dict
         assert "excerpt" in signal_dict
+        assert signal_dict["context"]["tool_name"] == "http.connect"

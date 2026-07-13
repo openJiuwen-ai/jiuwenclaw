@@ -1,7 +1,7 @@
 # Slash 命令体系设计（架构说明）
 
 > **文档性质**：架构与演进约定，描述「单一事实来源」、分层边界与落地原则。  
-> **与现有文档关系**：能力清单与入口对照见 [`CLI_COMMANDS.md`](./CLI_COMMANDS.md)、[`命令行指令.md`](./命令行指令.md)；本文不重复罗列全部命令，只定义**如何组织与避免漂移**。
+> **与现有文档关系**：能力清单与入口对照见 [`命令行指令.md`](./命令行指令.md)；本文不重复罗列全部命令，只定义**如何组织与避免漂移**。
 
 ---
 
@@ -11,7 +11,7 @@
 
 - **Gateway**：`MessageHandler._handle_channel_control` 处理受控通道上的 `/new_session`、`/mode …` 等，并决定是否**拦截、不转发 Agent**。
 - **IM 管线 / 各 Channel**：例如 `gateway/im_pipeline/im_inbound.py` 中的控制消息集合、飞书/企业微信等通道内的文本判断，可能与主逻辑**集合不一致**。
-- **CLI TUI**：`jiuwenclaw/cli/src/core/commands/` 下本地注册表，部分命令通过 WebSocket 调用后端，部分纯本地。
+- **CLI TUI**：`jiuwenswarm/channels/tui/frontend/src/core/commands/` 下本地注册表，部分命令通过 WebSocket 调用后端，部分纯本地。
 
 若不建立明确分层与单一数据源，会出现：**同名命令语义不一致、文档与代码漂移、新通道重复实现解析规则**。
 
@@ -39,7 +39,7 @@
 
 **定义**：到达 Gateway 用户消息中，由 `MessageHandler`（或其后继统一入口）识别后，**可能只改会话/模式/路由，而不进入 Agent 对话**的指令。
 
-**典型**：`/new_session`、受控通道上的 `/mode agent|code|team` 与 `/switch plan|fast|normal`，以及 `/mode agent.plan|agent.fast|code.plan|code.normal` 直达写法（以当前实现为准）。
+**典型**：`/new_session`、受控通道上的 `/mode agent|code|team` 与 `/switch plan|fast|normal|team`，以及 `/mode agent.plan|agent.fast|code.normal|code.team` 直达写法（以当前实现为准）。TUI 本地额外支持 `/mode plan`、`/mode team.normal`，这些不属于 Gateway 受控通道白名单。
 
 **要求**：
 
@@ -50,7 +50,7 @@
 
 **定义**：仅在 CLI TUI、Web REPL 等**本地**解析与执行，或明确不应经 Gateway 做语义拦截的命令。
 
-**典型**：CLI 的界面切换、`/resume`、`/model`（若仅本地配置）、帮助/诊断类 stub 等（以 [`CLI_COMMANDS.md`](./CLI_COMMANDS.md) 为准）。
+**典型**：CLI 的界面切换、`/resume`、`/model`（若仅本地配置）、帮助/诊断类 stub 等（以 [`命令行指令.md`](./命令行指令.md) 为准）。
 
 **要求**：
 
@@ -72,7 +72,7 @@
 
 ### 4.1 模块位置（建议）
 
-- **Python 侧**：已实现为 `jiuwenclaw/gateway/slash_command.py`（受控通道解析、`CONTROL_MESSAGE_TEXTS`、第一批命令元数据 `FIRST_BATCH_REGISTRY`）。亦可按演进拆分为 `channel_control_slash.py` 等。原建议职责为：
+- **Python 侧**：已实现为 `jiuwenswarm/gateway/slash_command.py`（受控通道解析、`CONTROL_MESSAGE_TEXTS`、第一批命令元数据 `FIRST_BATCH_REGISTRY`）。亦可按演进拆分为 `channel_control_slash.py` 等。原建议职责为：
   - **数据**：受控命令的集合、匹配规则（精确 / 前缀 / 禁止多行等）、元数据（说明、是否转发 Agent）。
   - **纯函数**：给定通道类型与用户文本，返回**结构化判定结果**（未命中 / 命中且合法 / 命中但非法），**不**直接做 IO（不在这里 `create_task` 发通知）。
 - **命名建议**：若仅包含 A 类，模块名应避免被误解为「全站所有 slash」，以免后续贡献者把 B 类逻辑塞入 Gateway。
@@ -86,7 +86,7 @@
 | `scope` | `gateway`（本设计主体）。 |
 | `channels` | `all_controlled` 或显式列表，与配置中的通道类型对齐。 |
 | `intercept` | 命中且合法时是否不转发 Agent（与现 `_handle_channel_control` 语义一致）。 |
-| `notes` | 与 CLI 别名、文档锚点的交叉引用（链接到 `CLI_COMMANDS.md` 章节）。 |
+| `notes` | 与 CLI 别名、文档锚点的交叉引用（链接到 [`命令行指令.md`](./命令行指令.md) 章节）。 |
 
 ### 4.3 与 `MessageHandler` 的关系
 
@@ -102,7 +102,7 @@
 | **Gateway `MessageHandler`** | 受控通道用户文本进入统一控制逻辑前，以 SSOT 为准做判定。 |
 | **`im_inbound` 等管线** | 若需提前过滤或统计，**import 同一常量/函数**，禁止维护独立 `frozenset` 子集。 |
 | **Feishu / WeCom 等 Channel** | 若因协议必须在 Channel 层做轻量判断，应**复用 SSOT**或仅做「是否可能为控制指令」的粗筛，最终语义以 Gateway 为准；若存在双点判断，须在注册表 `notes` 中写明并压测避免重复提示。 |
-| **CLI** | 继续维护 TS `registry`；与 A 类命令**名称对齐**见 [`CLI_COMMANDS.md`](./CLI_COMMANDS.md) 与本文第 3.3 节，不在 Gateway 重复实现 B 类。 |
+| **CLI** | 继续维护 TS `registry`；与 A 类命令**名称对齐**见 [`命令行指令.md`](./命令行指令.md) 与本文第 3.3 节，不在 Gateway 重复实现 B 类。 |
 
 ---
 
@@ -126,7 +126,7 @@
 |------|------|
 | **P0** | 提炼 A 类命令到 SSOT 模块；`im_inbound` 等改为引用，消除集合漂移。 |
 | **P1** | 收敛 `message_handler.py` 内联解析到对 SSOT 的调用，行为不变。 |
-| **P2** | 在文档矩阵中补齐 B/C 类与 `CLI_COMMANDS.md` 的交叉引用；可选：生成给前端的只读清单（若未来需要统一补全）。 |
+| **P2** | 在文档矩阵中补齐 B/C 类与 [`命令行指令.md`](./命令行指令.md) 的交叉引用；可选：生成给前端的只读清单（若未来需要统一补全）。 |
 
 ---
 

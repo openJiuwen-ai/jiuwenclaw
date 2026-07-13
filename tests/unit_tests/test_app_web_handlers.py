@@ -1,0 +1,1005 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+import asyncio
+
+import pytest
+
+from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
+    WebHandlersBindParams,
+    _FEISHU_APP_DEFAULTS,
+    _XIAOYI_APP_DEFAULTS,
+    _flatten_modes_team_for_config_panel,
+    _flatten_symphony_for_config_panel,
+    _normalize_feishu_conf,
+    _normalize_xiaoyi_conf,
+    _register_web_handlers,
+)
+
+
+class FakeWebChannel:
+    def __init__(self):
+        self.methods: dict[str, object] = {}
+        self.responses: list[dict] = []
+        self.connect_handler = None
+
+    def register_method(self, name, handler):
+        self.methods[name] = handler
+
+    def on_connect(self, handler):
+        self.connect_handler = handler
+
+    async def send_response(self, ws, req_id, *, ok, payload=None, error=None, code=None):
+        self.responses.append(
+            {
+                "id": req_id,
+                "ok": ok,
+                "payload": payload,
+                "error": error,
+                "code": code,
+            }
+        )
+
+
+class FakeAgentClient:
+    def __init__(self):
+        self.reload_started = asyncio.Event()
+        self.release_reload = asyncio.Event()
+        self.reload_finished = asyncio.Event()
+
+    async def send_request(self, envelope):
+        self.reload_started.set()
+        try:
+            await self.release_reload.wait()
+            return type("Resp", (), {"ok": True, "payload": {}})()
+        finally:
+            self.reload_finished.set()
+
+
+class FakeChannelManager:
+    def __init__(self):
+        self.configs: dict[str, dict] = {}
+
+    async def set_conf(self, channel_id, new_conf):
+        self.configs[channel_id] = dict(new_conf)
+
+    def get_conf(self, channel_id):
+        return dict(self.configs.get(channel_id, {}))
+
+
+class FakeHeartbeatService:
+    def __init__(self):
+        self.config = {"every": 60.0, "target": "web"}
+
+    async def set_heartbeat_conf(self, *, every=None, target=None, active_hours=None):
+        if every is not None:
+            self.config["every"] = every
+        if target is not None:
+            self.config["target"] = target
+        if active_hours is not None:
+            self.config["active_hours"] = active_hours
+
+    def get_heartbeat_conf(self):
+        return dict(self.config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "params"),
+    [
+        ("channel.feishu.set_conf", {"apps": [{"app_id": "app-1"}]}),
+        ("channel.dingtalk.set_conf", {"enabled": False, "client_id": "client-1"}),
+        ("heartbeat.set_conf", {"every": 30, "target": "web"}),
+    ],
+)
+async def test_config_save_handlers_respond_before_agent_reload_finishes(monkeypatch, method, params):
+    channel = FakeWebChannel()
+    agent_client = FakeAgentClient()
+    channel_manager = FakeChannelManager()
+    heartbeat_service = FakeHeartbeatService()
+    persisted: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_channel_in_config",
+        lambda channel_id, conf: persisted.append((channel_id, dict(conf))),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_channel_subsection_with_cleanup",
+        lambda channel_id, subsection, conf, keep_keys: persisted.append((channel_id, conf)),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_heartbeat_in_config",
+        lambda payload: persisted.append(("heartbeat", dict(payload))),
+    )
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            agent_client=agent_client,
+            channel_manager=channel_manager,
+            heartbeat_service=heartbeat_service,
+        )
+    )
+
+    task = asyncio.create_task(channel.methods[method](object(), "req-save", params, "sess-1"))
+    try:
+        await asyncio.wait_for(agent_client.reload_started.wait(), timeout=0.5)
+
+        assert persisted
+        assert channel.responses[-1]["id"] == "req-save"
+        assert channel.responses[-1]["ok"] is True
+    finally:
+        agent_client.release_reload.set()
+        await task
+        await asyncio.wait_for(agent_client.reload_finished.wait(), timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_config_set_applies_scoped_reload_before_responding(monkeypatch, tmp_path):
+    channel = FakeWebChannel()
+    reload_started = asyncio.Event()
+    release_first_reload = asyncio.Event()
+    reload_calls: list[tuple[set[str], dict, dict]] = []
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ENV_FILE",
+        tmp_path / ".env",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"models": {"defaults": []}},
+    )
+
+    async def on_config_saved(updated_keys, *, env_updates, config_payload, reload_options):
+        reload_calls.append((set(updated_keys), dict(env_updates), dict(reload_options)))
+        reload_started.set()
+        await release_first_reload.wait()
+        return True
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            on_config_saved=on_config_saved,
+        )
+    )
+
+    task = asyncio.create_task(channel.methods["config.set"](
+        object(),
+        "req-1",
+        {"api_base": "https://example.com/one"},
+        "sess-1",
+    ))
+
+    await asyncio.wait_for(reload_started.wait(), timeout=1)
+    assert channel.responses == []
+
+    release_first_reload.set()
+    await task
+
+    assert reload_calls[0][0] == {"API_BASE"}
+    assert reload_calls[0][2]["target_channel_id"] == "web"
+    assert reload_calls[0][2]["reload_scopes"] == ["model"]
+    assert channel.responses[-1]["id"] == "req-1"
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["applied_without_restart"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_set_reports_saved_when_hot_reload_callback_fails(monkeypatch, tmp_path):
+    channel = FakeWebChannel()
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ENV_FILE",
+        tmp_path / ".env",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"models": {"defaults": []}},
+    )
+
+    async def on_config_saved(updated_keys, *, env_updates, config_payload, reload_options):
+        raise RuntimeError("agent unreachable at 10.0.0.1")
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            on_config_saved=on_config_saved,
+        )
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-hot-reload-failed",
+        {"api_base": "https://example.com/one"},
+        "sess-1",
+    )
+
+    assert channel.responses == [
+        {
+            "id": "req-hot-reload-failed",
+            "ok": True,
+            "payload": {
+                "updated": ["api_base"],
+                "applied_without_restart": False,
+            },
+            "error": None,
+            "code": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_models_replace_all_applies_scoped_reload_before_responding(monkeypatch):
+    channel = FakeWebChannel()
+    reload_started = asyncio.Event()
+    release_reload = asyncio.Event()
+    persisted: list[list[dict]] = []
+    reload_options_seen: list[dict] = []
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"models": {"defaults": []}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_default_models",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_default_models_in_config",
+        lambda models: persisted.append(list(models)),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.registry.ExtensionRegistry.get_instance",
+        lambda: type(
+            "Registry",
+            (),
+            {"get_crypto_provider": lambda self: type("Crypto", (), {"encrypt": lambda self, value: value})()},
+        )(),
+    )
+
+    async def on_config_saved(updated_keys, *, env_updates, config_payload, reload_options):
+        reload_options_seen.append(dict(reload_options))
+        reload_started.set()
+        await release_reload.wait()
+        return True
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            on_config_saved=on_config_saved,
+        )
+    )
+
+    task = asyncio.create_task(channel.methods["models.replace_all"](
+        object(),
+        "req-models",
+        {
+            "models": [
+                {
+                    "model_name": "model-one",
+                    "api_base": "https://example.com/v1",
+                    "api_key": "secret",
+                    "model_provider": "OpenAI",
+                    "is_default": True,
+                }
+            ]
+        },
+        "sess-1",
+    ))
+
+    await asyncio.wait_for(reload_started.wait(), timeout=1)
+    assert channel.responses == []
+
+    release_reload.set()
+    await task
+
+    assert persisted
+    assert reload_options_seen[-1]["target_channel_id"] == "web"
+    assert reload_options_seen[-1]["reload_scopes"] == ["model"]
+    assert channel.responses[-1]["id"] == "req-models"
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["applied_without_restart"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_set_routes_team_payload_to_modes_team_helper(monkeypatch):
+    channel = FakeWebChannel()
+    recorded: list[dict] = []
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+                        lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+                        lambda: {"modes": {"team": {}}})
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
+        lambda payload: recorded.append(payload),
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-1",
+        {
+            "agents": {"agent_1": {"model": {"provider": "OpenAI"}}},
+            "team": [{"team_name": "alpha_team", "leader": {"agent_key": "agent_1"}}],
+        },
+        "sess-1",
+    )
+
+    assert recorded and recorded[0]["team"][0]["team_name"] == "alpha_team"
+    assert channel.responses[-1] == {
+        "id": "req-1",
+        "ok": True,
+        "payload": {"updated": ["modes.team"], "applied_without_restart": True},
+        "error": None,
+        "code": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_config_set_returns_bad_request_when_team_payload_is_invalid(monkeypatch):
+    channel = FakeWebChannel()
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+                        lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
+        lambda payload: (_ for _ in ()).throw(ValueError("duplicate team_name: alpha_team")),
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-2",
+        {
+            "agents": {"agent_1": {"model": {"provider": "OpenAI"}}},
+            "team": [{"team_name": "alpha_team", "leader": {"agent_key": "agent_1"}}],
+        },
+        "sess-2",
+    )
+
+    assert channel.responses[-1] == {
+        "id": "req-2",
+        "ok": False,
+        "payload": None,
+        "error": "duplicate team_name: alpha_team",
+        "code": "BAD_REQUEST",
+    }
+
+
+def test_config_panel_flatten_reads_standalone_agent_registry():
+    raw = {
+        "web_config_panel": {
+            "agent_team_agents": {
+                "agent_1": {
+                    "model": {
+                        "model_request_config": {
+                            "model": "gpt-4.1",
+                            "api_base": "https://api.openai.com/v1",
+                            "api_key": "${OPENAI_API_KEY}",
+                        },
+                        "model_client_config": {"client_provider": "OpenAI"},
+                    },
+                    "skills": ["coding"],
+                    "max_iterations": 12,
+                    "completion_timeout": 34,
+                }
+            }
+        }
+    }
+
+    flat = _flatten_modes_team_for_config_panel(raw)
+
+    assert flat["agent_name_0"] == "agent_1"
+    assert flat["agent_model_0"] == "gpt-4.1"
+    assert flat["agent_skills_0"] == "coding"
+    assert flat["agent_max_iterations_0"] == "12"
+    assert flat["agent_completion_timeout_0"] == "34"
+
+
+@pytest.mark.parametrize(
+    ("enabled", "expected"),
+    [
+        (True, "true"),
+        (False, "false"),
+    ],
+)
+def test_config_panel_flatten_reads_team_enable_permissions(enabled: bool, expected: str) -> None:
+    raw = {
+        "modes": {
+            "team": {
+                "alpha_team": {
+                    "team_name": "alpha_team",
+                    "enable_permissions": enabled,
+                },
+            },
+        },
+    }
+
+    flat = _flatten_modes_team_for_config_panel(raw)
+
+    assert flat["team_0_enable_permissions"] == expected
+
+
+def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
+    raw = {
+        "symphony": {
+            "enabled": True,
+            "orchestration": {"mode": "fast"},
+            "skill_retrieval": {
+                "enabled": True,
+                "build": {"branching_factor": 64},
+                "retrieve": {"top_k": 5, "flatten_tree": True},
+            },
+        }
+    }
+
+    flat = _flatten_symphony_for_config_panel(raw)
+
+    assert flat["symphony_enabled"] == "true"
+    assert "symphony_orchestration_mode" not in flat
+    assert flat["skill_retrieval_enabled"] == "true"
+    assert flat["skill_retrieval_build_branching_factor"] == "64"
+    assert "skill_retrieval_retrieve_top_k" not in flat
+    assert flat["skill_retrieval_retrieve_flatten_tree"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
+    channel = FakeWebChannel()
+    recorded_symphony: list[dict] = []
+    recorded_skill_retrieval: list[dict] = []
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"preferred_language": "zh"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"symphony": {}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_symphony_in_config",
+        lambda updates: recorded_symphony.append(updates),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_skill_retrieval_in_config",
+        lambda updates: recorded_skill_retrieval.append(updates),
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-3",
+        {
+            "symphony_enabled": "true",
+            "skill_retrieval_enabled": "false",
+            "skill_retrieval_retrieve_flatten_tree": "true",
+        },
+        "sess-3",
+    )
+
+    assert recorded_symphony == [{"enabled": True}]
+    assert recorded_skill_retrieval == [{"enabled": False, "retrieve": {"flatten_tree": True}}]
+    assert channel.responses[-1] == {
+        "id": "req-3",
+        "ok": True,
+        "payload": {
+            "updated": [
+                "symphony_enabled",
+                "skill_retrieval_enabled",
+                "skill_retrieval_retrieve_flatten_tree",
+            ],
+            "applied_without_restart": True,
+        },
+        "error": None,
+        "code": None,
+    }
+
+
+# =====================================================================
+# _normalize_feishu_conf 纯函数测试
+# =====================================================================
+
+
+def test_normalize_feishu_conf_empty():
+    """空配置 → 返回含单默认应用的 apps 列表。"""
+    result = _normalize_feishu_conf({})
+    assert "apps" in result
+    assert len(result["apps"]) == 1
+    app = result["apps"][0]
+    assert app["name"] == "默认应用"
+    assert app["is_default"] is True
+    assert app["enabled"] is True
+    assert app["allow_from"] == ["0.0.0.0/0"]
+
+
+def test_normalize_feishu_conf_non_dict():
+    """非 dict 输入 → 返回 {"apps": []}。"""
+    assert _normalize_feishu_conf(None) == {"apps": []}
+    assert _normalize_feishu_conf("") == {"apps": []}
+    assert _normalize_feishu_conf([]) == {"apps": []}
+
+
+def test_normalize_feishu_conf_flat_to_apps():
+    """旧平铺格式 → 转为 apps 格式，补充缺省字段。"""
+    raw = {
+        "enabled": True,
+        "app_id": "cli_xxx",
+        "app_secret": "my_secret",
+        "encrypt_key": "enc_key",
+        "verification_token": "verify_token",
+    }
+    result = _normalize_feishu_conf(raw)
+    assert "apps" in result
+    assert len(result["apps"]) == 1
+    app = result["apps"][0]
+    assert app["is_default"] is True
+    assert app["app_id"] == "cli_xxx"
+    assert app["app_secret"] == "my_secret"
+    assert app["allow_from"] == ["0.0.0.0/0"]
+    assert app["enable_streaming"] is True
+    assert app["group_digital_avatar"] is False
+    # 原始平铺字段仍保留在顶层
+    assert result["app_id"] == "cli_xxx"
+
+
+def test_normalize_feishu_conf_apps_fills_defaults():
+    """已有 apps 列表 → 为每个 app 补充缺省字段。"""
+    raw = {
+        "apps": [
+            {
+                "name": "默认应用",
+                "is_default": True,
+                "app_id": "cli_xxx",
+                "app_secret": "xxx",
+                "encrypt_key": "key",
+                "verification_token": "token",
+            },
+            {
+                "name": "业务应用",
+                "is_default": False,
+                "app_id": "cli_yyy",
+                "app_secret": "yyy",
+                "encrypt_key": "key2",
+                "verification_token": "token2",
+            },
+        ]
+    }
+    result = _normalize_feishu_conf(raw)
+    assert len(result["apps"]) == 2
+
+    # 第一个 app：缺省字段被填充
+    app0 = result["apps"][0]
+    assert app0["name"] == "默认应用"
+    assert app0["enable_streaming"] is True
+    assert app0["group_digital_avatar"] is False
+    assert app0["allow_from"] == ["0.0.0.0/0"]
+
+    # 第二个 app：同样补全
+    app1 = result["apps"][1]
+    assert app1["name"] == "业务应用"
+    assert app1["enable_streaming"] is True
+
+
+def test_normalize_feishu_conf_apps_empty_list():
+    """空 apps 列表 → 返回 {"apps": []}。"""
+    result = _normalize_feishu_conf({"apps": []})
+    assert result == {"apps": []}
+
+
+def test_normalize_feishu_conf_apps_preserves_extra_fields():
+    """apps 中额外非标准字段应被保留（未来扩展）。"""
+    raw = {"apps": [{"name": "test", "is_default": True, "app_id": "x", "app_secret": "x",
+                     "encrypt_key": "x", "verification_token": "x", "custom_tag": "hello"}]}
+    result = _normalize_feishu_conf(raw)
+    assert result["apps"][0]["custom_tag"] == "hello"
+    assert result["apps"][0]["enable_streaming"] is True  # 默认值仍在
+
+
+# =====================================================================
+# _normalize_xiaoyi_conf 纯函数测试
+# =====================================================================
+
+
+def test_normalize_xiaoyi_conf_empty():
+    """空配置 → 返回含单默认应用的 apps 列表。"""
+    result = _normalize_xiaoyi_conf({})
+    assert "apps" in result
+    assert len(result["apps"]) == 1
+    app = result["apps"][0]
+    assert app["name"] == "默认应用"
+    assert app["is_default"] is True
+    assert app["mode"] == "xiaoyi_channel"
+    assert app["ws_url1"] == "wss://hag.cloud.huawei.com/openclaw/v1/ws/link"
+
+
+def test_normalize_xiaoyi_conf_non_dict():
+    """非 dict 输入 → 返回 {"apps": []}。"""
+    assert _normalize_xiaoyi_conf(None) == {"apps": []}
+    assert _normalize_xiaoyi_conf(42) == {"apps": []}
+
+
+def test_normalize_xiaoyi_conf_flat_to_apps():
+    """旧平铺格式 → 转为 apps 格式，补充缺省字段。"""
+    raw = {
+        "enabled": True,
+        "ak": "access_key",
+        "sk": "secret_key",
+        "agent_id": "agent_default",
+        "app_id": "app_xxx",
+    }
+    result = _normalize_xiaoyi_conf(raw)
+    assert "apps" in result
+    assert len(result["apps"]) == 1
+    app = result["apps"][0]
+    assert app["is_default"] is True
+    assert app["ak"] == "access_key"
+    assert app["sk"] == "secret_key"
+    assert app["agent_id"] == "agent_default"
+    assert app["mode"] == "xiaoyi_channel"
+    assert app["phone_tools_enabled"] is False
+
+
+def test_normalize_xiaoyi_conf_apps_fills_defaults():
+    """已有 apps 列表 → 为每个 app 补充缺省字段。"""
+    raw = {
+        "apps": [
+            {
+                "name": "默认应用",
+                "is_default": True,
+                "ak": "ak_1",
+                "sk": "sk_1",
+                "app_id": "app_1",
+                "agent_id": "agent_1",
+            }
+        ]
+    }
+    result = _normalize_xiaoyi_conf(raw)
+    assert len(result["apps"]) == 1
+    app = result["apps"][0]
+    assert app["mode"] == "xiaoyi_channel"
+    assert app["enable_streaming"] is True
+    assert app["phone_tools_enabled"] is False
+    assert app["push_id"] == ""
+    assert app["ws_url1"] == "wss://hag.cloud.huawei.com/openclaw/v1/ws/link"
+
+
+def test_normalize_xiaoyi_conf_apps_empty_list():
+    """空 apps 列表 → 返回 {"apps": []}。"""
+    assert _normalize_xiaoyi_conf({"apps": []}) == {"apps": []}
+
+
+# =====================================================================
+# get_conf 处理程序 — 验证归一化在读取时生效
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_channel_feishu_get_conf_normalizes(monkeypatch):
+    channel = FakeWebChannel()
+    cm = FakeChannelManager()
+    # 预置旧平铺配置
+    cm.configs["feishu"] = {"app_id": "old_id", "app_secret": "old_secret"}
+    _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=cm))
+
+    await channel.methods["channel.feishu.get_conf"](object(), "req-1", {}, "sess-1")
+
+    assert channel.responses[-1]["ok"] is True
+    payload = channel.responses[-1]["payload"]
+    assert "config" in payload
+    assert "apps" in payload["config"]
+    assert len(payload["config"]["apps"]) == 1
+    app = payload["config"]["apps"][0]
+    assert app["app_id"] == "old_id"
+    assert app["app_secret"] == "old_secret"
+    # 验证归一化补充了缺省字段
+    assert app["allow_from"] == ["0.0.0.0/0"]
+    assert app["enable_streaming"] is True
+    assert app["is_default"] is True
+
+
+@pytest.mark.asyncio
+async def test_channel_feishu_get_conf_empty_returns_default_apps(monkeypatch):
+    channel = FakeWebChannel()
+    cm = FakeChannelManager()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=cm))
+
+    await channel.methods["channel.feishu.get_conf"](object(), "req-1", {}, "sess-1")
+
+    assert channel.responses[-1]["ok"] is True
+    payload = channel.responses[-1]["payload"]
+    assert "apps" in payload["config"]
+    # 空配置 → 返回一个默认应用
+    assert len(payload["config"]["apps"]) == 1
+    assert payload["config"]["apps"][0]["is_default"] is True
+
+
+@pytest.mark.asyncio
+async def test_channel_xiaoyi_get_conf_normalizes(monkeypatch):
+    channel = FakeWebChannel()
+    cm = FakeChannelManager()
+    cm.configs["xiaoyi"] = {"ak": "ak_1", "sk": "sk_1", "agent_id": "agent_1"}
+    _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=cm))
+
+    await channel.methods["channel.xiaoyi.get_conf"](object(), "req-1", {}, "sess-1")
+
+    assert channel.responses[-1]["ok"] is True
+    payload = channel.responses[-1]["payload"]
+    assert "config" in payload
+    assert "apps" in payload["config"]
+    app = payload["config"]["apps"][0]
+    assert app["ak"] == "ak_1"
+    assert app["mode"] == "xiaoyi_channel"
+
+
+@pytest.mark.asyncio
+async def test_channel_xiaoyi_get_conf_empty_returns_default_apps(monkeypatch):
+    channel = FakeWebChannel()
+    cm = FakeChannelManager()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=cm))
+
+    await channel.methods["channel.xiaoyi.get_conf"](object(), "req-1", {}, "sess-1")
+
+    assert channel.responses[-1]["ok"] is True
+    assert len(channel.responses[-1]["payload"]["config"]["apps"]) == 1
+
+
+# =====================================================================
+# set_conf 处理程序 — 多应用模式（apps 键）
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_channel_feishu_set_conf_apps_mode(monkeypatch):
+    """feishu.set_conf 带 apps → 写 channels.feishu.apps，返回归一化配置。"""
+    channel = FakeWebChannel()
+    cm = FakeChannelManager()
+    recorded_subsection: list[tuple] = []
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_channel_subsection_with_cleanup",
+        lambda cid, sub, conf, keep_keys: recorded_subsection.append((cid, sub, conf, keep_keys)),
+    )
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=cm))
+
+    apps_payload = [
+        {"name": "应用A", "is_default": True, "app_id": "cli_a",
+         "app_secret": "sec_a", "encrypt_key": "key_a", "verification_token": "token_a"},
+        {"name": "应用B", "is_default": False, "app_id": "cli_b",
+         "app_secret": "sec_b", "encrypt_key": "key_b", "verification_token": "token_b"},
+    ]
+    await channel.methods["channel.feishu.set_conf"](
+        object(), "req-apps", {"apps": apps_payload}, "sess-1"
+    )
+
+    # 验证写入了归一化后的 subsection（默认字段已填充）
+    assert len(recorded_subsection) == 1
+    assert recorded_subsection[0][0] == "feishu"
+    assert recorded_subsection[0][1] == "apps"
+    written_apps = recorded_subsection[0][2]
+    assert len(written_apps) == 2
+    assert written_apps[0]["name"] == "应用A"
+    assert written_apps[0]["app_id"] == "cli_a"
+    assert written_apps[0]["enabled"] is True  # 默认值已补充
+    assert written_apps[0]["allow_from"] == ["0.0.0.0/0"]  # 默认值已补充
+    assert written_apps[1]["name"] == "应用B"
+
+    # 验证 cm 中存储了归一化后的 apps
+    assert "apps" in cm.configs.get("feishu", {})
+    cm_apps = cm.configs["feishu"]["apps"]
+    assert len(cm_apps) == 2
+
+    # 验证响应包含归一化后的完整配置
+    assert channel.responses[-1]["ok"] is True
+    config = channel.responses[-1]["payload"]["config"]
+    assert len(config["apps"]) == 2
+    # 缺省字段已被填充
+    assert config["apps"][0]["allow_from"] == ["0.0.0.0/0"]
+    assert config["apps"][0]["enable_streaming"] is True
+
+
+@pytest.mark.asyncio
+async def test_channel_xiaoyi_set_conf_apps_mode(monkeypatch):
+    """xiaoyi.set_conf 带 apps → 写 channels.xiaoyi.apps，返回归一化配置。"""
+    channel = FakeWebChannel()
+    cm = FakeChannelManager()
+    recorded_subsection: list[tuple] = []
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_channel_subsection_with_cleanup",
+        lambda cid, sub, conf, keep_keys: recorded_subsection.append((cid, sub, conf, keep_keys)),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._clear_agent_config_cache",
+        lambda *a, **kw: None,
+    )
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=cm))
+
+    apps_payload = [
+        {"name": "默认应用", "is_default": True, "ak": "ak_1", "sk": "sk_1",
+         "app_id": "app_1", "agent_id": "agent_1"},
+    ]
+    await channel.methods["channel.xiaoyi.set_conf"](
+        object(), "req-apps", {"apps": apps_payload}, "sess-1"
+    )
+
+    assert len(recorded_subsection) == 1
+    assert recorded_subsection[0][0] == "xiaoyi"
+    assert recorded_subsection[0][1] == "apps"
+    # 验证持久化的数据已归一化（默认字段被填充）
+    written_apps = recorded_subsection[0][2]
+    assert len(written_apps) == 1
+    assert written_apps[0]["name"] == "默认应用"
+    assert written_apps[0]["ak"] == "ak_1"
+    assert written_apps[0]["mode"] == "xiaoyi_channel"  # 默认值已补充
+    assert written_apps[0]["phone_tools_enabled"] is False  # 默认值已补充
+    assert written_apps[0]["ws_url1"] == "wss://hag.cloud.huawei.com/openclaw/v1/ws/link"  # 默认值已补充
+    assert written_apps[0]["enable_streaming"] is True  # 默认值已补充
+
+    assert channel.responses[-1]["ok"] is True
+    config = channel.responses[-1]["payload"]["config"]
+    assert len(config["apps"]) == 1
+    # 缺省字段被填充
+    assert config["apps"][0]["mode"] == "xiaoyi_channel"
+    assert config["apps"][0]["phone_tools_enabled"] is False
+
+# =====================================================================
+# set_conf 处理程序 — 边界场景
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_channel_feishu_set_conf_apps_empty_list(monkeypatch):
+    """空 apps 列表 → 保存并返回空列表。"""
+    channel = FakeWebChannel()
+    cm = FakeChannelManager()
+    recorded_subsection: list[tuple] = []
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_channel_subsection_with_cleanup",
+        lambda cid, sub, conf, keep_keys: recorded_subsection.append((cid, sub, conf, keep_keys)),
+    )
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=cm))
+
+    await channel.methods["channel.feishu.set_conf"](
+        object(), "req-empty", {"apps": []}, "sess-1"
+    )
+
+    assert recorded_subsection[0][2] == []
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["config"]["apps"] == []
+
+
+@pytest.mark.asyncio
+async def test_channel_set_conf_channel_manager_unavailable(monkeypatch):
+    """cm 为 None → 返回 SERVICE_UNAVAILABLE。"""
+    channel = FakeWebChannel()
+    # 不传 channel_manager，_resolve 返回 None
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["channel.feishu.set_conf"](object(), "req-1", {"apps": []}, "sess-1")
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "SERVICE_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_channel_set_conf_invalid_params():
+    """params 非 dict → 返回 BAD_REQUEST。"""
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=FakeChannelManager()))
+
+    for invalid in [None, "string", 123, []]:
+        channel.responses.clear()
+        await channel.methods["channel.feishu.set_conf"](object(), "req-1", invalid, "sess-1")
+        assert channel.responses[-1]["ok"] is False
+        assert channel.responses[-1]["code"] == "BAD_REQUEST"
+
+
+# =====================================================================
+# 落盘测试 — 验证 update_channel_subsection_in_config 真实写回文件
+# =====================================================================
+
+
+def test_update_channel_subsection_in_config_persists_to_disk(tmp_path, monkeypatch):
+    """验证 update_channel_subsection_in_config 确实将数据写到 config.yaml 文件。"""
+    import yaml
+    from jiuwenswarm.common import config as cfg
+
+    # 1. 准备一个临时的 config.yaml，包含已有内容
+    temp_config = tmp_path / "config.yaml"
+    initial_data = {
+        "app_version": "1.0.0",
+        "channels": {
+            "web": {"enabled": True},
+        },
+    }
+    with open(temp_config, "w", encoding="utf-8") as f:
+        yaml.dump(initial_data, f)
+
+    # 2. monkeypatch CONFIG_YAML_PATH 指向临时文件
+    monkeypatch.setattr(cfg, "CONFIG_YAML_PATH", temp_config)
+
+    # 3. 调用被测试函数——写入 feishu apps 配置
+    feishu_apps = [
+        {"name": "应用A", "is_default": True, "app_id": "cli_a", "app_secret": "sec_a"},
+        {"name": "应用B", "is_default": False, "app_id": "cli_b", "app_secret": "sec_b"},
+    ]
+    cfg.update_channel_subsection_in_config("feishu", "apps", feishu_apps)
+
+    # 4. 读回文件，验证数据已落盘
+    with open(temp_config, "r", encoding="utf-8") as f:
+        saved = yaml.safe_load(f)
+
+    # 4a. 验证 channels.feishu.apps 存在且内容正确
+    assert "channels" in saved
+    assert "feishu" in saved["channels"]
+    assert "apps" in saved["channels"]["feishu"]
+    assert len(saved["channels"]["feishu"]["apps"]) == 2
+    assert saved["channels"]["feishu"]["apps"][0]["name"] == "应用A"
+    assert saved["channels"]["feishu"]["apps"][0]["app_id"] == "cli_a"
+    assert saved["channels"]["feishu"]["apps"][1]["name"] == "应用B"
+
+    # 4b. 验证已有内容未被破坏（round-trip 安全）
+    assert saved["app_version"] == "1.0.0"
+    assert saved["channels"]["web"]["enabled"] is True
+
+
+def test_update_channel_subsection_in_config_creates_missing_sections(tmp_path, monkeypatch):
+    """当 channels / channel_id / subsection 不存在时，应自动创建。"""
+    import yaml
+    from jiuwenswarm.common import config as cfg
+
+    temp_config = tmp_path / "config.yaml"
+    # 只有顶层字段，没有任何 channels
+    with open(temp_config, "w", encoding="utf-8") as f:
+        yaml.dump({"app_version": "2.0.0"}, f)
+
+    monkeypatch.setattr(cfg, "CONFIG_YAML_PATH", temp_config)
+
+    cfg.update_channel_subsection_in_config("xiaoyi", "apps", [{"name": "默认应用", "ak": "ak_1"}])
+
+    with open(temp_config, "r", encoding="utf-8") as f:
+        saved = yaml.safe_load(f)
+
+    assert "channels" in saved
+    assert "xiaoyi" in saved["channels"]
+    assert "apps" in saved["channels"]["xiaoyi"]
+    assert saved["channels"]["xiaoyi"]["apps"][0]["name"] == "默认应用"
+    # 原始顶层字段保留
+    assert saved["app_version"] == "2.0.0"
+
+
+def test_update_channel_subsection_in_config_overwrites_existing(tmp_path, monkeypatch):
+    """相同 subsection 多次写入应覆盖而不是追加。"""
+    import yaml
+    from jiuwenswarm.common import config as cfg
+
+    temp_config = tmp_path / "config.yaml"
+    initial_data = {
+        "channels": {
+            "feishu": {
+                "apps": [{"name": "旧应用", "app_id": "old_id"}],
+            },
+        },
+    }
+    with open(temp_config, "w", encoding="utf-8") as f:
+        yaml.dump(initial_data, f)
+
+    monkeypatch.setattr(cfg, "CONFIG_YAML_PATH", temp_config)
+
+    # 写入新数据覆盖
+    new_apps = [{"name": "新应用", "app_id": "new_id"}]
+    cfg.update_channel_subsection_in_config("feishu", "apps", new_apps)
+
+    with open(temp_config, "r", encoding="utf-8") as f:
+        saved = yaml.safe_load(f)
+
+    assert len(saved["channels"]["feishu"]["apps"]) == 1
+    assert saved["channels"]["feishu"]["apps"][0]["name"] == "新应用"
+    assert saved["channels"]["feishu"]["apps"][0]["app_id"] == "new_id"

@@ -3,13 +3,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwenclaw.app_cli import run_acp
-from jiuwenclaw.e2a.constants import (
+from jiuwenswarm.channels.acp.app_acp import run_acp
+from jiuwenswarm.common.e2a.constants import (
     E2A_RESPONSE_KIND_ACP_JSONRPC_ERROR,
     E2A_RESPONSE_KIND_ACP_PROMPT_RESULT,
     E2A_RESPONSE_KIND_E2A_CHUNK,
 )
-from jiuwenclaw.e2a.models import E2AProvenance, E2AResponse, utc_now_iso
+from jiuwenswarm.common.e2a.models import E2AProvenance, E2AResponse, utc_now_iso
 
 pytestmark = [pytest.mark.integration, pytest.mark.system]
 
@@ -91,7 +91,7 @@ def test_acp_cli_ignores_chunks_and_returns_final_result(monkeypatch):
 
     monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: proc)
     monkeypatch.setattr(
-        "jiuwenclaw.app_cli.write_json_stdout",
+        "jiuwenswarm.channels.acp.app_acp.write_json_stdout",
         lambda payload: captured.setdefault("output", payload),
     )
 
@@ -125,7 +125,7 @@ def test_acp_cli_returns_final_jsonrpc_error(monkeypatch):
 
     monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: proc)
     monkeypatch.setattr(
-        "jiuwenclaw.app_cli.write_json_stdout",
+        "jiuwenswarm.channels.acp.app_acp.write_json_stdout",
         lambda payload: captured.setdefault("output", payload),
     )
 

@@ -13,7 +13,7 @@ except ImportError:
 
 UI_E2E_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WEB_DIR = REPO_ROOT / "jiuwenclaw" / "web"
+WEB_DIR = REPO_ROOT / "jiuwenswarm" / "web"
 
 CASE_SCRIPTS = {
     "todo": UI_E2E_ROOT / "todo_ui_report.py",
@@ -22,7 +22,7 @@ CASE_SCRIPTS = {
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run JiuwenClaw Web UI E2E reports and collect their output directories.",
+        description="Run JiuwenSwarm Web UI E2E reports and collect their output directories.",
     )
     parser.add_argument(
         "--cases",

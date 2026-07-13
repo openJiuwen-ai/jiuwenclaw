@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shutil
 import subprocess
@@ -10,13 +11,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SIDECAR_ROOT = ROOT / "packages" / "jiuwenclaw-tui"
+SIDECAR_ROOT = ROOT / "packages" / "jiuwenswarm-tui"
 SIDE_CAR_DIST = SIDECAR_ROOT / "dist"
-CLI_ROOT = ROOT / "jiuwenclaw" / "cli"
+JIUWENBOX_ROOT = ROOT / "jiuwenbox"
+JIUWENBOX_DIST = JIUWENBOX_ROOT / "dist"
+TUI_ROOT = ROOT / "jiuwenswarm" / "channels" / "tui" / "frontend"
 
 TUI_TARGETS = {
-    #"linux-x64": "linux_x86_64",
-    #"linux-arm64": "linux_aarch64",
+    "linux-x64": "linux_x86_64",
+    "linux-arm64": "linux_aarch64",
     #"macos-x64": "macosx_10_15_x86_64",
     "macos-arm64": "macosx_11_0_arm64",
     "windows-x64": "win_amd64",
@@ -25,7 +28,7 @@ TUI_TARGETS = {
 
 
 def run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> None:
-    print(f"[build] ({cwd.relative_to(ROOT) if cwd != ROOT else '.'}) {' '.join(cmd)}")
+    logging.info(f"[build] ({cwd.relative_to(ROOT) if cwd != ROOT else '.'}) {' '.join(cmd)}")
     subprocess.run(cmd, cwd=cwd, check=True, env=env)
 
 
@@ -38,13 +41,18 @@ def remove_path(path: Path) -> None:
 
 
 def clean_root() -> None:
-    for relative in ("build", "jiuwenclaw.egg-info"):
+    for relative in ("build", "jiuwenswarm.egg-info"):
         remove_path(ROOT / relative)
 
 
 def clean_sidecar() -> None:
-    for relative in ("dist", "build", "jiuwenclaw_tui.egg-info"):
+    for relative in ("dist", "build", "jiuwenswarm_tui.egg-info"):
         remove_path(SIDECAR_ROOT / relative)
+
+
+def clean_jiuwenbox() -> None:
+    for relative in ("dist", "build", "jiuwenbox.egg-info"):
+        remove_path(JIUWENBOX_ROOT / relative)
 
 
 def build_root_wheel() -> None:
@@ -53,12 +61,19 @@ def build_root_wheel() -> None:
 
 
 def build_sidecar_wheel(platform_tag: str | None = None) -> None:
-    for relative in ("build", "jiuwenclaw_tui.egg-info"):
+    for relative in ("build", "jiuwenswarm_tui.egg-info"):
         remove_path(SIDECAR_ROOT / relative)
     env = os.environ.copy()
     if platform_tag:
         env["JWC_TUI_WHEEL_PLATFORM"] = platform_tag
     run(["uv", "build", "--wheel"], SIDECAR_ROOT, env=env)
+
+
+def build_jiuwenbox_wheel() -> None:
+    for relative in ("build", "jiuwenbox.egg-info"):
+        remove_path(JIUWENBOX_ROOT / relative)
+    JIUWENBOX_DIST.mkdir(parents=True, exist_ok=True)
+    run(["uv", "build", "--wheel", "--out-dir", str(JIUWENBOX_DIST)], JIUWENBOX_ROOT)
 
 
 def build_tui_binary(target: str, clean: bool) -> None:
@@ -68,33 +83,41 @@ def build_tui_binary(target: str, clean: bool) -> None:
     run(cmd, ROOT)
 
 
+class MissingJsDependenciesError(RuntimeError):
+    """Raised when TUI frontend node_modules is missing and auto-install is disabled."""
+
+
+class InvalidTargetError(ValueError):
+    """Raised when --target contains unknown TUI build target(s)."""
+
+
 def ensure_js_dependencies(install: bool) -> None:
-    node_modules = CLI_ROOT / "node_modules"
+    node_modules = TUI_ROOT / "node_modules"
     if node_modules.exists():
         return
 
     if not install:
-        raise SystemExit(
+        raise MissingJsDependenciesError(
             "\n".join(
                 [
-                    "missing JavaScript dependencies for jiuwenclaw/cli",
+                    "missing JavaScript dependencies for jiuwenswarm/channels/tui/frontend",
                     f"expected: {node_modules}",
                     "run one of:",
-                    "  cd jiuwenclaw/cli && npm install",
+                    "  cd jiuwenswarm/channels/tui/frontend && npm install",
                     "  python scripts/build_python_packages.py --install-js-deps",
                 ]
             )
         )
 
-    if (CLI_ROOT / "package-lock.json").exists():
-        run(["npm", "install"], CLI_ROOT)
+    if (TUI_ROOT / "package-lock.json").exists():
+        run(["npm", "install"], TUI_ROOT)
         return
 
-    if (CLI_ROOT / "bun.lock").exists() or (CLI_ROOT / "bun.lockb").exists():
-        run(["bun", "install"], CLI_ROOT)
+    if (TUI_ROOT / "bun.lock").exists() or (TUI_ROOT / "bun.lockb").exists():
+        run(["bun", "install"], TUI_ROOT)
         return
 
-    run(["npm", "install"], CLI_ROOT)
+    run(["npm", "install"], TUI_ROOT)
 
 
 def resolve_requested_targets(raw: str) -> list[str]:
@@ -106,13 +129,16 @@ def resolve_requested_targets(raw: str) -> list[str]:
     unknown = [value for value in values if value not in TUI_TARGETS]
     if unknown:
         valid = ", ".join(["current", "all", *TUI_TARGETS.keys()])
-        raise SystemExit(f"unknown target(s): {', '.join(unknown)}; valid: {valid}")
+        raise InvalidTargetError(f"unknown target(s): {', '.join(unknown)}; valid: {valid}")
     return values
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Build JiuwenClaw Python distributions (main package and optional TUI sidecar).",
+        description=(
+            "Build JiuwenSwarm Python distributions "
+            "(main package, optional TUI sidecar, and optional jiuwenbox wheel)."
+        ),
     )
     parser.add_argument(
         "--target",
@@ -121,8 +147,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--out-dir",
-        default="./packages/jiuwenclaw-tui/dist",
-        help="Directory to output the built TUI binary (default: ./packages/jiuwenclaw-tui/dist)",
+        default="./packages/jiuwenswarm-tui/dist",
+        help="Directory to output the built TUI binary (default: ./packages/jiuwenswarm-tui/dist)",
     )
     parser.add_argument(
         "--skip-binary",
@@ -132,12 +158,17 @@ def main() -> None:
     parser.add_argument(
         "--skip-root",
         action="store_true",
-        help="Skip building the main jiuwenclaw wheel",
+        help="Skip building the main jiuwenswarm wheel",
     )
     parser.add_argument(
         "--skip-sidecar",
         action="store_true",
-        help="Skip building the jiuwenclaw-tui sidecar wheel",
+        help="Skip building the jiuwenswarm-tui sidecar wheel",
+    )
+    parser.add_argument(
+        "--skip-jiuwenbox",
+        action="store_true",
+        help="Skip building the jiuwenbox wheel",
     )
     parser.add_argument(
         "--clean",
@@ -147,7 +178,7 @@ def main() -> None:
     parser.add_argument(
         "--install-js-deps",
         action="store_true",
-        help="Install jiuwenclaw/cli JavaScript dependencies if node_modules is missing",
+        help="Install jiuwenswarm/channels/tui/frontend JavaScript dependencies if node_modules is missing",
     )
     args = parser.parse_args()
     targets = resolve_requested_targets(args.target)
@@ -157,9 +188,11 @@ def main() -> None:
             clean_root()
         if not args.skip_sidecar:
             clean_sidecar()
+        if not args.skip_jiuwenbox:
+            clean_jiuwenbox()
 
-    if args.skip_sidecar and args.skip_root:
-        raise SystemExit("nothing to build: both --skip-root and --skip-sidecar were set")
+    if args.skip_sidecar and args.skip_root and args.skip_jiuwenbox:
+        raise SystemExit("nothing to build: --skip-root, --skip-sidecar, and --skip-jiuwenbox were all set")
 
     if args.skip_binary and not args.skip_sidecar and len(targets) > 1:
         raise SystemExit("--skip-binary only supports a single sidecar wheel target")
@@ -177,15 +210,22 @@ def main() -> None:
             platform_tag = None if target == "current" else TUI_TARGETS[target]
             build_sidecar_wheel(platform_tag=platform_tag)
 
-    print("\n[build] done")
+    if not args.skip_jiuwenbox:
+        build_jiuwenbox_wheel()
+
+    logging.info("\n[build] done")
     if not args.skip_root:
-        print(f"[build] main wheel: {SIDE_CAR_DIST}")
+        logging.info(f"[build] main wheel: {SIDE_CAR_DIST}")
     if not args.skip_sidecar:
-        print(f"[build] tui wheel(s): {SIDE_CAR_DIST}")
+        logging.info(f"[build] tui wheel(s): {SIDE_CAR_DIST}")
+    if not args.skip_jiuwenbox:
+        logging.info(f"[build] jiuwenbox wheel: {JIUWENBOX_DIST}")
 
 
 if __name__ == "__main__":
     try:
         main()
+    except (MissingJsDependenciesError, InvalidTargetError) as exc:
+        raise SystemExit(str(exc)) from exc
     except subprocess.CalledProcessError as exc:
         raise SystemExit(exc.returncode) from exc

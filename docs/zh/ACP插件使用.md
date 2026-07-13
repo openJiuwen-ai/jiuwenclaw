@@ -1,6 +1,6 @@
 # ACP 快速启动
 
-本文将介绍如何在本机启动 `jiuwenclaw` 主进程，并通过 VS Code ACP Client 连接使用。
+本文将介绍如何在本机启动 `jiuwenswarm` 主进程，并通过 VS Code ACP Client 连接使用。
 
 ## 前置要求
 
@@ -17,8 +17,8 @@ ACP 依赖本地 Gateway，**必须先启动主进程，再在 VS Code 中连接
 
 顺序如下：
 
-1. 安装 `jiuwenclaw`
-2. 执行 `jiuwenclaw-init`
+1. 安装 `jiuwenswarm`
+2. 执行 `jiuwenswarm-init`
 3. 配置大模型相关信息
 4. 启动主进程
 5. 在 VS Code 中配置 ACP Agent
@@ -50,24 +50,24 @@ uv sync
 ### 2. 初始化
 
 ```bash
-jiuwenclaw-init
+jiuwenswarm-init
 ```
 
 ### 3. 配置大模型信息
 
-执行 `jiuwenclaw-init` 后，需要按项目要求**配置大模型相关信息**，否则 Agent 无法正常推理。配置方法参考: [配置方法](配置信息.md)
+执行 `jiuwenswarm-init` 后，需要按项目要求**配置大模型相关信息**，否则 Agent 无法正常推理。配置方法参考: [配置方法](配置信息.md)
 
 ### 4. 启动主进程
 
 ```bash
-python -m jiuwenclaw.app
+python -m jiuwenswarm.app
 ```
 
 ### 5. 在 VS Code 中配置 ACP
 
 在 ACP Client 插件中执行 **ACP: Add Agent Configuration**，然后填写：
 
-* **Name**：`jiuwenclaw`
+* **Name**：`jiuwenswarm`
 * **Command**：
 
   * Windows：`<repo>/scripts/run_gateway_acp.cmd`
@@ -81,7 +81,7 @@ python -m jiuwenclaw.app
 
 ### 6. 建立连接
 
-完成上述配置后，在 ACP Client 中连接 jiuwenclaw Agent 即可开始使用。
+完成上述配置后，在 ACP Client 中连接 jiuwenswarm Agent 即可开始使用。
 
 ![ACP配置完成](../assets/images/ACP配置完成.png)
 
@@ -102,55 +102,40 @@ python -m venv .venv
 # Linux / macOS
 source .venv/bin/activate
 
-pip install jiuwenclaw
+pip install jiuwenswarm
 ```
 
 ### 2. 初始化
 
 ```bash
-jiuwenclaw-init
+jiuwenswarm-init
 ```
 
 ### 3. 配置大模型信息
 
-执行 `jiuwenclaw-init` 后，需要按项目要求**配置大模型相关信息**，否则 Agent 无法正常推理。配置方法参考: [配置方法](配置信息.md)
+执行 `jiuwenswarm-init` 后，需要按项目要求**配置大模型相关信息**，否则 Agent 无法正常推理。配置方法参考: [配置方法](配置信息.md)
 
 ### 4. 启动主进程
 
 ```bash
-python -m jiuwenclaw.app
+python -m jiuwenswarm.app
 ```
 
 ### 5. 在 VS Code 中配置 ACP
 
 在 ACP Client 插件中执行 **ACP: Add Agent Configuration**，然后填写：
 
-* **Name**：`jiuwenclaw`
-* **Command**：
-
-  * Windows：`python -m jiuwenclaw.channel.acp_channel`
-  * Linux / macOS：`python -m jiuwenclaw.channel.acp_channel`
+* **Name**：`jiuwenswarm`
+* **Command**：`jiuwenswarm-acp`
 * **Config / Arguments**：留空
 
-**注意**：python 需为已安装 jiuwenclaw 包的 Python 解释器；若非当前默认解释器，请使用对应环境中的 Python 完整路径替代。例如：
-
-**Windows**
-
-```text
-C:\path\to\your\venv\Scripts\python.exe -m jiuwenclaw.channel.acp_channel
-```
-
-**Linux / macOS**
-
-```text
-/path/to/your/venv/bin/python -m jiuwenclaw.channel.acp_channel
-```
+> 说明：`jiuwenswarm-acp` 是 pip install 后自动生成的命令，与 `jiuwenswarm-init`、`jiuwenswarm-start` 同级。需确保 VS Code 在已安装 jiuwenswarm 的虚拟环境中运行，否则需填写完整路径，例如 Windows：`C:\path\to\venv\Scripts\jiuwenswarm-acp.exe`，Linux / macOS：`/path/to/venv/bin/jiuwenswarm-acp`。
 
 ![ACP配置](../assets/images/ACP插件添加agent.png)
 
 ### 6. 建立连接
 
-完成上述配置后，在 ACP Client 中连接 jiuwenclaw Agent 即可开始使用。
+完成上述配置后，在 ACP Client 中连接 jiuwenswarm Agent 即可开始使用。
 
 ![ACP配置完成](../assets/images/ACP配置完成.png)
 

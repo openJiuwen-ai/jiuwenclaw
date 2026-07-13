@@ -4,10 +4,12 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 
-from jiuwenclaw.agentserver.deep_agent.rails.team_member_skill_toolkit_rail import (
+from jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail import (
     MemberSkillToolkitRail,
 )
 
@@ -17,9 +19,11 @@ class _FakeResourceManager:
         self.tools = {}
         self.removed = []
 
-    def add_tool(self, tools):
+    def add_tool(self, tools, *, tag=None, refresh=False, skip_if_exists=False):
         items = tools if isinstance(tools, list) else [tools]
         for tool in items:
+            if skip_if_exists and tool.card.id in self.tools:
+                continue
             self.tools[tool.card.id] = tool
 
     def remove_tool(self, tool_id):
@@ -55,17 +59,9 @@ class _FakeSkillToolkit:
 
 
 def _make_agent(agent_id: str):
-    ability_manager = AbilityManager()
-    for tool_name in ("search_skill", "install_skill", "uninstall_skill"):
-        ability_manager.add(
-            ToolCard(
-                id=tool_name,
-                name=tool_name,
-                description=f"global {tool_name}",
-                input_params={"type": "object"},
-            )
-        )
-
+    # The owner id drives ``add_ability`` id qualification (mirrors how
+    # BaseAgent / DeepAgent.configure wire it from the agent card in production).
+    ability_manager = AbilityManager(owner_id=agent_id)
     return SimpleNamespace(
         card=SimpleNamespace(id=agent_id, name=agent_id),
         ability_manager=ability_manager,
@@ -75,9 +71,9 @@ def _make_agent(agent_id: str):
 def test_team_member_skill_toolkit_rail_init_registers_member_scoped_tools(monkeypatch, tmp_path):
     """Rail init should replace inherited global cards with member-scoped tool ids."""
     resource_mgr = _FakeResourceManager()
-    rail_module = "jiuwenclaw.agentserver.deep_agent.rails.team_member_skill_toolkit_rail"
+    rail_module = "jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail"
 
-    monkeypatch.setattr(f"{rail_module}.Runner", SimpleNamespace(resource_mgr=resource_mgr))
+    monkeypatch.setattr("openjiuwen.core.runner.Runner.resource_mgr", resource_mgr, raising=False)
     monkeypatch.setattr(f"{rail_module}.SkillManager", _FakeSkillManager)
     monkeypatch.setattr(f"{rail_module}.SkillToolkit", _FakeSkillToolkit)
 
@@ -99,9 +95,9 @@ def test_team_member_skill_toolkit_rail_init_registers_member_scoped_tools(monke
 def test_team_member_skill_toolkit_rail_uninit_cleans_up_registered_tools(monkeypatch, tmp_path):
     """Rail uninit should remove member-scoped tools from ability and resource managers."""
     resource_mgr = _FakeResourceManager()
-    rail_module = "jiuwenclaw.agentserver.deep_agent.rails.team_member_skill_toolkit_rail"
+    rail_module = "jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail"
 
-    monkeypatch.setattr(f"{rail_module}.Runner", SimpleNamespace(resource_mgr=resource_mgr))
+    monkeypatch.setattr("openjiuwen.core.runner.Runner.resource_mgr", resource_mgr, raising=False)
     monkeypatch.setattr(f"{rail_module}.SkillManager", _FakeSkillManager)
     monkeypatch.setattr(f"{rail_module}.SkillToolkit", _FakeSkillToolkit)
 
@@ -120,3 +116,45 @@ def test_team_member_skill_toolkit_rail_uninit_cleans_up_registered_tools(monkey
         "install_skill_member-agent-2",
         "uninstall_skill_member-agent-2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_team_member_skill_toolkit_rail_refreshes_links_after_install(monkeypatch, tmp_path):
+    """Rail should refresh linked skill views after a successful install."""
+    resource_mgr = _FakeResourceManager()
+    rail_module = "jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail"
+    refresh_calls = []
+    shared_manager = object()
+    toolkit_managers = []
+
+    class _InstallSkillToolkit(_FakeSkillToolkit):
+        async def install_skill(self, **_):
+            return {"success": True, "skill": {"name": "new-skill"}}
+
+        def get_tools(self):
+            card = ToolCard(
+                id="install_skill",
+                name="install_skill",
+                description="install_skill desc",
+                input_params={"type": "object", "properties": {}},
+            )
+            return [LocalFunction(card=card, func=self.install_skill)]
+
+    monkeypatch.setattr("openjiuwen.core.runner.Runner.resource_mgr", resource_mgr, raising=False)
+    monkeypatch.setattr(f"{rail_module}.SkillToolkit", _InstallSkillToolkit)
+    monkeypatch.setattr(_InstallSkillToolkit, "__init__", lambda self, manager: toolkit_managers.append(manager))
+
+    agent = _make_agent("member-agent-3")
+    rail = MemberSkillToolkitRail(
+        workspace_dir=str(tmp_path),
+        manager=shared_manager,
+        refresh_links=lambda result: refresh_calls.append(result),
+    )
+
+    rail.init(agent)
+    install_tool = resource_mgr.tools["install_skill_member-agent-3"]
+    result = await install_tool.invoke({})
+
+    assert result["success"] is True
+    assert toolkit_managers == [shared_manager]
+    assert refresh_calls == [result]

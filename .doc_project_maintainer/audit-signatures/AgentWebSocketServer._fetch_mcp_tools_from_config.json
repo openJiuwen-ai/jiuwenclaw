@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f40da-8ce7-7791-a960-a770eb203ff0",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._fetch_mcp_tools_from_config",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._fetch_mcp_tools_from_config in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f40da-8ce7-7791-a960-a770eb203ff0",
+        "nickname": "Kierkegaard",
+        "symbol_id": "AgentWebSocketServer._fetch_mcp_tools_from_config",
+        "completed": true,
+        "finding_count": 4
+      }
+    }
+  ]
+}

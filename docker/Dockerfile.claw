@@ -6,21 +6,21 @@ RUN useradd --create-home --shell /bin/bash app
 RUN mkdir -p /app
 
 # Copy project files
-COPY --chown=app:app . /app/jiuwenclaw/
+COPY --chown=app:app . /app/jiuwenswarm/
 
 USER app
 
 # Build web
-WORKDIR /app/jiuwenclaw/jiuwenclaw/web
+WORKDIR /app/jiuwenswarm/jiuwenswarm/channels/web/frontend
 RUN npm install
 RUN npm run build
 
 # Install server dependencies
-WORKDIR /app/jiuwenclaw
+WORKDIR /app/jiuwenswarm
 ENV PATH=$PATH:/home/app/.local/bin
-RUN sed -i '/--host/ s/default="localhost"/default="0.0.0.0"/' /app/jiuwenclaw/jiuwenclaw/app_web.py
+RUN sed -i '/--host/ s/default="localhost"/default="0.0.0.0"/' /app/jiuwenswarm/jiuwenswarm/channels/web/app_web.py
 RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[all]" --no-cache-dir
 
 # Start claw app
 EXPOSE 5173
-CMD ["jiuwenclaw-start"]
+CMD ["jiuwenswarm-start"]
