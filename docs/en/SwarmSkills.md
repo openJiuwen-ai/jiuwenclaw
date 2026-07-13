@@ -907,4 +907,4 @@ A: The default URL is `https://swarmskills.openjiuwen.com`, which can be overrid
 
 *Document version: v2.0*
 *Target audience: JiuwenClaw users, skill developers*
-*Last updated: 2026-05-08*
+*Last updated: 2026-07-13*
