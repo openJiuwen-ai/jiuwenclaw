@@ -299,7 +299,10 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=icon_path,
-    uac_admin=True,
+    # 运行时数据全部落在用户目录 ~/.jiuwenswarm（cwd、单实例锁、日志、工作区），
+    # 不写 Program Files / HKLM，因此运行时不需要管理员权限。
+    # uac_admin=True 会让双击 exe 时弹 UAC，去掉它实现"安装需管理员、运行不需要"。
+    uac_admin=False,
 )
 
 coll = COLLECT(
