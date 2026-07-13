@@ -31,9 +31,6 @@ class PrewarmCoordinator:
 
     def __init__(self, config: Optional[PrewarmConfig] = None):
         self._config = config or PrewarmConfig.from_env()
-        # session_id -> set of in-flight asyncio tasks; used to await pending
-        # prewarms at session end so scenario-C cache is actually populated.
-        self._inflight: Dict[str, set[asyncio.Task]] = {}
 
     @property
     def config(self) -> PrewarmConfig:
@@ -42,7 +39,7 @@ class PrewarmCoordinator:
     def is_supported_client(self, client: Any) -> bool:
         """Only InferenceAffinity (vLLM) clients support prewarm semantics."""
         name = getattr(client, "__client_name__", "") or ""
-        return name == "InferenceAffinity"
+        return "InferenceAffinity" in name or "OpenAI" in name or "vLLM" in name
 
     def _build_body(
         self,
@@ -55,7 +52,9 @@ class PrewarmCoordinator:
         session_id: Optional[str],
     ) -> Dict[str, Any]:
         """Build the prewarm request body via the client's own param builder."""
-        params = client._build_and_sanitize_params(
+        build_fn = getattr(client, "_build_and_sanitize_params", None)
+        if callable(build_fn):     
+            params = client._build_and_sanitize_params(
             messages=messages,
             tools=tools,
             temperature=0,
@@ -67,7 +66,23 @@ class PrewarmCoordinator:
             session_id=session_id if enable_cache_sharing else None,
             enable_cache_sharing=enable_cache_sharing,
         )
-        # Force prewarm semantics regardless of model_config defaults.
+        else :
+            params = client._build_request_params(
+                messages=messages,
+                tools=tools,
+                temperature=0,
+                top_p=None,
+                model=model_name,
+                max_tokens=1,
+                stop=None,
+                stream=False,
+            )
+            sanitized_fn = getattr(client, "_sanitize_request_params", None)
+            if callable(sanitized_fn):
+                params["messages"] = sanitized_fn(params.get("messages", []))
+            if enable_cache_sharing and session_id:
+                params["cache_sharing"] = True
+                params["cache_salt"] = session_id
         params["max_tokens"] = 1
         params["temperature"] = 0
         params["stream"] = False
@@ -79,7 +94,7 @@ class PrewarmCoordinator:
     async def _fire_request(self, client: Any, body: Dict[str, Any]) -> None:
         """Issue a single aiohttp POST; swallow all errors."""
         cfg = client.model_client_config
-        url = f"{cfg.api_base.rstrip('/')}/v1/chat/completions"
+        url = _chat_completions_url(cfg.api_base)
         headers = {"Content-Type": "application/json"}
         custom = getattr(cfg, "custom_headers", None) or {}
         headers.update(custom)
@@ -117,10 +132,13 @@ class PrewarmCoordinator:
     ) -> None:
         """Fire a prewarm request as a background task (fire-and-forget)."""
         if not self._config.enabled:
+            logger.info("%s prewarm disabled, skipping", _PREWARM_LOG_PREFIX)
             return
         if not self.is_supported_client(client):
+            logger.info("%s prewarm unsupported client=%s, skipping", _PREWARM_LOG_PREFIX, type(client))
             return
         if not messages:
+            logger.info("%s prewarm empty messages, skipping", _PREWARM_LOG_PREFIX)
             return
 
         try:
@@ -136,27 +154,26 @@ class PrewarmCoordinator:
             logger.warning("%s prewarm body build failed: %s", _PREWARM_LOG_PREFIX, exc)
             return
 
-        task = asyncio.create_task(self._fire_request(client, body))
-        self._inflight.setdefault(session_id or "_default", set()).add(task)
+        asyncio.create_task(self._fire_request(client, body))
 
-        def _cleanup(_t: asyncio.Task, _sid: str = session_id or "_default") -> None:
-            self._inflight.get(_sid, set()).discard(_t)
 
-        task.add_done_callback(_cleanup)
+def _chat_completions_url(api_base: str) -> str:
+    """Resolve the chat-completions endpoint from an api_base that may or may
+    not include the /v1 segment.
 
-    async def await_pending(self, session_id: Optional[str]) -> None:
-        """Wait for in-flight prewarms for a session (best-effort, timeout-bounded)."""
-        sid = session_id or "_default"
-        tasks = list(self._inflight.get(sid, set()))
-        if not tasks:
-            return
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=self._config.timeout + 1.0,
-            )
-        except asyncio.TimeoutError:
-            logger.info("%s await_pending timed out for sid=%s", _PREWARM_LOG_PREFIX, sid)
+    Two real-client conventions exist: InferenceAffinity appends
+    ``/v1/chat/completions`` to a bare host, while OpenAI/SiliconFlow pass a
+    base already ending in ``/v1`` and append only ``/chat/completions``.
+    Normalize so the prewarm request hits the same path the real request uses
+    regardless of convention (avoids both double-``/v1`` and missing-``/v1``
+    404s).
+    """
+    base = (api_base or "").rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    if not base.endswith("/v1"):
+        base = f"{base}/v1"
+    return f"{base}/chat/completions"
 
 
 def _approx_input_tokens(body: Dict[str, Any]) -> int:

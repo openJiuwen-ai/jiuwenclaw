@@ -4,8 +4,7 @@
 
 Env vars:
   JIUWENSWARM_PREWARM_ENABLED      (bool, default false) master switch
-  JIUWENSWARM_PREWARM_SCENARIO_A   (bool, default true)  static-prefix prewarm on first call
-  JIUWENSWARM_PREWARM_SCENARIO_BC  (bool, default true)  per-round prewarm at after_model_call
+  JIUWENSWARM_PREWARM_SCENARIO_B   (bool, default true)  tool-call round prewarm (after_model_call)
   JIUWENSWARM_PREWARM_TIMEOUT      (float, default 10.0) per-request timeout in seconds
   JIUWENSWARM_PREWARM_DEBUG        (bool, default false) log cache-hit ratio per real LLM call
 """
@@ -35,8 +34,7 @@ def _env_float(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class PrewarmConfig:
     enabled: bool = False
-    scenario_a: bool = True
-    scenario_bc: bool = True
+    scenario_b: bool = True
     timeout: float = 10.0
     debug: bool = False
 
@@ -44,8 +42,7 @@ class PrewarmConfig:
     def from_env(cls) -> "PrewarmConfig":
         return cls(
             enabled=_env_bool("JIUWENSWARM_PREWARM_ENABLED", False),
-            scenario_a=_env_bool("JIUWENSWARM_PREWARM_SCENARIO_A", True),
-            scenario_bc=_env_bool("JIUWENSWARM_PREWARM_SCENARIO_BC", True),
+            scenario_b=_env_bool("JIUWENSWARM_PREWARM_SCENARIO_B", True),
             timeout=_env_float("JIUWENSWARM_PREWARM_TIMEOUT", 10.0),
             debug=_env_bool("JIUWENSWARM_PREWARM_DEBUG", False),
         )
