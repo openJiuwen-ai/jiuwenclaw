@@ -286,6 +286,8 @@ interface UseWebSocketOptions {
   onConnect?: (payload: ConnectionAckPayload) => void;
   onDisconnect?: () => void;
   onError?: (error: string) => void;
+  /** 配置变更广播到达时回调（其他窗口保存了配置）。父组件据此决定 fetchConfig 或弹草稿覆盖确认。 */
+  onConfigChanged?: (updatedKeys?: string[]) => void;
 }
 
 interface UseWebSocketReturn {
@@ -544,6 +546,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onConnect,
     onDisconnect,
     onError,
+    onConfigChanged,
   } = options;
 
   // 同步更新 ref，避免竞态条件
@@ -561,6 +564,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const onConnectRef = useRef(onConnect);
   const onDisconnectRef = useRef(onDisconnect);
   const onErrorRef = useRef(onError);
+  const onConfigChangedRef = useRef(onConfigChanged);
   const sendMessageRef = useRef<typeof sendMessage>();
   const recentEventRef = useRef<Map<string, number>>(new Map());
   const teamToolCallMemberRef = useRef<Map<string, string>>(new Map());
@@ -595,6 +599,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     stopStreaming,
     updateMessage,
     setProcessing,
+    setGlobalTaskRunning,
     setThinking,
     setEvolutionStatus,
     setPaused,
@@ -688,9 +693,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       if (Array.isArray(ackPayload.tools)) {
         setAvailableTools(ackPayload.tools);
       }
+      // 用后端 ack 携带的 task_running 初始化全局运行态，让新连接/重连窗口立即知道是否有任务在跑。
+      setGlobalTaskRunning(Boolean(ackPayload.task_running));
       onConnectRef.current?.(ackPayload);
     },
-    [setAvailableTools, setConnected]
+    [setAvailableTools, setConnected, setGlobalTaskRunning]
   );
 
   // 断开连接
@@ -1397,7 +1404,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onConnectRef.current = onConnect;
     onDisconnectRef.current = onDisconnect;
     onErrorRef.current = onError;
-  }, [onConnect, onDisconnect, onError]);
+    onConfigChangedRef.current = onConfigChanged;
+  }, [onConnect, onDisconnect, onError, onConfigChanged]);
 
   const shouldDropDuplicatedEvent = useCallback(
     (eventName: string, payload: Record<string, unknown>): boolean => {
@@ -2131,6 +2139,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
           }
         }
+      }),
+      // 配置变更广播：其他窗口保存了配置后由后端广播而来。
+      // 注意：配置是全局的，不带 session_id，故不走 shouldHandleSessionEvent 过滤。
+      // 父组件（App.tsx）在回调里判断是否有未保存草稿，决定直接 fetchConfig 还是弹覆盖确认。
+      webClient.on('config.changed', ({ payload }) => {
+        const updatedKeys = Array.isArray(payload?.updated_keys)
+          ? (payload!.updated_keys as string[])
+          : undefined;
+        onConfigChangedRef.current?.(updatedKeys);
+      }),
+      // 全局任务运行态快照：后端在任务起止时广播，用于跨窗口配置保存锁。
+      // 不走 shouldHandleSessionEvent 过滤（运行态是全局的，不带 session_id）。
+      webClient.on('task.global_running', ({ payload }) => {
+        setGlobalTaskRunning(Boolean(payload?.running));
       }),
       webClient.on('chat.symphony_status', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;

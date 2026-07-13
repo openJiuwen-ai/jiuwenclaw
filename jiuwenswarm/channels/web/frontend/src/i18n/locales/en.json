@@ -882,6 +882,11 @@
       "requiredModelFields": "These model fields are required: {{fields}}. Complete them before saving and restarting.",
       "saveFailed": "Save failed, please try again later",
       "processingDisabled": "A task is running. Please wait for it to finish before saving config.",
+      "taskRunning": "A task is currently running. Please wait for it to finish before saving config.",
+      "configChangedTitle": "Config updated by another window",
+      "configChangedDesc": "Discard your local draft and load the latest config? Cancel to keep editing your draft.",
+      "configChangedConfirm": "Load latest",
+      "configChangedCancel": "Keep draft",
       "proactiveIntEmpty": "{{field}} cannot be empty; must be a positive integer ({{lo}}-{{hi}})",
       "proactiveIntNotInteger": "{{field}} must be a positive integer ({{lo}}-{{hi}}); invalid value: {{value}}",
       "proactiveIntOutOfRange": "{{field}} must be a positive integer in {{lo}}-{{hi}}; current: {{value}}"

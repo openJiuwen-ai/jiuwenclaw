@@ -204,6 +204,8 @@ interface ConfigPanelProps {
       predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
     }>;
   }, showRestartModal?: boolean) => Promise<void>;
+  /** 草稿是否有未保存改动（派生值）变更时回调，供父组件感知（如 config.changed 广播时判断是否覆盖草稿） */
+  onHasChangesChange?: (hasChanges: boolean) => void;
 }
 
 interface AgentsTeamsPayload {
@@ -2510,9 +2512,11 @@ export function ConfigPanel({
   onModelValidate,
   onModelsRefresh,
   onAgentsTeamsSave,
+  onHasChangesChange,
 }: ConfigPanelProps) {
   const { t, i18n } = useTranslation();
   const isProcessing = useChatStore((s) => s.isProcessing);
+  const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
   const { availableModels: storeAvailableModels, mode } = useSessionStore();
   const [draftValues, setDraftValues] = useState<Record<string, string>>(() => {
     if (!config) return {};
@@ -2986,6 +2990,10 @@ export function ConfigPanel({
     return false;
   }, [draftAgents, draftTeams, initialAgents, initialTeams]);
   const hasChanges = hasConfigChanges || hasModelChanges || hasAgentsTeamsChanges;
+  // 将草稿是否有未保存改动上报给父组件，供 config.changed 广播到达时判断是否覆盖草稿。
+  useEffect(() => {
+    onHasChangesChange?.(hasChanges);
+  }, [hasChanges, onHasChangesChange]);
   const missingRequiredModelFields = useMemo(
     () => REQUIRED_MODEL_FIELDS.filter((key) => !(draftValues[key] ?? "").trim()),
     [draftValues],
@@ -3294,8 +3302,14 @@ export function ConfigPanel({
         }
       }
     } catch (saveError) {
-      const message = saveError instanceof Error ? saveError.message : t('config.errors.saveFailed');
-      setError(message);
+      // 后端兜底返回 code=TASK_RUNNING 时，用 i18n 文案提示（而非后端硬编码中文）。
+      const errorCode = (saveError as { code?: string } | null)?.code;
+      if (errorCode === 'TASK_RUNNING') {
+        setError(t('config.errors.taskRunning'));
+      } else {
+        const message = saveError instanceof Error ? saveError.message : t('config.errors.saveFailed');
+        setError(message);
+      }
     } finally {
       setSaving(false);
     }
@@ -3312,7 +3326,7 @@ export function ConfigPanel({
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {isProcessing && mode !== 'team' ? (
+            {(isProcessing || globalTaskRunning) && mode !== 'team' ? (
               <span className="text-xs text-amber-600 dark:text-amber-400">{t('config.errors.processingDisabled')}</span>
             ) : null}
             <button
@@ -3326,7 +3340,7 @@ export function ConfigPanel({
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || (isProcessing && mode !== 'team')}
+              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || ((isProcessing || globalTaskRunning) && mode !== 'team')}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? t('common.saving') : t('common.save')}

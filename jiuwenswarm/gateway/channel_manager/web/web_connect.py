@@ -274,14 +274,23 @@ class WebChannel(BaseWsChannel):
             *,
             seq: int | None = None,
             stream_id: str | None = None,
+            exclude_ws: Any = None,
     ) -> None:
-        """向所有已连接客户端广播 ``event`` 帧."""
+        """向所有已连接客户端广播 ``event`` 帧.
+
+        exclude_ws: 排除单个发起方 ws（如 config.changed 的保存发起方），
+        避免发起方收到自身触发的广播而误弹「丢弃草稿」确认框。发起方靠
+        保存响应的本地乐观合并自行刷新，无需这条广播。
+        """
         frame: dict[str, Any] = {"type": "event", "event": event, "payload": payload}
         if seq is not None:
             frame["seq"] = seq
         if stream_id is not None:
             frame["stream_id"] = stream_id
-        await self._broadcast(frame)
+        clients = self.clients
+        if exclude_ws is not None:
+            clients = {c for c in clients if c is not exclude_ws}
+        await self._broadcast_to(frame, clients)
 
     async def _download_file(self, url: str) -> bytes | None:
         try:

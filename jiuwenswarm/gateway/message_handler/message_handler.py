@@ -188,6 +188,11 @@ class MessageHandler(ABC):
         self._stream_metadata: dict[str, dict[str, Any] | None] = {}  # request_id -> request metadata
         self._stream_modes: dict[str, str] = {}  # request_id -> mode
         self._stream_emits_processing_status: dict[str, bool] = {}  # request_id -> emits chat.processing_status
+        # 非流式 chat.send（如飞书 enable_streaming=False）任务追踪：rid 集合。
+        # 流式任务走 _stream_emits_processing_status；非流式 chat 不产生 processing_status，
+        # 但同样是“用户发起的对话任务在跑”，配置保存锁须覆盖，故单列此集合。
+        # has_active_streams() / task.global_running 广播读两集合之并集。
+        self._active_chat_tasks: dict[str, None] = {}
         self._disconnect_cancel_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._stream_app_ids: dict[str, str] = {}  # request_id -> app_id, 多应用流式精确路由
         self._fire_and_forget_tasks: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
@@ -1920,6 +1925,53 @@ class MessageHandler(ABC):
 
     # ---------- robot_messages ----------
 
+    def has_active_streams(self) -> bool:
+        """是否有任意用户对话任务正在运行（全局运行态快照，只读）。
+
+        用于配置保存接口的全局运行态兜底检查：非空即代表有任务正在运行，
+        此时应拒绝写入配置以避免热更新破坏运行中的任务。
+
+        覆盖两类任务：流式（_stream_emits_processing_status，含 web/tui 等流式通道）
+        与非流式 chat.send（_active_chat_tasks，如飞书 enable_streaming=False）。
+        """
+        return bool(self._stream_emits_processing_status) or bool(self._active_chat_tasks)
+
+    async def _broadcast_task_global_running(self) -> None:
+        """向所有 web ws 客户端广播当前全局运行态快照（task.global_running）。
+
+        running/count 取流式与非流式两集合之并集，保证多任务并发时计数准确、幂等。
+        任何 chat 任务的起止点都应调用，让跨窗口配置保存锁感知运行态变化。
+        """
+        try:
+            web_channel = self._resolve_web_channel()
+            if web_channel is not None:
+                count = len(self._stream_emits_processing_status) + len(self._active_chat_tasks)
+                await web_channel.broadcast_event("task.global_running", {
+                    "event_type": "task.global_running",
+                    "running": bool(count),
+                    "count": count,
+                })
+        except Exception:
+            logger.debug("[task.global_running] broadcast failed", exc_info=True)
+
+    def set_channel_manager(self, channel_manager: Any) -> None:
+        """注入 ChannelManager 引用，供广播全局事件（如 task.global_running）取 web channel 用。
+
+        MessageHandler 在 ChannelManager 之前实例化（ChannelManager 构造需要 message_handler），
+        故通过此方法在装配阶段回填引用。
+        """
+        self._channel_manager = channel_manager
+
+    def _resolve_web_channel(self) -> Any:
+        """从 ChannelManager 取 web channel 实例（广播用）；取不到返回 None。"""
+        cm = getattr(self, "_channel_manager", None)
+        if cm is None:
+            return None
+        try:
+            return cm.get_channel("web")
+        except Exception:
+            return None
+
     async def publish_robot_messages(self, msg: "Message") -> None:
         """将 Agent 响应放入 robot_messages 队列."""
         # Outbound Pipeline（数字分身出站路由）— 在入队前运行
@@ -3442,6 +3494,10 @@ class MessageHandler(ABC):
                         # 流式处理：启动后台任务
                         # 通知前端新任务开始处理
                         emit_processing_status = self._should_emit_processing_status_for_stream(msg)
+                        # 先把 tracking 写入，确保 _send_processing_status → _broadcast_task_global_running()
+                        # 能正确计到此任务；否则飞书等跨通道场景下全局运行态广播会漏计，
+                        # 导致 web 前端保存按钮无法被禁用。
+                        self._stream_emits_processing_status[stream_rid] = emit_processing_status
                         if emit_processing_status:
                             await self._send_processing_status(
                                 stream_rid, msg.session_id, msg.channel_id,
@@ -3459,7 +3515,6 @@ class MessageHandler(ABC):
                         self._stream_channels[stream_rid] = msg.channel_id
                         self._stream_sessions[stream_rid] = msg.session_id
                         self._stream_metadata[stream_rid] = msg.metadata
-                        self._stream_emits_processing_status[stream_rid] = emit_processing_status
                         self._stream_app_ids[stream_rid] = msg.app_id or ""
                         self._stream_modes[stream_rid] = (
                             msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
@@ -3482,7 +3537,17 @@ class MessageHandler(ABC):
                             method_label,
                         )
                     else:
-                        await self._process_non_stream_request(msg, env)
+                        # 非流式 chat.send（如飞书 enable_streaming=False）：同样属于
+                        # “用户对话任务在跑”，需让跨窗口配置保存锁感知。流式靠
+                        # _send_processing_status 广播；非流式无 processing_status，故在此
+                        # 起止点显式写入 _active_chat_tasks 并广播 task.global_running。
+                        self._active_chat_tasks[stream_rid] = None
+                        await self._broadcast_task_global_running()
+                        try:
+                            await self._process_non_stream_request(msg, env)
+                        finally:
+                            self._active_chat_tasks.pop(stream_rid, None)
+                            await self._broadcast_task_global_running()
                 except Exception as e:
                     logger.exception("AgentServer send_request failed for %s: %s", msg.id, e)
                     err_msg = self._build_error_out_message(msg, e)
@@ -3767,6 +3832,10 @@ class MessageHandler(ABC):
             metadata=None,
         )
         await self.publish_robot_messages(status_msg)
+        # 广播全局运行态快照给所有 ws 客户端（不按 session 路由），用于多窗口配置保存锁。
+        # running 取当前活跃任务集合快照（任务结束时该 dict 已 pop 对应 rid），
+        # 而非本函数的 is_processing 参数，保证多任务并发时计数准确、幂等。
+        await self._broadcast_task_global_running()
         logger.info(
             "[MessageHandler] processing status sent: request_id=%s session_id=%s is_processing=%s",
             request_id,

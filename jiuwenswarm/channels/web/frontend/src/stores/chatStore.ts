@@ -56,6 +56,7 @@ interface TaskItem {
 interface ChatState {
   messages: Message[];
   isProcessing: boolean;
+  globalTaskRunning: boolean;  // 全局任务运行态（跨窗口，后端 task.global_running / ack 推送）
   isThinking: boolean;  // 思考中状态（显示闪烁动画）
   isLoadingHistory: boolean;  // 正在加载历史消息
   evolutionStatus: EvolutionStatusPayload | null;
@@ -91,6 +92,7 @@ interface ChatState {
   startStreaming: (messageId: string, streamKey?: string) => void;
   stopStreaming: (streamKey?: string) => void;
   setProcessing: (status: boolean) => void;
+  setGlobalTaskRunning: (running: boolean) => void;
   setThinking: (status: boolean) => void;
   setLoadingHistory: (status: boolean) => void;
   setEvolutionStatus: (status: EvolutionStatusPayload | null) => void;
@@ -128,6 +130,7 @@ interface ChatState {
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   isProcessing: false,
+  globalTaskRunning: false,
   isThinking: false,
   isLoadingHistory: false,
   evolutionStatus: null,
@@ -209,6 +212,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setProcessing: (status) => {
     set({ isProcessing: status });
+  },
+
+  setGlobalTaskRunning: (running) => {
+    set({ globalTaskRunning: running });
   },
 
   setThinking: (status) => {
