@@ -11,7 +11,7 @@ from jiuwenswarm.agents.harness.common.memory import (
     get_memory_manager,
     is_memory_enabled,
 )
-from jiuwenswarm.agents.harness.common.memory.config import is_proactive_memory
+from jiuwenswarm.agents.harness.common.memory.config import is_auto_memory_enabled, is_proactive_memory
 from jiuwenswarm.agents.harness.common.memory.external_memory_config import (
     get_memory_engine,
     is_external_memory_allowed,
@@ -70,6 +70,34 @@ def _is_in_allowed_dirs(abs_path: str, workspace: str, project_dir: str | None =
         return False
 
 
+def _get_runtime_memory_dirs(workspace: str, project_dir: str | None = None) -> list[str]:
+    """运行时记忆目录（agent 自动写入，对用户只读）。
+
+    使用父目录以覆盖所有项目子目录：
+    - <workspace>/memory            -> agent mode auto memory
+    - <workspace>/coding_memory     -> code mode coding memory（含各项目子目录）
+    """
+    return [
+        os.path.normpath(os.path.join(workspace, "memory")),
+        os.path.normpath(os.path.join(workspace, "coding_memory")),
+    ]
+
+
+def _is_runtime_memory_path(abs_path: str, workspace: str, project_dir: str | None = None) -> bool:
+    """abs_path 是否落在运行时记忆目录内（auto/coding memory 文件，禁止手动编辑）。"""
+    if os.name == "nt":
+        abs_lower = abs_path.lower()
+        for d in _get_runtime_memory_dirs(workspace, project_dir):
+            d_lower = d.lower()
+            if abs_lower == d_lower or abs_lower.startswith(d_lower + os.sep):
+                return True
+        return False
+    for d in _get_runtime_memory_dirs(workspace, project_dir):
+        if abs_path == d or abs_path.startswith(d + os.sep):
+            return True
+    return False
+
+
 def _validate_edit_path(raw_path: str, workspace: str, project_dir: str | None = None) -> tuple[bool, str]:
     normalized = raw_path.replace("\\", "/")
     expanded = os.path.expanduser(normalized)
@@ -83,6 +111,10 @@ def _validate_edit_path(raw_path: str, workspace: str, project_dir: str | None =
             project_resolved = os.path.normpath(os.path.abspath(os.path.join(project_dir, expanded)))
             if _is_in_allowed_dirs(project_resolved, workspace, project_dir):
                 abs_path = project_resolved
+
+    # 运行时记忆（auto/coding memory）只读，禁止手动编辑
+    if _is_runtime_memory_path(abs_path, workspace, project_dir):
+        return (False, "runtime memory is read-only, manual editing is not allowed")
 
     if _is_in_allowed_dirs(abs_path, workspace, project_dir):
         return (True, abs_path)
@@ -102,7 +134,7 @@ def _validate_edit_path(raw_path: str, workspace: str, project_dir: str | None =
             if project_dir and parent == os.path.normpath(project_dir):
                 return (True, abs_path)
 
-    return (False, f"Path not in allowed memory directories: {raw_path}")
+    return (False, "path not in allowed memory directories")
 
 
 def _classify_memory_file(path: str, workspace: str) -> str:
@@ -256,6 +288,7 @@ async def handle_memory_edit(
             "content_preview": "",
             "kind": "unknown",
             "editable": False,
+            "reason": resolved,
         }
 
     exists = Path(resolved).is_file()
@@ -290,8 +323,6 @@ async def handle_memory_status(
     mode: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    from jiuwenswarm.common.config import is_auto_memory_enabled
-
     detailed = params.get("detailed", False)
     config = get_config()
 
@@ -306,7 +337,10 @@ async def handle_memory_status(
         "enabled": enabled,
         "proactive": proactive,
         "forbidden_enabled": _is_forbidden_enabled(config),
-        "auto_memory_enabled": is_auto_memory_enabled(),
+        # auto_memory_enabled: agent mode 读全局（保留兼容）；code mode 读 auto_coding_memory
+        "auto_memory_enabled": is_auto_memory_enabled(mode, config),
+        # auto_coding_memory: 仅 code mode 有意义；agent mode 返回 None（UI 不展示）
+        "auto_coding_memory": is_auto_memory_enabled(mode, config) if _is_code_mode(mode) else None,
     }
 
     if detailed:
@@ -437,12 +471,36 @@ async def handle_memory_toggle(
             "needs_restart": True,
         }
 
-    if key == "auto_memory_enabled":
-        from jiuwenswarm.common.config import (
-            is_auto_memory_enabled,
-            set_auto_memory_enabled,
+    if key == "auto_coding_memory":
+        # code mode 专属：子 agent 每轮兜底提取开关，写入 modes.code.memory.auto_coding_memory
+        if not _is_code_mode(mode):
+            return {
+                "key": key,
+                "old_value": False,
+                "new_value": False,
+                "mode_affected": "",
+                "needs_restart": False,
+                "error": f"auto_coding_memory is only valid in code mode (current: {mode})",
+            }
+        old = is_auto_memory_enabled(mode, config)
+        new = not old
+        _update_mode_memory_config(mode, "auto_coding_memory", new)
+        logger.info(
+            "[memory_rpc] Toggle auto_coding_memory: old=%s -> new=%s (mode=%s)",
+            old, new, mode,
         )
-        old = is_auto_memory_enabled()
+        return {
+            "key": key,
+            "old_value": old,
+            "new_value": new,
+            "mode_affected": mode,
+            "needs_restart": True,
+        }
+
+    if key == "auto_memory_enabled":
+        # legacy 全局开关（agent mode 对话后提取）；UI 不暴露，保留兼容
+        from jiuwenswarm.common.config import set_auto_memory_enabled
+        old = bool(config.get("auto_memory_enabled", False))
         new = not old
         set_auto_memory_enabled(new)
         logger.info(

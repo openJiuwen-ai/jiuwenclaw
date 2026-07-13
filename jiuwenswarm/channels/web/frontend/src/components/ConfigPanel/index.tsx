@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useState, useRef, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Music2, Workflow } from "lucide-react";
 import { useTranslation } from 'react-i18next';
@@ -172,6 +172,7 @@ interface TeamEntry {
 interface ConfigPanelProps {
   config: Record<string, unknown> | null;
   isConnected: boolean;
+  sessionId?: string;
   onSaveConfig: (updates: Record<string, string>) => Promise<void>;
   onSaveAllConfig?: (payload: ConfigSaveAllPayload) => Promise<void>;
   /** 校验默认模型配置（api_base / api_key / model / model_provider）能否完成一次最小 LLM 请求 */
@@ -257,7 +258,7 @@ const EVOLUTION_KEYS = new Set(["evolution_auto_scan", "skill_create"]);
 // 模型字段长度校验常量
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
-const MAX_API_BASE_LENGTH = 256;
+const MAX_API_BASE_LENGTH = 512;
 const MAX_API_KEY_LENGTH = 500;
 
 // URL 格式校验函数
@@ -2502,6 +2503,7 @@ function TeamsSection({
 export function ConfigPanel({
   config,
   isConnected,
+  sessionId,
   onSaveConfig,
   onSaveAllConfig,
   onValidateModel: _onValidateModel,
@@ -2553,23 +2555,28 @@ export function ConfigPanel({
     setError(null);
   };
 
+  const fetchInstalledSkills = useCallback(async () => {
+    try {
+      const data = await webRequest<{ skills?: { name: string; installed?: boolean }[] }>(
+        "skills.list",
+        { with_installed: true, session_id: sessionId }
+      );
+      const filteredSkills = (data.skills || [])
+        .filter((s) => s.installed !== false)
+        .sort((a, b) => a.name.localeCompare(b.name));
+      setInstalledSkills(filteredSkills);
+    } catch (error) {
+      console.error("Failed to fetch skills:", error);
+    }
+  }, [sessionId]);
+
+  // 挂载时预加载（仅一次），之后仅在切到 Agent 配置 Tab 时刷新
+  const skillsFetchInitRef = useRef(false);
   useEffect(() => {
-    const fetchSkills = async () => {
-      try {
-        const data = await webRequest<{ skills?: { name: string; installed?: boolean }[] }>(
-          "skills.list",
-          { with_installed: true }
-        );
-        const filteredSkills = (data.skills || [])
-          .filter((s) => s.installed !== false)
-          .sort((a, b) => a.name.localeCompare(b.name));
-        setInstalledSkills(filteredSkills);
-      } catch (error) {
-        console.error("Failed to fetch skills:", error);
-      }
-    };
-    fetchSkills();
-  }, []);
+    if (skillsFetchInitRef.current && configTab !== 'agent') return;
+    skillsFetchInitRef.current = true;
+    fetchInstalledSkills();
+  }, [configTab, fetchInstalledSkills]);
 
   // 当技能列表更新时，自动清理 agent 配置中已卸载的技能
   useEffect(() => {

@@ -19,6 +19,7 @@ from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService, reset_harness_packages_state
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
+from jiuwenswarm.server.ws_send import send_wire_payload
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
 from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
@@ -46,6 +47,7 @@ from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_peer,
     format_ws_diagnostics,
 )
+from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
@@ -1098,8 +1100,6 @@ class AgentWebSocketServer:
 
         await ensure_persistent_checkpointer()
 
-        ws_max_size = 8 * 2**20  # 8 MB — matches Gateway → AgentServer link
-
         try:
             from websockets.legacy.server import serve as legacy_serve
             self._server = await legacy_serve(
@@ -1109,7 +1109,7 @@ class AgentWebSocketServer:
                 process_request=self._process_request,
                 ping_interval=self._ping_interval,
                 ping_timeout=self._ping_timeout,
-                max_size=ws_max_size,
+                max_size=AGENT_WS_MAX_MESSAGE_BYTES,
             )
         except ImportError:
             import websockets
@@ -1120,7 +1120,7 @@ class AgentWebSocketServer:
                 process_request=self._process_request,
                 ping_interval=self._ping_interval,
                 ping_timeout=self._ping_timeout,
-                max_size=ws_max_size,
+                max_size=AGENT_WS_MAX_MESSAGE_BYTES,
             )
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
@@ -1353,7 +1353,7 @@ class AgentWebSocketServer:
                 "event": "connection.ack",
                 "payload": {"status": "ready"},
             }
-            await ws.send(json.dumps(ack_frame, ensure_ascii=False))
+            await send_wire_payload(ws, ack_frame)
             logger.info("[AgentWebSocketServer] 已发送 connection.ack: %s", remote)
         except Exception as e:
             logger.warning("[AgentWebSocketServer] 发送 connection.ack 失败: %s", e)
@@ -1427,7 +1427,7 @@ class AgentWebSocketServer:
             )
             try:
                 async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                    await send_wire_payload(ws, wire)
             except WebSocketConnectionClosed as send_exc:
                 logger.info(
                     "[AgentWebSocketServer] WebSocket 已关闭，JSON 解析错误未发送: %s",
@@ -1777,7 +1777,7 @@ class AgentWebSocketServer:
             )
             try:
                 async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                    await send_wire_payload(ws, wire)
             except WebSocketConnectionClosed as send_exc:
                 logger.info(
                     "[AgentWebSocketServer] WebSocket 已关闭，错误响应未发送: %s",
@@ -1933,7 +1933,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     @staticmethod
     def _resolve_code_language() -> str:
@@ -2251,7 +2251,7 @@ class AgentWebSocketServer:
                 resp.agent_ref = request.agent_ref
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
             logger.info(
                 "[AgentWebSocketServer] 非流式响应已发送: request_id=%s",
                 request.request_id,
@@ -2280,7 +2280,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
         logger.info(
             "[AgentWebSocketServer] 非流式响应已发送: request_id=%s",
             request.request_id,
@@ -2343,7 +2343,7 @@ class AgentWebSocketServer:
                             sequence=-1,  # 心跳使用特殊序列号 -1
                         )
                         async with send_lock:
-                            await ws.send(json.dumps(wire, ensure_ascii=False))
+                            await send_wire_payload(ws, wire)
                         logger.info(
                             "[AgentWebSocketServer] keepalive chunk 发送: request_id=%s",
                             request.request_id,
@@ -2386,7 +2386,15 @@ class AgentWebSocketServer:
                     )
                 try:
                     async with send_lock:
-                        await ws.send(json.dumps(wire, ensure_ascii=False))
+                        sent_original = await send_wire_payload(ws, wire)
+                    if not sent_original:
+                        logger.warning(
+                            "[AgentWebSocketServer] 流式响应因单个 chunk 超限而停止: "
+                            "request_id=%s seq=%s",
+                            request.request_id,
+                            chunk_count - 1,
+                        )
+                        return
                 except WebSocketConnectionClosed:
                     logger.info(
                         "[AgentWebSocketServer] 流式响应停止，WebSocket 已关闭: request_id=%s",
@@ -2453,7 +2461,7 @@ class AgentWebSocketServer:
         )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_session_rename(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """处理 session.rename：与 CLI Gateway 本地回退共用 apply_session_rename。"""
@@ -2484,7 +2492,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_session_switch(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """Switch the active team runtime without deleting recoverable session state."""
@@ -2534,7 +2542,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _find_team_session_ids(self, team_name: str) -> list[str]:
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
@@ -2673,7 +2681,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_session_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """Delete a single session and its recoverable runtime state."""
@@ -2757,7 +2765,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     def _resolve_rewind_agent(self, channel_id: str) -> tuple[Any, Any] | None:
         """Return (deep_agent, react_agent) for the given channel, or None."""
@@ -2777,8 +2785,8 @@ class AgentWebSocketServer:
     @staticmethod
     def _send_error_response(ws: Any, request: AgentRequest,
                               send_lock: asyncio.Lock, error: str,
-                              code: str | None = None) -> str:
-        """Send an error AgentResponse and return the wire JSON string."""
+                              code: str | None = None) -> dict[str, Any]:
+        """Build an error AgentResponse wire payload."""
         payload: dict[str, Any] = {"error": error}
         if code:
             payload["code"] = code
@@ -2789,9 +2797,9 @@ class AgentWebSocketServer:
             payload=payload,
             metadata=request.metadata,
         )
-        return json.dumps(
-            encode_agent_response_for_wire(resp, response_id=request.request_id),
-            ensure_ascii=False,
+        return encode_agent_response_for_wire(
+            resp,
+            response_id=request.request_id,
         )
 
     async def _handle_session_rewind_full(
@@ -2818,7 +2826,7 @@ class AgentWebSocketServer:
                 "session_id and turn_index required", "BAD_REQUEST",
             )
             async with send_lock:
-                await ws.send(wire)
+                await send_wire_payload(ws, wire)
             return
 
         try:
@@ -2829,7 +2837,7 @@ class AgentWebSocketServer:
                 "turn_index must be integer", "BAD_REQUEST",
             )
             async with send_lock:
-                await ws.send(wire)
+                await send_wire_payload(ws, wire)
             return
 
         try:
@@ -2981,7 +2989,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_session_rewind_context(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -3002,7 +3010,7 @@ class AgentWebSocketServer:
                 "session_id and turn_index required", "BAD_REQUEST",
             )
             async with send_lock:
-                await ws.send(wire)
+                await send_wire_payload(ws, wire)
             return
 
         try:
@@ -3013,7 +3021,7 @@ class AgentWebSocketServer:
                 "turn_index must be integer", "BAD_REQUEST",
             )
             async with send_lock:
-                await ws.send(wire)
+                await send_wire_payload(ws, wire)
             return
 
         pair = self._resolve_rewind_agent(request.channel_id or "default")
@@ -3022,7 +3030,7 @@ class AgentWebSocketServer:
                 ws, request, send_lock, "no agent instance available",
             )
             async with send_lock:
-                await ws.send(wire)
+                await send_wire_payload(ws, wire)
             return
         deep_agent, _react_agent = pair
 
@@ -3063,7 +3071,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_permissions_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """处理 permissions.* E2A 请求（与 Web ``register_method`` 同名 method）。"""
@@ -3094,7 +3102,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_history_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         params = request.params if isinstance(request.params, dict) else {}
@@ -3117,7 +3125,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
 
     async def _handle_proactive_tick(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
@@ -3163,7 +3171,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_team_snapshot(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenswarm.agents.harness.team import get_team_manager
@@ -3183,7 +3191,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
             return
 
         try:
@@ -3205,7 +3213,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_team_members_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """Return the live team member list for /join seat validation.
@@ -3251,7 +3259,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
             return
 
         try:
@@ -3277,7 +3285,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_command_workflows(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """Handle command.workflows RPC request — return workflow_run_snapshot."""
@@ -3339,7 +3347,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
             return
 
         try:
@@ -3380,7 +3388,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_team_history_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """返回 team 模式历史记录的分页，避免与 history.get 并发竞争。
@@ -3402,7 +3410,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
             return
 
         session_id = session_id.strip()
@@ -3469,7 +3477,7 @@ class AgentWebSocketServer:
         )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_history_get_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         params = request.params if isinstance(request.params, dict) else {}
@@ -3492,7 +3500,7 @@ class AgentWebSocketServer:
                 sequence=0,
             )
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
             return
 
         messages = data.get("messages", [])
@@ -3517,8 +3525,17 @@ class AgentWebSocketServer:
                     response_id=request.request_id,
                     sequence=seq,
                 )
+                sent_original = False
                 async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                    sent_original = await send_wire_payload(ws, wire)
+                if not sent_original:
+                    logger.warning(
+                        "[AgentWebSocketServer] history 流式响应因单个 chunk 超限而停止: "
+                        "request_id=%s seq=%s",
+                        request.request_id,
+                        seq,
+                    )
+                    return
 
         done_chunk = AgentResponseChunk(
             request_id=request.request_id,
@@ -3539,7 +3556,7 @@ class AgentWebSocketServer:
             sequence=done_seq,
         )
         async with send_lock:
-            await ws.send(json.dumps(wire_done, ensure_ascii=False))
+            await send_wire_payload(ws, wire_done)
 
     async def _handle_command_add_dir(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -3573,7 +3590,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_command_chrome(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -3593,7 +3610,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_command_compact(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -3700,7 +3717,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_command_compact_partial(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -3749,7 +3766,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_command_context(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -3787,7 +3804,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_command_recap(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """处理 /recap 命令：生成会话快速回顾（read-only，不修改历史）"""
@@ -3829,7 +3846,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_command_btw(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """处理 /btw 命令：独立、无工具、单轮 LLM 侧问题查询。
@@ -3861,7 +3878,7 @@ class AgentWebSocketServer:
                 )
                 wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
                 async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                    await send_wire_payload(ws, wire)
                 return
 
             mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent.plan"))
@@ -3906,7 +3923,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_command_diff(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenswarm.server.utils.diff_service import get_diff_service
@@ -3951,7 +3968,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_command_simplify(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """处理 /simplify 命令：组装代码精简审查 prompt 并返回（由前端作为消息发送给 Agent）。
@@ -3983,7 +4000,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_command_model(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -4079,7 +4096,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     @staticmethod
     def _mask_sensitive_fields(payload: Any) -> Any:
@@ -4617,7 +4634,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_command_sandbox(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -4689,7 +4706,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_sandbox_enable(self, channel_id: str) -> dict[str, Any]:
         # 1. 解析 sandbox endpoint: 优先 config.yaml::sandbox.url/type, 缺省走本地 jiuwenbox.
@@ -5362,7 +5379,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_command_session(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -5387,7 +5404,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_command_status(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -5534,7 +5551,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_browser_start(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """启动浏览器并返回执行结果（returncode）。"""
@@ -5560,7 +5577,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_browser_runtime_restart(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -5584,7 +5601,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_agents_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from dataclasses import asdict as dataclass_asdict
@@ -5611,7 +5628,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_agents_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from dataclasses import asdict as dataclass_asdict
@@ -5648,7 +5665,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _generate_agent_with_llm(
         self, name: str, description: str
@@ -5769,7 +5786,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_agents_update(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from dataclasses import asdict as dataclass_asdict
@@ -5827,7 +5844,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_agents_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenswarm.server.runtime.agent_config_service import AgentConfigService
@@ -5865,7 +5882,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_agents_set_enabled(
         self,
@@ -5922,7 +5939,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_agents_tools_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenswarm.server.runtime.agent_config_service import AgentConfigService
@@ -5949,7 +5966,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_config_cache_clear(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -5973,7 +5990,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_agent_reload_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -6035,7 +6052,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_extensions_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """获取所有 Rail 扩展列表."""
@@ -6060,7 +6077,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_extensions_import(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """导入新的 Rail 扩展（文件夹结构）."""
@@ -6095,7 +6112,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_extensions_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """删除 Rail 扩展."""
@@ -6126,7 +6143,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_extensions_toggle(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """切换 Rail 扩展的启用状态，并触发热更新."""
@@ -6172,7 +6189,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_hooks_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """获取当前 hooks 配置（供 TUI /hooks 命令浏览）."""
@@ -6202,7 +6219,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def send_push(self, msg) -> None:
         """AgentServer 主动向 Gateway 推送消息。
@@ -6219,7 +6236,13 @@ class AgentWebSocketServer:
         try:
             wire = build_server_push_wire(msg)
             async with self._current_send_lock:
-                await self._current_ws.send(json.dumps(wire, ensure_ascii=False))
+                sent_original = await send_wire_payload(self._current_ws, wire)
+            if not sent_original:
+                logger.warning(
+                    "[AgentWebSocketServer] send_push 内容过大已降级为错误帧: channel_id=%s",
+                    msg.get("channel_id", ""),
+                )
+                return
             response_kind = str(msg.get("response_kind") or "").strip()
             if response_kind:
                 logger.info(
@@ -6338,7 +6361,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
 
             logger.info("[AgentServer] initialize completed: capabilities=%s", capabilities)
 
@@ -6352,7 +6375,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
 
     async def _handle_session_create(
             self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -6452,7 +6475,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
 
             logger.info("[AgentServer] session.create completed: session_id=%s", session_id)
 
@@ -6466,7 +6489,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
 
     async def _handle_session_fork(
             self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -6541,7 +6564,7 @@ class AgentWebSocketServer:
                 resp, response_id=request.request_id
             )
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
 
             logger.info(
                 "[AgentServer] session.fork completed: source=%s target=%s title=%s",
@@ -6565,7 +6588,7 @@ class AgentWebSocketServer:
                 resp, response_id=request.request_id
             )
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
         except Exception as e:
             logger.exception("[AgentServer] session.fork failed: %s", e)
             resp = AgentResponse(
@@ -6578,7 +6601,7 @@ class AgentWebSocketServer:
                 resp, response_id=request.request_id
             )
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
 
     async def _handle_acp_tool_response(
             self,
@@ -6619,7 +6642,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def handle_acp_tool_response_for_test(
             self,
@@ -6654,7 +6677,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_harness_packages_scan(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -6681,7 +6704,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_harness_packages_activate(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -6699,7 +6722,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
             return
 
         try:
@@ -6753,7 +6776,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_harness_packages_deactivate(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -6771,7 +6794,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
             return
 
         try:
@@ -6820,7 +6843,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     async def _handle_harness_packages_delete(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -6838,7 +6861,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
             return
 
         if package_id == "native":
@@ -6850,7 +6873,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await send_wire_payload(ws, wire)
             return
 
         try:
@@ -6897,7 +6920,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)
 
     def _resolve_model(self, model_name: Optional[str] = None) -> Optional[Any]:
         """Resolve model from jiuwenswarm config.
@@ -7100,4 +7123,4 @@ class AgentWebSocketServer:
             action, request.request_id, list(wire.keys())[:10],
         )
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await send_wire_payload(ws, wire)

@@ -478,6 +478,26 @@ class WebChannel(BaseWsChannel):
             )
             return
 
+        # ── 主动推荐系统通知推 web：与 cron 推送同理——后端主动推、无前端 session_id 绑定，
+        # 按 session_id 路由会被当"无 session"丢弃（旧路径 580 行 if not msg.session_id 兜底丢弃）。
+        # proactive notification（"今日已达上限"等系统提醒）带 payload.source ==
+        # "proactive_notification" 标记，据此广播给所有 web 客户端。前端 shouldHandleSessionEvent
+        # 对无 session_id 的 payload 放行，作为普通 assistant 消息渲染。
+        if (
+            msg.event_type == EventType.CHAT_FINAL
+            and isinstance(msg.payload, dict)
+            and msg.payload.get("source") == "proactive_notification"
+        ):
+            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            clients = self.clients
+            for w in clients:
+                self._enqueue_send(w, frame)
+            logger.debug(
+                "[WebChannel] proactive_notification broadcast to %d client(s) id=%s",
+                len(clients), getattr(msg, "id", ""),
+            )
+            return
+
         if msg.type == "res":
             if isinstance(msg.payload, dict):
                 res_payload = {**msg.payload}

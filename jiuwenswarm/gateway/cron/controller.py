@@ -240,8 +240,8 @@ class CronController:
         await self._scheduler.reload()
         return job.to_dict()
 
-    async def delete_job(self, job_id: str) -> bool:
-        deleted = await self._store.delete_job(job_id)
+    async def delete_job(self, job_id: str, *, force: bool = False) -> bool:
+        deleted = await self._store.delete_job(job_id, force=force)
         if deleted:
             await self._scheduler.reload()
         return deleted

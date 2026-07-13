@@ -92,6 +92,7 @@ class ToolMgr:
             raise build_error(StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR, server_config=server_config,
                               reason="server_id is already exist")
         client = self._create_client(server_config)
+        connected = False
         try:
             connected = await client.connect()
             if not connected:
@@ -101,6 +102,14 @@ class ToolMgr:
             self._mcp_server_name_to_ids.setdefault(server_config.server_name, []).append(server_config.server_id)
             return results
         except Exception as e:
+            if connected:
+                try:
+                    await client.disconnect()
+                except Exception as disconnect_exc:
+                    logger.error(
+                        f"add_tool_server cleanup failed: {disconnect_exc}, "
+                        f"server_id={server_config.server_id}"
+                    )
             raise build_error(StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR, cause=e, server_config=server_config,
                               reason=str(e))
 
@@ -130,24 +139,35 @@ class ToolMgr:
         return self._mcp_server_name_to_ids.get(server_name, [])
 
     async def remove_tool_server(self, server_id: str, ignore_not_exist: bool = True) -> list[str]:
-        mcp_server_resource = self._mcp_server_resources.pop(server_id, None)
+        mcp_server_resource = self._mcp_server_resources.get(server_id)
         if not mcp_server_resource:
             if not ignore_not_exist:
                 raise build_error(StatusCode.RESOURCE_MCP_SERVER_REMOVE_ERROR, server_id=server_id,
                                   reason="server is not exist")
             else:
                 return []
+
         try:
-            await mcp_server_resource.client.disconnect()
+            success = await mcp_server_resource.client.disconnect()
+            if not success:
+                logger.error(f"remove tool server disconnect failed, server_id={server_id}")
+                return []
         except Exception as e:
-            logger.warn(f"remove tool server discount {str(e)}, server_id={server_id}")
-        finally:
+            logger.error(f"remove tool server disconnect exception: {e}, server_id={server_id}")
+            return []
+
+        self._mcp_server_resources.pop(server_id, None)
+
+        try:
             self._inner_remove_mcp_tools(mcp_server_resource.tool_ids)
             ids = self._mcp_server_name_to_ids.get(mcp_server_resource.config.server_name)
             if ids and server_id in ids:
                 ids.remove(server_id)
             if not ids:
                 self._mcp_server_name_to_ids.pop(mcp_server_resource.config.server_name)
+        except Exception as e:
+            logger.error(f"remove tool server cleanup failed: {e}, server_id={server_id}")
+
         return mcp_server_resource.tool_ids
 
     def add_sys_operation_tools(self, sys_op_id: str, tool_ids: list[str]) -> None:

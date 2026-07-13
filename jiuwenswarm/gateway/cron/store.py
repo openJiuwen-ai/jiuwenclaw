@@ -30,6 +30,14 @@ _PROACTIVE_UPDATE_ALLOWED_KEYS: frozenset[str] = frozenset(
 )
 
 
+class _ProactiveJobProtected(RuntimeError):
+    """proactive.tick job 受保护，禁止手动 删除/toggle/改非调度字段 时抛出。
+
+    所有删除路径（web handler / TUI /cron / 自然语言 cron 工具）共用 store 层，
+    在此抛出可统一拦截，避免 config 开关与 cron store 不一致。
+    """
+
+
 class CronJobStore:
     """Persist cron jobs to ~/.jiuwenswarm/agent/home/cron_jobs.json."""
 
@@ -225,10 +233,23 @@ class CronJobStore:
         await self._upsert_job(updated)
         return updated
 
-    async def delete_job(self, job_id: str) -> bool:
+    async def delete_job(self, job_id: str, *, force: bool = False) -> bool:
         job_id = str(job_id or "").strip()
         if not job_id:
             return False
+        # proactive.tick job 由主动推荐开关自动创建/删除，禁止任何路径
+        # （web 面板 / TUI /cron / 自然语言 cron 工具）手动删除——否则会出现
+        # config 开关仍开但 job 没了的不一致，且重启后会被 sync 重建。
+        # force=True 仅供 proactive_cron_sync 在 config 开关关闭时合法删除用。
+        if not force:
+            existing = await self.get_job(job_id)
+            if (
+                    existing is not None
+                    and str(getattr(existing, "mode", "") or "").strip().lower() == _PROACTIVE_TICK_MODE
+            ):
+                raise _ProactiveJobProtected(
+                    "主动推荐定时任务由设置→主动推荐开关控制，不能删除；请到设置关闭开关。"
+                )
         async with self._lock:
             data = self._read_json_unlocked()
             jobs_raw = data.get("jobs") or []

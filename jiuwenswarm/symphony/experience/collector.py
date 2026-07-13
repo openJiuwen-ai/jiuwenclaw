@@ -88,10 +88,15 @@ class ExperienceBaseBuilder:
             LOGGER.warning("TraceIndexBuilder: no traces provided, skipping")
             return 0
 
+        valid_traces = self._filter_valid_traces(traces)
+        if not valid_traces:
+            LOGGER.warning("TraceIndexBuilder: no valid traces after filtering, skipping")
+            return 0
+
         # --- Cluster ---
         t1 = time.monotonic()
         clusters = cluster_traces(
-            traces, self._embedder,
+            valid_traces, self._embedder,
             n_clusters=self._skill_cluster_num,
             min_cluster_size=self._min_cluster_size,
             cluster_max_examples=self._cluster_max_examples,
@@ -167,12 +172,41 @@ class ExperienceBaseBuilder:
         )
         return created
 
+    @staticmethod
+    def _filter_valid_traces(traces: list[TraceRecord]) -> list[TraceRecord]:
+        """Drop traces that are not success or carry no skills.
+
+        Both conditions make a trace useless for positive-pattern distillation:
+        failures have no skill signal to reinforce, and skill-less traces
+        cannot be partitioned by skill set in clustering.
+        """
+        valid_traces: list[TraceRecord] = []
+        dropped = 0
+        for t in traces:
+            if not t.success or not t.skills:
+                dropped += 1
+                continue
+            valid_traces.append(t)
+        if dropped > 0:
+            LOGGER.warning(
+                "ExperienceBaseBuilder: dropped %d invalid trace(s) "
+                "(success=False or no skills) out of %d provided",
+                dropped, len(traces),
+            )
+        return valid_traces
 
     def add(self, trace: TraceRecord) -> None:
         """Record a successful query-skill mapping.
 
         This adds to the pending buffer. Call flush() to cluster and persist.
         """
+        if not trace.success or not trace.skills:
+            reason = "success=False" if not trace.success else "no skills associated"
+            LOGGER.error(
+                "ExperienceBaseBuilder: rejecting trace %s: %s",
+                getattr(trace, "trace_id", "<unknown>"), reason,
+            )
+            return
         with self._lock:
             self._pending.append(trace)
             pending_count = len(self._pending)

@@ -201,6 +201,8 @@ class ProactiveEngine:
             _get_all_skills,
             _analyze_and_decide,
             _trigger_main_agent,
+            _limit_notif_sent_today,
+            _mark_limit_notif_sent,
         )
         from jiuwenswarm.agents.harness.common.recommendation.profile_extractor import (
             load_recommendation_state,
@@ -230,14 +232,17 @@ class ProactiveEngine:
         if _today_recommend_count() >= self._max_per_day:
             logger.info("[ProactiveEngine] daily limit reached (%d/%d), skipping tick",
                        _today_recommend_count(), self._max_per_day)
-            # 推送通知提醒用户已到上限（每天最多推一次上限提醒，用 last_tick_at 兜底避免刷屏）
-            if self._send_notification_callback is not None:
+            # 推送通知提醒用户已到上限——每天最多推一次，避免 cron 多次到点刷屏。
+            # 用进程内 _limit_notif_sent 当日标记去重；跨天/重启自动重置。
+            # 推送失败不标记，下次 tick 仍会重试（没送达就不算发过）。
+            if self._send_notification_callback is not None and not _limit_notif_sent_today():
                 try:
                     await self._send_notification_callback(
                         target_channel,
                         f"今日主动推荐已达每日上限（{self._max_per_day} 条），"
                         f"明日恢复。",
                     )
+                    _mark_limit_notif_sent()
                 except Exception as exc:
                     logger.debug("[ProactiveEngine] send_notification failed: %s", exc)
             self._last_tick_at = time.time()
@@ -345,6 +350,7 @@ class ProactiveEngine:
         from jiuwenswarm.agents.harness.common.recommendation.proactive_actions import (
             _prune_daily_counts,
             _prune_cooldown_records,
+            _prune_limit_notif,
         )
         from jiuwenswarm.agents.harness.common.recommendation.profile_extractor import (
             load_recommendation_state,
@@ -352,6 +358,7 @@ class ProactiveEngine:
         )
 
         _prune_daily_counts()
+        _prune_limit_notif()
         state = load_recommendation_state()
         _prune_cooldown_records(state)
         save_recommendation_state(state)

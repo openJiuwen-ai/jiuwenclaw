@@ -27,7 +27,7 @@ from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     create_adapter,
     resolve_sdk_choice,
 )
-from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_memory_enabled
+from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_auto_memory_enabled, is_memory_enabled
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
     append_history_record,
@@ -35,7 +35,7 @@ from jiuwenswarm.server.runtime.session.session_history import (
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.utils.utils import is_team_params
-from jiuwenswarm.common.config import get_config, is_auto_memory_enabled
+from jiuwenswarm.common.config import get_config
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
@@ -1187,15 +1187,36 @@ class JiuWenSwarm:
                     question_text = str(answer.get("question", "") or "").strip()
                     selected_options = answer.get("selected_options", [])
                     custom_input = str(answer.get("custom_input", "") or "").strip()
-                    answer_value = ""
-                    if selected_options:
-                        answer_value = str(selected_options[0] or "").strip()
+                    if selected_options and isinstance(selected_options, list):
+                        # Normalize each option to a stripped string, drop empties.
+                        cleaned_options = [
+                            str(raw_option or "").strip()
+                            for raw_option in selected_options
+                            if str(raw_option or "").strip()
+                        ]
+                        # When the only selection is "Other", prefer the free-text
+                        # custom_input (single-select free-text path).
+                        if len(cleaned_options) == 1 and cleaned_options[0] == "Other" and custom_input:
+                            answer_value: Any = custom_input
+                        elif len(cleaned_options) == 1:
+                            answer_value = cleaned_options[0]
+                        elif cleaned_options:
+                            # Multi-select: preserve the full list of selections.
+                            answer_value = cleaned_options
+                        else:
+                            answer_value = ""
                     elif custom_input:
                         answer_value = custom_input
+                    else:
+                        answer_value = ""
                     if question_text and answer_value:
                         answers_dict[question_text] = answer_value
                     elif answer_value:
-                        free_text_answer = answer_value
+                        free_text_answer = (
+                            answer_value
+                            if isinstance(answer_value, str)
+                            else ", ".join(answer_value)
+                        )
             if not answers_dict and free_text_answer:
                 answers_dict["__free_text__"] = free_text_answer
             payload: dict[str, Any] = {"answers": answers_dict}
@@ -1749,7 +1770,7 @@ class JiuWenSwarm:
             # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
             mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
             config = get_config()
-            if is_auto_memory_enabled() and is_memory_enabled(mode, config):
+            if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
                 _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
 
         return result
@@ -2329,7 +2350,7 @@ class JiuWenSwarm:
         # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
         mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
         config = get_config()
-        if is_auto_memory_enabled() and is_memory_enabled(mode, config):
+        if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
         yield AgentResponseChunk(

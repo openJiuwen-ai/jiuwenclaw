@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -526,6 +527,50 @@ _CONFIG_YAML_KEYS = frozenset({
     "proactive_recommendation_max_rounds_per_tick",
     "swarmflow_enabled",
 })
+
+# 微信通道数值参数的取值范围：(下限, 上限, 是否必须为整数)。均为秒，必须为有限正数。
+# 用于 channel.wechat.set_conf 写盘前校验，拒绝负数 / 0 / 极大值 / 浮点越界 / 非数字，
+# 避免非法值落盘后导致后台轮询忙循环轰炸接口或退避过久使通道僵死。
+_WECHAT_NUMERIC_BOUNDS: dict[str, tuple[float, float, bool]] = {
+    "qrcode_poll_interval_sec": (0.1, 3600.0, False),
+    "long_poll_timeout_sec": (1, 600, True),
+    "backoff_base_sec": (0.1, 3600.0, False),
+    "backoff_max_sec": (0.1, 3600.0, False),
+}
+
+
+def _validate_wechat_numeric_params(params: dict) -> str | None:
+    """校验微信通道四个数值参数。合法返回 None，非法返回中文错误描述。
+
+    规则：出现在 params 中的字段必须为有限正数并落在各自范围内；
+    ``long_poll_timeout_sec`` 必须为整数；且 ``backoff_max_sec`` 不得小于
+    ``backoff_base_sec``（两者同时出现时才校验此跨字段约束）。
+    仅校验存在的键，缺省字段交由默认值处理。
+    """
+    def _as_number(value: Any) -> float | None:
+        # bool 是 int 的子类，需显式排除，避免 True/False 被当作 1/0 通过。
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        val = float(value)
+        return val if math.isfinite(val) else None
+
+    for key, (lo, hi, is_int) in _WECHAT_NUMERIC_BOUNDS.items():
+        if key not in params:
+            continue
+        val = _as_number(params[key])
+        if val is None:
+            return f"{key} 需为有限数值"
+        if is_int and val != int(val):
+            return f"{key} 需为整数"
+        if not (lo <= val <= hi):
+            return f"{key} 需在 {lo}–{hi} 之间"
+
+    base = _as_number(params.get("backoff_base_sec"))
+    mx = _as_number(params.get("backoff_max_sec"))
+    if base is not None and mx is not None and mx < base:
+        return "backoff_max_sec 不得小于 backoff_base_sec"
+    return None
+
 
 _SYMPHONY_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
     "symphony_enabled": (("enabled",), "bool", False),
@@ -3495,6 +3540,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 req_id,
                 ok=False,
                 error="params must be object",
+                code="BAD_REQUEST",
+            )
+            return
+        # 数值参数写盘前校验：拒绝负数 / 0 / 极大值 / 浮点越界 / 非数字，早于 set_conf 中断。
+        numeric_error = _validate_wechat_numeric_params(params)
+        if numeric_error is not None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=numeric_error,
                 code="BAD_REQUEST",
             )
             return

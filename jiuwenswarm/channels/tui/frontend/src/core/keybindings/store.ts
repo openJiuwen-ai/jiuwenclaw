@@ -1,5 +1,4 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { watch } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, watch } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -252,6 +251,7 @@ export function loadKeybindings(): LoadResult {
 // ---------------------------------------------------------------------------
 
 let _watcher: ReturnType<typeof watch> | null = null;
+let _reloadTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * Start watching the keybindings.json file for external changes.
@@ -259,28 +259,31 @@ let _watcher: ReturnType<typeof watch> | null = null;
  * Calls `onReload` whenever the file is created, changed, or deleted so the
  * caller can reload the resolver and reflect the change immediately.
  *
- * Uses a directory watch + basename filter because `fs.watch` on individual
- * files is unreliable on some platforms (especially Windows).
+ * 不对 filename 做过滤：编辑器（vi/nano 等）保存时采用「写临时文件→rename
+ * 覆盖」，在 Linux 5.4 等旧内核上 inotify 的 rename 事件回调 filename 会是
+ * 临时文件名（如 vim 的 "4913"）而非 null，basename 过滤会误杀这些事件导致
+ * 热更新失效。Windows 上一次保存可能触发多次事件，用 200ms 防抖合并。
+ * reloadResolver 内部用 mtime 比对兜底，keybindings.json 未变时直接跳过。
  */
 export function startKeybindingsWatcher(onReload: () => void): void {
   if (_watcher) return;
 
-  const filePath = KEYBINDINGS_FILE;
-  const dirPath = dirname(filePath);
-  const fileName = join(filePath).split(/[/\\]/).pop() ?? "keybindings.json";
+  const dirPath = dirname(KEYBINDINGS_FILE);
 
   try {
-    _watcher = watch(dirPath, { persistent: false }, (_eventType, filename) => {
-      // Node 在 Linux 下对 rename 事件回调的 filename 可能为 null/undefined
-      //（vi/nano 的「写临时文件→rename 覆盖」保存方式正会触发此语义）。
-      // 该目录可能还有其它配置文件，null filename 也会触发同目录其它文件的
-      // rename 事件，此处一并放行；reloadResolver 内部用 mtime 比对兜底，
-      // keybindings.json 未变时直接跳过，不会真正读盘。
-      if (filename != null && filename !== fileName) return;
-      onReload();
+    mkdirSync(dirPath, { recursive: true });
+    _watcher = watch(dirPath, { persistent: false }, () => {
+      if (_reloadTimer) clearTimeout(_reloadTimer);
+      _reloadTimer = setTimeout(() => {
+        _reloadTimer = null;
+        onReload();
+      }, 200);
+    });
+    _watcher.on("error", () => {
+      stopKeybindingsWatcher();
     });
   } catch {
-    // Directory doesn't exist yet — nothing to watch.
+    stopKeybindingsWatcher();
   }
 }
 
@@ -288,6 +291,10 @@ export function startKeybindingsWatcher(onReload: () => void): void {
  * Stop the file watcher. Idempotent.
  */
 export function stopKeybindingsWatcher(): void {
+  if (_reloadTimer) {
+    clearTimeout(_reloadTimer);
+    _reloadTimer = null;
+  }
   if (_watcher) {
     _watcher.close();
     _watcher = null;

@@ -152,9 +152,9 @@ def _faiss_cluster(
 
     # Auto-determine k: aim for clusters of 3-8 items
     if n_clusters is None:
-        k = max(2, n // 3)
+        k = max(2, n // 5)
     else:
-        k = max(2, min(n_clusters, n))
+        k = max(1, min(n_clusters, n))
     k = min(k, n)
     if k < 2:
         # Too few points for meaningful clustering — treat as single cluster

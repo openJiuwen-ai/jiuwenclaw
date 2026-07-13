@@ -364,7 +364,6 @@ def build_filesystem_policy(
         _mount_rw_dir(resolved_workspace)
 
     resolved_project = _resolve_project_dir(project_dir)
-    logger.info(f'zzx: resolved_project: {resolved_project}')
     if resolved_project is not None:
         _mount_rw_dir(resolved_project)
 

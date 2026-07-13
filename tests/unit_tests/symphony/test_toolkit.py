@@ -401,7 +401,10 @@ def test_toolkit_plan_preserves_display_content_after_score_summary():
         lambda _params, request=None: {
             "success": True,
             "presentation": {
-                "markdown": "## Recommended Plan\n\nUse skill A, then skill B.",
+                "markdown": (
+                    "## Recommended Plan\n\nUse skill A, then skill B.\n\n"
+                    "是否按照上述编排结果执行？"
+                ),
                 "mermaid": "flowchart LR\n  A --> B",
             },
         },
@@ -412,6 +415,7 @@ def test_toolkit_plan_preserves_display_content_after_score_summary():
     assert result["direct_display"] is True
     assert result["display_format"] == "markdown"
     assert result["content"].startswith("## Recommended Plan")
+    assert result["content"].endswith("是否按照上述编排结果执行？")
     assert "## Symphony score" not in result["content"]
     assert "Detail: up to date" not in result["content"]
     assert result["mermaid"] == "flowchart LR\n  A --> B"

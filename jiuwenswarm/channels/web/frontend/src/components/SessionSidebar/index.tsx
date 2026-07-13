@@ -12,7 +12,6 @@ import channelIcon from '../../assets/sidebar/channel.svg';
 import pluginIcon from '../../assets/sidebar/plugin.svg';
 import configIcon from '../../assets/sidebar/config.svg';
 import webIcon from '../../assets/sidebar/web.svg';
-import logsIcon from '../../assets/sidebar/logs.svg';
 import plusIcon from '../../assets/sidebar/plus.svg';
 import logoIcon from '/logo.svg';
 import advancedConfigIcon from '../../assets/sidebar/advanced-config-new.svg';
@@ -27,7 +26,7 @@ import agentDesignIcon from '../../assets/智能体.svg';
 import moreDesignIcon from '../../assets/更多.svg';
 import { webRequest } from '../../services/webClient';
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
 
 interface SessionSidebarProps {
   activeNav: MainNavKey;
@@ -66,7 +65,6 @@ const moreNavItems: NavItem[] = [
   { key: 'extensions', labelKey: 'nav.extensions', icon: <img src={pluginIcon} alt="" /> },
   { key: 'browserpanel', labelKey: 'nav.browser', icon: <img src={webIcon} alt="" /> },
   { key: 'configpanel', labelKey: 'nav.config', icon: <img src={configIcon} alt="" /> },
-  { key: 'logspanel', labelKey: 'nav.logs', icon: <img src={logsIcon} alt="" /> },
   { key: 'updatepanel', labelKey: 'nav.update', icon: <img src={updateIcon} alt="" /> },
 ];
 

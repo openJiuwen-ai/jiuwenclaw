@@ -300,14 +300,17 @@ async def test_command_model_switch_sends_scoped_agent_reload(monkeypatch):
     async def fake_send_tui_agent_request(_client, env, *, label):
         sent_envs.append((env, label))
 
+    def fake_update_config(mutator, **kwargs):
+        data = {"models": {"defaults": [dict(d) for d in defaults]}}
+        return mutator(data)
+
     monkeypatch.setattr(tui_connect_module, "_send_tui_agent_request", fake_send_tui_agent_request)
+    monkeypatch.setattr(tui_connect_module, "update_config", fake_update_config)
     monkeypatch.setattr(
         tui_connect_module,
         "get_config_raw",
         lambda: {"models": {"defaults": defaults}},
     )
-    monkeypatch.setattr(tui_connect_module, "ensure_defaults_list_in_config", lambda: defaults)
-    monkeypatch.setattr(tui_connect_module, "update_default_models_in_config", lambda _defaults: None)
     monkeypatch.setattr(tui_connect_module, "get_config", lambda: {"models": {"defaults": defaults}})
 
     register_cli_handlers(
