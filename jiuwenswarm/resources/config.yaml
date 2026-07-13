@@ -423,6 +423,12 @@ react:
       third_pass_target_tokens: 10000
       truncate_head_ratio: 0.2
       offload_writeback_enabled: false
+    # 连续相同 reasoning + 相同工具集时，折叠较早重复轮次（始终保留最近 1 轮完整内容）
+    reasoning_tool_loop_compact_config:
+      enabled: true                      # 是否启用 reasoning+工具循环压缩
+      consecutive_threshold: 3             # 尾部连续几轮相同才触发压缩
+      reasoning_min_chars: 4               # reasoning 低于此长度（strip 后）的轮次不参与匹配
+      reasoning_preview_max_chars: 512     # 摘要里 reasoning 预览的最大字符数
   # Skills 在线自演进配置
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进
