@@ -553,7 +553,7 @@ class BidirectionalBeamPlanner:
             )
 
         plans = self._plans_from_states(all_states)[: self.top_k]
-        recommended_plans = [self._plan_payload(plan) for plan in plans]
+        recommended_plans = [self._plan_payload(plan, query=query) for plan in plans]
         final_plan = recommended_plans[0] if recommended_plans else {}
         final_graph_payload = self._beam_graph.mark_final_plan(final_plan)
         await self._emit_beam_event(
@@ -1256,11 +1256,9 @@ class BidirectionalBeamPlanner:
             ),
         )
 
-    def _plan_payload(self, plan: OrchestrationPlan) -> dict[str, Any]:
+    def _plan_payload(self, plan: OrchestrationPlan, *, query: str) -> dict[str, Any]:
         payload = plan.to_dict()
-        title = default_beam_plan_title(self.language)
-        if plan.steps:
-            title = " -> ".join(step.name for step in plan.steps[:4])
+        title = _query_plan_title(query, language=self.language)
         reason = "; ".join(plan.reasons[:3])
         payload.update(
             {
@@ -1324,6 +1322,15 @@ def _clamp_score(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return max(0.0, min(1.0, parsed))
+
+
+def _query_plan_title(query: str, *, language: str) -> str:
+    title = " ".join(str(query or "").split())
+    if not title:
+        return default_beam_plan_title(language)
+    if len(title) <= 80:
+        return title
+    return f"{title[:77].rstrip()}..."
 
 
 def _append_unique(values: tuple[str, ...], value: str) -> tuple[str, ...]:

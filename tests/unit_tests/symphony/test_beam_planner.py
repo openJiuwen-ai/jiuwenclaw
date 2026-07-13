@@ -60,6 +60,7 @@ async def test_beam_batches_outgoing_neighbors_and_filters_low_scores(tmp_path):
 
     assert result["planning_mode"] == "bidirectional_beam"
     assert result["llm_call_count"] == 1
+    assert result["recommended_plans"][0]["title"] == "compose an alpha plan"
     assert result["beam_search"]["seed_skill_ids"] == ["skill-a"]
     assert result["beam_search"]["round_index"] == 1
     assert result["beam_search"]["events"][0]["event"] == "started"
