@@ -10,12 +10,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-ENV_API_TOKEN = "JIUWENBOX_API_TOKEN"
+_ENV_API_TOKEN_NAME = "JIUWENBOX_API_TOKEN"
 
 
 def get_configured_token() -> str | None:
     """Return the configured API token, or ``None`` when auth is disabled."""
-    raw = os.environ.get(ENV_API_TOKEN)
+    raw = os.environ.get(_ENV_API_TOKEN_NAME)
     if raw is None:
         return None
     token = raw.strip()
@@ -42,7 +42,7 @@ def token_is_valid(provided: str | None, expected: str) -> bool:
 
 
 class BearerTokenAuthMiddleware(BaseHTTPMiddleware):
-    """Require ``Authorization: Bearer <token>`` when ``JIUWENBOX_API_TOKEN`` is set."""
+    """Require ``Authorization: Bearer <token>`` when the API token env is set."""
 
     async def dispatch(self, request: Request, call_next) -> Response:
         expected = get_configured_token()

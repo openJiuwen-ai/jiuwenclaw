@@ -115,7 +115,7 @@ def _flush_stderr() -> None:
 
 _ENV_BASE_URL = "JIUWENBOX_URL"
 _ENV_TIMEOUT = "JIUWENBOX_TIMEOUT"
-_ENV_API_TOKEN = "JIUWENBOX_API_TOKEN"
+_ENV_API_TOKEN_NAME = "JIUWENBOX_API_TOKEN"
 _DEFAULT_BASE_URL = "http://127.0.0.1:8321"
 _DEFAULT_TIMEOUT = 30.0
 _API_PREFIX = "/api/v1"
@@ -909,10 +909,10 @@ def _add_global_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--api-token",
-        default=os.environ.get(_ENV_API_TOKEN),
+        default=os.environ.get(_ENV_API_TOKEN_NAME),
         help=(
-            f"Bearer token for API authentication (env {_ENV_API_TOKEN}; "
-            "must match server-side JIUWENBOX_API_TOKEN when enabled)"
+            f"Bearer token for API authentication (env {_ENV_API_TOKEN_NAME}; "
+            f"must match server-side {_ENV_API_TOKEN_NAME} when enabled)"
         ),
     )
     parser.add_argument(

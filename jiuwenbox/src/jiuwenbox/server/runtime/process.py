@@ -836,6 +836,8 @@ class ProcessRuntime(RuntimeAdapter):
         scripts, seccomp BPF, landlock payload) keep the per-call cost low.
         """
         config = BwrapConfig.from_policy(policy, list(command))
+        process_uid = config.uid
+        process_gid = config.gid
         if sandbox_env:
             config.env.update(sandbox_env)
         if workdir:
@@ -921,6 +923,21 @@ class ProcessRuntime(RuntimeAdapter):
                 ]
 
         config.seccomp_fd = seccomp_fd
+        if self._needs_setpriv_for_process_identity(process_uid):
+            if process_uid is None or process_gid is None:
+                raise RuntimeError(
+                    "run_as_user/run_as_group could not be resolved for setpriv",
+                )
+            config.command = self._wrap_command_with_setpriv(
+                config.command,
+                process_uid,
+                process_gid,
+            )
+            logger.info(
+                "Using setpriv for sandbox command as host uid %d gid %d",
+                process_uid,
+                process_gid,
+            )
         return config.to_args()
 
     def _get_netns_name(self, sandbox_id: str) -> str:
@@ -1278,6 +1295,44 @@ class ProcessRuntime(RuntimeAdapter):
             )
             os.chmod(path, fallback_mode)
 
+    @staticmethod
+    def _needs_setpriv_for_process_identity(uid: int | None) -> bool:
+        """Whether to drop to the host uid via setpriv after bwrap setup.
+
+        The jiuwenbox server normally runs as root; bubblewrap only applies
+        ``--uid`` together with ``--unshare-user``. ``setpriv`` runs the sandbox
+        command as the real host uid/gid from ``run_as_user`` / ``run_as_group``
+        without changing ``namespace.user`` in policy.
+        """
+        if os.geteuid() != 0 or uid is None or uid == 0:
+            return False
+        if shutil.which("setpriv") is None:
+            logger.warning(
+                "setpriv (util-linux) is not installed; sandbox command will not "
+                "drop to host uid %d",
+                uid,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _wrap_command_with_setpriv(
+        command: list[str],
+        uid: int,
+        gid: int,
+    ) -> list[str]:
+        setpriv = shutil.which("setpriv")
+        if setpriv is None:
+            raise RuntimeError("setpriv (util-linux) is required to run as host user")
+        return [
+            setpriv,
+            f"--reuid={uid}",
+            f"--regid={gid}",
+            "--init-groups",
+            "--",
+            *command,
+        ]
+
     def _ensure_policy_directories(
         self,
         sandbox_id: str,
@@ -1309,6 +1364,8 @@ class ProcessRuntime(RuntimeAdapter):
             self._apply_path_permissions(host_path, permissions)
             if self._needs_userns_write_fallback(policy, uid, permissions):
                 self._apply_userns_write_fallback(host_path)
+            elif self._needs_userns_owner_access_fallback(policy, uid):
+                self._apply_userns_file_access_fallback(host_path)
             self._ensure_writable_when_chown_unavailable(host_path, owner_applied)
             binds.append({
                 "host_path": str(host_path),
