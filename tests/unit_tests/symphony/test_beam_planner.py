@@ -93,11 +93,21 @@ async def test_beam_batches_outgoing_neighbors_and_filters_low_scores(tmp_path):
     assert graph_nodes["skill-b"]["status"] == "final"
     assert graph_nodes["skill-c"]["status"] == "rejected"
     payload = json.loads(llm.calls[0]["user_content"])
+    assert set(payload) == {
+        "query",
+        "direction",
+        "current_skill",
+        "candidates",
+    }
     assert payload["direction"] == "forward"
     assert [item["skill"]["id"] for item in payload["candidates"]] == [
         "skill-b",
         "skill-c",
     ]
+    assert all(set(item) == {"candidate_id", "skill"} for item in payload["candidates"])
+    assert "Write all user-visible natural-language fields in Simplified Chinese" in (
+        llm.calls[0]["system_prompt"]
+    )
     assert _plan_signatures(result) == {("skill-a", "skill-b")}
 
 
@@ -152,12 +162,50 @@ async def test_beam_reuses_same_round_judgement_for_duplicate_skill_edge(tmp_pat
 
     assert result["llm_call_count"] == 3
     assert len(llm.calls) == 3
+    first_round_current_skills = {
+        json.loads(call["user_content"])["current_skill"]["id"]
+        for call in llm.calls[:2]
+    }
+    assert first_round_current_skills == {"skill-a", "skill-c"}
     final_payload = json.loads(llm.calls[-1]["user_content"])
     assert [item["skill"]["id"] for item in final_payload["candidates"]] == [
         "skill-d"
     ]
     assert result["decision"]["judge_cache_misses"] >= 3
     assert any("skill-d" in signature for signature in _plan_signatures(result))
+
+
+async def test_beam_judges_same_candidate_separately_by_direction(tmp_path):
+    artifacts = _artifacts(
+        tmp_path,
+        edges=[
+            _edge("skill-a", "skill-shared", confidence=0.91),
+            _edge("skill-shared", "skill-b", confidence=0.9),
+        ],
+    )
+    llm = _FakeBeamLLM({"skill-shared": 0.9})
+
+    result = await _planner(
+        artifacts,
+        llm,
+        top_k=2,
+        max_depth=2,
+        candidate_skill_ids=["skill-a", "skill-b"],
+    ).plan("use the shared skill")
+
+    shared_calls = [
+        json.loads(call["user_content"])
+        for call in llm.calls
+        if any(
+            candidate["skill"]["id"] == "skill-shared"
+            for candidate in json.loads(call["user_content"])["candidates"]
+        )
+    ]
+    assert result["llm_call_count"] == 2
+    assert {payload["direction"] for payload in shared_calls} == {
+        "forward",
+        "backward",
+    }
 
 
 async def test_beam_limits_concurrent_judge_requests(tmp_path):
@@ -258,9 +306,39 @@ async def test_beam_progress_callback_receives_lightweight_graph_events(tmp_path
         "completed",
     ]
     assert events == result["beam_search"]["events"]
+    assert result["language"] == "cn"
+    assert result["beam_search"]["language"] == "cn"
+    assert all(event["language"] == "cn" for event in events)
     judged = events[2]["payload"]["candidates"]
     assert {item["status"] for item in judged} == {"selected", "rejected"}
     assert all("score" not in item and "reason" not in item for item in judged)
+
+
+async def test_beam_judge_and_seed_reason_use_english(tmp_path):
+    artifacts = _artifacts(
+        tmp_path,
+        edges=[_edge("skill-a", "skill-b", confidence=0.91)],
+    )
+    llm = _FakeBeamLLM({"skill-b": 0.9})
+
+    result = await _planner(
+        artifacts,
+        llm,
+        top_k=1,
+        max_depth=2,
+        candidate_skill_ids=["skill-a"],
+        language="en",
+    ).plan("compose a plan")
+
+    prompt = llm.calls[0]
+    payload = json.loads(prompt["user_content"])
+    assert "language" not in payload
+    assert "language_instruction" not in payload
+    assert "state" not in payload
+    assert "Write all user-visible natural-language fields in English" in (
+        prompt["system_prompt"]
+    )
+    assert "skill-a selected as a seed skill" in result["reason"]
 
 
 def _planner(
@@ -271,6 +349,7 @@ def _planner(
     max_depth: int,
     candidate_skill_ids: list[str],
     progress_callback=None,
+    language="cn",
 ) -> BidirectionalBeamPlanner:
     return BidirectionalBeamPlanner(
         artifacts,
@@ -281,6 +360,7 @@ def _planner(
         max_depth=max_depth,
         candidate_skill_ids=candidate_skill_ids,
         progress_callback=progress_callback,
+        language=language,
     )
 
 

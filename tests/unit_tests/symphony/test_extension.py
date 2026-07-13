@@ -81,6 +81,10 @@ def test_plan_uses_llm_plan_from_score(monkeypatch, tmp_path):
     llm_config = object()
     seen = {}
     monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.get_config",
+        lambda: {"preferred_language": "zh"},
+    )
+    monkeypatch.setattr(
         "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
         lambda: symphony_config_from_dict(
             {"paths": {"score_dir": str(configured_score_dir)}}
@@ -127,6 +131,90 @@ def test_plan_uses_llm_plan_from_score(monkeypatch, tmp_path):
     assert seen["query"] == "do work"
     assert seen["llm_config"] is llm_config
     assert "orchestration_config" in seen["kwargs"]
+    assert seen["kwargs"]["language"] == "cn"
+
+
+def test_plan_uses_explicit_internal_language(monkeypatch, tmp_path):
+    configured_score_dir = tmp_path / "configured"
+    seen = {}
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {"paths": {"score_dir": str(configured_score_dir)}}
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_score_artifacts",
+        lambda score_dir: {"score_dir": str(score_dir)},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+
+    async def fake_plan_from_score(*args, **kwargs):
+        del args
+        seen.update(kwargs)
+        return {
+            "status": "ready",
+            "recommended_plans": [],
+            "execution_graph": {"edges": []},
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.plan_from_score",
+        fake_plan_from_score,
+    )
+
+    result = asyncio.run(
+        SymphonyExtension().plan({"query": "do work", "language": "en"})
+    )
+
+    assert result["language"] == "en"
+    assert result["content"].startswith("## Symphony plan")
+    assert seen["language"] == "en"
+
+
+def test_plan_resolves_language_from_runtime_config(monkeypatch, tmp_path):
+    configured_score_dir = tmp_path / "configured"
+    seen = {}
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.get_config",
+        lambda: {"preferred_language": "en"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {"paths": {"score_dir": str(configured_score_dir)}}
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_score_artifacts",
+        lambda score_dir: {"score_dir": str(score_dir)},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+
+    async def fake_plan_from_score(*args, **kwargs):
+        del args
+        seen.update(kwargs)
+        return {
+            "status": "ready",
+            "recommended_plans": [],
+            "execution_graph": {"edges": []},
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.plan_from_score",
+        fake_plan_from_score,
+    )
+
+    result = asyncio.run(SymphonyExtension().plan({"query": "do work"}))
+
+    assert result["language"] == "en"
+    assert seen["language"] == "en"
 
 
 def test_plan_uses_requested_fast_mode(monkeypatch, tmp_path):
@@ -359,9 +447,13 @@ def test_plan_streams_beam_progress_events(monkeypatch, tmp_path):
             {
                 "type": "symphony.beam_search.started",
                 "event": "started",
+                "language": "en",
                 "sequence": 1,
                 "round": 0,
-                "payload": {"seed_skill_ids": ["skill-1"]},
+                "payload": {
+                    "seed_skill_ids": ["skill-1"],
+                    "graph": {"nodes": [], "edges": []},
+                },
             }
         )
         return {
@@ -390,9 +482,11 @@ def test_plan_streams_beam_progress_events(monkeypatch, tmp_path):
         {
             "type": "symphony.beam_search.started",
             "event": "started",
+            "language": "en",
             "sequence": 1,
-            "round": 0,
-            "payload": {"seed_skill_ids": ["skill-1"]},
+            "round_index": 0,
+            "seed_skill_ids": ["skill-1"],
+            "graph": {"nodes": [], "edges": []},
         }
     ]
 

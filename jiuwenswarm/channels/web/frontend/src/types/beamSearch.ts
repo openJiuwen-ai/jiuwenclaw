@@ -24,6 +24,7 @@ export interface BeamSearchGraph {
 
 export interface BeamSearchProgress {
   event: string;
+  language: 'cn' | 'en';
   roundIndex: number;
   graph: BeamSearchGraph;
 }
@@ -44,6 +45,7 @@ export function parseBeamSearchProgress(raw: unknown): BeamSearchProgress | unde
   }
   return {
     event: typeof event.event === 'string' ? event.event : '',
+    language: event.language === 'en' ? 'en' : 'cn',
     roundIndex: typeof event.round_index === 'number' ? event.round_index : 0,
     graph: {
       nodes: graph.nodes as BeamSearchNode[],

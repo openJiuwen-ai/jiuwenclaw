@@ -17,6 +17,9 @@ from jiuwenswarm.agents.harness.common.tool_progress_context import (
     current_tool_progress,
 )
 from jiuwenswarm.symphony.config import load_symphony_config
+from jiuwenswarm.symphony.orchestration.language import (
+    resolve_orchestration_language,
+)
 from jiuwenswarm.symphony.score_storage import (
     CURRENT_POINTER_FILENAME,
     resolve_score_artifact_dir,
@@ -29,6 +32,9 @@ _SKILL_RETRIEVAL_CANDIDATE_RECORD_LIMIT = 10
 
 class SymphonyToolkit:
     """Expose Symphony extension RPC methods as model-callable tools."""
+
+    def __init__(self, language: str = "cn") -> None:
+        self.language = resolve_orchestration_language(language)
 
     @staticmethod
     def _resolve_timeout_s(default_s: float = 1800.0) -> float:
@@ -197,6 +203,7 @@ class SymphonyToolkit:
         }
         for key in (
             "disabled",
+            "language",
             "content",
             "mermaid",
             "direct_display",
@@ -416,6 +423,7 @@ class SymphonyToolkit:
             payload,
             (
                 "mode",
+                "language",
                 "top_k",
                 "max_depth",
                 "min_edge_confidence",
@@ -703,6 +711,7 @@ class SymphonyToolkit:
 
         params: dict[str, Any] = {
             "query": str(query or "").strip(),
+            "language": self.language,
         }
         mode_text = str(mode or "").strip()
         if mode_text:

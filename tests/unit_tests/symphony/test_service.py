@@ -118,10 +118,12 @@ async def test_plan_from_score_fast_uses_one_shot_planner(monkeypatch, tmp_path)
             mode="fast",
             min_edge_confidence=0.7,
         ),
+        language="en",
     )
 
     assert len(llm.calls) == 1
     assert result["planning_mode"] == "one_shot_fast"
+    assert result["language"] == "en"
     assert result["llm_call_count"] == 1
     assert result["recommended_plans"][0]["title"] == "Fast plan"
     assert result["recommended_plans"][0]["steps"][0]["inputs"] == [
@@ -134,6 +136,14 @@ async def test_plan_from_score_fast_uses_one_shot_planner(monkeypatch, tmp_path)
 
     prompt_payload = json.loads(llm.calls[0]["user_content"])
     assert set(prompt_payload) == {"query", "skills", "can_feed_edges"}
+    assert "language" not in prompt_payload
+    assert "planning_instructions" not in prompt_payload
+    assert "Write all user-visible natural-language fields in English" in (
+        llm.calls[0]["system_prompt"]
+    )
+    assert "Keep Skill IDs, original Skill names, status values" in (
+        llm.calls[0]["system_prompt"]
+    )
     assert prompt_payload["can_feed_edges"] == [
         {
             "source_id": "skill-a",

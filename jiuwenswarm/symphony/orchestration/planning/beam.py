@@ -12,6 +12,12 @@ from typing import Any, Awaitable, Callable, Protocol, Sequence
 
 from jiuwenswarm.symphony.llm import LLMConfig, create_llm_client, llm_usage_context
 from jiuwenswarm.symphony.orchestration.artifacts import ScoreArtifacts
+from jiuwenswarm.symphony.orchestration.language import (
+    default_beam_plan_title,
+    planner_language_instruction,
+    resolve_orchestration_language,
+    seed_skill_reason,
+)
 from jiuwenswarm.symphony.orchestration.planning.fast import FAST_PLANNER_MAX_SKILLS
 from jiuwenswarm.symphony.orchestration.planning.models import (
     GroundedQuery,
@@ -37,11 +43,12 @@ You receive:
 - The user's query.
 - The current Skill being expanded.
 - A search direction: forward or backward.
-- Candidate Skill expansions connected by existing can_feed edges.
+- Candidate Skills already validated by existing can_feed edges.
 
 Task:
-- Score each candidate from 0.0 to 1.0 for usefulness to the user's query.
-- Use the provided can_feed evidence only.
+- Score each candidate from 0.0 to 1.0 for usefulness to the user's query and
+  the local Skill chain represented by the current Skill and search direction.
+- Treat data dependency as already validated; do not judge edge feasibility.
 - Do not invent Skills, inputs, outputs, or edge relationships.
 
 Schema:
@@ -96,7 +103,6 @@ class NeighborExpansion:
     current_skill_id: str
     candidate_skill_id: str
     edge_index: int
-    edge_key: str
 
 
 @dataclass(frozen=True)
@@ -304,10 +310,10 @@ class BeamSearchGraph:
 
 
 class SemanticJudgementCache:
-    """Per-plan semantic judgement cache keyed by query, Skill, and edge."""
+    """Cache judgements by the local semantic context visible to the LLM."""
 
     def __init__(self) -> None:
-        self._items: dict[tuple[str, str, str], SemanticJudgement] = {}
+        self._items: dict[tuple[str, str, str, str], SemanticJudgement] = {}
         self.hits = 0
         self.misses = 0
 
@@ -336,11 +342,12 @@ class SemanticJudgementCache:
     def key_for(
         query_signature: str,
         expansion: NeighborExpansion,
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str, str, str]:
         return (
             query_signature,
+            expansion.direction,
+            expansion.current_skill_id,
             expansion.candidate_skill_id,
-            expansion.edge_key,
         )
 
 
@@ -417,6 +424,7 @@ class BidirectionalBeamPlanner:
         candidate_skill_ids: Sequence[str] | None = None,
         max_concurrent_judges: int = DEFAULT_MAX_CONCURRENT_JUDGES,
         progress_callback: BeamProgressCallback | None = None,
+        language: str = "cn",
     ) -> None:
         self.artifacts = artifacts
         self.llm_config = llm_config
@@ -431,6 +439,7 @@ class BidirectionalBeamPlanner:
             known_skill_ids=set(self.skill_by_id),
         )
         self.progress_callback = progress_callback
+        self.language = resolve_orchestration_language(language)
         self._beam_event_sequence = 0
         self._beam_events: list[dict[str, Any]] = []
         self.eligible_edges = self._sorted_eligible_edges()
@@ -565,6 +574,7 @@ class BidirectionalBeamPlanner:
         }
         return {
             "query": query,
+            "language": self.language,
             "score_dir": str(self.artifacts.score_dir),
             "planning_mode": "bidirectional_beam",
             "llm_call_count": judge_queue.llm_call_count,
@@ -575,6 +585,7 @@ class BidirectionalBeamPlanner:
             "ranking_mode": "bidirectional_beam",
             "beam_search": {
                 "mode": "bidirectional_beam",
+                "language": self.language,
                 "top_k": self.top_k,
                 "max_depth": self.max_depth,
                 "min_edge_confidence": self.min_edge_confidence,
@@ -619,11 +630,6 @@ class BidirectionalBeamPlanner:
             "query": query,
             "direction": first.direction,
             "current_skill": self._skill_payload(current_skill),
-            "state": {
-                "skill_ids": list(first.state.skill_ids),
-                "depth": first.state.depth,
-                "directions": sorted(first.state.directions),
-            },
             "candidates": [
                 self._candidate_payload(expansion)
                 for expansion in expansions
@@ -631,7 +637,10 @@ class BidirectionalBeamPlanner:
         }
         with llm_usage_context("orchestration", "bidirectional_beam_judgement"):
             raw = await self._client().complete_json_async(
-                system_prompt=BEAM_JUDGE_SYSTEM_PROMPT,
+                system_prompt=(
+                    f"{BEAM_JUDGE_SYSTEM_PROMPT}\n"
+                    f"{planner_language_instruction(self.language)}"
+                ),
                 user_content=json.dumps(payload, ensure_ascii=False),
                 error_context="Symphony bidirectional beam judgement",
             )
@@ -673,7 +682,7 @@ class BidirectionalBeamPlanner:
                 edge_indices=(),
                 available=frozenset(),
                 semantic_scores=(1.0,),
-                score_reasons=(f"{current_skill_id} selected as a seed skill",),
+                score_reasons=(seed_skill_reason(current_skill_id, self.language),),
                 seed_skill_ids=tuple(seeds),
                 directions=frozenset({"seed"}),
             )
@@ -811,7 +820,6 @@ class BidirectionalBeamPlanner:
                     current_skill_id=current_skill_id,
                     candidate_skill_id=candidate_skill_id,
                     edge_index=edge_index,
-                    edge_key=_edge_key(edge),
                 )
             )
         return expansions
@@ -869,6 +877,7 @@ class BidirectionalBeamPlanner:
         item = {
             "type": f"symphony.beam_search.{event}",
             "event": event,
+            "language": self.language,
             "sequence": self._beam_event_sequence,
             "round": round_index,
             "payload": payload,
@@ -1010,6 +1019,7 @@ class BidirectionalBeamPlanner:
                     ),
                     skill_by_id=self.skill_by_id,
                     can_feed_edges=self.eligible_edges,
+                    language=self.language,
                 ),
             )
             for state in states
@@ -1182,6 +1192,7 @@ class BidirectionalBeamPlanner:
             ),
             skill_by_id=self.skill_by_id,
             can_feed_edges=self.eligible_edges,
+            language=self.language,
         )
 
     def _state_missing_count(self, state: BeamState) -> int:
@@ -1209,13 +1220,11 @@ class BidirectionalBeamPlanner:
         return max(0.0, min(1.0, (required - missing) / required))
 
     def _candidate_payload(self, expansion: NeighborExpansion) -> dict[str, Any]:
-        edge = self.eligible_edges[expansion.edge_index]
         return {
             "candidate_id": expansion.candidate_id,
             "skill": self._skill_payload(
                 self.skill_by_id[expansion.candidate_skill_id]
             ),
-            "edge": self._edge_payload(edge),
         }
 
     @staticmethod
@@ -1225,21 +1234,6 @@ class BidirectionalBeamPlanner:
             "id": current_skill_id,
             "name": str(skill.get("name") or current_skill_id),
             "description": str(skill.get("description") or "")[:800],
-        }
-
-    @staticmethod
-    def _edge_payload(edge: dict[str, Any]) -> dict[str, Any]:
-        evidence = (
-            edge.get("evidence")
-            if isinstance(edge.get("evidence"), dict)
-            else {}
-        )
-        return {
-            "source_id": skill_id(edge.get("source")),
-            "target_id": skill_id(edge.get("target")),
-            "confidence": edge.get("confidence"),
-            "method": edge.get("method"),
-            "evidence": evidence,
         }
 
     def _sorted_eligible_edges(self) -> list[dict[str, Any]]:
@@ -1266,7 +1260,7 @@ class BidirectionalBeamPlanner:
 
     def _plan_payload(self, plan: OrchestrationPlan) -> dict[str, Any]:
         payload = plan.to_dict()
-        title = "Symphony beam plan"
+        title = default_beam_plan_title(self.language)
         if plan.steps:
             title = " -> ".join(step.name for step in plan.steps[:4])
         reason = "; ".join(plan.reasons[:3])
@@ -1324,27 +1318,6 @@ def _state_signature(state: BeamState) -> str:
     return hashlib.sha1(
         json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()[:10]
-
-
-def _edge_key(edge: dict[str, Any]) -> str:
-    source_id = skill_id(edge.get("source"))
-    target_id = skill_id(edge.get("target"))
-    payload = {
-        "source_id": source_id,
-        "target_id": target_id,
-        "method": edge.get("method"),
-        "confidence": edge.get("confidence"),
-        "evidence": edge.get("evidence"),
-    }
-    digest = hashlib.sha1(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()[:12]
-    return f"{source_id}->{target_id}:{digest}"
 
 
 def _clamp_score(value: Any) -> float:

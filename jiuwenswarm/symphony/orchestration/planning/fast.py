@@ -9,6 +9,11 @@ from typing import Any, Sequence
 
 from jiuwenswarm.symphony.llm import LLMConfig, create_llm_client, llm_usage_context
 from jiuwenswarm.symphony.orchestration.artifacts import ScoreArtifacts
+from jiuwenswarm.symphony.orchestration.language import (
+    default_fast_no_plan_title,
+    planner_language_instruction,
+    resolve_orchestration_language,
+)
 from jiuwenswarm.symphony.orchestration.planning.plan_builder import edge_plan_item
 from jiuwenswarm.symphony.orchestration.planning.utils import skill_id
 
@@ -68,12 +73,14 @@ class FastOneShotPlanner:
         min_edge_confidence: float,
         max_depth: int = 4,
         candidate_skill_ids: Sequence[str] | None = None,
+        language: str = "cn",
     ) -> None:
         self.artifacts = artifacts
         self.llm_config = llm_config
         self.llm_client = llm_client
         self.min_edge_confidence = min_edge_confidence
         self.max_depth = max(1, int(max_depth))
+        self.language = resolve_orchestration_language(language)
         self.candidate_skill_ids = self._normalize_candidate_skill_ids(
             candidate_skill_ids,
             known_skill_ids=set(artifacts.skill_by_id),
@@ -89,7 +96,10 @@ class FastOneShotPlanner:
         }
         with llm_usage_context("orchestration", "one_shot_fast_planning"):
             raw = await client.complete_json_async(
-                system_prompt=FAST_PLANNER_SYSTEM_PROMPT,
+                system_prompt=(
+                    f"{FAST_PLANNER_SYSTEM_PROMPT}\n"
+                    f"{planner_language_instruction(self.language)}"
+                ),
                 user_content=json.dumps(prompt_payload, ensure_ascii=False),
                 error_context="Symphony one-shot fast planning",
                 request_overrides={
@@ -99,6 +109,7 @@ class FastOneShotPlanner:
 
         base = {
             "query": query,
+            "language": self.language,
             "score_dir": str(self.artifacts.score_dir),
             "planning_mode": "one_shot_fast",
             "llm_call_count": 1,
@@ -420,7 +431,8 @@ class FastOneShotPlanner:
                 "detail": "",
                 "plan": {
                     "title": str(
-                        selection.get("title") or "No Symphony fast plan"
+                        selection.get("title")
+                        or default_fast_no_plan_title(self.language)
                     ).strip(),
                     "status": "no_plan",
                     "steps": [],

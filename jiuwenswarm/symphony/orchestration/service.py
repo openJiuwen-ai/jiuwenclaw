@@ -12,6 +12,9 @@ from jiuwenswarm.symphony.orchestration.artifacts import (
     load_score_artifacts,
 )
 from jiuwenswarm.symphony.orchestration.execution_graph import build_execution_graph
+from jiuwenswarm.symphony.orchestration.language import (
+    resolve_orchestration_language,
+)
 from jiuwenswarm.symphony.orchestration.planning.beam import BidirectionalBeamPlanner
 from jiuwenswarm.symphony.orchestration.planning.fast import FastOneShotPlanner
 from jiuwenswarm.symphony.orchestration.planning.utils import clamp
@@ -30,9 +33,11 @@ async def plan_from_score(
     candidate_skill_ids: Sequence[str] | None = None,
     disabled_skill_names: Sequence[str] | None = None,
     progress_callback: Any | None = None,
+    language: str = "cn",
 ) -> dict[str, Any]:
     """Run online planning from an existing Symphony score."""
 
+    language = resolve_orchestration_language(language)
     if orchestration_config is not None:
         top_k = orchestration_config.top_k
         max_depth = orchestration_config.max_depth
@@ -60,6 +65,7 @@ async def plan_from_score(
             max_depth=max(1, int(max_depth)),
             candidate_skill_ids=selected_candidate_skill_ids,
             progress_callback=progress_callback,
+            language=language,
         ).plan(query)
     else:
         result = await FastOneShotPlanner(
@@ -69,7 +75,9 @@ async def plan_from_score(
             min_edge_confidence=clamp(min_edge_confidence),
             max_depth=max(1, int(max_depth)),
             candidate_skill_ids=selected_candidate_skill_ids,
+            language=language,
         ).plan(query)
+    result["language"] = language
     result["skill_retrieval"] = skill_retrieval
     result["execution_graph"] = build_execution_graph(result, artifacts)
     return result

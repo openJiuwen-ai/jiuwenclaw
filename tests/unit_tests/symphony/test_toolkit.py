@@ -97,7 +97,7 @@ def test_toolkit_calls_rpc_handler():
         lambda _params, request=None: {"success": True, "exists": True, "stale": False},
     )
 
-    result = asyncio.run(SymphonyToolkit().plan("use installed skills"))
+    result = asyncio.run(SymphonyToolkit(language="en").plan("use installed skills"))
 
     assert result["success"] is True
     assert result["score_status"] == {"success": True, "exists": True, "stale": False}
@@ -109,6 +109,11 @@ def test_toolkit_calls_rpc_handler():
     for key in ("params", "result", "presentation", "markdown", "summary"):
         assert key not in result
     assert seen["query"] == "use installed skills"
+    assert seen["language"] == "en"
+
+
+def test_toolkit_normalizes_unknown_language_to_chinese():
+    assert SymphonyToolkit(language="unknown").language == "cn"
 
 
 def test_toolkit_passes_fast_mode_to_rpc_handler():
@@ -1014,6 +1019,7 @@ def test_toolkit_get_tools_respects_symphony_enabled(monkeypatch):
         "fast",
         "beam",
     ]
+    assert "language" not in compose_tool.card.input_params["properties"]
     assert compose_tool.card.input_params["properties"]["candidate_skill_ids"] == {
         "type": "array",
         "items": {"type": "string"},

@@ -20,6 +20,10 @@ from jiuwenswarm.symphony.build import score_status
 from jiuwenswarm.symphony.orchestration import load_score_artifacts
 from jiuwenswarm.symphony.orchestration.artifacts import filter_disabled_score_artifacts
 from jiuwenswarm.symphony.orchestration.execution_graph import select_primary_plan
+from jiuwenswarm.symphony.orchestration.language import (
+    default_plan_title,
+    resolve_orchestration_language,
+)
 from jiuwenswarm.symphony.orchestration.service import plan_from_score
 from jiuwenswarm.symphony.score_storage import resolve_score_artifact_dir
 
@@ -174,6 +178,10 @@ class SymphonyExtension(BaseExtension):
         candidate_skill_ids = _candidate_skill_ids_from_params(
             params.get("candidate_skill_ids")
         )
+        configured_language = params.get("language")
+        if configured_language is None:
+            configured_language = get_config().get("preferred_language", "zh")
+        language = resolve_orchestration_language(configured_language)
         config = load_symphony_config()
         score_dir = config.paths.score_dir
         orchestration_config = config.orchestration
@@ -211,6 +219,7 @@ class SymphonyExtension(BaseExtension):
             candidate_skill_ids=candidate_skill_ids,
             disabled_skill_names=load_execution_disabled_skills(),
             progress_callback=progress_callback,
+            language=language,
         )
         if payload.get("success") is False:
             return {
@@ -218,17 +227,16 @@ class SymphonyExtension(BaseExtension):
                 "score_dir": str(score_dir),
                 "query": query,
                 "mode": orchestration_config.mode,
+                "language": language,
                 **payload,
             }
-        preferred_language = str(
-            get_config().get("preferred_language") or "zh"
-        ).strip().lower()
-        presentation = _build_presentation(payload, language=preferred_language)
+        presentation = _build_presentation(payload, language=language)
         return {
             "success": True,
             "score_dir": str(score_dir),
             "query": query,
             "mode": orchestration_config.mode,
+            "language": language,
             "content": presentation["markdown"],
             "markdown": presentation["markdown"],
             "mermaid": presentation["mermaid"],
@@ -342,9 +350,23 @@ def _param_bool(value: Any, default: bool = False) -> bool:
 
 def _beam_progress_callback(request: Any):
     async def callback(event: dict[str, Any]) -> None:
-        await _emit_beam_progress_event(request, event)
+        await _emit_beam_progress_event(request, _beam_display_event(event))
 
     return callback
+
+
+def _beam_display_event(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return event
+    return {
+        "type": event.get("type") or "symphony.beam_search.update",
+        "event": event.get("event") or "",
+        "language": event.get("language") or "cn",
+        "sequence": event.get("sequence") or 0,
+        "round_index": event.get("round") or 0,
+        **payload,
+    }
 
 
 async def _emit_beam_progress_event(request: Any, event: dict[str, Any]) -> None:
@@ -645,10 +667,10 @@ def _compact_details(details: dict[str, Any]) -> str:
 def _build_presentation(
     payload: dict[str, Any],
     *,
-    language: str = "zh",
+    language: str = "cn",
 ) -> dict[str, str]:
     plan = select_primary_plan(payload)
-    title = str(plan.get("title") or "Symphony plan").strip()
+    title = str(plan.get("title") or default_plan_title(language)).strip()
     mermaid = _plan_to_mermaid(plan, payload.get("execution_graph") or {})
     lines = [
         f"## {title}",

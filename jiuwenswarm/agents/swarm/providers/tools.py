@@ -39,6 +39,9 @@ from openjiuwen.agent_teams.harness.manifest import (
 )
 
 from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
+from jiuwenswarm.symphony.orchestration.language import (
+    resolve_orchestration_language,
+)
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_image_gen_model_config_from_yaml,
@@ -404,7 +407,14 @@ def _build_symphony_tools(ctx: SwarmBuildContext) -> list[Any]:
     if getattr(ctx, "role", "") != "leader":
         return []
     try:
-        return list(SymphonyToolkit().get_tools(get_config()))
+        config = ctx.config or get_config()
+        return list(
+            SymphonyToolkit(
+                language=resolve_orchestration_language(
+                    config.get("preferred_language", "zh")
+                )
+            ).get_tools(config)
+        )
     except Exception as exc:
         logger.warning("[swarm.symphony_toolkit] construction failed: %s", exc)
         return []

@@ -2288,7 +2288,9 @@ class JiuWenSwarmDeepAdapter:
             current_tools=self._symphony_tools,
             registered=self._symphony_tools_registered,
             enabled=enabled,
-            create_fn=lambda: SymphonyToolkit().get_tools(config_base),
+            create_fn=lambda: SymphonyToolkit(
+                language=self._resolve_runtime_language()
+            ).get_tools(config_base),
             warn_label="symphony tools",
         )
 
@@ -4217,7 +4219,9 @@ class JiuWenSwarmDeepAdapter:
             logger.info("[JiuWenSwarmDeepAdapter] SkillRetrievalToolkit skipped: disabled")
 
         try:
-            symphony_toolkit = SymphonyToolkit()
+            symphony_toolkit = SymphonyToolkit(
+                language=self._resolve_runtime_language()
+            )
             symphony_tool_names: list[str] = []
             symphony_tools = symphony_toolkit.get_tools(config_base)
             for tool in symphony_tools:

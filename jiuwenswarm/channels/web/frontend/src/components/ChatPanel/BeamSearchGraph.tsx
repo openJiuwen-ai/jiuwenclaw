@@ -43,6 +43,14 @@ export function BeamSearchGraph({ progress }: { progress: BeamSearchProgress }) 
   const selected = progress.graph.nodes.filter(
     (node) => node.status === 'selected' || node.status === 'final'
   ).length;
+  const isEnglish = progress.language === 'en';
+  const title = isEnglish ? 'Skill orchestration search' : '技能编排搜索';
+  const round = isEnglish
+    ? `Round ${progress.roundIndex}`
+    : `第 ${progress.roundIndex} 轮`;
+  const summary = isEnglish
+    ? `${progress.graph.nodes.length} skills · ${selected} selected`
+    : `${progress.graph.nodes.length} 个技能 · ${selected} 个入选`;
 
   return (
     <div className="beam-search animate-rise" data-testid="beam-search-graph">
@@ -53,11 +61,11 @@ export function BeamSearchGraph({ progress }: { progress: BeamSearchProgress }) 
         aria-expanded={!collapsed}
       >
         <span className="beam-search__title">
-          <span className="beam-search__badge">技能编排搜索</span>
-          <span>第 {progress.roundIndex} 轮</span>
+          <span className="beam-search__badge">{title}</span>
+          <span>{round}</span>
         </span>
         <span className="beam-search__meta">
-          {progress.graph.nodes.length} 个技能 · {selected} 个入选
+          {summary}
           <ChevronDown
             className={clsx('beam-search__chevron', !collapsed && 'is-open')}
             size={14}
