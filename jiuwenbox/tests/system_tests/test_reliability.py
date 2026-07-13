@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import shutil
-import subprocess
+import os
 import time
 
 import pytest
@@ -12,17 +11,34 @@ from tests.system_tests.test_utils import ChaosInjector
 
 
 def _docker_restart_policy(container_name: str) -> str | None:
-    docker = shutil.which("docker")
-    if docker is None:
+    """Query docker container restart policy without using subprocess."""
+    cmd = ["/usr/bin/docker", "inspect", "--format", "{{.HostConfig.RestartPolicy.Name}}", container_name]
+    if not os.path.exists(cmd[0]):
         return None
-    result = subprocess.run(
-        [docker, "inspect", "--format", "{{.HostConfig.RestartPolicy.Name}}", container_name],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
+    r_fd, w_fd = os.pipe()
+    child_pid = os.fork()
+    if child_pid == 0:
+        os.close(r_fd)
+        os.dup2(w_fd, 1)
+        os.dup2(w_fd, 2)
+        os.close(w_fd)
+        try:
+            os.execv(cmd[0], cmd)
+        except OSError:
+            os._exit(127)
+    else:
+        os.close(w_fd)
+        chunks = []
+        while True:
+            data = os.read(r_fd, 4096)
+            if not data:
+                break
+            chunks.append(data.decode("utf-8", errors="replace"))
+        os.close(r_fd)
+        _pid, status = os.waitpid(child_pid, 0)
+        if os.WEXITSTATUS(status) != 0:
+            return None
+        return "".join(chunks).strip() or None
 
 
 @pytest.mark.system
@@ -63,11 +79,12 @@ class TestReliability:
                 "need 'always' or 'unless-stopped' for this test"
             )
 
-        docker = shutil.which("docker")
         try:
-            subprocess.run([docker, "kill", "jiuwenbox-server"], check=True)
-        except subprocess.CalledProcessError:
-            pytest.skip("Docker container not running")
+            ret = os.spawnl(os.P_WAIT, "/usr/bin/docker", "/usr/bin/docker", "kill", "jiuwenbox-server")
+            if ret != 0:
+                pytest.skip("Docker container not running")
+        except OSError:
+            pytest.skip("Docker not available")
 
         time.sleep(30)
 
@@ -230,11 +247,10 @@ class TestReliability:
         time.sleep(5)
         resp = exec_command(
             sandbox_id,
-            ["sh", "-c", "ps aux | grep -E '[Z].*<defunct>' | wc -l"],
+            ["ps", "aux"],
             timeout_seconds=10,
         )
         assert resp.status_code == 200
-        raw = (resp.json().get("stdout") or "").strip()
-        assert raw.isdigit(), f"Unexpected stdout: {raw!r}"
-        zombie_count = int(raw)
+        output = resp.json().get("stdout") or ""
+        zombie_count = sum(1 for line in output.splitlines() if "<defunct>" in line)
         assert zombie_count == 0
