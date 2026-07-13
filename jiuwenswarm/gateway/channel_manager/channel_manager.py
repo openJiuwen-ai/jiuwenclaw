@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import asyncio
 import time
@@ -81,9 +82,14 @@ class ChannelManager(ABC):
         注意: 回调本身保持同步签名，避免旧 Channel 调用方（如飞书 webhook）
         产生 "coroutine was never awaited" 错误。
         """
+        # feishu_create_time 为飞书服务端在消息创建（用户发送）时刻打的毫秒时间戳，
+        # 与本行日志时间（我方收到回调时刻）的差值即"飞书侧创建→我方收到"的投递延迟，
+        # 用于排查飞书延迟补推旧消息造成的幽灵 /join、重复通知等问题。
+        # 其他 channel 无此字段时为 None，不影响日志。
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
         logger.info(
-            "[ChannelManager] Channel 消息 -> MessageHandler: id=%s channel_id=%s",
-            msg.id, msg.channel_id,
+            "[ChannelManager] Channel 消息 -> MessageHandler: id=%s channel_id=%s feishu_create_time=%s",
+            msg.id, msg.channel_id, metadata.get("feishu_create_time"),
         )
         if not self._get_channel_by_id(msg.channel_id):
             logger.info(f"[ChannelManager] Channel: {msg.channel_id} closed, cancel this user message.")
@@ -154,6 +160,14 @@ class ChannelManager(ABC):
             if ch is not None:
                 out.append(ch)
         return out
+
+    def get_channels_by_id(self, channel_id: str) -> list["BaseChannel"]:
+        """返回所有匹配 channel_id 的 Channel 实例（只读，不删除）。
+
+        多应用场景下同一 channel_id（如 "feishu"）对应多个 app 实例，
+        _get_channel_by_id 只返回第一个，此方法返回全部，供 fan-out 使用。
+        """
+        return [ch for k, ch in self._channels.items() if k.channel_id == channel_id]
 
     @property
     def enabled_channels(self) -> list[str]:
@@ -267,6 +281,55 @@ class ChannelManager(ABC):
                                 msg.session_id, msg.id,
                             )
                         continue
+
+                # ── 飞书 cron 推送 / 心跳 relay fan-out：同 channel_id 全部 app 各自投递（各用各的 last_*）。
+                # 仅普通飞书（channel_id == "feishu"）：多 app 共享同一 channel_id，精确路由只到创建 app
+                # （cron-push 的 app_id）或第一个实例（心跳 relay 无 app_id → resolve_app_id='default'），
+                # 其余 app 收不到。fan-out 前清掉 metadata 里创建 app 的 feishu_chat_id，使各 app 走
+                # _extract_receive_info 回退链第 3 档（各 app 自己的 last_*）。
+                # ── 企业飞书（feishu_enterprise:<app_id>）不进此分支：一 channel_id 一 bot 无需 fan-out，
+                # 且其 cron 推送的 feishu_chat_id 是创建任务时绑定的特定群（来自 routing_sid 的
+                # feishu::chat_id::bot_id::...，见 scheduler._push_to_targets），清掉会误投到 last_* 的群。
+                from jiuwenswarm.common.schema.message import EventType as _EventType
+                _is_feishu_fanout = (
+                    isinstance(msg.channel_id, str)
+                    and msg.channel_id == "feishu"
+                    and (
+                        (getattr(msg, "id", "") or "").startswith("cron-push-")
+                        or getattr(msg, "event_type", None) == _EventType.HEARTBEAT_RELAY
+                    )
+                )
+                if _is_feishu_fanout:
+                    targets = self.get_channels_by_id(msg.channel_id)
+                    if not targets:
+                        logger.warning(
+                            "[ChannelManager] 飞书 fan-out: 无 channel channel_id=%s id=%s",
+                            msg.channel_id, getattr(msg, "id", ""),
+                        )
+                        continue
+                    # 清掉创建 app 的平台身份，让每个 app 各走自己的 last_*
+                    fanout_meta = dict(getattr(msg, "metadata", None) or {})
+                    for _k in (
+                        "feishu_chat_id", "feishu_open_id",
+                        "reply_candidate_feishu_open_id", "reply_feishu_open_id",
+                        "reply_candidate_reason", "reply_target_name",
+                    ):
+                        fanout_meta.pop(_k, None)
+                    fanout_msg = dataclasses.replace(msg, metadata=fanout_meta)
+                    logger.info(
+                        "[ChannelManager] 飞书 fan-out: channel_id=%s targets=%d id=%s",
+                        msg.channel_id, len(targets), getattr(msg, "id", ""),
+                    )
+                    for ch in targets:
+                        try:
+                            await ch.send(fanout_msg)
+                        except Exception as e:
+                            logger.error(
+                                "[ChannelManager] 飞书 fan-out 投递失败: channel_id=%s app=%s id=%s: %s",
+                                msg.channel_id, getattr(ch, "app_id", "?"),
+                                getattr(msg, "id", ""), e, exc_info=True,
+                            )
+                    continue
 
                 # ── 兜底：旧单 channel 投递（非 team 模式）──
                 # V2: 优先按 ChannelKey 精确路由（多应用场景下同一 channel_id 对应多个 app）

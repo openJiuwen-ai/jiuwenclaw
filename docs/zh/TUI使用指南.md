@@ -81,7 +81,7 @@
 | `/compact` | - | 压缩上下文，保留摘要 | `/compact` | 全部 |
 | `/config` | `/settings`, `/setting` | 查看/设置后端配置 | `/config`、`/config get`、`/config set key value` | 全部 |
 | `/context` | - | 查看上下文窗口占用与 Token 用量明细 | `/context` | 全部 |
-| `/diff` | - | 交互式查看工作树与按轮次的文件改动 | `/diff` | 全部 |
+| `/diff` | - | 交互式回顾按轮次 diff + 未提交工作树改动 | `/diff` | 全部 |
 | `/evolve` | - | 触发技能演进 | `/evolve myskill 修正错误处理` | `agent.plan` / `team`（见下） |
 | `/evolve_list` | - | 列出某技能的演进条目 | `/evolve_list myskill --sort score` | `agent.plan` / `team` |
 | `/evolve_rebuild` | - | 从归档与演进记录重建 SKILL.md | `/evolve_rebuild myskill 强化错误处理` | `agent.plan` / `team` |
@@ -220,7 +220,9 @@
 
 #### `/diff`（交互式改动回顾）
 
-- **`/diff`**：调用 `command.diff`，获取工作树（uncommitted changes）及本会话内有文件变更的轮次，然后打开 **交互式 Diff 查看器**（全屏覆盖模式）。
+- **`/diff`**：调用 `command.diff`（60s 超时），处理器从请求元数据解析 `session_id` 与 `project_dir`，并行获取两组数据后打开 **交互式 Diff 查看器**（全屏覆盖模式）：
+  - **按轮次改动**：基于 `.agent_history` 文件操作日志计算，涵盖 agent 工作区、用户工作区和项目目录三处日志，去重合并后按用户消息边界划分轮次；
+  - **工作树改动**：基于 `git diff HEAD` 获取未提交的已跟踪文件改动。
 
   **快捷键**：
 
@@ -234,7 +236,14 @@
   | `Home` / `g` | 列表 → 跳至顶部；详情 → 跳至文件开头 |
   | `End` / `Shift+g` | 列表 → 跳至底部；详情 → 跳至文件末尾 |
 
-  注意：未提交的工作树改动通过 `git diff HEAD` 获取；同一文件在工作树和某轮次中均出现时会重复列出，来源标注为 `working` 或 `Turn N`。
+  **效果边界**：
+  - 同一文件在工作树和某轮次中均出现时会重复列出，来源标注为 `working` 或 `Turn N`；
+  - 按轮次 diff 仅追踪 agent 的文件操作日志，不覆盖手动或 bash 编辑的文件；
+  - git diff 部分仅覆盖已跟踪文件的未提交改动，不包含未跟踪文件和已提交历史；
+  - 在 merge/rebase/cherry-pick/revert 等瞬态 git 状态下，git diff 返回 `None`；
+  - 单文件 hunk 超过 400 行会被截断；单文件 diff 超过 1 MB 跳过 hunk 解析；变更文件超过 500 时仅返回统计；
+  - 非 git 仓库或无法解析 `project_dir` 时，仅返回按轮次 diff；
+  - 详见 [Slash命令表](Slash命令表.md#diff交互式改动回顾)。
 
 - **`/compact`**：调用 `command.compact`，返回 `busy` | `compressed` | `noop`；成功时展示 token 节省比例（`compact.ts`）。
 
@@ -369,13 +378,24 @@
 #### `/memory`（记忆管理）
 
 - 别名：`/mem`。
+- 无参数时打开**页签控制台**（仿 StatusView），含 4 个页签：`edit` / `status` / `toggle` / `open`，默认停在 `edit` 页签。
 - 子命令：
-  - `list` — 列出所有记忆文件（大小、行数、修改时间）。
-  - `edit [path]` — 编辑记忆文件；无参数时交互式选择。
-  - `status` — 显示记忆系统详细状态（引擎、索引、Project/Coding/Auto/External Memory 统计）。
-  - `toggle [key]` — 切换记忆开关；无参数时列出可切换项（`memory_enabled`、`memory_proactive`、`memory_forbidden_enabled`）。
-  - `open` — 显示记忆系统各目录路径。
-- 示例：`/memory status`、`/memory toggle memory_enabled`、`/memory edit memory/MEMORY.md`。
+  - `edit [path]` — 编辑记忆文件；无参数时进入 `edit` 页签（展示 Project memory（Checked in at）/ Local memory（Saved in）/ User memory（Saved in），Enter 用 `$EDITOR` 打开），带路径时直接用 `$EDITOR` 打开（不打开页签控制台）。
+  - `status` — 打开 `status` 页签，展示：Engine（`builtin (local)`）、按模式自适应的开关行（`✓ on` / `✗ off`）、运行时记忆统计（agent 模式 "Auto Memory"、code 模式 "Coding Memory"）、Project Memory 统计、External Memory（如果有）；不展示 Current Mode、Index/FTS5/Vector/Cache。
+  - `toggle [key]` — 切换记忆开关；无参数时进入 `toggle` 页签列出可切换项，带 key 时直接切换（不打开页签控制台）。
+  - `open` — 打开 `open` 页签，按模式自适应展示目录（agent 模式：Memory Dir / Project Dir / User Project Dir；code 模式：Coding Memory Dir / Project Dir / User Project Dir），Enter 直接打开系统文件管理器。
+- 页签控制台交互：
+  - `←` / `→` — 切换页签（循环）。
+  - `↑` / `↓` — 在列表项间移动光标。
+  - `Enter` — 执行当前页签操作（edit 编辑文件、toggle 切换开关、open 打开目录）。
+  - `Ctrl+O` — 在 `edit` / `open` 页签切换显示完整路径与相对路径，切换页签时重置为默认（相对路径）。
+  - `Esc` — 关闭页签控制台。
+- `toggle` 页签展示格式（只显示 key，不显示英文 label，有 `✓ on` / `✗ off` 状态标记和中文描述，无 `·` 分隔符）。可切换项按当前 mode 过滤：
+  - agent mode：`memory_enabled`（记忆功能总开关）、`memory_proactive`（对话中自动搜索和记录）、`memory_forbidden_enabled`（过滤敏感信息）；
+  - code mode：`memory_enabled`（记忆功能总开关）、`auto_coding_memory`（每轮对话后自动提取记忆（需总开关开启））、`memory_forbidden_enabled`（过滤敏感信息）。
+  - 切换后若需重启会话生效会给出提示。
+- Tab 补全：`/memory edit ` 后显示文件列表（路径用 `getDisplayPath` 展示，去重）；`/memory toggle ` 后显示当前 mode 的 key 列表；均支持前缀过滤。
+- 示例：`/memory`（打开控制台）、`/memory status`、`/memory toggle memory_enabled`、`/memory edit memory/MEMORY.md`。
 
 #### `/sandbox`（沙箱模式管理）
 
@@ -388,7 +408,7 @@
   - `excluded_commands` — 命中后穿透到本地执行的 shell glob 列表。
   - `landlock` — jiuwenbox Landlock 支持情况（`supported` + `compatibility`）。
   - `files.allow_write` / `files.deny_write` — 生效（auto-managed ∪ user-configured，去重）的写入策略，显示 `(rw)` / `(ro)`。
-- 自动配置路径：文件 `AGENT.md`、`HEARTBEAT.md`、`IDENTITY.md`、`SOUL.md`、`USER.md`，目录 `memory/daily_memory/`，以及 `project_dir`（allow_write）与 `project_dir/config/config.yaml`（deny_write）。`preserve_file_sharing_mode` 仅支持 `mount`。
+- 自动配置路径：当前工作路径。`preserve_file_sharing_mode` 仅支持 `mount`。
 - `excluded_commands` 的匹配：按完整命令字符串匹配，不仅看 `argv[0]`；写 glob 时要把参数也覆盖进去（例如 `"git *"` 而不是 `git`）。本质等同于沙箱穿透口，不要对 `rm -rf` / `curl` 这类高风险命令使用。
 - add / remove 严格校验：`exclude add` 已存在 pattern、`exclude remove` 不存在 pattern 都会报错；`files allow|deny` 在同 bucket 已有 path 或对侧 bucket 已有 path（allow/deny 冲突）会报错，先 `files remove` 再 add；`files remove` 没匹配到也会报错。避免"看起来执行了实际什么也没改"。
 - 写入策略：`allow` / `deny` 控制写访问（rw/ro），不是 Unix 八进制权限；支持「父 allow + 子 deny」，不支持「子 allow + 父 deny」。

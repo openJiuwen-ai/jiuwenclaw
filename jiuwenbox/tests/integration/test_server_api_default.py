@@ -518,7 +518,7 @@ class TestSandboxCRUD:
             "ABC123",
             "my sb",
             " abcd ",
-            "a" * 17,
+            "a" * 41,
             "id!",
         ],
     )
@@ -3638,7 +3638,7 @@ class TestBackgroundJobs:
         )
 
     @staticmethod
-    @pytest.mark.parametrize("invalid_id", ["ab", "ABC123", "my job", "a" * 17])
+    @pytest.mark.parametrize("invalid_id", ["ab", "ABC123", "my job", "a" * 41])
     def test_invalid_job_id_returns_400(client, invalid_id):
         create_resp = client.post("/api/v1/sandboxes", json={})
         sandbox_id = create_resp.json()["id"]

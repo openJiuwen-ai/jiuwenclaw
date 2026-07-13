@@ -26,7 +26,7 @@ ENV_UDS_MODE = "JIUWENBOX_UDS_MODE"
 # the launcher independent of the FastAPI app module (``main`` runs before
 # anything imports ``jiuwenbox.server.app`` lazily inside ``uvicorn.run``).
 ENV_SAVE_LOGS_DIR = "JIUWENBOX_SAVE_LOGS_DIR"
-
+_ENV_API_TOKEN_NAME = "JIUWENBOX_API_TOKEN"
 DEFAULT_LISTEN = "http://0.0.0.0:8321"
 
 HttpSpec = Tuple[str, str, int]   # ("http", host, port)
@@ -177,6 +177,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "kept across boots."
         ),
     )
+    parser.add_argument(
+        "--api-token",
+        default=None,
+        help=(
+            "Enable Bearer token authentication for all HTTP endpoints "
+            f"(including /health and /mcp). Falls back to ${_ENV_API_TOKEN_NAME} "
+            "env; unset means authentication is disabled."
+        ),
+    )
     return parser
 
 
@@ -187,6 +196,14 @@ def _resolve_listen_uri(cli_value: str | None) -> str:
     if env_value:
         return env_value
     return DEFAULT_LISTEN
+
+
+def _resolve_api_token(cli_value: str | None) -> str | None:
+    raw = cli_value if cli_value else os.environ.get(_ENV_API_TOKEN_NAME)
+    if not raw:
+        return None
+    token = raw.strip()
+    return token or None
 
 
 def _resolve_save_logs_dir(cli_value: str | None) -> str | None:
@@ -240,6 +257,13 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("[launcher] sandbox logs will be saved under %s", save_logs_dir)
     else:
         os.environ.pop(ENV_SAVE_LOGS_DIR, None)
+
+    api_token = _resolve_api_token(args.api_token)
+    if api_token:
+        os.environ[_ENV_API_TOKEN_NAME] = api_token
+        logger.info("[launcher] API authentication enabled")
+    else:
+        os.environ.pop(_ENV_API_TOKEN_NAME, None)
 
     try:
         import uvicorn  # 延迟导入: argparse / URI 校验失败时不必拖 uvicorn 进来

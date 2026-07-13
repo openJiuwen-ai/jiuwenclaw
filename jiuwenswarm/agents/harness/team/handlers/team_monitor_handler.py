@@ -330,3 +330,54 @@ class TeamMonitorHandler(BaseMonitorHandler):
             )
             return None
 
+    @staticmethod
+    async def get_member_list_from_db(team_name: str) -> list[dict[str, Any]] | None:
+        """monitor 不在时直查 ``team.db`` 取该 team 的全部成员（/join 成员校验降级）。
+
+        monitor 是 runtime 运行态对象，runtime 被 chat.interrupt 中断 / 后端重启
+        / 轮间 idle 时 monitor 不在，但成员定义静态持久于全局 ``team_member`` 表，
+        不依赖 monitor 存活。本方法在 monitor 不可达时供 server 层降级调用，
+        使 /join 成员校验通过 runtime 间隙继续工作。
+
+        只查全局 ``team_member`` 表，返回该 team 的**全部**成员（不按 role 过滤、
+        不排除 leader）——业务过滤（``role == "human_agent"`` 等）由调用方做，
+        与 ``get_member_list`` 的职责边界一致。member dict 形状（member_id/name/
+        status/execution_status/mode/role）与 ``get_member_list`` 保持一致，便于
+        调用方统一过滤。
+
+        ``initialize()`` 幂等：runtime 已初始化过单例则 no-op；首次由本路径初始化
+        时只建全局表（``create_cur_session_tables`` 无 session 上下文会跳过动态表，
+        但本方法只查全局表，不受影响）。异常或 db 不可达返回 None，调用方按
+        "未就绪"语义处理。
+        """
+        from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+        from openjiuwen.agent_teams.tools.database.config import DatabaseConfig
+
+        from jiuwenswarm.common.config import get_config
+        from jiuwenswarm.agents.harness.team.config_loader import resolve_team_sqlite_db_path
+
+        if not team_name:
+            return None
+        db_path = resolve_team_sqlite_db_path(get_config())
+        if db_path is None:
+            return None
+        db = get_shared_db(DatabaseConfig(db_type="sqlite", connection_string=str(db_path)))
+
+        # db.member dao 在 initialize() 后才挂载（未初始化时为 None），故必须先
+        # initialize；幂等，runtime 已起过则 no-op。
+        await db.initialize()
+        members = await db.member.get_team_members(team_name, status=None)
+
+        return [
+            {
+                "member_id": m.member_name,
+                "name": m.display_name,
+                "status": m.status,
+                "execution_status": m.execution_status,
+                "mode": m.mode,
+                "role": m.role,
+            }
+            for m in members or []
+        ]
+
+

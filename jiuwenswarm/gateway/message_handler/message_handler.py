@@ -107,6 +107,12 @@ class ChannelMode(str, Enum):
     CODE_NORMAL = "code.normal"
     CODE_TEAM = "code.team"
     TEAM = "team"
+    TEAM_PLAN = "team.plan"
+
+    @classmethod
+    def is_team_mode(cls, mode: str) -> bool:
+        """Return True if *mode* resolves to any team variant (case-insensitive)."""
+        return mode.strip().lower() in {cls.TEAM.value, cls.CODE_TEAM.value, cls.TEAM_PLAN.value}
 
 
 @dataclass
@@ -337,7 +343,7 @@ class MessageHandler(ABC):
         godview intent can resolve.
 
         Trigger when:
-        - params.mode == "team", or
+        - params.mode is a team variant (team / code.team / team.plan), or
         - session already has subscribers (already a team session; web mode may be "agent")
         """
         if not msg.session_id:
@@ -349,9 +355,9 @@ class MessageHandler(ABC):
         if isinstance(msg.metadata, dict) and msg.metadata.get("member_name"):
             return
         _params = msg.params if isinstance(msg.params, dict) else {}
-        _mode = str(_params.get("mode") or "").strip()
+        _mode = str(_params.get("mode") or "")
         _session_has_subs = bool(self._session_sharing.lookup_all(msg.session_id))
-        if not (_mode == "team" or _session_has_subs):
+        if not (ChannelMode.is_team_mode(_mode) or _session_has_subs):
             return
         godview_subs = self._session_sharing.lookup_member(msg.session_id, SubRole.GODVIEW)
         _ch = msg.channel_id or "web"
@@ -451,7 +457,7 @@ class MessageHandler(ABC):
     def _is_team_chat_send(msg: "Message") -> bool:
         if not isinstance(msg.params, dict):
             return False
-        return str(msg.params.get("mode") or "").strip().lower() == "team"
+        return ChannelMode.is_team_mode(str(msg.params.get("mode") or ""))
 
     @classmethod
     def _is_interrupt_resume_chat_send(cls, msg: "Message") -> bool:
@@ -496,6 +502,7 @@ class MessageHandler(ABC):
             "code.normal": ChannelMode.CODE_NORMAL,
             "code.team": ChannelMode.CODE_TEAM,
             "team": ChannelMode.TEAM,
+            "team.plan": ChannelMode.TEAM_PLAN,
         }
         mode = mode_map.get(mode_raw, ChannelMode.AGENT_PLAN)
         return ChannelControlState(session_id=sid, mode=mode)
@@ -884,6 +891,14 @@ class MessageHandler(ABC):
                 "[MessageHandler] 已 fire-and-forget 发送 AgentServer 中断: session_id=%s",
                 sid_for_agent,
             )
+            if publish_interrupt_result:
+                await self._send_interrupt_result_notification(
+                    msg.id,
+                    msg.channel_id,
+                    sid_for_agent,
+                    "cancel",
+                    success=True,
+                )
             return
 
         try:
@@ -1286,6 +1301,7 @@ class MessageHandler(ABC):
                 "code.plan",
                 "code.normal",
                 "code.team",
+                "team.plan",
             ):
                 asyncio.create_task(
                     self.send_channel_notice(
@@ -1314,6 +1330,8 @@ class MessageHandler(ABC):
                 state.mode = ChannelMode.CODE_NORMAL
             elif mode_str == "code.team":
                 state.mode = ChannelMode.CODE_TEAM
+            elif mode_str == "team.plan":
+                state.mode = ChannelMode.TEAM_PLAN
             new_label = state.mode.value
             if old_mode != state.mode:
                 asyncio.create_task(

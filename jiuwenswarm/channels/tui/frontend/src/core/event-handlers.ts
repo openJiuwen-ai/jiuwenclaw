@@ -58,6 +58,7 @@ export interface PendingQuestionOption {
   description?: string;
   value?: string;
   details?: string[];
+  preview?: string;
 }
 
 export interface UserAnswer {
@@ -438,6 +439,10 @@ function normalizePendingQuestion(payload: Record<string, unknown>): PendingQues
               label: typeof option.label === "string" ? option.label : "",
               description: typeof option.description === "string" ? option.description : undefined,
               value: typeof option.value === "string" ? option.value : undefined,
+              preview:
+                typeof option.preview === "string" && option.preview.trim()
+                  ? option.preview
+                  : undefined,
             }))
             .filter((option) => option.label.length > 0)
         : [],

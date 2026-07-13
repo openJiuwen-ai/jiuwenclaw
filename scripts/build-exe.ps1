@@ -1,10 +1,173 @@
 # JiuwenSwarm 打包 exe 脚本
 # 用法: .\scripts\build-exe.ps1  或  pwsh -File scripts\build-exe.ps1
 
+param(
+    [string]$NodeDir = ""
+)
+
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $ProjectRoot
+
+$BundleNode = if ($env:BUNDLE_NODE) { $env:BUNDLE_NODE } else { "1" }
+$NodeVersion = if ($env:NODE_VERSION) { $env:NODE_VERSION } else { "v22.11.0" }
+$NodeSource = $null
+
+function Test-Truthy {
+    param([string]$Value)
+
+    $normalized = $Value.Trim().ToLowerInvariant()
+    return $normalized -in @("1", "true", "yes", "on")
+}
+
+function Get-NodeArch {
+    $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    if ($arch -eq [System.Runtime.InteropServices.Architecture]::Arm64) {
+        return "arm64"
+    }
+    return "x64"
+}
+
+function Download-NodeRuntime {
+    param(
+        [string]$ProjectRoot,
+        [string]$NodeVersion
+    )
+
+    $arch = Get-NodeArch
+    $nodeName = "node-$NodeVersion-win-$arch"
+    $nodeUrl = "https://nodejs.org/dist/$NodeVersion/$nodeName.zip"
+    $vendorRoot = Join-Path $ProjectRoot "vendor"
+    $target = Join-Path $vendorRoot "node"
+    $downloadDir = Join-Path $ProjectRoot ".build\node-download"
+    $zipPath = Join-Path $downloadDir "$nodeName.zip"
+
+    Write-Host "[runtime] Downloading Node.js $NodeVersion ($arch)..." -ForegroundColor Yellow
+    New-Item -ItemType Directory -Path $vendorRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+    Invoke-WebRequest -Uri $nodeUrl -OutFile $zipPath -UseBasicParsing
+
+    $extractRoot = Join-Path $downloadDir "extract"
+    if (Test-Path -LiteralPath $extractRoot) {
+        Remove-Item -LiteralPath $extractRoot -Recurse -Force
+    }
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
+
+    $extracted = Join-Path $extractRoot $nodeName
+    if (-not (Test-Path -LiteralPath (Join-Path $extracted "node.exe"))) {
+        throw "Downloaded Node archive does not contain node.exe: $nodeUrl"
+    }
+
+    if (Test-Path -LiteralPath $target) {
+        $projectResolved = (Resolve-Path -LiteralPath $ProjectRoot).Path
+        $targetResolved = (Resolve-Path -LiteralPath $target).Path
+        if (-not $targetResolved.StartsWith($projectResolved, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove Node cache outside project: $targetResolved"
+        }
+        Remove-Item -LiteralPath $targetResolved -Recurse -Force
+    }
+    Move-Item -LiteralPath $extracted -Destination $target
+    return (Resolve-Path -LiteralPath $target).Path
+}
+
+function Resolve-NodeRuntimeDir {
+    param(
+        [string]$ProjectRoot,
+        [string]$ExplicitNodeDir,
+        [string]$NodeVersion
+    )
+
+    if ($ExplicitNodeDir) {
+        $resolved = (Resolve-Path -LiteralPath $ExplicitNodeDir -ErrorAction Stop).Path
+        if (-not (Test-Path -LiteralPath (Join-Path $resolved "node.exe"))) {
+            throw "NodeDir must contain node.exe: $resolved"
+        }
+        return $resolved
+    }
+
+    if ($env:NODE_DIR) {
+        $resolved = (Resolve-Path -LiteralPath $env:NODE_DIR -ErrorAction Stop).Path
+        if (-not (Test-Path -LiteralPath (Join-Path $resolved "node.exe"))) {
+            throw "NODE_DIR must contain node.exe: $resolved"
+        }
+        return $resolved
+    }
+
+    $vendorNode = Join-Path $ProjectRoot "vendor\node"
+    if (Test-Path -LiteralPath (Join-Path $vendorNode "node.exe")) {
+        return (Resolve-Path -LiteralPath $vendorNode).Path
+    }
+
+    $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+    if ($nodeCommand) {
+        return Split-Path -Parent $nodeCommand.Source
+    }
+
+    return Download-NodeRuntime -ProjectRoot $ProjectRoot -NodeVersion $NodeVersion
+}
+
+function Use-NodeRuntime {
+    param([string]$SourceDir)
+
+    if (-not $SourceDir) {
+        return
+    }
+    $env:PATH = "$SourceDir$([System.IO.Path]::PathSeparator)$env:PATH"
+}
+
+function Copy-NodeRuntime {
+    param(
+        [string]$SourceDir,
+        [string]$DistDir
+    )
+
+    if (-not $SourceDir) {
+        return
+    }
+
+    $distResolved = (Resolve-Path -LiteralPath $DistDir -ErrorAction Stop).Path
+    $runtimeDir = Join-Path $distResolved "runtime"
+    $target = Join-Path $runtimeDir "node-runtime"
+    if (Test-Path -LiteralPath $target) {
+        $targetResolved = (Resolve-Path -LiteralPath $target).Path
+        if (-not $targetResolved.StartsWith($distResolved, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove Node runtime outside dist: $targetResolved"
+        }
+        Remove-Item -LiteralPath $targetResolved -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+
+    $files = @("node.exe", "npm.cmd", "npx.cmd", "corepack.cmd", "nodevars.bat")
+    foreach ($file in $files) {
+        $source = Join-Path $SourceDir $file
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -LiteralPath $source -Destination $target -Force
+        }
+    }
+
+    $npmModules = Join-Path $SourceDir "node_modules\npm"
+    if (Test-Path -LiteralPath $npmModules) {
+        $modulesTarget = Join-Path $target "node_modules"
+        New-Item -ItemType Directory -Path $modulesTarget -Force | Out-Null
+        Copy-Item -LiteralPath $npmModules -Destination $modulesTarget -Recurse -Force
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $target "npx.cmd"))) {
+        throw "Bundled Node runtime is missing npx.cmd: $target"
+    }
+
+    $nodeVersion = & (Join-Path $target "node.exe") --version
+    Write-Host "[runtime] Bundled Node $nodeVersion into $target" -ForegroundColor Green
+}
+
+if (Test-Truthy $BundleNode) {
+    $NodeSource = Resolve-NodeRuntimeDir `
+        -ProjectRoot $ProjectRoot `
+        -ExplicitNodeDir $NodeDir `
+        -NodeVersion $NodeVersion
+    Use-NodeRuntime -SourceDir $NodeSource
+}
 
 Write-Host "=== JiuwenSwarm Build Exe ===" -ForegroundColor Cyan
 Write-Host "Project root: $ProjectRoot`n" -ForegroundColor Gray
@@ -30,9 +193,19 @@ Write-Host "`n[3/4] Running PyInstaller..." -ForegroundColor Yellow
 uv run pyinstaller scripts\jiuwenswarm.spec --noconfirm
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# 3.5 Bundle Node.js runtime for browser tools
+if (Test-Truthy $BundleNode) {
+    Write-Host "`n[3.5/4] Bundling Node.js runtime..." -ForegroundColor Yellow
+    $DistDir = Join-Path $ProjectRoot "dist\jiuwenswarm"
+    Copy-NodeRuntime -SourceDir $NodeSource -DistDir $DistDir
+} else {
+    Write-Host "`n[3.5/4] Skipping bundled Node.js runtime (BUNDLE_NODE=$BundleNode)" -ForegroundColor Yellow
+}
+
 # 4. Build installer (Inno Setup)
 Write-Host "`n[4/4] Building installer (Inno Setup)..." -ForegroundColor Yellow
 $IsccPaths = @(
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     "C:\Program Files\Inno Setup 6\ISCC.exe"
 )
@@ -46,7 +219,11 @@ if (-not $Iscc) {
     $InnoExe = "$env:TEMP\innosetup-6.7.1.exe"
     Invoke-WebRequest -Uri $InnoUrl -OutFile $InnoExe -UseBasicParsing
     Write-Host "Installing Inno Setup 6 (silent)..." -ForegroundColor Yellow
-    Start-Process -FilePath $InnoExe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-" -Wait -NoNewWindow
+    Start-Process `
+        -FilePath $InnoExe `
+        -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-" `
+        -Wait `
+        -NoNewWindow
     $Iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
     if (-not (Test-Path $Iscc)) {
         Write-Host "ERROR: Inno Setup installation failed" -ForegroundColor Red

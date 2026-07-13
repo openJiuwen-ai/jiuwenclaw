@@ -38,6 +38,9 @@ from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import (
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
+from jiuwenswarm.agents.harness.common.rails.symphony_orchestration_prompt_rail import (
+    SymphonyOrchestrationPromptRail,
+)
 from jiuwenswarm.agents.harness.team.rails.team_skill_storage_policy_rail import (
     TeamSkillStoragePolicyRail,
 )
@@ -61,6 +64,7 @@ TEAM_WORKSPACE_REPORT_PATH = "swarm.team_workspace_report_path"
 CONTEXT_PROCESSOR = "swarm.context_processor"
 PLUGIN_RAILS = "swarm.plugin_rails"
 SKILL_RETRIEVAL_PROMPT = "swarm.skill_retrieval_prompt"
+SYMPHONY_ORCHESTRATION_PROMPT = "swarm.symphony_orchestration_prompt"
 TEAM_PERMISSION_POLICY = "swarm.team_permission_policy"
 
 
@@ -104,6 +108,22 @@ def _build_skill_retrieval_prompt_rail(
         manager=manager,
         visible_skill_names=lambda: visible_skill_names_for_list_skill(context),
     )
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=SYMPHONY_ORCHESTRATION_PROMPT,
+    description="Leader-only prompt guidance for Symphony orchestration.",
+)
+def _build_symphony_orchestration_prompt_rail(
+    params: dict[str, Any],
+    context: SwarmBuildContext,
+) -> SymphonyOrchestrationPromptRail | None:
+    """Build the Symphony orchestration prompt rail for the team leader."""
+    _ = params
+    if getattr(context, "role", "") != "leader":
+        return None
+    return SymphonyOrchestrationPromptRail()
 
 
 class RuntimePromptInput(ConstructionInput):
@@ -399,6 +419,7 @@ __all__ = [
     "CONTEXT_PROCESSOR",
     "PLUGIN_RAILS",
     "SKILL_RETRIEVAL_PROMPT",
+    "SYMPHONY_ORCHESTRATION_PROMPT",
     "TEAM_PERMISSION",
     "TEAM_PERMISSION_POLICY",
 ]

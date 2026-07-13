@@ -1700,10 +1700,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // Defensive: chat.final is the definitive end-of-response marker.
         // The primary transition is driven by chat.processing_status
         // (is_processing=false), but if that frame is lost the UI would be stuck
-        // showing the stop button. Setting isProcessing=false here is safe —
-        // processing_status will override if needed.
+        // showing the stop button.
+        // In team mode the backend suppresses chat.final while the team is
+        // still running and only sends chat.processing_status(is_complete=true)
+        // on team.completed, so we must NOT reset isProcessing here.
         if (!useChatStore.getState().isLoadingHistory) {
-          setProcessing(false);
+          if (currentMode !== 'team') {
+            setProcessing(false);
+          }
           setThinking(false);
           clearSubtasks();
         }

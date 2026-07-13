@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f40b2-0055-7883-9914-43739662b94c",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._handle_command_context",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._handle_command_context in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f40b2-0055-7883-9914-43739662b94c",
+        "nickname": "Avicenna",
+        "symbol_id": "AgentWebSocketServer._handle_command_context",
+        "completed": true,
+        "finding_count": 1
+      }
+    }
+  ]
+}

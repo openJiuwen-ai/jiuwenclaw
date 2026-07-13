@@ -1,8 +1,28 @@
 import asyncio
+import contextlib
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+_OJ_MEMORY_MANAGER_MODULE = "openjiuwen.core.memory.lite.manager"
+
+
+@contextlib.contextmanager
+def _maybe_patch_aclose_memory_cache():
+    import importlib
+
+    mod = importlib.import_module(_OJ_MEMORY_MANAGER_MODULE)
+    if hasattr(mod, "aclose_memory_manager_cache"):
+        with patch(
+            f"{_OJ_MEMORY_MANAGER_MODULE}.aclose_memory_manager_cache",
+            AsyncMock(),
+        ):
+            yield
+    else:
+        yield
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
@@ -248,6 +268,81 @@ async def test_agent_reload_config_handler_passes_explicit_scope(monkeypatch):
     ]
 
 
+@pytest.mark.asyncio
+async def test_agent_reload_config_handler_skips_agent_manager_for_web_ui_scope(monkeypatch):
+    server = agent_ws_server_module.AgentWebSocketServer()
+    reload_agents = AsyncMock()
+    monkeypatch.setattr(server._agent_manager, "reload_agents_config", reload_agents)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        lambda resp, response_id: {
+            "response_id": response_id,
+            "ok": resp.ok,
+            "payload": resp.payload,
+        },
+    )
+
+    request = AgentRequest(
+        request_id="reload-ui",
+        channel_id="web",
+        req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+        params={
+            "config": {"a2ui": {"enabled": True}},
+            "env": {},
+            "reload_scopes": ["web_ui"],
+        },
+    )
+
+    ws = FakeWebSocket()
+    await server._handle_agent_reload_config(ws, request, asyncio.Lock())
+
+    reload_agents.assert_not_awaited()
+    assert json.loads(ws.sent[-1])["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_agent_reload_config_handler_applies_proactive_scope_without_agent_reload(monkeypatch):
+    server = agent_ws_server_module.AgentWebSocketServer()
+    reload_agents = AsyncMock()
+    proactive_engine = MagicMock()
+    server._proactive_engine = proactive_engine
+
+    monkeypatch.setattr(server._agent_manager, "reload_agents_config", reload_agents)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "get_config",
+        lambda: {"proactive_recommendation": {"enabled": True}},
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        lambda resp, response_id: {
+            "response_id": response_id,
+            "ok": resp.ok,
+            "payload": resp.payload,
+        },
+    )
+
+    request = AgentRequest(
+        request_id="reload-proactive",
+        channel_id="web",
+        req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+        params={
+            "config": {"proactive_recommendation": {"enabled": True}},
+            "env": {},
+            "reload_scopes": ["proactive"],
+        },
+    )
+
+    ws = FakeWebSocket()
+    await server._handle_agent_reload_config(ws, request, asyncio.Lock())
+
+    reload_agents.assert_not_awaited()
+    proactive_engine.reload_config.assert_called_once_with({"enabled": True})
+    assert json.loads(ws.sent[-1])["ok"] is True
+
+
 def test_deep_adapter_reload_session_scope_selects_only_target_session():
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
         JiuWenSwarmDeepAdapter,
@@ -291,7 +386,8 @@ async def test_deep_adapter_global_reload_marks_sessions_stale_without_fanout(mo
 
     with (
         patch.object(interface_module, "clear_config_cache", MagicMock()),
-        patch.object(interface_module, "clear_memory_manager_cache", MagicMock()),
+        _maybe_patch_aclose_memory_cache(),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_handle_memory_rail_by_config", AsyncMock()),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_refresh_multimodal_configs", MagicMock()),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_model", MagicMock(return_value=object())),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_sync_multimodal_tools_for_runtime", MagicMock()),
@@ -368,7 +464,8 @@ async def _reload_deep_adapter_config_for_test(previous_config, deep_config_fact
 
     with (
         patch.object(interface_module, "clear_config_cache", MagicMock()),
-        patch.object(interface_module, "clear_memory_manager_cache", MagicMock()),
+        _maybe_patch_aclose_memory_cache(),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_handle_memory_rail_by_config", AsyncMock()),
         patch.object(
             interface_module.JiuWenSwarmDeepAdapter,
             "_refresh_multimodal_configs",

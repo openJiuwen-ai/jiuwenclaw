@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f3f64-61cd-7b31-83d3-3c8339ed60ce",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._handle_cancel",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._handle_cancel in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f3f64-61cd-7b31-83d3-3c8339ed60ce",
+        "nickname": "Leibniz",
+        "symbol_id": "AgentWebSocketServer._handle_cancel",
+        "completed": true,
+        "finding_count": 2
+      }
+    }
+  ]
+}

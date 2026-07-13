@@ -336,3 +336,38 @@ def test_first_batch_registry_ids() -> None:
         "workspace_dir", "branch", "rewind", "recap", "agents", "review", "security-review",
     }
     assert ids == expected
+
+
+def test_exit_parse_rejects_short_form_requires_full_team_session_ref() -> None:
+    """/exit 简化格式不再允许：缺 team_name 维度无法做一致性校验。
+
+    - /exit（无参）→ EXIT_OK，不校验 team_name（handler 用当前 session 兜底）
+    - /exit team_<name>_session_<id>（完整）→ EXIT_OK，带 session_ref，handler 校验
+    - /exit <session_id>（简化）→ EXIT_BAD，引导用户用完整格式或无参 /exit
+    """
+    # 无参：EXIT_OK，无 session_ref
+    p = parse_channel_control_text("/exit")
+    assert p.action is ParsedControlAction.EXIT_OK
+    assert p.session_ref is None
+
+    # 完整格式：EXIT_OK，session_ref 原样回填
+    p = parse_channel_control_text(
+        "/exit team_jiuwen_team_sess_19f4b147e5a_session_sess_19f4b147e5a"
+    )
+    assert p.action is ParsedControlAction.EXIT_OK
+    assert p.session_ref == "team_jiuwen_team_sess_19f4b147e5a_session_sess_19f4b147e5a"
+
+    # 简化格式：EXIT_BAD（无论 session_id 是否合法形态）
+    assert parse_channel_control_text("/exit sess_19f4b147e5a").action \
+        is ParsedControlAction.EXIT_BAD
+    assert parse_channel_control_text("/exit someplainid").action \
+        is ParsedControlAction.EXIT_BAD
+
+    # /join 简化格式不再允许（缺 team_name 维度无法做一致性校验）
+    assert parse_channel_control_text("/join sess_19f4b147e5a as auditor").action \
+        is ParsedControlAction.JOIN_BAD
+    # 完整格式
+    pj = parse_channel_control_text("/join team_jiuwen_sess_19f4b147e5a_session_sess_19f4b147e5a as auditor")
+    assert pj.action is ParsedControlAction.JOIN_OK
+    assert pj.session_ref == "team_jiuwen_sess_19f4b147e5a_session_sess_19f4b147e5a"
+    assert pj.member_name == "auditor"

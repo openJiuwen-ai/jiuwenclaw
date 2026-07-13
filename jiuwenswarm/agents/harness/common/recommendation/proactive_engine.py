@@ -22,11 +22,41 @@ Usage:
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# proactive 数值配置项的合法区间（与 web handler _validate_proactive_int 保持一致）。
+_PROACTIVE_INT_LO = 1
+_PROACTIVE_INT_HI = 50
+
+
+def _safe_proactive_int(val: Any, default: int) -> int:
+    """读取 proactive 数值配置项的防御性解析。
+
+    config.yaml 被手改成非数字/浮点/超范围时，降级用 default + warning，不让引擎崩溃。
+    （handler 写入时已校验，这里只防手改 config / 旧脏数据。）
+    """
+    # 先按字符串校验：挡住浮点(3.5)、科学计数(1e5)、字符串(abc)、空。
+    # int(3.5) 在 Python 会静默截断成 3，不能直接 int()。
+    raw = str(val).strip() if val is not None else ""
+    if not re.fullmatch(r"[0-9]+", raw):
+        logger.warning(
+            "[ProactiveEngine] invalid int config %r, fallback to default %d", val, default,
+        )
+        return default
+    n = int(raw)
+    if n < _PROACTIVE_INT_LO or n > _PROACTIVE_INT_HI:
+        logger.warning(
+            "[ProactiveEngine] int config %r out of [%d,%d], fallback to default %d",
+            val, _PROACTIVE_INT_LO, _PROACTIVE_INT_HI, default,
+        )
+        return default
+    return n
 
 
 class ProactiveEngine:
@@ -46,8 +76,8 @@ class ProactiveEngine:
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
-        self._max_per_day: int = int(config.get("max_recommend_per_day", 5))
-        self._max_rounds: int = int(config.get("max_rounds_per_tick", 20))
+        self._max_per_day: int = _safe_proactive_int(config.get("max_recommend_per_day", 5), 5)
+        self._max_rounds: int = _safe_proactive_int(config.get("max_rounds_per_tick", 20), 20)
         # 默认 False，与 config.yaml 的 proactive_recommendation.enabled 默认值一致，
         # 防御性默认=关闭，避免配置段缺失时引擎被误启用。
         self._enabled: bool = config.get("enabled", False)
@@ -116,8 +146,8 @@ class ProactiveEngine:
     def reload_config(self, config: dict[str, Any]) -> None:
         """Hot-reload configuration without restarting the process."""
         new_enabled = bool(config.get("enabled", False))
-        new_max_per_day = int(config.get("max_recommend_per_day", self._max_per_day))
-        new_max_rounds = int(config.get("max_rounds_per_tick", self._max_rounds))
+        new_max_per_day = _safe_proactive_int(config.get("max_recommend_per_day", self._max_per_day), self._max_per_day)
+        new_max_rounds = _safe_proactive_int(config.get("max_rounds_per_tick", self._max_rounds), self._max_rounds)
 
         self._max_per_day = new_max_per_day
         self._max_rounds = new_max_rounds
@@ -171,6 +201,8 @@ class ProactiveEngine:
             _get_all_skills,
             _analyze_and_decide,
             _trigger_main_agent,
+            _limit_notif_sent_today,
+            _mark_limit_notif_sent,
         )
         from jiuwenswarm.agents.harness.common.recommendation.profile_extractor import (
             load_recommendation_state,
@@ -200,14 +232,17 @@ class ProactiveEngine:
         if _today_recommend_count() >= self._max_per_day:
             logger.info("[ProactiveEngine] daily limit reached (%d/%d), skipping tick",
                        _today_recommend_count(), self._max_per_day)
-            # 推送通知提醒用户已到上限（每天最多推一次上限提醒，用 last_tick_at 兜底避免刷屏）
-            if self._send_notification_callback is not None:
+            # 推送通知提醒用户已到上限——每天最多推一次，避免 cron 多次到点刷屏。
+            # 用进程内 _limit_notif_sent 当日标记去重；跨天/重启自动重置。
+            # 推送失败不标记，下次 tick 仍会重试（没送达就不算发过）。
+            if self._send_notification_callback is not None and not _limit_notif_sent_today():
                 try:
                     await self._send_notification_callback(
                         target_channel,
                         f"今日主动推荐已达每日上限（{self._max_per_day} 条），"
                         f"明日恢复。",
                     )
+                    _mark_limit_notif_sent()
                 except Exception as exc:
                     logger.debug("[ProactiveEngine] send_notification failed: %s", exc)
             self._last_tick_at = time.time()
@@ -315,6 +350,7 @@ class ProactiveEngine:
         from jiuwenswarm.agents.harness.common.recommendation.proactive_actions import (
             _prune_daily_counts,
             _prune_cooldown_records,
+            _prune_limit_notif,
         )
         from jiuwenswarm.agents.harness.common.recommendation.profile_extractor import (
             load_recommendation_state,
@@ -322,6 +358,7 @@ class ProactiveEngine:
         )
 
         _prune_daily_counts()
+        _prune_limit_notif()
         state = load_recommendation_state()
         _prune_cooldown_records(state)
         save_recommendation_state(state)
