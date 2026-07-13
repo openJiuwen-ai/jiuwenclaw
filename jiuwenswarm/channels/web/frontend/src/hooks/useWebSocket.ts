@@ -1684,6 +1684,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const currentMode = useSessionStore.getState().mode;
         const content = normalizeFinalContent(payload);
 
+        // 上限提醒（source=proactive_notification）：不进会话历史，改走全局弹窗。
+        // 后端每次命中每日上限都推一次，前端用 store 信号驱动 banner 显示 + 定时消失。
+        // 必须在 team 模式消息处理之前拦截，否则 team 模式下会被当成 team leader
+        // 系统消息进会话历史（与"从会话改到弹窗"的设计意图相反）。
+        const source = typeof payload.source === 'string' ? payload.source : '';
+        if (source === 'proactive_notification') {
+          if (content) {
+            useHarnessStore.getState().setProactiveNotification(content);
+          }
+          return;
+        }
+
         // team 模式下，过滤成员输出，只保留外层 leader 回复。
         if (isHiddenTeamTeammateMessagePayload(currentMode, payload)) {
           const memberId = getTeamPayloadMemberName(payload);
@@ -1748,8 +1760,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const payloadSessionId =
           typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
 
-        // 检查是否为主动推荐消息
-        const source = typeof payload.source === 'string' ? payload.source : '';
+        // 检查是否为主动推荐消息（source 已在 team 处理前提取）
         const isProactiveRecommendation = source === 'proactive_recommendation';
         const proactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
 
