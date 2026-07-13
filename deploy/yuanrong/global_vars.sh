@@ -22,6 +22,7 @@ declare -ga MODULES=()
 
 declare -A DEPLOY_VARS=(
     ["FUNC_SVC_NAME"]="0@jiuwen@swarm"
+    ["SANDBOX_TYPE"]=""
     ["MGR_CPU"]="300"
     ["MGR_MEMORY"]="600"
     ["MGR_MIN_INSTANCE"]="1"
