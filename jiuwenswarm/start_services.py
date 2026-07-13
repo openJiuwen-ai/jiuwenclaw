@@ -23,12 +23,6 @@ import sys
 import time
 from pathlib import Path
 
-# Configure logging here so that ``--list``/``--status`` output and
-# service-startup messages are actually emitted. Without this, the root logger
-# keeps its default WARNING level and every ``logging.info`` call below is
-# silently dropped — the process runs but nothing is printed to the terminal.
-logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
-
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
 from jiuwenswarm.dotenv_early import parse_dotenv_early
 parse_dotenv_early("jiuwenswarm-start")
@@ -664,6 +658,16 @@ def _dispatch_action(args: argparse.Namespace) -> int:
 def main() -> None:
     """CLI entry point."""
     signal.signal(signal.SIGTERM, signal.default_int_handler)
+
+    # Configure logging here (inside the entry point, not at module import time)
+    # so that ``--list``/``--status`` output and service-startup messages are
+    # actually emitted. The root logger otherwise keeps its default WARNING
+    # level and every ``logging.info`` call is silently dropped — the process
+    # runs but nothing is printed to the terminal. Locating the call here
+    # (rather than at module scope) also avoids import-time side effects on the
+    # global logger configuration.
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+
     args = _parse_args()
     exit_code = _dispatch_action(args)
     raise SystemExit(exit_code)
