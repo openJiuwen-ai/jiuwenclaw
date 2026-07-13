@@ -14,6 +14,7 @@ from openjiuwen.core.context_engine.qa_block.freezer import FreezeCommitResult, 
 from openjiuwen.core.context_engine.qa_block.registry import load_registry
 from openjiuwen.core.context_engine.qa_block.selector import resolve_summarizer_model
 from openjiuwen.core.context_engine.qa_block.store import QABlockStore
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 from openjiuwen.harness.rails.base import DeepAgentRail
 
@@ -21,6 +22,7 @@ from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
     resolve_actual_session,
     resolve_context_engine,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.utils import is_ask_user_question_interrupt
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,18 @@ def infer_qa_status(ctx: AgentCallbackContext) -> Literal["completed", "interrup
     if ctx.extra.get("_qa_block_freeze_interrupted"):
         return "interrupted"
     return "completed"
+
+
+def _is_ask_user_question_interrupt(ctx: AgentCallbackContext) -> bool:
+    """检测中断是否为工具权限确认弹窗(ask_user_question/popup)。
+
+    与用户主动取消(CancelledError)不同：
+    - 工具权限弹窗：result_type="interrupt" + 包含 interrupt_ids
+    - 用户主动取消：不设置 result，直接抛 CancelledError
+
+    这类中断应跳过QA卸载，沿用当前上下文。
+    """
+    return is_ask_user_question_interrupt(ctx)
 
 
 class JiuClawQABlockFreezeRail(DeepAgentRail):
@@ -217,6 +231,19 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
         if context is None:
             logger.info("[QABlockFreezeRail] freeze skipped: context not in pool session_id=%s", session_id)
             return
+
+        # 弹窗交互(ask_user_question)中断时不卸载QA，沿用当前上下文
+        if _is_ask_user_question_interrupt(ctx):
+            logger.info("[QABlockFreezeRail] skip freeze for ask_user_question interrupt session_id=%s", session_id)
+            return
+
+        # 弹窗确认恢复请求，未产生最终结果前不卸载QA
+        # 避免恢复失败时把第一请求保留的上下文也冻掉
+        if isinstance(ctx.inputs, InvokeInputs) and isinstance(ctx.inputs.query, InteractiveInput):
+            result = getattr(ctx.inputs, "result", None)
+            if result is None or (isinstance(result, dict) and result.get("result_type") == "interrupt"):
+                logger.info("[QABlockFreezeRail] skip freeze for popup confirmation resume session_id=%s", session_id)
+                return
 
         workspace_root = ""
         if self.workspace is not None:

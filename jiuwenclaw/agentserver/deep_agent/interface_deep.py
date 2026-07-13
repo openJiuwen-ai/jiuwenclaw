@@ -333,6 +333,7 @@ from jiuwenclaw.agentserver.stream_utils import propagate_stream_source_id, tool
 from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.gateway.cron.models import CronTargetChannel
 from jiuwenclaw.agentserver.team import get_team_manager
+from jiuwenclaw.agentserver.utils import extract_uploaded_files
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import (
     deep_merge_dicts,
@@ -6167,9 +6168,11 @@ class JiuWenClawDeepAdapter:
             if clear_task_plan_on_state(state):
                 self._instance.save_state(session, state)
 
+            has_new_file = _has_uploaded_file(params)
             decision = build_paused_plan_decision_prompt_from_session_snapshot(
                 self._resolve_runtime_language(),
                 snapshot,
+                has_new_file=has_new_file,
             )
             merge_supplementary_into_request_params(params, decision)
             clear_plan_pause_on_session(session)
@@ -8224,3 +8227,11 @@ class JiuWenClawDeepAdapter:
             pass
 
         return False
+
+
+def _has_uploaded_file(params: dict) -> bool:
+    """判断是否有新文件上传"""
+    entries = extract_uploaded_files(params)
+    if entries is None:
+        return False
+    return len(entries) > 0
