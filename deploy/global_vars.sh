@@ -43,17 +43,11 @@ declare -A CONFIG=(
     ["MINIO_TEMPLATE_FILE"]="${TEMPLATE_DIR}/minio.template.yaml"
     ["MINIO_FILE"]="${CONFIG_DIR}/minio.yaml"
 
+    ["MANAGER_TEMPLATE_FILE"]="${TEMPLATE_DIR}/manager.template.yaml"
+    ["MANAGER_FILE"]="${CONFIG_DIR}/manager.yaml"
+
     ["WEB_TEMPLATE_FILE"]="${TEMPLATE_DIR}/web.template.yaml"
     ["WEB_FILE"]="${CONFIG_DIR}/web.yaml"
-
-    ["MANAGER_SERVER_TEMPLATE_FILE"]="${TEMPLATE_DIR}/manager-server.template.yaml"
-    ["MANAGER_SERVER_FILE"]="${CONFIG_DIR}/manager-server.yaml"
-
-    ["MANAGER_WEB_TEMPLATE_FILE"]="${TEMPLATE_DIR}/manager-web.template.yaml"
-    ["MANAGER_WEB_FILE"]="${CONFIG_DIR}/manager-web.yaml"
-
-    ["WEBUI_TEMPLATE_FILE"]="${TEMPLATE_DIR}/webui.template.yaml"
-    ["WEBUI_FILE"]="${CONFIG_DIR}/webui.yaml"
 
     ["PV_TEMPLATE_FILE"]="${TEMPLATE_DIR}/pv-nfs.template.yaml"
     ["PV_FILE"]="${CONFIG_DIR}/pv-nfs.yaml"
@@ -73,8 +67,7 @@ declare -A ARGS=(
 
 
 # ==== All available modules ====
-#declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB" "MANAGER")
-declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "GATEWAY" "WEB" "MANAGER" "WEBUI")
+declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "POSTGRESQL" "REDIS"  "MINIO" "GATEWAY"  "MANAGER" "WEB")
 
 declare -ga MODULES=()
 
@@ -98,7 +91,6 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_CONFIG_MAP_NAME"]="jiuwenclaw-gateway-config"
     ["GATEWAY_ENV_FILE_NAME"]="jiuwenclaw-gateway-env"
     ["GATEWAY_REPLICAS"]="1"
-    ["ENTERPRISE_WEB_WS_PORT"]="19000"
     ["NFS_NAME"]="nfs-server"
     ["NFS_IMAGE"]="ghcr.io/obeone/nfs-server:2.2.2"
     ["NFS_HOST_PATH"]="/data/nfs"
@@ -112,7 +104,6 @@ declare -A DEPLOY_VARS=(
     ["CLAW_MOUNT_TYPE"]="pvc"
     ["CLAW_STORAGE_SIZE"]="1Gi"
     ["AGENT_SERVER_POD_NAME"]="jiuwenclaw-agentserver"
-    ["WEB_NAME"]="jiuwenclaw-web"
     ["RABBITMQ_NAME"]="rabbitmq"
     ["RABBITMQ_IMAGE"]="rabbitmq:3.9.22-management"
     ["RABBITMQ_USER"]="admin"
@@ -144,22 +135,23 @@ declare -A DEPLOY_VARS=(
     ["MINIO_SECURE"]="false"
     ["MINIO_REGION"]="default"
     ["MINIO_STORAGE_SIZE"]="4Gi"
-    ["MANAGER_SERVER_NAME"]="jiuwenclaw-manager-server"
-    ["MANAGER_WEB_NAME"]="jiuwenclaw-manager-web"
+    ["MANAGER_NAME"]="jiuwenclaw-manager-server"
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_WS_PORT"]="8766"
-    ["MANAGER_WEB_PORT"]="5273"
-    # 认证中心(独立服务+独立身份库)与统一前端 webui(对外唯一入口)
-    ["IDENTITY_NAME"]="jiuwenclaw-identity"
-    ["IDENTITY_PORT"]="8770"
-    ["IDENTITY_DB_NAME"]="identity"
-    ["IDENTITY_DB_USER"]=""
-    ["IDENTITY_DB_PASSWORD"]=""
-    ["IDENTITY_SQLITE_PATH"]="identity.db"
-    ["IDENTITY_PG_SCHEMA"]="public"
-    ["IDENTITY_JWT_ISSUER"]="jiuwenclaw-identity"
-    ["IDENTITY_JWT_AUDIENCE"]="jiuwenclaw"
-    ["WEBUI_NAME"]="jiuwenclaw-webui"
+    ["AUTH_SRV_NAME"]="jiuwenclaw-identity"
+    ["AUTH_SRV_PORT"]="8770"
+    ["AUTH_SRV_DB_NAME"]="identity"
+    ["AUTH_SRV_DB_USER"]=""
+    ["AUTH_SRV_DB_PASSWORD"]=""
+    ["AUTH_SRV_SQLITE_PATH"]="identity.db"
+    ["AUTH_SRV_PG_SCHEMA"]="public"
+    ["AUTH_SRV_JWT_ISSUER"]="jiuwenclaw-identity"
+    ["AUTH_SRV_JWT_AUDIENCE"]="jiuwenclaw"
+    ["MGR_SRV_NAME"]="jiuwenclaw-manager-web"
+    ["MGR_SRV_PORT"]="5273"
+    ["USER_SRV_NAME"]="jiuwenclaw-web"
+    ["USER_SRV_WS_PORT"]="19000"
+    ["WEB_NAME"]="jiuwenclaw-webui"
     ["OBS_TYPE"]="minio"
     ["OBS_BUCKET"]="jiuwenclaw"
     ["OBS_PUBLIC_BASE_URL"]=""
@@ -179,7 +171,6 @@ declare -A DEPLOY_VARS=(
     ["ENABLE_EXTERNAL_POSTGRES"]="false"
     ["ENABLE_EXTERNAL_REDIS"]="false"
     ["ENABLE_EXTERNAL_MINIO"]="false"
-    ["IS_UP_MANAGER_WEB"]="true"
     ["RENDER_ONLY"]="false"
     ["ENABLE_GATEWAY_SCHED_LABEL"]="false"
     ["TIMEZONE"]="Asia/Shanghai"

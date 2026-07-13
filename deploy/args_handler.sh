@@ -13,7 +13,7 @@ parse_args() {
                 i=$((i+1))
                 ;;
             #nfs|rabbitmq|yr_claw|gateway|web|manager)
-            nfs|nfs-sc|rabbitmq|mysql|redis|postgresql|minio|gateway|web|manager|webui)
+            nfs|nfs-sc|rabbitmq|mysql|redis|postgresql|minio|gateway|web|manager)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;
@@ -23,10 +23,6 @@ parse_args() {
                 ;;
             --web-port)
                 DEPLOY_VARS["WEB_NODE_PORT"]="${args[$((i+1))]}"
-                i=$((i+2))
-                ;;
-            --manager-web-port)
-                DEPLOY_VARS["MANAGER_WEB_NODE_PORT"]="${args[$((i+1))]}"
                 i=$((i+2))
                 ;;
             --render-only)
@@ -50,20 +46,16 @@ parse_args() {
 
     # If no modules are specified, deploy all by default
     if [ ${#MODULES[@]} -eq 0 ]; then
-        process_modules
+        MODULES=("GATEWAY" "MANAGER" "WEB")
+        if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "yuanrong" ]; then
+            MODULES+=("YR_CLAW")
+        fi
     fi
 
     info "Executing command: $*"
     info "CMD=${CMD}"
     info "MODULES=${MODULES[@]}"
     info "NAMESPACE=${DEPLOY_VARS["NAMESPACE"]}"
-}
-
-process_modules() {
-    MODULES=("GATEWAY")
-    if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "yuanrong" ]; then
-        MODULES+=("YR_CLAW")
-    fi
 }
 
 # Print help info and exit
@@ -83,13 +75,12 @@ Modules (Optional):
   redis     Redis module (deploys to default namespace, ignores -n parameter)
   minio     Minio module (deploys to default namespace, ignores -n parameter)
   gateway   Gateway service module
-  web       Web frontend module
+  web       Frontend module
   manager   CLAW Manager module
 
 Options:
   -n NAMESPACE              Specify Kubernetes namespace (defaults to default if unspecified)
   --web-port PORT           Set host port for web service （range: 30000-32767）
-  --manager-web-port PORT   Set host port for manager web UI （range: 30000-32767）
   --render-only             Only render and output YAML manifests to conf directory
   -h, --help                Display this help message and exit
 

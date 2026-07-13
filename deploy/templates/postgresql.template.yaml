@@ -49,7 +49,7 @@ spec:
           env:
             - name: POSTGRES_PASSWORD
               value: "<<POSTGRES_PASSWORD>>"
-            - name: POSTGRES_HOST_AUTH_METHOD
+            - name: POSTGRES_HOST_AUTH_SRV_METHOD
               value: "scram-sha-256"
             - name: TZ
               value: "<<TIMEZONE>>"

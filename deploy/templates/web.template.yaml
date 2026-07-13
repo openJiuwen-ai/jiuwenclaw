@@ -1,3 +1,12 @@
+# 整体架构说明
+# 前端 Web：Nginx + 静态 SPA 单页应用
+# 后端：
+#   1. auth：身份认证中心 (OAuth2 + RS256 JWT，独立身份库)
+#   2. mgr：管理面服务
+#   3. user：用户业务服务
+
+
+# ---------------------- 前端 Web -------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,15 +25,172 @@ spec:
         app: <<WEB_NAME>>
     spec:
       containers:
-        - name: web
+        - name: webui
           image: <<WEB_IMAGE>>
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          env:
+            - name: NGINX_ENVSUBST_FILTER
+              value: "^BACKEND_"
+            - name: BACKEND_API
+              value: "http://<<MANAGER_NAME>>:<<MANAGER_REST_PORT>>"
+            - name: BACKEND_IDP
+              value: "http://<<AUTH_SRV_NAME>>:<<AUTH_SRV_PORT>>"
+            - name: BACKEND_WS
+              value: "http://<<USER_SRV_NAME>>:<<USER_SRV_WS_PORT>>"
+---
+
+# NodePort Service：供外连接
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<WEB_NAME>>-nodeport
+  namespace: <<NAMESPACE>>
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: <<WEB_NODE_PORT>>
+  selector:
+    app: <<WEB_NAME>>
+---
+
+# ----------------- auth：身份认证中心 -----------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<AUTH_SRV_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  selector:
+    app: <<AUTH_SRV_NAME>>
+  ports:
+    - name: rest
+      port: <<AUTH_SRV_PORT>>
+      targetPort: <<AUTH_SRV_PORT>>
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<AUTH_SRV_NAME>>
+  namespace: <<NAMESPACE>>
+  labels:
+    app: <<AUTH_SRV_NAME>>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<AUTH_SRV_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<AUTH_SRV_NAME>>
+    spec:
+      containers:
+        - name: identity
+          image: <<AUTH_SRV_IMAGE>>
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: rest
+              containerPort: <<AUTH_SRV_PORT>>
+          env:
+            - name: AUTH_SRV_REST_HOST
+              value: "0.0.0.0"
+            - name: AUTH_SRV_REST_PORT
+              value: "<<AUTH_SRV_PORT>>"
+            - name: AUTH_SRV_DB_TYPE
+              value: "<<DB_TYPE>>"
+            - name: AUTH_SRV_SQLITE_PATH
+              value: "<<AUTH_SRV_SQLITE_PATH>>"
+            - name: AUTH_SRV_DB_HOST
+              value: "<<DB_HOST>>"
+            - name: AUTH_SRV_DB_PORT
+              value: "<<DB_PORT>>"
+            - name: AUTH_SRV_DB_USER
+              value: "<<AUTH_SRV_DB_USER>>"
+            - name: AUTH_SRV_DB_PASSWORD
+              value: "<<AUTH_SRV_DB_PASSWORD>>"
+            - name: AUTH_SRV_DB_NAME
+              value: "<<AUTH_SRV_DB_NAME>>"
+            - name: AUTH_SRV_PG_SCHEMA
+              value: "<<AUTH_SRV_PG_SCHEMA>>"
+            - name: AUTH_SRV_JWT_ISSUER
+              value: "<<AUTH_SRV_JWT_ISSUER>>"
+            - name: AUTH_SRV_JWT_AUDIENCE
+              value: "<<AUTH_SRV_JWT_AUDIENCE>>"
+
+---
+# ---------------------- mgr：管理面服务 ------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<MGR_SRV_NAME>>
+  namespace: <<NAMESPACE>>
+  labels:
+    app: <<MGR_SRV_NAME>>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<MGR_SRV_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<MGR_SRV_NAME>>
+    spec:
+      containers:
+        - name: manager-web
+          image: <<MGR_SRV_IMAGE>>
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: <<MGR_SRV_PORT>>
+              protocol: TCP
+          env:
+            - name: MGR_SRV_HOST
+              value: "0.0.0.0"
+            - name: MGR_SRV_PORT
+              value: "<<MGR_SRV_PORT>>"
+            - name: MGR_SRV_PROXY_TARGET
+              value: "http://<<MANAGER_NAME>>:<<MANAGER_REST_PORT>>"
+            - name: TZ
+              value: "<<TIMEZONE>>"
+
+# ----------------------- user：用户业务服务 ----------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<USER_SRV_NAME>>
+  namespace: <<NAMESPACE>>
+  labels:
+    app: <<USER_SRV_NAME>>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<USER_SRV_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<USER_SRV_NAME>>
+    spec:
+      containers:
+        - name: web
+          image: <<USER_SRV_IMAGE>>
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 5173
               protocol: TCP
             - name: websocket
-              containerPort: <<ENTERPRISE_WEB_WS_PORT>>
+              containerPort: <<USER_SRV_WS_PORT>>
               protocol: TCP
           env:
             - name: JIUWENCLAW_WEB_HOST
@@ -33,15 +199,14 @@ spec:
               value: "5173"
             - name: ENTERPRISE_WEB_WS_HOST
               value: "0.0.0.0"
-            - name: ENTERPRISE_WEB_WS_PORT
-              value: "<<ENTERPRISE_WEB_WS_PORT>>"
+            - name: USER_SRV_WS_PORT
+              value: "<<USER_SRV_WS_PORT>>"
             - name: WS_ORIGIN_CHECK_ENABLED
               value: "<<WS_ORIGIN_CHECK_ENABLED>>"
             - name: WS_ALLOWED_ORIGINS
               value: "<<WS_ALLOWED_ORIGINS>>"
             - name: TZ
               value: "<<TIMEZONE>>"
-            # 文件上传 /file-api/upload-obs 写 MinIO(infra 在 default 命名空间,跨 ns 用 .default)
             - name: JIUWENCLAW_MINIO_ENDPOINT
               value: "<<MINIO_NAME>>-headless.default:9000"
             - name: JIUWENCLAW_MINIO_ACCESS_KEY
@@ -62,29 +227,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: <<WEB_NAME>>
+  name: <<USER_SRV_NAME>>
   namespace: <<NAMESPACE>>
 spec:
   selector:
-    app: <<WEB_NAME>>
+    app: <<USER_SRV_NAME>>
   ports:
     - name: websocket
-      port: <<ENTERPRISE_WEB_WS_PORT>>         # Service 端口
-      targetPort: <<ENTERPRISE_WEB_WS_PORT>>   # 容器端口
-  type: ClusterIP                             # 集群内部访问，不需要外网
-
----
-# NodePort Service：供外连接
-apiVersion: v1
-kind: Service
-metadata:
-  name: <<WEB_NAME>>-nodeport
-  namespace: <<NAMESPACE>>
-spec:
-  type: NodePort
-  ports:
-    - port: 5173                    # 集群内部端口
-      targetPort: 5173              # 容器端口
-      nodePort: <<WEB_NODE_PORT>>   # 外部访问端口（30000-32767）
-  selector:
-    app: <<WEB_NAME>>
+      port: <<USER_SRV_WS_PORT>>         # Service 端口
+      targetPort: <<USER_SRV_WS_PORT>>   # 容器端口
+  type: ClusterIP                        # 集群内部访问，不需要外网

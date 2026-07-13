@@ -2,11 +2,11 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: <<MANAGER_SERVER_NAME>>
+  name: <<MANAGER_NAME>>
   namespace: <<NAMESPACE>>
 spec:
   selector:
-    app: <<MANAGER_SERVER_NAME>>
+    app: <<MANAGER_NAME>>
   ports:
     - name: rest
       port: <<MANAGER_REST_PORT>>
@@ -21,7 +21,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: <<MANAGER_SERVER_NAME>>-nodeport
+  name: <<MANAGER_NAME>>-nodeport
   namespace: <<NAMESPACE>>
 spec:
   type: NodePort
@@ -29,29 +29,29 @@ spec:
     - name: rest
       port: <<MANAGER_REST_PORT>>       # 集群内部端口
       targetPort: <<MANAGER_REST_PORT>> # 容器端口
-      nodePort: <<MANAGER_SERVER_NODE_PORT>>   # 外部访问端口（30000-32767）
+      nodePort: <<MANAGER_NODE_PORT>>   # 外部访问端口（30000-32767）
   selector:
-    app: <<MANAGER_SERVER_NAME>>
+    app: <<MANAGER_NAME>>
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: <<MANAGER_SERVER_NAME>>
+  name: <<MANAGER_NAME>>
   namespace: <<NAMESPACE>>
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: <<MANAGER_SERVER_NAME>>
+      app: <<MANAGER_NAME>>
   template:
     metadata:
       labels:
-        app: <<MANAGER_SERVER_NAME>>
+        app: <<MANAGER_NAME>>
     spec:
       containers:
       - name: manager
-        image: <<MANAGER_SERVER_IMAGE>>
+        image: <<MANAGER_IMAGE>>
         ports:
         - name: rest
           containerPort: <<MANAGER_REST_PORT>>
@@ -87,12 +87,12 @@ spec:
         - name: TZ
           value: "<<TIMEZONE>>"
         # 资源服务器:去独立认证中心拉公钥验签 JWT(集群内 Service DNS)
-        - name: IDENTITY_PUBLIC_KEY_URL
-          value: "http://<<IDENTITY_NAME>>:<<IDENTITY_PORT>>/v1/auth/public_key"
-        - name: IDENTITY_JWT_ISSUER
-          value: "<<IDENTITY_JWT_ISSUER>>"
-        - name: IDENTITY_JWT_AUDIENCE
-          value: "<<IDENTITY_JWT_AUDIENCE>>"
+        - name: AUTH_SRV_PUBLIC_KEY_URL
+          value: "http://<<AUTH_SRV_NAME>>:<<AUTH_SRV_PORT>>/v1/auth/public_key"
+        - name: AUTH_SRV_JWT_ISSUER
+          value: "<<AUTH_SRV_JWT_ISSUER>>"
+        - name: AUTH_SRV_JWT_AUDIENCE
+          value: "<<AUTH_SRV_JWT_AUDIENCE>>"
         # 本实例标识(与本命名空间 gateway 同值):/me/bots 据此把可见 bot 限定到当前 gateway。
         - name: JIUWENCLAW_ID
           value: "<<JIUWENCLAW_ID>>"
