@@ -69,6 +69,7 @@ _COMMON_RAIL_NAMES: tuple[str, ...] = (
     registry.CONTEXT_PROCESSOR,
     registry.PLUGIN_RAILS,
     registry.SKILL_RETRIEVAL_PROMPT,
+    registry.SYMPHONY_ORCHESTRATION_PROMPT,
 )
 
 # Tools common to both roles. Each element self-gates on config, so all are
@@ -115,6 +116,7 @@ _CODE_RAIL_NAMES: tuple[str, ...] = (
     registry.USER_HOOKS,
     registry.CODE_SKILL_USE,
     registry.SKILL_RETRIEVAL_PROMPT,
+    registry.SYMPHONY_ORCHESTRATION_PROMPT,
 )
 
 # Rails shared with the team profile, appended to the code profile.

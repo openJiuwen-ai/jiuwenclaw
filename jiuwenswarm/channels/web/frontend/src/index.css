@@ -1505,6 +1505,21 @@ select {
     padding: 2px 0;
   }
 
+  .tool-tree__notices {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 4px;
+  }
+
+  .tool-tree__notice {
+    max-width: 100%;
+    color: var(--muted);
+    font-size: var(--font-size-xs);
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+
   .tool-tree__header {
     width: 100%;
     display: flex;

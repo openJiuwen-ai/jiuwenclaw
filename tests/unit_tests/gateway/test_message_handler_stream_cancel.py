@@ -12,7 +12,7 @@ import pytest
 from jiuwenswarm.common.schema import Message
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod
-from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+from jiuwenswarm.gateway.message_handler.message_handler import ChannelMode, MessageHandler
 
 
 class _FakeAgentClient:
@@ -310,6 +310,12 @@ def test_team_chat_send_keeps_existing_team_stream() -> None:
     assert not _should_cancel_existing_stream_before_chat_send(
         _chat_send_message(channel_id="web", session_id="sess_team", mode="team"),
     )
+    assert not _should_cancel_existing_stream_before_chat_send(
+        _chat_send_message(channel_id="web", session_id="sess_team", mode="code.team"),
+    )
+    assert not _should_cancel_existing_stream_before_chat_send(
+        _chat_send_message(channel_id="web", session_id="sess_team", mode="team.plan"),
+    )
     assert _should_cancel_existing_stream_before_chat_send(
         _chat_send_message(channel_id="web", session_id="sess_agent", mode="agent.plan"),
     )
@@ -605,3 +611,40 @@ async def test_disconnect_backward_compatible_without_request_keys_kwarg() -> No
 
     await asyncio.sleep(0)
     assert len(_FakeAgentClient.sent_requests) == 1
+
+
+# ---------- ChannelMode.is_team_mode ----------
+
+
+@pytest.mark.parametrize(
+    "mode,expected",
+    [
+        ("team", True),
+        ("code.team", True),
+        ("team.plan", True),
+        ("agent.plan", False),
+        ("agent.fast", False),
+        ("code.plan", False),
+        ("code.normal", False),
+        ("", False),
+        ("  team  ", True),   # strip
+        ("Team", True),       # case-insensitive
+    ],
+)
+def test_is_team_mode(mode: str, expected: bool) -> None:
+    assert ChannelMode.is_team_mode(mode) is expected
+
+
+@pytest.mark.parametrize(
+    "mode,expected",
+    [
+        ("team", True),
+        ("code.team", True),
+        ("team.plan", True),
+        ("agent.plan", False),
+    ],
+)
+def test_is_team_chat_send_recognizes_all_team_modes(mode: str, expected: bool) -> None:
+    _is_team_chat_send = getattr(MessageHandler, "_is_team_chat_send")
+    msg = _chat_send_message(channel_id="web", session_id="sess", mode=mode)
+    assert _is_team_chat_send(msg) is expected

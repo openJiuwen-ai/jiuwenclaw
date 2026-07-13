@@ -352,7 +352,7 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
     SlashCommandEntry(
         id="mode",
         canonical_text=f"{GatewaySlashCommand.MODE.value} agent|code|team|agent.plan|agent.fast|code.plan|"
-                       f"code.normal|code.team",
+                       f"code.normal|code.team|team.plan",
         scope="gateway",
         req_method=None,
         notes="受控通道切换模式：一级模式 agent/code/team（映射到默认子模式）或直达 agent.plan/agent.fast/code.plan/code.normal；"
@@ -433,8 +433,63 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
 )
 
 
+def _skill_source_tag(item: dict[str, Any]) -> str:
+    """与 TUI ``listSkills`` 标签逻辑对齐：is_builtin_source→[builtin]，否则按 source 取 [local]/[project]/…。"""
+    if item.get("is_builtin_source") is True or item.get("is_builtin") is True:
+        return "[builtin]"
+    src = str(item.get("source") or "").strip()
+    if not src:
+        return "[project]"
+    if src == "local":
+        return "[local]"
+    return f"[{src}]"
+
+
+def _truncate_desc_by_bytes(desc: str, max_bytes: int = 600) -> str:
+    """按 UTF-8 字节预算截断描述，使中英文视觉长度一致。
+
+    Python ``len()`` 数的是字符数：中文 1 字符 = 3 字节、英文 1 字符 = 1 字节，
+    若按字符数截断会出现"中文描述很长很完整、英文描述一句话没说完就被切在单词
+    中间（如 immediatel…）"的不一致。这里按字节预算截断：600 字节约等于 200 个
+    汉字或 600 个英文字母，两边视觉长度相当，且都能讲清一句话。
+
+    截断点优先落在最近的空格/换行（词界），避免把英文单词劈成两半；找不到词界
+    时才在字节边界硬截。截断后补 ``…``。
+    """
+    if not desc:
+        return ""
+    encoded = desc.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return desc
+    # 字节预算内能完整容纳的最大字符数：逐字符推进，直到加上下一个字符会超预算。
+    cut_chars = 0
+    used = 0
+    for ch in desc:
+        n = len(ch.encode("utf-8"))
+        if used + n > max_bytes:
+            break
+        used += n
+        cut_chars += 1
+    prefix = desc[:cut_chars]
+    # 词界兜底：把末尾不完整的英文单词去掉（回退到最后一个空格/换行）。
+    if cut_chars < len(desc):
+        last_sep = max(prefix.rfind(" "), prefix.rfind("\n"))
+        if last_sep > 0:
+            prefix = prefix[:last_sep]
+    return prefix.rstrip() + "…"
+
+
 def format_skills_list_for_notice(payload: dict[str, Any] | None, *, max_items: int = 50) -> str:
-    """将 skills.list 响应 payload 格式化为适合 IM 的纯文本。"""
+    """将 skills.list 响应 payload 格式化为适合 IM 的纯文本。
+
+    与 TUI ``skills.ts`` 的 ``listSkills`` 渲染对齐：按 ``installed`` 字段分
+    "已安装"/"可安装"两组，每项标注来源标签（[builtin]/[local]/[project]/…），
+    使 IM 端 /skills list 与 TUI 显示一致。后端 ``handle_skills_list`` 对本地已装
+    技能置 ``installed=True``、内置未装技能置 ``installed=False``，渲染据此分组。
+
+    两组用醒目标题 + 空行分隔，且编号各自从 1 开始（不跨组连续），让用户一眼
+    区分"已安装"与"可安装"。
+    """
     if not payload or not isinstance(payload, dict):
         return "暂无技能数据。"
     err = payload.get("error")
@@ -443,21 +498,64 @@ def format_skills_list_for_notice(payload: dict[str, Any] | None, *, max_items: 
     skills = payload.get("skills")
     if not isinstance(skills, list) or not skills:
         return "当前无可用技能。"
-    lines: list[str] = ["【技能列表】"]
-    for i, item in enumerate(skills[:max_items], 1):
+
+    installed: list[dict[str, Any]] = []
+    available: list[dict[str, Any]] = []
+    others: list[Any] = []  # 非 dict 项兜底，避免整条丢失
+    for item in skills:
         if isinstance(item, dict):
-            name = str(item.get("name") or item.get("title") or "?").strip()
-            desc = str(item.get("description") or "").strip()
-            src = str(item.get("source") or "").strip()
-            suffix = f" ({src})" if src else ""
-            if desc:
-                short = desc if len(desc) <= 200 else desc[:200] + "…"
-                lines.append(f"{i}. {name}{suffix}\n   {short}")
+            if item.get("installed") is True:
+                installed.append(item)
             else:
-                lines.append(f"{i}. {name}{suffix}")
+                available.append(item)
         else:
+            others.append(item)
+
+    def _render_items(group: list[dict[str, Any]], quota: int) -> list[str]:
+        # 编号每组独立从 1 开始，避免跨组连续让两组混作一坨。
+        # quota 控制本组最多渲染多少项，使总输出受 max_items 约束。
+        lines: list[str] = []
+        for i, item in enumerate(group, 1):
+            if i > quota:
+                break
+            name = str(item.get("name") or item.get("title") or "?").strip()
+            tag = _skill_source_tag(item)
+            desc = str(item.get("description") or "").strip()
+            if desc:
+                short = _truncate_desc_by_bytes(desc)
+                lines.append(f"{i}. {name} {tag}\n   {short}")
+            else:
+                lines.append(f"{i}. {name} {tag}")
+        return lines
+
+    lines: list[str] = ["【技能列表】"]
+    remaining = max_items  # 跨组共享的总配额：先满足已安装组，再给可安装组
+    shown = 0
+
+    if installed and remaining > 0:
+        q = min(len(installed), remaining)
+        lines.append("")
+        lines.append(f"■ 已安装（{q}）")
+        lines.extend(_render_items(installed, q))
+        shown += q
+        remaining -= q
+
+    if available and remaining > 0:
+        q = min(len(available), remaining)
+        lines.append("")
+        lines.append(f"■ 可安装（{q}）")
+        lines.extend(_render_items(available, q))
+        shown += q
+        remaining -= q
+
+    if others and remaining > 0:  # 兜底：非 dict 项独立编号，受剩余配额约束
+        q = min(len(others), remaining)
+        for i, item in enumerate(others[:q], 1):
             lines.append(f"{i}. {item}")
-    if len(skills) > max_items:
+        shown += q
+        remaining -= q
+
+    if len(skills) > max_items and shown < len(skills):
         lines.append(f"... 共 {len(skills)} 项，仅显示前 {max_items} 项。")
     return "\n".join(lines)
 

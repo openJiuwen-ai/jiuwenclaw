@@ -75,6 +75,75 @@ for _jiuwen_log in LogManager.get_all_loggers().values():
 
 logger = logging.getLogger(__name__)
 
+
+_WEB_CONFIG_RELOAD_CHANNEL_ID = "web"
+_MODEL_RELOAD_ENV_KEYS = {
+    "MODEL_PROVIDER",
+    "MODEL_NAME",
+    "API_BASE",
+    "API_KEY",
+    "VIDEO_PROVIDER",
+    "VIDEO_MODEL_NAME",
+    "VIDEO_API_BASE",
+    "VIDEO_API_KEY",
+    "AUDIO_PROVIDER",
+    "AUDIO_MODEL_NAME",
+    "AUDIO_API_BASE",
+    "AUDIO_API_KEY",
+    "VISION_PROVIDER",
+    "VISION_MODEL_NAME",
+    "VISION_API_BASE",
+    "VISION_API_KEY",
+}
+
+
+@dataclass(frozen=True)
+class _ConfigChangeSet:
+    env_updates: dict[str, str]
+    yaml_updated: list[str]
+    force: bool = False
+
+    @property
+    def changed(self) -> bool:
+        return self.force or bool(self.env_updates or self.yaml_updated)
+
+    @property
+    def updated_keys(self) -> set[str]:
+        return set(self.env_updates.keys()) | set(self.yaml_updated)
+
+    @property
+    def reload_scopes(self) -> set[str]:
+        scopes: set[str] = set()
+        if _MODEL_RELOAD_ENV_KEYS & set(self.env_updates):
+            scopes.add("model")
+        for key in self.yaml_updated:
+            key_text = str(key)
+            if key_text in {"models.defaults"} or key_text.startswith("models."):
+                scopes.add("model")
+            elif key_text in {"modes.team", "agents", "team"}:
+                scopes.add("team")
+            elif key_text.startswith("permissions"):
+                scopes.add("permissions")
+            elif key_text.startswith("proactive_recommendation"):
+                scopes.add("proactive")
+            elif key_text.startswith("symphony") or key_text.startswith("skill_retrieval"):
+                scopes.add("agent_runtime")
+            elif key_text.startswith("a2ui_"):
+                scopes.add("web_ui")
+            else:
+                scopes.add("agent_runtime")
+        if self.force and not scopes:
+            scopes.add("agent_runtime")
+        return scopes
+
+    @property
+    def reload_options(self) -> dict[str, Any]:
+        return {
+            "target_channel_id": _WEB_CONFIG_RELOAD_CHANNEL_ID,
+            "reload_scopes": sorted(self.reload_scopes),
+        }
+
+
 _PROJECT_ROOT = get_root_dir()
 _ENV_FILE = get_env_file()
 load_dotenv(dotenv_path=_ENV_FILE, override=True)
@@ -454,7 +523,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "a2ui_enabled",
     "proactive_recommendation_enabled",
     "proactive_recommendation_max_recommend_per_day",
-    "proactive_recommendation_max_sessions_per_tick",
+    "proactive_recommendation_max_rounds_per_tick",
     "swarmflow_enabled",
 })
 
@@ -1088,9 +1157,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             proactive_cfg = resolved.get("proactive_recommendation") or {}
             payload["proactive_recommendation_enabled"] = "true" if proactive_cfg.get("enabled", False) else "false"
             payload["proactive_recommendation_max_recommend_per_day"] = str(
-                proactive_cfg.get("max_recommend_per_day", 5))
-            payload["proactive_recommendation_max_sessions_per_tick"] = str(
-                proactive_cfg.get("max_sessions_per_tick", 10))
+                proactive_cfg.get("max_recommend_per_day", 10))
+            payload["proactive_recommendation_max_rounds_per_tick"] = str(
+                proactive_cfg.get("max_rounds_per_tick", 20))
         except Exception:  # noqa: BLE001
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
@@ -1116,8 +1185,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("free_search_ddg_enabled", "false")
             payload.setdefault("free_search_bing_enabled", "false")
             payload.setdefault("proactive_recommendation_enabled", "false")
-            payload.setdefault("proactive_recommendation_max_recommend_per_day", "5")
-            payload.setdefault("proactive_recommendation_max_sessions_per_tick", "10")
+            payload.setdefault("proactive_recommendation_max_recommend_per_day", "10")
+            payload.setdefault("proactive_recommendation_max_rounds_per_tick", "20")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     def _persist_env_updates(updates: dict[str, str]) -> None:
@@ -1155,6 +1224,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     class _ConfigInternalError(RuntimeError):
         pass
+
+    def _validate_proactive_int(
+        val: Any, *, name: str, lo: int = 1, hi: int = 50,
+    ) -> int:
+        """校验 proactive 数值配置项：必须是 [lo, hi] 的正整数字符串。
+
+        挡住负数、零、浮点数(3.5)、字符串(abc)、科学计数(1e5)、空值。
+        校验失败抛 _ConfigBadRequest（携带中文提示），由外层返回前端。
+        """
+        raw = str(val if val is not None else "").strip()
+        if not raw:
+            raise _ConfigBadRequest(f"{name} 不能为空，需为 {lo}-{hi} 的正整数")
+        # 正则一次挡住浮点、负数、科学计数、非数字
+        if not re.fullmatch(r"[0-9]+", raw):
+            raise _ConfigBadRequest(
+                f"{name} 必须是正整数（{lo}-{hi}），当前值无效：{raw!r}"
+            )
+        n = int(raw)
+        if n < lo or n > hi:
+            raise _ConfigBadRequest(f"{name} 需为 {lo}-{hi} 的正整数，当前：{n}")
+        return n
 
     def _encrypt_config_params(params: dict[str, Any]) -> dict[str, Any]:
         encrypted = dict(params)
@@ -1223,10 +1313,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 elif param_key == "proactive_recommendation_enabled":
                     update_proactive_recommendation_in_config({"enabled": parsed})
                 elif param_key == "proactive_recommendation_max_recommend_per_day":
-                    update_proactive_recommendation_in_config({"max_recommend_per_day": int(str(val).strip())})
-                elif param_key == "proactive_recommendation_max_sessions_per_tick":
-                    update_proactive_recommendation_in_config({"max_sessions_per_tick": int(str(val).strip())})
+                    n = _validate_proactive_int(val, name="每日推荐上限(max_recommend_per_day)")
+                    update_proactive_recommendation_in_config({"max_recommend_per_day": n})
+                elif param_key == "proactive_recommendation_max_rounds_per_tick":
+                    n = _validate_proactive_int(val, name="每次检查对话轮数(max_rounds_per_tick)")
+                    update_proactive_recommendation_in_config({"max_rounds_per_tick": n})
                 yaml_updated.append(param_key)
+            except _ConfigBadRequest:
+                # proactive 数值校验等：直接返回前端，不被外层吞成 warning
+                raise
             except Exception as e:  # noqa: BLE001
                 logger.warning("[config.set] 写回 config.yaml 失败 %s: %s", param_key, e)
                 if param_key == "swarmflow_enabled":
@@ -1261,26 +1356,23 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         return env_updates, yaml_updated
 
-    async def _notify_config_saved_once(
-            env_updates: dict[str, str],
-            yaml_updated: list[str],
-            *,
-            force: bool = False,
-    ) -> None:
-        """Trigger at most one hot reload after all file writes are complete."""
-        if not force and not (env_updates or yaml_updated):
-            return
+    async def _apply_config_change_set(change_set: _ConfigChangeSet) -> bool:
+        """Synchronously apply only the runtime scope affected by a saved config change."""
+        if not change_set.changed:
+            return True
         if on_config_saved:
             config_payload = get_config()
             callback_result = on_config_saved(
-                set(env_updates.keys()) | set(yaml_updated),
-                env_updates=dict(env_updates),
+                change_set.updated_keys,
+                env_updates=dict(change_set.env_updates),
                 config_payload=config_payload,
+                reload_options=change_set.reload_options,
             )
             if inspect.isawaitable(callback_result):
-                await callback_result
-        else:
-            await _clear_agent_config_cache(_resolve(agent_client))
+                return bool(await callback_result)
+            return bool(callback_result)
+        await _clear_agent_config_cache(_resolve(agent_client))
+        return True
 
     def _build_models_defaults_from_frontend(raw_models: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_models, list) or not raw_models:
@@ -1383,19 +1475,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _ConfigInternalError as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
             return
-        applied_without_restart = True
+        change_set = _ConfigChangeSet(env_updates, yaml_updated)
+        try:
+            applied_without_restart = await _apply_config_change_set(change_set)
+        except Exception as exc:
+            logger.warning("[config.set] on_config_saved failed: %s", exc)
+            applied_without_restart = False
 
         updated_param_keys = [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated
         await channel.send_response(
             ws, req_id, ok=True,
             payload={"updated": updated_param_keys, "applied_without_restart": applied_without_restart},
         )
-
-        if env_updates or yaml_updated:
-            try:
-                await _notify_config_saved_once(env_updates, yaml_updated)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("[config.set] on_config_saved failed: %s", e)
 
     async def _config_validate_model(ws, req_id, params, session_id, max_tokens_bounds=None):
         """Send a minimal chat completion (user message \"Hi\") using draft default-model fields.
@@ -1598,10 +1689,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             new_models = _build_models_defaults_from_frontend(params.get("models"))
             update_default_models_in_config(new_models)
 
-            await _notify_config_saved_once({}, ["models.defaults"], force=True)
+            applied_without_restart = await _apply_config_change_set(
+                _ConfigChangeSet({}, ["models.defaults"], force=True)
+            )
 
             await channel.send_response(ws, req_id, ok=True, payload={
                 "count": len(new_models),
+                "applied_without_restart": applied_without_restart,
             })
         except _ConfigBadRequest as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
@@ -1652,22 +1746,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 yaml_updated.append("models.defaults")
                 models_count = len(new_models)
 
+            change_set = _ConfigChangeSet(env_updates, yaml_updated, force=bool(env_updates or yaml_updated))
+            applied_without_restart = await _apply_config_change_set(change_set)
+
             await channel.send_response(
                 ws,
                 req_id,
                 ok=True,
                 payload={
                     "updated": [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated,
-                    "applied_without_restart": True,
+                    "applied_without_restart": applied_without_restart,
                     "models_count": models_count,
                 },
             )
-
-            if env_updates or yaml_updated:
-                try:
-                    await _notify_config_saved_once(env_updates, yaml_updated, force=True)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("[config.save_all] on_config_saved failed: %s", e)
         except _ConfigBadRequest as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
         except _ConfigInternalError as exc:
@@ -2859,10 +2950,25 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 try:
                     raw = get_config_raw() or {}
                     ch_cfg = (raw.get("channels") or {}).get("feishu") or {}
-                    has_target = bool(
-                        str(ch_cfg.get("last_chat_id") or "").strip()
-                        or str(ch_cfg.get("chat_id") or "").strip()
-                    )
+                    # V2 多应用：心跳 relay 会 fan-out 到同 channel_id 的全部 app，每个 app 各走
+                    # 自己的 last_chat_id/chat_id 投递；故要求「每个 app 都有目标」才算可用，
+                    # 否则缺失目标的 app 每次 tick 都会静默投递失败。
+                    apps = ch_cfg.get("apps") or []
+                    if isinstance(apps, list) and apps:
+                        has_target = all(
+                            isinstance(app, dict)
+                            and (
+                                bool(str(app.get("last_chat_id") or "").strip())
+                                or bool(str(app.get("chat_id") or "").strip())
+                            )
+                            for app in apps
+                        )
+                    else:
+                        # 旧平铺格式（单应用）：兜底看顶层 last_chat_id/chat_id。
+                        has_target = bool(
+                            str(ch_cfg.get("last_chat_id") or "").strip()
+                            or str(ch_cfg.get("chat_id") or "").strip()
+                        )
                     if not has_target:
                         await channel.send_response(
                             ws, req_id, ok=False,
@@ -3554,6 +3660,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
+        # proactive.tick job 由主动推荐开关自动创建/删除，禁止面板删除。
+        existing = await cc.get_job(job_id)
+        if existing is not None and str(getattr(existing, "mode", "") or "").strip().lower() == "proactive.tick":
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="主动推荐定时任务由设置→主动推荐开关控制，不能在面板删除；请到设置关闭开关。",
+                code="BAD_REQUEST",
+            )
+            return
         deleted = await cc.delete_job(job_id)
         if not deleted:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
@@ -3575,6 +3690,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         if enabled is None:
             await channel.send_response(ws, req_id, ok=False, error="enabled is required", code="BAD_REQUEST")
+            return
+        # proactive.tick job 的 enabled 由 config 开关驱动，禁止面板手动切换。
+        existing = await cc.get_job(job_id)
+        if existing is not None and str(getattr(existing, "mode", "") or "").strip().lower() == "proactive.tick":
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="主动推荐定时任务由设置→主动推荐开关控制，不能在面板启停。",
+                code="BAD_REQUEST",
+            )
             return
         try:
             job = await cc.toggle_job(job_id, bool(enabled))
@@ -3752,8 +3876,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             owner_scopes = params.get("owner_scopes", {})
             deny_guidance = params.get("deny_guidance_message")
             update_permissions_owner_scopes_in_config(owner_scopes, deny_guidance)
-            await _notify_config_saved_once({}, ["permissions"], force=True)
-            await channel.send_response(ws, req_id, ok=True, payload={"ok": True})
+            applied_without_restart = await _apply_config_change_set(
+                _ConfigChangeSet({}, ["permissions"], force=True)
+            )
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={"ok": True, "applied_without_restart": applied_without_restart},
+            )
         except Exception as e:
             logger.exception("[permissions.owner_scopes.set] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
@@ -3796,12 +3927,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 )
                 return
             out = resp.payload if isinstance(resp.payload, dict) else {}
-            if resp.ok and req_method not in (
+            should_schedule_reload = req_method not in (
                 ReqMethod.PERMISSIONS_TOOLS_GET,
                 ReqMethod.PERMISSIONS_RULES_GET,
                 ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_GET,
-            ):
-                await _notify_config_saved_once({}, ["permissions"], force=True)
+            )
+            if should_schedule_reload:
+                out = {
+                    **out,
+                    "applied_without_restart": await _apply_config_change_set(
+                        _ConfigChangeSet({}, ["permissions"], force=True)
+                    ),
+                }
             await channel.send_response(ws, req_id, ok=True, payload=out)
             return
 

@@ -36,12 +36,13 @@ _cron_route_ctx: contextvars.ContextVar[CronToolRoute | None] = contextvars.Cont
 
 @dataclass(frozen=True, slots=True)
 class CronToolRoute:
-    """当前请求同步到 Gateway 时使用的路由（request_id / channel / session / chat_type）。"""
+    """当前请求同步到 Gateway 时使用的路由（request_id / channel / session / chat_type / app_id）。"""
 
     request_id: str = ""
     channel_id: str = CronTargetChannel.WEB.value
     session_id: str | None = None
     chat_type: str | None = None  # "group" 表示群聊, "p2p" 或 None 表示私聊
+    app_id: str = ""
     project_dir: str = ""  # 当前 agent 工作目录，用于 cron 任务归属项目解析
 
 
@@ -260,12 +261,16 @@ class CronTools:
             targets_str,
         )
         session_kw: dict[str, Any] = {}
-        sid = self._route().session_id
+        r = self._route()
+        sid = r.session_id
         if isinstance(sid, str) and sid.strip():
             session_kw["session_id"] = sid.strip()
-        chat_type = self._route().chat_type
+        chat_type = r.chat_type
         if chat_type:
             session_kw["chat_type"] = chat_type
+        app_id = str(getattr(r, "app_id", None) or "").strip()
+        if app_id:
+            session_kw["app_id"] = app_id
         mode_kw: dict[str, Any] = {}
         mode_raw = normalized.get("mode")
         if mode_raw is not None and str(mode_raw).strip():

@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f40da-8ad0-74f0-9917-ee5058088342",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._pre_check_mcp_server",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._pre_check_mcp_server in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f40da-8ad0-74f0-9917-ee5058088342",
+        "nickname": "Dewey",
+        "symbol_id": "AgentWebSocketServer._pre_check_mcp_server",
+        "completed": true,
+        "finding_count": 3
+      }
+    }
+  ]
+}

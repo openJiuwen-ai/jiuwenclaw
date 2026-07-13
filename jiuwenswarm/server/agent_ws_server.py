@@ -111,6 +111,20 @@ from jiuwenswarm.common.schema.message import ReqMethod
 
 logger = logging.getLogger(__name__)
 
+# 后台权限重载任务引用集合,防止 fire-and-forget 任务被 GC 提前回收。
+# task 完成后自动从集合移除(Python 官方推荐模式)。
+_background_permission_reload_tasks: set[asyncio.Task] = set()
+
+
+def _log_permission_reload_failure(task: asyncio.Task) -> None:
+    """后台权限重载任务完成回调: 仅在异常时记 debug(与原同步 try/except 语义一致)。"""
+    exc = task.exception()
+    if exc is not None:
+        logger.debug(
+            "[AgentWebSocketServer] post-permissions reload failed (non-critical)",
+            exc_info=exc,
+        )
+
 # Serialize plan-mode restore per session to avoid checkpoint races.
 _session_mode_sync_locks: dict[str, asyncio.Lock] = {}
 
@@ -601,9 +615,20 @@ def _is_restorable_history_record(record: Any) -> bool:
     role = record.get("role")
     content = record.get("content")
     has_content = isinstance(content, str) and bool(content.strip())
+    has_media = (
+        isinstance(record.get("media_items"), list) and bool(record["media_items"])
+    ) or (
+        isinstance(record.get("mediaItems"), list) and bool(record["mediaItems"])
+    )
+    files = record.get("files")
+    if isinstance(files, dict):
+        has_media = has_media or (
+            isinstance(files.get("uploaded_images"), list)
+            and bool(files["uploaded_images"])
+        )
 
     if role == "user":
-        return has_content
+        return has_content or has_media
 
     event_type = record.get("event_type")
     if not event_type:
@@ -784,6 +809,12 @@ def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
             for key, value in metadata.items()
             if key not in E2A_WIRE_INTERNAL_METADATA_KEYS
         } or None
+    # 将 app_id 注入 metadata，供 cron 路由等下游使用
+    app_id = data.get("app_id")
+    if app_id:
+        if metadata is None:
+            metadata = {}
+        metadata.setdefault("app_id", app_id)
 
     return AgentRequest(
         request_id=data["request_id"],
@@ -2003,6 +2034,40 @@ class AgentWebSocketServer:
                 session_id,
             )
 
+    @staticmethod
+    def _is_stateless_method_request(request: AgentRequest) -> bool:
+        """skills / skilldev / plugins / symphony 为无状态 RPC，无需 mode 解析与 adapter.
+
+        恢复 5084467df 引入、8f54b26a7 合入 team 时误删的短路判定。
+        """
+        return (
+            request.req_method is not None
+            and request.req_method.value.startswith(
+                ("skills.", "skilldev.", "plugins.", "symphony.")
+            )
+        )
+
+    async def _get_stateless_agent(self, channel_id: str) -> Any:
+        """为无状态请求取 agent，**不触发任何 mode 的 adapter 重建**.
+
+        优先用 AgentManager 已缓存的 agent 模式 agent（get_agent_nowait 命中即返回，
+        不命中返回 None，绝不创建）；都没缓存时现场构造一个轻量 JiuWenSwarm()
+        （**不调 create_instance**，_adapter 保持 None）——其 process_message 内部对
+        skills/skilldev/plugins/symphony 的无状态短路会在 _ensure_adapter 之前 return，
+        碰不到 adapter。真正的 adapter 重建留给 chat.send。
+
+        相比 5084467df 原版用 get_agent(mode="agent") 作 fallback（会触发 agent 模式
+        adapter 重建，治标不治本），此处彻底解耦。JiuWenSwarm.__init__ 仅 4 个赋值 +
+        一个只读目录的 SkillManager，现场 new 开销可忽略，无需额外缓存态。
+        """
+        cached = self._agent_manager.get_agent_nowait(
+            channel_id=channel_id, mode="agent"
+        )
+        if cached is not None:
+            return cached
+        from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+        return JiuWenSwarm()  # 不调 create_instance，_adapter 保持 None
+
     async def _prepare_code_mode_chat_turn(
         self,
         request: AgentRequest,
@@ -2176,6 +2241,23 @@ class AgentWebSocketServer:
             await self._handle_acp_tool_response(ws, request, send_lock)
             return
 
+        # 无状态请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
+        # code mode 状态管理，直接走 process_message 即可。用轻量 agent 获取，不触发
+        # adapter 重建（恢复 8f54b26a7 误删的短路，并修正 5084467df 触发重建的缺陷）。
+        if self._is_stateless_method_request(request):
+            agent = await self._get_stateless_agent(channel_id)
+            resp = await agent.process_message(request)
+            if getattr(resp, "agent_ref", None) is None:
+                resp.agent_ref = request.agent_ref
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            async with send_lock:
+                await ws.send(json.dumps(wire, ensure_ascii=False))
+            logger.info(
+                "[AgentWebSocketServer] 非流式响应已发送: request_id=%s",
+                request.request_id,
+            )
+            return
+
         mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
             request, channel_id
         )
@@ -2212,13 +2294,19 @@ class AgentWebSocketServer:
         if current_task is not None:
             self._session_stream_tasks[session_id] = current_task
 
-        mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
-            request, channel_id
-        )
+        # 无状态流式请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
+        # code mode 状态管理，直接走 process_message_stream 即可。用轻量 agent 获取，
+        # 不触发 adapter 重建（恢复 8f54b26a7 误删的短路，并修正 5084467df 触发重建的缺陷）。
+        if self._is_stateless_method_request(request):
+            agent = await self._get_stateless_agent(channel_id)
+        else:
+            mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
+                request, channel_id
+            )
 
-        restored_plan = await self._ensure_code_mode_state(request, mode, sub_mode, agent)
-        if restored_plan:
-            await self._push_plan_mode_exited(request)
+            restored_plan = await self._ensure_code_mode_state(request, mode, sub_mode, agent)
+            if restored_plan:
+                await self._push_plan_mode_exited(request)
 
         chunk_count = 0
         # 心跳控制：当有真实 chunk 发送时重置，空闲时发送心跳
@@ -2994,13 +3082,15 @@ class AgentWebSocketServer:
             ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_GET,
         }
         if resp.ok and request.req_method not in read_only_methods:
-            try:
-                await self._agent_manager.reload_agents_config(get_config(), None)
-            except Exception:
-                logger.debug(
-                    "[AgentWebSocketServer] post-permissions reload failed (non-critical)",
-                    exc_info=True,
-                )
+            # 后台异步重载: 不阻塞权限 RPC 回包(避免 reload 慢导致 AgentServer
+            # request timed out)。reload_agents_config 内部有 _reload_lock 串行化
+            # + fingerprint 去重,fire-and-forget 安全。
+            reload_task = asyncio.create_task(
+                self._agent_manager.reload_agents_config(get_config(), None)
+            )
+            _background_permission_reload_tasks.add(reload_task)
+            reload_task.add_done_callback(_background_permission_reload_tasks.discard)
+            reload_task.add_done_callback(_log_permission_reload_failure)
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
@@ -5892,20 +5982,30 @@ class AgentWebSocketServer:
             env_overrides = params.get("env")
             target_channel_id = str(params.get("target_channel_id") or "").strip() or None
             target_session_id = str(params.get("target_session_id") or "").strip() or None
+            raw_reload_scopes = params.get("reload_scopes")
+            reload_scopes = {
+                str(scope)
+                for scope in raw_reload_scopes
+                if isinstance(scope, str) and scope
+            } if isinstance(raw_reload_scopes, list) else set()
 
             reload_kwargs = {}
             if target_channel_id:
                 reload_kwargs["target_channel_id"] = target_channel_id
             if target_session_id:
                 reload_kwargs["target_session_id"] = target_session_id
-            await self._agent_manager.reload_agents_config(
-                config_payload,
-                env_overrides,
-                **reload_kwargs,
-            )
+            agent_reload_scopes = {"model", "team", "permissions", "agent_runtime"}
+            should_reload_agents = not reload_scopes or bool(reload_scopes & agent_reload_scopes)
+            if should_reload_agents:
+                await self._agent_manager.reload_agents_config(
+                    config_payload,
+                    env_overrides,
+                    **reload_kwargs,
+                )
 
             # Hot-reload ProactiveEngine config if available
-            if self._proactive_engine is not None:
+            should_reload_proactive = not reload_scopes or bool(reload_scopes & {"model", "proactive", "agent_runtime"})
+            if self._proactive_engine is not None and should_reload_proactive:
                 cfg = get_config()
                 proactive_cfg = cfg.get("proactive_recommendation", {})
                 self._proactive_engine.reload_config(proactive_cfg)

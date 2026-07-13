@@ -16,6 +16,48 @@ from jiuwenswarm.server.runtime.agent_adapter import evolution_helpers
 from jiuwenswarm.server.runtime.agent_adapter import team_helpers
 
 
+def test_persist_team_history_event_keeps_human_spawn_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        team_helpers,
+        "append_history_record",
+        lambda **kwargs: persisted.append(kwargs),
+    )
+
+    team_helpers._persist_team_history_event(
+        "web",
+        "sess_werewolf",
+        {
+            "event_type": "team.member",
+            "event": {
+                "type": "team.member.spawned",
+                "team_id": "werewolf",
+                "member_id": "villager-human",
+                "name": "人类玩家",
+                "mode": "human",
+                "status": "idle",
+            },
+        },
+    )
+
+    assert len(persisted) == 1
+    assert persisted[0]["event_type"] == "team.member"
+    assert persisted[0]["mode"] == "team"
+    assert persisted[0]["extra"] == {
+        "session_id": "sess_werewolf",
+        "event": {
+            "type": "team.member.spawned",
+            "team_id": "werewolf",
+            "member_id": "villager-human",
+            "name": "人类玩家",
+            "mode": "human",
+            "status": "idle",
+        },
+    }
+
+
 class _InactiveTeamRuntimeManagerMixin:
     """Provide the session-scoped runtime state API for inactive test managers."""
 

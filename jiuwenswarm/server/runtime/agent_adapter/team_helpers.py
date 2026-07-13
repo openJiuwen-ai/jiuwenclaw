@@ -2271,13 +2271,23 @@ def _persist_team_history_event(
 
     request_key = ""
     if evt_type == "team.member":
-        if payload.get("type") != "team.member.status_changed":
+        member_event_type = str(payload.get("type") or "").strip()
+        if member_event_type not in {
+            "team.member.spawned",
+            "team.member.restarted",
+            "team.member.status_changed",
+            "team.member.shutdown",
+        }:
             return
         member_id = str(payload.get("member_id") or "").strip()
-        new_status = str(payload.get("new_status") or "").strip()
-        if not member_id or not new_status:
+        if not member_id:
             return
-        request_key = member_id
+        if (
+            member_event_type == "team.member.status_changed"
+            and not str(payload.get("new_status") or "").strip()
+        ):
+            return
+        request_key = f"{member_id}-{member_event_type.rsplit('.', 1)[-1]}"
     else:
         task_id = str(payload.get("task_id") or payload.get("id") or "").strip()
         if not task_id:

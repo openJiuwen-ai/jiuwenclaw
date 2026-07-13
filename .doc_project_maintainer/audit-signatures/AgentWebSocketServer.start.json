@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f3f51-acc3-7a93-bbf4-a84abd55e983",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer.start",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer.start in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f3f51-acc3-7a93-bbf4-a84abd55e983",
+        "nickname": "Feynman",
+        "symbol_id": "AgentWebSocketServer.start",
+        "completed": true,
+        "finding_count": 2
+      }
+    }
+  ]
+}

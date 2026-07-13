@@ -134,6 +134,173 @@ async def test_config_save_handlers_respond_before_agent_reload_finishes(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_config_set_applies_scoped_reload_before_responding(monkeypatch, tmp_path):
+    channel = FakeWebChannel()
+    reload_started = asyncio.Event()
+    release_first_reload = asyncio.Event()
+    reload_calls: list[tuple[set[str], dict, dict]] = []
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ENV_FILE",
+        tmp_path / ".env",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"models": {"defaults": []}},
+    )
+
+    async def on_config_saved(updated_keys, *, env_updates, config_payload, reload_options):
+        reload_calls.append((set(updated_keys), dict(env_updates), dict(reload_options)))
+        reload_started.set()
+        await release_first_reload.wait()
+        return True
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            on_config_saved=on_config_saved,
+        )
+    )
+
+    task = asyncio.create_task(channel.methods["config.set"](
+        object(),
+        "req-1",
+        {"api_base": "https://example.com/one"},
+        "sess-1",
+    ))
+
+    await asyncio.wait_for(reload_started.wait(), timeout=1)
+    assert channel.responses == []
+
+    release_first_reload.set()
+    await task
+
+    assert reload_calls[0][0] == {"API_BASE"}
+    assert reload_calls[0][2]["target_channel_id"] == "web"
+    assert reload_calls[0][2]["reload_scopes"] == ["model"]
+    assert channel.responses[-1]["id"] == "req-1"
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["applied_without_restart"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_set_reports_saved_when_hot_reload_callback_fails(monkeypatch, tmp_path):
+    channel = FakeWebChannel()
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ENV_FILE",
+        tmp_path / ".env",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"models": {"defaults": []}},
+    )
+
+    async def on_config_saved(updated_keys, *, env_updates, config_payload, reload_options):
+        raise RuntimeError("agent unreachable at 10.0.0.1")
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            on_config_saved=on_config_saved,
+        )
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-hot-reload-failed",
+        {"api_base": "https://example.com/one"},
+        "sess-1",
+    )
+
+    assert channel.responses == [
+        {
+            "id": "req-hot-reload-failed",
+            "ok": True,
+            "payload": {
+                "updated": ["api_base"],
+                "applied_without_restart": False,
+            },
+            "error": None,
+            "code": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_models_replace_all_applies_scoped_reload_before_responding(monkeypatch):
+    channel = FakeWebChannel()
+    reload_started = asyncio.Event()
+    release_reload = asyncio.Event()
+    persisted: list[list[dict]] = []
+    reload_options_seen: list[dict] = []
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"models": {"defaults": []}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_default_models",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_default_models_in_config",
+        lambda models: persisted.append(list(models)),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.registry.ExtensionRegistry.get_instance",
+        lambda: type(
+            "Registry",
+            (),
+            {"get_crypto_provider": lambda self: type("Crypto", (), {"encrypt": lambda self, value: value})()},
+        )(),
+    )
+
+    async def on_config_saved(updated_keys, *, env_updates, config_payload, reload_options):
+        reload_options_seen.append(dict(reload_options))
+        reload_started.set()
+        await release_reload.wait()
+        return True
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            on_config_saved=on_config_saved,
+        )
+    )
+
+    task = asyncio.create_task(channel.methods["models.replace_all"](
+        object(),
+        "req-models",
+        {
+            "models": [
+                {
+                    "model_name": "model-one",
+                    "api_base": "https://example.com/v1",
+                    "api_key": "secret",
+                    "model_provider": "OpenAI",
+                    "is_default": True,
+                }
+            ]
+        },
+        "sess-1",
+    ))
+
+    await asyncio.wait_for(reload_started.wait(), timeout=1)
+    assert channel.responses == []
+
+    release_reload.set()
+    await task
+
+    assert persisted
+    assert reload_options_seen[-1]["target_channel_id"] == "web"
+    assert reload_options_seen[-1]["reload_scopes"] == ["model"]
+    assert channel.responses[-1]["id"] == "req-models"
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["applied_without_restart"] is True
+
+
+@pytest.mark.asyncio
 async def test_config_set_routes_team_payload_to_modes_team_helper(monkeypatch):
     channel = FakeWebChannel()
     recorded: list[dict] = []

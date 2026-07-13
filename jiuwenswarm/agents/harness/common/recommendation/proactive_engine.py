@@ -22,11 +22,41 @@ Usage:
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# proactive 数值配置项的合法区间（与 web handler _validate_proactive_int 保持一致）。
+_PROACTIVE_INT_LO = 1
+_PROACTIVE_INT_HI = 50
+
+
+def _safe_proactive_int(val: Any, default: int) -> int:
+    """读取 proactive 数值配置项的防御性解析。
+
+    config.yaml 被手改成非数字/浮点/超范围时，降级用 default + warning，不让引擎崩溃。
+    （handler 写入时已校验，这里只防手改 config / 旧脏数据。）
+    """
+    # 先按字符串校验：挡住浮点(3.5)、科学计数(1e5)、字符串(abc)、空。
+    # int(3.5) 在 Python 会静默截断成 3，不能直接 int()。
+    raw = str(val).strip() if val is not None else ""
+    if not re.fullmatch(r"[0-9]+", raw):
+        logger.warning(
+            "[ProactiveEngine] invalid int config %r, fallback to default %d", val, default,
+        )
+        return default
+    n = int(raw)
+    if n < _PROACTIVE_INT_LO or n > _PROACTIVE_INT_HI:
+        logger.warning(
+            "[ProactiveEngine] int config %r out of [%d,%d], fallback to default %d",
+            val, _PROACTIVE_INT_LO, _PROACTIVE_INT_HI, default,
+        )
+        return default
+    return n
 
 
 class ProactiveEngine:
@@ -46,8 +76,8 @@ class ProactiveEngine:
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         config = config or {}
-        self._max_per_day: int = int(config.get("max_recommend_per_day", 5))
-        self._max_sessions: int = int(config.get("max_sessions_per_tick", 10))
+        self._max_per_day: int = _safe_proactive_int(config.get("max_recommend_per_day", 5), 5)
+        self._max_rounds: int = _safe_proactive_int(config.get("max_rounds_per_tick", 20), 20)
         # 默认 False，与 config.yaml 的 proactive_recommendation.enabled 默认值一致，
         # 防御性默认=关闭，避免配置段缺失时引擎被误启用。
         self._enabled: bool = config.get("enabled", False)
@@ -56,9 +86,12 @@ class ProactiveEngine:
         # 替代 proactive_actions._analyze_and_decide 里的裸 model.invoke。
         self._proactive_agent: Any = None
         # 触发主 agent 跑一轮生成话术的回调。
-        # 话术交给主 agent 生成 → 自然进其 context engine（save_contexts 持久化）
-        # → stream 输出推前端。撤掉旧的 push/inject 回调。
         self._trigger_main_agent_callback: Any = None
+        # 检查目标 channel 是否有活跃 agent（避免 agent 被 evict 后白调 LLM）。
+        self._check_agent_available_callback: Any = None
+        # 推送通知回调——直接推一条文本到前端，不经过主 agent（不进 context）。
+        # 用于"今日推荐已达上限"等系统提醒。
+        self._send_notification_callback: Any = None
 
     def set_proactive_agent(self, agent: Any) -> None:
         """Set the proactive lightweight agent used for recommendation decision.
@@ -96,26 +129,28 @@ class ProactiveEngine:
             logger.warning("[ProactiveEngine] proactive agent rebuild failed: %s", exc)
 
     def set_trigger_main_agent_callback(self, callback: Any) -> None:
-        """Set the callback that triggers the main agent to run one round.
-
-        Args:
-            callback: Async function ``(session_id, channel_id, query, decision) -> bool``.
-                      Constructs an AgentRequest with the directive-style query and
-                      drives ``adapter.process_message_stream`` so the main agent
-                      generates the recommendation message naturally (entering its
-                      own context engine + streaming to the frontend). Returns False
-                      when the session is busy (避让) or delivery fails.
-        """
+        """Set the callback that triggers the main agent to run one round."""
         self._trigger_main_agent_callback = callback
+
+    def set_check_agent_available_callback(self, callback: Any) -> None:
+        """Set the callback that checks if the target channel has an active agent."""
+        self._check_agent_available_callback = callback
+
+    def set_send_notification_callback(self, callback: Any) -> None:
+        """Set the callback for pushing a simple text notification (no LLM, no context).
+
+        用于"今日推荐已达上限"等系统提醒——直接推文本到前端，不触发主 agent。
+        """
+        self._send_notification_callback = callback
 
     def reload_config(self, config: dict[str, Any]) -> None:
         """Hot-reload configuration without restarting the process."""
         new_enabled = bool(config.get("enabled", False))
-        new_max_per_day = int(config.get("max_recommend_per_day", self._max_per_day))
-        new_max_sessions = int(config.get("max_sessions_per_tick", self._max_sessions))
+        new_max_per_day = _safe_proactive_int(config.get("max_recommend_per_day", self._max_per_day), self._max_per_day)
+        new_max_rounds = _safe_proactive_int(config.get("max_rounds_per_tick", self._max_rounds), self._max_rounds)
 
         self._max_per_day = new_max_per_day
-        self._max_sessions = new_max_sessions
+        self._max_rounds = new_max_rounds
         self._enabled = new_enabled
         logger.info("[ProactiveEngine] config reloaded (enabled=%s, max_per_day=%d)",
                    new_enabled, new_max_per_day)
@@ -168,32 +203,50 @@ class ProactiveEngine:
             _trigger_main_agent,
         )
         from jiuwenswarm.agents.harness.common.recommendation.profile_extractor import (
-            load_user_profile,
-            save_user_profile,
+            load_recommendation_state,
+            save_recommendation_state,
         )
         from jiuwenswarm.agents.harness.common.recommendation.situation_report import (
             build_situation_report,
         )
 
         # 每次 tick 顺手清理过期数据（daily_counts 老日期 key、cooldown_records 过期项）。
-        # 这些数据只增不减，不清理会长期累积（user_profile.json 越来越大）。
         try:
             self.run_maintenance()
         except Exception as exc:
             logger.debug("[ProactiveEngine] maintenance failed: %s", exc)
 
-        # Gate: daily budget (skip for manual triggers)
+        # Step 0: 检查目标 channel 是否有活跃 agent——agent 被 evict 后白调 LLM 是浪费 token。
+        if self._check_agent_available_callback is not None:
+            try:
+                if not self._check_agent_available_callback(target_channel):
+                    logger.debug("[ProactiveEngine] no active agent for channel=%s, skipping tick", target_channel)
+                    self._last_tick_at = time.time()
+                    return False
+            except Exception as exc:
+                logger.debug("[ProactiveEngine] check_agent_available failed: %s", exc)
+
+        # Gate: daily budget
         if _today_recommend_count() >= self._max_per_day:
-            logger.debug("[ProactiveEngine] daily limit reached, skipping tick")
+            logger.info("[ProactiveEngine] daily limit reached (%d/%d), skipping tick",
+                       _today_recommend_count(), self._max_per_day)
+            # 推送通知提醒用户已到上限（每天最多推一次上限提醒，用 last_tick_at 兜底避免刷屏）
+            if self._send_notification_callback is not None:
+                try:
+                    await self._send_notification_callback(
+                        target_channel,
+                        f"今日主动推荐已达每日上限（{self._max_per_day} 条），"
+                        f"明日恢复。",
+                    )
+                except Exception as exc:
+                    logger.debug("[ProactiveEngine] send_notification failed: %s", exc)
             self._last_tick_at = time.time()
             return False
 
         # ── Step 1: Build situation report ─────────────────────
-        # build_situation_report 默认只扫 agent 类会话（mode_prefix="agent"），
-        # 避免 code/team 会话的技术语境污染推荐决策。
         _, available_skills = _get_all_skills()
         report = await build_situation_report(
-            max_sessions=self._max_sessions,
+            max_rounds=self._max_rounds,
             skills=available_skills,
         )
 
@@ -205,36 +258,30 @@ class ProactiveEngine:
         report_text = report.render_for_llm()
 
         # ── Step 2: LLM analysis + decision ────────────────────
-        # 决策由专用 agent 生成（替代裸 model.invoke），无 session、单轮、输出 JSON。
-        profile = load_user_profile()
+        state = load_recommendation_state()
         if self._proactive_agent is None:
             logger.debug("[ProactiveEngine] no proactive agent available, skipping tick")
             self._last_tick_at = time.time()
             return False
 
         result = await _analyze_and_decide(
-            report_text, profile, available_skills, self._proactive_agent,
+            report_text, state, available_skills, self._proactive_agent,
         )
 
-        # ── Step 3: Update profile ─────────────────────────────
-        if result.profile_delta:
-            profile.merge(result.profile_delta)
-            save_user_profile(profile)
-
-        # ── Step 4: Check if we have a recommendation ───────────
+        # ── Step 3: Check if we have a recommendation ───────────
         decision = result.decision
         if not decision:
             logger.debug("[ProactiveEngine] no recommendation this tick")
             self._last_tick_at = time.time()
             return False
 
-        # ── Step 5: Cooldown check ─────────────────────────────
-        if not _is_cooled_down(decision.target, profile):
+        # ── Step 4: Cooldown check ─────────────────────────────
+        if not _is_cooled_down(decision.target, state):
             logger.debug("[ProactiveEngine] '%s' still in cooldown, skipping", decision.target)
             self._last_tick_at = time.time()
             return False
 
-        # ── Step 6: Pick delivery target ───────────────────────
+        # ── Step 5: Pick delivery target ───────────────────────
         if target_channel:
             target_session = report.find_session_for_channel(target_channel)
             if not target_session:
@@ -248,10 +295,7 @@ class ProactiveEngine:
                 self._last_tick_at = time.time()
                 return False
 
-        # ── Step 7: Trigger main agent to generate & deliver ────
-        # 把决策包成指令式 query 触发主 agent 跑一轮，主 agent 自己生成话术
-        # → 进其 context engine（save_contexts 持久化）→ stream 输出推前端。
-        # 避让：目标 session 正忙则跳过本次 tick。
+        # ── Step 6: Trigger main agent to generate & deliver ────
         if self._trigger_main_agent_callback is None:
             logger.warning("[ProactiveEngine] no trigger_main_agent_callback, skipping")
             self._last_tick_at = time.time()
@@ -268,10 +312,10 @@ class ProactiveEngine:
             self._last_tick_at = time.time()
             return False
 
-        # ── Step 8: Update state ────────────────────────────────
+        # ── Step 7: Update state ────────────────────────────────
         _increment_daily_count()
-        _mark_recommended(decision.target, profile)
-        profile.add_recommendation({
+        _mark_recommended(decision.target, state)
+        state.add_recommendation({
             "type": decision.type,
             "target": decision.target,
             "reason": decision.reason,
@@ -279,8 +323,9 @@ class ProactiveEngine:
             "tick_at": time.time(),
             "session_id": target_session.session_id,
         })
+        state.touch()
 
-        save_user_profile(profile)
+        save_recommendation_state(state)
         self._last_tick_at = time.time()
 
         logger.info("[ProactiveEngine] delivered '%s' (type=%s, urgency=%.2f, session=%s)",
@@ -302,12 +347,12 @@ class ProactiveEngine:
             _prune_cooldown_records,
         )
         from jiuwenswarm.agents.harness.common.recommendation.profile_extractor import (
-            load_user_profile,
-            save_user_profile,
+            load_recommendation_state,
+            save_recommendation_state,
         )
 
         _prune_daily_counts()
-        profile = load_user_profile()
-        _prune_cooldown_records(profile)
-        save_user_profile(profile)
+        state = load_recommendation_state()
+        _prune_cooldown_records(state)
+        save_recommendation_state(state)
         logger.debug("[ProactiveEngine] maintenance completed")

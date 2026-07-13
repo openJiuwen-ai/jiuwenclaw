@@ -113,7 +113,7 @@ interface InputAreaProps {
 }
 
 const ACCEPTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
-const MAX_IMAGE_BYTES = 100 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_IMAGE_COUNT = 20;
 
 type AttachmentStatus = 'uploading' | 'ready' | 'error';

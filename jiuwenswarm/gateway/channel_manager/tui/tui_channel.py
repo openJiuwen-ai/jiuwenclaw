@@ -19,6 +19,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from jiuwenswarm.common.schema.message import EventType
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
@@ -81,7 +82,37 @@ class TuiChannel(BaseWsChannel):
         miss 再按 routing_keys 五维精确查 _clients_by_key。
         非团队模式（routing_target 为空）：扫 _clients_by_key 按 session_id 命中
         （对齐 WebChannel，不再广播，避免串窗）。
+
+        例外：定时任务推送（CHAT_FINAL + payload.cron）。scheduler 对 tui 置空
+        session_id（避免 TUI 重启后旧 session_id 与新不同被前端过滤），但下方非团队
+        路径要求 session_id 才能精确匹配，会导致 cron 推送被直接丢弃。仿 WebChannel
+        的 cron 广播分支，对此类消息广播给所有 tui 客户端——多开终端都会收到结果，
+        前端按当前活跃会话展示。
         """
+        # ── 定时任务推 tui：scheduler 对 tui 置空 msg.session_id（见 scheduler
+        # _push_to_targets 的 routing_sid 注释），按 session_id 路由会被丢弃。
+        # cron 推送（占位 + 结果）带 payload.cron 标记，普通对话 chat.final 不带，
+        # 以此为识别条件广播给所有 tui 客户端，与 WebChannel.send 对称。
+        if (
+            getattr(msg, "event_type", None) == EventType.CHAT_FINAL
+            and isinstance(getattr(msg, "payload", None), dict)
+            and isinstance(msg.payload.get("cron"), dict)
+        ):
+            frame = self._serialize_frame(msg, None)
+            clients: set[Any] = set()
+            for ws_list in self._clients_by_key.values():
+                for w in ws_list:
+                    if not getattr(w, "closed", False):
+                        clients.add(w)
+            for w in clients:
+                self._enqueue_send(w, frame)
+            logger.debug(
+                "[TuiChannel] cron push broadcast to %d client(s) id=%s run_id=%s",
+                len(clients), getattr(msg, "id", ""),
+                (msg.payload.get("cron") or {}).get("run_id", ""),
+            )
+            return
+
         ws_set: set[Any] = set()
 
         if routing_target is not None:

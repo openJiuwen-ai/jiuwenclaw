@@ -1,4 +1,4 @@
-import { Message, MessageRole, UsageSummary, FileDownloadItem, WsEvent } from '../types';
+import { Message, MessageRole, UsageSummary, FileDownloadItem, MediaItem, WsEvent } from '../types';
 import { webClient } from '../services/webClient';
 import { normalizeFinalContent } from '../utils/finalContent';
 import { isA2UIClientEventContent } from './a2ui/a2uiContent';
@@ -249,6 +249,90 @@ function extractTeamEventRecord(record: Record<string, unknown>): Record<string,
   return Object.keys(payload).length > 0 ? payload : null;
 }
 
+function filenameFromPath(path: string): string {
+  const parts = path.split(/[\\/]+/).filter(Boolean);
+  return parts[parts.length - 1] || 'image';
+}
+
+function normalizeHistoryMediaItem(value: unknown): MediaItem | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const rawType = typeof value.type === 'string' ? value.type.trim().toLowerCase() : 'image';
+  if (rawType && rawType !== 'image') {
+    return null;
+  }
+
+  const path = pickFirstString(value, ['path', 'url']);
+  if (!path) {
+    return null;
+  }
+
+  const mimeType = pickFirstString(value, ['mime_type', 'mimeType']) ?? 'image/png';
+  if (!mimeType.startsWith('image/')) {
+    return null;
+  }
+
+  const filename = pickFirstString(value, ['filename', 'name']) ?? filenameFromPath(path);
+  const size = typeof value.size_bytes === 'number'
+    ? value.size_bytes
+    : typeof value.sizeBytes === 'number'
+      ? value.sizeBytes
+      : undefined;
+
+  return {
+    type: 'image',
+    filename,
+    path,
+    mime_type: mimeType,
+    mimeType,
+    ...(typeof size === 'number' ? { size_bytes: size, sizeBytes: size } : {}),
+  };
+}
+
+function appendHistoryMediaItems(
+  target: MediaItem[],
+  seenKeys: Set<string>,
+  value: unknown
+): void {
+  if (!Array.isArray(value)) {
+    return;
+  }
+  for (const item of value) {
+    const normalized = normalizeHistoryMediaItem(item);
+    if (!normalized) {
+      continue;
+    }
+    const key = normalized.path || `${normalized.filename}:${normalized.mimeType}`;
+    if (seenKeys.has(key)) {
+      continue;
+    }
+    seenKeys.add(key);
+    target.push(normalized);
+  }
+}
+
+function extractHistoryMediaItems(record: Record<string, unknown>): MediaItem[] {
+  const mediaItems: MediaItem[] = [];
+  const seenKeys = new Set<string>();
+
+  appendHistoryMediaItems(mediaItems, seenKeys, record.media_items);
+  appendHistoryMediaItems(mediaItems, seenKeys, record.mediaItems);
+
+  if (isRecord(record.files)) {
+    appendHistoryMediaItems(mediaItems, seenKeys, record.files.uploaded_images);
+  }
+  if (isRecord(record.event_payload)) {
+    appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.media_items);
+    if (isRecord(record.event_payload.files)) {
+      appendHistoryMediaItems(mediaItems, seenKeys, record.event_payload.files.uploaded_images);
+    }
+  }
+
+  return mediaItems;
+}
+
 function parseHistoryTimelineEntry(
   record: Record<string, unknown>,
   sessionId: string
@@ -262,14 +346,21 @@ function parseHistoryTimelineEntry(
       return null;
     }
     const content = typeof rawContent === 'string' ? rawContent : String(rawContent ?? '');
-    if (!content.trim()) {
+    const mediaItems = extractHistoryMediaItems(record);
+    if (!content.trim() && mediaItems.length === 0) {
       return null;
     }
     const id =
       pickFirstString(record, ['id', 'message_id', 'msg_id']) ?? `hist-user-${sessionId}-${at}`;
     return {
       kind: 'message',
-      message: { id, role: 'user', content, timestamp: at },
+      message: {
+        id,
+        role: 'user',
+        content,
+        timestamp: at,
+        ...(mediaItems.length > 0 ? { mediaItems } : {}),
+      },
     };
   }
 

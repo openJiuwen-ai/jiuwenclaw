@@ -91,6 +91,10 @@ class ExperienceBankBuildConfig:
     max_success_examples: int = 20
     pending_flush_threshold: int = 20
     min_hits_for_pattern: int = 1
+    skill_cluster_num: int | None = None
+    pattern_merge_threshold: float = 0.9
+    query_examples_count: int = 5
+    cluster_max_examples: int | None = None
 
 
 @dataclass
@@ -98,10 +102,7 @@ class DistilledPattern:
     """Distilled knowledge pattern from one cluster."""
 
     cluster_id: int
-    effective_skills: list[list[str]] = field(default_factory=list)
-    ineffective_skills: list[dict[str, str | list[str]]] = field(default_factory=list)
-    success_rate: float = 0.0
-    raw_trace_count: int = 0
+    effective_skills: list[str] = field(default_factory=list)
     pattern_description: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -109,9 +110,6 @@ class DistilledPattern:
         return {
             "cluster_id": self.cluster_id,
             "effective_skills": self.effective_skills,
-            "ineffective_skills": self.ineffective_skills,
-            "success_rate": self.success_rate,
-            "raw_trace_count": self.raw_trace_count,
             "pattern_description": self.pattern_description,
         }
 
@@ -121,8 +119,5 @@ class DistilledPattern:
         return cls(
             cluster_id=d["cluster_id"],
             effective_skills=list(d.get("effective_skills", [])),
-            ineffective_skills=list(d.get("ineffective_skills", [])),
-            success_rate=float(d.get("success_rate", 0.0)),
-            raw_trace_count=int(d.get("raw_trace_count", 0)),
             pattern_description=str(d.get("pattern_description", "")),
         )

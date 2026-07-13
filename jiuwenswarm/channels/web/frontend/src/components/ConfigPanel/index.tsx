@@ -333,7 +333,7 @@ const PROACTIVE_BOOLEAN_KEYS = new Set(["proactive_recommendation_enabled"]);
 const PROACTIVE_KEYS = new Set([
   ...PROACTIVE_BOOLEAN_KEYS,
   "proactive_recommendation_max_recommend_per_day",
-  "proactive_recommendation_max_sessions_per_tick",
+  "proactive_recommendation_max_rounds_per_tick",
 ]);
 // 调度频率已交给定时任务面板，ConfigPanel 不再暴露 tick_interval。
 // 即便后端残留下发，也在比较/提交时跳过，避免误提交空值。
@@ -537,6 +537,43 @@ function isBooleanKey(key: string): boolean {
   );
 }
 
+// proactive 数值配置项：只接受 1-50 的正整数。
+// 与后端 web handler _validate_proactive_int 保持一致。
+interface ProactiveIntSpec {
+  lo: number;
+  hi: number;
+  labelKey: string;
+}
+const PROACTIVE_INT_SPECS: Record<string, ProactiveIntSpec> = {
+  proactive_recommendation_max_recommend_per_day: {
+    lo: 1, hi: 50, labelKey: "config.keys.proactiveMaxPerDay",
+  },
+  proactive_recommendation_max_rounds_per_tick: {
+    lo: 1, hi: 50, labelKey: "config.keys.proactiveMaxRounds",
+  },
+};
+
+function validateProactiveInt(
+  key: string, raw: string, t: (k: string, opts?: Record<string, unknown>) => string,
+): string | null {
+  const spec = PROACTIVE_INT_SPECS[key];
+  if (!spec) return null;
+  const field = t(spec.labelKey);
+  const s = (raw ?? "").trim();
+  if (!s) {
+    return t("config.errors.proactiveIntEmpty", { field, lo: spec.lo, hi: spec.hi });
+  }
+  // 正则一次挡住浮点(3.5)、负数(-1)、科学计数(1e5)、字符串(abc)
+  if (!/^[0-9]+$/.test(s)) {
+    return t("config.errors.proactiveIntNotInteger", { field, value: s, lo: spec.lo, hi: spec.hi });
+  }
+  const n = parseInt(s, 10);
+  if (n < spec.lo || n > spec.hi) {
+    return t("config.errors.proactiveIntOutOfRange", { field, lo: spec.lo, hi: spec.hi, value: n });
+  }
+  return null;
+}
+
 function parseBoolValue(value: string): boolean {
   return value.toLowerCase() === "true" || value === "1";
 }
@@ -649,7 +686,7 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   skill_retrieval_retrieve_max_exposure_depth: "config.keys.skillRetrievalMaxExposureDepth",
   proactive_recommendation_enabled: "config.keys.proactiveEnabled",
   proactive_recommendation_max_recommend_per_day: "config.keys.proactiveMaxPerDay",
-  proactive_recommendation_max_sessions_per_tick: "config.keys.proactiveMaxSessions",
+  proactive_recommendation_max_rounds_per_tick: "config.keys.proactiveMaxRounds",
 };
 const KEY_PLACEHOLDER_I18N: Record<string, string> = {
   memory_forbidden_description: "config.keys.memoryForbiddenDescriptionPlaceholder",
@@ -670,7 +707,7 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   skill_retrieval_enabled: 1,
   proactive_recommendation_enabled: 0,
   proactive_recommendation_max_recommend_per_day: 2,
-  proactive_recommendation_max_sessions_per_tick: 3,
+  proactive_recommendation_max_rounds_per_tick: 3,
   skill_retrieval_retrieve_max_exposure_depth: 10,
   skill_retrieval_build_max_depth: 20,
   skill_retrieval_build_max_workers: 21,
@@ -793,6 +830,12 @@ function GroupSection({
                         {getKeyLabelHintText(key, t)}
                       </div>
                     ) : null}
+                    {PROACTIVE_INT_SPECS[key] ? (() => {
+                      const e = validateProactiveInt(key, draftValues[key] ?? "", t);
+                      return e ? (
+                        <div className="mt-1 text-[11px] leading-4 text-danger">{e}</div>
+                      ) : null;
+                    })() : null}
                   </td>
                   <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                     {isBooleanKey(key) ? (
@@ -3184,6 +3227,18 @@ export function ConfigPanel({
       setConfigTab("agent");
       setError(agentsTeamsValidationError);
       return;
+    }
+
+    // proactive 数值配置项提交校验：只校验有改动的，挡住负数/浮点/字符串/超范围
+    for (const key of Object.keys(PROACTIVE_INT_SPECS)) {
+      if (key in configUpdates) {
+        const err = validateProactiveInt(key, configUpdates[key], t);
+        if (err) {
+          setConfigTab("other");
+          setError(err);
+          return;
+        }
+      }
     }
 
     setSaving(true);

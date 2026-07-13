@@ -1,6 +1,7 @@
 import { webClient } from '../services/webClient';
 import type { Message } from '../types';
 import type {
+  HumanShareCommand,
   TeamTask,
   TeamMemberExecutionEvent,
   TeamTaskStatus,
@@ -38,6 +39,7 @@ export interface TeamHistoryPanelState {
   taskEvents: TeamTaskEvent[];
   executionEvents: TeamMemberExecutionEvent[];
   messages: Message[];
+  humanShareCommands: HumanShareCommand[];
 }
 
 interface TeamHistoryGetResponse {
@@ -327,6 +329,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
   const taskEvents = new Map<string, TeamTaskEvent>();
   const tasks = new Map<string, TeamTask>();
   const executionEvents = new Map<string, TeamMemberExecutionEvent>();
+  const humanShareCommands = new Map<string, HumanShareCommand>();
   const messages: Message[] = [];
   const shutdownMembers = new Set<string>();
   let hasSeenMember = false;
@@ -357,6 +360,44 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     }
     shutdownMembers.add(memberId);
     members.delete(memberId);
+  };
+
+  const upsertHumanShareCommand = (
+    memberName: string,
+    patch: Partial<HumanShareCommand>,
+    timestamp: number
+  ) => {
+    if (!memberName) {
+      return;
+    }
+    const existing = humanShareCommands.get(memberName);
+    const teamName = patch.teamName || existing?.teamName || '';
+    const sessionRef =
+      patch.sessionRef ||
+      existing?.sessionRef ||
+      (teamName ? `team_${teamName}_session_${sessionId}` : '');
+    humanShareCommands.set(memberName, {
+      memberName,
+      displayName: patch.displayName || existing?.displayName,
+      sessionId,
+      teamName,
+      sessionRef,
+      joinCommand:
+        patch.joinCommand ||
+        existing?.joinCommand ||
+        (sessionRef ? `/join ${sessionRef} as ${memberName}` : ''),
+      exitCommand:
+        patch.exitCommand ||
+        existing?.exitCommand ||
+        (sessionRef ? `/exit ${sessionRef}` : ''),
+      status:
+        patch.status === 'pending' && existing?.status && existing.status !== 'pending'
+          ? existing.status
+          : patch.status || existing?.status || 'pending',
+      sourceChannel: patch.sourceChannel || existing?.sourceChannel,
+      userId: patch.userId || existing?.userId,
+      updatedAt: Math.max(existing?.updatedAt || 0, timestamp),
+    });
   };
 
   const upsertTask = (
@@ -497,6 +538,25 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     const timestamp = recordTimestamp(record);
     const eventType = typeof record.event_type === 'string' ? record.event_type : '';
     const recordSessionId = getRecordSessionId(record);
+    if (eventType === 'chat.final') {
+      const actionPayload = isRecord(record.event_payload)
+        ? { ...record, ...record.event_payload }
+        : record;
+      const memberAction = pickString(actionPayload, ['member_action']);
+      const actionMemberName = pickString(actionPayload, ['member_name']);
+      if (actionMemberName && (memberAction === 'joined' || memberAction === 'left')) {
+        upsertHumanShareCommand(
+          actionMemberName,
+          {
+            displayName: pickString(actionPayload, ['display_name']) || undefined,
+            status: memberAction,
+            sourceChannel: pickString(actionPayload, ['source_channel']) || undefined,
+            userId: pickString(actionPayload, ['user_id']) || undefined,
+          },
+          timestamp
+        );
+      }
+    }
     if (
       isTeamTeammateRecord(record) &&
       (!recordSessionId || recordSessionId === sessionId)
@@ -627,6 +687,22 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       if (!memberId) {
         continue;
       }
+      if (pickString(event, ['mode']) === 'human') {
+        const teamName = pickString(event, ['team_id']);
+        const sessionRef = teamName ? `team_${teamName}_session_${sessionId}` : '';
+        upsertHumanShareCommand(
+          memberId,
+          {
+            displayName: pickString(event, ['name']) || undefined,
+            teamName,
+            sessionRef,
+            joinCommand: sessionRef ? `/join ${sessionRef} as ${memberId}` : '',
+            exitCommand: sessionRef ? `/exit ${sessionRef}` : '',
+            status: 'pending',
+          },
+          eventTimestamp
+        );
+      }
       if (pickString(event, ['type']) === 'team.member.shutdown') {
         applyMemberShutdown(memberId);
         continue;
@@ -698,6 +774,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       taskEvents: [],
       executionEvents: [],
       messages: [],
+      humanShareCommands: [],
     };
   }
 
@@ -707,6 +784,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     taskEvents: Array.from(taskEvents.values()),
     executionEvents: Array.from(executionEvents.values()),
     messages,
+    humanShareCommands: Array.from(humanShareCommands.values()),
   };
 }
 
