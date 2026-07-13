@@ -352,7 +352,7 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
     SlashCommandEntry(
         id="mode",
         canonical_text=f"{GatewaySlashCommand.MODE.value} agent|code|team|agent.plan|agent.fast|code.plan|"
-                       f"code.normal|code.team",
+                       f"code.normal|code.team|team.plan",
         scope="gateway",
         req_method=None,
         notes="受控通道切换模式：一级模式 agent/code/team（映射到默认子模式）或直达 agent.plan/agent.fast/code.plan/code.normal；"

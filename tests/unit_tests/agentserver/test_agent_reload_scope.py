@@ -1,9 +1,28 @@
 import asyncio
+import contextlib
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+_OJ_MEMORY_MANAGER_MODULE = "openjiuwen.core.memory.lite.manager"
+
+
+@contextlib.contextmanager
+def _maybe_patch_aclose_memory_cache():
+    import importlib
+
+    mod = importlib.import_module(_OJ_MEMORY_MANAGER_MODULE)
+    if hasattr(mod, "aclose_memory_manager_cache"):
+        with patch(
+            f"{_OJ_MEMORY_MANAGER_MODULE}.aclose_memory_manager_cache",
+            AsyncMock(),
+        ):
+            yield
+    else:
+        yield
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
@@ -367,7 +386,8 @@ async def test_deep_adapter_global_reload_marks_sessions_stale_without_fanout(mo
 
     with (
         patch.object(interface_module, "clear_config_cache", MagicMock()),
-        patch.object(interface_module, "clear_memory_manager_cache", MagicMock()),
+        _maybe_patch_aclose_memory_cache(),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_handle_memory_rail_by_config", AsyncMock()),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_refresh_multimodal_configs", MagicMock()),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_create_model", MagicMock(return_value=object())),
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "_sync_multimodal_tools_for_runtime", MagicMock()),
@@ -444,7 +464,8 @@ async def _reload_deep_adapter_config_for_test(previous_config, deep_config_fact
 
     with (
         patch.object(interface_module, "clear_config_cache", MagicMock()),
-        patch.object(interface_module, "clear_memory_manager_cache", MagicMock()),
+        _maybe_patch_aclose_memory_cache(),
+        patch.object(interface_module.JiuWenSwarmDeepAdapter, "_handle_memory_rail_by_config", AsyncMock()),
         patch.object(
             interface_module.JiuWenSwarmDeepAdapter,
             "_refresh_multimodal_configs",

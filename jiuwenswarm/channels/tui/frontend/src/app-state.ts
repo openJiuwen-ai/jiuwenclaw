@@ -1701,6 +1701,11 @@ export class CliPiAppState {
       this.localPendingQuestion = null;
       this.pendingQuestion = null;
       this.setStreamingStateInternal(StreamingState.Idle);
+    } else if (this.pendingQuestion) {
+      // Server-side pendingQuestion (ask_user_interrupt, permission_interrupt, etc.)
+      // chat.interrupt sent below will notify the server to cancel the agent work
+      this.pendingQuestion = null;
+      this.setStreamingStateInternal(StreamingState.Idle);
     }
     // Set local interrupt flag immediately for long-running command detection
     this.interruptRequested = true;

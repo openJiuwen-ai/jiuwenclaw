@@ -149,21 +149,6 @@ def set_config(config):
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
 
 
-def is_auto_memory_enabled() -> bool:
-    """Check if auto-memory feature is enabled in config.
-
-    Returns:
-        True if auto_memory_enabled is True in config.yaml, False otherwise.
-        Defaults to True if not configured.
-    """
-    try:
-        config = get_config()
-        return bool(config.get("auto_memory_enabled", False))
-    except Exception:
-        # Default to True if config cannot be read
-        return True
-
-
 def _get_bool_env(value: str | None) -> bool | None:
     if value is None:
         return None

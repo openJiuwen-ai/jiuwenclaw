@@ -11,6 +11,8 @@ import {
   draftFromWechatConfig,
   normalizeWechatConfig,
   normalizeWechatLoginUi,
+  validateWechatNumericDraft,
+  WECHAT_NUMERIC_BOUNDS,
   type WechatConfig,
   type WechatDraft,
   type WechatLoginUiState,
@@ -1654,6 +1656,20 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
 
   const handleSaveWechatConfig = async () => {
     if (!hasWechatConfigChanges || wechatSaving) return;
+    // 数值参数保存前拦截：负数 / 0 / 极大值 / 非整数 / max<base 均阻止保存并红字提示。
+    const numericError = validateWechatNumericDraft(wechatDraft);
+    if (numericError) {
+      setWechatSaveError(
+        numericError.kind === 'order'
+          ? t('channels.errors.wechatBackoffOrder')
+          : t('channels.errors.wechatNumericInvalid', {
+              field: numericError.field,
+              min: numericError.min,
+              max: numericError.max,
+            }),
+      );
+      return;
+    }
     setWechatSaving(true);
     setWechatSaveError(null);
     const payload = buildWechatPayload(wechatDraft);
@@ -3195,6 +3211,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   <input
                                     type="number"
                                     step={field === 'long_poll_timeout_sec' ? 1 : 0.1}
+                                    min={WECHAT_NUMERIC_BOUNDS[field].min}
+                                    max={WECHAT_NUMERIC_BOUNDS[field].max}
                                     value={wechatDraft[field]}
                                     onChange={(e) => handleWechatFieldChange(field, Number(e.target.value) || 0)}
                                     placeholder={t('channels.placeholders.configValue')}

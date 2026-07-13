@@ -104,6 +104,7 @@ _COMMON_RAIL_NAMES: frozenset[str] = frozenset(
         registry.CONTEXT_PROCESSOR,
         registry.PLUGIN_RAILS,
         registry.SKILL_RETRIEVAL_PROMPT,
+        registry.SYMPHONY_ORCHESTRATION_PROMPT,
         registry.MEMBER_SKILL_TOOLKIT,
     }
 )
@@ -399,9 +400,9 @@ def test_build_member_capability_specs_rail_names(
 
     assert _COMMON_RAIL_NAMES <= rail_names
     assert extra_rails <= rail_names
-    # The common set has exactly 15 entries; the role adds only its explicit
+    # The common set has exactly 16 entries; the role adds only its explicit
     # extra rails on top.
-    assert len(_COMMON_RAIL_NAMES) == 15
+    assert len(_COMMON_RAIL_NAMES) == 16
     assert rail_names == _COMMON_RAIL_NAMES | extra_rails
     # No DeepAgent is involved; every entry is a plain declarative RailSpec.
     assert all(isinstance(spec, RailSpec) for spec in rails_specs)
@@ -1041,6 +1042,34 @@ def test_symphony_toolkit_respects_disabled_config(
     assert tools.build_symphony_toolkit({}, SwarmBuildContext(role="leader")) == []
 
 
+def test_symphony_orchestration_prompt_provider_is_leader_only() -> None:
+    """Only the leader gets the Symphony orchestration prompt rail."""
+    factory = resolve_factory(
+        get_catalog()[registry.SYMPHONY_ORCHESTRATION_PROMPT].factory_ref,
+    )
+
+    leader_rail = factory({}, SwarmBuildContext(role="leader"))
+    teammate_rail = factory({}, SwarmBuildContext(role="teammate"))
+
+    assert type(leader_rail).__name__ == "SymphonyOrchestrationPromptRail"
+    assert teammate_rail is None
+
+
+def test_team_leader_spec_includes_symphony_orchestration_prompt() -> None:
+    """The team leader spec declares the Symphony orchestration prompt provider."""
+    spec = build_member_deep_agent_spec(
+        {"symphony": {"enabled": True}},
+        "team",
+        "leader",
+        DeepAgentSpec(),
+    )
+
+    assert any(
+        rail.type == registry.SYMPHONY_ORCHESTRATION_PROMPT
+        for rail in (spec.rails or [])
+    )
+
+
 def test_vision_model_config_params_gating(monkeypatch: pytest.MonkeyPatch) -> None:
     """Vision config params are empty without a dedicated model, filled when complete."""
     assert tools.vision_model_config_params({}) == {}
@@ -1340,6 +1369,7 @@ _EXPECTED_CODE_RAIL_NAMES: frozenset[str] = frozenset(
         registry.USER_HOOKS,
         registry.CODE_SKILL_USE,
         registry.SKILL_RETRIEVAL_PROMPT,
+        registry.SYMPHONY_ORCHESTRATION_PROMPT,
         registry.CODE_CONFIRM_INTERRUPT,
         registry.MEMBER_SKILL_TOOLKIT,
         registry.TEAM_WORKSPACE_REPORT_PATH,

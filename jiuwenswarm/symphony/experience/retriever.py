@@ -22,13 +22,15 @@ class ExperienceRetriever:
         self._top_k = top_k
 
     def search(self, query: str) -> list[str]:
-        """Search the experience KB. Returns skill list on hit, None on miss."""
+        """Search the experience KB."""
         results = self._kb.search_by_embedding(
             query, top_k=self._top_k, threshold=self._threshold
         )
         if not results:
             return []
-        return [skill_id for result in results for skill_id in result[1].skill_ids]
+        return list(dict.fromkeys(
+            skill_id for result in results for skill_id in result[1].skill_ids
+        ))
 
 
 __all__ = ["ExperienceRetriever"]

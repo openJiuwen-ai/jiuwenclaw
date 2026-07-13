@@ -34,7 +34,7 @@ from jiuwenswarm.common.security.ws_origin import (
     is_origin_check_enabled,
     is_allowed_browser_origin,
 )
-from jiuwenswarm.common.schema.message import Message, Mode, ReqMethod
+from jiuwenswarm.common.schema.message import EventType, Message, Mode, ReqMethod
 from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_exception,
     describe_ws_peer,
@@ -443,6 +443,41 @@ class WebChannel(BaseWsChannel):
             getattr(msg, "id", ""), getattr(msg, "event_type", None), _et,
             _has_fanout, routing_target is not None, len(self.clients),
         )
+        # ── 心跳 relay：临时 session_id（heartbeat_{ts}_{suffix}）不匹配任何前端连接，
+        # 按常规 session_id 路由会被当作"无连接"丢弃。心跳状态是全局的（非会话级），
+        # 前端 setHeartbeatStatus 也是全局 store，因此直接广播给所有 web 客户端。
+        # 与 wechat 等 IM 渠道在 send() 中对 HEARTBEAT_RELAY 的专属分支对齐。
+        if msg.event_type == EventType.HEARTBEAT_RELAY:
+            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            clients = self.clients
+            for w in clients:
+                self._enqueue_send(w, frame)
+            logger.debug(
+                "[WebChannel] heartbeat.relay broadcast to %d client(s) id=%s",
+                len(clients), getattr(msg, "id", ""),
+            )
+            return
+
+        # ── 定时任务推 web：原设计绑定 job.session_id，但关闭 tab/换设备后旧会话再无连接，
+        # 按 session_id 路由会被丢弃。cron 推送（占位 + 结果）带 payload.cron 标记，普通对话
+        # chat.final 不带，以此为识别条件广播给所有 web 客户端。前端 _push_to_targets 已对 web
+        # 置空 session_id，shouldHandleSessionEvent 放行，消息进当前活跃会话流（含 placeholder 替换）。
+        if (
+            msg.event_type == EventType.CHAT_FINAL
+            and isinstance(msg.payload, dict)
+            and isinstance(msg.payload.get("cron"), dict)
+        ):
+            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            clients = self.clients
+            for w in clients:
+                self._enqueue_send(w, frame)
+            logger.debug(
+                "[WebChannel] cron push broadcast to %d client(s) id=%s run_id=%s",
+                len(clients), getattr(msg, "id", ""),
+                (msg.payload.get("cron") or {}).get("run_id", ""),
+            )
+            return
+
         if msg.type == "res":
             if isinstance(msg.payload, dict):
                 res_payload = {**msg.payload}

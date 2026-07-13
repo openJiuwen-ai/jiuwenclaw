@@ -52,6 +52,7 @@ import {
 import type { ConfigItemSchema } from "../core/commands/builtins/config.js";
 import type { McpListItem, McpListPayload } from "../core/commands/builtins/mcp.js";
 import { buildModeAutocompleteItems } from "../core/commands/builtins/mode.js";
+import { MemoryViewController, type MemoryViewTab } from "./memory-view.js";
 import { PIPELINE_VALUES, PIPELINE_OPTIONS, INTERVAL_VALUES, INTERVAL_OPTIONS, FLAG_OPTIONS } from "../core/commands/builtins/auto-harness.js";
 import { isTeamMode } from "../core/modes.js";
 import {
@@ -90,7 +91,7 @@ import {
   orderedMemberIds,
   teamWorkingStartedAtMs,
 } from "./components/team-shared.js";
-import { padToWidth, prefixedLines, renderStyledMarkdownLines, renderWrappedText } from "./rendering/text.js";
+import { padToWidth, prefixedLines, renderMarkdownLines, renderStyledMarkdownLines, renderWrappedText } from "./rendering/text.js";
 import { chalk, editorTheme, palette, selectListTheme, setCurrentThemeName } from "./theme.js";
 import type { Hunk, GitDiffData, GitDiffStats, TurnDiff } from "../core/types.js";
 
@@ -666,6 +667,7 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
   constructor(
     private readonly inner: AutocompleteProvider,
     private readonly cwd: string,
+    private readonly memoryArgCompletion?: (sub: string) => Promise<{ label: string; description: string }[]>,
   ) {}
 
   async getSuggestions(
@@ -683,8 +685,57 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
       return null;
     }
 
+    // /memory edit|toggle + 空格：直接调用 completion 获取文件/key 列表，绕过 CombinedAutocompleteProvider
+    const memArgMatch = textBeforeCursor.match(/^\/memory\s+(edit|toggle)\s+(\S*)$/);
+    if (memArgMatch && this.memoryArgCompletion) {
+      try {
+        const sub = memArgMatch[1];
+        const argPrefix = memArgMatch[2].toLowerCase();
+        const items = await this.memoryArgCompletion(sub);
+        const filtered = argPrefix
+          ? items.filter((item) => item.label.toLowerCase().startsWith(argPrefix))
+          : items;
+        if (filtered.length > 0) {
+          return {
+            items: filtered.map((item) => ({
+              label: item.label,
+              description: item.description,
+              value: item.label,
+              usage: "",
+              example: "",
+            })),
+            prefix: argPrefix,
+          };
+        }
+      } catch { /* ignore */ }
+      return null;
+    }
+
+    // /memory edit|toggle（无尾随空格）：抑制 inner provider 的文件补全。
+    // inner provider 会以 "edit" 为 prefix 返回文件列表，applyCompletion 时会把
+    // "edit" 替换成文件名 → /memory JIUWENSWARM.local.md（丢失子命令）。
+    // 用户需要先输入空格，才走上面的 memArgMatch 路径正确展示文件列表。
+    if (/^\/memory\s+(edit|toggle)$/.test(textBeforeCursor)) {
+      return null;
+    }
+
     const innerResult = await this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
-    if (innerResult) return innerResult;
+    if (innerResult) {
+      // 对命令参数候选项做前缀过滤：取最后一个空格后的文本作为参数前缀
+      const lastSpaceIdx = textBeforeCursor.lastIndexOf(" ");
+      if (lastSpaceIdx >= 0) {
+        const argPrefix = textBeforeCursor.slice(lastSpaceIdx + 1).toLowerCase();
+        if (argPrefix) {
+          const filtered = innerResult.items.filter((item) =>
+            item.label.toLowerCase().startsWith(argPrefix)
+          );
+          if (filtered.length > 0 && filtered.length < innerResult.items.length) {
+            return { ...innerResult, items: filtered };
+          }
+        }
+      }
+      return innerResult;
+    }
 
     if (options.signal.aborted) return null;
 
@@ -713,6 +764,7 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
 
     const result = this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
 
+    // @ 文件补全后自动加空格
     if (prefix.startsWith("@") && !result.lines[result.cursorLine]?.endsWith(" ")) {
       const line = result.lines[result.cursorLine] ?? "";
       const newLines = [...result.lines];
@@ -1253,8 +1305,11 @@ export class AppScreen implements Component, Focusable {
   private draftBeforeQuestion = "";
   private syncingComposerInput = false;
   private pendingQuestionAnswers = new Map<number, string>();
+  private pendingMultiSelectAnswers = new Map<number, string[]>();
   private questionList: SelectList | null = null;
+  private questionCheckboxList: CheckboxList | null = null;
   private questionDetailsMap: Map<string, string[]> | null = null;
+  private questionPreviewMap: Map<string, string> | null = null;
   private questionOptionRows: QuestionOptionRowHit[] = [];
   private otherInputMode = false;
   private ctrlCPendingForQuestion = false;
@@ -1269,6 +1324,7 @@ export class AppScreen implements Component, Focusable {
   private themeList: ThemeListState | null = null;
   private configEditorState: ConfigEditorState | null = null;
   private statusViewState: StatusViewState | null = null;
+  private mvController: MemoryViewController | null = null;
   private swarmWorkflowsViewState: SwarmWorkflowsViewState | null = null;
   private startupPromptList: SelectList | null = null;
   private todosCollapsed = false;
@@ -1339,6 +1395,22 @@ export class AppScreen implements Component, Focusable {
         this.transientNotice = null;
       }
       this.tui.requestRender();
+
+      // pi-tui 的 Editor 只对字母数字字符自动触发 autocomplete，不处理空格。
+      // 这导致 /memory edit<空格> 后不会自动展示文件列表——用户必须手按 Tab。
+      // 在 slash 命令上下文中输入空格时手动触发，补全 provider 会自行决定是否展示。
+      const ed = this.editor as unknown as {
+        autocompleteState?: unknown;
+        tryTriggerAutocomplete?: () => void;
+        state?: { cursorLine: number; cursorCol: number; lines: string[] };
+      };
+      if (!ed.autocompleteState && ed.tryTriggerAutocomplete && ed.state) {
+        const line = ed.state.lines[ed.state.cursorLine] ?? "";
+        const before = line.slice(0, ed.state.cursorCol);
+        if (before.trimStart().startsWith("/") && before.endsWith(" ")) {
+          ed.tryTriggerAutocomplete();
+        }
+      }
     };
     this.editor.onSubmit = async (value) => {
       void await this.handleSubmit(value);
@@ -2061,7 +2133,8 @@ export class AppScreen implements Component, Focusable {
       this.themeList !== null ||
       this.swarmWorkflowsViewState !== null ||
       this.configEditorState !== null ||
-      this.diffViewerState !== null;
+      this.diffViewerState !== null ||
+      this.mvController !== null && this.mvController.isOpen;
 
     if (
       !pendingQuestion &&
@@ -2158,19 +2231,26 @@ export class AppScreen implements Component, Focusable {
       }
       if (hasInput) {
         // 第一次 Esc（输入框非空）：进入待清空状态并显示提示
-        this.escClearPending = true;
-        this.transientNotice = "Press Esc again to clear input";
-        if (this.transientNoticeTimer) {
-          clearTimeout(this.transientNoticeTimer);
-        }
-        this.transientNoticeTimer = setTimeout(() => {
-          this.escClearPending = false;
-          this.transientNoticeTimer = null;
-          this.transientNotice = null;
+        // 例外：/memory edit 和 /memory toggle 跳过双击清空，让 editor 处理 Esc 取消 completion 提示
+        const trimmed = this.editor.getText().trimStart();
+        const skipEscClear = trimmed === "/memory edit" || trimmed === "/memory toggle";
+        if (skipEscClear) {
+          // 不拦截，继续后续流程让 editor.handleInput 处理
+        } else {
+          this.escClearPending = true;
+          this.transientNotice = "Press Esc again to clear input";
+          if (this.transientNoticeTimer) {
+            clearTimeout(this.transientNoticeTimer);
+          }
+          this.transientNoticeTimer = setTimeout(() => {
+            this.escClearPending = false;
+            this.transientNoticeTimer = null;
+            this.transientNotice = null;
+            this.tui.requestRender();
+          }, 3000);
           this.tui.requestRender();
-        }, 3000);
-        this.tui.requestRender();
-        return;
+          return;
+        }
       }
       // 输入框为空：不响应，继续后续流程
     }
@@ -2201,6 +2281,26 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
+    // Ctrl+D during pending question: same double-press mechanism as Ctrl+C
+    if (pendingQuestion && matchesKey(data, "ctrl+d")) {
+      if (this.ctrlCPendingForQuestion) {
+        this.clearCtrlCPendingForQuestion();
+        this.transientNotice = null;
+        this.interruptTask();
+        return;
+      }
+      this.ctrlCPendingForQuestion = true;
+      this.transientNotice = "Press Ctrl+D again to cancel";
+      this.ctrlCPendingForQuestionTimer = setTimeout(() => {
+        this.ctrlCPendingForQuestion = false;
+        this.ctrlCPendingForQuestionTimer = null;
+        this.transientNotice = null;
+        this.tui.requestRender();
+      }, 3000);
+      this.tui.requestRender();
+      return;
+    }
+
     if (pendingQuestion && this.handlePendingQuestionInput(data, snapshot)) {
       this.tui.requestRender();
       return;
@@ -2215,7 +2315,7 @@ export class AppScreen implements Component, Focusable {
     const skipGlobalMainScreenKeys = hasOverlay || this.showTeamPanel;
     const allowGlobalAction =
       !skipGlobalMainScreenKeys ||
-      globalAction === "app:toggleTranscript" ||
+      (globalAction === "app:toggleTranscript" && !(this.mvController?.isOpen ?? false)) ||
       (this.showTeamPanel && !hasOverlay && globalAction === "app:toggleTeamPanel");
     let handled = false;
     if (allowGlobalAction) {
@@ -2505,6 +2605,12 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
+    // MemoryView 键盘：←/→ 切页签，Esc 关闭，Ctrl+O 切全路径，其余交给 SelectList
+    if (!snapshot.pendingQuestion && this.mvController?.isOpen) {
+      this.mvController.handleInput(data);
+      return;
+    }
+
     if (!snapshot.pendingQuestion && this.configEditorState !== null) {
       this.handleConfigEditorInput(data);
       this.tui.requestRender();
@@ -2663,7 +2769,8 @@ export class AppScreen implements Component, Focusable {
       hideEditorForInlinePlanReject ||
       this.resumeSessionList !== null ||
       this.state.isHelpVisible() ||
-      this.modelList !== null;
+      this.modelList !== null ||
+      (this.mvController?.isOpen ?? false);
     const editorLines = hideMainEditor
       ? []
       : this.applySlashCommandHint(this.editor.render(width), width);
@@ -2671,6 +2778,7 @@ export class AppScreen implements Component, Focusable {
     const questionLines = [
       ...this.buildStartupPromptLines(width),
       ...this.buildStatusViewLines(width),
+      ...(this.mvController?.isOpen ? this.mvController.buildLines(width) : []),
       ...(!this.statusViewState ? this.buildConfigEditorLines(width) : []),
       ...this.buildResumeSessionListLines(width),
       ...this.buildModelListLines(width),
@@ -2937,13 +3045,10 @@ export class AppScreen implements Component, Focusable {
       // Check for mode switch when there's ongoing work
       if (/^\/(?:mode|switch)\s/.test(text) && snapshot.cancellableWork) {
         const currentMode = snapshot.mode;
-        const isTeamMode = currentMode === "code.team" || currentMode === "team";
         // Parse the target mode from the command
         const modeMatch = text.match(/^\/(?:mode|switch)\s+(\S+)/);
         const targetMode = modeMatch?.[1] ?? "";
-        const targetIsTeamMode = targetMode === "code.team" || targetMode === "team";
-        // Only warn when leaving team mode
-        if (isTeamMode && !targetIsTeamMode) {
+        if (currentMode !== targetMode) {
           const answers = await this.state.askQuestions(
             [
               {
@@ -3037,6 +3142,18 @@ export class AppScreen implements Component, Focusable {
           subMatch?.[1] === "config" ? "config" :
           undefined;
         await this.openStatusView(tab);
+        return;
+      }
+      // /memory（无参）及 /memory <edit|status|toggle|open>（无后续参数）
+      // 打开 MemoryView 页签控制台；带参数的形式（/memory edit <path>、/memory toggle <key>）
+      // 不匹配，继续走命令分发器（保留 completion）。
+      const memMatch = text.match(/^\/memory(?:\s+(edit|status|toggle|open))?$/);
+      if (memMatch) {
+        this.editor.addToHistory(text);
+        this.editor.setText("");
+        this.state.addItem(addCommandEcho(snapshot.sessionId, text));
+        const memTab = (memMatch[1] as MemoryViewTab | undefined) ?? "edit";
+        await this.ensureMvController().open(memTab);
         return;
       }
       if (/^\/theme\s*$/.test(text)) {
@@ -3144,6 +3261,7 @@ export class AppScreen implements Component, Focusable {
       this.activeQuestionId = questionId;
       this.activeQuestionIndex = 0;
       this.pendingQuestionAnswers.clear();
+      this.pendingMultiSelectAnswers.clear();
       this.draftBeforeQuestion = this.editor.getText();
       this.editor.setText("");
       const pendingQuestion = snapshot.pendingQuestion;
@@ -3161,8 +3279,11 @@ export class AppScreen implements Component, Focusable {
       this.activeQuestionIndex = 0;
       this.otherInputMode = false;
       this.pendingQuestionAnswers.clear();
+      this.pendingMultiSelectAnswers.clear();
       this.questionList = null;
+      this.questionCheckboxList = null;
       this.questionDetailsMap = null;
+      this.questionPreviewMap = null;
       this.setMouseTrackingEnabled(false);
       if (!this.editor.getText() && this.draftBeforeQuestion) {
         this.editor.setText(this.draftBeforeQuestion);
@@ -6377,6 +6498,18 @@ export class AppScreen implements Component, Focusable {
     this.tui.requestRender();
   }
 
+  // ──────────────────────────── MemoryView ────────────────────────────
+
+  /** 懒初始化 MemoryViewController（复用实例，状态在 controller 内部管理） */
+  private ensureMvController(): MemoryViewController {
+    if (!this.mvController) {
+      this.mvController = new MemoryViewController(this.state, this.tui);
+    }
+    return this.mvController;
+  }
+
+  // MemoryView 的具体逻辑已提取到 ui/memory-view.ts（MemoryViewController）
+
   private clearPastedTextState(): void {
     this.cancelPastedTextStateClear();
     this.pastedTextById.clear();
@@ -6738,6 +6871,10 @@ export class AppScreen implements Component, Focusable {
         resolveFdBinary(),
       ),
       getCurrentCwd() || process.cwd(),
+      // /memory edit|toggle 参数 completion 回调（绕过 CombinedAutocompleteProvider 的子命令名候选项）
+      async (sub: string) => {
+        return this.ensureMvController().getMemoryCompletions(sub);
+      },
     );
   }
 
@@ -6849,6 +6986,25 @@ export class AppScreen implements Component, Focusable {
               }));
             }
 
+            // 子命令名补全：当输入前缀未精确匹配任何子命令时，
+            // 提示以该前缀开头的子命令名（如 /memory edi → edit）。
+            // 输入为空时提示全部子命令（如 /memory <space>）。
+            if (matchedPath.length === 0 && command.subCommands?.length) {
+              const prefix = trimmed.toLowerCase();
+              const matchingSubs = command.subCommands.filter(
+                (sub) => !prefix || sub.name.toLowerCase().startsWith(prefix),
+              );
+              if (matchingSubs.length > 0) {
+                return matchingSubs.map((sub) => ({
+                  label: sub.name,
+                  description: sub.description ?? "",
+                  value: sub.name,
+                  usage: sub.usage,
+                  example: sub.example,
+                }));
+              }
+            }
+
             return null;
           }
         : undefined,
@@ -6942,26 +7098,46 @@ export class AppScreen implements Component, Focusable {
       );
     }
 
-    if (this.questionList !== null) {
+    if (this.questionCheckboxList !== null) {
+      const checkboxLines = this.questionCheckboxList.render(width);
+      lines.push(...checkboxLines);
+    } else if (this.questionList !== null) {
       const listLines = this.questionList.render(width);
 
-      // Insert details sub-lines right after the currently selected item
+      // Insert preview / details sub-lines right after the currently selected item
       // instead of appending them after the entire list.
       const selectedItem = this.questionList.getSelectedItem();
-      if (selectedItem && this.questionDetailsMap) {
-        const details = this.questionDetailsMap.get(selectedItem.value);
-        if (details && details.length > 0) {
-          const indent = "              ";
-          const detailLines: string[] = [];
-          for (const d of details) {
-            // Wrap indented text to full terminal width, so long paths auto-break into multiple lines
-            detailLines.push(
-              ...renderWrappedText(Math.max(1, width), `${indent}${d}`, palette.text.dim),
+      if (selectedItem) {
+        const previewText = this.questionPreviewMap?.get(selectedItem.value);
+        const details = this.questionDetailsMap?.get(selectedItem.value);
+        const hasPreview = !!previewText;
+        const hasDetails = !!(details && details.length > 0);
+        if (hasPreview || hasDetails) {
+          const previewIndent = "  ";
+          const detailIndent = "              ";
+          const subLines: string[] = [];
+          // Markdown preview (ASCII mockups / code snippets) rendered with the
+          // same renderer as assistant messages so monospace alignment survives.
+          if (hasPreview) {
+            const mdLines = renderMarkdownLines(
+              Math.max(1, width - previewIndent.length),
+              previewText!,
             );
+            for (const l of mdLines) {
+              subLines.push(previewIndent + l);
+            }
+          }
+          // Plain-text detail lines (e.g. rewind file-change summaries).
+          if (hasDetails) {
+            for (const d of details!) {
+              subLines.push(
+                ...renderWrappedText(Math.max(1, width), `${detailIndent}${d}`, palette.text.dim),
+              );
+            }
           }
           // SelectList.render() layout: [visible item 0..N-1, (scroll indicator?)]
           // Replicate its scroll-window calculation to find where the selected
-          // item sits, then splice detail lines right after it.
+          // item sits, then splice sub-lines right after it.
           const filteredLen: number = this.questionList["filteredItems"]?.length ?? 0;
           const selectedIdx: number = this.questionList["selectedIndex"] ?? 0;
           const maxVis: number = this.questionList["maxVisible"] ?? 6;
@@ -6970,7 +7146,7 @@ export class AppScreen implements Component, Focusable {
             Math.min(selectedIdx - Math.floor(maxVis / 2), filteredLen - maxVis),
           );
           const insertAt = Math.max(0, Math.min(selectedIdx - scrollStart + 1, listLines.length));
-          listLines.splice(insertAt, 0, ...detailLines);
+          listLines.splice(insertAt, 0, ...subLines);
         }
       }
 
@@ -7000,6 +7176,12 @@ export class AppScreen implements Component, Focusable {
   ): boolean {
     if (!snapshot.pendingQuestion) {
       return false;
+    }
+
+    if (this.questionCheckboxList !== null) {
+      this.questionCheckboxList.handleInput(data);
+      this.tui.requestRender();
+      return true;
     }
 
     if (this.questionList !== null) {
@@ -7101,7 +7283,7 @@ export class AppScreen implements Component, Focusable {
       !!pendingQuestion &&
       !this.otherInputMode &&
       !this.isEditingInlinePlanReject(snapshot) &&
-      (this.questionList !== null || (pendingQuestion.questions[0]?.options.length ?? 0) > 0);
+      (this.questionList !== null || this.questionCheckboxList !== null || (pendingQuestion.questions[0]?.options.length ?? 0) > 0);
   }
 
   private isEditingInlinePlanReject(snapshot: ReturnType<CliPiAppState["getSnapshot"]>): boolean {
@@ -7144,7 +7326,9 @@ export class AppScreen implements Component, Focusable {
     const pendingQuestion = snapshot.pendingQuestion;
     if (!pendingQuestion) {
       this.questionList = null;
+      this.questionCheckboxList = null;
       this.questionDetailsMap = null;
+      this.questionPreviewMap = null;
       this.setMouseTrackingEnabled(false);
       return;
     }
@@ -7156,10 +7340,48 @@ export class AppScreen implements Component, Focusable {
     );
     if (!question || question.options.length === 0) {
       this.questionList = null;
+      this.questionCheckboxList = null;
       this.questionDetailsMap = null;
+      this.questionPreviewMap = null;
       this.setMouseTrackingEnabled(false);
       return;
     }
+
+    // --- Multi-select: use CheckboxList ---
+    if (question.multiSelect) {
+      this.questionList = null;
+      this.questionDetailsMap = null;
+      this.questionPreviewMap = null;
+
+      const groups: CheckboxGroupType[] = [
+        {
+          name: question.header || question.question,
+          items: question.options.map((option) => ({
+            label: option.label,
+            value: option.label,
+            checked: false,
+            description: option.description,
+          })),
+        },
+      ];
+
+      const checkboxList = new CheckboxList(
+        groups,
+        Math.min(Math.max(question.options.length, 1), 20),
+      );
+      checkboxList.onSelect = (selectedValues: string[]) => {
+        this.handleMultiSelectConfirm(selectedValues);
+      };
+      checkboxList.onCancel = () => {
+        this.handleQuestionSelection("");
+      };
+      this.questionCheckboxList = checkboxList;
+      this.setMouseTrackingEnabled(true);
+      return;
+    }
+
+    // --- Single-select: use SelectList ---
+    this.questionCheckboxList = null;
 
     const currentSelectedValue = this.questionList?.getSelectedItem()?.value;
     const showRejectCursor =
@@ -7196,6 +7418,16 @@ export class AppScreen implements Component, Focusable {
       }
     }
     this.questionDetailsMap = detailsMap;
+
+    // Build preview map for options that carry markdown preview content
+    // (LLM-supplied ASCII mockups / code snippets). Rendered only for single-select.
+    const previewMap = new Map<string, string>();
+    for (const option of question.options) {
+      if (option.preview && option.preview.trim()) {
+        previewMap.set(option.label, option.preview);
+      }
+    }
+    this.questionPreviewMap = previewMap;
 
     const maxVisible =
       pendingQuestion.source === "permission_interrupt" ||
@@ -7251,6 +7483,37 @@ export class AppScreen implements Component, Focusable {
     this.setMouseTrackingEnabled(true);
   }
 
+  private handleMultiSelectConfirm(selectedValues: string[]): void {
+    const snapshot = this.state.getSnapshot();
+    const pendingQuestion = snapshot.pendingQuestion;
+    if (!pendingQuestion) {
+      return;
+    }
+
+    if (this.activeQuestionIndex < pendingQuestion.questions.length - 1) {
+      // Multiple questions: advance to the next one
+      this.pendingMultiSelectAnswers.set(this.activeQuestionIndex, selectedValues);
+      this.activeQuestionIndex += 1;
+      this.syncQuestionList(this.state.getSnapshot());
+      this.tui.requestRender();
+      return;
+    }
+
+    const answers = pendingQuestion.questions.map((question, index) => {
+      // Current multi-select question uses the just-confirmed selectedValues;
+      // earlier multi-select questions use their stored arrays.
+      const multi =
+        index === this.activeQuestionIndex
+          ? selectedValues
+          : this.pendingMultiSelectAnswers.get(index);
+      return {
+        question: question.question,
+        selected_options: multi ?? [this.pendingQuestionAnswers.get(index) ?? ""],
+      };
+    });
+    this.state.submitQuestionAnswers(answers);
+  }
+
   private handleQuestionSelection(label: string): void {
     const snapshot = this.state.getSnapshot();
     const pendingQuestion = snapshot.pendingQuestion;
@@ -7290,10 +7553,11 @@ export class AppScreen implements Component, Focusable {
     }
 
     const answers = pendingQuestion.questions.map((question, index) => {
+      const multi = this.pendingMultiSelectAnswers.get(index);
       const answerValue = this.pendingQuestionAnswers.get(index) ?? question.options[0]?.label ?? "";
       const answer = {
         question: question.question,
-        selected_options: [answerValue],
+        selected_options: multi ?? [answerValue],
       };
       if (
         index === this.activeQuestionIndex &&
