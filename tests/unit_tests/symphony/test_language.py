@@ -1,7 +1,6 @@
 from jiuwenswarm.symphony.orchestration.language import (
     default_plan_title,
     resolve_orchestration_language,
-    seed_skill_reason,
 )
 
 
@@ -19,7 +18,3 @@ def test_resolve_orchestration_language_falls_back_to_chinese() -> None:
 def test_deterministic_copy_uses_selected_language() -> None:
     assert default_plan_title("cn") == "Symphony 编排计划"
     assert default_plan_title("en") == "Symphony plan"
-    assert seed_skill_reason("skill-a", "cn") == "skill-a 被选为种子 Skill"
-    assert seed_skill_reason("skill-a", "en") == (
-        "skill-a selected as a seed skill"
-    )

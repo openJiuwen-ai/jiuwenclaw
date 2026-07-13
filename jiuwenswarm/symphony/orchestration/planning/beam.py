@@ -16,7 +16,6 @@ from jiuwenswarm.symphony.orchestration.language import (
     default_beam_plan_title,
     planner_language_instruction,
     resolve_orchestration_language,
-    seed_skill_reason,
 )
 from jiuwenswarm.symphony.orchestration.planning.fast import FAST_PLANNER_MAX_SKILLS
 from jiuwenswarm.symphony.orchestration.planning.models import (
@@ -586,6 +585,7 @@ class BidirectionalBeamPlanner:
             "beam_search": {
                 "mode": "bidirectional_beam",
                 "language": self.language,
+                "round_index": len(rounds),
                 "top_k": self.top_k,
                 "max_depth": self.max_depth,
                 "min_edge_confidence": self.min_edge_confidence,
@@ -682,7 +682,7 @@ class BidirectionalBeamPlanner:
                 edge_indices=(),
                 available=frozenset(),
                 semantic_scores=(1.0,),
-                score_reasons=(seed_skill_reason(current_skill_id, self.language),),
+                score_reasons=(),
                 seed_skill_ids=tuple(seeds),
                 directions=frozenset({"seed"}),
             )
@@ -1019,7 +1019,6 @@ class BidirectionalBeamPlanner:
                     ),
                     skill_by_id=self.skill_by_id,
                     can_feed_edges=self.eligible_edges,
-                    language=self.language,
                 ),
             )
             for state in states
@@ -1192,7 +1191,6 @@ class BidirectionalBeamPlanner:
             ),
             skill_by_id=self.skill_by_id,
             can_feed_edges=self.eligible_edges,
-            language=self.language,
         )
 
     def _state_missing_count(self, state: BeamState) -> int:

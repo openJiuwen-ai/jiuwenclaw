@@ -424,6 +424,7 @@ class SymphonyToolkit:
             (
                 "mode",
                 "language",
+                "round_index",
                 "top_k",
                 "max_depth",
                 "min_edge_confidence",

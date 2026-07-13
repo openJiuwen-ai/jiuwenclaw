@@ -36,14 +36,6 @@ def planner_language_instruction(language: str) -> str:
     )
 
 
-def seed_skill_reason(skill_id: str, language: str) -> str:
-    """Return a localized deterministic seed-selection reason."""
-
-    if resolve_orchestration_language(language) == "en":
-        return f"{skill_id} selected as a seed skill"
-    return f"{skill_id} 被选为种子 Skill"
-
-
 def default_plan_title(language: str) -> str:
     """Return the localized presentation fallback title."""
 

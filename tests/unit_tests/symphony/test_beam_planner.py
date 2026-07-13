@@ -61,6 +61,7 @@ async def test_beam_batches_outgoing_neighbors_and_filters_low_scores(tmp_path):
     assert result["planning_mode"] == "bidirectional_beam"
     assert result["llm_call_count"] == 1
     assert result["beam_search"]["seed_skill_ids"] == ["skill-a"]
+    assert result["beam_search"]["round_index"] == 1
     assert result["beam_search"]["events"][0]["event"] == "started"
     assert result["beam_search"]["events"][0]["payload"]["graph"]["nodes"] == [
         {
@@ -314,7 +315,7 @@ async def test_beam_progress_callback_receives_lightweight_graph_events(tmp_path
     assert all("score" not in item and "reason" not in item for item in judged)
 
 
-async def test_beam_judge_and_seed_reason_use_english(tmp_path):
+async def test_beam_judge_reason_uses_english_without_seed_copy(tmp_path):
     artifacts = _artifacts(
         tmp_path,
         edges=[_edge("skill-a", "skill-b", confidence=0.91)],
@@ -338,7 +339,7 @@ async def test_beam_judge_and_seed_reason_use_english(tmp_path):
     assert "Write all user-visible natural-language fields in English" in (
         prompt["system_prompt"]
     )
-    assert "skill-a selected as a seed skill" in result["reason"]
+    assert result["reason"] == "skill-b is useful"
 
 
 def _planner(

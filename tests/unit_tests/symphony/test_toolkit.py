@@ -732,6 +732,7 @@ def test_toolkit_plan_returns_compact_beam_search():
             ],
             "beam_search": {
                 "mode": "bidirectional_beam",
+                "round_index": 1,
                 "top_k": 2,
                 "max_depth": 3,
                 "seed_skill_ids": ["skill-a"],
@@ -839,6 +840,7 @@ def test_toolkit_plan_returns_compact_beam_search():
 
     assert result["success"] is True
     assert result["beam_search"]["seed_skill_ids"] == ["skill-a"]
+    assert result["beam_search"]["round_index"] == 1
     assert result["beam_search"]["graph"]["nodes"][2]["status"] == "rejected"
     assert result["beam_search"]["graph"]["edges"][0] == {
         "id": "skill-a->skill-b",

@@ -18,7 +18,6 @@ from jiuwenswarm.symphony.orchestration.planning.models import (
     PlanStep,
     SearchState,
 )
-from jiuwenswarm.symphony.orchestration.language import seed_skill_reason
 from jiuwenswarm.symphony.orchestration.planning.utils import skill_id
 
 
@@ -28,13 +27,11 @@ def state_to_plan(
     grounded: GroundedQuery,
     skill_by_id: dict[str, dict[str, Any]],
     can_feed_edges: list[dict[str, Any]],
-    language: str = "cn",
 ) -> OrchestrationPlan:
     available = set(state.available)
     steps: list[PlanStep] = []
     all_missing: list[dict[str, Any]] = []
     produced: set[tuple[str, str]] = set()
-    reasons: list[str] = []
 
     for current_skill_id in state.skill_ids:
         skill = skill_by_id[current_skill_id]
@@ -64,9 +61,6 @@ def state_to_plan(
                 filled_inputs=filled,
             )
         )
-        if current_skill_id in grounded.seed_skill_ids:
-            reasons.append(seed_skill_reason(current_skill_id, language))
-
     edges = [can_feed_edges[index] for index in state.edges]
     edge_confidence = (
         sum(float(edge.get("confidence") or 0.0) for edge in edges) / len(edges)
@@ -93,7 +87,7 @@ def state_to_plan(
             grounded.available_artifacts,
         ),
         status=status,
-        reasons=[*reasons, *state.score_reasons][:8],
+        reasons=list(state.score_reasons[:8]),
     )
 
 

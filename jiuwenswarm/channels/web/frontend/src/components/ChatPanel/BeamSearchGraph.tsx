@@ -44,7 +44,7 @@ export function BeamSearchGraph({ progress }: { progress: BeamSearchProgress }) 
     (node) => node.status === 'selected' || node.status === 'final'
   ).length;
   const isEnglish = progress.language === 'en';
-  const title = isEnglish ? 'Skill orchestration search' : '技能编排搜索';
+  const title = isEnglish ? 'Skill orchestration' : '技能编排';
   const round = isEnglish
     ? `Round ${progress.roundIndex}`
     : `第 ${progress.roundIndex} 轮`;
