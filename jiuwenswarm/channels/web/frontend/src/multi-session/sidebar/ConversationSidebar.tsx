@@ -27,6 +27,7 @@ import './ConversationSidebar.css';
 import addProjectIcon from '../../assets/work-mode/add-project.svg';
 import arrowRightIcon from '../../assets/work-mode/arrow-right.svg';
 import collapseIcon from '../../assets/work-mode/collapse.svg';
+import closeIcon from '../../assets/work-mode/close.svg';
 import deleteIcon from '../../assets/work-mode/delete.svg';
 import editIcon from '../../assets/work-mode/edit.svg';
 import folderFoldIcon from '../../assets/work-mode/folder-fold.svg';
@@ -496,6 +497,14 @@ function ProjectCreateDialog({
           if (canSubmit) onSubmit(name.trim(), mode === 'blank' ? '' : projectDir.trim());
         }}
       >
+        <button
+          type="button"
+          className="conversation-path-dialog__close"
+          aria-label={t('common.close')}
+          onClick={onCancel}
+        >
+          <img src={closeIcon} alt="" aria-hidden="true" />
+        </button>
         <div className="conversation-path-dialog__title">{t('multiSession.project.newProject')}</div>
         <input
           className="conversation-path-dialog__input"

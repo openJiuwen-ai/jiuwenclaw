@@ -7,16 +7,17 @@
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
 import { useEffect, useMemo, useRef } from 'react';
-import { FileText, ListTodo, Minimize2 } from 'lucide-react';
+import { FileText, Minimize2 } from 'lucide-react';
 import { webRequest } from '../../services/webClient';
 import { ArtifactsPanel, useSessionArtifactsCount } from '../ArtifactsPanel';
 import { TeamArea } from '../teamArea';
+import { loadTeamHistoryPanelState } from '../../features/teamHistoryPanelRestore';
 import { TaskPlanningPanel } from '../teamArea/TaskPlanningPanel';
 import { HarnessExtensionTree } from './HarnessExtensionTree';
-import { loadTeamHistoryPanelState } from '../../features/teamHistoryPanelRestore';
 import { type TabType, type TeamDetailTab } from '../teamArea/shared';
 import type { TeamTask, TeamTaskStatus } from '../../stores/sessionStore';
 import type { TodoItem, TodoStatus } from '../../types';
+import teamProcessIcon from '../../assets/team-process.svg';
 import './ToolPanel.css';
 
 /** 规划/性能模式下把 TodoItem 降级映射为 TeamTask，复用 TaskPlanningPanel 紧凑态样式 */
@@ -104,7 +105,7 @@ function ExpandedSingleAgentArea({
       key: 'planning',
       label: t('team.planning.tab'),
       count: `${completedTasks}/${totalTasks}`,
-      icon: <ListTodo size={16} />,
+      icon: <img src={teamProcessIcon} width={16} height={16} aria-hidden="true" />,
     },
     {
       key: 'artifacts',
@@ -116,7 +117,7 @@ function ExpandedSingleAgentArea({
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-card">
-      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-border">
+      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-b border-border">
         <div className="flex items-center gap-2">
           {tabs.map((tab) => (
             <button
