@@ -55,7 +55,7 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 | `/skills` | Skills management (list, install, uninstall, marketplace, ClawHub, SkillNet) (see below) |
 | `/model` | Model view, add, switch (see below) |
 | `/mcp` | MCP server management (see below) |
-| `/diff` | View session changes by turn (see below) |
+| `/diff` | Interactive change review: per-turn diffs + uncommitted working tree changes (see below) |
 | `/compact` | Compress current context (see below) |
 | `/init` | Project initialization (see below) |
 | `/branch` | Create a branch session from current conversation point (see below) |
@@ -168,7 +168,11 @@ Behavior:
 ### `/diff` (Interactive Change Review)
 
 - Usage: `/diff` (no subcommands).
-- Data source: TUI requests Agent diff service via `command.diff`, returns `turns` (change sets per turn) and `gitDiff` (uncommitted working tree changes) for current `session_id`.
+- Applicable modes: All modes.
+- Data source: TUI sends a `command.diff` request to the AgentServer (60s timeout). The handler resolves the current `session_id` and `project_dir` from request metadata, then fetches two data sets **in parallel** via worker threads:
+  - `turns` — per-turn change sets derived from `.agent_history` file operation logs;
+  - `gitDiff` — uncommitted working tree changes from `git diff HEAD`.
+- Response payload: `{ type: "list", turns: [...], gitDiff?: {...} }`. On error: `{ ok: false, error: "..." }`.
 - Display mode: Opens a **full-screen interactive Diff viewer**:
   - **List view**: Shows all changed files (working tree `working` and per-turn `Turn N`) with relative paths, source label, and added/removed line counts;
   - **Detail view**: Press `Enter` on a selected file to view its full hunk-by-hunk diff with scrolling support.
@@ -184,8 +188,44 @@ Behavior:
   - `Home` / `g` — Go to file top;
   - `End` / `Shift+g` — Go to file bottom;
   - `←` / `Esc` — Return to list view.
-- Scope: Covers both the working tree (`git diff HEAD`) and per-turn change traces. Not a replacement for `git diff` full version control perspective.
 - Fallback: When the TUI does not provide the `enterDiffViewer` capability, falls back to inline display (file names, source, and line stats only).
+
+#### Turn-based diff data source
+
+Per-turn diffs are computed from `.agent_history/file_ops_jiuwenswarm*.json` logs, not from git. The service reads and merges file operation logs from multiple locations:
+
+1. Agent workspace (`~/.jiuwenswarm/agent/jiuwenswarm_workspace/.agent_history/`)
+2. User workspace `.agent_history/`
+3. Project directory `.agent_history/` (session-specific and global files)
+
+Entries are deduplicated by path normalization and timestamp proximity (±1 second). Turn boundaries are defined by user messages in session history: a turn spans from one user message timestamp to the next. Only turns with file changes are returned; empty turns are filtered out. Turn indices are preserved (aligned with the actual user message count in history) to allow `/rewind` to map correctly.
+
+#### Git diff data source
+
+Working tree changes are obtained via `git diff HEAD` (tracked files only). The git repo root is resolved from `project_dir` (which may be a subdirectory). Staged renames (including brace shorthand form `a/{b => c}/d.txt`) are handled to align numstat keys with hunk keys.
+
+#### Effect boundaries and limits
+
+| Boundary | Value | Behavior |
+|---|---|---|
+| Max files in detail | 50 | Only the first 50 tracked files get hunks; stats still cover all changed files |
+| Max lines per file | 400 | Hunks are truncated beyond 400 lines per file; `isTruncated` flag is set |
+| Max diff size per file | 1 MB | Files whose diff exceeds 1 MB are skipped in hunk parsing; `isLargeFile` flag is set, stats still counted |
+| Max files for details | 500 | If more than 500 files changed, only aggregate stats are returned (no per-file hunks) |
+| Git command timeout | 10s | Git commands that exceed 10 seconds return `None` |
+| Git root resolution timeout | 5s | `git rev-parse --show-toplevel` that exceeds 5 seconds returns `None` |
+
+#### What is NOT covered
+
+- **Untracked files**: `git diff HEAD` only covers tracked file modifications. Untracked files are excluded from the git diff section. (Untracked files edited by the agent may still appear in per-turn diffs via file_ops logs.)
+- **Manual/bash edits in turn diffs**: Per-turn diffs are derived from the agent's `.agent_history` file operation logs. Files edited manually or via bash commands are not tracked in turn diffs.
+- **Committed changes**: Only uncommitted working tree changes are shown. Committed history is not covered.
+- **Transient git states**: During merge, rebase, cherry-pick, or revert, git diff returns `None` to avoid showing misleading incoming changes.
+- **Binary files**: Binary file changes are counted in stats but no hunks are shown (`isBinary` flag set).
+- **Not a git repo**: If `project_dir` is not in a git repository, `gitDiff` is `None`; only per-turn diffs are returned.
+- **No project_dir**: If `project_dir` cannot be resolved, `gitDiff` is `None`; per-turn diffs may still work using session metadata.
+
+> `/diff` is not a replacement for `git diff` from a full version control perspective. It combines agent-tracked per-turn changes with a snapshot of uncommitted tracked-file changes for quick review within a coding session.
 
 ### `/compact` (Context Compression)
 

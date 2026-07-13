@@ -81,7 +81,7 @@
 | `/compact` | - | 压缩上下文，保留摘要 | `/compact` | 全部 |
 | `/config` | `/settings`, `/setting` | 查看/设置后端配置 | `/config`、`/config get`、`/config set key value` | 全部 |
 | `/context` | - | 查看上下文窗口占用与 Token 用量明细 | `/context` | 全部 |
-| `/diff` | - | 交互式查看工作树与按轮次的文件改动 | `/diff` | 全部 |
+| `/diff` | - | 交互式回顾按轮次 diff + 未提交工作树改动 | `/diff` | 全部 |
 | `/evolve` | - | 触发技能演进 | `/evolve myskill 修正错误处理` | `agent.plan` / `team`（见下） |
 | `/evolve_list` | - | 列出某技能的演进条目 | `/evolve_list myskill --sort score` | `agent.plan` / `team` |
 | `/evolve_rebuild` | - | 从归档与演进记录重建 SKILL.md | `/evolve_rebuild myskill 强化错误处理` | `agent.plan` / `team` |
@@ -220,7 +220,9 @@
 
 #### `/diff`（交互式改动回顾）
 
-- **`/diff`**：调用 `command.diff`，获取工作树（uncommitted changes）及本会话内有文件变更的轮次，然后打开 **交互式 Diff 查看器**（全屏覆盖模式）。
+- **`/diff`**：调用 `command.diff`（60s 超时），处理器从请求元数据解析 `session_id` 与 `project_dir`，并行获取两组数据后打开 **交互式 Diff 查看器**（全屏覆盖模式）：
+  - **按轮次改动**：基于 `.agent_history` 文件操作日志计算，涵盖 agent 工作区、用户工作区和项目目录三处日志，去重合并后按用户消息边界划分轮次；
+  - **工作树改动**：基于 `git diff HEAD` 获取未提交的已跟踪文件改动。
 
   **快捷键**：
 
@@ -234,7 +236,14 @@
   | `Home` / `g` | 列表 → 跳至顶部；详情 → 跳至文件开头 |
   | `End` / `Shift+g` | 列表 → 跳至底部；详情 → 跳至文件末尾 |
 
-  注意：未提交的工作树改动通过 `git diff HEAD` 获取；同一文件在工作树和某轮次中均出现时会重复列出，来源标注为 `working` 或 `Turn N`。
+  **效果边界**：
+  - 同一文件在工作树和某轮次中均出现时会重复列出，来源标注为 `working` 或 `Turn N`；
+  - 按轮次 diff 仅追踪 agent 的文件操作日志，不覆盖手动或 bash 编辑的文件；
+  - git diff 部分仅覆盖已跟踪文件的未提交改动，不包含未跟踪文件和已提交历史；
+  - 在 merge/rebase/cherry-pick/revert 等瞬态 git 状态下，git diff 返回 `None`；
+  - 单文件 hunk 超过 400 行会被截断；单文件 diff 超过 1 MB 跳过 hunk 解析；变更文件超过 500 时仅返回统计；
+  - 非 git 仓库或无法解析 `project_dir` 时，仅返回按轮次 diff；
+  - 详见 [Slash命令表](Slash命令表.md#diff交互式改动回顾)。
 
 - **`/compact`**：调用 `command.compact`，返回 `busy` | `compressed` | `noop`；成功时展示 token 节省比例（`compact.ts`）。
 

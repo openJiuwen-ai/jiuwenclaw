@@ -55,7 +55,7 @@
 | `/skills` | 技能管理（列表、安装、卸载、市场源、ClawHub、SkillNet） |
 | `/model` | 模型查看、新增、切换（见下文） |
 | `/mcp` | MCP 服务管理（见下文） |
-| `/diff` | 查看当前会话按轮次改动（见下文） |
+| `/diff` | 交互式改动回顾：按轮次 diff + 未提交工作树改动（见下文） |
 | `/compact` | 压缩当前上下文（见下文） |
 | `/init` | 项目初始化（见下文） |
 | `/branch` | 从当前对话点创建分支会话（见下文） |
@@ -170,7 +170,11 @@
 ### `/diff`（交互式改动回顾）
 
 - 用法：`/diff`（无子命令）。
-- 数据来源：TUI 通过 `command.diff` 请求 Agent 侧 diff 服务，按当前 `session_id` 返回 `turns`（每轮改动集合）及 `gitDiff`（未提交的工作树改动）。
+- 适用模式：全部模式。
+- 数据来源：TUI 通过 `command.diff` 请求 AgentServer diff 服务（60s 超时），处理器从请求元数据解析当前 `session_id` 与 `project_dir`，然后**并行**通过 worker 线程获取两组数据：
+  - `turns` — 基于 `.agent_history` 文件操作日志计算的每轮改动集合；
+  - `gitDiff` — 基于 `git diff HEAD` 获取的未提交工作树改动。
+- 响应格式：`{ type: "list", turns: [...], gitDiff?: {...} }`；出错时返回 `{ ok: false, error: "..." }`。
 - 展示方式：打开 **交互式 Diff 查看器**（全屏覆盖模式）：
   - **列表视图**：展示所有变更文件（含工作树 `working` 和按轮次 `Turn N`），显示相对路径、来源、增删行数；
   - **详情视图**：选中文件后 `Enter` 进入，展示完整的 hunk diff，支持上下滚动。
@@ -186,8 +190,44 @@
   - `Home` / `g` — 跳至文件开头；
   - `End` / `Shift+g` — 跳至文件末尾；
   - `←` / `Esc` — 返回列表视图。
-- 作用范围：同时覆盖工作树（`git diff HEAD`）和会话按轮次改动轨迹，不替代 `git diff` 的完整版本控制视角。
 - 回退行为：当 TUI 不提供 `enterDiffViewer` 能力时，回退为内联展示（仅显示文件名、来源和增删行数）。
+
+#### 按轮次 diff 数据来源
+
+按轮次 diff 基于 `.agent_history/file_ops_jiuwenswarm*.json` 日志计算，而非 git。服务从多个位置读取并合并文件操作日志：
+
+1. Agent 工作区（`~/.jiuwenswarm/agent/jiuwenswarm_workspace/.agent_history/`）
+2. 用户工作区 `.agent_history/`
+3. 项目目录 `.agent_history/`（含 session 专属文件和全局文件）
+
+条目通过路径规范化和时间戳邻近度（±1 秒）去重。轮次边界由 session history 中的用户消息定义：一个轮次从一条用户消息时间戳到下一条用户消息为止。仅返回有文件变更的轮次，空轮次被过滤。轮次编号保留原始序号（与 history 中实际用户消息计数对齐），以便 `/rewind` 正确映射。
+
+#### Git diff 数据来源
+
+工作树改动通过 `git diff HEAD`（仅已跟踪文件）获取。Git 仓库根目录从 `project_dir`（可以是子目录）解析。暂存区重命名（含 brace 简写形式 `a/{b => c}/d.txt`）会进行归一化处理，确保 numstat key 与 hunk key 对齐。
+
+#### 效果边界与限制
+
+| 边界 | 值 | 行为 |
+|---|---|---|
+| 详情最大文件数 | 50 | 仅前 50 个已跟踪文件有 hunks；统计仍覆盖所有变更文件 |
+| 单文件最大行数 | 400 | 超过 400 行的 hunk 被截断，设置 `isTruncated` 标志 |
+| 单文件最大 diff 大小 | 1 MB | diff 超过 1 MB 的文件跳过 hunk 解析，设置 `isLargeFile` 标志，统计仍计入 |
+| 详情最大文件数阈值 | 500 | 变更文件超过 500 时，仅返回汇总统计（无逐文件 hunk） |
+| Git 命令超时 | 10s | 超过 10 秒的 git 命令返回 `None` |
+| Git 根目录解析超时 | 5s | `git rev-parse --show-toplevel` 超过 5 秒返回 `None` |
+
+#### 不覆盖的范围
+
+- **未跟踪文件**：`git diff HEAD` 仅覆盖已跟踪文件的修改。未跟踪文件不在 git diff 部分中显示。（由 agent 编辑过的未跟踪文件可能通过 file_ops 日志出现在按轮次 diff 中。）
+- **手动/bash 编辑**：按轮次 diff 来源于 agent 的 `.agent_history` 文件操作日志。手动或通过 bash 命令编辑的文件不在按轮次 diff 中追踪。
+- **已提交的改动**：仅显示未提交的工作树改动，已提交的历史不覆盖。
+- **瞬态 git 状态**：在 merge、rebase、cherry-pick、revert 期间，git diff 返回 `None`，避免显示误导性的 incoming 改动。
+- **二进制文件**：二进制文件变更计入统计但不展示 hunks（设置 `isBinary` 标志）。
+- **非 git 仓库**：`project_dir` 不在 git 仓库中时，`gitDiff` 为 `None`，仅返回按轮次 diff。
+- **无 project_dir**：无法解析 `project_dir` 时，`gitDiff` 为 `None`，按轮次 diff 仍可通过 session metadata 工作。
+
+> `/diff` 并非 `git diff` 的完整版本控制替代方案。它将 agent 追踪的按轮次变更与未提交已跟踪文件的快照结合，用于在编码会话内快速回顾改动。
 
 ### `/compact`（上下文压缩）
 
