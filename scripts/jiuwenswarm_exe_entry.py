@@ -42,6 +42,19 @@ if getattr(sys, "frozen", False):
         except Exception:  # noqa: BLE001
             pass
 
+    # Windows: use the Node runtime bundled by scripts/build-exe.ps1, when present.
+    # This makes browser runtime's default "npx" command work on machines without
+    # a system Node.js installation. Frozen child processes inherit this PATH too.
+    if os.name == "nt":
+        _node_runtime = Path(sys.executable).resolve().parent / "runtime" / "node-runtime"
+        if (_node_runtime / "npx.cmd").is_file():
+            _old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = (
+                f"{_node_runtime}{os.pathsep}{_old_path}"
+                if _old_path
+                else str(_node_runtime)
+            )
+
     # Windows: 防止 subprocess 弹出控制台窗口（console=False 编译时 git 等命令会弹出黑框）
     # Monkey-patch asyncio.create_subprocess_exec 和 subprocess.Popen，
     # 自动添加 CREATE_NO_WINDOW 标志
