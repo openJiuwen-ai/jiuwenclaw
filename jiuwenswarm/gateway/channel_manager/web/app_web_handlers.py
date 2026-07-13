@@ -1941,7 +1941,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "offset": offset,
         })
 
-    async def _session_create(ws, req_id, params, session_id):
+    async def _session_create(ws, req_id, params, session_id, user_id=None):
         """创建一个新 session（在 agent/sessions 下创建一个新目录）。"""
         if not isinstance(params, dict):
             await channel.send_response(
@@ -1967,19 +1967,22 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         session_dir.mkdir()
 
+        # 与 Message.user_id 一致：仅使用连接握手注入的 user_id，忽略 params.user_id（客户端可控）。
+        session_user_id = str(user_id or "").strip()
+
         # 初始化会话元数据
         from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
         init_session_metadata(
             session_id=session_id_to_create,
             channel_id=params.get("channel_id", ""),
-            user_id=params.get("user_id", ""),
+            user_id=session_user_id,
             title=params.get("title", ""),
             mode=params.get("mode", "unknown"),
         )
 
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": session_id_to_create})
 
-    async def _session_delete(ws, req_id, params, session_id):
+    async def _session_delete(ws, req_id, params, session_id, user_id=None):
         """删除一个 session（在 agent/sessions 下删除一个目录）。"""
         if not isinstance(params, dict):
             await channel.send_response(
@@ -2007,6 +2010,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     session_id=session_id,
                     req_method=ReqMethod.SESSION_DELETE,
                     params=params,
+                    user_id=user_id,
                 )
                 resp = await ac.send_request(env)
                 if resp.ok:
@@ -3212,7 +3216,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("permissions.owner_scopes.get", _permissions_owner_scopes_get)
     channel.register_method("permissions.owner_scopes.set", _permissions_owner_scopes_set)
 
-    async def _forward_permissions_to_agent(ws, req_id, params, session_id, *, req_method):
+    async def _forward_permissions_to_agent(
+        ws, req_id, params, session_id, *, req_method, user_id=None,
+    ):
         """permissions.*：优先经 E2A 转发到 AgentServer；Agent 未就绪时本地执行（与 config_rpc 同源）。"""
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.agent import AgentRequest
@@ -3269,6 +3275,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             session_id=session_id,
             req_method=req_method,
             params=dict(params) if isinstance(params, dict) else {},
+            user_id=user_id,
         )
         try:
             resp = await ac.send_request(env)
@@ -3292,8 +3299,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     from jiuwenswarm.common.schema.message import ReqMethod as _PermReq
 
     def _register_perm(method_name: str, rm: Any) -> None:
-        async def _handler(ws, req_id, params, session_id):
-            await _forward_permissions_to_agent(ws, req_id, params, session_id, req_method=rm)
+        async def _handler(ws, req_id, params, session_id, user_id=None):
+            await _forward_permissions_to_agent(
+                ws, req_id, params, session_id, req_method=rm, user_id=user_id,
+            )
 
         channel.register_method(method_name, _handler)
 
@@ -3332,7 +3341,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("memory.forbidden.get", _memory_forbidden_get)
     channel.register_method("memory.forbidden.set", _memory_forbidden_set)
 
-    async def _forward_harness_to_agent(ws, req_id, params, session_id, *, req_method):
+    async def _forward_harness_to_agent(
+        ws, req_id, params, session_id, *, req_method, user_id=None,
+    ):
         """harness.*：优先经 E2A 转发到 AgentServer；Agent 未就绪时本地执行（无 agent 实例）。"""
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -3399,6 +3410,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             session_id=session_id,
             req_method=req_method,
             params=dict(params) if isinstance(params, dict) else {},
+            user_id=user_id,
         )
         try:
             resp = await ac.send_request(env)
@@ -3422,8 +3434,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     from jiuwenswarm.common.schema.message import ReqMethod as _HarnessReq
 
     def _register_harness(method_name: str, rm: Any) -> None:
-        async def _handler(ws, req_id, params, session_id):
-            await _forward_harness_to_agent(ws, req_id, params, session_id, req_method=rm)
+        async def _handler(ws, req_id, params, session_id, user_id=None):
+            await _forward_harness_to_agent(
+                ws, req_id, params, session_id, req_method=rm, user_id=user_id,
+            )
 
         channel.register_method(method_name, _handler)
 

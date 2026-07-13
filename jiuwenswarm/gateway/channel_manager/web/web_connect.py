@@ -43,6 +43,8 @@ from jiuwenswarm.common.ws_diagnostics import (
 
 logger = logging.getLogger(__name__)
 
+_WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
+
 _HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
 
 # ── 类型别名 ──────────────────────────────────────────────
@@ -214,16 +216,58 @@ class WebChannel(BaseWsChannel):
                 return
             raise
 
+    @staticmethod
+    def _extract_query_user_id(flat_query: dict[str, str]) -> str | None:
+        uid = str(flat_query.get("user_id", "") or "").strip()
+        return uid or None
+
+    @staticmethod
+    def _extract_ws_header_user_id(ws: Any) -> str | None:
+        headers = (
+            getattr(getattr(ws, "request", None), "headers", None)
+            or getattr(ws, "request_headers", None)
+        )
+        raw = get_header_value(headers, "X-User-Id")
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        return text or None
+
+    @classmethod
+    def _resolve_connection_user_id(cls, flat_query: dict[str, str], ws: Any) -> str | None:
+        connection_user_id = cls._extract_query_user_id(flat_query) or cls._extract_ws_header_user_id(ws)
+        setattr(ws, _WEB_CONNECTION_USER_ID_ATTR, connection_user_id)
+        return connection_user_id
+
+    @staticmethod
+    def _connection_user_id(ws: Any) -> str | None:
+        """返回 Web 连接建立时缓存的 user_id（query 或 X-User-Id Header）。"""
+        uid = getattr(ws, _WEB_CONNECTION_USER_ID_ATTR, None)
+        if uid is None:
+            return None
+        text = str(uid).strip()
+        return text or None
+
+    @staticmethod
+    def _routing_key_user_id(connection_user_id: str | None, remote: Any) -> str:
+        if connection_user_id:
+            return connection_user_id
+        return str(remote or "unknown")
+
     async def _invoke_method_handler(
             self,
             invocation: _MethodHandlerInvocation,
     ) -> bool:
+        kwargs: dict[str, Any] = {}
+        if "user_id" in inspect.signature(invocation.handler).parameters:
+            kwargs["user_id"] = self._connection_user_id(invocation.ws)
         try:
             await invocation.handler(
                 invocation.ws,
                 invocation.req_id,
                 invocation.params,
                 invocation.session_id,
+                **kwargs,
             )
             return True
         except Exception as e:
@@ -751,12 +795,20 @@ class WebChannel(BaseWsChannel):
 
         query = parse_qs(parsed.query)
         remote = getattr(ws, "remote_address", None)
-        logger.info(f"WebChannel 新连接: remote={remote} query={query}")
+        _flat_query = {k: (v[0] if v else "") for k, v in query.items()}
+        connection_user_id = self._resolve_connection_user_id(_flat_query, ws)
+        uid_marker = "" if connection_user_id else " uid_empty=yes"
+        logger.info(
+            "WebChannel 新连接: remote=%s query=%s user_id=%r%s",
+            remote,
+            query,
+            connection_user_id,
+            uid_marker,
+        )
 
         # ── V2: 从 query 提取身份字段，构造默认 RoutingKey ──
         # session_id 和 agent_id 可能在首条消息中更新
-        _flat_query = {k: (v[0] if v else "") for k, v in query.items()}
-        _user_id = _flat_query.get("user_id", str(remote or "unknown"))
+        _user_id = self._routing_key_user_id(connection_user_id, remote)
         _app_id = _flat_query.get("app_id", "default")
         _mode = _flat_query.get("mode", "agent")
         _agent_id = _flat_query.get("agent_id", "default")
@@ -903,11 +955,10 @@ class WebChannel(BaseWsChannel):
         _mode = params.get("mode", "agent")
         _agent_id = params.get("agent_id", "default")
         _app_id = _flat_query.get("app_id", "default")
+        req_user_id = self._connection_user_id(ws)
         if has_explicit_session:
             _rk = RoutingKey(
-                user_id=_flat_query.get(
-                    "user_id", str(getattr(ws, "remote_address", "unknown"))
-                ),
+                user_id=self._routing_key_user_id(req_user_id, getattr(ws, "remote_address", None)),
                 channel_id=self.channel_id,
                 app_id=_app_id,
                 agent_ref=AgentRef(mode=_mode, id=_agent_id),
@@ -928,11 +979,13 @@ class WebChannel(BaseWsChannel):
             mode=self._parse_mode(params.get("mode")),
             app_id=_app_id,
             agent_ref={"mode": _mode, "id": _agent_id},
+            user_id=req_user_id,
             metadata={
                 "query": query,
                 "method": method,
                 # V2: 注入 ws_id 供 MessageHandler 构造 WebDeliveryTarget(ws_id=真值)。
                 "ws_id": getattr(ws, "_jiuwen_ws_id", ""),
+                "user_id": req_user_id,
             },
         )
 
