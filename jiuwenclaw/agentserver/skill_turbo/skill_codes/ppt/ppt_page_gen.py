@@ -118,7 +118,8 @@ _DESIGN_RULES_DIGEST = (
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
     "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`，主要内容必须放在安全区内；"
     "子元素禁止额外加 padding，否则导致双重边距\n"
-    "3. 三级字号：页面标题 36-48px / 副标题 24-28px / 正文 16-20px；"
+    "3. 三级字号：页面标题 36-48px / 副标题 24-28px / 正文 16-20px"
+    "（除非用户在原始 query 中明确指定了字号，此时以用户指定值为准）；"
     "但紧凑卡片内（grid 子项或 flex-col 中 ≥3 个并列卡片）标题 ≤18px、正文 ≤14px，"
     "同级卡片字号必须一致，禁止个别卡片字号放大导致内容溢出\n"
     "4. 图表类型：时序数据→折线图(line)；对比数据→柱状图/分组柱状图(bar)；"
@@ -150,9 +151,11 @@ _DESIGN_RULES_DIGEST = (
     "10. flex-col 子元素：必须 `flex-1 min-h-0 overflow-hidden`\n"
     "10.1 内容预算：flex-col 中有多个子元素时，禁止把大块内容（如完整表格）设 `flex-shrink-0`，"
     "否则会挤压其他 `flex-1` 兄弟元素至高度为 0；大块内容也要参与弹性收缩或拆分\n"
-    "11. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体；"
+    "11. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体"
+    "（除非用户在原始 query 中明确指定了字体或配色，此时以用户指定值为准）；"
     "所有页面 `<body>` 背景色必须统一，从风格规范中取一致的背景色，禁止部分页面用浅灰/灰色背景而其他页用白色\n"
-    "12. 页脚：底部必须有数据来源汇总条（如'数据来源：央行、财政部、...'），即使卡片内已有来源标注也必须保留页脚，禁止纯数字编号\n"
+    "12. 页脚：底部必须有数据来源汇总条（如'数据来源：央行、财政部、...'），即使卡片内已有来源标注也必须保留页脚；"
+    "禁止页脚出现纯数字页码编号（除非用户在原始 query 中明确要求页码，此时应在用户指定位置添加页码，格式如 3/12）\n"
     "13. 布局实现：所有区域用 `flex-1 min-h-0` 自动分配高度，禁止手动计算 px 值；子元素用 `h-full min-h-0 overflow-hidden` 防溢出，信任 flex/grid 自动布局\n"
     "13.1 表格禁用 CSS Grid：html-to-pptx 引擎不支持 `display:grid` 渲染表格，grid 表格会被转为低质量截图；"
     "数据表格必须用 `<table><tr><td>` 原生标签或 `flex` 布局替代 `grid grid-cols-N`\n"
@@ -164,8 +167,7 @@ _DESIGN_RULES_DIGEST = (
     "17. 标题、正文、图表标签、数据来源和数据卡片必须完整显示，禁止裁切或隐藏\n"
     "18. 遮罩层≠底色：`bg-black/50`、`from-black/*`、`bg-gradient-*` 等是遮罩层(overlay)，"
     "必须配合底层 `<img>` 背景图使用以保证文字可读，不是页面/卡片底色；"
-    "页面底色仅用风格规范文件中定义的背景色，"
-    "禁止用 `bg-black`、`from-black/*`、`bg-brandRedBg` 等作整页背景\n"
+    "页面底色必须严格遵循风格规范文件定义的背景色，禁止使用与风格不符的底色\n"
 )
 
 
@@ -196,13 +198,15 @@ _STRUCTURAL_DESIGN_RULES = (
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
     "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`\n"
     "3. 字号：封面标题 48-64px / 副标题 24-28px / 日期 18px；"
-    "结束页标题 42-48px / 正文 22px\n"
+    "结束页标题 42-48px / 正文 22px"
+    "（除非用户在原始 query 中明确指定了字号，此时以用户指定值为准）\n"
     "4. 防溢出：单行文字不超容器宽度\n"
-    "5. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体；"
+    "5. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体"
+    "（除非用户在原始 query 中明确指定了字体或配色，此时以用户指定值为准）；"
     "所有页面背景色必须统一，从风格规范中取一致的背景色，禁止部分页面自行使用不同背景色；"
-    "页面背景色必须与风格规范一致，禁止自行使用渐变或深色背景；"
-    "封面/结束页如使用图片背景，`from-black/*` 渐变层是遮罩(overlay)非底色，"
-    "商务经典风格封面/结束页优先白底方案，不推荐图片+黑色遮罩方案\n"
+    "页面背景色必须与风格规范一致，深色主题用深色底色、浅色主题用浅色底色，"
+    "禁止自行使用与风格不符的渐变或底色；"
+    "封面/结束页如使用图片背景，`from-black/*` 渐变层是遮罩(overlay)非底色\n"
     "6. 布局：居中排列（`flex flex-col items-center justify-center`），"
     "不强制 grid-cols-2 双栏\n"
     "7. 留白：允许较高留白，不强制数据卡片、图表或数据来源页脚\n"
@@ -745,7 +749,16 @@ def _build_page_prompt(
     rewrite_hint: str = "",
     original_html: str = "",
     image_map_page: str = "",
+    user_query: str = "",
 ) -> str:
+    # 用户原始 query 段（最高优先级，包含用户所有格式/内容/风格要求）
+    user_query_section = ""
+    if user_query:
+        user_query_section = (
+            "## 用户原始 query（最高优先级，所有格式/版式/风格要求以此为准）\n"
+            f"{user_query}\n\n"
+        )
+
     preset_clause = ""
     if style_id in _PRESET_STYLE_IDS:
         preset_clause = (
@@ -857,6 +870,7 @@ def _build_page_prompt(
         )
 
     return (
+        f"{user_query_section}"
         "## 0. 输出要求（最高优先级）\n"
         f"- 输出**第 {page_number} 页**完整 HTML（含 <!DOCTYPE>、<html>、<head>、<body>）\n"
         "- 严禁任何解释、注释、Markdown 代码块包裹，只输出 HTML 原文\n"
@@ -922,6 +936,7 @@ class PageGenContext:
     image_map_page: str  # 本页图片素材描述（空串=无图）
     designer_md_text: str  # designer/SKILL.md 原文（由 PrepareNode 通过 read_file 读取）
     charts_md_text: str  # designer/charts.md 原文（由 PrepareNode 通过 read_file 读取）
+    user_query: str = ""  # 用户原始 query（由 collect_user_text 提取）
 
 
 class PrepareNode(PlanNode):
@@ -1177,6 +1192,7 @@ class PageWorkerNode(PlanNode):
         image_map: dict[str, Any] = inputs.get("image_map") or {}
         designer_md_text = str(inputs.get("designer_md_text") or "")
         charts_md_text = str(inputs.get("charts_md_text") or "")
+        user_query = PptCommon.collect_user_text(inputs)
 
         if not pages_dir or not all_pages:
             logger.error("[P8.1] 必填输入缺失，跳过生成")
@@ -1206,6 +1222,7 @@ class PageWorkerNode(PlanNode):
                 image_map=image_map,
                 designer_md_text=designer_md_text,
                 charts_md_text=charts_md_text,
+                user_query=user_query,
             )
             for p in all_pages
         ]
@@ -1263,6 +1280,7 @@ class PageWorkerNode(PlanNode):
         image_map: dict[str, Any],
         designer_md_text: str = "",
         charts_md_text: str = "",
+        user_query: str = "",
     ) -> dict[str, Any]:
         """单页闭环：生成(含重试) → 密度判定 → 搜索补充+重写(含重试)。"""
         path = f"{pages_dir}/page-{page_num}.pptx.html"
@@ -1291,6 +1309,7 @@ class PageWorkerNode(PlanNode):
             image_map_page=image_map_page,
             designer_md_text=designer_md_text,
             charts_md_text=charts_md_text,
+            user_query=user_query,
         )
 
         html = ""
@@ -1369,6 +1388,7 @@ class PageWorkerNode(PlanNode):
                     image_map_page=ctx.image_map_page,
                     designer_md_text=ctx.designer_md_text,
                     charts_md_text=ctx.charts_md_text,
+                    user_query=ctx.user_query,
                 ),
                 system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
                 node_name=f"p8_1_page_{ctx.page_num}",
@@ -1529,6 +1549,7 @@ class PageWorkerNode(PlanNode):
                     image_map_page=ctx.image_map_page,
                     designer_md_text=ctx.designer_md_text,
                     charts_md_text=ctx.charts_md_text,
+                    user_query=ctx.user_query,
                 ),
                 system_prompt="你是资深演示文稿设计师，直接输出完整 HTML 原文，不输出任何解释。",
                 node_name=f"p8_2_page_{ctx.page_num}",

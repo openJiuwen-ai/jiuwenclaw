@@ -76,6 +76,7 @@ class StylePrepareNode(PlanNode):
         topic = str(inputs.get("topic", "")).strip()
         style_description = str(inputs.get("style_description", "")).strip()
         output_dir = str(inputs.get("output_dir", "")).strip()
+        user_query = PptCommon.collect_user_text(inputs)
 
         if not output_dir:
             logger.error("[P7] output_dir 为空，无法落盘风格文件")
@@ -112,7 +113,7 @@ class StylePrepareNode(PlanNode):
         if not style_content:
             if style_id in _PRESET_STYLES:
                 logger.warning("[P7] 预设风格 %s 加载失败，降级为自定义生成", style_id)
-            style_content = await self._generate_custom_style(topic, style_id, style_description)
+            style_content = await self._generate_custom_style(topic, style_id, style_description, user_query)
 
         if not style_content:
             logger.error(
@@ -184,13 +185,18 @@ class StylePrepareNode(PlanNode):
         topic: str,
         style_id: str,
         style_description: str,
+        user_query: str = "",
     ) -> str:
+        user_query_clause = ""
+        if user_query:
+            user_query_clause = f"用户原始 query：{user_query}\n"
         prompt = (
             "你是 PPT 视觉设计师。请根据主题和风格描述生成一份风格规范 Markdown 文件，"
             "供后续 HTML 幻灯片生成使用。\n\n"
             f"PPT 主题：{topic or '（未提供）'}\n"
             f"风格标识：{style_id}\n"
-            f"用户风格描述：{style_description or '（未提供，请根据主题自由发挥）'}\n\n"
+            f"用户风格描述：{style_description or '（未提供，请根据主题自由发挥）'}\n"
+            f"{user_query_clause}\n"
             "### 输出要求（严格按以下结构生成）\n"
             "```markdown\n"
             f"# 风格规范：{style_id}\n"
