@@ -27,6 +27,15 @@ DISPATCH_PACKAGE_ROOTS = ("indexing", "models", "orchestration", "retrieval", "s
 EXCLUDED_RESOURCE_DIRS = (
     os.path.join("agent", "workspace", "skills", "project-maintainer"),
 )
+OPENJIUWEN_DATA_EXCLUDES = [
+    "**/AGENTS.md",
+    "**/CLAUDE.md",
+    "**/deepagents/tools/browser_move/.browser/**",
+    "**/deepagents/tools/browser_move/.browser-profiles/**",
+    "**/deepagents/tools/browser_move/.venv/**",
+    "**/deepagents/tools/browser_move/logs/**",
+    "**/deepagents/tools/browser_move/.env",
+]
 
 
 def collect_tree_data_files(source_dir, target_dir, patterns):
@@ -128,7 +137,7 @@ datas += collect_resources_data_files(
 datas += copy_metadata("fastmcp", recursive=True)
 datas += copy_metadata("mcp", recursive=True)
 datas += copy_metadata("openjiuwen", recursive=True)
-datas += collect_data_files("openjiuwen", include_py_files=False)
+datas += collect_data_files("openjiuwen", include_py_files=False, excludes=OPENJIUWEN_DATA_EXCLUDES)
 datas += collect_data_files(
     "jiuwenswarm.extensions",
     include_py_files=True,
