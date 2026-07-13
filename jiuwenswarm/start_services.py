@@ -23,6 +23,12 @@ import sys
 import time
 from pathlib import Path
 
+# Configure logging here so that ``--list``/``--status`` output and
+# service-startup messages are actually emitted. Without this, the root logger
+# keeps its default WARNING level and every ``logging.info`` call below is
+# silently dropped — the process runs but nothing is printed to the terminal.
+logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
 from jiuwenswarm.dotenv_early import parse_dotenv_early
 parse_dotenv_early("jiuwenswarm-start")
