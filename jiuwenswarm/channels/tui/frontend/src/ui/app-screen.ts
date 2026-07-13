@@ -4068,11 +4068,8 @@ export class AppScreen implements Component, Focusable {
     const toggleHint = `${projectHint} · ${branchHint}`;
     const scopeSuffix = branchOn ? ` · branch:${this.resumeSessionList.currentBranch}` : "";
     const searchBox = this.resumeSessionList.searchQuery
-      ? padToWidth(palette.text.primary(`Search: ${this.resumeSessionList.searchQuery}${END_CURSOR}`), width)
-      : padToWidth(
-          palette.text.dim(`Type to search · ↑/↓ to choose · Enter to resume · Space to preview · Ctrl+R to rename · ${toggleHint} · Esc to cancel`),
-          width,
-        );
+      ? padToWidth(palette.text.primary(`🔍: ${this.resumeSessionList.searchQuery}${END_CURSOR}`), width)
+      : padToWidth(palette.text.dim(`🔍: Type to search · Esc to cancel`), width);
     const st = this.resumeSessionList;
     const visibleCount = computeResumeItems(st.sessions, {
       query: st.searchQuery,
