@@ -201,6 +201,10 @@ def _setup_evolve_command_rail(*, auto_save: bool):
     return rail, store, generate
 
 
+async def _mock_signal_detect(_self, _messages):
+    return [_make_evolve_test_signal()]
+
+
 @pytest.mark.asyncio
 async def test_evolve_command_auto_save_false_returns_message(adapter, monkeypatch):
     rail, store, generate = _setup_evolve_command_rail(auto_save=False)
@@ -213,7 +217,7 @@ async def test_evolve_command_auto_save_false_returns_message(adapter, monkeypat
     monkeypatch.setattr(
         interface_deep_module.SignalDetector,
         "detect",
-        lambda self, _messages: [_make_evolve_test_signal()],
+        _mock_signal_detect,
     )
 
     result = await adapter._handle_evolve_command("/evolve demo-skill", "sess-1")  # pylint: disable=protected-access
@@ -238,7 +242,7 @@ async def test_evolve_command_auto_save_true_persists_without_approval(adapter, 
     monkeypatch.setattr(
         interface_deep_module.SignalDetector,
         "detect",
-        lambda self, _messages: [_make_evolve_test_signal()],
+        _mock_signal_detect,
     )
 
     result = await adapter._handle_evolve_command("/evolve demo-skill", "sess-1")  # pylint: disable=protected-access
@@ -691,7 +695,7 @@ async def test_handle_skill_create_approval_rejected_calls_reject(adapter):
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_handle_skill_create_approval_no_prompt_graceful(adapter):
-    """When on_approve_new_skill returns None, dispatch is NOT called."""
+    """When on_approve_new_skill returns None, dispatch is NOT called and result is False."""
     mock_rail = MagicMock()
     mock_rail.on_approve_new_skill = AsyncMock(return_value=None)
     adapter._skill_evolution_rail = mock_rail
@@ -702,7 +706,7 @@ async def test_handle_skill_create_approval_no_prompt_graceful(adapter):
         [{"selected_options": ["Create"]}],
     )
 
-    assert result is True
+    assert result is False
     adapter._dispatch_skill_creator_follow_up.assert_not_called()
 
 
@@ -722,7 +726,7 @@ async def test_handle_skill_create_approval_no_rail_returns_false(adapter):
 @pytest.mark.asyncio
 async def test_dispatch_skill_creator_follow_up_calls_runner(adapter, monkeypatch):
     """_dispatch_skill_creator_follow_up should invoke Runner.run_agent."""
-    import asyncio as _asyncio
+    import asyncio
 
     mock_instance = MagicMock()
     adapter._instance = mock_instance
@@ -731,8 +735,8 @@ async def test_dispatch_skill_creator_follow_up_calls_runner(adapter, monkeypatc
     # Mock Runner.run_agent to verify it's called
     captured_inputs = []
 
-    async def _fake_run_agent(*, agent, inputs):
-        captured_inputs.append(inputs)
+    async def _fake_run_agent(*, agent, inputs, session=None):
+        captured_inputs.append({"agent": agent, "inputs": inputs, "session": session})
 
     monkeypatch.setattr(
         interface_deep_module.Runner,
@@ -742,21 +746,288 @@ async def test_dispatch_skill_creator_follow_up_calls_runner(adapter, monkeypatc
 
     prompt = "**重要：你必须先向用户确认...**\n模拟 skill_creator_prompt"
     await adapter._dispatch_skill_creator_follow_up("skill_create_test", prompt)
+    pending = list(adapter._pending_follow_ups)
+    assert len(pending) == 1
+    await asyncio.gather(*pending)
+    await asyncio.sleep(0)
 
-    # The fire-and-forget task may not have run yet, but the log should be emitted
-    # For a sync test, we can at least verify the method doesn't raise
+    assert len(captured_inputs) == 1
+    assert captured_inputs[0]["agent"] is mock_instance
+    assert captured_inputs[0]["inputs"]["query"] == prompt
+    assert captured_inputs[0]["inputs"]["conversation_id"] == "test-session"
+    assert captured_inputs[0]["session"] == "test-session"
+    assert len(adapter._pending_follow_ups) == 0
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_dispatch_skill_creator_follow_up_handles_runner_exception(adapter):
+async def test_dispatch_skill_creator_follow_up_retains_task_against_gc(adapter, monkeypatch):
+    """Pending follow-up tasks must stay referenced until done (not silently GC'd)."""
+    import asyncio
+    import gc
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def _slow_run_agent(*, agent, inputs, session=None):
+        started.set()
+        await release.wait()
+        finished.set()
+
+    monkeypatch.setattr(
+        interface_deep_module.Runner,
+        "run_agent",
+        _slow_run_agent,
+    )
+    adapter._instance = MagicMock()
+    adapter._current_session_id = lambda: "gc-session"
+
+    await adapter._dispatch_skill_creator_follow_up("skill_create_gc", "prompt")
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert len(adapter._pending_follow_ups) == 1
+
+    gc.collect()
+    assert len(adapter._pending_follow_ups) == 1
+    assert not finished.is_set()
+
+    release.set()
+    await asyncio.wait_for(finished.wait(), timeout=1.0)
+    pending = list(adapter._pending_follow_ups)
+    if pending:
+        await asyncio.gather(*pending)
+    # done_callback is scheduled via call_soon; yield so discard runs.
+    await asyncio.sleep(0)
+    assert len(adapter._pending_follow_ups) == 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_dispatch_skill_creator_follow_up_handles_runner_exception(adapter, monkeypatch):
     """_dispatch_skill_creator_follow_up should catch exceptions gracefully."""
-    mock_instance = MagicMock()
-    adapter._instance = mock_instance
+    import asyncio
+
+    async def _boom(*, agent, inputs, session=None):
+        raise RuntimeError("runner failed")
+
+    monkeypatch.setattr(
+        interface_deep_module.Runner,
+        "run_agent",
+        _boom,
+    )
+    adapter._instance = MagicMock()
     adapter._current_session_id = lambda: "test-session"
 
-    # The method should not raise even if the runner call fails
     try:
         await adapter._dispatch_skill_creator_follow_up("skill_create_test", "prompt")
+        await asyncio.sleep(0)
     except Exception:
         pytest.fail("_dispatch_skill_creator_follow_up should not raise")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_iter_skill_creator_follow_up_stream_yields_parsed_chunks(adapter, monkeypatch):
+    """Normal streaming path should yield parsed AgentResponseChunk payloads."""
+
+    async def _fake_stream(agent, inputs):
+        yield SimpleNamespace(kind="delta", text="hello")
+        yield None
+        yield SimpleNamespace(kind="delta", text="world")
+
+    monkeypatch.setattr(
+        interface_deep_module.Runner,
+        "run_agent_streaming",
+        _fake_stream,
+    )
+    adapter._instance = MagicMock()
+    adapter._parse_stream_chunk_with_source = MagicMock(
+        side_effect=lambda chunk: None
+        if chunk is None
+        else {"event_type": "chat.delta", "content": chunk.text}
+    )
+
+    chunks = [
+        c
+        async for c in adapter._iter_skill_creator_follow_up_stream(
+            base_inputs={"query": "orig"},
+            prompt="create skill",
+            skill_create_request_id="skill_create_1",
+            stream_request_id="req-1",
+            channel_id="ch-1",
+            session_id="sess-1",
+        )
+    ]
+
+    assert len(chunks) == 2
+    assert chunks[0].request_id == "req-1"
+    assert chunks[0].channel_id == "ch-1"
+    assert chunks[0].payload == {"event_type": "chat.delta", "content": "hello"}
+    assert chunks[1].payload == {"event_type": "chat.delta", "content": "world"}
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_iter_skill_creator_follow_up_stream_empty(adapter, monkeypatch):
+    """Empty stream should yield no chunks."""
+
+    async def _empty_stream(agent, inputs):
+        if False:  # pragma: no cover - keep async generator shape
+            yield None
+
+    monkeypatch.setattr(
+        interface_deep_module.Runner,
+        "run_agent_streaming",
+        _empty_stream,
+    )
+    adapter._instance = MagicMock()
+    adapter._parse_stream_chunk_with_source = MagicMock(return_value={"event_type": "chat.delta"})
+
+    chunks = [
+        c
+        async for c in adapter._iter_skill_creator_follow_up_stream(
+            base_inputs={},
+            prompt="create skill",
+            skill_create_request_id="skill_create_empty",
+            stream_request_id="req-empty",
+            channel_id="ch",
+            session_id="sess",
+        )
+    ]
+    assert chunks == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_iter_skill_creator_follow_up_stream_error(adapter, monkeypatch):
+    """Streaming failures should yield a chat.error chunk instead of raising."""
+
+    async def _failing_stream(agent, inputs):
+        raise RuntimeError("stream boom")
+        if False:  # pragma: no cover
+            yield None
+
+    monkeypatch.setattr(
+        interface_deep_module.Runner,
+        "run_agent_streaming",
+        _failing_stream,
+    )
+    adapter._instance = MagicMock()
+
+    chunks = [
+        c
+        async for c in adapter._iter_skill_creator_follow_up_stream(
+            base_inputs={},
+            prompt="create skill",
+            skill_create_request_id="skill_create_err",
+            stream_request_id="req-err",
+            channel_id="ch-err",
+            session_id="sess-err",
+        )
+    ]
+
+    assert len(chunks) == 1
+    assert chunks[0].payload["event_type"] == "chat.error"
+    assert "stream boom" in chunks[0].payload["error"]
+
+
+@pytest.mark.unit
+def test_current_session_id_logs_debug_on_exception(adapter):
+    """_current_session_id should debug-log when card access raises."""
+    records, detach = _attach_capture_handler(interface_deep_module.logger)
+    try:
+        broken = MagicMock()
+        type(broken).card = property(lambda self: (_ for _ in ()).throw(RuntimeError("card gone")))
+        adapter._instance = broken
+        assert adapter._current_session_id() == ""
+        assert any(
+            "failed to resolve current session_id" in r.getMessage() for r in records
+        )
+    finally:
+        detach()
+
+
+# =============================================================================
+# /evolve message collection tests
+# =============================================================================
+
+
+def _setup_collect_messages_mocks(
+    adapter: DeepAdapterHarness,
+    *,
+    buffer_messages: list[dict[str, str]],
+    qa_caches: dict[str, list[dict[str, str]]] | None = None,
+    qa_ids: list[str] | None = None,
+) -> MagicMock:
+    """Wire context_engine mocks for _collect_messages_for_evolve."""
+    qa_caches = qa_caches or {}
+    history = MagicMock()
+    history.get.side_effect = lambda qa_id: qa_caches.get(qa_id)
+    history.recent_qa_ids.return_value = qa_ids if qa_ids is not None else list(qa_caches.keys())
+
+    context = MagicMock()
+    context.get_messages.return_value = buffer_messages
+    context.get_session_ref.return_value = None
+    context.context_id.return_value = "ctx-1"
+
+    context_engine = MagicMock()
+    context_engine.get_context.return_value = context
+    context_engine.get_history_qa_buffer.return_value = history
+
+    react_agent = MagicMock()
+    react_agent.context_engine = context_engine
+
+    instance = MagicMock()
+    instance.react_agent = react_agent
+    adapter._instance = instance
+    return history
+
+
+@pytest.mark.unit
+def test_collect_messages_for_evolve_prepends_qa_history_when_buffer_nonempty(adapter):
+    """QA history must be prepended even when the current buffer is non-empty."""
+    buffer = [{"role": "user", "content": "current turn"}]
+    qa_caches = {"qa-1": [{"role": "user", "content": "old turn"}]}
+    _setup_collect_messages_mocks(
+        adapter,
+        buffer_messages=buffer,
+        qa_caches=qa_caches,
+        qa_ids=["qa-1"],
+    )
+
+    result = adapter._collect_messages_for_evolve("sess-1")  # pylint: disable=protected-access
+
+    assert len(result) == 2
+    assert result[0]["content"] == "old turn"
+    assert result[1]["content"] == "current turn"
+
+
+@pytest.mark.unit
+def test_collect_messages_for_evolve_buffer_only_when_no_qa_history(adapter):
+    """When QA history is empty, only buffer messages are returned."""
+    buffer = [{"role": "user", "content": "only buffer"}]
+    _setup_collect_messages_mocks(adapter, buffer_messages=buffer, qa_caches={}, qa_ids=[])
+
+    result = adapter._collect_messages_for_evolve("sess-2")  # pylint: disable=protected-access
+
+    assert len(result) == 1
+    assert result[0]["content"] == "only buffer"
+
+
+@pytest.mark.unit
+def test_collect_messages_for_evolve_dedups_overlapping_messages(adapter):
+    """Overlapping QA history and buffer messages should be deduplicated."""
+    duplicate = {"role": "user", "content": "same message"}
+    buffer = [duplicate]
+    qa_caches = {"qa-1": [dict(duplicate)]}
+    _setup_collect_messages_mocks(
+        adapter,
+        buffer_messages=buffer,
+        qa_caches=qa_caches,
+        qa_ids=["qa-1"],
+    )
+
+    result = adapter._collect_messages_for_evolve("sess-3")  # pylint: disable=protected-access
+
+    assert len(result) == 1
+    assert result[0]["content"] == "same message"

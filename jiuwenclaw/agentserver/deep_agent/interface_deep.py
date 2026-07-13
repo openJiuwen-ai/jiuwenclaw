@@ -1206,6 +1206,8 @@ class JiuWenClawDeepAdapter:
         self._lsp_rail: LspRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: JiuClawSkillEvolutionRail | None = None
+        # Retain fire-and-forget follow-up tasks so they are not GC'd mid-run.
+        self._pending_follow_ups: set[asyncio.Task] = set()
         self._subagent_rail: SubagentRail | None = None
         self._disabled_tools_rail: DisabledToolsRail | None = None
         self._progressive_tool_rail: JiuWenProgressiveToolRail | None = None
@@ -5313,6 +5315,7 @@ class JiuWenClawDeepAdapter:
                     "[JiuWenClaw] skill create approved but no prompt returned: request_id=%s",
                     request_id,
                 )
+                return False
         else:
             await rail.on_reject_new_skill(request_id)
             logger.info("[JiuWenClaw] skill create rejected: request_id=%s", request_id)
@@ -5379,8 +5382,6 @@ class JiuWenClawDeepAdapter:
             request_id: 原 skill_create_<uuid> request_id（用于关联日志/审计）
             prompt: Rail 构造的 skill_creator_prompt（含 skills_dir / reason / suggested_name）
         """
-        import asyncio as _asyncio
-
         resolved_session_id = (session_id or self._current_session_id() or "").strip()
         logger.info(
             "[JiuWenClaw] dispatching skill_creator follow-up: request_id=%s session=%s prompt_chars=%d",
@@ -5405,7 +5406,9 @@ class JiuWenClawDeepAdapter:
                 )
 
         try:
-            _asyncio.create_task(_run_follow_up())
+            task = asyncio.create_task(_run_follow_up())
+            self._pending_follow_ups.add(task)
+            task.add_done_callback(self._pending_follow_ups.discard)
         except Exception as exc:
             logger.error(
                 "[JiuWenClaw] skill_creator follow-up dispatch failed: %s", exc
@@ -5421,8 +5424,12 @@ class JiuWenClawDeepAdapter:
             # _instance.card may carry session info
             if hasattr(self._instance, "card") and self._instance.card is not None:
                 return getattr(self._instance.card, "session_id", "")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "[JiuWenClaw] failed to resolve current session_id: %s",
+                exc,
+                exc_info=True,
+            )
         return ""
 
     # ------------------------------------------------------------------
@@ -5512,7 +5519,7 @@ class JiuWenClawDeepAdapter:
         # 2) Detect signals (reuse rail's dedup set)
         existing_skills = {n for n in skill_names if store.skill_exists(n)}
         detector = SignalDetector(existing_skills=existing_skills)
-        detected = detector.detect(parsed_messages)
+        detected = await detector.detect(parsed_messages)
 
         new_signals = [
             sig for sig in detected
@@ -5594,44 +5601,46 @@ class JiuWenClawDeepAdapter:
             logger.debug("[JiuWenClaw] _collect_messages_for_evolve failed: %s", exc)
             return []
 
-        if not raw_messages:
+        qa_history_messages: list[Any] = []
+        try:
+            session_ref_getter = getattr(context, "get_session_ref", None)
+            session_ref = (
+                session_ref_getter()
+                if callable(session_ref_getter)
+                else getattr(context, "_session_ref", None)
+            )
+            context_id_getter = getattr(context, "context_id", None)
+            context_id = context_id_getter() if callable(context_id_getter) else "default_context_id"
+            history = context_engine.get_history_qa_buffer(session_id, context_id)
+            qa_ids: list[str] = []
             try:
-                session_ref_getter = getattr(context, "get_session_ref", None)
-                session_ref = (
-                    session_ref_getter()
-                    if callable(session_ref_getter)
-                    else getattr(context, "_session_ref", None)
-                )
-                context_id_getter = getattr(context, "context_id", None)
-                context_id = context_id_getter() if callable(context_id_getter) else "default_context_id"
-                history = context_engine.get_history_qa_buffer(session_id, context_id)
-                qa_ids: list[str] = []
-                try:
-                    from openjiuwen.core.context_engine.qa_block.registry import load_registry
-                    if session_ref is not None:
-                        registry = load_registry(session_ref)
-                        sorted_blocks = sorted(
-                            registry.blocks.values(),
-                            key=lambda item: item.qa_index,
-                            reverse=True,
-                        )
-                        qa_ids = [entry.qa_id for entry in sorted_blocks]
-                except Exception as registry_exc:
-                    logger.debug("[JiuWenClaw] load QA block registry for evolve failed: %s", registry_exc)
-                if not qa_ids and hasattr(history, "recent_qa_ids"):
-                    qa_ids = list(reversed(history.recent_qa_ids()))
-                fallback_qa_ids = qa_ids[:10]
-                merged_messages = []
-                for qa_id in reversed(fallback_qa_ids):
-                    cached = history.get(qa_id)
-                    if cached:
-                        merged_messages.extend(list(cached))
-                if merged_messages:
-                    raw_messages = merged_messages
-            except Exception as fallback_exc:
-                logger.debug("[JiuWenClaw] collect QA block fallback for evolve failed: %s", fallback_exc)
+                from openjiuwen.core.context_engine.qa_block.registry import load_registry
+                if session_ref is not None:
+                    registry = load_registry(session_ref)
+                    sorted_blocks = sorted(
+                        registry.blocks.values(),
+                        key=lambda item: item.qa_index,
+                        reverse=True,
+                    )
+                    qa_ids = [entry.qa_id for entry in sorted_blocks]
+            except Exception as registry_exc:
+                logger.debug("[JiuWenClaw] load QA block registry for evolve failed: %s", registry_exc)
+            if not qa_ids and hasattr(history, "recent_qa_ids"):
+                qa_ids = list(reversed(history.recent_qa_ids()))
+            fallback_qa_ids = qa_ids[:10]
+            for qa_id in reversed(fallback_qa_ids):
+                cached = history.get(qa_id)
+                if cached:
+                    qa_history_messages.extend(list(cached))
+            if qa_history_messages:
+                raw_messages = qa_history_messages + list(raw_messages)
+        except Exception as fallback_exc:
+            logger.debug("[JiuWenClaw] collect QA block fallback for evolve failed: %s", fallback_exc)
 
-        return JiuClawSkillEvolutionRail.parse_messages(raw_messages)
+        parsed_messages = JiuClawSkillEvolutionRail.parse_messages(raw_messages)
+        if qa_history_messages:
+            parsed_messages = JiuClawSkillEvolutionRail.dedup_messages(parsed_messages)
+        return parsed_messages
 
     async def _handle_solidify_command(self, query: str) -> dict[str, Any]:
         """/solidify <skill_name> handler using the new online EvolutionStore."""
@@ -7438,6 +7447,13 @@ class JiuWenClawDeepAdapter:
                                     session_id=session_id,
                                 ):
                                     yield follow_chunk
+                            else:
+                                logger.warning(
+                                    "[JiuWenClawDeepAdapter] skill_creator_follow_up dropped: "
+                                    "empty prompt (request_id=%s stream_request_id=%s)",
+                                    request_id,
+                                    rid,
+                                )
                             continue
 
                     parsed = self._parse_stream_chunk_with_source(evt)
