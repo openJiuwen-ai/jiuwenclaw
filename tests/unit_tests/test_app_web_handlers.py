@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import os
 import threading
 import time
 from pathlib import Path
@@ -488,6 +489,67 @@ async def test_config_set_routes_team_payload_to_modes_team_helper(monkeypatch):
         "payload": {"updated": ["modes.team"], "applied_without_restart": True},
         "error": None,
         "code": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["true", "false"])
+async def test_config_set_expands_evolution_switch_to_both_triggers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    value: str,
+) -> None:
+    channel = FakeWebChannel()
+    saved_updates: list[dict[str, str]] = []
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ENV_FILE",
+        tmp_path / ".env",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"preferred_language": "zh"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"evolution": {}},
+    )
+    for env_key in (
+        "EVOLUTION_AUTO_SCAN",
+        "EVOLUTION_SIGNAL_TRIGGER",
+        "EVOLUTION_REVIEW_TRIGGER",
+    ):
+        monkeypatch.setenv(env_key, "")
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            on_config_saved=lambda _, **kwargs: saved_updates.append(
+                kwargs["env_updates"]
+            ),
+        )
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-evolution",
+        {"evolution_auto_scan": value},
+        "sess-evolution",
+    )
+
+    expected = {
+        "EVOLUTION_AUTO_SCAN": value,
+        "EVOLUTION_SIGNAL_TRIGGER": value,
+        "EVOLUTION_REVIEW_TRIGGER": value,
+    }
+    assert saved_updates == [expected]
+    assert {key: os.environ[key] for key in expected} == expected
+    assert set((tmp_path / ".env").read_text(encoding="utf-8").splitlines()) == {
+        f'{key}="{env_value}"' for key, env_value in expected.items()
+    }
+    assert channel.responses[-1]["payload"] == {
+        "updated": ["evolution_auto_scan"],
+        "applied_without_restart": True,
     }
 
 

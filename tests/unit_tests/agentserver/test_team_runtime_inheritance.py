@@ -298,12 +298,12 @@ def test_build_member_rails_wires_team_trajectory_registry_to_evolution_rails(
     assert leader_rail.kwargs["trajectory_source"] is registry
     assert leader_rail.kwargs["trajectory_sink"] is registry
     assert leader_rail.kwargs["member_role"] == "leader"
-    assert leader_rail.kwargs["auto_scan"] is False
-    assert leader_rail.kwargs["completion_followup_enabled"] is True
+    assert leader_rail.kwargs["signal_trigger"] is False
+    assert leader_rail.kwargs["review_trigger"] is True
     assert member_rail.bound_sink is registry
     assert member_rail.bound_team_id == "demo-team"
     assert member_rail.bound_member_role == "teammate"
-    assert member_rail.kwargs["auto_scan"] is True
+    assert member_rail.kwargs["signal_trigger"] is True
 
 
 @pytest.mark.parametrize(
@@ -355,8 +355,8 @@ def test_build_member_rails_creates_leader_team_skill_evolution_rail_with_comple
 
     team_skill_rails = [rail for rail in rails if isinstance(rail, _FakeTeamSkillEvolutionRail)]
     assert len(team_skill_rails) == 1
-    assert team_skill_rails[0].kwargs["auto_scan"] is False
-    assert team_skill_rails[0].kwargs["completion_followup_enabled"] is expected_review_trigger
+    assert team_skill_rails[0].kwargs["signal_trigger"] is False
+    assert team_skill_rails[0].kwargs["review_trigger"] is expected_review_trigger
 
 
 @pytest.mark.parametrize("auto_save", [False, True])
@@ -421,7 +421,7 @@ def test_build_member_rails_wires_leader_team_skill_evolution_active_review_rail
     assert team_rail.kwargs["auto_save"] is auto_save
 
 
-def test_build_member_rails_keeps_member_skill_evolution_when_auto_scan_disabled(
+def test_build_member_rails_keeps_member_skill_evolution_when_signal_trigger_disabled(
     tmp_path, monkeypatch
 ):
     class _FakeEvolutionInterruptRail:
@@ -430,7 +430,7 @@ def test_build_member_rails_keeps_member_skill_evolution_when_auto_scan_disabled
 
     class _FakeSkillEvolutionRail:
         def __init__(self, **kwargs):
-            self.auto_scan = kwargs["auto_scan"]
+            self.signal_trigger = kwargs["signal_trigger"]
             self.auto_save = kwargs["auto_save"]
             self._review_runtime = kwargs.get("review_runtime")
             self.experience_manager = SimpleNamespace(
@@ -463,7 +463,7 @@ def test_build_member_rails_keeps_member_skill_evolution_when_auto_scan_disabled
 
     evo_rails = [rail for rail in rails if isinstance(rail, _FakeSkillEvolutionRail)]
     assert len(evo_rails) == 1
-    assert evo_rails[0].auto_scan is False
+    assert evo_rails[0].signal_trigger is False
     assert evo_rails[0].auto_save is True
     interrupt_index = next(
         index for index, rail in enumerate(rails) if isinstance(rail, _FakeEvolutionInterruptRail)
@@ -473,7 +473,7 @@ def test_build_member_rails_keeps_member_skill_evolution_when_auto_scan_disabled
     assert rails[interrupt_index].kwargs["auto_save"] is True
 
 
-def test_build_member_rails_keeps_team_skill_create_when_auto_scan_disabled(
+def test_build_member_rails_keeps_team_skill_create_when_signal_trigger_disabled(
     tmp_path, monkeypatch
 ):
     class _FakeTeamSkillCreateRail:
@@ -490,7 +490,7 @@ def test_build_member_rails_keeps_team_skill_create_when_auto_scan_disabled(
         member_info=MemberInfo(role="leader"),
         team_workspace=TeamWorkspaceInfo(
             skills_dir=str(tmp_path / "skills"),
-            config={"evolution": {"auto_scan": False, "skill_create": True}},
+            config={"evolution": {"signal_trigger": False, "skill_create": True}},
         ),
     )
 

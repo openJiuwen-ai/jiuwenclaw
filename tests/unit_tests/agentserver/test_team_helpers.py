@@ -202,6 +202,8 @@ class _FakeRail:
         self._pending_first = pending_first
         self._drain_calls = 0
         self.drain_waits: list[bool] = []
+        self.signal_trigger = True
+        self.review_trigger = False
 
     async def drain_pending_approval_events(self, wait: bool = False, timeout: float | None = None):
         self._drain_calls += 1
@@ -914,6 +916,8 @@ async def test_team_evolution_monitor_uses_approval_request_id_without_provision
     class _PendingThenApprovalRail:
         def __init__(self):
             self._drain_calls = 0
+            self.signal_trigger = True
+            self.review_trigger = False
 
         async def drain_pending_approval_events(self, wait: bool = False, timeout: float | None = None):
             assert wait is False
@@ -1056,7 +1060,7 @@ async def test_ensure_team_evolution_watcher_starts_without_reasoning_gate(monke
 
         @staticmethod
         def get_team_skill_rail(session_id: str):
-            return object()
+            return SimpleNamespace(signal_trigger=True, review_trigger=False)
 
         @staticmethod
         def register_team_evolution_watcher(
@@ -1110,12 +1114,12 @@ async def test_ensure_team_evolution_watcher_defers_when_rail_missing(monkeypatc
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("completion_followup_enabled", "should_start"),
+    ("review_trigger", "should_start"),
     [(False, False), (True, True)],
 )
-async def test_ensure_team_evolution_watcher_respects_completion_followup(
+async def test_ensure_team_evolution_watcher_respects_review_trigger(
         monkeypatch,
-        completion_followup_enabled: bool,
+        review_trigger: bool,
         should_start: bool,
 ):
     registered: dict[str, asyncio.Task] = {}
@@ -1123,8 +1127,8 @@ async def test_ensure_team_evolution_watcher_respects_completion_followup(
     class _Rail:
         pass
 
-    _Rail.auto_scan = False
-    _Rail.completion_followup_enabled = completion_followup_enabled
+    _Rail.signal_trigger = False
+    _Rail.review_trigger = review_trigger
 
     class _FakeManager(_InactiveTeamRuntimeManagerMixin):
         @staticmethod

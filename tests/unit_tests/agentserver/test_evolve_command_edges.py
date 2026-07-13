@@ -140,7 +140,12 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = _FakeInstance()  # pylint: disable=protected-access
     adapter._config_cache = {  # pylint: disable=protected-access
-        "evolution": {"enabled": True, "auto_scan": False, "auto_save": auto_save},
+        "evolution": {
+            "enabled": True,
+            "signal_trigger": False,
+            "review_trigger": False,
+            "auto_save": auto_save,
+        },
         "model_name": "configured-model",
     }
     adapter._skill_manager = _FakeSkillManager()  # pylint: disable=protected-access
@@ -178,8 +183,8 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
             "skills_dir": str(interface_deep_module.get_agent_skills_dir()),
             "llm": adapter._model,  # pylint: disable=protected-access
             "model": "default-model",
-            "auto_scan": False,
-            "fuzzy_review": True,
+            "signal_trigger": False,
+            "review_trigger": False,
             "auto_save": auto_save,
             "disabled_skills": ["disabled-demo"],
             "language": "en",

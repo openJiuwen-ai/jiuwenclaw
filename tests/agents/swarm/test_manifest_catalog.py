@@ -200,7 +200,7 @@ def test_attribute_fields_are_params_env_fields_are_context() -> None:
         },
         registry.TEAM_SKILL_EVOLUTION: {
             "evolution_model_config": "params",
-            "completion_followup_enabled": "params",
+            "review_trigger": "params",
             "team_skills_dir": "context",
             "trajectory_registry": "context",
         },

@@ -1293,7 +1293,7 @@ class TeamManager:
         for rails in self._team_member_skill_evolution_rails.values():
             for rail in rails:
                 try:
-                    rail.auto_scan = signal_trigger_enabled
+                    rail.signal_trigger = signal_trigger_enabled
                 except Exception as exc:
                     logger.warning(
                         "[TeamManager] SkillEvolutionRail signal_trigger update failed: %s",
@@ -1302,7 +1302,7 @@ class TeamManager:
 
         for rail in self._team_skill_rails.values():
             try:
-                rail.completion_followup_enabled = review_trigger_enabled
+                rail.review_trigger = review_trigger_enabled
             except Exception as exc:
                 logger.warning(
                     "[TeamManager] TeamSkillEvolutionRail review_trigger update failed: %s",

@@ -342,8 +342,8 @@ def _set_skill_evolution_triggers(
     signal_trigger: bool,
     review_trigger: bool,
 ) -> None:
-    rail.auto_scan = signal_trigger
-    rail.fuzzy_review = review_trigger
+    rail.signal_trigger = signal_trigger
+    rail.review_trigger = review_trigger
 
 
 def _clean_heartbeat_content(content: str) -> str:
@@ -3299,8 +3299,8 @@ class JiuWenSwarmDeepAdapter:
                 llm=self._model,
                 model=model_name,
                 review_runtime=EvolutionReviewRuntime(),
-                auto_scan=evolution_signal_trigger,
-                fuzzy_review=evolution_review_trigger,
+                signal_trigger=evolution_signal_trigger,
+                review_trigger=evolution_review_trigger,
                 auto_save=evolution_auto_save,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
             )
@@ -3341,8 +3341,8 @@ class JiuWenSwarmDeepAdapter:
             llm=self._model,
             model=self._default_model_name
             or self._config_cache.get("model_name", "gpt-4"),
-            auto_scan=evolution_signal_trigger,
-            fuzzy_review=evolution_review_trigger,
+            signal_trigger=evolution_signal_trigger,
+            review_trigger=evolution_review_trigger,
             auto_save=evolution_auto_save,
             disabled_skills=disabled_skills,
             language=resolved_language,
@@ -8238,7 +8238,7 @@ class JiuWenSwarmDeepAdapter:
         try:
             if self._skill_evolution_rail is None:
                 return
-            if not getattr(self._skill_evolution_rail, "auto_scan", True):
+            if not self._skill_evolution_rail.signal_trigger:
                 return
 
             active = False
@@ -8251,7 +8251,7 @@ class JiuWenSwarmDeepAdapter:
             while True:
                 if self._skill_evolution_rail is None:
                     return
-                if not getattr(self._skill_evolution_rail, "auto_scan", True):
+                if not self._skill_evolution_rail.signal_trigger:
                     if active:
                         await _push_status("end", "hidden", "")
                     await _cleanup_evolution_rail()

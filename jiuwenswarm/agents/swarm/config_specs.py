@@ -305,7 +305,7 @@ def _team_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     auto_scan = get_evolution_auto_scan_enabled(config)
     return {
         "evolution_model_config": _evolution_model_config(config),
-        "completion_followup_enabled": get_evolution_review_trigger_enabled(
+        "review_trigger": get_evolution_review_trigger_enabled(
             config,
             fallback=auto_scan,
         ),
@@ -317,7 +317,7 @@ def _member_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the member skill-evolution rail."""
     return {
         "evolution_model_config": _evolution_model_config(config),
-        "auto_scan": get_evolution_signal_trigger_enabled(
+        "signal_trigger": get_evolution_signal_trigger_enabled(
             config,
             fallback=get_evolution_auto_scan_enabled(config),
         ),

@@ -200,7 +200,7 @@ def _assert_evolution_approval_stack(
     assert isinstance(interrupt_rail, _FakeEvolutionInterruptRail)
     assert "review_runtime" in rail.kwargs
     assert rail.kwargs["review_runtime"] is not None
-    assert rail.kwargs["fuzzy_review"] is False
+    assert "fuzzy_review" not in rail.kwargs
     assert interrupt_rail.kwargs == {
         "review_runtime": rail.kwargs["review_runtime"],
         "submission_service": rail.approval_submission_service,
@@ -1149,7 +1149,7 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     built = evolution_rails.build_team_skill_evolution_rail(
         {
             "evolution_model_config": {},
-            "completion_followup_enabled": True,
+            "review_trigger": True,
             "auto_save": auto_save,
         },
         ctx,
@@ -1162,9 +1162,9 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         language="cn",
     )
     rail = built[1]
-    assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is auto_save
-    assert rail.kwargs["completion_followup_enabled"] is True
+    assert rail.kwargs["review_trigger"] is True
 
 
 def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
@@ -1251,7 +1251,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
     )
 
     built = evolution_rails.build_member_skill_evolution_rail(
-        {"evolution_model_config": {}, "auto_scan": False},
+        {"evolution_model_config": {}, "signal_trigger": False},
         ctx,
     )
 
@@ -1262,7 +1262,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
         language="en",
     )
     assert rail.kwargs["language"] == "en"
-    assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is True
     assert rail.bound_sink == (registry_obj, "t", "teammate")
 
