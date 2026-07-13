@@ -404,7 +404,7 @@ The distinction matters:
 Run inside the inner project folder that contains `jiuwenswarm/package.json`:
 
 ```powershell
-cd C:\Users\chiak\OneDrive\Desktop\jiuwenswarm\jiuwenswarm
+cd <project-root>/jiuwenswarm
 npm install
 ```
 
@@ -418,7 +418,7 @@ npm install @whiskeysockets/baileys ws pino qrcode-terminal
 
 Edit your runtime config file:
 
-`C:\Users\chiak\.jiuwenswarm\config\config.yaml`
+`~/.jiuwenswarm/config/config.yaml`
 
 Under `channels:` use:
 
@@ -430,7 +430,7 @@ Under `channels:` use:
     enable_streaming: true
     auto_start_bridge: false
     bridge_command: node scripts/whatsapp-bridge.js
-    bridge_workdir: C:/Users/chiak/OneDrive/Desktop/jiuwenswarm/jiuwenswarm
+    bridge_workdir: <project-root>/jiuwenswarm
     enabled: true
 ```
 
@@ -449,7 +449,7 @@ Open two terminals unless you use `auto_start_bridge: true`.
 Terminal A, bridge:
 
 ```powershell
-cd C:\Users\chiak\OneDrive\Desktop\jiuwenswarm\jiuwenswarm
+cd <project-root>/jiuwenswarm
 npm run whatsapp:bridge
 ```
 
@@ -460,7 +460,7 @@ Expected line:
 Terminal B, app:
 
 ```powershell
-cd C:\Users\chiak\OneDrive\Desktop\jiuwenswarm
+cd <project-root>
 python -m jiuwenswarm.app
 ```
 
@@ -520,7 +520,7 @@ Restart `python -m jiuwenswarm.app` after updating `.env`.
 
 You ran `npm` in the wrong folder. Use:
 
-`C:\Users\chiak\OneDrive\Desktop\jiuwenswarm\jiuwenswarm`
+`<project-root>/jiuwenswarm`
 
 **Bridge starts but no QR**
 
