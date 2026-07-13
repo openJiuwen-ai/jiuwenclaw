@@ -115,7 +115,7 @@ def instrument_session(
                     # ctx is the caller's ContextVar context, passed to
                     # create_task so the task inherits workspace/cwd/project_root
                     # rather than the processor Task's (possibly stale) context.
-                    priority, task_func, task_ctx, task_ctx = await queue.get()
+                    priority, task_func, task_ctx= await queue.get()
                     if task_func is None:
                         break
 
@@ -125,8 +125,7 @@ def instrument_session(
                     _emit_state(session_id, "active", "task_started")
 
                     self._session_tasks[session_id] = asyncio.create_task(
-                        task_func(), context=task_ctx
-                    , context = task_ctx)
+                        task_func(), context=task_ctx)
                     try:
                         await self._session_tasks[session_id]
                         # >>> 埋点: state=idle, reason=task_completed
