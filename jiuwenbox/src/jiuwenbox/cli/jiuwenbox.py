@@ -976,7 +976,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--sandbox-id",
-        help="optional sandbox id (4-16 chars: lowercase letters, digits, -, _)",
+        help="optional sandbox id (4-40 chars: lowercase letters, digits, -, _)",
     )
     p.set_defaults(_handler=cmd_sandbox_create)
 
@@ -1045,7 +1045,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--job-id",
-        help="optional background job id (4-16 chars, [0-9a-z_-])",
+        help="optional background job id (4-40 chars, [0-9a-z_-])",
     )
     p.add_argument(
         "--no-capture",
