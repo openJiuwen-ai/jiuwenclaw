@@ -761,7 +761,7 @@
       "apiBaseUrlInvalid": "API Base URL must start with http:// or https://",
       "modelNameTooLong": "Model name is too long, please keep it under 100 characters",
       "aliasTooLong": "Alias is too long, please keep it under 100 characters",
-      "apiBaseTooLong": "API Base URL is too long, please keep it under 256 characters",
+      "apiBaseTooLong": "API Base URL is too long, please keep it under 512 characters",
       "apiKeyTooLong": "API Key is too long, please keep it under 500 characters",
       "reasoningDefault": "Use default",
       "alias": "Alias",
