@@ -132,7 +132,7 @@
 .share-image-footer__note {
   flex: 0 0 auto;
   color: color-mix(in srgb, var(--color-text-secondary) 88%, var(--color-text-primary));
-  font-size: 11px;
+  font-size: 16px;
   font-weight: 600;
   line-height: 1.35;
 }
