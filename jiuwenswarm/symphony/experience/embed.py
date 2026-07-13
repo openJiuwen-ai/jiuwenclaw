@@ -24,9 +24,11 @@ class EmbeddingClient:
         model: str = "",
         model_name: str = "",
         normalize: bool = True,
+        dimension: int | None = None,
     ) -> None:
         self._backend: str = ""
         self._normalize = bool(normalize)
+        self._dimension = dimension
         self._total_tokens: int = 0
 
         # Path 1: OpenAI-compatible API
@@ -58,6 +60,11 @@ class EmbeddingClient:
             "Option 2: install 'sentence-transformers' and provide model_name."
         )
 
+    @property
+    def dimension(self) -> int | None:
+        """Return the configured embedding vector dimension, or None if unset."""
+        return self._dimension
+
     def reset_token_counter(self) -> int:
         """Reset and return the accumulated token counter."""
         prev = self._total_tokens
@@ -84,7 +91,13 @@ class EmbeddingClient:
     # -- private --
 
     def _embed_api(self, text: str) -> list[float]:
-        resp = self._api_client.embeddings.create(input=text, model=self._api_model)
+        params: dict[str, Any] = {
+            "input": text,
+            "model": self._api_model,
+        }
+        if self._dimension is not None:
+            params["dimensions"] = self._dimension
+        resp = self._api_client.embeddings.create(**params)
         vec = resp.data[0].embedding
         usage = getattr(resp, "usage", None)
         if usage is not None:

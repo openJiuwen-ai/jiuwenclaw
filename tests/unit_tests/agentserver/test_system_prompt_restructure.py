@@ -14,10 +14,15 @@ from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 from jiuwenswarm.common import utils as _utils_mod
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
-from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
+from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
+    build_agent_identity_prompt,
+)
 from jiuwenswarm.agents.harness.common.rails import skill_retrieval_prompt_rail as _skill_retrieval_prompt_mod
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import SkillRetrievalPromptRail
+from jiuwenswarm.agents.harness.common.rails.symphony_orchestration_prompt_rail import (
+    SymphonyOrchestrationPromptRail,
+)
 
 
 class _TestableJiuWenSwarmDeepAdapter(JiuWenSwarmDeepAdapter):
@@ -96,50 +101,140 @@ class _FakeRuntimeInstance:
         self.ability_manager = _FakeAbilityManager()
 
 
-def test_build_agent_identity_prompt_contains_identity_section_only(monkeypatch):
+def test_build_agent_identity_prompt_contains_identity_section_only():
+    prompt = build_agent_identity_prompt(language="zh")
+
+    assert "# 你的家" in prompt
+    assert "## Symphony Orchestration" not in prompt
+    assert "`symphony_compose_score`" not in prompt
+    assert "# 消息说明" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_prompt_rail_respects_config_snapshot():
+    enabled_builder = SystemPromptBuilder(language="cn")
+    enabled_agent = _FakeAgent(enabled_builder)
+    enabled_ctx = AgentCallbackContext(
+        agent=enabled_agent,
+        inputs=SimpleNamespace(
+            tools=[SimpleNamespace(name="symphony_compose_score")],
+        ),
+        session=_FakeSession(),
+        extra={},
+    )
+    enabled_rail = SymphonyOrchestrationPromptRail(
+        config_base={"symphony": {"enabled": True}},
+    )
+    enabled_rail.init(enabled_agent)
+    await enabled_rail.before_model_call(enabled_ctx)
+
+    disabled_builder = SystemPromptBuilder(language="cn")
+    disabled_agent = _FakeAgent(disabled_builder)
+    disabled_ctx = AgentCallbackContext(
+        agent=disabled_agent,
+        inputs=SimpleNamespace(
+            tools=[SimpleNamespace(name="symphony_compose_score")],
+        ),
+        session=_FakeSession(),
+        extra={},
+    )
+    disabled_rail = SymphonyOrchestrationPromptRail(
+        config_base={"symphony": {"enabled": False}},
+    )
+    disabled_rail.init(disabled_agent)
+    await disabled_rail.before_model_call(disabled_ctx)
+
+    enabled_prompt = enabled_builder.build()
+    disabled_prompt = disabled_builder.build()
+    assert "## Symphony Orchestration" in enabled_prompt
+    assert "`symphony_compose_score`" in enabled_prompt
+    assert "## Symphony Orchestration" not in disabled_prompt
+    assert "`symphony_compose_score`" not in disabled_prompt
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_prompt_rail_injects_when_tool_visible(
+    monkeypatch,
+):
     monkeypatch.setattr(
         "jiuwenswarm.symphony.config.load_symphony_config",
         lambda: SimpleNamespace(enabled=True),
     )
-    prompt = build_agent_identity_prompt(language="zh")
-    prompt_inline = " ".join(prompt.split())
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=SimpleNamespace(
+            tools=[SimpleNamespace(name="symphony_compose_score")],
+        ),
+        session=_FakeSession(),
+        extra={},
+    )
 
-    assert "# 你的家" in prompt
-    assert "## Symphony Routing" in prompt
+    rail = SymphonyOrchestrationPromptRail()
+    rail.init(agent)
+    await rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    assert "## Symphony Orchestration" in prompt
     assert "`symphony_compose_score`" in prompt
-    assert "skill capabilities, skill chaining, skill ordering" in prompt_inline
-    assert "use `search_skill` to discover external skills" in prompt_inline
-    assert "call `symphony_refresh_score`" in prompt_inline
-    assert "present its returned `content` directly" in prompt
-    assert "# 消息说明" not in prompt
 
 
-def test_build_agent_identity_prompt_omits_symphony_when_disabled(monkeypatch):
+@pytest.mark.asyncio
+async def test_symphony_orchestration_prompt_rail_clears_when_unavailable(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.config.load_symphony_config",
+        lambda: SimpleNamespace(enabled=True),
+    )
+    builder = SystemPromptBuilder(language="cn")
+    builder.add_section(
+        PromptSection(
+            name="symphony_orchestration",
+            content={"cn": "stale orchestration prompt"},
+            priority=42,
+        )
+    )
+    agent = _FakeAgent(builder)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=SimpleNamespace(tools=[SimpleNamespace(name="other_tool")]),
+        session=_FakeSession(),
+        extra={},
+    )
+
+    rail = SymphonyOrchestrationPromptRail()
+    rail.init(agent)
+    await rail.before_model_call(ctx)
+
+    assert "stale orchestration prompt" not in builder.build()
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_prompt_rail_clears_when_disabled(
+    monkeypatch,
+):
     monkeypatch.setattr(
         "jiuwenswarm.symphony.config.load_symphony_config",
         lambda: SimpleNamespace(enabled=False),
     )
-
-    prompt = build_agent_identity_prompt(language="zh")
-
-    assert "## Symphony Routing" not in prompt
-    assert "`symphony_compose_score`" not in prompt
-
-
-def test_build_agent_identity_prompt_respects_config_snapshot():
-    enabled_prompt = build_agent_identity_prompt(
-        language="zh",
-        config_base={"symphony": {"enabled": True}},
-    )
-    disabled_prompt = build_agent_identity_prompt(
-        language="zh",
-        config_base={"symphony": {"enabled": False}},
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=SimpleNamespace(
+            tools=[SimpleNamespace(name="symphony_compose_score")],
+        ),
+        session=_FakeSession(),
+        extra={},
     )
 
-    assert "## Symphony Routing" in enabled_prompt
-    assert "`symphony_compose_score`" in enabled_prompt
-    assert "## Symphony Routing" not in disabled_prompt
-    assert "`symphony_compose_score`" not in disabled_prompt
+    rail = SymphonyOrchestrationPromptRail()
+    rail.init(agent)
+    await rail.before_model_call(ctx)
+
+    assert "## Symphony Orchestration" not in builder.build()
 
 
 def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):

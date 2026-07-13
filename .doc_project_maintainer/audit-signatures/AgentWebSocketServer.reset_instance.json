@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f3f8f-9720-7fb1-8953-40ee09f2cbc7",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer.reset_instance",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer.reset_instance in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f3f8f-9720-7fb1-8953-40ee09f2cbc7",
+        "nickname": "Curie",
+        "symbol_id": "AgentWebSocketServer.reset_instance",
+        "completed": true,
+        "finding_count": 3
+      }
+    }
+  ]
+}

@@ -32,6 +32,9 @@ class _TeamManagerHarness(TeamManager):
     def cache_local_team_agent_for_test(self, session_id: str, team_agent) -> None:
         getattr(self, "_team_agents")[session_id] = team_agent
 
+    def register_stream_task_for_test(self, session_id: str, task: asyncio.Task) -> None:
+        getattr(self, "_stream_tasks")[session_id] = task
+
     def resolve_session_team_name_for_test(self, session_id: str) -> str | None:
         return self._resolve_session_team_name(session_id)
 
@@ -93,7 +96,12 @@ def teardown_function() -> None:
     reset_team_manager()
 
 
-def test_get_team_manager_is_scoped_by_channel() -> None:
+def test_get_team_manager_is_singleton() -> None:
+    # TeamManager is a process-wide singleton shared across channels so that
+    # bridged follow-up requests (e.g. a /join member replying from feishu
+    # while the originating web stream is still alive) can see the
+    # originating channel's runtime markers and avoid being misidentified as
+    # a first request.
     web_manager = get_team_manager("web")
     feishu_manager = get_team_manager("feishu")
     web_manager_again = get_team_manager("web")
@@ -101,7 +109,11 @@ def test_get_team_manager_is_scoped_by_channel() -> None:
     assert isinstance(web_manager, TeamManager)
     assert isinstance(feishu_manager, TeamManager)
     assert web_manager is web_manager_again
-    assert web_manager is not feishu_manager
+    assert web_manager is feishu_manager  # singleton: same instance regardless of channel
+
+    reset_team_manager()
+    after_reset = get_team_manager("web")
+    assert after_reset is not web_manager  # reset yields a fresh instance
 
 
 @pytest.mark.asyncio
@@ -473,7 +485,7 @@ async def test_create_team_does_not_run_global_runtime_cleanup(monkeypatch: pyte
 
             @staticmethod
             def build():
-                return object()
+                return SimpleNamespace()
 
         return _Spec()
 
@@ -512,7 +524,7 @@ async def test_create_team_appends_session_id_to_team_name(monkeypatch: pytest.M
 
         def build(self):
             created_team_names.append(self.team_name)
-            return object()
+            return SimpleNamespace()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
     monkeypatch.setattr(
@@ -548,7 +560,7 @@ async def test_create_team_appends_session_id_to_web_team_name(monkeypatch: pyte
 
         def build(self):
             created_team_names.append(self.team_name)
-            return object()
+            return SimpleNamespace()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
     monkeypatch.setattr(
@@ -933,6 +945,96 @@ async def test_pause_session_runtime_pauses_runner_owned_team_runtime(
     assert paused is True
     assert pause_calls == [("demo-team", "sess-1")]
     assert manager.is_runtime_active("sess-1") is False
+
+
+@pytest.mark.asyncio
+async def test_pause_session_runtime_waits_for_stream_task_graceful_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    manager.set_active_runtime_for_test("sess-1", "demo-team")
+    stream_can_exit = asyncio.Event()
+    stream_exited = asyncio.Event()
+
+    async def stream_task_body() -> None:
+        await stream_can_exit.wait()
+        stream_exited.set()
+
+    stream_task = asyncio.create_task(stream_task_body())
+    manager.register_stream_task_for_test("sess-1", stream_task)
+
+    async def fake_pause_agent_team(*, team_name: str, session_id: str) -> bool:
+        assert (team_name, session_id) == ("demo-team", "sess-1")
+        stream_can_exit.set()
+        return True
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.Runner.pause_agent_team",
+        fake_pause_agent_team,
+    )
+
+    paused = await manager.pause_session_runtime("sess-1", reason="interrupt(intent=pause): ")
+
+    assert paused is True
+    assert stream_exited.is_set()
+    assert stream_task.done()
+    assert not stream_task.cancelled()
+    assert manager.has_stream_task("sess-1") is False
+
+
+@pytest.mark.asyncio
+async def test_pause_session_runtime_warns_and_cancels_stream_task_after_grace_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _TeamManagerHarness()
+    manager.set_active_runtime_for_test("sess-1", "demo-team")
+    stream_cancelled = asyncio.Event()
+
+    async def stream_task_body() -> None:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            stream_cancelled.set()
+            raise
+
+    stream_task = asyncio.create_task(stream_task_body())
+    manager.register_stream_task_for_test("sess-1", stream_task)
+
+    async def fake_pause_agent_team(*, team_name: str, session_id: str) -> bool:
+        assert (team_name, session_id) == ("demo-team", "sess-1")
+        return True
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.Runner.pause_agent_team",
+        fake_pause_agent_team,
+    )
+    original_wait_for_stream_task_exit = manager._wait_for_stream_task_exit
+
+    async def wait_for_stream_task_exit_with_short_timeout(session_id: str) -> bool:
+        return await original_wait_for_stream_task_exit(session_id, timeout_sec=0.01)
+
+    monkeypatch.setattr(
+        manager,
+        "_wait_for_stream_task_exit",
+        wait_for_stream_task_exit_with_short_timeout,
+    )
+    warning_messages: list[str] = []
+
+    def fake_warning(message: str, *args) -> None:
+        warning_messages.append(message % args if args else message)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.logger.warning",
+        fake_warning,
+    )
+
+    paused = await manager.pause_session_runtime("sess-1", reason="interrupt(intent=pause): ")
+
+    assert paused is True
+    assert stream_cancelled.is_set()
+    assert stream_task.cancelled()
+    assert manager.has_stream_task("sess-1") is False
+    assert any("stream task did not exit within grace timeout" in message for message in warning_messages)
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 import sys
 from enum import IntEnum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from openjiuwen.harness.prompts import SystemPromptBuilder, PromptSection, resolve_language
 from jiuwenswarm.agents.harness.common.prompt.shell_environment import build_shell_environment_prompt
@@ -19,45 +19,6 @@ from jiuwenswarm.common.utils import (
 
 def _get_config_dir() -> "Path":
     return get_user_workspace_dir() / "config"
-
-
-def _symphony_routing_prompt(config_base: dict[str, Any] | None = None) -> str:
-    try:
-        from jiuwenswarm.symphony.config import load_symphony_config
-
-        config = (
-            load_symphony_config()
-            if config_base is None
-            else load_symphony_config(config_base)
-        )
-        if not config.enabled:
-            return ""
-    except Exception:
-        return ""
-    return """
-## Symphony Routing
-
-When the user says to use skill(s) or 技能, or when you judge that skill
-capabilities, skill chaining, skill ordering, or a specialized toolchain could
-help complete the task, you MUST call `symphony_compose_score` with the original
-user task as `query` before answering.
-When installed-skill retrieval is available and can narrow the search space,
-use `skill_branch_peek` / `skill_branch_explore` to shortlist candidate skills
-first, then pass the selected `worker_id` values as
-`symphony_compose_score.candidate_skill_ids`. Do not inspect skill folders
-manually or choose the execution chain yourself; Symphony owns ordering and
-graph composition. After it returns, present its returned `content` directly to
-the user. If Symphony reports missing inputs, ask for those inputs.
-
-If Symphony reports no suitable candidates, a missing capability, or caveats
-that point to a skill gap, use `search_skill` to discover external skills. When
-installing a discovered skill is appropriate, call `install_skill`; after a
-successful install, call `symphony_refresh_score` and then call
-`symphony_compose_score` again with the original user task.
-
-For clearly ordinary tasks that do not benefit from skill capabilities, continue
-normally without Symphony.
-"""
 
 
 class PromptPriority(IntEnum):
@@ -172,7 +133,6 @@ After completing a system task, notify the user via a reply.
 
 def _identity_prompt(
     language: str,
-    config_base: dict[str, Any] | None = None,
 ) -> PromptSection:
     config_dir = _get_config_dir()
     workspace_dir = get_agent_workspace_dir()
@@ -181,7 +141,6 @@ def _identity_prompt(
     todo_dir = get_deepagent_todo_dir()
     os_type = sys.platform
     shell_env_prompt = build_shell_environment_prompt(language, os_type)
-    symphony_routing_prompt = _symphony_routing_prompt(config_base)
 
     if language == "cn":
         content = f"""你是一个私人智能体，由 JiuwenSwarm 创建。像一个有温度的人类助手一样与用户互动。
@@ -199,7 +158,6 @@ def _identity_prompt(
 | `{memory_dir}` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |
 | `{skills_dir}` | 技能库 | 可随时翻阅、调用，不可修改 |
 | `{todo_dir}` | 待办事项 | 记录用户请求的任务，每次请求后会更新 |
-{symphony_routing_prompt}
 
 ## 配置信息
 
@@ -254,6 +212,11 @@ def _identity_prompt(
 - 用户询问生成的文件如何获取
 
 **调用方式**：使用文件的绝对路径作为参数调用 `send_file_to_user` 工具。
+
+**跨 channel 投递**：`send_file_to_user` 接受可选参数 `target_channels`（字符串数组），用于指定文件投递的目标 channel（如 `["feishu", "xiaoyi", "web"]`）。
+- 用户在某个 channel（如飞书）请求发送文件、或要求把文件发给指定 channel 时，传入 `target_channels`。
+- 省略 `target_channels` 时，文件会自动投递给当前会话已接入的所有用户 channel（team 模式下含飞书等 IM 端）。
+- 文件路径必须是服务端可访问的绝对路径。
 """
     else:
         content = f"""
@@ -272,7 +235,6 @@ Everything starts from the `.jiuwenswarm` directory.
 | `{memory_dir}` | Persistent memory | Treat it as part of your memory; consult it anytime |
 | `{skills_dir}` | Skill library | Read and invoke freely; do not modify |
 | `{todo_dir}` | Todo list | Records tasks from user requests; updated after each request |
-{symphony_routing_prompt}
 
 ## Configuration
 
@@ -327,6 +289,11 @@ When the `send_file_to_user` tool is available in your tool list, you **must** p
 - User asks how to obtain generated files
 
 **How to call**: Use the absolute file path(s) as the parameter to invoke the `send_file_to_user` tool.
+
+**Cross-channel delivery**: `send_file_to_user` accepts an optional `target_channels` parameter (array of strings) to specify delivery targets by channel id (e.g. `["feishu", "xiaoyi", "web"]`).
+- When a user on a given channel (e.g. Feishu) requests a file, or asks to send a file to a specific channel, pass `target_channels`.
+- When `target_channels` is omitted, the file is auto-delivered to every user channel joined to the current session (including IM endpoints like Feishu in team mode).
+- File paths must be absolute and server-accessible.
 """
     return PromptSection(
         name="identity",
@@ -340,7 +307,6 @@ When the `send_file_to_user` tool is available in your tool list, you **must** p
 
 def build_agent_identity_prompt(
     language: str,
-    config_base: dict[str, Any] | None = None,
 ) -> str:
     """Build the system prompt for the general (non-code) agent.
 
@@ -350,7 +316,7 @@ def build_agent_identity_prompt(
     resolved_language = resolve_language(language)
     builder = SystemPromptBuilder(language=resolved_language)
 
-    builder.add_section(_identity_prompt(resolved_language, config_base))
+    builder.add_section(_identity_prompt(resolved_language))
 
     return builder.build()
 

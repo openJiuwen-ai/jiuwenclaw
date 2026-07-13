@@ -72,6 +72,9 @@ CRON_JOB_MODES: frozenset[str] = frozenset(
         "agent.fast",
         "team.plan",
         "code.team",
+        # 不走 chat.send，scheduler 消费时直接发 PROACTIVE_TICK WS 请求
+        # 触发 AgentServer ProactiveEngine.tick_now()。由 proactive_cron_sync 自动注册。
+        "proactive.tick",
     }
 )
 
@@ -213,6 +216,8 @@ class CronJob:
     delete_after_run: bool = False
     # 单次执行超时（秒）；未配置时普通模式 10 分钟，team 模式 20 分钟
     timeout_seconds: int | None = None
+    # 飞书多应用场景：创建该定时任务的 app_id，用于推送时定位到正确的 app 配置
+    app_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -238,6 +243,8 @@ class CronJob:
             d["delete_after_run"] = bool(self.delete_after_run)
         if self.timeout_seconds is not None:
             d["timeout_seconds"] = int(self.timeout_seconds)
+        if self.app_id:
+            d["app_id"] = self.app_id
         return d
 
     @staticmethod
@@ -317,6 +324,9 @@ class CronJob:
         if timeout_seconds_raw is not None:
             timeout_seconds = normalize_cron_job_timeout_seconds(timeout_seconds_raw)
 
+        app_id_raw = data.get("app_id", "")
+        job_app_id = str(app_id_raw).strip() if isinstance(app_id_raw, str) else ""
+
         return CronJob(
             id=job_id,
             name=name,
@@ -334,6 +344,7 @@ class CronJob:
             mode=job_mode,
             delete_after_run=delete_after_run,
             timeout_seconds=timeout_seconds,
+            app_id=job_app_id,
         )
 
 

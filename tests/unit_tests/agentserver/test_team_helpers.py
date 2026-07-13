@@ -16,6 +16,48 @@ from jiuwenswarm.server.runtime.agent_adapter import evolution_helpers
 from jiuwenswarm.server.runtime.agent_adapter import team_helpers
 
 
+def test_persist_team_history_event_keeps_human_spawn_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        team_helpers,
+        "append_history_record",
+        lambda **kwargs: persisted.append(kwargs),
+    )
+
+    team_helpers._persist_team_history_event(
+        "web",
+        "sess_werewolf",
+        {
+            "event_type": "team.member",
+            "event": {
+                "type": "team.member.spawned",
+                "team_id": "werewolf",
+                "member_id": "villager-human",
+                "name": "人类玩家",
+                "mode": "human",
+                "status": "idle",
+            },
+        },
+    )
+
+    assert len(persisted) == 1
+    assert persisted[0]["event_type"] == "team.member"
+    assert persisted[0]["mode"] == "team"
+    assert persisted[0]["extra"] == {
+        "session_id": "sess_werewolf",
+        "event": {
+            "type": "team.member.spawned",
+            "team_id": "werewolf",
+            "member_id": "villager-human",
+            "name": "人类玩家",
+            "mode": "human",
+            "status": "idle",
+        },
+    }
+
+
 class _InactiveTeamRuntimeManagerMixin:
     """Provide the session-scoped runtime state API for inactive test managers."""
 
@@ -28,6 +70,50 @@ class _InactiveTeamRuntimeManagerMixin:
     def is_runtime_pending(session_id: str) -> bool:
         _ = session_id
         return False
+
+    @staticmethod
+    def has_waiters(session_id: str) -> bool:
+        return False
+
+    @staticmethod
+    def get_waiters(session_id: str) -> list[tuple[str, asyncio.Queue]]:
+        return []
+
+    @staticmethod
+    def add_waiter(session_id: str, request_id: str, queue: asyncio.Queue) -> None:
+        pass
+
+    @staticmethod
+    def remove_waiter(session_id: str, request_id: str) -> None:
+        pass
+
+    @staticmethod
+    def broadcast_event(session_id: str, event: dict) -> None:
+        pass
+
+    @staticmethod
+    def is_session_initialized(session_id: str) -> bool:
+        return False
+
+    @staticmethod
+    def clear_session_initialized(session_id: str) -> None:
+        pass
+
+    @staticmethod
+    def setdefault_cron_completion(session_id: str, default: dict) -> dict:
+        return default
+
+    @staticmethod
+    def pop_cron_completion(session_id: str) -> dict | None:
+        return None
+
+    @staticmethod
+    def get_cron_completion(session_id: str) -> dict | None:
+        return None
+
+    @staticmethod
+    def pop_stream_task(session_id: str) -> asyncio.Task | None:
+        return None
 
 
 class _FakeTransport:
@@ -147,9 +233,14 @@ class _TeamHelpersTestApi:
             waiter_key: tuple[str, str],
             request_id: str,
     ) -> None:
-        pending = getattr(team_helpers, "_pending_waiters")
-        pending[waiter_key] = [(request_id, asyncio.Queue())]
-        getattr(team_helpers, "_cron_team_completion").clear()
+        """Seed a cron waiter on the shared _CronFakeManager.
+
+        waiter_key is (channel_id, session_id); the waiter is registered by
+        session_id (matching production TeamManager.get_waiters).
+        """
+        _channel_id, session_id = waiter_key
+        _CronFakeManager._waiters[session_id] = [(request_id, asyncio.Queue())]
+        _CronFakeManager._completion.clear()
 
     @staticmethod
     def try_finish_cron_team_stream(
@@ -162,8 +253,43 @@ class _TeamHelpersTestApi:
 
     @staticmethod
     def clear_cron_team_waiter(waiter_key: tuple[str, str]) -> None:
-        getattr(team_helpers, "_pending_waiters").pop(waiter_key, None)
-        getattr(team_helpers, "_cron_team_completion").pop(waiter_key, None)
+        _channel_id, session_id = waiter_key
+        _CronFakeManager._waiters.pop(session_id, None)
+        _CronFakeManager._completion.pop(session_id, None)
+
+
+class _CronFakeManager(_InactiveTeamRuntimeManagerMixin):
+    """Fake TeamManager with waiter + completion state for cron team stream tests."""
+
+    _waiters: dict[str, list[tuple[str, asyncio.Queue]]] = {}
+    _completion: dict[str, dict] = {}
+    _stream_tasks: dict[str, asyncio.Task] = {}
+
+    @classmethod
+    def reset(cls) -> None:
+        cls._waiters.clear()
+        cls._completion.clear()
+        cls._stream_tasks.clear()
+
+    @classmethod
+    def get_waiters(cls, session_id: str) -> list[tuple[str, asyncio.Queue]]:
+        return cls._waiters.get(session_id, [])
+
+    @classmethod
+    def setdefault_cron_completion(cls, session_id: str, default: dict) -> dict:
+        return cls._completion.setdefault(session_id, default)
+
+    @classmethod
+    def pop_cron_completion(cls, session_id: str) -> dict | None:
+        return cls._completion.pop(session_id, None)
+
+    @classmethod
+    def get_cron_completion(cls, session_id: str) -> dict | None:
+        return cls._completion.get(session_id)
+
+    @classmethod
+    def pop_stream_task(cls, session_id: str) -> asyncio.Task | None:
+        return cls._stream_tasks.pop(session_id, None)
 
 
 def _write_team_skill(tmp_path, name: str, *, records: list[dict] | None = None) -> str:
@@ -1277,10 +1403,10 @@ async def test_process_team_message_stream_emits_deferred_marker_for_followup(mo
     assert _FakeManager.interact_calls == [
         ("sess-team-followup", "$human-reporter claim task"),
     ]
-    # follow-up short stream must NOT emit is_processing=False directly;
-    # it emits an internal deferred marker so the Gateway suppresses the
-    # auto-complete signal. The real round-complete event is broadcast
-    # later by the background team stream on team.completed.
+    # follow-up short stream emits chat.processing_status_deferred
+    # to tell the Gateway not to auto-emit is_processing=False, preventing
+    # "finished -> wait -> running again" flashing. See
+    # team_helpers.process_team_message_stream.
     assert len(chunks) == 2
     assert chunks[0].payload == {
         "event_type": "chat.processing_status_deferred",
@@ -2058,6 +2184,10 @@ async def test_process_team_message_stream_recovers_paused_runtime_for_interacti
     assert _FakeManager.interact_calls == [
         ("sess-team-plan-recover", approval_input),
     ]
+    # follow-up short stream emits chat.processing_status_deferred
+    # so the Gateway does not auto-emit is_processing=False, preventing
+    # "finished -> wait -> running again" flashing. See
+    # team_helpers.process_team_message_stream.
     assert chunks[0].payload == {
         "event_type": "chat.processing_status_deferred",
         "session_id": "sess-team-plan-recover",
@@ -2210,6 +2340,10 @@ async def test_process_team_message_stream_converts_a2ui_followup_event(monkeypa
     assert "A2UI" in prompt
     assert "submitDietForm" in prompt
     assert "dietType" in prompt
+    # follow-up short stream emits chat.processing_status_deferred
+    # so the Gateway does not auto-emit is_processing=False, preventing
+    # "finished -> wait -> running again" flashing. See
+    # team_helpers.process_team_message_stream.
     assert chunks[0].payload == {
         "event_type": "chat.processing_status_deferred",
         "session_id": "sess-team-a2ui",
@@ -3348,26 +3482,25 @@ def _make_cancellable_stream_task(*, cancelled: list[str], session_id: str) -> _
 @pytest.mark.anyio
 async def test_try_finish_cron_team_stream_cancels_background_task(monkeypatch):
     """Cron waiter should end the team stream once workflow completes and leader reports."""
+    _CronFakeManager.reset()
     channel_id = "tui"
     session_id = "sess-cron-finish"
     waiter_key = (channel_id, session_id)
-    _TeamHelpersTestApi.seed_cron_team_waiter(waiter_key, "cron-job-1:123")
 
     cancelled: list[str] = []
     processing_done: list[dict[str, object]] = []
 
-    class _FakeTeamManager:
-        @staticmethod
-        def pop_stream_task(sid: str):
-            assert sid == session_id
-            return _make_cancellable_stream_task(cancelled=cancelled, session_id=session_id)
-
-    monkeypatch.setattr(team_helpers, "get_team_manager", lambda cid: _FakeTeamManager())
+    _CronFakeManager._stream_tasks[session_id] = _make_cancellable_stream_task(
+        cancelled=cancelled, session_id=session_id,
+    )
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda cid: _CronFakeManager)
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
         lambda cid, sid, event: processing_done.append(event),
     )
+
+    _TeamHelpersTestApi.seed_cron_team_waiter(waiter_key, "cron-job-1:123")
 
     _TeamHelpersTestApi.try_finish_cron_team_stream(
         channel_id,
@@ -3409,27 +3542,26 @@ async def test_try_finish_cron_team_stream_cancels_background_task(monkeypatch):
 @pytest.mark.anyio
 async def test_try_finish_cron_team_stream_on_leader_final_without_team_completed(monkeypatch):
     """Harness teams may emit chat.final without team.completed."""
+    _CronFakeManager.reset()
     channel_id = "tui"
     session_id = "sess-cron-final-only"
     waiter_key = (channel_id, session_id)
-    _TeamHelpersTestApi.seed_cron_team_waiter(waiter_key, "cron-job-2:456")
 
     cancelled: list[str] = []
     processing_done: list[dict[str, object]] = []
 
-    class _FakeTeamManager:
-        @staticmethod
-        def pop_stream_task(sid: str):
-            assert sid == session_id
-            return _make_cancellable_stream_task(cancelled=cancelled, session_id=session_id)
-
-    monkeypatch.setattr(team_helpers, "get_team_manager", lambda cid: _FakeTeamManager())
+    _CronFakeManager._stream_tasks[session_id] = _make_cancellable_stream_task(
+        cancelled=cancelled, session_id=session_id,
+    )
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda cid: _CronFakeManager)
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
         lambda cid, sid, event: processing_done.append(event),
     )
     monkeypatch.setattr(team_helpers, "_CRON_DELEGATION_GRACE_SECONDS", 0.0)
+
+    _TeamHelpersTestApi.seed_cron_team_waiter(waiter_key, "cron-job-2:456")
 
     _TeamHelpersTestApi.try_finish_cron_team_stream(
         channel_id,

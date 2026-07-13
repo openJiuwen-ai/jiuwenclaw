@@ -17,6 +17,8 @@ from aiohttp.client_exceptions import ContentTypeError
 from pydantic import BaseModel, Field
 
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.gateway.routing.keys import DeliveryTarget
+from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 
 logger = logging.getLogger(__name__)
@@ -467,7 +469,7 @@ class WechatChannel(BaseChannel):
             raise RuntimeError("WechatChannel HTTP client is not initialized")
         return http
 
-    async def send(self, msg: Message) -> None:
+    async def send(self, msg: Message, *, routing_target: RoutingTarget | None = None) -> None:
         """delta 聚合；enable_streaming 时与原先一致：工具调用/结果会即时下发并在边界冲刷 delta；关闭时仅 chat.final / interrupt 等完结事件合并下发（对齐飞书非流式）。"""
         if not self._http or not self.config.bot_token:
             logger.warning("WechatChannel 未就绪，跳过发送")

@@ -153,6 +153,7 @@ class CronController:
         chat_type = params.get("chat_type")
         delete_after_run = params.get("delete_after_run")
         timeout_seconds = params.get("timeout_seconds")
+        app_id = str(params.get("app_id") or "").strip()
         job = await self._store.create_job(
             job_id=str(params.get("id") or "").strip() or None,
             name=name,
@@ -167,6 +168,7 @@ class CronController:
             mode=mode,
             delete_after_run=delete_after_run,
             timeout_seconds=timeout_seconds,
+            app_id=app_id,
         )
         await self._scheduler.reload()
         return job.to_dict()
@@ -204,8 +206,8 @@ class CronController:
         await self._scheduler.reload()
         return job.to_dict()
 
-    async def delete_job(self, job_id: str) -> bool:
-        deleted = await self._store.delete_job(job_id)
+    async def delete_job(self, job_id: str, *, force: bool = False) -> bool:
+        deleted = await self._store.delete_job(job_id, force=force)
         if deleted:
             await self._scheduler.reload()
         return deleted

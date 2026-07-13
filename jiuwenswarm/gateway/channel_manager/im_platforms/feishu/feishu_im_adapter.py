@@ -13,11 +13,13 @@ from jiuwenswarm.gateway.im_pipeline.im_inbound import IMHistoryMessage
 try:
     import lark_oapi as lark
     from lark_oapi.api.contact.v3 import GetUserRequest
+    from lark_oapi.api.application.v6 import GetApplicationRequest
     FEISHU_AVAILABLE = True
 except ImportError:
     FEISHU_AVAILABLE = False
     lark = None
     GetUserRequest = None
+    GetApplicationRequest = None
 
 from jiuwenswarm.common.utils import logger
 
@@ -94,8 +96,34 @@ class FeishuIMPlatformAdapter:
         )
         return self._target_user_name_cache
 
+    def get_bot_name(self) -> str:
+        """获取机器人名称。优先使用飞书 API 动态获取，配置的 bot_name 作为兜底。"""
+        if (self._bot_name or "").strip():
+            return self._bot_name.strip()
+
+        # 尝试通过飞书 API 获取当前应用名称
+        if self._api_client and FEISHU_AVAILABLE and GetApplicationRequest:
+            try:
+                request = (
+                    GetApplicationRequest.builder()
+                    .app_id("me")
+                    .lang("zh_cn")
+                    .build()
+                )
+                response = self._api_client.application.v6.application.get(request)
+                if response.success() and response.data and response.data.app:
+                    app_name = getattr(response.data.app, "app_name", "") or ""
+                    if app_name.strip():
+                        self._bot_name = app_name.strip()
+                        logger.info("[FeishuIMAdapter] 从飞书 API 获取机器人名称: %s", self._bot_name)
+                        return self._bot_name
+            except Exception as e:
+                logger.debug("[FeishuIMAdapter] 从飞书 API 获取机器人名称失败: %s", e)
+
+        return ""
+
     def get_bot_mention_tokens(self) -> list[str]:
-        bot_name = (self._bot_name or "").strip()
+        bot_name = self.get_bot_name()
         return [f"@{bot_name}"] if bot_name else []
 
     def load_recent_messages(

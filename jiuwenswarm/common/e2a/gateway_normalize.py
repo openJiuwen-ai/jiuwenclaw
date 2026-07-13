@@ -150,6 +150,13 @@ def message_to_e2a(msg: "Message") -> E2AEnvelope:
         metadata["group_digital_avatar"] = msg.group_digital_avatar
     if metadata:
         d["metadata"] = metadata
+
+    # ── V2: 传递 agent_ref / app_id 到 E2A 线协议 ──
+    if getattr(msg, "agent_ref", None):
+        d["agent_ref"] = msg.agent_ref
+    if getattr(msg, "app_id", None):
+        d["app_id"] = msg.app_id
+
     return E2AEnvelope.from_dict(d)
 
 
@@ -273,6 +280,8 @@ def e2a_response_from_agent_response(
         metadata=meta,
         identity_origin=IdentityOrigin.AGENT,
         is_stream=False,
+        # V2: 非流式响应回带 agent_ref，与流式 chunk 对称（设计 §6.3）。
+        agent_ref=getattr(resp, "agent_ref", None),
     )
 
 
@@ -305,6 +314,10 @@ def e2a_response_from_agent_chunk(
     )
     pl = dict(chunk.payload) if chunk.payload else {}
 
+    # ── 从 chunk 提取 agent_ref / metadata（V2 路由用）──
+    _chunk_agent_ref: dict | None = getattr(chunk, "agent_ref", None)
+    _chunk_metadata: dict = getattr(chunk, "metadata", None) or {}
+
     if chunk.is_complete and pl == {"is_complete": True}:
         return E2AResponse(
             protocol_version=E2A_PROTOCOL_VERSION,
@@ -320,6 +333,8 @@ def e2a_response_from_agent_chunk(
             channel=chunk.channel_id or None,
             identity_origin=IdentityOrigin.AGENT,
             is_stream=is_stream,
+            agent_ref=_chunk_agent_ref,
+            metadata=_chunk_metadata,
         )
 
     if chunk.is_complete and pl.get("event_type") == "chat.error":
@@ -341,6 +356,8 @@ def e2a_response_from_agent_chunk(
             channel=chunk.channel_id or None,
             identity_origin=IdentityOrigin.AGENT,
             is_stream=is_stream,
+            agent_ref=_chunk_agent_ref,
+            metadata=_chunk_metadata,
         )
 
     if chunk.is_complete:
@@ -358,6 +375,8 @@ def e2a_response_from_agent_chunk(
             channel=chunk.channel_id or None,
             identity_origin=IdentityOrigin.AGENT,
             is_stream=is_stream,
+            agent_ref=_chunk_agent_ref,
+            metadata=_chunk_metadata,
         )
 
     event_type = pl.get("event_type")
@@ -396,6 +415,8 @@ def e2a_response_from_agent_chunk(
         channel=chunk.channel_id or None,
         identity_origin=IdentityOrigin.AGENT,
         is_stream=is_stream,
+        agent_ref=_chunk_agent_ref,
+        metadata=_chunk_metadata,
     )
 
 
@@ -461,6 +482,10 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
     body = dict(e2a.body or {})
     kind = e2a.response_kind
 
+    # ── V2: 从 E2A 响应提取 agent_ref / metadata ──
+    _agent_ref: dict | None = getattr(e2a, "agent_ref", None) or None
+    _meta: dict | None = dict(e2a.metadata) if e2a.metadata else None
+
     if kind == E2A_RESPONSE_KIND_E2A_COMPLETE and e2a.is_final:
         res = body.get("result")
 
@@ -472,14 +497,14 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
             return list(b.keys()) == ["result"]
 
         if _empty_complete_marker(body, res):
-            return AgentResponseChunk(
+            return AgentResponseChunk(agent_ref=_agent_ref, metadata=_meta, 
                 request_id=rid,
                 channel_id=ch,
                 payload={"is_complete": True},
                 is_complete=True,
             )
         pl = dict(res) if isinstance(res, dict) else {}
-        return AgentResponseChunk(
+        return AgentResponseChunk(agent_ref=_agent_ref, metadata=_meta, 
             request_id=rid,
             channel_id=ch,
             payload=pl,
@@ -489,7 +514,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
     if kind == E2A_RESPONSE_KIND_E2A_ERROR and e2a.is_final:
         det = body.get("details")
         pl = dict(det) if isinstance(det, dict) else dict(body)
-        return AgentResponseChunk(
+        return AgentResponseChunk(agent_ref=_agent_ref, metadata=_meta, 
             request_id=rid,
             channel_id=ch,
             payload=pl,
@@ -515,7 +540,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
                 _val = body.get(_key)
                 if _val is not None:
                     pl[_key] = _val
-            return AgentResponseChunk(
+            return AgentResponseChunk(agent_ref=_agent_ref, metadata=_meta, 
                 request_id=rid,
                 channel_id=ch,
                 payload=pl,
@@ -532,7 +557,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
                 pl2["content"] = delta
         if et is not None and "event_type" not in pl2:
             pl2["event_type"] = et
-        return AgentResponseChunk(
+        return AgentResponseChunk(agent_ref=_agent_ref, metadata=_meta, 
             request_id=rid,
             channel_id=ch,
             payload=pl2,
@@ -547,7 +572,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
             "data": body.get("data"),
             "message": body.get("message"),
         }
-        return AgentResponseChunk(
+        return AgentResponseChunk(agent_ref=_agent_ref, metadata=_meta, 
             request_id=rid,
             channel_id=ch,
             payload=body_payload,
@@ -555,7 +580,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
         )
 
     if kind == E2A_RESPONSE_KIND_ACP_OUTPUT_REQUEST:
-        return AgentResponseChunk(
+        return AgentResponseChunk(agent_ref=_agent_ref, metadata=_meta, 
             request_id=rid,
             channel_id=ch,
             payload={
@@ -566,7 +591,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
         )
 
     if kind == E2A_RESPONSE_KIND_PLAN_APPROVAL_REQUIRED:
-        return AgentResponseChunk(
+        return AgentResponseChunk(agent_ref=_agent_ref, metadata=_meta, 
             request_id=rid,
             channel_id=ch,
             payload={

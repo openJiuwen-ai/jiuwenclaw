@@ -61,7 +61,9 @@ class ReqMethod(Enum):
     AGENT_RELOAD_CONFIG = "agent.reload_config"
 
     MEMORY_COMPUTE = "memory.compute"
-    
+
+    PROACTIVE_TICK = "proactive.tick"  # Trigger proactive recommendation tick (from Cron)
+
     FILES_LIST = "files.list"
     FILES_GET = "files.get"
     TTS_SYNTHESIZE = "tts.synthesize"
@@ -173,6 +175,7 @@ class ReqMethod(Enum):
 
     TEAM_SNAPSHOT = "team.snapshot"
     TEAM_HISTORY_GET = "team.history.get"
+    TEAM_MEMBERS_GET = "team.members.get"
 
     # Harness package management
     HARNESS_PACKAGES_GET = "harness.packages.get"
@@ -230,6 +233,7 @@ class EventType(Enum):
     WORKFLOW_UPDATED = "workflow.updated"
     HEARTBEAT_RELAY = "heartbeat.relay"
     HISTORY_GET = "history.message"
+    PROACTIVE_RECOMMENDATION = "proactive_recommendation"
 
 
 class Mode(Enum):
@@ -274,7 +278,9 @@ class Message:
     provider: str | None = None
     chat_id: str | None = None
     user_id: str | None = None
-    bot_id: str | None = None
+    bot_id: str | None = None  # 已弃用，请使用 app_id + agent_ref 替代
+    app_id: str | None = None  # V2: 应用实例标识，从 bot_id 拆出
+    agent_ref: Any = None      # V2: AgentRef(mode, id)，后端智能体标识
     payload: dict | None = None
     req_method: ReqMethod | None = None
     event_type: EventType | None = None

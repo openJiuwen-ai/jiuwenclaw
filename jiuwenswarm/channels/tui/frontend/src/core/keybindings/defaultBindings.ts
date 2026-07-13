@@ -89,6 +89,15 @@ export const DEFAULT_BINDINGS: KeybindingBlock[] = [
     },
   },
   {
+    context: "MemoryView",
+    bindings: {
+      escape: "memory:close",
+      left: "memory:prevTab",
+      right: "memory:nextTab",
+      "ctrl+o": "memory:toggleFullPath",
+    },
+  },
+  {
     context: "ResumeList",
     bindings: {
       escape: "resume:close",

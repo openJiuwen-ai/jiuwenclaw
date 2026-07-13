@@ -41,12 +41,14 @@ class AgentAdapter(Protocol):
         self,
         config_base: dict[str, Any] | None = None,
         env_overrides: dict[str, Any] | None = None,
+        target_session_id: str | None = None,
     ) -> None:
         """Hot-reload configuration without restarting the process.
 
         Args:
             config_base: Optional complete config snapshot; if provided, use it instead of reading local config.yaml.
             env_overrides: Optional environment variable overrides; only override keys present in the request.
+            target_session_id: Optional session id to limit session-scoped reload fan-out.
         """
         ...
 

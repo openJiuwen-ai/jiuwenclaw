@@ -294,6 +294,64 @@ def _read_history_by_path(path: Path) -> list[dict[str, Any]]:
     return _read_history(path)
 
 
+def _is_member_relevant(item: dict[str, Any], member_name: str) -> bool:
+    """判断一条 team 历史记录是否与指定 member 相关（用于飞书 /join 历史推送）。
+
+    与实时 fan_out 投递语义一致：每个 member 只看到"涉及自己的对话"：
+    - team.message.p2p 且 to_member 或 from_member == member_name →
+      发给/由该成员发出的私聊（与 fan_out
+      [godview, mention(to_member), private(from_member)] 对齐：收件人和
+      发送方都能看到 P2P 卡片）
+    - team.message.broadcast → @all 广播，所有人都能看到
+    - chat.* teammate 流式输出 且 member_name == 该成员 →
+      该成员扮演的 agent 的输出（与 fan_out [godview, private(member)] 对齐）
+
+    不含 team.member/team.task 上下文事件（不会发给飞书，避免刷屏）。
+    """
+    et = item.get("event_type")
+    if not isinstance(et, str):
+        return False
+
+    if et == "team.message":
+        inner = item.get("event", {}) if isinstance(item.get("event"), dict) else {}
+        msg_type = inner.get("type", "") or item.get("type", "")
+        if msg_type == "team.message.broadcast":
+            return True
+        if msg_type == "team.message.p2p":
+            to_m = item.get("to_member", "") or inner.get("to_member", "")
+            from_m = item.get("from_member", "") or inner.get("from_member", "")
+            return member_name in {to_m, from_m}
+        return False
+
+    # chat.* teammate outputs: 已在 _is_team_relevant 中按 role/mode 过滤。
+    # 实时投递只发给该 member 的 private 席位，历史同样只对该 member 可见。
+    if et in {"chat.final", "chat.tool_call", "chat.tool_result", "chat.file", "chat.tracer_agent"}:
+        src_member = str(item.get("member_name", "") or "").strip()
+        return bool(src_member) and src_member == member_name
+
+    # 注意：team.member / team.task / team.event 不包含，
+    # 这些是上下文事件，飞书端不需要看到，避免刷屏。
+    return False
+
+
+def read_member_history_records(session_id: str, member_name: str) -> list[dict[str, Any]]:
+    """读取 team 历史记录，仅返回与指定 member 相关的记录。
+
+    与实时 fan_out 投递语义一致：
+    - 发给/由该 member 发出的 p2p 消息
+    - @all 广播消息
+    - 该 member 扮演的 teammate 的流式输出
+
+    不含 team.member/team.task 上下文事件，也不含其他 member 的输出。
+    无 member_name 时回退到 read_team_history_records（供 web 前端面板恢复用）。
+    """
+    if not member_name or not isinstance(member_name, str):
+        return read_team_history_records(session_id)
+    all_team_records = read_team_history_records(session_id)
+    mn = member_name.strip()
+    return [item for item in all_team_records if _is_member_relevant(item, mn)]
+
+
 def read_session_history_records(session_id: str) -> list[dict[str, Any]]:
     """读取指定会话的历史记录，返回所有记录。
 

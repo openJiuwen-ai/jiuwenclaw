@@ -1673,6 +1673,9 @@ def is_package_installation() -> bool:
 
 # 统一敏感信息掩码值。
 _SENSITIVE_MASK = "******"
+_DATA_IMAGE_PATTERN = re.compile(
+    r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+"
+)
 # 匹配常见敏感字段键值对（不要求值必须带引号），用于覆盖:
 # - token=abc
 # - api_key: sk-xxx
@@ -1725,6 +1728,7 @@ def _sanitize_log_text(text: str) -> str:
         return text
 
     masked = text
+    masked = _DATA_IMAGE_PATTERN.sub("data:image/*;base64,******", masked)
     masked = _KV_SENSITIVE_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}", masked)
     masked = _NAMED_SENSITIVE_KV_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}" r"\2", masked)
     masked = _BEARER_SENSITIVE_PATTERN.sub(r"\1" f"{_SENSITIVE_MASK}", masked)

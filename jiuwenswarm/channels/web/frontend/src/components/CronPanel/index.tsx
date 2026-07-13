@@ -11,6 +11,10 @@ import { useSessionStore } from '../../stores/sessionStore';
 
 const DEFAULT_CRON_TIMEZONE = 'Asia/Shanghai';
 const DEFAULT_CRON_TARGET = 'web';
+// 由主动推荐配置自动维护的 job id（与后端 proactive_cron_sync.PROACTIVE_JOB_ID 一致）。
+// 该 job 的整体开关由 config 的 proactive_recommendation.enabled 驱动（关则删除，不在列表里），
+// 面板上禁用 启停/删除；编辑时仅 cron 表达式与时区可改，其余字段（名称/状态/描述/偏移/频道）只读。
+const PROACTIVE_AUTO_JOB_ID = 'proactive-tick-auto';
 
 interface CronJob {
   id: string;
@@ -514,9 +518,24 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
     }
 
     try {
+      const patch = buildLegacyJobInput(editJob, mode);
+      // proactive 自动维护 job 的 enabled 由 ConfigPanel 开关驱动，
+      // 面板编辑提交时不带 enabled，避免与配置侧开关冲突。
+      // 同样不带 mode——proactive.tick 的 mode 必须保持 proactive.tick，
+      // 否则会被会话 mode（agent.plan）覆盖，导致走普通 cron 流程而非引擎。
+      // 不带 wake_offset_seconds——proactive.tick 到点就执行，偏移由后端强制 0。
+      if (jobId === PROACTIVE_AUTO_JOB_ID) {
+        // proactive job 只允许改 cron_expr 和 timezone，其余由 ConfigPanel/cron_sync 管
+        delete patch['enabled'];
+        delete patch['mode'];
+        delete patch['wake_offset_seconds'];
+        delete patch['name'];
+        delete patch['description'];
+        delete patch['targets'];
+      }
       const updateData: Record<string, unknown> = {
         id: editJob.id,
-        patch: buildLegacyJobInput(editJob, mode),
+        patch,
       };
 
       await webRequest<{ job: CronJob }>('cron.job.update', {
@@ -743,7 +762,8 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                                 ...prev,
                                 [job.id]: { ...prev[job.id], name: e.target.value },
                               }))}
-                              className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                              disabled={job.id === PROACTIVE_AUTO_JOB_ID}
+                              className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent ${job.id === PROACTIVE_AUTO_JOB_ID ? 'opacity-50 cursor-not-allowed' : ''}`}
                               placeholder={t('cron.placeholders.name')}
                             />
                           </td>
@@ -774,11 +794,12 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                             <div className="flex items-center">
                               <span className="text-sm mr-2">{editJob.enabled ? t('cron.status.enabled') : t('cron.status.disabled')}</span>
                               <div
-                                className="relative inline-block w-10 h-6 align-middle select-none rounded-full cursor-pointer"
-                                onClick={() => setEditingJobs((prev) => ({
+                                className={`relative inline-block w-10 h-6 align-middle select-none rounded-full ${job.id === PROACTIVE_AUTO_JOB_ID ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                                onClick={job.id === PROACTIVE_AUTO_JOB_ID ? undefined : () => setEditingJobs((prev) => ({
                                   ...prev,
                                   [job.id]: { ...prev[job.id], enabled: !prev[job.id].enabled },
                                 }))}
+                                title={job.id === PROACTIVE_AUTO_JOB_ID ? t('cron.autoManagedToggleDisabled') : undefined}
                                 style={{ backgroundColor: editJob.enabled ? '#10b981' : '#d1d5db' }}
                               >
                                 <div
@@ -796,19 +817,21 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                                 ...prev,
                                 [job.id]: { ...prev[job.id], description: e.target.value },
                               }))}
-                              className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                              disabled={job.id === PROACTIVE_AUTO_JOB_ID}
+                              className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent ${job.id === PROACTIVE_AUTO_JOB_ID ? 'opacity-50 cursor-not-allowed' : ''}`}
                               placeholder={t('cron.placeholders.description')}
                             />
                           </td>
                           <td className="px-4 py-3">
                             <input
                               type="number"
-                              value={editJob.wake_offset_seconds}
+                              value={job.id === PROACTIVE_AUTO_JOB_ID ? 0 : editJob.wake_offset_seconds}
                               onChange={(e) => setEditingJobs((prev) => ({
                                 ...prev,
                                 [job.id]: { ...prev[job.id], wake_offset_seconds: parseInt(e.target.value, 10) || 0 },
                               }))}
-                              className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                              disabled={job.id === PROACTIVE_AUTO_JOB_ID}
+                              className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent ${job.id === PROACTIVE_AUTO_JOB_ID ? 'opacity-50 cursor-not-allowed' : ''}`}
                               placeholder={t('cron.placeholders.wakeOffset')}
                             />
                           </td>
@@ -835,7 +858,8 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                                 ...prev,
                                 [job.id]: { ...prev[job.id], targets: e.target.value },
                               }))}
-                              className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                              disabled={job.id === PROACTIVE_AUTO_JOB_ID}
+                              className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent ${job.id === PROACTIVE_AUTO_JOB_ID ? 'opacity-50 cursor-not-allowed' : ''}`}
                             >
                               {targetOptions.map((option) => (
                                 <option key={option.value} value={option.value} disabled={option.disabled}>
@@ -874,21 +898,40 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                           data-cron-name={job.name}
                         >
                           <td className="px-4 py-3 text-sm">
-                            <div className="max-w-[100px] overflow-hidden text-ellipsis whitespace-nowrap" title={job.name}>
-                              {job.name}
+                            <div className="flex items-center gap-1">
+                              <div className="max-w-[100px] overflow-hidden text-ellipsis whitespace-nowrap" title={job.name}>
+                                {job.name}
+                              </div>
+                              {job.id === PROACTIVE_AUTO_JOB_ID && (
+                                <span
+                                  className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-sky-100 text-sky-700"
+                                  title={t('cron.autoManagedHint')}
+                                >
+                                  {t('cron.autoManaged')}
+                                </span>
+                              )}
                             </div>
                           </td>
                           <td className="px-4 py-3 text-sm mono" data-testid={`cron-schedule-${job.id}`}>
                             {displayCron}
                           </td>
                           <td className="px-4 py-3">
-                            <span
-                              className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                                job.expired ? 'bg-amber-100 text-amber-700' : job.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
-                              }`}
-                            >
-                              {job.expired ? t('cron.status.expired') : job.enabled ? t('cron.status.enabled') : t('cron.status.disabled')}
-                            </span>
+                            {(() => {
+                              // proactive 自动维护 job 的整体开关由 config 控制（关了就删除，不在列表里），
+                              // 因此状态只有两态：cron 过期 → 过期；否则 → 启用。不显示"禁用"中间态。
+                              const isProactiveRow = job.id === PROACTIVE_AUTO_JOB_ID;
+                              const isExpired = Boolean(job.expired);
+                              const isEnabled = isProactiveRow ? !isExpired : Boolean(job.enabled);
+                              return (
+                                <span
+                                  className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
+                                    isExpired ? 'bg-amber-100 text-amber-700' : isEnabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
+                                  }`}
+                                >
+                                  {isExpired ? t('cron.status.expired') : isEnabled ? t('cron.status.enabled') : t('cron.status.disabled')}
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td className="px-4 py-3 text-sm text-text-muted">
                             <div className="max-w-[300px] overflow-hidden text-ellipsis whitespace-nowrap" title={displayDescription || '-'}>
@@ -935,26 +978,46 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                               >
                                 {t('cron.previewAction')}
                               </span>
-                              <span
-                                onClick={() => handleToggleJob(job.id, job.enabled, job.expired)}
-                                className={`cursor-pointer text-sm ${job.enabled ? 'text-danger' : 'text-accent'}`}
-                                data-testid={`cron-toggle-${job.id}`}
-                              >
-                                {job.enabled ? t('cron.disable') : t('cron.enable')}
-                              </span>
+                              {job.id === PROACTIVE_AUTO_JOB_ID ? (
+                                <span
+                                  className="text-sm text-text-muted/50 cursor-not-allowed select-none"
+                                  title={t('cron.autoManagedToggleDisabled')}
+                                  data-testid={`cron-toggle-${job.id}`}
+                                >
+                                  {job.enabled ? t('cron.disable') : t('cron.enable')}
+                                </span>
+                              ) : (
+                                <span
+                                  onClick={() => handleToggleJob(job.id, job.enabled, job.expired)}
+                                  className={`cursor-pointer text-sm ${job.enabled ? 'text-danger' : 'text-accent'}`}
+                                  data-testid={`cron-toggle-${job.id}`}
+                                >
+                                  {job.enabled ? t('cron.disable') : t('cron.enable')}
+                                </span>
+                              )}
                               <span
                                 onClick={() => handleUpdateJob(job.id)}
                                 className="cursor-pointer text-sm text-accent"
                               >
                                 {t('cron.update')}
                               </span>
-                              <span
-                                onClick={() => handleDeleteJob(job.id)}
-                                className="cursor-pointer text-sm text-accent"
-                                data-testid={`cron-delete-${job.id}`}
-                              >
-                                {t('cron.delete')}
-                              </span>
+                              {job.id === PROACTIVE_AUTO_JOB_ID ? (
+                                <span
+                                  className="text-sm text-text-muted/50 cursor-not-allowed select-none"
+                                  title={t('cron.autoManagedToggleDisabled')}
+                                  data-testid={`cron-delete-${job.id}`}
+                                >
+                                  {t('cron.delete')}
+                                </span>
+                              ) : (
+                                <span
+                                  onClick={() => handleDeleteJob(job.id)}
+                                  className="cursor-pointer text-sm text-accent"
+                                  data-testid={`cron-delete-${job.id}`}
+                                >
+                                  {t('cron.delete')}
+                                </span>
+                              )}
                             </div>
                           </td>
                         </tr>

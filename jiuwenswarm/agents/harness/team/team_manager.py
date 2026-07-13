@@ -78,6 +78,7 @@ _PG_POST_START_READY_INIT_SLEEP = 0.4
 _PG_POST_START_READY_MAX_SLEEP = 2.0
 _PG_POST_START_READY_BACKOFF = 1.45
 _PG_POST_START_LOG_EVERY_SEC = 5.0
+_TEAM_STREAM_EXIT_GRACE_TIMEOUT_SEC = 1.5
 
 # ── Team Observability ──────────────────────────────────────
 # Tracks whether observability is currently active so we can
@@ -216,6 +217,16 @@ class TeamManager:
         self._active_pause_tasks: dict[str, asyncio.Task] = {}
         self._active_team_names: dict[str, str] = {}
         self._pending_team_names: dict[str, str] = {}
+        # session_id → list of (request_id, asyncio.Queue) waiters
+        self._pending_waiters: dict[str, list[tuple[str, asyncio.Queue]]] = {}
+        # session_id → cron team round completion state. Lifetime-coupled to
+        # _pending_waiters: set by _try_finish_cron_team_stream, popped by the
+        # finisher coroutines once the cron stream ends.
+        self._cron_team_completion: dict[str, dict[str, Any]] = {}
+        # Sessions that have successfully initialized a team runtime at least once.
+        # Persists across stream lifecycles so follow-up requests are not
+        # misidentified as first requests.
+        self._initialized_sessions: set[str] = set()
         # session_id → TeamSkillEvolutionRail instance (set by customizer, used for drain/approval)
         self._team_skill_rails: dict[str, Any] = {}
         # session_id → member SkillEvolutionRail instances
@@ -240,6 +251,65 @@ class TeamManager:
 
     def pop_stream_task(self, session_id: str) -> asyncio.Task | None:
         return self._stream_tasks.pop(session_id, None)
+
+    def is_session_initialized(self, session_id: str) -> bool:
+        """Return whether the session has ever initialized a team runtime."""
+        return session_id in self._initialized_sessions
+
+    def clear_session_initialized(self, session_id: str) -> None:
+        """Clear the initialized marker for a session (e.g. on stream end)."""
+        self._initialized_sessions.discard(session_id)
+
+    def has_waiters(self, session_id: str) -> bool:
+        """Return whether there are pending waiters for the given session."""
+        return bool(self._pending_waiters.get(session_id))
+
+    def add_waiter(self, session_id: str, request_id: str, queue: asyncio.Queue) -> None:
+        """Register a waiter queue for a session's event stream."""
+        self._pending_waiters.setdefault(session_id, []).append((request_id, queue))
+
+    def remove_waiter(self, session_id: str, request_id: str) -> None:
+        """Remove a waiter by request_id; clean up empty lists."""
+        waiters = self._pending_waiters.get(session_id)
+        if waiters is None:
+            return
+        remaining = [(rid, q) for rid, q in waiters if rid != request_id]
+        if remaining:
+            self._pending_waiters[session_id] = remaining
+        else:
+            self._pending_waiters.pop(session_id, None)
+
+    def broadcast_event(self, session_id: str, event: dict[str, Any]) -> None:
+        """Broadcast an event to all request queues waiting on the same session."""
+        waiters = self._pending_waiters.get(session_id)
+        if waiters:
+            for request_id, queue in waiters:
+                try:
+                    queue.put_nowait(dict(event))
+                except Exception:
+                    logger.debug(
+                        "[TeamManager] broadcast failed: session_id=%s request_id=%s",
+                        session_id,
+                        request_id,
+                    )
+
+    def get_waiters(self, session_id: str) -> list[tuple[str, asyncio.Queue]]:
+        """Return the (request_id, queue) pairs waiting on the given session."""
+        return self._pending_waiters.get(session_id, [])
+
+    def get_cron_completion(self, session_id: str) -> dict[str, Any] | None:
+        """Return the cron team round completion state for the session, if any."""
+        return self._cron_team_completion.get(session_id)
+
+    def setdefault_cron_completion(
+        self, session_id: str, default: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Get or create the cron team round completion state for the session."""
+        return self._cron_team_completion.setdefault(session_id, default)
+
+    def pop_cron_completion(self, session_id: str) -> dict[str, Any] | None:
+        """Drop the cron team round completion state for the session."""
+        return self._cron_team_completion.pop(session_id, None)
 
     def is_runtime_active(self, session_id: str) -> bool:
         """Return whether a Runner-owned runtime is active for the session."""
@@ -628,6 +698,7 @@ class TeamManager:
     def commit_runtime_ready(self, session_id: str, team_name: str) -> None:
         self._active_team_names[session_id] = team_name
         self._pending_team_names.pop(session_id, None)
+        self._initialized_sessions.add(session_id)
         logger.info(
             "[TeamManager] commit_runtime_ready session_id=%s team_name=%s active=%s pending=%s",
             session_id,
@@ -902,6 +973,7 @@ class TeamManager:
         try:
             logger.info("[TeamManager] creating TeamAgent from spec")
             team_agent = spec.build()
+            team_agent.channel_id = channel_id  # 记录 channel，供 _destroy_other_sessions 按 channel 隔离
             self._team_agents[session_id] = team_agent
             # After build, initialize team shared skill links.
             self.ensure_team_shared_skills_ready_for_session(session_id, spec)
@@ -974,7 +1046,7 @@ class TeamManager:
             if team_agent is not None:
                 return team_agent
 
-            await self._destroy_other_sessions(session_id)
+            await self._destroy_other_sessions(session_id, channel_id)
             return await self.create_team(
                 session_id,
                 deep_agent,
@@ -1207,9 +1279,18 @@ class TeamManager:
         async with self._bootstrap_lock:
             return await self._destroy_team(session_id)
 
-    async def _destroy_other_sessions(self, current_session_id: str) -> None:
-        """Destroy stale distributed bootstrap TeamAgents on session switch."""
-        stale_session_ids = [sid for sid in list(self._team_agents.keys()) if sid != current_session_id]
+    async def _destroy_other_sessions(self, current_session_id: str, channel_id: str | None = None) -> None:
+        """Destroy stale distributed bootstrap TeamAgents on session switch.
+
+        按 channel_id 过滤：singleton 模式下多个 channel 共享同一个 TeamManager，
+        只销毁同 channel 的旧 session，不影响其他 channel 正在运行的 team 实例。
+        """
+        stale_session_ids = []
+        for sid, agent in self._team_agents.items():
+            if sid != current_session_id and (
+                channel_id is None or getattr(agent, 'channel_id', None) == channel_id
+            ):
+                stale_session_ids.append(sid)
         for stale_session_id in stale_session_ids:
             await self._destroy_team(stale_session_id)
 
@@ -1588,6 +1669,55 @@ class TeamManager:
             session_id,
         )
 
+    async def _wait_for_stream_task_exit(
+        self,
+        session_id: str,
+        *,
+        timeout_sec: float = _TEAM_STREAM_EXIT_GRACE_TIMEOUT_SEC,
+    ) -> bool:
+        """Wait briefly for a team stream task to finish its own cleanup."""
+        stream_task = self._stream_tasks.get(session_id)
+        if stream_task is None or stream_task.done():
+            return True
+
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(stream_task),
+                timeout=timeout_sec,
+            )
+            logger.info(
+                "[TeamManager] stream task exited within grace timeout: "
+                "session_id=%s timeout_sec=%.1f",
+                session_id,
+                timeout_sec,
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[TeamManager] stream task did not exit within grace timeout: "
+                "session_id=%s timeout_sec=%.1f; cancelling during cleanup",
+                session_id,
+                timeout_sec,
+            )
+            return False
+        except asyncio.CancelledError:
+            if stream_task.done() and stream_task.cancelled():
+                logger.info(
+                    "[TeamManager] stream task was cancelled during grace timeout: "
+                    "session_id=%s",
+                    session_id,
+                )
+                return True
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[TeamManager] stream task exited with error during grace timeout: "
+                "session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            return True
+
     async def terminate_session_runtime(self, session_id: str, reason: str = "") -> bool:
         """Stop-like teardown for the current team session runtime.
 
@@ -1854,6 +1984,9 @@ class TeamManager:
                         exc,
                     )
 
+            if runner_paused:
+                await self._wait_for_stream_task_exit(session_id)
+
             # Pause parks the runtime in place (resumable via a later chat.send),
             # so running workflows may still continue — do NOT finalize them.
             await self._cleanup_runtime_locals(session_id, finalize_workflows=False)
@@ -1946,62 +2079,55 @@ class TeamManager:
         )
 
 
-_team_managers: dict[str, TeamManager] = {}
+# Singleton TeamManager: all channels share one instance. Team runtime state
+# (_stream_tasks / _initialized_sessions / _active_team_names /
+# _pending_waiters / _cron_team_completion / rails / watchers) is indexed by
+# session_id and is per-session, never per-channel. Sharing the instance lets a
+# bridged follow-up request (e.g. a /join member replying from feishu while the
+# originating web stream is still
+# alive) see the originating channel's runtime markers so it is correctly
+# routed through interact() instead of being misidentified as a first request
+# and colliding with the Runner team pool.
+_team_manager: TeamManager | None = None
 
 
 def get_team_manager(channel_id: str | None = None) -> TeamManager:
-    resolved_channel_id = str(channel_id or "default").strip() or "default"
-    manager = _team_managers.get(resolved_channel_id)
-    if manager is None:
-        manager = TeamManager()
-        _team_managers[resolved_channel_id] = manager
-    return manager
+    """Return the singleton TeamManager instance (channel_id is ignored)."""
+    global _team_manager
+    if _team_manager is None:
+        _team_manager = TeamManager()
+    return _team_manager
 
 
 def find_team_skill_rail_across_managers(request_id: str) -> Any | None:
-    """Find the TeamSkillEvolutionRail that owns a pending request across all channel managers."""
-    for manager in _team_managers.values():
-        rail = manager.find_team_skill_rail_for_request(request_id)
-        if rail is not None:
-            return rail
-    return None
+    """Find the TeamSkillEvolutionRail that owns a pending request."""
+    return get_team_manager().find_team_skill_rail_for_request(request_id)
 
 
 def refresh_team_shared_skill_links_across_managers(session_id: str | None = None) -> bool:
-    """Refresh team shared skill links across channel managers."""
-    refreshed = 0
-    for manager in _team_managers.values():
-        if session_id is None:
-            refreshed += manager.refresh_all_team_shared_skill_links()
-        elif manager.refresh_team_shared_skill_links(session_id):
-            refreshed += 1
-    return refreshed > 0
+    """Refresh team shared skill links on the singleton manager."""
+    tm = get_team_manager()
+    if session_id is None:
+        return tm.refresh_all_team_shared_skill_links() > 0
+    return tm.refresh_team_shared_skill_links(session_id)
 
 
 async def cancel_all_team_stream_tasks_across_managers(reason: str = "") -> None:
-    """Cancel team stream tasks for all channel managers."""
-    for manager in list(_team_managers.values()):
-        await manager.cancel_all_stream_tasks(reason=reason)
+    """Cancel all team stream tasks on the singleton manager."""
+    await get_team_manager().cancel_all_stream_tasks(reason=reason)
 
 
 async def stop_team_session_runtime_across_managers(session_id: str, reason: str = "") -> bool:
-    """Stop a team session runtime across all channel managers."""
-    stopped = False
-    for manager in list(_team_managers.values()):
-        manager_stopped = await manager.stop_session_runtime(session_id, reason=reason)
-        stopped = manager_stopped or stopped
-    return stopped
+    """Stop a team session runtime on the singleton manager."""
+    return await get_team_manager().stop_session_runtime(session_id, reason=reason)
 
 
 def get_all_team_managers() -> list[TeamManager]:
-    """Return a snapshot of all channel-scoped team managers."""
-    return list(_team_managers.values())
+    """Return the singleton manager wrapped in a list (callers iterate this)."""
+    return [get_team_manager()]
 
 
 def reset_team_manager(channel_id: str | None = None) -> None:
-    if channel_id is None:
-        _team_managers.clear()
-        return
-
-    resolved_channel_id = str(channel_id).strip() or "default"
-    _team_managers.pop(resolved_channel_id, None)
+    """Reset the singleton TeamManager (channel_id is ignored)."""
+    global _team_manager
+    _team_manager = None

@@ -1,23 +1,142 @@
-import { useState, useRef, useCallback, KeyboardEvent, useEffect } from 'react';
+import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Square } from 'lucide-react';
+import { CircleX, FileImage, Loader2, Plus, Square, X } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
 import { useChatStore, useSessionStore } from '../../stores';
-import { AgentMode } from '../../types';
+import { AgentMode, MediaItem } from '../../types';
 import clsx from 'clsx';
 import { getEvolutionPillLabel } from './evolution-status';
 import sendIcon from '../../assets/send.svg';
 import sendActiveIcon from '../../assets/send_active.svg';
 
 interface InputAreaProps {
-  onSubmit: (content: string) => void;
+  onSubmit: (content: string, mediaItems?: MediaItem[]) => void;
+  onPersistMedia: (content: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
   onInterrupt: (newInput?: string) => void;
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
   onNewSession: () => Promise<void>;
+}
+
+const ACCEPTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_IMAGE_COUNT = 20;
+
+type AttachmentStatus = 'uploading' | 'ready' | 'error';
+
+interface AttachmentDraft {
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  status: AttachmentStatus;
+  base64Data?: string;
+  previewUrl?: string;
+  persistedMediaItem?: Record<string, unknown>;
+  error?: string;
+  file?: File;
+}
+
+interface AttachmentAlert {
+  id: string;
+  message: string;
+}
+
+interface PersistMediaResponse {
+  content?: string;
+  query?: string;
+  media_items?: Record<string, unknown>[];
+  files?: Record<string, unknown>;
+}
+
+function formatAttachmentSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function makeAttachmentId(file: File): string {
+  const random = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${file.name || 'image'}-${file.size}-${random}`;
+}
+
+function attachmentToMediaItem(attachment: AttachmentDraft): MediaItem {
+  const persisted = attachment.persistedMediaItem;
+  const filename = pickString(persisted?.filename) || attachment.filename;
+  const mimeType = pickString(persisted?.mime_type, persisted?.mimeType) || attachment.mimeType;
+  const sizeBytes = pickNumber(persisted?.size_bytes, persisted?.sizeBytes) ?? attachment.size;
+  return {
+    type: 'image',
+    mimeType,
+    mime_type: mimeType,
+    filename,
+    base64Data: attachment.base64Data,
+    path: pickString(persisted?.path),
+    sizeBytes,
+    size_bytes: sizeBytes,
+  };
+}
+
+function buildUploadMediaItem(attachment: AttachmentDraft, payload: Pick<AttachmentDraft, 'base64Data'>): MediaItem {
+  return {
+    type: 'image',
+    mimeType: attachment.mimeType,
+    filename: attachment.filename,
+    base64Data: payload.base64Data,
+  };
+}
+
+function pickString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function pickNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function getImageValidationError(file: File): string | null {
+  if (!ACCEPTED_IMAGE_TYPES.has(file.type)) {
+    return `文件类型不支持：${file.name || '未命名文件'}`;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    return `文件大小超出限制：${file.name || '未命名文件'}（最大${formatAttachmentSize(MAX_IMAGE_BYTES)}）`;
+  }
+  return null;
+}
+
+function readImageFile(file: File): Promise<Pick<AttachmentDraft, 'base64Data' | 'previewUrl'> | null> {
+  if (getImageValidationError(file)) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      const base64Data = result.includes(',') ? result.split(',')[1] : '';
+      if (!base64Data) {
+        resolve(null);
+        return;
+      }
+      resolve({ base64Data, previewUrl: result });
+    };
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
 }
 
 function ClusterIcon({ className }: { className?: string }) {
@@ -33,6 +152,7 @@ function ClusterIcon({ className }: { className?: string }) {
 
 export function InputArea({
   onSubmit,
+  onPersistMedia,
   onInterrupt,
   onCancel,
   onSwitchMode,
@@ -43,9 +163,16 @@ export function InputArea({
   const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
   const [showModeSwitchModal, setShowModeSwitchModal] = useState(false);
   const [pendingMode, setPendingMode] = useState<AgentMode | null>(null);
+  const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
+  const [attachmentAlerts, setAttachmentAlerts] = useState<AttachmentAlert[]>([]);
+  const [attachmentMenuId, setAttachmentMenuId] = useState<string | null>(null);
+  const [isDraggingImage, setIsDraggingImage] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const modeMenuRef = useRef<HTMLDivElement>(null);
   const autoSendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attachmentMenuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attachmentMenuOpenedByLongPressRef = useRef(false);
   const isComposingRef = useRef(false);
   // const activePointerIdRef = useRef<number | null>(null);
   const isVoicePressingRef = useRef(false);
@@ -112,6 +239,18 @@ export function InputArea({
     },
   });
 
+  const imageInputDisabled = isListening || (isInterruptible && !isTeamMode);
+  const readyAttachments = useMemo(
+    () => attachments.filter((attachment) => attachment.status === 'ready' && attachment.base64Data),
+    [attachments],
+  );
+  const hasUploadingAttachments = attachments.some((attachment) => attachment.status === 'uploading');
+  const hasAttachmentErrors = attachments.some((attachment) => attachment.status === 'error');
+  const readyMediaItems = useMemo(
+    () => readyAttachments.map(attachmentToMediaItem),
+    [readyAttachments],
+  );
+
   useEffect(() => {
     if (!isListening && pendingVoiceText) {
       const finalText = (inputValue + pendingVoiceText).trim();
@@ -141,8 +280,154 @@ export function InputArea({
       if (autoSendTimeoutRef.current) {
         clearTimeout(autoSendTimeoutRef.current);
       }
+      if (attachmentMenuTimerRef.current) {
+        clearTimeout(attachmentMenuTimerRef.current);
+      }
     };
   }, []);
+
+  const pushAttachmentAlert = useCallback((message: string) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setAttachmentAlerts((prev) => [...prev, { id, message }].slice(-3));
+  }, []);
+
+  const dismissAttachmentAlert = useCallback((id: string) => {
+    setAttachmentAlerts((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
+  const updateAttachment = useCallback((id: string, update: Partial<AttachmentDraft>) => {
+    setAttachments((prev) => prev.map((item) => (
+      item.id === id ? { ...item, ...update } : item
+    )));
+  }, []);
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((prev) => prev.filter((item) => item.id !== id));
+    setAttachmentMenuId((current) => (current === id ? null : current));
+  }, []);
+
+  const clearAttachments = useCallback(() => {
+    setAttachments([]);
+    setAttachmentAlerts([]);
+    setAttachmentMenuId(null);
+  }, []);
+
+  const stopAttachmentMenuTimer = useCallback(() => {
+    if (attachmentMenuTimerRef.current) {
+      clearTimeout(attachmentMenuTimerRef.current);
+      attachmentMenuTimerRef.current = null;
+    }
+  }, []);
+
+  const startAttachmentMenuTimer = useCallback((id: string) => {
+    stopAttachmentMenuTimer();
+    attachmentMenuOpenedByLongPressRef.current = false;
+    attachmentMenuTimerRef.current = setTimeout(() => {
+      attachmentMenuOpenedByLongPressRef.current = true;
+      setAttachmentMenuId(id);
+    }, 520);
+  }, [stopAttachmentMenuTimer]);
+
+  const handleAttachmentRemoveClick = useCallback((id: string) => {
+    if (attachmentMenuOpenedByLongPressRef.current || attachmentMenuId === id) {
+      attachmentMenuOpenedByLongPressRef.current = false;
+      return;
+    }
+    removeAttachment(id);
+  }, [attachmentMenuId, removeAttachment]);
+
+  const uploadAttachment = useCallback((attachment: AttachmentDraft) => {
+    if (!attachment.file) return;
+    const validationError = getImageValidationError(attachment.file);
+    if (validationError) {
+      pushAttachmentAlert(validationError);
+      updateAttachment(attachment.id, { status: 'error', error: validationError });
+      return;
+    }
+    updateAttachment(attachment.id, { status: 'uploading', error: undefined });
+    void readImageFile(attachment.file).then(async (payload) => {
+      if (!payload) {
+        updateAttachment(attachment.id, {
+          status: 'error',
+          error: '上传失败，请重试',
+        });
+        return;
+      }
+      try {
+        const persisted = await onPersistMedia('', [buildUploadMediaItem(attachment, payload)]);
+        const persistedMediaItem = persisted.media_items?.[0];
+        if (!persistedMediaItem || !pickString(persistedMediaItem.path)) {
+          throw new Error('media.persist did not return image path');
+        }
+        updateAttachment(attachment.id, {
+          ...payload,
+          persistedMediaItem,
+          status: 'ready',
+          error: undefined,
+        });
+      } catch (error) {
+        console.error('图片上传失败:', error);
+        updateAttachment(attachment.id, {
+          ...payload,
+          status: 'error',
+          error: '上传失败，请重试',
+        });
+      }
+    });
+  }, [onPersistMedia, pushAttachmentAlert, updateAttachment]);
+
+  const retryAttachment = useCallback((attachment: AttachmentDraft) => {
+    uploadAttachment(attachment);
+  }, [uploadAttachment]);
+
+  const appendImageFiles = useCallback((files: FileList | File[]) => {
+    const selectedFiles = Array.from(files);
+    if (!selectedFiles.length) return;
+    const remainingSlots = Math.max(0, MAX_IMAGE_COUNT - attachments.length);
+    if (!remainingSlots) {
+      pushAttachmentAlert(`单次对话最多上传${MAX_IMAGE_COUNT}个附件。`);
+      return;
+    }
+
+    const acceptedFiles = selectedFiles.slice(0, remainingSlots);
+    const overflow = selectedFiles.length - acceptedFiles.length;
+    if (overflow > 0) {
+      pushAttachmentAlert(`单次对话最多上传${MAX_IMAGE_COUNT}个附件。`);
+    }
+
+    const drafts = acceptedFiles.reduce<AttachmentDraft[]>((items, file) => {
+      const base = {
+        id: makeAttachmentId(file),
+        filename: file.name || `image-${Date.now()}`,
+        mimeType: file.type || 'application/octet-stream',
+        size: file.size,
+        file,
+      };
+      const validationError = getImageValidationError(file);
+      if (validationError) {
+        pushAttachmentAlert(validationError);
+        items.push({
+          ...base,
+          status: 'error',
+          error: validationError,
+        });
+        return items;
+      }
+      items.push({
+        ...base,
+        status: 'uploading',
+      });
+      return items;
+    }, []);
+
+    if (!drafts.length) return;
+
+    setAttachments((prev) => [...prev, ...drafts].slice(0, MAX_IMAGE_COUNT));
+    drafts.forEach((draft) => {
+      if (draft.status !== 'uploading' || !draft.file) return;
+      uploadAttachment(draft);
+    });
+  }, [attachments.length, pushAttachmentAlert, uploadAttachment]);
 
   useEffect(() => {
     if (!isModeMenuOpen) return;
@@ -160,37 +445,77 @@ export function InputArea({
     };
   }, [isModeMenuOpen]);
 
+  useEffect(() => {
+    if (!attachmentMenuId) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Element | null;
+      if (
+        target?.closest('.chat-input-attachment-menu') ||
+        target?.closest('.chat-input-attachment-remove')
+      ) {
+        return;
+      }
+      setAttachmentMenuId(null);
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+    };
+  }, [attachmentMenuId]);
+
   const handleSubmit = useCallback(() => {
     const trimmed = (inputValue + pendingVoiceText).trim();
-    if (!trimmed) return;
+    if ((!trimmed && readyMediaItems.length === 0) || hasUploadingAttachments || hasAttachmentErrors) return;
+    if (isInterruptible && !isTeamMode && readyMediaItems.length > 0) return;
 
     if (isListening) {
       stopListening();
     }
 
     if (isTeamMode) {
-      onSubmit(trimmed);
+      onSubmit(trimmed, readyMediaItems);
     } else if (isInterruptible) {
-      if (isAgentMode) {
+      if (isAgentMode && readyMediaItems.length === 0) {
         addToTaskQueue(trimmed);
       } else {
         onInterrupt(trimmed);
       }
     } else {
-      onSubmit(trimmed);
+      onSubmit(trimmed, readyMediaItems);
     }
     setInputValue('');
     setPendingVoiceText('');
+    setAttachments([]);
+    setAttachmentAlerts([]);
 
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [inputValue, pendingVoiceText, isInterruptible, isListening, onSubmit, onInterrupt, stopListening, isAgentMode, isTeamMode, addToTaskQueue, setInputValue]);
+  }, [
+    inputValue,
+    pendingVoiceText,
+    readyMediaItems,
+    hasUploadingAttachments,
+    hasAttachmentErrors,
+    isInterruptible,
+    isListening,
+    onSubmit,
+    onInterrupt,
+    stopListening,
+    isAgentMode,
+    isTeamMode,
+    addToTaskQueue,
+    setInputValue,
+  ]);
 
   const trimmedDraft = (inputValue + pendingVoiceText).trim();
-  const hasDraft = trimmedDraft.length > 0 || isListening;
+  const hasDraft = trimmedDraft.length > 0 || attachments.length > 0 || isListening;
+  const isImageInterruptBlocked = isInterruptible && !isTeamMode && readyMediaItems.length > 0;
   const showStop = isProcessing && !isPaused && !hasDraft;
-  const canSubmit = hasDraft || showStop;
+  const canSubmit = (hasDraft && !isImageInterruptBlocked && !hasUploadingAttachments && !hasAttachmentErrors) || showStop;
 
   const handleSendButtonClick = useCallback(() => {
     if (showStop) {
@@ -217,6 +542,49 @@ export function InputArea({
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
     }
   }, []);
+
+  const handleFileInputChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (files) {
+      void appendImageFiles(files);
+    }
+    event.target.value = '';
+  }, [appendImageFiles]);
+
+  const handlePaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = Array.from(event.clipboardData.items);
+    const files = items
+      .filter((item) => item.kind === 'file' && ACCEPTED_IMAGE_TYPES.has(item.type))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (files.length) {
+      event.preventDefault();
+      void appendImageFiles(files);
+    }
+  }, [appendImageFiles]);
+
+  const handleDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    const hasImage = Array.from(event.dataTransfer.items).some(
+      (item) => item.kind === 'file' && ACCEPTED_IMAGE_TYPES.has(item.type)
+    );
+    if (!hasImage) return;
+    event.preventDefault();
+    setIsDraggingImage(true);
+  }, []);
+
+  const handleDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setIsDraggingImage(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
+    setIsDraggingImage(false);
+    const files = Array.from(event.dataTransfer.files).filter((file) => ACCEPTED_IMAGE_TYPES.has(file.type));
+    if (!files.length) return;
+    event.preventDefault();
+    void appendImageFiles(files);
+  }, [appendImageFiles]);
 
   // const handleVoiceStart = useCallback(() => {
   //   if (isListening) return;
@@ -270,16 +638,6 @@ export function InputArea({
   //   [handleVoiceEnd]
   // );
 
-  const handleNewSession = useCallback(async () => {
-    if (isListening || (isInterruptible && !isTeamMode)) return;
-    setInputValue('');
-    setPendingVoiceText('');
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-    }
-    await onNewSession();
-  }, [isListening, isInterruptible, isTeamMode, onNewSession, setInputValue]);
-
   const handleModeSwitch = useCallback(async (targetMode: AgentMode) => {
     if (mode === targetMode) return;
     
@@ -324,13 +682,37 @@ export function InputArea({
   const evolutionLabel = getEvolutionPillLabel(mode, evolutionStatus, t);
 
   return (
-    <div
-      className={cx(
-        'chat-input-container',
-        isModeMenuOpen && 'chat-input-container--menu-open',
-        isListening && 'chat-input-container--recording',
-      )}
-    >
+    <>
+      <div className="chat-input-frame">
+        {attachmentAlerts.length > 0 && (
+          <div className="chat-input-local-alerts" role="status" aria-live="polite">
+            {attachmentAlerts.map((alert) => (
+              <div className="chat-input-local-alert" key={alert.id}>
+                <CircleX size={16} strokeWidth={2.2} />
+                <span>{alert.message}</span>
+                <button
+                  type="button"
+                  onClick={() => dismissAttachmentAlert(alert.id)}
+                  aria-label="关闭提示"
+                >
+                  <X size={15} strokeWidth={2} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div
+          className={cx(
+            'chat-input-container',
+            isModeMenuOpen && 'chat-input-container--menu-open',
+            isListening && 'chat-input-container--recording',
+            isDraggingImage && 'chat-input-container--dragging',
+          )}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
       {isListening && (
         <div className="chat-input-recording-bar">
           <span className="chat-input-recording-dot" />
@@ -367,6 +749,108 @@ export function InputArea({
         </div>
       )}
 
+      {attachments.length > 0 && (
+        <div className="chat-input-attachment-panel">
+          <div
+            className={cx(
+              'chat-input-attachment-grid',
+              attachmentMenuId && 'chat-input-attachment-grid--menu-open',
+            )}
+          >
+            {attachments.map((attachment) => (
+              <div
+                className={cx(
+                  'chat-input-attachment-card',
+                  attachment.status === 'error' && 'chat-input-attachment-card--error',
+                  attachment.status === 'uploading' && 'chat-input-attachment-card--uploading',
+                )}
+                key={attachment.id}
+              >
+                <div className="chat-input-attachment-preview" aria-hidden="true">
+                  {attachment.previewUrl ? (
+                    <img src={attachment.previewUrl} alt="" />
+                  ) : (
+                    <FileImage size={18} strokeWidth={1.8} />
+                  )}
+                </div>
+                <div className="chat-input-attachment-main">
+                  <div className="chat-input-attachment-name" title={attachment.filename}>
+                    {attachment.filename}
+                  </div>
+                  <div className="chat-input-attachment-meta">
+                    {attachment.status === 'uploading' ? (
+                      <>
+                        <Loader2 className="chat-input-attachment-spin" size={12} strokeWidth={2} />
+                        <span>上传中...</span>
+                      </>
+                    ) : attachment.status === 'error' ? (
+                      <>
+                        <span
+                          className="chat-input-attachment-status-error"
+                          title={attachment.error || '上传失败'}
+                        >
+                          上传失败
+                        </span>
+                        {attachment.file && (
+                          <button
+                            type="button"
+                            className="chat-input-attachment-retry"
+                            onClick={() => retryAttachment(attachment)}
+                          >
+                            重试
+                          </button>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <span>{attachment.mimeType.split('/')[1]?.toUpperCase() || 'IMAGE'}</span>
+                        <span>{formatAttachmentSize(attachment.size)}</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="chat-input-attachment-remove"
+                  onPointerDown={() => startAttachmentMenuTimer(attachment.id)}
+                  onPointerUp={stopAttachmentMenuTimer}
+                  onPointerCancel={stopAttachmentMenuTimer}
+                  onPointerLeave={stopAttachmentMenuTimer}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    stopAttachmentMenuTimer();
+                    setAttachmentMenuId(attachment.id);
+                  }}
+                  onClick={() => handleAttachmentRemoveClick(attachment.id)}
+                  title="删除，长按显示更多操作"
+                  aria-label="删除附件"
+                >
+                  <X size={12} strokeWidth={2} />
+                </button>
+                {attachmentMenuId === attachment.id && (
+                  <div className="chat-input-attachment-menu" role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => removeAttachment(attachment.id)}
+                    >
+                      删除
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={clearAttachments}
+                    >
+                      清空附件
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <textarea
         ref={textareaRef}
         value={displayValue}
@@ -375,6 +859,7 @@ export function InputArea({
         onCompositionStart={() => { isComposingRef.current = true; }}
         onCompositionEnd={() => { isComposingRef.current = false; }}
         onInput={handleInput}
+        onPaste={handlePaste}
         placeholder={
           isListening
             ? t('chat.placeholderVoice')
@@ -397,6 +882,27 @@ export function InputArea({
 
       <div className="chat-input-toolbar">
         <div className="chat-input-toolbar-left">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            multiple
+            className="hidden"
+            onChange={handleFileInputChange}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={imageInputDisabled}
+            className={cx(
+              'chat-input-btn chat-input-btn--add-file',
+              imageInputDisabled && 'chat-input-btn--disabled',
+            )}
+            title={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
+            aria-label={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
+          >
+            <Plus className="chat-input-btn-icon" strokeWidth={1.8} />
+          </button>
           <div
             ref={modeMenuRef}
             className={clsx(
@@ -466,21 +972,6 @@ export function InputArea({
         </div>
 
         <div className="chat-input-actions">
-          <button
-            type="button"
-            onClick={handleNewSession}
-            disabled={isListening || (isInterruptible && !isTeamMode)}
-            className={cx(
-              'chat-input-btn',
-              (isListening || (isInterruptible && !isTeamMode)) && 'chat-input-btn--disabled',
-            )}
-            title={isListening || (isInterruptible && !isTeamMode) ? t('chat.newSessionDisabled') : t('chat.newSession')}
-          >
-            <svg className="chat-input-btn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-            </svg>
-          </button>
-
           {/* {speechSupported && (
             <button
               type="button"
@@ -557,7 +1048,9 @@ export function InputArea({
           </div>
         </div>
       )}
-    </div>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -569,29 +1062,33 @@ function ModelSelector() {
 
   if (chatAvailableModels.length === 1) {
     return (
-      <span
-        className="text-xs text-text-muted px-2 truncate max-w-[200px]"
-        title={chatAvailableModels[0].model_name}
-      >
-        {chatAvailableModels[0].alias || chatAvailableModels[0].model_name}
+      <span className="chat-model-inline">
+        <span
+          className="chat-model-inline__name"
+          title={chatAvailableModels[0].model_name}
+        >
+          {chatAvailableModels[0].alias || chatAvailableModels[0].model_name}
+        </span>
       </span>
     );
   }
 
   return (
-    <select
-      value={selectedModelName ?? ''}
-      onChange={(e) => setSelectedModelName(e.target.value)}
-      title={t('chat.modelSelector.tooltip')}
-      className="chat-model-selector"
-      data-testid="chat-model-selector"
-    >
-      {chatAvailableModels.map((m, idx) => (
-        <option key={`${m.model_name}-${idx}`} value={m.alias || m.model_name}>
-          {m.alias ? `${m.alias} (${m.model_name})` : m.model_name}
-        </option>
-      ))}
-    </select>
+    <span className="chat-model-inline">
+      <select
+        value={selectedModelName ?? ''}
+        onChange={(e) => setSelectedModelName(e.target.value)}
+        title={t('chat.modelSelector.tooltip')}
+        className="chat-model-selector"
+        data-testid="chat-model-selector"
+      >
+        {chatAvailableModels.map((m, idx) => (
+          <option key={`${m.model_name}-${idx}`} value={m.alias || m.model_name}>
+            {m.alias ? `${m.alias} (${m.model_name})` : m.model_name}
+          </option>
+        ))}
+      </select>
+    </span>
   );
 }
 

@@ -83,10 +83,9 @@ export function createModeCommand(): SlashCommand {
         return;
       }
 
-      // Check if leaving team mode with running tasks
+      // Check if switching mode with running team tasks
       const currentMode = ctx.mode;
-      const isLeavingTeamMode = isTeamMode(currentMode) && !isTeamMode(nextMode);
-      if (isLeavingTeamMode && ctx.hasRunningTeamTasks?.()) {
+      if (currentMode !== nextMode && isTeamMode(currentMode) && ctx.hasRunningTeamTasks?.()) {
         const answers = await ctx.askQuestions(
           [
             {

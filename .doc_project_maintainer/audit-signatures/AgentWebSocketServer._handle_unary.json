@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f3f64-2434-78b3-a6e8-5aa9518c0c57",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._handle_unary",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._handle_unary in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f3f64-2434-78b3-a6e8-5aa9518c0c57",
+        "nickname": "Erdos",
+        "symbol_id": "AgentWebSocketServer._handle_unary",
+        "completed": true,
+        "finding_count": 2
+      }
+    }
+  ]
+}

@@ -77,8 +77,13 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
 
 logger = logging.getLogger(__name__)
 
-_pending_waiters: dict[tuple[str, str], list[tuple[str, asyncio.Queue]]] = {}
-_cron_team_completion: dict[tuple[str, str], dict[str, Any]] = {}
+# Waiter + cron-team-completion state lives on the singleton TeamManager
+# (TeamManager._pending_waiters / TeamManager._cron_team_completion), indexed
+# by session_id. TeamManager is process-wide and shared across channels, so a
+# bridged follow-up (e.g. /join from feishu while the web stream is alive)
+# finds the originating channel's waiter regardless of arrival channel. There
+# is no module-level global waiter registry — reach it via
+# get_team_manager(channel_id) or the team_manager handle passed in.
 _WORKFLOW_RUNS_STATE_KEY = "workflow_runs"
 
 _TEAM_CREATE_KINDS = {
@@ -107,7 +112,124 @@ _INTERACT_REASON_ERROR_MAP: dict[str, str] = {
     "unknown_human_agent": "Member not found, please check the name",
     "human_agent_not_enabled": "Human agent is not yet available, please try again later",
     "no_team_backend": "Team backend not ready, please try again later",
+    "agent_unavailable": "Target member not available, please check the member name",
 }
+
+# ── fan_out 规则（表驱动）──────────────────────────────────────
+# 所有 team 事件均显式产出 fan_out，godview 始终在 fan_out 中（不靠 Gateway 兜底）。
+# 规则按两个独立维度组织，分别用一张表：
+#   1. _INNER_TYPE_FANOUT —— 按 event.event.type（team.message 内层子类型）
+#   2. _ROLE_FANOUT       —— 按 event.role（外层角色）
+# _build_logical_targets 依次查这两张表，命中即返回；都未命中走 godview 兜底。
+#
+# intent 语义（三态，见 session_sharing.LogicalTarget / _build_routing_target）：
+#   - godview  : 投递给 GodView 订阅者，不带 @
+#   - mention  : 投递给被点名成员 + 带 @（飞书 <at>）；monitor 转发的 P2P 消息用此
+#   - private  : 投递给被点名成员但不带 @；纯 teammate LLM 输出用此，不打扰人类用户
+# 区分 mention/private 的关键：前者 @ 用户，后者不 @，由 _build_routing_target 按 intent 决定。
+
+
+def _tgt_godview() -> dict:
+    return {"intent": "godview"}
+
+
+def _tgt_mention(
+    member_names, *, mention_all: bool = False, speaker: str | None = None
+) -> dict:
+    """mention intent：投递给被点名成员并带 @（飞书 <at>）。"""
+    tgt: dict = {
+        "intent": "mention",
+        "member_names": list(member_names),
+        "speaker": speaker,
+    }
+    if mention_all:
+        tgt["mention_all"] = True
+    return tgt
+
+
+def _tgt_private(member_names, *, speaker: str | None = None) -> dict:
+    """private intent：投递给被点名成员但不带 @。"""
+    return {
+        "intent": "private",
+        "member_names": list(member_names),
+        "speaker": speaker,
+    }
+
+
+def _p2p_fanout(inner: dict) -> list[dict]:
+    """P2P 消息 fan_out：godview + 收件人(mention, 带 @) + 发送方(private, 不带 @)。
+
+    - 收件人用 mention：被 @ 提醒，飞书渲染 <at>。
+    - 发送方用 private：自己发的消息不该 @ 自己（private intent 在
+      ``_build_routing_target`` 里不注入 mention_member_ids），零打扰，
+      仅用于发送方在自己的 /join 窗口看到自己发出的 P2P 卡片。
+    - from_member 缺失时不追加 private([None])，避免把 None 当 member_name
+      查 Registry 留下调试噪音（见 dispatch_to_session 的 lookup_member）。
+    - from/to 落同一物理容器（飞书群、同一 ws）时，dispatch_to_session 的
+      sent_containers 跨 intent 去重，先到的 intent 标记容器已发，后到跳过，
+      至少显示一次，不会双发。
+    """
+    targets = [
+        _tgt_godview(),
+        _tgt_mention([inner["to_member"]], speaker=inner.get("from_member")),
+    ]
+    fm = inner.get("from_member")
+    if fm:
+        targets.append(_tgt_private([fm], speaker=fm))
+    return targets
+
+
+# 维度 1：按 event.event.type 分发（team.message 内层子类型）
+_INNER_TYPE_FANOUT: dict[str, Any] = {
+    # monitor 转发的 P2P 消息 → godview + 收件人(mention,带@) + 发送方(private,不带@)
+    "team.message.p2p": _p2p_fanout,
+    # 广播 → godview + mention_all
+    "team.message.broadcast": lambda inner: [
+        _tgt_godview(),
+        _tgt_mention([], mention_all=True, speaker=inner.get("from_member")),
+    ],
+}
+
+# 维度 2：按 event.role 分发（外层角色）
+# teammate LLM 输出 → godview + private(该 teammate 席位，不带 @)。
+# HumanAgent 需要看到自己扮演的 agent 的输出才能进行自对话；纯 agent 输出不打扰人类。
+_ROLE_FANOUT: dict[str, Any] = {
+    "teammate": lambda ev: [
+        _tgt_godview(),
+        _tgt_private([ev["member_name"]], speaker=ev["member_name"]),
+    ],
+}
+
+_GODVIEW_TARGET = [_tgt_godview()]
+
+
+def _build_logical_targets(event: dict) -> list[dict]:
+    """所有 team 事件 → fan_out 规则（表驱动，依次查两维后兜底 godview）。
+
+    查询顺序（命中即返回）：
+      1. event.event.type ∈ _INNER_TYPE_FANOUT  —— team.message.p2p/broadcast
+      2. event.role ∈ _ROLE_FANOUT              —— teammate 输出 → private
+      3. 兜底 → [godview]                        —— leader 输出、team.member、team.task 等
+
+    p2p 用 mention（带 @），teammate 输出用 private（不带 @），broadcast 用 mention_all。
+    """
+    # 维度 1：team.message 内层子类型
+    if event.get("event_type") == "team.message":
+        inner = event.get("event", {}) or {}
+        fn = _INNER_TYPE_FANOUT.get(inner.get("type", ""))
+        if fn:
+            return fn(inner)
+
+    # 维度 2：外层角色
+    role = str(event.get("role", "")).strip().lower()
+    fn = _ROLE_FANOUT.get(role)
+    if fn:
+        member_name = str(event.get("member_name", "")).strip()
+        if member_name:
+            return fn(event)
+
+    # 兜底：其余所有 team 消息都带 godview
+    return _GODVIEW_TARGET
 
 
 def _is_followup_delivery_boundary_reason(reason: str | None) -> bool:
@@ -158,6 +280,37 @@ async def _wait_for_team_first_request_condition(
         if not await _team_session_has_runtime(team_manager, session_id):
             return True
     return not await _team_session_has_runtime(team_manager, session_id)
+
+
+def _build_team_event_chunk_meta(event: Any) -> tuple[dict | None, dict]:
+    """从 team event 统一推导 (agent_ref, metadata)，供所有 team 事件产出路径调用。
+
+    - agent_ref: 成员身份标识。前端 team.member.spawned 用 agent_ref.id 拼接
+      /join team_<name>_session_<sid>，取不到会 fallback 'unknown'。
+    - metadata: fan_out_targets 路由元数据，由 _build_logical_targets 产出。
+
+    按设计（§10/§14.2.3/§13.3）agent_ref 是 server 层统一注入，不在 monitor 层加。
+    非 team 事件（chat.error / processing_status / completion 等控制信号）返回
+    (None, {})，不注入。
+    """
+    if not isinstance(event, dict):
+        return None, {}
+    ev_type = event.get("event_type", "")
+    role = event.get("role", "")
+    if role == "teammate":
+        agent_ref: dict | None = {"mode": "team", "id": event.get("member_name", "teammate")}
+    elif ev_type in ("team.member", "team.task"):
+        # team_id 嵌套在 event.event 内层
+        inner = event.get("event", {}) or {}
+        agent_ref = {"mode": "team", "id": inner.get("team_id", "team")}
+    elif ev_type == "team.message":
+        inner = event.get("event", {}) or {}
+        agent_ref = {"mode": "team", "id": inner.get("from_member", "team")}
+    else:
+        agent_ref = None
+    fan_out = _build_logical_targets(event)
+    metadata = {"fan_out_targets": fan_out} if fan_out else {}
+    return agent_ref, metadata
 
 
 def _strip_directive(query: str, prefix: str) -> tuple[str, bool]:
@@ -612,8 +765,7 @@ async def _finish_cron_team_stream_after_delegation_grace(
     """Wait briefly after a solo harness final before ending the cron team stream."""
     await asyncio.sleep(_CRON_DELEGATION_GRACE_SECONDS)
     resolved_channel_id = _resolve_channel_id(channel_id)
-    waiter_key = (resolved_channel_id, session_id)
-    completion = _cron_team_completion.get(waiter_key)
+    completion = get_team_manager(channel_id).get_cron_completion(session_id)
     if completion is None:
         return
     if completion.get("tasks_ever_created"):
@@ -632,10 +784,9 @@ async def _finish_cron_team_stream_after_round(
 ) -> None:
     """Cancel the background team stream once cron SwarmFlow + leader report are done."""
     resolved_channel_id = _resolve_channel_id(channel_id)
-    waiter_key = (resolved_channel_id, session_id)
+    team_manager = get_team_manager(channel_id)
     try:
-        tm = get_team_manager(channel_id)
-        stream_task = tm.pop_stream_task(session_id)
+        stream_task = team_manager.pop_stream_task(session_id)
         if stream_task is not None and not stream_task.done():
             stream_task.cancel()
             try:
@@ -666,7 +817,7 @@ async def _finish_cron_team_stream_after_round(
             exc,
         )
     finally:
-        _cron_team_completion.pop(waiter_key, None)
+        team_manager.pop_cron_completion(session_id)
 
 
 def _try_finish_cron_team_stream(
@@ -675,13 +826,13 @@ def _try_finish_cron_team_stream(
     event: dict[str, Any],
 ) -> None:
     """End persistent team streams for cron once workflow completes and leader reports."""
-    waiter_key = (_resolve_channel_id(channel_id), session_id)
-    waiters = _pending_waiters.get(waiter_key, [])
+    team_manager = get_team_manager(channel_id)
+    waiters = team_manager.get_waiters(session_id)
     if not any(_is_cron_request_id(request_id) for request_id, _ in waiters):
         return
 
-    completion = _cron_team_completion.setdefault(
-        waiter_key,
+    completion = team_manager.setdefault_cron_completion(
+        session_id,
         {
             **new_cron_team_round_state(),
             "round_id": None,
@@ -702,7 +853,7 @@ def _try_finish_cron_team_stream(
                     session_id,
                     round_id,
                 ),
-                name=f"cron-team-grace-{waiter_key[0]}-{session_id}",
+                name=f"cron-team-grace-{session_id}",
             )
             return
         asyncio.create_task(
@@ -711,26 +862,15 @@ def _try_finish_cron_team_stream(
                 session_id,
                 round_id,
             ),
-            name=f"cron-team-finish-{waiter_key[0]}-{session_id}",
+            name=f"cron-team-finish-{session_id}",
         )
 
 
 def _broadcast_event(
     channel_id: str | None, session_id: str, event: dict[str, Any]
 ) -> None:
-    """Broadcast an event to all request queues waiting on the same channel/session."""
-    waiter_key = (_resolve_channel_id(channel_id), session_id)
-    waiters = _pending_waiters.get(waiter_key, [])
-    for request_id, queue in waiters:
-        try:
-            queue.put_nowait(dict(event))
-        except Exception:
-            logger.debug(
-                "[TeamHelpers] broadcast failed: channel_id=%s session_id=%s request_id=%s",
-                waiter_key[0],
-                session_id,
-                request_id,
-            )
+    """Broadcast an event to all request queues waiting on the same session."""
+    get_team_manager(channel_id).broadcast_event(session_id, event)
     _try_finish_cron_team_stream(channel_id, session_id, event)
 
 
@@ -1096,14 +1236,11 @@ async def _start_team_stream_round(
     sync_team_observability()
     await team_manager.prepare_runtime_activation(session_id, team_name)
     request_queue: asyncio.Queue = asyncio.Queue()
-    waiter_key = (_resolve_channel_id(channel_id), session_id)
-    if waiter_key not in _pending_waiters:
-        _pending_waiters[waiter_key] = []
-    _pending_waiters[waiter_key].append((request_id, request_queue))
+    team_manager.add_waiter(session_id, request_id, request_queue)
     logger.info(
         "[TeamHelpers] %s team request: channel_id=%s session_id=%s",
         source,
-        waiter_key[0],
+        _resolve_channel_id(channel_id),
         session_id,
     )
 
@@ -1157,9 +1294,16 @@ async def process_team_message_stream(
             session_id,
             exc,
         )
-    is_first_request = not await _team_session_has_runtime(
-        team_manager,
-        session_id,
+    # is_first_request 判断：
+    # 1. stream task 存在 → False
+    # 2. 已有同 session 的 waiter → False
+    # 3. session 已初始化过 team runtime → False
+    # 4. 否则 → True（首次请求，需要创建 team spec + stream）
+    has_active_waiters = team_manager.has_waiters(session_id)
+    is_first_request = (
+        not team_manager.has_stream_task(session_id)
+        and not has_active_waiters
+        and not team_manager.is_session_initialized(session_id)
     )
     request_queue: asyncio.Queue | None = None
 
@@ -1187,6 +1331,22 @@ async def process_team_message_stream(
 
     try:
         request_metadata = dict(request.metadata or {})
+        # V2: 若请求携带 member_name（由 Gateway resolve_member_by_user 反查注入），
+        # 在前拼接 $sender，让 OpenJiuwen 识别发言人身份。
+        # 规则：
+        #   - 消息中有 @mention → $member_name @target body（保留显式 @）
+        #   - 消息中无 @ → $member_name body（不自动拼接 @team_leader，
+        #     HumanAgent 可直接与自己扮演的 agent 对话，如 $reviewer-1 看一下当前有哪些任务）
+        member_name = str(request_metadata.get("member_name") or "").strip()
+        if member_name and query_text and not query_text.startswith("$"):
+            query = f"${member_name} {query_text}"
+            query_text = query if isinstance(query, str) else str(query)
+            logger.info(
+                "[TeamHelpers] prefixed query with member identity: member=%s session=%s query_preview=%s",
+                member_name,
+                session_id,
+                _safe_query_preview(query),
+            )
         if isinstance(getattr(request, "params", None), dict):
             request_metadata.setdefault("mode", request.params.get("mode"))
         resolved_mode = str(request_metadata.get("mode") or "").strip()
@@ -1304,6 +1464,12 @@ async def process_team_message_stream(
                 _resolve_channel_id(channel_id),
                 session_id,
             )
+            # V2: follow-up 不创建 waiter —— 一个 session 只保留一个 waiter（原始 stream 的）。
+            # follow-up 的唯一目的是 interact() 把 query 发给 team，
+            # 后续的 team events 由原始 waiter 的 while 循环产出，
+            # 通过 Gateway 的 fan_out 路由机制分发到各 channel。
+            # 之前 follow-up 也创建 waiter 导致 _broadcast_event 广播到两个 queue，
+            # 同一事件被 yield 两次 → Gateway dispatch 两次 → 重复消息。
             if query:
                 success, reason = await team_manager.interact(session_id, query)
                 if not success:
@@ -1377,12 +1543,11 @@ async def process_team_message_stream(
             if not is_first_request:
                 if _is_cron_request_id(rid):
                     request_queue = asyncio.Queue()
-                    waiter_key = (_resolve_channel_id(channel_id), session_id)
-                    _pending_waiters.setdefault(waiter_key, []).append((rid, request_queue))
+                    team_manager.add_waiter(session_id, rid, request_queue)
                     logger.info(
                         "[TeamHelpers] cron follow-up team request waits for round: "
                         "channel_id=%s session_id=%s request_id=%s",
-                        waiter_key[0],
+                        _resolve_channel_id(channel_id),
                         session_id,
                         rid,
                     )
@@ -1395,19 +1560,17 @@ async def process_team_message_stream(
                             channel_id=channel_id,
                             session_id=session_id,
                         ):
+                            _cron_agent_ref, _cron_meta = _build_team_event_chunk_meta(event)
                             yield AgentResponseChunk(
                                 request_id=rid,
                                 channel_id=channel_id,
                                 payload=event,
+                                agent_ref=_cron_agent_ref,
+                                metadata=_cron_meta,
                                 is_complete=False,
                             )
                     finally:
-                        waiters = _pending_waiters.get(waiter_key, [])
-                        _pending_waiters[waiter_key] = [
-                            (req_id, queue) for req_id, queue in waiters if req_id != rid
-                        ]
-                        if not _pending_waiters.get(waiter_key, []):
-                            _pending_waiters.pop(waiter_key, None)
+                        team_manager.remove_waiter(session_id, rid)
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=channel_id,
@@ -1478,27 +1641,35 @@ async def process_team_message_stream(
                     channel_id=channel_id,
                     session_id=session_id,
                 ):
+                    _cron_agent_ref, _cron_meta = _build_team_event_chunk_meta(event)
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=channel_id,
                         payload=event,
+                        agent_ref=_cron_agent_ref,
+                        metadata=_cron_meta,
                         is_complete=False,
                     )
             else:
+                # while 循环：仅 first-request 使用，依赖 stream_task 生命周期。
+                # follow-up 已在上方 return，不再进入此循环。
                 while team_manager.has_stream_task(session_id):
                     if request_queue is None:
                         break
                     try:
                         event = await asyncio.wait_for(request_queue.get(), timeout=0.1)
+                        # ── 统一推导 (agent_ref, fan_out_targets) ──
+                        _agent_ref, _metadata = _build_team_event_chunk_meta(event)
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=channel_id,
                             payload=event,
+                            agent_ref=_agent_ref,
+                            metadata=_metadata,
                             is_complete=False,
                         )
-                        if isinstance(event, dict):
-                            if event.get("event_type") == "team.error":
-                                break
+                        if isinstance(event, dict) and event.get("event_type") == "team.error":
+                            break
                     except asyncio.TimeoutError:
                         if not team_manager.has_stream_task(session_id):
                             break
@@ -1567,18 +1738,20 @@ async def process_team_message_stream(
             payload=None,
             is_complete=True,
         )
+        # 当前 stream 已结束，清除初始化标记，
+        # 下次请求需重新创建 stream task（gate 在 stream 结束时已关闭）。
+        team_manager.clear_session_initialized(session_id)
+        logger.info(
+            "[TeamHelpers] stream ended, cleared init marker: "
+            "channel_id=%s session_id=%s",
+            _resolve_channel_id(channel_id), session_id,
+        )
     finally:
         if request_queue is not None:
-            waiter_key = (_resolve_channel_id(channel_id), session_id)
-            waiters = _pending_waiters.get(waiter_key, [])
-            _pending_waiters[waiter_key] = [
-                (req_id, queue) for req_id, queue in waiters if req_id != rid
-            ]
-            if not _pending_waiters.get(waiter_key, []):
-                _pending_waiters.pop(waiter_key, None)
+            team_manager.remove_waiter(session_id, rid)
+            if not team_manager.has_waiters(session_id):
                 logger.info(
-                    "[TeamHelpers] cleared waiter set: channel_id=%s session_id=%s",
-                    waiter_key[0],
+                    "[TeamHelpers] cleared waiter set: session_id=%s",
                     session_id,
                 )
 
@@ -1634,9 +1807,24 @@ async def _consume_stream_with_query(
             stream_logger=lg,
         ):
             received_chunks += 1
+            # 诊断：每 30 个 chunk 或首个 chunk 时打印进度
+            if received_chunks == 1 or received_chunks % 30 == 0:
+                _role = getattr(chunk, "role", None)
+                logger.info(
+                    "[TeamHelpers] stream progress: channel_id=%s session_id=%s"
+                    " received=%s role=%s type=%s",
+                    _resolve_channel_id(channel_id), session_id,
+                    received_chunks, _role, getattr(chunk, "type", None),
+                )
             is_leader = _is_leader_output(chunk)
             is_teammate = _is_teammate_output(chunk)
             if not is_leader and not is_teammate:
+                if received_chunks <= 3:
+                    logger.info(
+                        "[TeamHelpers] stream chunk filtered (non-leader/non-teammate):"
+                        " session_id=%s role=%s type=%s",
+                        session_id, getattr(chunk, "role", None), getattr(chunk, "type", None),
+                    )
                 continue
             # Optional: filter out all non-leader frames so the frontend only
             # sees leader output. Leader-level control events
@@ -1658,6 +1846,10 @@ async def _consume_stream_with_query(
                 parsed["rid"] = round_id
                 if is_teammate:
                     parsed = _enrich_teammate_event(parsed, chunk)
+                elif is_leader:
+                    # 标记 role=leader，使 _build_logical_targets() 走 godview 兜底
+                    # （leader 不在 _ROLE_FANOUT 中，落到 [godview]）。
+                    parsed["role"] = TeamRole.LEADER.value
                 parsed = _truncate_team_tool_result_event(parsed)
                 if parsed.get("event_type") == "team.runtime_ready":
                     ready_team_name = str(parsed.get("team_name") or team_spec.team_name)
@@ -2079,13 +2271,23 @@ def _persist_team_history_event(
 
     request_key = ""
     if evt_type == "team.member":
-        if payload.get("type") != "team.member.status_changed":
+        member_event_type = str(payload.get("type") or "").strip()
+        if member_event_type not in {
+            "team.member.spawned",
+            "team.member.restarted",
+            "team.member.status_changed",
+            "team.member.shutdown",
+        }:
             return
         member_id = str(payload.get("member_id") or "").strip()
-        new_status = str(payload.get("new_status") or "").strip()
-        if not member_id or not new_status:
+        if not member_id:
             return
-        request_key = member_id
+        if (
+            member_event_type == "team.member.status_changed"
+            and not str(payload.get("new_status") or "").strip()
+        ):
+            return
+        request_key = f"{member_id}-{member_event_type.rsplit('.', 1)[-1]}"
     else:
         task_id = str(payload.get("task_id") or payload.get("id") or "").strip()
         if not task_id:

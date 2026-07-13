@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f4003-6335-7003-9069-9dc84ba074bf",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._handle_session_rename",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._handle_session_rename in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f4003-6335-7003-9069-9dc84ba074bf",
+        "nickname": "Copernicus",
+        "symbol_id": "AgentWebSocketServer._handle_session_rename",
+        "completed": true,
+        "finding_count": 1
+      }
+    }
+  ]
+}

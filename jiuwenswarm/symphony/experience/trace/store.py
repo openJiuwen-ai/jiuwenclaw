@@ -120,7 +120,6 @@ def clear_store() -> None:
     for path in [store / "records.jsonl", store / "processed_index.json"]:
         if path.exists():
             path.unlink()
-            LOGGER.info("Removed %s", path)
     LOGGER.info("clear_store: store cleared")
 
 
