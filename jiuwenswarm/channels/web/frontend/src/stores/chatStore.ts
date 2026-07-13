@@ -192,6 +192,7 @@ interface ChatState {
   setSwitchingMode: (sessionId: string, switching: boolean) => void;
   setNewSession: (sessionId: string, isNew: boolean) => void;
   addToolCall: (sessionId: string, toolCall: ToolCall, options?: { startedAt?: string; requestId?: string }) => void;
+  updateToolProgress: (sessionId: string, toolCallId: string, progress: Partial<ToolResult>) => void;
   addToolResult: (sessionId: string, toolResult: ToolResult, options?: { updatedAt?: string }) => void;
   markTimedOutExecutions: (sessionId: string) => void;
   updateSubtask: (sessionId: string, payload: SubtaskUpdatePayload) => void;
@@ -811,6 +812,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
         updatedAt,
         resultArrivedAfterTimeout:
           existingExecution.status === 'timeout' ? true : existingExecution.resultArrivedAfterTimeout,
+      });
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, toolExecutions: nextExecutions },
+        },
+      };
+    });
+  },
+
+  updateToolProgress: (sessionId, toolCallId, progress) => {
+    if (!toolCallId) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const execution = runtime.toolExecutions.get(toolCallId);
+      if (!execution) return state;
+      const nextExecutions = new Map(runtime.toolExecutions);
+      nextExecutions.set(toolCallId, {
+        ...execution,
+        result: {
+          toolName: execution.toolCall.name,
+          result: '',
+          success: true,
+          toolCallId,
+          ...execution.result,
+          ...progress,
+        },
+        status: 'pending',
+        updatedAt: new Date().toISOString(),
       });
       return {
         runtimes: {

@@ -34,12 +34,17 @@ from openjiuwen.harness.workspace.workspace import WorkspaceNode
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     convert_interactions_to_ask_user_question,
 )
+from jiuwenswarm.agents.harness.common.tool_progress_context import (
+    bind_tool_progress,
+    reset_tool_progress,
+)
 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
     strip_image_content_from_model_context,
 )
 from jiuwenswarm.common.utils import logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
+_TOOL_PROGRESS_TOKEN_KEY = "_tool_progress_token"
 
 
 def _structured_tool_result_payload(result: Any) -> Any | None:
@@ -649,6 +654,13 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             tc = ctx.inputs.tool_call
             await self._emit_tool_call(session, tc)
             await self._emit_tool_update(session, tc, status="in_progress")
+            if getattr(tc, "name", "") == "symphony_compose_score":
+                async def progress_callback(event: dict[str, Any]) -> None:
+                    await self._emit_symphony_tool_progress(session, tc, event)
+
+                ctx.extra[_TOOL_PROGRESS_TOKEN_KEY] = bind_tool_progress(
+                    progress_callback
+                )
             # Track in-flight tool call for cancellation
             tc_id = getattr(tc, "id", "")
             if tc_id:
@@ -669,6 +681,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
 
         tc = ctx.inputs.tool_call
         tc_id = getattr(tc, "id", "")
+        reset_tool_progress(ctx.extra.pop(_TOOL_PROGRESS_TOKEN_KEY, None))
         # Remove from in-flight tracking on completion
         if tc_id:
             self._inflight_tool_calls.pop(tc_id, None)
@@ -823,6 +836,33 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             )
         except Exception:
             logger.debug("tool_update emit failed", exc_info=True)
+
+    @staticmethod
+    async def _emit_symphony_tool_progress(
+        session: Session,
+        tool_call: Any,
+        event: dict[str, Any],
+    ) -> None:
+        graph = event.get("graph")
+        if not isinstance(graph, dict):
+            return
+        try:
+            await session.write_stream(
+                OutputSchema(
+                    type="tool_update",
+                    index=0,
+                    payload={
+                        "tool_update": {
+                            "tool_name": getattr(tool_call, "name", ""),
+                            "tool_call_id": getattr(tool_call, "id", ""),
+                            "status": "in_progress",
+                            "beam_search_event": event,
+                        }
+                    },
+                )
+            )
+        except Exception:
+            logger.debug("Symphony tool progress emit failed", exc_info=True)
 
     async def _emit_todo_updated(self, session: Session, session_id: str) -> None:
         """Load the main agent's todo list and push a todo.updated event to the frontend."""

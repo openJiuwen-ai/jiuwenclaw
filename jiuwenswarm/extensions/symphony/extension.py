@@ -660,9 +660,6 @@ def _build_presentation(
     reason = str(plan.get("reason") or payload.get("reason") or "").strip()
     if reason:
         lines.extend(["", reason])
-    beam_lines = _beam_search_markdown(payload.get("beam_search"))
-    if beam_lines:
-        lines.extend(["", *beam_lines])
     steps = plan.get("steps") if isinstance(plan, dict) else []
     if isinstance(steps, list) and steps:
         confirmation = (

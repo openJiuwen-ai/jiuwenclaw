@@ -50,6 +50,7 @@ import {
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
+  normalizeToolUpdatePayload,
 } from '../features/tool-events/toolEventNormalizer';
 import { findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn } from '../features/teamLeaderMessages';
 
@@ -1995,6 +1996,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (currentMode === 'team' && !isTeamPanelClearedForPayload(payload)) {
           applyTeamTaskToolCall(sessionId, toolCall);
         }
+      }),
+      webClient.on('chat.tool_update', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const update = normalizeToolUpdatePayload(payload);
+        if (!update.toolCallId || !update.beamSearch) return;
+        useChatStore.getState().updateToolProgress(sessionId, update.toolCallId, {
+          toolName: update.toolName,
+          beamSearch: update.beamSearch,
+        });
       }),
       webClient.on('chat.tool_result', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);

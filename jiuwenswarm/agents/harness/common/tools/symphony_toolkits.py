@@ -7,11 +7,15 @@ import inspect
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 from jiuwenswarm.extensions.registry import ExtensionRegistry
+from jiuwenswarm.agents.harness.common.tool_progress_context import (
+    current_tool_progress,
+)
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.symphony.score_storage import (
     CURRENT_POINTER_FILENAME,
@@ -53,7 +57,13 @@ class SymphonyToolkit:
 
         timeout_s = self._resolve_timeout_s()
         try:
-            result = handler(params, request=None)
+            progress_callback = current_tool_progress()
+            request = None
+            if progress_callback is not None:
+                request = SimpleNamespace(
+                    metadata={"symphony_progress_callback": progress_callback}
+                )
+            result = handler(params, request=request)
             payload = await asyncio.wait_for(
                 result if inspect.isawaitable(result) else _return_value(result),
                 timeout=timeout_s,

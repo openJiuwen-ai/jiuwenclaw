@@ -7,6 +7,10 @@ import pytest
 from jiuwenswarm.agents.harness.common.tools.symphony_toolkits import (
     SymphonyToolkit,
 )
+from jiuwenswarm.agents.harness.common.tool_progress_context import (
+    bind_tool_progress,
+    reset_tool_progress,
+)
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 
 
@@ -157,6 +161,38 @@ def test_toolkit_passes_beam_mode_to_rpc_handler():
     assert result["success"] is True
     assert "params" not in result
     assert seen["mode"] == "beam"
+
+
+def test_toolkit_passes_current_tool_progress_to_extension_request():
+    registry = ExtensionRegistry.create_instance(
+        callback_framework=_CallbackFramework(),
+        config={},
+        logger=object(),
+    )
+    events = []
+
+    async def progress_callback(event):
+        events.append(event)
+
+    async def handler(params, request=None):
+        del params
+        callback = request.metadata["symphony_progress_callback"]
+        await callback({"event": "started", "graph": {"nodes": [], "edges": []}})
+        return {"success": True}
+
+    registry.register_rpc_handler("symphony.plan", handler)
+    registry.register_rpc_handler(
+        "symphony.score_status",
+        lambda _params, request=None: {"success": True, "exists": True, "stale": False},
+    )
+    token = bind_tool_progress(progress_callback)
+    try:
+        result = asyncio.run(SymphonyToolkit().plan("compose", mode="beam"))
+    finally:
+        reset_tool_progress(token)
+
+    assert result["success"] is True
+    assert events == [{"event": "started", "graph": {"nodes": [], "edges": []}}]
 
 
 def test_toolkit_passes_candidate_skill_ids_to_rpc_handler():

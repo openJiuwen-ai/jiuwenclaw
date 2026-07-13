@@ -8,6 +8,9 @@ from openjiuwen.core.single_agent.rail.base import ToolCallInputs
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
     JiuSwarmStreamEventRail,
 )
+from jiuwenswarm.agents.harness.common.tool_progress_context import (
+    current_tool_progress,
+)
 from jiuwenswarm.symphony.agent import AgenticToolResult
 
 
@@ -136,6 +139,33 @@ async def test_stream_event_rail_does_not_enable_symphony_status_events_for_plan
 
     await rail.after_tool_call(ctx)
     assert not any(chunk.type == "chat.symphony_status" for chunk in session.chunks)
+
+
+@pytest.mark.asyncio
+async def test_stream_event_rail_emits_beam_progress_as_tool_update():
+    rail = JiuSwarmStreamEventRail()
+    session = _StreamSession()
+    ctx = _ctx(session, "symphony_compose_score", tool_call_id="beam-call")
+
+    await rail.before_tool_call(ctx)
+    callback = current_tool_progress()
+    assert callback is not None
+    await callback({
+        "type": "symphony.beam_search.started",
+        "event": "started",
+        "round_index": 0,
+        "graph": {
+            "nodes": [{"id": "seed", "label": "Seed", "status": "seed"}],
+            "edges": [],
+        },
+    })
+
+    updates = [chunk for chunk in session.chunks if chunk.type == "tool_update"]
+    assert updates[-1].payload["tool_update"]["tool_call_id"] == "beam-call"
+    assert updates[-1].payload["tool_update"]["beam_search_event"]["event"] == "started"
+
+    await rail.after_tool_call(ctx)
+    assert current_tool_progress() is None
 
 
 @pytest.mark.asyncio

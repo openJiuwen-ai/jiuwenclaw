@@ -11,6 +11,7 @@ import { ToolExecution } from '../../types';
 import { formatToolArguments, formatToolResult } from '../../utils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { SkillTreePath } from './SkillTreePath';
+import { BeamSearchGraph } from './BeamSearchGraph';
 
 interface ToolGroupDisplayProps {
   executions: ToolExecution[];
@@ -67,6 +68,9 @@ function isExecutionSuccessful(execution: ToolExecution) {
 }
 
 function getExecutionTone(execution: ToolExecution): ToolStatusTone {
+  if (execution.status === 'pending') {
+    return 'pending';
+  }
   if (isExecutionSuccessful(execution)) {
     return 'success';
   }
@@ -440,6 +444,10 @@ export function ToolGroupDisplay({
   const skillTrees = skillTreeExecutions
     .map((execution) => execution.result?.skillTree)
     .filter((tree): tree is NonNullable<typeof tree> => Boolean(tree));
+  const beamSearch = [...visibleExecutions]
+    .reverse()
+    .find((execution) => execution.result?.beamSearch)
+    ?.result?.beamSearch;
   const viewedSkillIds = Array.from(new Set([
     ...turnViewedSkillIds,
     ...collectViewedSkillIds(executions),
@@ -514,6 +522,7 @@ export function ToolGroupDisplay({
             autoCollapse={collapseSkillTreeWhenContentStarts}
           />
         )}
+        {beamSearch && <BeamSearchGraph progress={beamSearch} />}
       </div>
     </div>
   );

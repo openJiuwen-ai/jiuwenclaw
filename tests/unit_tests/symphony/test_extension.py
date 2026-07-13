@@ -568,13 +568,8 @@ def test_plan_presentation_uses_recommended_plan(monkeypatch, tmp_path):
     assert result["result"]["recommended_plans"][0]["status"] == "ready"
     assert "Best match." in result["content"]
     assert result["content"].endswith("是否按照上述编排结果执行？")
-    assert "## Beam search" in result["content"]
-    assert "classDef seed" in result["content"]
-    assert "classDef selected" in result["content"]
-    assert "classDef rejected fill:#f3f4f6" in result["content"]
-    assert "B1 --> B2" in result["content"]
-    assert "B1 --> B3" in result["content"]
-    assert "Round `1`: `2` candidates, `1` selected, `1` rejected" in result["content"]
+    assert "## Beam search" not in result["content"]
+    assert "classDef rejected" not in result["content"]
     assert "score `0.91`" not in result["content"]
     assert "strong can_feed match" not in result["content"]
     assert "Missing inputs:" not in result["content"]

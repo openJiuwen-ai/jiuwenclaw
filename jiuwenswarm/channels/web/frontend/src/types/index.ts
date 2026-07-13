@@ -4,6 +4,7 @@
 
 export * from './message';
 export * from './skillTree';
+export * from './beamSearch';
 export * from './todo';
 export * from './websocket';
 export * from '../features/workspace/projectTypes';

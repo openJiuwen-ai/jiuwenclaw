@@ -1,4 +1,8 @@
 import { parseSkillTreePath, type SkillTreePath } from '../../types/skillTree';
+import {
+  parseBeamSearchProgress,
+  type BeamSearchProgress,
+} from '../../types/beamSearch';
 
 type UnknownPayload = Record<string, unknown>;
 
@@ -78,6 +82,13 @@ export interface NormalizedToolResult {
   success: boolean;
   summary?: string;
   skillTree?: SkillTreePath;
+  beamSearch?: BeamSearchProgress;
+}
+
+export interface NormalizedToolUpdate {
+  toolName: string;
+  toolCallId?: string;
+  beamSearch?: BeamSearchProgress;
 }
 
 export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToolCall {
@@ -147,6 +158,9 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
   const skillTree =
     parseSkillTreePath(toolResultPayload.raw_output) ??
     parseSkillTreePath(toolResultPayload.rawOutput);
+  const beamSearch =
+    parseBeamSearchProgress(toolResultPayload.beam_search_event) ??
+    parseBeamSearchProgress(rawOutputRecord?.beam_search);
 
   return {
     toolName,
@@ -155,5 +169,16 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
     success,
     summary,
     skillTree,
+    beamSearch,
+  };
+}
+
+export function normalizeToolUpdatePayload(payload: UnknownPayload): NormalizedToolUpdate {
+  const update = asRecord(payload.tool_update) ?? payload;
+  return {
+    toolName:
+      (typeof update.tool_name === 'string' && update.tool_name) || 'unknown',
+    toolCallId: resolveToolCallId(update, payload),
+    beamSearch: parseBeamSearchProgress(update.beam_search_event),
   };
 }
