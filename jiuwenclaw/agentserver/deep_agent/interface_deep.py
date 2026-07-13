@@ -5205,7 +5205,9 @@ class JiuWenClawDeepAdapter:
         if source == "skill_evolve":
             resolved = await self._handle_evolution_approval(request_id, answers)
         elif source == "skill_create":
-            resolved = await self._handle_skill_create_approval(request_id, answers)
+            resolved = await self._handle_skill_create_approval(
+                request_id, answers, session_id=request.session_id or "",
+            )
         elif source == "ask_tool":
             resolved = AskUserQuestionRegistry.get_instance().resolve(request_id, answers)
         else:
@@ -5213,7 +5215,9 @@ class JiuWenClawDeepAdapter:
             if request_id.startswith("skill_evolve_"):
                 resolved = await self._handle_evolution_approval(request_id, answers)
             elif request_id.startswith("skill_create_"):
-                resolved = await self._handle_skill_create_approval(request_id, answers)
+                resolved = await self._handle_skill_create_approval(
+                    request_id, answers, session_id=request.session_id or "",
+                )
             elif isinstance(request_id, str) and request_id.startswith(ASK_REQUEST_PREFIX):
                 resolved = AskUserQuestionRegistry.get_instance().resolve(request_id, answers)
 
@@ -5271,11 +5275,16 @@ class JiuWenClawDeepAdapter:
 
         return True
 
-    async def _handle_skill_create_approval(self, request_id: str, answers: list) -> bool:
+    async def _handle_skill_create_approval(
+        self, request_id: str, answers: list, *, session_id: str = ""
+    ) -> bool:
         """Handle approval for new Skill creation proposals.
 
         Uses the optimizer path: calls rail.on_approve_new_skill() for accepted
-        proposals which will create the skill, or rail.on_reject_new_skill() to discard.
+        proposals which now returns a skill_creator_prompt string (instead of
+        creating the skill directly).  The host dispatches this prompt via
+        ``_dispatch_skill_creator_follow_up`` to launch a new invoke that calls
+        the **skill-creator** skill.
         """
         rail = self._skill_evolution_rail
         if rail is None:
@@ -5289,13 +5298,132 @@ class JiuWenClawDeepAdapter:
         )
 
         if accepted:
-            await rail.on_approve_new_skill(request_id)
-            logger.info("[JiuWenClaw] skill create accepted: request_id=%s", request_id)
+            prompt = await rail.on_approve_new_skill(request_id)
+            if prompt:
+                await self._dispatch_skill_creator_follow_up(
+                    request_id, prompt, session_id=session_id,
+                )
+                logger.info(
+                    "[JiuWenClaw] skill create follow-up dispatched: request_id=%s session=%s",
+                    request_id,
+                    session_id,
+                )
+            else:
+                logger.warning(
+                    "[JiuWenClaw] skill create approved but no prompt returned: request_id=%s",
+                    request_id,
+                )
         else:
             await rail.on_reject_new_skill(request_id)
             logger.info("[JiuWenClaw] skill create rejected: request_id=%s", request_id)
 
         return True
+
+    async def _iter_skill_creator_follow_up_stream(
+        self,
+        *,
+        base_inputs: dict[str, Any],
+        prompt: str,
+        skill_create_request_id: str,
+        stream_request_id: str,
+        channel_id: str,
+        session_id: str,
+    ) -> AsyncIterator[AgentResponseChunk]:
+        """Run skill-creator follow-up in the same stream/request scope as the main invoke."""
+        followup_inputs = dict(base_inputs)
+        followup_inputs["query"] = prompt
+        followup_inputs["conversation_id"] = session_id
+        followup_inputs["_invoke_turn_id"] = stream_request_id
+        logger.info(
+            "[JiuWenClaw] running in-stream skill_creator follow-up: "
+            "skill_create_request_id=%s stream_request_id=%s session=%s prompt_chars=%d",
+            skill_create_request_id,
+            stream_request_id,
+            session_id,
+            len(prompt),
+        )
+        try:
+            async for chunk in Runner.run_agent_streaming(self._instance, followup_inputs):
+                parsed = self._parse_stream_chunk_with_source(chunk)
+                if parsed is None:
+                    continue
+                yield AgentResponseChunk(
+                    request_id=stream_request_id,
+                    channel_id=channel_id,
+                    payload=parsed,
+                    is_complete=False,
+                )
+        except Exception as exc:
+            logger.error(
+                "[JiuWenClaw] in-stream skill_creator follow-up failed: %s", exc,
+                exc_info=True,
+            )
+            yield AgentResponseChunk(
+                request_id=stream_request_id,
+                channel_id=channel_id,
+                payload={"event_type": "chat.error", "error": str(exc)},
+                is_complete=False,
+            )
+
+    async def _dispatch_skill_creator_follow_up(
+        self, request_id: str, prompt: str, *, session_id: str = ""
+    ) -> None:
+        """方案一：发起新 invoke 调用 skill-creator 技能落盘。
+
+        Launches a new invoke (async fire-and-forget) that uses the
+        **skill-creator** skill to create the new skill in ``skills_dir``.
+        The new invoke reuses the current session so the skill-creator can
+        see the conversation context.
+
+        Args:
+            request_id: 原 skill_create_<uuid> request_id（用于关联日志/审计）
+            prompt: Rail 构造的 skill_creator_prompt（含 skills_dir / reason / suggested_name）
+        """
+        import asyncio as _asyncio
+
+        resolved_session_id = (session_id or self._current_session_id() or "").strip()
+        logger.info(
+            "[JiuWenClaw] dispatching skill_creator follow-up: request_id=%s session=%s prompt_chars=%d",
+            request_id,
+            resolved_session_id,
+            len(prompt),
+        )
+
+        async def _run_follow_up() -> None:
+            try:
+                await Runner.run_agent(
+                    agent=self._instance,
+                    inputs={
+                        "query": prompt,
+                        "conversation_id": resolved_session_id,
+                    },
+                    session=resolved_session_id or None,
+                )
+            except Exception as exc:
+                logger.error(
+                    "[JiuWenClaw] skill_creator follow-up run failed: %s", exc
+                )
+
+        try:
+            _asyncio.create_task(_run_follow_up())
+        except Exception as exc:
+            logger.error(
+                "[JiuWenClaw] skill_creator follow-up dispatch failed: %s", exc
+            )
+
+    def _current_session_id(self) -> str:
+        """Return the current session id for follow-up invokes.
+
+        Falls back to an empty string if no session is available.
+        """
+        # Try to get from the most recent request context
+        try:
+            # _instance.card may carry session info
+            if hasattr(self._instance, "card") and self._instance.card is not None:
+                return getattr(self._instance.card, "session_id", "")
+        except Exception:
+            pass
+        return ""
 
     # ------------------------------------------------------------------
     # /evolve, /evolve_list, /evolve_simplify & /solidify command handlers
@@ -5492,7 +5620,7 @@ class JiuWenClawDeepAdapter:
                     logger.debug("[JiuWenClaw] load QA block registry for evolve failed: %s", registry_exc)
                 if not qa_ids and hasattr(history, "recent_qa_ids"):
                     qa_ids = list(reversed(history.recent_qa_ids()))
-                fallback_qa_ids = qa_ids[:3]
+                fallback_qa_ids = qa_ids[:10]
                 merged_messages = []
                 for qa_id in reversed(fallback_qa_ids):
                     cached = history.get(qa_id)
@@ -7291,6 +7419,27 @@ class JiuWenClawDeepAdapter:
             # session.write_stream 传递，需手动注入到 stream 输出
             if self._skill_evolution_rail is not None:
                 for evt in self._skill_evolution_rail.drain_pending_approval_events():
+                    payload = evt.payload or {}
+                    action = payload.get("action")
+
+                    if action == "skill_creator_follow_up":
+                        meta = payload.get("skill_create_meta", {})
+                        if meta.get("auto_save") is True:
+                            # auto_save=True：在同一 stream/request scope 内续跑 skill-creator
+                            prompt = payload.get("skill_creator_prompt", "")
+                            request_id = payload.get("request_id", "")
+                            if prompt:
+                                async for follow_chunk in self._iter_skill_creator_follow_up_stream(
+                                    base_inputs=inputs,
+                                    prompt=prompt,
+                                    skill_create_request_id=request_id,
+                                    stream_request_id=rid,
+                                    channel_id=cid,
+                                    session_id=session_id,
+                                ):
+                                    yield follow_chunk
+                            continue
+
                     parsed = self._parse_stream_chunk_with_source(evt)
                     hitl_pending_stream = self._detect_hitl_pause(
                         parsed,
