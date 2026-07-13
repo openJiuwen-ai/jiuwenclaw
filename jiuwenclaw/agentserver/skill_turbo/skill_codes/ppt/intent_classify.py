@@ -49,11 +49,18 @@ _LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = """你是 PPT 任务分析助手。从用户
 第二步：PPT 需求信息提取（仅当没有找到任何文件路径时执行）
 - 只提取用户**明确提到**的信息，不要推断或补充
 - 未提及的字段留空字符串或 null
-- page_count 必须是正整数（内容页数，不含封面/结束页；如 10）
+- page_count 必须是正整数（内容页数，不含封面/结束页；总页数 = page_count + 2）。
+  判断规则：①用户表达总页数或上限（"总页数N页"/"N页以内"/"不超过N页"等）→ page_count = N - 2；
+  ②用户仅说页数（"N页"/"做N页PPT"）→ page_count = N；
+  ③用户明确说内容页/正文（"内容页N页"/"正文N页"）→ page_count = N。
+  示例："10页以内"→8, "总页数8页"→6, "8页"→8
 - style_id 可选值：business-classic / tech-minimal / elegant-narrative / industrial-tech / free / 其他风格名
 - audience 可选值：公司高管 / 技术团队 / 投资人 / 普通受众 / 其他
 - presentation_purpose 可选值：工作汇报 / 产品展示 / 教学分享 / auto / 其他
-- pack_dir: 用户提供的模板包目录绝对路径（字符串；未知则 ""）。当用户在消息中提到"用 XX 模板""用模板包""template pack"等，且给出了目录路径时提取该路径。路径可能是 Windows 格式（如 D:\\path\\to\\pack）或 Unix 格式（/path/to/pack）。仅提取用户明确给出的路径，不要编造。
+- pack_dir: 用户提供的模板包目录绝对路径（字符串；未知则 ""）。
+  当用户在消息中提到"用 XX 模板""用模板包""template pack"等，且给出了目录路径时提取该路径。
+  路径可能是 Windows 格式（如 D:\\path\\to\\pack）或 Unix 格式（/path/to/pack）。
+  仅提取用户明确给出的路径，不要编造。
 
 重要：如果找到了文件路径，slots 各字段留空，不需要提取需求信息；
       如果没有找到任何文件路径，则必须提取 slots 信息。
