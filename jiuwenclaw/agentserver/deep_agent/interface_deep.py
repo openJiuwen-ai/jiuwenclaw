@@ -6812,6 +6812,7 @@ class JiuWenClawDeepAdapter:
             )
 
         has_streamed_content = False
+        chat_final_sent = False
         accumulated_text = ""
         accumulated_reasoning = ""
         evolution_status_started = False
@@ -7060,6 +7061,8 @@ class JiuWenClawDeepAdapter:
                                     payload=parsed,
                                     is_complete=False,
                                 )
+                                if isinstance(parsed, dict) and parsed.get("event_type") == "chat.final":
+                                    chat_final_sent = True
                                 if should_pause_for_user_input:
                                     suppress_stream_after_hitl = True
                                     continue
@@ -7077,6 +7080,8 @@ class JiuWenClawDeepAdapter:
                                 payload=parsed,
                                 is_complete=False,
                             )
+                            if isinstance(parsed, dict) and parsed.get("event_type") == "chat.final":
+                                chat_final_sent = True
                             if should_pause_for_user_input:
                                 suppress_stream_after_hitl = True
                                 continue
@@ -7136,6 +7141,13 @@ class JiuWenClawDeepAdapter:
                     "[JiuWenClawDeepAdapter] merged evolution footnote into chat.final: request_id=%s",
                     rid,
                     extra={"user_visible": "progress"},
+                )
+
+            if not chat_final_sent and not accumulated_text and not hitl_pending_stream and not has_streamed_content:
+                accumulated_text = "处理完成，但未生成回复内容。请尝试重新发送消息。"
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] ReAct loop ended with no visible content — using fallback: request_id=%s",
+                    rid,
                 )
 
             if accumulated_text and not hitl_pending_stream:
