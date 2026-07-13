@@ -105,8 +105,14 @@ class SkillTurboPlanner:
 
         messages = self._build_route_messages(task, context, skills_payload)
         try:
-            response = await client.invoke(messages)
-            raw_content = getattr(response, "content", response)
+            # 使用流式调用，避免部分 MaaS 模型（如 maas-glm-5.1-zhipu）
+            # 非流式路由未注册导致 429 Route missed
+            collected: list[str] = []
+            async for chunk in client.stream(messages):
+                content = getattr(chunk, "content", None)
+                if content:
+                    collected.append(content)
+            raw_content = "".join(collected)
             route = extract_llm_json(raw_content, expected_type=dict)
         except Exception as e:
             logger.warning(
