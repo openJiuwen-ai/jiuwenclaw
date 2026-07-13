@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CircleAlert } from 'lucide-react';
+import { CircleAlert, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
-import { PROJECT_SESSION_PAGE_SIZE, useWorkspaceStore } from '../../stores';
+import { webClient } from '../../services/webClient';
+import {
+  PROJECT_SESSION_PAGE_SIZE,
+  useWorkspaceStore,
+  useCronStore,
+  filterJobsForProject,
+  type SidebarCronJob,
+} from '../../stores';
 import type { ProjectInfo, Session } from '../../types';
 import {
   getConversationMenuItems,
@@ -24,10 +31,12 @@ import {
   selectProjectDirectory,
 } from '../../features/workspace/projectDirectoryPicker';
 import './ConversationSidebar.css';
+import '../dialogs/dialogs.css';
 import addProjectIcon from '../../assets/work-mode/add-project.svg';
 import arrowRightIcon from '../../assets/work-mode/arrow-right.svg';
 import collapseIcon from '../../assets/work-mode/collapse.svg';
 import closeIcon from '../../assets/work-mode/close.svg';
+import cronIcon from '../../assets/定时任务.svg';
 import deleteIcon from '../../assets/work-mode/delete.svg';
 import editIcon from '../../assets/work-mode/edit.svg';
 import folderFoldIcon from '../../assets/work-mode/folder-fold.svg';
@@ -562,6 +571,38 @@ function ProjectDeleteDialog({
   );
 }
 
+function CronJobDeleteDialog({
+  job,
+  error,
+  deleting,
+  onCancel,
+  onDelete,
+}: {
+  job: SidebarCronJob;
+  error?: string | null;
+  deleting: boolean;
+  onCancel: () => void;
+  onDelete: () => void;
+}) {
+  const { t } = useTranslation();
+  const title = t('multiSession.delete');
+  return (
+    <div className="conversation-dialog" role="dialog" aria-modal="true" aria-label={title}>
+      <button type="button" className="conversation-dialog__backdrop" onClick={onCancel} aria-label={t('common.cancel')} />
+      <div className="conversation-dialog__panel">
+        <button type="button" className="conversation-dialog__close" onClick={onCancel} aria-label={t('common.close')}><X size={16} /></button>
+        <h2>{title}</h2>
+        <p>{t('multiSession.project.deleteCronJobConfirm', { name: job.name })}</p>
+        {error ? <div className="conversation-dialog__error">{error}</div> : null}
+        <div className="conversation-dialog__actions">
+          <button type="button" onClick={onCancel}>{t('common.cancel')}</button>
+          <button type="button" className="is-danger" disabled={deleting} onClick={onDelete}>{t('multiSession.delete')}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 type RenameTarget =
   | { kind: 'project'; id: string; value: string }
   | { kind: 'session'; id: string; value: string };
@@ -586,6 +627,9 @@ export function ConversationSidebar({
   const [deleteProjectTarget, setDeleteProjectTarget] = useState<ProjectInfo | null>(null);
   const [deleteProjectBusy, setDeleteProjectBusy] = useState(false);
   const [deleteProjectError, setDeleteProjectError] = useState<string | null>(null);
+  const [deleteCronTarget, setDeleteCronTarget] = useState<SidebarCronJob | null>(null);
+  const [deleteCronBusy, setDeleteCronBusy] = useState(false);
+  const [deleteCronError, setDeleteCronError] = useState<string | null>(null);
   const [projectAddMenuOpen, setProjectAddMenuOpen] = useState(false);
   const addMenuRef = useRef<HTMLDivElement>(null);
   const previousProcessing = useRef<Record<string, boolean>>({});
@@ -608,6 +652,43 @@ export function ConversationSidebar({
     pinSession,
     renameSession,
   } = useWorkspaceStore();
+
+  const cronJobs = useCronStore((s) => s.jobs);
+  const loadCronJobs = useCronStore((s) => s.loadJobs);
+  const expandedCronGroups = useCronStore((s) => s.expandedCronGroups);
+  const toggleCronGroup = useCronStore((s) => s.toggleCronGroup);
+  const cronSessions = useCronStore((s) => s.cronSessions);
+  const cronSessionsLoading = useCronStore((s) => s.cronSessionsLoading);
+  const loadCronSessions = useCronStore((s) => s.loadCronSessions);
+  const deleteJob = useCronStore((s) => s.deleteJob);
+
+  useEffect(() => {
+    void loadCronJobs();
+  }, [loadCronJobs]);
+
+  // 监听 agent 工具调用结果：当 cron 相关工具执行后刷新侧边栏定时任务
+  useEffect(() => {
+    const CRON_TOOL_PREFIX = 'cron_';
+    const unsubscribe = webClient.on('chat.tool_result', (event) => {
+      const payload = event.payload as Record<string, unknown>;
+      const inner = (payload?.tool_result as Record<string, unknown>) ?? payload;
+      const toolName = String(inner?.tool_name ?? inner?.name ?? '');
+      if (toolName.startsWith(CRON_TOOL_PREFIX)) {
+        void loadCronJobs();
+      }
+    });
+    return unsubscribe;
+  }, [loadCronJobs]);
+
+  // 按项目归属定时任务
+  const jobsByProject = useMemo(() => {
+    const map = new Map<string, SidebarCronJob[]>();
+    for (const project of projects) {
+      const jobs = filterJobsForProject(cronJobs, project.project_id);
+      if (jobs.length > 0) map.set(project.project_id, jobs);
+    }
+    return map;
+  }, [cronJobs, projects]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setRelativeTimeNow(Date.now()), RELATIVE_TIME_REFRESH_MS);
@@ -712,6 +793,15 @@ export function ConversationSidebar({
       await pinSession(session.session_id, !session.pinned);
     } catch (error) {
       setPinError(error instanceof Error ? error.message : String(error));
+    } finally {
+      // 置顶/取消置顶后刷新所有展开的定时任务触发列表，保证触发会话实时回归/移除
+      for (const [groupId, isOpen] of Object.entries(expandedCronGroups)) {
+        if (!isOpen) continue;
+        const cronId = groupId.startsWith('cron-') ? groupId.slice(5) : groupId;
+        const job = cronJobs.find((j) => j.id === cronId);
+        if (!job) continue;
+        void loadCronSessions(job.project_id || 'default', cronId);
+      }
     }
   }
 
@@ -797,6 +887,20 @@ export function ConversationSidebar({
     }
   }
 
+  async function handleDeleteCronJob() {
+    if (!deleteCronTarget) return;
+    setDeleteCronBusy(true);
+    setDeleteCronError(null);
+    try {
+      await deleteJob(deleteCronTarget.id);
+      setDeleteCronTarget(null);
+    } catch (error) {
+      setDeleteCronError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDeleteCronBusy(false);
+    }
+  }
+
   function renderSession(session: Session, options: { nested?: boolean; projectMenu?: boolean } = {}) {
     const nested = options.nested === true;
     const projectMenu = options.projectMenu === true;
@@ -821,6 +925,74 @@ export function ConversationSidebar({
           value: getSessionTitle(session, t('multiSession.untitled')),
         })}
       />
+    );
+  }
+
+  function renderCronJob(job: SidebarCronJob, projectId: string, nested = false) {
+    const cronGroupId = `cron-${job.id}`;
+    const cronExpanded = expandedCronGroups[cronGroupId] ?? false;
+    const triggerSessions = cronSessions[job.id] || [];
+    const isCronSessionsLoading = cronSessionsLoading[job.id] ?? false;
+    return (
+      <div key={`cron-wrapper-${job.id}`} className={`conversation-sidebar__session-wrapper${nested ? ' conversation-sidebar__session-wrapper--nested' : ''}`}>
+        <div
+          className={`conversation-sidebar__cron-row${cronExpanded ? ' is-expanded' : ''}`}
+          onClick={() => {
+            toggleCronGroup(cronGroupId);
+            if (!cronExpanded) {
+              void loadCronSessions(projectId, job.id);
+            }
+          }}
+          title={job.name}
+        >
+          <img className="conversation-sidebar__cron-row-icon" src={cronIcon} alt="" aria-hidden="true" />
+          <span className="conversation-sidebar__cron-row-name">{job.name}</span>
+          <button
+            type="button"
+            className="conversation-sidebar__cron-row-delete"
+            onClick={(event) => {
+              event.stopPropagation();
+              setDeleteCronTarget(job);
+            }}
+            title={t('multiSession.project.deleteCronJob')}
+            aria-label={t('multiSession.project.deleteCronJob')}
+            data-tooltip={t('multiSession.project.deleteCronJob')}
+          >
+            <img src={deleteIcon} alt="" aria-hidden="true" />
+          </button>
+          <img className="conversation-sidebar__cron-row-chevron" src={cronExpanded ? collapseIcon : arrowRightIcon} alt="" aria-hidden="true" />
+        </div>
+        {cronExpanded ? (
+          <div className="conversation-sidebar__cron-sessions">
+            {isCronSessionsLoading ? (
+              <div className="conversation-sidebar__cron-sessions-loading">{t('common.loading')}</div>
+            ) : triggerSessions.length > 0 ? (
+              triggerSessions.map((ts) => (
+                <ConversationListItem
+                  key={ts.session_id}
+                  session={ts}
+                  runtime={runtimes[ts.session_id]}
+                  active={activeSessionId === ts.session_id}
+                  nested={false}
+                  unread={unreadSessions.has(ts.session_id)}
+                  now={relativeTimeNow}
+                  onSelect={() => onSelect(ts)}
+                  onDelete={() => onDelete(ts)}
+                  onPin={() => void handlePinSession(ts)}
+                  menuItems={getConversationMenuItems(Boolean(ts.pinned), t)}
+                  onRename={() => setRenameTarget({
+                    kind: 'session',
+                    id: ts.session_id,
+                    value: getSessionTitle(ts, t('multiSession.untitled')),
+                  })}
+                />
+              ))
+            ) : (
+              <div className="conversation-sidebar__cron-sessions-empty">{t('multiSession.project.noSessions')}</div>
+            )}
+          </div>
+        ) : null}
+      </div>
     );
   }
 
@@ -895,8 +1067,9 @@ export function ConversationSidebar({
         />
         {expanded ? (
           <div className="conversation-sidebar__group-list">
+            {(jobsByProject.get(project.project_id) || []).map((job) => renderCronJob(job, project.project_id, true))}
             {sessionsForProject.length > 0 ? sessionsForProject.map((session) => renderSession(session, { nested: true, projectMenu: true })) : (
-              <div className="conversation-sidebar__empty">{t('multiSession.project.noConversations')}</div>
+              (jobsByProject.get(project.project_id) || []).length === 0 ? <div className="conversation-sidebar__empty">{t('multiSession.project.noConversations')}</div> : null
             )}
             {renderSessionPagination(project.project_id, true)}
           </div>
@@ -929,7 +1102,9 @@ export function ConversationSidebar({
             <div className="conversation-sidebar__group-list">
               {orderedPinnedSessions.map((session) => {
                 const project = getSessionProject(session);
-                return renderSession(session, { projectMenu: Boolean(project && !isDefaultProject(project)) });
+                return renderSession(session, {
+                  projectMenu: Boolean(project && !isDefaultProject(project)),
+                });
               })}
               {pinnedProjects.map((project) => renderProject(project))}
             </div>
@@ -986,7 +1161,7 @@ export function ConversationSidebar({
             {regularProjects.map((project) => renderProject(project))}
           </div>
         </div>
-        <div className="conversation-sidebar__group">
+        <div className="conversation-sidebar__group conversation-sidebar__group--conversations">
           <div className="conversation-sidebar__section-heading">
             <span className="conversation-sidebar__label">{t('multiSession.conversations')}</span>
             <button
@@ -1005,8 +1180,9 @@ export function ConversationSidebar({
             </button>
           </div>
           <div className="conversation-sidebar__group-list">
+            {defaultProject ? (jobsByProject.get(defaultProject.project_id) || []).map((job) => renderCronJob(job, defaultProject.project_id)) : null}
             {conversationSessions.length > 0 ? conversationSessions.map((session) => renderSession(session)) : (
-              <div className="conversation-sidebar__empty">{t('multiSession.project.noConversations')}</div>
+              (!defaultProject || (jobsByProject.get(defaultProject.project_id) || []).length === 0) ? <div className="conversation-sidebar__empty">{t('multiSession.project.noConversations')}</div> : null
             )}
             {defaultProject ? renderSessionPagination(defaultProject.project_id, false) : null}
           </div>
@@ -1049,6 +1225,18 @@ export function ConversationSidebar({
             setDeleteProjectTarget(null);
           }}
           onDelete={() => { void handleRemoveProject(); }}
+        />
+      ) : null}
+      {deleteCronTarget ? (
+        <CronJobDeleteDialog
+          job={deleteCronTarget}
+          deleting={deleteCronBusy}
+          error={deleteCronError}
+          onCancel={() => {
+            setDeleteCronError(null);
+            setDeleteCronTarget(null);
+          }}
+          onDelete={() => { void handleDeleteCronJob(); }}
         />
       ) : null}
     </aside>

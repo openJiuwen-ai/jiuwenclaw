@@ -430,6 +430,11 @@
   padding-left: 32px;
 }
 
+/* 对话区块下的会话：左间距 12px（置顶区域仍为 8px，cron 触发会话不受影响） */
+.conversation-sidebar__group--conversations > .conversation-sidebar__group-list > .conversation-list-item > .conversation-list-item__main {
+  padding-left: 12px;
+}
+
 .conversation-list-item:hover {
   z-index: 10;
   background: var(--bg-hover);
@@ -794,4 +799,171 @@
 
 @keyframes conversation-spin {
   to { transform: rotate(360deg); }
+}
+
+/* ---- 定时任务折叠列表 ---- */
+
+.conversation-sidebar__session-wrapper {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 定时任务行：与 session 同级 */
+.conversation-sidebar__cron-row {
+  display: flex;
+  height: 32px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+/* 项目下的定时任务行 */
+.conversation-sidebar__session-wrapper--nested > .conversation-sidebar__cron-row {
+  padding: 0 6px 0 32px;
+}
+
+/* 项目下的定时任务触发会话与空态：与定时任务文字对齐 */
+.conversation-sidebar__session-wrapper--nested .conversation-sidebar__cron-sessions .conversation-list-item__main {
+  padding-left: 44px;
+}
+
+.conversation-sidebar__session-wrapper--nested .conversation-sidebar__cron-sessions-empty {
+  padding-left: 44px;
+}
+
+.conversation-sidebar__cron-row:hover {
+  background: var(--secondary);
+}
+
+.conversation-sidebar__cron-row.is-expanded {
+  background: var(--secondary);
+}
+
+.conversation-sidebar__cron-row-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  opacity: .7;
+}
+
+.conversation-sidebar__cron-row-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.conversation-sidebar__cron-row-delete {
+  position: relative;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.conversation-sidebar__cron-row:hover .conversation-sidebar__cron-row-delete {
+  opacity: 1;
+}
+
+.conversation-sidebar__cron-row-delete:hover {
+  background: #E6E6E6;
+  color: var(--text);
+}
+
+.conversation-sidebar__cron-row-delete img {
+  width: 14px;
+  height: 14px;
+}
+
+.conversation-sidebar__cron-row-delete[data-tooltip]:hover::after,
+.conversation-sidebar__cron-row-delete[data-tooltip]:focus-visible::after {
+  position: absolute;
+  right: 0;
+  bottom: 30px;
+  z-index: 60;
+  display: block;
+  width: max-content;
+  height: 40px;
+  padding: 0 14px;
+  border-radius: 8px;
+  background: #FFFFFF;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, .14);
+  color: var(--text);
+  content: attr(data-tooltip);
+  font-size: 12px;
+  line-height: 40px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.conversation-sidebar__cron-row-chevron {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  opacity: .5;
+}
+
+/* 定时任务触发会话列表 */
+.conversation-sidebar__cron-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-left: 8px;
+}
+
+/* 定时任务触发会话：悬浮不显示背景色 */
+.conversation-sidebar__cron-sessions .conversation-list-item:hover,
+.conversation-sidebar__cron-sessions .conversation-list-item.is-active:hover {
+  background: transparent !important;
+}
+
+.conversation-sidebar__cron-sessions-loading,
+.conversation-sidebar__cron-sessions-empty {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  padding: 0 6px 0 20px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 定时任务触发会话：文字与定时任务名对齐（缩进 icon+gap = 20px） */
+.conversation-sidebar__cron-sessions .conversation-list-item__main {
+  padding-left: 20px;
+}
+
+/* cron 状态标签 */
+.conversation-sidebar__cron-item-status {
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.conversation-sidebar__cron-item-status.is-enabled {
+  background: #dcfce7;
+  color: #16a34a;
+}
+
+.conversation-sidebar__cron-item-status.is-disabled {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
+.conversation-sidebar__cron-item-status.is-expired {
+  background: #fef3c7;
+  color: #d97706;
 }

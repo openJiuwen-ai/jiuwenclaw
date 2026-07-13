@@ -1810,6 +1810,7 @@
     "waitingReply": "Needs input",
     "completedUnread": "Background task completed",
     "moreActions": "More actions",
+    "cronJobs": "Cron Jobs",
     "delete": "Delete",
     "deleteRunningDisabled": "Running conversations and conversations awaiting input cannot be deleted",
     "status": {
@@ -1837,11 +1838,14 @@
       "noProjectMatches": "No matching projects",
       "noProjects": "No projects",
       "noConversations": "No conversations",
+      "noSessions": "No trigger sessions",
       "startConversation": "Start a new conversation from {{projectName}}",
       "pinProject": "Pin project",
       "unpinProject": "Unpin project",
       "pinConversation": "Pin conversation",
       "unpinConversation": "Unpin",
+      "deleteCronJob": "Delete cron job",
+      "deleteCronJobConfirm": "Are you sure you want to delete the cron job \"{{name}}\"?",
       "pin": "Pin",
       "unpin": "Unpin",
       "pinFailed": "Pin action failed",
@@ -1858,7 +1862,7 @@
       "confirm": "Confirm"
     },
     "runtime": { "processing": "Processing" },
-    "deleteDialog": { "title": "Delete conversation", "description": "Delete “{{title}}”? This action cannot be undone." },
+    "deleteDialog": { "title": "Delete", "description": "Delete “{{title}}”? This action cannot be undone." },
     "notFound": { "title": "Conversation not found or deleted", "newConversation": "New conversation" },
     "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
   },
