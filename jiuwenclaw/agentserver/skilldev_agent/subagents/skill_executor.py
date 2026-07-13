@@ -109,9 +109,19 @@ SYSTEM_PROMPT_CN = """\
 ## user_notes.md（可选）
 如果执行过程中遇到不确定性、需要关注的问题、或采用了变通方案，在 `output_dir/user_notes.md` 中记录。如果没有需要说明的问题则不用创建。
 
-# 完成标准
+# 完成标准（强制）
 
-任务完成后，输出简短的执行总结，说明完成了什么、产出了哪些文件。
+任务完成后，你的**最后一轮回复必须是非空文本总结**，不得以空消息结束，也不得只调用工具后直接停止。
+
+硬性要求：
+1. **必须生成最终文本回复**：在所有文件写入（含 metrics.json、transcript.md）完成后，再用一段自然语言总结结束，不要再发起工具调用。
+2. **禁止空收尾**：最后一轮必须直接写出可被读取的总结正文；不要只在内心思考/推理里完成总结却不对外输出文字。
+3. **总结至少包含**：
+   - 任务是否完成
+   - 产出文件列表（含路径，尤其是 output_dir 下的文件）
+   - 如有错误，简要说明错误与处理结果
+4. 总结写在最终回复正文中即可，简短清晰，例如：
+   `任务已完成。产出：<output_dir>/xxx.txt、<output_dir>/metrics.json；transcript 已写入 <parent>/transcript.md。`
 """
 
 SYSTEM_PROMPT_EN = """\
@@ -185,9 +195,19 @@ Record each major tool call and result. No need to copy full output verbatim, bu
 ## user_notes.md (optional)
 If you encounter uncertainties, issues requiring attention, or workarounds during execution, record them in `output_dir/user_notes.md`. Skip if there's nothing to note.
 
-# Completion
+# Completion (mandatory)
 
-After finishing, output a brief execution summary: what was done, what files were produced.
+After finishing, your **final reply must be a non-empty text summary**. Do not end with an empty message, and do not stop right after tool calls without a final text response.
+
+Hard requirements:
+1. **Must produce a final text reply**: After all file writes (including metrics.json and transcript.md) are done, end with a natural-language summary and do not make further tool calls.
+2. **No empty ending**: The final turn must include a readable summary in the reply text itself; do not keep the summary only in internal reasoning/thinking without writing it out.
+3. **Summary must include at least**:
+   - Whether the task completed
+   - List of produced files (with paths, especially under output_dir)
+   - Brief error notes and how they were handled, if any
+4. Put the summary in the final reply body, short and clear, e.g.:
+   `Task completed. Outputs: <output_dir>/xxx.txt, <output_dir>/metrics.json; transcript written to <parent>/transcript.md.`
 """
 
 
