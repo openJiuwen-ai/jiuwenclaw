@@ -5,17 +5,17 @@ source: jiuwenswarm/server/agent_ws_server.py
 source_role: runtime_source
 audit_scope: default_health_audit
 class: AgentWebSocketServer
-signature: "_handle_session_switch(ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None"
+signature: "_handle_session_switch(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None"
 health:
-  overall: watch
-  name_behavior_match: good
+  overall: risky
+  name_behavior_match: partial
   responsibility_focus: single
   length: short
   complexity: low
   implementation_soundness: partial
   boundary_safety: partial
   input_contract: weak
-  output_contract: clear
+  output_contract: weak
   side_effects: explicit
   error_handling: partial
   state_mutation: shared
@@ -24,11 +24,12 @@ health:
   observability: partial
   performance_risk: low
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:38:06Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:51ddc58507cc99b8b70e7c1e68741232ca0a88de5e32dfd58b2a3445b146c9da
   confidence: confirmed
   expired_reason: null
 issues:
@@ -37,40 +38,38 @@ issues:
     severity: medium
     status: open
     summary: "The handler trusts client-supplied team mode and target identity."
-    evidence: "It checks only is_team_params(params) and a non-empty target before calling prepare_session_switch; it does not verify the target session directory or persisted metadata mode/team_name."
-    suggested_action: "Validate the target session exists and is a team session before stopping stale distributed runtimes, or document this RPC as best-effort runtime prep only."
+    evidence: "Lines 2403-2429 accept params.session_id/request.session_id plus caller-declared team mode without. See AgentWebSocketServer._handle_session_switch/risks.md#issue-001."
+    suggested_action: "Verify that the target exists and is a team session before invoking distributed cleanup."
   - id: ISSUE-002
     dimension: error_handling
     severity: low
     status: open
     summary: "Delegated switch failures fall through to the outer generic error path."
-    evidence: "prepare_session_switch is awaited without local try/except; _handle_message would convert exceptions to a generic error response without a switch-specific code."
-    suggested_action: "Catch delegated failures locally and return a structured switch error code."
+    evidence: "The await at lines 2427-2432 has no local exception mapping; _handle_message can only return the generic. See AgentWebSocketServer._handle_session_switch/risks.md#issue-002."
+    suggested_action: "Catch delegated failures and return a switch-specific error code."
   - id: ISSUE-003
     dimension: test_coverage
     severity: medium
     status: open
-    summary: "Important validation and failure branches lack direct tests."
-    evidence: "Direct tests cover valid team switch and non-team rejection, but not missing session_id, nonexistent target, metadata mismatch, or prepare_session_switch exception behavior."
-    suggested_action: "Add focused async handler tests for those branches plus metadata passthrough."
-confidence: confirmed
-details: {}
+    summary: "Validation and failure branches lack direct tests."
+    evidence: "test_agentserver_acp.py covers team success and non-team rejection; TeamManager tests cover distributed. See AgentWebSocketServer._handle_session_switch/risks.md#issue-003."
+    suggested_action: "Test those branches and metadata passthrough."
+  - id: ISSUE-004
+    dimension: output_contract
+    severity: medium
+    status: open
+    summary: "The success response overstates the performed operation."
+    evidence: "Lines 2433-2441 always return mode='team' and switched=true. prepare_session_switch is a local-runtime. See AgentWebSocketServer._handle_session_switch/risks.md#issue-004."
+    suggested_action: "Report a preparation result with the requested canonical mode, or activate/verify the target before claiming."
 ---
 
-# `AgentWebSocketServer._handle_session_switch`
+# AgentWebSocketServer._handle_session_switch
 
 ## Actual Role
 
-Handles `session.switch` for team-mode sessions by validating a target session id, requiring team-mode params, and delegating stale distributed-runtime cleanup to the channel-scoped `TeamManager.prepare_session_switch`. It sends one E2A-encoded unary response and does not persist active-session metadata or load the target session itself.
+The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
 
-## Key Signals
+## Audit Details
 
-- Input: `params.session_id` wins, then `request.session_id`; `params.mode` or `params.team` controls team-mode acceptance.
-- Output: Success payload is `{session_id, mode: "team", switched: true}`; validation failures return `BAD_REQUEST` or `UNSUPPORTED_MODE`.
-- Main side effects: Calls `get_team_manager(channel_id).prepare_session_switch(target, reason="session.switch: ")`.
-- Main risk: The handler trusts caller-provided mode/target identity without checking persisted session metadata before delegated cleanup.
-- Related tests: Direct tests cover team success and non-team rejection; TeamManager tests cover distributed/local stale-runtime behavior.
-
-## Detail Index
-
-- Detail docs pending.
+- [Reviewed behavior](AgentWebSocketServer._handle_session_switch/actual-behavior.md)
+- [Full issue evidence](AgentWebSocketServer._handle_session_switch/risks.md)

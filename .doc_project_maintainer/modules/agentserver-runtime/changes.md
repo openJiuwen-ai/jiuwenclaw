@@ -1,3 +1,3 @@
 # AgentServer Runtime Changes
 
-No semantic git-history change records have been created in this first artifact build. This file is present so future code changes can link AgentServer runtime behavior changes without mixing them with routine artifact synchronization.
+- [CHG-20260713-001: Close AgentWebSocketServer method audit delivery](../../changes/records/CHG-20260713-001-agentserver-method-closure.md) records the knowledge-model change that closed 128 method audits, refreshed the session flow, and added five AgentServer flows. It does not describe a product-code change.

@@ -1,21 +1,20 @@
 version: 0.0.1
 artifact_root: .doc_project_maintainer
-last_updated: '2026-07-08'
+last_updated: '2026-07-15'
 sync:
   status: partial
-  last_scanned_commit: af779aa6742969e46005a2a94f49d42d7a3b443a
-  last_synced_commit: null
+  last_scanned_commit: 10afedf222bcd6db98b24347a28f75e4613b3c87
+  last_synced_commit: 10afedf222bcd6db98b24347a28f75e4613b3c87
   coverage_closure:
     status: partial
     source: git ls-files plus git status --short via inventory_symbols.py
-    last_audited: '2026-07-08'
+    last_audited: '2026-07-15'
     tracked_paths: pending
     untracked_paths: classified
     flow_traces: partial
     code_symbols: partial
     symbol_audits: pending
-    notes: AgentServer-first build. Project-wide source inventory exists, but complete symbol docs and trusted audits are
-      pending.
+    notes: The 2026-07-15 normalized-AST scan at 10afedf2 found 0 expired audits among the 128 existing AgentWebSocketServer method reviews. No method card, audit signature, or previously unaudited symbol was added or promoted. Six newly observed unaudited server methods remain outside the frozen queue. Current integrity verification trusts 59 records and flags 69 non-source-expired entry-document hash mismatches; project-wide symbol docs, broader flows, and audits remain pending.
   pending:
   - id: SYNC-20260707-001
     reason: Full repository coverage is incomplete after initial AgentServer-focused slice.
@@ -29,10 +28,7 @@ sync:
     - gateway-and-channels
     - agent-harness
     - project-packaging
-    flows:
-    - agentserver-command-mcp
-    - agentserver-sandbox-runtime
-    - agentserver-schedule-auto-harness
+    flows: []
     code_symbols:
     - jiuwenswarm/server/agent_ws_server.py
     created: '2026-07-07'
@@ -72,9 +68,14 @@ modules:
   - gateway-agentserver-e2a-chat
   - agentserver-session-lifecycle
   - agentserver-server-push
+  - agentserver-command-mcp
+  - agentserver-sandbox-runtime
+  - agentserver-plan-mode-exit
+  - agentserver-schedule-auto-harness
+  - agentserver-history-stream
   coverage:
     status: partial
-    last_scanned: '2026-07-07'
+    last_scanned: '2026-07-13'
 - id: gateway-and-channels
   name: Gateway And Channels
   summary: Gateway clients, channel adapters, and frontend/TUI surfaces that send E2A requests to AgentServer.
@@ -87,6 +88,11 @@ modules:
   related_flows:
   - gateway-agentserver-e2a-chat
   - agentserver-server-push
+  - agentserver-command-mcp
+  - agentserver-sandbox-runtime
+  - agentserver-plan-mode-exit
+  - agentserver-schedule-auto-harness
+  - agentserver-history-stream
   coverage:
     status: planned
     last_scanned: '2026-07-07'
@@ -99,6 +105,11 @@ modules:
   directories:
   - jiuwenswarm/agents
   - jiuwenswarm/server/runtime/agent_adapter
+  related_flows:
+  - agentserver-command-mcp
+  - agentserver-sandbox-runtime
+  - agentserver-plan-mode-exit
+  - agentserver-schedule-auto-harness
   coverage:
     status: planned
     last_scanned: '2026-07-07'
@@ -127,6 +138,11 @@ directories:
   - gateway-agentserver-e2a-chat
   - agentserver-session-lifecycle
   - agentserver-server-push
+  - agentserver-command-mcp
+  - agentserver-sandbox-runtime
+  - agentserver-plan-mode-exit
+  - agentserver-schedule-auto-harness
+  - agentserver-history-stream
   coverage:
     status: partial
     last_scanned: '2026-07-07'
@@ -191,267 +207,165 @@ flows:
   directories:
   - jiuwenswarm/server
   - jiuwenswarm/gateway/routing
+- id: agentserver-command-mcp
+  name: AgentServer MCP Command Lifecycle
+  summary: TUI and Gateway MCP requests read or mutate config.yaml, discover tools, reload cached agents, and reconcile runtime MCP resources.
+  confidence: confirmed
+  doc: project/flows/agentserver-command-mcp.md
+  modules:
+  - agentserver-runtime
+  - gateway-and-channels
+  - agent-harness
+  directories:
+  - jiuwenswarm/server
+  - jiuwenswarm/gateway
+  code_symbols:
+  - AgentWebSocketServer._handle_command_mcp
+  - AgentWebSocketServer._normalize_mcp_payload
+- id: agentserver-sandbox-runtime
+  name: AgentServer Sandbox Runtime
+  summary: Sandbox commands mutate persisted policy, control JiuwenBox, recreate or hot-patch agents, and report effective files and Landlock status.
+  confidence: confirmed
+  doc: project/flows/agentserver-sandbox-runtime.md
+  modules:
+  - agentserver-runtime
+  - gateway-and-channels
+  - agent-harness
+  directories:
+  - jiuwenswarm/server
+  - jiuwenswarm/gateway
+  code_symbols:
+  - AgentWebSocketServer._handle_command_sandbox
+  - AgentWebSocketServer._handle_sandbox_enable
+  - AgentWebSocketServer._apply_sandbox_runtime_patch
+- id: agentserver-plan-mode-exit
+  name: AgentServer Plan Mode Exit
+  summary: Approval restores code mode in the session checkpoint, blocks stale plan re-entry, and pushes plan.mode_exited to clients.
+  confidence: confirmed
+  doc: project/flows/agentserver-plan-mode-exit.md
+  modules:
+  - agentserver-runtime
+  - gateway-and-channels
+  - agent-harness
+  directories:
+  - jiuwenswarm/server
+  - jiuwenswarm/agents/harness/code
+  code_symbols:
+  - AgentWebSocketServer._ensure_code_mode_state
+  - AgentWebSocketServer._check_post_process_plan_exit
+  - AgentWebSocketServer._push_plan_mode_exited
+- id: agentserver-schedule-auto-harness
+  name: AgentServer Scheduled Auto-Harness
+  summary: Schedule RPCs lazily start AutoHarnessService, persist tasks, execute autonomous jobs, and expose state and logs.
+  confidence: confirmed
+  doc: project/flows/agentserver-schedule-auto-harness.md
+  modules:
+  - agentserver-runtime
+  - gateway-and-channels
+  - agent-harness
+  directories:
+  - jiuwenswarm/server
+  - jiuwenswarm/agents/harness/common/auto_harness
+  code_symbols:
+  - AgentWebSocketServer._handle_schedule_request
+  - AgentWebSocketServer._resolve_model
+  - AgentWebSocketServer._build_model_cache
+- id: agentserver-history-stream
+  name: AgentServer History Stream
+  summary: History requests read persisted records, filter and sanitize pages, stream correlated events, and reconstruct frontend state.
+  confidence: confirmed
+  doc: project/flows/agentserver-history-stream.md
+  modules:
+  - agentserver-runtime
+  - gateway-and-channels
+  directories:
+  - jiuwenswarm/server
+  - jiuwenswarm/gateway
+  - jiuwenswarm/channels
+  code_symbols:
+  - AgentWebSocketServer.get_conversation_history
+  - AgentWebSocketServer._handle_history_get_stream
 code_symbols:
 - symbol: _run
   kind: function
   source: jiuwenswarm/server/app_agentserver.py
   doc: code/jiuwenswarm/server/app_agentserver.py/_run.md
-- symbol: AgentWebSocketServer.__init__
+- symbol: AgentWebSocketServer._handle_command_mcp
   kind: method
   source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer.__init__.md
-- symbol: AgentWebSocketServer.set_proactive_engine
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_command_mcp.md
+- symbol: AgentWebSocketServer._normalize_mcp_payload
   kind: method
   source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer.set_proactive_engine.md
-- symbol: AgentWebSocketServer._ws_capabilities_key
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._normalize_mcp_payload.md
+- symbol: AgentWebSocketServer._normalize_mcp_add_payload
   kind: method
   source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._ws_capabilities_key.md
-- symbol: AgentWebSocketServer._set_ws_acp_client_capabilities
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._normalize_mcp_add_payload.md
+- symbol: AgentWebSocketServer._normalize_mcp_update_payload
   kind: method
   source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._set_ws_acp_client_capabilities.md
-- symbol: AgentWebSocketServer._get_ws_acp_client_capabilities
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._normalize_mcp_update_payload.md
+- symbol: AgentWebSocketServer._handle_command_sandbox
   kind: method
   source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._get_ws_acp_client_capabilities.md
-- symbol: AgentWebSocketServer._clear_ws_acp_client_capabilities
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_command_sandbox.md
+- symbol: AgentWebSocketServer._handle_sandbox_enable
   kind: method
   source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._clear_ws_acp_client_capabilities.md
-- symbol: AgentWebSocketServer.get_instance
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer.get_instance.md
-- symbol: AgentWebSocketServer.reset_instance
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer.reset_instance.md
-- symbol: AgentWebSocketServer.host
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer.host.md
-- symbol: AgentWebSocketServer.port
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer.port.md
-- symbol: AgentWebSocketServer.start
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer.start.md
-- symbol: AgentWebSocketServer._bootstrap_internal_jiuwenbox
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._bootstrap_internal_jiuwenbox.md
-- symbol: AgentWebSocketServer._stop_scheduler
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._stop_scheduler.md
-- symbol: AgentWebSocketServer._process_request
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._process_request.md
-- symbol: AgentWebSocketServer.stop
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer.stop.md
-- symbol: AgentWebSocketServer._connection_handler
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._connection_handler.md
-- symbol: AgentWebSocketServer._handle_message
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_message.md
-- symbol: AgentWebSocketServer._should_trigger_before_chat_request_hook
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._should_trigger_before_chat_request_hook.md
-- symbol: AgentWebSocketServer._trigger_before_chat_request_hook
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._trigger_before_chat_request_hook.md
-- symbol: AgentWebSocketServer._handle_cancel
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_cancel.md
-- symbol: AgentWebSocketServer._resolve_code_language
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._resolve_code_language.md
-- symbol: AgentWebSocketServer._should_sync_code_mode_state
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._should_sync_code_mode_state.md
-- symbol: AgentWebSocketServer._is_explicit_plan_entry_request
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._is_explicit_plan_entry_request.md
-- symbol: AgentWebSocketServer._session_mode_sync_lock
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._session_mode_sync_lock.md
-- symbol: AgentWebSocketServer._handle_unary
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_unary.md
-- symbol: AgentWebSocketServer._handle_stream
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_stream.md
-- symbol: AgentWebSocketServer.send_push
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer.send_push.md
-- symbol: AgentWebSocketServer._push_plan_mode_exited
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._push_plan_mode_exited.md
-- symbol: AgentWebSocketServer._check_post_process_plan_exit
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._check_post_process_plan_exit.md
-- symbol: AgentWebSocketServer._prepare_code_mode_chat_turn
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._prepare_code_mode_chat_turn.md
-- symbol: AgentWebSocketServer._ensure_code_mode_state
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._ensure_code_mode_state.md
-- symbol: AgentWebSocketServer._is_stateless_method_request
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._is_stateless_method_request.md
-- symbol: AgentWebSocketServer._handle_session_list
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_session_list.md
-- symbol: AgentWebSocketServer._handle_session_rename
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_session_rename.md
-- symbol: AgentWebSocketServer._handle_session_switch
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_session_switch.md
-- symbol: AgentWebSocketServer._find_team_session_ids
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._find_team_session_ids.md
-- symbol: AgentWebSocketServer._ensure_persistent_checkpointer_response
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._ensure_persistent_checkpointer_response.md
-- symbol: AgentWebSocketServer._handle_team_delete
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_team_delete.md
-- symbol: AgentWebSocketServer._handle_session_delete
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_session_delete.md
-- symbol: AgentWebSocketServer._resolve_rewind_agent
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._resolve_rewind_agent.md
-- symbol: AgentWebSocketServer._send_error_response
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._send_error_response.md
-- symbol: AgentWebSocketServer._handle_session_rewind_full
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_session_rewind_full.md
-- symbol: AgentWebSocketServer._handle_session_rewind_context
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_session_rewind_context.md
-- symbol: AgentWebSocketServer._handle_permissions_config
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_permissions_config.md
-- symbol: AgentWebSocketServer._handle_history_get
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_history_get.md
-- symbol: AgentWebSocketServer._handle_proactive_tick
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_proactive_tick.md
-- symbol: AgentWebSocketServer._handle_team_snapshot
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_team_snapshot.md
-- symbol: AgentWebSocketServer._handle_command_workflows
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_command_workflows.md
-- symbol: AgentWebSocketServer._handle_team_history_get
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_team_history_get.md
-- symbol: AgentWebSocketServer._handle_history_get_stream
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_history_get_stream.md
-- symbol: AgentWebSocketServer._handle_command_add_dir
-  kind: method
-  source: jiuwenswarm/server/agent_ws_server.py
-  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_command_add_dir.md
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_sandbox_enable.md
 code_symbol_inventory:
   generated_by: scripts/inventory_symbols.py
   source_symbol_inventory: project/source-symbol-inventory.json
   coverage_map: project/coverage-map.json
   symbol_audit_map: project/symbol-audit-map.json
   source_files:
-    total: 1236
+    total: 1275
     documented: 1
-    pending: 985
-    pending_review: 250
+    pending: 1022
+    pending_review: 252
   required_symbols:
-    total: 14746
-    documented: 66
-    pending: 14680
-  default_health_audit_symbols: 8737
-  repository_coverage_only_symbols: 6009
+    total: 15584
+    documented: 131
+    pending: 15453
+  default_health_audit_symbols: 9040
+  repository_coverage_only_symbols: 6544
   directory_summary:
-    recorded_directories: 275
-    excluded_directories: 1
-    skipped_non_source_directories: 95
+    recorded_directories: 277
+    excluded_directories: 17
+    skipped_non_source_directories: 99
   recommended_mode: multi-agent
 coverage_map:
   path: project/coverage-map.json
   recommended_mode: multi-agent
-  pending_files: 985
+  pending_files: 1022
   documented_files: 1
-  documented_required_symbols: 66
-  pending_review_files: 250
-  suggested_slices: 282
-  suggested_audit_slices: 164
+  documented_required_symbols: 131
+  pending_review_files: 252
+  suggested_slices: 298
+  suggested_audit_slices: 167
 symbol_audit_map:
   path: project/symbol-audit-map.json
   audit_statuses:
-    unaudited: 14683
+    unaudited: 15456
     script_assessed: 0
-    agent_audited: 63
+    agent_audited: 128
     human_audited: 0
     audit_expired: 0
     out_of_scope: 0
   health_audit_summary:
-    unaudited: 8674
+    unaudited: 8912
     script_assessed: 0
-    agent_audited: 63
+    agent_audited: 128
     human_audited: 0
     audit_expired: 0
     out_of_scope: 0
   audit_integrity_summary:
     scope: default_health_audit
-    trusted_agent_audit: 63
+    trusted_agent_audit: 59
     suspicious_agent_audit: 0
-    invalid_agent_audit: 0
-    closure_eligible: 63
-    pending: 8674
-    unique_signature_batch_hashes: 63
-  open_issues: 160
+    invalid_agent_audit: 69
+    closure_eligible: 59
+    pending: 8981
+    unique_signature_batch_hashes: 128
+  open_issues: 492

@@ -37,15 +37,15 @@ issues:
     severity: medium
     status: open
     summary: "Getter cannot distinguish missing cache from explicitly empty capabilities."
-    evidence: "The setter stores any dict, including an empty dict; the getter returns an empty dict for both missing and empty values, and the caller uses ws_caps or manager fallback."
+    evidence: "The setter stores any dict, including an empty dict, but this getter returns {} for both an empty stored value and a miss. _handle_message then uses ws_caps or AgentManager.get_client_capabilities('acp'); that manager cache is channel-scoped and overwritten by each ACP initialize, so an explicitly capability-free connection can inherit another connection's latest non-empty map."
     suggested_action: "Return None for no entry or add a presence-aware helper, then fall back only when no WebSocket-scoped value exists."
   - id: ISSUE-002
     dimension: test_coverage
     severity: low
     status: open
     summary: "Existing coverage validates non-empty per-WebSocket behavior but not getter edge cases."
-    evidence: "The related ACP test asserts a non-empty terminal capability map; no direct getter tests were found for no-entry, top-level copy isolation, or explicit empty capabilities."
-    suggested_action: "Add focused helper tests for no entry, copy isolation, and explicit empty capabilities."
+    evidence: "test_handle_message_uses_ws_scoped_acp_client_capabilities proves a non-empty ws_b map wins over the manager fallback. No direct getter tests were found for no entry, shallow-copy isolation, or an explicit empty map after another connection initializes non-empty capabilities."
+    suggested_action: "Add focused helper tests for no entry and copy isolation, plus a two-connection explicit-empty regression test."
 confidence: confirmed
 details: {}
 ---
@@ -54,15 +54,15 @@ details: {}
 
 ## Actual Role
 
-Returns a top-level copy of cached ACP client capabilities for the given WebSocket identity, keyed by `id(ws)`. It supports later ACP requests using connection-scoped capability metadata instead of relying only on AgentManager's channel-level cache.
+Looks up ACP client capabilities by the WebSocket's `id(ws)` key and returns a shallow top-level copy when the cached value is a dict; otherwise it returns a new empty dict. `_handle_message` uses this result to prefer connection-scoped capability metadata over AgentManager's channel-level fallback for later ACP requests.
 
 ## Key Signals
 
 - Input: WebSocket-like object accepted as `Any`.
 - Output: A copied capabilities dict, or `{}` when no dict is cached.
 - Main side effects: None.
-- Main risk: `{}` means both no cache entry and explicit empty capabilities, so the caller can accidentally fall back to stale manager-level capabilities.
-- Related tests: `tests/unit_tests/agentserver/test_agentserver_acp.py::test_handle_message_uses_ws_scoped_acp_client_capabilities`; direct getter and explicit-empty tests are pending.
+- Main risk: `{}` means both no cache entry and explicit empty capabilities; after another connection overwrites the channel-level manager cache, the caller can attach that other connection's capabilities.
+- Related tests: `tests/unit_tests/agentserver/test_agentserver_acp.py::test_handle_message_uses_ws_scoped_acp_client_capabilities` covers the non-empty connection-scoped path; direct getter, copy-isolation, and explicit-empty regression tests are absent.
 
 ## Detail Index
 

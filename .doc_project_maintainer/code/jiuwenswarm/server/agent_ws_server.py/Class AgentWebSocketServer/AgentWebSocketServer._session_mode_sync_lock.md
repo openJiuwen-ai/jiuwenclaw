@@ -46,6 +46,13 @@ issues:
     summary: "No direct test verifies the per-session serialization contract or registry lifetime."
     evidence: "Plan-mode orchestration tests cover _ensure_code_mode_state transitions and skip paths, but no direct reference to _session_mode_sync_lock or _session_mode_sync_locks and no same-session contention test was found."
     suggested_action: "Add focused async tests proving same-session calls share and serialize on one lock, different sessions do not block each other, and cleanup cannot remove a locked in-flight guard."
+  - id: ISSUE-003
+    dimension: boundary_safety
+    severity: medium
+    status: open
+    summary: "Module-global locks can outlive the server event loop that used them."
+    evidence: "The registry survives reset_instance and server stop; asyncio.Lock is loop-bound when its contended acquire path creates waiters, so a cached lock can be reused by a later server/test loop."
+    suggested_action: "Scope the registry to the server/loop or clear only quiescent locks during shutdown and test reset."
 confidence: confirmed
 details: {}
 ---
@@ -54,14 +61,14 @@ details: {}
 
 ## Actual Role
 
-Returns a cached per-session `asyncio.Lock`, creating and storing one in module-global `_session_mode_sync_locks` on first use. `_ensure_code_mode_state` uses it to serialize plan/normal mode checkpoint synchronization for the same session while allowing different session IDs to proceed independently.
+Returns the module-global cached `asyncio.Lock` for a session key, creating it synchronously on first access. `_ensure_code_mode_state` holds that lock across checkpoint load, mode comparison/switch, persistence, and exit notification so same-session transitions serialize while different keys proceed independently; the cache spans server instances and event loops.
 
 ## Key Signals
 
 - Input: `session_id` string; caller uses `request.session_id` or `"default"`.
 - Output: Reused `asyncio.Lock` for that session key.
 - Main side effects: Mutates module-global `_session_mode_sync_locks` on cache miss.
-- Main risk: Locks live for the process lifetime once created, with no observed cleanup path on session delete, server stop, or singleton reset.
+- Main risk: Locks live indefinitely across deleted sessions, server instances, and event loops, creating unbounded retention and possible loop-affinity failures after contended use.
 - Related tests: Indirect `_ensure_code_mode_state` behavior tests exist; no direct lock, concurrency, or lifetime test was found.
 
 ## Detail Index

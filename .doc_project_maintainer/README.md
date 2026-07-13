@@ -1,7 +1,7 @@
 # Project Maintainer Docs
 
 Status: partial
-Last updated: 2026-07-07
+Last updated: 2026-07-15
 Sync status: partial
 
 ## Project Brief
@@ -16,7 +16,7 @@ Sync status: partial
 
 Start with `INDEX.md`, then `manifest.yaml`, then the module, directory, flow, or code symbol relevant to the task.
 
-The first build prioritizes `agentserver` runtime analysis. Project-wide source inventory exists, but complete per-symbol documentation and trusted health audit remain pending because this repository has 1236 inventoried source files and 14746 discovered symbols.
+The delivery prioritizes `agentserver` runtime analysis. The frozen authoritative inventory contains 1,275 source files and 15,584 required symbols. A fresh comparison scan at `10afedf2` observed 1,285 files and 15,809 symbols without widening that ledger. All 128 existing `AgentWebSocketServer` methods have cards and remain `agent_audited`, with 0 source-expired; current integrity verification trusts 59 and flags 69 entry-document hash mismatches. The 823-method frozen server queue excludes 6 newly observed unaudited methods. Eight AgentServer flows are documented; broader repository coverage remains partial.
 
 ## Maintenance Rules
 
@@ -26,3 +26,4 @@ The first build prioritizes `agentserver` runtime analysis. Project-wide source 
 - For very large ledgers, store full generated JSON in compressed machine files and keep the project JSON files as navigable summaries.
 - Do not mark this artifact `current` until stable tracked paths are mapped or out of scope, every required source symbol has an entry doc with `Actual Role` and health, required flows are documented or out of scope, and requested-scope audit symbols are audited or out of scope.
 - Treat `audit.status: unaudited` as pending even when a symbol card has a useful first-pass behavior summary.
+- Expire Python audits by normalized AST symbol hash. A changed method expires itself and its class audit without expiring unchanged siblings; legacy file-hash records remain conservative when safe migration is impossible.

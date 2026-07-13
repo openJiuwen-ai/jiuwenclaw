@@ -36,16 +36,16 @@ issues:
     dimension: boundary_safety
     severity: low
     status: open
-    summary: "id(ws) is safe only while stale cache entries are reliably cleared."
-    evidence: "The method returns id(ws), and the cache is keyed by int while cleanup happens externally in _connection_handler.finally."
-    suggested_action: "Keep cleanup coverage strong; consider object-keyed weak storage if the cache grows beyond tightly scoped connection lifecycle use."
+    summary: "The integer key does not retain the WebSocket, so safety depends on lifecycle-paired cache cleanup."
+    evidence: "Adjacent set/get helpers index _acp_client_capabilities_by_ws by id(ws); the normal runtime path clears that entry in _connection_handler.finally while the same ws object is still live. Calls outside that paired lifecycle could leave an integer key that Python may later reuse."
+    suggested_action: "Keep all writes inside the connection lifecycle and add cleanup coverage; consider object-keyed weak storage if callers expand beyond that lifecycle."
   - id: ISSUE-002
     dimension: test_coverage
     severity: low
     status: open
-    summary: "No direct test asserts key behavior or clear-after-lifecycle semantics."
-    evidence: "Only source references to _ws_capabilities_key were found; related behavior is covered indirectly through the ws-scoped ACP capability flow."
-    suggested_action: "Add a small set/get/clear test with two websocket objects if this helper remains part of the cache contract."
+    summary: "WebSocket isolation is covered, but key and disconnect-cleanup semantics lack direct assertions."
+    evidence: "test_handle_message_uses_ws_scoped_acp_client_capabilities initializes two FakeWebSocket objects and verifies ws_b receives its own capabilities. No test directly calls _ws_capabilities_key or asserts that _connection_handler.finally removes the cached entry."
+    suggested_action: "Add a focused set/get/clear test and a connection-finally assertion if this integer-key cache remains part of the lifecycle contract."
 confidence: confirmed
 details: {}
 ---
@@ -54,15 +54,15 @@ details: {}
 
 ## Actual Role
 
-Returns `id(ws)` as the integer identity key used by adjacent helpers to store, retrieve, and clear per-WebSocket ACP client capabilities. The method itself is pure and tiny; correctness depends on surrounding cache lifecycle cleanup.
+Returns Python's object-identity integer for the supplied WebSocket. Adjacent helpers use that integer to store, retrieve, and clear per-connection ACP client capabilities; the key is stable while the WebSocket object is live, and the normal connection handler removes its cache entry in `finally`.
 
 ## Key Signals
 
 - Input: WebSocket-like object accepted as `Any`.
 - Output: Python object identity integer from `id(ws)`.
 - Main side effects: None.
-- Main risk: Stale cache entries could be mis-associated if cleanup is missed and Python later reuses an object id.
-- Related tests: `tests/unit_tests/agentserver/test_agentserver_acp.py::test_handle_message_uses_ws_scoped_acp_client_capabilities` covers related behavior indirectly.
+- Main risk: A write outside the paired connection lifecycle could leave a stale integer key that is vulnerable to later object-id reuse.
+- Related tests: `tests/unit_tests/agentserver/test_agentserver_acp.py::test_handle_message_uses_ws_scoped_acp_client_capabilities` covers two-WebSocket capability isolation through the surrounding flow; direct key and disconnect-cleanup assertions are absent.
 
 ## Detail Index
 

@@ -24,11 +24,12 @@ health:
   observability: clear
   performance_risk: medium
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:37:46Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:351c34df48a6e7b4775d3cbcb0fee48b8a6de29c20402f1a4ed7f977d791baa4
   confidence: confirmed
   expired_reason: null
 issues:
@@ -37,40 +38,45 @@ issues:
     severity: medium
     status: open
     summary: "Large method is the central routing table for many runtime RPC families."
-    evidence: "It parses JSON/E2A/legacy payloads, injects ACP metadata, triggers hooks, dispatches dozens of ReqMethod branches, handles cancel semantics, and sends fallback errors."
-    suggested_action: "Keep branch-specific tests and document handler families before refactoring."
+    evidence: "Current lines 1341-1717 span 377 lines with 76 if nodes, 75 awaits, 68 req_method predicates, and 70. See AgentWebSocketServer._handle_message/risks.md#issue-001."
+    suggested_action: "Separate decode/normalize, metadata enrichment, dispatch-table routing, and cancel orchestration behind tested helpers."
   - id: ISSUE-002
     dimension: boundary_safety
     severity: high
     status: open
     summary: "Malformed non-JSON-error payloads can escape before normalized error handling."
-    evidence: "After json.loads succeeds, E2A/legacy conversion runs before the main request-handling try; non-object JSON or missing legacy_agent_request can raise before the fallback error response path has a request context."
+    evidence: "Lines 1365-1399 convert E2A/fallback payloads before the guarded dispatch block at 1401. JSON. See AgentWebSocketServer._handle_message/risks.md#issue-002."
     suggested_action: "Validate decoded JSON is a dict and wrap E2A/legacy conversion in the same error-normalization path."
   - id: ISSUE-003
     dimension: test_coverage
     severity: medium
     status: open
     summary: "Direct router coverage misses malformed converted payloads and many dispatch branches."
-    evidence: "Direct tests cover closed-WebSocket handling, invalid JSON sends, and ACP-scoped capabilities, but not non-object JSON, invalid fallback envelopes, unknown legacy req_method, or representative dispatch routing."
-    suggested_action: "Add direct router tests for malformed E2A/legacy inputs and selected high-risk ReqMethod branches."
-confidence: confirmed
-details: {}
+    evidence: "Direct tests cover open/closed invalid-JSON sends, closed unary handling, WebSocket-scoped ACP metadata. See AgentWebSocketServer._handle_message/risks.md#issue-003."
+    suggested_action: "Add direct router tests for malformed E2A/legacy inputs, capability precedence, cancellation timeout, and selected."
+  - id: ISSUE-004
+    dimension: boundary_safety
+    severity: medium
+    status: open
+    summary: "An ACP request can override connection-scoped client capabilities."
+    evidence: "Lines 1402-1409 copy request metadata and use metadata.setdefault('acp_client_capabilities', ws_caps or. See AgentWebSocketServer._handle_message/risks.md#issue-004."
+    suggested_action: "Treat the WebSocket-scoped INITIALIZE record as authoritative and assign the capability field rather than preserving an."
+  - id: ISSUE-005
+    dimension: performance_risk
+    severity: medium
+    status: open
+    summary: "Cancel handling can wait indefinitely for a cancellation-resistant stream task."
+    evidence: "Lines 1625-1659 cancel the per-session stream task and then await it without a timeout before disconnect. See AgentWebSocketServer._handle_message/risks.md#issue-005."
+    suggested_action: "Bound the cleanup wait, log timeout diagnostics, and continue disconnect-scoped runtime cleanup even when the producer."
 ---
 
-# `AgentWebSocketServer._handle_message`
+# AgentWebSocketServer._handle_message
 
 ## Actual Role
 
-Parses one inbound WebSocket frame, converts E2A or legacy payloads into an `AgentRequest`, enriches ACP metadata, triggers before-chat hooks, and routes many `ReqMethod` families to local handlers or unary/streaming agent execution. It normalizes JSON parse errors and most handler failures into wire responses when the WebSocket is still open, but some conversion failures happen before that guarded path.
+The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
 
-## Key Signals
+## Audit Details
 
-- Input: raw WebSocket JSON frame and send lock.
-- Output: response sent to WebSocket or delegated to another handler.
-- Main side effects: local handler dispatch, canceling stream tasks, extension hook invocation.
-- Main risk: high branch count plus unguarded E2A/legacy conversion before the request error path.
-- Related tests: `test_agentserver_modes.py`, `test_agentserver_acp.py`, `test_agentserver_cli_commands.py`, `test_agent_ws_connection_close.py`.
-
-## Detail Index
-
-- Detail docs pending.
+- [Reviewed behavior](AgentWebSocketServer._handle_message/actual-behavior.md)
+- [Full issue evidence](AgentWebSocketServer._handle_message/risks.md)
