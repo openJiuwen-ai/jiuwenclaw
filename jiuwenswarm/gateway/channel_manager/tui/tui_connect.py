@@ -1010,6 +1010,17 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     _yaml_sections_updated.append("embed")
             except Exception as e:
                 logger.warning("[cli config.set] failed to sync models/embed: %s", e)
+                # env 变更先落盘，避免随 models/embed 失败一起丢失
+                if env_updates:
+                    _persist_env_updates(env_updates)
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=f"Failed to sync models/embed to config.yaml: {e}",
+                    code="CONFIG_SYNC_FAILED",
+                )
+                return
 
         if _yaml_sections_updated:
             applied_without_restart = False  # YAML 改动需要热重载才生效
@@ -2253,6 +2264,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 return
             try:
                 _update_result: dict = {}
+
                 def _update_mutate(data):
                     models = data.get("models")
                     if not isinstance(models, dict):
