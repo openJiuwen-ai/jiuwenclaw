@@ -481,40 +481,92 @@ def _should_use_novel_scenario(profile: str, payload: dict[str, Any]) -> bool:
     return True
 
 
-def _agent_flow_stage(messages: list[Any]) -> int:
-    """按 tool 消息数量驱动多工具 Agent 场景。
+def _tool_call_id_to_name(messages: list[Any]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            call_id = call.get("id")
+            fn = call.get("function")
+            if not isinstance(call_id, str) or not isinstance(fn, dict):
+                continue
+            name = fn.get("name")
+            if isinstance(name, str) and name:
+                mapping[call_id] = name
+    return mapping
 
-    0 todo_create → 1 聊天区长文 → 2 bash(权限 ASK) → 3 write_file
-    → 4 read_file → 5 todo_modify(权限 ASK) → 6 todo_modify
-    → 7 send_file_to_user → 8 收尾
-    """
-    tool_indices = [
-        idx
-        for idx, message in enumerate(messages)
-        if isinstance(message, dict) and message.get("role") == "tool"
-    ]
-    tool_count = len(tool_indices)
-    if tool_count == 0:
+
+def _completed_tool_names(messages: list[Any]) -> list[str]:
+    """按历史顺序解析已完成工具名（优先 tool.name，否则用 tool_call_id 映射）。"""
+    id_to_name = _tool_call_id_to_name(messages)
+    names: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        name = message.get("name")
+        if not isinstance(name, str) or not name:
+            call_id = message.get("tool_call_id")
+            name = id_to_name.get(call_id, "") if isinstance(call_id, str) else ""
+        if name:
+            names.append(name)
+    return names
+
+
+def _assistants_after_last_tool(messages: list[Any]) -> int:
+    last_tool_idx = -1
+    for idx, message in enumerate(messages):
+        if isinstance(message, dict) and message.get("role") == "tool":
+            last_tool_idx = idx
+    if last_tool_idx < 0:
         return 0
-    last_tool_idx = tool_indices[-1]
-    assistants_after = sum(
+    return sum(
         1
         for message in messages[last_tool_idx + 1:]
         if isinstance(message, dict) and message.get("role") == "assistant"
     )
-    if tool_count == 1:
-        return 1 if assistants_after == 0 else 2
-    if tool_count == 2:
+
+
+def _agent_flow_stage(messages: list[Any]) -> int:
+    """按已完成工具名驱动多工具 Agent 场景（避免多余 tool 消息导致跳段）。
+
+    0 todo_create → 1 聊天区长文 → 2 bash(权限 ASK) → 3 write_file
+    → 4 read_file → 5 todo_modify(权限 ASK) → 6 todo_modify
+    → 7 send_file_to_user → 8 收尾
+
+    一旦出现 send_file_to_user 的 tool result，强制进入 stage 8。
+    """
+    names = _completed_tool_names(messages)
+    if not names:
+        return 0
+    if "send_file_to_user" in names:
+        return 8
+
+    has_todo_create = "todo_create" in names
+    has_bash = "bash" in names
+    has_write = "write_file" in names
+    has_read = "read_file" in names
+    todo_modify_count = sum(1 for name in names if name == "todo_modify")
+
+    if not has_todo_create:
+        return 0
+    if not has_bash:
+        # todo_create 刚结束：先出长文；其后的 LLM 轮再调 bash
+        return 1 if _assistants_after_last_tool(messages) == 0 else 2
+    if not has_write:
         return 3
-    if tool_count == 3:
+    if not has_read:
         return 4
-    if tool_count == 4:
+    if todo_modify_count == 0:
         return 5
-    if tool_count == 5:
+    if todo_modify_count == 1:
         return 6
-    if tool_count == 6:
-        return 7
-    return 8
+    return 7
 
 
 def _build_travel_opening_text(target_chars: int) -> str:
