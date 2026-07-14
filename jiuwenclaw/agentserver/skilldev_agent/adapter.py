@@ -168,7 +168,7 @@ class SkillDevDeepAdapter:
 
         # 父 agent 工具
         parent_tool_names = [
-            "GlobTool", "ListDirTool", "BashTool", "CodeTool",
+            "GlobTool", "ListDirTool", "BashTool", "CodeTool", "GrepTool",
             "ReadFileTool", "WriteFileTool", "EditFileTool",
             "SkillTool", "SkillCompleteTool", "TodoCreateTool",
             "TodoListTool", "TodoModifyTool", "TodoCreateTool",
