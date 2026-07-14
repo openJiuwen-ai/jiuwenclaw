@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useState, useRef, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Music2, Workflow } from "lucide-react";
 import { useTranslation } from 'react-i18next';
@@ -171,6 +171,7 @@ interface TeamEntry {
 interface ConfigPanelProps {
   config: Record<string, unknown> | null;
   isConnected: boolean;
+  sessionId?: string;
   onSaveConfig: (updates: Record<string, string>) => Promise<void>;
   onSaveAllConfig?: (payload: ConfigSaveAllPayload) => Promise<void>;
   /** 校验默认模型配置（api_base / api_key / model / model_provider）能否完成一次最小 LLM 请求 */
@@ -203,6 +204,8 @@ interface ConfigPanelProps {
       predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
     }>;
   }, showRestartModal?: boolean) => Promise<void>;
+  /** 草稿是否有未保存改动（派生值）变更时回调，供父组件感知（如 config.changed 广播时判断是否覆盖草稿） */
+  onHasChangesChange?: (hasChanges: boolean) => void;
 }
 
 interface AgentsTeamsPayload {
@@ -256,7 +259,7 @@ const EVOLUTION_KEYS = new Set(["evolution_auto_scan", "skill_create"]);
 // 模型字段长度校验常量
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
-const MAX_API_BASE_LENGTH = 256;
+const MAX_API_BASE_LENGTH = 512;
 const MAX_API_KEY_LENGTH = 500;
 
 // URL 格式校验函数
@@ -2500,6 +2503,7 @@ function TeamsSection({
 export function ConfigPanel({
   config,
   isConnected,
+  sessionId,
   onSaveConfig,
   onSaveAllConfig,
   onValidateModel: _onValidateModel,
@@ -2508,9 +2512,11 @@ export function ConfigPanel({
   onModelValidate,
   onModelsRefresh,
   onAgentsTeamsSave,
+  onHasChangesChange,
 }: ConfigPanelProps) {
   const { t, i18n } = useTranslation();
   const isProcessing = useChatStore((s) => s.isProcessing);
+  const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
   const { availableModels: storeAvailableModels, mode } = useSessionStore();
   const [draftValues, setDraftValues] = useState<Record<string, string>>(() => {
     if (!config) return {};
@@ -2548,23 +2554,28 @@ export function ConfigPanel({
     setError(null);
   };
 
+  const fetchInstalledSkills = useCallback(async () => {
+    try {
+      const data = await webRequest<{ skills?: { name: string; installed?: boolean }[] }>(
+        "skills.list",
+        { with_installed: true, session_id: sessionId }
+      );
+      const filteredSkills = (data.skills || [])
+        .filter((s) => s.installed !== false)
+        .sort((a, b) => a.name.localeCompare(b.name));
+      setInstalledSkills(filteredSkills);
+    } catch (error) {
+      console.error("Failed to fetch skills:", error);
+    }
+  }, [sessionId]);
+
+  // 挂载时预加载（仅一次），之后仅在切到 Agent 配置 Tab 时刷新
+  const skillsFetchInitRef = useRef(false);
   useEffect(() => {
-    const fetchSkills = async () => {
-      try {
-        const data = await webRequest<{ skills?: { name: string; installed?: boolean }[] }>(
-          "skills.list",
-          { with_installed: true }
-        );
-        const filteredSkills = (data.skills || [])
-          .filter((s) => s.installed !== false)
-          .sort((a, b) => a.name.localeCompare(b.name));
-        setInstalledSkills(filteredSkills);
-      } catch (error) {
-        console.error("Failed to fetch skills:", error);
-      }
-    };
-    fetchSkills();
-  }, []);
+    if (skillsFetchInitRef.current && configTab !== 'agent') return;
+    skillsFetchInitRef.current = true;
+    fetchInstalledSkills();
+  }, [configTab, fetchInstalledSkills]);
 
   // 当技能列表更新时，自动清理 agent 配置中已卸载的技能
   useEffect(() => {
@@ -2979,6 +2990,10 @@ export function ConfigPanel({
     return false;
   }, [draftAgents, draftTeams, initialAgents, initialTeams]);
   const hasChanges = hasConfigChanges || hasModelChanges || hasAgentsTeamsChanges;
+  // 将草稿是否有未保存改动上报给父组件，供 config.changed 广播到达时判断是否覆盖草稿。
+  useEffect(() => {
+    onHasChangesChange?.(hasChanges);
+  }, [hasChanges, onHasChangesChange]);
   const missingRequiredModelFields = useMemo(
     () => REQUIRED_MODEL_FIELDS.filter((key) => !(draftValues[key] ?? "").trim()),
     [draftValues],
@@ -3287,8 +3302,14 @@ export function ConfigPanel({
         }
       }
     } catch (saveError) {
-      const message = saveError instanceof Error ? saveError.message : t('config.errors.saveFailed');
-      setError(message);
+      // 后端兜底返回 code=TASK_RUNNING 时，用 i18n 文案提示（而非后端硬编码中文）。
+      const errorCode = (saveError as { code?: string } | null)?.code;
+      if (errorCode === 'TASK_RUNNING') {
+        setError(t('config.errors.taskRunning'));
+      } else {
+        const message = saveError instanceof Error ? saveError.message : t('config.errors.saveFailed');
+        setError(message);
+      }
     } finally {
       setSaving(false);
     }
@@ -3305,7 +3326,7 @@ export function ConfigPanel({
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {isProcessing && mode !== 'team' ? (
+            {(isProcessing || globalTaskRunning) && mode !== 'team' ? (
               <span className="text-xs text-amber-600 dark:text-amber-400">{t('config.errors.processingDisabled')}</span>
             ) : null}
             <button
@@ -3319,7 +3340,7 @@ export function ConfigPanel({
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || (isProcessing && mode !== 'team')}
+              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || ((isProcessing || globalTaskRunning) && mode !== 'team')}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? t('common.saving') : t('common.save')}

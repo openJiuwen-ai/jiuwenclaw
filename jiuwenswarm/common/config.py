@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from copy import deepcopy
@@ -14,6 +15,7 @@ from typing import Any, Optional
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 import yaml
+import portalocker
 
 from jiuwenswarm.common.utils import get_config_dir, get_config_file
 
@@ -220,20 +222,72 @@ def dump_yaml_round_trip(config_path: Path, data: Any) -> None:
     rt = YAML()
     rt.preserve_quotes = True
     rt.default_flow_style = False
-    # mapping 2 空格；list 用 sequence=4 + offset=2 保证 dash 前有 2 空格（tools: 下 - todo），否则 list 会变成无缩进
     rt.indent(mapping=2, sequence=4, offset=2)
     rt.width = 4096
     tmp = config_path.with_name(f"{config_path.stem}.{uuid.uuid4().hex}.yaml.tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             rt.dump(data, f)
-        os.replace(tmp, config_path)
+        _atomic_replace(tmp, config_path)
     except BaseException:
         try:
             os.unlink(tmp)
         except FileNotFoundError:
             pass
         raise
+
+
+def _atomic_replace(src: Path, dst: Path, max_attempts: int = 10) -> None:
+    """os.replace 重试：应对 Windows 下目标文件被并发占用导致的 PermissionError。
+
+    max_attempts 为总尝试次数（含首次），非重试次数；至少尝试 1 次。
+    """
+    for attempt in range(max(1, max_attempts)):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == max(1, max_attempts) - 1:
+                raise
+            time.sleep(0.002 * (attempt + 1))
+
+
+# 进程内不可重入锁。portalocker 文件锁同样不可同进程重入，
+# 因此 update_config 的 mutator 内禁止再调用任何走 update_config 的函数
+# （如 ensure_defaults_list_in_config / update_default_models_in_config），
+# 否则同进程二次获取锁会死锁。展示用数据请在事务外、另起独立事务读取。
+_CONFIG_WRITE_LOCK = threading.Lock()
+
+
+def _config_lock_path(config_path: Path) -> Path:
+    """锁文件路径跟随当前 CONFIG_YAML_PATH，避免模块加载时静态绑定。"""
+    return config_path.with_name(f"{config_path.stem}.lock")
+
+
+def update_config(mutator, *, lock_timeout: float = 10.0) -> Any:
+    """跨进程互斥地读-改-写 config.yaml。
+
+    portalocker 文件锁防跨进程并发（AgentServer+Gateway 两个 PID 同时写），
+    threading.Lock 防同进程多线程。整个 load→mutate→dump 在锁内为原子临界区。
+
+    警告：双层锁均不可重入。mutator 内不得调用任何会再次进入 update_config
+    的函数（ensure_defaults_list_in_config、update_default_models_in_config 等），
+    否则同进程二次获取锁将死锁。如需在写盘后读取展示数据，请在 update_config
+    返回后另起一次独立调用（此时锁已释放，安全）。
+    """
+    with _CONFIG_WRITE_LOCK:
+        with portalocker.Lock(
+            str(_config_lock_path(CONFIG_YAML_PATH)),
+            timeout=lock_timeout,
+        ):
+            data = load_yaml_round_trip(CONFIG_YAML_PATH)
+            if data is None:
+                data = {}
+            new_data = mutator(data)
+            if new_data is None:
+                return data
+            dump_yaml_round_trip(CONFIG_YAML_PATH, new_data)
+            return new_data
 
 
 # Backward-compat aliases — downstream modules import the underscore-prefixed names
@@ -960,55 +1014,52 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
 
 
 def update_default_models_in_config(models_list: list[dict[str, Any]]) -> None:
-    """将默认模型列表写入 config.yaml 的 models.defaults 段。"""
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    if "models" not in data:
-        data["models"] = {}
-    # alias 为字符串时强制带双引号写出，避免 "yes"/"no"/"on"/"off" 等被 YAML 1.1 解析为布尔值
-    for entry in models_list:
-        if isinstance(entry, dict) and isinstance(entry.get("alias"), str):
-            entry["alias"] = DoubleQuotedScalarString(entry["alias"])
-    data["models"]["defaults"] = models_list
-    if "default" in data["models"]:
-        del data["models"]["default"]
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+    def _mutate(data):
+        if "models" not in data:
+            data["models"] = {}
+        for entry in models_list:
+            if isinstance(entry, dict) and isinstance(entry.get("alias"), str):
+                entry["alias"] = DoubleQuotedScalarString(entry["alias"])
+        data["models"]["defaults"] = models_list
+        if "default" in data["models"]:
+            del data["models"]["default"]
+        return data
+    update_config(_mutate)
 
 
 def ensure_defaults_list_in_config() -> list[dict[str, Any]]:
-    """确保 config.yaml 中 models.defaults 列表存在。
+    def _mutate(data):
+        models = data.get("models") or {}
+        if not isinstance(models, dict):
+            models = {}
+        defaults = models.get("defaults")
+        if isinstance(defaults, list) and defaults:
+            return None
+        default_entry = models.get("default")
+        if isinstance(default_entry, dict):
+            if "is_default" not in default_entry:
+                default_entry["is_default"] = True
+            defaults_list = [default_entry]
+        else:
+            defaults_list = [{
+                "model_client_config": {
+                    "api_base": "${API_BASE}",
+                    "api_key": "${API_KEY}",
+                    "model_name": "${MODEL_NAME}",
+                    "client_provider": "${MODEL_PROVIDER}",
+                },
+                "model_config_obj": {"temperature": 0.95},
+                "is_default": True,
+            }]
+        models["defaults"] = defaults_list
+        data["models"] = models
+        if "default" in data["models"]:
+            del data["models"]["default"]
+        return data
 
-    如果不存在，将 models.default 单对象迁移为列表条目，
-    并删除冗余的 models.default key。返回 defaults 列表。
-    """
-    data = load_yaml_round_trip(CONFIG_YAML_PATH)
-    models = data.get("models") or {}
-    defaults = models.get("defaults")
-    if isinstance(defaults, list) and defaults:
-        return defaults
-
-    default_entry = models.get("default")
-    if isinstance(default_entry, dict):
-        if "is_default" not in default_entry:
-            default_entry["is_default"] = True
-        defaults_list = [default_entry]
-    else:
-        defaults_list = [{
-            "model_client_config": {
-                "api_base": "${API_BASE}",
-                "api_key": "${API_KEY}",
-                "model_name": "${MODEL_NAME}",
-                "client_provider": "${MODEL_PROVIDER}",
-            },
-            "model_config_obj": {"temperature": 0.95},
-            "is_default": True,
-        }]
-
-    data["models"] = models
-    data["models"]["defaults"] = defaults_list
-    if "default" in data["models"]:
-        del data["models"]["default"]
-    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
-    return defaults_list
+    result = update_config(_mutate)
+    defs = (result.get("models") or {}).get("defaults")
+    return defs if isinstance(defs, list) else []
 
 
 def _require_dict(value: Any, field_name: str) -> dict[str, Any]:

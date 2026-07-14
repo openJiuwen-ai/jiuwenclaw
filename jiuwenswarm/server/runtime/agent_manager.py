@@ -558,9 +558,10 @@ class AgentManager:
         agents = self.agents.get(channel_key)
         if not agents:
             logger.info(
-                "[AgentManager] recreate_agent: no active agent on channel %s",
+                "[AgentManager] recreate_agent: no active agent on channel %s, skip",
                 channel_key,
             )
+            return
 
         # 1. 备份 (mode -> create_params)
         existing_modes = list(agents.keys())

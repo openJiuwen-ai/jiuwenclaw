@@ -55,7 +55,7 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
     validate_a2ui_config_update,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
-from jiuwenswarm.common.updater import UpdaterService
+from jiuwenswarm.common.updater import UpdaterService, DEFAULT_SOURCE_CONFIG
 from jiuwenswarm.common.utils import (
     get_agent_sessions_dir,
     get_env_file,
@@ -1097,6 +1097,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         else:
             return value
 
+    async def _reject_if_task_running(ws, req_id) -> bool:
+        """全局运行态兜底：有任务在跑时拒绝写入并返回 True，否则返回 False。"""
+        _mh = _resolve(message_handler)
+        if _mh is not None and _mh.has_active_streams():
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="有任务正在运行，请等待任务完成后再保存配置",
+                code="TASK_RUNNING",
+            )
+            return True
+        return False
+
     async def _on_connect(ws):
         ac = _resolve(agent_client)
         if ac is None or not getattr(ac, "server_ready", False):
@@ -1107,6 +1119,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # 导致 send() 按 session_id 反查落空、ACK 被丢弃，前端收不到 connection.ack。
         # 复用 sid_A 后，ACK 走标准 send 流程即可命中本 ws，无需特殊路由兜底。
         sid = getattr(ws, "_jiuwen_initial_sid", None) or _make_session_id()
+
+        mh = _resolve(message_handler)
+        # ack 携带当前全局运行态，让新连接/重连的窗口立即知道是否有任务在跑（配置保存锁初始态）。
+        task_running = bool(mh.has_active_streams()) if mh is not None else False
 
         ack_msg = Message(
             id=f"ack-{sid}",
@@ -1122,9 +1138,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "mode": "BUILD",
                 "tools": [],
                 "protocol_version": "1.0",
+                "task_running": task_running,
             },
         )
-        mh = _resolve(message_handler)
         if mh:
             await mh.publish_robot_messages(ack_msg)
         else:
@@ -1382,7 +1398,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         return env_updates, yaml_updated
 
-    async def _apply_config_change_set(change_set: _ConfigChangeSet) -> bool:
+    async def _apply_config_change_set(
+        change_set: _ConfigChangeSet,
+        *,
+        source_ws: Any = None,
+    ) -> bool:
         """Synchronously apply only the runtime scope affected by a saved config change."""
         if not change_set.changed:
             return True
@@ -1395,10 +1415,25 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 reload_options=change_set.reload_options,
             )
             if inspect.isawaitable(callback_result):
-                return bool(await callback_result)
-            return bool(callback_result)
-        await _clear_agent_config_cache(_resolve(agent_client))
-        return True
+                applied_without_restart = bool(await callback_result)
+            else:
+                applied_without_restart = bool(callback_result)
+        else:
+            await _clear_agent_config_cache(_resolve(agent_client))
+            applied_without_restart = True
+        # 通知所有 ws 客户端配置已变更，触发其他窗口 fetchConfig 拉取最新配置（痛点②）。
+        # 即使热更新回调失败，配置文件也已写入磁盘，其他窗口仍应感知到变更。
+        # exclude_ws=source_ws：保存发起方靠 saveConfigAndRestart 的本地乐观合并自行刷新，
+        # 收到这条广播反而会因时序未 flush 的 hasChanges 误弹「丢弃草稿」确认框，故排除。
+        try:
+            await channel.broadcast_event(
+                "config.changed",
+                {"updated_keys": sorted(change_set.updated_keys)},
+                exclude_ws=source_ws,
+            )
+        except Exception:
+            logger.debug("[config] broadcast config.changed failed", exc_info=True)
+        return applied_without_restart
 
     def _build_models_defaults_from_frontend(raw_models: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_models, list) or not raw_models:
@@ -1493,6 +1528,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
+        if await _reject_if_task_running(ws, req_id):
+            return
         try:
             env_updates, yaml_updated = _apply_config_payload(params)
         except _ConfigBadRequest as exc:
@@ -1503,7 +1540,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         change_set = _ConfigChangeSet(env_updates, yaml_updated)
         try:
-            applied_without_restart = await _apply_config_change_set(change_set)
+            applied_without_restart = await _apply_config_change_set(change_set, source_ws=ws)
         except Exception as exc:
             logger.warning("[config.set] on_config_saved failed: %s", exc)
             applied_without_restart = False
@@ -1711,12 +1748,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
+        # 全局运行态兜底：有任意任务正在运行时拒绝替换模型列表，避免热更新破坏运行中的任务。
+        if await _reject_if_task_running(ws, req_id):
+            return
         try:
             new_models = _build_models_defaults_from_frontend(params.get("models"))
             update_default_models_in_config(new_models)
 
             applied_without_restart = await _apply_config_change_set(
-                _ConfigChangeSet({}, ["models.defaults"], force=True)
+                _ConfigChangeSet({}, ["models.defaults"], force=True),
+                source_ws=ws,
             )
 
             await channel.send_response(ws, req_id, ok=True, payload={
@@ -1739,6 +1780,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         """
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+
+        # 全局运行态兜底：有任意任务正在运行时拒绝批量写入，避免热更新破坏运行中的任务。
+        if await _reject_if_task_running(ws, req_id):
             return
 
         env_updates: dict[str, str] = {}
@@ -1773,7 +1818,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 models_count = len(new_models)
 
             change_set = _ConfigChangeSet(env_updates, yaml_updated, force=bool(env_updates or yaml_updated))
-            applied_without_restart = await _apply_config_change_set(change_set)
+            applied_without_restart = await _apply_config_change_set(change_set, source_ws=ws)
 
             await channel.send_response(
                 ws,
@@ -1862,6 +1907,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                                         error=str(exc), code="INTERNAL_ERROR")
             return
 
+        service = updater_service or UpdaterService()
+        await channel.send_response(ws, req_id, ok=True, payload=service.get_runtime_config())
+
+    async def _updater_reset_source(ws, req_id, params, session_id):
+        """恢复更新源相关配置字段为默认值。"""
+        try:
+            update_updater_in_config(DEFAULT_SOURCE_CONFIG)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[updater.reset_source] 写回 config.yaml 失败: %s", exc)
+            await channel.send_response(ws, req_id, ok=False,
+                                        error=str(exc), code="INTERNAL_ERROR")
+            return
         service = updater_service or UpdaterService()
         await channel.send_response(ws, req_id, ok=True, payload=service.get_runtime_config())
 
@@ -2215,6 +2272,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
+        # 心跳配置是实时读取的（仅写 config.yaml heartbeat 段 + 重启心跳服务，不走全局热更新），
+        # 运行中改不会破坏任务，故不套用任务运行态保存锁。
         try:
             every = params.get("every")
             target = params.get("target")
@@ -2376,6 +2435,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             # 多应用模式：params 必须含 apps 键
             apps = params["apps"]
@@ -2458,6 +2518,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             # 多应用模式：params 必须含 apps 键
             apps = params["apps"]
@@ -2523,6 +2584,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             await cm.set_conf("telegram", params)
             conf = cm.get_conf("telegram")
@@ -2574,6 +2636,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             await cm.set_conf("dingtalk", params)
             conf = cm.get_conf("dingtalk")
@@ -2630,6 +2693,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             await cm.set_conf("whatsapp", params)
             conf = cm.get_conf("whatsapp")
@@ -2681,6 +2745,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             await cm.set_conf("discord", params)
             conf = cm.get_conf("discord")
@@ -2732,6 +2797,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             await cm.set_conf("wecom", params)
             conf = cm.get_conf("wecom")
@@ -2794,6 +2860,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             await cm.set_conf("wechat", params)
             conf = cm.get_conf("wechat")
@@ -3078,6 +3145,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("updater.upgrade", _updater_upgrade)
     channel.register_method("updater.get_conf", _updater_get_conf)
     channel.register_method("updater.set_conf", _updater_set_conf)
+    channel.register_method("updater.reset_source", _updater_reset_source)
     channel.register_method("heartbeat.get_conf", _heartbeat_get_conf)
     channel.register_method("heartbeat.set_conf", _heartbeat_set_conf)
     channel.register_method("heartbeat.get_path", _heartbeat_get_path)
@@ -3133,7 +3201,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             deny_guidance = params.get("deny_guidance_message")
             update_permissions_owner_scopes_in_config(owner_scopes, deny_guidance)
             applied_without_restart = await _apply_config_change_set(
-                _ConfigChangeSet({}, ["permissions"], force=True)
+                _ConfigChangeSet({}, ["permissions"], force=True),
+                source_ws=ws,
             )
             await channel.send_response(
                 ws,
@@ -3192,7 +3261,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 out = {
                     **out,
                     "applied_without_restart": await _apply_config_change_set(
-                        _ConfigChangeSet({}, ["permissions"], force=True)
+                        _ConfigChangeSet({}, ["permissions"], force=True),
+                        source_ws=ws,
                     ),
                 }
             await channel.send_response(ws, req_id, ok=True, payload=out)

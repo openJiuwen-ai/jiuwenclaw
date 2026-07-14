@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -38,6 +39,7 @@ parse_dotenv_early("jiuwenswarm-gateway")
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect import AcpGatewayBridge
 from jiuwenswarm.gateway.routing.agent_request_timeout import coerce_client_timeout_ms
+from jiuwenswarm.common.security.ws_origin import get_header_value
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.utils import (
     get_cron_jobs_path,
@@ -121,6 +123,7 @@ def _normalize_gateway_message(msg):
         stream_seq=msg.stream_seq,
         stream_id=msg.stream_id,
         metadata=msg.metadata,
+        user_id=getattr(msg, "user_id", None),
     )
 
 
@@ -314,6 +317,15 @@ class GatewayServerConfig:
             self.routes[path] = RouteConfig(path=path, channel_id=channel_id)
 
 
+@dataclass(frozen=True)
+class _LocalHandlerContext:
+    ws: Any
+    req_id: str
+    params: dict[str, Any]
+    session_id: str
+    user_id: str | None
+
+
 class GatewayServer:
     """通用多路路由 WebSocket Gateway Server。
 
@@ -342,6 +354,38 @@ class GatewayServer:
             idle_finalize_seconds=lambda: _PROMPT_IDLE_FINALIZE_SECONDS,
         )
         self._install_default_route_hooks()
+
+    @staticmethod
+    def _extract_ws_user_id(ws: Any) -> str | None:
+        """从 WebSocket 握手 HTTP Header 读取 X-User-Id（大小写不敏感）。"""
+        headers = (
+            getattr(getattr(ws, "request", None), "headers", None)
+            or getattr(ws, "request_headers", None)
+        )
+        raw = get_header_value(headers, "X-User-Id")
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        return text or None
+
+    @staticmethod
+    def _connection_user_id(ws: Any) -> str | None:
+        """返回连接建立时缓存的 user_id（来自握手 Header）。"""
+        uid = getattr(ws, "_gateway_user_id", None)
+        if uid is None:
+            return None
+        text = str(uid).strip()
+        return text or None
+
+    @staticmethod
+    def _invoke_local_handler(
+        handler: Callable[..., Awaitable[None]],
+        ctx: _LocalHandlerContext,
+    ) -> Awaitable[None]:
+        kwargs: dict[str, Any] = {}
+        if "user_id" in inspect.signature(handler).parameters:
+            kwargs["user_id"] = ctx.user_id
+        return handler(ctx.ws, ctx.req_id, ctx.params, ctx.session_id, **kwargs)
 
     @staticmethod
     def _client_route_key(
@@ -836,6 +880,17 @@ class GatewayServer:
 
         self._clients.add(ws)
 
+        ws_user_id = self._extract_ws_user_id(ws)
+        setattr(ws, "_gateway_user_id", ws_user_id)
+        uid_marker = "" if ws_user_id else " uid_empty=yes"
+        logger.info(
+            "[Gateway] WS handshake X-User-Id: user_id=%r%s channel=%s path=%s",
+            ws_user_id,
+            uid_marker,
+            route.channel_id,
+            matched_path,
+        )
+
         # connection.ack
         try:
             await ws.send(json.dumps({
@@ -979,6 +1034,8 @@ class GatewayServer:
         session_id = (str(params.get("session_id") or "").strip()) or req_id
         session_key = self._client_route_key(route.channel_id, session_id) if explicit_session_id else None
 
+        req_user_id = self._connection_user_id(ws)
+
         # 1. forward 优先：方法在 forward_methods 中则转发到 MessageHandler
         if method in route.forward_methods:
             req_method = None
@@ -1120,6 +1177,7 @@ class GatewayServer:
                 # 阶段2：tui ws_channel route 用合成的 _resolved_agent_ref（与 _register /
                 # GodView 同源）；非 ws_channel route 保留原 _agent_ref。
                 agent_ref=_resolved_agent_ref,
+                user_id=req_user_id,
             )
 
             if self._on_message_cb is not None:
@@ -1143,7 +1201,16 @@ class GatewayServer:
             if session_key is not None:
                 await self._bind_route_session_client(route, session_id, ws)
             try:
-                await local_handler(ws, req_id, params, session_id)
+                await self._invoke_local_handler(
+                    local_handler,
+                    _LocalHandlerContext(
+                        ws=ws,
+                        req_id=req_id,
+                        params=params,
+                        session_id=session_id,
+                        user_id=req_user_id,
+                    ),
+                )
             except Exception as e:
                 ws_closed = bool(getattr(ws, "closed", False))
                 if ws_closed:
@@ -1366,6 +1433,8 @@ async def _run(
 
     initial_channels_conf: dict = channels_cfg if isinstance(channels_cfg, dict) else {}
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
+    # 回填引用：MessageHandler 实例化早于 ChannelManager，广播全局事件时需经它取 web channel。
+    message_handler.set_channel_manager(channel_manager)
     updater_service = UpdaterService()
 
     async def _on_config_saved(

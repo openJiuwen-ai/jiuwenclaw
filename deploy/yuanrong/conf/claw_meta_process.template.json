@@ -31,5 +31,6 @@
   "storageType": "local",
   "codePath": "<<YR_FUNC_CODE_DIR>>",
   "s3CodePath": {},
-  "enableSessionCtx": true
+  "enableSessionCtx": true,
+  "sandboxType": "<<SANDBOX_TYPE>>"
 }

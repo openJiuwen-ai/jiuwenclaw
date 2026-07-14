@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -546,6 +547,41 @@ async def _team_session_has_runtime(team_manager: TeamManager, session_id: str) 
     )
 
 
+async def query_team_human_members_for_join(
+    session_id: str, team_name: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """直查 team.db 取 human_agent 席位列表，同时校验 session_id ↔ team_name。
+
+    用 _build_session_scoped_team_name(team_name, session_id) 拼出完整
+    team_name 作为 DB key——key 拼不出来说明 session_id 与 team_name 不一致，
+    DB 自然查不到返回空。不依赖 monitor 是否存活。
+    team_name 为空返回 ([], None)。
+    """
+    if not team_name:
+        return [], None
+
+    # 拼 session-scoped team_name 作为 DB key
+    session_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "").strip()).strip("._-")
+    if session_suffix and not team_name.endswith(f"_{session_suffix}"):
+        full_team_name = f"{team_name}_{session_suffix}"
+    else:
+        full_team_name = team_name
+    try:
+        members_raw = await TeamMonitorHandler.get_member_list_from_db(full_team_name)
+    except Exception as exc:
+        logger.warning(
+            "[TeamHelpers] query_team_human_members_for_join db query failed: "
+            "session=%s team=%s error=%s", session_id, team_name, exc,
+        )
+        members_raw = None
+
+    members = [
+        m for m in (members_raw or [])
+        if isinstance(m, dict) and m.get("role") == "human_agent"
+    ]
+    return members, team_name
+
+
 async def ensure_monitor_handlers_for_active_runtime(
     channel_id: str | None,
     session_id: str,
@@ -866,11 +902,20 @@ def _try_finish_cron_team_stream(
         )
 
 
+_TEAM_BUILDING_EVENT_TYPES = frozenset({
+    "team.member", "team.task", "workflow.updated",
+})
+
+
 def _broadcast_event(
     channel_id: str | None, session_id: str, event: dict[str, Any]
 ) -> None:
     """Broadcast an event to all request queues waiting on the same session."""
-    get_team_manager(channel_id).broadcast_event(session_id, event)
+    tm = get_team_manager(channel_id)
+    tm.broadcast_event(session_id, event)
+    # Track team-building events so chat.final can be gated correctly.
+    if (not tm.has_seen_team_events(session_id)) and event.get("event_type") in _TEAM_BUILDING_EVENT_TYPES:
+        tm.mark_seen_team_events(session_id)
     _try_finish_cron_team_stream(channel_id, session_id, event)
 
 
@@ -1519,8 +1564,18 @@ async def process_team_message_stream(
                         else:
                             reason = reason or "gate_closed"
                     if not success and not is_first_request:
+                        final_reason = reason or ""
+                        # gate_closed 是 shutdown race（leader stream 正在收尾），静默结束流
+                        if final_reason == "gate_closed":
+                            yield AgentResponseChunk(
+                                request_id=rid,
+                                channel_id=channel_id,
+                                payload=None,
+                                is_complete=True,
+                            )
+                            return
                         error_msg = _INTERACT_REASON_ERROR_MAP.get(
-                            reason or "",
+                            final_reason,
                             "Failed to send message, please try again later",
                         )
                         yield AgentResponseChunk(
@@ -1770,6 +1825,11 @@ async def _consume_stream_with_query(
     hide_dm: bool = bool(_envs.get("hide_dm", False))
     received_chunks = 0
     emitted_ask_user_request_ids: set[str] = set()
+    # Reset the team-events flag at the start of a new round so chat.final
+    # can correctly determine whether the team is active.
+    tm_ = get_team_manager(channel_id)
+    tm_.reset_seen_team_events(session_id)
+    tm_.reset_workflow_completed(session_id)
     try:
         logger.info(
             "[TeamHelpers] stream started: channel_id=%s session_id=%s round_id=%s",
@@ -1947,6 +2007,31 @@ async def _consume_stream_with_query(
                             },
                         )
                     continue
+                # chat.final: if team events (team.member / team.task /
+                # workflow.updated) have already been broadcast (tracked
+                # via TeamManager.seen_team_events), the team is still
+                # running — suppress chat.final so the frontend does not
+                # prematurely set isProcessing=false.  Exception: once the
+                # workflow has completed (workflow_completed=True), chat.final
+                # is no longer suppressed and serves as the normal
+                # end-of-round signal.  In non-swarmflow mode,
+                # workflow_completed stays False so the original behavior
+                # is preserved.
+                if parsed.get("event_type") == "chat.final":
+                    tm_ = get_team_manager(channel_id)
+                    if tm_.has_seen_team_events(session_id) and not tm_.is_workflow_completed(session_id):
+                        continue
+                    _broadcast_event(
+                        channel_id,
+                        session_id,
+                        {
+                            "event_type": "chat.processing_status",
+                            "session_id": session_id,
+                            "rid": round_id,
+                            "is_processing": False,
+                            "is_complete": True,
+                        },
+                    )
                 _broadcast_event(channel_id, session_id, parsed)
 
         # If stream ended without any chunks, broadcast an error event
@@ -1997,6 +2082,12 @@ async def _consume_stream_with_query(
             },
         )
     finally:
+        # Flush & close the stream trace logger if one was opened.
+        if lg is not None:
+            try:
+                lg.flush()
+            except Exception as e:
+                logger.warning(f"TeamStreamLogger flush failed, error is {e}")
         # Broadcast team.completed so cron round watchers (both the agent
         # adapter's _wait_for_cron_team_round_events and the cron scheduler's
         # own round_state) can finalise even when the team stream ended
@@ -2227,12 +2318,32 @@ async def _consume_workflow_events(
             )
             if is_tui:
                 _broadcast_event(channel_id, session_id, event)
+                # Check terminal status for TUI path too
+                wf_status = (wf.get("status") or "").strip()
+                if wf_status in ("completed", "failed", "stopped"):
+                    logger.info(
+                        "[TeamHelpers] workflow terminal: channel_id=%s session_id=%s wf_status=%s",
+                        _resolve_channel_id(channel_id), session_id, wf_status,
+                    )
+                    get_team_manager(channel_id).mark_workflow_completed(session_id)
+                    break
                 continue
             for team_ev in _workflow_updated_to_team_events(
                 event, session_id, seen_phase, seen_agent, spawned_members
             ):
                 _persist_team_history_event(channel_id, session_id, team_ev)
                 _broadcast_event(channel_id, session_id, team_ev)
+            # When the workflow reaches a terminal status, mark
+            # workflow_completed and broadcast chat.processing_status
+            # so the frontend transitions out of the processing state.
+            wf_status = (wf.get("status") or "").strip()
+            if wf_status in ("completed", "failed", "stopped"):
+                logger.info(
+                    "[TeamHelpers] workflow terminal: channel_id=%s session_id=%s wf_status=%s",
+                    _resolve_channel_id(channel_id), session_id, wf_status,
+                )
+                get_team_manager(channel_id).mark_workflow_completed(session_id)
+                break
 
         logger.info(
             "[TeamHelpers] workflow event loop ended: channel_id=%s session_id=%s",

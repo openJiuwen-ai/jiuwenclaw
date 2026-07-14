@@ -245,6 +245,14 @@ class TeamManager:
         self._team_shared_skill_link_targets: dict[str, Path] = {}
         # session_id → workflow handler instance
         self._workflow_handlers: dict[str, Any] = {}
+        # session_id → True once a team-building event (team.member,
+        # team.task, workflow.updated) has been broadcast in the current
+        # round.  Reset when a new round starts.
+        self._seen_team_events: dict[str, bool] = {}
+        # session_id → True after workflow.updated(status=completed/…)
+        # is received.  When True, chat.final is no longer suppressed
+        # even if seen_team_events is True.
+        self._workflow_completed: dict[str, bool] = {}
 
     def has_stream_task(self, session_id: str) -> bool:
         return session_id in self._stream_tasks
@@ -292,6 +300,35 @@ class TeamManager:
                         session_id,
                         request_id,
                     )
+
+    # --- seen_team_events tracking ---
+    # A session enters "team" mode once any team-building event (team.member,
+    # team.task, workflow.updated, team.runtime_ready) is broadcast.  While
+    # the flag is set, chat.final must NOT be forwarded to the frontend
+    # because the team may still be running; only team.completed (via
+    # chat.processing_status is_complete=True) should finalize the round.
+
+    def mark_seen_team_events(self, session_id: str) -> None:
+        """Record that a team-building event has been broadcast for this session."""
+        self._seen_team_events[session_id] = True
+
+    def has_seen_team_events(self, session_id: str) -> bool:
+        """Return whether any team-building event has been broadcast in this round."""
+        return self._seen_team_events.get(session_id, False)
+
+    def reset_seen_team_events(self, session_id: str) -> None:
+        """Reset the flag at the start of a new conversation round."""
+        self._seen_team_events.pop(session_id, None)
+
+    def mark_workflow_completed(self, session_id: str) -> None:
+        """Mark that the workflow has reached a terminal status."""
+        self._workflow_completed[session_id] = True
+
+    def is_workflow_completed(self, session_id: str) -> bool:
+        return self._workflow_completed.get(session_id, False)
+
+    def reset_workflow_completed(self, session_id: str) -> None:
+        self._workflow_completed.pop(session_id, None)
 
     def get_waiters(self, session_id: str) -> list[tuple[str, asyncio.Queue]]:
         """Return the (request_id, queue) pairs waiting on the given session."""

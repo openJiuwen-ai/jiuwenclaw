@@ -91,7 +91,10 @@ check_gateway_up_dependency() {
             DEPLOY_VARS["MASTER_NODE_IP"]="${_gw_host_list[0]}"
             info "MASTER_NODE_IP inferred from CLUSTER_HOSTS: ${DEPLOY_VARS["MASTER_NODE_IP"]}"
         else
-            error "MASTER_NODE_IP is not set. Please set it in .env.custom or deploy jiuwenswarm first."
+            local local_ip
+            local_ip=$(get_local_ip)
+            DEPLOY_VARS["MASTER_NODE_IP"]="${local_ip}"
+            info "MASTER_NODE_IP not set, defaulting to local: ${local_ip}"
         fi
     fi
 

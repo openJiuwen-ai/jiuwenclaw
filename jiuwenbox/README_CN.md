@@ -174,6 +174,36 @@ UDS 相关环境变量：
 | `JIUWENBOX_UDS_HOST_DIR` | `/tmp/jiuwenbox-sock` | `run_docker.sh` 把宿主 socket 目录挂载到容器内的位置。 |
 | `JIUWENBOX_UDS_CONTAINER_DIR` | `/run/jiuwenbox` | 容器内挂载点，必须与 `JIUWENBOX_LISTEN` 里 socket 路径所在的目录一致。 |
 
+### API 认证（opt-in）
+
+设置 `JIUWENBOX_API_TOKEN` 后，所有 HTTP 端点（含 `/health`、`/api/v1/*`、`/mcp`）均要求请求头：
+
+```http
+Authorization: Bearer <token>
+```
+
+未携带或 token 错误时返回 `401`，响应体 `{"error":"unauthorized"}`。
+
+```bash
+# 生成 token 并启动服务端
+export JIUWENBOX_API_TOKEN="$(openssl rand -hex 32)"
+JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN jiuwenbox-server
+# 或: jiuwenbox-server --api-token "$JIUWENBOX_API_TOKEN"
+
+# CLI
+export JIUWENBOX_API_TOKEN=$JIUWENBOX_API_TOKEN
+jiuwenbox health
+
+# curl
+curl -H "Authorization: Bearer $JIUWENBOX_API_TOKEN" http://127.0.0.1:8321/health
+```
+
+| 变量 / 参数 | 说明 |
+| --- | --- |
+| `JIUWENBOX_API_TOKEN` | 服务端与 CLI **共用**；未设置 = 不启用认证 |
+| `jiuwenbox-server --api-token` | 启动参数，优先级高于 env |
+| `jiuwenbox --api-token` | CLI 参数，优先级高于 env |
+
 ### 持久化审计日志（`--save-logs DIR`）
 
 **默认情况下 jiuwenbox 不会写任何日志文件**：审计事件只在 Python 标
@@ -850,6 +880,7 @@ jiuwenbox proxy logs openai --lines 50
 | 选项 | 默认值 | 环境变量 | 说明 |
 | --- | --- | --- | --- |
 | `--base-url` | `http://127.0.0.1:8321` | `JIUWENBOX_URL` | jiuwenbox 服务地址。接受 `http://host:port` 或 `unix:///abs/socket/path` |
+| `--api-token` | _未设置_ | `JIUWENBOX_API_TOKEN` | Bearer token；服务端启用认证时必须与服务端 token 一致 |
 | `--timeout` | `30` | `JIUWENBOX_TIMEOUT` | HTTP 超时秒数 |
 | `--verbose / -v` | 关闭 | – | stderr 打印 debug 日志 |
 | `--no-color` | 关闭 | `NO_COLOR` | 关闭 stderr ANSI 颜色 |

@@ -763,7 +763,7 @@
       "apiBaseUrlInvalid": "API Base URL must start with http:// or https://",
       "modelNameTooLong": "Model name is too long, please keep it under 100 characters",
       "aliasTooLong": "Alias is too long, please keep it under 100 characters",
-      "apiBaseTooLong": "API Base URL is too long, please keep it under 256 characters",
+      "apiBaseTooLong": "API Base URL is too long, please keep it under 512 characters",
       "apiKeyTooLong": "API Key is too long, please keep it under 500 characters",
       "reasoningDefault": "Use default",
       "alias": "Alias",
@@ -882,6 +882,11 @@
       "requiredModelFields": "These model fields are required: {{fields}}. Complete them before saving and restarting.",
       "saveFailed": "Save failed, please try again later",
       "processingDisabled": "A task is running. Please wait for it to finish before saving config.",
+      "taskRunning": "A task is currently running. Please wait for it to finish before saving config.",
+      "configChangedTitle": "Config updated by another window",
+      "configChangedDesc": "Discard your local draft and load the latest config? Cancel to keep editing your draft.",
+      "configChangedConfirm": "Load latest",
+      "configChangedCancel": "Keep draft",
       "proactiveIntEmpty": "{{field}} cannot be empty; must be a positive integer ({{lo}}-{{hi}})",
       "proactiveIntNotInteger": "{{field}} must be a positive integer ({{lo}}-{{hi}}); invalid value: {{value}}",
       "proactiveIntOutOfRange": "{{field}} must be a positive integer in {{lo}}-{{hi}}; current: {{value}}"
@@ -1626,6 +1631,7 @@
     "installNow": "Install and restart",
     "pipUpgrade": "Upgrade",
     "pipRestart": "Restart now",
+    "restoreDefaults": "Restore Default Source",
     "currentVersion": "Current version",
     "latestVersion": "Latest version",
     "state": "Update state",
@@ -1658,11 +1664,11 @@
       "downloadFailed": "Failed to download the update",
       "upgradeFailed": "Failed to install the update",
       "saveConfigFailed": "Failed to save updater config",
+      "resetSourceFailed": "Failed to reset update source config",
       "installUnavailable": "The installer cannot be started here. Please run inside the desktop app.",
       "installFailed": "Failed to launch the update installer"
     },
     "fields": {
-      "enabled": "Enable updater",
       "releaseApiType": "Update source",
       "releaseApiUrl": "Release API URL"
     }

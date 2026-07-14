@@ -231,7 +231,7 @@ const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlo
 const REASONING_LEVEL_OPTIONS = ["", "off", "low", "medium", "high"];
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
-const MAX_API_BASE_LENGTH = 100;
+const MAX_API_BASE_LENGTH = 512;
 const MAX_API_KEY_LENGTH = 500;
 
 type ToolSelectorState = {
@@ -2261,12 +2261,12 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    // Ctrl+C during pending question: first press shows hint, second press within 1s cancels
+    // Ctrl+C during pending question: first press shows hint, second press within 3s exits
     if (pendingQuestion && matchesKey(data, "ctrl+c")) {
       if (this.ctrlCPendingForQuestion) {
         this.clearCtrlCPendingForQuestion();
         this.transientNotice = null;
-        this.interruptTask();
+        this.exit();
         return;
       }
       this.ctrlCPendingForQuestion = true;
@@ -3950,11 +3950,8 @@ export class AppScreen implements Component, Focusable {
     const toggleHint = `${projectHint} · ${branchHint}`;
     const scopeSuffix = branchOn ? ` · branch:${this.resumeSessionList.currentBranch}` : "";
     const searchBox = this.resumeSessionList.searchQuery
-      ? padToWidth(palette.text.primary(`Search: ${this.resumeSessionList.searchQuery}${END_CURSOR}`), width)
-      : padToWidth(
-          palette.text.dim(`Type to search · ↑/↓ to choose · Enter to resume · Space to preview · Ctrl+R to rename · ${toggleHint} · Esc to cancel`),
-          width,
-        );
+      ? padToWidth(palette.text.primary(`🔍: ${this.resumeSessionList.searchQuery}${END_CURSOR}`), width)
+      : padToWidth(palette.text.dim(`🔍: Type to search · Esc to cancel`), width);
     const st = this.resumeSessionList;
     const visibleCount = computeResumeItems(st.sessions, {
       query: st.searchQuery,

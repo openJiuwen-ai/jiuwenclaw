@@ -56,6 +56,32 @@ def _prune_daily_counts() -> None:
             _daily_counts.pop(k, None)
 
 
+# "今日已达上限"提醒的去重——每天最多推一次，避免 cron 多次到点刷屏。
+# 与 _daily_counts 同构：进程内字典 + 当日 key，跨天/重启自动重置。
+_limit_notif_lock = threading.Lock()
+_limit_notif_sent: dict[str, bool] = {}
+
+
+def _limit_notif_sent_today() -> bool:
+    with _limit_notif_lock:
+        return _limit_notif_sent.get(_today_key(), False)
+
+
+def _mark_limit_notif_sent() -> None:
+    with _limit_notif_lock:
+        _limit_notif_sent[_today_key()] = True
+
+
+def _prune_limit_notif() -> None:
+    """Remove entries older than 2 days.（与 _prune_daily_counts 对齐）"""
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d")
+    with _limit_notif_lock:
+        keys_to_remove = [k for k in _limit_notif_sent if k < cutoff]
+        for k in keys_to_remove:
+            _limit_notif_sent.pop(k, None)
+
+
 # ── Cooldown ─────────────────────────────────────────────────────
 
 _COOLDOWN_HOURS = 24

@@ -87,7 +87,14 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         urn = urllib.parse.quote(self._function_version_urn, safe="")
         return f"{self._frontend_endpoint}/serverless/v1/functions/{urn}/invocations"
 
-    def _do_invoke(self, payload: dict[str, Any], session_id: str) -> tuple[int, str]:
+    def _invoke_headers(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+        req_method: str | None = None,
+        stream: bool = False,
+    ) -> dict[str, str]:
         headers = {
             "Content-Type": "application/json",
             "X-Instance-Session": json.dumps(
@@ -95,6 +102,42 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 ensure_ascii=False,
             ),
         }
+        if stream:
+            headers["Accept"] = "text/event-stream"
+        uid = str(user_id or "").strip()
+        if uid:
+            session_context = json.dumps({"sessionCtx": uid}, ensure_ascii=False)
+            headers["X-Session-Context"] = session_context
+            logger.debug(
+                "[YuanrongFrontendAgentClient] invoke headers: method=%s session_id=%s user_id=%s "
+                "X-Session-Context=%s stream=%s",
+                req_method,
+                session_id,
+                uid,
+                session_context,
+                stream,
+            )
+        else:
+            logger.info(
+                "[YuanrongFrontendAgentClient] invoke headers: method=%s session_id=%s "
+                "uid_empty=yes X-Session-Context omitted stream=%s",
+                req_method,
+                session_id,
+                stream,
+            )
+        return headers
+
+    def _do_invoke(
+        self,
+        payload: dict[str, Any],
+        session_id: str,
+        user_id: str | None = None,
+    ) -> tuple[int, str]:
+        headers = self._invoke_headers(
+            session_id,
+            user_id=user_id,
+            req_method=payload.get("req_method"),
+        )
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self._invoke_url(), data=data, headers=headers, method="POST")
 
@@ -141,7 +184,12 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             "metadata": request.metadata,
         }
         session_id = request.session_id or ""
-        status, body = await asyncio.to_thread(self._do_invoke, payload, session_id)
+        status, body = await asyncio.to_thread(
+            self._do_invoke,
+            payload,
+            session_id,
+            envelope.user_id,
+        )
         try:
             parsed = json.loads(body) if body else {}
         except Exception:
@@ -180,7 +228,14 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         queue: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
         session_id = request.session_id or ""
         reader_task = asyncio.create_task(
-            asyncio.to_thread(self._do_invoke_stream, payload, session_id, queue, loop)
+            asyncio.to_thread(
+                self._do_invoke_stream,
+                payload,
+                session_id,
+                queue,
+                loop,
+                envelope.user_id,
+            )
         )
         try:
             while True:
@@ -229,6 +284,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         session_id: str,
         out_queue: asyncio.Queue[tuple[str, str | None]],
         loop: asyncio.AbstractEventLoop,
+        user_id: str | None = None,
     ) -> None:
         """执行流式 HTTP 调用（在线程中运行）.
 
@@ -238,14 +294,12 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             out_queue: 输出队列
             loop: 事件循环
         """
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "X-Instance-Session": json.dumps(
-                {"sessionID": session_id, "concurrency": self._concurrency},
-                ensure_ascii=False,
-            ),
-        }
+        headers = self._invoke_headers(
+            session_id,
+            user_id=user_id,
+            req_method=payload.get("req_method"),
+            stream=True,
+        )
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self._invoke_url(), data=data, headers=headers, method="POST")
 
