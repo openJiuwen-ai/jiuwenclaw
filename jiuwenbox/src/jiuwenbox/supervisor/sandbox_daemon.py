@@ -75,6 +75,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 # These constants are duplicated from ``daemon_ipc`` so the in-sandbox
@@ -92,10 +93,16 @@ REQUEST_TYPE_SHUTDOWN = "shutdown"
 REQUEST_TYPE_WRITE_FILE = "write_file"
 REQUEST_TYPE_READ_FILE = "read_file"
 REQUEST_TYPE_LIST_DIR = "list_dir"
+REQUEST_TYPE_EXEC_BACKGROUND = "exec_background"
+REQUEST_TYPE_BG_STATUS = "bg_status"
+REQUEST_TYPE_BG_KILL = "bg_kill"
+
+SANDBOX_BG_LOG_DIR = "/tmp/.jiuwenbox-bg"
 
 PROTOCOL_VERSION = 1
 MAX_HEADER_BYTES = 1 * 1024 * 1024
 MAX_STDIN_BYTES = 64 * 1024 * 1024
+MAX_STDOUT_BYTES = 64 * 1024 * 1024
 MAX_FILE_BYTES = 256 * 1024 * 1024
 
 ACCEPT_TIMEOUT_SECONDS = 1.0
@@ -671,6 +678,343 @@ def _handle_list_dir(conn: socket.socket, header: dict[str, Any]) -> None:
     )
 
 
+@dataclass
+class _BgJob:
+    job_id: str
+    command: list[str]
+    proc: subprocess.Popen
+    capture_output: bool
+    stdout_path: str | None
+    stderr_path: str | None
+
+
+_bg_jobs: dict[str, _BgJob] = {}
+_bg_jobs_lock = threading.Lock()
+
+
+def _sync_bg_job(job: _BgJob) -> None:
+    if job.proc.returncode is None:
+        job.proc.poll()
+
+
+def _read_bg_log(path: str | None) -> str:
+    if not path or not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read(MAX_STDOUT_BYTES + 1)
+        if len(data) > MAX_STDOUT_BYTES:
+            data = data[:MAX_STDOUT_BYTES]
+        return data.decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _bg_job_response(
+    *,
+    ok: bool,
+    job_id: str,
+    job: _BgJob | None = None,
+    started: bool = True,
+    error: str | None = None,
+    stderr: str = "",
+) -> dict[str, Any]:
+    response: dict[str, Any] = {
+        "v": PROTOCOL_VERSION,
+        "ok": ok,
+        "job_id": job_id,
+        "started": started,
+    }
+    if error:
+        response["error"] = error
+    if stderr:
+        response["stderr"] = stderr
+    if job is not None:
+        _sync_bg_job(job)
+        response["pid"] = job.proc.pid
+        response["running"] = job.proc.returncode is None
+        response["exit_code"] = job.proc.returncode
+        if job.capture_output:
+            response["stdout"] = _read_bg_log(job.stdout_path)
+            response["stderr"] = _read_bg_log(job.stderr_path)
+    return response
+
+
+def _handle_exec_background(conn: socket.socket, header: dict[str, Any]) -> None:
+    try:
+        job_id = header.get("job_id")
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise ValueError("exec_background request missing 'job_id'")
+        job_id = job_id.strip()
+
+        command = header.get("command")
+        if not isinstance(command, list) or not command:
+            raise ValueError("exec_background request missing 'command'")
+        command = _stringify_command(command)
+
+        capture_output = bool(header.get("capture_output", True))
+        env_override = _normalize_env(header.get("env"))
+        workdir = header.get("workdir")
+        if workdir is not None and not isinstance(workdir, str):
+            raise ValueError("workdir must be a string")
+        stdin_size = int(header.get("stdin_size") or 0)
+        if stdin_size < 0 or stdin_size > MAX_STDIN_BYTES:
+            raise ValueError(f"invalid stdin_size {stdin_size}")
+
+        stdin_bytes = _recv_exact(conn, stdin_size) if stdin_size else b""
+
+        with _bg_jobs_lock:
+            if job_id in _bg_jobs:
+                _send_response(
+                    conn,
+                    _bg_job_response(
+                        ok=False,
+                        job_id=job_id,
+                        started=False,
+                        error="job_exists",
+                        stderr=f"background job {job_id!r} already exists",
+                    ),
+                )
+                return
+
+        merged_env = dict(os.environ)
+        merged_env.pop(LISTENER_FD_ENV, None)
+        if env_override is not None:
+            merged_env.update(env_override)
+
+        stdout_path: str | None = None
+        stderr_path: str | None = None
+        stdout_file = None
+        stderr_file = None
+        if capture_output:
+            os.makedirs(SANDBOX_BG_LOG_DIR, exist_ok=True)
+            stdout_path = f"{SANDBOX_BG_LOG_DIR}/{job_id}.out"
+            stderr_path = f"{SANDBOX_BG_LOG_DIR}/{job_id}.err"
+            stdout_file = open(stdout_path, "wb")
+            stderr_file = open(stderr_path, "wb")
+            stdout_target = stdout_file
+            stderr_target = stderr_file
+        else:
+            stdout_target = subprocess.DEVNULL
+            stderr_target = subprocess.DEVNULL
+
+        proc_kwargs: dict[str, Any] = {
+            "stdin": subprocess.PIPE if stdin_size else subprocess.DEVNULL,
+            "stdout": stdout_target,
+            "stderr": stderr_target,
+            "env": merged_env,
+            "close_fds": True,
+            "start_new_session": True,
+        }
+        if workdir:
+            proc_kwargs["cwd"] = workdir
+
+        try:
+            proc = subprocess.Popen(command, **proc_kwargs)
+            if stdin_size and proc.stdin is not None:
+                proc.stdin.write(stdin_bytes)
+                proc.stdin.close()
+        except OSError as exc:
+            _send_response(
+                conn,
+                _bg_job_response(
+                    ok=False,
+                    job_id=job_id,
+                    started=False,
+                    error="spawn_failed",
+                    stderr=f"failed to spawn background command: {exc}",
+                ),
+            )
+            return
+        finally:
+            if stdout_file is not None:
+                stdout_file.close()
+            if stderr_file is not None:
+                stderr_file.close()
+
+        job = _BgJob(
+            job_id=job_id,
+            command=command,
+            proc=proc,
+            capture_output=capture_output,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+        )
+        with _bg_jobs_lock:
+            _bg_jobs[job_id] = job
+
+        _send_response(conn, _bg_job_response(ok=True, job_id=job_id, job=job))
+    except (ValueError, ConnectionError) as exc:
+        _send_response(
+            conn,
+            _bg_job_response(
+                ok=False,
+                job_id=str(header.get("job_id") or ""),
+                started=False,
+                error="bad_request",
+                stderr=str(exc),
+            ),
+        )
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.exception("Unhandled error while handling exec_background request")
+        _send_response(
+            conn,
+            _bg_job_response(
+                ok=False,
+                job_id=str(header.get("job_id") or ""),
+                started=False,
+                error="internal",
+                stderr=f"daemon internal error: {exc}",
+            ),
+        )
+
+
+def _handle_bg_status(conn: socket.socket, header: dict[str, Any]) -> None:
+    job_id = header.get("job_id")
+    if not isinstance(job_id, str) or not job_id.strip():
+        _send_response(
+            conn,
+            _bg_job_response(
+                ok=False,
+                job_id="",
+                started=False,
+                error="bad_request",
+                stderr="bg_status request missing 'job_id'",
+            ),
+        )
+        return
+    job_id = job_id.strip()
+    with _bg_jobs_lock:
+        job = _bg_jobs.get(job_id)
+    if job is None:
+        _send_response(
+            conn,
+            _bg_job_response(
+                ok=False,
+                job_id=job_id,
+                started=False,
+                error="not_found",
+                stderr=f"background job {job_id!r} not found",
+            ),
+        )
+        return
+    _send_response(conn, _bg_job_response(ok=True, job_id=job_id, job=job))
+
+
+def _handle_bg_kill(conn: socket.socket, header: dict[str, Any]) -> None:
+    job_id = header.get("job_id")
+    if not isinstance(job_id, str) or not job_id.strip():
+        _send_response(
+            conn,
+            {
+                "v": PROTOCOL_VERSION,
+                "ok": False,
+                "error": "bad_request",
+                "stderr": "bg_kill request missing 'job_id'",
+            },
+        )
+        return
+    job_id = job_id.strip()
+    signum = header.get("signum", 15)
+    if not isinstance(signum, int):
+        _send_response(
+            conn,
+            {
+                "v": PROTOCOL_VERSION,
+                "ok": False,
+                "error": "bad_request",
+                "stderr": "signum must be an integer",
+            },
+        )
+        return
+
+    with _bg_jobs_lock:
+        job = _bg_jobs.get(job_id)
+    if job is None:
+        _send_response(
+            conn,
+            {
+                "v": PROTOCOL_VERSION,
+                "ok": False,
+                "job_id": job_id,
+                "killed": False,
+                "reason": "not_found",
+            },
+        )
+        return
+
+    _sync_bg_job(job)
+    if job.proc.returncode is not None:
+        _send_response(
+            conn,
+            {
+                "v": PROTOCOL_VERSION,
+                "ok": True,
+                "job_id": job_id,
+                "killed": False,
+                "reason": "already_exited",
+                "exit_code": job.proc.returncode,
+            },
+        )
+        return
+
+    try:
+        job.proc.send_signal(signum)
+    except ProcessLookupError:
+        _sync_bg_job(job)
+        _send_response(
+            conn,
+            {
+                "v": PROTOCOL_VERSION,
+                "ok": True,
+                "job_id": job_id,
+                "killed": False,
+                "reason": "already_exited",
+                "exit_code": job.proc.returncode,
+            },
+        )
+        return
+    except PermissionError:
+        _send_response(
+            conn,
+            {
+                "v": PROTOCOL_VERSION,
+                "ok": True,
+                "job_id": job_id,
+                "killed": False,
+                "reason": "permission_denied",
+                "exit_code": job.proc.returncode,
+            },
+        )
+        return
+    except OSError:
+        _send_response(
+            conn,
+            {
+                "v": PROTOCOL_VERSION,
+                "ok": True,
+                "job_id": job_id,
+                "killed": False,
+                "reason": "permission_denied",
+                "exit_code": job.proc.returncode,
+            },
+        )
+        return
+
+    _sync_bg_job(job)
+    _send_response(
+        conn,
+        {
+            "v": PROTOCOL_VERSION,
+            "ok": True,
+            "job_id": job_id,
+            "killed": True,
+            "reason": "ok",
+            "exit_code": job.proc.returncode,
+        },
+    )
+
+
 def _handle_connection(conn: socket.socket, state: DaemonState) -> None:
     state.begin_request()
     try:
@@ -708,6 +1052,12 @@ def _handle_connection(conn: socket.socket, state: DaemonState) -> None:
             _handle_read_file(conn, header)
         elif request_type == REQUEST_TYPE_LIST_DIR:
             _handle_list_dir(conn, header)
+        elif request_type == REQUEST_TYPE_EXEC_BACKGROUND:
+            _handle_exec_background(conn, header)
+        elif request_type == REQUEST_TYPE_BG_STATUS:
+            _handle_bg_status(conn, header)
+        elif request_type == REQUEST_TYPE_BG_KILL:
+            _handle_bg_kill(conn, header)
         else:
             _send_response(
                 conn,

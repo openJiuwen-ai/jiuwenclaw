@@ -1,13 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Process-based runtime adapter (bare-metal mode).
 
-Spawns bubblewrap directly for each sandbox lifecycle process and for each
-``exec`` request. Setup runs in-process and reuses the expensive artifacts
-(seccomp BPF program, encoded Landlock payload, copies of the in-sandbox
-launcher scripts) for the lifetime of the sandbox: bubblewrap still applies
-all namespace/mount/seccomp/Landlock isolation, the sandbox still runs
-through the dedicated launcher script, and the seccomp memfd still flows
-through ``pass_fds`` so it cannot be observed by sandboxed code.
+Spawns bubblewrap once per sandbox lifecycle to start the in-sandbox daemon.
+All ``exec`` and ``exec_background`` requests are served via daemon IPC so
+user commands inherit the same namespace/mount/seccomp/Landlock envelope
+without spawning bwrap per call.
 """
 
 from __future__ import annotations
@@ -27,6 +24,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,7 +55,10 @@ from jiuwenbox.supervisor.daemon_ipc import (
     LISTENER_FD_ENV,
     MAX_FILE_BYTES,
     MAX_HEADER_BYTES,
+    REQUEST_TYPE_BG_KILL,
+    REQUEST_TYPE_BG_STATUS,
     REQUEST_TYPE_EXEC,
+    REQUEST_TYPE_EXEC_BACKGROUND,
     REQUEST_TYPE_LIST_DIR,
     REQUEST_TYPE_READ_FILE,
     REQUEST_TYPE_SHUTDOWN,
@@ -245,6 +246,36 @@ class _DaemonListDirCall:
     include_dirs: bool
 
 
+@dataclasses.dataclass(frozen=True)
+class _DaemonBgExecCall:
+    """Inputs to one IPC ``exec_background`` request."""
+
+    socket_path: Path
+    job_id: str
+    command: list[str]
+    env: dict[str, str] | None
+    workdir: str | None
+    stdin_bytes: bytes | None
+    capture_output: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class _DaemonBgStatusCall:
+    """Inputs to one IPC ``bg_status`` request."""
+
+    socket_path: Path
+    job_id: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _DaemonBgKillCall:
+    """Inputs to one IPC ``bg_kill`` request."""
+
+    socket_path: Path
+    job_id: str
+    signum: int
+
+
 # Admission control for ``exec``. ``exec`` is the one operation that
 # spawns a fresh ``python3`` (or other) child inside the sandbox, which
 # is overwhelmingly CPU-bound (interpreter cold start + imports + user
@@ -267,23 +298,15 @@ EXEC_CONCURRENCY_ENV = "JIUWENBOX_EXEC_CONCURRENCY"
 # ---------------------------------------------------------------------------
 # Zombie reaper plumbing.
 #
-# Background: each ``bwrap`` invocation (sandbox daemon spawn, or
-# ``exec_background``) creates the bwrap monitor process as a direct child of
-# box-server. With ``--unshare-user`` (default in jiuwenbox) bwrap additionally
-# clones a userns helper via ``CLONE_PARENT`` so the helper's parent is *also*
-# box-server, not bwrap. When that helper finishes its short setup and exits,
-# it becomes a zombie of box-server until somebody calls ``waitpid`` on it.
-# Without proactive reaping the host process table fills up with
-# ``[bwrap] <defunct>`` entries (visible as a child of the box-server pid).
+# Background: each sandbox lifecycle spawns one bwrap monitor process as a
+# direct child of box-server. With ``--unshare-user`` (default in jiuwenbox)
+# bwrap additionally clones a userns helper via ``CLONE_PARENT`` so the
+# helper's parent is *also* box-server, not bwrap. When that helper finishes
+# its short setup and exits, it becomes a zombie of box-server until somebody
+# calls ``waitpid`` on it.
 #
-# The historical code only reaped lazily:
-# - daemon bwrap monitor: ``Popen.poll()`` is called from ``stop()``/
-#   ``cleanup()``/``is_running()``; if the user never invokes any of these
-#   the monitor's eventual exit lingers indefinitely.
-# - background bwrap: ``_reap_background_processes`` runs at the start of the
-#   *next* ``exec_background`` call; a workload that does one background exec
-#   and then nothing else leaks a zombie until shutdown.
-# - userns helper / other bwrap-internal forks: never tracked, never reaped.
+# Background jobs no longer spawn per-command bwrap processes; they are forked
+# inside the sandbox daemon's PID namespace via daemon IPC.
 #
 # The fix is three-pronged:
 # - ``prctl(PR_SET_CHILD_SUBREAPER, 1)`` so even when box-server isn't PID 1
@@ -316,15 +339,14 @@ class BackgroundJob:
     job_id: str
     sandbox_id: str
     command: list[str]
-    pid: int
-    proc: subprocess.Popen
+    pid: int | None
     capture_output: bool
-    stdout_path: Path | None
-    stderr_path: Path | None
     workdir: str | None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     finished_at: datetime | None = None
     exit_code: int | None = None
+    stdout: str = ""
+    stderr: str = ""
 
 
 class BackgroundJobNotFoundError(Exception):
@@ -648,55 +670,75 @@ class ProcessRuntime(RuntimeAdapter):
         self._control_dirs[sandbox_id] = control_dir
         return control_dir
 
-    def _ensure_bg_logs_dir(self, sandbox_id: str) -> Path:
-        control_dir = self._ensure_control_dir(sandbox_id)
-        logs_dir = control_dir / "bg-logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        return logs_dir
-
     def _background_jobs_for_sandbox(self, sandbox_id: str) -> dict[str, BackgroundJob]:
         return self._background_processes.setdefault(sandbox_id, {})
 
-    @staticmethod
-    def _sync_background_job(job: BackgroundJob) -> None:
-        if job.exit_code is not None:
+    def _apply_bg_status_response(
+        self,
+        job: BackgroundJob,
+        response: dict[str, Any],
+    ) -> None:
+        if not response.get("ok"):
             return
-        returncode = job.proc.poll()
-        if returncode is None:
+        pid = response.get("pid")
+        if isinstance(pid, int):
+            job.pid = pid
+        running = response.get("running")
+        if not isinstance(running, bool):
             return
-        job.exit_code = returncode
-        job.finished_at = datetime.now(timezone.utc)
+        if job.capture_output:
+            job.stdout = str(response.get("stdout", ""))
+            job.stderr = str(response.get("stderr", ""))
+        if running:
+            job.exit_code = None
+            job.finished_at = None
+            return
+        exit_code = response.get("exit_code")
+        if exit_code is None or isinstance(exit_code, int):
+            job.exit_code = exit_code
+        if job.finished_at is None:
+            job.finished_at = datetime.now(timezone.utc)
 
-    @staticmethod
-    def _read_job_stream(path: Path | None) -> str:
-        if path is None or not path.exists():
-            return ""
-        return path.read_text(encoding="utf-8", errors="replace")
+    def _sync_background_job_blocking(
+        self,
+        sandbox_id: str,
+        job: BackgroundJob,
+    ) -> None:
+        socket_path = self._control_socket_host_path(sandbox_id)
+        if socket_path is None or not self._daemon_ipc_available(sandbox_id):
+            return
+        try:
+            response = self._bg_status_via_daemon_blocking(
+                _DaemonBgStatusCall(socket_path=socket_path, job_id=job.job_id),
+            )
+        except (ConnectionError, ValueError, socket.timeout, OSError):
+            return
+        self._apply_bg_status_response(job, response)
 
     def _job_status(self, job: BackgroundJob) -> BackgroundJobStatus:
-        self._sync_background_job(job)
+        running = job.exit_code is None
         return BackgroundJobStatus(
             job_id=job.job_id,
             sandbox_id=job.sandbox_id,
             command=list(job.command),
             pid=job.pid,
-            running=job.exit_code is None,
+            running=running,
             exit_code=job.exit_code,
             started_at=job.started_at,
             finished_at=job.finished_at,
             capture_output=job.capture_output,
-            stdout=self._read_job_stream(job.stdout_path),
-            stderr=self._read_job_stream(job.stderr_path),
+            stdout=job.stdout,
+            stderr=job.stderr,
             workdir=job.workdir,
         )
 
     def _job_summary(self, job: BackgroundJob) -> BackgroundJobSummary:
-        self._sync_background_job(job)
+        running = job.exit_code is None
         return BackgroundJobSummary(
             job_id=job.job_id,
             pid=job.pid,
             command=list(job.command),
-            running=job.exit_code is None,
+            running=running,
             exit_code=job.exit_code,
             started_at=job.started_at,
             finished_at=job.finished_at,
@@ -823,7 +865,6 @@ class ProcessRuntime(RuntimeAdapter):
         policy: SecurityPolicy,
         command: list[str],
         *,
-        is_daemon: bool,
         workdir: str | None,
         sandbox_env: dict[str, str] | None,
         netns_attached: bool,
@@ -855,7 +896,7 @@ class ProcessRuntime(RuntimeAdapter):
         launcher_dir = self._launcher_dirs.get(sandbox_id)
         landlock_enabled = policy.landlock.compatibility != "disabled"
 
-        if is_daemon and launcher_dir is not None:
+        if launcher_dir is not None:
             daemon_path = launcher_dir / "sandbox-daemon.py"
             config.ro_binds.append(
                 (str(daemon_path), SANDBOX_DAEMON_SANDBOX_PATH),
@@ -899,28 +940,14 @@ class ProcessRuntime(RuntimeAdapter):
             # on-disk path needing to remain reachable. That lets us
             # keep ``/run`` outside the Landlock allowlist so user code
             # cannot read the launcher / daemon scripts at runtime.
-            #
-            # For the generic (legacy) path used by ``exec_background``,
-            # the launcher still runs in ``--`` mode: apply Landlock and
-            # then ``execvp`` the requested user command.
-            if is_daemon:
-                config.command = [
-                    PYTHON_EXECUTABLE,
-                    "-S",
-                    SANDBOX_LAUNCHER_PATH,
-                    payload,
-                    "--daemon",
-                    SANDBOX_DAEMON_SANDBOX_PATH,
-                ]
-            else:
-                config.command = [
-                    PYTHON_EXECUTABLE,
-                    "-S",
-                    SANDBOX_LAUNCHER_PATH,
-                    payload,
-                    "--",
-                    *config.command,
-                ]
+            config.command = [
+                PYTHON_EXECUTABLE,
+                "-S",
+                SANDBOX_LAUNCHER_PATH,
+                payload,
+                "--daemon",
+                SANDBOX_DAEMON_SANDBOX_PATH,
+            ]
 
         config.seccomp_fd = seccomp_fd
         if self._needs_privdrop_for_process_identity(
@@ -1447,19 +1474,15 @@ class ProcessRuntime(RuntimeAdapter):
 
     def _reap_background_processes(self, sandbox_id: str) -> None:
         for job in self._background_jobs_for_sandbox(sandbox_id).values():
-            self._sync_background_job(job)
+            self._sync_background_job_blocking(sandbox_id, job)
 
     # ------------------------------------------------------------------
     # SIGCHLD-driven zombie reaper.
     #
     # The reaper has two responsibilities:
-    #   1. Poll every tracked ``Popen`` (sandbox daemon monitor + every
-    #      ``exec_background`` invocation) so their exit status is recorded
-    #      and they leave the host process table promptly. This uses
-    #      ``Popen.poll()``, which acquires ``Popen._waitpid_lock`` and is
-    #      therefore race-safe with concurrent ``Popen.wait()`` calls that
-    #      stop()/_stop_background_processes() issue on an executor thread.
-    #   2. Drain any residual zombie via ``os.waitpid(-1, WNOHANG)``. These
+    #   1. Poll every tracked ``Popen`` (sandbox daemon monitor) so its exit
+    #      status is recorded promptly.
+    #   2. Drain any residual zombie via ``os.waitpid(-1, WNOHANG)``.
     #      are bwrap-internal helpers (most importantly the ``--unshare-user``
     #      userns helper that is cloned with ``CLONE_PARENT`` and is therefore
     #      a direct child of box-server, *not* a child of the bwrap monitor)
@@ -1470,13 +1493,8 @@ class ProcessRuntime(RuntimeAdapter):
     #      branch (which silently sets ``returncode = 0``).
     # ------------------------------------------------------------------
     def _iter_tracked_popens(self) -> list[subprocess.Popen]:
-        """Snapshot of all ``Popen`` objects tracked by this runtime."""
-        result: list[subprocess.Popen] = []
-        result.extend(self._processes.values())
-        for jobs in self._background_processes.values():
-            for job in jobs.values():
-                result.append(job.proc)
-        return result
+        """Snapshot of sandbox lifecycle ``Popen`` objects tracked by this runtime."""
+        return list(self._processes.values())
 
     def _reap_zombies(self) -> None:
         """Reap every zombie child (tracked + orphan).
@@ -1728,25 +1746,65 @@ class ProcessRuntime(RuntimeAdapter):
         if not jobs:
             return
 
-        running = [job for job in jobs.values() if job.proc.poll() is None]
-        for job in running:
-            try:
-                os.killpg(job.proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                continue
+        socket_path = self._control_socket_host_path(sandbox_id)
+        if socket_path is None or not self._daemon_ipc_available(sandbox_id):
+            return
 
         loop = asyncio.get_running_loop()
-        for job in running:
-            proc = job.proc
+        running_jobs = [
+            job for job in jobs.values() if job.exit_code is None
+        ]
+        for job in running_jobs:
             try:
-                await loop.run_in_executor(None, proc.wait, timeout)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    continue
-                await loop.run_in_executor(None, proc.wait, 5.0)
-            self._sync_background_job(job)
+                await loop.run_in_executor(
+                    None,
+                    self._bg_kill_via_daemon_blocking,
+                    _DaemonBgKillCall(
+                        socket_path=socket_path,
+                        job_id=job.job_id,
+                        signum=signal.SIGTERM,
+                    ),
+                )
+            except (ConnectionError, ValueError, socket.timeout, OSError):
+                continue
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            still_running = False
+            for job in running_jobs:
+                await loop.run_in_executor(
+                    None,
+                    self._sync_background_job_blocking,
+                    sandbox_id,
+                    job,
+                )
+                if job.exit_code is None:
+                    still_running = True
+            if not still_running:
+                return
+            await asyncio.sleep(0.1)
+
+        for job in running_jobs:
+            if job.exit_code is not None:
+                continue
+            try:
+                await loop.run_in_executor(
+                    None,
+                    self._bg_kill_via_daemon_blocking,
+                    _DaemonBgKillCall(
+                        socket_path=socket_path,
+                        job_id=job.job_id,
+                        signum=signal.SIGKILL,
+                    ),
+                )
+            except (ConnectionError, ValueError, socket.timeout, OSError):
+                continue
+            await loop.run_in_executor(
+                None,
+                self._sync_background_job_blocking,
+                sandbox_id,
+                job,
+            )
 
     async def create(
         self,
@@ -1802,7 +1860,6 @@ class ProcessRuntime(RuntimeAdapter):
             sandbox_id,
             policy,
             list(SANDBOX_DAEMON_COMMAND),
-            is_daemon=True,
             workdir=None,
             sandbox_env=env,
             netns_attached=netns_name is not None,
@@ -2171,52 +2228,6 @@ class ProcessRuntime(RuntimeAdapter):
             f"Sandbox lifecycle process is not running; returncode={returncode}"
         )
 
-    def _prepare_exec_invocation(
-        self,
-        sandbox_id: str,
-        request: RuntimeExecRequest,
-    ) -> tuple[list[str], int | None] | None:
-        """Build the bwrap argv + a fresh seccomp memfd for one ``exec``.
-
-        Returns ``None`` when the sandbox has no recorded policy (the caller
-        decides what failure to surface).
-        """
-        policy_path = self._policy_paths.get(sandbox_id)
-        if policy_path is None:
-            return None
-
-        policy = self._policy_for_sandbox(sandbox_id, policy_path)
-        if policy.network.mode == NetworkMode.ISOLATED:
-            netns_name = self._ensure_named_netns(sandbox_id, policy)
-        else:
-            netns_name = None
-        self._policy_binds_for_sandbox(sandbox_id, policy)
-        self._ensure_launcher_dir(sandbox_id)
-
-        seccomp_fd: int | None = None
-        try:
-            seccomp_fd = self._open_seccomp_fd_from_bytes(
-                self._ensure_seccomp_bpf(sandbox_id, policy),
-            )
-        except Exception:
-            logger.warning(
-                "Failed to build seccomp filter for sandbox %s exec; continuing without seccomp",
-                sandbox_id,
-                exc_info=True,
-            )
-
-        bwrap_args = self._build_sandbox_bwrap_args(
-            sandbox_id,
-            policy,
-            list(request.command),
-            is_daemon=False,
-            workdir=request.workdir,
-            sandbox_env=request.env,
-            netns_attached=netns_name is not None,
-            seccomp_fd=seccomp_fd,
-        )
-        return self._wrap_command_in_namespace(bwrap_args, netns_name), seccomp_fd
-
     def _daemon_ipc_available(self, sandbox_id: str) -> bool:
         if not self._daemon_socket_ready.get(sandbox_id, False):
             return False
@@ -2315,6 +2326,95 @@ class ProcessRuntime(RuntimeAdapter):
             stdout=str(response.get("stdout", "")),
             stderr=str(response.get("stderr", "")),
         )
+
+    def _exec_background_via_daemon_blocking(
+        self,
+        call: _DaemonBgExecCall,
+    ) -> dict[str, Any]:
+        request_payload: dict[str, Any] = {
+            "job_id": call.job_id,
+            "command": list(call.command),
+            "capture_output": call.capture_output,
+            "stdin_size": len(call.stdin_bytes or b""),
+        }
+        if call.env:
+            request_payload["env"] = dict(call.env)
+        if call.workdir:
+            request_payload["workdir"] = call.workdir
+        header_blob = encode_request(
+            request_type=REQUEST_TYPE_EXEC_BACKGROUND,
+            payload=request_payload,
+        )
+        if len(header_blob) > MAX_HEADER_BYTES:
+            return {
+                "ok": False,
+                "started": False,
+                "stderr": (
+                    f"daemon request header too large "
+                    f"({len(header_blob)} > {MAX_HEADER_BYTES})"
+                ),
+            }
+
+        sock = self._connect_daemon_socket(call.socket_path)
+        try:
+            sock.settimeout(30.0)
+            self._send_request_blob(sock, header_blob, call.stdin_bytes)
+            try:
+                sock.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            return self._read_response_blob(sock)
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _bg_status_via_daemon_blocking(
+        self,
+        call: _DaemonBgStatusCall,
+    ) -> dict[str, Any]:
+        header_blob = encode_request(
+            request_type=REQUEST_TYPE_BG_STATUS,
+            payload={"job_id": call.job_id},
+        )
+        sock = self._connect_daemon_socket(call.socket_path)
+        try:
+            sock.settimeout(30.0)
+            self._send_request_blob(sock, header_blob, None)
+            try:
+                sock.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            return self._read_response_blob(sock)
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _bg_kill_via_daemon_blocking(
+        self,
+        call: _DaemonBgKillCall,
+    ) -> dict[str, Any]:
+        header_blob = encode_request(
+            request_type=REQUEST_TYPE_BG_KILL,
+            payload={"job_id": call.job_id, "signum": call.signum},
+        )
+        sock = self._connect_daemon_socket(call.socket_path)
+        try:
+            sock.settimeout(30.0)
+            self._send_request_blob(sock, header_blob, None)
+            try:
+                sock.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            return self._read_response_blob(sock)
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     async def _exec_via_daemon(
         self,
@@ -2782,103 +2882,108 @@ class ProcessRuntime(RuntimeAdapter):
         sandbox_id: str,
         request: RuntimeBackgroundExecRequest,
     ) -> BackgroundExecResult:
-        prepared = self._prepare_exec_invocation(
-            sandbox_id,
-            RuntimeExecRequest(
-                command=request.command,
-                workdir=request.workdir,
-                env=request.env,
-                stdin_data=request.stdin_data,
-            ),
-        )
-        if prepared is None:
+        self._reap_background_processes(sandbox_id)
+
+        socket_path = self._control_socket_host_path(sandbox_id)
+        if socket_path is None or not self._daemon_ipc_available(sandbox_id):
             return BackgroundExecResult(
                 started=False,
                 command=list(request.command),
-                error_message="No policy found for sandbox",
+                error_message=(
+                    f"sandbox {sandbox_id!r} daemon IPC channel unavailable; "
+                    "the daemon is not running or its control socket is gone"
+                ),
                 capture_output=request.capture_output,
             )
 
-        jobs = self._background_jobs_for_sandbox(sandbox_id)
-        bwrap_cmd, seccomp_fd = prepared
-        process_env = {**os.environ, **(request.env or {})}
-        stdin_target = (
-            subprocess.PIPE if request.stdin_data is not None else subprocess.DEVNULL
-        )
-        pass_fds = (seccomp_fd,) if seccomp_fd is not None else ()
-
-        stdout_path: Path | None = None
-        stderr_path: Path | None = None
-        stdout_file = None
-        stderr_file = None
-        if request.capture_output:
-            logs_dir = self._ensure_bg_logs_dir(sandbox_id)
-            stdout_path = logs_dir / f"{request.job_id}.out"
-            stderr_path = logs_dir / f"{request.job_id}.err"
-            stdout_file = open(stdout_path, "wb")
-            stderr_file = open(stderr_path, "wb")
-            stdout_target = stdout_file
-            stderr_target = stderr_file
-        else:
-            stdout_target = subprocess.DEVNULL
-            stderr_target = subprocess.DEVNULL
-
+        loop = asyncio.get_running_loop()
         try:
-            proc = subprocess.Popen(
-                bwrap_cmd,
-                stdin=stdin_target,
-                stdout=stdout_target,
-                stderr=stderr_target,
-                env=process_env,
-                pass_fds=pass_fds,
-                start_new_session=True,
+            response = await loop.run_in_executor(
+                None,
+                self._exec_background_via_daemon_blocking,
+                _DaemonBgExecCall(
+                    socket_path=socket_path,
+                    job_id=request.job_id,
+                    command=list(request.command),
+                    env=dict(request.env) if request.env else None,
+                    workdir=request.workdir,
+                    stdin_bytes=request.stdin_data,
+                    capture_output=request.capture_output,
+                ),
             )
-            if request.stdin_data is not None and proc.stdin is not None:
-                proc.stdin.write(request.stdin_data)
-                proc.stdin.close()
-        except Exception as exc:
+        except (ConnectionError, ValueError) as exc:
+            self._daemon_socket_ready[sandbox_id] = False
             return BackgroundExecResult(
                 started=False,
                 command=list(request.command),
-                error_message=str(exc),
+                error_message=f"daemon IPC transport failure: {exc}",
                 capture_output=request.capture_output,
             )
-        finally:
-            if seccomp_fd is not None:
-                _safe_close_fd(seccomp_fd)
-            if stdout_file is not None:
-                stdout_file.close()
-            if stderr_file is not None:
-                stderr_file.close()
+        except socket.timeout as exc:
+            self._daemon_socket_ready[sandbox_id] = False
+            return BackgroundExecResult(
+                started=False,
+                command=list(request.command),
+                error_message=f"daemon IPC timeout: {exc}",
+                capture_output=request.capture_output,
+            )
+        except OSError as exc:
+            if exc.errno in FATAL_DAEMON_ERRNOS:
+                self._daemon_socket_ready[sandbox_id] = False
+            return BackgroundExecResult(
+                started=False,
+                command=list(request.command),
+                error_message=f"daemon IPC unavailable: {exc}",
+                capture_output=request.capture_output,
+            )
+
+        if not response.get("ok") or not response.get("started", False):
+            error = response.get("stderr") or response.get("error") or "unknown error"
+            return BackgroundExecResult(
+                started=False,
+                command=list(request.command),
+                error_message=str(error),
+                capture_output=request.capture_output,
+            )
+
+        pid = response.get("pid")
+        pid_int = pid if isinstance(pid, int) else None
+        running = response.get("running")
+        running_bool = running if isinstance(running, bool) else True
+        exit_code = response.get("exit_code")
+        exit_code_int = exit_code if isinstance(exit_code, int) else None
 
         job = BackgroundJob(
             job_id=request.job_id,
             sandbox_id=sandbox_id,
             command=list(request.command),
-            pid=proc.pid,
-            proc=proc,
+            pid=pid_int,
             capture_output=request.capture_output,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
             workdir=request.workdir,
+            exit_code=exit_code_int if not running_bool else None,
+            stdout=str(response.get("stdout", "")) if request.capture_output else "",
+            stderr=str(response.get("stderr", "")) if request.capture_output else "",
         )
+        if not running_bool and job.finished_at is None:
+            job.finished_at = datetime.now(timezone.utc)
+
+        jobs = self._background_jobs_for_sandbox(sandbox_id)
         jobs[request.job_id] = job
-        self._sync_background_job(job)
 
         logger.info(
-            "Started background command in sandbox %s (job=%s pid=%d): %s",
+            "Started background command in sandbox %s (job=%s pid=%s): %s",
             sandbox_id,
             request.job_id,
-            proc.pid,
+            pid_int,
             _summarize_command(list(request.command)),
         )
         return BackgroundExecResult(
             started=True,
             job_id=request.job_id,
-            pid=proc.pid,
+            pid=pid_int,
             command=list(request.command),
-            running=job.exit_code is None,
-            exit_code=job.exit_code,
+            running=running_bool,
+            exit_code=exit_code_int,
             capture_output=request.capture_output,
         )
 
@@ -2887,7 +2992,15 @@ class ProcessRuntime(RuntimeAdapter):
         sandbox_id: str,
         job_id: str,
     ) -> BackgroundJobStatus:
-        return self._job_status(self._get_background_job_record(sandbox_id, job_id))
+        job = self._get_background_job_record(sandbox_id, job_id)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            self._sync_background_job_blocking,
+            sandbox_id,
+            job,
+        )
+        return self._job_status(job)
 
     async def list_background_jobs(
         self,
@@ -2896,6 +3009,14 @@ class ProcessRuntime(RuntimeAdapter):
         running_only: bool = False,
     ) -> list[BackgroundJobSummary]:
         jobs = list(self._background_jobs_for_sandbox(sandbox_id).values())
+        loop = asyncio.get_running_loop()
+        for job in jobs:
+            await loop.run_in_executor(
+                None,
+                self._sync_background_job_blocking,
+                sandbox_id,
+                job,
+            )
         summaries = [self._job_summary(job) for job in jobs]
         if running_only:
             summaries = [item for item in summaries if item.running]
@@ -2909,7 +3030,13 @@ class ProcessRuntime(RuntimeAdapter):
         signum: int = 15,
     ) -> KillBackgroundJobResult:
         job = self._get_background_job_record(sandbox_id, job_id)
-        self._sync_background_job(job)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            self._sync_background_job_blocking,
+            sandbox_id,
+            job,
+        )
         if job.exit_code is not None:
             return KillBackgroundJobResult(
                 job_id=job_id,
@@ -2917,24 +3044,9 @@ class ProcessRuntime(RuntimeAdapter):
                 reason="already_exited",
                 exit_code=job.exit_code,
             )
-        try:
-            job.proc.send_signal(signum)
-        except ProcessLookupError:
-            self._sync_background_job(job)
-            return KillBackgroundJobResult(
-                job_id=job_id,
-                killed=False,
-                reason="already_exited",
-                exit_code=job.exit_code,
-            )
-        except PermissionError:
-            return KillBackgroundJobResult(
-                job_id=job_id,
-                killed=False,
-                reason="permission_denied",
-                exit_code=job.exit_code,
-            )
-        except OSError:
+
+        socket_path = self._control_socket_host_path(sandbox_id)
+        if socket_path is None or not self._daemon_ipc_available(sandbox_id):
             return KillBackgroundJobResult(
                 job_id=job_id,
                 killed=False,
@@ -2942,12 +3054,39 @@ class ProcessRuntime(RuntimeAdapter):
                 exit_code=job.exit_code,
             )
 
-        self._sync_background_job(job)
+        try:
+            response = await loop.run_in_executor(
+                None,
+                self._bg_kill_via_daemon_blocking,
+                _DaemonBgKillCall(
+                    socket_path=socket_path,
+                    job_id=job_id,
+                    signum=signum,
+                ),
+            )
+        except (ConnectionError, ValueError, socket.timeout, OSError):
+            return KillBackgroundJobResult(
+                job_id=job_id,
+                killed=False,
+                reason="permission_denied",
+                exit_code=job.exit_code,
+            )
+
+        reason = str(response.get("reason", "permission_denied"))
+        killed = bool(response.get("killed", False))
+        exit_code = response.get("exit_code")
+        exit_code_int = exit_code if isinstance(exit_code, int) else job.exit_code
+        await loop.run_in_executor(
+            None,
+            self._sync_background_job_blocking,
+            sandbox_id,
+            job,
+        )
         return KillBackgroundJobResult(
             job_id=job_id,
-            killed=True,
-            reason="ok",
-            exit_code=job.exit_code,
+            killed=killed,
+            reason=reason,
+            exit_code=exit_code_int,
         )
 
     async def cleanup(self, sandbox_id: str) -> None:
