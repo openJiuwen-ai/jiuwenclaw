@@ -107,6 +107,9 @@ def configure_openjiuwen_logging_under_jiuwenclaw(subdir: str = "openjiuwen") ->
     directory. JiuwenClaw owns a stable log root via ``get_logs_dir()``; this
     helper keeps openjiuwen's existing run/interface/performance layout while
     moving that root to ``<jiuwenclaw logs>/<subdir>``.
+
+    Also sets ``propagate=False`` so each structured line is not mirrored again
+    via the root logger (stdout was previously duplicated at ~2x volume).
     """
     apply_openjiuwen_safe_log_handler_patch()
     try:
@@ -121,11 +124,17 @@ def configure_openjiuwen_logging_under_jiuwenclaw(subdir: str = "openjiuwen") ->
 
         config = get_log_config_snapshot()
         target = str(log_root)
-        if config.get("log_path") == target:
-            return
-
-        config["log_path"] = target
-        configure_log_config(config)
+        changed = False
+        if config.get("log_path") != target:
+            config["log_path"] = target
+            changed = True
+        # openjiuwen defaults propagate=True; with console output enabled that
+        # doubles every structured record onto the process root/stdout handlers.
+        if config.get("propagate", True):
+            config["propagate"] = False
+            changed = True
+        if changed:
+            configure_log_config(config)
     except Exception as exc:
         llm_logger.warning(
             "Failed to route openjiuwen logs under JiuwenClaw log dir: %s",
