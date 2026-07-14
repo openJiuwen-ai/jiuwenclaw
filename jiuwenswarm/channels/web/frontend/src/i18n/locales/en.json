@@ -720,7 +720,11 @@
       "skillRetrievalBuildEquivalenceEnabled": "Enable equivalent branch merge",
       "skillRetrievalCompactCodes": "Compact code mode",
       "skillRetrievalFlattenTree": "Flatten retrieval tree",
-      "skillRetrievalMaxExposureDepth": "Exposure depth per call"
+      "skillRetrievalMaxExposureDepth": "Exposure depth per call",
+      "proactiveEnabled": "Enable proactive recommendation",
+      "proactiveTickInterval": "Check interval (minutes)",
+      "proactiveMaxPerDay": "Daily recommendation limit",
+      "proactiveMaxSessions": "Max sessions per check"
     },
     "keyHelp": {
       "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling",
@@ -816,7 +820,8 @@
       "skillRetrieval": { "label": "Skill Symphony", "hint": "Control Skill Symphony" },
       "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },
       "email": { "label": "Email Settings", "hint": "Email account and token settings" },
-      "other": { "label": "Other Settings", "hint": "Unclassified extended parameters" }
+      "other": { "label": "Other Settings", "hint": "Unclassified extended parameters" },
+      "proactive": { "label": "Proactive Recommendation", "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel" }
     },
     "booleanLabels": {
       "evolutionAutoScan": "Auto-detect evolution signals",
@@ -850,6 +855,23 @@
       "loadFailed": "Failed to load tool permissions",
       "saveFailed": "Save failed"
     },
+    "proactive": {
+      "title": "Proactive Recommendation",
+      "description": "Automatically analyze user needs and proactively offer suggestions based on conversation context.",
+      "tickInterval": "Check Interval",
+      "tickIntervalDesc": "How often the engine scans for proactive opportunities",
+      "maxPerDay": "Daily Limit",
+      "maxPerDayDesc": "Maximum proactive recommendations per day",
+      "maxSessions": "Sessions per Tick",
+      "maxSessionsDesc": "Maximum sessions analyzed per check cycle",
+      "notConnected": "Please connect to the server first.",
+      "disabledHint": "Enable proactive recommendation first to use this feature.",
+      "typeLabel": {
+        "skill_recommend": "Skill Recommend",
+        "task_reminder": "Task Reminder",
+        "need_exploration": "Explore"
+      }
+    },
     "errors": {
       "requiredModelFields": "These model fields are required: {{fields}}. Complete them before saving and restarting.",
       "saveFailed": "Save failed, please try again later",
@@ -871,6 +893,9 @@
     "loading": "Loading scheduled tasks...",
     "empty": "No scheduled tasks",
     "deleteConfirm": "Are you sure you want to delete this task?",
+    "autoManaged": "Auto-managed",
+    "autoManagedHint": "This task is auto-created/deleted by the proactive recommendation toggle (Settings → Proactive Recommendation). Schedule, offset, timezone and target channel can be edited here; to remove it, turn off the toggle in Settings.",
+    "autoManagedToggleDisabled": "The toggle of an auto-managed task is controlled by Settings → Proactive Recommendation and cannot be switched here.",
     "status": {
       "enabled": "Enabled",
       "disabled": "Disabled",

@@ -224,3 +224,81 @@ def test_dispatch_a2a_request_and_send_queue_roundtrip():
         assert queued.payload["content"] == "ok"
 
     asyncio.run(_run())
+
+
+def test_a2a_channel_start_serves_agent_card():
+    pytest.importorskip("a2a.types")
+    httpx = pytest.importorskip("httpx")
+
+    async def _run():
+        channel = A2AChannel(
+            A2AChannelConfig(enabled=True, host="127.0.0.1", port=19102),
+            DummyBus(),
+        )
+        try:
+            await channel.start()
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(
+                    "http://127.0.0.1:19102/.well-known/agent-card.json"
+                )
+            assert response.status_code == 200
+            card = response.json()
+            assert card["name"] == "JiuwenSwarm Gateway A2A Server"
+            iface = card["supportedInterfaces"][0]
+            assert iface["url"].endswith("/a2a")
+            assert iface["protocolBinding"] == "JSONRPC"
+        finally:
+            await channel.stop()
+
+    asyncio.run(_run())
+
+
+def test_executor_empty_query_emits_failed_task_lifecycle():
+    pytest.importorskip("a2a.types")
+    from a2a.types import Message, Part, Role, Task, TaskState, TaskStatusUpdateEvent
+    from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import _A2AAgentExecutor
+
+    class MockEventQueue:
+        def __init__(self) -> None:
+            self.events: list = []
+            self.closed = False
+
+        async def enqueue_event(self, event) -> None:
+            self.events.append(event)
+
+        async def close(self, immediate: bool = False) -> None:
+            self.closed = True
+
+    class MockContext:
+        def __init__(self) -> None:
+            self.current_task = None
+            self.task_id = "task-empty"
+            self.context_id = "ctx-empty"
+            self.metadata = {}
+            self.message = Message(
+                role=Role.ROLE_USER,
+                parts=[Part(text="")],
+                message_id="m-empty",
+                task_id=self.task_id,
+                context_id=self.context_id,
+            )
+
+        def get_user_input(self) -> str:
+            return ""
+
+    channel = build_channel()
+
+    async def _run():
+        event_queue = MockEventQueue()
+        await _A2AAgentExecutor(channel).execute(MockContext(), event_queue)
+        assert event_queue.closed is True
+        assert len(event_queue.events) == 2
+        assert isinstance(event_queue.events[0], Task)
+        assert event_queue.events[0].id == "task-empty"
+        status_event = event_queue.events[1]
+        assert isinstance(status_event, TaskStatusUpdateEvent)
+        assert status_event.task_id == "task-empty"
+        assert status_event.context_id == "ctx-empty"
+        assert status_event.status.state == TaskState.TASK_STATE_FAILED
+
+    asyncio.run(_run())

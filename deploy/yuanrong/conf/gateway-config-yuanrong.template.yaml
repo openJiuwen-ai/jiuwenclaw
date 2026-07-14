@@ -187,12 +187,6 @@ memory:
       base_id: ${LAKEBASE_MEM_BASE_ID:-}
       database_id: ${LAKEBASE_DATABASE_ID:-}
 
-
-proactive_recommendation:
-  enabled: ${PROACTIVE_RECOMMENDATION_ENABLED:-false}                # 总开关
-  max_recommend_per_day: ${MAX_RECOMMEND_PER_DAY:-5}               # 每天最多推荐次数
-  max_sessions_per_tick: ${MAX_SESSIONS_PER_TICK:-10}              # 每次 Tick 扫描最多几个会话
-
 models:
   defaults:
     - model_client_config:
@@ -382,9 +376,9 @@ react:
     enabled: true
     message_summary_offloader_config:
       messages_threshold: null
-      large_message_threshold: 15000
+      large_message_threshold: 10000
       offload_message_type: [ "tool" ]
-      protected_tool_names: ["read_file"]
+      protected_tool_names: ["read_file:*SKILL.md", "reload_original_context_messages"]
       messages_to_keep: null
       keep_last_round: false
       customized_summary_prompt: null
@@ -477,17 +471,17 @@ task_memory:
 gateway:
   # SessionMap 仅用于企业claw场景，如 feishu_enterprise 等通道：将平台身份映射为 Agent 的 session_id。
   # 取值：per_chat_bot（默认，同 chat+bot 共享会话）, per_chat_bot_user（按 user 分会话）
-  session_map_scope: per_chat_bot
+  session_map_scope: <<GATEWAY_SESSION_MAP_SCOPE>>
 
   # AgentClient 配置 - Gateway 连接到 AgentServer 的方式
   # type: websocket（默认，WebSocket 连接） | yuanrong（openYuanRong 函数调用）
   agent_client:
-    type: websocket # websocket | yuanrong
+    type: yuanrong # websocket | yuanrong
     # yuanrong 函数模式配置下面参数
-    frontend_endpoint:
-    function_version_urn:
-    concurrency: 1
-    invoke_timeout_s: 60
+    frontend_endpoint: http://<<MASTER_NODE_IP>>:<<FRONTEND_PORT>>
+    function_version_urn: <<FUNCTION_ID>>
+    concurrency: <<GATEWAY_CONCURRENCY>>
+    invoke_timeout_s: <<GATEWAY_INVOKE_TIMEOUT>>
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
@@ -501,25 +495,6 @@ heartbeat:
 
 # 执行护栏：工具循环检测与主动中断
 execution_guard:
-  # LLM 重试护栏：处理模型重复输出和流式帧超时，命中后重新发起模型请求
-  llm_retry_rail:
-    # 总开关。关闭后不注册 LLMRetryRail，也不会额外拦截重复输出/流式帧超时
-    enabled: true
-    # 单次 invoke 内同一类异常最多重试次数；超过后把异常继续抛给上层
-    max_retries: 2
-    # 重复片段检测的最短长度，单位：字符；用于检测短句/短片段循环输出
-    repeat_min_pattern_chars: 2
-    # 重复片段检测的最长长度，单位：字符；过长片段不作为循环模式检测
-    repeat_max_pattern_chars: 64
-    # 同一片段至少连续重复多少次才认为疑似死循环
-    repeat_min_count: 6
-    # 多字符重复输出的最小总长度，避免正常短文本重复误触发
-    repeat_min_total_chars: 160
-    # 滑动检测窗口大小，单位：字符；仅保留最近窗口内容用于重复判断
-    repeat_window_chars: 1024
-    # 单字符连续重复阈值，用于检测分隔线等场景，默认较高以减少误判
-    single_char_repeat_count: 90
-
   # 断路器：检测工具重复/交替/无进展循环，critical 级会强制结束当次回答
   circuit_breaker:
     # 总开关。断路器会主动中断 agent（force-finish），默认关闭，需显式开启
@@ -842,7 +817,7 @@ updater:
   # 桌面端版本检查源类型：gitcode / github
   desktop_release_api_type: "gitcode"
   repo_owner: openJiuwen
-  repo_name: jiuwenswarm 
+  repo_name: jiuwenswarm
   release_api_url: ""
   asset_name_pattern_windows: "JiuwenSwarm-setup-{version}.exe"
   asset_name_pattern_macos: "JiuwenSwarm-{version}.dmg"
@@ -960,7 +935,6 @@ mcp:
   #       Authorization: Bearer ${MCP_TOKEN}
   #     timeout_s: 30
 
-
 modes:
   # 一级模式 agent / code / team
   agent:
@@ -1015,6 +989,7 @@ modes:
       lifecycle: persistent
       teammate_mode: build_mode
       spawn_mode: inprocess
+      enable_swarmflow: true
 
       # Team-specific permission control.
       enable_permissions: false

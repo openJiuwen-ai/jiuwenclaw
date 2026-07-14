@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import inspect
 import json
 import logging
 import os
@@ -48,6 +47,8 @@ from jiuwenswarm.common.utils import (
     prepare_workspace,
     reset_free_search_runtime_flags,
 )
+from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+from jiuwenswarm.common.schema.message import ReqMethod, Message, Mode
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
@@ -91,7 +92,6 @@ def _build_event_frame(msg) -> dict[str, Any]:
 
 
 def _normalize_gateway_message(msg):
-    from jiuwenswarm.common.schema.message import Message, ReqMethod
 
     req_method = getattr(msg, "req_method", None) or ReqMethod.CHAT_SEND
     params = dict(msg.params or {})
@@ -325,7 +325,6 @@ class GatewayServer:
         self._request_to_client: dict[tuple[str, str], Any] = {}
         self._session_to_client: dict[tuple[str, str], Any] = {}
         self._pending_session_clients: dict[tuple[str, str], Any] = {}
-        self._web_pending_cancels: dict[str, tuple[asyncio.Task, float]] = {}
         self.message_handler_ref = None
         self._acp_bridge = AcpGatewayBridge(
             self._dispatch_on_message,
@@ -501,68 +500,6 @@ class GatewayServer:
                 session_key[1],
                 exc_info=True,
             )
-
-    WEB_DISCONNECT_GRACE_SECONDS = 60
-
-    def web_cancel_pending_cleanup(self, session_id: str) -> None:
-        entry = self._web_pending_cancels.pop(session_id, None)
-        if entry is not None:
-            task, _ = entry
-            if not task.done():
-                task.cancel()
-            logger.info(
-                "[App] Web 重连，取消待清理 session: session_id=%s",
-                session_id,
-            )
-
-    async def _web_delayed_session_cleanup(
-        self,
-        session_id: str,
-        grace_seconds: float,
-    ) -> None:
-        try:
-            await asyncio.sleep(grace_seconds)
-        except asyncio.CancelledError:
-            return
-        self._web_pending_cancels.pop(session_id, None)
-        logger.info(
-            "[App] Web 断连宽限期满，清理 session: session_id=%s",
-            session_id,
-        )
-        message_handler = self._get_message_handler()
-        if message_handler is None:
-            return
-        try:
-            await message_handler.cancel_agent_sessions_on_disconnect(
-                session_keys=[("web", session_id)],
-                stale_request_keys=[],
-            )
-        except Exception:
-            logger.warning(
-                "[App] Web 延迟清理 session 失败: session_id=%s",
-                session_id,
-                exc_info=True,
-            )
-
-    def schedule_web_session_cleanup(self, session_id: str) -> None:
-        existing = self._web_pending_cancels.get(session_id)
-        if existing is not None:
-            old_task, _ = existing
-            if not old_task.done():
-                old_task.cancel()
-        task = asyncio.create_task(
-            self._web_delayed_session_cleanup(
-                session_id,
-                self.WEB_DISCONNECT_GRACE_SECONDS,
-            ),
-            name=f"web-cleanup-{session_id}",
-        )
-        self._web_pending_cancels[session_id] = (task, time.time())
-        logger.info(
-            "[App] Web 断连，调度延迟清理: session_id=%s grace=%ds",
-            session_id,
-            self.WEB_DISCONNECT_GRACE_SECONDS,
-        )
 
     def _get_message_handler(self):
         return self.message_handler_ref
@@ -875,7 +812,6 @@ class GatewayServer:
                 await self._promote_pending_session_client(route, session_key)
 
     async def _handle_raw_message(self, ws: Any, raw: str, request_path: str, route: RouteConfig) -> None:
-        from jiuwenswarm.common.schema.message import Message, Mode, ReqMethod
 
         try:
             data = json.loads(raw)
@@ -1147,7 +1083,6 @@ async def _run(
     )
     from jiuwenswarm.extensions.manager import ExtensionManager
     from jiuwenswarm.extensions.registry import ExtensionRegistry
-    from jiuwenswarm.common.schema.message import Message
     from jiuwenswarm.common.updater import UpdaterService
     from openjiuwen.core.runner import Runner
 
@@ -1291,9 +1226,6 @@ async def _run(
                 env=dict(env_updates or {}),
             )
 
-            from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-            from jiuwenswarm.common.schema.message import ReqMethod
-
             reload_env = e2a_from_agent_fields(
                 request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
                 channel_id="",
@@ -1327,6 +1259,17 @@ async def _run(
                     req_method=ReqMethod.BROWSER_RUNTIME_RESTART,
                 )
                 await client.send_request(restart_env)
+
+            # 主动推荐：enabled 变更时同步 proactive.tick job（创建/删除）
+            proactive_keys = {
+                "proactive_recommendation_enabled",
+            }
+            if updated_env_keys and (proactive_keys & set(updated_env_keys)):
+                try:
+                    from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
+                    await sync_proactive_tick_job(cron_controller, config_payload)
+                except Exception as e:  # noqa: BLE001  # 兜底：proactive 同步失败不阻断配置保存
+                    logger.warning("[App] proactive.tick sync on config save failed: %s", e)
             return True
         except Exception as e:  # noqa: BLE001
             logger.warning("[App] hot config reload failed, scheduling restart: %s", e)
@@ -1336,6 +1279,7 @@ async def _run(
     web_channel = None
     web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
     web_channel = WebChannel(web_config, _DummyBus())
+
     _register_web_handlers(
         WebHandlersBindParams(
             channel=web_channel,
@@ -1413,27 +1357,6 @@ async def _run(
         if binding.install is not None:
             binding.install(gateway_server)
     gateway_server.on_message(acp_inbound_server.handle_message)
-
-    # 注册 Web 断连延迟清理回调
-    def _on_web_disconnect(ws, session_ids: set[str]):
-        for sid in session_ids:
-            gateway_server.schedule_web_session_cleanup(sid)
-
-    web_channel.on_disconnect(_on_web_disconnect)
-
-    # Web 重连时取消待清理任务：包装入站回调，在原始逻辑前插入取消检查
-    async def _web_message_wrapper(original_cb, msg):
-        sid = getattr(msg, "session_id", None)
-        if sid:
-            gateway_server.web_cancel_pending_cleanup(sid)
-        if original_cb is not None:
-            result = original_cb(msg)
-            if inspect.isawaitable(result):
-                result = await result
-            return result
-        return False
-
-    web_channel.wrap_message_callback(_web_message_wrapper)
 
     a2a_server_enabled = str(os.getenv("A2A_SERVER_ENABLED", "")).strip().lower() in {
         "1",
@@ -1980,6 +1903,12 @@ async def _run(
 
     await channel_manager.start_dispatch()
     await cron_scheduler.start()
+    # 主动推荐：按 config 自动注册/删除 proactive.tick 定时 job
+    try:
+        from jiuwenswarm.gateway.cron.proactive_cron_sync import sync_proactive_tick_job
+        await sync_proactive_tick_job(cron_controller, get_config())
+    except Exception as e:  # noqa: BLE001  # 兜底：启动时 proactive job 注册失败不阻断 Gateway 启动
+        logger.warning("[App] proactive.tick auto-register failed (non-fatal): %s", e)
     # 先同步完成监听绑定，避免 IDE/ACP 子进程在端口尚未就绪时连接导致多次重试。
     await gateway_server.start()
     gateway_server_task = asyncio.create_task(

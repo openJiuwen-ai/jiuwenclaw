@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -88,6 +89,39 @@ class AgentManager:
         self._latest_env_overrides: dict[str, Any] = {}
         # reload 串行锁: 防止并发 reload 叠加导致内存爆炸
         self._reload_lock: asyncio.Lock = asyncio.Lock()
+        self._last_reload_fingerprint: str | None = None
+
+    @staticmethod
+    def _reload_fingerprint(
+        config: Any,
+        env: Any,
+        *,
+        agent_topology: Any,
+        target_channel_id: str | None,
+        target_session_id: str | None,
+    ) -> str:
+        payload = {
+            "config": config,
+            "env": env if isinstance(env, dict) else {},
+            "agent_topology": agent_topology,
+            "target_channel_id": str(target_channel_id or "").strip() or None,
+            "target_session_id": str(target_session_id or "").strip() or None,
+        }
+        return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=repr)
+
+    def _reload_agent_topology(self, target_channel_id: str | None = None) -> dict[str, list[tuple[str, int]]]:
+        channel_items = (
+            [(target_channel_id, self.agents.get(target_channel_id, {}))]
+            if target_channel_id
+            else self.agents.items()
+        )
+        topology: dict[str, list[tuple[str, int]]] = {}
+        for channel_id, agents in channel_items:
+            if not isinstance(agents, dict):
+                topology[str(channel_id)] = []
+                continue
+            topology[str(channel_id)] = sorted((str(agent_key), id(agent)) for agent_key, agent in agents.items())
+        return topology
 
     async def _create_agent(
         self,
@@ -397,7 +431,14 @@ class AgentManager:
                         exc,
                     )
 
-    async def reload_agents_config(self, config, env) -> None:
+    async def reload_agents_config(
+        self,
+        config,
+        env,
+        *,
+        target_channel_id: str | None = None,
+        target_session_id: str | None = None,
+    ) -> None:
         """reload agent config.
 
         使用 ``self._reload_lock`` 串行化, 避免高频触发(如批量 MCP 增删)时多个
@@ -412,29 +453,66 @@ class AgentManager:
                 else:
                     os.environ[key] = str(env_value)
 
-            for channel_id, agents in self.agents.items():
+            target_channel = str(target_channel_id or "").strip() or None
+            target_session = str(target_session_id or "").strip() or None
+            effective_config = config
+            if effective_config is None:
+                try:
+                    effective_config = get_config()
+                except Exception:
+                    effective_config = None
+            fingerprint = self._reload_fingerprint(
+                effective_config,
+                self._latest_env_overrides,
+                agent_topology=self._reload_agent_topology(target_channel),
+                target_channel_id=target_channel,
+                target_session_id=target_session,
+            )
+            if fingerprint == self._last_reload_fingerprint:
+                logger.info(
+                    "[AgentManager] reload agent config skipped: unchanged scope/config/env "
+                    "(channel=%s session=%s)",
+                    target_channel or "*",
+                    target_session or "*",
+                )
+                return
+            channel_items = (
+                [(target_channel, self.agents.get(target_channel, {}))]
+                if target_channel
+                else list(self.agents.items())
+            )
+            reload_completed = True
+
+            for channel_id, agents in channel_items:
                 if not isinstance(agents, dict):
+                    reload_completed = False
                     logger.warning(
                         "[AgentManager] unexpected agents entry for channel %s: %r",
                         channel_id,
                         type(agents),
                     )
                     continue
-                for _, agent in agents.items():
-                    await agent.reload_agent_config(
-                        config_base=config,
-                        env_overrides=env,
-                    )
+                for _, agent in list(agents.items()):
+                    reload_kwargs = {
+                        "config_base": effective_config,
+                        "env_overrides": self._latest_env_overrides,
+                    }
+                    if target_session:
+                        reload_kwargs["target_session_id"] = target_session
+                    await agent.reload_agent_config(**reload_kwargs)
                 try:
-                    team_config = config if isinstance(config, dict) else get_config()
+                    team_config = effective_config if isinstance(effective_config, dict) else get_config()
                     await get_team_manager(channel_id).update_evolution_config(team_config)
                 except Exception as exc:
+                    reload_completed = False
                     logger.warning(
                         "[AgentManager] team evolution config hot-update failed: channel=%s error=%s",
                         channel_id,
                         exc,
                     )
                 logger.info(f"channel {channel_id} reload agent config success.")
+            if reload_completed:
+                self._last_reload_fingerprint = fingerprint
 
     async def recreate_agent(self, channel_id: str, *, immediate: bool = True) -> None:
         """重建指定 channel 的所有 agent 实例.

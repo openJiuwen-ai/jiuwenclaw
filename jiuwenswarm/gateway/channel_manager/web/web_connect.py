@@ -404,7 +404,8 @@ class WebChannel(BaseChannel):
                               "history.message",
                               "chat.session_result", "chat.usage_metadata",
                               "chat.usage_summary", "chat.file",
-                              "chat.retract", "security.alert") \
+                              "chat.retract", "security.alert",
+                              "proactive_recommendation") \
                                 or event_name.startswith("team.") \
                                 or event_name.startswith("harness."):
                 # 传递完整 payload，保留所有字段
@@ -431,6 +432,20 @@ class WebChannel(BaseChannel):
                     cron_extra = msg.payload.get("cron")
                     if isinstance(cron_extra, dict):
                         payload["cron"] = cron_extra
+                    # 保留 source 字段，供前端识别消息来源（如主动推荐）
+                    source = msg.payload.get("source")
+                    if source:
+                        payload["source"] = source
+                    # 保留 proactive_type，供前端选对卡片样式（技能推荐/任务提醒/探索发现）
+                    ptype = msg.payload.get("proactive_type")
+                    if ptype:
+                        payload["proactive_type"] = ptype
+                    if source == "proactive_recommendation":
+                        logger.info(
+                            "[WebChannel] proactive push frame: source=%s proactive_type=%s "
+                            "content_len=%d payload_keys=%s",
+                            source, ptype, len(str(payload.get("content", ""))), list(payload.keys()),
+                        )
         else:
             # payload 不是 dict，尝试从 params 提取
             content = str((msg.params or {}).get("content", "") or "")

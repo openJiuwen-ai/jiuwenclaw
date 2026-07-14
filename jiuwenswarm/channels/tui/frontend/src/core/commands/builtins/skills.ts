@@ -759,6 +759,9 @@ export function createSkillsCommand(): SlashCommand {
                   description: `${s.skill_description || "(no description)"} | by ${s.author || "?"} | ⭐${s.stars || 0} | ${s.category || "-"}`,
                 }));
                 ctx.addItem(makeItem(ctx.sessionId, "info", `SkillNet results (${payload.skills.length})`, "*", { view: "list", title: "SkillNet Search Results (use /skills skillnet install <url> to install)", items }));
+              } else if (payload.success) {
+                // Search succeeded but matched nothing — not a failure
+                ctx.addItem(makeItem(ctx.sessionId, "info", `No skills found on SkillNet for: ${q}`));
               } else {
                 ctx.addItem(makeItem(ctx.sessionId, "error", payload.detail || `SkillNet search failed: ${q}`));
               }

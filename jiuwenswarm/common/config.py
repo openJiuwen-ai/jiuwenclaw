@@ -386,6 +386,16 @@ def update_auto_recap_enabled_in_config(value: bool) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def update_proactive_recommendation_in_config(updates: dict[str, Any]) -> None:
+    """更新 proactive_recommendation 配置段并写回。"""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "proactive_recommendation" not in data or data["proactive_recommendation"] is None:
+        data["proactive_recommendation"] = {}
+    section = data["proactive_recommendation"]
+    _merge_config_dict(section, updates)
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
 def update_updater_in_config(updates: dict[str, Any]) -> None:
     """只更新 updater 段并写回。"""
     data = load_yaml_round_trip(CONFIG_YAML_PATH)

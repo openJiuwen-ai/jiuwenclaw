@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -52,6 +53,7 @@ from openjiuwen.harness import (
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import (
+    LLMRetryRail,
     SkillUseRail,
     TaskPlanningRail,
     SecurityRail,
@@ -556,6 +558,7 @@ class _RuntimeCronToolContext:
 class JiuWenSwarmDeepAdapter:
     SESSION_ADAPTER_IDLE_TTL_SEC = 2 * 60 * 60
     SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
+    SESSION_ADAPTER_RELOAD_RETRY_INTERVAL_SEC = 30.0
 
     """Deep SDK 适配器，实现 AgentAdapter 协议.
 
@@ -617,6 +620,7 @@ class JiuWenSwarmDeepAdapter:
         self._memory_rail: MemoryRail | None = None
         self._external_memory_rail: Any = None
         self._external_memory_rail_registered: bool = False
+        self._llm_retry_rail: LLMRetryRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._evolution_interrupt_rail: EvolutionInterruptRail | None = None
@@ -641,6 +645,11 @@ class JiuWenSwarmDeepAdapter:
         self._session_adapters: dict[str, JiuWenSwarmDeepAdapter] = {}
         self._session_adapter_locks: dict[str, asyncio.Lock] = {}
         self._session_adapter_last_used: dict[str, float] = {}
+        self._session_adapter_config_version: int = 0
+        self._session_adapter_versions: dict[str, int] = {}
+        self._session_adapter_reload_failures: dict[str, tuple[int, float]] = {}
+        self._pending_session_reload_config_base: dict[str, Any] | None = None
+        self._pending_session_reload_env_overrides: dict[str, Any] | None = None
         self._session_instance_config: dict[str, Any] | None = None
         self._session_instance_mode: str = "agent.plan"
         self._session_instance_sub_mode: str | None = None
@@ -704,8 +713,85 @@ class JiuWenSwarmDeepAdapter:
         sid = self._session_adapter_key(session_id)
         return self._session_adapters.get(sid)
 
+    def _iter_session_adapters_for_reload(
+        self,
+        target_session_id: str | None = None,
+    ) -> list[tuple[str, "JiuWenSwarmDeepAdapter"]]:
+        target_sid = str(target_session_id or "").strip()
+        if not target_sid:
+            return list(self._session_adapters.items())
+        adapter = self._session_adapters.get(self._session_adapter_key(target_sid))
+        if adapter is None:
+            return []
+        return [(self._session_adapter_key(target_sid), adapter)]
+
     def _touch_session_adapter(self, session_id: str | None) -> None:
         self._session_adapter_last_used[self._session_adapter_key(session_id)] = time.time()
+
+    def _mark_session_adapters_stale_for_reload(
+        self,
+        config_base: dict[str, Any],
+        env_overrides: dict[str, Any] | None,
+    ) -> None:
+        self._session_adapter_config_version += 1
+        self._pending_session_reload_config_base = copy.deepcopy(config_base)
+        self._pending_session_reload_env_overrides = (
+            copy.deepcopy(env_overrides) if isinstance(env_overrides, dict) else None
+        )
+        if self._session_adapters:
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] marked %d session adapters stale for lazy reload "
+                "(version=%d)",
+                len(self._session_adapters),
+                self._session_adapter_config_version,
+            )
+
+    async def _reload_session_adapter_if_stale(
+        self,
+        session_id: str,
+        adapter: "JiuWenSwarmDeepAdapter",
+    ) -> None:
+        current_version = self._session_adapter_config_version
+        if self._session_adapter_versions.get(session_id, 0) >= current_version:
+            return
+        config_base = self._pending_session_reload_config_base
+        if not isinstance(config_base, dict):
+            self._session_adapter_versions[session_id] = current_version
+            self._session_adapter_reload_failures.pop(session_id, None)
+            return
+        failed = self._session_adapter_reload_failures.get(session_id)
+        if failed is not None:
+            failed_version, failed_at = failed
+            if (
+                failed_version == current_version
+                and time.monotonic() - failed_at < self.SESSION_ADAPTER_RELOAD_RETRY_INTERVAL_SEC
+            ):
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] lazy session adapter reload retry suppressed: "
+                    "session_id=%s version=%s",
+                    session_id,
+                    current_version,
+                )
+                return
+        try:
+            await adapter.reload_agent_config(
+                config_base,
+                self._pending_session_reload_env_overrides,
+                target_session_id=session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] lazy session adapter reload failed: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            self._session_adapter_reload_failures[session_id] = (
+                current_version,
+                time.monotonic(),
+            )
+            return
+        self._session_adapter_versions[session_id] = current_version
+        self._session_adapter_reload_failures.pop(session_id, None)
 
     async def _evict_idle_session_adapters(self) -> None:
         if self._is_session_scoped_adapter:
@@ -735,6 +821,8 @@ class JiuWenSwarmDeepAdapter:
             self._session_adapters.pop(sid, None)
             self._session_adapter_locks.pop(sid, None)
             self._session_adapter_last_used.pop(sid, None)
+            self._session_adapter_versions.pop(sid, None)
+            self._session_adapter_reload_failures.pop(sid, None)
             try:
                 get_runtime_state_path(sid).unlink(missing_ok=True)
             except Exception:
@@ -751,15 +839,11 @@ class JiuWenSwarmDeepAdapter:
             return self
 
         sid = self._session_adapter_key(session_id)
-        existing = self._session_adapters.get(sid)
-        if existing is not None:
-            self._touch_session_adapter(sid)
-            return existing
-
         lock = self._session_adapter_locks.setdefault(sid, asyncio.Lock())
         async with lock:
             existing = self._session_adapters.get(sid)
             if existing is not None:
+                await self._reload_session_adapter_if_stale(sid, existing)
                 self._touch_session_adapter(sid)
                 return existing
 
@@ -775,6 +859,13 @@ class JiuWenSwarmDeepAdapter:
                 sub_mode=self._session_instance_sub_mode,
             )
             self._session_adapters[sid] = adapter
+            # A brand-new session adapter is created from ``_session_instance_config``
+            # (which may predate the latest global reload). If a global reload left a
+            # pending ``config_base``, apply it now so the new session reflects the
+            # same configuration as already-existing sessions that reload lazily.
+            # ``_reload_session_adapter_if_stale`` owns the version bookkeeping
+            # (including the no-pending case, where it silently catches up).
+            await self._reload_session_adapter_if_stale(sid, adapter)
             self._touch_session_adapter(sid)
             logger.info("[JiuWenSwarmDeepAdapter] session scoped DeepAgent created: session_id=%s", sid)
             return adapter
@@ -1081,6 +1172,31 @@ class JiuWenSwarmDeepAdapter:
     async def _try_init_a2x_client(self, config_base: dict[str, Any], *, reload: bool = False) -> None:
         """Best-effort A2X client init that never blocks agent startup."""
         try:
+            resolved_config = self._get_a2x_config(config_base)
+            if reload and self._a2x_client is not None and resolved_config == self._a2x_config:
+                try:
+                    await register_blank_agent_if_teammate(
+                        self._a2x_client,
+                        self._a2x_config,
+                        source="deep-agent-reload",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] A2X blank registration on reload failed; "
+                        "reusing existing client: %s",
+                        exc,
+                    )
+                registration = getattr(self._a2x_client, "_jiuwen_blank_agent_registration", {})
+                if isinstance(registration, dict):
+                    self._a2x_blank_service_id = str(registration.get("service_id") or "").strip()
+                    self._a2x_blank_dataset = str(registration.get("dataset") or "").strip()
+                self._sync_a2x_runtime_state()
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] A2X Client reused on reload: role=%s base_url=%s",
+                    self._a2x_config.get("role", "teammate"),
+                    self._a2x_config.get("base_url", ""),
+                )
+                return
             await self._init_a2x_client(config_base)
             await register_blank_agent_if_teammate(
                 self._a2x_client,
@@ -2963,6 +3079,30 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] AvatarPromptRail create failed: %s", exc)
             return None
 
+    @staticmethod
+    def _build_llm_retry_rail(config_base: dict[str, Any] | None = None) -> LLMRetryRail | None:
+        try:
+            config_base = config_base or get_config()
+            guard_cfg = config_base.get("execution_guard", {}) if isinstance(config_base, dict) else {}
+            retry_cfg = guard_cfg.get("llm_retry_rail", {}) if isinstance(guard_cfg, dict) else {}
+            if retry_cfg.get("enabled", False) is not True:
+                logger.info("[JiuWenSwarmDeepAdapter] LLMRetryRail disabled by config")
+                return None
+            rail = LLMRetryRail(
+                max_retries=retry_cfg.get("max_retries", 2),
+                repeat_min_pattern_chars=retry_cfg.get("repeat_min_pattern_chars", 2),
+                repeat_max_pattern_chars=retry_cfg.get("repeat_max_pattern_chars", 64),
+                repeat_min_count=retry_cfg.get("repeat_min_count", 6),
+                repeat_min_total_chars=retry_cfg.get("repeat_min_total_chars", 160),
+                repeat_window_chars=retry_cfg.get("repeat_window_chars", 1024),
+                single_char_repeat_count=retry_cfg.get("single_char_repeat_count", 100),
+            )
+            logger.info("[JiuWenSwarmDeepAdapter] LLMRetryRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] LLMRetryRail create failed: %s", exc)
+            return None
+
     def _build_circuit_breaker_rail(self) -> CircuitBreakerRail | None:
         try:
             guard_cfg = (get_config() or {}).get("execution_guard") or {}
@@ -3040,6 +3180,11 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
+            _RailBuildInfo(
+                "_llm_retry_rail",
+                self._build_llm_retry_rail,
+                {"config_base": config_base},
+            ),
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
@@ -3591,6 +3736,9 @@ class JiuWenSwarmDeepAdapter:
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
             enable_read_image_multimodal=self._vision_model_config is None,
+            enable_llm_retry_rail=((config_base.get("execution_guard") or {}).get("llm_retry_rail") or {}).get(
+                "enabled", False
+            ),
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 
@@ -3665,6 +3813,7 @@ class JiuWenSwarmDeepAdapter:
         self,
         config_base: dict[str, Any] | None = None,
         env_overrides: dict[str, Any] | None = None,
+        target_session_id: str | None = None,
     ) -> None:
         """从 config.yaml 重新加载配置，通过 DeepAgent.configure() 热更新当前实例（不新建 DeepAgent）。
 
@@ -3674,7 +3823,18 @@ class JiuWenSwarmDeepAdapter:
         Args:
             config_base: 可选的完整配置快照；传入时优先使用它而不是读取本地 config.yaml。
             env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
+            target_session_id: 可选的目标 session id；传入时仅级联热更新该 session adapter。
         """
+        target_sid = str(target_session_id or "").strip() or None
+        if self._is_session_scoped_adapter and target_sid:
+            own_sid = self._session_adapter_key(self._parent_session_id)
+            if own_sid != self._session_adapter_key(target_sid):
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] skip scoped reload for unrelated session: target=%s self=%s",
+                    target_sid,
+                    own_sid,
+                )
+                return
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
@@ -3835,15 +3995,25 @@ class JiuWenSwarmDeepAdapter:
         await self._sync_mcp_servers_for_runtime(config_base, tag="agent.reload")
 
         if not self._is_session_scoped_adapter:
-            for session_id, adapter in list(self._session_adapters.items()):
-                try:
-                    await adapter.reload_agent_config(config_base, env_overrides)
-                except Exception as exc:
-                    logger.warning(
-                        "[JiuWenSwarmDeepAdapter] session adapter reload failed: session_id=%s error=%s",
-                        session_id,
-                        exc,
-                    )
+            if target_sid:
+                for session_id, adapter in self._iter_session_adapters_for_reload(target_sid):
+                    try:
+                        await adapter.reload_agent_config(
+                            config_base,
+                            env_overrides,
+                            target_session_id=target_sid,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[JiuWenSwarmDeepAdapter] session adapter reload failed: session_id=%s error=%s",
+                            session_id,
+                            exc,
+                        )
+                    else:
+                        self._session_adapter_versions[session_id] = self._session_adapter_config_version
+                        self._session_adapter_reload_failures.pop(session_id, None)
+            else:
+                self._mark_session_adapters_stale_for_reload(config_base, env_overrides)
 
         logger.info("[JiuWenSwarmDeepAdapter] 配置已热更新（configure），未重启进程")
 
@@ -4438,6 +4608,8 @@ class JiuWenSwarmDeepAdapter:
             self._session_adapters.clear()
             self._session_adapter_locks.clear()
             self._session_adapter_last_used.clear()
+            self._session_adapter_versions.clear()
+            self._session_adapter_reload_failures.clear()
         await self._close_a2x_client()
 
     def _collect_registered_ability_names(self) -> set[str]:

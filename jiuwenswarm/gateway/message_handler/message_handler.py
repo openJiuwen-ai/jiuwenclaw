@@ -323,6 +323,9 @@ class MessageHandler(ABC):
 
     @classmethod
     def _should_cancel_existing_stream_before_chat_send(cls, msg: "Message") -> bool:
+        # 主动推荐消息不取消现有流式任务，避免干扰用户当前对话
+        if isinstance(msg.params, dict) and msg.params.get("source") == "proactive_recommendation":
+            return False
         return (
             cls._is_chat_send_message(msg)
             and not cls._is_team_chat_send(msg)

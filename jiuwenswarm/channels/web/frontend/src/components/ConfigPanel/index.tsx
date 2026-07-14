@@ -327,6 +327,15 @@ const SYMPHONY_KEYS = new Set([
   ...SYMPHONY_BOOLEAN_KEYS,
   ...SKILL_RETRIEVAL_KEYS,
 ]);
+const PROACTIVE_BOOLEAN_KEYS = new Set(["proactive_recommendation_enabled"]);
+const PROACTIVE_KEYS = new Set([
+  ...PROACTIVE_BOOLEAN_KEYS,
+  "proactive_recommendation_max_recommend_per_day",
+  "proactive_recommendation_max_sessions_per_tick",
+]);
+// 调度频率已交给定时任务面板，ConfigPanel 不再暴露 tick_interval。
+// 即便后端残留下发，也在比较/提交时跳过，避免误提交空值。
+const PROACTIVE_HIDDEN_FROM_UI_KEYS = new Set(["proactive_recommendation_tick_interval_minutes"]);
 
 function classifyKey(key: string): string {
   if (MODEL_DEFAULT_KEYS.has(key)) return "model_default";
@@ -343,6 +352,7 @@ function classifyKey(key: string): string {
   if (MEMORY_KEYS.has(key)) return "memory";
   if (A2UI_KEYS.has(key)) return "a2ui";
   if (SYMPHONY_KEYS.has(key)) return "symphony";
+  if (PROACTIVE_KEYS.has(key)) return "proactive";
   if (key === "context_engine_enabled" || key === "kv_cache_affinity_enabled") return "context_engine";
   if (key === "permissions_enabled") return "permissions";
   if (key.startsWith("feishu")) return "feishu";
@@ -457,6 +467,13 @@ function getGroupIcon(tag: string) {
       </svg>
     );
   }
+  if (tag === "proactive") {
+    return (
+      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.454 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+      </svg>
+    );
+  }
   return (
     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 6h9m-9 6h9m-9 6h9M3.75 6h.008v.008H3.75V6zm0 6h.008v.008H3.75V12zm0 6h.008v.008H3.75V18z" />
@@ -481,6 +498,7 @@ function getGroupToneClass(tag: string): string {
   if (tag === "a2ui") return "text-fuchsia-500 bg-fuchsia-500/10 border-fuchsia-500/20";
   if (tag === "symphony") return "text-amber-500 bg-amber-500/10 border-amber-500/20";
   if (tag === "skill_retrieval") return "text-emerald-500 bg-emerald-500/10 border-emerald-500/20";
+  if (tag === "proactive") return "text-sky-500 bg-sky-500/10 border-sky-500/20";
   if (tag === "email") return "text-emerald-500 bg-emerald-500/10 border-emerald-500/20";
   return "text-text-muted bg-secondary/70 border-border";
 }
@@ -506,7 +524,8 @@ function isBooleanKey(key: string): boolean {
     key === "memory_forbidden_enabled" ||
     key === "a2ui_enabled" ||
     SYMPHONY_BOOLEAN_KEYS.has(key) ||
-    SKILL_RETRIEVAL_BOOLEAN_KEYS.has(key)
+    SKILL_RETRIEVAL_BOOLEAN_KEYS.has(key) ||
+    PROACTIVE_BOOLEAN_KEYS.has(key)
   );
 }
 
@@ -527,6 +546,7 @@ function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
     a2ui_enabled: t('config.booleanLabels.enabled'),
     symphony_enabled: t('config.booleanLabels.enabled'),
     skill_retrieval_enabled: t('config.booleanLabels.enabled'),
+    proactive_recommendation_enabled: t('config.booleanLabels.enabled'),
   };
   return labels[key] ?? key;
 }
@@ -575,6 +595,7 @@ function getGroupMeta(t: (key: string) => string): Record<string, { label: strin
     a2ui: { label: t('config.groups.a2ui.label'), order: 10, hint: t('config.groups.a2ui.hint') },
     symphony: { label: t('config.groups.symphony.label'), order: 10.4, hint: t('config.groups.symphony.hint') },
     skill_retrieval: { label: t('config.groups.skillRetrieval.label'), order: 10.5, hint: t('config.groups.skillRetrieval.hint') },
+    proactive: { label: t('config.groups.proactive.label'), order: 10.6, hint: t('config.groups.proactive.hint') },
     memory: { label: t('config.groups.memory.label'), order: 11, hint: t('config.groups.memory.hint') },
     email: { label: t('config.groups.email.label'), order: 12, hint: t('config.groups.email.hint') },
     other: { label: t('config.groups.other.label'), order: 13, hint: t('config.groups.other.hint') },
@@ -615,6 +636,9 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   skill_retrieval_retrieve_compact_codes_enabled: "config.keys.skillRetrievalCompactCodes",
   skill_retrieval_retrieve_flatten_tree: "config.keys.skillRetrievalFlattenTree",
   skill_retrieval_retrieve_max_exposure_depth: "config.keys.skillRetrievalMaxExposureDepth",
+  proactive_recommendation_enabled: "config.keys.proactiveEnabled",
+  proactive_recommendation_max_recommend_per_day: "config.keys.proactiveMaxPerDay",
+  proactive_recommendation_max_sessions_per_tick: "config.keys.proactiveMaxSessions",
 };
 const KEY_PLACEHOLDER_I18N: Record<string, string> = {
   memory_forbidden_description: "config.keys.memoryForbiddenDescriptionPlaceholder",
@@ -633,6 +657,9 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   free_search_bing_enabled: 1,
   symphony_enabled: 0,
   skill_retrieval_enabled: 1,
+  proactive_recommendation_enabled: 0,
+  proactive_recommendation_max_recommend_per_day: 2,
+  proactive_recommendation_max_sessions_per_tick: 3,
   skill_retrieval_retrieve_max_exposure_depth: 10,
   skill_retrieval_build_max_depth: 20,
   skill_retrieval_build_max_workers: 21,
@@ -2834,11 +2861,12 @@ export function ConfigPanel({
   const topLevelGroupCount = groups.length;
   const hasConfigChanges = useMemo(() => {
     const keys = Object.keys(normalizedConfig);
-    return keys.some((key) => (draftValues[key] ?? "") !== normalizedConfig[key]);
+    return keys.some((key) => !PROACTIVE_HIDDEN_FROM_UI_KEYS.has(key) && (draftValues[key] ?? "") !== normalizedConfig[key]);
   }, [draftValues, normalizedConfig]);
   const configUpdates = useMemo(() => {
     const updates: Record<string, string> = {};
     for (const key of Object.keys(normalizedConfig)) {
+      if (PROACTIVE_HIDDEN_FROM_UI_KEYS.has(key)) continue;
       const draftValue = draftValues[key] ?? "";
       if (draftValue !== normalizedConfig[key]) {
         updates[key] = draftValue;

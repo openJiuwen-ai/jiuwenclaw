@@ -12,11 +12,16 @@ from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 
 logger = logging.getLogger(__name__)
 
+try:
+    from a2a.server.agent_execution import AgentExecutor as _AgentExecutorBase
+except ImportError:
+    _AgentExecutorBase = object
+
 
 def _raise_missing_a2a_sdk(exc: ImportError) -> None:
     raise RuntimeError(
-        "A2A server is enabled but optional dependency `a2a-sdk[http-server]` is not installed. "
-        "Install with `pip install .[a2a]` or `uv sync --extra a2a`."
+        "A2A server is enabled but optional dependency `a2a-sdk[http-server]>=1.0.0` "
+        "is not installed. Install with `pip install -e \".[a2a]\"` or `uv sync --extra a2a`."
     ) from exc
 
 
@@ -40,49 +45,77 @@ class _PendingA2ARequest:
     queue: asyncio.Queue[Message]
 
 
-class _A2AAgentExecutor:
+class _A2AAgentExecutor(_AgentExecutorBase):
     """A2A SDK AgentExecutor that forwards request via channel callback."""
 
     def __init__(self, channel: "A2AChannel") -> None:
         self._channel = channel
 
+    @staticmethod
+    def _resolve_task(context: Any) -> Any:
+        from a2a.helpers import new_task, new_task_from_user_message
+        from a2a.types import TaskState
+
+        if context.current_task is not None:
+            return context.current_task
+        if context.message is not None:
+            try:
+                return new_task_from_user_message(context.message)
+            except ValueError:
+                task_id = str(
+                    context.task_id
+                    or getattr(context.message, "task_id", None)
+                    or f"a2a_{uuid.uuid4().hex[:12]}"
+                )
+                context_id = str(
+                    context.context_id
+                    or getattr(context.message, "context_id", None)
+                    or f"a2a_ctx_{uuid.uuid4().hex[:8]}"
+                )
+                return new_task(task_id, context_id, TaskState.TASK_STATE_SUBMITTED)
+        task_id = str(context.task_id or f"a2a_{uuid.uuid4().hex[:12]}")
+        context_id = str(context.context_id or f"a2a_ctx_{uuid.uuid4().hex[:8]}")
+        return new_task(task_id, context_id, TaskState.TASK_STATE_SUBMITTED)
+
     async def execute(self, context: Any, event_queue: Any) -> None:
+        from a2a.helpers import new_text_status_update_event
         from a2a.types import (
             Artifact,
-            Part,
             TaskArtifactUpdateEvent,
             TaskState,
             TaskStatus,
             TaskStatusUpdateEvent,
         )
 
-        request_id = str(context.task_id or f"a2a_{uuid.uuid4().hex[:12]}")
-        task_id = str(context.task_id or request_id)
-        context_id = str(context.context_id or f"a2a_ctx_{uuid.uuid4().hex[:8]}")
-        query, files = self._channel.map_a2a_parts_to_params(
-            getattr(context, "message", None)
-        )
+        task = self._resolve_task(context)
+        task_id = str(task.id)
+        context_id = str(task.context_id)
+        request_id = task_id
+
+        query, files = self._channel.map_a2a_parts_to_params(context.message)
         if not query:
             query = str(context.get_user_input() or "").strip()
         if not query:
+            await event_queue.enqueue_event(task)
             await event_queue.enqueue_event(
-                TaskStatusUpdateEvent(
-                    task_id=task_id,
-                    context_id=context_id,
-                    status=TaskStatus(
-                        state=TaskState.TASK_STATE_FAILED,
-                    ),
+                new_text_status_update_event(
+                    task_id,
+                    context_id,
+                    TaskState.TASK_STATE_FAILED,
+                    "empty query",
                 )
             )
             await event_queue.close()
             return
 
         try:
+            await event_queue.enqueue_event(task)
             await event_queue.enqueue_event(
-                TaskStatusUpdateEvent(
-                    task_id=task_id,
-                    context_id=context_id,
-                    status=TaskStatus(state=TaskState.TASK_STATE_WORKING),
+                new_text_status_update_event(
+                    task_id,
+                    context_id,
+                    TaskState.TASK_STATE_WORKING,
+                    "Processing...",
                 )
             )
             pending = await self._channel.dispatch_a2a_request(
@@ -162,10 +195,12 @@ class _A2AAgentExecutor:
             await event_queue.close()
 
     async def cancel(self, context: Any, event_queue: Any) -> None:
-        from a2a.types import Message as A2AMessage, Part, Role, TaskState, TaskStatus, TaskStatusUpdateEvent
+        from a2a.types import TaskState, TaskStatus, TaskStatusUpdateEvent
 
-        task_id = str(context.task_id or "a2a")
-        context_id = str(context.context_id or f"a2a_ctx_{uuid.uuid4().hex[:8]}")
+        task = context.current_task or self._resolve_task(context)
+        task_id = str(context.task_id or task.id)
+        context_id = str(context.context_id or task.context_id)
+        await event_queue.enqueue_event(task)
         await event_queue.enqueue_event(
             TaskStatusUpdateEvent(
                 task_id=task_id,
@@ -202,10 +237,11 @@ class A2AChannel(BaseChannel):
             return
 
         try:
-            from a2a.server.apps import A2AFastAPIApplication
             from a2a.server.request_handlers import DefaultRequestHandler
+            from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
             from a2a.server.tasks import InMemoryPushNotificationConfigStore, InMemoryTaskStore
             from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+            from fastapi import FastAPI
         except ImportError as exc:
             _raise_missing_a2a_sdk(exc)
         import uvicorn
@@ -217,7 +253,7 @@ class A2AChannel(BaseChannel):
             supported_interfaces=[
                 AgentInterface(
                     url=f"http://{self.config.host}:{self.config.port}{self.config.rpc_path}",
-                    protocol_binding="jsonrpc",
+                    protocol_binding="JSONRPC",
                     protocol_version=self.config.protocol_version,
                 )
             ],
@@ -239,17 +275,14 @@ class A2AChannel(BaseChannel):
         request_handler = DefaultRequestHandler(
             agent_executor=_A2AAgentExecutor(self),
             task_store=InMemoryTaskStore(),
+            agent_card=agent_card,
             push_config_store=InMemoryPushNotificationConfigStore(),
         )
-        app_builder = A2AFastAPIApplication(
-            agent_card=agent_card,
-            http_handler=request_handler,
-        )
-        fastapi_app = app_builder.build(
-            rpc_url=self.config.rpc_path,
-            agent_card_url=self.config.card_path,
-            extended_agent_card_url=self.config.extended_card_path,
-        )
+        routes = [
+            *create_agent_card_routes(agent_card, card_url=self.config.card_path),
+            *create_jsonrpc_routes(request_handler, rpc_url=self.config.rpc_path),
+        ]
+        fastapi_app = FastAPI(routes=routes)
 
         uv_cfg = uvicorn.Config(
             app=fastapi_app,
