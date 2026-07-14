@@ -31,6 +31,7 @@ import {
 } from "../core/attachments.js";
 import {
   CommandService,
+  isCommandDisabled,
   parseSlashCommand,
   type InstalledSkillEntry,
 } from "../core/commands/CommandService.js";
@@ -686,8 +687,9 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
     }
 
     // /memory edit|toggle + 空格：直接调用 completion 获取文件/key 列表，绕过 CombinedAutocompleteProvider
+    // memory 被屏蔽（isCommandDisabled）时跳过本块，避免对已禁用命令补全参数而暴露其存在。
     const memArgMatch = textBeforeCursor.match(/^\/memory\s+(edit|toggle)\s+(\S*)$/);
-    if (memArgMatch && this.memoryArgCompletion) {
+    if (memArgMatch && this.memoryArgCompletion && !isCommandDisabled("memory")) {
       try {
         const sub = memArgMatch[1];
         const argPrefix = memArgMatch[2].toLowerCase();
@@ -715,7 +717,8 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
     // inner provider 会以 "edit" 为 prefix 返回文件列表，applyCompletion 时会把
     // "edit" 替换成文件名 → /memory JIUWENSWARM.local.md（丢失子命令）。
     // 用户需要先输入空格，才走上面的 memArgMatch 路径正确展示文件列表。
-    if (/^\/memory\s+(edit|toggle)$/.test(textBeforeCursor)) {
+    // memory 被屏蔽时不抑制（让 inner provider 按未知命令处理）。
+    if (!isCommandDisabled("memory") && /^\/memory\s+(edit|toggle)$/.test(textBeforeCursor)) {
       return null;
     }
 
@@ -3125,7 +3128,9 @@ export class AppScreen implements Component, Focusable {
         await this.openModelList();
         return;
       }
-      if (/^\/mcp(?:\s+list)?\s*$/.test(text)) {
+      // /mcp 入口：未被屏蔽时直接开 MCP 列表界面；被屏蔽（isCommandDisabled）则跳过本块，
+      // 落到下方命令分发器显示 "Unknown command: /mcp"。屏蔽名单见 CommandService.DISABLED_COMMANDS。
+      if (!isCommandDisabled("mcp") && /^\/mcp(?:\s+list)?\s*$/.test(text)) {
         this.editor.addToHistory(text);
         this.editor.setText("");
         this.state.addItem(addCommandEcho(snapshot.sessionId, text));
@@ -3147,8 +3152,10 @@ export class AppScreen implements Component, Focusable {
       // /memory（无参）及 /memory <edit|status|toggle|open>（无后续参数）
       // 打开 MemoryView 页签控制台；带参数的形式（/memory edit <path>、/memory toggle <key>）
       // 不匹配，继续走命令分发器（保留 completion）。
+      // 被屏蔽（isCommandDisabled）时跳过本块，落到分发器显示 "Unknown command: /memory"。
+      // 屏蔽名单见 CommandService.DISABLED_COMMANDS，恢复时删名字即可，本块无需改动。
       const memMatch = text.match(/^\/memory(?:\s+(edit|status|toggle|open))?$/);
-      if (memMatch) {
+      if (memMatch && !isCommandDisabled("memory")) {
         this.editor.addToHistory(text);
         this.editor.setText("");
         this.state.addItem(addCommandEcho(snapshot.sessionId, text));
