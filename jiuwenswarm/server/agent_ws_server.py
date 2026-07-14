@@ -2042,7 +2042,7 @@ class AgentWebSocketServer:
                 "tool execution for session=%s",
                 session_id,
             )
-            
+
     @staticmethod
     def _is_stateless_method_request(request: AgentRequest) -> bool:
         """skills / skilldev / plugins / symphony 为无状态 RPC，无需 mode 解析与 adapter.
@@ -2057,19 +2057,17 @@ class AgentWebSocketServer:
         )
 
     async def _get_stateless_agent(self, channel_id: str) -> Any:
-        """为无状态请求取 agent，**不触发任何 mode 的 adapter 重建**. 
- 
- 
-        优先用 AgentManager 已缓存的 agent 模式 agent（get_agent_nowait 命中即返回， 
-        不命中返回 None，绝不创建）；都没缓存时现场构造一个轻量 JiuWenSwarm() 
-        （**不调 create_instance**，_adapter 保持 None）——其 process_message 内部对 
-        skills/skilldev/plugins/symphony 的无状态短路会在 _ensure_adapter 之前 return， 
-        碰不到 adapter。真正的 adapter 重建留给 chat.send。 
- 
- 
-        相比 5084467df 原版用 get_agent(mode="agent") 作 fallback（会触发 agent 模式 
-        adapter 重建，治标不治本），此处彻底解耦。JiuWenSwarm.__init__ 仅 4 个赋值 + 
-        一个只读目录的 SkillManager，现场 new 开销可忽略，无需额外缓存态。 
+        """为无状态请求取 agent，**不触发任何 mode 的 adapter 重建**.
+
+        优先用 AgentManager 已缓存的 agent 模式 agent（get_agent_nowait 命中即返回，
+        不命中返回 None，绝不创建）；都没缓存时现场构造一个轻量 JiuWenSwarm()
+        （**不调 create_instance**，_adapter 保持 None）——其 process_message 内部对
+        skills/skilldev/plugins/symphony 的无状态短路会在 _ensure_adapter 之前 return，
+        碰不到 adapter。真正的 adapter 重建留给 chat.send。
+
+        相比 5084467df 原版用 get_agent(mode="agent") 作 fallback（会触发 agent 模式
+        adapter 重建，治标不治本），此处彻底解耦。JiuWenSwarm.__init__ 仅 4 个赋值 +
+        一个只读目录的 SkillManager，现场 new 开销可忽略，无需额外缓存态。
         """
         cached = self._agent_manager.get_agent_nowait(
             channel_id=channel_id, mode="agent"
@@ -2254,13 +2252,10 @@ class AgentWebSocketServer:
 
         # 无状态请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
         # code mode 状态管理，直接走 process_message 即可。用轻量 agent 获取，不触发
-        # adapter 重建、不写会话元数据——否则只读查询会刷新 last_user_message_at/
-        # last_message_at 并可能凭空建空会话目录（见 _is_stateless_method_request 注释）。
-        # （恢复 8f54b26a7 误删的短路，并修正 5084467df 触发重建的缺陷。）
+        # adapter 重建（恢复 8f54b26a7 误删的短路，并修正 5084467df 触发重建的缺陷）。
         if self._is_stateless_method_request(request):
             agent = await self._get_stateless_agent(channel_id)
             resp = await agent.process_message(request)
-            # is None 守卫：保留 agent 层显式设置的 agent_ref。
             if getattr(resp, "agent_ref", None) is None:
                 resp.agent_ref = request.agent_ref
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
@@ -2310,8 +2305,7 @@ class AgentWebSocketServer:
 
         # 无状态流式请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
         # code mode 状态管理，直接走 process_message_stream 即可。用轻量 agent 获取，
-        # 不触发 adapter 重建、不写会话元数据（见 _is_stateless_method_request 注释；
-        # 恢复 8f54b26a7 误删的短路，并修正 5084467df 触发重建的缺陷）。
+        # 不触发 adapter 重建（恢复 8f54b26a7 误删的短路，并修正 5084467df 触发重建的缺陷）。
         if self._is_stateless_method_request(request):
             agent = await self._get_stateless_agent(channel_id)
         else:
