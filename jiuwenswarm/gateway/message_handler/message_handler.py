@@ -771,8 +771,11 @@ class MessageHandler(ABC):
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks_to_stop, return_exceptions=True)
-        for rid, _, _, _ in candidates:
-            self._pop_stream_tracking(rid)
+        # 走集中化 pop+broadcast：新消息顶替旧流式任务后，须让跨窗口配置保存锁
+        # 感知运行态变化（否则前端保存锁卡在最后一次广播值，仅靠重连自愈）。
+        await self._pop_stream_tracking_and_broadcast(
+            [rid for rid, _, _, _ in candidates],
+        )
 
         for old_sid, mode in sid_mode.items():
             cancel_msg = self._clone_message_for_session_cancel(msg, old_sid, mode=mode)
@@ -3593,6 +3596,17 @@ class MessageHandler(ABC):
                             await self._broadcast_task_global_running()
                 except Exception as e:
                     logger.exception("AgentServer send_request failed for %s: %s", msg.id, e)
+                    # 流式任务启动在 tracking 写入后、process_stream 成功登记前
+                    # 抛异常（典型如 _send_processing_status / create_task 失败）时，
+                    # process_stream 自身的 finally 不会执行，残留的
+                    # _stream_modes / _stream_emits_processing_status 会让
+                    # has_active_streams() 永久误判、前端保存锁永久禁用。
+                    # 此处做防御性清理：stream_rid 的 tracking 已写入但任务未登记时清掉。
+                    if (
+                        stream_rid in self._stream_modes
+                        and stream_rid not in self._stream_tasks
+                    ):
+                        await self._pop_stream_tracking_and_broadcast([stream_rid])
                     err_msg = self._build_error_out_message(msg, e)
                     await self.publish_robot_messages(err_msg)
                     logger.info(

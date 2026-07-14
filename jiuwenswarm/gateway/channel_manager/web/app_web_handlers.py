@@ -2260,8 +2260,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
-        if await _reject_if_task_running(ws, req_id):
-            return
+        # 心跳配置是实时读取的（仅写 config.yaml heartbeat 段 + 重启心跳服务，不走全局热更新），
+        # 运行中改不会破坏任务，故不套用任务运行态保存锁。
         try:
             every = params.get("every")
             target = params.get("target")
