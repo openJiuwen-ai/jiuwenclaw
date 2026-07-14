@@ -101,12 +101,15 @@ let pendingQuestionInterruptCount = 0;
 let pendingQuestionRenderCount = 0;
 Object.assign(pendingQuestionScreen, {
   activeQuestionIndex: 0,
-  ctrlCPendingForQuestion: false,
-  ctrlCPendingForQuestionTimer: null,
-  transientNotice: null,
+  transientNotice: "stale hint",
   startupPromptList: null,
   fileViewerState: null,
   diffViewerState: null,
+  // Provide a minimal question list so Ctrl+D falls through to the
+  // approval input handler (which ignores it) instead of crashing.
+  questionList: { handleInput: () => undefined, getSelectedItem: () => null },
+  questionCheckboxList: null,
+  otherInputMode: false,
   state: {
     recordActivity: () => undefined,
     getSnapshot: () => ({
@@ -130,12 +133,26 @@ Object.assign(pendingQuestionScreen, {
   },
 });
 
+// Ctrl+C on the approval box interrupts the task (single press) and does NOT exit
 pendingQuestionScreen.handleInput("\x03");
-assert.equal(pendingQuestionScreen.transientNotice, "Press Ctrl+C again to exit");
+assert.equal(pendingQuestionInterruptCount, 1);
 assert.equal(pendingQuestionExitCount, 0);
-pendingQuestionScreen.handleInput("\x03");
-assert.equal(pendingQuestionExitCount, 1);
-assert.equal(pendingQuestionInterruptCount, 0);
-assert.equal(pendingQuestionRenderCount, 1);
+assert.equal(pendingQuestionScreen.transientNotice, null);
+
+// Esc likewise interrupts the task (single press)
+pendingQuestionScreen.handleInput("\x1b");
+assert.equal(pendingQuestionInterruptCount, 2);
+assert.equal(pendingQuestionExitCount, 0);
+assert.equal(pendingQuestionScreen.transientNotice, null);
+
+// Ctrl+D is no longer supported on the approval box: does nothing
+const renderCountBeforeCtrlD = pendingQuestionRenderCount;
+pendingQuestionScreen.handleInput("\x04");
+assert.equal(pendingQuestionInterruptCount, 2);
+assert.equal(pendingQuestionExitCount, 0);
+// Ctrl+D did not trigger an interrupt/exit; it may or may not request a
+// render depending on the list handler, but it must not interrupt or exit.
+assert.ok(pendingQuestionInterruptCount === 2 && pendingQuestionExitCount === 0);
+console.log("ctrl+d render requests:", pendingQuestionRenderCount - renderCountBeforeCtrlD);
 
 console.log("frontend tests passed");
