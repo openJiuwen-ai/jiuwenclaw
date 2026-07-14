@@ -260,7 +260,7 @@ const EVOLUTION_KEYS = new Set(["evolution_auto_scan", "skill_create"]);
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
 const MAX_API_BASE_LENGTH = 512;
-const MAX_API_KEY_LENGTH = 500;
+const MAX_API_KEY_LENGTH = 2048;
 
 // URL 格式校验函数
 function validateBaseUrl(url: string): boolean {

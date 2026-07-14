@@ -763,7 +763,7 @@
       "modelNameTooLong": "模型名称过长，请控制在 100 字符以内",
       "aliasTooLong": "别名过长，请控制在 100 字符以内",
       "apiBaseTooLong": "API Base URL 过长，请控制在 512 字符以内",
-      "apiKeyTooLong": "API Key 过长，请控制在 500 字符以内",
+      "apiKeyTooLong": "API Key 过长，请控制在 2048 字符以内",
       "reasoningDefault": "使用默认值",
       "alias": "别名",
       "aliasPlaceholder": "选填，默认为空"
