@@ -19,6 +19,7 @@ dependencies = [
     "loguru>=0.7.3",
     "openjiuwen==0.1.15.post3",
     "pgvector>=0.4.2",
+    "portalocker>=3.2.0",
     "websockets>=12.0",
     "psutil>=7.2.2",
     "aiosqlite>=0.22.1",
@@ -32,10 +33,10 @@ dependencies = [
     "skillnet-ai==0.0.16",
     "mutagen>=1.47.0",
     "google-genai>=1.68.0",
-    "opentelemetry-api>=1.25.0",
-    "opentelemetry-sdk>=1.25.0",
-    "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
-    "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+    "opentelemetry-api>=1.28.0",
+    "opentelemetry-sdk>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.28.0",
     "sqlite-vec==0.1.6",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -119,7 +120,12 @@ jiuwenbox = [
 ]
 
 [tool.setuptools.exclude-package-data]
-jiuwenswarm = ["channels/web/frontend/node_modules/**", "channels/web/frontend/node_modules/*"]
+jiuwenswarm = [
+    "channels/web/frontend/node_modules/**",
+    "channels/web/frontend/node_modules/*",
+    "resources/agent/workspace/skills/project-maintainer/**/*",
+    "resources/agent/workspace/skills/project-maintainer/*",
+]
 
 [tool.uv]
 default-groups = ['dev']

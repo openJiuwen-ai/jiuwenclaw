@@ -133,3 +133,58 @@ async def test_web_channel_chat_send_ack_before_forward_callback_finishes():
         release_callback.set()
         await task
         await channel.unregister_ws(client)
+
+
+@pytest.mark.asyncio
+async def test_web_channel_routes_rpc_response_by_request_ws_id():
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    client = _FakeClient()
+    other_client = _FakeClient()
+    routing_key = RoutingKey(
+        channel_id="web",
+        app_id="default",
+        user_id="test_user",
+        session_id="sess-real",
+        agent_ref=None,
+    )
+    other_routing_key = RoutingKey(
+        channel_id="web",
+        app_id="default",
+        user_id="other_user",
+        session_id="sess-other",
+        agent_ref=None,
+    )
+
+    await channel.register_ws(client, routing_key)
+    await channel.register_ws(other_client, other_routing_key)
+    try:
+        msg = Message(
+            id="req-graph",
+            type="res",
+            channel_id="web",
+            session_id="sess-temp",
+            params={},
+            timestamp=0.0,
+            ok=True,
+            payload={"success": True},
+            metadata={"ws_id": getattr(client, "_jiuwen_ws_id", "")},
+        )
+
+        await channel.send(msg)
+        for _ in range(20):
+            if client.frames:
+                break
+            await asyncio.sleep(0.005)
+
+        assert client.frames == [
+            {
+                "type": "res",
+                "id": "req-graph",
+                "ok": True,
+                "payload": {"success": True},
+            }
+        ]
+        assert other_client.frames == []
+    finally:
+        await channel.unregister_ws(client)
+        await channel.unregister_ws(other_client)

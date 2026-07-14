@@ -244,9 +244,10 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
             return ParsedChannelControl(ParsedControlAction.REVIEW_BAD)
         return ParsedChannelControl(ParsedControlAction.REVIEW_OK, pr_arg=sanitized)
     # /join <session_ref> as <member_name>
-    # 支持两种格式：
-    #   完整: /join team_<name>_session_<id> as <member_name>
-    #   简化: /join <session_id> as <member_name>
+    # 仅接受完整格式：/join team_<name>_session_<id> as <member_name>
+    # 简化格式 /join <session_id> as <member_name> 不再允许：
+    # 缺 team_name 维度无法做 team_name ↔ session_id 一致性校验，
+    # 直接判格式错误，引导用户用完整格式。
     if t.startswith(GatewaySlashCommand.JOIN.value):
         parts = t.split()
         if (
@@ -256,9 +257,7 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
         ):
             session_ref = parts[1]
             member_name = parts[3]
-            # 接受完整格式 team_*_session_* 或简化格式（任意 session_id）
-            if re.match(r'^team_[A-Za-z0-9_-]+_session_[A-Za-z0-9_-]+$', session_ref) or \
-               re.match(r'^[A-Za-z0-9_-]+$', session_ref):
+            if re.match(r'^team_[A-Za-z0-9_-]+_session_[A-Za-z0-9_-]+$', session_ref):
                 return ParsedChannelControl(
                     ParsedControlAction.JOIN_OK,
                     session_ref=session_ref,
@@ -266,19 +265,19 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
                 )
         return ParsedChannelControl(ParsedControlAction.JOIN_BAD)
     # /exit [session_ref]
-    # 支持三种格式：
-    #   不带参数: /exit（使用当前 session）
-    #   完整: /exit team_<name>_session_<id>
-    #   简化: /exit <session_id>
+    # 支持两种格式：
+    #   不带参数: /exit（使用当前 session，不校验 team_name）
+    #   完整: /exit team_<name>_session_<id>（handler 校验 team_name 与 session 一致）
+    # 简化格式 /exit <session_id> 不再允许：缺 team_name 维度无法做一致性校验，
+    # 直接判格式错误，引导用户用完整格式或无参 /exit。
     if t.startswith(GatewaySlashCommand.EXIT.value):
         parts = t.split()
         if len(parts) == 1 and parts[0] == GatewaySlashCommand.EXIT.value:
-            # /exit 不带 session_id → handler 用当前 session 兜底
+            # /exit 不带 session_id → handler 用当前 session 兜底，不做 team_name 校验
             return ParsedChannelControl(ParsedControlAction.EXIT_OK)
         if len(parts) == 2 and parts[0] == GatewaySlashCommand.EXIT.value:
             session_ref = parts[1]
-            if re.match(r'^team_[A-Za-z0-9_-]+_session_[A-Za-z0-9_-]+$', session_ref) or \
-               re.match(r'^[A-Za-z0-9_-]+$', session_ref):
+            if re.match(r'^team_[A-Za-z0-9_-]+_session_[A-Za-z0-9_-]+$', session_ref):
                 return ParsedChannelControl(
                     ParsedControlAction.EXIT_OK,
                     session_ref=session_ref,
@@ -352,7 +351,7 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
     SlashCommandEntry(
         id="mode",
         canonical_text=f"{GatewaySlashCommand.MODE.value} agent|code|team|agent.plan|agent.fast|code.plan|"
-                       f"code.normal|code.team",
+                       f"code.normal|code.team|team.plan",
         scope="gateway",
         req_method=None,
         notes="受控通道切换模式：一级模式 agent/code/team（映射到默认子模式）或直达 agent.plan/agent.fast/code.plan/code.normal；"

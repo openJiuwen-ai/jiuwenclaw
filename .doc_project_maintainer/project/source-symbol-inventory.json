@@ -1,0 +1,78 @@
+{
+  "agentserver_default_health_scope": {
+    "file_doc_exists": true,
+    "methods": 112,
+    "missing_entry_docs": 88,
+    "source": "jiuwenswarm/server/agent_ws_server.py",
+    "symbols": 152
+  },
+  "agentserver_method_queue": "audit-queues/server-method-audit-queue.json",
+  "archived_full_json_gzip": "ledger-archive/source-symbol-inventory.full.json.gz",
+  "directory_summary_totals": {
+    "excluded_directories": 1,
+    "listing_source": "git ls-files",
+    "notes": 3,
+    "recorded_directories": 275,
+    "skipped_non_source_directories": 95,
+    "totals": {
+      "excluded_directories": 1,
+      "excluded_files": 1,
+      "recorded_directories": 275,
+      "recorded_source_files": 1236,
+      "skipped_non_source_directories": 95,
+      "skipped_non_source_files": 542
+    }
+  },
+  "files_total": 1236,
+  "generated_at": "2026-07-08T07:40:06.462755+00:00",
+  "generated_from_full_inventory": true,
+  "notes": [
+    "Compact summary only; full source symbol inventory is archived as gzip.",
+    "Use the AgentServer method queue for the current default health audit slice."
+  ],
+  "repo_root": "E:\\Projects\\jiuwenswarm",
+  "schema": "project-maintainer.source-symbol-inventory.v1",
+  "summary": {
+    "audit_scopes": {
+      "default_health_audit": 840,
+      "repository_coverage_only": 396
+    },
+    "class_methods": 6650,
+    "classes": 1467,
+    "default_health_audit_source_files": 840,
+    "default_health_audit_symbols": 8737,
+    "extractors": {
+      "heuristic": 250,
+      "python_ast": 986
+    },
+    "missing_actual_role": 0,
+    "missing_entry_docs": 14680,
+    "missing_file_docs": 1234,
+    "missing_health": 0,
+    "repository_coverage_only_source_files": 396,
+    "repository_coverage_only_symbols": 6009,
+    "requires_review_files": 250,
+    "source_files": 1236,
+    "source_roles": {
+      "library_source": 494,
+      "package_metadata": 1,
+      "runtime_source": 346,
+      "script": 58,
+      "test_source": 214,
+      "tooling": 123
+    },
+    "symbols": 14746,
+    "top_level_functions": 6629
+  },
+  "target_files": [
+    {
+      "audit_scope": "default_health_audit",
+      "file_doc_exists": true,
+      "methods": 112,
+      "missing_entry_docs": 94,
+      "path": "jiuwenswarm/server/agent_ws_server.py",
+      "source_role": "runtime_source",
+      "symbols": 152
+    }
+  ]
+}

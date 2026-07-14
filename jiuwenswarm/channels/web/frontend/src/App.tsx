@@ -15,7 +15,6 @@ import { HeartbeatPanel } from './components/HeartbeatPanel';
 import CronPanel from './components/CronPanel';
 import { ToolPanel } from './components/ToolPanel';
 import { ConfigPanel } from './components/ConfigPanel';
-import { LogsPanel } from './components/LogsPanel';
 import { ChannelsPanel } from './components/ChannelsPanel';
 import { BrowserPanel } from './components/BrowserPanel';
 import { UpdatePanel } from './components/UpdatePanel';
@@ -60,7 +59,7 @@ import {
 import type { DesktopSaveApiResult } from './utils/desktopSave';
 import './App.css';
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
 
 type AgentsTeamsSavePayload = {
   agents: Record<string, {
@@ -244,6 +243,8 @@ function AppContent() {
   const [heartbeatToastVisible, setHeartbeatToastVisible] = useState(false);
   const [heartbeatToastMessage, setHeartbeatToastMessage] = useState('');
   const [saveToastVisible, setSaveToastVisible] = useState(false);
+  // 配置被其他窗口更新后，本窗口若正编辑草稿则弹覆盖确认；无草稿则静默 fetchConfig。
+  const [configChangedConfirmOpen, setConfigChangedConfirmOpen] = useState(false);
   const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
   const [securityAlertVisible, setSecurityAlertVisible] = useState(false);
   const [securityAlertContent, setSecurityAlertContent] = useState('');
@@ -280,6 +281,8 @@ function AppContent() {
   const newSessionToastTimerRef = useRef<number | null>(null);
   const heartbeatToastTimerRef = useRef<number | null>(null);
   const saveToastTimerRef = useRef<number | null>(null);
+  /** ConfigPanel 草稿是否有未保存改动（由 onHasChangesChange 上报）；config.changed 广播到达时判断是否覆盖草稿。 */
+  const hasChangesRef = useRef(false);
   const lastHeartbeatToastKeyRef = useRef<string | null>(null);
   /** 自「恢复会话」加载 history 后的分页元数据；用于聊天区顶部加载更早消息 */
   const [historyPagerMeta, setHistoryPagerMeta] = useState<{
@@ -436,6 +439,9 @@ function AppContent() {
     onError: (error) => {
       console.error('WebSocket error:', error);
     },
+    onConfigChanged: () => {
+      handleConfigChanged();
+    },
   });
 
   // 获取会话列表
@@ -484,6 +490,20 @@ function AppContent() {
       console.warn('Failed to fetch models list:', error);
     }
   }, [request, t, setAvailableModels]);
+
+  // 配置被其他窗口更新后由后端 config.changed 广播触发；有未保存草稿则弹覆盖确认，否则静默拉取。
+  const handleConfigChanged = useCallback(() => {
+    if (hasChangesRef.current) {
+      setConfigChangedConfirmOpen(true);
+      return;
+    }
+    void fetchConfig();
+  }, [fetchConfig]);
+
+  // ConfigPanel 草稿变更上报，供 handleConfigChanged 判断是否覆盖草稿。
+  const handleHasChangesChange = useCallback((hasChanges: boolean) => {
+    hasChangesRef.current = hasChanges;
+  }, []);
 
   useEffect(() => {
     if (!FEATURE_APP_UPDATER_UI || !isConnected || startupUpdateCheckRef.current) {
@@ -1626,6 +1646,7 @@ function AppContent() {
             <ConfigPanel
               config={serverConfig}
               isConnected={isConnected}
+              sessionId={sessionId}
               onSaveConfig={saveConfigAndRestart}
               onSaveAllConfig={saveAllConfigAndRestart}
               onValidateModel={validateModelConfig}
@@ -1634,12 +1655,8 @@ function AppContent() {
               onModelValidate={validateModelConfig}
               onModelsRefresh={handleModelsRefresh}
               onAgentsTeamsSave={handleAgentsTeamsSave}
+              onHasChangesChange={handleHasChangesChange}
             />
-          </div>
-        )}
-        {activeNav === 'logspanel' && (
-          <div className="app-section">
-            <LogsPanel isConnected={isConnected} />
           </div>
         )}
         {activeNav === 'browserpanel' && (
@@ -1824,6 +1841,46 @@ function AppContent() {
                   {t('common.ok')}
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {configChangedConfirmOpen && (
+        <div className="app-restart-modal">
+          <div className="app-restart-modal__backdrop" />
+          <div className="app-restart-modal__panel">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-12 h-12 rounded-full bg-amber-500/15 text-amber-500 flex items-center justify-center mb-4">
+                <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                </svg>
+              </div>
+              <h3 className="text-base font-semibold text-text mb-1">
+                {t('config.errors.configChangedTitle')}
+              </h3>
+              <p className="text-sm text-text-muted mb-5">
+                {t('config.errors.configChangedDesc')}
+              </p>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfigChangedConfirmOpen(false);
+                    void fetchConfig();
+                  }}
+                  className="btn primary !px-4 !py-2"
+                >
+                  {t('config.errors.configChangedConfirm')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfigChangedConfirmOpen(false)}
+                  className="btn !px-4 !py-2"
+                >
+                  {t('config.errors.configChangedCancel')}
+                </button>
+              </div>
             </div>
           </div>
         </div>

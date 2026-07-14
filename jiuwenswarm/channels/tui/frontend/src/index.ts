@@ -13,6 +13,7 @@ const { values } = parseArgs({
     url: { type: "string", default: "ws://127.0.0.1:19001/tui" },
     session: { type: "string" },
     token: { type: "string", default: "" },
+    "user-id": { type: "string", default: "" },
     help: { type: "boolean", short: "h" },
   },
   strict: true,
@@ -25,6 +26,7 @@ Options:
   --url <url>       Gateway CLI WebSocket URL (default: ws://127.0.0.1:19001/tui)
   --session <id>    Resume a specific session
   --token <token>   Authentication token
+  --user-id <id>    User identifier for the session
   -h, --help        Show this help
 `);
   process.exit(0);
@@ -36,7 +38,7 @@ if (!process.env.JIUWENSWARM_TUI_HEADLESS && (!process.stdin.isTTY || !process.s
   process.exit(1);
 }
 
-const wsClient = new WsClient(values.url ?? "ws://127.0.0.1:19001/tui", values.token ?? "");
+const wsClient = new WsClient(values.url ?? "ws://127.0.0.1:19001/tui", values.token ?? "", values["user-id"] ?? "");
 const appState = new CliPiAppState(wsClient, values.session);
 const commandService = new CommandService();
 commandService.register(createBuiltinCommands());

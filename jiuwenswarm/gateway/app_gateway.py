@@ -1366,6 +1366,8 @@ async def _run(
 
     initial_channels_conf: dict = channels_cfg if isinstance(channels_cfg, dict) else {}
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
+    # 回填引用：MessageHandler 实例化早于 ChannelManager，广播全局事件时需经它取 web channel。
+    message_handler.set_channel_manager(channel_manager)
     updater_service = UpdaterService()
 
     async def _on_config_saved(

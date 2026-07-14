@@ -290,6 +290,21 @@ def build_permission_rail(
             )
 
             perm_ctx = TOOL_PERMISSION_CONTEXT.get()
+
+            # issue #1976: ask_user has its own dedicated interrupt rail. The
+            # permission rail intercepts *every* tool, so on resume it grabs the
+            # ask_user answer (keyed by tool_call_id) as its own user_input,
+            # fails to parse it as a ConfirmPayload, and re-raises a permission
+            # interrupt that swallows the answer — the option card then re-pops
+            # forever. Bypass the permission rail for ask_user so the ask_user
+            # rail's answer reaches the model. The digital-avatar scene below
+            # intentionally blocks interactive tools, so exclude it here.
+            if inp.normalized_tool_name == "ask_user" and (
+                perm_ctx is None
+                or getattr(perm_ctx, "scene", None) != "group_digital_avatar"
+            ):
+                return ("approve",)
+
             if perm_ctx is None:
                 return None
 
@@ -697,6 +712,9 @@ def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
     value = option.get("value")
     if isinstance(value, str) and value:
         normalized["value"] = value
+    preview = option.get("preview")
+    if isinstance(preview, str) and preview.strip():
+        normalized["preview"] = preview
     return normalized
 
 

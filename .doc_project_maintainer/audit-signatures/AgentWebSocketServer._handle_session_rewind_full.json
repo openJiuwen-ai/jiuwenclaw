@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f407b-f1ef-7533-876a-904a8cb6e644",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._handle_session_rewind_full",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._handle_session_rewind_full in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f407b-f1ef-7533-876a-904a8cb6e644",
+        "nickname": "Noether",
+        "symbol_id": "AgentWebSocketServer._handle_session_rewind_full",
+        "completed": true,
+        "finding_count": 5
+      }
+    }
+  ]
+}

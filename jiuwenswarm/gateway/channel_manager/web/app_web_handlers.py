@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -526,6 +527,50 @@ _CONFIG_YAML_KEYS = frozenset({
     "proactive_recommendation_max_rounds_per_tick",
     "swarmflow_enabled",
 })
+
+# 微信通道数值参数的取值范围：(下限, 上限, 是否必须为整数)。均为秒，必须为有限正数。
+# 用于 channel.wechat.set_conf 写盘前校验，拒绝负数 / 0 / 极大值 / 浮点越界 / 非数字，
+# 避免非法值落盘后导致后台轮询忙循环轰炸接口或退避过久使通道僵死。
+_WECHAT_NUMERIC_BOUNDS: dict[str, tuple[float, float, bool]] = {
+    "qrcode_poll_interval_sec": (0.1, 3600.0, False),
+    "long_poll_timeout_sec": (1, 600, True),
+    "backoff_base_sec": (0.1, 3600.0, False),
+    "backoff_max_sec": (0.1, 3600.0, False),
+}
+
+
+def _validate_wechat_numeric_params(params: dict) -> str | None:
+    """校验微信通道四个数值参数。合法返回 None，非法返回中文错误描述。
+
+    规则：出现在 params 中的字段必须为有限正数并落在各自范围内；
+    ``long_poll_timeout_sec`` 必须为整数；且 ``backoff_max_sec`` 不得小于
+    ``backoff_base_sec``（两者同时出现时才校验此跨字段约束）。
+    仅校验存在的键，缺省字段交由默认值处理。
+    """
+    def _as_number(value: Any) -> float | None:
+        # bool 是 int 的子类，需显式排除，避免 True/False 被当作 1/0 通过。
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        val = float(value)
+        return val if math.isfinite(val) else None
+
+    for key, (lo, hi, is_int) in _WECHAT_NUMERIC_BOUNDS.items():
+        if key not in params:
+            continue
+        val = _as_number(params[key])
+        if val is None:
+            return f"{key} 需为有限数值"
+        if is_int and val != int(val):
+            return f"{key} 需为整数"
+        if not (lo <= val <= hi):
+            return f"{key} 需在 {lo}–{hi} 之间"
+
+    base = _as_number(params.get("backoff_base_sec"))
+    mx = _as_number(params.get("backoff_max_sec"))
+    if base is not None and mx is not None and mx < base:
+        return "backoff_max_sec 不得小于 backoff_base_sec"
+    return None
+
 
 _SYMPHONY_CONFIG_SPECS: dict[str, tuple[tuple[str, ...], str, Any]] = {
     "symphony_enabled": (("enabled",), "bool", False),
@@ -1052,6 +1097,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         else:
             return value
 
+    async def _reject_if_task_running(ws, req_id) -> bool:
+        """全局运行态兜底：有任务在跑时拒绝写入并返回 True，否则返回 False。"""
+        _mh = _resolve(message_handler)
+        if _mh is not None and _mh.has_active_streams():
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="有任务正在运行，请等待任务完成后再保存配置",
+                code="TASK_RUNNING",
+            )
+            return True
+        return False
+
     async def _on_connect(ws):
         ac = _resolve(agent_client)
         if ac is None or not getattr(ac, "server_ready", False):
@@ -1062,6 +1119,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # 导致 send() 按 session_id 反查落空、ACK 被丢弃，前端收不到 connection.ack。
         # 复用 sid_A 后，ACK 走标准 send 流程即可命中本 ws，无需特殊路由兜底。
         sid = getattr(ws, "_jiuwen_initial_sid", None) or _make_session_id()
+
+        mh = _resolve(message_handler)
+        # ack 携带当前全局运行态，让新连接/重连的窗口立即知道是否有任务在跑（配置保存锁初始态）。
+        task_running = bool(mh.has_active_streams()) if mh is not None else False
 
         ack_msg = Message(
             id=f"ack-{sid}",
@@ -1077,9 +1138,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "mode": "BUILD",
                 "tools": [],
                 "protocol_version": "1.0",
+                "task_running": task_running,
             },
         )
-        mh = _resolve(message_handler)
         if mh:
             await mh.publish_robot_messages(ack_msg)
         else:
@@ -1206,6 +1267,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     class _ConfigInternalError(RuntimeError):
         pass
 
+    def _validate_proactive_int(
+        val: Any, *, name: str, lo: int = 1, hi: int = 50,
+    ) -> int:
+        """校验 proactive 数值配置项：必须是 [lo, hi] 的正整数字符串。
+
+        挡住负数、零、浮点数(3.5)、字符串(abc)、科学计数(1e5)、空值。
+        校验失败抛 _ConfigBadRequest（携带中文提示），由外层返回前端。
+        """
+        raw = str(val if val is not None else "").strip()
+        if not raw:
+            raise _ConfigBadRequest(f"{name} 不能为空，需为 {lo}-{hi} 的正整数")
+        # 正则一次挡住浮点、负数、科学计数、非数字
+        if not re.fullmatch(r"[0-9]+", raw):
+            raise _ConfigBadRequest(
+                f"{name} 必须是正整数（{lo}-{hi}），当前值无效：{raw!r}"
+            )
+        n = int(raw)
+        if n < lo or n > hi:
+            raise _ConfigBadRequest(f"{name} 需为 {lo}-{hi} 的正整数，当前：{n}")
+        return n
+
     def _encrypt_config_params(params: dict[str, Any]) -> dict[str, Any]:
         encrypted = dict(params)
         for key, val in list(encrypted.items()):
@@ -1273,10 +1355,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 elif param_key == "proactive_recommendation_enabled":
                     update_proactive_recommendation_in_config({"enabled": parsed})
                 elif param_key == "proactive_recommendation_max_recommend_per_day":
-                    update_proactive_recommendation_in_config({"max_recommend_per_day": int(str(val).strip())})
+                    n = _validate_proactive_int(val, name="每日推荐上限(max_recommend_per_day)")
+                    update_proactive_recommendation_in_config({"max_recommend_per_day": n})
                 elif param_key == "proactive_recommendation_max_rounds_per_tick":
-                    update_proactive_recommendation_in_config({"max_rounds_per_tick": int(str(val).strip())})
+                    n = _validate_proactive_int(val, name="每次检查对话轮数(max_rounds_per_tick)")
+                    update_proactive_recommendation_in_config({"max_rounds_per_tick": n})
                 yaml_updated.append(param_key)
+            except _ConfigBadRequest:
+                # proactive 数值校验等：直接返回前端，不被外层吞成 warning
+                raise
             except Exception as e:  # noqa: BLE001
                 logger.warning("[config.set] 写回 config.yaml 失败 %s: %s", param_key, e)
                 if param_key == "swarmflow_enabled":
@@ -1311,7 +1398,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         return env_updates, yaml_updated
 
-    async def _apply_config_change_set(change_set: _ConfigChangeSet) -> bool:
+    async def _apply_config_change_set(
+        change_set: _ConfigChangeSet,
+        *,
+        source_ws: Any = None,
+    ) -> bool:
         """Synchronously apply only the runtime scope affected by a saved config change."""
         if not change_set.changed:
             return True
@@ -1324,10 +1415,25 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 reload_options=change_set.reload_options,
             )
             if inspect.isawaitable(callback_result):
-                return bool(await callback_result)
-            return bool(callback_result)
-        await _clear_agent_config_cache(_resolve(agent_client))
-        return True
+                applied_without_restart = bool(await callback_result)
+            else:
+                applied_without_restart = bool(callback_result)
+        else:
+            await _clear_agent_config_cache(_resolve(agent_client))
+            applied_without_restart = True
+        # 通知所有 ws 客户端配置已变更，触发其他窗口 fetchConfig 拉取最新配置（痛点②）。
+        # 即使热更新回调失败，配置文件也已写入磁盘，其他窗口仍应感知到变更。
+        # exclude_ws=source_ws：保存发起方靠 saveConfigAndRestart 的本地乐观合并自行刷新，
+        # 收到这条广播反而会因时序未 flush 的 hasChanges 误弹「丢弃草稿」确认框，故排除。
+        try:
+            await channel.broadcast_event(
+                "config.changed",
+                {"updated_keys": sorted(change_set.updated_keys)},
+                exclude_ws=source_ws,
+            )
+        except Exception:
+            logger.debug("[config] broadcast config.changed failed", exc_info=True)
+        return applied_without_restart
 
     def _build_models_defaults_from_frontend(raw_models: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_models, list) or not raw_models:
@@ -1422,6 +1528,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
+        if await _reject_if_task_running(ws, req_id):
+            return
         try:
             env_updates, yaml_updated = _apply_config_payload(params)
         except _ConfigBadRequest as exc:
@@ -1432,7 +1540,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         change_set = _ConfigChangeSet(env_updates, yaml_updated)
         try:
-            applied_without_restart = await _apply_config_change_set(change_set)
+            applied_without_restart = await _apply_config_change_set(change_set, source_ws=ws)
         except Exception as exc:
             logger.warning("[config.set] on_config_saved failed: %s", exc)
             applied_without_restart = False
@@ -1640,12 +1748,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
+        # 全局运行态兜底：有任意任务正在运行时拒绝替换模型列表，避免热更新破坏运行中的任务。
+        if await _reject_if_task_running(ws, req_id):
+            return
         try:
             new_models = _build_models_defaults_from_frontend(params.get("models"))
             update_default_models_in_config(new_models)
 
             applied_without_restart = await _apply_config_change_set(
-                _ConfigChangeSet({}, ["models.defaults"], force=True)
+                _ConfigChangeSet({}, ["models.defaults"], force=True),
+                source_ws=ws,
             )
 
             await channel.send_response(ws, req_id, ok=True, payload={
@@ -1668,6 +1780,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         """
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+
+        # 全局运行态兜底：有任意任务正在运行时拒绝批量写入，避免热更新破坏运行中的任务。
+        if await _reject_if_task_running(ws, req_id):
             return
 
         env_updates: dict[str, str] = {}
@@ -1702,7 +1818,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 models_count = len(new_models)
 
             change_set = _ConfigChangeSet(env_updates, yaml_updated, force=bool(env_updates or yaml_updated))
-            applied_without_restart = await _apply_config_change_set(change_set)
+            applied_without_restart = await _apply_config_change_set(change_set, source_ws=ws)
 
             await channel.send_response(
                 ws,
@@ -2144,6 +2260,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
+        if await _reject_if_task_running(ws, req_id):
+            return
         try:
             every = params.get("every")
             target = params.get("target")
@@ -2164,10 +2282,25 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 try:
                     raw = get_config_raw() or {}
                     ch_cfg = (raw.get("channels") or {}).get("feishu") or {}
-                    has_target = bool(
-                        str(ch_cfg.get("last_chat_id") or "").strip()
-                        or str(ch_cfg.get("chat_id") or "").strip()
-                    )
+                    # V2 多应用：心跳 relay 会 fan-out 到同 channel_id 的全部 app，每个 app 各走
+                    # 自己的 last_chat_id/chat_id 投递；故要求「每个 app 都有目标」才算可用，
+                    # 否则缺失目标的 app 每次 tick 都会静默投递失败。
+                    apps = ch_cfg.get("apps") or []
+                    if isinstance(apps, list) and apps:
+                        has_target = all(
+                            isinstance(app, dict)
+                            and (
+                                bool(str(app.get("last_chat_id") or "").strip())
+                                or bool(str(app.get("chat_id") or "").strip())
+                            )
+                            for app in apps
+                        )
+                    else:
+                        # 旧平铺格式（单应用）：兜底看顶层 last_chat_id/chat_id。
+                        has_target = bool(
+                            str(ch_cfg.get("last_chat_id") or "").strip()
+                            or str(ch_cfg.get("chat_id") or "").strip()
+                        )
                     if not has_target:
                         await channel.send_response(
                             ws, req_id, ok=False,
@@ -2290,6 +2423,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        if await _reject_if_task_running(ws, req_id):
+            return
         try:
             # 多应用模式：params 必须含 apps 键
             apps = params["apps"]
@@ -2372,6 +2507,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        if await _reject_if_task_running(ws, req_id):
+            return
         try:
             # 多应用模式：params 必须含 apps 键
             apps = params["apps"]
@@ -2437,6 +2574,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        if await _reject_if_task_running(ws, req_id):
+            return
         try:
             await cm.set_conf("telegram", params)
             conf = cm.get_conf("telegram")
@@ -2487,6 +2626,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 error="params must be object",
                 code="BAD_REQUEST",
             )
+            return
+        if await _reject_if_task_running(ws, req_id):
             return
         try:
             await cm.set_conf("dingtalk", params)
@@ -2544,6 +2685,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        if await _reject_if_task_running(ws, req_id):
+            return
         try:
             await cm.set_conf("whatsapp", params)
             conf = cm.get_conf("whatsapp")
@@ -2594,6 +2737,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 error="params must be object",
                 code="BAD_REQUEST",
             )
+            return
+        if await _reject_if_task_running(ws, req_id):
             return
         try:
             await cm.set_conf("discord", params)
@@ -2646,6 +2791,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        if await _reject_if_task_running(ws, req_id):
+            return
         try:
             await cm.set_conf("wecom", params)
             conf = cm.get_conf("wecom")
@@ -2696,6 +2843,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 error="params must be object",
                 code="BAD_REQUEST",
             )
+            return
+        # 数值参数写盘前校验：拒绝负数 / 0 / 极大值 / 浮点越界 / 非数字，早于 set_conf 中断。
+        numeric_error = _validate_wechat_numeric_params(params)
+        if numeric_error is not None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=numeric_error,
+                code="BAD_REQUEST",
+            )
+            return
+        if await _reject_if_task_running(ws, req_id):
             return
         try:
             await cm.set_conf("wechat", params)
@@ -2846,6 +3006,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
+        # proactive.tick job 由主动推荐开关自动创建/删除，禁止面板删除。
+        existing = await cc.get_job(job_id)
+        if existing is not None and str(getattr(existing, "mode", "") or "").strip().lower() == "proactive.tick":
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="主动推荐定时任务由设置→主动推荐开关控制，不能在面板删除；请到设置关闭开关。",
+                code="BAD_REQUEST",
+            )
+            return
         deleted = await cc.delete_job(job_id)
         if not deleted:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
@@ -2867,6 +3036,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         if enabled is None:
             await channel.send_response(ws, req_id, ok=False, error="enabled is required", code="BAD_REQUEST")
+            return
+        # proactive.tick job 的 enabled 由 config 开关驱动，禁止面板手动切换。
+        existing = await cc.get_job(job_id)
+        if existing is not None and str(getattr(existing, "mode", "") or "").strip().lower() == "proactive.tick":
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="主动推荐定时任务由设置→主动推荐开关控制，不能在面板启停。",
+                code="BAD_REQUEST",
+            )
             return
         try:
             job = await cc.toggle_job(job_id, bool(enabled))
@@ -3018,7 +3196,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             deny_guidance = params.get("deny_guidance_message")
             update_permissions_owner_scopes_in_config(owner_scopes, deny_guidance)
             applied_without_restart = await _apply_config_change_set(
-                _ConfigChangeSet({}, ["permissions"], force=True)
+                _ConfigChangeSet({}, ["permissions"], force=True),
+                source_ws=ws,
             )
             await channel.send_response(
                 ws,
@@ -3077,7 +3256,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 out = {
                     **out,
                     "applied_without_restart": await _apply_config_change_set(
-                        _ConfigChangeSet({}, ["permissions"], force=True)
+                        _ConfigChangeSet({}, ["permissions"], force=True),
+                        source_ws=ws,
                     ),
                 }
             await channel.send_response(ws, req_id, ok=True, payload=out)

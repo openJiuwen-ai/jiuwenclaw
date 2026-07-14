@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f3f79-3ce1-7430-91d9-1810f6494335",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer.get_instance",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer.get_instance in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f3f79-3ce1-7430-91d9-1810f6494335",
+        "nickname": "Archimedes",
+        "symbol_id": "AgentWebSocketServer.get_instance",
+        "completed": true,
+        "finding_count": 3
+      }
+    }
+  ]
+}

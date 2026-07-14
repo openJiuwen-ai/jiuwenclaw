@@ -2523,6 +2523,9 @@ class FeishuChannel(BaseChannel):
                 params["files"] = [file_info]
 
             # 构建基础 metadata
+            # feishu_create_time：飞书服务端在消息创建（用户发送）时刻打的毫秒时间戳，
+            # 透传到 ChannelManager 入站日志，与本进程收到回调的时刻对比，即可判断
+            # 该入站消息是用户当下新发（差值小）还是飞书延迟补推的旧消息（差值大）。
             base_metadata = {
                 "message_id": message.message_id,
                 "chat_type": message.chat_type,
@@ -2530,6 +2533,7 @@ class FeishuChannel(BaseChannel):
                 "open_id": open_id,
                 "feishu_open_id": open_id,
                 "feishu_chat_id": getattr(message, "chat_id", None) or "",
+                "feishu_create_time": getattr(message, "create_time", None),
                 **({"file_info": file_info} if file_info else {}),
             }
 

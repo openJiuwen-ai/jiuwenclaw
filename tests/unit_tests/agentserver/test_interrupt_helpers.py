@@ -1,8 +1,10 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    build_permission_rail,
     convert_interactions_to_ask_user_question,
 )
 
@@ -109,3 +111,58 @@ def test_legacy_skill_evolution_approval_metadata_is_classified():
     assert result is not None
     assert result["source"] == "evolution_interrupt"
     assert result["approval_kind"] == "evolve"
+
+
+def _scene_hook_input(normalized_tool_name: str, user_input):
+    from openjiuwen.harness.security.host import PermissionSceneHookInput
+
+    return PermissionSceneHookInput(
+        ctx=SimpleNamespace(session=None),
+        tool_call=SimpleNamespace(id="call_1", name=normalized_tool_name, arguments={}),
+        user_input=user_input,
+        normalized_tool_name=normalized_tool_name,
+        tool_args={},
+        engine=None,
+    )
+
+
+def _permission_scene_hook():
+    rail = build_permission_rail({"permissions": {"enabled": True}})
+    assert rail is not None
+    hook = rail._host.permission_scene_hook
+    assert hook is not None
+    return hook
+
+
+def test_scene_hook_approves_ask_user_on_resume():
+    """Regression for issue #1976.
+
+    The permission rail intercepts every tool. On resume it would otherwise
+    grab the ask_user answer as its own user_input and re-raise a permission
+    interrupt, making the option card re-pop forever. The scene hook must
+    approve ask_user so its answer reaches the model.
+    """
+    hook = _permission_scene_hook()
+    resume_answer = {"answers": {"__free_text__": "数据处理"}, "original_request": "..."}
+
+    outcome = asyncio.run(hook(_scene_hook_input("ask_user", resume_answer)))
+
+    assert outcome == ("approve",)
+
+
+def test_scene_hook_approves_ask_user_on_first_pass():
+    hook = _permission_scene_hook()
+
+    outcome = asyncio.run(hook(_scene_hook_input("ask_user", None)))
+
+    assert outcome == ("approve",)
+
+
+def test_scene_hook_leaves_other_tools_to_engine():
+    """Non-interactive tools must still fall through to the tiered engine
+    (returns ``None``) when no owner-scope context is set."""
+    hook = _permission_scene_hook()
+
+    outcome = asyncio.run(hook(_scene_hook_input("bash", None)))
+
+    assert outcome is None

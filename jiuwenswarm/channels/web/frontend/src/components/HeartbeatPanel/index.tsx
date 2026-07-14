@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { FileViewer } from '../AgentPanel/FileViewer';
 import { HeartbeatMessageModal } from '../../features/HeartbeatMessageModal';
 import { webRequest } from '../../services/webClient';
-import { useSessionStore } from '../../stores';
+import { useChatStore, useSessionStore } from '../../stores';
 
 const HEARTBEAT_FILE_NAME = 'HEARTBEAT.md';
 
@@ -60,6 +60,7 @@ function isValidTime(text: string): boolean {
 export function HeartbeatPanel() {
   const { t, i18n } = useTranslation();
   const { isConnected, heartbeatState, heartbeatMessage, heartbeatUpdatedAt, heartbeatHistory } = useSessionStore();
+  const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMessage, setModalMessage] = useState('');
   const [loading, setLoading] = useState(true);
@@ -311,13 +312,18 @@ export function HeartbeatPanel() {
                     type="button"
                     className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                     onClick={() => void saveConf()}
-                    disabled={loading || saving || !hasChanges || !isConnected}
+                    disabled={loading || saving || !hasChanges || !isConnected || globalTaskRunning}
                   >
                     {saving ? t('common.saving') : t('common.save')}
                   </button>
                 </div>
               </div>
             </div>
+            {globalTaskRunning ? (
+              <div className="px-4 py-2 bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800">
+                <span className="text-xs text-amber-600 dark:text-amber-400">{t('config.errors.processingDisabled')}</span>
+              </div>
+            ) : null}
             <div className="flex-1 min-h-0 p-4 flex flex-col gap-3 text-sm text-text-muted">
               {loading ? (
                 <div className="rounded-lg border border-border bg-secondary/30 px-3 py-2">

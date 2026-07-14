@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f409a-2bd5-7c33-b6b5-3875f8455472",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._handle_team_history_get",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._handle_team_history_get in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f409a-2bd5-7c33-b6b5-3875f8455472",
+        "nickname": "Boyle",
+        "symbol_id": "AgentWebSocketServer._handle_team_history_get",
+        "completed": true,
+        "finding_count": 2
+      }
+    }
+  ]
+}

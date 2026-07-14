@@ -24,6 +24,18 @@ if symphony_root not in sys.path:
 DATA_FILE_PATTERNS = ["**/*.yaml", "**/*.yml", "**/*.json", "**/*.md"]
 EXTENSION_DATA_FILE_PATTERNS = ["**/*.py", *DATA_FILE_PATTERNS]
 DISPATCH_PACKAGE_ROOTS = ("indexing", "models", "orchestration", "retrieval", "shared")
+EXCLUDED_RESOURCE_DIRS = (
+    os.path.join("agent", "workspace", "skills", "project-maintainer"),
+)
+OPENJIUWEN_DATA_EXCLUDES = [
+    "**/AGENTS.md",
+    "**/CLAUDE.md",
+    "**/deepagents/tools/browser_move/.browser/**",
+    "**/deepagents/tools/browser_move/.browser-profiles/**",
+    "**/deepagents/tools/browser_move/.venv/**",
+    "**/deepagents/tools/browser_move/logs/**",
+    "**/deepagents/tools/browser_move/.env",
+]
 
 
 def collect_tree_data_files(source_dir, target_dir, patterns):
@@ -36,6 +48,30 @@ def collect_tree_data_files(source_dir, target_dir, patterns):
             rel_dir = os.path.dirname(os.path.relpath(path, source_dir))
             dest_dir = os.path.normpath(os.path.join(target_dir, rel_dir))
             data_files.append((path, dest_dir))
+    return data_files
+
+
+def collect_resources_data_files(source_dir, target_dir):
+    data_files = []
+    excluded_dirs = {
+        os.path.normcase(os.path.abspath(os.path.join(source_dir, rel_path)))
+        for rel_path in EXCLUDED_RESOURCE_DIRS
+    }
+
+    for root, dirs, files in os.walk(source_dir):
+        root_abs = os.path.normcase(os.path.abspath(root))
+        dirs[:] = [
+            dirname for dirname in dirs
+            if os.path.normcase(os.path.abspath(os.path.join(root, dirname))) not in excluded_dirs
+        ]
+        if any(root_abs == excluded or root_abs.startswith(excluded + os.sep) for excluded in excluded_dirs):
+            continue
+
+        rel_dir = os.path.dirname(os.path.relpath(root, source_dir))
+        dest_dir = os.path.normpath(os.path.join(target_dir, rel_dir))
+        for filename in files:
+            data_files.append((os.path.join(root, filename), dest_dir))
+
     return data_files
 
 
@@ -92,13 +128,16 @@ if not os.path.isdir(web_dist) or not os.listdir(web_dist):
 
 # 数据文件：resources（含 agent 模板）、前端构建产物
 datas = webview_datas + [
-    (os.path.join(project_root, "jiuwenswarm", "resources"), "jiuwenswarm/resources"),
     (os.path.join(project_root, "jiuwenswarm", "channels", "web", "frontend", "dist"), "jiuwenswarm/channels/web/frontend/dist"),
 ]
+datas += collect_resources_data_files(
+    os.path.join(project_root, "jiuwenswarm", "resources"),
+    "jiuwenswarm/resources",
+)
 datas += copy_metadata("fastmcp", recursive=True)
 datas += copy_metadata("mcp", recursive=True)
 datas += copy_metadata("openjiuwen", recursive=True)
-datas += collect_data_files("openjiuwen", include_py_files=False)
+datas += collect_data_files("openjiuwen", include_py_files=False, excludes=OPENJIUWEN_DATA_EXCLUDES)
 datas += collect_data_files(
     "jiuwenswarm.extensions",
     include_py_files=True,

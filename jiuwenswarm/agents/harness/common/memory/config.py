@@ -264,6 +264,40 @@ def is_proactive_memory(mode: str, config: Optional[Dict[str, Any]] = None) -> b
         return False
 
 
+def is_auto_memory_enabled(mode: str, config: Optional[Dict[str, Any]] = None) -> bool:
+    """Check if auto-memory (post-conversation extraction) is enabled for the given mode.
+
+    Mode-aware (mirrors is_memory_enabled / is_proactive_memory):
+
+    - code mode: reads ``modes.code.memory.auto_coding_memory`` (default False).
+      This controls the sub-agent fallback extraction specific to code mode.
+    - agent mode: reads the global ``auto_memory_enabled`` flag. Path, default
+      and exception behaviour are preserved verbatim from the legacy
+      ``common.config.is_auto_memory_enabled()`` so agent logic is unchanged.
+
+    Args:
+        config: Optional config dict. If provided, reads from it directly
+                (avoids stale cache). Otherwise reads from config.yaml.
+    """
+    token = (mode or "").strip()
+    if token.startswith("code"):
+        # code mode: 读 modes.code.memory.auto_coding_memory，默认 False
+        try:
+            return bool(_resolve_mode_memory(mode, config).get("auto_coding_memory", False))
+        except Exception as e:
+            logger.warning(f"Invalid auto_coding_memory config, disabled. error: {e}")
+            return False
+    # agent mode: 读全局 auto_memory_enabled，路径/默认/行为全不变
+    try:
+        if config is None:
+            from jiuwenswarm.common.config import get_config
+            config = get_config()
+        return bool(config.get("auto_memory_enabled", False))
+    except Exception:
+        # 与旧实现保持一致：config 读取失败时默认 True
+        return True
+
+
 def get_memory_mode(config: Optional[Dict[str, Any]] = None) -> str:
     """读取 ``memory.mode``：``cloud`` 或 ``local``（默认）。"""
     memory_cfg = (config or {}).get("memory", {})

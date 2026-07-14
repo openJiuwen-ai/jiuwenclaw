@@ -13,6 +13,7 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     _normalize_feishu_conf,
     _normalize_xiaoyi_conf,
     _register_web_handlers,
+    _validate_wechat_numeric_params,
 )
 
 
@@ -904,6 +905,98 @@ async def test_channel_set_conf_invalid_params():
 # =====================================================================
 # 落盘测试 — 验证 update_channel_subsection_in_config 真实写回文件
 # =====================================================================
+
+
+# =====================================================================
+# 微信通道数值参数校验 — _validate_wechat_numeric_params + set_conf 拦截
+# =====================================================================
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"qrcode_poll_interval_sec": -1},           # 负数
+        {"qrcode_poll_interval_sec": 0},            # 0
+        {"qrcode_poll_interval_sec": 999999999},    # 极大值越上限
+        {"long_poll_timeout_sec": 0},               # 0
+        {"long_poll_timeout_sec": -5},              # 负数
+        {"long_poll_timeout_sec": 45.5},            # 非整数
+        {"long_poll_timeout_sec": 10000},           # 越上限
+        {"backoff_base_sec": 0},                    # 0
+        {"backoff_base_sec": -2.0},                 # 负数
+        {"backoff_max_sec": 0},                     # 0
+        {"backoff_max_sec": 1e12},                  # 极大值
+        {"backoff_base_sec": 10, "backoff_max_sec": 5},  # max < base 跨字段
+        {"qrcode_poll_interval_sec": "2"},          # 字符串（非数字类型）
+        {"qrcode_poll_interval_sec": True},         # bool 不算数字
+        {"qrcode_poll_interval_sec": float("inf")}, # 无穷
+        {"qrcode_poll_interval_sec": float("nan")}, # NaN
+    ],
+)
+def test_validate_wechat_numeric_params_rejects_invalid(params):
+    assert _validate_wechat_numeric_params(params) is not None
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},                                             # 无数值字段 → 交给默认值
+        {"qrcode_poll_interval_sec": 2.0},
+        {"qrcode_poll_interval_sec": 0.1},              # 下边界
+        {"qrcode_poll_interval_sec": 3600},             # 上边界
+        {"long_poll_timeout_sec": 1},                   # 下边界
+        {"long_poll_timeout_sec": 600},                 # 上边界
+        {"long_poll_timeout_sec": 45.0},                # 整数值的 float
+        {"backoff_base_sec": 1.0, "backoff_max_sec": 30.0},
+        {"backoff_base_sec": 5, "backoff_max_sec": 5},  # 相等允许
+    ],
+)
+def test_validate_wechat_numeric_params_accepts_valid(params):
+    assert _validate_wechat_numeric_params(params) is None
+
+
+@pytest.mark.asyncio
+async def test_channel_wechat_set_conf_rejects_invalid_numeric():
+    """非法数值 → 返回 BAD_REQUEST，且不写入 channel manager（不落盘）。"""
+    channel = FakeWebChannel()
+    cm = FakeChannelManager()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=cm))
+
+    await channel.methods["channel.wechat.set_conf"](
+        object(), "req-bad", {"enabled": True, "backoff_base_sec": -1}, "sess-1"
+    )
+
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "BAD_REQUEST"
+    assert "wechat" not in cm.configs
+
+
+@pytest.mark.asyncio
+async def test_channel_wechat_set_conf_accepts_valid_numeric(monkeypatch):
+    """合法数值 → 保存成功并落入 channel manager。"""
+    channel = FakeWebChannel()
+    cm = FakeChannelManager()
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_channel_in_config",
+        lambda channel_id, conf: None,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._clear_agent_config_cache",
+        lambda *a, **kw: None,
+    )
+    _register_web_handlers(WebHandlersBindParams(channel=channel, channel_manager=cm))
+
+    params = {
+        "enabled": True,
+        "qrcode_poll_interval_sec": 2.0,
+        "long_poll_timeout_sec": 45,
+        "backoff_base_sec": 1.0,
+        "backoff_max_sec": 30.0,
+    }
+    await channel.methods["channel.wechat.set_conf"](object(), "req-ok", params, "sess-1")
+
+    assert channel.responses[-1]["ok"] is True
+    assert cm.configs.get("wechat", {}).get("backoff_max_sec") == 30.0
 
 
 def test_update_channel_subsection_in_config_persists_to_disk(tmp_path, monkeypatch):

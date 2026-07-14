@@ -34,7 +34,7 @@ from jiuwenswarm.common.security.ws_origin import (
     is_origin_check_enabled,
     is_allowed_browser_origin,
 )
-from jiuwenswarm.common.schema.message import Message, Mode, ReqMethod
+from jiuwenswarm.common.schema.message import EventType, Message, Mode, ReqMethod
 from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_exception,
     describe_ws_peer,
@@ -274,14 +274,23 @@ class WebChannel(BaseWsChannel):
             *,
             seq: int | None = None,
             stream_id: str | None = None,
+            exclude_ws: Any = None,
     ) -> None:
-        """向所有已连接客户端广播 ``event`` 帧."""
+        """向所有已连接客户端广播 ``event`` 帧.
+
+        exclude_ws: 排除单个发起方 ws（如 config.changed 的保存发起方），
+        避免发起方收到自身触发的广播而误弹「丢弃草稿」确认框。发起方靠
+        保存响应的本地乐观合并自行刷新，无需这条广播。
+        """
         frame: dict[str, Any] = {"type": "event", "event": event, "payload": payload}
         if seq is not None:
             frame["seq"] = seq
         if stream_id is not None:
             frame["stream_id"] = stream_id
-        await self._broadcast(frame)
+        clients = self.clients
+        if exclude_ws is not None:
+            clients = {c for c in clients if c is not exclude_ws}
+        await self._broadcast_to(frame, clients)
 
     async def _download_file(self, url: str) -> bytes | None:
         try:
@@ -443,6 +452,124 @@ class WebChannel(BaseWsChannel):
             getattr(msg, "id", ""), getattr(msg, "event_type", None), _et,
             _has_fanout, routing_target is not None, len(self.clients),
         )
+        # ── 心跳 relay：临时 session_id（heartbeat_{ts}_{suffix}）不匹配任何前端连接，
+        # 按常规 session_id 路由会被当作"无连接"丢弃。心跳状态是全局的（非会话级），
+        # 前端 setHeartbeatStatus 也是全局 store，因此直接广播给所有 web 客户端。
+        # 与 wechat 等 IM 渠道在 send() 中对 HEARTBEAT_RELAY 的专属分支对齐。
+        if msg.event_type == EventType.HEARTBEAT_RELAY:
+            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            clients = self.clients
+            for w in clients:
+                self._enqueue_send(w, frame)
+            logger.debug(
+                "[WebChannel] heartbeat.relay broadcast to %d client(s) id=%s",
+                len(clients), getattr(msg, "id", ""),
+            )
+            return
+
+        # ── 定时任务推 web：原设计绑定 job.session_id，但关闭 tab/换设备后旧会话再无连接，
+        # 按 session_id 路由会被丢弃。cron 推送（占位 + 结果）带 payload.cron 标记，普通对话
+        # chat.final 不带，以此为识别条件广播给所有 web 客户端。前端 _push_to_targets 已对 web
+        # 置空 session_id，shouldHandleSessionEvent 放行，消息进当前活跃会话流（含 placeholder 替换）。
+        if (
+            msg.event_type == EventType.CHAT_FINAL
+            and isinstance(msg.payload, dict)
+            and isinstance(msg.payload.get("cron"), dict)
+        ):
+            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            clients = self.clients
+            for w in clients:
+                self._enqueue_send(w, frame)
+            logger.debug(
+                "[WebChannel] cron push broadcast to %d client(s) id=%s run_id=%s",
+                len(clients), getattr(msg, "id", ""),
+                (msg.payload.get("cron") or {}).get("run_id", ""),
+            )
+            return
+
+        # ── 主动推荐系统通知推 web：与 cron 推送同理——后端主动推、无前端 session_id 绑定，
+        # 按 session_id 路由会被当"无 session"丢弃（旧路径 580 行 if not msg.session_id 兜底丢弃）。
+        # proactive notification（"今日已达上限"等系统提醒）带 payload.source ==
+        # "proactive_notification" 标记，据此广播给所有 web 客户端。前端 shouldHandleSessionEvent
+        # 对无 session_id 的 payload 放行，作为普通 assistant 消息渲染。
+        if (
+            msg.event_type == EventType.CHAT_FINAL
+            and isinstance(msg.payload, dict)
+            and msg.payload.get("source") == "proactive_notification"
+        ):
+            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            clients = self.clients
+            for w in clients:
+                self._enqueue_send(w, frame)
+            logger.debug(
+                "[WebChannel] proactive_notification broadcast to %d client(s) id=%s",
+                len(clients), getattr(msg, "id", ""),
+            )
+            return
+
+        if msg.type == "res":
+            if isinstance(msg.payload, dict):
+                res_payload = {**msg.payload}
+            elif msg.payload is None:
+                res_payload = {}
+            else:
+                res_payload = {"content": str(msg.payload)}
+
+            frame: dict[str, Any] = {
+                "type": "res",
+                "id": msg.id,
+                "ok": bool(msg.ok),
+                "payload": res_payload,
+            }
+            if not msg.ok:
+                error_text = res_payload.get("error")
+                if isinstance(error_text, str) and error_text:
+                    frame["error"] = error_text
+                code_text = res_payload.get("code")
+                if isinstance(code_text, str) and code_text:
+                    frame["code"] = code_text
+
+            ws_set: set[Any] = set()
+            metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+            request_ws_id = str(metadata.get("ws_id") or "").strip()
+            if request_ws_id:
+                ws = self._ws_by_id.get(request_ws_id)
+                if ws is not None and not getattr(ws, "closed", False):
+                    ws_set.add(ws)
+
+            if not ws_set and routing_target is not None:
+                delivery = routing_target.delivery
+                if delivery is not None:
+                    ws_id = getattr(delivery, "ws_id", "")
+                    if ws_id:
+                        ws = self._ws_by_id.get(ws_id)
+                        if ws is not None and not getattr(ws, "closed", False):
+                            ws_set.add(ws)
+                if not ws_set:
+                    for rk in routing_target.routing_keys:
+                        ws_list = self._clients_by_key.get(rk) or []
+                        for w in ws_list:
+                            if not getattr(w, "closed", False):
+                                ws_set.add(w)
+
+            if not ws_set and msg.session_id:
+                for rk, ws_list in self._clients_by_key.items():
+                    if rk.session_id == msg.session_id:
+                        for w in ws_list:
+                            if not getattr(w, "closed", False):
+                                ws_set.add(w)
+
+            if not ws_set:
+                logger.debug(
+                    "[WebChannel] response route miss: ws_id=%s session_id=%s id=%s",
+                    request_ws_id,
+                    msg.session_id,
+                    getattr(msg, "id", ""),
+                )
+                return
+            await self._broadcast_to(frame, ws_set)
+            return
+
         # ── V2 精确路由 ──
         if routing_target is not None:
             routing_keys = routing_target.routing_keys
@@ -499,31 +626,6 @@ class WebChannel(BaseWsChannel):
             )
             return
         all_clients = ws_set
-
-        # 响应帧：优先按 res 语义透传，避免误封装为 chat.final
-        if msg.type == "res":
-            if isinstance(msg.payload, dict):
-                res_payload = {**msg.payload}
-            elif msg.payload is None:
-                res_payload = {}
-            else:
-                res_payload = {"content": str(msg.payload)}
-
-            frame: dict[str, Any] = {
-                "type": "res",
-                "id": msg.id,
-                "ok": bool(msg.ok),
-                "payload": res_payload,
-            }
-            if not msg.ok:
-                error_text = res_payload.get("error")
-                if isinstance(error_text, str) and error_text:
-                    frame["error"] = error_text
-                code_text = res_payload.get("code")
-                if isinstance(code_text, str) and code_text:
-                    frame["code"] = code_text
-            await self._broadcast_to(frame, all_clients)
-            return
 
         # 确定事件名称
         event_name = "chat.final"
