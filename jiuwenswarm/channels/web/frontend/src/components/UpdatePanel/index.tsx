@@ -140,7 +140,7 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
   }, [refreshStatus, status?.state]);
 
   const handleCheck = useCallback(async () => {
-    if (!isConnected || checking) return;
+    if (!isConnected || checking || normalizeString(status?.state) === 'downloading') return;
     setChecking(true);
     setError(null);
     try {
@@ -152,7 +152,7 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
     } finally {
       setChecking(false);
     }
-  }, [checking, isConnected, request, t]);
+  }, [checking, isConnected, status, request, t]);
 
   const handleDownload = useCallback(async () => {
     if (!isConnected) return;
@@ -255,7 +255,7 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
             <p className="text-sm text-text-muted mt-1">{t('updatePanel.subtitle')}</p>
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={() => void handleCheck()} className="btn secondary" disabled={!isConnected || checking}>
+            <button onClick={() => void handleCheck()} className="btn secondary" disabled={!isConnected || checking || state === 'downloading'}>
               {checking ? t('updatePanel.checking') : t('updatePanel.checkNow')}
             </button>
             {isPipMode ? (

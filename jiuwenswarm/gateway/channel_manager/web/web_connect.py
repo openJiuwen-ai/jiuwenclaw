@@ -25,7 +25,7 @@ from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
-from jiuwenswarm.gateway.routing.keys import AgentRef, DeliveryTarget, RoutingKey
+from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 from jiuwenswarm.common.security.ws_origin import (
     extract_handshake_request,
@@ -34,7 +34,7 @@ from jiuwenswarm.common.security.ws_origin import (
     is_origin_check_enabled,
     is_allowed_browser_origin,
 )
-from jiuwenswarm.common.schema.message import Message, Mode, ReqMethod
+from jiuwenswarm.common.schema.message import EventType, Message, Mode, ReqMethod
 from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_exception,
     describe_ws_peer,
@@ -43,11 +43,23 @@ from jiuwenswarm.common.ws_diagnostics import (
 
 logger = logging.getLogger(__name__)
 
+_HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
+
 # ── 类型别名 ──────────────────────────────────────────────
 # 方法处理器签名: (ws, req_id, params, session_id) -> None
 MethodHandler = Callable[..., Awaitable[None]]
 # 连接钩子签名: (ws) -> None | Awaitable[None]
 ConnectHook = Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class _MethodHandlerInvocation:
+    ws: Any
+    method: str
+    req_id: str
+    params: dict[str, Any]
+    session_id: str
+    handler: MethodHandler
 
 
 @dataclass
@@ -201,6 +213,59 @@ class WebChannel(BaseWsChannel):
                 )
                 return
             raise
+
+    async def _invoke_method_handler(
+            self,
+            invocation: _MethodHandlerInvocation,
+    ) -> bool:
+        try:
+            await invocation.handler(
+                invocation.ws,
+                invocation.req_id,
+                invocation.params,
+                invocation.session_id,
+            )
+            return True
+        except Exception as e:
+            ws_closed = bool(getattr(invocation.ws, "closed", False))
+            if ws_closed:
+                logger.warning(
+                    "WebChannel method handler aborted on closed websocket: %s",
+                    format_ws_diagnostics(
+                        {
+                            "method": invocation.method,
+                            "id": invocation.req_id,
+                            "session_id": invocation.session_id,
+                        },
+                        describe_ws_peer(invocation.ws),
+                        describe_ws_exception(e),
+                    ),
+                )
+                return False
+
+            logger.error(
+                "WebChannel method handler error: %s",
+                format_ws_diagnostics(
+                    {
+                        "method": invocation.method,
+                        "id": invocation.req_id,
+                        "session_id": invocation.session_id,
+                    },
+                    describe_ws_peer(invocation.ws),
+                    describe_ws_exception(e),
+                ),
+            )
+            try:
+                await self.send_response(
+                    invocation.ws, invocation.req_id, ok=False,
+                    error=f"handler error: {e}", code="INTERNAL_ERROR",
+                )
+            except Exception as send_err:
+                logger.warning(
+                    "WebChannel failed to send handler error response ({}): {}",
+                    invocation.method, send_err,
+                )
+            return False
 
     async def broadcast_event(
             self,
@@ -378,6 +443,124 @@ class WebChannel(BaseWsChannel):
             getattr(msg, "id", ""), getattr(msg, "event_type", None), _et,
             _has_fanout, routing_target is not None, len(self.clients),
         )
+        # ── 心跳 relay：临时 session_id（heartbeat_{ts}_{suffix}）不匹配任何前端连接，
+        # 按常规 session_id 路由会被当作"无连接"丢弃。心跳状态是全局的（非会话级），
+        # 前端 setHeartbeatStatus 也是全局 store，因此直接广播给所有 web 客户端。
+        # 与 wechat 等 IM 渠道在 send() 中对 HEARTBEAT_RELAY 的专属分支对齐。
+        if msg.event_type == EventType.HEARTBEAT_RELAY:
+            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            clients = self.clients
+            for w in clients:
+                self._enqueue_send(w, frame)
+            logger.debug(
+                "[WebChannel] heartbeat.relay broadcast to %d client(s) id=%s",
+                len(clients), getattr(msg, "id", ""),
+            )
+            return
+
+        # ── 定时任务推 web：原设计绑定 job.session_id，但关闭 tab/换设备后旧会话再无连接，
+        # 按 session_id 路由会被丢弃。cron 推送（占位 + 结果）带 payload.cron 标记，普通对话
+        # chat.final 不带，以此为识别条件广播给所有 web 客户端。前端 _push_to_targets 已对 web
+        # 置空 session_id，shouldHandleSessionEvent 放行，消息进当前活跃会话流（含 placeholder 替换）。
+        if (
+            msg.event_type == EventType.CHAT_FINAL
+            and isinstance(msg.payload, dict)
+            and isinstance(msg.payload.get("cron"), dict)
+        ):
+            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            clients = self.clients
+            for w in clients:
+                self._enqueue_send(w, frame)
+            logger.debug(
+                "[WebChannel] cron push broadcast to %d client(s) id=%s run_id=%s",
+                len(clients), getattr(msg, "id", ""),
+                (msg.payload.get("cron") or {}).get("run_id", ""),
+            )
+            return
+
+        # ── 主动推荐系统通知推 web：与 cron 推送同理——后端主动推、无前端 session_id 绑定，
+        # 按 session_id 路由会被当"无 session"丢弃（旧路径 580 行 if not msg.session_id 兜底丢弃）。
+        # proactive notification（"今日已达上限"等系统提醒）带 payload.source ==
+        # "proactive_notification" 标记，据此广播给所有 web 客户端。前端 shouldHandleSessionEvent
+        # 对无 session_id 的 payload 放行，作为普通 assistant 消息渲染。
+        if (
+            msg.event_type == EventType.CHAT_FINAL
+            and isinstance(msg.payload, dict)
+            and msg.payload.get("source") == "proactive_notification"
+        ):
+            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            clients = self.clients
+            for w in clients:
+                self._enqueue_send(w, frame)
+            logger.debug(
+                "[WebChannel] proactive_notification broadcast to %d client(s) id=%s",
+                len(clients), getattr(msg, "id", ""),
+            )
+            return
+
+        if msg.type == "res":
+            if isinstance(msg.payload, dict):
+                res_payload = {**msg.payload}
+            elif msg.payload is None:
+                res_payload = {}
+            else:
+                res_payload = {"content": str(msg.payload)}
+
+            frame: dict[str, Any] = {
+                "type": "res",
+                "id": msg.id,
+                "ok": bool(msg.ok),
+                "payload": res_payload,
+            }
+            if not msg.ok:
+                error_text = res_payload.get("error")
+                if isinstance(error_text, str) and error_text:
+                    frame["error"] = error_text
+                code_text = res_payload.get("code")
+                if isinstance(code_text, str) and code_text:
+                    frame["code"] = code_text
+
+            ws_set: set[Any] = set()
+            metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+            request_ws_id = str(metadata.get("ws_id") or "").strip()
+            if request_ws_id:
+                ws = self._ws_by_id.get(request_ws_id)
+                if ws is not None and not getattr(ws, "closed", False):
+                    ws_set.add(ws)
+
+            if not ws_set and routing_target is not None:
+                delivery = routing_target.delivery
+                if delivery is not None:
+                    ws_id = getattr(delivery, "ws_id", "")
+                    if ws_id:
+                        ws = self._ws_by_id.get(ws_id)
+                        if ws is not None and not getattr(ws, "closed", False):
+                            ws_set.add(ws)
+                if not ws_set:
+                    for rk in routing_target.routing_keys:
+                        ws_list = self._clients_by_key.get(rk) or []
+                        for w in ws_list:
+                            if not getattr(w, "closed", False):
+                                ws_set.add(w)
+
+            if not ws_set and msg.session_id:
+                for rk, ws_list in self._clients_by_key.items():
+                    if rk.session_id == msg.session_id:
+                        for w in ws_list:
+                            if not getattr(w, "closed", False):
+                                ws_set.add(w)
+
+            if not ws_set:
+                logger.debug(
+                    "[WebChannel] response route miss: ws_id=%s session_id=%s id=%s",
+                    request_ws_id,
+                    msg.session_id,
+                    getattr(msg, "id", ""),
+                )
+                return
+            await self._broadcast_to(frame, ws_set)
+            return
+
         # ── V2 精确路由 ──
         if routing_target is not None:
             routing_keys = routing_target.routing_keys
@@ -435,31 +618,6 @@ class WebChannel(BaseWsChannel):
             return
         all_clients = ws_set
 
-        # 响应帧：优先按 res 语义透传，避免误封装为 chat.final
-        if msg.type == "res":
-            if isinstance(msg.payload, dict):
-                res_payload = {**msg.payload}
-            elif msg.payload is None:
-                res_payload = {}
-            else:
-                res_payload = {"content": str(msg.payload)}
-
-            frame: dict[str, Any] = {
-                "type": "res",
-                "id": msg.id,
-                "ok": bool(msg.ok),
-                "payload": res_payload,
-            }
-            if not msg.ok:
-                error_text = res_payload.get("error")
-                if isinstance(error_text, str) and error_text:
-                    frame["error"] = error_text
-                code_text = res_payload.get("code")
-                if isinstance(code_text, str) and code_text:
-                    frame["code"] = code_text
-            await self._broadcast_to(frame, all_clients)
-            return
-
         # 确定事件名称
         event_name = "chat.final"
         if msg.event_type is not None:
@@ -479,7 +637,7 @@ class WebChannel(BaseWsChannel):
                               "chat.error", "heartbeat.relay",
                               "context.usage", "context.compression_state",
                               "chat.ask_user_question", "chat.subtask_update",
-                              "chat.symphony_status",
+                              "chat.symphony_status", "chat.notice",
                               "history.message",
                               "chat.session_result", "chat.usage_metadata",
                               "chat.usage_summary", "chat.file",
@@ -492,6 +650,8 @@ class WebChannel(BaseWsChannel):
                 # 确保包含 session_id
                 if "session_id" not in payload and msg.session_id:
                     payload["session_id"] = msg.session_id
+                if event_name.startswith("chat.") and "request_id" not in payload and msg.id:
+                    payload["request_id"] = msg.id
             else:
                 # 对于纯文本消息（chat.delta, chat.final, chat.error 等），提取 content
                 content = str(msg.payload.get("content", "") or "")
@@ -768,6 +928,17 @@ class WebChannel(BaseWsChannel):
         )
 
         # 发布到 route 或回调
+        handler = self._method_handlers.get(method)
+        handler_already_called = False
+        if method in _HANDLER_BEFORE_CALLBACK_METHODS and handler is not None:
+            handler_already_called = await self._invoke_method_handler(
+                _MethodHandlerInvocation(
+                    ws, method, req_id, params, session_id, handler,
+                ),
+            )
+            if not handler_already_called:
+                return
+
         handled_by_callback = False
         if self._on_message_cb is not None:
             result = self._on_message_cb(user_message)
@@ -779,44 +950,16 @@ class WebChannel(BaseWsChannel):
 
         if handled_by_callback:
             return
+        if handler_already_called:
+            return
 
         # 路由到已注册的方法处理器
-        handler = self._method_handlers.get(method)
         if handler is not None:
-            try:
-                await handler(ws, req_id, params, session_id)
-            except Exception as e:
-                # 客户端断开（如服务关闭时 code=1001）不再尝试回包，避免二次异常噪音。
-                ws_closed = bool(getattr(ws, "closed", False))
-                if ws_closed:
-                    logger.warning(
-                        "WebChannel method handler aborted on closed websocket: %s",
-                        format_ws_diagnostics(
-                            {"method": method, "id": req_id, "session_id": session_id},
-                            describe_ws_peer(ws),
-                            describe_ws_exception(e),
-                        ),
-                    )
-                    return
-
-                logger.error(
-                    "WebChannel method handler error: %s",
-                    format_ws_diagnostics(
-                        {"method": method, "id": req_id, "session_id": session_id},
-                        describe_ws_peer(ws),
-                        describe_ws_exception(e),
-                    ),
-                )
-                try:
-                    await self.send_response(
-                        ws, req_id, ok=False,
-                        error=f"handler error: {e}", code="INTERNAL_ERROR",
-                    )
-                except Exception as send_err:
-                    logger.warning(
-                        "WebChannel failed to send handler error response ({}): {}",
-                        method, send_err,
-                    )
+            await self._invoke_method_handler(
+                _MethodHandlerInvocation(
+                    ws, method, req_id, params, session_id, handler,
+                ),
+            )
         else:
             await self.send_response(
                 ws, req_id, ok=False,

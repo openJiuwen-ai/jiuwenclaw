@@ -352,7 +352,7 @@ def _envelope_from_dict(data: dict[str, Any]) -> E2AEnvelope:
             _meta=dict(auth_raw.get("_meta") or {}),
         )
 
-    # channel_context：合并 wire 顶层 metadata 中尚未出现的键。
+    # channel_context：合并 wire 顶层 metadata + app_id 中尚未出现的键。
     channel_context = dict(data.get("channel_context") or {})
     meta_top = data.get("metadata")
     if isinstance(meta_top, dict) and meta_top:
@@ -361,6 +361,9 @@ def _envelope_from_dict(data: dict[str, Any]) -> E2AEnvelope:
                 continue
             if k not in channel_context:
                 channel_context[k] = v
+    app_id = data.get("app_id")
+    if app_id and "app_id" not in channel_context:
+        channel_context["app_id"] = app_id
 
     ch = data.get("channel")
     if ch is None:

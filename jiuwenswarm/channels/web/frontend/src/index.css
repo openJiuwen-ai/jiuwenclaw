@@ -785,6 +785,19 @@ select {
     animation: chatStreamPulse 1.5s ease-in-out infinite;
   }
 
+  /* AI disclaimer — footer note pinned below the composer */
+  .chat-ai-disclaimer {
+    flex: 0 0 auto;
+    margin: 0 auto;
+    padding: 8px 12px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 400;
+    line-height: 1.4;
+    text-align: center;
+    letter-spacing: 0.1px;
+  }
+
   /* Reading indicator */
   .chat-reading-indicator {
     width: fit-content;
@@ -1503,6 +1516,21 @@ select {
   .tool-tree {
     margin: 8px 0;
     padding: 2px 0;
+  }
+
+  .tool-tree__notices {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 4px;
+  }
+
+  .tool-tree__notice {
+    max-width: 100%;
+    color: var(--muted);
+    font-size: var(--font-size-xs);
+    line-height: 1.45;
+    overflow-wrap: anywhere;
   }
 
   .tool-tree__header {

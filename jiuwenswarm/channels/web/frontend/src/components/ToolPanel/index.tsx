@@ -190,6 +190,7 @@ export function ToolPanel({
   const setTeamTasks = useSessionStore((s) => s.setTeamTasks);
   const setTeamMemberExecutionEvents = useSessionStore((s) => s.setTeamMemberExecutionEvents);
   const setTeamHistoryMessages = useSessionStore((s) => s.setTeamHistoryMessages);
+  const setTeamHumanShareCommands = useSessionStore((s) => s.setTeamHumanShareCommands);
   const isProcessing = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isProcessing ?? false);
   const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
   // 规划/性能模式下复用 TaskPlanningPanel 紧凑态：把 TodoItem 降级为 TeamTask
@@ -312,6 +313,15 @@ export function ToolPanel({
           setTeamMemberExecutionEvents(sessionId, mergedExecutionEvents);
         }
 
+        const mergedHumanShareCommands = mergeById(
+          historyState.humanShareCommands,
+          current?.teamHumanShareCommands ?? [],
+          (command) => `${command.sessionId}:${command.memberName}`
+        );
+        if (mergedHumanShareCommands.length > 0) {
+          setTeamHumanShareCommands(sessionId, mergedHumanShareCommands);
+        }
+
         setTeamHistoryMessages(sessionId, historyState.messages);
       })
       .catch((error) => {
@@ -325,7 +335,7 @@ export function ToolPanel({
     return () => {
       controller.abort();
     };
-  }, [isConnected, isNewSessionPromotion, mode, sessionId, setTeamHistoryMessages, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
+  }, [isConnected, isNewSessionPromotion, mode, sessionId, setTeamHistoryMessages, setTeamHumanShareCommands, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
 
   const memoryDisplay =
     memoryUsage.rssMb == null

@@ -56,15 +56,15 @@ def _fake_report() -> MagicMock:
     return report
 
 
-def _write_profile(ws_dir: Path, profile_data: dict) -> Path:
-    """Write user_profile.json into the workspace dir (where the engine reads/writes)."""
-    profile_path = ws_dir / "user_profile.json"
-    profile_path.write_text(json.dumps(profile_data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return profile_path
+def _write_state(ws_dir: Path, state_data: dict) -> Path:
+    """Write recommendation.json into the workspace dir (where the engine reads/writes)."""
+    state_path = ws_dir / "recommendation.json"
+    state_path.write_text(json.dumps(state_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return state_path
 
 
-def _read_profile(ws_dir: Path) -> dict:
-    return json.loads((ws_dir / "user_profile.json").read_text(encoding="utf-8"))
+def _read_state(ws_dir: Path) -> dict:
+    return json.loads((ws_dir / "recommendation.json").read_text(encoding="utf-8"))
 
 
 class _MockProactiveAgent:
@@ -109,10 +109,6 @@ async def test_tick1_recommend_skill():
     emitted = []
 
     tick1_llm = {
-        "preferences": ["使用 pytest 做测试"],
-        "goals": ["搭建测试自动化"],
-        "interests": ["CI/CD 自动化"],
-        "commitments": [],
         "decision": {
             "type": "need_exploration",
             "target": "auto-test-runner",
@@ -125,11 +121,7 @@ async def test_tick1_recommend_skill():
 
     with tempfile.TemporaryDirectory() as ws:
         ws_path = Path(ws)
-        _write_profile(ws_path, {
-            "preferences": ["使用 pytest 做测试"],
-            "goals": ["搭建测试自动化"],
-            "interests": [],
-            "commitments": [],
+        _write_state(ws_path, {
             "recommendation_history": [],
             "last_updated": "",
         })
@@ -151,8 +143,8 @@ async def test_tick1_recommend_skill():
             assert len(emitted) == 1, f"Should trigger 1 recommendation, got {len(emitted)}"
 
             # Verify profile was updated
-            profile_data = _read_profile(ws_path)
-            assert len(profile_data["recommendation_history"]) == 1
+            state_data = _read_state(ws_path)
+            assert len(state_data["recommendation_history"]) == 1
 
 
 # ── Tick 2: Continue recommending different skill ──────
@@ -164,11 +156,7 @@ async def test_tick2_recommend_different_skill():
 
     with tempfile.TemporaryDirectory() as ws:
         ws_path = Path(ws)
-        _write_profile(ws_path, {
-            "preferences": ["使用 pytest 做测试"],
-            "goals": ["搭建测试自动化"],
-            "interests": ["CI/CD 自动化"],
-            "commitments": [],
+        _write_state(ws_path, {
             "recommendation_history": [{
                 "type": "need_exploration",
                 "target": "auto-test-runner",
@@ -181,10 +169,6 @@ async def test_tick2_recommend_different_skill():
         })
 
         tick2_llm = {
-            "preferences": ["使用 pytest 做测试"],
-            "goals": ["搭建测试自动化"],
-            "interests": ["CI/CD 自动化"],
-            "commitments": [],
             "decision": {
                 "type": "need_exploration",
                 "target": "test-coverage",
@@ -212,8 +196,8 @@ async def test_tick2_recommend_different_skill():
             assert len(emitted) == 1, f"Should trigger 1 recommendation, got {len(emitted)}"
 
             # Verify profile was updated with new recommendation
-            profile_data = _read_profile(ws_path)
-            assert len(profile_data["recommendation_history"]) == 2
+            state_data = _read_state(ws_path)
+            assert len(state_data["recommendation_history"]) == 2
 
 
 # ── Tick 3: No recommendation when cooldown active ─────
@@ -225,11 +209,7 @@ async def test_tick3_cooldown_blocks_recommendation():
 
     with tempfile.TemporaryDirectory() as ws:
         ws_path = Path(ws)
-        _write_profile(ws_path, {
-            "preferences": ["使用 pytest 做测试"],
-            "goals": ["搭建测试自动化"],
-            "interests": [],
-            "commitments": [],
+        _write_state(ws_path, {
             "recommendation_history": [{
                 "type": "need_exploration",
                 "target": "auto-test-runner",
@@ -245,10 +225,6 @@ async def test_tick3_cooldown_blocks_recommendation():
         })
 
         tick3_llm = {
-            "preferences": ["使用 pytest 做测试"],
-            "goals": ["搭建测试自动化"],
-            "interests": [],
-            "commitments": [],
             "decision": {
                 "type": "skill_recommend",
                 "target": "auto-test-runner",
@@ -285,11 +261,7 @@ async def test_no_recommendation_when_decision_null():
 
     with tempfile.TemporaryDirectory() as ws:
         ws_path = Path(ws)
-        _write_profile(ws_path, {
-            "preferences": [],
-            "goals": [],
-            "interests": [],
-            "commitments": [],
+        _write_state(ws_path, {
             "recommendation_history": [{
                 "type": "need_exploration",
                 "target": "auto-test-runner",
@@ -302,10 +274,6 @@ async def test_no_recommendation_when_decision_null():
         })
 
         tick_llm = {
-            "preferences": [],
-            "goals": [],
-            "interests": [],
-            "commitments": [],
             "decision": None,  # No recommendation
         }
 
@@ -344,11 +312,7 @@ async def test_daily_limit_blocks_tick():
 
     with tempfile.TemporaryDirectory() as ws:
         ws_path = Path(ws)
-        _write_profile(ws_path, {
-            "preferences": [],
-            "goals": [],
-            "interests": [],
-            "commitments": [],
+        _write_state(ws_path, {
             "recommendation_history": [],
             "last_updated": "",
         })
@@ -382,8 +346,6 @@ async def test_skip_when_main_agent_busy():
     )
 
     tick_llm = {
-        "preferences": [], "goals": [],
-        "interests": [], "commitments": [],
         "decision": {
             "type": "task_reminder", "target": "项目周会",
             "reason": "时间临近", "urgency": 0.9,
@@ -399,9 +361,7 @@ async def test_skip_when_main_agent_busy():
 
     with tempfile.TemporaryDirectory() as ws:
         ws_path = Path(ws)
-        _write_profile(ws_path, {
-            "preferences": [], "goals": [],
-            "interests": [], "commitments": [],
+        _write_state(ws_path, {
             "recommendation_history": [], "last_updated": "",
         })
 
@@ -422,8 +382,8 @@ async def test_skip_when_main_agent_busy():
             assert result is False
 
             # 不应记冷却/推荐历史（因为没真正投递）
-            profile_data = _read_profile(ws_path)
-            assert len(profile_data["recommendation_history"]) == 0
+            state_data = _read_state(ws_path)
+            assert len(state_data["recommendation_history"]) == 0
 
 
 # ── 专用 agent JSON 解析 ───────────────────────────────────────
@@ -435,29 +395,20 @@ async def test_proactive_agent_output_parsed_to_decision():
         _analyze_and_decide, RecommendationDecision,
     )
     tick_llm = {
-        "preferences": ["Python 异步"],
-        "goals": ["认证模块重构"],
-        "interests": ["CI/CD"],
-        "commitments": ["编写单元测试"],
         "decision": {
             "type": "skill_recommend", "target": "auto-test-runner",
             "reason": "手动测试繁琐", "urgency": 0.7,
         },
     }
     dedicated = _make_proactive_agent([tick_llm])
-    profile = MagicMock(
-        preferences=[], goals=[],
-        interests=[], commitments=[],
-    )
+    state = MagicMock()
 
-    result = await _analyze_and_decide("report text", profile, SAMPLE_SKILLS, dedicated)
+    result = await _analyze_and_decide("report text", state, SAMPLE_SKILLS, dedicated)
 
     assert result.decision is not None
     assert result.decision.type == "skill_recommend"
     assert result.decision.target == "auto-test-runner"
     assert result.decision.urgency == 0.7
-    assert "preferences" in result.profile_delta
-    assert result.profile_delta["preferences"] == ["Python 异步"]
 
 
 @pytest.mark.asyncio
@@ -471,10 +422,68 @@ async def test_proactive_agent_invalid_json_returns_empty():
         async def invoke(self, inputs, session=None):
             return {"output": "这不是JSON", "result_type": "answer"}
 
-    profile = MagicMock(
-        preferences=[], goals=[],
-        interests=[], commitments=[],
-    )
-    result = await _analyze_and_decide("report", profile, SAMPLE_SKILLS, _BadAgent())
+    state = MagicMock()
+    result = await _analyze_and_decide("report", state, SAMPLE_SKILLS, _BadAgent())
     assert result.decision is None
-    assert result.profile_delta == {}
+
+
+# ── Daily limit reached: push "limit reached" notification once per day ──
+
+
+def _capture_notifications(notified_list):
+    """Capture _send_notification_callback calls (channel_id, text)."""
+    async def _notify(channel_id, text):
+        notified_list.append({"channel_id": channel_id, "text": text})
+        return True
+    return _notify
+
+
+@pytest.mark.asyncio
+async def test_daily_limit_pushes_notification_once():
+    """达到每日上限时，应推送一次"已达上限"通知；同日再次 tick 不再刷屏。"""
+    notified = []
+
+    with tempfile.TemporaryDirectory() as ws:
+        ws_path = Path(ws)
+        _write_state(ws_path, {"recommendation_history": [], "last_updated": ""})
+
+        # _today_recommend_count 返回已达上限（max_per_day=1）
+        with patch(f"{_PATCH_TARGETS['utils']}.get_agent_workspace_dir", return_value=ws_path), \
+             patch(f"{_PATCH_TARGETS['actions']}._today_recommend_count", return_value=1), \
+             patch(f"{_PATCH_TARGETS['actions']}._get_all_skills", return_value=(set(), SAMPLE_SKILLS)):
+
+            from jiuwenswarm.agents.harness.common.recommendation.proactive_engine import ProactiveEngine
+
+            engine = ProactiveEngine({"enabled": True, "max_recommend_per_day": 1})
+            engine.set_send_notification_callback(_capture_notifications(notified))
+
+            # 第一次 tick：命中上限 → 推送一次通知
+            pushed1 = await engine.tick_now()
+            assert pushed1 is False
+            assert len(notified) == 1, f"应推送 1 次上限通知，实际 {len(notified)}"
+            assert "已达每日上限" in notified[0]["text"]
+            assert "1 条" in notified[0]["text"]
+
+            # 第二次 tick：同日已达上限 → 不再刷屏
+            pushed2 = await engine.tick_now()
+            assert pushed2 is False
+            assert len(notified) == 1, f"同日不应重复推送，实际累计 {len(notified)} 次"
+
+
+@pytest.mark.asyncio
+async def test_daily_limit_no_callback_no_crash():
+    """达到上限但未注册 notification 回调时，不应抛异常。"""
+    with tempfile.TemporaryDirectory() as ws:
+        ws_path = Path(ws)
+        _write_state(ws_path, {"recommendation_history": [], "last_updated": ""})
+
+        with patch(f"{_PATCH_TARGETS['utils']}.get_agent_workspace_dir", return_value=ws_path), \
+             patch(f"{_PATCH_TARGETS['actions']}._today_recommend_count", return_value=5), \
+             patch(f"{_PATCH_TARGETS['actions']}._get_all_skills", return_value=(set(), SAMPLE_SKILLS)):
+
+            from jiuwenswarm.agents.harness.common.recommendation.proactive_engine import ProactiveEngine
+
+            engine = ProactiveEngine({"enabled": True, "max_recommend_per_day": 5})
+            # 故意不调 set_send_notification_callback
+            pushed = await engine.tick_now()
+            assert pushed is False

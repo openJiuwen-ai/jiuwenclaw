@@ -1373,6 +1373,7 @@ async def _run(
             *,
             env_updates: dict[str, str] | None = None,
             config_payload: dict[str, Any] | None = None,
+            reload_options: dict[str, Any] | None = None,
     ) -> bool:
         browser_runtime_keys = {
             "MODEL_PROVIDER",
@@ -1407,6 +1408,7 @@ async def _run(
                     "config": dict(config_payload or {}),
                     # env: incremental environment updates; missing keys mean unchanged.
                     "env": dict(env_updates or {}),
+                    **dict(reload_options or {}),
                 },
             )
             reload_resp = await client.send_request(reload_env)

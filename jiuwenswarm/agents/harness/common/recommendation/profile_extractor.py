@@ -1,12 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""User profile data model and persistence for the proactive recommendation engine.
+"""Recommendation state persistence for the proactive recommendation engine.
 
-The profile captures what the LLM has learned about the user from their
-conversations across all channels.  It is updated incrementally by the
-proactive engine on each tick.
+只存引擎运行态——冷却记录 + 推荐历史。用户画像已废弃（所有推荐基于当前对话）。
 
-Storage: ``~/.jiuwenswarm/agent/workspace/user_profile.json``
+Storage: ``~/.jiuwenswarm/agent/workspace/recommendation.json``
 """
 
 from __future__ import annotations
@@ -21,62 +19,25 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# ── UserProfile ──────────────────────────────────────────────────
+# ── RecommendationState ──────────────────────────────────────────
 
 
 @dataclass
-class UserProfile:
-    """Persistent user profile maintained by the proactive engine.
+class RecommendationState:
+    """Persistent state for the proactive recommendation engine.
 
-    Fields are grouped by who manages them:
-
-    * **LLM-managed** (updated via ``merge()`` from LLM output):
-      ``preferences``, ``goals``, ``interests``, ``commitments``
-
-    * **Engine-managed** (updated by the engine itself, never by LLM):
-      ``recommendation_history``
+    Only engine-managed runtime state — no user profile fields.
+    User profile (preferences/goals/interests/commitments) is deprecated;
+    all recommendations are now based on the current conversation.
     """
-
-    # ── LLM-managed fields ──────────────────────────────────────
-
-    preferences: list[str] = field(default_factory=list)
-    """Long-term preferences: tech stack, work habits, communication style."""
-
-    goals: list[str] = field(default_factory=list)
-    """Short-term goals: tasks the user is actively working on (days-scale)."""
-
-    interests: list[str] = field(default_factory=list)
-    """Interest boundaries: areas the user might want to explore but hasn't yet."""
-
-    commitments: list[str] = field(default_factory=list)
-    """Pending tasks: things the user said they'd do but haven't done yet."""
-
-    # ── Engine-managed fields ───────────────────────────────────
 
     recommendation_history: list[dict[str, Any]] = field(default_factory=list)
     """Past recommendations with type, target, reason, timestamp (max 20)."""
 
     cooldown_records: dict[str, float] = field(default_factory=dict)
-    """Cooldown records: target -> last recommended timestamp. Persisted to survive restarts."""
+    """Cooldown records: target -> last recommended timestamp."""
 
     last_updated: str = ""
-
-    # ── Merge ───────────────────────────────────────────────────
-
-    def merge(self, delta: dict[str, Any]) -> None:
-        """Apply an incremental update from the LLM.
-
-        The LLM outputs the *complete* list for each field it wants to change.
-        Fields absent from ``delta`` are left untouched.  Engine-managed fields
-        (``recommendation_history``) are never modified here.
-        """
-        replace_fields = ("preferences", "goals", "interests", "commitments")
-        for key in replace_fields:
-            new_val = delta.get(key)
-            if isinstance(new_val, list):
-                setattr(self, key, [v for v in new_val if v])
-
-        self.last_updated = datetime.now(timezone.utc).isoformat()
 
     def add_recommendation(self, rec: dict[str, Any]) -> None:
         """Append a recommendation record and cap at 20 entries."""
@@ -84,60 +45,51 @@ class UserProfile:
         if len(self.recommendation_history) > 20:
             self.recommendation_history = self.recommendation_history[-20:]
 
+    def touch(self) -> None:
+        """Update last_updated timestamp."""
+        self.last_updated = datetime.now(timezone.utc).isoformat()
+
 
 # ── File helpers ──────────────────────────────────────────────────
 
 
-def _default_profile_path() -> Path:
+def _default_state_path() -> Path:
     from jiuwenswarm.common.utils import get_agent_workspace_dir
-    return get_agent_workspace_dir() / "user_profile.json"
+    return get_agent_workspace_dir() / "recommendation.json"
 
 
-def load_user_profile(path: Path | None = None) -> UserProfile:
-    """Load profile from disk, returning an empty profile on missing/corrupt file."""
-    profile_path = path or _default_profile_path()
-    if not profile_path.exists() or profile_path.stat().st_size == 0:
-        # Missing or empty file = fresh state, not an error.
-        return UserProfile()
+def load_recommendation_state(path: Path | None = None) -> RecommendationState:
+    """Load state from disk, returning empty state on missing/corrupt file."""
+    state_path = path or _default_state_path()
+    if not state_path.exists() or state_path.stat().st_size == 0:
+        return RecommendationState()
     try:
-        data = json.loads(profile_path.read_text(encoding="utf-8"))
+        data = json.loads(state_path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            return UserProfile()
+            return RecommendationState()
 
-        return UserProfile(
-            preferences=_safe_list(data, "preferences"),
-            goals=_safe_list(data, "goals"),
-            interests=_safe_list(data, "interests"),
-            commitments=_safe_list(data, "commitments"),
-            recommendation_history=_safe_list(data, "recommendation_history"),
-            cooldown_records=_safe_dict(data, "cooldown_records"),
+        return RecommendationState(
+            recommendation_history=(
+                data.get("recommendation_history", [])
+                if isinstance(data.get("recommendation_history"), list)
+                else []
+            ),
+            cooldown_records=data.get("cooldown_records", {}) if isinstance(data.get("cooldown_records"), dict) else {},
             last_updated=data.get("last_updated", ""),
         )
     except Exception as exc:
-        logger.warning("[UserProfile] load failed: %s", exc)
-        return UserProfile()
+        logger.warning("[RecommendationState] load failed: %s", exc)
+        return RecommendationState()
 
 
-def _safe_list(data: dict, key: str) -> list:
-    """Extract a list from JSON data, returning [] on missing/wrong type."""
-    val = data.get(key, [])
-    return val if isinstance(val, list) else []
-
-
-def _safe_dict(data: dict, key: str) -> dict:
-    """Extract a dict from JSON data, returning {} on missing/wrong type."""
-    val = data.get(key, {})
-    return val if isinstance(val, dict) else {}
-
-
-def save_user_profile(profile: UserProfile, path: Path | None = None) -> None:
-    """Persist profile to disk."""
-    profile_path = path or _default_profile_path()
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
+def save_recommendation_state(state: RecommendationState, path: Path | None = None) -> None:
+    """Persist state to disk."""
+    state_path = path or _default_state_path()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        profile_path.write_text(
-            json.dumps(asdict(profile), ensure_ascii=False, indent=2),
+        state_path.write_text(
+            json.dumps(asdict(state), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except Exception as exc:
-        logger.warning("[UserProfile] save failed: %s", exc)
+        logger.warning("[RecommendationState] save failed: %s", exc)

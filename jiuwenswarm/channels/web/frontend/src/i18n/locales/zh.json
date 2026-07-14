@@ -675,7 +675,9 @@
       "loadWecom": "获取企业微信配置失败",
       "loadWechat": "获取微信配置失败",
       "unbindWechat": "微信解绑失败",
-      "saveGeneric": "保存失败，请稍后重试"
+      "saveGeneric": "保存失败，请稍后重试",
+      "wechatNumericInvalid": "{{field}} 需为 {{min}}–{{max}} 之间的有效数值",
+      "wechatBackoffOrder": "backoff_max_sec 不得小于 backoff_base_sec"
     }
   },
   "config": {
@@ -774,7 +776,7 @@
       "proactiveEnabled": "启用主动推荐",
       "proactiveTickInterval": "检查间隔（分钟）",
       "proactiveMaxPerDay": "每日推荐上限",
-      "proactiveMaxSessions": "每次检查会话数"
+      "proactiveMaxRounds": "每次检查对话轮数"
     },
     "keyHelp": {
       "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启",
@@ -808,7 +810,7 @@
       "apiBaseUrlInvalid": "API Base URL 必须以 http:// 或 https:// 开头",
       "modelNameTooLong": "模型名称过长，请控制在 100 字符以内",
       "aliasTooLong": "别名过长，请控制在 100 字符以内",
-      "apiBaseTooLong": "API Base URL 过长，请控制在 256 字符以内",
+      "apiBaseTooLong": "API Base URL 过长，请控制在 512 字符以内",
       "apiKeyTooLong": "API Key 过长，请控制在 500 字符以内",
       "reasoningDefault": "使用默认值",
       "alias": "别名",
@@ -913,8 +915,8 @@
       "tickIntervalDesc": "引擎扫描主动推荐机会的频率",
       "maxPerDay": "每日上限",
       "maxPerDayDesc": "每日主动推荐次数上限",
-      "maxSessions": "每次检查会话数",
-      "maxSessionsDesc": "每轮检查最多分析的会话数",
+      "maxRounds": "每次检查对话轮数",
+      "maxRoundsDesc": "每次检查最多读取的对话轮数",
       "notConnected": "请先连接服务器。",
       "disabledHint": "请先启用主动推荐，再使用此功能。",
       "typeLabel": {
@@ -926,7 +928,10 @@
     "errors": {
       "requiredModelFields": "模型配置为必填：{{fields}}。请完整填写后再保存并重启。",
       "saveFailed": "保存失败，请稍后重试",
-      "processingDisabled": "任务执行中，请等待任务完成后再保存配置。"
+      "processingDisabled": "任务执行中，请等待任务完成后再保存配置。",
+      "proactiveIntEmpty": "{{field}} 不能为空，需为 {{lo}}-{{hi}} 的正整数",
+      "proactiveIntNotInteger": "{{field}} 必须是正整数（{{lo}}-{{hi}}），当前值无效：{{value}}",
+      "proactiveIntOutOfRange": "{{field}} 需为 {{lo}}-{{hi}} 的正整数，当前：{{value}}"
     }
   },
   "cron": {
@@ -945,7 +950,7 @@
     "empty": "暂无定时任务",
     "deleteConfirm": "确定要删除这个任务吗？",
     "autoManaged": "自动维护",
-    "autoManagedHint": "此任务由主动推荐开关自动创建/删除；开关在设置→主动推荐。调度频率、偏移、时区、推送频道可在此面板编辑，删除请到设置关闭开关。",
+    "autoManagedHint": "此任务由主动推荐开关自动创建/删除；开关在设置→主动推荐。仅 Cron 表达式与时区可在此面板编辑，其余字段（名称/状态/描述/偏移/频道）不可改；删除请到设置关闭开关。",
     "autoManagedToggleDisabled": "自动维护任务的开关由设置→主动推荐控制，不可在此切换。",
     "status": {
       "enabled": "启用",
@@ -1603,7 +1608,7 @@
     "groupChat": "群聊记录",
     "noGroupChat": "暂无群聊记录",
     "everyone": "所有人",
-    "generatedBy": "由 openJiuwen AI 生成",
+    "aiNotice": "内容由AI生成，仅供参考",
     "website": "官网地址：{{url}}",
     "repository": "代码仓：{{url}}"
   },
@@ -1665,7 +1670,7 @@
   },
   "updatePanel": {
     "title": "应用更新",
-    "subtitle": "检查新版本并在 Windows 上下载静默安装包。",
+    "subtitle": "检查新版本并下载安装包。",
     "configTitle": "更新源配置",
     "checkNow": "检查更新",
     "checking": "检查中...",
@@ -1680,7 +1685,7 @@
     "publishedAt": "发布时间",
     "releaseNotes": "更新说明",
     "downloadProgress": "下载进度",
-    "readyToInstall": "安装包已下载完成，点击「安装并重启」后将退出当前应用并静默升级。",
+    "readyToInstall": "安装包已下载完成，点击「安装并重启」后退出应用开始升级。",
     "restartPendingHint": "升级完成，请点击「立即重启」重启服务。",
     "unsupported": "当前平台暂不支持此更新流程。",
     "noReleaseNotes": "暂无更新说明。",
@@ -1706,7 +1711,7 @@
       "downloadFailed": "下载更新失败",
       "upgradeFailed": "安装更新失败",
       "saveConfigFailed": "保存更新配置失败",
-      "installUnavailable": "当前环境无法直接触发安装，请确认在 Windows 桌面应用内运行。",
+      "installUnavailable": "当前环境无法直接触发安装，请确认在桌面应用内运行。",
       "installFailed": "启动更新安装失败"
     },
     "fields": {

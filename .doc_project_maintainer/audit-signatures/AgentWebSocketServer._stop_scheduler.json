@@ -1,0 +1,23 @@
+{
+  "calls": [
+    {
+      "tool_name": "multi_agent_v1.spawn_agent",
+      "raw_input": {
+        "agent_id": "019f3f8f-ad2d-75f3-ab3b-800c3facede7",
+        "agent_type": "explorer",
+        "symbol_id": "AgentWebSocketServer._stop_scheduler",
+        "assignment": "Audit exactly one symbol: AgentWebSocketServer._stop_scheduler in jiuwenswarm/server/agent_ws_server.py."
+      }
+    },
+    {
+      "tool_name": "multi_agent_v1.wait_agent",
+      "raw_input": {
+        "agent_id": "019f3f8f-ad2d-75f3-ab3b-800c3facede7",
+        "nickname": "Hegel",
+        "symbol_id": "AgentWebSocketServer._stop_scheduler",
+        "completed": true,
+        "finding_count": 3
+      }
+    }
+  ]
+}

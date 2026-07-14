@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .cluster import ClusteredQuery
-from .models import DistilledPattern, TraceRecord
+from .models import DistilledPattern
 
 LOGGER = logging.getLogger(__name__)
 
@@ -114,12 +114,11 @@ class TraceDistiller:
         return [r for r in results if r is not None]
 
     def _distill_one(self, cluster: ClusteredQuery) -> DistilledPattern | None:
-        metrics = self._compute_metrics(cluster.success_traces, cluster.failure_traces)
+        success_traces = cluster.success_traces
+        effective_skills = list(success_traces[0].skills) if success_traces else []
 
-        success_queries = [t.query for t in cluster.success_traces]
-        used_skill_names = {
-            s for combo in metrics["effective_skills"] for s in combo
-        }
+        success_queries = [t.query for t in success_traces]
+        used_skill_names = set(effective_skills)
 
         prompt = self._build_prompt(cluster, success_queries, used_skill_names)
 
@@ -156,46 +155,9 @@ class TraceDistiller:
 
         return DistilledPattern(
             cluster_id=cluster.cluster_id,
+            effective_skills=effective_skills,
             pattern_description=pattern_description,
-            **metrics,
         )
-
-    @staticmethod
-    def _compute_metrics(
-            success_traces: list[TraceRecord],
-            failure_traces: list[TraceRecord],
-    ) -> dict[str, Any]:
-        effective_skills_map: dict[tuple[str, ...], int] = {}
-        for t in success_traces:
-            key = tuple(sorted(t.skills))
-            effective_skills_map[key] = effective_skills_map.get(key, 0) + 1
-        effective_skills = [
-            list(k)
-            for k, _ in sorted(effective_skills_map.items(), key=lambda x: -x[1])
-        ]
-
-        ineffective_skills: list[dict[str, str | list[str]]] = []
-        seen: set[tuple[str, ...]] = set()
-        for t in failure_traces:
-            key = tuple(sorted(t.skills))
-            if key not in seen:
-                seen.add(key)
-                ineffective_skills.append(
-                    {
-                        "skills": list(key),
-                        "reason": t.error_type or "unknown",
-                    }
-                )
-
-        total = len(success_traces) + len(failure_traces)
-        success_rate = len(success_traces) / total if total > 0 else 0.0
-
-        return {
-            "effective_skills": effective_skills,
-            "ineffective_skills": ineffective_skills,
-            "success_rate": success_rate,
-            "raw_trace_count": total,
-        }
 
     def _build_prompt(
             self,

@@ -166,6 +166,7 @@ class CronController:
         )
         from jiuwenswarm.server.runtime.session.project_store import resolve_cron_project_id
         resolved_project_id = resolve_cron_project_id(project_dir_val)
+        app_id = str(params.get("app_id") or "").strip()
         job = await self._store.create_job(
             job_id=str(params.get("id") or "").strip() or None,
             name=name,
@@ -182,6 +183,7 @@ class CronController:
             timeout_seconds=timeout_seconds,
             project_id=resolved_project_id,
             model_name=model_name,
+            app_id=app_id,
         )
         await self._scheduler.reload()
         return job.to_dict()
@@ -238,8 +240,8 @@ class CronController:
         await self._scheduler.reload()
         return job.to_dict()
 
-    async def delete_job(self, job_id: str) -> bool:
-        deleted = await self._store.delete_job(job_id)
+    async def delete_job(self, job_id: str, *, force: bool = False) -> bool:
+        deleted = await self._store.delete_job(job_id, force=force)
         if deleted:
             await self._scheduler.reload()
         return deleted

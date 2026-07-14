@@ -1680,11 +1680,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // Defensive: chat.final is the definitive end-of-response marker.
         // The primary transition is driven by chat.processing_status
         // (is_processing=false), but if that frame is lost the UI would be stuck
-        // showing the stop button. Setting isProcessing=false here is safe —
-        // processing_status will override if needed.
+        // showing the stop button.
+        // In team mode the backend suppresses chat.final while the team is
+        // still running and only sends chat.processing_status(is_complete=true)
+        // on team.completed, so we must NOT reset isProcessing here.
         if (!useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) {
           useChatStore.getState().setExecutionError(sessionId, null);
-          useChatStore.getState().setProcessing(sessionId, false);
+          if (currentMode !== 'team') {
+            useChatStore.getState().setProcessing(sessionId, false);
+          }
           useChatStore.getState().setThinking(sessionId, false);
           useChatStore.getState().clearSubtasks(sessionId);
         }
@@ -1929,6 +1933,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const runtime = useChatStore.getState().getRuntime(sessionId);
         const currentStreamId = runtime?.currentStreamId;
         const messages = runtime?.messages ?? [];
+        const toolRequestId = getPayloadRequestId(payload) || activeRequestIdRef.current;
         const currentStreamMessage =
           currentMode === 'team'
             ? findActiveTeamLeaderMessage(sessionId)
@@ -1939,8 +1944,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           sessionId,
           toolCall,
           currentStreamMessage?.timestamp
-            ? { startedAt: currentStreamMessage.timestamp, requestId: activeRequestIdRef.current }
-            : { requestId: activeRequestIdRef.current }
+            ? { startedAt: currentStreamMessage.timestamp, requestId: toolRequestId }
+            : { requestId: toolRequestId }
         );
         if (currentMode === 'team' && !isTeamPanelClearedForPayload(payload)) {
           applyTeamTaskToolCall(sessionId, toolCall);
@@ -2186,6 +2191,31 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!sessionId) return;
         if (shouldDropDuplicatedEvent('chat.evolution_status', payload)) return;
         useChatStore.getState().setEvolutionStatus(sessionId, payload as unknown as EvolutionStatusPayload);
+      }),
+      webClient.on('chat.notice', ({ payload }) => {
+        const sessionId = resolveEventSessionId(payload);
+        if (!sessionId) return;
+        if (shouldDropDuplicatedEvent('chat.notice', payload)) return;
+        const content = pickString(payload.content, payload.message, payload.text);
+        if (!content) return;
+        const noticeType = pickString(payload.notice_type, payload.type) || 'notice';
+        const requestId = getPayloadRequestId(payload) || `${Date.now()}`;
+        const messageId = `notice-${noticeType}-${requestId}`;
+        const chatState = useChatStore.getState();
+        const existing = chatState.getRuntime(sessionId)?.messages.find((message) => message.id === messageId);
+        if (existing) {
+          chatState.updateMessage(sessionId, messageId, {
+            content,
+            timestamp: new Date().toISOString(),
+          });
+          return;
+        }
+        chatState.addMessage(sessionId, {
+          id: messageId,
+          role: 'system',
+          content,
+          timestamp: new Date().toISOString(),
+        });
       }),
       webClient.on('chat.error', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);

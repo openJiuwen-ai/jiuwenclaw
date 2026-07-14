@@ -27,7 +27,7 @@ from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     create_adapter,
     resolve_sdk_choice,
 )
-from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_memory_enabled
+from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_auto_memory_enabled, is_memory_enabled
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
     append_history_record,
@@ -35,7 +35,7 @@ from jiuwenswarm.server.runtime.session.session_history import (
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.utils.utils import is_team_params
-from jiuwenswarm.common.config import get_config, is_auto_memory_enabled
+from jiuwenswarm.common.config import get_config
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
@@ -73,6 +73,86 @@ def _history_user_content(params: Any, query: Any) -> Any:
         if isinstance(supplement_input, str) and supplement_input.strip():
             return supplement_input
     return query
+
+
+def _history_media_string(item: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _history_media_size(item: dict[str, Any]) -> int | float | None:
+    for key in ("size_bytes", "sizeBytes"):
+        value = item.get(key)
+        if isinstance(value, (int, float)) and value >= 0:
+            return value
+    return None
+
+
+def _history_media_record(value: Any, *, default_type: str = "image") -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+
+    path = _history_media_string(value, "path")
+    url = _history_media_string(value, "url")
+    if not path and not url:
+        return None
+
+    media_type = _history_media_string(value, "type") or default_type
+    filename = _history_media_string(value, "filename", "name") or (
+        Path(path).name if path else "image"
+    )
+    mime_type = _history_media_string(value, "mime_type", "mimeType")
+    size = _history_media_size(value)
+
+    record: dict[str, Any] = {
+        "type": media_type,
+        "filename": filename,
+    }
+    if mime_type:
+        record["mime_type"] = mime_type
+    if path:
+        record["path"] = path
+    if url:
+        record["url"] = url
+    if size is not None:
+        record["size_bytes"] = size
+    return record
+
+
+def _history_user_extra(params: Any) -> dict[str, Any] | None:
+    if not isinstance(params, dict):
+        return None
+
+    extra: dict[str, Any] = {}
+    raw_media_items = params.get("media_items")
+    if isinstance(raw_media_items, list):
+        media_items: list[dict[str, Any]] = []
+        for raw_item in raw_media_items:
+            item = _history_media_record(raw_item)
+            if item is not None:
+                media_items.append(item)
+        if media_items:
+            extra["media_items"] = media_items
+
+    raw_files = params.get("files")
+    if isinstance(raw_files, dict):
+        files: dict[str, Any] = {}
+        uploaded_images = raw_files.get("uploaded_images")
+        if isinstance(uploaded_images, list):
+            image_items: list[dict[str, Any]] = []
+            for raw_item in uploaded_images:
+                item = _history_media_record(raw_item, default_type="image")
+                if item is not None:
+                    image_items.append(item)
+            if image_items:
+                files["uploaded_images"] = image_items
+        if files:
+            extra["files"] = files
+
+    return extra or None
 
 
 def _compact_stats_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -780,6 +860,18 @@ class JiuWenSwarm:
         except Exception as exc:
             logger.warning("[JiuWenSwarm] team shared skill link refresh failed: %s", exc)
 
+    async def _refresh_skill_rails_after_change(self) -> None:
+        """轻量刷新 skill rail，避免 uninstall 后全量重建 agent 实例.
+
+        SkillUseRail 通过 reload_skills() 重新扫描 skills_dir 并清除已删除的 skill 缓存，
+        无需重建整个 agent（省去 _get_tool_cards + _build_agent_rails + create_deep_agent 开销）。
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return
+        if hasattr(adapter, "refresh_skill_rails"):
+            await adapter.refresh_skill_rails()
+
     async def reload_agent_config(
             self,
             config_base: dict[str, Any] | None = None,
@@ -1095,15 +1187,36 @@ class JiuWenSwarm:
                     question_text = str(answer.get("question", "") or "").strip()
                     selected_options = answer.get("selected_options", [])
                     custom_input = str(answer.get("custom_input", "") or "").strip()
-                    answer_value = ""
-                    if selected_options:
-                        answer_value = str(selected_options[0] or "").strip()
+                    if selected_options and isinstance(selected_options, list):
+                        # Normalize each option to a stripped string, drop empties.
+                        cleaned_options = [
+                            str(raw_option or "").strip()
+                            for raw_option in selected_options
+                            if str(raw_option or "").strip()
+                        ]
+                        # When the only selection is "Other", prefer the free-text
+                        # custom_input (single-select free-text path).
+                        if len(cleaned_options) == 1 and cleaned_options[0] == "Other" and custom_input:
+                            answer_value: Any = custom_input
+                        elif len(cleaned_options) == 1:
+                            answer_value = cleaned_options[0]
+                        elif cleaned_options:
+                            # Multi-select: preserve the full list of selections.
+                            answer_value = cleaned_options
+                        else:
+                            answer_value = ""
                     elif custom_input:
                         answer_value = custom_input
+                    else:
+                        answer_value = ""
                     if question_text and answer_value:
                         answers_dict[question_text] = answer_value
                     elif answer_value:
-                        free_text_answer = answer_value
+                        free_text_answer = (
+                            answer_value
+                            if isinstance(answer_value, str)
+                            else ", ".join(answer_value)
+                        )
             if not answers_dict and free_text_answer:
                 answers_dict["__free_text__"] = free_text_answer
             payload: dict[str, Any] = {"answers": answers_dict}
@@ -1237,7 +1350,6 @@ class JiuWenSwarm:
             payload = await handler(request.params)
             _reload_after_skills = handler_name in [
                 "handle_skills_install",
-                "handle_skills_uninstall",
                 "handle_skills_import_local",
                 "handle_skills_toggle",
                 "handle_skills_skillnet_install",
@@ -1248,6 +1360,12 @@ class JiuWenSwarm:
                 _reload_after_skills = False
             if _reload_after_skills:
                 await self.create_instance()
+                self._refresh_team_shared_skill_links(request.session_id)
+            elif handler_name == "handle_skills_uninstall" and payload.get("success"):
+                # 卸载只需轻量刷新 skill rail，不需要全量重建 agent 实例。
+                # SkillUseRail 会通过文件系统签名检测到目录删除并自动刷新，
+                # 这里主动调用 reload_skills() 确保立即生效，避免延迟到下一次模型调用。
+                await self._refresh_skill_rails_after_change()
                 self._refresh_team_shared_skill_links(request.session_id)
         except Exception as exc:
             logger.error("[JiuWenSwarm] skills 请求处理失败: %s", exc)
@@ -1566,6 +1684,7 @@ class JiuWenSwarm:
                 role="user",
                 content=_history_user_content(request.params, query),
                 timestamp=time.time(),
+                extra=_history_user_extra(request.params),
                 channel_metadata=request.metadata,
                 mode=request.params.get("mode", "unknown"),
             )
@@ -1651,7 +1770,7 @@ class JiuWenSwarm:
             # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
             mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
             config = get_config()
-            if is_auto_memory_enabled() and is_memory_enabled(mode, config):
+            if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
                 _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
 
         return result
@@ -1736,6 +1855,7 @@ class JiuWenSwarm:
                 role="user",
                 content=_history_user_content(request.params, query),
                 timestamp=time.time(),
+                extra=_history_user_extra(request.params),
                 channel_metadata=request.metadata,
                 mode=request.params.get("mode", "unknown"),
             )
@@ -1850,7 +1970,12 @@ class JiuWenSwarm:
                 event_type="chat.final",
                 content=pending_text,
                 timestamp=time.time(),
-                extra=_attach_reasoning_content(),
+                # 透传 proactive 标记到 history——刷新页面时前端靠 payload.source===
+                # 'proactive_recommendation' 渲染推荐卡片，不带则退化白色气泡。
+                extra=_attach_reasoning_content({
+                    k: v for k, v in request.params.items()
+                    if k in ("source", "proactive_type", "proactive_target")
+                }),
                 mode=request.params.get("mode", "unknown"),
             )
             durable_final_content = pending_text
@@ -2039,6 +2164,10 @@ class JiuWenSwarm:
                                                 extra_fields[k] = v
                                 if et in {"chat.final", "chat.tool_call"}:
                                     extra_fields = _attach_reasoning_content(extra_fields)
+                                # 透传 proactive 标记——刷新页面时前端靠 source 识别卡片
+                                for pk in ("source", "proactive_type", "proactive_target"):
+                                    if pk not in extra_fields and pk in request.params:
+                                        extra_fields[pk] = request.params[pk]
                                 append_history_record(
                                     session_id=session_id,
                                     request_id=rid,
@@ -2133,6 +2262,10 @@ class JiuWenSwarm:
                                             extra_fields[k] = v
                             if et in {"chat.final", "chat.tool_call"}:
                                 extra_fields = _attach_reasoning_content(extra_fields)
+                            # 透传 proactive 标记——刷新页面时前端靠 source 识别卡片
+                            for pk in ("source", "proactive_type", "proactive_target"):
+                                if pk not in extra_fields and pk in request.params:
+                                    extra_fields[pk] = request.params[pk]
                             append_history_record(
                                 session_id=session_id,
                                 request_id=rid,
@@ -2184,7 +2317,10 @@ class JiuWenSwarm:
                 event_type="chat.final",
                 content=finalized_assistant_message,
                 timestamp=time.time(),
-                extra=_attach_reasoning_content(),
+                extra=_attach_reasoning_content({
+                    k: v for k, v in request.params.items()
+                    if k in ("source", "proactive_type", "proactive_target")
+                }),
                 mode=request.params.get("mode", "unknown"),
             )
             final_answer_content = finalized_assistant_message
@@ -2214,7 +2350,7 @@ class JiuWenSwarm:
         # 需要 auto_memory_enabled 和 memory.enabled 都为 true 才触发
         mode = request.params.get("mode", "code") if isinstance(request.params, dict) else "code"
         config = get_config()
-        if is_auto_memory_enabled() and is_memory_enabled(mode, config):
+        if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
         yield AgentResponseChunk(

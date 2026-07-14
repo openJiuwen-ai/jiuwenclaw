@@ -421,19 +421,6 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
   }
 
   const requestedOffset = Math.max(0, Math.floor(options.transcriptScrollOffset ?? 0));
-  const teamWorking =
-    isTeamMode(snapshot.mode) &&
-    isTeamWorking(snapshot.teamMemberEvents, snapshot.teamMessageEvents);
-  const liveTranscript =
-    snapshot.isProcessing ||
-    snapshot.isPaused ||
-    snapshot.cancellableWork ||
-    teamWorking ||
-    snapshot.workflowRuns.some((workflow) => workflow.status === "running");
-  if (requestedOffset === 0 && !liveTranscript) {
-    return [...transcriptLines, ...fixedLines];
-  }
-
   const maxOffset = transcriptLines.length - transcriptHeight;
   const offset = Math.min(maxOffset, requestedOffset);
   if (offset !== requestedOffset) {

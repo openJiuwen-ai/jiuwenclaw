@@ -1,0 +1,94 @@
+{
+  "agentserver_target_method_summary": {
+    "audit_statuses": {
+      "agent_audited": 63,
+      "unaudited": 722
+    },
+    "closure_eligible_from_latest_report": 63,
+    "documented_methods": 63,
+    "open_issues": 158,
+    "pending_methods_after_latest_report": 722,
+    "scope": "jiuwenswarm/server default_health_audit class methods",
+    "total_methods": 785
+  },
+  "archived_full_json_gzip": "ledger-archive/symbol-audit-map.full.json.gz",
+  "audit_integrity_summary": {
+    "closure_eligible": 63,
+    "invalid_agent_audit": 0,
+    "pending": 8674,
+    "scope": "default_health_audit",
+    "suspicious_agent_audit": 0,
+    "trusted_agent_audit": 63,
+    "unique_signature_batch_hashes": 63
+  },
+  "audit_scope_summary": {
+    "default_health_audit": 8737,
+    "repository_coverage_only": 6009
+  },
+  "generated_at": "2026-07-08T07:40:06.462755+00:00",
+  "generated_from_full_symbol_audit_map": true,
+  "git": {
+    "head": "af779aa6742969e46005a2a94f49d42d7a3b443a",
+    "status_short": [
+      "?? .doc_project_maintainer/"
+    ]
+  },
+  "health_audit_summary": {
+    "agent_audited": 63,
+    "audit_expired": 0,
+    "class_methods": 3939,
+    "classes": 831,
+    "human_audited": 0,
+    "open_issues": 160,
+    "out_of_scope": 0,
+    "script_assessed": 0,
+    "symbols": 8737,
+    "top_level_functions": 3967,
+    "unaudited": 8674
+  },
+  "health_dimensions": [
+    "overall",
+    "name_behavior_match",
+    "responsibility_focus",
+    "length",
+    "complexity",
+    "implementation_soundness",
+    "input_contract",
+    "output_contract",
+    "boundary_safety",
+    "side_effects",
+    "state_mutation",
+    "error_handling",
+    "dependency_coupling",
+    "test_coverage",
+    "observability",
+    "performance_risk"
+  ],
+  "notes": [
+    "Compact summary only; full symbol audit map is archived as gzip.",
+    "Trusted audit counts come from audit_integrity.py report over the full map."
+  ],
+  "repo_root": "E:\\Projects\\jiuwenswarm",
+  "schema": "project-maintainer.symbol-audit-map.v1",
+  "source_role_summary": {
+    "library_source": 5507,
+    "package_metadata": 5,
+    "runtime_source": 3230,
+    "script": 370,
+    "test_source": 4236,
+    "tooling": 1398
+  },
+  "summary": {
+    "agent_audited": 63,
+    "audit_expired": 0,
+    "class_methods": 6650,
+    "classes": 1467,
+    "human_audited": 0,
+    "open_issues": 160,
+    "out_of_scope": 0,
+    "script_assessed": 0,
+    "symbols": 14746,
+    "top_level_functions": 6629,
+    "unaudited": 14683
+  }
+}

@@ -161,6 +161,35 @@ async def init_proactive_engine(server, config: dict[str, Any] | None = None) ->
         proactive_agent = build_proactive_agent()
         proactive_engine.set_proactive_agent(proactive_agent)
 
+        # 检查 agent 是否活跃——在调 LLM 之前检查，避免 agent 被 evict 后白调 LLM。
+        def _check_agent_cb(channel_id):
+            cid = channel_id or "web"
+            agent = server.get_agent_manager().get_agent_nowait(cid)
+            return agent is not None and hasattr(agent, "process_message_stream")
+        proactive_engine.set_check_agent_available_callback(_check_agent_cb)
+
+        # 推送通知回调——直接推文本到前端，不经过主 agent（不进 context）。
+        # 用于"今日推荐已达上限"等系统提醒。
+        async def _send_notification_cb(channel_id, text):
+            cid = channel_id or "web"
+            import time as _time
+            try:
+                await server.send_push({
+                    "request_id": f"proactive_notification_{int(_time.time() * 1000)}",
+                    "channel_id": cid,
+                    "payload": {
+                        "content": text,
+                        "event_type": "chat.final",
+                        "role": "assistant",
+                        "source": "proactive_notification",
+                    },
+                })
+                return True
+            except Exception as exc:
+                logger.debug("[ProactiveEngine] send_notification push failed: %s", exc)
+                return False
+        proactive_engine.set_send_notification_callback(_send_notification_cb)
+
         # 触发主 agent 回调：tick 决策后，把决策包成指令式 query 触发主 agent
         # 跑一轮，主 agent 自己生成话术 → 进 context engine → stream 推前端。
         async def _trigger_cb(session_id, channel_id, query, decision):

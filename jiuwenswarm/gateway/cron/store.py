@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from dataclasses import replace
@@ -16,6 +17,25 @@ from jiuwenswarm.gateway.cron.models import (
     normalize_cron_job_timeout_seconds,
 )
 from jiuwenswarm.common.utils import get_cron_jobs_path
+
+logger = logging.getLogger(__name__)
+
+# proactive.tick 是由 proactive_cron_sync 自动注册、由 config 开关驱动的任务。
+# 其 name/enabled/description/wake_offset/targets/mode 均由系统/配置侧维护，
+# update 时只允许改调度本身（cron_expr/timezone）；expired/updated_at 由调度器/内部写。
+# 用 mode 判断（而非硬编码 id），避免依赖 id 字符串。
+_PROACTIVE_TICK_MODE = "proactive.tick"
+_PROACTIVE_UPDATE_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {"cron_expr", "timezone", "expired", "updated_at"}
+)
+
+
+class _ProactiveJobProtected(RuntimeError):
+    """proactive.tick job 受保护，禁止手动 删除/toggle/改非调度字段 时抛出。
+
+    所有删除路径（web handler / TUI /cron / 自然语言 cron 工具）共用 store 层，
+    在此抛出可统一拦截，避免 config 开关与 cron store 不一致。
+    """
 
 
 class CronJobStore:
@@ -73,6 +93,7 @@ class CronJobStore:
         timeout_seconds: int | None = None,
         project_id: str = "",
         model_name: str | None = None,
+        app_id: str = "",
     ) -> CronJob:
         now = time.time()
         sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
@@ -108,6 +129,7 @@ class CronJobStore:
             timeout_seconds=timeout,
             project_id=pid,
             model_name=model_name_val,
+            app_id=str(app_id or "").strip(),
         )
         # validate via round-trip
         CronJob.from_dict(job.to_dict())
@@ -122,6 +144,18 @@ class CronJobStore:
         existing = await self.get_job(job_id)
         if existing is None:
             raise KeyError("job not found")
+
+        # proactive.tick job：只接受调度字段（cron_expr/timezone），其余字段一律丢弃，
+        # 防止前端或其它调用方改 name/enabled/description/wake_offset/targets/mode 等，
+        # 这些字段由 config 开关 / proactive_cron_sync / scheduler 统一维护。
+        if str(getattr(existing, "mode", "") or "").strip().lower() == _PROACTIVE_TICK_MODE:
+            dropped = [k for k in patch if k not in _PROACTIVE_UPDATE_ALLOWED_KEYS]
+            if dropped:
+                logger.warning(
+                    "[CronStore] reject proactive.tick update fields on job=%s: %s (only %s allowed)",
+                    job_id, ", ".join(dropped), ", ".join(sorted(_PROACTIVE_UPDATE_ALLOWED_KEYS)),
+                )
+                patch = {k: v for k, v in patch.items() if k in _PROACTIVE_UPDATE_ALLOWED_KEYS}
 
         updated = existing
         if "name" in patch:
@@ -199,10 +233,23 @@ class CronJobStore:
         await self._upsert_job(updated)
         return updated
 
-    async def delete_job(self, job_id: str) -> bool:
+    async def delete_job(self, job_id: str, *, force: bool = False) -> bool:
         job_id = str(job_id or "").strip()
         if not job_id:
             return False
+        # proactive.tick job 由主动推荐开关自动创建/删除，禁止任何路径
+        # （web 面板 / TUI /cron / 自然语言 cron 工具）手动删除——否则会出现
+        # config 开关仍开但 job 没了的不一致，且重启后会被 sync 重建。
+        # force=True 仅供 proactive_cron_sync 在 config 开关关闭时合法删除用。
+        if not force:
+            existing = await self.get_job(job_id)
+            if (
+                    existing is not None
+                    and str(getattr(existing, "mode", "") or "").strip().lower() == _PROACTIVE_TICK_MODE
+            ):
+                raise _ProactiveJobProtected(
+                    "主动推荐定时任务由设置→主动推荐开关控制，不能删除；请到设置关闭开关。"
+                )
         async with self._lock:
             data = self._read_json_unlocked()
             jobs_raw = data.get("jobs") or []

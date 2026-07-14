@@ -12,8 +12,8 @@ import { useSessionStore } from '../../stores/sessionStore';
 const DEFAULT_CRON_TIMEZONE = 'Asia/Shanghai';
 const DEFAULT_CRON_TARGET = 'web';
 // 由主动推荐配置自动维护的 job id（与后端 proactive_cron_sync.PROACTIVE_JOB_ID 一致）。
-// 该 job 的调度表达式随 proactive_recommendation.tick_interval_minutes 变化，
-// 面板上对其禁用编辑/删除，频率调整走设置→主动推荐。
+// 该 job 的整体开关由 config 的 proactive_recommendation.enabled 驱动（关则删除，不在列表里），
+// 面板上禁用 启停/删除；编辑时仅 cron 表达式与时区可改，其余字段（名称/状态/描述/偏移/频道）只读。
 const PROACTIVE_AUTO_JOB_ID = 'proactive-tick-auto';
 
 interface CronJob {
@@ -316,7 +316,6 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
     { value: 'feishu', label: t('cron.targets.feishu'), disabled: !enabledChannels.has('feishu') },
     { value: 'dingtalk', label: t('cron.targets.dingtalk'), disabled: !enabledChannels.has('dingtalk') },
     { value: 'whatsapp', label: t('cron.targets.whatsapp'), disabled: !enabledChannels.has('whatsapp') },
-    { value: 'wechat', label: t('cron.targets.wechat'), disabled: !enabledChannels.has('wechat') },
   ], [t, enabledChannels]);
 
   // 加载任务列表
@@ -532,9 +531,13 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
       // 否则会被会话 mode（agent.plan）覆盖，导致走普通 cron 流程而非引擎。
       // 不带 wake_offset_seconds——proactive.tick 到点就执行，偏移由后端强制 0。
       if (jobId === PROACTIVE_AUTO_JOB_ID) {
+        // proactive job 只允许改 cron_expr 和 timezone，其余由 ConfigPanel/cron_sync 管
         delete patch['enabled'];
         delete patch['mode'];
         delete patch['wake_offset_seconds'];
+        delete patch['name'];
+        delete patch['description'];
+        delete patch['targets'];
       }
       const updateData: Record<string, unknown> = {
         id: editJob.id,
@@ -765,7 +768,8 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                                 ...prev,
                                 [job.id]: { ...prev[job.id], name: e.target.value },
                               }))}
-                              className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                              disabled={job.id === PROACTIVE_AUTO_JOB_ID}
+                              className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent ${job.id === PROACTIVE_AUTO_JOB_ID ? 'opacity-50 cursor-not-allowed' : ''}`}
                               placeholder={t('cron.placeholders.name')}
                             />
                           </td>
@@ -819,7 +823,8 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                                 ...prev,
                                 [job.id]: { ...prev[job.id], description: e.target.value },
                               }))}
-                              className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                              disabled={job.id === PROACTIVE_AUTO_JOB_ID}
+                              className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent ${job.id === PROACTIVE_AUTO_JOB_ID ? 'opacity-50 cursor-not-allowed' : ''}`}
                               placeholder={t('cron.placeholders.description')}
                             />
                           </td>
@@ -859,7 +864,8 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                                 ...prev,
                                 [job.id]: { ...prev[job.id], targets: e.target.value },
                               }))}
-                              className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                              disabled={job.id === PROACTIVE_AUTO_JOB_ID}
+                              className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent ${job.id === PROACTIVE_AUTO_JOB_ID ? 'opacity-50 cursor-not-allowed' : ''}`}
                             >
                               {targetOptions.map((option) => (
                                 <option key={option.value} value={option.value} disabled={option.disabled}>
@@ -916,13 +922,22 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                             {displayCron}
                           </td>
                           <td className="px-4 py-3">
-                            <span
-                              className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                                job.expired ? 'bg-amber-100 text-amber-700' : job.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
-                              }`}
-                            >
-                              {job.expired ? t('cron.status.expired') : job.enabled ? t('cron.status.enabled') : t('cron.status.disabled')}
-                            </span>
+                            {(() => {
+                              // proactive 自动维护 job 的整体开关由 config 控制（关了就删除，不在列表里），
+                              // 因此状态只有两态：cron 过期 → 过期；否则 → 启用。不显示"禁用"中间态。
+                              const isProactiveRow = job.id === PROACTIVE_AUTO_JOB_ID;
+                              const isExpired = Boolean(job.expired);
+                              const isEnabled = isProactiveRow ? !isExpired : Boolean(job.enabled);
+                              return (
+                                <span
+                                  className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
+                                    isExpired ? 'bg-amber-100 text-amber-700' : isEnabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700'
+                                  }`}
+                                >
+                                  {isExpired ? t('cron.status.expired') : isEnabled ? t('cron.status.enabled') : t('cron.status.disabled')}
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td className="px-4 py-3 text-sm text-text-muted">
                             <div className="max-w-[300px] overflow-hidden text-ellipsis whitespace-nowrap" title={displayDescription || '-'}>

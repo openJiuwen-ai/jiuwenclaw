@@ -189,9 +189,9 @@ memory:
 
 
 proactive_recommendation:
-  enabled: ${PROACTIVE_RECOMMENDATION_ENABLED:-false}                # 总开关
-  max_recommend_per_day: ${MAX_RECOMMEND_PER_DAY:-5}               # 每天最多推荐次数
-  max_sessions_per_tick: ${MAX_SESSIONS_PER_TICK:-10}              # 每次 Tick 扫描最多几个会话
+  enabled: false                # 总开关
+  max_recommend_per_day: 10               # 每天最多推荐次数
+  max_rounds_per_tick: 20                # 每次 Tick 读取最近几轮对话
 
 models:
   defaults:

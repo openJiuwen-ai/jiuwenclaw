@@ -249,6 +249,8 @@ class CronJob:
     last_session_id: str | None = None
     # 执行时使用的模型；None 表示使用 AgentServer 默认模型
     model_name: str | None = None
+    # 飞书多应用场景：创建该定时任务的 app_id，用于推送时定位到正确的 app 配置
+    app_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -281,6 +283,8 @@ class CronJob:
             d["last_session_id"] = self.last_session_id
         if self.model_name:
             d["model_name"] = self.model_name
+        if self.app_id:
+            d["app_id"] = self.app_id
         return d
 
     @staticmethod
@@ -372,6 +376,8 @@ class CronJob:
 
         model_raw = data.get("model_name", None)
         job_model_name = str(model_raw).strip() if isinstance(model_raw, str) and str(model_raw).strip() else None
+        app_id_raw = data.get("app_id", "")
+        job_app_id = str(app_id_raw).strip() if isinstance(app_id_raw, str) else ""
 
         return CronJob(
             id=job_id,
@@ -393,6 +399,7 @@ class CronJob:
             project_id=project_id,
             last_session_id=last_session_id,
             model_name=job_model_name,
+            app_id=job_app_id,
         )
 
 

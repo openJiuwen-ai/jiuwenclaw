@@ -128,6 +128,7 @@ from jiuwenswarm.agents.harness.common.rails import (
     ResponsePromptRail,
     RuntimePromptRail,
     StructuredAskUserRail,
+    SymphonyOrchestrationPromptRail,
 )
 from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
@@ -141,7 +142,6 @@ from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
     setup_permission_context,
     cleanup_permission_context,
 )
-from jiuwenswarm.agents.harness.common.memory import clear_memory_manager_cache
 from jiuwenswarm.agents.harness.common.memory.config import (
     clear_config_cache,
     get_memory_mode,
@@ -603,6 +603,7 @@ class JiuWenSwarmDeepAdapter:
         self._model: Model | None = None
         self._model_client_config: ModelClientConfig | None = None
         self._model_request_config: ModelRequestConfig | None = None
+        self._config_base_cache: dict[str, Any] | None = None
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: SysOperationRail | None = None
         self._skill_rail: SkillUseRail | None = None
@@ -627,6 +628,13 @@ class JiuWenSwarmDeepAdapter:
         self._memory_rail: MemoryRail | None = None
         self._external_memory_rail: Any = None
         self._external_memory_rail_registered: bool = False
+        # 记忆 embedding 配置指纹：用于检测 embed 段变化并据此重建 MemoryRail。
+        # 重建 rail 才能让 _embedding_config 刷新；否则换 endpoint 时 rail 复用旧配置。
+        self._memory_embedding_fingerprint: str = ""
+        # 最近一次请求使用的 mode：reload 时无 runtime_config 上下文，靠它主动刷新 memory rail。
+        self._last_mode: str | None = None
+        # 延时重索引任务（debounce）：连续改多次 embedding 只在最后一次后跑一次。
+        self._memory_reindex_task: asyncio.Task | None = None
         self._llm_retry_rail: LLMRetryRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
@@ -665,6 +673,7 @@ class JiuWenSwarmDeepAdapter:
         self._paid_search_tool: WebPaidSearchTool | None = None
         self._symphony_tools: list[Any] = []
         self._symphony_tools_registered: bool = False
+        self._symphony_orchestration_prompt_rail = None
         self._skill_retrieval_tools_registered: bool = False
         self._skill_retrieval_tools: list[Any] = []
         self._skill_retrieval_prompt_rail: SkillRetrievalPromptRail | None = None
@@ -2615,6 +2624,139 @@ class JiuWenSwarmDeepAdapter:
         )
         return updated
 
+    @staticmethod
+    def _prepare_react_image_tool_prompt(
+        request: AgentRequest,
+        inputs: dict[str, Any],
+        *,
+        enable_read_image_multimodal: bool,
+    ) -> dict[str, Any]:
+        """Add image file paths to the ReAct prompt when native image input is off."""
+        if enable_read_image_multimodal:
+            return inputs
+
+        query = inputs.get("query")
+        if not isinstance(query, str) or "jiuwenswarm_image_tool_context" in query:
+            return inputs
+
+        from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+            extract_multimodal_image_files,
+        )
+
+        image_files = inputs.get("_multimodal_image_files")
+        if not isinstance(image_files, list) or not image_files:
+            image_files = extract_multimodal_image_files(request.params)
+        if not image_files:
+            return inputs
+
+        params = request.params if isinstance(request.params, dict) else {}
+        raw_question = params.get("query")
+        if not isinstance(raw_question, str) or not raw_question.strip():
+            raw_question = params.get("content")
+        question = raw_question.strip() if isinstance(raw_question, str) else ""
+        first_path = str(image_files[0].get("path") or "").strip()
+        if not first_path:
+            return inputs
+
+        media_items = []
+        for image_file in image_files:
+            path = str(image_file.get("path") or "").strip()
+            if not path:
+                continue
+            media_items.append(
+                {
+                    "type": "image",
+                    "filename": image_file.get("filename") or Path(path).name,
+                    "mediaPath": path,
+                    "mimeType": image_file.get("mime_type") or image_file.get("mimeType"),
+                }
+            )
+        if not media_items:
+            return inputs
+
+        tool_context = {
+            "marker": "jiuwenswarm_image_tool_context",
+            "mediaPath": first_path,
+            "mediaItems": media_items,
+            "question": question,
+            "toolHint": (
+                "当前主模型未启用原生图片输入。如果需要理解图片内容，请调用图片理解工具；"
+                "优先使用 image_reading(local_url=mediaPath, prompt=question)，"
+                "或使用 visual_question_answering(image_path_or_url=mediaPath, question=question)。"
+            ),
+        }
+
+        updated = dict(inputs)
+        updated.pop("_multimodal_image_files", None)
+        updated["query"] = (
+            query
+            + "\n\n图片附件上下文（供 ReAct 选择图片理解工具使用）：\n"
+            + json.dumps(tool_context, ensure_ascii=False)
+        )
+        return updated
+
+    @staticmethod
+    def _build_image_tool_fallback_notice(
+        request: AgentRequest,
+        *,
+        enable_read_image_multimodal: bool,
+        model: Any | None,
+    ) -> dict[str, Any] | None:
+        if enable_read_image_multimodal:
+            return None
+
+        from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+            extract_multimodal_image_files,
+        )
+
+        image_files = extract_multimodal_image_files(request.params)
+        if not image_files:
+            return None
+
+        model_config = getattr(model, "model_config", None)
+        model_name = str(getattr(model_config, "model_name", "") or "").strip()
+        model_label = f"（{model_name}）" if model_name else ""
+        content = f"当前模型{model_label}不支持原生图片理解，已切换为图片理解工具处理。"
+        notice = {
+            "event_type": "chat.notice",
+            "notice_type": "image_tool_fallback",
+            "level": "info",
+            "content": content,
+            "request_id": request.request_id,
+            "session_id": request.session_id,
+            "image_count": len(image_files),
+        }
+        if model_name:
+            notice["model_name"] = model_name
+        return notice
+
+    @staticmethod
+    def _native_image_support_from_model_name(model_name: str) -> bool | None:
+        normalized = model_name.strip().lower()
+        if not normalized:
+            return None
+
+        if re.search(r"(?:^|[/_:-])glm-[0-9]+(?:\.[0-9]+)*(?:$|[/_:-])", normalized):
+            return False
+        if re.search(r"(?:^|[/_:-])glm-[^/]*v(?:$|[/_.:-])", normalized):
+            return True
+        if any(token in normalized for token in ("vision", "vl", "omni")):
+            return True
+        return None
+
+    def _native_image_input_enabled(self, config: dict[str, Any], model: Any | None) -> bool:
+        model_config = getattr(model, "model_config", None)
+        model_name = str(getattr(model_config, "model_name", "") or "").strip()
+        support = self._native_image_support_from_model_name(model_name)
+        if support is False:
+            return False
+        configured = config.get("enable_read_image_multimodal")
+        if isinstance(configured, bool):
+            return configured
+        if support is True:
+            return True
+        return self._vision_model_config is None
+
     def _resolve_enable_read_image_multimodal(self, config: dict[str, Any]) -> bool:
         configured = config.get("enable_read_image_multimodal")
         if isinstance(configured, bool):
@@ -3331,6 +3473,94 @@ class JiuWenSwarmDeepAdapter:
             security_prompt_rail = None
         return security_prompt_rail
 
+    # 重索引延时（秒）：embedding 配置变更后，延后这段时间再跑一次全量重索引。
+    # 配合 _schedule_memory_reindex 的 debounce，连续改多次只在最后一次后跑一次。
+    _MEMORY_REINDEX_DELAY_SECONDS: float = 5.0
+
+    @staticmethod
+    def _embedding_config_fingerprint(config: dict | None) -> str:
+        """计算 config.yaml embed 段的配置指纹，用于检测是否变化。
+
+        归一化逻辑与 openjiuwen OpenAICompatibleEmbeddingProvider.normalize_base_url
+        保持一致（去尾斜杠 + 去尾 /embeddings），使等价 endpoint 不会被误判为变化。
+        api_key 取 sha256 截断，不明文比较。
+        """
+        embed = config.get("embed") if isinstance(config, dict) else None
+        if not isinstance(embed, dict):
+            return ""
+        api_key = str(embed.get("embed_api_key") or "")
+        base_url = str(embed.get("embed_base_url") or "").strip()
+        # 与 provider 侧归一化一致：去尾 /embeddings 再去尾斜杠
+        if base_url.endswith("/embeddings"):
+            base_url = base_url.rsplit("/embeddings", 1)[0]
+        while base_url.endswith("/"):
+            base_url = base_url[:-1]
+        model = str(embed.get("embed_model") or "")
+        api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
+        return f"{model}:{base_url}:{api_key_hash}"
+
+    def _schedule_memory_reindex(self) -> None:
+        """延时后对记忆重新索引（debounce：多次触发只跑最后一次）。
+
+        前提：调用前 MemoryRail 已按新 embedding 配置重建（_embedding_config 已刷新），
+        且 openjiuwen lite 的 INDEX_CACHE 已清（aclose_memory_manager_cache）。
+        这样延时到期时 init_memory_manager_async 会用新配置建新 manager + 新 provider。
+        """
+        if self._memory_reindex_task is not None and not self._memory_reindex_task.done():
+            self._memory_reindex_task.cancel()
+        self._memory_reindex_task = asyncio.create_task(self._do_memory_reindex())
+
+    async def _do_memory_reindex(self) -> None:
+        try:
+            await asyncio.sleep(self._MEMORY_REINDEX_DELAY_SECONDS)
+            rail = self._memory_rail
+            if rail is None:
+                return
+            manager = await self._get_current_memory_manager()
+            if manager is None:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] memory reindex skipped: manager unavailable"
+                )
+                return
+            await manager.sync(reason="embed_config_changed", force=True)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] memory reindexed after embedding config change"
+            )
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning("[JiuWenSwarmDeepAdapter] memory reindex failed: %s", e)
+
+    async def _get_current_memory_manager(self):
+        """获取当前 MemoryRail 对应的 memory manager（必要时按新配置重建）。
+
+        rail 重建后其 _embedding_config 已是最新值；但 manager 在 rail 首次 invoke
+        前可能尚未 init，这里主动调 init_memory_manager_async 触发初始化/复用。
+        """
+        from openjiuwen.core.memory.lite.memory_tools import init_memory_manager_async
+
+        rail = self._memory_rail
+        if rail is None:
+            return None
+        embedding_config = getattr(rail, "_embedding_config", None)
+        workspace = self._get_memory_workspace()
+        agent_id = getattr(getattr(self._instance, "card", None), "id", None) or "default"
+        try:
+            return await init_memory_manager_async(
+                workspace=workspace,
+                agent_id=agent_id,
+                embedding_config=embedding_config,
+                sys_operation=self._sys_operation,
+            )
+        except Exception as e:
+            logger.warning("[JiuWenSwarmDeepAdapter] init memory manager failed: %s", e)
+            return None
+
+    def _get_memory_workspace(self):
+        """构造记忆用的 Workspace 对象（与 _make_deep_agent_config 中构造方式一致）。"""
+        resolved_language = getattr(self, "_resolved_language", None) or "zh"
+        return Workspace(root_path=self._workspace_dir or "./", language=resolved_language)
+
     def _build_memory_rail(self, mode: str) -> MemoryRail | None:
         try:
             config = get_config()
@@ -3465,6 +3695,42 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillRetrievalPromptRail create failed: %s", exc)
             return None
 
+    async def refresh_skill_rails(self) -> None:
+        """轻量刷新 skill 相关 rail，避免全量重建 agent 实例.
+
+        uninstall 后调用：SkillUseRail.reload_skills() 重新扫描 skills_dir，
+        增量移除已删除 skill 的缓存；同步更新 disabled_skills。
+        """
+        new_disabled = set(self._skill_manager.list_execution_disabled_skills())
+        if self._skill_rail is not None:
+            if self._skill_rail.disabled_skills != new_disabled:
+                self._skill_rail.disabled_skills = new_disabled
+            try:
+                await self._skill_rail.reload_skills()
+            except Exception as exc:
+                logger.warning("[JiuWenSwarmDeepAdapter] skill rail reload failed: %s", exc)
+        if self._skill_evolution_rail is not None:
+            if getattr(self._skill_evolution_rail, "disabled_skills", None) != new_disabled:
+                try:
+                    self._skill_evolution_rail.disabled_skills = new_disabled
+                except (AttributeError, TypeError):
+                    pass
+
+    def _build_symphony_orchestration_prompt_rail(
+        self,
+    ) -> SymphonyOrchestrationPromptRail | None:
+        """Build dynamic Symphony orchestration prompt guidance."""
+        try:
+            return SymphonyOrchestrationPromptRail(
+                config_base=lambda: self._config_base_cache,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] SymphonyOrchestrationPromptRail create failed: %s",
+                exc,
+            )
+            return None
+
     def _build_agent_rails(
         self, config: dict[str, Any], config_base: dict[str, Any], *, mode: str = "agent.plan"
     ) -> list[Any]:
@@ -3540,6 +3806,13 @@ class JiuWenSwarmDeepAdapter:
         rail_infos.insert(
             3 if self._filesystem_rail_enabled_for_profile() else 2,
             _RailBuildInfo("_skill_retrieval_prompt_rail", self._build_skill_retrieval_prompt_rail),
+        )
+        rail_infos.insert(
+            4 if self._filesystem_rail_enabled_for_profile() else 3,
+            _RailBuildInfo(
+                "_symphony_orchestration_prompt_rail",
+                self._build_symphony_orchestration_prompt_rail,
+            ),
         )
         if isinstance(mode, str) and mode.startswith("agent"):
             rail_infos.append(_RailBuildInfo("_ask_user_rail", self._build_structured_ask_user_rail))
@@ -3647,7 +3920,6 @@ class JiuWenSwarmDeepAdapter:
             card=agent_card,
             system_prompt=build_agent_identity_prompt(
                 language=self._resolve_prompt_language(),
-                config_base=config_base,
             ),
             context_engine_config=_deep_agent_context_engine_config(config),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
@@ -3720,7 +3992,7 @@ class JiuWenSwarmDeepAdapter:
             if self._skill_rail.skill_mode != new_skill_mode:
                 self._skill_rail.skill_mode = new_skill_mode
             # Update disabled_skills.
-            new_disabled = self._skill_manager.list_execution_disabled_skills()
+            new_disabled = set(self._skill_manager.list_execution_disabled_skills())
             if self._skill_rail.disabled_skills != new_disabled:
                 self._skill_rail.disabled_skills = new_disabled
 
@@ -3985,6 +4257,7 @@ class JiuWenSwarmDeepAdapter:
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
         load_dotenv(dotenv_path=get_env_file(), override=True)
         config_base = get_config()
+        self._config_base_cache = config_base.copy()
         self._refresh_multimodal_configs(config_base)
         config = config_base.get("react", {}).copy()
         self._config_cache = config.copy()
@@ -4025,7 +4298,6 @@ class JiuWenSwarmDeepAdapter:
             card=agent_card,
             system_prompt=build_agent_identity_prompt(
                 language=self._resolve_prompt_language(),
-                config_base=config_base,
             ),
             tools=tool_cards if tool_cards else [],
             subagents=configured_subagents,
@@ -4150,7 +4422,17 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
-        clear_memory_manager_cache()
+        # 清 MemoryRail 实际使用的 openjiuwen lite INDEX_CACHE（而非仓内并行实现的那份），
+        # 并 close 旧实例（db 连接 / watchdog observer / 定时任务），使下次
+        # init_memory_manager_async 用最新 embedding_config 创建新 manager + 新 provider。
+        try:
+            from openjiuwen.core.memory.lite.manager import aclose_memory_manager_cache
+
+            await aclose_memory_manager_cache()
+        except Exception as e:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] aclose openjiuwen memory cache failed: %s", e
+            )
 
         if env_overrides is not None:
             if not isinstance(env_overrides, dict):
@@ -4168,6 +4450,7 @@ class JiuWenSwarmDeepAdapter:
         else:
             config_base = resolve_env_vars(config_base)
 
+        self._config_base_cache = config_base.copy()
         self._refresh_multimodal_configs(config_base)
         config = config_base.get("react", {}).copy()
         self._config_cache = config.copy()
@@ -4332,6 +4615,17 @@ class JiuWenSwarmDeepAdapter:
             else:
                 self._mark_session_adapters_stale_for_reload(config_base, env_overrides)
 
+        # 主动刷新 memory rail（不等下次请求的 _update_rails_for_mode）：
+        # 让 embedding 配置变更立即走指纹检测 + 重建 rail + 延时重索引。
+        # 若从未处理过请求（_last_mode 为 None），退化为下次请求自然触发。
+        try:
+            mode = self._last_mode or "agent.plan"
+            await self._handle_memory_rail_by_config(mode)
+        except Exception as e:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] memory rail refresh on reload failed: %s", e
+            )
+
         logger.info("[JiuWenSwarmDeepAdapter] 配置已热更新（configure），未重启进程")
 
     @staticmethod
@@ -4385,6 +4679,8 @@ class JiuWenSwarmDeepAdapter:
 
     async def _update_rails_for_mode(self, mode: str) -> None:
         """按 mode 注册或卸载 rails。"""
+        # 记录最近一次请求的 mode，供 reload_agent_config 主动刷新 memory rail 时使用
+        self._last_mode = mode
         if mode == "agent.plan":
             await self._update_plan_mode_rails()
         else:
@@ -4931,6 +5227,11 @@ class JiuWenSwarmDeepAdapter:
             self._session_adapter_last_used.clear()
             self._session_adapter_versions.clear()
             self._session_adapter_reload_failures.clear()
+        # 取消未到期的延时重索引 task，避免 adapter cleanup 后仍有孤儿 task
+        # 去触发 manager.sync（此时 rail/manager 可能已失效）。
+        if self._memory_reindex_task is not None and not self._memory_reindex_task.done():
+            self._memory_reindex_task.cancel()
+        self._memory_reindex_task = None
         await self._close_a2x_client()
 
     def _collect_registered_ability_names(self) -> set[str]:
@@ -5979,6 +6280,15 @@ class JiuWenSwarmDeepAdapter:
                 request,
                 inputs,
             )
+            enable_read_image_multimodal = self._native_image_input_enabled(
+                self._config_cache,
+                resolved_model,
+            )
+            inputs = self._prepare_react_image_tool_prompt(
+                request,
+                inputs,
+                enable_read_image_multimodal=enable_read_image_multimodal,
+            )
             await self._sync_prompt_attachments_for_request(session_id)
             from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                 set_current_multimodal_image_files,
@@ -6241,6 +6551,27 @@ class JiuWenSwarmDeepAdapter:
                 request,
                 inputs,
             )
+            enable_read_image_multimodal = self._native_image_input_enabled(
+                self._config_cache,
+                resolved_model,
+            )
+            image_tool_fallback_notice = self._build_image_tool_fallback_notice(
+                request,
+                enable_read_image_multimodal=enable_read_image_multimodal,
+                model=resolved_model,
+            )
+            inputs = self._prepare_react_image_tool_prompt(
+                request,
+                inputs,
+                enable_read_image_multimodal=enable_read_image_multimodal,
+            )
+            if image_tool_fallback_notice is not None:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload=image_tool_fallback_notice,
+                    is_complete=False,
+                )
             await self._sync_prompt_attachments_for_request(session_id)
             from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                 set_current_multimodal_image_files,
@@ -6929,20 +7260,45 @@ class JiuWenSwarmDeepAdapter:
             builtin_on = is_builtin_memory_allowed(config) and is_memory_enabled(mode, config)
             if builtin_on:
                 # 开启记忆
+                new_embed_fp = self._embedding_config_fingerprint(config)
                 if self._memory_rail is not None:
                     cur_memory_type = is_proactive_memory(mode, config)
                     if self._is_proactive_memory != cur_memory_type:
                         # 当前记忆类型（主动/被动）和之前注册的不一致，重新注册
                         await self._instance.unregister_rail(self._memory_rail)
                         self._memory_rail = None
+                    elif self._memory_embedding_fingerprint != new_embed_fp:
+                        # 记忆类型没变，但 embedding 配置（base_url/api_key/model）变了：
+                        # 必须重建 rail 才能刷新 MemoryRail._embedding_config，否则换 endpoint
+                        # 时 rail 仍持旧配置，新 manager 仍用旧 provider。
+                        logger.info(
+                            "[JiuWenSwarmDeepAdapter] embedding config changed, rebuilding MemoryRail"
+                        )
+                        await self._instance.unregister_rail(self._memory_rail)
+                        self._memory_rail = None
                     else:
-                        # 已经注册，且记忆类型相同，无需其他操作
+                        # 已经注册，且记忆类型与 embedding 配置均未变，无需其他操作
                         return
                 if self._memory_rail is None:
                     self._memory_rail = self._build_memory_rail(mode)
                 if self._memory_rail is not None:
-                    await self._instance.register_rail(self._memory_rail)
-                    logger.info(f"[JiuWenSwarmDeepAdapter] MemoryRail registered for {mode} mode")
+                    # 重建（或首次注册）后记录新指纹，作为下次比对的基线
+                    self._memory_embedding_fingerprint = new_embed_fp
+                    try:
+                        await self._instance.register_rail(self._memory_rail)
+                    except Exception as e:
+                        # register_rail 失败：回滚指纹与 rail，避免留下"指纹已是新值、
+                        # 但 rail 未成功注册"的不一致状态——否则下次比对会认为"没变"而
+                        # 走 return，让这个孤儿 rail 既不注册也不重建，记忆静默失效。
+                        self._memory_embedding_fingerprint = ""
+                        self._memory_rail = None
+                        logger.warning(
+                            "[JiuWenSwarmDeepAdapter] register MemoryRail failed: %s", e
+                        )
+                    else:
+                        logger.info(f"[JiuWenSwarmDeepAdapter] MemoryRail registered for {mode} mode")
+                        # 重建后触发延时重索引（debounce），使新 embedding 配置对历史记忆文件生效
+                        self._schedule_memory_reindex()
             elif not builtin_on and self._memory_rail is not None:
                 await self._instance.unregister_rail(self._memory_rail)
                 self._memory_rail = None

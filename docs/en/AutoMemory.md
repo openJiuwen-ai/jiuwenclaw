@@ -16,24 +16,32 @@ Auto Memory is JiuwenSwarm's post-conversation memory extraction feature. After 
 
 ### Config File
 
-Set `auto_memory_enabled` in `config.yaml`:
+The config key is mode-aware:
+
+- **agent mode**: global `auto_memory_enabled` (top-level in `config.yaml`);
+- **code mode**: `modes.code.memory.auto_coding_memory` (under the `modes.code.memory` section).
 
 ```yaml
-# Auto Memory: Automatically extract memories after conversation ends, stored per-project
+# agent mode — global toggle
 auto_memory_enabled: true
+
+# code mode — per-mode toggle under modes.code.memory
+modes:
+  code:
+    memory:
+      auto_coding_memory: true
 ```
 
 ### TUI Command
 
-Toggle via `/memory` command in TUI terminal:
+Open the tabbed console via `/memory` command in TUI terminal:
 
 ```
-/memory          # Enter memory management interface
-/memory toggle   # Show all memory toggles
-/memory toggle auto_memory_enabled   # Toggle auto memory switch
+/memory          # Open memory management tabbed console
+/memory toggle   # Switch to toggle tab
 ```
 
-In the interactive interface, select the `Auto-memory: on/off` option to toggle.
+The tabbed console provides 4 tabs: edit / status / toggle / open, with the **edit** tab selected by default. Interaction keys: ←/→ switch tabs, ↑/↓ move within the list, Enter execute the selected item, Ctrl+O toggle full path (edit/open tabs; resets to relative path when switching tabs), Esc close the console.
 
 ---
 
@@ -77,7 +85,7 @@ The system analyzes conversation content through a sub-Agent, extracting the fol
 
 ```mermaid
 flowchart TD
-    A[Conversation End] --> B{auto_memory_enabled?}
+    A[Conversation End] --> B{auto_memory enabled?}
     B -->|No| C[Skip Extraction]
     B -->|Yes| D[Create Extraction Sub-Agent]
     D --> E[Analyze Conversation History]
@@ -92,7 +100,8 @@ flowchart TD
 
 | Config Item | Description | Default Value |
 |------------|-------------|---------------|
-| `auto_memory_enabled` | Whether to enable auto memory extraction | `false` |
+| `auto_memory_enabled` | Auto memory extraction toggle (agent mode, top-level) | `false` |
+| `modes.code.memory.auto_coding_memory` | Auto coding memory extraction toggle (code mode) | `false` |
 
 ---
 
@@ -100,20 +109,29 @@ flowchart TD
 
 ### `/memory` Command
 
-Enter `/memory` command in TUI to display memory management interface:
+Enter `/memory` command in TUI to open the memory management tabbed console (the **edit** tab is selected by default):
 
 ```
 Memory
-Select a memory file to edit:
+[edit] [status] [toggle] [open]
+  ↑
+  ←/→ switch tabs | ↑/↓ move list | Enter execute | Ctrl+O toggle full path (edit/open) | Esc close
 
-  Auto-memory: on          [Press Enter to toggle]
-  Project memory           Checked in at ./JIUWENSWARM.md
-  Local memory             Saved in ./JIUWENSWARM.local.md
-  User memory              Saved in ~/.jiuwen/JIUWENSWARM.md
-  Open auto-memory folder
+--- toggle tab ---
+Switches adapt to the current mode. Each row shows the key (padded), a ✓ on / ✗ off marker, and a Chinese description (separated by spaces, no ·):
+
+agent mode:
+  memory_enabled              ✓ on   记忆功能总开关
+  memory_proactive            ✓ on   对话中自动搜索和记录
+  memory_forbidden_enabled    ✗ off  过滤敏感信息
+
+code mode:
+  memory_enabled              ✓ on   记忆功能总开关
+  auto_coding_memory          ✓ on   每轮对话后自动提取记忆（需总开关开启）
+  memory_forbidden_enabled    ✗ off  过滤敏感信息
 ```
 
-Select the `Auto-memory: on/off` row and press Enter to toggle auto memory.
+The switches in the toggle tab adapt to the current mode (agent mode / code mode). Toggle the corresponding switch to enable/disable the respective memory feature.
 
 ---
 

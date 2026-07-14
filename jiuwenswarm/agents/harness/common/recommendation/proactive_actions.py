@@ -56,6 +56,32 @@ def _prune_daily_counts() -> None:
             _daily_counts.pop(k, None)
 
 
+# "今日已达上限"提醒的去重——每天最多推一次，避免 cron 多次到点刷屏。
+# 与 _daily_counts 同构：进程内字典 + 当日 key，跨天/重启自动重置。
+_limit_notif_lock = threading.Lock()
+_limit_notif_sent: dict[str, bool] = {}
+
+
+def _limit_notif_sent_today() -> bool:
+    with _limit_notif_lock:
+        return _limit_notif_sent.get(_today_key(), False)
+
+
+def _mark_limit_notif_sent() -> None:
+    with _limit_notif_lock:
+        _limit_notif_sent[_today_key()] = True
+
+
+def _prune_limit_notif() -> None:
+    """Remove entries older than 2 days.（与 _prune_daily_counts 对齐）"""
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d")
+    with _limit_notif_lock:
+        keys_to_remove = [k for k in _limit_notif_sent if k < cutoff]
+        for k in keys_to_remove:
+            _limit_notif_sent.pop(k, None)
+
+
 # ── Cooldown ─────────────────────────────────────────────────────
 
 _COOLDOWN_HOURS = 24
@@ -258,7 +284,6 @@ from jiuwenswarm.agents.harness.common.recommendation.proactive_prompts import (
 @dataclass
 class AnalysisResult:
     """Output from the unified LLM analysis call."""
-    profile_delta: dict[str, Any] = field(default_factory=dict)
     decision: RecommendationDecision | None = None
 
 
@@ -284,7 +309,7 @@ async def _analyze_and_decide(
     duplicate them in the LLM context.
     """
     prompt = UNIFIED_ANALYSIS_PROMPT.format(
-        conversation_summary=report_text[:60000],
+        conversation_summary=report_text,
     )
 
     # conversation_id 每次 tick 用唯一值——若用固定 id，DeepAgent 的 context
@@ -310,14 +335,8 @@ async def _analyze_and_decide(
         if not isinstance(delta, dict):
             return AnalysisResult()
 
-        # Extract profile delta (only fields the LLM is allowed to change)
-        profile_delta: dict[str, Any] = {}
-        profile_keys = ("preferences", "goals", "interests", "commitments")
-        for key in profile_keys:
-            if key in delta and isinstance(delta[key], list):
-                profile_delta[key] = delta[key]
-
-        # Extract decision
+        # Extract decision (画像已废弃——所有推荐基于当前对话)
+        decision = None
         decision = None
         raw_decision = delta.get("decision")
         if isinstance(raw_decision, dict) and raw_decision.get("type") and raw_decision.get("target"):
@@ -350,13 +369,11 @@ async def _analyze_and_decide(
                 )
 
         logger.info(
-            "[ProactiveEngine] analysis: delta_keys=%s, decision=%s",
-            list(profile_delta.keys()),
+            "[ProactiveEngine] analysis: decision=%s",
             f"{decision.type}:{decision.target}" if decision else "null",
         )
 
         return AnalysisResult(
-            profile_delta=profile_delta,
             decision=decision,
         )
     except Exception as exc:
