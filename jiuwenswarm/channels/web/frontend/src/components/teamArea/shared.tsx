@@ -2,7 +2,6 @@ import { Check, ChevronRight, Circle } from 'lucide-react';
 import i18n from '../../i18n';
 import { ParsedTeamEvent, parseTeamEventMessage } from '../ChatPanel/teamEventUtils';
 import type { Message, TodoItem } from '../../types';
-import expandIcon from '../../assets/work-mode/zoom-in.svg';
 import type {
   TeamTask as SessionTeamTask,
   TeamMemberExecutionEvent,
@@ -292,10 +291,6 @@ export function Chevron({ expanded }: { expanded?: boolean }) {
       className={` ${expanded ? 'rotate-90' : ''}`}
     />
   );
-}
-
-export function ExpandIcon() {
-  return <img src={expandIcon} className="h-3 w-3" aria-hidden="true" />;
 }
 
 export function buildTaskMap(

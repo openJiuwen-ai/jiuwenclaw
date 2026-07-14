@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { File, Puzzle } from 'lucide-react';
+import { File, Maximize2, Puzzle } from 'lucide-react';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import type { TeamTask as SessionTeamTask } from '../../stores/sessionStore';
 import recentTasksIcon from '../../assets/work-mode/recent-tasks.svg';
@@ -11,7 +11,6 @@ import statusWaitingIcon from '../../assets/work-mode/status-waiting.svg';
 import statusWarningIcon from '../../assets/work-mode/status-warning.svg';
 import {
   BOARD_COLUMNS,
-  ExpandIcon,
   getBoardTaskContent,
   getBoardTaskTitle,
   getMemberDisplayName,
@@ -129,7 +128,7 @@ export function TaskPlanningPanel({
               className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
               title={t('team.expand')}
             >
-              <ExpandIcon />
+              <Maximize2 size={12} aria-hidden="true" />
             </button>
           )}
         </div>

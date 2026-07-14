@@ -166,7 +166,7 @@ function ExpandedTeamArea({
           className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
           title={t('team.collapse')}
         >
-          <Minimize2 size={16} />
+          <Minimize2 size={12} />
         </button>
       </div>
 
