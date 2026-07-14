@@ -282,9 +282,11 @@ class SendFileToolkit:
                     "使用场景包括：用户请求导出/下载文件、任务完成后需要交付文件、生成报告/文档后发送给用户。"
                     "参数格式：abs_file_path_list 接受单个路径字符串或路径数组，路径必须是绝对路径。"
                     "示例：'/tmp/report.pdf' 或 ['/tmp/file1.csv', '/tmp/file2.xlsx']。"
-                    "target_channels 可选：指定文件投递的目标 channel（如 ['feishu', 'xiaoyi', 'web']）。"
-                    "省略时自动投递给当前会话已接入的所有用户 channel（team 模式下含飞书等 IM 端）。"
-                    "当用户在某个 channel（如飞书）请求文件、或要求把文件发给指定 channel 时，应显式传入 target_channels。"
+                    "target_channels 可选：指定文件投递目标，每项可以是 channel id（如 'web'）"
+                    "或 team 人类席位名（如 'human-player-1'）。"
+                    "省略时默认投给最近发起请求的人类成员（按 session 记录的发起者）；web 发起或无人类成员时投 web。"
+                    "多 app 场景定向到指定 feishu 用户时，传入该用户的 member_name（不会误投其它 app）；"
+                    "跨端投递（如把文件发给飞书用户、或发给 web）时传入对应 member_name 或 'web'。"
                 ),
                 input_params={
                     "type": "object",
@@ -302,10 +304,10 @@ class SendFileToolkit:
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "可选：文件投递目标 channel 或 team 成员席位名列表，"
-                                "如 [\"feishu\"] 或 [\"xiaoyi\"]。"
-                                "省略时自动投递给当前会话已接入的所有用户 channel。"
-                                "当需跨 channel 投递（如 web 会话中把文件发给飞书用户）时传入此项。"
+                                "可选：文件投递目标列表。每项可为 channel id（如 'web'）"
+                                "或 team 人类席位名（如 'human-player-1'）。"
+                                "省略时默认投给最近发起请求的人类成员；web 发起或无人类成员时投 web。"
+                                "定向到指定 feishu 用户传其 member_name；跨端投递传对应 member_name 或 'web'。"
                             ),
                         },
                     },

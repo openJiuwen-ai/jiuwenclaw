@@ -198,6 +198,10 @@ class MessageHandler(ABC):
         self._fire_and_forget_tasks: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
         self._evolution_approval = EvolutionApprovalCoordinator()
         self._session_last_user_query: dict[str, str] = {}
+        # session_id -> 最近一次人类发起请求的 (channel_id, member_name)。
+        # team 模式下 file msg 不携带发起者身份（rid 固定为建会话那轮），send_file 定向
+        # 投递时按 session_id 取最近发起者兜底（并发时可能取到另一 human，仅投错人不泄漏）。
+        self._session_last_originator: dict[str, tuple[str, str]] = {}
         self._acp_session_aliases: dict[str, str] = {}  # external_session_id -> internal_session_id
         self._acp_session_alias_lock = asyncio.Lock()
 
@@ -431,11 +435,30 @@ class MessageHandler(ABC):
         if not query:
             return
         self._session_last_user_query[session_id] = query[:8000]
+        # 记录最近人类发起者身份（member_name 由 resolve_member_by_user 注入 msg.metadata），
+        # 供 send_file 在 file msg 不携带发起者时按 session_id 反查定向。
+        # 排除 GodView：它是通道级自动注册的伪 member，非真实 /join 人类席位，不应作为发起者定向。
+        # 无 member_name 的入站（如 web：web 不 /join，resolve_member_by_user 不命中）→ 清空
+        # last-originator，避免 web 发起时残留上一次 feishu 用户导致文件误投到 feishu。
+        origin_member = str((msg.metadata or {}).get("member_name") or "").strip()
+        if origin_member and origin_member != SubRole.GODVIEW:
+            self._session_last_originator[session_id] = (
+                str(msg.channel_id or "").strip(),
+                origin_member,
+            )
+        else:
+            self._session_last_originator.pop(session_id, None)
 
     def _get_session_last_user_query(self, session_id: str | None) -> str:
         if not session_id:
             return ""
         return self._session_last_user_query.get(str(session_id), "")
+
+    def get_session_last_originator(self, session_id: str | None) -> tuple[str, str] | None:
+        """返回该 session 最近一次人类发起请求的 (channel_id, member_name)，供 send_file 定向。"""
+        if not session_id:
+            return None
+        return self._session_last_originator.get(str(session_id))
 
     def _attach_original_request_to_ask_user_answer(self, msg: "Message") -> "Message":
         if not isinstance(msg.params, dict):
