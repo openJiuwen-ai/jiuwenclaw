@@ -2423,8 +2423,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
-        if await _reject_if_task_running(ws, req_id):
-            return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             # 多应用模式：params 必须含 apps 键
             apps = params["apps"]
@@ -2507,8 +2506,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
-        if await _reject_if_task_running(ws, req_id):
-            return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             # 多应用模式：params 必须含 apps 键
             apps = params["apps"]
@@ -2574,8 +2572,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
-        if await _reject_if_task_running(ws, req_id):
-            return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             await cm.set_conf("telegram", params)
             conf = cm.get_conf("telegram")
@@ -2627,8 +2624,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
-        if await _reject_if_task_running(ws, req_id):
-            return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             await cm.set_conf("dingtalk", params)
             conf = cm.get_conf("dingtalk")
@@ -2685,8 +2681,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
-        if await _reject_if_task_running(ws, req_id):
-            return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             await cm.set_conf("whatsapp", params)
             conf = cm.get_conf("whatsapp")
@@ -2738,8 +2733,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
-        if await _reject_if_task_running(ws, req_id):
-            return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             await cm.set_conf("discord", params)
             conf = cm.get_conf("discord")
@@ -2791,8 +2785,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
-        if await _reject_if_task_running(ws, req_id):
-            return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             await cm.set_conf("wecom", params)
             conf = cm.get_conf("wecom")
@@ -2855,8 +2848,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
-        if await _reject_if_task_running(ws, req_id):
-            return
+        # IM 渠道配置实时读取（只写 config.yaml + 清缓存，不走全局热更新），运行中改不影响任务。
         try:
             await cm.set_conf("wechat", params)
             conf = cm.get_conf("wechat")

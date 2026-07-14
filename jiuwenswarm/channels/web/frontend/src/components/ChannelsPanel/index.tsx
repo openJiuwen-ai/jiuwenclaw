@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronRight, Plus, Trash2 } from 'lucide-react';
 import { webRequest } from '../../services/webClient';
-import { useChatStore } from '../../stores';
 import { AvatarPermEditor } from './AvatarPermEditor';
 import { WechatQrModal } from './WechatQrModal';
 import { WechatUnbindConfirmModal } from './WechatUnbindConfirmModal';
@@ -842,7 +841,6 @@ function ChannelHeaderLogo({ channelId, label }: { channelId: SupportedChannelId
 
 export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
   const { t, i18n } = useTranslation();
-  const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
   const [channels, setChannels] = useState<ChannelItem[]>(() => buildChannels([]));
   const [activeChannelId, setActiveChannelId] = useState<SupportedChannelId>('xiaoyi');
   const [loadState, setLoadState] = useState<LoadState>('idle');
@@ -1963,12 +1961,6 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
           <div className="flex items-center gap-2" />
         </div>
 
-        {globalTaskRunning ? (
-          <div className="px-4 py-2 bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800 rounded-t-lg -mt-2 mb-2">
-            <span className="text-xs text-amber-600 dark:text-amber-400">{t('config.errors.processingDisabled')}</span>
-          </div>
-        ) : null}
-
         {error ? (
           <div className="border border-[var(--border-danger)] bg-danger-subtle rounded-lg p-4 text-sm text-danger flex items-center justify-between">
             <span>{t('channels.fetchFailed')}: {error}</span>
@@ -2102,7 +2094,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveXiaoyiConfig()}
-                            disabled={!hasXiaoyiConfigChanges || xiaoyiSaving || !isConnected || globalTaskRunning}
+                            disabled={!hasXiaoyiConfigChanges || xiaoyiSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {xiaoyiSaving ? t('common.saving') : t('common.save')}
@@ -2158,7 +2150,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveDingtalkConfig()}
-                            disabled={!hasDingtalkConfigChanges || dingtalkSaving || !isConnected || globalTaskRunning}
+                            disabled={!hasDingtalkConfigChanges || dingtalkSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {dingtalkSaving ? t('common.saving') : t('common.save')}
@@ -2278,7 +2270,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveConfig()}
-                            disabled={!hasConfigChanges || saving || !isConnected || globalTaskRunning}
+                            disabled={!hasConfigChanges || saving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {saving ? t('common.saving') : t('common.save')}
@@ -2334,7 +2326,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveConfig()}
-                            disabled={!hasConfigChanges || saving || !isConnected || globalTaskRunning}
+                            disabled={!hasConfigChanges || saving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {saving ? t('common.saving') : t('common.save')}
@@ -2538,7 +2530,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveTelegramConfig()}
-                            disabled={!hasTelegramConfigChanges || telegramSaving || !isConnected || globalTaskRunning}
+                            disabled={!hasTelegramConfigChanges || telegramSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {telegramSaving ? t('common.saving') : t('common.save')}
@@ -2681,7 +2673,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveDiscordConfig()}
-                            disabled={!hasDiscordConfigChanges || discordSaving || !isConnected || globalTaskRunning}
+                            disabled={!hasDiscordConfigChanges || discordSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {discordSaving ? t('common.saving') : t('common.save')}
@@ -2832,7 +2824,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveWhatsAppConfig()}
-                            disabled={!hasWhatsAppConfigChanges || whatsappSaving || !isConnected || globalTaskRunning}
+                            disabled={!hasWhatsAppConfigChanges || whatsappSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {whatsappSaving ? t('common.saving') : t('common.save')}
@@ -2988,7 +2980,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveWechatConfig()}
-                            disabled={!hasWechatConfigChanges || wechatSaving || wechatUnbinding || !isConnected || globalTaskRunning}
+                            disabled={!hasWechatConfigChanges || wechatSaving || wechatUnbinding || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {wechatSaving ? t('common.saving') : t('common.save')}
@@ -3145,7 +3137,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveWecomConfig()}
-                            disabled={!hasWecomConfigChanges || wecomSaving || !isConnected || globalTaskRunning}
+                            disabled={!hasWecomConfigChanges || wecomSaving || !isConnected}
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {wecomSaving ? t('common.saving') : t('common.save')}
