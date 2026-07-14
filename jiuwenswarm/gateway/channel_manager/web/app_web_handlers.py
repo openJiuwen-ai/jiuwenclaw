@@ -1101,6 +1101,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         """全局运行态兜底：有任务在跑时拒绝写入并返回 True，否则返回 False。"""
         _mh = _resolve(message_handler)
         if _mh is not None and _mh.has_active_streams():
+            # 记录拒绝时的活跃 mode 明细，便于定位是哪个 rid 让保存锁误判运行中。
+            try:
+                _non_team_modes = _mh.active_non_team_modes()
+            except Exception:
+                _non_team_modes = []
+            logger.info(
+                "[task.global_running] 拒绝配置保存(TASK_RUNNING): req_id=%s "
+                "non_team_count=%d non_team_modes=%s",
+                req_id, len(_non_team_modes), _non_team_modes,
+            )
             await channel.send_response(
                 ws, req_id, ok=False,
                 error="有任务正在运行，请等待任务完成后再保存配置",
@@ -1123,6 +1133,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         mh = _resolve(message_handler)
         # ack 携带当前全局运行态，让新连接/重连的窗口立即知道是否有任务在跑（配置保存锁初始态）。
         task_running = bool(mh.has_active_streams()) if mh is not None else False
+        logger.info(
+            "[task.global_running] connection.ack 初始化: sid=%s task_running=%s "
+            "(stream_rids=%d active_chat_rids=%d)",
+            sid, task_running,
+            len(getattr(mh, "_stream_modes", {})) if mh is not None else 0,
+            len(getattr(mh, "_active_chat_tasks", {})) if mh is not None else 0,
+        )
 
         ack_msg = Message(
             id=f"ack-{sid}",

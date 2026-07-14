@@ -2518,6 +2518,23 @@ export function ConfigPanel({
   const isProcessing = useChatStore((s) => s.isProcessing);
   const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
   const { availableModels: storeAvailableModels, mode } = useSessionStore();
+  // 调试日志：保存按钮锁定/解锁翻转时记录一次，便于还原“保存按钮为何一直禁用”。
+  // 锁定条件与保存按钮 disabled 中的运行锁分支一致（team 模式豁免）。
+  const saveLocked = (isProcessing || globalTaskRunning) && mode !== 'team';
+  const lockRef = useRef<boolean>(saveLocked);
+  if (lockRef.current !== saveLocked) {
+    console.info(
+      '[task.global_running] 保存锁切换: locked=',
+      saveLocked,
+      'isProcessing=',
+      isProcessing,
+      'globalTaskRunning=',
+      globalTaskRunning,
+      'mode=',
+      mode,
+    );
+    lockRef.current = saveLocked;
+  }
   const [draftValues, setDraftValues] = useState<Record<string, string>>(() => {
     if (!config) return {};
     const next: Record<string, string> = {};

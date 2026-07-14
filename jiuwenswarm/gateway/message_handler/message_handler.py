@@ -1995,6 +1995,22 @@ class MessageHandler(ABC):
             for mode in self._iter_active_stream_modes()
         )
 
+    def active_non_team_modes(self) -> list[tuple[str, str]]:
+        """非 team 活跃任务的 (request_id, mode) 明细（只读，调试/日志用）。
+
+        流式 rid 来自 ``_stream_modes``，非流式 chat rid 来自
+        ``_active_chat_tasks``；两者 key 集合互补，组合后覆盖全部活跃任务。
+        供保存锁拒绝日志定位“是哪个 rid 让运行态误判为 true”。
+        """
+        result: list[tuple[str, str]] = []
+        for rid, mode in self._stream_modes.items():
+            if not ChannelMode.is_team_mode(mode):
+                result.append((rid, mode))
+        for rid, mode in self._active_chat_tasks.items():
+            if not ChannelMode.is_team_mode(mode):
+                result.append((rid, mode))
+        return result
+
     async def _broadcast_task_global_running(self) -> None:
         """向所有 web ws 客户端广播当前全局运行态快照（task.global_running）。
 
@@ -2005,15 +2021,31 @@ class MessageHandler(ABC):
         try:
             web_channel = self._resolve_web_channel()
             if web_channel is not None:
+                all_modes = self._iter_active_stream_modes()
                 count = sum(
-                    1 for mode in self._iter_active_stream_modes()
+                    1 for mode in all_modes
                     if not ChannelMode.is_team_mode(mode)
                 )
+                # 非团队活跃 mode 明细，供排查“保存锁卡禁用”时定位是哪个 rid 残留。
+                non_team_modes = [m for m in all_modes if not ChannelMode.is_team_mode(m)]
+                team_modes = [m for m in all_modes if ChannelMode.is_team_mode(m)]
                 await web_channel.broadcast_event("task.global_running", {
                     "event_type": "task.global_running",
                     "running": bool(count),
                     "count": count,
                 })
+                logger.info(
+                    "[task.global_running] broadcast: running=%s non_team_count=%d "
+                    "non_team_modes=%s team_modes=%s stream_rids=%d active_chat_rids=%d",
+                    bool(count), count, non_team_modes, team_modes,
+                    len(self._stream_modes), len(self._active_chat_tasks),
+                )
+            else:
+                logger.info(
+                    "[task.global_running] skip broadcast: web channel 未就绪 "
+                    "(stream_rids=%d active_chat_rids=%d)",
+                    len(self._stream_modes), len(self._active_chat_tasks),
+                )
         except Exception:
             logger.debug("[task.global_running] broadcast failed", exc_info=True)
 
@@ -3763,6 +3795,27 @@ class MessageHandler(ABC):
             if session_id is not None and session_id not in self._stream_sessions.values():
                 # Fallback cleanup when stream exits unexpectedly without evolution end signal.
                 self._evolution_approval.clear_session_in_progress(session_id)
+            # 标注本 rid 退出后是否还会触发 task.global_running 广播。
+            # 若以下分支均不进入 _send_processing_status（其内部会广播），
+            # 则前端保存锁可能卡在最后一次广播值，仅靠重连自愈。
+            _will_broadcast = (
+                emit_processing_status
+                and not cancelled
+                and not has_processing_status_false
+                and not any(
+                    sid == session_id
+                    and self._stream_emits_processing_status.get(active_rid, True)
+                    for active_rid, sid in self._stream_sessions.items()
+                )
+            )
+            logger.info(
+                "[task.global_running] stream 退出: rid=%s cancelled=%s emit=%s "
+                "has_status_false=%s remaining_stream=%d remaining_chat=%d "
+                "will_broadcast_processing_status=%s",
+                rid, cancelled, emit_processing_status, has_processing_status_false,
+                len(self._stream_modes), len(self._active_chat_tasks),
+                _will_broadcast,
+            )
             logger.debug(
                 "[MessageHandler] Stream 任务状态已清理: request_id=%s",
                 rid,

@@ -695,6 +695,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
       // 用后端 ack 携带的 task_running 初始化全局运行态，让新连接/重连窗口立即知道是否有任务在跑。
       setGlobalTaskRunning(Boolean(ackPayload.task_running));
+      // 调试日志：保存锁卡禁用时据此判断是否由 ack 初值导致（新连接/重连窗口）。
+      console.info(
+        '[task.global_running] connection.ack 初始化 task_running=',
+        Boolean(ackPayload.task_running),
+      );
       onConnectRef.current?.(ackPayload);
     },
     [setAvailableTools, setConnected, setGlobalTaskRunning]
@@ -2158,7 +2163,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       // 全局任务运行态快照：后端在任务起止时广播，用于跨窗口配置保存锁。
       // 不走 shouldHandleSessionEvent 过滤（运行态是全局的，不带 session_id）。
       webClient.on('task.global_running', ({ payload }) => {
-        setGlobalTaskRunning(Boolean(payload?.running));
+        const running = Boolean(payload?.running);
+        setGlobalTaskRunning(running);
+        // 调试日志：保存锁卡禁用时据此核对前端收到的快照与后端广播是否一致。
+        console.info(
+          '[task.global_running] 收到广播 running=',
+          running,
+          'count=',
+          payload?.count,
+        );
       }),
       webClient.on('chat.symphony_status', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
