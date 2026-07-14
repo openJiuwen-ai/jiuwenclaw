@@ -195,6 +195,9 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     SkillProtocolPromptRail,
     TaskExecutionRail,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.recent_tool_results_rail import (
+    RecentToolResultsRail,
+)
 from jiuwenclaw.agentserver.deep_agent.rails.context_engineering_rail_ext import (
     normalize_identify_override,
     normalize_soul_override,
@@ -3063,6 +3066,7 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_progressive_tool_rail", self._build_progressive_tool_rail, {"config": config}),
             # DisabledToolsRail - highest priority (100), runs last to filter disabled tools
             _RailBuildInfo("_disabled_tools_rail", self._build_disabled_tools_rail, {"config": config}),
+            _RailBuildInfo("_recent_tool_results_rail", self._build_recent_tool_results_rail),
         ]
         # ContextEngineeringRail 不在冷启动时挂载，由 _update_rails_for_mode 按 mode 按需注册/注销
 
@@ -3134,6 +3138,10 @@ class JiuWenClawDeepAdapter:
         else:
             logger.info("[JiuWenClawDeepAdapter] TaskExecutionRail attached to adapter")
         return rails_list
+
+    @staticmethod
+    def _build_recent_tool_results_rail() -> RecentToolResultsRail:
+        return RecentToolResultsRail()
 
     def _make_deep_agent_config(
             self,

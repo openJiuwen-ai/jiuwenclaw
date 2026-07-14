@@ -32,6 +32,9 @@ from jiuwenclaw.agentserver.tools.subagent_models import (
 )
 from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_subagent_base_prompt
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawContextEngineeringRail
+from jiuwenclaw.agentserver.deep_agent.rails.recent_tool_results_rail import (
+    RecentToolResultsRail,
+)
 from jiuwenclaw.utils import (
     get_agent_registered_skill_dirs,
     get_agent_workspace_dir,
@@ -1016,14 +1019,9 @@ Approach each task methodically and deliver high-quality results.
                 parent_session=parent_session,
                 workspace=workspace_obj,  # Pass workspace for artifact path detection
             ),
-            self._build_thinking_inject_rail(
-                task.thinking,
-                model or self._model,
-                role_id=getattr(task, "role_id", "") or "",
-                agent_id=getattr(task, "task_id", "") or "",
-            ),
-            # active-skill body 的 lift/pin 由 rail.after_tool_call 触发；
-            # include_tools=False：read_file/code/bash 已由 FileSystemRail 注册；
+            RecentToolResultsRail(parent_session=parent_session),
+            # active-skill body 的 lift/pin 由 rail.after_tool_call 触发;
+            # include_tools=False：read_file/code/bash 已由 FileSystemRail 注册;
             # include_skill_body_tools=True：子代理自行注册 skill_tool/skill_complete，
             # 不依赖父 agent 的 SkillUseRail 是否已初始化。
             # 子类版本跳过 before_model_call 的"# 技能"列表渲染（父 prompt 已指明）。
