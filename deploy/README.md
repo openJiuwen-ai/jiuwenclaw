@@ -96,6 +96,7 @@ JiuwenClaw_deployTool_0.0.74k_arm64/
 ├── update_conf.sh                        # 配置更新、重载处理脚本
 ├── update_docker_registry.py             # 镜像仓库地址批量更新工具
 ├── web_handler.sh                        # Web 前端模块部署、运维脚本
+├── log_handler.sh                        # 日志模块部署、运维脚本
 └── templates/                            # 所有 Kubernetes 资源模板配置目录
     ├── gateway-config-jiuwen.template.yaml # 网关业务配置模板
     ├── gateway.template.env                # 网关环境变量配置模板
@@ -109,6 +110,7 @@ JiuwenClaw_deployTool_0.0.74k_arm64/
     ├── claw-pvc.template.yaml              # 业务内置持久卷PVC资源清单模板
     ├── postgresql.template.yaml            # PostgreSQL 数据库 Kubernetes 资源模板
     ├── redis.template.yaml                 # Redis 缓存 Kubernetes 资源模板
+    ├── log.template.yaml                   # 日志模块 Kubernetes 资源模板
     └── web.template.yaml                   # Web 前端 Kubernetes 部署资源模板
 ```
 
@@ -179,6 +181,7 @@ FEISHU_BOTS="
 - **redis**：Redis 服务模块
 - **postgresql**：PostgreSQL 存储服务模块
 - **minio**：Minio 存储服务模块
+- **log**：日志管理模块
 - **gateway**：Gateway 模块
 - **web**：Web 前端页面服务模块
 - **manager**：CLAW-Manager 管理模块
@@ -191,6 +194,7 @@ FEISHU_BOTS="
 ./deploy.sh [操作命令] redis        # 仅操作 Redis 模块
 ./deploy.sh [操作命令] postgresql   # 仅操作 PostgreSQL 模块
 ./deploy.sh [操作命令] minio        # 仅操作 MinIO 模块
+./deploy.sh [操作命令] log          # 仅操作日志管理模块
 ./deploy.sh [操作命令] gateway      # 仅操作 Gateway 模块
 ./deploy.sh [操作命令] web          # 仅操作 Web 模块
 ./deploy.sh [操作命令] manager      # 仅操作 Manager 模块
@@ -210,6 +214,7 @@ FEISHU_BOTS="
 ./deploy.sh up postgresql # 启动 PostgreSQL 存储模块（只需一次）
 ./deploy.sh up minio      # 启动 MinIO 存储模块（只需一次）
 ./deploy.sh up redis      # 启动 Redis 存储模块（只需一次）
+./deploy.sh up log        # 启动日志管理服务模块（只需一次）
 ./deploy.sh up            # 启动 Gateway 服务模块
 ./deploy.sh up manager    # 启动 Manager 管理模块
 ./deploy.sh up web        # 启动 Web 前端模块
@@ -217,6 +222,7 @@ FEISHU_BOTS="
 ./deploy.sh down manager    # 卸载 Manager 管理模块（按需卸载）
 ./deploy.sh down web        # 卸载 Web 前端模块（按需卸载）
 ./deploy.sh down            # 卸载 Gateway 服务模块（按需卸载）
+./deploy.sh down            # 卸载日志管理服务模块（非必要不卸载）
 ./deploy.sh down mysql      # 卸载 MySQL 存储模块（非必要不卸载）
 ./deploy.sh down redis      # 卸载 Redis 存储模块（非必要不卸载）
 ./deploy.sh down postgresql # 卸载 PostgreSQL 存储模块（非必要不卸载）
@@ -227,6 +233,7 @@ FEISHU_BOTS="
 ./deploy.sh restart             # 重启 Gateway 服务模块（按需重启）
 ./deploy.sh restart web         # 重启 Web 前端模块（按需重启）
 ./deploy.sh restart manager     # 重启 Manager 管理模块（按需重启）
+./deploy.sh restart log         # 重启日志管理模块（非必要不重启）
 ./deploy.sh restart mysql       # 重启 MySQL 存储模块（非必要不重启）
 ./deploy.sh restart redis       # 重启 Redis 存储模块（非必要不重启）
 ./deploy.sh restart postgresql  # 重启 PostgreSQL 存储模块（非必要不重启）
@@ -236,7 +243,7 @@ FEISHU_BOTS="
 ```
 
 **重要说明：**
-每当升级新版本服务时，对于**NFS、NFS-SC、MySQL、PostgreSQL、Redis、MinIO** 等全局基础依赖组件应尽量保持不变，无需重复部署。仅需对业务服务**Gateway、Web、CLAW-Manager**进行版本替换：在旧版本部署目录中，依次卸载 业务模块；随后切换至新版本部署工具目录，启动对应新版业务模块。
+每当升级新版本服务时，对于**NFS、NFS-SC、MySQL、PostgreSQL、Redis、MinIO、Log** 等全局基础依赖组件应尽量保持不变，无需重复部署。仅需对业务服务**Gateway、Web、CLAW-Manager**进行版本替换：在旧版本部署目录中，依次卸载 业务模块；随后切换至新版本部署工具目录，启动对应新版业务模块。
 
 ### 2.3 配置参数（选填）
 
@@ -442,13 +449,48 @@ MINIO_SECURE="false"
 ```
 
 #### 3.4.3 使用外部 OBS 服务（待开放）
+### 3.5 部署日志管理服务（可选部署）
+为便于统一采集、查看与治理业务日志，本部署工具提供可自选部署的日志管理模块，基于 Fluent Bit + Vector 架构实现全链路日志采集与处理能力。
 
+**架构分工说明：** 
+- **Fluent Bit**： 以节点级组件部署于所有 K8s 集群节点，负责抓取业务容器原始日志，并将日志数据统一转发至 Vector 服务；
+- **Vector**： 承接日志后续处理工作，完成日志数据脱敏清洗后，将合规日志持久化存储至部署工具运行节点，存储路径由环境变量 CLAW_LOG_DIR 统一指定。
+
+#### 3.5.1 前置配置
+部署日志管理服务前，需在自定义配置文件`.env.custom`中完成如下核心参数配置：
+```
+# 宿主机日志持久化根目录
+# 默认路径：$HOME/claw_logs，生产环境建议手动显式配置，保证日志路径固定有读写权限
+CLAW_LOG_DIR=""
+```
+#### 3.5.2 日志脱敏与输出策略配置
+系统默认策略：业务日志默认输出至容器本地文件，且默认启用业务应用内置日志脱敏能力，日志管理服务（Vector）的脱敏功能默认关闭。
+为优化业务应用运行性能，可关闭业务侧内置脱敏能力与容器本地日志文件输出，统一交由日志管理服务实现日志脱敏、采集、存储全流程管控，需在`.env.custom` 中新增如下配置：
+
+```
+# 日志采集服务（Vector）脱敏功能开关：开启统一日志脱敏处理
+COLLECT_LOG_MASK_ENABLED=true
+
+# 业务应用内置日志脱敏功能开关：关闭业务侧原生脱敏，避免重复处理、提升性能
+LOG_MASK_ENABLED=false
+
+# 业务应用容器本地日志文件输出开关：关闭容器本地文件落盘，减少容器IO开销
+LOG_TO_FILE_ENABLED=false
+```
+
+#### 3.5.3 服务部署命令
+完成上述配置后，执行以下命令一键部署日志管理模块，该模块为可选组件，且仅支持单次部署：
+```
+./deploy.sh up log          # 部署日志模块（可选部署，也只能部署一次）
+```
 
 ## 4 部署JiuwenSwarm企业级服务
 
 JiuwenSwarm 企业级服务完整支持基于 Kubernetes 命名空间的多实例隔离部署，可在同一集群内通过不同命名空间部署多套独立运行的业务实例，实现环境隔离、多实例并行使用。
 
 同一业务实例下的所有组件（Gateway、Web、CLAW-Manager）只有部署在同一个命名空间内才能服务调用和互通。而基础依赖组件（NFS、MySQL、Redis、MinIO、PostgreSQL）为所有业务实例的公共组件，无需随业务实例重复部署。
+
+**注意**： 业务组件请勿部署至 default 默认命名空间，
 
 ### 4.1 部署 Gateway (必选部署)
 
@@ -596,6 +638,11 @@ pod_logs_20260707_163022/
 - 脚本执行前会自动清理当前指定命名空间的历史 kubectl 日志监听进程，避免多进程重复采集、日志重叠问题，且不会影响其他命名空间及其他用户的监听进程。
 - 所有容器日志监听任务均在后台持续运行，实时追加新日志；Pod 新建、重建或重启后需重新执行脚本，接续监听新 Pod 日志。
 - 长时间采集会持续落盘日志，需定期清理历史日志目录，避免磁盘占用过高。
+
+
+### 5.5 启动日志管理服务收集所有业务日志
+
+详情请见["部署日志管理服务"](#35-部署日志管理服务可选部署)
 
 
 # FAQ 

@@ -25,9 +25,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    gateway_log_masking_enabled: bool = Field(
+    log_masking_enabled: bool = Field(
         default=True,
-        validation_alias="GATEWAY_LOG_MASKING_ENABLED",
+        validation_alias="LOG_MASK_ENABLED",
+    )
+    log_to_file_enabled: bool = Field(
+        default=True,
+        validation_alias="LOG_TO_FILE_ENABLED",
     )
     agent_runtime: str = Field(default="", validation_alias="AGENT_RUNTIME")
 

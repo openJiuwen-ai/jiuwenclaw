@@ -1422,12 +1422,17 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
 
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
+
+    环境变量 ``LOG_TO_FILE_ENABLED`` 设为 ``false`` 时，跳过所有文件 handler 的创建与
+    ``$HOME/.logs`` 目录的写入，仅保留控制台输出。
     """
     from jiuwenclaw.infrastructure.config import settings
     from jiuwenclaw.infrastructure.log_masking import SensitiveDataFilter
 
     logs_root = get_logs_dir()
-    logs_root.mkdir(parents=True, exist_ok=True)
+    file_logging_enabled = settings.log_to_file_enabled
+    if file_logging_enabled:
+        logs_root.mkdir(parents=True, exist_ok=True)
 
     levels = _resolve_logging_levels(log_level)
 
@@ -1448,7 +1453,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     privacy_filter: Optional[SensitiveDataFilter] = None
-    if settings.gateway_log_masking_enabled:
+    if settings.log_masking_enabled:
         privacy_filter = SensitiveDataFilter()
 
     def _add_rotating(
@@ -1471,13 +1476,14 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             h.addFilter(privacy_filter)
         root.addHandler(h)
 
-    _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
-    _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
-    _add_rotating("agent_server.log", levels.agent_server,
-        _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
-    _add_rotating("full.log", levels.full, None)
-    json_formatter = JsonOnlyFormatter()
-    _add_rotating("permissions.log", levels.agent_server, _ComponentNameFilter("permissions"), json_formatter)
+    if file_logging_enabled:
+        _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
+        _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
+        _add_rotating("agent_server.log", levels.agent_server,
+            _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
+        _add_rotating("full.log", levels.full, None)
+        json_formatter = JsonOnlyFormatter()
+        _add_rotating("permissions.log", levels.agent_server, _ComponentNameFilter("permissions"), json_formatter)
 
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(levels.console)

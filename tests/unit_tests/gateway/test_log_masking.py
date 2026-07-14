@@ -397,10 +397,10 @@ def test_gateway_log_masking_enabled(monkeypatch, env_value, expected):
     from jiuwenclaw.infrastructure.config import Settings
 
     if env_value is None:
-        monkeypatch.delenv("GATEWAY_LOG_MASKING_ENABLED", raising=False)
+        monkeypatch.delenv("LOG_MASK_ENABLED", raising=False)
     else:
-        monkeypatch.setenv("GATEWAY_LOG_MASKING_ENABLED", env_value)
-    assert Settings().gateway_log_masking_enabled is expected
+        monkeypatch.setenv("LOG_MASK_ENABLED", env_value)
+    assert Settings().log_masking_enabled is expected
 
 
 def test_setup_logger_skips_privacy_filter_when_disabled(monkeypatch):
@@ -409,7 +409,7 @@ def test_setup_logger_skips_privacy_filter_when_disabled(monkeypatch):
     from jiuwenclaw.infrastructure.config import Settings
     from jiuwenclaw.infrastructure.log_masking.filter import SensitiveDataFilter
 
-    monkeypatch.setenv("GATEWAY_LOG_MASKING_ENABLED", "false")
+    monkeypatch.setenv("LOG_MASK_ENABLED", "false")
     import jiuwenclaw.infrastructure.config as infra_config
     import jiuwenclaw.utils as utils_mod
 
@@ -435,7 +435,7 @@ def test_setup_logger_masks_child_logger_via_handlers(monkeypatch, capsys):
     from jiuwenclaw.infrastructure.config import Settings
     from jiuwenclaw.infrastructure.log_masking.filter import SensitiveDataFilter
 
-    monkeypatch.setenv("GATEWAY_LOG_MASKING_ENABLED", "true")
+    monkeypatch.setenv("LOG_MASK_ENABLED", "true")
     import jiuwenclaw.infrastructure.config as infra_config
     import jiuwenclaw.utils as utils_mod
 

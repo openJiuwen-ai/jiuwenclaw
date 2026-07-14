@@ -547,6 +547,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 "AGENT_SERVER_HOST": "0.0.0.0",
                 "TZ": timezone,
                 "HOME": agent_server_home,
+                "LOG_ROOT_PATH": agent_server_home + "/.logs"
             }
 
             for key, value in (
@@ -572,6 +573,8 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 ("AGENT_SERVER_LOG_FILE", os.getenv("AGENT_SERVER_LOG_FILE")),
                 ("CLAW_LINK_AUTH_MODE", os.getenv("CLAW_LINK_AUTH_MODE")),
                 ("CLAW_LINK_TOKEN_TTL", os.getenv("CLAW_LINK_TOKEN_TTL")),
+                ("LOG_MASK_ENABLED", os.getenv("LOG_MASK_ENABLED")),
+                ("LOG_TO_FILE_ENABLED", os.getenv("LOG_TO_FILE_ENABLED")),
             ):
                 if value is not None:
                     base[key] = value
@@ -590,11 +593,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         "JIUWENBOX_FALLBACK_ON_FAILURE": _env_bool("JIUWENBOX_FALLBACK_ON_FAILURE", False),
                     }
                 )
-
-            if mode == "dev":
-                base["LOG_ROOT_PATH"] = "/root/.logs"
-            else:
-                base["LOG_ROOT_PATH"] = "/home/app/.logs"
 
             if agent_custom_envs and agent_custom_envs.strip():
                 try:
