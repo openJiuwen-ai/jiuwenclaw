@@ -365,6 +365,7 @@ def _build_bridge_env(os_env: dict[str, str]) -> dict[str, str]:
     # in-process manager 因 sidecar 的 openjiuwen 版本不同不受影响;子进程必须显式 false
     # (匹配 manager 的 verify_ssl=False 实际效果)。sidecar 若显式设了则尊重。
     env["LLM_SSL_VERIFY"] = os_env.get("LLM_SSL_VERIFY", "false")
+    env["TOOL_SSL_VERIFY"] = os_env.get("TOOL_SSL_VERIFY", "false")
 
     return env
 

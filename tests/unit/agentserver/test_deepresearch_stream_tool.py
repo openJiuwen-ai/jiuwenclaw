@@ -676,6 +676,13 @@ def test_build_bridge_env_maps_global_to_deepsearch_names():
     assert env["WEB_SEARCH_ENGINE_NAME"] == "bocha"
     assert "WEB_SEARCH_URL" not in env  # bocha 无显式 url,不设(有值才设),脚本侧管默认
     assert env["LLM_SSL_VERIFY"] == "false"  # 子进程默认 true 会触发 ssl_cert required
+    assert env["TOOL_SSL_VERIFY"] == "false"  # Petal 同样默认 true 且要求 TOOL_SSL_CERT
+
+
+def test_build_bridge_env_respects_explicit_tool_ssl_verify():
+    env = dt._build_bridge_env({"MODEL_NAME": "m", "TOOL_SSL_VERIFY": "true"})
+
+    assert env["TOOL_SSL_VERIFY"] == "true"
 
 
 def test_build_bridge_env_petal_requires_explicit_url_and_search_key():
