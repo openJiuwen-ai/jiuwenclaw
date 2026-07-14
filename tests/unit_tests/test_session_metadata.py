@@ -1346,7 +1346,13 @@ class TestSyncChatRequestMetadata:
 
     @staticmethod
     def test_collects_and_persists(sessions_dir, clean_model_env):
-        """正常路径：采集 model_name/project_dir/mode → 写盘 → 返回生效 project_dir"""
+        """正常路径：采集 model_name/project_dir/mode → 写盘 → 返回生效 project_dir
+
+        传 req_method=CHAT_SEND 使 is_chat_turn=True，名副其实地验证 chat 轮次刷新
+        last_user_message_at/last_message_at（避免之前因 req_method=None 导致
+        is_chat_turn=False、时间不被刷新、断言却靠 init 时间巧合通过的误导）。
+        """
+        from jiuwenswarm.common.schema.message import ReqMethod
         from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
@@ -1354,8 +1360,11 @@ class TestSyncChatRequestMetadata:
         )
 
         init_session_metadata(session_id="sess_1")  # project_dir 为空
+        # 记录 init 写入的时间，用于断言 _sync 确实刷新了它（而非巧合等于 init 值）
+        lum_before = get_session_metadata("sess_1")["last_user_message_at"]
         req = _make_agent_request(
             params={"model_name": "glm-5", "mode": "code", "project_dir": "E:\\projA"},
+            req_method=ReqMethod.CHAT_SEND,
         )
         # params 显式带了 mode → explicit_mode_provided=True；model_name 内部判断为显式
         effective = _sync_chat_request_metadata(
@@ -1369,7 +1378,8 @@ class TestSyncChatRequestMetadata:
         assert meta["mode"] == "code"
         assert meta["project_dir"] == "E:\\projA"
         assert meta["channel_id"] == "web"
-        # last_user_message_at 被刷新为当前时刻
+        # last_user_message_at 被刷新为当前时刻（chat 轮次 → is_chat_turn=True → 真正写入）
+        assert meta["last_user_message_at"] > lum_before, "chat 轮次应刷新 last_user_message_at"
         assert abs(meta["last_user_message_at"] - time.time()) < 5.0
 
     @staticmethod
