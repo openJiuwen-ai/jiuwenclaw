@@ -23,19 +23,26 @@ resolve_node_arch() {
   esac
 }
 
+# 校验某个目录是一份「能真正跑起来」的 Node：既有 bin/node，又能执行 --version。
+# 比 [[ -x ... ]] 强：能挡住下载损坏 / 架构不匹配 / 只解压了一半的情况。
+node_runs() {
+  local n="$1/bin/node"
+  [[ -x "$n" ]] && "$n" --version >/dev/null 2>&1
+}
+
 # 解析 Node 运行时来源，优先级：$NODE_DIR > vendor/node > nodejs.org 官方下载
 resolve_node_dir() {
-  if [[ -n "${NODE_DIR:-}" && -x "$NODE_DIR/bin/node" ]]; then
+  if [[ -n "${NODE_DIR:-}" ]] && node_runs "$NODE_DIR"; then
     echo "$NODE_DIR"; return
   fi
   local vendored="$PROJECT_ROOT/vendor/node"
-  if [[ -x "$vendored/bin/node" ]]; then
+  if node_runs "$vendored"; then
     echo "$vendored"; return
   fi
   local arch dir url
   arch="$(resolve_node_arch)"
   dir="$vendored"
-  printf 'Downloading Node %s (%s) from nodejs.org...\n' "$NODE_VERSION" "$arch"
+  printf 'Downloading Node %s (%s) from nodejs.org...\n' "$NODE_VERSION" "$arch" >&2
   url="https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-darwin-${arch}.tar.gz"
   mkdir -p "$PROJECT_ROOT/vendor"
 
@@ -53,14 +60,19 @@ resolve_node_dir() {
   fi
 
   tar -xzf "$tarball" -C "$tmpdir"
-  if [[ ! -x "$staged/bin/node" ]]; then
+  if ! node_runs "$staged"; then
     rm -rf "$tmpdir"
-    printf 'Error: extracted tarball missing executable bin/node\n' >&2
+    printf 'Error: extracted tarball has no working bin/node (%s)\n' "$staged" >&2
     return 1
   fi
 
   rm -rf "$dir"          # 仅在替换物校验通过后才删旧缓存
   mv "$staged" "$dir"
+  if ! node_runs "$dir"; then   # 跨卷 mv 可能只搬了一半，落地后再校验一次
+    rm -rf "$dir" "$tmpdir"
+    printf 'Error: node moved into %s but bin/node does not run\n' "$dir" >&2
+    return 1
+  fi
   rm -rf "$tmpdir"
   echo "$dir"
 }
@@ -69,6 +81,12 @@ resolve_node_dir() {
 copy_node_into_app() {
   local src="$1"
   local dest="$APP_PATH/Contents/Resources/node-runtime"
+  # 先确认来源 node 真能跑，否则 cp 会吐出晦涩的 'No such file or directory'。
+  if ! node_runs "$src"; then
+    printf 'Error: node source not usable — %s/bin/node missing or not runnable\n' "$src" >&2
+    printf '       if this is the cached vendor/node, remove it and re-run to re-download.\n' >&2
+    return 1
+  fi
   rm -rf "$dest"
   mkdir -p "$dest"
   # cp -R 保留 npx/npm 符号链接（指向 ../lib/node_modules/...）与可执行位。

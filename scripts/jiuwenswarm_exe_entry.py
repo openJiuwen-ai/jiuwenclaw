@@ -55,6 +55,7 @@ if getattr(sys, "frozen", False):
             _old_path = os.environ.get("PATH", "")
             os.environ["PATH"] = (
                 f"{_node_bin}{os.pathsep}{_old_path}" if _old_path else str(_node_bin)
+            )
     # Windows: use the Node runtime bundled by scripts/build-exe.ps1, when present.
     # This makes browser runtime's default "npx" command work on machines without
     # a system Node.js installation. Frozen child processes inherit this PATH too.
