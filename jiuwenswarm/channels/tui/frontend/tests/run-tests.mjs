@@ -95,4 +95,47 @@ assert.deepEqual(
   ["swarmflows", "workspace"],
 );
 
+const pendingQuestionScreen = Object.create(AppScreen.prototype);
+let pendingQuestionExitCount = 0;
+let pendingQuestionInterruptCount = 0;
+let pendingQuestionRenderCount = 0;
+Object.assign(pendingQuestionScreen, {
+  activeQuestionIndex: 0,
+  ctrlCPendingForQuestion: false,
+  ctrlCPendingForQuestionTimer: null,
+  transientNotice: null,
+  startupPromptList: null,
+  fileViewerState: null,
+  diffViewerState: null,
+  state: {
+    recordActivity: () => undefined,
+    getSnapshot: () => ({
+      pendingQuestion: {
+        requestId: "plan-approval",
+        source: "confirm_interrupt",
+        questions: [{ header: "Exit Plan and Execute", question: planQuestion, options: [] }],
+      },
+    }),
+  },
+  tui: {
+    requestRender: () => {
+      pendingQuestionRenderCount += 1;
+    },
+  },
+  exit: () => {
+    pendingQuestionExitCount += 1;
+  },
+  interruptTask: () => {
+    pendingQuestionInterruptCount += 1;
+  },
+});
+
+pendingQuestionScreen.handleInput("\x03");
+assert.equal(pendingQuestionScreen.transientNotice, "Press Ctrl+C again to exit");
+assert.equal(pendingQuestionExitCount, 0);
+pendingQuestionScreen.handleInput("\x03");
+assert.equal(pendingQuestionExitCount, 1);
+assert.equal(pendingQuestionInterruptCount, 0);
+assert.equal(pendingQuestionRenderCount, 1);
+
 console.log("frontend tests passed");

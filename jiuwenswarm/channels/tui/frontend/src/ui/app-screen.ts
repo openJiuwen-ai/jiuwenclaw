@@ -2261,12 +2261,12 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    // Ctrl+C during pending question: first press shows hint, second press within 1s cancels
+    // Ctrl+C during pending question: first press shows hint, second press within 3s exits
     if (pendingQuestion && matchesKey(data, "ctrl+c")) {
       if (this.ctrlCPendingForQuestion) {
         this.clearCtrlCPendingForQuestion();
         this.transientNotice = null;
-        this.interruptTask();
+        this.exit();
         return;
       }
       this.ctrlCPendingForQuestion = true;
