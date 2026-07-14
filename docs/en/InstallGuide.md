@@ -39,14 +39,14 @@ git --version
 
 ### Option 1: Desktop installer (dmg / exe)
 
-For Windows and macOS users who want a ready-to-run app without setting up Python / Node.js themselves. Download the installer for your platform from the gitcode [Release](https://gitcode.com/openJiuwen/jiuwenswarm/releases) page.
+For Windows and macOS users who want a ready-to-run app without setting up Python / Node.js themselves. Download the installer for your platform from the gitcode [Release](https://github.com/openJiuwen-ai/jiuwenswarm/releases) page.
 
 | Platform | Artifact |
 |----------|----------|
 | Windows | `JiuwenSwarm-setup-<version>.exe` |
 | macOS | `JiuwenSwarm-<version>.dmg` |
 
-Releases: https://gitcode.com/openJiuwen/jiuwenswarm/releases
+Releases: https://github.com/openJiuwen-ai/jiuwenswarm/releases
 
 #### 1. macOS: download the dmg with curl (recommended)
 
@@ -148,7 +148,7 @@ uv --version
 
 ```bash
 # Clone the repository
-git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
+git clone https://github.com/openJiuwen-ai/jiuwenswarm.git
 
 # Enter project directory
 cd jiuwenswarm
@@ -164,7 +164,7 @@ uv pip install -e .
 
 ```bash
 # Enter front-end directory (repo root is jiuwenswarm)
-cd jiuwenswarm/channels/web
+cd jiuwenswarm/channels/web/frontend
 
 # Install front-end dependencies
 npm install
@@ -246,7 +246,7 @@ conda activate jiuwenswarm
 
 ```bash
 # Clone the repository
-git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
+git clone https://github.com/openJiuwen-ai/jiuwenswarm.git
 
 # Enter project directory
 cd jiuwenswarm
@@ -504,8 +504,8 @@ pip uninstall jiuwenswarm
 
 ## Related links
 
-- **Repository:** https://gitcode.com/openJiuwen/jiuwenswarm
-- **Issues:** https://gitcode.com/openJiuwen/jiuwenswarm/issues
+- **Repository:** https://github.com/openJiuwen-ai/jiuwenswarm
+- **Issues:** https://github.com/openJiuwen-ai/jiuwenswarm/issues
 - **Docs:** https://gitcode.com/openJiuwen/jiuwenswarm/tree/develop/docs
 
 ---

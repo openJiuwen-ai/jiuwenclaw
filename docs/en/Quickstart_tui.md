@@ -8,7 +8,7 @@ JiuwenSwarm provides two installation methods: `pip install` or `install from so
 
 - Download JiuwenSwarm code:
   ```bash
-  git clone https://gitcode.com/openjiuwen/jiuwenswarm.git
+  git clone https://github.com/openJiuwen-ai/jiuwenswarm.git
   ```
 - Environment dependencies:
   - Python: >=3.11, <3.14
