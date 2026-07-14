@@ -685,7 +685,10 @@ def _sync_chat_request_metadata(
       未显式携带（如只读 RPC）则保持磁盘原值，不把进程 MODEL_NAME 默认值回写覆盖
       用户在该会话用 /model 切换过的模型。是否显式由本函数内部从 params 判断
       （model_name 不会被规范化改写，可安全在本函数内取），无需调用方传入。
-    - last_user_message_at：覆盖式（每次请求刷新为当前时刻）
+    - last_user_message_at：**仅 chat 轮次刷新**——只有用户真正发消息的方法
+      （CHAT_SEND / CHAT_RESUME / CHAT_ANSWER）才把当前时刻写入；其余请求（含只读
+      RPC）传 ``None`` → ``sync_session_request_metadata`` 不覆盖磁盘值，避免只读查询
+      把历史会话的排序时间刷新成「现在」（点击技能按钮就把两天前会话置顶）。
     - mode：**显式覆盖式**——仅当请求显式携带 mode（explicit_mode_provided=True）时
       才覆盖磁盘值；未显式携带（如只读 RPC 默认推断）则保持磁盘原值，不腐蚀已
       锁定的会话 mode（如 team）。因 _apply_resolved_mode_to_request 会把 canonical
@@ -722,6 +725,9 @@ def _sync_chat_request_metadata(
         if isinstance(request_cron_id, str) and request_cron_id.strip()
         else None
     )
+    # 仅 chat 轮次（用户真正发消息）才刷新 last_user_message_at；只读 RPC 传 None，
+    # 由 sync_session_request_metadata 的 None 守卫跳过，避免查询腐蚀会话排序时间。
+    is_chat_turn = request.req_method in _CODE_MODE_SYNC_METHODS
     try:
         from jiuwenswarm.server.runtime.session.session_metadata import (
             sync_session_request_metadata,
@@ -735,7 +741,10 @@ def _sync_chat_request_metadata(
             project_dir=str(project_dir) if project_dir else None,
             project_id=request_project_id,
             cron_id=request_cron_id,
-            last_user_message_at=_dt.datetime.now(_dt.timezone.utc).timestamp(),
+            last_user_message_at=(
+                _dt.datetime.now(_dt.timezone.utc).timestamp() if is_chat_turn else None
+            ),
+            is_chat_turn=is_chat_turn,
             explicit_mode_provided=explicit_mode_provided,
             explicit_model_provided=explicit_model_provided,
         )
@@ -6422,7 +6431,7 @@ class AgentWebSocketServer:
                 )
                 wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
                 async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                    await send_wire_payload(ws, wire)
                 return
 
             # 会话目录已存在则拒绝,避免覆盖既有会话元数据(与 web 本地 handler 一致)
@@ -6436,7 +6445,7 @@ class AgentWebSocketServer:
                 )
                 wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
                 async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                    await send_wire_payload(ws, wire)
                 return
 
             # 初始化会话元数据(同步写盘),将 project_dir/project_id 等字段落盘
