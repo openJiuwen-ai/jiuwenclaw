@@ -43,6 +43,9 @@ declare -A CONFIG=(
     ["MINIO_TEMPLATE_FILE"]="${TEMPLATE_DIR}/minio.template.yaml"
     ["MINIO_FILE"]="${CONFIG_DIR}/minio.yaml"
 
+    ["LOG_TEMPLATE_FILE"]="${TEMPLATE_DIR}/log.template.yaml"
+    ["LOG_FILE"]="${CONFIG_DIR}/log.yaml"
+
     ["WEB_TEMPLATE_FILE"]="${TEMPLATE_DIR}/web.template.yaml"
     ["WEB_FILE"]="${CONFIG_DIR}/web.yaml"
 
@@ -70,8 +73,7 @@ declare -A ARGS=(
 
 
 # ==== All available modules ====
-#declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB" "MANAGER")
-declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "GATEWAY" "WEB" "MANAGER")
+declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "LOG" "GATEWAY" "WEB" "MANAGER")
 
 declare -ga MODULES=()
 
@@ -92,6 +94,7 @@ declare -A DEPLOY_VARS=(
     ["CLAW_CODE_POD_PATH"]="/app/jiuwenclaw"
     ["CLAW_MOUNT_TYPE"]="pvc"
     ["CLAW_STORAGE_SIZE"]="1Gi"
+    ["COLLECT_LOG_MASK_ENABLED"]="false"
     ["DB_TYPE"]="sqlite"
     ["DEPLOYMENT_MODE"]="standalone"
     ["ENTERPRISE_WEB_WS_PORT"]="19000"
@@ -102,7 +105,8 @@ declare -A DEPLOY_VARS=(
     ["ENABLE_EXTERNAL_POSTGRES"]="false"
     ["ENABLE_EXTERNAL_RABBITMQ"]="false"
     ["ENABLE_EXTERNAL_REDIS"]="false"
-    ["ENABLE_GATEWAY_SCHED_LABEL"]="false"
+    ["FLUENT_BIT_NAME"]="fluent-bit"
+    ["FLUENT_BIT_IMAGE"]="fluent/fluent-bit:3.0.0"
     ["FUNC_SVC_NAME"]="0@jiuwen@clawtest"
     ["GATEWAY_CLAW_WS_PING_INTERVAL"]="20.0"
     ["GATEWAY_CLAW_WS_PING_TIMEOUT"]="20.0"
@@ -114,7 +118,9 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_DB_POOL_TIMEOUT"]="30"
     ["GATEWAY_ENV_FILE_NAME"]="jiuwenclaw-gateway-env"
     ["GATEWAY_INSTANCE_ID"]=""
-    ["GATEWAY_LOG_MASKING_ENABLED"]="true"
+    ["GATEWAY_SCHED_LABEL_ENABLED"]="false"
+    ["LOG_MASK_ENABLED"]="true"
+    ["LOG_TO_FILE_ENABLED"]="true"
     ["GATEWAY_NAME"]="jiuwenclaw-gateway"
     ["GATEWAY_PG_SCHEMA"]="public"
     ["GATEWAY_REPLICAS"]="1"
@@ -183,6 +189,8 @@ declare -A DEPLOY_VARS=(
     ["RUNTIME_CODE_PATH"]=""
     ["RUNTIME_CODE_POD_PATH"]="/usr/local/lib/python3.11/site-packages/openjiuwen_runtime"
     ["TIMEZONE"]="Asia/Shanghai"
+    ["VECTOR_NAME"]="vector-receiver"
+    ["VECTOR_IMAGE"]="timberio/vector:0.40.0-alpine"
     ["WEB_NAME"]="jiuwenclaw-web"
     ["WS_ALLOWED_ORIGINS"]=""
     ["WS_ORIGIN_CHECK_ENABLED"]="false"

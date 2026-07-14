@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 set -euo >/dev/null 2>&1
 
-source "global_vars.sh"
 source "common.sh"
-source "cmd_handler.sh"
+source "global_vars.sh"
 source "args_handler.sh"
 source "check_handler.sh"
+source "cmd_handler.sh"
 source "envfile_handler.sh"
-source "k8s_handler.sh"
 source "template_handler.sh"
+source "k8s_handler.sh"
+source "ports_handler.sh"
 source "nfs_handler.sh"
-source "oyr_handler.sh"
-source "gateway_handler.sh"
-source "web_handler.sh"
-source "rabbitmq_handler.sh"
 source "mysql_handler.sh"
-source "redis_handler.sh"
 source "postgresql_handler.sh"
 source "minio_handler.sh"
+source "rabbitmq_handler.sh"
+source "redis_handler.sh"
+source "log_handler.sh"
+source "gateway_handler.sh"
 source "manager_handler.sh"
-source "ports_handler.sh"
+source "web_handler.sh"
+source "oyr_handler.sh"
 
 process_up() {
     # MODULES是ALL_MODULES的子集，启动顺序正着来

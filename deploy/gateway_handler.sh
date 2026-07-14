@@ -70,7 +70,7 @@ gen_gateway_file() {
     local mode="${DEPLOY_VARS["MODE"]}"
     local template_file="${CONFIG["GATEWAY_TEMPLATE_FILE"]}"
     local file="${CONFIG["GATEWAY_FILE"]}"
-    local enable_gw_lable="${DEPLOY_VARS["ENABLE_GATEWAY_SCHED_LABEL"]}"
+    local enable_gw_lable="${DEPLOY_VARS["GATEWAY_SCHED_LABEL_ENABLED"]}"
 
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
     if [ "${client_type}" != "jiuwen" ]; then

@@ -98,27 +98,16 @@ check_cluster_has_enough_nodes() {
     success "Cluster has ${node_count} Ready nodes, check passed!"
 }
 
-check_if_yr_exist()
-{
-    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-
-    if helm list -n ${namespace} --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
-        error "${namespace}/${OYL_CHART_NAME} is already deployed. Please uninstall it first with: ./$(basename "$0") down yr_claw"
-    fi
-}
-
-check_if_yr_claw_up() {
-    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-    local name="function-agent-${DEPLOY_VARS["POOL_ID"]}"
-    local err_msg="YR_CLAW is not deployed. Please deploy it first with: ./$(basename "$0") up yr_claw"
-
-    if ! helm list -n ${namespace} --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
-        error ${err_msg}
+check_dependency(){
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+        return
     fi
 
-    if ! check_k8s_resource_exists "deployment" "${name}" "${namespace}"; then
-        error ${err_msg}
-    fi
+    check_cmds
+    check_if_master
+    check_if_root
+    check_ssh_connectivity
+    check_cluster_has_enough_nodes
 }
 
 check_if_nfs_up() {
@@ -154,34 +143,6 @@ check_if_nfs_sc_up() {
 
     DEPLOY_VARS["CLAW_PVC"]="jiuwenclaw-pvc"
 }
-
-
-check_if_rabbitmq_up() {
-    local name="${DEPLOY_VARS["RABBITMQ_NAME"]}"
-    local user=${DEPLOY_VARS["RABBITMQ_USER"]}
-    local password=${DEPLOY_VARS["RABBITMQ_PASSWORD"]}
-    local url=""
-    local encoded_password=$(urlencode "$password")
-
-    # Check if external RABBITMQ server
-    if [ -n "${DEPLOY_VARS["RABBITMQ_URL"]:-}" ]; then
-        info "Use external RABBITMQ server"
-        url="${DEPLOY_VARS["RABBITMQ_URL"]}"
-        DEPLOY_VARS["MANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
-        DEPLOY_VARS["ENABLE_EXTERNAL_RABBITMQ"]="true"
-        return
-    fi
-
-    # No Build-In RABBITMQ server
-    if ! check_k8s_resource_exists "statefulset" "${name}"; then
-        error "RABBITMQ is not deployed. Please deploy it first with: ./$(basename "$0") up rabbitmq"
-    fi
-
-    info "Use built-in RABBITMQ server"
-    url="${name}-headless.default:5672"
-    DEPLOY_VARS["MANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
-}
-
 
 check_if_mysql_up() {
     local name="${DEPLOY_VARS["MYSQL_NAME"]}"
@@ -318,7 +279,6 @@ check_if_obs_up() {
     check_if_minio_up
 }
 
-
 check_if_redis_up() {
     local mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]:-standalone}"
     local name="${DEPLOY_VARS["REDIS_NAME"]}"
@@ -344,16 +304,30 @@ check_if_redis_up() {
     DEPLOY_VARS["REDIS_PORT"]="6379"
 }
 
-check_dependency(){
-    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+check_if_rabbitmq_up() {
+    local name="${DEPLOY_VARS["RABBITMQ_NAME"]}"
+    local user=${DEPLOY_VARS["RABBITMQ_USER"]}
+    local password=${DEPLOY_VARS["RABBITMQ_PASSWORD"]}
+    local url=""
+    local encoded_password=$(urlencode "$password")
+
+    # Check if external RABBITMQ server
+    if [ -n "${DEPLOY_VARS["RABBITMQ_URL"]:-}" ]; then
+        info "Use external RABBITMQ server"
+        url="${DEPLOY_VARS["RABBITMQ_URL"]}"
+        DEPLOY_VARS["MANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
+        DEPLOY_VARS["ENABLE_EXTERNAL_RABBITMQ"]="true"
         return
     fi
 
-    check_cmds
-    check_if_master
-    check_if_root
-    check_ssh_connectivity
-    check_cluster_has_enough_nodes
+    # No Build-In RABBITMQ server
+    if ! check_k8s_resource_exists "statefulset" "${name}"; then
+        error "RABBITMQ is not deployed. Please deploy it first with: ./$(basename "$0") up rabbitmq"
+    fi
+
+    info "Use built-in RABBITMQ server"
+    url="${name}-headless.default:5672"
+    DEPLOY_VARS["MANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
 }
 
 check_nfs_up_dependency(){
@@ -375,62 +349,6 @@ check_nfs_up_dependency(){
 
 check_nfs_sc_up_dependency(){
     check_if_nfs_up
-}
-
-check_yr_claw_up_dependency(){
-    check_if_nfs_up
-    check_if_yr_exist
-}
-
-
-check_gateway_up_dependency(){
-    local jiuwenclaw_path="${DEPLOY_VARS["NFS_POD_PATH"]}/jiuwenclaw"
-    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
-
-    if [ "${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" == "nfs" ]; then
-        check_if_nfs_up
-
-        if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
-            info "Preparing JiuwenClaw data directory: ${jiuwenclaw_path}"
-            local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
-            info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}\""
-            kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}"
-            success "JiuwenClaw directory created successfully in NFS Pod!"
-        fi
-    elif [ "${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" == "pvc" ]; then
-        check_if_nfs_sc_up
-    fi
-
-    check_if_db_up
-    check_if_redis_up
-}
-
-check_redis_up_dependency() {
-    info "Redis module has no extra prerequisites (deploys to default namespace)"
-}
-
-check_web_up_dependency(){
-    check_if_obs_up
-
-    if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["GATEWAY_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
-        error "GATEWAY is not deployed. Please deploy it first with: ./$(basename "$0") up gateway"
-    fi
-}
-
-check_rabbitmq_up_dependency(){
-    local rabbit_path="${DEPLOY_VARS["NFS_POD_PATH"]}/${DEPLOY_VARS["RABBITMQ_NAME"]}"
-    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
-
-    check_if_nfs_up
-
-    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
-        info "Preparing RabbitMQ data directory: ${rabbit_path}"
-        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
-
-        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${rabbit_path}\""
-        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${rabbit_path}"
-        success "RabbitMQ directory created successfully in NFS Pod!"
-    fi
 }
 
 check_mysql_up_dependency(){
@@ -481,7 +399,95 @@ check_minio_up_dependency(){
     fi
 }
 
+check_redis_up_dependency() {
+    info "Redis module has no extra prerequisites (deploys to default namespace)"
+}
+
+check_rabbitmq_up_dependency(){
+    local rabbit_path="${DEPLOY_VARS["NFS_POD_PATH"]}/${DEPLOY_VARS["RABBITMQ_NAME"]}"
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
+    check_if_nfs_up
+
+    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+        info "Preparing RabbitMQ data directory: ${rabbit_path}"
+        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+
+        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${rabbit_path}\""
+        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${rabbit_path}"
+        success "RabbitMQ directory created successfully in NFS Pod!"
+    fi
+}
+
+check_log_up_dependency(){
+    if [ -z "${DEPLOY_VARS["CLAW_LOG_DIR"]:-}" ]; then
+        DEPLOY_VARS["CLAW_LOG_DIR"]="${HOME}/claw_logs"
+    fi
+
+    local log_dir="${DEPLOY_VARS["CLAW_LOG_DIR"]}"
+    exec_cmd mkdir -p "${log_dir}"
+    exec_cmd chmod 755 "${log_dir}"
+}
+
+check_gateway_up_dependency(){
+    local jiuwenclaw_path="${DEPLOY_VARS["NFS_POD_PATH"]}/jiuwenclaw"
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
+    if [ "${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" == "nfs" ]; then
+        check_if_nfs_up
+
+        if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+            info "Preparing JiuwenClaw data directory: ${jiuwenclaw_path}"
+            local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+            info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}\""
+            kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}"
+            success "JiuwenClaw directory created successfully in NFS Pod!"
+        fi
+    elif [ "${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" == "pvc" ]; then
+        check_if_nfs_sc_up
+    fi
+
+    check_if_db_up
+    check_if_redis_up
+}
+
+check_web_up_dependency(){
+    check_if_obs_up
+
+    if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["GATEWAY_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
+        error "GATEWAY is not deployed. Please deploy it first with: ./$(basename "$0") up gateway"
+    fi
+}
+
 check_manager_up_dependency(){
     #check_if_rabbitmq_up
     check_if_db_up
+}
+
+check_if_yr_exist()
+{
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+
+    if helm list -n ${namespace} --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
+        error "${namespace}/${OYL_CHART_NAME} is already deployed. Please uninstall it first with: ./$(basename "$0") down yr_claw"
+    fi
+}
+
+check_if_yr_claw_up() {
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    local name="function-agent-${DEPLOY_VARS["POOL_ID"]}"
+    local err_msg="YR_CLAW is not deployed. Please deploy it first with: ./$(basename "$0") up yr_claw"
+
+    if ! helm list -n ${namespace} --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
+        error ${err_msg}
+    fi
+
+    if ! check_k8s_resource_exists "deployment" "${name}" "${namespace}"; then
+        error ${err_msg}
+    fi
+}
+
+check_yr_claw_up_dependency(){
+    check_if_nfs_up
+    check_if_yr_exist
 }

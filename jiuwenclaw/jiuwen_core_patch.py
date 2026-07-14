@@ -214,6 +214,9 @@ def configure_openjiuwen_logging_under_jiuwenclaw(subdir: str = "openjiuwen") ->
     helper keeps openjiuwen's existing run/interface/performance layout while
     moving that root to ``<jiuwenclaw logs>/<subdir>``.
 
+    当 ``LOG_TO_FILE_ENABLED=false`` 时，仅保留 openjiuwen 的控制台输出，跳过
+    ``<jiuwenclaw logs>/<subdir>`` 目录与所有文件 handler 的创建。
+
     Also sets ``propagate=False`` so each structured line is not mirrored again
     via the root logger (stdout was previously duplicated at ~2x volume).
     """
@@ -224,11 +227,23 @@ def configure_openjiuwen_logging_under_jiuwenclaw(subdir: str = "openjiuwen") ->
             get_log_config_snapshot,
         )
         from jiuwenclaw.utils import get_logs_dir
+        from jiuwenclaw.infrastructure.config import settings
+
+        config = get_log_config_snapshot()
+
+        if not settings.log_to_file_enabled:
+            changed = False
+            for _key in ("output", "interface_output", "performance_output"):
+                if config.get(_key) != ["console"]:
+                    config[_key] = ["console"]
+                    changed = True
+            if changed:
+                configure_log_config(config)
+            return
 
         log_root = get_logs_dir() / subdir
         log_root.mkdir(parents=True, exist_ok=True)
 
-        config = get_log_config_snapshot()
         target = str(log_root)
         changed = False
         if config.get("log_path") != target:
