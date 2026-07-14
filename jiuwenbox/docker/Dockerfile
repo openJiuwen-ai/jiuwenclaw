@@ -48,6 +48,7 @@ RUN yum makecache \
         vim \
         unzip
 
+RUN useradd --create-home --shell /bin/bash app
 
 WORKDIR /app
 

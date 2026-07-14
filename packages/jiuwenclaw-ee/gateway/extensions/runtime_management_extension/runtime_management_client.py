@@ -575,6 +575,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 ("CLAW_LINK_TOKEN_TTL", os.getenv("CLAW_LINK_TOKEN_TTL")),
                 ("LOG_MASK_ENABLED", os.getenv("LOG_MASK_ENABLED")),
                 ("LOG_TO_FILE_ENABLED", os.getenv("LOG_TO_FILE_ENABLED")),
+                ("STREAMING_TOOL_WAIT_TIMEOUT_S", os.getenv("STREAMING_TOOL_WAIT_TIMEOUT_S")),
             ):
                 if value is not None:
                     base[key] = value

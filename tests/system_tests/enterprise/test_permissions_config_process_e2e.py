@@ -66,7 +66,6 @@ E2E_PERMISSIONS_BODY = {
     "file_guard": {
         "workspace": {"rw_enabled": True, "description": "e2e"},
         "global": {},
-        "trusted_exec_directory": [],
         "tool_bindings": {},
     },
 }

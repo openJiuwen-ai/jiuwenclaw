@@ -30,6 +30,112 @@ _retry_session: ContextVar[Optional[Any]] = ContextVar("retry_session", default=
 _ORIGINAL_BUILD_REQUEST_PARAMS = None
 _OPENJIUWEN_LOG_HANDLER_PATCHED = False
 _SKIP_TOOL_TOOL_MESSAGE_PATCHED = False
+_STREAMING_TOOL_WAIT_TIMEOUT_PATCHED = False
+
+# Default wall-clock budget for StreamingToolExecutor.wait_all().
+# Set STREAMING_TOOL_WAIT_TIMEOUT_S=0 (or negative) to disable and keep upstream behavior.
+# Prefer agent-core DEFAULT_WAIT_ALL_TIMEOUT_S (180) when openjiuwen already ships timeout.
+_DEFAULT_STREAMING_TOOL_WAIT_TIMEOUT_S = 180.0
+
+
+def _resolve_streaming_tool_wait_timeout_s(
+    *,
+    default: float = _DEFAULT_STREAMING_TOOL_WAIT_TIMEOUT_S,
+) -> Optional[float]:
+    """Return wait_all timeout seconds, or None to disable."""
+    raw = os.environ.get("STREAMING_TOOL_WAIT_TIMEOUT_S", str(default))
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if value <= 0:
+        return None
+    return value
+
+
+def _patch_streaming_tool_wait_timeout() -> None:
+    """Prevent ReAct from hanging forever on stuck tool tasks.
+
+    Prefer native agent-core ``StreamingToolExecutor.wait_all(timeout=...)``.
+    Only monkey-patch when the installed openjiuwen build has no timeout.
+
+    Env ``STREAMING_TOOL_WAIT_TIMEOUT_S`` overrides the default (180s) when
+    the shim is active; ``<=0`` disables.
+    """
+    global _STREAMING_TOOL_WAIT_TIMEOUT_PATCHED
+    if _STREAMING_TOOL_WAIT_TIMEOUT_PATCHED:
+        return
+    try:
+        from openjiuwen.core.operator import streaming_tool_executor as ste  # type: ignore
+    except ImportError:
+        return
+
+    _orig_wait_all = ste.StreamingToolExecutor.wait_all
+
+    # Native agent-core already implements timeout — do not wrap again.
+    if "timeout" in getattr(_orig_wait_all, "__code__", type("_", (), {"co_varnames": ()})).co_varnames:
+        native_default = getattr(ste, "DEFAULT_WAIT_ALL_TIMEOUT_S", None)
+        _STREAMING_TOOL_WAIT_TIMEOUT_PATCHED = True
+        llm_logger.info(
+            "StreamingToolExecutor.wait_all timeout already native "
+            "(DEFAULT_WAIT_ALL_TIMEOUT_S=%s); skip claw shim",
+            native_default,
+        )
+        return
+
+    async def _patched_wait_all(self, timeout=...):
+        # Ellipsis => resolve from env (default 180s). Explicit None => no timeout.
+        # Uses only public cancel_all / wait_all (G.CLS.11); remaps CancelledError
+        # from cancel-on-timeout to TimeoutError for the ReAct loop.
+        if timeout is ...:
+            timeout = _resolve_streaming_tool_wait_timeout_s()
+        if timeout is None:
+            return await _orig_wait_all(self)
+
+        try:
+            return await asyncio.wait_for(_orig_wait_all(self), timeout=float(timeout))
+        except asyncio.TimeoutError:
+            # wait_for cancels wait_all → gather may already have cancelled tool
+            # tasks (they land as CancelledError). cancel_all() then drain via
+            # public wait_all and remap cancel to TimeoutError.
+            llm_logger.warning(
+                "StreamingToolExecutor wait_all timed out after %.1fs; "
+                "cancelling pending tools",
+                float(timeout),
+            )
+            self.cancel_all()
+            grace = min(5.0, float(timeout))
+            try:
+                results = await asyncio.wait_for(_orig_wait_all(self), timeout=grace)
+            except asyncio.TimeoutError:
+                llm_logger.warning(
+                    "StreamingToolExecutor tool task(s) still running "
+                    "after cancel grace=%.1fs; draining via wait_all",
+                    grace,
+                )
+                results = await _orig_wait_all(self)
+
+            remapped = []
+            for tool_call, value in results:
+                name = getattr(tool_call, "name", "?")
+                if isinstance(value, asyncio.CancelledError):
+                    remapped.append(
+                        (
+                            tool_call,
+                            TimeoutError(f"Tool timed out after {timeout}s: {name}"),
+                        )
+                    )
+                else:
+                    remapped.append((tool_call, value))
+            return remapped
+
+    ste.StreamingToolExecutor.wait_all = _patched_wait_all  # type: ignore[method-assign]
+    _STREAMING_TOOL_WAIT_TIMEOUT_PATCHED = True
+    llm_logger.info(
+        "StreamingToolExecutor.wait_all timeout patch applied "
+        "(STREAMING_TOOL_WAIT_TIMEOUT_S default=%s)",
+        _DEFAULT_STREAMING_TOOL_WAIT_TIMEOUT_S,
+    )
 
 
 def apply_openjiuwen_safe_log_handler_patch() -> None:
@@ -110,6 +216,9 @@ def configure_openjiuwen_logging_under_jiuwenclaw(subdir: str = "openjiuwen") ->
 
     当 ``LOG_TO_FILE_ENABLED=false`` 时，仅保留 openjiuwen 的控制台输出，跳过
     ``<jiuwenclaw logs>/<subdir>`` 目录与所有文件 handler 的创建。
+
+    Also sets ``propagate=False`` so each structured line is not mirrored again
+    via the root logger (stdout was previously duplicated at ~2x volume).
     """
     apply_openjiuwen_safe_log_handler_patch()
     try:
@@ -136,11 +245,17 @@ def configure_openjiuwen_logging_under_jiuwenclaw(subdir: str = "openjiuwen") ->
         log_root.mkdir(parents=True, exist_ok=True)
 
         target = str(log_root)
-        if config.get("log_path") == target:
-            return
-
-        config["log_path"] = target
-        configure_log_config(config)
+        changed = False
+        if config.get("log_path") != target:
+            config["log_path"] = target
+            changed = True
+        # openjiuwen defaults propagate=True; with console output enabled that
+        # doubles every structured record onto the process root/stdout handlers.
+        if config.get("propagate", True):
+            config["propagate"] = False
+            changed = True
+        if changed:
+            configure_log_config(config)
     except Exception as exc:
         llm_logger.warning(
             "Failed to route openjiuwen logs under JiuwenClaw log dir: %s",
@@ -885,6 +1000,7 @@ def apply_openai_model_client_patch() -> None:
     OpenAIModelClient.stream = PatchOpenAIModelClient.stream
     _patch_skip_tool_tool_message()
     _patch_railed_model_call_session()
+    _patch_streaming_tool_wait_timeout()
     _static_attrs = ('_extract_error_details', '_extract_retry_after', '_raise_mock_error')
     _instance_attrs = (
         '_stream_with_retry', '_invoke_with_retry',

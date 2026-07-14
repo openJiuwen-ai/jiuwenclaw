@@ -664,18 +664,17 @@ permissions:
       thinking:
         type: disabled
 
-  # Phase-1: 文件路径三轴权限（read / write / exec）。
-  # - workspace: agent workspace 内的读写默认放行（rw_enabled=false 时所有内部读写也要审批）
-  # - global:    workspace 外的读写白名单（最长前缀匹配）；
-  #              entry 形如 {read_enable: true, write_enable: false}
-  # - trusted_exec_directory: 允许「通过解释器执行」的脚本目录前缀列表
+  # Phase-1: 文件路径权限（read / write / exec 均在 global 三态）。
+  # - workspace: agent workspace 内的读写默认放行（rw_enabled=false 时内部读写也要审批）；不影响 exec
+  # - global:    最长前缀匹配；entry 形如
+  #              {read: allow|deny|ask, write: allow|deny|ask, exec: allow|deny|ask}
+  #              缺省未写视为 ask；read/write 的 deny 可穿透 workspace；相对路径相对 workspace。
   # - tool_bindings: 在不改代码的情况下把额外工具的某个参数注册为 read / write / exec
   file_guard:
     workspace:
       rw_enabled: true
       description: "Agent workspace 内默认放行 read / write"
     global: {}
-    trusted_exec_directory: []
     tool_bindings: {}
 
   # 兼容键：旧 external_directory 在加载时会被自动迁移到 file_guard.global，

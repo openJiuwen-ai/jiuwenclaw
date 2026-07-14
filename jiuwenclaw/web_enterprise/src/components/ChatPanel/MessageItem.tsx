@@ -10,7 +10,7 @@ import { Message, FileDownloadItem } from '../../types';
 import { StreamingContent } from './StreamingContent';
 import { ToolCallDisplay } from './ToolCallDisplay';
 import { MediaRenderer } from './MediaRenderer';
-import { formatTimestamp, onTtsStop, sanitizeTtsText } from '../../utils';
+import { formatTimestamp, onTtsStop, sanitizeTtsText, normalizeFinalDisplayText } from '../../utils';
 import { useSpeechSynthesis } from '../../hooks';
 import clsx from 'clsx';
 import ReactMarkdown from 'react-markdown';
@@ -117,7 +117,9 @@ export function MessageItem({ message, autoSpeak = false }: MessageItemProps) {
 
   const handleCopy = useCallback(async () => {
     if (!content) return;
-    const text = typeof content === 'string' ? content : String(content);
+    const text = normalizeFinalDisplayText(
+      typeof content === 'string' ? content : String(content)
+    );
     let ok = false;
     try {
       if (navigator.clipboard && window.isSecureContext) {

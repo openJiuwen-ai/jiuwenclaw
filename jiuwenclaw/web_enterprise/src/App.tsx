@@ -25,6 +25,7 @@ import {
 } from './features/tool-events/toolEventNormalizer';
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
+import { setToolResultDisplayMaxChars } from './utils/formatters';
 import { AgentMode, UserAnswer, ChatSendFile, ModelEntry } from './types';
 import {
   useSessionStore,
@@ -413,6 +414,10 @@ function AppContent() {
     }
     await fetchModels();
   }, [request, t, fetchModels]);
+
+  useEffect(() => {
+    setToolResultDisplayMaxChars(serverConfig?.tool_result_display_max_chars);
+  }, [serverConfig?.tool_result_display_max_chars]);
 
   const clearRestartAutoCloseTimer = useCallback(() => {
     if (restartAutoCloseTimerRef.current != null) {
