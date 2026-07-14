@@ -2,38 +2,40 @@
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 import time
 
+import httpx
 import pytest
 
 from tests.system_tests.test_utils import ChaosInjector
 
+# Docker Engine API via Unix socket (replaces subprocess docker CLI calls)
+_DOCKER_SOCKET = "/var/run/docker.sock"
+_DOCKER_API_BASE = "http://localhost"
 
-def resolve_docker_path() -> str:
-    """Resolve docker binary path via PATH lookup, with fallback."""
-    return shutil.which("docker") or ""
+
+def build_docker_client() -> httpx.Client:
+    """Build an httpx client connected to Docker Engine API via Unix socket."""
+    return httpx.Client(
+        transport=httpx.HTTPTransport(uds=_DOCKER_SOCKET),
+        base_url=_DOCKER_API_BASE,
+        timeout=10.0,
+    )
 
 
 def get_docker_restart_policy(container_name: str) -> str:
-    """Query docker container restart policy.
+    """Query docker container restart policy via Engine API.
 
     Returns the restart policy string, or empty string if unavailable.
     """
-    docker = resolve_docker_path()
-    if not docker:
-        return ""
     try:
-        result = subprocess.run(
-            [docker, "inspect", "--format", "{{.HostConfig.RestartPolicy.Name}}", container_name],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            return ""
-        return result.stdout.strip()
-    except (OSError, subprocess.SubprocessError):
+        with build_docker_client() as client:
+            resp = client.get(f"/containers/{container_name}/json")
+            if resp.status_code != 200:
+                return ""
+            data = resp.json()
+            return data.get("HostConfig", {}).get("RestartPolicy", {}).get("Name", "")
+    except Exception:
         return ""
 
 
@@ -76,13 +78,11 @@ class TestReliability:
             )
 
         try:
-            docker = resolve_docker_path()
-            if not docker:
-                pytest.skip("Docker not available")
-            result = subprocess.run([docker, "kill", "jiuwenbox-server"], capture_output=True, text=True)
-            if result.returncode != 0:
-                pytest.skip("Docker container not running")
-        except (OSError, subprocess.SubprocessError):
+            with build_docker_client() as docker_client:
+                resp = docker_client.post("/containers/jiuwenbox-server/kill")
+                if resp.status_code not in (200, 204):
+                    pytest.skip("Docker container not running")
+        except Exception:
             pytest.skip("Docker not available")
 
         time.sleep(30)
