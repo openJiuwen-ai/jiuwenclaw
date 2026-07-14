@@ -658,7 +658,10 @@ def _sync_chat_request_metadata(
       未显式携带（如只读 RPC）则保持磁盘原值，不把进程 MODEL_NAME 默认值回写覆盖
       用户在该会话用 /model 切换过的模型。是否显式由本函数内部从 params 判断
       （model_name 不会被规范化改写，可安全在本函数内取），无需调用方传入。
-    - last_user_message_at：覆盖式（每次请求刷新为当前时刻）
+    - last_user_message_at：**仅 chat 轮次刷新**——只有用户真正发消息的方法
+      （CHAT_SEND / CHAT_RESUME / CHAT_ANSWER）才把当前时刻写入；其余请求（含只读
+      RPC）传 ``None`` → ``sync_session_request_metadata`` 不覆盖磁盘值，避免只读查询
+      把历史会话的排序时间刷新成「现在」（点击技能按钮就把两天前会话置顶）。
     - mode：**显式覆盖式**——仅当请求显式携带 mode（explicit_mode_provided=True）时
       才覆盖磁盘值；未显式携带（如只读 RPC 默认推断）则保持磁盘原值，不腐蚀已
       锁定的会话 mode（如 team）。因 _apply_resolved_mode_to_request 会把 canonical
@@ -695,6 +698,9 @@ def _sync_chat_request_metadata(
         if isinstance(request_cron_id, str) and request_cron_id.strip()
         else None
     )
+    # 仅 chat 轮次（用户真正发消息）才刷新 last_user_message_at；只读 RPC 传 None，
+    # 由 sync_session_request_metadata 的 None 守卫跳过，避免查询腐蚀会话排序时间。
+    is_chat_turn = request.req_method in _CODE_MODE_SYNC_METHODS
     try:
         from jiuwenswarm.server.runtime.session.session_metadata import (
             sync_session_request_metadata,
@@ -708,7 +714,10 @@ def _sync_chat_request_metadata(
             project_dir=str(project_dir) if project_dir else None,
             project_id=request_project_id,
             cron_id=request_cron_id,
-            last_user_message_at=_dt.datetime.now(_dt.timezone.utc).timestamp(),
+            last_user_message_at=(
+                _dt.datetime.now(_dt.timezone.utc).timestamp() if is_chat_turn else None
+            ),
+            is_chat_turn=is_chat_turn,
             explicit_mode_provided=explicit_mode_provided,
             explicit_model_provided=explicit_model_provided,
         )
@@ -1957,6 +1966,41 @@ class AgentWebSocketServer:
             },
         })
 
+    @staticmethod
+    def _is_stateless_method_request(request: AgentRequest) -> bool:
+        """skills / skilldev / plugins / symphony 为无状态 RPC，无需 mode 解析与 adapter.
+
+        短路判定：这些只读 RPC 不进入 ``_prepare_code_mode_chat_turn``，从而不会触发
+        ``_sync_chat_request_metadata`` 写盘——否则只读查询会把会话的
+        ``last_user_message_at``/``last_message_at`` 刷新成当前时刻，腐蚀会话排序
+        （历史会话被点一下技能按钮就置顶），甚至在会话尚不存在时凭空建出只含
+        ``metadata.json`` 的空目录。恢复 ``99bad745`` 引入、``fac68467`` 合入 team 时
+        误删的短路（与上游 ``405f158c`` 对齐）。
+        """
+        return (
+            request.req_method is not None
+            and request.req_method.value.startswith(
+                ("skills.", "skilldev.", "plugins.", "symphony.")
+            )
+        )
+
+    async def _get_stateless_agent(self, channel_id: str) -> Any:
+        """为无状态请求取 agent，**不触发任何 mode 的 adapter 重建**.
+
+        优先用 AgentManager 已缓存的 agent 模式 agent（``get_agent_nowait`` 命中即返回，
+        不命中返回 None，绝不创建）；都没缓存时现场构造一个轻量 ``JiuWenSwarm()``
+        （**不调 ``create_instance``**，``_adapter`` 保持 None）——其 ``process_message``
+        内部对 skills/skilldev/plugins/symphony 的无状态短路会在 ``_ensure_adapter`` 之前
+        return，碰不到 adapter。真正的 adapter 重建留给 chat.send。
+        """
+        cached = self._agent_manager.get_agent_nowait(
+            channel_id=channel_id, mode="agent"
+        )
+        if cached is not None:
+            return cached
+        from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+        return JiuWenSwarm()  # 不调 create_instance，_adapter 保持 None
+
     async def _check_post_process_plan_exit(
         self,
         request: AgentRequest,
@@ -2176,6 +2220,25 @@ class AgentWebSocketServer:
             await self._handle_acp_tool_response(ws, request, send_lock)
             return
 
+        # 无状态请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
+        # code mode 状态管理，直接走 process_message 即可。用轻量 agent 获取，不触发
+        # adapter 重建、不写会话元数据——否则只读查询会刷新 last_user_message_at/
+        # last_message_at 并可能凭空建空会话目录（见 _is_stateless_method_request 注释）。
+        if self._is_stateless_method_request(request):
+            agent = await self._get_stateless_agent(channel_id)
+            resp = await agent.process_message(request)
+            # is None 守卫：保留 agent 层显式设置的 agent_ref。
+            if getattr(resp, "agent_ref", None) is None:
+                resp.agent_ref = request.agent_ref
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            async with send_lock:
+                await ws.send(json.dumps(wire, ensure_ascii=False))
+            logger.info(
+                "[AgentWebSocketServer] 非流式响应已发送: request_id=%s",
+                request.request_id,
+            )
+            return
+
         mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
             request, channel_id
         )
@@ -2212,13 +2275,19 @@ class AgentWebSocketServer:
         if current_task is not None:
             self._session_stream_tasks[session_id] = current_task
 
-        mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
-            request, channel_id
-        )
+        # 无状态流式请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
+        # code mode 状态管理，直接走 process_message_stream 即可。用轻量 agent 获取，
+        # 不触发 adapter 重建、不写会话元数据（见 _is_stateless_method_request 注释）。
+        if self._is_stateless_method_request(request):
+            agent = await self._get_stateless_agent(channel_id)
+        else:
+            mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
+                request, channel_id
+            )
 
-        restored_plan = await self._ensure_code_mode_state(request, mode, sub_mode, agent)
-        if restored_plan:
-            await self._push_plan_mode_exited(request)
+            restored_plan = await self._ensure_code_mode_state(request, mode, sub_mode, agent)
+            if restored_plan:
+                await self._push_plan_mode_exited(request)
 
         chunk_count = 0
         # 心跳控制：当有真实 chunk 发送时重置，空闲时发送心跳

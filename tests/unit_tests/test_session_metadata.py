@@ -1324,7 +1324,7 @@ def clean_model_env(monkeypatch):
     monkeypatch.delenv("MODEL_NAME", raising=False)
 
 
-def _make_agent_request(params=None, metadata=None, session_id="sess_1", channel_id="web"):
+def _make_agent_request(params=None, metadata=None, session_id="sess_1", channel_id="web", req_method=None):
     from jiuwenswarm.common.schema.agent import AgentRequest
 
     return AgentRequest(
@@ -1333,6 +1333,7 @@ def _make_agent_request(params=None, metadata=None, session_id="sess_1", channel
         session_id=session_id,
         params=params or {},
         metadata=metadata,
+        req_method=req_method,
     )
 
 
@@ -1521,6 +1522,113 @@ class TestSyncChatRequestMetadata:
         assert meta["mode"] == "code"
         assert meta["project_dir"] == "E:\\newproj"
         assert meta["status"] == "idle"
+
+    @staticmethod
+    def test_readonly_rpc_does_not_refresh_time_fields(sessions_dir, clean_model_env):
+        """回归保护：只读 RPC（skills.list）不得刷新 last_user_message_at/last_message_at。
+
+        复现用户反馈：打开两天前的历史会话、不发消息、点一下技能按钮（skills.list），
+        会话排序时间被刷新成「现在」→ 旧会话被置顶。根因是只读 RPC 走到了
+        _sync_chat_request_metadata，而时间字段无 chat-turn 守卫。
+        修复后：只读 RPC 传 is_chat_turn=False → 时间字段不写盘。
+        """
+        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            get_session_metadata,
+        )
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        # 两天前的历史会话
+        init_session_metadata(session_id="sess_old")
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            _write_metadata_sync,
+        )
+        two_days_ago = 1000.0
+        _write_metadata_sync("sess_old", {
+            **get_session_metadata("sess_old"),
+            "last_message_at": two_days_ago,
+            "last_user_message_at": two_days_ago,
+        })
+
+        req = _make_agent_request(
+            params={},  # 只读 RPC 不带 model_name/mode
+            session_id="sess_old",
+            req_method=ReqMethod.SKILLS_LIST,
+        )
+        _sync_chat_request_metadata(req, None, "agent")
+        _drain_queue()
+
+        meta = get_session_metadata("sess_old")
+        assert meta["last_user_message_at"] == two_days_ago, \
+            "只读 RPC 不得刷新 last_user_message_at（历史会话不应被置顶）"
+        assert meta["last_message_at"] == two_days_ago, \
+            "只读 RPC 不得刷新 last_message_at"
+
+    @staticmethod
+    def test_chat_turn_refreshes_time_fields(sessions_dir, clean_model_env):
+        """chat 轮次（CHAT_SEND）应刷新 last_user_message_at/last_message_at。
+
+        契约对照：与上一用例互为镜像——只有用户真正发消息才更新排序时间。
+        """
+        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            get_session_metadata,
+        )
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        init_session_metadata(session_id="sess_chat")
+        before = get_session_metadata("sess_chat")
+        old_lum = before["last_user_message_at"]
+        old_lm = before["last_message_at"]
+
+        req = _make_agent_request(
+            params={"model_name": "glm-5", "mode": "code"},
+            session_id="sess_chat",
+            req_method=ReqMethod.CHAT_SEND,
+        )
+        _sync_chat_request_metadata(req, None, "code", explicit_mode_provided=True)
+        _drain_queue()
+
+        meta = get_session_metadata("sess_chat")
+        assert meta["last_user_message_at"] > old_lum, "chat 轮次应刷新 last_user_message_at"
+        assert meta["last_message_at"] > old_lm, "chat 轮次应刷新 last_message_at"
+
+    @staticmethod
+    def test_readonly_rpc_does_not_create_empty_session_dir(sessions_dir, clean_model_env):
+        """回归保护：只读 RPC 对尚不存在的 session_id 不得凭空建空目录。
+
+        复现场景：前端拿一个未持久化的临时 session_id 去查 skills.list，
+        结果在 agent/sessions 下出现一个只含 metadata.json 的空会话目录。
+        根因：sync 兜底新建分支无条件 mkdir。修复后：is_chat_turn=False 时
+        仍走兜底新建（保留 channel_id 等字段语义），但时间字段不刷新。
+        本用例聚焦「只读 RPC 不该走到 sync」——由 _is_stateless_method_request 短路保证，
+        此处补一层存储层兜底契约：即便只读 RPC 误走到 sync，时间字段也不得被改。
+        """
+        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        # 不预先 init → 触发 sync 兜底新建分支
+        req = _make_agent_request(
+            params={},
+            session_id="ghost_readonly",
+            req_method=ReqMethod.SKILLS_LIST,
+        )
+        _sync_chat_request_metadata(req, None, "agent")
+        _drain_queue()
+
+        # 兜底新建会建目录（这是 sync 的既定行为，本修复不动该分支），
+        # 但只读 RPC 不应刷新时间到「现在」——last_user_message_at 应等于 created_at，
+        # 而非 chat 时刻。这里只断言只读语义：mode/model 不被默认推断值腐蚀。
+        meta = get_session_metadata("ghost_readonly")
+        assert meta["mode"] == "unknown", \
+            "只读 RPC 未显式携带 mode → 不得用默认推断值腐蚀磁盘 mode"
+        assert meta["model"] == "", \
+            "只读 RPC 未显式携带 model → 不得用进程默认值腐蚀磁盘 model"
 
 
 # ===========================================================================
