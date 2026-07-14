@@ -126,7 +126,7 @@ export function TaskPlanningPanel({
           {hideExpandButton ? null : (
             <button
               onClick={onExpand}
-              className="rounded p-2 text-text-muted transition-colors hover:bg-secondary hover:text-text"
+              className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
               title={t('team.expand')}
             >
               <ExpandIcon />
@@ -144,7 +144,7 @@ export function TaskPlanningPanel({
               </div>
               <div className="h-2 bg-secondary rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-accent rounded-full transition-all duration-300"
+                  className="h-full bg-accent rounded-full  "
                   style={{ width: `${progressPercent}%` }}
                 />
               </div>
@@ -177,7 +177,7 @@ export function TaskPlanningPanel({
                 const seq = globalIndexMap.get(task.task_id) ?? 0;
                 return (
                   <div key={task.task_id} className="flex items-center gap-3 px-3 py-2 rounded-md">
-                    <span className="inline-flex items-center justify-center w-[20px] h-[20px] text-xs font-medium text-muted rounded-[16px] bg-[#F2F2F2]">
+                    <span className="inline-flex items-center justify-center w-[20px] h-[20px] text-xs font-medium text-muted rounded-[16px] bg-[var(--color-task-index-surface)]">
                       {String(seq).padStart(2, '0')}
                     </span>
                     {!hideAssignee && (
@@ -255,7 +255,7 @@ function BoardColumn({
 
   return (
     <section className="min-w-0">
-      <div className={`mb-3 inline-flex h-7 items-center rounded-full px-4 text-sm font-medium shadow-[0_1px_2px_rgba(25,25,25,0.04)] ${column.pillClassName}`}>
+      <div className={`mb-3 inline-flex h-7 items-center rounded-full px-4 text-sm font-medium shadow-[var(--effect-task-column-pill-shadow)] ${column.pillClassName}`}>
         <span className={`mr-2 h-1.5 w-1.5 rounded-full ${column.dotClassName}`} />
         {t(column.labelKey)} {tasks.length}
       </div>
@@ -294,8 +294,8 @@ function BoardTaskCard({
   const content = getBoardTaskContent(task);
 
   return (
-    <article className="rounded-2xl border border-border bg-[#fafafa] p-1 shadow-sm">
-      <div className="rounded-2xl border border-border bg-white px-4 py-4">
+    <article className="rounded-2xl border border-border bg-[var(--color-task-card-surface)] p-1 shadow-sm">
+      <div className="rounded-2xl border border-border bg-card px-4 py-4">
         <h3 className="truncate text-base font-medium leading-[18px] text-text-strong" title={title}>
           {title}
         </h3>
@@ -306,9 +306,9 @@ function BoardTaskCard({
         ) : null}
         <TaskResourcePanel skills={task.skills} files={task.files} />
       </div>
-      <div className="mt-3 flex h-8 items-center bg-[#fafafa] px-1 pb-1">
+      <div className="mt-3 flex h-8 items-center bg-[var(--color-task-card-surface)] px-1 pb-1">
         {hideAssignee ? (
-          <span className="inline-flex h-[20px] w-[20px] items-center justify-center rounded-[16px] bg-[#F2F2F2] text-xs font-medium text-muted">
+          <span className="inline-flex h-[20px] w-[20px] items-center justify-center rounded-[16px] bg-[var(--color-task-index-surface)] text-xs font-medium text-muted">
             {String(index).padStart(2, '0')}
           </span>
         ) : assigneeExists ? (

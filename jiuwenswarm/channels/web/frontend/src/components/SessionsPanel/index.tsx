@@ -521,9 +521,9 @@ export function SessionsPanel({
                   <div key={session.session_id} className="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                     <button
                       type="button"
-                      className={`w-full min-w-0 text-left px-3 py-2 rounded-lg border text-sm transition-colors ${
+                      className={`w-full min-w-0 text-left px-3 py-2 rounded-lg border text-sm  ${
                         selectedSessionId === session.session_id
-                          ? 'border-[var(--border-accent)] bg-accent-subtle text-text'
+                          ? 'border-[var(--color-border-accent)] bg-accent-subtle text-text'
                           : 'border-transparent hover:bg-secondary/40 text-text-muted hover:text-text'
                       }`}
                       onClick={() => {
@@ -546,7 +546,7 @@ export function SessionsPanel({
                     <button
                       type="button"
                       title={t('sessions.delete')}
-                      className="shrink-0 p-1.5 rounded-md text-text-muted hover:text-danger hover:bg-danger-subtle transition-colors disabled:opacity-50"
+                      className="shrink-0 p-1.5 rounded-md text-text-muted hover:text-danger hover:bg-danger-subtle  disabled:opacity-50"
                       disabled={deletingSessionId === session.session_id}
                       onClick={() => void handleDeleteSession(session)}
                     >
@@ -587,11 +587,11 @@ export function SessionsPanel({
                         <button
                           key={file.path}
                           type="button"
-                          className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ${
+                          className={`w-full text-left px-3 py-2 rounded-lg border text-sm  ${
                             canPreview &&
                               normalizeWorkspacePath(selectedFile?.path ?? '') ===
                                 normalizeWorkspacePath(file.path)
-                              ? 'border-[var(--border-accent)] bg-accent-subtle text-text'
+                              ? 'border-[var(--color-border-accent)] bg-accent-subtle text-text'
                               : 'border-transparent text-text-muted'
                           } ${canPreview ? 'hover:bg-secondary/40 hover:text-text' : 'cursor-default'}`}
                           onClick={() => {

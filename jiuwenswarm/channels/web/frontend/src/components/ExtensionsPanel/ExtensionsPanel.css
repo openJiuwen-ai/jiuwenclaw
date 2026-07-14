@@ -9,12 +9,12 @@
   font-size: var(--font-size-lg);
   font-weight: 600;
   margin-bottom: 0.5rem;
-  color: var(--text);
+  color: var(--color-text-primary);
 }
 
 .extensions-panel__description {
   font-size: var(--font-size-sm);
-  color: var(--text-muted);
+  color: var(--color-text-secondary);
   margin-bottom: 1.5rem;
 }
 
@@ -22,33 +22,32 @@
 .extensions-panel__import-section {
   margin-bottom: 1.5rem;
   padding: 1rem;
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-border-default);
   border-radius: var(--radius-md);
-  background: var(--card);
+  background: var(--color-surface-card);
 }
 
 .extensions-panel__import-title {
   font-size: var(--font-size-sm);
   font-weight: 500;
   margin-bottom: 0.75rem;
-  color: var(--text);
+  color: var(--color-text-primary);
 }
 
 .extensions-panel__import-button {
   display: inline-flex;
   align-items: center;
   padding: 0.5rem 1rem;
-  background: var(--accent);
-  color: var(--accent-foreground);
+  background: var(--color-action-primary);
+  color: var(--color-action-primary-text);
   border-radius: var(--radius-md);
   font-weight: 500;
   font-size: var(--font-size-sm);
   cursor: pointer;
-  transition: background var(--duration-fast) ease;
 }
 
 .extensions-panel__import-button:hover {
-  background: var(--accent-hover);
+  background: var(--color-action-primary-hover);
 }
 
 .extensions-panel__import-button:disabled {
@@ -59,27 +58,27 @@
 
 .extensions-panel__import-hint {
   font-size: var(--font-size-xs);
-  color: var(--text-muted);
+  color: var(--color-text-secondary);
   margin-left: 0.75rem;
 }
 
 /* 扩展列表 */
 .extensions-panel__list {
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-border-default);
   border-radius: var(--radius-md);
-  background: var(--card);
+  background: var(--color-surface-card);
 }
 
 .extensions-panel__empty {
   padding: 2rem;
   text-align: center;
-  color: var(--text-muted);
+  color: var(--color-text-secondary);
 }
 
 .extensions-panel__loading {
   padding: 2rem;
   text-align: center;
-  color: var(--text-muted);
+  color: var(--color-text-secondary);
 }
 
 /* 扩展项 */
@@ -88,7 +87,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-border-default);
 }
 
 .extensions-panel__item:last-child {
@@ -110,7 +109,7 @@
 
 .extensions-panel__item-name {
   font-weight: 500;
-  color: var(--text);
+  color: var(--color-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -119,14 +118,14 @@
 .extensions-panel__item-class {
   padding: 0.25rem 0.5rem;
   font-size: var(--font-size-xs);
-  background: var(--secondary);
-  color: var(--secondary-foreground);
+  background: var(--color-action-secondary);
+  color: var(--color-action-secondary-text);
   border-radius: var(--radius-sm);
 }
 
 .extensions-panel__item-description {
   font-size: var(--font-size-sm);
-  color: var(--text-muted);
+  color: var(--color-text-secondary);
   margin-top: 0.25rem;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -156,13 +155,12 @@
   width: 2.5rem;
   height: 1.25rem;
   border-radius: 9999px;
-  background: var(--input);
+  background: var(--color-border-input);
   position: relative;
-  transition: background var(--duration-fast) ease;
 }
 
 .extensions-panel__toggle-track.enabled {
-  background: var(--accent);
+  background: var(--color-action-primary);
 }
 
 .extensions-panel__toggle-thumb {
@@ -174,8 +172,7 @@
   height: 0.75rem;
   border-radius: 9999px;
   background: white;
-  transition: transform var(--duration-fast) ease;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--effect-control-shadow);
 }
 
 .extensions-panel__toggle-track.enabled .extensions-panel__toggle-thumb {
@@ -186,16 +183,15 @@
 .extensions-panel__delete-button {
   padding: 0.375rem 0.75rem;
   font-size: var(--font-size-sm);
-  color: var(--danger);
+  color: var(--color-feedback-danger);
   background: transparent;
   border: none;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: all var(--duration-fast) ease;
 }
 
 .extensions-panel__delete-button:hover {
-  background: var(--danger-subtle);
+  background: var(--color-feedback-danger-subtle);
 }
 
 .extensions-panel__delete-button:disabled {
@@ -208,10 +204,10 @@
 .extensions-panel__error {
   margin-bottom: 1rem;
   padding: 0.75rem;
-  background: var(--danger-subtle);
-  border: 1px solid var(--border-danger);
+  background: var(--color-feedback-danger-subtle);
+  border: 1px solid var(--color-border-danger);
   border-radius: var(--radius-md);
-  color: var(--danger);
+  color: var(--color-feedback-danger);
   font-size: var(--font-size-sm);
 }
 
@@ -219,7 +215,7 @@
 .extensions-panel__help {
   margin-top: 1.5rem;
   padding: 1rem;
-  background: var(--secondary);
+  background: var(--color-action-secondary);
   border-radius: var(--radius-md);
 }
 
@@ -227,7 +223,7 @@
   font-size: var(--font-size-sm);
   font-weight: 500;
   margin-bottom: 0.75rem;
-  color: var(--text);
+  color: var(--color-text-primary);
 }
 
 .extensions-panel__help-list {
@@ -238,7 +234,7 @@
 
 .extensions-panel__help-list li {
   font-size: var(--font-size-sm);
-  color: var(--text);
+  color: var(--color-text-primary);
   line-height: 1.5;
   margin-bottom: 0.5rem;
 }
@@ -248,14 +244,14 @@
 }
 
 /* Light theme 适配 */
-:root[data-theme="light"] .extensions-panel__import-section {
-  background: var(--bg);
+:root[data-theme='default'][data-color-mode='light'] .extensions-panel__import-section {
+  background: var(--color-surface-page);
 }
 
-:root[data-theme="light"] .extensions-panel__list {
-  background: var(--bg);
+:root[data-theme='default'][data-color-mode='light'] .extensions-panel__list {
+  background: var(--color-surface-page);
 }
 
-:root[data-theme="light"] .extensions-panel__help {
-  background: var(--bg-muted);
+:root[data-theme='default'][data-color-mode='light'] .extensions-panel__help {
+  background: var(--color-surface-muted);
 }

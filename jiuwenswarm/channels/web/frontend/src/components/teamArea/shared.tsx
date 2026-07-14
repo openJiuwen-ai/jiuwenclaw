@@ -99,26 +99,26 @@ export const BOARD_COLUMNS: Array<{
   {
     key: 'waiting',
     labelKey: 'team.planning.columns.waiting',
-    pillClassName: 'bg-white text-[#777777]',
-    dotClassName: 'bg-[#777777]',
+    pillClassName: 'bg-card text-[color:var(--color-team-status-waiting)]',
+    dotClassName: 'bg-[var(--color-team-status-waiting)]',
   },
   {
     key: 'running',
     labelKey: 'team.planning.columns.running',
-    pillClassName: 'bg-[#d1e6fa] text-[#5e7ce0]',
-    dotClassName: 'bg-[#5e7ce0]',
+    pillClassName: 'bg-[var(--color-team-status-running-surface)] text-[color:var(--color-team-status-running)]',
+    dotClassName: 'bg-[var(--color-team-status-running)]',
   },
   {
     key: 'completed',
     labelKey: 'team.planning.columns.completed',
-    pillClassName: 'bg-[#d3f3e6] text-[#088c58]',
-    dotClassName: 'bg-[#088c58]',
+    pillClassName: 'bg-[var(--color-team-status-completed-surface)] text-[color:var(--color-team-status-completed)]',
+    dotClassName: 'bg-[var(--color-team-status-completed)]',
   },
   {
     key: 'cancelled',
     labelKey: 'team.planning.columns.cancelled',
-    pillClassName: 'bg-[#fde2e2] text-[#c84646]',
-    dotClassName: 'bg-[#c84646]',
+    pillClassName: 'bg-[var(--color-team-status-cancelled-surface)] text-[color:var(--color-team-status-cancelled)]',
+    dotClassName: 'bg-[var(--color-team-status-cancelled)]',
   },
 ];
 
@@ -212,16 +212,16 @@ export const getTaskStatusLabel = (status: TaskStatus): string => {
 const getTaskStatusIconClass = (status: TaskStatus): string => {
   switch (status) {
     case 'completed':
-      return 'bg-emerald-500 text-white';
+      return 'bg-emerald-500 text-text-inverse';
     case 'in_progress':
-      return 'bg-blue-500 text-white';
+      return 'bg-blue-500 text-text-inverse';
     case 'cancelled':
-      return 'bg-slate-300 text-white';
+      return 'bg-slate-300 text-text-inverse';
     case 'error':
-      return 'bg-red-500 text-white';
+      return 'bg-red-500 text-text-inverse';
     case 'pending':
     default:
-      return 'bg-white text-slate-400 ring-1 ring-slate-300';
+      return 'bg-card text-slate-400 ring-1 ring-slate-300';
   }
 };
 
@@ -289,7 +289,7 @@ export function Chevron({ expanded }: { expanded?: boolean }) {
   return (
     <ChevronRight
       size={16}
-      className={`transition-transform ${expanded ? 'rotate-90' : ''}`}
+      className={` ${expanded ? 'rotate-90' : ''}`}
     />
   );
 }

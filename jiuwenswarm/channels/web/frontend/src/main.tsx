@@ -5,6 +5,9 @@ import type { A2UIClientEventMessage } from '@a2ui/react';
 import { injectStyles } from '@a2ui/react/styles';
 import App from './App.tsx'
 import { dispatchA2UIAction } from './features/a2ui/actionBridge';
+import './styles/foundation.css'
+import './styles/themes/default/dark.css'
+import './styles/themes/default/light.css'
 import './index.css'
 import './features/a2ui/a2ui.css'
 

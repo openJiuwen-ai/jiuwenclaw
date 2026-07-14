@@ -27,6 +27,7 @@ import moreDesignIcon from '../../assets/更多.svg';
 import { webRequest } from '../../services/webClient';
 
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
+type ThemePreference = 'system' | 'dark' | 'light';
 
 interface SessionSidebarProps {
   activeNav: MainNavKey;
@@ -68,6 +69,17 @@ const moreNavItems: NavItem[] = [
   { key: 'updatepanel', labelKey: 'nav.update', icon: <img src={updateIcon} alt="" /> },
 ];
 
+function applyThemePreference(theme: ThemePreference) {
+  const prefersLight =
+    theme === 'system' &&
+    window.matchMedia?.('(prefers-color-scheme: light)').matches;
+  document.documentElement.setAttribute('data-theme', 'default');
+  document.documentElement.setAttribute(
+    'data-color-mode',
+    theme === 'light' || prefersLight ? 'light' : 'dark',
+  );
+}
+
 // Advanced Config Panel Component
 function AdvancedConfigPanel({
   isOpen,
@@ -83,8 +95,25 @@ function AdvancedConfigPanel({
   buttonRef: React.RefObject<HTMLButtonElement>;
 }) {
   const { i18n, t } = useTranslation();
-  const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light');
+  const [theme, setTheme] = useState<ThemePreference>(() => {
+    const savedTheme = localStorage.getItem('theme');
+    return savedTheme === 'system' || savedTheme === 'dark' || savedTheme === 'light'
+      ? savedTheme
+      : 'system';
+  });
   const panelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    applyThemePreference(theme);
+    if (theme !== 'system') return;
+
+    const mediaQuery = window.matchMedia?.('(prefers-color-scheme: light)');
+    if (!mediaQuery) return;
+
+    const handleSystemThemeChange = () => applyThemePreference('system');
+    mediaQuery.addEventListener('change', handleSystemThemeChange);
+    return () => mediaQuery.removeEventListener('change', handleSystemThemeChange);
+  }, [theme]);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -110,14 +139,9 @@ function AdvancedConfigPanel({
     void webRequest('locale.set_conf', { preferred_language: lang }).catch(() => {});
   };
 
-  const handleThemeChange = (newTheme: string) => {
+  const handleThemeChange = (newTheme: ThemePreference) => {
     setTheme(newTheme);
     localStorage.setItem('theme', newTheme);
-    if (newTheme === 'light') {
-      document.documentElement.setAttribute('data-theme', 'light');
-    } else {
-      document.documentElement.removeAttribute('data-theme');
-    }
   };
 
   const isZh = i18n.language.startsWith('zh');

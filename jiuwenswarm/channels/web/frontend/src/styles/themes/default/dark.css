@@ -1,0 +1,205 @@
+:root[data-theme="default"][data-color-mode="dark"] {
+  /* Surfaces */
+  --color-surface-page: #0f1320;
+  --color-surface-page-accent: #131a2a;
+  --color-surface-elevated: #1a2234;
+  --color-surface-hover: #232f46;
+  --color-surface-muted: #202b42;
+  --color-surface-content: #f5f5f5;
+  --color-surface-card: #171f30;
+  --color-surface-highlight: rgba(255, 255, 255, 0.05);
+  --color-surface-popover: #171f30;
+  --color-surface-panel: #101728;
+  --color-surface-panel-strong: #182134;
+  --color-surface-panel-hover: #25334d;
+  --color-surface-chrome: rgba(15, 19, 32, 0.92);
+  --color-surface-chrome-strong: rgba(15, 19, 32, 0.97);
+  --color-surface-shell: #101728;
+  --color-surface-transparent: transparent;
+
+  /* Text */
+  --color-text-primary: #e4e4e7;
+  --color-text-strong: #fafafa;
+  --color-text-chat: #e4e4e7;
+  --color-text-secondary: #777777;
+  --color-text-tertiary: #52525b;
+  --color-text-placeholder: #71717a;
+  --color-text-card: #f4f4f5;
+  --color-text-popover: #f4f4f5;
+  --color-text-inverse: #ffffff;
+  --color-text-link: #0067d1;
+
+  /* Borders */
+  --color-border-default: #243049;
+  --color-border-strong: #33456b;
+  --color-border-hover: #47618f;
+  --color-border-accent: rgba(96, 165, 250, 0.5);
+  --color-border-success: rgba(34, 197, 94, 0.5);
+  --color-border-warning: rgba(245, 158, 11, 0.5);
+  --color-border-danger: rgba(239, 68, 68, 0.5);
+  --color-border-input: #283550;
+  --color-border-focus: #60a5fa;
+
+  /* Actions and brand */
+  --color-action-primary: #60a5fa;
+  --color-action-primary-hover: #93c5fd;
+  --color-action-primary-muted: #60a5fa;
+  --color-action-primary-subtle: rgba(96, 165, 250, 0.18);
+  --color-action-primary-text: #1e293b;
+  --color-action-primary-glow: rgba(96, 165, 250, 0.3);
+  --color-action-primary-rgb: 96, 165, 250;
+  --color-action-secondary: #1e2028;
+  --color-action-secondary-text: #f4f4f5;
+  --color-brand-secondary: #14b8a6;
+  --color-brand-secondary-muted: rgba(20, 184, 166, 0.7);
+  --color-brand-secondary-subtle: rgba(20, 184, 166, 0.15);
+
+  /* Feedback */
+  --color-feedback-success: #22c55e;
+  --color-feedback-success-muted: rgba(34, 197, 94, 0.75);
+  --color-feedback-success-subtle: rgba(34, 197, 94, 0.12);
+  --color-feedback-warning: #f59e0b;
+  --color-feedback-warning-muted: rgba(245, 158, 11, 0.75);
+  --color-feedback-warning-subtle: rgba(245, 158, 11, 0.12);
+  --color-feedback-warning-text: #1e293b;
+  --color-feedback-danger: #ef4444;
+  --color-feedback-danger-muted: rgba(239, 68, 68, 0.75);
+  --color-feedback-danger-subtle: rgba(239, 68, 68, 0.12);
+  --color-feedback-danger-text: #fafafa;
+  --color-feedback-info: #3b82f6;
+  --color-feedback-info-subtle: rgba(59, 130, 246, 0.08);
+  --color-feedback-success-toast: #d5f2dc;
+  --color-feedback-success-indicator: #1a991d;
+
+  /* Feature accents whose identity is stable across color modes */
+  --color-chat-accent: #1476ff;
+  --color-chat-accent-subtle: #deecff;
+
+  /* Utility color roles */
+  --color-focus: rgba(96, 165, 250, 0.25);
+  --color-grid-line: rgba(255, 255, 255, 0.04);
+  --color-backdrop: rgba(0, 0, 0, 0.35);
+  --color-backdrop-strong: rgba(0, 0, 0, 0.5);
+  --color-scrollbar-thumb: rgba(119, 119, 119, 0.45);
+  --color-scrollbar-track-hover: #e6e6e6;
+
+  /* Theme-dependent effects */
+  --effect-focus-ring: 0 0 0 2px var(--color-surface-page), 0 0 0 4px var(--color-border-focus);
+  --effect-focus-glow: 0 0 0 2px var(--color-surface-page), 0 0 0 4px var(--color-border-focus), 0 0 20px var(--color-action-primary-glow);
+  --effect-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --effect-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(255, 255, 255, 0.03);
+  --effect-shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.03);
+  --effect-shadow-xl: 0 24px 48px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.03);
+  --effect-shadow-glow: 0 0 30px var(--color-action-primary-glow);
+  --effect-page-background: radial-gradient(1200px 480px at 55% -20%, rgba(37, 99, 235, 0.16), transparent 60%), radial-gradient(720px 320px at 18% 8%, rgba(20, 184, 166, 0.08), transparent 65%), var(--color-surface-page);
+  --effect-content-background: linear-gradient(180deg, var(--color-surface-page-accent), var(--color-surface-page));
+  --effect-proactive-card-hover: 0 8px 24px rgba(0, 0, 0, 0.15);
+  --effect-status-danger-glow: 0 0 8px rgba(239, 68, 68, 0.5);
+  --effect-status-success-glow: 0 0 8px rgba(34, 197, 94, 0.5);
+  --effect-button-primary-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --effect-glow-pulse-rest: 0 0 0 rgba(255, 92, 92, 0);
+  --effect-voice-pulse-start: 0 0 0 0 rgba(239, 68, 68, 0.4);
+  --effect-voice-pulse-end: 0 0 0 8px rgba(239, 68, 68, 0);
+
+  /* Component roles */
+  --color-chat-composer-surface: var(--color-surface-card);
+  --color-chat-composer-border: var(--color-border-input);
+  --effect-chat-composer-shadow: inset 0 1px 0 var(--color-surface-highlight), 0 2px 10px rgba(25, 25, 25, 0.06);
+  --effect-chat-brand-gradient: linear-gradient(-89.29deg, #007eff 0%, #9026f4 100%);
+  --color-animation-breath-peak: #e4e4e7;
+  --color-chat-bubble-default: var(--color-surface-card);
+  --color-chat-bubble-user: var(--color-action-primary-subtle);
+  --color-chat-bubble-assistant: var(--color-surface-muted);
+  --color-chat-bubble-assistant-border: transparent;
+  --color-chat-task-queue-border: var(--color-chat-composer-border);
+  --color-chat-task-queue-divider: var(--color-chat-composer-border);
+  --effect-chat-task-queue-highlight: none;
+  --color-kbd-background: rgba(255, 255, 255, 0.15);
+  --color-skill-action-border: #4b5563;
+  --color-skill-action-surface: #374151;
+  --color-skill-action-text: #ffffff;
+  --color-skill-action-hover: #4b5563;
+  --color-team-event-surface: transparent;
+  --color-team-event-summary-surface: transparent;
+  --color-sidebar-nav-hover: rgba(255, 255, 255, 0.08);
+  --color-sidebar-nav-active: rgba(255, 255, 255, 0.1);
+  --color-sidebar-nav-active-hover: rgba(255, 255, 255, 0.15);
+  --color-sidebar-action-hover: var(--color-action-secondary);
+  --color-sidebar-more-item-hover: var(--color-surface-hover);
+  --color-conversation-unread: #1677ff;
+  --color-conversation-error: #ff3333;
+  --color-conversation-dialog-backdrop: rgba(15, 23, 42, 0.18);
+  --effect-conversation-dialog-shadow: 0 18px 40px rgba(15, 23, 42, 0.22);
+  --color-chat-group-border: rgba(25, 25, 25, 0.12);
+  --color-chat-spinner-border: rgba(25, 25, 25, 0.16);
+  --color-chat-group-divider: rgba(25, 25, 25, 0.08);
+  --color-chat-hero-border: rgba(25, 25, 25, 0.14);
+  --color-chat-pill-border: rgba(25, 25, 25, 0.72);
+  --color-chat-error-divider: rgba(239, 68, 68, 0.15);
+  --color-chat-card-border: rgba(25, 25, 25, 0.1);
+  --color-chat-warning-border: rgba(245, 158, 11, 0.28);
+  --color-chat-warning-icon: #ff8800;
+  --color-chat-supporting-text: #595959;
+  --color-chat-send-active: rgb(0, 102, 255);
+  --color-chat-share-badge-text: #1d4ed8;
+  --color-chat-share-badge-surface: #dbe8ff;
+  --color-chat-joined-text: #047857;
+  --color-chat-joined-surface: #d1fae5;
+  --color-chat-joined-note-surface: #ecfdf5;
+  --color-chat-left-text: #6b7280;
+  --color-chat-left-surface: #f3f4f6;
+  --color-chat-suggestion-hover: var(--color-action-primary-subtle);
+  --color-harness-success: #22c55e;
+  --color-harness-timeout: #f59e0b;
+  --color-harness-pending: #71717a;
+  --color-chat-modal-backdrop: rgba(15, 23, 42, 0.28);
+  --color-chat-dialog-backdrop: rgba(0, 0, 0, 0.46);
+  --effect-chat-group-highlight: 0 -1px 0 rgba(255, 255, 255, 0.78);
+  --effect-chat-control-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+  --effect-chat-modal-shadow: 0 24px 72px rgba(15, 23, 42, 0.24);
+  --effect-chat-select-shadow: 0 18px 48px rgba(15, 23, 42, 0.16);
+  --effect-chat-tooltip-shadow: 0 2px 12px rgba(0, 0, 0, 0.12);
+  --effect-chat-toolbar-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --effect-chat-menu-shadow: 0 1px 4px rgba(15, 23, 42, 0.14);
+  --effect-chat-popover-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
+  --effect-chat-alert-shadow: 0 12px 28px rgba(185, 28, 28, 0.12);
+  --effect-chat-suggestion-hover: 0 4px 16px rgba(96, 165, 250, 0.12);
+  --effect-chat-suggestion-rest: none;
+  --effect-chat-active-marker: 0 0 6px rgba(var(--color-action-primary-rgb), 0.4);
+  --effect-interaction-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+  --effect-interaction-highlight: 0 -1px 0 rgba(255, 255, 255, 0.78);
+  --effect-control-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  --effect-tool-panel-shadow: 0 8px 20px rgba(15, 23, 42, 0.1), inset 0 1px 0 var(--color-surface-highlight);
+  --effect-skill-evaluation-dialog-shadow: 0 25px 80px -16px rgba(0, 0, 0, 0.55);
+  --effect-task-column-pill-shadow: 0 1px 2px rgba(25, 25, 25, 0.04);
+  --color-skill-evaluation-dialog-ring: rgba(255, 255, 255, 0.1);
+  --color-control-thumb: #ffffff;
+  --color-toggle-enabled: #10b981;
+  --color-toggle-disabled: #d1d5db;
+  --color-extension-input-border: #cccccc;
+  --color-task-index-surface: #1a2234;
+  --color-task-card-surface: #101728;
+  --color-team-overflow-surface: #edf1ff;
+  --color-team-detail-surface: #f8fafc;
+  --color-team-detail-text: #5d6675;
+  --color-team-detail-label: #9aa3af;
+  --color-team-detail-divider: #e2e5ea;
+  --color-team-status-waiting: #777777;
+  --color-team-status-running: #5e7ce0;
+  --color-team-status-running-surface: #d1e6fa;
+  --color-team-status-completed: #088c58;
+  --color-team-status-completed-surface: #d3f3e6;
+  --color-team-status-cancelled: #c84646;
+  --color-team-status-cancelled-surface: #fde2e2;
+  --color-chat-paused: #f5a623;
+  --color-source-selected-surface: #eaeaeb;
+  --color-option-disabled: #8c8c96;
+  --color-control-emphasis: #191919;
+  --color-control-emphasis-text: #ffffff;
+  --color-control-emphasis-hover: #1f2937;
+  --color-control-emphasis-hover-strong: #333333;
+  --color-config-team-icon: rgb(217, 70, 239);
+  --color-channel-backdrop: rgba(0, 0, 0, 0.45);
+
+  color-scheme: dark;
+}

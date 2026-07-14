@@ -191,7 +191,7 @@ export function AuthorizationPrompt({ pending, onSubmit }: AuthorizationPromptPr
             ? `auth-prompt__body ${PROSE_CLS}`
             : 'auth-prompt__body auth-prompt__body--collapsed'
         }
-        style={{ color: 'var(--text)' }}
+        style={{ color: 'var(--color-text-primary)' }}
       >
         {expanded ? (
           questions.map((q, i) => (

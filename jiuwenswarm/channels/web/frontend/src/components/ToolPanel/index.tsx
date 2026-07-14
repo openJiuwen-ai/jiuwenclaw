@@ -122,7 +122,7 @@ function ExpandedSingleAgentArea({
           {tabs.map((tab) => (
             <button
               key={tab.key}
-              className={`h-9 rounded-lg px-4 text-sm transition-colors flex items-center gap-2 ${
+              className={`h-9 rounded-lg px-4 text-sm  flex items-center gap-2 ${
                 resolvedTab === tab.key
                   ? 'bg-secondary font-medium text-text'
                   : 'text-text-muted hover:bg-secondary/50 hover:text-text'
@@ -137,7 +137,7 @@ function ExpandedSingleAgentArea({
 
         <button
           onClick={onCollapse}
-          className="rounded p-2 text-text-muted transition-colors hover:bg-secondary hover:text-text"
+          className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
           title={t('team.collapse')}
         >
           <Minimize2 size={16} />

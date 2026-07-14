@@ -384,7 +384,7 @@ export function ArtifactsPanel({ className }: { className?: string }) {
                     key={artifact.id}
                     type="button"
                     className={clsx(
-                      'w-full rounded-md border px-3 py-2.5 text-left transition-colors',
+                      'w-full rounded-md border px-3 py-2.5 text-left ',
                       selected
                         ? 'border-accent bg-accent-subtle'
                         : 'border-border bg-card hover:border-border-hover hover:bg-secondary'
@@ -417,7 +417,7 @@ export function ArtifactsPanel({ className }: { className?: string }) {
       </aside>
 
       <div
-        className="w-1 shrink-0 cursor-col-resize bg-border/70 transition-colors hover:bg-border-hover"
+        className="w-1 shrink-0 cursor-col-resize bg-border/70  hover:bg-border-hover"
         onMouseDown={handleDividerMouseDown}
       />
 
@@ -441,7 +441,7 @@ export function ArtifactsPanel({ className }: { className?: string }) {
               </div>
               <button
                 type="button"
-                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-secondary hover:text-text disabled:cursor-not-allowed disabled:opacity-40"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text-muted  hover:bg-secondary hover:text-text disabled:cursor-not-allowed disabled:opacity-40"
                 title={t('artifacts.download')}
                 aria-label={t('artifacts.download')}
                 disabled={!selectedArtifact.downloadUrl && !selectedArtifact.path}

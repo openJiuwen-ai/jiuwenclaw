@@ -43,7 +43,7 @@ const ChevronIcon = ({ expanded }: { expanded: boolean }) => (
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
-    className={`transition-transform duration-200 ${expanded ? '' : '-rotate-90'}`}
+    className={`  ${expanded ? '' : '-rotate-90'}`}
   >
     <path d="M18 15l-6-6-6 6" />
   </svg>
@@ -91,11 +91,11 @@ interface CollapsibleTaskGroupProps {
 
 function CollapsibleTaskGroup({ title, count, expanded, onToggle, children }: CollapsibleTaskGroupProps) {
   return (
-    <div className="border-b border-border bg-white">
+    <div className="border-b border-border bg-card">
       {/* 标题栏 */}
       <button
         onClick={onToggle}
-        className="w-full flex items-center justify-between px-4 py-3 bg-white hover:bg-gray-50 transition-colors"
+        className="w-full flex items-center justify-between px-4 py-3 bg-card hover:bg-gray-50 "
       >
         <div className="flex items-center gap-2">
           <h3 className="text-sm font-medium text-text">{title}</h3>
@@ -109,7 +109,7 @@ function CollapsibleTaskGroup({ title, count, expanded, onToggle, children }: Co
       <div className="border-t border-border" />
       {/* 内容区域 */}
       {expanded && (
-        <div className="px-4 py-3 bg-white space-y-3">
+        <div className="px-4 py-3 bg-card space-y-3">
           {children}
         </div>
       )}
@@ -183,7 +183,7 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
       {/* 抽屉面板 */}
       <div className="relative w-[420px] max-w-full h-full bg-bg shadow-xl flex flex-col animate-slide-in-right">
         {/* 头部 */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-white">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-card">
           <div className="flex items-center gap-3">
             <TeamMemberAvatar
               member={memberId}
@@ -198,7 +198,7 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-secondary/50 transition-colors"
+            className="p-1.5 rounded-lg hover:bg-secondary/50 "
           >
             <svg className="w-5 h-5 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -207,7 +207,7 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
         </div>
 
         {/* 任务统计 */}
-        <div className="px-4 py-3 bg-white border-b border-border">
+        <div className="px-4 py-3 bg-card border-b border-border">
           <div className="grid grid-cols-3 gap-4 text-center">
             <div>
               <div className="text-lg font-semibold text-text">{inProgressTasks.length}</div>

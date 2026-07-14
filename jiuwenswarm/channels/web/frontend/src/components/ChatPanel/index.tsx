@@ -33,7 +33,6 @@ import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
 import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import welcomeBanner from '../../assets/jiuwen-xiaobanner.png';
-import folderIcon from '../../assets/work-mode/folder.svg';
 import './ChatPanel.css';
 
 export interface ChatHistoryPagerProps {
@@ -264,8 +263,8 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
             <span className="team-event-group-summary__title">{t('chatUi.messageQueue')}</span>
             {queuePaused && (
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginLeft: '8px' }}>
-                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#f5a623', flexShrink: 0 }} />
-                <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{t('chat.paused')}</span>
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-chat-paused)', flexShrink: 0 }} />
+                <span style={{ fontSize: '13px', color: 'var(--color-text-secondary)' }}>{t('chat.paused')}</span>
               </span>
             )}
           </span>
@@ -295,8 +294,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
                   justifyContent: 'space-between',
                   gap: '8px',
                   opacity: dragIndex === index ? 0.4 : 1,
-                  background: dragOverIndex === index ? 'var(--bg-hover)' : 'transparent',
-                  transition: 'opacity 0.15s ease, background 0.15s ease',
+                  background: dragOverIndex === index ? 'var(--color-surface-hover)' : 'transparent',
                 }}
                 onDragOver={(e) => handleDragOver(e, index)}
                 onDrop={() => handleDrop(index)}
@@ -962,7 +960,7 @@ export function ChatPanel({
             </div>
             {sessionProjectName && (
               <div className="chat-panel-header__project" title={sessionProjectName}>
-                <img src={folderIcon} alt="" aria-hidden="true" />
+                <span className="chat-config-icon chat-config-icon--folder" aria-hidden="true" />
                 <span>{sessionProjectName}</span>
               </div>
             )}

@@ -26,7 +26,7 @@ const MERMAID_CONFIG: MermaidConfig = {
 };
 
 function getMermaidTheme(): 'default' | 'dark' {
-  return document.documentElement.getAttribute('data-theme') === 'light' ? 'default' : 'dark';
+  return document.documentElement.getAttribute('data-color-mode') === 'light' ? 'default' : 'dark';
 }
 
 function ToolbarButton({ title, onClick, children }: { title: string; onClick: () => void; children: React.ReactNode }) {

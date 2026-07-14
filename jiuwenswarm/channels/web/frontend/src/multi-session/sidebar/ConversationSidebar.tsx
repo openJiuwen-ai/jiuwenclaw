@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CircleAlert, X } from 'lucide-react';
+import { CircleAlert, LoaderCircle, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
 import { webClient } from '../../services/webClient';
@@ -45,7 +45,6 @@ import moreIcon from '../../assets/work-mode/more-rimless.svg';
 import newTaskIcon from '../../assets/work-mode/new-task.svg';
 import pinIcon from '../../assets/work-mode/pin.svg';
 import plusIcon from '../../assets/work-mode/plus.svg';
-import statusProcessingIcon from '../../assets/work-mode/status-processing.svg';
 import unpinIcon from '../../assets/work-mode/unpin.svg';
 
 const UNREAD_KEY = 'jiuwenswarm_session_unread';
@@ -196,7 +195,11 @@ function ConversationListItem({
       </span>
     );
   } else if (indicator === 'processing') {
-    status = <img className="conversation-list-item__status-icon" src={statusProcessingIcon} alt="" title={getTaskStatusLabel(indicator, t)} aria-hidden="true" />;
+    status = (
+      <span title={getTaskStatusLabel(indicator, t)}>
+        <LoaderCircle className="conversation-list-item__loader" aria-hidden="true" />
+      </span>
+    );
   } else if (indicator === 'unread') {
     status = <span className="conversation-list-item__status-dot" title={t('multiSession.completedUnread')} aria-hidden="true" />;
   } else if (indicator === 'error') {

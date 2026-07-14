@@ -309,14 +309,14 @@ function DetailTabSwitch({
     <div className="grid grid-cols-2 rounded-md bg-secondary p-1 text-sm">
       <button
         type="button"
-        className={`h-8 rounded text-center transition-colors ${activeTab === 'members' ? 'bg-card font-medium text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
+        className={`h-8 rounded text-center  ${activeTab === 'members' ? 'bg-card font-medium text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
         onClick={() => onChange?.('members')}
       >
         {t('team.detailTabs.members')}
       </button>
       <button
         type="button"
-        className={`h-8 rounded text-center transition-colors ${activeTab === 'group' ? 'bg-card font-medium text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
+        className={`h-8 rounded text-center  ${activeTab === 'group' ? 'bg-card font-medium text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
         onClick={() => onChange?.('group')}
       >
         {t('team.detailTabs.group')}
@@ -408,7 +408,7 @@ function GroupAvatarStack({ memberIds }: { memberIds: string[] }) {
         <TeamMemberAvatar key={memberId} member={memberId} className="!h-7 !w-7 ring-2 ring-card" />
       ))}
       {hiddenCount > 0 && (
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#edf1ff] text-xs font-medium text-accent ring-2 ring-card">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--color-team-overflow-surface)] text-xs font-medium text-accent ring-2 ring-card">
           +{hiddenCount}
         </span>
       )}
@@ -558,10 +558,10 @@ function MemberTaskDetail({
                         {getTaskStatusLabel(task.status)}
                         {task.id ? ` · ${task.id}` : ''}
                       </div>
-                      <div className="mt-2 rounded bg-[#F8FAFC] px-3 py-2 text-[11px] leading-5 text-[#5D6675]">
+                      <div className="mt-2 rounded bg-[var(--color-team-detail-surface)] px-3 py-2 text-[11px] leading-5 text-[color:var(--color-team-detail-text)]">
                         {buildTaskRawEntries(task).map(([label, value]) => (
                           <div key={label} className="grid grid-cols-[88px_minmax(0,1fr)] gap-2">
-                            <span className="text-[#9AA3AF]">{label}</span>
+                            <span className="text-[color:var(--color-team-detail-label)]">{label}</span>
                             <span className="whitespace-pre-wrap break-words">{value}</span>
                           </div>
                         ))}
@@ -668,7 +668,7 @@ function FinalSummaryList({ events }: { events: TeamMemberExecutionEvent[] }) {
   }
 
   return (
-    <div className="mx-auto mt-5 max-w-[720px] border-t border-[#E2E5EA] pt-4">
+    <div className="mx-auto mt-5 max-w-[720px] border-t border-[color:var(--color-team-detail-divider)] pt-4">
       <h3 className="text-sm font-semibold text-text">{t('team.process.execution.final')}</h3>
       <div className="mt-4 space-y-6">
         {events.map((event) => (
@@ -789,7 +789,7 @@ function TaskListBar({
     <button
       type="button"
       onClick={onToggle}
-      className="flex w-full h-[54px] items-center justify-between px-5 text-left transition-colors hover:bg-secondary"
+      className="flex w-full h-[54px] items-center justify-between px-5 text-left  hover:bg-secondary"
     >
       <div className="flex min-w-0 items-center gap-2">
         <span className="text-sm font-medium text-text">{t('team.memberTasks')}</span>
