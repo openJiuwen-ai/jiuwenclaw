@@ -255,7 +255,15 @@ class SkillDevDeepAdapter:
         inputs: dict[str, Any],
         *,
         interactive_ask: bool = True,
+        emit_terminal: bool = True,
     ) -> AsyncIterator[AgentResponseChunk]:
+        """Run the inner Agent stream.
+
+        ``skilldev.chat`` performs additional review/package finalization after the
+        Agent stops.  Its caller therefore sets ``emit_terminal=False`` so the
+        first ``is_complete`` marker is not emitted until that outer finalization
+        has finished.  Direct callers retain the historical standalone behavior.
+        """
         if self._instance is None:
             await self.create_instance(self._last_config)
 
@@ -412,12 +420,13 @@ class SkillDevDeepAdapter:
             logger.exception("[session=%s] [SkillDevDeepAdapter] stream task failed: %s", session_id, exc)
             yield _make_chunk({"event_type": "skilldev.error", "error": str(exc)})
 
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=cid,
-            payload=None,
-            is_complete=True,
-        )
+        if emit_terminal:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload=None,
+                is_complete=True,
+            )
 
     # ------------------------------------------------------------------
     # skilldev.chat entry point (workspace init + resource write + stream)
@@ -451,6 +460,7 @@ class SkillDevDeepAdapter:
         raw_session_id = str(request.session_id or task_id)
         conversation_id = self._make_todo_session_id(raw_session_id)
         persist_error: str | None = None
+        terminal_emitted = False
         try:
             if recorder is not None:
                 recorder.begin_round(
@@ -460,7 +470,16 @@ class SkillDevDeepAdapter:
                     is_first=is_first_task_input(task_workspace),
                 )
             async for chunk in self._iter_chat_locked(request, params, task_id, task_workspace):
+                terminal_emitted = terminal_emitted or chunk.is_complete
                 yield self._track_chunk(recorder, task_id, chunk)
+            if not terminal_emitted:
+                terminal_chunk = AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload=None,
+                    is_complete=True,
+                )
+                yield self._track_chunk(recorder, task_id, terminal_chunk)
         except Exception as exc:
             persist_error = str(exc)
             raise
@@ -608,7 +627,11 @@ class SkillDevDeepAdapter:
             "conversation_id": self._make_todo_session_id(raw_session_id),
             "query": combined_query,
         }
-        async for chunk in self.process_message_stream_impl(request, inputs):
+        async for chunk in self.process_message_stream_impl(
+            request,
+            inputs,
+            emit_terminal=False,
+        ):
             yield chunk
 
         async for chunk in self._finalize_skilldev_run(
@@ -818,6 +841,7 @@ class SkillDevDeepAdapter:
             request,
             inputs,
             interactive_ask=True,
+            emit_terminal=False,
         ):
             yield chunk
 
