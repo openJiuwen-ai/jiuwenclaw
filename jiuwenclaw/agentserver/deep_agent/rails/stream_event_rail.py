@@ -38,6 +38,7 @@ from jiuwenclaw.agentserver.deep_agent.read_file_validation import (
     normalize_read_file_tool_outcome,
 )
 from jiuwenclaw.config import get_config
+from jiuwenclaw.local_env_config import get_local_config
 from jiuwenclaw.utils import fix_json_arguments, logger
 
 # Import subagent context functions for fork_agent
@@ -48,6 +49,10 @@ from jiuwenclaw.agentserver.tools.subagent_executor import (
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_list", "todo_modify"])
 _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS = 128000
+# When TOOL_RESULT_DISPLAY_MAX_CHARS is unset (typical non-enterprise), keep the
+# historical emit cap. Enterprise deploy normally sets the env (e.g. 500).
+_DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS = 1000
+_TOOL_RESULT_DISPLAY_MAX_CHARS_LIMIT = 100_000
 
 
 def _resolve_context_window_limit_tokens() -> int:
@@ -70,6 +75,35 @@ def _resolve_context_window_limit_tokens() -> int:
     if value <= 0:
         return _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS
     return value
+
+
+def _resolve_tool_result_display_max_chars() -> int:
+    """Resolve streamed tool_result.result max chars.
+
+    - env configured and valid -> use TOOL_RESULT_DISPLAY_MAX_CHARS
+      (0 = no truncation; max 100000)
+    - unset / invalid -> 1000 (legacy default)
+    """
+    raw = get_local_config("TOOL_RESULT_DISPLAY_MAX_CHARS", None)
+    if raw is None or str(raw).strip() == "":
+        return _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS
+    if parsed < 0 or parsed > _TOOL_RESULT_DISPLAY_MAX_CHARS_LIMIT:
+        return _DEFAULT_TOOL_RESULT_DISPLAY_MAX_CHARS
+    return parsed
+
+
+def _format_tool_result_for_stream(result: Any) -> str:
+    if result is None:
+        return ""
+    text = str(result)
+    limit = _resolve_tool_result_display_max_chars()
+    if limit == 0 or len(text) <= limit:
+        return text
+    return text[:limit]
 
 
 def _structured_tool_result_payload(result: Any) -> Any | None:
@@ -239,7 +273,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
             tool_result_payload = {
                 "tool_name": getattr(tool_call, "name", "") if tool_call else "",
                 "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
-                "result": str(result)[:1000] if result is not None else "",
+                "result": _format_tool_result_for_stream(result),
             }
             if raw_output is not None:
                 tool_result_payload["raw_output"] = raw_output
