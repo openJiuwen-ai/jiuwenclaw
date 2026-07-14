@@ -6018,6 +6018,8 @@ class AgentWebSocketServer:
                 reload_kwargs["target_channel_id"] = target_channel_id
             if target_session_id:
                 reload_kwargs["target_session_id"] = target_session_id
+            if reload_scopes:
+                reload_kwargs["reload_scopes"] = reload_scopes
             agent_reload_scopes = {"model", "team", "permissions", "agent_runtime"}
             should_reload_agents = not reload_scopes or bool(reload_scopes & agent_reload_scopes)
             if should_reload_agents:
