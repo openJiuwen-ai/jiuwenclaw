@@ -194,15 +194,10 @@ overflow: hidden;
 }
 
 .chat-active-team-group .team-event-group {
-  border: 1px solid var(--color-chat-group-border);
+  border: 1px solid var(--color-chat-active-group-border);
   border-radius: 18px 18px 0 0;
   background: color-mix(in srgb, var(--color-chat-composer-surface) 96%, var(--color-surface-page) 4%);
-  box-shadow: var(--effect-chat-group-highlight);
-}
-
-:root[data-theme="default"][data-color-mode="dark"] .chat-active-team-group .team-event-group {
-  border-color: var(--color-chat-composer-border);
-  box-shadow: none;
+  box-shadow: var(--effect-chat-active-group-highlight);
 }
 
 .chat-active-team-group .team-event-group-summary {
@@ -222,14 +217,9 @@ overflow: hidden;
   border-radius: 7px;
 }
 
-.chat-active-team-group .team-event-group-summary__icon img {
+.chat-active-team-group .team-event-group-summary__icon svg {
   opacity: 0.78;
   transform: none;
-}
-
-:root[data-theme="default"][data-color-mode="dark"] .chat-active-team-group .team-event-group-summary__icon img {
-  filter: brightness(0) invert(1);
-  opacity: 1;
 }
 
 .chat-active-team-group .team-event-group-summary__title {
@@ -271,19 +261,14 @@ overflow: hidden;
 }
 
 .chat-active-team-group .team-event-group-summary:hover {
-  background: color-mix(in srgb, var(--color-action-secondary) 44%, transparent);
+  background: var(--color-chat-active-group-hover);
 }
 
 .team-event-group.team-event-group--context-compression {
   margin: 0 12px;
-  border: 1px solid var(--color-chat-group-border);
+  border: 1px solid var(--color-chat-active-group-border);
   border-bottom: none;
   border-radius: 18px 18px 0 0;
-}
-
-:root[data-theme="default"][data-color-mode="dark"] .team-event-group.team-event-group--context-compression {
-  border-color: var(--color-chat-composer-border);
-  box-shadow: none;
 }
 
 .team-event-group-summary.team-event-group-summary--context-compression {
@@ -329,11 +314,6 @@ overflow: hidden;
 .team-event-group-summary__icon--close:hover {
   background: var(--color-action-secondary);
   color: var(--color-text-primary);
-}
-
-:root[data-theme="default"][data-color-mode="dark"] .chat-active-team-group .team-event-group-summary:hover,
-:root[data-theme="default"][data-color-mode="dark"] .chat-active-team-group button.team-event-group-row:hover {
-  background: color-mix(in srgb, var(--color-surface-panel-hover) 56%, transparent);
 }
 
 .chat-active-team-group .team-event-group-list--activity {
@@ -3257,10 +3237,10 @@ z-index: 2;
   max-width: 100%;
   min-width: 0;
   max-height: min(70vh, 720px);
-  border: 1px solid rgba(148, 163, 184, 0.26);
+  border: 1px solid var(--color-a2ui-card-border);
   border-radius: 12px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+  background: var(--color-a2ui-card-surface);
+  box-shadow: var(--effect-a2ui-card-shadow);
   overflow: auto;
   overflow-wrap: anywhere;
 }
@@ -3271,12 +3251,6 @@ z-index: 2;
 
 :root.a2ui-material-symbols-unavailable .a2ui-message-content .a2ui-icon .g-icon {
   font-size: 0;
-}
-
-:root[data-theme="default"][data-color-mode="light"] .a2ui-message-content .a2ui-card > section {
-  border-color: rgba(15, 23, 42, 0.12);
-  background: #fff;
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
 }
 
 .a2ui-message-content .a2ui-image {

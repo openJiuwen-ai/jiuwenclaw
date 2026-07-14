@@ -12,20 +12,5 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
-    <script>
-      // Apply the saved preference before React mounts to avoid a theme flash.
-      (function() {
-        const savedTheme = localStorage.getItem('theme');
-        const theme = savedTheme === 'light' || savedTheme === 'dark' || savedTheme === 'system'
-          ? savedTheme
-          : 'system';
-        const prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
-        const colorMode = theme === 'light' || (theme === 'system' && prefersLight)
-          ? 'light'
-          : 'dark';
-        document.documentElement.setAttribute('data-theme', 'default');
-        document.documentElement.setAttribute('data-color-mode', colorMode);
-      })();
-    </script>
   </body>
 </html>

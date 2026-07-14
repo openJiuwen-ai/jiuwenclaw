@@ -326,7 +326,7 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
                 }`}
                 title={t('fileViewer.chatPreview')}
               >
-                <span className="pointer-events-none h-5 w-5 rounded-full bg-[var(--color-control-thumb)] shadow-sm ring-1 ring-black/5 dark:ring-white/10" />
+                <span className="pointer-events-none h-5 w-5 rounded-full bg-[var(--color-control-thumb)] shadow-sm ring-1 ring-control-ring" />
               </button>
             </div>
           ) : null}

@@ -9,7 +9,7 @@
   width: 100%;
   height: 100vh;
   border-right: 1px solid var(--color-border-default);
-  background: var(--color-surface-panel);
+  background: var(--color-sidebar-surface);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -141,49 +141,6 @@
   box-shadow: var(--effect-shadow-sm);
 }
 
-/* Icon Segmented Control */
-.segmented-control--icons .segmented-control__btn {
-  padding: 4px 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.segmented-control--icons .segmented-control__btn svg,
-.segmented-control--icons .segmented-control__btn img {
-  width: 14px;
-  height: 14px;
-}
-
-.segmented-control--icons .segmented-control__btn img {
-  opacity: 0.4;
-}
-
-:root[data-theme="default"][data-color-mode="dark"] .segmented-control--icons .segmented-control__btn img {
-  filter: brightness(0) invert(1);
-  opacity: 0.65;
-}
-
-.segmented-control--icons .segmented-control__btn--active {
-  color: var(--color-action-primary);
-}
-
-
-.segmented-control--icons .segmented-control__btn--active img {
-  opacity: 1;
-}
-
-/* ============================================
-   Dark Mode
-   ============================================ */
-:root[data-theme="default"][data-color-mode="dark"] .sidebar {
-  background: var(--color-surface-panel);
-}
-
-:root[data-theme="default"][data-color-mode="light"] .sidebar {
-  background: var(--color-surface-shell);
-}
-
 /* ============================================
    Icon Rail (64px sidebar)
    Based on Pixso high-fidelity design
@@ -282,7 +239,7 @@
   z-index: 1200;
   width: 240px;
   padding: 24px 8px;
-  background: var(--color-surface-shell);
+  background: var(--color-sidebar-surface);
 }
 
 .icon-rail-more-panel__title {
@@ -357,39 +314,4 @@
 /* Last bottom item gets more spacing */
 .icon-rail-spacer + .icon-rail-nav-item {
   margin-bottom: 12px;
-}
-
-/* Dark mode overrides for icon rail */
-:root[data-theme="default"][data-color-mode="dark"] .sidebar--icon-rail {
-  background: var(--color-surface-panel);
-}
-
-:root[data-theme="default"][data-color-mode="dark"] .icon-rail-nav-item img {
-  filter: brightness(0) invert(1);
-}
-
-:root[data-theme="default"][data-color-mode="dark"] .icon-rail-more-panel {
-  border-color: var(--color-border-default);
-  background: var(--color-surface-panel-strong);
-}
-
-:root[data-theme="default"][data-color-mode="dark"] .icon-rail-more-panel__title,
-:root[data-theme="default"][data-color-mode="dark"] .icon-rail-more-panel__item {
-  color: var(--color-text-primary);
-}
-
-:root[data-theme="default"][data-color-mode="dark"] .icon-rail-more-panel__icon img {
-  filter: brightness(0) invert(1);
-}
-
-:root[data-theme="default"][data-color-mode="dark"] .icon-rail-nav-item {
-  color: var(--color-text-primary);
-}
-
-:root[data-theme="default"][data-color-mode="dark"] .icon-rail-logo {
-  background: transparent;
-}
-
-:root[data-theme="default"][data-color-mode="dark"] .icon-rail-logo img {
-  filter: none;
 }

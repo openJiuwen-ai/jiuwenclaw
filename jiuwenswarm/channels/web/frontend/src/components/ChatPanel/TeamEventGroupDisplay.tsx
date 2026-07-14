@@ -8,7 +8,7 @@ import {
 } from './teamEventUtils';
 import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
 import { openTeamPanel } from '../../features/teamPanelState';
-import teamProcessIcon from '../../assets/team-process.svg';
+import TeamProcessIcon from '../../assets/team-process.svg?react';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { useChatStore, useSessionStore } from '../../stores';
 import type {
@@ -480,7 +480,7 @@ function AgentTeamHeader({
     >
       <span className="team-event-group-summary__main">
         <span className="team-event-group-summary__icon" aria-hidden="true">
-          <img src={teamProcessIcon} alt="" />
+          <TeamProcessIcon aria-hidden />
         </span>
         <span className="team-event-group-summary__title">
           {buildProgressLabel(memberCount, isProcessing, t)}

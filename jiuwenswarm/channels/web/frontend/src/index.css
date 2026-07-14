@@ -887,10 +887,6 @@ select {
     gap: 4px;
   }
 
-  :root[data-theme='default'][data-color-mode='light'] .chat-tool-card {
-    background: var(--color-surface-muted);
-  }
-
   /* ====== Team Timeline Messages ====== */
   .team-member-message {
     width: min(95%, 920px);
@@ -935,10 +931,6 @@ select {
   .team-member-message__content {
     max-width: 100%;
     min-width: 0;
-  }
-
-  :root[data-theme='default'][data-color-mode='light'] .team-member-message__card {
-    background: var(--color-surface-muted);
   }
 
   .team-member-message__plain {
@@ -1413,59 +1405,6 @@ select {
     text-overflow: ellipsis;
   }
 
-  /* Theme Toggle */
-  .theme-toggle {
-    --theme-item: 28px;
-    --theme-gap: 2px;
-    --theme-pad: 4px;
-    position: relative;
-  }
-
-  .theme-toggle__track {
-    position: relative;
-    display: grid;
-    grid-template-columns: repeat(3, var(--theme-item));
-    gap: var(--theme-gap);
-    padding: var(--theme-pad);
-    border-radius: var(--radius-full);
-    border: 1px solid var(--color-border-default);
-    background: var(--color-action-secondary);
-  }
-
-  .theme-toggle__indicator {
-    position: absolute;
-    top: 50%;
-    left: var(--theme-pad);
-    width: var(--theme-item);
-    height: var(--theme-item);
-    border-radius: var(--radius-full);
-    transform: translateY(-50%) translateX(calc(var(--theme-index, 0) * (var(--theme-item) + var(--theme-gap))));
-    background: var(--color-action-primary);
-    z-index: 0;
-  }
-
-  .theme-toggle__button {
-    height: var(--theme-item);
-    width: var(--theme-item);
-    display: grid;
-    place-items: center;
-    border: 0;
-    border-radius: var(--radius-full);
-    background: transparent;
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    position: relative;
-    z-index: 1;
-  }
-
-  .theme-toggle__button:hover {
-    color: var(--color-text-primary);
-  }
-
-  .theme-toggle__button.active {
-    color: var(--color-action-primary-text);
-  }
-
   /* Keyboard shortcut badge */
   .kbd {
     display: inline-flex;
@@ -1492,7 +1431,7 @@ select {
     vertical-align: text-bottom;
   }
 
-  /* Skill action button - white/black in light mode, gray/white in dark mode */
+  /* Skill action button */
   .skill-action-btn {
     min-width: 76px;
     height: 28px;

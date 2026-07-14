@@ -25,7 +25,7 @@ export function Switch({ checked, onChange, disabled = false, title }: SwitchPro
         focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2
         ${checked 
           ? 'bg-accent border-accent' 
-          : 'bg-gray-200 dark:bg-gray-600 border-gray-300 dark:border-gray-500'}
+          : 'bg-secondary border-border'}
         ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
       `}
     >

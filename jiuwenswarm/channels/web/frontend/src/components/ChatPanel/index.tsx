@@ -32,7 +32,7 @@ import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
 import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
-import welcomeBanner from '../../assets/jiuwen-xiaobanner.png';
+import welcomeBanner from '../../assets/home-banner.svg';
 import './ChatPanel.css';
 
 export interface ChatHistoryPagerProps {

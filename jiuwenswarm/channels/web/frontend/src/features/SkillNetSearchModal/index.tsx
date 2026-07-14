@@ -82,7 +82,7 @@ function levelPillClass(level: string | undefined): string {
     l.includes("moderate") ||
     l.includes("中")
   ) {
-    return "border-amber-500/45 bg-amber-500/15 text-amber-900 dark:text-amber-400";
+    return "border-warn/45 bg-warn/15 text-warn";
   }
   return "border-border bg-secondary text-text-muted";
 }

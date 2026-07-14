@@ -3318,7 +3318,7 @@ export function ConfigPanel({
           </div>
           <div className="flex items-center gap-2">
             {isProcessing && mode !== 'team' ? (
-              <span className="text-xs text-amber-600 dark:text-amber-400">{t('config.errors.processingDisabled')}</span>
+              <span className="text-xs text-warn">{t('config.errors.processingDisabled')}</span>
             ) : null}
             <button
               type="button"

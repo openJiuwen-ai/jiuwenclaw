@@ -461,7 +461,6 @@
     "connectionStatus": "Connection Status",
     "version": "Version",
     "language": "Language",
-    "appearance": "Appearance",
     "moreSettings": "More Settings"
   },
   "heartbeat": {
@@ -1727,9 +1726,6 @@
     "errorTitle": "Application Error",
     "unknownError": "Unknown error",
     "reload": "Reload page",
-    "themeSystem": "Follow system",
-    "themeDark": "Dark mode",
-    "themeLight": "Light mode",
     "configError": "Failed to fetch config via WebSocket, using defaults",
     "configErrorHint": "Please start the backend first (e.g.",
     "configErrorDefault": ", default port 19000). If backend is remote, set",

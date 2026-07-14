@@ -41,12 +41,8 @@
   border-color: var(--color-chat-composer-border, var(--color-border-default));
   /* 比输入框正文稍深一档，保持吸附区域层次。 */
   background: color-mix(in srgb, var(--color-surface-card) 50%, var(--color-action-secondary) 50%);
-  box-shadow: var(--effect-interaction-highlight);
+  box-shadow: var(--effect-interaction-attached-highlight);
   padding-bottom: 1px;
-}
-
-:root[data-theme="default"][data-color-mode="dark"] .interaction-slot--attached .auth-prompt {
-  box-shadow: none;
 }
 
 /* 顶部行：标题（左）+ 动作按钮（右）；整行可点击展开/收起 */

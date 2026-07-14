@@ -58,6 +58,7 @@ export default {
           'emphasis-foreground': color('--color-control-emphasis-text'),
           'emphasis-hover': color('--color-control-emphasis-hover'),
           'emphasis-hover-strong': color('--color-control-emphasis-hover-strong'),
+          ring: color('--color-control-ring'),
         },
         // Semantic colors
         ok: {
@@ -83,6 +84,30 @@ export default {
         body: ['var(--font-body)'],
         display: ['var(--font-display)'],
         mono: ['var(--font-mono)'],
+      },
+      typography: {
+        DEFAULT: {
+          css: {
+            '--tw-prose-body': 'var(--color-text-primary)',
+            '--tw-prose-headings': 'var(--color-text-strong)',
+            '--tw-prose-lead': 'var(--color-text-secondary)',
+            '--tw-prose-links': 'var(--color-text-link)',
+            '--tw-prose-bold': 'var(--color-text-strong)',
+            '--tw-prose-counters': 'var(--color-text-secondary)',
+            '--tw-prose-bullets': 'var(--color-text-secondary)',
+            '--tw-prose-hr': 'var(--color-border-default)',
+            '--tw-prose-quotes': 'var(--color-text-primary)',
+            '--tw-prose-quote-borders': 'var(--color-border-strong)',
+            '--tw-prose-captions': 'var(--color-text-secondary)',
+            '--tw-prose-kbd': 'var(--color-text-primary)',
+            '--tw-prose-kbd-shadows': 'var(--color-border-default)',
+            '--tw-prose-code': 'var(--color-text-strong)',
+            '--tw-prose-pre-code': 'var(--color-text-primary)',
+            '--tw-prose-pre-bg': 'var(--color-surface-panel)',
+            '--tw-prose-th-borders': 'var(--color-border-strong)',
+            '--tw-prose-td-borders': 'var(--color-border-default)',
+          },
+        },
       },
       borderRadius: {
         sm: 'var(--radius-sm)',
