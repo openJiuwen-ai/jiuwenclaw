@@ -151,7 +151,6 @@
       "tab": "Task Planning",
       "progressTitle": "Task Progress",
       "token": "Token",
-      "elapsedTime": "Elapsed {{value}}",
       "taskList": "Task List",
       "taskListAria": "{{task}} task list",
       "resources": "Task resources",
@@ -163,6 +162,9 @@
         "list": "List view",
         "structure": "Structure view",
         "board": "Board view"
+      },
+      "metrics": {
+        "progress": "Progress"
       },
       "columns": {
         "waiting": "Waiting",

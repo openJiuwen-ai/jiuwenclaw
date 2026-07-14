@@ -44,6 +44,32 @@ const compactStatusIcons: Record<TaskColumnKey, string> = {
   cancelled: statusWarningIcon,
 };
 
+function ListViewIcon() {
+  return (
+    <svg width={16} height={16} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M0.5 0C0.223858 0 0 0.223858 0 0.5C0 0.776142 0.223858 1 0.5 1C0.776142 1 1 0.776142 1 0.5C1 0.223858 0.776142 0 0.5 0ZM2.5 0.5C2.5 0.78 2.72 1 3 1L12 1C12.28 1 12.5 0.78 12.5 0.5C12.5 0.22 12.28 0 12 0L3 0C2.72 0 2.5 0.22 2.5 0.5ZM0 5.5C0 5.22386 0.223858 5 0.5 5C0.776142 5 1 5.22386 1 5.5C1 5.77614 0.776142 6 0.5 6C0.223858 6 0 5.77614 0 5.5ZM3 6L12 6C12.28 6 12.5 5.78 12.5 5.5C12.5 5.22 12.28 5 12 5L3 5C2.72 5 2.5 5.22 2.5 5.5C2.5 5.78 2.72 6 3 6ZM0.5 10C0.223858 10 0 10.2239 0 10.5C0 10.7761 0.223858 11 0.5 11C0.776142 11 1 10.7761 1 10.5C1 10.2239 0.776142 10 0.5 10ZM12 10L3 10C2.72 10 2.5 10.22 2.5 10.5C2.5 10.78 2.72 11 3 11L12 11C12.28 11 12.5 10.78 12.5 10.5C12.5 10.22 12.28 10 12 10Z"
+        transform="matrix(1,0,0,-1,1.7998,13.5)"
+        fill="currentColor"
+        fillRule="evenodd"
+      />
+    </svg>
+  );
+}
+
+function BoardViewIcon() {
+  return (
+    <svg width={16} height={16} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M12 0C13.1046 0 14 0.89543 14 2L14 10C14 11.1046 13.1046 12 12 12L2 12C0.89543 12 0 11.1046 0 10L0 2C0 0.89543 0.89543 0 2 0L12 0ZM9 1L5 1L5 11L9 11L9 1ZM10 11L10 1L12 1C12.5523 1 13 1.44772 13 2L13 10C13 10.5523 12.5523 11 12 11L10 11ZM2 1L4 1L4 11L2 11C1.44772 11 1 10.5523 1 10L1 2C1 1.44772 1.44772 1 2 1Z"
+        transform="matrix(1,0,0,-1,1,14)"
+        fill="currentColor"
+        fillRule="evenodd"
+      />
+    </svg>
+  );
+}
+
 export function TaskPlanningPanel({
   variant,
   tasks,
@@ -58,6 +84,7 @@ export function TaskPlanningPanel({
 }: TaskPlanningPanelProps) {
   const { t } = useTranslation();
   const [now, setNow] = useState(() => Date.now());
+  const [view, setView] = useState<'board' | 'list'>('board');
   const groupedTasks = useMemo(() => {
     const groups: Record<TaskColumnKey, SessionTeamTask[]> = {
       waiting: [],
@@ -207,33 +234,144 @@ export function TaskPlanningPanel({
     );
   }
 
+  const viewSwitcher = (
+    <div className="flex items-center gap-1" role="group" aria-label={t('team.planning.progressTitle')}>
+      <button
+        type="button"
+        onClick={() => setView('list')}
+        className={`flex h-8 w-8 items-center justify-center rounded-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-card ${view === 'list' ? 'bg-secondary text-text' : 'text-text-muted hover:bg-secondary/50 hover:text-text'}`}
+        aria-label={t('team.planning.views.list')}
+        title={t('team.planning.views.list')}
+        aria-pressed={view === 'list'}
+      >
+        <ListViewIcon />
+      </button>
+      <button
+        type="button"
+        onClick={() => setView('board')}
+        className={`flex h-8 w-8 items-center justify-center rounded-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-card ${view === 'board' ? 'bg-secondary text-text' : 'text-text-muted hover:bg-secondary/50 hover:text-text'}`}
+        aria-label={t('team.planning.views.board')}
+        title={t('team.planning.views.board')}
+        aria-pressed={view === 'board'}
+      >
+        <BoardViewIcon />
+      </button>
+    </div>
+  );
+
   return (
     <div className="flex-1 overflow-hidden bg-card">
-      <div className="flex h-full flex-col px-6 pb-6">
-        <div className="mb-5 flex items-center gap-4">
-          <h2 className="text-sm font-medium text-text-strong">{t('team.planning.progressTitle')}</h2>
-          <span className="text-sm font-medium text-text-strong">{progressPercent}%</span>
+      {view === 'list' ? (
+        <div className="flex h-full flex-col px-6 pb-6 pt-8">
+          <div className="flex h-8 items-center gap-3">
+            <h2 className="text-base font-medium leading-6 text-text-strong">{t('team.planning.progressTitle')}</h2>
+            {viewSwitcher}
+          </div>
+          <ExpandedTaskList
+            tasks={tasks}
+            groupedTasks={groupedTasks}
+            globalIndexMap={globalIndexMap}
+            progressPercent={progressPercent}
+          />
         </div>
+      ) : (
+        <div className="flex h-full flex-col px-6 pb-6">
+          <div className="mb-5 flex items-center gap-3">
+            <h2 className="text-sm font-medium text-text-strong">{t('team.planning.progressTitle')}</h2>
+            {viewSwitcher}
+            <span className="text-sm font-medium text-text-strong">{progressPercent}%</span>
+          </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto rounded-lg bg-secondary p-6">
-          <div
-            className="grid min-w-[920px] gap-5"
-            style={{ gridTemplateColumns: 'repeat(4, minmax(220px, 1fr))' }}
-          >
-            {BOARD_COLUMNS.map((column) => (
-              <BoardColumn
-                key={column.key}
-                column={column}
-                tasks={groupedTasks[column.key]}
-                members={members}
-                hideAssignee={hideAssignee}
-                globalIndexMap={globalIndexMap}
-              />
-            ))}
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-lg bg-secondary p-6">
+            <div
+              className="grid min-w-[920px] gap-5"
+              style={{ gridTemplateColumns: 'repeat(4, minmax(220px, 1fr))' }}
+            >
+              {BOARD_COLUMNS.map((column) => (
+                <BoardColumn
+                  key={column.key}
+                  column={column}
+                  tasks={groupedTasks[column.key]}
+                  members={members}
+                  hideAssignee={hideAssignee}
+                  globalIndexMap={globalIndexMap}
+                />
+              ))}
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
+  );
+}
+
+function ExpandedTaskList({
+  tasks,
+  groupedTasks,
+  globalIndexMap,
+  progressPercent,
+}: {
+  tasks: SessionTeamTask[];
+  groupedTasks: Record<TaskColumnKey, SessionTeamTask[]>;
+  globalIndexMap: Map<string, number>;
+  progressPercent: number;
+}) {
+  const { t } = useTranslation();
+
+  return (
+    <>
+      <div className="mt-2 flex min-h-7 flex-wrap items-baseline gap-x-8 gap-y-2">
+        <div className="flex shrink-0 items-baseline gap-2">
+          <span className="text-base leading-6 text-text-muted">{t('team.planning.metrics.progress')}</span>
+          <span className="text-lg font-semibold leading-7 text-text-strong">{progressPercent}%</span>
+        </div>
+        <div className="flex shrink-0 items-baseline gap-2">
+          <span className="text-base leading-6 text-text-muted">{t('team.planning.columns.completed')}</span>
+          <span className="text-lg font-semibold leading-7 text-text-strong">{groupedTasks.completed.length}</span>
+        </div>
+        <div className="flex shrink-0 items-baseline gap-2">
+          <span className="text-base leading-6 text-text-muted">{t('team.planning.columns.running')}</span>
+          <span className="text-lg font-semibold leading-7 text-text-strong">{groupedTasks.running.length}</span>
+        </div>
+        <div className="flex shrink-0 items-baseline gap-2">
+          <span className="text-base leading-6 text-text-muted">{t('team.planning.columns.waiting')}</span>
+          <span className="text-lg font-semibold leading-7 text-text-strong">{groupedTasks.waiting.length}</span>
+        </div>
+        <div className="flex shrink-0 items-baseline gap-2">
+          <span className="text-base leading-6 text-text-muted">{t('team.taskStatus.error')}</span>
+          <span className="text-lg font-semibold leading-7 text-text-strong">{groupedTasks.cancelled.length}</span>
+        </div>
+      </div>
+      <div className="h-1 overflow-hidden rounded-full bg-secondary">
+        <div
+          className={`h-full rounded-full transition-all duration-300 ${tasks.length > 0 && groupedTasks.completed.length === tasks.length ? 'bg-ok' : 'bg-accent'}`}
+          style={{ width: `${progressPercent}%` }}
+        />
+      </div>
+      <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
+        {tasks.length === 0 ? (
+          <div className="py-8 text-center text-sm text-text-muted">{t('team.noTasks')}</div>
+        ) : tasks.map((task) => {
+          const columnKey = getTaskColumnKey(task);
+          const seq = globalIndexMap.get(task.task_id) ?? 0;
+          const title = getBoardTaskTitle(task);
+
+          return (
+            <div key={task.task_id} className="flex h-12 items-center">
+              <span className="mr-4 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-secondary text-xs font-medium leading-4 text-muted">
+                {String(seq).padStart(2, '0')}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-base leading-6 text-text" title={title}>{title}</span>
+              <img
+                src={compactStatusIcons[columnKey]}
+                className={`ml-4 h-4 w-4 shrink-0 ${columnKey === 'running' ? 'animate-spin' : ''}`}
+                aria-hidden="true"
+              />
+            </div>
+          );
+        })}
+      </div>
+    </>
   );
 }
 
