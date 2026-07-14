@@ -992,6 +992,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       userInputVersionRef.current += 1;
       stopAllTts();
 
+      // 用户忽略未回答的提问器、直接发新 query：清掉残留的内联提问卡片。
+      // 否则该卡片作为时间线最后一个元素会一直钉在最底部（issue #2091）。
+      if (useChatStore.getState().pendingQuestion) {
+        useChatStore.getState().setPendingQuestion(null);
+      }
+
       // 添加用户消息
       addMessage({
         id: `user-${Date.now()}`,
