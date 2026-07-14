@@ -13,6 +13,7 @@ from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.tools.bash import BashTool
 from openjiuwen.harness.tools.code import CodeTool
+from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.tools.filesystem import (
     EditFileTool,
     GlobTool,
@@ -26,7 +27,6 @@ from jiuwenclaw.agentserver.skilldev_agent.meta_tools.invoke_tool import (
 )
 from jiuwenclaw.agentserver.skilldev_agent.meta_tools.exec_tool import get_exec_tool
 from jiuwenclaw.agentserver.skilldev_agent.tools import WebSearchTool, WebFetchTool
-
 
 DESCRIPTION_CN = (
     "Skill 执行器：执行单个测试用例。支持两种模式 — "
@@ -212,9 +212,9 @@ Hard requirements:
 
 
 def _build_executor_tools(
-    sys_operation: Optional[SysOperation],
-    language: str = "cn",
-    agent_id: Optional[str] = None,
+        sys_operation: Optional[SysOperation],
+        language: str = "cn",
+        agent_id: Optional[str] = None,
 ) -> List[Tool | ToolCard]:
     """Build full tool set for the skill executor subagent.
 
@@ -229,7 +229,7 @@ def _build_executor_tools(
             GlobTool, GrepTool, ListDirTool,
             BashTool, CodeTool,
         ]
-        tools = [cls(sys_operation, language=language) for cls in tool_classes]
+        tools = [cls(sys_operation, language=language, agent_id=agent_id) for cls in tool_classes]
 
     # Pass ToolCards (not Tool instances) to reuse the parent's already-registered
     # instances in Runner.resource_mgr, avoiding "Tool id already registered" conflicts.
@@ -245,11 +245,12 @@ def _build_executor_tools(
 
 
 def build_skill_executor_config(
-    model: Model,
-    *,
-    language: str = "cn",
-    sys_operation: Optional[SysOperation] = None,
-    agent_id: Optional[str] = None,
+        model: Model,
+        *,
+        language: str = "cn",
+        sys_operation: Optional[SysOperation] = None,
+        agent_id: Optional[str] = None,
+        workspace: Optional[Workspace] = None,
 ) -> SubAgentConfig:
     """Build SubAgentConfig for the skill executor subagent.
 
@@ -258,8 +259,8 @@ def build_skill_executor_config(
     - with_skill: includes skill_path in the prompt
     - without_skill: omits skill_path
 
-    workspace is intentionally left as None so that create_subagent derives
-    it dynamically from the parent's current workspace at invocation time.
+    workspace 显式传入父 agent 的 workspace，使 create_subagent 同时复用父的
+    sys_operation，避免传入 sys_operation=None 导致 create_deep_agent 新建孤儿 sysop。
     """
     is_cn = language in ("cn", "zh")
     tools = _build_executor_tools(sys_operation, language=language, agent_id=agent_id)
@@ -271,6 +272,8 @@ def build_skill_executor_config(
         ),
         system_prompt=SYSTEM_PROMPT_CN if is_cn else SYSTEM_PROMPT_EN,
         tools=tools,
+        sys_operation=sys_operation,
+        workspace=workspace,
         model=model,
         max_iterations=50,
         language=language,

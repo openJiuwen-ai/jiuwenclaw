@@ -37,7 +37,7 @@ import shutil
 import mimetypes
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Awaitable, Callable, Literal, Optional
 from collections import OrderedDict
 import logging
 from ruamel.yaml import YAML
@@ -162,7 +162,7 @@ def _find_package_root() -> Path | None:
 
 
 def _resolve_preferred_language(
-    config_yaml_dest: Path, explicit: Optional[str]
+        config_yaml_dest: Path, explicit: Optional[str]
 ) -> str:
     """确定初始化使用的语言：显式参数优先，否则读已复制的 config，默认 zh。"""
     if explicit is not None:
@@ -218,8 +218,8 @@ def _get_builtin_skill_names() -> set[str]:
 
 
 def _migrate_legacy_workspace(
-    workspace_dir: Path,
-    preferred_language: Optional[str] = None,
+        workspace_dir: Path,
+        preferred_language: Optional[str] = None,
 ) -> None:
     """Migrate from legacy layout to new DeepAgent workspace layout.
 
@@ -271,7 +271,7 @@ def _migrate_legacy_workspace(
         if old_heartbeat.exists() and not new_heartbeat.exists():
             shutil.copy2(old_heartbeat, new_heartbeat)
             logger.info("Migrated HEARTBEAT.md from home")
-        
+
         # Merge PRINCIPLE.md and TONE.md into SOUL.md
         old_principle = old_home / "PRINCIPLE.md"
         old_tone = old_home / "TONE.md"
@@ -301,7 +301,7 @@ def _migrate_legacy_workspace(
         builtin_skill_names = _get_builtin_skill_names()
         for skill_dir in new_skills.iterdir():
             if skill_dir.is_dir() and (skill_dir.name in builtin_skill_names \
-                 or skill_dir.name in ["daily-report", "skill-creation"]):
+                                       or skill_dir.name in ["daily-report", "skill-creation"]):
                 shutil.rmtree(skill_dir)
 
     # 4. Migrate memory
@@ -553,8 +553,8 @@ def update_config():
 
 
 def prepare_workspace(
-    overwrite: bool = True,
-    preferred_language: Optional[str] = None,
+        overwrite: bool = True,
+        preferred_language: Optional[str] = None,
 ) -> None:
     package_root = _find_package_root()
     if not package_root:
@@ -572,7 +572,7 @@ def prepare_workspace(
     # Check for legacy directory migration (for start command, overwrite=False)
     # Migration triggers when ANY legacy directory exists, not just old_workspace
     legacy_dirs_exist = (
-        old_workspace.exists() or old_skills.exists() or old_memory.exists()
+            old_workspace.exists() or old_skills.exists() or old_memory.exists()
     )
 
     if legacy_dirs_exist and not overwrite:
@@ -670,9 +670,9 @@ def prepare_workspace(
     template_agent_memory = template_agent_dir / "jiuwenclaw_workspace" / "memory"
 
     def _copy_dir(
-        src_dir: Path,
-        dst_dir: Path,
-        ignore_patterns: tuple[str, ...] | None = None,
+            src_dir: Path,
+            dst_dir: Path,
+            ignore_patterns: tuple[str, ...] | None = None,
     ) -> None:
         if not src_dir.exists():
             return
@@ -957,7 +957,7 @@ def get_agent_skills_dir() -> Path:
 
 
 def get_multi_tenant_skill_dirs(
-    service_id: str | None, agent_id: str | None,
+        service_id: str | None, agent_id: str | None,
 ) -> list[Path]:
     """Resolve the skills directory list for multi-tenant / single-tenant mode.
 
@@ -1160,8 +1160,8 @@ def _migrate_legacy_checkpoint_and_logs() -> None:
 
 
 def get_checkpoint_dir(
-    service_id: str | None = None,
-    agent_id: str | None = None,
+        service_id: str | None = None,
+        agent_id: str | None = None,
 ) -> Path:
     """Get the checkpoint directory path (agent_id level).
 
@@ -1228,16 +1228,47 @@ logger = logging.getLogger(__name__)
 
 
 class AsyncLRUCache:
-    """带过期时间的 LRU 缓存（异步并发安全）."""
+    """带过期时间的 LRU 缓存（异步并发安全）.
 
-    def __init__(self, max_size: int = 100, ttl_seconds: int = 600) -> None:
+    on_evict: 可选异步回调 ``async (key, value) -> None``，在条目被淘汰/过期/移除时调用，
+    用于释放被淘汰值持有的资源（如 SQLite engine、AgentManager cleanup）。
+    回调在锁外 await，避免长持锁；回调异常被吞掉并记录日志，不影响缓存正常运作。
+    """
+
+    def __init__(
+            self,
+            max_size: int = 100,
+            ttl_seconds: int = 600,
+            on_evict: "Callable[[str, Any], Awaitable[None]] | None" = None,
+    ) -> None:
+        # max_size clamp 到 ≥1：put 依赖 popitem(last=False) 淘汰旧值，
+        # 缓存为空时 popitem 会抛 KeyError；0/负值会让首次 put 即崩溃。
         self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
-        self._max_size = max_size
+        self._max_size = max(1, int(max_size))
         self._ttl = ttl_seconds
         self._lock = asyncio.Lock()
+        self._on_evict = on_evict
+
+    async def _safe_evict(self, key: str, value: Any, *, source: str = "") -> None:
+        """在锁外执行淘汰回调；异常吞掉不影响调用方.
+
+        ``source`` 标识淘汰来源（``get_expired``/``put_cover``/``put_lru``/
+        ``remove``/``clear``/``keys_expired``/``cleanup_expired``），仅用于日志，
+        不传给 on_evict 回调（回调签名保持 ``(key, value)``）。
+        """
+        cb = self._on_evict
+        if cb is None:
+            return
+        if source:
+            logger.info("[AsyncLRUCache] evict key=%s source=%s", key, source)
+        try:
+            await cb(key, value)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AsyncLRUCache] on_evict failed for key=%s source=%s: %s", key, source, exc)
 
     async def get(self, key: str) -> Any | None:
         """获取缓存值，如果不存在或已过期则返回 None."""
+        evicted: list[tuple[str, Any]] = []
         async with self._lock:
             if key not in self._cache:
                 return None
@@ -1245,44 +1276,122 @@ class AsyncLRUCache:
             value, timestamp = self._cache[key]
             if time.time() - timestamp > self._ttl:
                 self._cache.pop(key, None)
-                return None
+                evicted.append((key, value))
+                result = None
+            else:
+                self._cache.move_to_end(key)
+                result = value
+        # 锁外 await 淘汰回调（TTL 过期）
+        for ek, ev in evicted:
+            await self._safe_evict(ek, ev, source="get_expired")
+        return result
 
-            self._cache.move_to_end(key)
-            return value
+    async def get_or_create(
+            self, key: str, factory: "Callable[[str], Awaitable[Any]]",
+    ) -> tuple[Any, bool]:
+        """原子地获取或创建缓存项，消除 get→create→put 之间的 TOCTOU 竞态.
+
+        在同一把锁内完成"检查-创建-缓存"：若 key 不存在或已过期，调用 ``factory(key)``
+        创建值并写入缓存；若已存在且未过期，直接返回缓存值。
+
+        Args:
+            key: 缓存键。
+            factory: 异步工厂函数，仅当需要创建时调用。签名 ``async (key) -> value``。
+                factory 在锁内 await，因此**会阻塞其他 get/put**——factory 必须快
+                （如已就绪的构造），避免长持锁。耗时的初始化应在工厂外完成。
+
+        Returns:
+            ``(value, is_new)``：``value`` 为缓存值；``is_new`` 表示本次是否新建。
+        """
+        evicted: list[tuple[str, Any, str]] = []  # (key, value, source)
+        async with self._lock:
+            hit = self._cache.get(key)
+            now = time.time()
+            if hit is not None:
+                value, timestamp = hit
+                if now - timestamp <= self._ttl:
+                    # 命中且未过期：复用，不触发任何淘汰
+                    self._cache.move_to_end(key)
+                    return value, False
+                # 命中但已过期：按 get_expired 淘汰旧值，下面走新建路径
+                self._cache.pop(key, None)
+                evicted.append((key, value, "get_expired"))
+
+            # key 不存在或已过期：在锁内创建（factory 会阻塞其他操作，需快）
+            new_value = await factory(key)
+            # 容量淘汰（与 put 一致：仅在满且非空时 popitem）
+            if len(self._cache) >= self._max_size and self._cache:
+                ek, ev_tuple = self._cache.popitem(last=False)
+                evicted.append((ek, ev_tuple[0], "put_lru"))
+            self._cache[key] = (new_value, now)
+            result, is_new = new_value, True
+        # 锁外 await 淘汰回调（过期清理 / 容量淘汰）
+        for ek, ev, src in evicted:
+            await self._safe_evict(ek, ev, source=src)
+        return result, is_new
 
     async def put(self, key: str, value: Any) -> None:
         """存入缓存值，如果超过容量则淘汰最久未使用的."""
+        evicted: list[tuple[str, Any, str]] = []  # (key, value, source)
         async with self._lock:
             if key in self._cache:
-                self._cache.pop(key)
-            elif len(self._cache) >= self._max_size:
-                self._cache.popitem(last=False)
+                old = self._cache.pop(key)
+                evicted.append((key, old[0], "put_cover"))
+            elif len(self._cache) >= self._max_size and self._cache:
+                # 容量淘汰：缓存非空时才 popitem（防御 max_size≤0 或空缓存的边界）
+                ek, ev_tuple = self._cache.popitem(last=False)
+                evicted.append((ek, ev_tuple[0], "put_lru"))
 
             self._cache[key] = (value, time.time())
+        # 锁外 await 淘汰回调（容量淘汰 / 原值覆盖）
+        for ek, ev, src in evicted:
+            await self._safe_evict(ek, ev, source=src)
 
     async def remove(self, key: str) -> None:
         """删除缓存项."""
         async with self._lock:
-            self._cache.pop(key, None)
+            value = self._cache.pop(key, None)
+        if value is not None:
+            await self._safe_evict(key, value[0], source="remove")
 
     async def clear(self) -> None:
         """清空缓存."""
         async with self._lock:
+            items = list(self._cache.items())
             self._cache.clear()
+        # 锁外逐个 await 淘汰回调
+        for ek, ev_tuple in items:
+            await self._safe_evict(ek, ev_tuple[0], source="clear")
 
     def __len__(self) -> int:
         return len(self._cache)
 
-    async def keys(self) -> list[str]:
+    async def keys(self, *, _evict_source: str = "keys_expired") -> list[str]:
+        evicted: list[tuple[str, Any]] = []
         async with self._lock:
             now = time.time()
-            expired_keys = [
-                key for key, (_, timestamp) in self._cache.items()
+            for key in [
+                k for k, (_, timestamp) in self._cache.items()
                 if now - timestamp > self._ttl
-            ]
-            for key in expired_keys:
-                del self._cache[key]
-            return list(self._cache.keys())
+            ]:
+                ev_tuple = self._cache.pop(key, None)
+                if ev_tuple is not None:
+                    evicted.append((key, ev_tuple[0]))
+            result = list(self._cache.keys())
+        # 锁外 await 淘汰回调（TTL 过期清理）
+        for ek, ev in evicted:
+            await self._safe_evict(ek, ev, source=_evict_source)
+        return result
+
+    async def cleanup_expired(self) -> int:
+        """清理所有 TTL 过期条目并触发 on_evict 回调，返回清理的条目数.
+
+        与 ``keys()`` 的差异：本方法语义明确为"主动清理过期"，返回清理计数而非
+        剩余 key 列表，便于调用方表达"为副作用而调用"的意图，避免忽略返回值的告警。
+        """
+        before = len(self._cache)
+        result = await self.keys(_evict_source="cleanup_expired")  # 标注来源为主动清理
+        return before - len(result)
 
 
 _TOOL_ARGS_LOG_MAX_DEFAULT = 480
@@ -1295,12 +1404,12 @@ def _truncate_tool_args_log_fragment(text: str, *, full_detail: bool) -> str:
 
 
 def _log_tool_args_repair_stage(
-    *,
-    stage: str,
-    before_raw: str,
-    outcome: Literal["success", "failed"],
-    after_dict: Optional[dict] = None,
-    error: Optional[str] = None,
+        *,
+        stage: str,
+        before_raw: str,
+        outcome: Literal["success", "failed"],
+        after_dict: Optional[dict] = None,
+        error: Optional[str] = None,
 ) -> None:
     full_detail = logger.isEnabledFor(logging.DEBUG)
     before_shown = _truncate_tool_args_log_fragment(before_raw, full_detail=full_detail)

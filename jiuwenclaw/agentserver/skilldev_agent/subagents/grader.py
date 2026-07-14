@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from openjiuwen.core.foundation.llm.model import Model
-from openjiuwen.core.foundation.tool import Tool
+from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.schema.config import SubAgentConfig
@@ -18,7 +18,7 @@ from openjiuwen.harness.tools.filesystem import (
     ReadFileTool,
     WriteFileTool,
 )
-
+from openjiuwen.harness.workspace.workspace import Workspace
 
 DESCRIPTION_CN = (
     "评分器：对比执行结果与预期断言，生成 grading.json。"
@@ -297,26 +297,28 @@ Hard requirements:
 
 
 def build_grader_config(
-    model: Model,
-    *,
-    language: str = "cn",
-    sys_operation: Optional[SysOperation] = None,
+        model: Model,
+        *,
+        language: str = "cn",
+        sys_operation: Optional[SysOperation] = None,
+        agent_id: Optional[str] = None,
+        workspace: Optional[Workspace] = None,
 ) -> SubAgentConfig:
     """Build SubAgentConfig for the grader subagent.
 
-    workspace is intentionally left as None so that create_subagent derives
-    it dynamically from the parent's current workspace at invocation time.
+    workspace 显式传入父 agent 的 workspace，使 create_subagent 同时复用父的
+    sys_operation，避免传入 sys_operation=None 导致 create_deep_agent 新建孤儿 sysop。
     """
     is_cn = language in ("cn", "zh")
 
-    tools: List[Tool] = []
+    tools: List[Tool | ToolCard] = []
     if sys_operation is not None:
         tools = [
-            ReadFileTool(sys_operation, language=language),
-            WriteFileTool(sys_operation, language=language),
-            GlobTool(sys_operation, language=language),
-            GrepTool(sys_operation, language=language),
-            ListDirTool(sys_operation, language=language),
+            ReadFileTool(sys_operation, language=language, agent_id=agent_id),
+            WriteFileTool(sys_operation, language=language, agent_id=agent_id),
+            GlobTool(sys_operation, language=language, agent_id=agent_id),
+            GrepTool(sys_operation, language=language, agent_id=agent_id),
+            ListDirTool(sys_operation, language=language, agent_id=agent_id),
         ]
 
     return SubAgentConfig(
@@ -326,6 +328,8 @@ def build_grader_config(
         ),
         system_prompt=SYSTEM_PROMPT_CN if is_cn else SYSTEM_PROMPT_EN,
         tools=tools,
+        sys_operation=sys_operation,
+        workspace=workspace,
         model=model,
         max_iterations=30,
         language=language,
