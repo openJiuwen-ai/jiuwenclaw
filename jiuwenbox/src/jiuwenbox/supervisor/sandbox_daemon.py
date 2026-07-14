@@ -688,8 +688,28 @@ class _BgJob:
     stderr_path: str | None
 
 
-_bg_jobs: dict[str, _BgJob] = {}
+_bg_jobs: dict[str, _BgJob | object] = {}
 _bg_jobs_lock = threading.Lock()
+_BG_JOB_RESERVED = object()
+
+
+def _try_reserve_bg_job(job_id: str) -> bool:
+    with _bg_jobs_lock:
+        if job_id in _bg_jobs:
+            return False
+        _bg_jobs[job_id] = _BG_JOB_RESERVED
+        return True
+
+
+def _release_bg_job_reservation(job_id: str) -> None:
+    with _bg_jobs_lock:
+        if _bg_jobs.get(job_id) is _BG_JOB_RESERVED:
+            del _bg_jobs[job_id]
+
+
+def _commit_bg_job(job_id: str, job: _BgJob) -> None:
+    with _bg_jobs_lock:
+        _bg_jobs[job_id] = job
 
 
 def _sync_bg_job(job: _BgJob) -> None:
@@ -763,87 +783,91 @@ def _handle_exec_background(conn: socket.socket, header: dict[str, Any]) -> None
 
         stdin_bytes = _recv_exact(conn, stdin_size) if stdin_size else b""
 
-        with _bg_jobs_lock:
-            if job_id in _bg_jobs:
-                _send_response(
-                    conn,
-                    _bg_job_response(
-                        ok=False,
-                        job_id=job_id,
-                        started=False,
-                        error="job_exists",
-                        stderr=f"background job {job_id!r} already exists",
-                    ),
-                )
-                return
-
-        merged_env = dict(os.environ)
-        merged_env.pop(LISTENER_FD_ENV, None)
-        if env_override is not None:
-            merged_env.update(env_override)
-
-        stdout_path: str | None = None
-        stderr_path: str | None = None
-        stdout_file = None
-        stderr_file = None
-        if capture_output:
-            os.makedirs(SANDBOX_BG_LOG_DIR, exist_ok=True)
-            stdout_path = f"{SANDBOX_BG_LOG_DIR}/{job_id}.out"
-            stderr_path = f"{SANDBOX_BG_LOG_DIR}/{job_id}.err"
-            stdout_file = open(stdout_path, "wb")
-            stderr_file = open(stderr_path, "wb")
-            stdout_target = stdout_file
-            stderr_target = stderr_file
-        else:
-            stdout_target = subprocess.DEVNULL
-            stderr_target = subprocess.DEVNULL
-
-        proc_kwargs: dict[str, Any] = {
-            "stdin": subprocess.PIPE if stdin_size else subprocess.DEVNULL,
-            "stdout": stdout_target,
-            "stderr": stderr_target,
-            "env": merged_env,
-            "close_fds": True,
-            "start_new_session": True,
-        }
-        if workdir:
-            proc_kwargs["cwd"] = workdir
-
-        try:
-            proc = subprocess.Popen(command, **proc_kwargs)
-            if stdin_size and proc.stdin is not None:
-                proc.stdin.write(stdin_bytes)
-                proc.stdin.close()
-        except OSError as exc:
+        if not _try_reserve_bg_job(job_id):
             _send_response(
                 conn,
                 _bg_job_response(
                     ok=False,
                     job_id=job_id,
                     started=False,
-                    error="spawn_failed",
-                    stderr=f"failed to spawn background command: {exc}",
+                    error="job_exists",
+                    stderr=f"background job {job_id!r} already exists",
                 ),
             )
             return
+
+        reserved = True
+        try:
+            merged_env = dict(os.environ)
+            merged_env.pop(LISTENER_FD_ENV, None)
+            if env_override is not None:
+                merged_env.update(env_override)
+
+            stdout_path: str | None = None
+            stderr_path: str | None = None
+            stdout_file = None
+            stderr_file = None
+            if capture_output:
+                os.makedirs(SANDBOX_BG_LOG_DIR, exist_ok=True)
+                stdout_path = f"{SANDBOX_BG_LOG_DIR}/{job_id}.out"
+                stderr_path = f"{SANDBOX_BG_LOG_DIR}/{job_id}.err"
+                stdout_file = open(stdout_path, "wb")
+                stderr_file = open(stderr_path, "wb")
+                stdout_target = stdout_file
+                stderr_target = stderr_file
+            else:
+                stdout_target = subprocess.DEVNULL
+                stderr_target = subprocess.DEVNULL
+
+            proc_kwargs: dict[str, Any] = {
+                "stdin": subprocess.PIPE if stdin_size else subprocess.DEVNULL,
+                "stdout": stdout_target,
+                "stderr": stderr_target,
+                "env": merged_env,
+                "close_fds": True,
+                "start_new_session": True,
+            }
+            if workdir:
+                proc_kwargs["cwd"] = workdir
+
+            try:
+                proc = subprocess.Popen(command, **proc_kwargs)
+                if stdin_size and proc.stdin is not None:
+                    proc.stdin.write(stdin_bytes)
+                    proc.stdin.close()
+            except OSError as exc:
+                _send_response(
+                    conn,
+                    _bg_job_response(
+                        ok=False,
+                        job_id=job_id,
+                        started=False,
+                        error="spawn_failed",
+                        stderr=f"failed to spawn background command: {exc}",
+                    ),
+                )
+                return
+            finally:
+                if stdout_file is not None:
+                    stdout_file.close()
+                if stderr_file is not None:
+                    stderr_file.close()
+
+            job = _BgJob(
+                job_id=job_id,
+                command=command,
+                proc=proc,
+                capture_output=capture_output,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+            )
+            _commit_bg_job(job_id, job)
+            reserved = False
+
+            _send_response(conn, _bg_job_response(ok=True, job_id=job_id, job=job))
         finally:
-            if stdout_file is not None:
-                stdout_file.close()
-            if stderr_file is not None:
-                stderr_file.close()
-
-        job = _BgJob(
-            job_id=job_id,
-            command=command,
-            proc=proc,
-            capture_output=capture_output,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-        )
-        with _bg_jobs_lock:
-            _bg_jobs[job_id] = job
-
-        _send_response(conn, _bg_job_response(ok=True, job_id=job_id, job=job))
+            if reserved:
+                _release_bg_job_reservation(job_id)
     except (ValueError, ConnectionError) as exc:
         _send_response(
             conn,
@@ -886,7 +910,7 @@ def _handle_bg_status(conn: socket.socket, header: dict[str, Any]) -> None:
     job_id = job_id.strip()
     with _bg_jobs_lock:
         job = _bg_jobs.get(job_id)
-    if job is None:
+    if job is None or job is _BG_JOB_RESERVED:
         _send_response(
             conn,
             _bg_job_response(
@@ -930,7 +954,7 @@ def _handle_bg_kill(conn: socket.socket, header: dict[str, Any]) -> None:
 
     with _bg_jobs_lock:
         job = _bg_jobs.get(job_id)
-    if job is None:
+    if job is None or job is _BG_JOB_RESERVED:
         _send_response(
             conn,
             {

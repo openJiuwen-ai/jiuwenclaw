@@ -711,7 +711,8 @@ class ProcessRuntime(RuntimeAdapter):
             response = self._bg_status_via_daemon_blocking(
                 _DaemonBgStatusCall(socket_path=socket_path, job_id=job.job_id),
             )
-        except (ConnectionError, ValueError, socket.timeout, OSError):
+        except (OSError, ValueError):
+            # ``OSError`` already covers ``ConnectionError`` and ``socket.timeout`` (G.ERR.09).
             return
         self._apply_bg_status_response(job, response)
 
@@ -1765,7 +1766,8 @@ class ProcessRuntime(RuntimeAdapter):
                         signum=signal.SIGTERM,
                     ),
                 )
-            except (ConnectionError, ValueError, socket.timeout, OSError):
+            except (OSError, ValueError):
+                # ``OSError`` already covers ``ConnectionError`` and ``socket.timeout`` (G.ERR.09).
                 continue
 
         deadline = time.monotonic() + timeout
@@ -1797,7 +1799,8 @@ class ProcessRuntime(RuntimeAdapter):
                         signum=signal.SIGKILL,
                     ),
                 )
-            except (ConnectionError, ValueError, socket.timeout, OSError):
+            except (OSError, ValueError):
+                # ``OSError`` already covers ``ConnectionError`` and ``socket.timeout`` (G.ERR.09).
                 continue
             await loop.run_in_executor(
                 None,
@@ -3064,7 +3067,8 @@ class ProcessRuntime(RuntimeAdapter):
                     signum=signum,
                 ),
             )
-        except (ConnectionError, ValueError, socket.timeout, OSError):
+        except (OSError, ValueError):
+            # ``OSError`` already covers ``ConnectionError`` and ``socket.timeout`` (G.ERR.09).
             return KillBackgroundJobResult(
                 job_id=job_id,
                 killed=False,

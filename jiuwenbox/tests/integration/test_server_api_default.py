@@ -3797,6 +3797,7 @@ class TestBackgroundJobs:
             json={},
         )
 
+
 class TestSandboxListing:
     @staticmethod
     def test_list_returns_all_sandboxes(client):
