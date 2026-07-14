@@ -157,7 +157,7 @@ _CDN_HEAD_SNIPPET = (
 
 
 _DESIGN_RULES_DIGEST = (
-    "### 视觉与布局硬约束（精选 26 条）\n"
+    "### 视觉与布局硬约束（精选 23 条）\n"
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
     "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`，主要内容必须放在安全区内；"
     "子元素禁止额外加 padding，否则导致双重边距\n"
@@ -197,8 +197,9 @@ _DESIGN_RULES_DIGEST = (
     "留白 > 30% 判定为'空白率过高'；通过增加卡片、图表、列表项填充内容，而非放大字号\n"
     "7. 防溢出：单行文字不超容器宽度；连续段落 ≤ 100 字（超过必须拆列表）；"
     "文本容器（p、span、div）必须加 `break-words` 类防止中英混排时英文/数字处不换行溢出\n"
-    "8. 布局结构：严格遵循标准 HTML 骨架——main 用 `flex gap-3`，"
-    "恰好 2 个 `<section>` 子元素；header/main/footer 纵向排列在 content-safe 内\n"
+    "8. 布局结构：严格遵循标准 HTML 骨架——main 用 `flex`，"
+    "恰好 2 个 `<section>` 子元素，间距用 `pr-[12px]`/`pl-[12px]` 替代 gap；"
+    "header/main/footer 纵向排列在 content-safe 内\n"
     "8.1 禁止使用 CSS Grid：html-to-pptx 转换器不支持 `display:grid`（Grid 仅检测不转换，视为非文本容器），"
     "所有布局必须用 Flexbox（`flex`、`flex-col`、`flex-[N]`）替代 `grid grid-cols-*`；"
     "左右分栏用 `flex` + `flex-[3]` / `flex-[2]` 比例分配，不用 `grid grid-cols-[3fr_2fr]`\n"
@@ -231,33 +232,20 @@ _DESIGN_RULES_DIGEST = (
     "18. 遮罩层≠底色：`bg-black/50`、`from-black/*`、`bg-gradient-*` 等是遮罩层(overlay)，"
     "必须配合底层 `<img>` 背景图使用以保证文字可读，不是页面/卡片底色；"
     "页面底色必须严格遵循风格规范文件定义的背景色，禁止使用与风格不符的底色\n"
+    "\n"
+    "### html-to-pptx 转换器限制（以下规则源于转换器实际能力，非设计偏好）\n"
     "19. 图表分割线：`splitLine` 建议使用 `type:'dashed'` 虚线，避免实线分割线在 PPTX 中过于突兀；"
     "颜色用 `#DDDDDD`，禁止用深色实线\n"
     "20. padding/border 转换缩放：html-to-pptx 转换器对 padding 缩放 0.85（减少 15%）、border-width 缩放 0.65（减少 35%），"
     "生成 HTML 时需预留余量，避免 PPTX 中内容因缩放溢出或边框过细\n"
-    "21. 文本换行（强制）：`break-words`（`overflow-wrap:break-word`）在 PPTX 转换中不生效，"
+    "21. 文本换行：`break-words`（`overflow-wrap:break-word`）在 PPTX 转换中不生效，"
     "长文本不会在 PPTX 中自动换行而会溢出右边界；"
-    "必须将长段落拆分为多个 `<p>` 标签或用 `<br>` 手动换行，单行文字不超过容器宽度；"
-    "案例/说明文字控制在 40 字以内一行，超过时用 `<br>` 分行\n"
-    "22. 间距控制（强制）："
-    "禁止使用 `justify-between` 分布列表项（无论数量多少，因为项的高度不一时 gap 相等但视觉间距不一致）；"
-    "列表项间距统一用 `mt-[10px]` 或 `mt-[12px]` 逐项递增，确保每个项之间的视觉间距一致；"
-    "正确写法：`<div class=\"flex flex-col\"><div class=\"mt-[10px]\">项1</div><div class=\"mt-[10px]\">项2</div></div>`；"
-    "禁止使用 `leading-[2]` 或 `leading-loose`（行高 2 倍），行高上限 `leading-[1.6]`；"
-    "图标与文字间距不超过 `mr-[8px]`，禁止用 `mr-[28px]` 或更大的图标边距；"
-    "ECharts SVG 图例在 PPTX 转换后图标和文字可能不对齐（转换器限制），"
-    "图例项之间留足间距，图例文字用 `fontSize:12` 确保字号统一\n"
-    "23. ECharts 数据一致性（强制）：xAxis.data 数组的长度必须与 series[].data 数组的长度完全一致，"
-    "禁止 x 轴标签数量与数据点数量不匹配；双轴图必须确保两个 yAxis 的数据点一一对应\n"
-    "24. 容器高度（强制）：文本容器的固定高度必须大于等于其内文字行高，"
-    "例如 `h-[28px]` 的容器不能放 `text-[26px] leading-[1.1]`（行高 28.6px > 28px），"
-    "否则 PPTX 中文字会向上溢出与上方元素重叠；"
-    "正确做法：容器高度 ≥ 字号 × 行高系数 + 4px 余量\n"
-    "25. 文本宽度约束（强制）：`flex justify-between` 布局中的文本元素必须加 `max-w-[Npx]` 或 `w-[Npx]` 约束宽度，"
-    "否则 PPTX 中文本不自动换行会溢出右边界；"
-    "英文/数字混合文本（如 'GMTN Programme · Carbon Neutral Green Bond'）必须加 `break-words` + `max-w-[200px]`\n"
-    "26. ECharts 图例与轴标题防重叠（强制）：图例项 ≥3 个时必须设 `legend.top: 'bottom'` 或 `legend.orient: 'vertical'`，"
-    "避免图例水平排列时与 Y 轴标题重叠；双轴图的右 Y 轴标题（`yAxis.name`）必须设置 `yAxis.nameLocation: 'end'` 且 `grid.right` 留足 ≥60px 空间\n"
+    "必须将长段落拆分为多个 `<p>` 标签或用 `<br>` 手动换行；"
+    "flex 布局中的文本元素应加 `max-w-[Npx]` 约束宽度，防止 PPTX 中溢出\n"
+    "22. 行高限制：禁止使用 `leading-[2]` 或 `leading-loose`（行高 2 倍），行高上限 `leading-[1.6]`\n"
+    "23. ECharts SVG 图例：PPTX 转换后图例图标和文字可能不对齐（转换器限制），"
+    "图例项之间留足间距，图例文字用 `fontSize:12` 确保字号统一；"
+    "图例项 ≥3 个时设 `legend.top:'bottom'` 或 `legend.orient:'vertical'`，避免与 Y 轴标题重叠\n"
 )
 
 
@@ -450,7 +438,7 @@ _DENSITY_CHECKLIST_DIGEST = (
     "5. 数据来源：页脚有标注（机构名 / 资料名）\n"
     "6. 无大段文字：无连续 > 100 字段落\n"
     "7. 视觉层级：标题 → 副标题 → 正文 → 注释 层级清晰\n"
-    "8. 布局正确：main 元素采用双区域布局（如 `flex gap-4`、`flex` + `flex-[3]`/`flex-[2]` 等），"
+    "8. 布局正确：main 元素采用双区域布局（如 `flex` + `flex-[3]`/`flex-[2]` 等），"
     "且恰好 2 个直接子元素（`<section>` 或 `<div>`）；"
     "禁止使用 `grid grid-cols-*`（html-to-pptx 不支持 CSS Grid）；"
     "禁止所有页面使用相同布局，需根据内容叙事选择不同布局比例和方向\n"
@@ -487,6 +475,43 @@ def _is_valid_html(text: str) -> bool:
         return False
     lower = text.lower()
     return ("<html" in lower or "<!doctype html" in lower) and "ppt-slide" in lower
+
+
+# 匹配含 ppt-slide 的 div 开始标签
+_PPT_SLIDE_DIV_RE = re.compile(r'<div[^>]*\bclass="[^"]*ppt-slide[^"]*"', re.IGNORECASE)
+
+
+def _truncate_to_single_slide(html: str) -> str:
+    """如果 HTML 包含多个 ppt-slide 容器，截取第一个并保留 HTML 骨架。
+
+    LLM 偶尔会忽略单页约束，将全部页面写入一个 HTML 文件。
+    此函数检测到多 slide 时截取第一个，丢弃其余，并补全闭合标签。
+    """
+    matches = list(_PPT_SLIDE_DIV_RE.finditer(html))
+    if len(matches) <= 1:
+        return html
+
+    # 从第二个 ppt-slide div 往前找 <div 起始位置
+    second_match = matches[1]
+    div_start = html.rfind("<div", 0, second_match.start())
+    if div_start == -1:
+        div_start = second_match.start()
+
+    # 还需要往回找注释标记（如 <!-- P2 ... -->）
+    comment_pos = html.rfind("<!--", 0, div_start)
+    cut_pos = min(comment_pos, div_start) if comment_pos != -1 else div_start
+
+    truncated = html[:cut_pos].rstrip()
+    # 补全闭合标签
+    if "</body>" not in truncated.lower():
+        truncated += "\n</body>\n</html>\n"
+
+    logger.warning(
+        "[P8.1] 检测到 %d 个 ppt-slide 容器，已截取第一个 slide，丢弃其余 %d 个",
+        len(matches),
+        len(matches) - 1,
+    )
+    return truncated
 
 
 # 匹配 <h1>/<h2> 中「第X页」占位符（X 为数字或中文数字）
@@ -667,15 +692,21 @@ def _post_check_layout_issues(html: str, failed_items: list[str]) -> list[str]:
     # 检测 leading-[2] 或 leading-loose（行高过大导致空白）
     if re.search(r'leading-\[2\]|leading-loose', html) and "行高过大导致空白" not in failed_items:
         failed_items.append("行高过大导致空白")
-    # 检测 justify-between 用于列表项（项高度不一时视觉间距不一致）
-    # 匹配任何使用 justify-between 的 flex-col 容器
-    if re.search(r'class="[^"]*flex[^"]*flex-col[^"]*justify-between', html) and "间距过大" not in failed_items:
+    # 检测 justify-between + flex-col 组合（项高度不一时视觉间距不一致）
+    # 使用先行断言确保三个关键词同时出现在同一 class 属性中，不依赖顺序
+    if re.search(
+        r'class="(?=[^"]*\bflex\b)(?=[^"]*\bflex-col\b)(?=[^"]*\bjustify-between\b)[^"]*"',
+        html,
+    ) and "间距过大" not in failed_items:
         failed_items.append("间距过大")
-    elif re.search(r'class="[^"]*justify-between[^"]*flex[^"]*flex-col', html) and "间距过大" not in failed_items:
-        failed_items.append("间距过大")
-    # 检测过大的图标边距（mr-[28px] 或更大）
-    if re.search(r'mr-\[(?:[3-9]\d|2[89])px\]', html) and "图标边距过大" not in failed_items:
-        failed_items.append("图标边距过大")
+    # 检测图标元素（class 含 fa-）上过大的右边距（mr-[28px] 或更大）
+    # 仅检查图标场景，避免误杀普通布局边距
+    for m in re.finditer(r'class="([^"]*\bfa-[^"]*)"', html):
+        mr_match = re.search(r'mr-\[(\d+)px\]', m.group(1))
+        if mr_match and int(mr_match.group(1)) >= 28:
+            if "图标边距过大" not in failed_items:
+                failed_items.append("图标边距过大")
+            break
     # 检测容器高度不足（h-[Npx] 容器内放 text-[Mpx] leading-[L]，N < M*L）
     # 简化检测：h-[Npx] 且同级有 text-[Mpx] leading-[1.1]，若 N < M*1.1+2 则标记
     for m in re.finditer(r'h-\[(\d+)px\][^>]*>.*?text-\[(\d+)px\].*?leading-\[1\.[01]\]', html, re.DOTALL):
@@ -686,7 +717,11 @@ def _post_check_layout_issues(html: str, failed_items: list[str]) -> list[str]:
             break
     # 检测 flex justify-between 中的文本无宽度约束
     # 匹配 justify-between 容器中的文本元素（p/span/div）没有 max-w 或 w- 约束
-    if re.search(r'class="[^"]*justify-between[^"]*"[^>]*>.*?<(?:p|span|div)[^>]*class="[^"]*text-\[\d+px\][^"]*"[^>]*>[^<]{20,}', html, re.DOTALL):
+    _jb_text_re = (
+        r'class="[^"]*justify-between[^"]*"[^>]*>.*?'
+        r'<(?:p|span|div)[^>]*class="[^"]*text-\[\d+px\][^"]*"[^>]*>[^<]{20,}'
+    )
+    if re.search(_jb_text_re, html, re.DOTALL):
         if not re.search(r'class="[^"]*justify-between[^"]*"[^>]*>.*?max-w-\[', html, re.DOTALL):
             if "文本无宽度约束" not in failed_items:
                 failed_items.append("文本无宽度约束")
@@ -724,15 +759,25 @@ _REWRITE_ACTIONS = {
     "缺数据来源": "在页脚标注'数据来源：XXX'（机构名或资料名）",
     "大段文字": "拆分为多个列表项/小节，添加小标题",
     "视觉层级混乱": "调整字号梯度，建立明确的标题→副标题→正文→注释层级",
-    "布局错误": "main 改为 `flex gap-3`，恰好 2 个 `<section>` 子元素；header/footer 放在 main 外部的 content-safe 内",
+    "布局错误": (
+        "main 改为 `flex`（左右分栏用 `flex-[N]` 比例，间距用 `pr-[12px]`/`pl-[12px]` 替代 gap），"
+        "恰好 2 个 `<section>` 子元素；header/footer 放在 main 外部的 content-safe 内"
+    ),
     "内容被隐藏": "移除 line-clamp、text-overflow:ellipsis、overflow:auto/scroll、max-height 限制等隐藏手段，确保核心内容完整可见",
     "核心内容缺失": "检查标题、正文、图表标签、数据来源和数据卡片是否全部完整显示，补充缺失的内容元素",
     "使用了不支持的Grid布局": "将所有 `grid grid-cols-*` 改为 Flexbox 布局（`flex` + `flex-[N]` 比例分配），因为 html-to-pptx 转换器不支持 CSS Grid",
-    "核心内容被overflow-hidden裁切": "移除核心内容容器（div/section/main 等）上的 `overflow-hidden` 类，仅保留 `.ppt-slide` 画布边界上的 overflow-hidden",
+    "核心内容被overflow-hidden裁切": (
+        "移除核心内容容器（div/section/main 等）上的 `overflow-hidden` 类，"
+        "仅保留 `.ppt-slide` 画布边界上的 overflow-hidden"
+    ),
     "字号不一致": "统一同级别卡片/模块的字号，使用风格文件定义的字号值，确保同级元素字号一致",
     "行高过大导致空白": "将 `leading-[2]` 或 `leading-loose` 改为 `leading-[1.5]` 或 `leading-[1.6]`，消除过大行高导致的空白",
-    "间距过大": "将 `justify-between` 改为 `justify-start`，用 `mt-[10px]` 逐项递增间距",
-    "图标边距过大": "将 `mr-[28px]` 或更大的图标边距缩小为 `mr-[8px]`，图标和文字之间保持紧凑",
+    "间距过大": (
+        "如果是 flex-col 列表项使用 justify-between 导致间距不均，"
+        "改为 justify-start + mt-[10px] 逐项递增间距；"
+        "header/footer 的 justify-between 可保留"
+    ),
+    "图标边距过大": "将图标（fa- 元素）上 `mr-[28px]` 或更大的边距缩小为 `mr-[8px]`，图标和文字之间保持紧凑",
     "容器高度不足": "增大容器高度使 ≥ 字号×行高系数+4px，或减小字号/行高",
     "文本无宽度约束": "在 flex 布局的文本元素上加 `max-w-[Npx]` 约束宽度，防止 PPTX 中溢出右边界",
     "图例与轴标题重叠": "设 `legend.top:'bottom'` 或 `legend.orient:'vertical'`，双轴图 `grid.right` 留足 ≥60px",
@@ -852,22 +897,24 @@ _IMAGE_LAYOUT_TEMPLATES: dict[int, str] = {
     2: (
         "### 图片布局（2 张图）\n"
         "- 推荐左右对半分或一大一小\n"
+        "- 左右间距用 `pr-[6px]`/`pl-[6px]` 替代 gap（gap 在 PPTX 中不生效）\n"
         "```html\n"
-        '<div class="flex gap-3 flex-1 min-h-0">\n'
-        '  <img src="..." class="flex-1 h-full object-contain" />\n'
-        '  <img src="..." class="flex-1 h-full object-contain" />\n'
+        '<div class="flex flex-1 min-h-0">\n'
+        '  <div class="flex-1 h-full pr-[6px]"><img src="..." class="w-full h-full object-contain" /></div>\n'
+        '  <div class="flex-1 h-full pl-[6px]"><img src="..." class="w-full h-full object-contain" /></div>\n'
         '</div>\n'
         "```\n"
     ),
     3: (
         "### 图片布局（3 张图）\n"
         "- 推荐「左 1 右 2」：左侧大图，右侧上下两小图\n"
+        "- 左右间距用 `pr-[6px]`/`pl-[6px]`，上下间距用 `pb-[4px]`/`pt-[4px]` 替代 gap\n"
         "```html\n"
-        '<div class="flex gap-3 flex-1 min-h-0">\n'
-        '  <div class="flex-[2] h-full"><img src="..." class="w-full h-full object-contain" /></div>\n'
-        '  <div class="flex-1 flex flex-col min-h-0">\n'
-        '    <img src="..." class="w-full flex-1 min-h-0 object-contain" />\n'
-        '    <img src="..." class="w-full flex-1 min-h-0 object-contain" />\n'
+        '<div class="flex flex-1 min-h-0">\n'
+        '  <div class="flex-[2] h-full pr-[6px]"><img src="..." class="w-full h-full object-contain" /></div>\n'
+        '  <div class="flex-1 flex flex-col min-h-0 pl-[6px]">\n'
+        '    <img src="..." class="w-full flex-1 min-h-0 pb-[4px] object-contain" />\n'
+        '    <img src="..." class="w-full flex-1 min-h-0 pt-[4px] object-contain" />\n'
         '  </div>\n'
         '</div>\n'
         "```\n"
@@ -875,11 +922,12 @@ _IMAGE_LAYOUT_TEMPLATES: dict[int, str] = {
     4: (
         "### 图片布局（4 张图）\n"
         "- 推荐 2×2 布局（用 flex flex-wrap 替代 grid）\n"
+        "- 间距用 margin（`mr-[2%]`/`mb-[2%]`）替代 gap\n"
         "```html\n"
-        '<div class="flex flex-wrap gap-3 flex-1 min-h-0">\n'
-        '  <img src="..." class="w-[48%] h-[48%] object-contain" />\n'
-        '  <img src="..." class="w-[48%] h-[48%] object-contain" />\n'
-        '  <img src="..." class="w-[48%] h-[48%] object-contain" />\n'
+        '<div class="flex flex-wrap flex-1 min-h-0">\n'
+        '  <img src="..." class="w-[48%] h-[48%] mr-[2%] mb-[2%] object-contain" />\n'
+        '  <img src="..." class="w-[48%] h-[48%] mb-[2%] object-contain" />\n'
+        '  <img src="..." class="w-[48%] h-[48%] mr-[2%] object-contain" />\n'
         '  <img src="..." class="w-[48%] h-[48%] object-contain" />\n'
         '</div>\n'
         "```\n"
@@ -889,9 +937,10 @@ _IMAGE_LAYOUT_TEMPLATES: dict[int, str] = {
 _IMAGE_LAYOUT_TEMPLATE_MANY = (
     "### 图片布局（{n} 张图）\n"
     "- 推荐用 flex flex-wrap 布局，每行 3-4 张（禁止使用 grid grid-cols-N）\n"
+    "- 间距用 margin（每行最后一张不加 mr，每列最后一行不加 mb）替代 gap\n"
     "```html\n"
-    '<div class="flex flex-wrap gap-3 flex-1 min-h-0">\n'
-    '  <!-- {n} 张图片，每张 w-[31%] object-contain -->\n'
+    '<div class="flex flex-wrap flex-1 min-h-0">\n'
+    '  <!-- {n} 张图片，每张 w-[31%] mb-[8px] mr-[8px] object-contain（行末/列末项不加对应 margin）-->\n'
     '</div>\n'
     "```\n"
 )
@@ -938,12 +987,14 @@ def _build_page_prompt(
     image_map_page: str = "",
     user_query: str = "",
 ) -> str:
-    # 用户原始 query 段（最高优先级，包含用户所有格式/内容/风格要求）
+    # 用户原始 query 段（用于指导内容方向/格式/风格，不改变本任务的页面范围）
     user_query_section = ""
     if user_query:
         user_query_section = (
-            "## 用户原始 query（最高优先级，所有格式/版式/风格要求以此为准）\n"
-            f"{user_query}\n\n"
+            "## 用户原始 query（用于指导内容方向和视觉风格要求）\n"
+            f"{user_query}\n"
+            "⚠️ 用户 query 中的页数/总量要求已由大纲规划完成，本步骤**仅生成第 "
+            f"{page_number} 页**，不生成其他页面。\n\n"
         )
 
     preset_clause = ""
@@ -1054,8 +1105,8 @@ def _build_page_prompt(
     if not is_structural:
         diversity_rule = (
             "\n### 布局多样性约束\n"
-            "- 禁止连续两页使用完全相同的 main 布局结构（grid 列数、子元素数量、比例分配）\n"
-            "- 主动使用不同的布局比例（如 `flex-[3]_flex-[2]`、`grid-cols-[3fr_2fr]`、`flex-[5]_flex-[4]` 等）\n"
+            "- 禁止连续两页使用完全相同的 main 布局结构（flex 比例、子元素数量、分栏方向）\n"
+            "- 主动使用不同的布局比例（如 `flex-[3]`/`flex-[2]`、`flex-[5]`/`flex-[4]`、`flex-[2]`/`flex-[3]` 等）\n"
             "- 根据内容叙事选择布局，而非机械套用模板\n"
         )
 
@@ -1106,6 +1157,8 @@ def _build_page_prompt(
         "\n"
         "## 5. 任务\n"
         f"你负责生成**第 {page_number} 页** HTML。仅生成该页，直接输出 HTML 原文。"
+        "**HTML 中必须只包含 1 个 `<div class=\"ppt-slide\">` 容器**，"
+        "禁止生成多个 slide 页面。"
         "先产出可运行 HTML，再按密度检查清单做小步修正；禁止在写文件前反复做像素级完整规划。"
         "生成时必须同时满足上述「内容密度检查（12 项）」全部要求，"
         "确保首次生成即通过密度检查，避免后续重写。"
@@ -1512,6 +1565,9 @@ class PageWorkerNode(PlanNode):
         if not html:
             return {"missing": True, "low_density": False, "report": {}}
 
+        # 防御：LLM 偶尔忽略单页约束，生成多个 slide，截取第一个
+        html = _truncate_to_single_slide(html)
+
         ok = await self._write_file(path, html)
         if not ok:
             return {"missing": True, "low_density": False, "report": {}}
@@ -1551,6 +1607,8 @@ class PageWorkerNode(PlanNode):
                 low_density = True
                 logger.info("[P8.1] 页面 %d 重写失败，保留当前 HTML，进 low_density", page_num)
                 break
+            # 防御：重写产物也可能包含多个 slide
+            rewritten = _truncate_to_single_slide(rewritten)
             write_ok = await self._write_file(path, rewritten)
             if not write_ok:
                 low_density = True
