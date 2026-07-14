@@ -71,3 +71,75 @@ async def test_set_checkpoint_reuses_mysql_engine(monkeypatch):
     assert create_mock.await_count == 1
     create_conf = create_mock.await_args_list[0].args[0].conf
     assert create_conf["db_client"] is mock_engine
+
+
+@pytest.mark.asyncio
+async def test_build_mysql_engine_reuses_gateway_db(monkeypatch):
+    monkeypatch.setenv("GATEWAY_DB_HOST", "db.example")
+    monkeypatch.setenv("GATEWAY_DB_NAME", "gateway")
+    mock_engine = MagicMock(name="shared_engine")
+    mock_conn = AsyncMock()
+    mock_conn.execute = AsyncMock(
+        return_value=MagicMock(fetchone=MagicMock(return_value=("LONGTEXT",)))
+    )
+    mock_engine.begin = MagicMock(
+        return_value=AsyncMock(
+            __aenter__=AsyncMock(return_value=mock_conn),
+            __aexit__=AsyncMock(return_value=None),
+        )
+    )
+
+    with patch.object(
+        iface,
+        "_get_shared_gateway_db_engine",
+        new=AsyncMock(return_value=mock_engine),
+    ) as shared_mock:
+        engine = await iface._build_mysql_handler_engine()
+
+    assert engine is mock_engine
+    shared_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_build_postgresql_engine_reuses_gateway_db(monkeypatch):
+    monkeypatch.setenv("GATEWAY_DB_HOST", "db.example")
+    monkeypatch.setenv("GATEWAY_DB_NAME", "gateway")
+    mock_engine = MagicMock(name="shared_engine")
+    mock_conn = AsyncMock()
+    mock_conn.execute = AsyncMock(
+        return_value=MagicMock(fetchone=MagicMock(return_value=("text",)))
+    )
+    mock_engine.begin = MagicMock(
+        return_value=AsyncMock(
+            __aenter__=AsyncMock(return_value=mock_conn),
+            __aexit__=AsyncMock(return_value=None),
+        )
+    )
+
+    with patch.object(
+        iface,
+        "_get_shared_gateway_db_engine",
+        new=AsyncMock(return_value=mock_engine),
+    ) as shared_mock:
+        engine = await iface._build_postgresql_handler_engine()
+
+    assert engine is mock_engine
+    shared_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_shared_gateway_db_engine_uses_ensure_db_handler():
+    mock_engine = MagicMock(name="engine")
+    mock_handler = MagicMock()
+    mock_handler.get_engine.return_value = mock_engine
+    mock_db_mod = MagicMock()
+    mock_db_mod.ensure_db_handler = AsyncMock(return_value=mock_handler)
+
+    with patch(
+        "jiuwenclaw.infrastructure.module_importer.import_manager_ws_client_module",
+        return_value=mock_db_mod,
+    ):
+        engine = await iface._get_shared_gateway_db_engine()
+
+    assert engine is mock_engine
+    mock_db_mod.ensure_db_handler.assert_awaited_once_with(log_prefix="checkpoint")

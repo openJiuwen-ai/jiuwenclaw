@@ -72,14 +72,6 @@ from openjiuwen.harness.tools import (
 )
 from openjiuwen.harness.tools.todo import TodoStatus, TodoModifyTool
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
-from openjiuwen_runtime.foundation.db.engine_options import (
-    get_max_overflow,
-    get_pool_size,
-    get_pool_timeout,
-)
-from openjiuwen_runtime.foundation.db.mysql_handler import MySQLHandler
-from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandler
-
 from jiuwenclaw.agentserver.deep_agent.rails.concurrent_safe_rails import (
     ConcurrentSafeFileSystemRail,
     ConcurrentSafeTaskPlanningRail,
@@ -674,40 +666,35 @@ def reset_shared_checkpoint_for_tests() -> None:
     _checkpoint_singleton_lock = None
 
 
-async def _build_mysql_handler_engine():
-    """构建 checkpoint MySQL AsyncEngine，使用 openjiuwen_runtime SDK.
+async def _get_shared_gateway_db_engine():
+    """复用 GatewayDb 单例的 AsyncEngine（不新建连接池）。"""
+    from jiuwenclaw.infrastructure.module_importer import (
+        import_manager_ws_client_module,
+    )
 
-    连接参数从 GATEWAY_DB_* 环境变量读取。
+    db_mod = import_manager_ws_client_module("infrastructure.db")
+    handler = await db_mod.ensure_db_handler(log_prefix="checkpoint")
+    engine = handler.get_engine()
+    if engine is None:
+        raise RuntimeError("GatewayDb handler has no engine")
+    return engine
+
+
+async def _build_mysql_handler_engine():
+    """获取 checkpoint MySQL AsyncEngine，复用 GatewayDb 连接池.
+
     未配置 GATEWAY_DB_HOST 时返回 None，checkpoint 回退到 SQLite。
     """
     db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
     if not db_host:
         return None
     try:
-        db_port = int(os.getenv("GATEWAY_DB_PORT", "3306").strip())
-        db_user = os.getenv("GATEWAY_DB_USER", "root").strip()
-        db_password = os.getenv("GATEWAY_DB_PASSWORD", "").strip()
         db_name = os.getenv("GATEWAY_DB_NAME", "openjiuwen_gateway").strip()
-
-        handler = MySQLHandler(
-            host=db_host,
-            port=db_port,
-            user=db_user,
-            password=db_password,
-            database=db_name,
-        )
-        await handler.init_database()
-        await handler.connect()
-        engine = handler.get_engine()
+        engine = await _get_shared_gateway_db_engine()
         logger.info(
-            "[JiuWenClawDeepAdapter] checkpoint MySQL engine created via SDK: %s:%s/%s "
-            "pool_size=%s max_overflow=%s pool_timeout=%s",
+            "[JiuWenClawDeepAdapter] checkpoint MySQL engine reused from GatewayDb: %s/%s",
             db_host,
-            db_port,
             db_name,
-            get_pool_size(),
-            get_max_overflow(),
-            get_pool_timeout(),
         )
 
         # 确保 kv_store.value 列为 LONGTEXT，避免 checkpoint 序列化数据被截断
@@ -745,43 +732,23 @@ async def _build_mysql_handler_engine():
 
 
 async def _build_postgresql_handler_engine():
-    """构建 checkpoint PostgreSQL AsyncEngine，使用 openjiuwen_runtime SDK.
+    """获取 checkpoint PostgreSQL AsyncEngine，复用 GatewayDb 连接池.
 
-    连接参数从 GATEWAY_DB_* 环境变量读取。
     未配置 GATEWAY_DB_HOST 时返回 None，checkpoint 回退到 SQLite。
-    支持通过 GATEWAY_PG_SCHEMA 环境变量配置 schema。
     """
     db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
     if not db_host:
         return None
     try:
-        db_port = int(os.getenv("GATEWAY_DB_PORT", "5432").strip())
-        db_user = os.getenv("GATEWAY_DB_USER", "postgres").strip()
-        db_password = os.getenv("GATEWAY_DB_PASSWORD", "").strip()
         db_name = os.getenv("GATEWAY_DB_NAME", "openjiuwen_gateway").strip()
         db_schema = os.getenv("GATEWAY_PG_SCHEMA", "public").strip()
-
-        handler = PostgreSQLHandler(
-            host=db_host,
-            port=db_port,
-            user=db_user,
-            password=db_password,
-            database=db_name,
-            schema=db_schema,
-        )
-        await handler.init_database()
-        await handler.connect()
-        engine = handler.get_engine()
+        engine = await _get_shared_gateway_db_engine()
         logger.info(
-            "[JiuWenClawDeepAdapter] checkpoint PostgreSQL engine created via SDK: %s:%s/%s schema=%s "
-            "pool_size=%s max_overflow=%s pool_timeout=%s",
+            "[JiuWenClawDeepAdapter] checkpoint PostgreSQL engine reused from GatewayDb: "
+            "%s/%s schema=%s",
             db_host,
-            db_port,
             db_name,
             db_schema,
-            get_pool_size(),
-            get_max_overflow(),
-            get_pool_timeout(),
         )
         # 确保 kv_store.value 列为 TEXT，避免 checkpoint 序列化数据被截断
         async with engine.begin() as conn:

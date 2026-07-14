@@ -46,6 +46,9 @@ spec:
       containers:
         - name: <<POSTGRES_NAME>>
           image: <<POSTGRES_IMAGE>>
+          args:
+            - -c
+            - max_connections=<<POSTGRES_MAX_CONNECTION>>
           env:
             - name: POSTGRES_PASSWORD
               value: "<<POSTGRES_PASSWORD>>"
