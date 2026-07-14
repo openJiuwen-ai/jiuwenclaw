@@ -52,6 +52,12 @@ render_web_files() {
     add_resource_if_set "AUTH_SRV" "${file}"
     add_resource_if_set "MGR_SRV" "${file}"
     add_resource_if_set "USER_SRV" "${file}"
+
+    # Manager 前端(mgr-srv)为可选组件:IS_UP_MGR_SRV != true 时从渲染结果中移除其 Deployment
+    if [ "${DEPLOY_VARS["IS_UP_MGR_SRV"]:-}" != "true" ]; then
+        local mgr_srv_name="${DEPLOY_VARS["MGR_SRV_NAME"]}"
+        yq eval 'select((.kind == "Deployment" and .metadata.name == "'"${mgr_srv_name}"'") | not)' -i "${file}"
+    fi
 }
 
 deploy_web() {
@@ -65,7 +71,9 @@ deploy_web() {
     exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "deployment" "${auth_name}" "${namespace}"
     wait_k8s_resource_ready "deployment" "${usr_srv_name}" "${namespace}"
-    wait_k8s_resource_ready "deployment" "${mgr_srv_name}" "${namespace}"
+    if [ "${DEPLOY_VARS["IS_UP_MGR_SRV"]:-}" == "true" ]; then
+        wait_k8s_resource_ready "deployment" "${mgr_srv_name}" "${namespace}"
+    fi
     wait_k8s_resource_ready "deployment" "${web_name}" "${namespace}"
     success "WEB_NODE_PORT: ${DEPLOY_VARS["WEB_NODE_PORT"]}"
 }
@@ -81,7 +89,9 @@ uninstall_web() {
 
     exec_cmd kubectl delete -f ${file} --ignore-not-found=true
     wait_pod_terminated "${web_name}" "${namespace}"
-    wait_pod_terminated "${mgr_srv_name}" "${namespace}"
+    if [ "${DEPLOY_VARS["IS_UP_MGR_SRV"]:-}" == "true" ]; then
+        wait_pod_terminated "${mgr_srv_name}" "${namespace}"
+    fi
     wait_pod_terminated "${usr_srv_name}" "${namespace}"
     wait_pod_terminated "${auth_name}" "${namespace}"
 }

@@ -132,7 +132,7 @@ def _run(mode: str) -> int:
 
     enterprise_env: dict[str, str] | None = None
     if mode in ("enterprise", "dev-enterprise"):
-        relay_port = os.getenv("ENTERPRISE_WEB_WS_PORT", os.getenv("WEB_PORT", "19000"))
+        relay_port = os.getenv("USER_SRV_WS_PORT", os.getenv("WEB_PORT", "19000"))
         enterprise_env = {
             "ENTERPRISE_WEB_ENABLED": "true",
             "ENTERPRISE_WEB_GATEWAY_URL": os.getenv(

@@ -2128,7 +2128,7 @@ def main() -> None:
         or os.getenv("AGENT_SERVER_URL")
         or f"ws://{default_host}:{default_port}"
     )
-    web_host = args.host or os.getenv("WEB_HOST", "127.0.0.1")
+    web_host = args.host or os.getenv("USER_SRV_HOST", "127.0.0.1")
     web_port = args.port or int(os.getenv("WEB_PORT", "19000"))
     web_path = args.web_path or os.getenv("WEB_PATH", "/ws")
 

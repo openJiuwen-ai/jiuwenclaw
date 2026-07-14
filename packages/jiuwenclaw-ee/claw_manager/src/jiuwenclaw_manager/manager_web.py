@@ -108,16 +108,16 @@ def create_manager_web_app(dist_root: Path, backend_url: str, idp_url: str) -> F
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve JiuwenClaw Manager Web static files.")
-    parser.add_argument("--host", default=os.getenv("MANAGER_WEB_HOST", "localhost"))
+    parser.add_argument("--host", default=os.getenv("MGR_SRV_HOST", "localhost"))
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.getenv("MANAGER_WEB_PORT", "5273")),
+        default=int(os.getenv("MGR_SRV_PORT", "5273")),
     )
     parser.add_argument("--dist", default=str(_manager_web_dist()))
     parser.add_argument(
         "--proxy-target",
-        default=os.getenv("MANAGER_WEB_PROXY_TARGET", "http://127.0.0.1:8765"),
+        default=os.getenv("MGR_SRV_PROXY_TARGET", "http://127.0.0.1:8765"),
         help="Claw Manager REST base URL for /api relay.",
     )
     parser.add_argument(

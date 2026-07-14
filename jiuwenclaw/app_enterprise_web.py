@@ -67,7 +67,7 @@ def main() -> None:
     parser.add_argument("--relay-host", default=os.getenv("ENTERPRISE_WEB_WS_HOST", "0.0.0.0"),
                         help="WebSocket bind host (browser /ws and gateway /gateway).")
     parser.add_argument("--relay-port", type=int,
-                        default=int(os.getenv("ENTERPRISE_WEB_WS_PORT", os.getenv("WEB_PORT", "19000"))),
+                        default=int(os.getenv("USER_SRV_WS_PORT", os.getenv("WEB_PORT", "19000"))),
                         help="WebSocket bind port (browser /ws and gateway /gateway).")
     parser.add_argument("--relay-browser-path",
                         default=os.getenv("ENTERPRISE_WEB_BROWSER_PATH", os.getenv("WEB_PATH", "/ws")))

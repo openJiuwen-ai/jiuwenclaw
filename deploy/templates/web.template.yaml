@@ -163,6 +163,7 @@ spec:
             - name: TZ
               value: "<<TIMEZONE>>"
 
+---
 # ----------------------- user：用户业务服务 ----------------
 apiVersion: apps/v1
 kind: Deployment

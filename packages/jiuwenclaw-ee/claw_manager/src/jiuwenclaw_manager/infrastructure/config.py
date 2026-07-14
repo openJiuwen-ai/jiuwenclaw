@@ -94,10 +94,10 @@ class Settings(BaseSettings):
     # ---- 资源服务器：验签认证服务(jiuwenclaw_identity)签发的 RS256 JWT ----
     identity_public_key_url: str = Field(
         default="http://127.0.0.1:8770/v1/auth/public_key",
-        validation_alias="IDENTITY_PUBLIC_KEY_URL",
+        validation_alias="AUTH_SRV_PUBLIC_KEY_URL",
     )
-    jwt_issuer: str = Field(default="jiuwenclaw-identity", validation_alias="IDENTITY_JWT_ISSUER")
-    jwt_audience: str = Field(default="jiuwenclaw", validation_alias="IDENTITY_JWT_AUDIENCE")
+    jwt_issuer: str = Field(default="jiuwenclaw-identity", validation_alias="AUTH_SRV_JWT_ISSUER")
+    jwt_audience: str = Field(default="jiuwenclaw", validation_alias="AUTH_SRV_JWT_AUDIENCE")
 
     # ---- 本实例标识：仅用户态 /me/bots 用它把可见 bot 限定到"当前 gateway"。
     # 每命名空间部署时与本命名空间 gateway 同值注入；管理端接口不用它(实例由路径显式指定)。
