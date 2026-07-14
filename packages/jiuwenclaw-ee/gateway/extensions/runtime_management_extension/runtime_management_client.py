@@ -572,6 +572,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 ("AGENT_SERVER_LOG_FILE", os.getenv("AGENT_SERVER_LOG_FILE")),
                 ("CLAW_LINK_AUTH_MODE", os.getenv("CLAW_LINK_AUTH_MODE")),
                 ("CLAW_LINK_TOKEN_TTL", os.getenv("CLAW_LINK_TOKEN_TTL")),
+                ("STREAMING_TOOL_WAIT_TIMEOUT_S", os.getenv("STREAMING_TOOL_WAIT_TIMEOUT_S")),
             ):
                 if value is not None:
                     base[key] = value
