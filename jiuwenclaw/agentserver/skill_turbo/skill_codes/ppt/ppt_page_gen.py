@@ -157,7 +157,7 @@ _CDN_HEAD_SNIPPET = (
 
 
 _DESIGN_RULES_DIGEST = (
-    "### 视觉与布局硬约束（精选 23 条）\n"
+    "### 视觉与布局硬约束（精选 22 条）\n"
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
     "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`，主要内容必须放在安全区内；"
     "子元素禁止额外加 padding，否则导致双重边距\n"
@@ -170,19 +170,14 @@ _DESIGN_RULES_DIGEST = (
     "单行初始化，禁止用变量赋值（如 `var chartDom=...; echarts.init(chartDom)`），"
     "禁止 Canvas 渲染器（会导致转 PPTX 后变位图）；"
     "初始化脚本必须写在目标图表容器之后、紧邻 `</body>`，禁止写入 `<head>`（否则 getElementById 得到 null）\n"
-    "4.2 图表最小高度（强制）：图表容器实际渲染高度必须 ≥ 250px（内联 SVG 的 viewBox height ≥ 250），"
-    "否则 Y 轴名称/图例/标签会溢出重叠；"
-    "用 `min-h-[250px]` 或 `flex-1` 确保图表区域有足够空间；禁止把图表挤在高度 < 200px 的容器里\n"
-    "4.3 图表数据标签防重叠（强制，所有含图表的页面都必须遵守）："
-    "用 echarts.init 时每个 series 都必须设 `labelLayout:{moveOverlap:'shiftY'}`；"
-    "双轴图中柱状图标签放柱顶上方（position:'top'），折线图标签放数据点下方（position:'bottom'），"
-    "两组标签垂直间距 ≥15px；"
-    "用内联 SVG 时折线图 text 的 transform translate y = 数据点 y + 12（向下偏移），柱状图 text 的 y = 柱顶 y - 8（向上偏移）\n"
-    "4.4 图例防叠字（强制，所有含图表的页面都必须遵守）："
-    "图例项 ≥3 个时，用 echarts.init 设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`；"
-    "用内联 SVG 时确保图例文字间距 ≥ 每项文字宽度+20px，排不下就换行或竖排；禁止水平挤排叠字\n"
-    "4.5 图表颜色（强制）：图表数据系列颜色必须来自风格文件的图表配色优先级表，禁止使用相近色；"
-    "坐标轴标签用 `#555757` 或 `#000000`，分割线用 `#DDDDDD`，禁止用浅灰色作为文字颜色\n"
+    "4.2 图表最小高度（强制）：图表容器实际渲染高度必须 ≥ 160px（防塌缩下限），"
+    "用 `min-h-[160px]` 或 `flex-1` 确保图表区域能初始化渲染；"
+    "建议图表可读高度 ≥ 300px，由页面预算保证\n"
+    "4.3 图表颜色（强制）：图表数据系列颜色必须来自风格文件的图表配色表，禁止使用相近色；"
+    "坐标轴标签用深色，分割线用浅色\n"
+    "4.4 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}` 防止数据标签重叠\n"
+    "4.5 图例防叠字：图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`，避免水平挤排叠字\n"
+    "4.6 图表分割线：`splitLine` 建议使用浅色虚线，避免实线在 PPTX 中过于突兀；颜色由风格文件决定\n"
     "5. 步骤/流程页 → 用 HTML/CSS 绘制节点+连线+文字，禁止纯文字描述\n"
     "6. 关键数字必须有放大数字卡片，结论必须有摘要高亮；"
     "数据可视化量化阈值：内容页必须 ≥1 个 ECharts 图表 或 ≥3 个数据卡片"
@@ -197,16 +192,12 @@ _DESIGN_RULES_DIGEST = (
     "留白 > 30% 判定为'空白率过高'；通过增加卡片、图表、列表项填充内容，而非放大字号\n"
     "7. 防溢出：单行文字不超容器宽度；连续段落 ≤ 100 字（超过必须拆列表）；"
     "文本容器（p、span、div）必须加 `break-words` 类防止中英混排时英文/数字处不换行溢出\n"
-    "8. 布局结构：严格遵循标准 HTML 骨架——main 用 `flex`，"
-    "恰好 2 个 `<section>` 子元素，间距用 `pr-[12px]`/`pl-[12px]` 替代 gap；"
+    "8. 布局结构：严格遵循标准 HTML 骨架——main 用 `flex gap-3`，"
+    "恰好 2 个 `<section>` 子元素；"
     "header/main/footer 纵向排列在 content-safe 内\n"
     "8.1 禁止使用 CSS Grid：html-to-pptx 转换器不支持 `display:grid`（Grid 仅检测不转换，视为非文本容器），"
     "所有布局必须用 Flexbox（`flex`、`flex-col`、`flex-[N]`）替代 `grid grid-cols-*`；"
     "左右分栏用 `flex` + `flex-[3]` / `flex-[2]` 比例分配，不用 `grid grid-cols-[3fr_2fr]`\n"
-    "8.2 gap 属性限制（强制）：`gap-*` 类在 PPTX 转换中**完全不生效**，"
-    "左右分栏时必须在子元素上用 `pl-[Npx]`/`pr-[Npx]` 或 `ml-[Npx]`/`mr-[Npx]` 替代 gap 做间距；"
-    "例如左右两栏不用 `flex gap-3`，而是左栏加 `pr-[12px]`、右栏加 `pl-[12px]`；"
-    "在 HTML 预览中 gap 正常，但 PPTX 中间距会完全丢失导致左右栏文本重叠遮挡\n"
     "9. flex 子元素：必须 `flex-1 min-h-0 min-w-0`（水平布局）或 `flex-1 min-h-0`（垂直布局）；"
     "禁止使用 `overflow-hidden` 隐藏核心内容\n"
     "10. flex-col 子元素：必须 `flex-1 min-h-0`；禁止使用 `overflow-hidden` 隐藏核心内容\n"
@@ -234,18 +225,8 @@ _DESIGN_RULES_DIGEST = (
     "页面底色必须严格遵循风格规范文件定义的背景色，禁止使用与风格不符的底色\n"
     "\n"
     "### html-to-pptx 转换器限制（以下规则源于转换器实际能力，非设计偏好）\n"
-    "19. 图表分割线：`splitLine` 建议使用 `type:'dashed'` 虚线，避免实线分割线在 PPTX 中过于突兀；"
-    "颜色用 `#DDDDDD`，禁止用深色实线\n"
-    "20. padding/border 转换缩放：html-to-pptx 转换器对 padding 缩放 0.85（减少 15%）、border-width 缩放 0.65（减少 35%），"
+    "19. padding/border 转换缩放：html-to-pptx 转换器对 padding 缩放 0.85（减少 15%）、border-width 缩放 0.65（减少 35%），"
     "生成 HTML 时需预留余量，避免 PPTX 中内容因缩放溢出或边框过细\n"
-    "21. 文本换行：`break-words`（`overflow-wrap:break-word`）在 PPTX 转换中不生效，"
-    "长文本不会在 PPTX 中自动换行而会溢出右边界；"
-    "必须将长段落拆分为多个 `<p>` 标签或用 `<br>` 手动换行；"
-    "flex 布局中的文本元素应加 `max-w-[Npx]` 约束宽度，防止 PPTX 中溢出\n"
-    "22. 行高限制：禁止使用 `leading-[2]` 或 `leading-loose`（行高 2 倍），行高上限 `leading-[1.6]`\n"
-    "23. ECharts SVG 图例：PPTX 转换后图例图标和文字可能不对齐（转换器限制），"
-    "图例项之间留足间距，图例文字用 `fontSize:12` 确保字号统一；"
-    "图例项 ≥3 个时设 `legend.top:'bottom'` 或 `legend.orient:'vertical'`，避免与 Y 轴标题重叠\n"
 )
 
 
@@ -255,9 +236,9 @@ _HTML_SKELETON = (
     '<div class="ppt-slide" type="content" data-page-role="content">\n'
     '  <div class="content-safe flex flex-col h-full">\n'
     '    <header class="flex-shrink-0">标题区</header>\n'
-    '    <main class="flex-1 min-h-0 flex">\n'
-    '      <section class="flex-1 min-h-0 min-w-0 pr-[12px]">左侧内容</section>\n'
-    '      <section class="flex-1 min-h-0 min-w-0 pl-[12px]">右侧内容</section>\n'
+    '    <main class="flex-1 min-h-0 flex gap-3">\n'
+    '      <section class="flex-1 min-h-0 min-w-0">左侧内容</section>\n'
+    '      <section class="flex-1 min-h-0 min-w-0">右侧内容</section>\n'
     '    </main>\n'
     '    <footer class="flex-shrink-0">数据来源页脚</footer>\n'
     '  </div>\n'
@@ -315,39 +296,37 @@ _PAGE_LAYOUT_TEMPLATES = {
         "```html\n"
         '<div class="content-safe flex flex-col h-full">\n'
         '  <header class="flex-shrink-0">4-6 个关键数字卡片，flex</header>\n'
-        '  <main class="flex-1 min-h-0 flex">\n'
-        '    <section class="flex-[3] min-h-0 min-w-0 pr-[12px]">6 个核心论点卡片，flex flex-col</section>\n'
-        '    <section class="flex-[2] min-h-0 min-w-0 pl-[12px]">ECharts 图表 + 对比表格</section>\n'
+        '  <main class="flex-1 min-h-0 flex gap-3">\n'
+        '    <section class="flex-[3] min-h-0 min-w-0">6 个核心论点卡片，flex flex-col</section>\n'
+        '    <section class="flex-[2] min-h-0 min-w-0">ECharts 图表 + 对比表格</section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
         '</div>\n'
         "```\n"
         "- ECharts 图表类型根据数据形态选择（柱状图/饼图/雷达图）\n"
-        "- 左右分栏间距用 `pr-[12px]`/`pl-[12px]` 替代 gap（gap 在 PPTX 中不生效）\n"
     ),
     "trend": (
         "### 参考布局（trend 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
         '<div class="content-safe flex flex-col h-full">\n'
         '  <header class="flex-shrink-0">3 个关键数字卡片</header>\n'
-        '  <main class="flex-1 min-h-0 flex">\n'
-        '    <section class="flex-1 min-h-0 min-w-0 pr-[12px]">ECharts 折线图（趋势数据）</section>\n'
-        '    <section class="w-[40%] min-h-0 min-w-0 pl-[12px]">4-6 个核心论点卡片，flex-col</section>\n'
+        '  <main class="flex-1 min-h-0 flex gap-3">\n'
+        '    <section class="flex-1 min-h-0 min-w-0">ECharts 折线图（趋势数据）</section>\n'
+        '    <section class="w-[40%] min-h-0 min-w-0">4-6 个核心论点卡片，flex-col</section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
         '</div>\n'
         "```\n"
         "- ECharts 默认折线图(line)，数据形态更适合其他类型时可切换\n"
-        "- 左右分栏间距用 `pr-[12px]`/`pl-[12px]` 替代 gap\n"
     ),
     "comparison": (
         "### 参考布局（comparison 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
         '<div class="content-safe flex flex-col h-full">\n'
         '  <main class="flex-1 min-h-0 flex flex-col">\n'
-        '    <div class="flex flex-1 min-h-0">\n'
-        '      <section class="flex-1 min-h-0 min-w-0 pr-[6px]">对比对象 A 的卡片（flex flex-col）</section>\n'
-        '      <section class="flex-1 min-h-0 min-w-0 pl-[6px]">对比对象 B 的卡片（flex flex-col）</section>\n'
+        '    <div class="flex flex-1 min-h-0 gap-3">\n'
+        '      <section class="flex-1 min-h-0 min-w-0">对比对象 A 的卡片（flex flex-col）</section>\n'
+        '      <section class="flex-1 min-h-0 min-w-0">对比对象 B 的卡片（flex flex-col）</section>\n'
         '    </div>\n'
         '    <section class="flex-shrink-0">对比表格</section>\n'
         '  </main>\n'
@@ -355,16 +334,15 @@ _PAGE_LAYOUT_TEMPLATES = {
         '</div>\n'
         "```\n"
         "- ECharts 默认分组柱状图(grouped bar)，占比数据用饼图\n"
-        "- 左右分栏间距用 `pr-[6px]`/`pl-[6px]` 替代 gap\n"
     ),
     "case": (
         "### 参考布局（case 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
         '<div class="content-safe flex flex-col h-full">\n'
         '  <header class="flex-shrink-0">3 个关键数字卡片</header>\n'
-        '  <main class="flex-1 min-h-0 flex">\n'
-        '    <section class="flex-[2] min-h-0 min-w-0 pr-[12px]">6 个核心论点卡片，flex-col</section>\n'
-        '    <section class="flex-[3] min-h-0 min-w-0 pl-[12px]">ECharts 图表 + 关键数据表格</section>\n'
+        '  <main class="flex-1 min-h-0 flex gap-3">\n'
+        '    <section class="flex-[2] min-h-0 min-w-0">6 个核心论点卡片，flex-col</section>\n'
+        '    <section class="flex-[3] min-h-0 min-w-0">ECharts 图表 + 关键数据表格</section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">案例素材详细描述 + 数据来源页脚</footer>\n'
         '</div>\n'
@@ -375,9 +353,9 @@ _PAGE_LAYOUT_TEMPLATES = {
         "```html\n"
         '<div class="content-safe flex flex-col h-full">\n'
         '  <header class="flex-shrink-0">4 个关键数字卡片</header>\n'
-        '  <main class="flex-1 min-h-0 flex flex-col">\n'
-        '    <section class="flex-1 min-h-0 min-w-0 pb-[8px]">ECharts 图表 + 对比表格</section>\n'
-        '    <section class="flex-1 min-h-0 min-w-0 pt-[8px]">6 个核心论点卡片，flex flex-wrap</section>\n'
+        '  <main class="flex-1 min-h-0 flex flex-col gap-3">\n'
+        '    <section class="flex-1 min-h-0 min-w-0">ECharts 图表 + 对比表格</section>\n'
+        '    <section class="flex-1 min-h-0 min-w-0">6 个核心论点卡片，flex flex-wrap</section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
         '</div>\n'
@@ -449,9 +427,9 @@ _DENSITY_CHECKLIST_DIGEST = (
     "且使用 `document.getElementById('xxx')` 直接传参，禁止变量赋值\n"
     "12. grid-cols 合法性：禁止使用 `grid-cols-*`（CSS Grid 不被转换器支持，改用 Flexbox）\n"
     "13. 字号一致性：同级别卡片/模块必须使用相同字号，字号值来自风格文件\n"
-    "14. 图表标签防重叠：所有 ECharts series 必须设 `labelLayout:{moveOverlap:'shiftY'}`；"
-    "图例项 ≥3 个时设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`\n"
-    "15. 图表颜色：数据系列颜色来自风格文件图表配色表，坐标轴标签用深色，分割线用浅色虚线\n"
+    "14. 图表颜色：数据系列颜色来自风格文件图表配色表，坐标轴标签用深色，分割线用浅色\n"
+    "15. 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}`；"
+    "图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`\n"
 )
 
 
@@ -689,42 +667,6 @@ def _post_check_layout_issues(html: str, failed_items: list[str]) -> list[str]:
     # 检测字号不一致
     if _check_font_size_consistency(html) and "字号不一致" not in failed_items:
         failed_items.append("字号不一致")
-    # 检测 leading-[2] 或 leading-loose（行高过大导致空白）
-    if re.search(r'leading-\[2\]|leading-loose', html) and "行高过大导致空白" not in failed_items:
-        failed_items.append("行高过大导致空白")
-    # 检测 justify-between + flex-col 组合（项高度不一时视觉间距不一致）
-    # 使用先行断言确保三个关键词同时出现在同一 class 属性中，不依赖顺序
-    if re.search(
-        r'class="(?=[^"]*\bflex\b)(?=[^"]*\bflex-col\b)(?=[^"]*\bjustify-between\b)[^"]*"',
-        html,
-    ) and "间距过大" not in failed_items:
-        failed_items.append("间距过大")
-    # 检测图标元素（class 含 fa-）上过大的右边距（mr-[28px] 或更大）
-    # 仅检查图标场景，避免误杀普通布局边距
-    for m in re.finditer(r'class="([^"]*\bfa-[^"]*)"', html):
-        mr_match = re.search(r'mr-\[(\d+)px\]', m.group(1))
-        if mr_match and int(mr_match.group(1)) >= 28:
-            if "图标边距过大" not in failed_items:
-                failed_items.append("图标边距过大")
-            break
-    # 检测容器高度不足（h-[Npx] 容器内放 text-[Mpx] leading-[L]，N < M*L）
-    # 简化检测：h-[Npx] 且同级有 text-[Mpx] leading-[1.1]，若 N < M*1.1+2 则标记
-    for m in re.finditer(r'h-\[(\d+)px\][^>]*>.*?text-\[(\d+)px\].*?leading-\[1\.[01]\]', html, re.DOTALL):
-        h_val, font_val = int(m.group(1)), int(m.group(2))
-        if h_val < font_val * 1.1 + 2:
-            if "容器高度不足" not in failed_items:
-                failed_items.append("容器高度不足")
-            break
-    # 检测 flex justify-between 中的文本无宽度约束
-    # 匹配 justify-between 容器中的文本元素（p/span/div）没有 max-w 或 w- 约束
-    _jb_text_re = (
-        r'class="[^"]*justify-between[^"]*"[^>]*>.*?'
-        r'<(?:p|span|div)[^>]*class="[^"]*text-\[\d+px\][^"]*"[^>]*>[^<]{20,}'
-    )
-    if re.search(_jb_text_re, html, re.DOTALL):
-        if not re.search(r'class="[^"]*justify-between[^"]*"[^>]*>.*?max-w-\[', html, re.DOTALL):
-            if "文本无宽度约束" not in failed_items:
-                failed_items.append("文本无宽度约束")
     return failed_items
 
 
@@ -759,10 +701,7 @@ _REWRITE_ACTIONS = {
     "缺数据来源": "在页脚标注'数据来源：XXX'（机构名或资料名）",
     "大段文字": "拆分为多个列表项/小节，添加小标题",
     "视觉层级混乱": "调整字号梯度，建立明确的标题→副标题→正文→注释层级",
-    "布局错误": (
-        "main 改为 `flex`（左右分栏用 `flex-[N]` 比例，间距用 `pr-[12px]`/`pl-[12px]` 替代 gap），"
-        "恰好 2 个 `<section>` 子元素；header/footer 放在 main 外部的 content-safe 内"
-    ),
+    "布局错误": "main 改为 `flex gap-3`，恰好 2 个 `<section>` 子元素；header/footer 放在 main 外部的 content-safe 内",
     "内容被隐藏": "移除 line-clamp、text-overflow:ellipsis、overflow:auto/scroll、max-height 限制等隐藏手段，确保核心内容完整可见",
     "核心内容缺失": "检查标题、正文、图表标签、数据来源和数据卡片是否全部完整显示，补充缺失的内容元素",
     "使用了不支持的Grid布局": "将所有 `grid grid-cols-*` 改为 Flexbox 布局（`flex` + `flex-[N]` 比例分配），因为 html-to-pptx 转换器不支持 CSS Grid",
@@ -771,16 +710,7 @@ _REWRITE_ACTIONS = {
         "仅保留 `.ppt-slide` 画布边界上的 overflow-hidden"
     ),
     "字号不一致": "统一同级别卡片/模块的字号，使用风格文件定义的字号值，确保同级元素字号一致",
-    "行高过大导致空白": "将 `leading-[2]` 或 `leading-loose` 改为 `leading-[1.5]` 或 `leading-[1.6]`，消除过大行高导致的空白",
-    "间距过大": (
-        "如果是 flex-col 列表项使用 justify-between 导致间距不均，"
-        "改为 justify-start + mt-[10px] 逐项递增间距；"
-        "header/footer 的 justify-between 可保留"
-    ),
-    "图标边距过大": "将图标（fa- 元素）上 `mr-[28px]` 或更大的边距缩小为 `mr-[8px]`，图标和文字之间保持紧凑",
-    "容器高度不足": "增大容器高度使 ≥ 字号×行高系数+4px，或减小字号/行高",
-    "文本无宽度约束": "在 flex 布局的文本元素上加 `max-w-[Npx]` 约束宽度，防止 PPTX 中溢出右边界",
-    "图例与轴标题重叠": "设 `legend.top:'bottom'` 或 `legend.orient:'vertical'`，双轴图 `grid.right` 留足 ≥60px",
+    "图例与轴标题重叠": "图例项过多时设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`，避免与坐标轴标题重叠",
 }
 
 
@@ -897,24 +827,22 @@ _IMAGE_LAYOUT_TEMPLATES: dict[int, str] = {
     2: (
         "### 图片布局（2 张图）\n"
         "- 推荐左右对半分或一大一小\n"
-        "- 左右间距用 `pr-[6px]`/`pl-[6px]` 替代 gap（gap 在 PPTX 中不生效）\n"
         "```html\n"
-        '<div class="flex flex-1 min-h-0">\n'
-        '  <div class="flex-1 h-full pr-[6px]"><img src="..." class="w-full h-full object-contain" /></div>\n'
-        '  <div class="flex-1 h-full pl-[6px]"><img src="..." class="w-full h-full object-contain" /></div>\n'
+        '<div class="flex gap-3 flex-1 min-h-0">\n'
+        '  <img src="..." class="flex-1 h-full object-contain" />\n'
+        '  <img src="..." class="flex-1 h-full object-contain" />\n'
         '</div>\n'
         "```\n"
     ),
     3: (
         "### 图片布局（3 张图）\n"
         "- 推荐「左 1 右 2」：左侧大图，右侧上下两小图\n"
-        "- 左右间距用 `pr-[6px]`/`pl-[6px]`，上下间距用 `pb-[4px]`/`pt-[4px]` 替代 gap\n"
         "```html\n"
-        '<div class="flex flex-1 min-h-0">\n'
-        '  <div class="flex-[2] h-full pr-[6px]"><img src="..." class="w-full h-full object-contain" /></div>\n'
-        '  <div class="flex-1 flex flex-col min-h-0 pl-[6px]">\n'
-        '    <img src="..." class="w-full flex-1 min-h-0 pb-[4px] object-contain" />\n'
-        '    <img src="..." class="w-full flex-1 min-h-0 pt-[4px] object-contain" />\n'
+        '<div class="flex gap-3 flex-1 min-h-0">\n'
+        '  <div class="flex-[2] h-full"><img src="..." class="w-full h-full object-contain" /></div>\n'
+        '  <div class="flex-1 flex flex-col min-h-0 gap-2">\n'
+        '    <img src="..." class="w-full flex-1 min-h-0 object-contain" />\n'
+        '    <img src="..." class="w-full flex-1 min-h-0 object-contain" />\n'
         '  </div>\n'
         '</div>\n'
         "```\n"
@@ -922,12 +850,11 @@ _IMAGE_LAYOUT_TEMPLATES: dict[int, str] = {
     4: (
         "### 图片布局（4 张图）\n"
         "- 推荐 2×2 布局（用 flex flex-wrap 替代 grid）\n"
-        "- 间距用 margin（`mr-[2%]`/`mb-[2%]`）替代 gap\n"
         "```html\n"
-        '<div class="flex flex-wrap flex-1 min-h-0">\n'
-        '  <img src="..." class="w-[48%] h-[48%] mr-[2%] mb-[2%] object-contain" />\n'
-        '  <img src="..." class="w-[48%] h-[48%] mb-[2%] object-contain" />\n'
-        '  <img src="..." class="w-[48%] h-[48%] mr-[2%] object-contain" />\n'
+        '<div class="flex flex-wrap gap-3 flex-1 min-h-0">\n'
+        '  <img src="..." class="w-[48%] h-[48%] object-contain" />\n'
+        '  <img src="..." class="w-[48%] h-[48%] object-contain" />\n'
+        '  <img src="..." class="w-[48%] h-[48%] object-contain" />\n'
         '  <img src="..." class="w-[48%] h-[48%] object-contain" />\n'
         '</div>\n'
         "```\n"
@@ -937,10 +864,9 @@ _IMAGE_LAYOUT_TEMPLATES: dict[int, str] = {
 _IMAGE_LAYOUT_TEMPLATE_MANY = (
     "### 图片布局（{n} 张图）\n"
     "- 推荐用 flex flex-wrap 布局，每行 3-4 张（禁止使用 grid grid-cols-N）\n"
-    "- 间距用 margin（每行最后一张不加 mr，每列最后一行不加 mb）替代 gap\n"
     "```html\n"
-    '<div class="flex flex-wrap flex-1 min-h-0">\n'
-    '  <!-- {n} 张图片，每张 w-[31%] mb-[8px] mr-[8px] object-contain（行末/列末项不加对应 margin）-->\n'
+    '<div class="flex flex-wrap gap-3 flex-1 min-h-0">\n'
+    '  <!-- {n} 张图片，每张 w-[31%] object-contain -->\n'
     '</div>\n'
     "```\n"
 )
@@ -1160,7 +1086,7 @@ def _build_page_prompt(
         "**HTML 中必须只包含 1 个 `<div class=\"ppt-slide\">` 容器**，"
         "禁止生成多个 slide 页面。"
         "先产出可运行 HTML，再按密度检查清单做小步修正；禁止在写文件前反复做像素级完整规划。"
-        "生成时必须同时满足上述「内容密度检查（12 项）」全部要求，"
+        "生成时必须同时满足上述「内容密度检查」全部要求，"
         "确保首次生成即通过密度检查，避免后续重写。"
     )
 
@@ -1686,8 +1612,7 @@ class PageWorkerNode(PlanNode):
                 "缺数据来源 / 大段文字 / 视觉层级混乱 / 布局错误 / "
                 "内容被隐藏 / 核心内容缺失 / grid-cols 非法 / "
                 "使用了不支持的Grid布局 / 核心内容被overflow-hidden裁切 / 字号不一致 / "
-                "行高过大导致空白 / 间距过大 / 图标边距过大 / "
-                "容器高度不足 / 文本无宽度约束 / 图例与轴标题重叠"
+                "图例与轴标题重叠"
             )
 
         prompt = (
