@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List
+from typing import Any, ClassVar, Dict, List, Mapping
 
 from openjiuwen_deepsearch.config.config import Config
 from openjiuwen_deepsearch.config.method import ExecutionMethod
@@ -161,12 +161,16 @@ class DeepResearchTaskManager:
             return cls._instance
 
     @staticmethod
-    def _resolve_petal_search_url() -> str:
+    def _resolve_petal_search_url(env: Mapping[str, str] | None = None) -> str:
         """Build Petal Search URL from LLM API_BASE: strip trailing /v2, append /v1/ai-tools/web-search."""
+        source = os.environ if env is None else env
+        petal_api_url = source.get("PETAL_API_URL", "").strip()
+        if petal_api_url:
+            return petal_api_url
         api_base = (
-            os.environ.get("API_BASE")
-            or os.environ.get("OPENAI_BASE_URL")
-            or os.environ.get("OPENAI_API_BASE")
+            source.get("API_BASE")
+            or source.get("OPENAI_BASE_URL")
+            or source.get("OPENAI_API_BASE")
             or ""
         ).strip()
         if not api_base:
@@ -178,38 +182,39 @@ class DeepResearchTaskManager:
         return f"{trimmed}/v1/ai-tools/web-search"
 
     @staticmethod
-    def _detect_configured_search_engines() -> Dict[str, str]:
+    def _detect_configured_search_engines(env: Mapping[str, str] | None = None) -> Dict[str, str]:
         """自动识别环境变量中已配置的检索引擎.
 
         返回：
             Dict[str, str]: 引擎名字 -> API key 的映射，例如 {"jina": "sk-xxx", "bocha": "sk-yyy"}
         """
+        source = os.environ if env is None else env
         configured_engines = {}
 
         # SerpAPI 搜索引擎
-        serper_api_key = os.environ.get("SERPER_API_KEY", "").strip()
+        serper_api_key = source.get("SERPER_API_KEY", "").strip()
         if serper_api_key:
             configured_engines[SearchEngine.SERPER.value] = serper_api_key
 
         # JINA 搜索引擎
-        jina_api_key = os.environ.get("JINA_API_KEY", "").strip()
+        jina_api_key = source.get("JINA_API_KEY", "").strip()
         if jina_api_key:
             configured_engines[SearchEngine.JINA.value] = jina_api_key
 
         # 博查搜索引擎
-        bocha_api_key = os.environ.get("BOCHA_API_KEY", "").strip()
+        bocha_api_key = source.get("BOCHA_API_KEY", "").strip()
         if bocha_api_key:
             configured_engines[SearchEngine.BOCHA.value] = bocha_api_key
 
         # Perplexity 搜索引擎
-        perplexity_api_key = os.environ.get("PERPLEXITY_API_KEY", "").strip()
+        perplexity_api_key = source.get("PERPLEXITY_API_KEY", "").strip()
         if perplexity_api_key:
             configured_engines[SearchEngine.PERPLEXITY.value] = perplexity_api_key
 
         return configured_engines
 
     @staticmethod
-    def _load_config() -> Dict[str, str]:
+    def _load_config(env: Mapping[str, str] | None = None) -> Dict[str, str]:
         """从环境变量加载 DeepSearch 配置.
 
         策略：
@@ -221,29 +226,31 @@ class DeepResearchTaskManager:
           WEB_SEARCH_ENGINE_NAME, WEB_SEARCH_API_KEY, WEB_SEARCH_URL, EXECUTION_METHOD
         - 项目全局：MODEL_NAME, MODEL_PROVIDER, API_BASE, API_KEY
         """
+        source = os.environ if env is None else env
+
         # 大模型相关配置：DeepSearch 专属优先，fallback 到项目全局
         llm_model_name = (
-                os.environ.get("LLM_MODEL_NAME", "").strip()
-                or os.environ.get("MODEL_NAME", "").strip()
+                source.get("LLM_MODEL_NAME", "").strip()
+                or source.get("MODEL_NAME", "").strip()
         )
         llm_model_type = (
-                os.environ.get("LLM_MODEL_TYPE", "").strip().lower()
-                or os.environ.get("MODEL_PROVIDER", "").strip().lower()
+                source.get("LLM_MODEL_TYPE", "").strip().lower()
+                or source.get("MODEL_PROVIDER", "").strip().lower()
         )
         llm_base_url = (
-                os.environ.get("LLM_BASE_URL", "").strip()
-                or os.environ.get("API_BASE", "").strip()
+                source.get("LLM_BASE_URL", "").strip()
+                or source.get("API_BASE", "").strip()
         )
         llm_api_key = (
-                os.environ.get("LLM_API_KEY", "").strip()
-                or os.environ.get("API_KEY", "").strip()
+                source.get("LLM_API_KEY", "").strip()
+                or source.get("API_KEY", "").strip()
         )
 
         # 自动识别已配置的检索引擎
-        configured_engines = DeepResearchTaskManager._detect_configured_search_engines()
+        configured_engines = DeepResearchTaskManager._detect_configured_search_engines(source)
 
         # 确定搜索引擎名称：WEB_SEARCH_ENGINE_NAME > 已配置搜索引擎 > petal
-        web_search_engine_name = os.environ.get("WEB_SEARCH_ENGINE_NAME", "").strip()
+        web_search_engine_name = source.get("WEB_SEARCH_ENGINE_NAME", "").strip().lower()
         if not web_search_engine_name and configured_engines:
             # 使用第一个已配置的搜索引擎
             web_search_engine_name = next(iter(configured_engines.keys()))
@@ -251,24 +258,33 @@ class DeepResearchTaskManager:
             web_search_engine_name = SearchEngine.PETAL.value
 
         # 确定搜索引擎 API Key：WEB_SEARCH_API_KEY > 已配置搜索引擎的 API Key > OPENAI_DEFAULT_HEADERS/default_headers
-        web_search_api_key = os.environ.get("WEB_SEARCH_API_KEY", "").strip()
+        web_search_api_key = source.get("WEB_SEARCH_API_KEY", "").strip()
+        if not web_search_api_key and web_search_engine_name:
+            web_search_api_key = source.get(
+                f"{web_search_engine_name.upper()}_API_KEY", ""
+            ).strip()
         if not web_search_api_key and configured_engines and web_search_engine_name in configured_engines:
             # 使用对应引擎的 API Key
             web_search_api_key = configured_engines[web_search_engine_name]
         if not web_search_api_key:
+            for header_name in ("default_headers", "DEFAULT_HEADERS", "OPENAI_DEFAULT_HEADERS"):
+                web_search_api_key = source.get(header_name, "").strip()
+                if web_search_api_key:
+                    break
+        if not web_search_api_key and env is None:
             web_search_api_key = read_default_headers_raw()
 
-        web_search_url = os.environ.get("WEB_SEARCH_URL", "").strip()
+        web_search_url = source.get("WEB_SEARCH_URL", "").strip()
         if not web_search_url and web_search_engine_name == SearchEngine.PETAL.value:
-            web_search_url = DeepResearchTaskManager._resolve_petal_search_url()
+            web_search_url = DeepResearchTaskManager._resolve_petal_search_url(source)
 
-        execution_method = os.environ.get("EXECUTION_METHOD", "parallel").strip()
+        execution_method = source.get("EXECUTION_METHOD", "parallel").strip()
 
         # 检查 VISION 相关配置
-        vision_api_key = os.environ.get("VISION_API_KEY", "").strip()
-        vision_api_base = os.environ.get("VISION_API_BASE", "").strip()
-        vision_provider = os.environ.get("VISION_PROVIDER", "").strip().lower()
-        vision_model_name = os.environ.get("VISION_MODEL_NAME", "").strip()
+        vision_api_key = source.get("VISION_API_KEY", "").strip()
+        vision_api_base = source.get("VISION_API_BASE", "").strip()
+        vision_provider = source.get("VISION_PROVIDER", "").strip().lower()
+        vision_model_name = source.get("VISION_MODEL_NAME", "").strip()
 
         # 如果 VISION 相关环境变量已配置，启用 VLM 图表生成器
         vlm_chart_generator_enable = "False"
