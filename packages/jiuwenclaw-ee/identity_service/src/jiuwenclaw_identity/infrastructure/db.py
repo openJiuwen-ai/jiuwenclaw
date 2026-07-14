@@ -45,7 +45,7 @@ def _mysql_handler_from_settings(cfg: Settings) -> MySQLHandler:
             database=str(cfg.db_name).strip(),
         )
     except (TypeError, ValueError) as e:
-        logger.exception("Invalid MySQL config (IDENTITY_DB_*).")
+        logger.exception("Invalid MySQL config (AUTH_SRV_DB_*).")
         raise ValueError("Invalid MySQL database configuration.") from e
 
 
@@ -57,7 +57,7 @@ def _pg_handler_from_settings(cfg: Settings) -> PostgreSQLHandler:
             database=str(cfg.db_name).strip(), schema=str(cfg.pg_schema).strip(),
         )
     except (TypeError, ValueError) as e:
-        logger.exception("Invalid PostgreSQL config (IDENTITY_DB_*).")
+        logger.exception("Invalid PostgreSQL config (AUTH_SRV_DB_*).")
         raise ValueError("Invalid PostgreSQL database configuration.") from e
 
 

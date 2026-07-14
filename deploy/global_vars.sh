@@ -147,6 +147,7 @@ declare -A DEPLOY_VARS=(
     ["AUTH_SRV_PG_SCHEMA"]="public"
     ["AUTH_SRV_JWT_ISSUER"]="jiuwenclaw-identity"
     ["AUTH_SRV_JWT_AUDIENCE"]="jiuwenclaw"
+    ["IS_UP_MGR_SRV"]="false"
     ["MGR_SRV_NAME"]="jiuwenclaw-manager-web"
     ["MGR_SRV_PORT"]="5273"
     ["USER_SRV_NAME"]="jiuwenclaw-web"

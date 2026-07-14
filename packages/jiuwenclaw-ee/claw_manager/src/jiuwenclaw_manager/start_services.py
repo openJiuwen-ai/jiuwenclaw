@@ -50,7 +50,7 @@ def compose_launch_plan(profile: LaunchProfile) -> list[ServiceLaunchPlan]:
                 f"manager web dist not found: {UI_DIST}; "
                 "run `npm run build` under packages/jiuwenclaw-ee/claw_manager/web first."
             )
-        relay = os.getenv("MANAGER_WEB_PROXY_TARGET", resolve_api_relay_url())
+        relay = os.getenv("MGR_SRV_PROXY_TARGET", resolve_api_relay_url())
         ui_argv = [
             py,
             "-m",
@@ -60,10 +60,10 @@ def compose_launch_plan(profile: LaunchProfile) -> list[ServiceLaunchPlan]:
             "--proxy-target",
             relay,
         ]
-        web_host = os.getenv("MANAGER_WEB_HOST")
+        web_host = os.getenv("MGR_SRV_HOST")
         if web_host:
             ui_argv.extend(["--host", web_host])
-        web_port = os.getenv("MANAGER_WEB_PORT")
+        web_port = os.getenv("MGR_SRV_PORT")
         if web_port:
             ui_argv.extend(["--port", web_port])
         plan.append(ServiceLaunchPlan("manager-ui", ui_argv))
