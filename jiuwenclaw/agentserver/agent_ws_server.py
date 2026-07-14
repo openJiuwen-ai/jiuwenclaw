@@ -355,8 +355,23 @@ class AgentWebSocketServer:
                 task = asyncio.create_task(self._handle_message(ws, raw, send_lock))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
-        except websockets.exceptions.ConnectionClosed:
-            logger.info("[AgentWebSocketServer] 连接关闭: %s", remote, extra={'user_visible': 'critical'})
+        except websockets.exceptions.ConnectionClosed as e:
+            # websockets>=12: 正式字段为 rcvd/sent；勿用已 deprecate 的 e.code/e.reason
+            rcvd = getattr(e, "rcvd", None)
+            sent = getattr(e, "sent", None)
+            logger.warning(
+                "[AgentWebSocketServer] 连接关闭 remote=%s "
+                "rcvd_code=%s rcvd_reason=%r sent_code=%s sent_reason=%r "
+                "rcvd_then_sent=%s detail=%s",
+                remote,
+                getattr(rcvd, "code", None),
+                getattr(rcvd, "reason", None) or "",
+                getattr(sent, "code", None),
+                getattr(sent, "reason", None) or "",
+                getattr(e, "rcvd_then_sent", None),
+                e,
+                extra={"user_visible": "critical"},
+            )
         except Exception as e:
             logger.exception("[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e, 
                              extra={'user_visible': 'critical'})

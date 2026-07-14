@@ -12,6 +12,7 @@ Both processes share the same user workspace directory (~/.jiuwenclaw).
 from __future__ import annotations
 
 import argparse
+import atexit
 import asyncio
 import logging
 import os
@@ -57,6 +58,22 @@ for _lg in LogManager.get_all_loggers().values():
 
 # Load env from user workspace config/.env
 load_dotenv(dotenv_path=get_env_file())
+
+# 进程退出诊断：仅记录原因，不改变退出码/清理顺序。默认为 unknown，
+# 若 atexit 仍为 unknown 且看不到 stopping…，多半是强杀/原生崩/os._exit。
+_EXIT_REASON = "unknown"
+
+
+def _set_exit_reason(reason: str) -> None:
+    global _EXIT_REASON
+    _EXIT_REASON = reason
+
+
+def _atexit_log_exit_reason() -> None:
+    logger.critical("[AgentServer] atexit reason=%s", _EXIT_REASON)
+
+
+atexit.register(_atexit_log_exit_reason)
 
 
 class _NopCronScheduler:
@@ -179,6 +196,7 @@ async def _run(host: str, port: int) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning("[AgentServer] history flush failed: %s", exc)
         logger.info("[AgentServer] stopped")
+        _set_exit_reason("clean_shutdown")
 
 
 def main() -> None:
@@ -207,7 +225,17 @@ def main() -> None:
         else:
             port = 18092
 
-    asyncio.run(_run(host=host, port=port))
+    try:
+        asyncio.run(_run(host=host, port=port))
+        # 若 finally 已标 clean_shutdown，保留之；否则记录“正常返回但未走完收尾”
+        if _EXIT_REASON == "unknown":
+            _set_exit_reason("asyncio_run_returned")
+    except SystemExit as exc:
+        _set_exit_reason(f"SystemExit({exc.code})")
+        raise
+    except BaseException as exc:
+        _set_exit_reason(f"{type(exc).__name__}: {exc}")
+        raise
 
 
 if __name__ == "__main__":
