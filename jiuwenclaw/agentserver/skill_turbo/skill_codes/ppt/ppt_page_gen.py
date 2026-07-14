@@ -200,9 +200,22 @@ _DESIGN_RULES_DIGEST = (
     "左右分栏用 `flex` + `flex-[3]` / `flex-[2]` 比例分配，不用 `grid grid-cols-[3fr_2fr]`\n"
     "9. flex 子元素：必须 `flex-1 min-h-0 min-w-0`（水平布局）或 `flex-1 min-h-0`（垂直布局）；"
     "禁止使用 `overflow-hidden` 隐藏核心内容\n"
-    "10. flex-col 子元素：必须 `flex-1 min-h-0`；禁止使用 `overflow-hidden` 隐藏核心内容\n"
+    "10. flex-col 子元素：必须 `flex-1 min-h-0`；禁止使用 `overflow-hidden` 隐藏核心内容；"
+    "注意：`overflow-hidden` 在浏览器中裁剪溢出内容，但 PPTX 导出时不被尊重——"
+    "超出容器边界的内容会直接溢出；因此卡片内容必须通过控制行数和行高确保不超出容器高度\n"
     "10.1 内容预算：flex-col 中有多个子元素时，禁止把大块内容（如完整表格）设 `flex-shrink-0`，"
     "否则会挤压其他 `flex-1` 兄弟元素至高度为 0；大块内容也要参与弹性收缩或拆分\n"
+    "10.2 多栏等高卡片防空白：当使用 `grid-rows-N` + `flex-1` 布局多卡片时，"
+    "每个卡片内容（文字行+图标+数据）必须填充容器高度的 60% 以上；"
+    "若内容不足，改用 `flex-shrink-0` 让卡片按内容自适应高度，"
+    "或将 `grid-rows-N` 改为 `grid-rows-[auto]` 让容器收缩包裹内容，剩余空间分配给其他区域\n"
+    "10.3 多栏卡片防溢出与行高禁令："
+    "① 卡片内正文禁止使用 `leading-loose`（line-height:2），该类使文字高度翻倍，"
+    "在 PPTX 导出时极易导致内容超出卡片边界；正文统一使用 `leading-snug`（1.25）或 `leading-normal`（1.5）\n"
+    "② 多栏等高卡片（如 `grid-rows-N`）中每个卡片的实际内容行数不得超过容器可容纳行数"
+    "（按 660px 内容区 ÷ 行数 - padding 估算）；宁可精简文字，不可溢出\n"
+    "③ 禁止通过添加 `mt-auto` 底部子元素（色块标签、badge 行等）来填充空白——"
+    "这些子元素增加总内容高度，在 PPTX 导出时 `overflow-hidden` 不被尊重会导致溢出\n"
     "11. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体"
     "（除非用户在原始 query 中明确指定了字体或配色，此时以用户指定值为准）；"
     "所有页面 `<body>` 背景色必须统一，从风格规范中取一致的背景色，禁止部分页面用浅灰/灰色背景而其他页用白色\n"
@@ -219,7 +232,9 @@ _DESIGN_RULES_DIGEST = (
     "16. 标题栏、页脚为跨页锚点片段（见风格文件「四、组件样式库」开头的「跨页锚点片段」说明），"
     "必须逐字复用 HTML 结构/class/间距，只改文字内容，禁止自行重新设计\n"
     "17. 标题、正文、图表标签、数据来源和数据卡片必须完整显示，禁止裁切或隐藏；"
-    "禁止在核心内容容器上使用 `overflow-hidden`（仅允许在 `.ppt-slide` 画布边界使用）\n"
+    "禁止在核心内容容器上使用 `overflow-hidden`（仅允许在 `.ppt-slide` 画布边界使用）；"
+    "PPTX 导出不尊重 overflow-hidden，卡片内容超出边界会直接溢出，"
+    "必须通过控制文字行数和行高（禁止 leading-loose）确保内容不溢出\n"
     "18. 遮罩层≠底色：`bg-black/50`、`from-black/*`、`bg-gradient-*` 等是遮罩层(overlay)，"
     "必须配合底层 `<img>` 背景图使用以保证文字可读，不是页面/卡片底色；"
     "页面底色必须严格遵循风格规范文件定义的背景色，禁止使用与风格不符的底色\n"
@@ -400,19 +415,22 @@ def _detect_page_type(outline_page: str) -> str:
 
 
 _STRUCTURAL_DENSITY_CHECKLIST = (
-    "### 结构页密度检查（4 项，全部必须通过）\n"
+    "### 结构页密度检查（5 项，全部必须通过）\n"
     "1. 完整显示：核心内容未被裁切、滚动、折叠或省略\n"
     "2. 无大段文字：无连续 > 100 字段落\n"
     "3. 视觉层级：标题 → 副标题 → 正文 层级清晰\n"
     "4. 留白质量：留白服务于视觉聚焦，非空洞\n"
+    "5. 溢出风险：卡片/容器内容未超出边界，无 `leading-loose` 导致的高度翻倍\n"
 )
 
 _DENSITY_CHECKLIST_DIGEST = (
-    "### 内容密度检查（15 项，全部必须通过）\n"
+    "### 内容密度检查（16 项，全部必须通过）\n"
     "1. 数据可视化：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式且页面为'数据有限'时可降至 2 个数据卡片）\n"
     "2. 核心要点：6-10 个列表项或卡片\n"
     "3. 装饰图标：≥3 个 FontAwesome 图标（class 含 `fa-`）\n"
-    "4. 空白率：估算 < 30%\n"
+    "4. 留白质量：留白是否服务于层级、聚焦或阅读节奏；"
+    "检查 flex-1 或 grid-rows-N 容器内的每个卡片/子元素，"
+    "若内容（文字行+图表+图标）填充不足容器高度的 50%，判定为'局部空白失衡'\n"
     "5. 数据来源：页脚有标注（机构名 / 资料名）\n"
     "6. 无大段文字：无连续 > 100 字段落\n"
     "7. 视觉层级：标题 → 副标题 → 正文 → 注释 层级清晰\n"
@@ -430,6 +448,10 @@ _DENSITY_CHECKLIST_DIGEST = (
     "14. 图表颜色：数据系列颜色来自风格文件图表配色表，坐标轴标签用深色，分割线用浅色\n"
     "15. 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}`；"
     "图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`\n"
+    "16. 溢出风险：检查所有 `flex-col` 或 `flex-1` 容器内的卡片，"
+    "若存在 `leading-loose`（line-height:2）或 `mt-auto` 底部子元素（色块标签/badge 行），"
+    "且卡片内容总行数可能超过容器可容纳行数，判定为'内容溢出'；"
+    "PPTX 导出不尊重 overflow-hidden，超出边界的内容会直接溢出\n"
 )
 
 
@@ -657,7 +679,11 @@ def _post_check_data_viz(html: str, failed_items: list[str], search_mode: str) -
 
 
 def _post_check_layout_issues(html: str, failed_items: list[str]) -> list[str]:
-    """程序化后置校验：检测 Grid 布局、overflow-hidden 等布局问题。"""
+    """程序化后置校验：检测 Grid 布局、overflow-hidden、字号不一致、溢出风险等布局问题。
+
+    leading-loose（line-height:2）使文字高度翻倍，在 PPTX 导出时极易导致内容超出卡片边界。
+    PPTX 不尊重 overflow-hidden，超出边界的内容会直接溢出。
+    """
     # 检测 CSS Grid 使用
     if _has_grid_layout(html) and "使用了不支持的Grid布局" not in failed_items:
         failed_items.append("使用了不支持的Grid布局")
@@ -667,6 +693,9 @@ def _post_check_layout_issues(html: str, failed_items: list[str]) -> list[str]:
     # 检测字号不一致
     if _check_font_size_consistency(html) and "字号不一致" not in failed_items:
         failed_items.append("字号不一致")
+    # 检测溢出风险：leading-loose 使文字高度翻倍
+    if "内容溢出" not in failed_items and "leading-loose" in html:
+        failed_items.append("内容溢出")
     return failed_items
 
 
@@ -698,6 +727,16 @@ _REWRITE_ACTIONS = {
     "核心要点不足": "将段落拆分为 6-10 个列表项或卡片，每条 1-2 行加图标",
     "缺装饰图标": "为每个核心要点/卡片添加相关 FontAwesome 图标（class 含 fa-）",
     "空白率过高": "添加总结框（1-2 句概括性陈述），其次添加分隔线、引用块、背景装饰",
+    "局部空白失衡": (
+        "优先调整布局（第一选择）：将空白卡片的容器从 flex-1 改为 flex-shrink-0"
+        "（按内容自适应高度），或将 grid-rows-N 改为更少的行数，"
+        "缩小该区域占比并放大其他区域以消化多余空间\n"
+        "若必须补充内容（第二选择）：在卡片内追加 1-2 行精简描述即可，"
+        "但禁止使用 leading-loose（line-height:2 会翻倍高度导致溢出），"
+        "禁止添加 mt-auto 底部子元素（色块标签/badge 行等，会增加总高度），"
+        "禁止增加已有文字的行高；"
+        "注意：PPTX 导出时不尊重 overflow-hidden，卡片内容超出边界会直接溢出"
+    ),
     "缺数据来源": "在页脚标注'数据来源：XXX'（机构名或资料名）",
     "大段文字": "拆分为多个列表项/小节，添加小标题",
     "视觉层级混乱": "调整字号梯度，建立明确的标题→副标题→正文→注释层级",
@@ -711,6 +750,12 @@ _REWRITE_ACTIONS = {
     ),
     "字号不一致": "统一同级别卡片/模块的字号，使用风格文件定义的字号值，确保同级元素字号一致",
     "图例与轴标题重叠": "图例项过多时设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`，避免与坐标轴标题重叠",
+    "内容溢出": (
+        "移除 `leading-loose`（改为 `leading-snug` 或 `leading-normal`），"
+        "移除 `mt-auto` 底部子元素（色块标签/badge 行等），"
+        "精简每张卡片的文字行数使其不超过容器可容纳行数；"
+        "若内容确实需要更多空间，将 `flex-col` 改为更少的子元素或改为 `flex-shrink-0` 自适应高度"
+    ),
 }
 
 
@@ -1297,7 +1342,7 @@ class PageWorkerNode(PlanNode):
                 "   - 失败按 gen_retry_round 重试（仅本页）\n"
                 "   - 重试后仍失败 → 进 missing_pages，该页闭环终止\n"
                 "2. 密度判定阶段：调 LLM 做 12 项密度检查（受控 JSON 输出），叠加程序化后置校验（echarts/card 计数）\n"
-                "   - 检查项：数据可视化 / 核心要点 / 装饰图标 / 空白率 / 数据来源 / 大段文字 / 视觉层级 / 布局正确 / 完整显示 / 内容完整\n"
+                "   - 检查项：数据可视化 / 核心要点 / 装饰图标 / 留白质量 / 数据来源 / 大段文字 / 视觉层级 / 布局正确 / 完整显示 / 内容完整 / 溢出风险\n"
                 "   - 数据可视化阈值：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式降至 2 个）\n"
                 "3. 不通过 → 修复阶段（按 density_retry_round 轮）：\n"
                 "   a. 分析缺失项，判断是否需要搜索补充数据\n"
@@ -1598,7 +1643,7 @@ class PageWorkerNode(PlanNode):
 
         if is_structural:
             checklist = _STRUCTURAL_DENSITY_CHECKLIST
-            failed_enum = "内容被裁切 / 大段文字 / 视觉层级混乱 / 空白失衡"
+            failed_enum = "内容被裁切 / 大段文字 / 视觉层级混乱 / 空白失衡 / 内容溢出"
         else:
             checklist = _DENSITY_CHECKLIST_DIGEST
             no_search_hint = ""
@@ -1608,11 +1653,11 @@ class PageWorkerNode(PlanNode):
                     "数据可视化阈值降至 ≥2 个数据卡片。\n"
                 )
             failed_enum = (
-                "缺数据可视化 / 核心要点不足 / 缺装饰图标 / 空白率过高 / "
+                "缺数据可视化 / 核心要点不足 / 缺装饰图标 / 空白率过高 / 局部空白失衡 / "
                 "缺数据来源 / 大段文字 / 视觉层级混乱 / 布局错误 / "
                 "内容被隐藏 / 核心内容缺失 / grid-cols 非法 / "
                 "使用了不支持的Grid布局 / 核心内容被overflow-hidden裁切 / 字号不一致 / "
-                "图例与轴标题重叠"
+                "图例与轴标题重叠 / 内容溢出"
             )
 
         prompt = (
@@ -1646,7 +1691,7 @@ class PageWorkerNode(PlanNode):
                 if _has_empty_chart_svg(html) and "缺数据可视化" not in failed_items:
                     failed_items.append("缺数据可视化")
                     logger.info("[P8.1] 页面 %d 检测到空SVG图表，标记缺数据可视化", page_num)
-                # 程序化布局检查：Grid 使用、overflow-hidden 裁切、字号不一致
+                # 程序化布局检查：Grid 使用、overflow-hidden 裁切、字号不一致、溢出风险（leading-loose）
                 before_count = len(failed_items)
                 failed_items = _post_check_layout_issues(html, failed_items)
                 new_issues = failed_items[before_count:]
