@@ -531,7 +531,9 @@ function AppContent() {
         return todos.length > 0 || hasMessages;
     }
   }, [mode, todos.length, teamTaskEvents.length, teamTasks.length, teamMembers.length, extensionReady?.runtimePath, messages.length, isRestoringTeamHistory]);
-  const isTeamAreaExpanded = mode === 'team' && teamAreaExpanded && toolPanelHasContent;
+  // 单 agent 模式同样复用集群模式的展开布局（百分比宽度 + 可拖拽分割线），
+  // 避免右侧面板与聊天面板平分空间导致宽度与集群模式不一致；auto_harness 走收起态分支。
+  const isTeamAreaExpanded = mode !== 'auto_harness' && teamAreaExpanded && toolPanelHasContent;
 
   // WebSocket 连接 - provider 由后端配置决定 - provider 由后端配置决定，前端默认不在 URL query 传递
   const {

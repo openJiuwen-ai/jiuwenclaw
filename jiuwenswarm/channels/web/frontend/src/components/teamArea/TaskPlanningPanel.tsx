@@ -338,7 +338,7 @@ function ExpandedTaskList({
           <span className="text-lg font-semibold leading-7 text-text-strong">{groupedTasks.waiting.length}</span>
         </div>
         <div className="flex shrink-0 items-baseline gap-2">
-          <span className="text-base leading-6 text-text-muted">{t('team.taskStatus.error')}</span>
+          <span className="text-base leading-6 text-text-muted">{t('team.taskStatus.cancelled')}</span>
           <span className="text-lg font-semibold leading-7 text-text-strong">{groupedTasks.cancelled.length}</span>
         </div>
       </div>
