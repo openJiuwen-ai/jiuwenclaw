@@ -70,10 +70,13 @@ def _outline_title_cache(route: dict[str, object]) -> dict[str, dict[str, str]]:
     return cache
 
 
-def _write_report_markdown(report_content: str, file_name: str, conversation_id: str) -> str:
-    """Write the completed report into the current request output directory."""
+def _write_report_markdown(final_result: dict, file_name: str, conversation_id: str) -> str:
+    """Build and write the completed report bundle into the request output directory."""
     from jiuwenclaw.agentserver.tools.deepresearch_plugin.conversion_utils import (
         make_safe_filename_component,
+    )
+    from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import (
+        build_report_bundle,
     )
     from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
         get_effective_request_output_dir,
@@ -88,7 +91,8 @@ def _write_report_markdown(report_content: str, file_name: str, conversation_id:
     safe_stem = make_safe_filename_component(requested_stem, default=fallback_stem)
     report_path = Path(output_dir).expanduser().resolve() / f"{safe_stem}.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(report_content, encoding="utf-8")
+    bundle = build_report_bundle(final_result, report_path.with_suffix(""))
+    report_path.write_text(bundle.markdown_text, encoding="utf-8")
     return str(report_path)
 
 
@@ -434,8 +438,6 @@ async def deepresearch_stream(
             /marker.questions/marker.prompt 建 free_input/preview 卡);prompt 扁平字符串 fallback。
           {"status":"completed","conversation_id":"...","report_delivered":true,"report_path":"...md"}
             正常 chat 路由下报告已通过 chat.file 作为 Markdown 文件交付,不进入 tool outcome。
-          {"status":"completed","conversation_id":"...","report_content":"...","report_path":""}
-            无 chat 路由时的兼容回退。
           {"status":"error","error":"..."}
     """
     from jiuwenclaw.agentserver.gateway_push.transport import (  # pylint: disable=import-outside-toplevel
@@ -588,13 +590,18 @@ async def deepresearch_stream(
                 # breaking here makes finally terminate the resumable subprocess.
                 continue
             if status == "completed":
-                report_content = chunk.get("report_content", "")
+                final_result = chunk.get("final_result")
+                response_content = (
+                    final_result.get("response_content", "")
+                    if isinstance(final_result, dict)
+                    else ""
+                )
                 has_chat_route = bool(route.get("session_id") and route.get("channel_id"))
-                if report_content and has_chat_route:
+                if response_content and has_chat_route:
                     try:
                         report_path = await asyncio.to_thread(
                             _write_report_markdown,
-                            report_content,
+                            final_result,
                             file_name,
                             chunk.get("conversation_id", outcome_cid),
                         )
@@ -610,9 +617,22 @@ async def deepresearch_stream(
                         "event_type": "chat.file",
                         "files": [{"path": report_path, "name": os.path.basename(report_path)}],
                     })
+                elif not response_content:
+                    outcome = {
+                        "status": "error",
+                        "conversation_id": chunk.get("conversation_id", outcome_cid),
+                        "error_code": "empty_report",
+                        "error": "completed marker missing final_result.response_content",
+                    }
+                    break
                 else:
-                    report_path = ""
-                    report_delivered = False
+                    outcome = {
+                        "status": "error",
+                        "conversation_id": chunk.get("conversation_id", outcome_cid),
+                        "error_code": "report_file_delivery_failed",
+                        "error": "Markdown report file route is unavailable",
+                    }
+                    break
 
                 if report_delivered:
                     outcome = {
@@ -620,22 +640,15 @@ async def deepresearch_stream(
                         "conversation_id": chunk.get("conversation_id", outcome_cid),
                         "report_delivered": True,
                         "report_path": report_path,
-                        "report_chars": len(report_content),
+                        "report_chars": len(response_content),
                     }
-                elif report_content and has_chat_route:
+                elif response_content and has_chat_route:
                     outcome = {
                         "status": "error",
                         "conversation_id": chunk.get("conversation_id", outcome_cid),
                         "error_code": "report_file_delivery_failed",
                         "error": "Markdown report file could not be delivered",
                         "report_path": report_path,
-                    }
-                else:
-                    outcome = {
-                        "status": "completed",
-                        "conversation_id": chunk.get("conversation_id", outcome_cid),
-                        "report_content": report_content,
-                        "report_path": "",
                     }
                 break
             if status == "error":
@@ -677,13 +690,13 @@ def _resolve_skill_root() -> str:
     """定位 deepsearch-research skill 目录。
 
     优先 JIUWENCLAW_SHARED_SKILLS_DIRS(sidecar 的 cwd 不一定是仓根——sidecar 常跑在
-    vendor/jiuwenclaw 下,os.getcwd() 会落空);分隔符 : (unix) 或 ; (windows) 都切。
+    vendor/jiuwenclaw 下,os.getcwd() 会落空);使用当前平台的路径分隔符。
     fallback: cwd/office-claw-skills(仅当 sidecar cwd 恰为仓根时命中)。
     """
     candidates: list[str] = []
     dirs_env = os.environ.get("JIUWENCLAW_SHARED_SKILLS_DIRS", "")
     if dirs_env:
-        for d in dirs_env.replace(";", ":").split(":"):
+        for d in dirs_env.split(os.pathsep):
             d = d.strip()
             if d:
                 candidates.append(os.path.join(d, "deepsearch-research"))

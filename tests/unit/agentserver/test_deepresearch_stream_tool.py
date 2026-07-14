@@ -5,6 +5,7 @@
 的 schema/trigger 机制,聚焦 spawn+route+outcome 逻辑。
 """
 import asyncio
+import base64
 import json
 
 import os
@@ -97,7 +98,7 @@ class _StderrBackpressureProc(_Proc):
             yield json.dumps({
                 "__deepsearch_status__": "completed",
                 "conversation_id": "C1",
-                "report_content": "done",
+                "final_result": {"response_content": "done"},
             }).encode()
             self.returncode = 0
 
@@ -130,7 +131,7 @@ class _LargeStdoutLineProc(_Proc):
         self._stdout.feed_data((json.dumps({
             "__deepsearch_status__": "completed",
             "conversation_id": "C1",
-            "report_content": report_content,
+            "final_result": {"response_content": report_content},
         }) + "\n").encode())
         self._stdout.feed_eof()
 
@@ -174,7 +175,7 @@ async def test_tool_sends_section_scoped_raw_reasoning_without_task_updates():
         json.dumps({
             "__deepsearch_status__": "completed",
             "conversation_id": "C1",
-            "report_content": "done",
+            "final_result": {"response_content": "done"},
         }),
     ]
     push = AsyncMock()
@@ -230,26 +231,43 @@ async def test_tool_sends_section_scoped_raw_reasoning_without_task_updates():
     )
 
 
-def test_write_report_markdown_uses_request_output_dir(tmp_path):
+def test_write_report_markdown_builds_inference_bundle_and_strips_internal_markers(tmp_path):
+    final_result = {
+        "response_content": (
+            "# 报告\n\n"
+            "[观点](#inference:7)"
+            "[checked_citation:3][[1]](https://example.com/source)\n"
+        ),
+        "infer_messages": [{
+            "id": "7",
+            "html_base64": base64.b64encode(b"<html>trace</html>").decode("ascii"),
+        }],
+        "chart_messages": [],
+    }
     with patch(
         "jiuwenclaw.agentserver.tools.subagent_executor.context_vars.get_effective_request_output_dir",
         return_value=str(tmp_path),
     ):
-        report_path = dt._write_report_markdown("# 报告\n", "研究报告.md", "C1")
+        report_path = dt._write_report_markdown(final_result, "研究报告.md", "C1")
 
     assert report_path == str(tmp_path / "研究报告.md")
-    assert (tmp_path / "研究报告.md").read_text(encoding="utf-8") == "# 报告\n"
+    report = (tmp_path / "研究报告.md").read_text(encoding="utf-8")
+    assert "checked_citation" not in report
+    assert "[观点](研究报告_infer/inference_7.html)" in report
+    assert "[[1]](https://example.com/source)" in report
+    assert (tmp_path / "研究报告_infer" / "inference_7.html").read_bytes() == b"<html>trace</html>"
 
 
 @pytest.mark.asyncio
 async def test_completed_report_is_delivered_as_markdown_file_without_entering_tool_outcome():
     report_content = "# 最终报告\n\n完整正文"
+    final_result = {"response_content": report_content, "infer_messages": [], "chart_messages": []}
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
         json.dumps({
             "__deepsearch_status__": "completed",
             "conversation_id": "C1",
-            "report_content": report_content,
+            "final_result": final_result,
         }),
     ]
     push = AsyncMock()
@@ -258,7 +276,7 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
          patch.object(dt, "_get_route", return_value={
              "request_id": "R1", "channel_id": "CH1", "session_id": "S1"
          }), \
-         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md"), \
+         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md") as write_report, \
          patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_Proc(lines))), \
          patch(
              "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
@@ -269,6 +287,7 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
     report_frames = [payload for payload in payloads if payload.get("event_type") == "chat.delta"]
     assert report_frames == []
+    write_report.assert_called_once_with(final_result, "r", "C1")
     assert {"event_type": "chat.file", "files": [{"path": "/tmp/r.md", "name": "r.md"}]} in payloads
     assert json.loads(result) == {
         "status": "completed",
@@ -286,7 +305,7 @@ async def test_completed_report_does_not_fall_back_to_chat_when_file_delivery_fa
         json.dumps({
             "__deepsearch_status__": "completed",
             "conversation_id": "C1",
-            "report_content": "完整报告",
+            "final_result": {"response_content": "完整报告"},
         }),
     ]
     push = AsyncMock()
@@ -461,7 +480,7 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume():
             }, ensure_ascii=False),
         }),
         json.dumps({"__deepsearch_status__": "completed", "conversation_id": "C1",
-                    "report_content": ""}),
+                    "final_result": {"response_content": "done"}}),
     ]
     route = {"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}
     push = AsyncMock()
@@ -469,6 +488,7 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume():
     with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
          patch.object(dt, "_resolve_run_script", return_value="/s"), \
          patch.object(dt, "_get_route", return_value=route), \
+         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md"), \
          patch("asyncio.create_subprocess_exec", new=spawn), \
          patch(
              "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
@@ -517,11 +537,13 @@ async def test_interrupted_marker_waits_for_runner_to_exit_naturally():
 @pytest.mark.asyncio
 async def test_stderr_is_drained_while_subprocess_is_running():
     proc = _StderrBackpressureProc()
+    push = AsyncMock()
     with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
          patch.object(dt, "_resolve_run_script", return_value="/s"), \
-         patch.object(dt, "_get_route", return_value={"request_id": "", "channel_id": "", "session_id": ""}), \
+         patch.object(dt, "_get_route", return_value={"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}), \
+         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md"), \
          patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)), \
-         patch("jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport"):
+         patch("jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport", return_value=push):
         result = await asyncio.wait_for(
             dt.deepresearch_stream._func(action="start", query="X", file_name="r"),
             timeout=0.2,
@@ -535,37 +557,66 @@ async def test_stderr_is_drained_while_subprocess_is_running():
 async def test_completed_marker_can_exceed_asyncio_stream_line_limit():
     report_content = "报告正文" * 20000
     proc = _LargeStdoutLineProc(report_content)
+    push = AsyncMock()
     with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
          patch.object(dt, "_resolve_run_script", return_value="/s"), \
-         patch.object(dt, "_get_route", return_value={"request_id": "", "channel_id": "", "session_id": ""}), \
+         patch.object(dt, "_get_route", return_value={"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}), \
+         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md"), \
          patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)), \
-         patch("jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport"):
+         patch("jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport", return_value=push):
         result = await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
 
     outcome = json.loads(result)
     assert outcome["status"] == "completed"
-    assert outcome["report_content"] == report_content
+    assert outcome["report_chars"] == len(report_content)
 
 
 @pytest.mark.asyncio
 async def test_start_returns_completed_outcome():
+    final_result = {"response_content": "最终报告正文"}
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
         json.dumps({"agent": "reporter", "content": "最终报告正文"}),
         json.dumps({"__deepsearch_status__": "completed", "conversation_id": "C1",
-                    "report_content": "最终报告正文"}),
+                    "final_result": final_result}),
     ]
-    patches = _patch_env(lines)
-    for p in patches:
-        p.start()
-    try:
+    push = AsyncMock()
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch.object(dt, "_get_route", return_value={"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}), \
+         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md"), \
+         patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_Proc(lines))), \
+         patch("jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport", return_value=push):
         result = await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
-    finally:
-        for p in patches:
-            p.stop()
     out = json.loads(result)
     assert out["status"] == "completed"
-    assert out["report_content"] == "最终报告正文"
+    assert out["report_chars"] == len("最终报告正文")
+    assert "report_content" not in out
+
+
+@pytest.mark.asyncio
+async def test_completed_marker_rejects_legacy_report_content():
+    lines = [
+        json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+        json.dumps({
+            "__deepsearch_status__": "completed",
+            "conversation_id": "C1",
+            "report_content": "legacy report",
+        }),
+    ]
+    write_report = AsyncMock()
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch.object(dt, "_get_route", return_value={"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}), \
+         patch.object(dt, "_write_report_markdown", write_report), \
+         patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_Proc(lines))), \
+         patch("jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport", return_value=AsyncMock()):
+        result = await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
+
+    out = json.loads(result)
+    assert out["status"] == "error"
+    assert out["error_code"] == "empty_report"
+    write_report.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -813,13 +864,26 @@ def test_get_deepresearch_tools_exposes_only_stream(monkeypatch):
     assert dt.get_deepresearch_tools() == [dt.deepresearch_stream]
 
 
-def test_resolve_skill_root_env_multi_delimiter(tmp_path, monkeypatch):
-    # ; 与 : 两种分隔符都能切(跨平台)
+def test_resolve_skill_root_env_uses_platform_path_separator(tmp_path, monkeypatch):
     p1 = str(tmp_path / "d1"); os.makedirs(p1); sd1 = _make_fake_skill(p1)
     p2 = str(tmp_path / "d2"); os.makedirs(p2)
-    monkeypatch.setenv("JIUWENCLAW_SHARED_SKILLS_DIRS", f"{p1};{p2}")
+    monkeypatch.setenv("JIUWENCLAW_SHARED_SKILLS_DIRS", os.pathsep.join((p1, p2)))
     monkeypatch.chdir(tmp_path)
     assert dt._resolve_skill_root() == sd1  # 命中第一个含 skill 的
+
+
+def test_resolve_skill_root_preserves_windows_drive_letter(tmp_path, monkeypatch):
+    windows_parent = r"C:\shared-skills"
+    skill_dir = _make_fake_skill(str(tmp_path / windows_parent))
+    monkeypatch.setattr(dt.os, "pathsep", ";")
+    monkeypatch.setenv(
+        "JIUWENCLAW_SHARED_SKILLS_DIRS",
+        rf"{windows_parent};D:\other-skills",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert dt._resolve_skill_root() == os.path.join(windows_parent, "deepsearch-research")
+    assert os.path.samefile(dt._resolve_skill_root(), skill_dir)
 
 
 def test_resolve_skill_root_falls_back_to_cwd(tmp_path, monkeypatch):
