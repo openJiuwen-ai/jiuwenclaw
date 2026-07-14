@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import os
+import shutil
+import subprocess
 import time
 
 import pytest
@@ -10,35 +11,30 @@ import pytest
 from tests.system_tests.test_utils import ChaosInjector
 
 
-def _docker_restart_policy(container_name: str) -> str | None:
-    """Query docker container restart policy without using subprocess."""
-    cmd = ["/usr/bin/docker", "inspect", "--format", "{{.HostConfig.RestartPolicy.Name}}", container_name]
-    if not os.path.exists(cmd[0]):
-        return None
-    r_fd, w_fd = os.pipe()
-    child_pid = os.fork()
-    if child_pid == 0:
-        os.close(r_fd)
-        os.dup2(w_fd, 1)
-        os.dup2(w_fd, 2)
-        os.close(w_fd)
-        try:
-            os.execv(cmd[0], cmd)
-        except OSError:
-            os._exit(127)
-    else:
-        os.close(w_fd)
-        chunks = []
-        while True:
-            data = os.read(r_fd, 4096)
-            if not data:
-                break
-            chunks.append(data.decode("utf-8", errors="replace"))
-        os.close(r_fd)
-        _pid, status = os.waitpid(child_pid, 0)
-        if os.WEXITSTATUS(status) != 0:
-            return None
-        return "".join(chunks).strip() or None
+def resolve_docker_path() -> str:
+    """Resolve docker binary path via PATH lookup, with fallback."""
+    return shutil.which("docker") or ""
+
+
+def get_docker_restart_policy(container_name: str) -> str:
+    """Query docker container restart policy.
+
+    Returns the restart policy string, or empty string if unavailable.
+    """
+    docker = resolve_docker_path()
+    if not docker:
+        return ""
+    try:
+        result = subprocess.run(
+            [docker, "inspect", "--format", "{{.HostConfig.RestartPolicy.Name}}", container_name],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
 
 @pytest.mark.system
@@ -70,8 +66,8 @@ class TestReliability:
         sandbox_id = resp.json()["id"]
         wait_for_sandbox_ready(sandbox_id)
 
-        restart_policy = _docker_restart_policy("jiuwenbox-server")
-        if restart_policy is None:
+        restart_policy = get_docker_restart_policy("jiuwenbox-server")
+        if not restart_policy:
             pytest.skip("Docker or jiuwenbox-server container not available")
         if restart_policy not in ("always", "unless-stopped"):
             pytest.skip(
@@ -80,10 +76,13 @@ class TestReliability:
             )
 
         try:
-            ret = os.spawnl(os.P_WAIT, "/usr/bin/docker", "/usr/bin/docker", "kill", "jiuwenbox-server")
-            if ret != 0:
+            docker = resolve_docker_path()
+            if not docker:
+                pytest.skip("Docker not available")
+            result = subprocess.run([docker, "kill", "jiuwenbox-server"], capture_output=True, text=True)
+            if result.returncode != 0:
                 pytest.skip("Docker container not running")
-        except OSError:
+        except (OSError, subprocess.SubprocessError):
             pytest.skip("Docker not available")
 
         time.sleep(30)
@@ -239,7 +238,7 @@ class TestReliability:
 
         resp = exec_command(
             sandbox_id,
-            ["python3", "-c", "import os; os.fork(); os._exit(0)"],
+            ["python3", "-c", "import sys; sys.exit(0)"],
             timeout_seconds=10,
         )
         assert resp.status_code == 200

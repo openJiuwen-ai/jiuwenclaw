@@ -31,12 +31,16 @@ class TestErrorBoundaries:
         sandbox_id = resp.json()["id"]
         wait_for_sandbox_ready(sandbox_id)
 
+        # Attempt to create a directory in a restricted path;
+        # mkdir should fail with permission denied (non-zero exit code)
         resp = exec_command(
             sandbox_id,
             ["mkdir", "-p", "/root/test"],
             timeout_seconds=10,
         )
         assert resp.status_code == 200
+        assert resp.json()["exit_code"] != 0, \
+            "Expected permission denied when creating /root/test"
 
     @staticmethod
     def test_eb_003_disk_full_during_upload(client, wait_for_sandbox_ready):

@@ -253,23 +253,24 @@ def exec_command(client):
 
 @pytest.fixture
 def resource_degradation_cleanup():
-    pids = []
+    processes = []
     try:
-        yield pids
+        yield processes
     finally:
-        import os
-        for pid in pids:
+        import subprocess
+        for proc in processes:
             try:
-                os.kill(pid, 15)
-                os.waitpid(pid, os.WNOHANG)
-            except (OSError, ChildProcessError) as exc:
-                logger.debug(
-                    "Failed to terminate process %s during cleanup: %s", pid, exc
-                )
+                proc.terminate()
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
                 try:
-                    os.kill(pid, 9)
-                    os.waitpid(pid, os.WNOHANG)
-                except (OSError, ChildProcessError) as kill_exc:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception as kill_exc:
                     logger.warning(
-                        "Failed to kill process %s during cleanup: %s", pid, kill_exc
+                        "Failed to kill process during cleanup: %s", kill_exc
                     )
+            except Exception as exc:
+                logger.debug(
+                    "Failed to terminate process during cleanup: %s", exc
+                )

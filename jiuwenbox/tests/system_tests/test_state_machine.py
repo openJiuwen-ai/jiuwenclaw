@@ -283,7 +283,7 @@ class TestStateMachineInvalidTransitions:
         resp = client.post(
             f"/api/v1/sandboxes/{sandbox_id}/exec",
             json={
-                "command": ["python3", "-c", "import os; os._exit(0)"],
+                "command": ["python3", "-c", "import sys; sys.exit(0)"],
                 "timeout_seconds": 5,
             },
         )

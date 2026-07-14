@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-import os
+import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -29,7 +29,7 @@ class ResourceDegradationManager:
     """Manage resource degradation for testing."""
 
     def __init__(self):
-        self._pids = []
+        self._processes = []
         self._network_degraded = False
 
     def degrade_cpu(self, cores: int = TestConfig.CPU_CORES_SEVERE, duration: int = 30):
@@ -37,47 +37,35 @@ class ResourceDegradationManager:
         if not EnvironmentDetector.has_stress_ng():
             raise RuntimeError("stress-ng not available, cannot degrade CPU")
 
-        pid = os.spawnl(
-            os.P_NOWAIT,
-            "/usr/bin/stress-ng",
-            "/usr/bin/stress-ng",
-            f"--cpu={cores}",
-            f"--timeout={duration}s",
+        proc = subprocess.Popen(
+            ["/usr/bin/stress-ng", f"--cpu={cores}", f"--timeout={duration}s"],
         )
-        self._pids.append(pid)
+        self._processes.append(proc)
         time.sleep(2)
-        return pid
+        return proc
 
     def degrade_memory(self, vm_bytes: str = TestConfig.MEMORY_SEVERE, duration: int = 30):
         """Degrade memory by running stress-ng."""
         if not EnvironmentDetector.has_stress_ng():
             raise RuntimeError("stress-ng not available, cannot degrade memory")
 
-        pid = os.spawnl(
-            os.P_NOWAIT,
-            "/usr/bin/stress-ng",
-            "/usr/bin/stress-ng",
-            f"--vm-bytes={vm_bytes}",
-            "--vm=4",
-            f"--timeout={duration}s",
+        proc = subprocess.Popen(
+            ["/usr/bin/stress-ng", f"--vm-bytes={vm_bytes}", "--vm=4", f"--timeout={duration}s"],
         )
-        self._pids.append(pid)
+        self._processes.append(proc)
         time.sleep(2)
-        return pid
+        return proc
 
     def degrade_network(self, loss: int = 10, delay: int = 100, interface: str = TestConfig.NETWORK_INTERFACE):
         """Degrade network using tc."""
         if not EnvironmentDetector.has_tc():
             raise RuntimeError("tc not available, cannot degrade network")
 
-        ret = os.spawnl(
-            os.P_WAIT,
-            "/sbin/tc",
-            "/sbin/tc", "qdisc", "add", "dev", interface, "root",
-            "netem", "loss", "random", f"{loss}%", "delay", f"{delay}ms",
+        subprocess.run(
+            ["/sbin/tc", "qdisc", "add", "dev", interface, "root",
+             "netem", "loss", "random", f"{loss}%", "delay", f"{delay}ms"],
+            check=True,
         )
-        if ret != 0:
-            raise OSError(f"tc qdisc add failed with exit code {ret}")
         self._network_degraded = True
         return interface
 
@@ -85,57 +73,49 @@ class ResourceDegradationManager:
         """Restore network quality."""
         if self._network_degraded and EnvironmentDetector.has_tc():
             try:
-                os.spawnl(
-                    os.P_WAIT,
-                    "/sbin/tc",
-                    "/sbin/tc", "qdisc", "del", "dev", interface, "root",
+                subprocess.run(
+                    ["/sbin/tc", "qdisc", "del", "dev", interface, "root"],
+                    check=True,
                 )
-            except OSError as exc:
+            except subprocess.CalledProcessError as exc:
                 logger.warning("Failed to restore network on %s: %s", interface, exc)
             self._network_degraded = False
 
     def degrade_disk(self, path: str = "/tmp", size: str = "5G", duration: int = 30):
         """Degrade disk by filling it."""
         count = size[:-1]
-        pid = os.spawnl(
-            os.P_NOWAIT,
-            "/usr/bin/timeout",
-            "/usr/bin/timeout",
-            f"{duration}s",
-            "/bin/dd",
-            "if=/dev/urandom",
-            f"of={path}/stress_file",
-            "bs=1G",
-            f"count={count}",
+        proc = subprocess.Popen(
+            [
+                "/usr/bin/timeout", f"{duration}s",
+                "/bin/dd", "if=/dev/urandom",
+                f"of={path}/stress_file", "bs=1G", f"count={count}",
+            ],
         )
-        self._pids.append(pid)
+        self._processes.append(proc)
         time.sleep(2)
-        return pid
+        return proc
 
     @staticmethod
     def restore_disk(path: str = "/tmp"):
         """Clean up disk stress file."""
-        os.spawnl(
-            os.P_WAIT,
-            "/bin/rm",
-            "/bin/rm", "-f", f"{path}/stress_file",
-        )
+        subprocess.run(["/bin/rm", "-f", f"{path}/stress_file"], check=True)
 
     def cleanup(self):
         """Clean up all degradation processes."""
         self.restore_network()
-        for pid in self._pids:
+        for proc in self._processes:
             try:
-                os.kill(pid, 15)  # SIGTERM
-                os.waitpid(pid, os.WNOHANG)
-            except (OSError, ChildProcessError) as exc:
-                logger.debug("Failed to terminate process %s: %s", pid, exc)
+                proc.terminate()
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
                 try:
-                    os.kill(pid, 9)  # SIGKILL
-                    os.waitpid(pid, os.WNOHANG)
-                except (OSError, ChildProcessError) as kill_exc:
-                    logger.warning("Failed to kill process %s: %s", pid, kill_exc)
-        self._pids.clear()
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception as kill_exc:
+                    logger.warning("Failed to kill process: %s", kill_exc)
+            except Exception as exc:
+                logger.debug("Failed to terminate process: %s", exc)
+        self._processes.clear()
 
 
 class ChaosInjector:
@@ -199,15 +179,12 @@ class ChaosInjector:
             raise RuntimeError("iproute2 not available, cannot disconnect network")
 
         try:
-            ret = os.spawnl(
-                os.P_WAIT,
-                "/sbin/ip",
-                "/sbin/ip", "link", "set", TestConfig.NETWORK_INTERFACE, "down",
+            subprocess.run(
+                ["/sbin/ip", "link", "set", TestConfig.NETWORK_INTERFACE, "down"],
+                check=True,
             )
-            if ret != 0:
-                raise OSError(f"ip link set down failed with exit code {ret}")
             return True
-        except OSError as exc:
+        except subprocess.CalledProcessError as exc:
             logger.warning("Failed to disconnect network: %s", exc)
             return False
 
@@ -215,10 +192,9 @@ class ChaosInjector:
     def reconnect_network():
         """Reconnect network by bringing up interface."""
         if EnvironmentDetector.has_iproute2():
-            os.spawnl(
-                os.P_WAIT,
-                "/sbin/ip",
-                "/sbin/ip", "link", "set", TestConfig.NETWORK_INTERFACE, "up",
+            subprocess.run(
+                ["/sbin/ip", "link", "set", TestConfig.NETWORK_INTERFACE, "up"],
+                check=True,
             )
 
     def trigger_oom(self, sandbox_id: str, memory_gb: int = 22):

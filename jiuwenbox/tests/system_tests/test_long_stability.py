@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-import os
 import statistics
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,40 +24,24 @@ class TestLongStability:
     """Long stability test cases."""
 
     @staticmethod
-    def _get_system_metrics() -> dict:
+    def get_system_metrics() -> dict:
+        """Get current system CPU and memory metrics."""
         try:
-            cmd = ["/bin/ps", "-aux", "--sort=-%mem"]
-            r_fd, w_fd = os.pipe()
-            child_pid = os.fork()
-            if child_pid == 0:
-                os.close(r_fd)
-                os.dup2(w_fd, 1)
-                os.dup2(w_fd, 2)
-                os.close(w_fd)
-                try:
-                    os.execv(cmd[0], cmd)
-                except OSError:
-                    os._exit(127)
-            else:
-                os.close(w_fd)
-                chunks = []
-                while True:
-                    data = os.read(r_fd, 4096)
-                    if not data:
-                        break
-                    chunks.append(data.decode("utf-8", errors="replace"))
-                os.close(r_fd)
-                os.waitpid(child_pid, 0)
-                output = "".join(chunks)
-                lines = output.strip().split("\n")
-                if len(lines) > 1:
-                    header = lines[0].split()
-                    data = lines[1].split(None, len(header) - 1)
-                    if len(data) >= len(header):
-                        return {
-                            "cpu": float(data[2]),
-                            "memory": float(data[3]),
-                        }
+            result = subprocess.run(
+                ["/bin/ps", "-aux", "--sort=-%mem"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            lines = result.stdout.strip().split("\n")
+            if len(lines) > 1:
+                header = lines[0].split()
+                data = lines[1].split(None, len(header) - 1)
+                if len(data) >= len(header):
+                    return {
+                        "cpu": float(data[2]),
+                        "memory": float(data[3]),
+                    }
         except Exception as exc:
             logger.debug("Failed to get system metrics: %s", exc)
         return {"cpu": 0.0, "memory": 0.0}
