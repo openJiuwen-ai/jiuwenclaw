@@ -429,11 +429,6 @@
   padding-left: 32px;
 }
 
-/* 对话区块下的会话：左间距 12px（置顶区域仍为 8px，cron 触发会话不受影响） */
-.conversation-sidebar__group--conversations > .conversation-sidebar__group-list > .conversation-list-item > .conversation-list-item__main {
-  padding-left: 12px;
-}
-
 .conversation-list-item:hover {
   z-index: 10;
   background: var(--color-surface-hover);
@@ -841,11 +836,11 @@
 }
 
 .conversation-sidebar__cron-row:hover {
-  background: var(--secondary);
+  background: var(--color-surface-hover);
 }
 
 .conversation-sidebar__cron-row.is-expanded {
-  background: var(--secondary);
+  background: var(--color-surface-hover);
 }
 
 .conversation-sidebar__cron-row-icon {
@@ -861,7 +856,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
-  color: var(--text);
+  color: var(--color-text-primary);
 }
 
 .conversation-sidebar__cron-row-delete {
@@ -875,7 +870,7 @@
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: var(--muted);
+  color: var(--color-text-secondary);
   cursor: pointer;
   opacity: 0;
 }
@@ -885,11 +880,11 @@
 }
 
 .conversation-sidebar__cron-row-delete:hover {
-  background: #E6E6E6;
-  color: var(--text);
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
 }
 
-.conversation-sidebar__cron-row-delete img {
+.conversation-sidebar__cron-row-delete svg {
   width: 14px;
   height: 14px;
 }
@@ -905,9 +900,9 @@
   height: 40px;
   padding: 0 14px;
   border-radius: 8px;
-  background: #FFFFFF;
-  box-shadow: 0 6px 18px rgba(15, 23, 42, .14);
-  color: var(--text);
+  background: var(--color-surface-popover);
+  box-shadow: var(--effect-shadow-lg);
+  color: var(--color-text-primary);
   content: attr(data-tooltip);
   font-size: 12px;
   line-height: 40px;
@@ -943,7 +938,7 @@
   align-items: center;
   padding: 0 6px 0 20px;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--color-text-secondary);
 }
 
 /* 定时任务触发会话：文字与定时任务名对齐（缩进 icon+gap = 20px） */
@@ -961,16 +956,16 @@
 }
 
 .conversation-sidebar__cron-item-status.is-enabled {
-  background: #dcfce7;
-  color: #16a34a;
+  background: var(--color-feedback-success-subtle);
+  color: var(--color-feedback-success);
 }
 
 .conversation-sidebar__cron-item-status.is-disabled {
-  background: #f3f4f6;
-  color: #6b7280;
+  background: var(--color-surface-muted);
+  color: var(--color-text-secondary);
 }
 
 .conversation-sidebar__cron-item-status.is-expired {
-  background: #fef3c7;
-  color: #d97706;
+  background: var(--color-feedback-warning-subtle);
+  color: var(--color-feedback-warning);
 }
