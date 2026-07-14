@@ -1631,6 +1631,7 @@
     "installNow": "Install and restart",
     "pipUpgrade": "Upgrade",
     "pipRestart": "Restart now",
+    "restoreDefaults": "Restore Default Source",
     "currentVersion": "Current version",
     "latestVersion": "Latest version",
     "state": "Update state",
@@ -1663,11 +1664,11 @@
       "downloadFailed": "Failed to download the update",
       "upgradeFailed": "Failed to install the update",
       "saveConfigFailed": "Failed to save updater config",
+      "resetSourceFailed": "Failed to reset update source config",
       "installUnavailable": "The installer cannot be started here. Please run inside the desktop app.",
       "installFailed": "Failed to launch the update installer"
     },
     "fields": {
-      "enabled": "Enable updater",
       "releaseApiType": "Update source",
       "releaseApiUrl": "Release API URL"
     }
