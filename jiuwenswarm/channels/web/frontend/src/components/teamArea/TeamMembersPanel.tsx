@@ -558,10 +558,10 @@ function MemberTaskDetail({
                         {getTaskStatusLabel(task.status)}
                         {task.id ? ` · ${task.id}` : ''}
                       </div>
-                      <div className="mt-2 rounded bg-[var(--color-team-detail-surface)] px-3 py-2 text-[11px] leading-5 text-[color:var(--color-team-detail-text)]">
+                      <div className="mt-2 rounded bg-[var(--color-team-detail-surface)] px-3 py-2 text-[11px] leading-5 text-[var(--color-team-detail-text)]">
                         {buildTaskRawEntries(task).map(([label, value]) => (
                           <div key={label} className="grid grid-cols-[88px_minmax(0,1fr)] gap-2">
-                            <span className="text-[color:var(--color-team-detail-label)]">{label}</span>
+                            <span className="text-[var(--color-team-detail-label)]">{label}</span>
                             <span className="whitespace-pre-wrap break-words">{value}</span>
                           </div>
                         ))}
@@ -668,7 +668,7 @@ function FinalSummaryList({ events }: { events: TeamMemberExecutionEvent[] }) {
   }
 
   return (
-    <div className="mx-auto mt-5 max-w-[720px] border-t border-[color:var(--color-team-detail-divider)] pt-4">
+    <div className="mx-auto mt-5 max-w-[720px] border-t border-[var(--color-team-detail-divider)] pt-4">
       <h3 className="text-sm font-semibold text-text">{t('team.process.execution.final')}</h3>
       <div className="mt-4 space-y-6">
         {events.map((event) => (

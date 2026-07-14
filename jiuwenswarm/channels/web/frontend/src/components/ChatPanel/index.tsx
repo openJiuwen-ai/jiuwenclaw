@@ -9,7 +9,7 @@ import { createPortal } from 'react-dom';
 import { ArrowRight, CheckCircle2, ClipboardList, Copy, Info, LoaderCircle, Share2, Sparkles, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
-import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
+import { useChatStore, useHarnessStore, useSessionStore, useTodoStore } from '../../stores';
 import { AgentMode, MediaItem, Message, UserAnswer } from '../../types';
 import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
@@ -673,6 +673,9 @@ export function ChatPanel({
   const contextCompressionRuntime = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRuntime);
   const contextCompressionSummary = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionSummary);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent.plan');
+  const hasHarnessProgress = useHarnessStore((s) => (
+    mode === 'auto_harness' && (s.runtimes[activeSessionId ?? '']?.stageResults.length ?? 0) > 0
+  ));
   const teamHumanShareCommands = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHumanShareCommands ?? []);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const historyLayoutSnapshotRef = useRef<{
@@ -1016,9 +1019,11 @@ export function ChatPanel({
           </div>
         </div>
       )}
-      <div className="sticky top-0 z-10 px-3 pt-2 bg-bg/95 backdrop-blur-sm">
-        <HarnessProgressBar />
-      </div>
+      {hasHarnessProgress && (
+        <div className="sticky top-0 z-10 px-3 pt-2 bg-bg/95 backdrop-blur-sm">
+          <HarnessProgressBar />
+        </div>
+      )}
       {humanShareOpen && (
         <HumanSharePanel
           commands={teamHumanShareCommands}
@@ -1037,9 +1042,6 @@ export function ChatPanel({
                   onLoadMore={historyPager.onLoadMore}
                 />
               )}
-              <div className="chat-harness-entry">
-                <HarnessProgressBar />
-              </div>
               {hasTimelineContent ? (
                 <>
                   <MessageList messages={messages} />

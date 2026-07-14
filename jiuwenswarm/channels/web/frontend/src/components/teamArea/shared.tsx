@@ -99,25 +99,25 @@ export const BOARD_COLUMNS: Array<{
   {
     key: 'waiting',
     labelKey: 'team.planning.columns.waiting',
-    pillClassName: 'bg-card text-[color:var(--color-team-status-waiting)]',
+    pillClassName: 'bg-card text-[var(--color-team-status-waiting)]',
     dotClassName: 'bg-[var(--color-team-status-waiting)]',
   },
   {
     key: 'running',
     labelKey: 'team.planning.columns.running',
-    pillClassName: 'bg-[var(--color-team-status-running-surface)] text-[color:var(--color-team-status-running)]',
+    pillClassName: 'bg-[var(--color-team-status-running-surface)] text-[var(--color-team-status-running)]',
     dotClassName: 'bg-[var(--color-team-status-running)]',
   },
   {
     key: 'completed',
     labelKey: 'team.planning.columns.completed',
-    pillClassName: 'bg-[var(--color-team-status-completed-surface)] text-[color:var(--color-team-status-completed)]',
+    pillClassName: 'bg-[var(--color-team-status-completed-surface)] text-[var(--color-team-status-completed)]',
     dotClassName: 'bg-[var(--color-team-status-completed)]',
   },
   {
     key: 'cancelled',
     labelKey: 'team.planning.columns.cancelled',
-    pillClassName: 'bg-[var(--color-team-status-cancelled-surface)] text-[color:var(--color-team-status-cancelled)]',
+    pillClassName: 'bg-[var(--color-team-status-cancelled-surface)] text-[var(--color-team-status-cancelled)]',
     dotClassName: 'bg-[var(--color-team-status-cancelled)]',
   },
 ];

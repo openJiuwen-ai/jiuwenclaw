@@ -106,16 +106,6 @@
   display: block;
 }
 
-.chat-harness-entry:not(:empty) {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  padding: 8px 12px 0;
-  margin-bottom: 8px;
-  background: color-mix(in srgb, var(--color-surface-page) 95%, transparent);
-  backdrop-filter: blur(8px);
-}
-
 .chat-input-container {
   container-type: inline-size;
   display: flex;
