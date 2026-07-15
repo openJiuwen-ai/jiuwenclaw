@@ -830,6 +830,32 @@ def test_build_bridge_env_empty_value_not_set():
     assert env["LLM_MODEL_NAME"] == "m"
 
 
+def test_child_env_enables_hitl_for_interactive_request(monkeypatch):
+    monkeypatch.setattr(dt, "_build_bridge_env", lambda _env: {"BASE": "1"})
+
+    assert dt._build_deepresearch_child_env({}, interactive_ask=True) == {
+        "BASE": "1",
+        "DEEPSEARCH_HITL": "true",
+        "PYTHONUNBUFFERED": "1",
+    }
+
+
+def test_child_env_disables_hitl_and_overrides_stale_parent(monkeypatch):
+    monkeypatch.setattr(
+        dt,
+        "_build_bridge_env",
+        lambda _env: {"DEEPSEARCH_HITL": "true"},
+    )
+
+    env = dt._build_deepresearch_child_env(
+        {"DEEPSEARCH_HITL": "true"},
+        interactive_ask=False,
+    )
+
+    assert env["DEEPSEARCH_HITL"] == "false"
+    assert env["PYTHONUNBUFFERED"] == "1"
+
+
 def _make_fake_skill(parent: str) -> str:
     """在 parent/deepsearch-research/scripts/run_deepsearch.py 建假 skill,返回 skill dir。"""
     import os

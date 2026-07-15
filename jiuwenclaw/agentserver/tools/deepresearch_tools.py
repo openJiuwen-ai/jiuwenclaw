@@ -374,6 +374,16 @@ def _build_bridge_env(os_env: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def _build_deepresearch_child_env(
+    os_env: dict[str, str], *, interactive_ask: bool
+) -> dict[str, str]:
+    """Build the stream child env with an explicit per-request HITL switch."""
+    env = _build_bridge_env(os_env)
+    env["DEEPSEARCH_HITL"] = "true" if interactive_ask else "false"
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
 async def _iter_ndjson_lines(stream, read_size: int = 64 * 1024):
     """Read newline-delimited subprocess output without StreamReader's line limit."""
     if stream is None:
@@ -443,6 +453,9 @@ async def deepresearch_stream(
     from jiuwenclaw.agentserver.gateway_push.transport import (  # pylint: disable=import-outside-toplevel
         WebSocketGatewayPushTransport,
     )
+    from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (  # pylint: disable=import-outside-toplevel
+        get_ask_request_context,
+    )
     from jiuwenclaw.agentserver.tools.deepresearch_stream_router import (  # pylint: disable=import-outside-toplevel
         RouterState,
         build_interrupt_prompt,
@@ -451,6 +464,7 @@ async def deepresearch_stream(
     )
 
     route = _get_route()
+    interactive_ask, _, _, _ = get_ask_request_context()
     outline_title_cache = _outline_title_cache(route)
     python_bin = _resolve_jiuwenclaw_python()
     script = _resolve_run_script()
@@ -508,7 +522,9 @@ async def deepresearch_stream(
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={**_build_bridge_env(os.environ), "PYTHONUNBUFFERED": "1"},
+            env=_build_deepresearch_child_env(
+                os.environ, interactive_ask=interactive_ask
+            ),
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         return f'{{"status":"error","error":"spawn failed: {exc}"}}'
