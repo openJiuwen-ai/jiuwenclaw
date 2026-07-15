@@ -76,6 +76,11 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 2
+          resources:
+            requests:
+              memory: "<<POSTGRES_MEMORY_REQUEST>>"
+            limits:
+              memory: "<<POSTGRES_MEMORY_LIMIT>>"
       volumes:
         - name: <<POSTGRES_NAME>>-data
           persistentVolumeClaim:
