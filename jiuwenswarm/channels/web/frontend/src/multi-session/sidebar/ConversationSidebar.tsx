@@ -53,6 +53,8 @@ const RELATIVE_TIME_REFRESH_MS = 60_000;
 export type NewConversationOptions = {
   preserveProject?: boolean;
   project?: Pick<ProjectInfo, 'project_id' | 'project_dir'>;
+  /** 进入新对话时预填到输入框的文本（例如"通过聊天创建定时任务"引导语），见 App.tsx enterNewConversation */
+  initialInputValue?: string;
 };
 
 function isDefaultProject(project: ProjectInfo): boolean {
@@ -64,6 +66,10 @@ interface ConversationSidebarProps {
   onNew: (options?: NewConversationOptions) => void;
   onSelect: (session: Session) => void;
   onDelete: (session: Session) => void;
+  /** 跳转到"定时任务"主面板；该入口原来在最左侧图标栏，现移到工作小窗口的"新建任务"下方 */
+  onOpenCron: () => void;
+  /** 当前是否正停留在定时任务面板，用于给下面这个入口按钮加选中态 */
+  isCronActive: boolean;
 }
 
 interface ConversationListItemProps {
@@ -586,6 +592,8 @@ export function ConversationSidebar({
   onNew,
   onSelect,
   onDelete,
+  onOpenCron,
+  isCronActive,
 }: ConversationSidebarProps) {
   const { t } = useTranslation();
   const runtimes = useChatStore((state) => state.runtimes);
@@ -1034,6 +1042,14 @@ export function ConversationSidebar({
         }}>
           <NewTaskIcon aria-hidden />
           <span>{t('multiSession.newConversation')}</span>
+        </button>
+        <button
+          type="button"
+          className={`conversation-sidebar__new${isCronActive ? ' is-active' : ''}`}
+          onClick={onOpenCron}
+        >
+          <CronIcon aria-hidden />
+          <span>{t('nav.cron')}</span>
         </button>
       </div>
       <div className="conversation-sidebar__body">

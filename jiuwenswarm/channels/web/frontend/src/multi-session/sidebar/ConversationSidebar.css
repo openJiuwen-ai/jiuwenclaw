@@ -63,6 +63,15 @@
   outline-offset: 2px;
 }
 
+/* 选中态沿用 .conversation-list-item.is-active 的配色约定 */
+.conversation-sidebar__new.is-active {
+  background: #E6E6E6;
+}
+
+.conversation-sidebar__new.is-active:hover {
+  background: #DEDEE0;
+}
+
 .conversation-sidebar__body {
   min-height: 0;
   flex: 1 1 auto;
@@ -912,3 +921,4 @@
   background: var(--color-feedback-warning-subtle);
   color: var(--color-feedback-warning);
 }
+

@@ -965,7 +965,7 @@
       "trigger": "Create",
       "manual": "Create manually",
       "viaChat": "Create via chat",
-      "viaChatPlaceholder": "Create via chat: this flow is designed by another teammate. Coming soon."
+      "viaChatPrompt": "Let's set up a scheduled task together. First, explain how scheduled tasks work in JiuwenSwarm. Then ask me what I'd like to schedule and when it should run."
     },
     "stats": {
       "total": "Total tasks ({{count}})"
@@ -987,10 +987,13 @@
       "channel": "Channel",
       "actions": "Actions",
       "noProject": "–",
+      "runNow": "Run now",
       "stop": "Stop",
       "edit": "Edit",
       "more": "More",
-      "history": "Run history"
+      "history": "Run history",
+      "triggeredSessions": "Triggered sessions",
+      "noTriggeredSessions": "No trigger records"
     },
     "empty": {
       "createButton": "Create scheduled task",
@@ -1004,7 +1007,9 @@
       "deleteTitle": "Delete",
       "deleteMessage": "Delete task \"{{name}}\"?",
       "stopTitle": "Stop",
-      "stopMessage": "Stop task \"{{name}}\"?"
+      "stopMessage": "Stop task \"{{name}}\"?",
+      "runNowTitle": "Run now",
+      "runNowMessage": "Run task \"{{name}}\" now?"
     },
     "drawer": {
       "titleCreate": "Create scheduled task",
@@ -1023,7 +1028,8 @@
       "fieldEnabled": "Enabled",
       "placeholderInput": "Enter",
       "placeholderSelect": "Select",
-      "placeholderEffectiveDate": "Select effective date"
+      "placeholderEffectiveDate": "Select effective date",
+      "missingFieldsHint": "Still needed: {{fields}}"
     },
     "schedule": {
       "title": "Schedule",
@@ -1032,13 +1038,61 @@
       "modeInterval": "Interval",
       "modeOnce": "Once",
       "modeCronExpr": "Cron expression",
-      "modeComingSoon": "Coming soon",
       "cronExprPlaceholder": "e.g. 0 0 9 * * ? *",
-      "cronExprHelp": "7-field Quartz: second minute hour day month weekday year"
+      "cronExprHelp": "7-field Quartz: second minute hour day month weekday year",
+      "daily": "Daily",
+      "weekly": "Weekly",
+      "monthly": "Monthly",
+      "yearly": "Yearly",
+      "selectTime": "Select time",
+      "selectMonth": "Select month",
+      "selectDay": "Select day",
+      "every": "Every",
+      "everyHoursPlaceholder": "Hours",
+      "hoursUnit": "hours",
+      "dayOption": "{{day}}",
+      "monthOption": "{{month}}",
+      "lastDayOfMonth": "Last day of month",
+      "listSeparator": ", ",
+      "weekday": {
+        "mon": "Mon",
+        "tue": "Tue",
+        "wed": "Wed",
+        "thu": "Thu",
+        "fri": "Fri",
+        "sat": "Sat",
+        "sun": "Sun"
+      },
+      "summary": {
+        "daily": "Daily at {{time}}",
+        "weekly": "Weekly on {{days}} at {{time}}",
+        "monthly": "Monthly on {{day}} at {{time}}",
+        "monthlyWeekday": "Monthly, {{weekOfMonth}}, {{days}} at {{time}}",
+        "yearly": "Yearly on {{month}}/{{day}} at {{time}}",
+        "interval": "Every {{n}}h",
+        "intervalWithWeekdays": "Every {{n}}h ({{days}})",
+        "once": "{{date}} {{time}}",
+        "lastDay": "the last day"
+      },
+      "monthlySubMode": {
+        "date": "By date",
+        "week": "By week"
+      },
+      "weekOfMonth": {
+        "1": "week 1",
+        "2": "week 2",
+        "3": "week 3",
+        "4": "week 4",
+        "last": "last week"
+      }
     },
     "modelPicker": {
       "configured": "Configured",
       "empty": "No models available yet, add one in the config panel first"
+    },
+    "timePicker": {
+      "hour": "Hr",
+      "minute": "Min"
     },
     "datePicker": {
       "prevYear": "Previous year",
@@ -1060,7 +1114,7 @@
     "template": {
       "trend": {
         "title": "Daily industry news",
-        "description": "Every day at 8am, send me the latest industry news for [your industry, e.g. customer service / finance / new energy]"
+        "description": "Every day at 8am, send me the latest industry news for [your industry, e.g. customer service / finance / new energy], organized into a structured document."
       },
       "newspaper": {
         "title": "Market sentiment tracking",
@@ -1068,13 +1122,15 @@
       },
       "briefcase": {
         "title": "Weekly work report",
-        "description": "Every Friday at 6pm, generate my weekly report based on this week's chats, docs and sheets, including progress and next week's plan"
+        "description": "Every Friday at 6pm, generate my weekly report based on this week's chats, docs and sheets, including task progress and next week's plan, delivered as a document."
       }
     },
     "status": {
       "enabled": "Enabled",
       "disabled": "Disabled",
-      "expired": "Expired"
+      "expired": "Expired",
+      "running": "Running",
+      "paused": "Paused"
     },
     "columns": {
       "name": "Task Name",
@@ -1135,7 +1191,7 @@
       "cronHourStep": "Hour step must divide 24",
       "cronDay": "Invalid day field (1-31, supports * ? - ,)",
       "cronMonth": "Invalid month field (1-12, supports * - ,)",
-      "cronWeek": "Invalid dow field (1-7, supports * ? - ,, 1=SUN)",
+      "cronWeek": "Invalid dow field (0-6, supports * ? - ,, 0=Sun, 1=Mon...6=Sat)",
       "cronYear": "Invalid year field (1970-2099 or *)",
       "timezoneRequired": "Time zone is required",
       "targetRequired": "Target channel is required",

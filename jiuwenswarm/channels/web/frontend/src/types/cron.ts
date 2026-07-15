@@ -57,3 +57,17 @@ export interface CronTemplateUI {
   descriptionKey: string;
   cronExpr: string;
 }
+
+/** 执行计划编辑器（ScheduleEditor）内部结构化状态，见 _migration/plan.md §2.3.6/§2.3.8 */
+export type CronScheduleKind = 'daily' | 'weekly' | 'monthly' | 'monthlyWeekday' | 'yearly' | 'interval' | 'once';
+
+export interface CronSchedule {
+  kind: CronScheduleKind;
+  time?: string; // HH:mm，daily/weekly/monthly/monthlyWeekday/yearly/once 用
+  weekdays?: number[]; // 0=周日...6=周六（croniter 真实编号），weekly/interval/monthlyWeekday 用
+  day?: number | 'L'; // monthly 用："每月第几天"，或 'L' 表示月末最后一天
+  weekOfMonth?: number | 'L'; // monthlyWeekday 用：1-4，或 'L' 表示最后一周（不支持"第五周"，见 §2.3.8）
+  month?: number; // 1-12，yearly 用
+  date?: string; // YYYY-MM-DD，once 用
+  everyHours?: number; // interval 用；暂不限制取值范围/是否整数，交给 cron_expr 整体校验兜底（见 2026-07-14 progress.md）
+}

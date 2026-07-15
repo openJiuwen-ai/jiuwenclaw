@@ -11,6 +11,11 @@ import { TIMEZONE_OPTIONS } from './constants';
 import type { CronTaskUI, CronTemplateUI } from '../../types/cron';
 import type { ProjectInfo } from '../../features/workspace/projectTypes';
 
+// "生效周期"依赖后端 effective_from/effective_until（见 backend-requests.md 需求3），目前后端还
+// 没有这个概念，选了也不下发。之前的方案是保留字段但标注"即将上线"，用户后来觉得不如先整个隐藏，
+// 等后端接口交付后再打开——代码/state（`CronTaskFormValue.effectiveDate`）都保留，不用重写
+const CRON_EFFECTIVE_DATE_UI_ENABLED = false;
+
 export interface CronTaskFormValue {
   name: string;
   projectDir: string | null; // 仅创建/模板创建模式使用；编辑模式不展示项目字段，不参与提交
@@ -89,7 +94,12 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
   const title = mode === 'edit' ? t('cron.drawer.titleEdit') : mode === 'template' ? t('cron.drawer.titleTemplate') : t('cron.drawer.titleCreate');
   const projectOptions = projects.map((p) => ({ value: p.project_dir, label: p.name }));
   const timezoneOptions = TIMEZONE_OPTIONS.map((tz) => ({ value: tz, label: tz }));
-  const canSubmit = form.name.trim().length > 0 && form.cronExpr.trim().length > 0 && validateCronExpr(form.cronExpr).valid;
+  // 必填项缺失时，收集清单用来在"确定"按钮旁给出具体提示（而不是只让按钮变灰、不说原因）
+  const missingFieldLabels: string[] = [];
+  if (!form.name.trim()) missingFieldLabels.push(t('cron.drawer.fieldName'));
+  if (!form.cronExpr.trim() || !validateCronExpr(form.cronExpr).valid) missingFieldLabels.push(t('cron.schedule.title'));
+  const canSubmit = missingFieldLabels.length === 0;
+  const missingFieldsHint = canSubmit ? undefined : t('cron.drawer.missingFieldsHint', { fields: missingFieldLabels.join(t('cron.schedule.listSeparator')) });
   const lockedTitle = proactiveLocked ? t('cron.autoManagedToggleDisabled') ?? undefined : undefined;
 
   return (
@@ -131,7 +141,9 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
           )}
 
           <div>
-            <label className="mb-1.5 block text-sm font-bold text-text-strong">{t('cron.drawer.fieldName')}</label>
+            <label className="mb-1.5 block text-sm font-bold text-text-strong">
+              {t('cron.drawer.fieldName')} <span className="text-danger">*</span>
+            </label>
             <input
               type="text"
               value={form.name}
@@ -194,15 +206,17 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
             />
           </div>
 
-          <div>
-            <label className="mb-1.5 block text-sm font-bold text-text-strong">{t('cron.drawer.fieldEffectiveDate')}</label>
-            <DatePicker
-              value={form.effectiveDate ?? ''}
-              onChange={(v) => setForm({ ...form, effectiveDate: v || null })}
-              placeholder={t('cron.drawer.placeholderEffectiveDate') ?? undefined}
-            />
-            <p className="mt-1 text-xs text-text-muted">{t('cron.drawer.effectiveDateComingSoon')}</p>
-          </div>
+          {CRON_EFFECTIVE_DATE_UI_ENABLED && (
+            <div>
+              <label className="mb-1.5 block text-sm font-bold text-text-strong">{t('cron.drawer.fieldEffectiveDate')}</label>
+              <DatePicker
+                value={form.effectiveDate ?? ''}
+                onChange={(v) => setForm({ ...form, effectiveDate: v || null })}
+                placeholder={t('cron.drawer.placeholderEffectiveDate') ?? undefined}
+              />
+              <p className="mt-1 text-xs text-text-muted">{t('cron.drawer.effectiveDateComingSoon')}</p>
+            </div>
+          )}
 
           <div className="flex items-center gap-2">
             <button
@@ -226,6 +240,7 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
           <button
             onClick={() => onSubmit(form)}
             disabled={!canSubmit}
+            title={missingFieldsHint}
             className="rounded-full bg-[#141414] px-10 py-1.5 text-sm font-bold text-white hover:bg-black disabled:opacity-50"
           >
             {t('cron.actions.confirm')}

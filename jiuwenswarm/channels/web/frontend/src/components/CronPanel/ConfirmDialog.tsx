@@ -6,9 +6,10 @@ interface ConfirmDialogProps {
   message: string;
   onConfirm: () => void;
   onCancel: () => void;
+  loading?: boolean;
 }
 
-export default function ConfirmDialog({ title, message, onConfirm, onCancel }: ConfirmDialogProps) {
+export default function ConfirmDialog({ title, message, onConfirm, onCancel, loading = false }: ConfirmDialogProps) {
   const { t } = useTranslation();
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onCancel}>
@@ -26,7 +27,8 @@ export default function ConfirmDialog({ title, message, onConfirm, onCancel }: C
         <div className="flex justify-center gap-3">
           <button
             onClick={onConfirm}
-            className="rounded-full bg-[#141414] px-10 py-1.5 text-sm font-bold text-white hover:bg-black"
+            disabled={loading}
+            className="rounded-full bg-[#141414] px-10 py-1.5 text-sm font-bold text-white hover:bg-black disabled:cursor-not-allowed disabled:opacity-60"
           >
             {t('cron.actions.confirm')}
           </button>
