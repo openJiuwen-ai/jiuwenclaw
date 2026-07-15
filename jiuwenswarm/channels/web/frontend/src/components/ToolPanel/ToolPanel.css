@@ -1,24 +1,12 @@
 .toolpanel-status-card {
-  padding: 1rem;
+  padding: 1rem 0 0 0;
   overflow-y: auto;
   max-height: 13rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--card);
-  box-shadow:
-    0 2px 8px rgba(15, 23, 42, 0.06),
-    inset 0 1px 0 var(--card-highlight);
-  transition:
-    box-shadow var(--duration-fast) ease,
-    border-color var(--duration-fast) ease,
-    transform var(--duration-fast) ease;
 }
 
 .toolpanel-status-card:hover {
-  border-color: var(--border-strong);
-  box-shadow:
-    0 8px 20px rgba(15, 23, 42, 0.10),
-    inset 0 1px 0 var(--card-highlight);
+  border-color: var(--color-border-strong);
+  box-shadow: var(--effect-tool-panel-shadow);
   transform: translateY(-1px);
 }
 
@@ -28,7 +16,7 @@
   gap: 0.25rem;
   font-size: 0.75rem;
   font-weight: 500;
-  color: var(--muted);
+  color: var(--color-text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin-bottom: 0.75rem;
@@ -58,19 +46,19 @@
   justify-content: space-between;
   gap: 0.5rem;
   padding: 0.75rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--secondary);
+  border-bottom: 1px solid var(--color-border-default);
+  background: var(--color-action-secondary);
 }
 
 .harness-extension-tree-title {
   font-size: 0.875rem;
   font-weight: 500;
-  color: var(--text);
+  color: var(--color-text-primary);
 }
 
 .harness-extension-tree-path {
   font-size: 0.75rem;
-  color: var(--muted);
+  color: var(--color-text-secondary);
 }
 
 .harness-extension-tree-content {

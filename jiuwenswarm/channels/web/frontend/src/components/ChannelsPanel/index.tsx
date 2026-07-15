@@ -1688,12 +1688,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
       role="switch"
       aria-checked={checked}
       onClick={onClick}
-      className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+      className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
         checked ? 'bg-ok' : 'bg-secondary'
       }`}
     >
       <span
-        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
           checked ? 'translate-x-4' : 'translate-x-0'
         }`}
       />
@@ -1803,7 +1803,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 aria-label={expanded ? '收起应用配置' : '展开应用配置'}
                 title={expanded ? '收起应用配置' : '展开应用配置'}
               >
-                <ChevronRight className={`h-4 w-4 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+                <ChevronRight className={`h-4 w-4  ${expanded ? 'rotate-90' : ''}`} />
               </button>
               <input
                 type="text"
@@ -1948,7 +1948,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
       <div className="card w-full h-full flex flex-col">
         {configErrorNotice ? (
           <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20">
-            <div className="bg-danger text-white px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+            <div className="bg-danger text-text-inverse px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
               {configErrorNotice}
             </div>
           </div>
@@ -1962,7 +1962,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
         </div>
 
         {error ? (
-          <div className="border border-[var(--border-danger)] bg-danger-subtle rounded-lg p-4 text-sm text-danger flex items-center justify-between">
+          <div className="border border-[var(--color-border-danger)] bg-danger-subtle rounded-lg p-4 text-sm text-danger flex items-center justify-between">
             <span>{t('channels.fetchFailed')}: {error}</span>
             <button onClick={() => void fetchChannels()} className="btn !px-3 !py-1.5">
               {t('channels.retry')}
@@ -2006,7 +2006,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           key={channel.channel_id}
                           onClick={() => handleSelectChannel(channel.channel_id)}
                           disabled={isAdapting}
-                          className={`w-full rounded-xl border px-4 py-3.5 text-left transition-colors ${
+                          className={`w-full rounded-xl border px-4 py-3.5 text-left  ${
                             isAdapting
                               ? 'channels-panel__channel-disabled border-border bg-card text-text-muted'
                               : activeChannelId === channel.channel_id
@@ -2104,7 +2104,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {xiaoyiSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--border-ok)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
                         {xiaoyiSuccess}
                       </div>
                     ) : null}
@@ -2160,7 +2160,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {dingtalkSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--border-ok)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
                         {dingtalkSuccess}
                       </div>
                     ) : null}
@@ -2179,12 +2179,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   role="switch"
                                   aria-checked={dingtalkDraft.enabled}
                                   onClick={() => handleDingtalkFieldChange('enabled', !dingtalkDraft.enabled)}
-                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                     dingtalkDraft.enabled ? 'bg-ok' : 'bg-secondary'
                                   }`}
                                 >
                                   <span
-                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                       dingtalkDraft.enabled ? 'translate-x-4' : 'translate-x-0'
                                     }`}
                                   />
@@ -2280,7 +2280,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {success ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--border-ok)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
                         {success}
                       </div>
                     ) : null}
@@ -2336,7 +2336,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {success ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--border-ok)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
                         {success}
                       </div>
                     ) : null}
@@ -2355,12 +2355,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   role="switch"
                                   aria-checked={draft.enabled}
                                   onClick={() => handleFieldChange('enabled', !draft.enabled)}
-                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                     draft.enabled ? 'bg-ok' : 'bg-secondary'
                                   }`}
                                 >
                                   <span
-                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                       draft.enabled ? 'translate-x-4' : 'translate-x-0'
                                     }`}
                                   />
@@ -2375,12 +2375,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   role="switch"
                                   aria-checked={draft.enable_streaming}
                                   onClick={() => handleFieldChange('enable_streaming', !draft.enable_streaming)}
-                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                     draft.enable_streaming ? 'bg-ok' : 'bg-secondary'
                                   }`}
                                 >
                                   <span
-                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                       draft.enable_streaming ? 'translate-x-4' : 'translate-x-0'
                                     }`}
                                   />
@@ -2424,12 +2424,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   role="switch"
                                   aria-checked={draft.group_digital_avatar}
                                   onClick={() => handleFieldChange('group_digital_avatar', !draft.group_digital_avatar)}
-                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                     draft.group_digital_avatar ? 'bg-ok' : 'bg-secondary'
                                   }`}
                                 >
                                   <span
-                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                       draft.group_digital_avatar ? 'translate-x-4' : 'translate-x-0'
                                     }`}
                                   />
@@ -2470,12 +2470,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                       role="switch"
                                       aria-checked={draft.enable_memory}
                                       onClick={() => handleFieldChange('enable_memory', !draft.enable_memory)}
-                                      className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                      className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                         draft.enable_memory ? 'bg-ok' : 'bg-secondary'
                                       }`}
                                     >
                                       <span
-                                        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                           draft.enable_memory ? 'translate-x-4' : 'translate-x-0'
                                         }`}
                                       />
@@ -2540,7 +2540,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {telegramSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--border-ok)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
                         {telegramSuccess}
                       </div>
                     ) : null}
@@ -2559,12 +2559,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   role="switch"
                                   aria-checked={telegramDraft.enabled}
                                   onClick={() => handleTelegramFieldChange('enabled', !telegramDraft.enabled)}
-                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                     telegramDraft.enabled ? 'bg-ok' : 'bg-secondary'
                                   }`}
                                 >
                                   <span
-                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                       telegramDraft.enabled ? 'translate-x-4' : 'translate-x-0'
                                     }`}
                                   />
@@ -2683,7 +2683,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {discordSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--border-ok)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
                         {discordSuccess}
                       </div>
                     ) : null}
@@ -2706,12 +2706,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     role="switch"
                                     aria-checked={discordDraft.enabled}
                                     onClick={() => handleDiscordFieldChange('enabled', !discordDraft.enabled)}
-                                    className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                    className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                       discordDraft.enabled ? 'bg-ok' : 'bg-secondary'
                                     }`}
                                   >
                                     <span
-                                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                         discordDraft.enabled ? 'translate-x-4' : 'translate-x-0'
                                       }`}
                                     />
@@ -2726,12 +2726,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     role="switch"
                                     aria-checked={discordDraft.block_dm}
                                     onClick={() => handleDiscordFieldChange('block_dm', !discordDraft.block_dm)}
-                                    className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                    className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                       discordDraft.block_dm ? 'bg-ok' : 'bg-secondary'
                                     }`}
                                   >
                                     <span
-                                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                         discordDraft.block_dm ? 'translate-x-4' : 'translate-x-0'
                                       }`}
                                     />
@@ -2834,7 +2834,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {whatsappSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--border-ok)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
                         {whatsappSuccess}
                       </div>
                     ) : null}
@@ -2853,12 +2853,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   role="switch"
                                   aria-checked={whatsappDraft.enabled}
                                   onClick={() => handleWhatsAppFieldChange('enabled', !whatsappDraft.enabled)}
-                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                     whatsappDraft.enabled ? 'bg-ok' : 'bg-secondary'
                                   }`}
                                 >
                                   <span
-                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                       whatsappDraft.enabled ? 'translate-x-4' : 'translate-x-0'
                                     }`}
                                   />
@@ -2899,12 +2899,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   role="switch"
                                   aria-checked={whatsappDraft.enable_streaming}
                                   onClick={() => handleWhatsAppFieldChange('enable_streaming', !whatsappDraft.enable_streaming)}
-                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                     whatsappDraft.enable_streaming ? 'bg-ok' : 'bg-secondary'
                                   }`}
                                 >
                                   <span
-                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                       whatsappDraft.enable_streaming ? 'translate-x-4' : 'translate-x-0'
                                     }`}
                                   />
@@ -2919,12 +2919,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   role="switch"
                                   aria-checked={whatsappDraft.auto_start_bridge}
                                   onClick={() => handleWhatsAppFieldChange('auto_start_bridge', !whatsappDraft.auto_start_bridge)}
-                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                     whatsappDraft.auto_start_bridge ? 'bg-ok' : 'bg-secondary'
                                   }`}
                                 >
                                   <span
-                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                       whatsappDraft.auto_start_bridge ? 'translate-x-4' : 'translate-x-0'
                                     }`}
                                   />
@@ -2965,7 +2965,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                               setWechatUnbindConfirmOpen(true);
                             }}
                             disabled={!wechatConfig.enabled || wechatSaving || wechatUnbinding || wechatLoading}
-                            className="btn !px-3 !py-1.5 border border-[var(--destructive)] text-[var(--destructive)] hover:bg-[var(--destructive)]/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="btn !px-3 !py-1.5 border border-[var(--color-feedback-danger)] text-[var(--color-feedback-danger)] hover:bg-[var(--color-feedback-danger)]/10 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {wechatUnbinding ? t('channels.wechatUnbind.unbinding') : t('channels.wechatUnbind.button')}
                           </button>
@@ -2990,7 +2990,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {wechatSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--border-ok)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
                         {wechatSuccess}
                       </div>
                     ) : null}
@@ -3014,12 +3014,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   role="switch"
                                   aria-checked={wechatDraft.enabled}
                                   onClick={() => handleWechatFieldChange('enabled', !wechatDraft.enabled)}
-                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                     wechatDraft.enabled ? 'bg-ok' : 'bg-secondary'
                                   }`}
                                 >
                                   <span
-                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                       wechatDraft.enabled ? 'translate-x-4' : 'translate-x-0'
                                     }`}
                                   />
@@ -3061,12 +3061,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     role="switch"
                                     aria-checked={wechatDraft[field]}
                                     onClick={() => handleWechatFieldChange(field, !wechatDraft[field])}
-                                    className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                    className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                       wechatDraft[field] ? 'bg-ok' : 'bg-secondary'
                                     }`}
                                   >
                                     <span
-                                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                         wechatDraft[field] ? 'translate-x-4' : 'translate-x-0'
                                       }`}
                                     />
@@ -3147,7 +3147,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     </div>
 
                     {wecomSuccess ? (
-                      <div className="mx-4 mt-4 rounded-md border border-[var(--border-ok)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+                      <div className="mx-4 mt-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
                         {wecomSuccess}
                       </div>
                     ) : null}
@@ -3166,12 +3166,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   role="switch"
                                   aria-checked={wecomDraft.enabled}
                                   onClick={() => handleWecomFieldChange('enabled', !wecomDraft.enabled)}
-                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                     wecomDraft.enabled ? 'bg-ok' : 'bg-secondary'
                                   }`}
                                 >
                                   <span
-                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                       wecomDraft.enabled ? 'translate-x-4' : 'translate-x-0'
                                     }`}
                                   />
@@ -3240,12 +3240,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   role="switch"
                                   aria-checked={wecomDraft.group_digital_avatar}
                                   onClick={() => handleWecomFieldChange('group_digital_avatar', !wecomDraft.group_digital_avatar)}
-                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                     wecomDraft.group_digital_avatar ? 'bg-ok' : 'bg-secondary'
                                   }`}
                                 >
                                   <span
-                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                       wecomDraft.group_digital_avatar ? 'translate-x-4' : 'translate-x-0'
                                     }`}
                                   />
@@ -3286,12 +3286,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                       role="switch"
                                       aria-checked={wecomDraft.enable_memory}
                                       onClick={() => handleWecomFieldChange('enable_memory', !wecomDraft.enable_memory)}
-                                      className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                      className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${
                                         wecomDraft.enable_memory ? 'bg-ok' : 'bg-secondary'
                                       }`}
                                     >
                                       <span
-                                        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                        className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                                           wecomDraft.enable_memory ? 'translate-x-4' : 'translate-x-0'
                                         }`}
                                       />

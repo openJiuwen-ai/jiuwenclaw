@@ -6,12 +6,21 @@ export * from './message';
 export * from './skillTree';
 export * from './todo';
 export * from './websocket';
+export * from '../features/workspace/projectTypes';
 
 // 会话类型
 export interface Session {
   session_id: string;
   title: string;
-  project_path: string;
+  project_id: string;
+  project_dir: string;
+  pinned?: boolean;
+  pin_order?: number;
+  renamed_at?: string | null;
+  display_title?: string | null;
+  is_custom_title?: boolean;
+  title_source?: 'auto' | 'user';
+  model?: string;
   mode: AgentMode;
   status: SessionStatus;
   message_count: number;
@@ -26,10 +35,12 @@ export interface Session {
   channel_id?: string;         // 渠道ID
   user_id?: string;            // 创建人ID
   last_message_at?: number;    // 最近对话时间(Unix时间戳)
+  last_user_message_at?: number; // 最后一条用户消息时间(Unix时间戳)
 }
 
 export type AgentMode = 'agent' | 'team' | 'auto_harness';
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'interrupted';
+export type Permission = 'default' | 'full_access';
 
 export interface ModelEntry {
   model_name: string;

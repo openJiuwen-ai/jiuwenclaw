@@ -321,12 +321,12 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
                 role="switch"
                 aria-checked={historyChatPreview}
                 onClick={() => setHistoryChatPreview((v) => !v)}
-                className={`inline-flex h-8 w-12 shrink-0 items-center rounded-full border border-border p-1 transition-colors ${
+                className={`inline-flex h-8 w-12 shrink-0 items-center rounded-full border border-border p-1  ${
                   historyChatPreview ? 'justify-end bg-accent' : 'justify-start bg-secondary'
                 }`}
                 title={t('fileViewer.chatPreview')}
               >
-                <span className="pointer-events-none h-5 w-5 rounded-full bg-card shadow-sm ring-1 ring-black/5 dark:ring-white/10" />
+                <span className="pointer-events-none h-5 w-5 rounded-full bg-[var(--color-control-thumb)] shadow-sm ring-1 ring-control-ring" />
               </button>
             </div>
           ) : null}
@@ -337,7 +337,7 @@ export function FileViewer({ filePath, fileName, reloadNonce = 0 }: FileViewerPr
           </div>
         ) : null}
         {fileNotFound ? (
-          <div className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
+          <div className="mt-2 rounded-md border border-warn/30 bg-warn/10 px-2.5 py-1.5 text-xs text-warn">
             {t('fileViewer.fileMissingPrefix')} <span className="mono">{filePath}</span> {t('fileViewer.fileMissingSuffix')}
           </div>
         ) : null}

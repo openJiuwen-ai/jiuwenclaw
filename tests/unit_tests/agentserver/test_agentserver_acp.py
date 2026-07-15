@@ -150,6 +150,16 @@ def fake_encode_agent_response_for_wire(resp, response_id):
     }
 
 
+def _patch_session_create_fs(monkeypatch, tmp_path):
+    """隔离 session.create 的文件系统副作用:会话目录指向 tmp_path,
+    init_session_metadata 替换为空操作(这些用例不校验落盘内容)。"""
+    monkeypatch.setattr(agent_ws_server_module, "get_agent_sessions_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.init_session_metadata",
+        lambda **kwargs: None,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _reset_acp_output_manager():
     mgr = get_acp_output_manager()
@@ -715,7 +725,7 @@ async def test_handle_initialize_falls_back_to_default_capabilities(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_handle_session_create_returns_session_id(monkeypatch):
+async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
     server = AgentWebSocketServerHarness()
     fake_manager = FakeAgentManager(session_id="acp_session_001")
     server.set_agent_manager_for_test(fake_manager)
@@ -726,6 +736,7 @@ async def test_handle_session_create_returns_session_id(monkeypatch):
         "encode_agent_response_for_wire",
         fake_encode_agent_response_for_wire,
     )
+    _patch_session_create_fs(monkeypatch, tmp_path)
 
     request = AgentRequest(
         request_id="req-session-create",
@@ -747,7 +758,7 @@ async def test_handle_session_create_returns_session_id(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handle_session_create_returns_explicit_session_id(monkeypatch):
+async def test_handle_session_create_returns_explicit_session_id(monkeypatch, tmp_path):
     server = AgentWebSocketServerHarness()
     fake_manager = FakeAgentManager(session_id="unused-default")
     server.set_agent_manager_for_test(fake_manager)
@@ -758,6 +769,7 @@ async def test_handle_session_create_returns_explicit_session_id(monkeypatch):
         "encode_agent_response_for_wire",
         fake_encode_agent_response_for_wire,
     )
+    _patch_session_create_fs(monkeypatch, tmp_path)
 
     request = AgentRequest(
         request_id="req-session-create-explicit",
@@ -781,7 +793,7 @@ async def test_handle_session_create_returns_explicit_session_id(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handle_session_create_stops_old_team_runtime_for_team_mode(monkeypatch):
+async def test_handle_session_create_stops_old_team_runtime_for_team_mode(monkeypatch, tmp_path):
     server = AgentWebSocketServerHarness()
     fake_manager = FakeAgentManager(session_id="unused-default")
     fake_team_manager = FakeTeamManager()
@@ -793,6 +805,7 @@ async def test_handle_session_create_stops_old_team_runtime_for_team_mode(monkey
         "encode_agent_response_for_wire",
         fake_encode_agent_response_for_wire,
     )
+    _patch_session_create_fs(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.get_team_manager",
         lambda channel_id: fake_team_manager,

@@ -4,12 +4,14 @@
 
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Minimize2, Users } from 'lucide-react';
-import { useSessionStore, useTodoStore } from '../../stores';
+import { FileText, Minimize2 } from 'lucide-react';
+import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
 import type { Message } from '../../types';
+import { ArtifactsPanel, useSessionArtifactsCount } from '../ArtifactsPanel';
 import { TaskPlanningPanel } from './TaskPlanningPanel';
 import { TeamMembersPanel } from './TeamMembersPanel';
 import teamProcessIcon from '../../assets/team-process.svg';
+import teamIcon from '../../assets/team.svg';
 import {
   normalizeTaskStatus,
   type TabType,
@@ -19,8 +21,10 @@ import {
 } from './shared';
 
 function useTaskPlanningMetrics() {
-  const { todos } = useTodoStore();
-  const { teamTaskEvents, teamTasks } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
+  const teamTaskEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTaskEvents ?? []);
+  const teamTasks = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTasks ?? []);
 
   const totalTasks = useMemo(() => {
     if (teamTasks.length > 0) return teamTasks.length;
@@ -106,6 +110,7 @@ function ExpandedTeamArea({
 }) {
   const { t } = useTranslation();
   const { completedTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
+  const artifactsCount = useSessionArtifactsCount();
 
   const selectedMember = useMemo(() => {
     if (!externalSelectedMemberId) return null;
@@ -126,18 +131,24 @@ function ExpandedTeamArea({
     {
       key: 'team',
       label: t('team.membersTab'),
-      icon: <Users size={16} />,
+      icon: <img src={teamIcon} width={16} height={16} />,
+    },
+    {
+      key: 'artifacts',
+      label: t('artifacts.tab'),
+      count: artifactsCount,
+      icon: <FileText size={16} />,
     },
   ] as const;
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-card">
-      <div className="flex shrink-0 items-center justify-between px-6 py-6 bg-card border-border">
+      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-b border-border">
         <div className="flex items-center gap-2">
           {tabs.map((tab) => (
             <button
               key={tab.key}
-              className={`h-9 rounded-lg px-4 text-sm transition-colors flex items-center gap-2 ${
+              className={`h-9 rounded-lg px-4 text-sm  flex items-center gap-2 ${
                 activeTab === tab.key
                   ? 'bg-secondary font-medium text-text'
                   : 'text-text-muted hover:bg-secondary/50 hover:text-text'
@@ -152,10 +163,10 @@ function ExpandedTeamArea({
 
         <button
           onClick={onCollapse}
-          className="rounded p-2 text-text-muted transition-colors hover:bg-secondary hover:text-text"
+          className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
           title={t('team.collapse')}
         >
-          <Minimize2 size={16} />
+          <Minimize2 size={12} />
         </button>
       </div>
 
@@ -168,6 +179,10 @@ function ExpandedTeamArea({
             totalTasks={totalTasks}
             completedTasks={completedTasks}
           />
+        ) : activeTab === 'artifacts' ? (
+          <div className="flex min-w-0 flex-1 overflow-hidden mt-0 mx-6 mb-6">
+            <ArtifactsPanel />
+          </div>
         ) : (
           <TeamMembersPanel
             variant="expanded"

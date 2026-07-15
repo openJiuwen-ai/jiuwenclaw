@@ -6,6 +6,7 @@ import { useChatStore, useSessionStore } from '../../stores';
 import type { ModelEntry } from '../../types';
 import { webRequest } from '../../services/webClient';
 import { PermissionsToolsEditor } from "./PermissionsToolsEditor";
+import { ModelProviderIcon } from '../ModelProviderIcon';
 
 function MultiSelectDropdown({
   options,
@@ -204,7 +205,7 @@ interface ConfigPanelProps {
       predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
     }>;
   }, showRestartModal?: boolean) => Promise<void>;
-  /** 草稿是否有未保存改动（派生值）变更时回调，供父组件感知（如 config.changed 广播时判断是否覆盖草稿） */
+  /** Reports unsaved drafts so cross-window config updates cannot silently overwrite them. */
   onHasChangesChange?: (hasChanges: boolean) => void;
 }
 
@@ -260,7 +261,7 @@ const EVOLUTION_KEYS = new Set(["evolution_auto_scan", "skill_create"]);
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
 const MAX_API_BASE_LENGTH = 512;
-const MAX_API_KEY_LENGTH = 2048;
+const MAX_API_KEY_LENGTH = 500;
 
 // URL 格式校验函数
 function validateBaseUrl(url: string): boolean {
@@ -432,7 +433,7 @@ function getGroupIcon(tag: string) {
   }
   if (tag === "team") {
     return (
-      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgb(217 70 239)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-users text-text-muted" aria-hidden="true">
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-config-team-icon)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-users text-text-muted" aria-hidden="true">
         <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><path d="M16 3.128a4 4 0 0 1 0 7.744"></path>
         <path d="M22 21v-2a4 4 0 0 0-3-3.87"></path>
         <circle cx="9" cy="7" r="4"></circle>
@@ -771,7 +772,7 @@ function GroupSection({
   };
 
   const nestedStyle = nested ? getNestedModelStyle(group.tag) : "";
-  const headerClass = `w-full flex items-center justify-between transition-colors text-sm ${showNestedChrome ? `py-2 pr-3 pl-4 ${nestedStyle} hover:opacity-90` : "px-4 py-3 bg-secondary/30"
+  const headerClass = `w-full flex items-center justify-between  text-sm ${showNestedChrome ? `py-2 pr-3 pl-4 ${nestedStyle} hover:opacity-90` : "px-4 py-3 bg-secondary/30"
     } ${alwaysExpanded ? "" : showNestedChrome ? "" : "hover:bg-secondary/60"}`;
 
   const headerInner = (
@@ -791,7 +792,7 @@ function GroupSection({
         </span>
         {!alwaysExpanded ? (
           <svg
-            className={`w-4 h-4 transition-transform ${isOpen ? "rotate-180" : ""}`}
+            className={`w-4 h-4  ${isOpen ? "rotate-180" : ""}`}
             fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}
           >
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
@@ -824,7 +825,7 @@ function GroupSection({
           <table className="w-full text-sm border-t border-border">
             <tbody>
               {group.keys.map(([key, value]) => (
-                <tr key={key} className="border-t border-border first:border-t-0 even:bg-secondary/10 hover:bg-secondary/25 transition-colors">
+                <tr key={key} className="border-t border-border first:border-t-0 even:bg-secondary/10 hover:bg-secondary/25 ">
                   <td className="px-4 py-2.5 align-middle text-xs text-text-muted w-[32%]" title={key}>
                     <div className="mono">{getKeyDisplayLabel(key, t)}</div>
                     {getKeyLabelHintText(key, t) ? (
@@ -856,11 +857,11 @@ function GroupSection({
                             aria-checked={parseBoolValue(draftValues[key] ?? value)}
                             onClick={() => onChange(key, parseBoolValue(draftValues[key] ?? value) ? "false" : "true")}
                             title={getBooleanKeyLabel(key, t) ?? key}
-                            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${parseBoolValue(draftValues[key] ?? value) ? "bg-ok" : "bg-secondary"
+                            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${parseBoolValue(draftValues[key] ?? value) ? "bg-[var(--color-toggle-enabled)]" : "bg-[var(--color-toggle-disabled)]"
                               }`}
                           >
                             <span
-                              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${parseBoolValue(draftValues[key] ?? value) ? "translate-x-4" : "translate-x-0"
+                              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${parseBoolValue(draftValues[key] ?? value) ? "translate-x-4" : "translate-x-0"
                                 }`}
                             />
                           </button>
@@ -935,7 +936,7 @@ function GroupSection({
                             <button
                               type="button"
                               onClick={() => toggleFieldVisible(key)}
-                              className="absolute inset-y-0 right-0 flex items-center justify-center w-9 text-text-muted hover:text-text transition-colors"
+                              className="absolute inset-y-0 right-0 flex items-center justify-center w-9 text-text-muted hover:text-text "
                               aria-label={visibleFields[key] ? t('config.hideValue') : t('config.showValue')}
                               title={visibleFields[key] ? t('config.hideValue') : t('config.showValue')}
                             >
@@ -1257,7 +1258,7 @@ function MultiModelSection({
     <>
       <div className="space-y-2">
         {localError && (
-          <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-xs text-danger">
+          <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-xs text-danger">
             {localError}
           </div>
         )}
@@ -1300,9 +1301,10 @@ function MultiModelSection({
                   className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
                   onClick={() => setExpandedIdx(isExpanded ? null : idx)}
                 >
-                  <svg className={`w-3 h-3 transition-transform shrink-0 ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <svg className={`w-3 h-3  shrink-0 ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                   </svg>
+                  <ModelProviderIcon model={model} className="shrink-0" />
                   <span className="truncate">{displayName || t("config.modelList.untitled")}</span>
                   {isPrimaryDefault && (
                     <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30">{t("config.modelList.primaryDefault")}</span>
@@ -1639,7 +1641,7 @@ function MultiAgentSection({
                 className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
                 onClick={() => setExpandedIdx(isExpanded ? null : idx)}
               >
-                <svg className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                <svg className={`w-3 h-3  ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                 </svg>
                 <span className="truncate">{agent.name || t("config.agentList.untitled")}</span>
@@ -2087,11 +2089,11 @@ function TeamItemSection({
             aria-checked={team.enable_permissions}
             onClick={updateTeamPermissions}
             title={t("config.keys.teamEnablePermissions")}
-            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${team.enable_permissions ? "bg-ok" : "bg-secondary"
+            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${team.enable_permissions ? "bg-[var(--color-toggle-enabled)]" : "bg-[var(--color-toggle-disabled)]"
               }`}
           >
             <span
-              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${team.enable_permissions ? "translate-x-4" : "translate-x-0"
+              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${team.enable_permissions ? "translate-x-4" : "translate-x-0"
                 }`}
             />
           </button>
@@ -2106,7 +2108,7 @@ function TeamItemSection({
           className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-text"
         >
           <span>{t("config.team.leader")}</span>
-          <svg className={`w-3 h-3 transition-transform ${openLeader ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+          <svg className={`w-3 h-3  ${openLeader ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
         </button>
@@ -2164,7 +2166,7 @@ function TeamItemSection({
           className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-text"
         >
           <span>{t("config.team.teammate")}</span>
-          <svg className={`w-3 h-3 transition-transform ${openTeammate ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+          <svg className={`w-3 h-3  ${openTeammate ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
         </button>
@@ -2217,7 +2219,7 @@ function TeamItemSection({
           className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-text"
         >
           <span>{t("config.team.predefinedMembers")} ({team.predefined_members.length})</span>
-          <svg className={`w-3 h-3 transition-transform ${openMembers ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+          <svg className={`w-3 h-3  ${openMembers ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
         </button>
@@ -2233,7 +2235,7 @@ function TeamItemSection({
                       className="flex items-center gap-2 text-xs font-medium text-text truncate flex-1 text-left"
                       onClick={() => setExpandedMemberIdx(isExpanded ? null : idx)}
                     >
-                      <svg className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                      <svg className={`w-3 h-3  ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                       </svg>
                       <span className="truncate">{member.member_name || t("config.agentList.untitled")}</span>
@@ -2439,7 +2441,7 @@ function TeamsSection({
                 className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
                 onClick={() => setExpandedIdx(isExpanded ? null : idx)}
               >
-                <svg className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                <svg className={`w-3 h-3  ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                 </svg>
                 <span className="truncate">{team.team_name || t("config.agentList.untitled")}</span>
@@ -2515,26 +2517,12 @@ export function ConfigPanel({
   onHasChangesChange,
 }: ConfigPanelProps) {
   const { t, i18n } = useTranslation();
-  const isProcessing = useChatStore((s) => s.isProcessing);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const isProcessing = useChatStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.isProcessing ?? false : false));
   const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
-  const { availableModels: storeAvailableModels, mode } = useSessionStore();
-  // 调试日志：保存按钮锁定/解锁翻转时记录一次，便于还原“保存按钮为何一直禁用”。
-  // 锁定条件与保存按钮 disabled 中的运行锁分支一致（team 模式豁免）。
-  const saveLocked = (isProcessing || globalTaskRunning) && mode !== 'team';
-  const lockRef = useRef<boolean>(saveLocked);
-  if (lockRef.current !== saveLocked) {
-    console.info(
-      '[task.global_running] 保存锁切换: locked=',
-      saveLocked,
-      'isProcessing=',
-      isProcessing,
-      'globalTaskRunning=',
-      globalTaskRunning,
-      'mode=',
-      mode,
-    );
-    lockRef.current = saveLocked;
-  }
+  const availableModels = useSessionStore((s) => s.availableModels);
+  const mode = useSessionStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.mode ?? 'agent' : 'agent'));
+  const storeAvailableModels = availableModels;
   const [draftValues, setDraftValues] = useState<Record<string, string>>(() => {
     if (!config) return {};
     const next: Record<string, string> = {};
@@ -3007,7 +2995,6 @@ export function ConfigPanel({
     return false;
   }, [draftAgents, draftTeams, initialAgents, initialTeams]);
   const hasChanges = hasConfigChanges || hasModelChanges || hasAgentsTeamsChanges;
-  // 将草稿是否有未保存改动上报给父组件，供 config.changed 广播到达时判断是否覆盖草稿。
   useEffect(() => {
     onHasChangesChange?.(hasChanges);
   }, [hasChanges, onHasChangesChange]);
@@ -3319,14 +3306,8 @@ export function ConfigPanel({
         }
       }
     } catch (saveError) {
-      // 后端兜底返回 code=TASK_RUNNING 时，用 i18n 文案提示（而非后端硬编码中文）。
-      const errorCode = (saveError as { code?: string } | null)?.code;
-      if (errorCode === 'TASK_RUNNING') {
-        setError(t('config.errors.taskRunning'));
-      } else {
-        const message = saveError instanceof Error ? saveError.message : t('config.errors.saveFailed');
-        setError(message);
-      }
+      const message = saveError instanceof Error ? saveError.message : t('config.errors.saveFailed');
+      setError(message);
     } finally {
       setSaving(false);
     }
@@ -3334,7 +3315,7 @@ export function ConfigPanel({
 
   return (
     <div className="flex-1 min-h-0">
-      <div className="card w-full h-full flex flex-col">
+      <div className="card main-panel-card w-full h-full flex flex-col">
         <div className="flex items-center justify-between gap-4 mb-4">
           <div>
             <h2 className="text-lg font-semibold">{t('config.title')}</h2>
@@ -3344,7 +3325,7 @@ export function ConfigPanel({
           </div>
           <div className="flex items-center gap-2">
             {(isProcessing || globalTaskRunning) && mode !== 'team' ? (
-              <span className="text-xs text-amber-600 dark:text-amber-400">{t('config.errors.processingDisabled')}</span>
+              <span className="text-xs text-warn">{t('config.errors.processingDisabled')}</span>
             ) : null}
             <button
               type="button"
@@ -3365,29 +3346,29 @@ export function ConfigPanel({
           </div>
         </div>
         {error ? (
-          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {error}
           </div>
         ) : null}
         {!error && hasMissingRequiredModelFields ? (
-          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
           </div>
         ) : null}
         {!error && hasMissingModelApiBase ? (
-          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.modelList.apiBaseRequired')}
           </div>
         ) : null}
         {!error && hasDuplicateAgentNames ? (
-          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.agentList.duplicateName')}
           </div>
         ) : null
         }
         {
           !error && agentsTeamsValidationError ? (
-            <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+            <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
               {agentsTeamsValidationError}
             </div>
           ) : null
@@ -3423,22 +3404,22 @@ export function ConfigPanel({
               {configTab === "model" ? (
                 <div role="tabpanel" aria-labelledby="config-tab-model" className="space-y-3 pb-2">
                   {modelError ? (
-                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {modelError}
                     </div>
                   ) : null}
                   {!modelError && hasMissingRequiredModelFields ? (
-                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
                     </div>
                   ) : null}
                   {!modelError && hasMissingModelApiKey ? (
-                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.modelList.apiKeyRequired')}
                     </div>
                   ) : null}
                   {!modelError && hasMissingModelApiBase ? (
-                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.modelList.apiBaseRequired')}
                     </div>
                   ) : null}
@@ -3605,7 +3586,7 @@ export function ConfigPanel({
         deleteAgentConfirm && (
           <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
+            <div className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
               <div className="flex flex-col items-center text-center">
                 <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
@@ -3645,7 +3626,7 @@ export function ConfigPanel({
         deleteModelConfirm && (
           <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
+            <div className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
               <div className="flex flex-col items-center text-center">
                 <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
@@ -3685,7 +3666,7 @@ export function ConfigPanel({
         deleteTeamConfirm && (
           <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
+            <div className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
               <div className="flex flex-col items-center text-center">
                 <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
@@ -3725,7 +3706,7 @@ export function ConfigPanel({
         deleteTeamMemberConfirm && (
           <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
+            <div className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
               <div className="flex flex-col items-center text-center">
                 <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">

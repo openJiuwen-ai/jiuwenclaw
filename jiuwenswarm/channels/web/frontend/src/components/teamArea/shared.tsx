@@ -1,8 +1,7 @@
-import { Check, ChevronRight, Circle, Maximize2 } from 'lucide-react';
-import { useChatStore, useTodoStore } from '../../stores';
+import { Check, ChevronRight, Circle } from 'lucide-react';
 import i18n from '../../i18n';
 import { ParsedTeamEvent, parseTeamEventMessage } from '../ChatPanel/teamEventUtils';
-import type { Message } from '../../types';
+import type { Message, TodoItem } from '../../types';
 import type {
   TeamTask as SessionTeamTask,
   TeamMemberExecutionEvent,
@@ -83,7 +82,7 @@ export type TeamAreaProps = BaseTeamAreaProps & (
   }
 );
 
-export type TabType = 'planning' | 'team';
+export type TabType = 'planning' | 'team' | 'artifacts';
 export type TeamDetailTab = 'members' | 'group';
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled' | 'error';
 export type TaskColumnKey = 'waiting' | 'running' | 'completed' | 'cancelled';
@@ -99,26 +98,26 @@ export const BOARD_COLUMNS: Array<{
   {
     key: 'waiting',
     labelKey: 'team.planning.columns.waiting',
-    pillClassName: 'bg-white text-[#777777]',
-    dotClassName: 'bg-[#777777]',
+    pillClassName: 'bg-card text-[var(--color-team-status-waiting)]',
+    dotClassName: 'bg-[var(--color-team-status-waiting)]',
   },
   {
     key: 'running',
     labelKey: 'team.planning.columns.running',
-    pillClassName: 'bg-[#d1e6fa] text-[#5e7ce0]',
-    dotClassName: 'bg-[#5e7ce0]',
+    pillClassName: 'bg-[var(--color-team-status-running-surface)] text-[var(--color-team-status-running)]',
+    dotClassName: 'bg-[var(--color-team-status-running)]',
   },
   {
     key: 'completed',
     labelKey: 'team.planning.columns.completed',
-    pillClassName: 'bg-[#d3f3e6] text-[#088c58]',
-    dotClassName: 'bg-[#088c58]',
+    pillClassName: 'bg-[var(--color-team-status-completed-surface)] text-[var(--color-team-status-completed)]',
+    dotClassName: 'bg-[var(--color-team-status-completed)]',
   },
   {
     key: 'cancelled',
     labelKey: 'team.planning.columns.cancelled',
-    pillClassName: 'bg-[#fde2e2] text-[#c84646]',
-    dotClassName: 'bg-[#c84646]',
+    pillClassName: 'bg-[var(--color-team-status-cancelled-surface)] text-[var(--color-team-status-cancelled)]',
+    dotClassName: 'bg-[var(--color-team-status-cancelled)]',
   },
 ];
 
@@ -212,16 +211,16 @@ export const getTaskStatusLabel = (status: TaskStatus): string => {
 const getTaskStatusIconClass = (status: TaskStatus): string => {
   switch (status) {
     case 'completed':
-      return 'bg-emerald-500 text-white';
+      return 'bg-emerald-500 text-text-inverse';
     case 'in_progress':
-      return 'bg-blue-500 text-white';
+      return 'bg-blue-500 text-text-inverse';
     case 'cancelled':
-      return 'bg-slate-300 text-white';
+      return 'bg-slate-300 text-text-inverse';
     case 'error':
-      return 'bg-red-500 text-white';
+      return 'bg-red-500 text-text-inverse';
     case 'pending':
     default:
-      return 'bg-white text-slate-400 ring-1 ring-slate-300';
+      return 'bg-card text-slate-400 ring-1 ring-slate-300';
   }
 };
 
@@ -289,18 +288,14 @@ export function Chevron({ expanded }: { expanded?: boolean }) {
   return (
     <ChevronRight
       size={16}
-      className={`transition-transform ${expanded ? 'rotate-90' : ''}`}
+      className={` ${expanded ? 'rotate-90' : ''}`}
     />
   );
 }
 
-export function ExpandIcon() {
-  return <Maximize2 size={16} />;
-}
-
 export function buildTaskMap(
   memberId: string,
-  todos: ReturnType<typeof useTodoStore.getState>['todos'],
+  todos: TodoItem[],
   teamTaskEvents: TeamTaskEvent[],
   fallbackPrompt: string,
   teamTasks: SessionTeamTask[] = [],
@@ -375,7 +370,7 @@ export function buildProcessItems(
   memberId: string,
   memberTasks: MemberTask[],
   teamTaskEvents: TeamTaskEvent[],
-  messages: ReturnType<typeof useChatStore.getState>['messages'],
+  messages: Message[],
   executionEvents: TeamMemberExecutionEvent[] = [],
   t: Translate = i18n.t.bind(i18n),
 ): ProcessItem[] {
@@ -519,7 +514,7 @@ export function mergeUniqueMessages(messages: Message[]): Message[] {
   return merged;
 }
 
-export function latestUserPrompt(messages: ReturnType<typeof useChatStore.getState>['messages']): string {
+export function latestUserPrompt(messages: Message[]): string {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
     if (message.role === 'user' && message.content.trim()) {

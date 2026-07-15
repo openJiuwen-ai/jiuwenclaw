@@ -91,6 +91,8 @@ class CronJobStore:
         mode: str | None = None,
         delete_after_run: bool | None = None,
         timeout_seconds: int | None = None,
+        project_id: str = "",
+        model_name: str | None = None,
         app_id: str = "",
     ) -> CronJob:
         now = time.time()
@@ -101,6 +103,12 @@ class CronJobStore:
         timeout = (
             normalize_cron_job_timeout_seconds(timeout_seconds)
             if timeout_seconds is not None
+            else None
+        )
+        pid = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else ""
+        model_name_val = (
+            str(model_name).strip()
+            if isinstance(model_name, str) and model_name.strip()
             else None
         )
         job = CronJob(
@@ -119,6 +127,8 @@ class CronJobStore:
             mode=m,
             delete_after_run=dar,
             timeout_seconds=timeout,
+            project_id=pid,
+            model_name=model_name_val,
             app_id=str(app_id or "").strip(),
         )
         # validate via round-trip
@@ -197,6 +207,26 @@ class CronJobStore:
                     updated,
                     timeout_seconds=normalize_cron_job_timeout_seconds(raw_timeout),
                 )
+        if "project_id" in patch:
+            raw_pid = patch.get("project_id")
+            new_pid = str(raw_pid).strip() if isinstance(raw_pid, str) and raw_pid.strip() else ""
+            updated = replace(updated, project_id=new_pid)
+        if "last_session_id" in patch:
+            raw_lsid = patch.get("last_session_id")
+            new_lsid = (
+                str(raw_lsid).strip()
+                if isinstance(raw_lsid, str) and str(raw_lsid).strip()
+                else None
+            )
+            updated = replace(updated, last_session_id=new_lsid)
+        if "model_name" in patch:
+            raw_model_name = patch.get("model_name")
+            new_model_name = (
+                str(raw_model_name).strip()
+                if isinstance(raw_model_name, str) and str(raw_model_name).strip()
+                else None
+            )
+            updated = replace(updated, model_name=new_model_name)
 
         updated.updated_at = time.time()
         CronJob.from_dict(updated.to_dict())

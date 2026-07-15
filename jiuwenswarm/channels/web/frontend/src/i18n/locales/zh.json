@@ -17,6 +17,7 @@
   },
   "nav": {
     "chat": "对话",
+    "work": "工作",
     "agent": "智能体",
     "teams": "团队",
     "sessions": "会话",
@@ -27,6 +28,7 @@
     "extensions": "Harness",
     "rails": "Rails",
     "harnesspkg": "Harness Package",
+    "more": "更多",
     "settings": "设置",
     "config": "配置信息",
     "browser": "浏览器服务",
@@ -35,7 +37,7 @@
   },
   "team": {
     "members": "团队成员",
-    "membersTab": "Team成员",
+    "membersTab": "团队",
     "statusTab": "状态",
     "filesTab": "文件",
     "taskEventLog": "任务事件日志",
@@ -149,7 +151,6 @@
       "tab": "任务规划",
       "progressTitle": "任务进度",
       "token": "Token",
-      "elapsedTime": "已用时 {{value}}",
       "taskList": "任务列表",
       "taskListAria": "{{task}} 任务列表",
       "resources": "任务资源",
@@ -162,6 +163,9 @@
         "structure": "结构视图",
         "board": "任务板视图"
       },
+      "metrics": {
+        "progress": "进度"
+      },
       "columns": {
         "waiting": "等待中",
         "running": "进行中",
@@ -170,6 +174,17 @@
         "failed": "任务失败"
       }
     }
+  },
+  "artifacts": {
+    "title": "所有产物",
+    "tab": "产物",
+    "count": "{{count}} 个产物",
+    "empty": "暂无产物",
+    "download": "下载",
+    "selectArtifact": "请选择一个产物预览",
+    "previewUnsupported": "仅支持 Markdown 文件预览",
+    "previewMissingPath": "当前产物没有可读取的本地路径",
+    "previewFailed": "Markdown 预览加载失败"
   },
   "teams": {
     "title": "团队管理",
@@ -220,7 +235,6 @@
     "placeholderVoice": "正在听取语音...",
     "welcomeLogoAlt": "JiuwenSwarm 标志",
     "welcomeHeading": "你好，我是JiuwenSwarm，很高兴认识你！",
-    "welcomeSubtext": "我可以帮你回答问题，解决疑惑，还可以帮你完成一些任务。",
     "welcomeSuggestions": {
       "journey": "让我们开启一段新的旅程吧！",
       "skills": "能告诉我你有哪些技能吗？"
@@ -228,24 +242,47 @@
     "newSession": "新建会话",
     "sessionCreated": "已新建会话",
     "modeAgentSingle": "Agent模式",
+    "modePlan": "规划模式",
+    "modeAgent": "性能模式",
     "modeAgentTeam": "集群模式",
     "modeAutoHarness": "自优化模式",
     "modeAutoHarnessDesc": "自动分析并优化目标仓库",
     "recording": "正在录音...（松开按钮自动发送）",
     "waitingTasks": "等待任务",
+    "messageQueue": "消息队列",
     "waitingTasksCount": "等待任务 ({{count}})",
     "removeTask": "移除任务",
     "addImage": "添加图片",
     "addImageDisabled": "处理中或录音中不可添加图片",
     "removeImage": "移除图片",
+    "sendTask": "发送消息，但不打断模型运行",
+    "editTask": "编辑",
+    "dragTask": "拖动排序",
+    "queueModeEnabled": "开启队列模式",
+    "paused": "已暂停",
+    "resume": "继续执行",
+    "queuePausedConfirm": "你即将发送一条消息，要清除正在排队的{{count}}条消息吗？\n\n点击「确定」清空队列并发送；点击「取消」保持队列（消息将加入队列）。",
     "holdToSpeak": "按住说话",
     "send": "发送 (Enter)",
     "stop": "停止",
     "modelSelector": {
-      "tooltip": "切换对话使用的模型"
+      "tooltip": "切换对话使用的模型",
+      "configured": "已配置模型",
+      "addModel": "添加自定义模型",
+      "placeholder": "选择模型"
     },
+    "modeSwitchDisabledProcessing": "当前对话运行中，请新建对话后选择模式",
+    "configLockedHistory": "会话已有消息，请新建会话后更改配置",
     "modeSwitchTitle": "切换模式",
     "modeSwitchConfirm": "当前会话有历史消息，切换模式将新建会话。是否继续？",
+    "skills": "技能",
+    "skillsToggle": "查看已安装技能",
+    "noInstalledSkills": "暂无已安装技能",
+    "skillsSearchPlaceholder": "搜索技能名称或描述",
+    "skillsManage": "技能管理",
+    "skillsAdd": "添加到输入栏",
+    "skillsRemove": "移除",
+    "recentTasks": "最近任务",
     "teamPause": "暂停",
     "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
     "teamBroadcastTarget": "@所有人",
@@ -253,10 +290,28 @@
     "historyPager": {
       "loadedOfTotal": "历史已加载 {{loaded}} / {{total}} 页",
       "loadingMore": "加载中…",
-      "allLoaded": "已显示全部历史",
-      "wheelToLoadMore": "向上滚动加载更多",
-      "clickToLoadMore": "点击加载更多",
-      "clickOrScrollToLoadMore": "点击或向上滚动加载更多"
+      "clickOrScrollToLoadMore": "点击或向上滚动加载更多",
+      "allLoaded": "历史已全部加载"
+    },
+    "config": {
+      "mode": {
+        "cluster": "集群模式",
+        "clusterDesc": "深度推理，复杂需求，长任务处理",
+        "singleAgent": "单Agent模式"
+      },
+      "permission": {
+        "default": "默认权限",
+        "defaultDesc": "编辑外部文件和使用互联网时始终询问",
+        "fullAccess": "完全访问权限",
+        "fullAccessDesc": "可不受限制地访问互联网和您电脑上的任何文件",
+        "fullAccessWarning": {
+          "title": "告警",
+          "body1": "在完全访问模式下，Jiuwen无需你的批准即可编辑你电脑上的任何文件，并执行可联网的命令。",
+          "body2": "启用完全访问权限前请谨慎评估。此操作将显著增加数据丢失、泄露或异常行为的风险。",
+          "cancel": "取消",
+          "confirm": "仍然继续"
+        }
+      }
     }
   },
   "autoHarness": {
@@ -403,18 +458,15 @@
       "loadSessions": "会话列表加载失败",
       "loadFiles": "会话文件列表加载失败",
       "deleteSession": "删除会话失败：{{sessionId}}",
-      "switchSession": "切换团队会话失败",
       "restoreFailed": "恢复会话失败：{{sessionId}}"
     }
   },
   "sessionSidebar": {
     "newSession": "新会话",
-    "advancedConfig": "高级配置",
-    "expandSidebar": "展开侧边栏",
-    "collapseSidebar": "收起侧边栏",
     "connectionStatus": "连接状态",
+    "version": "版本",
     "language": "语言",
-    "appearance": "外观"
+    "moreSettings": "更多设置"
   },
   "heartbeat": {
     "title": "心跳管理",
@@ -1480,6 +1532,12 @@
     "stopReading": "停止朗读",
     "readMessage": "朗读消息",
     "fileExpired": "已过期",
+    "agentProcessing": "Agent 处理中",
+    "thinking": "正在思考...",
+    "processing": "正在处理...",
+    "paused": "已暂停",
+    "waitingTasks": "等待任务",
+    "messageQueue": "消息队列",
     "parallelProgress": "并行任务执行中 ({{completedCount}}/{{total}} 完成)",
     "subtask": {
       "starting": "启动中...",
@@ -1558,7 +1616,7 @@
     "groupChat": "群聊记录",
     "noGroupChat": "暂无群聊记录",
     "everyone": "所有人",
-    "generatedBy": "由 openJiuwen AI 生成",
+    "aiNotice": "内容由AI生成，仅供参考",
     "website": "官网地址：{{url}}",
     "repository": "代码仓：{{url}}"
   },
@@ -1678,9 +1736,6 @@
     "errorTitle": "应用加载出错",
     "unknownError": "未知错误",
     "reload": "刷新页面",
-    "themeSystem": "跟随系统",
-    "themeDark": "深色模式",
-    "themeLight": "浅色模式",
     "configError": "无法通过 WebSocket 获取后端配置，已使用默认配置",
     "configErrorHint": "请先启动 E2E 后端（如",
     "configErrorDefault": "，默认监听 19000）。若后端不在本机或端口不同，可在",
@@ -1752,5 +1807,104 @@
   },
   "security": {
     "contentRetracted": "内容已因安全原因撤回"
+  },
+  "multiSession": {
+    "title": "工作",
+    "conversations": "对话",
+    "newConversation": "新建任务",
+    "empty": "暂无对话",
+    "untitled": "未命名对话",
+    "showMore": "展开更多",
+    "collapse": "折叠显示",
+    "waitingReply": "等待确认",
+    "completedUnread": "后台任务已完成",
+    "moreActions": "更多操作",
+    "cronJobs": "定时任务",
+    "delete": "删除",
+    "deleteRunningDisabled": "运行中或等待回复的对话不能删除",
+    "status": {
+      "waiting": "等待确认",
+      "processing": "进行中",
+      "unread": "已完成未读",
+      "error": "任务异常",
+      "read": "已完成已读"
+    },
+    "project": {
+      "projects": "项目",
+      "newConversation": "新建对话",
+      "pinned": "置顶",
+      "newProject": "新建项目",
+      "createBlank": "新建空白项目",
+      "selectExisting": "选择现有目录",
+      "addNewProject": "添加新项目",
+      "namePlaceholder": "请输入简短易识别的项目名称",
+      "chooseProjectDirectory": "选择项目目录",
+      "directoryPickerUnsupported": "当前环境无法打开系统目录选择器，请手动填写项目名和路径",
+      "directoryPickerFailed": "目录选择失败，请重试",
+      "lockedProjectTitle": "已有会话的项目归属不可在输入框改写",
+      "clearProject": "不使用项目",
+      "searchProject": "搜索项目",
+      "noProjectMatches": "暂无匹配项目",
+      "noProjects": "暂无项目",
+      "noConversations": "暂无会话",
+      "noSessions": "暂无触发记录",
+      "startConversation": "从{{projectName}}开始新对话",
+      "pinProject": "置顶项目",
+      "unpinProject": "取消置顶项目",
+      "pinConversation": "置顶对话",
+      "unpinConversation": "取消置顶",
+      "pin": "置顶",
+      "unpin": "取消置顶",
+      "pinFailed": "置顶操作失败",
+      "rename": "重命名",
+      "renamePlaceholder": "输入新名称",
+      "deleteProject": "删除项目",
+      "deleteProjectDescription": "确定要移除“{{projectName}}”吗？项目下未置顶会话会临时归入默认项目。",
+      "absolutePathError": "请输入绝对路径，例如 /Users/name/work/project",
+      "errors": {
+        "pathExists": "该项目路径已存在，请选择其他目录或直接从现有项目开始新对话",
+        "nameExists": "该项目名已存在，请换个名称"
+      },
+      "cancel": "取消",
+      "confirm": "确定"
+    },
+    "runtime": { "processing": "处理中" },
+    "deleteDialog": { "title": "删除", "description": "确定删除“{{title}}”吗？此操作不可撤销。" },
+    "notFound": { "title": "对话不存在或已删除", "newConversation": "新建对话" },
+    "errors": { "delete": "删除对话失败", "create": "创建对话失败", "send": "发送消息失败" }
+  },
+  "mermaid": {
+    "image": "图片",
+    "code": "代码",
+    "copyCode": "复制代码",
+    "zoomIn": "放大",
+    "zoomOut": "缩小",
+    "fitView": "适应视图"
+  },
+  "authPrompt": {
+    "title": "操作授权",
+    "titleConfirm": "操作确认",
+    "allowOnce": "授权单次",
+    "allowAlways": "总是允许",
+    "skip": "跳过",
+    "tip": {
+      "allowOnce": "仅本次授权执行",
+      "allowAlways": "记住该规则，以后自动放行",
+      "skip": "拒绝执行此操作"
+    }
+  },
+  "interactionPrompt": {
+    "title": "请回答问题",
+    "prev": "上一题",
+    "next": "下一题",
+    "cancel": "取消",
+    "skip": "跳过",
+    "nextStep": "下一步",
+    "confirm": "确定",
+    "customOption": "自定义",
+    "customPlaceholder": "没有合适的选项？输入您的答案..."
+  },
+  "qaSummary": {
+    "title": "问题澄清"
   }
 }

@@ -17,6 +17,7 @@
   },
   "nav": {
     "chat": "Chat",
+    "work": "Work",
     "agent": "Agent",
     "teams": "Teams",
     "sessions": "Sessions",
@@ -27,6 +28,7 @@
     "extensions": "Harness",
     "rails": "Rails",
     "harnesspkg": "Harness Package",
+    "more": "More",
     "settings": "Settings",
     "config": "Configuration",
     "browser": "Browser Service",
@@ -35,7 +37,7 @@
   },
   "team": {
     "members": "Team Members",
-    "membersTab": "Team Members",
+    "membersTab": "Team",
     "statusTab": "Status",
     "filesTab": "Files",
     "taskEventLog": "Task Event Log",
@@ -149,7 +151,6 @@
       "tab": "Task Planning",
       "progressTitle": "Task Progress",
       "token": "Token",
-      "elapsedTime": "Elapsed {{value}}",
       "taskList": "Task List",
       "taskListAria": "{{task}} task list",
       "resources": "Task resources",
@@ -162,6 +163,9 @@
         "structure": "Structure view",
         "board": "Board view"
       },
+      "metrics": {
+        "progress": "Progress"
+      },
       "columns": {
         "waiting": "Waiting",
         "running": "Running",
@@ -170,6 +174,17 @@
         "failed": "Failed"
       }
     }
+  },
+  "artifacts": {
+    "title": "Artifacts",
+    "tab": "Artifacts",
+    "count": "{{count}} item(s)",
+    "empty": "No artifacts",
+    "download": "Download",
+    "selectArtifact": "Select an artifact to preview",
+    "previewUnsupported": "Preview is only supported for Markdown files",
+    "previewMissingPath": "No readable local path is available for this artifact",
+    "previewFailed": "Failed to load Markdown preview"
   },
   "teams": {
     "title": "Team Management",
@@ -220,7 +235,6 @@
     "placeholderVoice": "Listening...",
     "welcomeLogoAlt": "JiuwenSwarm logo",
     "welcomeHeading": "Hi, I'm JiuwenSwarm. Nice to meet you!",
-    "welcomeSubtext": "I can answer questions, clear up confusion, and help you complete tasks.",
     "welcomeSuggestions": {
       "journey": "Let's begin a brand-new journey!",
       "skills": "Can you tell me what skills you have?"
@@ -228,6 +242,8 @@
     "newSession": "New Session",
     "sessionCreated": "Session created",
     "modeAgentSingle": "Agent Mode",
+    "modePlan": "Planning Mode",
+    "modeAgent": "Performance Mode",
     "modeAgentTeam": "Cluster Mode",
     "modeAutoHarness": "Auto-Harness Mode",
     "modeAutoHarnessDesc": "Automatically analyze and optimize target repository",
@@ -238,14 +254,34 @@
     "addImage": "Add image",
     "addImageDisabled": "Cannot add images while processing or recording",
     "removeImage": "Remove image",
+    "sendTask": "Send message without interrupting model",
+    "editTask": "Edit",
+    "dragTask": "Drag to reorder",
+    "queueModeEnabled": "Queue mode enabled",
+    "paused": "Paused",
+    "resume": "Resume",
+    "queuePausedConfirm": "You are about to send a message. Clear the {{count}} queued message(s)?\n\nClick \"OK\" to clear the queue and send; click \"Cancel\" to keep the queue (message will be added to the queue).",
     "holdToSpeak": "Hold to speak",
     "send": "Send (Enter)",
     "stop": "Stop",
     "modelSelector": {
-      "tooltip": "Switch the model used for chat"
+      "tooltip": "Switch the model used for chat",
+      "configured": "Configured Models",
+      "addModel": "Add Custom Model",
+      "placeholder": "Select Model"
     },
+    "configLockedHistory": "Session has messages — create a new session to change config",
+    "modeSwitchDisabledProcessing":"This conversation is running. Start a new conversation to choose another mode",
     "modeSwitchTitle": "Switch Mode",
     "modeSwitchConfirm": "Current session has history messages. Switching mode will create a new session. Continue?",
+    "skills": "Skills",
+    "skillsToggle": "View installed skills",
+    "noInstalledSkills": "No installed skills",
+    "skillsSearchPlaceholder": "Search skill name or description",
+    "skillsManage": "Skill Management",
+    "skillsAdd": "Add to composer",
+    "skillsRemove": "Remove",
+    "recentTasks": "Recent Tasks",
     "teamPause": "Pause",
     "teamPauseHint": "After pausing a team, send the next message to continue",
     "teamBroadcastTarget": "@all",
@@ -253,10 +289,28 @@
     "historyPager": {
       "loadedOfTotal": "Loaded {{loaded}} / {{total}} pages",
       "loadingMore": "Loading...",
-      "allLoaded": "All history shown",
-      "wheelToLoadMore": "Scroll up to load more",
-      "clickToLoadMore": "Click to load more",
-      "clickOrScrollToLoadMore": "Click or scroll up to load more"
+      "clickOrScrollToLoadMore": "Click or scroll up to load more",
+      "allLoaded": "All history loaded"
+    },
+    "config": {
+      "mode": {
+        "cluster": "Cluster",
+        "clusterDesc": "Deep reasoning, complex tasks, long-running workflows",
+        "singleAgent": "Agent"
+      },
+      "permission": {
+        "default": "Default",
+        "defaultDesc": "Always ask when editing external files or accessing the internet",
+        "fullAccess": "Full Access",
+        "fullAccessDesc": "Unrestricted access to the internet and any files on your computer",
+        "fullAccessWarning": {
+          "title": "Warning",
+          "body1": "In full access mode, Jiuwen can edit any file on your computer and run internet-connected commands without your approval.",
+          "body2": "Please evaluate carefully before enabling full access. This significantly increases the risk of data loss, leakage, or unexpected behavior.",
+          "cancel": "Cancel",
+          "confirm": "Continue Anyway"
+        }
+      }
     }
   },
   "autoHarness": {
@@ -403,18 +457,15 @@
       "loadSessions": "Failed to load sessions",
       "loadFiles": "Failed to load session files",
       "deleteSession": "Failed to delete session: {{sessionId}}",
-      "switchSession": "Failed to switch team session",
       "restoreFailed": "Failed to restore session: {{sessionId}}"
     }
   },
   "sessionSidebar": {
     "newSession": "New session",
-    "advancedConfig": "Advanced Config",
-    "expandSidebar": "Expand Sidebar",
-    "collapseSidebar": "Collapse Sidebar",
     "connectionStatus": "Connection Status",
+    "version": "Version",
     "language": "Language",
-    "appearance": "Appearance"
+    "moreSettings": "More Settings"
   },
   "heartbeat": {
     "title": "Heartbeat Management",
@@ -1481,6 +1532,12 @@
     "stopReading": "Stop reading",
     "readMessage": "Read message",
     "fileExpired": "Expired",
+    "agentProcessing": "Agent Processing",
+    "thinking": "Thinking...",
+    "processing": "Processing...",
+    "paused": "Paused",
+    "waitingTasks": "Waiting Tasks",
+    "messageQueue": "Message Queue",
     "parallelProgress": "Parallel tasks running ({{completedCount}}/{{total}} complete)",
     "subtask": {
       "starting": "Starting...",
@@ -1559,7 +1616,7 @@
     "groupChat": "Group chat",
     "noGroupChat": "No group chat messages",
     "everyone": "Everyone",
-    "generatedBy": "Generated by openJiuwen AI",
+    "aiNotice": "Answers are AI-generated, for reference only",
     "website": "Website: {{url}}",
     "repository": "Repository: {{url}}"
   },
@@ -1679,9 +1736,6 @@
     "errorTitle": "Application Error",
     "unknownError": "Unknown error",
     "reload": "Reload page",
-    "themeSystem": "Follow system",
-    "themeDark": "Dark mode",
-    "themeLight": "Light mode",
     "configError": "Failed to fetch config via WebSocket, using defaults",
     "configErrorHint": "Please start the backend first (e.g.",
     "configErrorDefault": ", default port 19000). If backend is remote, set",
@@ -1750,5 +1804,104 @@
       "sendFile": "Send File",
       "sendFileDesc": "Send files to user"
     }
+  },
+  "multiSession": {
+    "title": "Work",
+    "conversations": "Conversations",
+    "newConversation": "New task",
+    "empty": "No chat yet",
+    "untitled": "Untitled conversation",
+    "showMore": "Show more",
+    "collapse": "Show less",
+    "waitingReply": "Needs input",
+    "completedUnread": "Background task completed",
+    "moreActions": "More actions",
+    "cronJobs": "Cron Jobs",
+    "delete": "Delete",
+    "deleteRunningDisabled": "Running conversations and conversations awaiting input cannot be deleted",
+    "status": {
+      "waiting": "Waiting for approval",
+      "processing": "Running",
+      "unread": "Completed unread",
+      "error": "Execution error",
+      "read": "Completed read"
+    },
+    "project": {
+      "projects": "Projects",
+      "newConversation": "New conversation",
+      "pinned": "Pinned",
+      "newProject": "New project",
+      "createBlank": "Create blank project",
+      "selectExisting": "Select existing directory",
+      "addNewProject": "Add new project",
+      "namePlaceholder": "Enter a short, recognizable project name",
+      "chooseProjectDirectory": "Choose project directory",
+      "directoryPickerUnsupported": "This environment cannot open the system directory picker. Enter the project name and path manually.",
+      "directoryPickerFailed": "Failed to choose directory. Please try again.",
+      "lockedProjectTitle": "Project assignment cannot be changed from the input box for an existing conversation",
+      "clearProject": "Do not use a project",
+      "searchProject": "Search projects",
+      "noProjectMatches": "No matching projects",
+      "noProjects": "No projects",
+      "noConversations": "No conversations",
+      "noSessions": "No trigger sessions",
+      "startConversation": "Start a new conversation from {{projectName}}",
+      "pinProject": "Pin project",
+      "unpinProject": "Unpin project",
+      "pinConversation": "Pin conversation",
+      "unpinConversation": "Unpin",
+      "pin": "Pin",
+      "unpin": "Unpin",
+      "pinFailed": "Pin action failed",
+      "rename": "Rename",
+      "renamePlaceholder": "Enter a new name",
+      "deleteProject": "Delete project",
+      "deleteProjectDescription": "Remove “{{projectName}}”? Unpinned conversations in this project will temporarily move to the default project.",
+      "absolutePathError": "Enter an absolute path, for example /Users/name/work/project",
+      "errors": {
+        "pathExists": "This project path already exists. Choose another directory or start a new conversation from the existing project.",
+        "nameExists": "This project name already exists. Please choose another name."
+      },
+      "cancel": "Cancel",
+      "confirm": "Confirm"
+    },
+    "runtime": { "processing": "Processing" },
+    "deleteDialog": { "title": "Delete", "description": "Delete “{{title}}”? This action cannot be undone." },
+    "notFound": { "title": "Conversation not found or deleted", "newConversation": "New conversation" },
+    "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
+  },
+  "mermaid": {
+    "image": "Image",
+    "code": "Code",
+    "copyCode": "Copy code",
+    "zoomIn": "Zoom in",
+    "zoomOut": "Zoom out",
+    "fitView": "Fit view"
+  },
+  "authPrompt": {
+    "title": "Authorization",
+    "titleConfirm": "Confirm action",
+    "allowOnce": "Allow once",
+    "allowAlways": "Always allow",
+    "skip": "Skip",
+    "tip": {
+      "allowOnce": "Allow this action only this time",
+      "allowAlways": "Remember this rule and auto-allow from now on",
+      "skip": "Reject this action"
+    }
+  },
+  "interactionPrompt": {
+    "title": "Please answer",
+    "prev": "Previous",
+    "next": "Next",
+    "cancel": "Cancel",
+    "skip": "Skip",
+    "nextStep": "Next",
+    "confirm": "Confirm",
+    "customOption": "Custom",
+    "customPlaceholder": "No suitable option? Type your answer..."
+  },
+  "qaSummary": {
+    "title": "Clarifications"
   }
 }

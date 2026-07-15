@@ -157,6 +157,33 @@ def normalize_cron_job_timeout_seconds(raw: Any) -> int | None:
     return value
 
 
+def validate_cron_model(raw: Any) -> str | None:
+    """Validate model name/alias against configured models. Returns canonical model_name or raises.
+
+    If the input is an alias, resolves to the underlying ``model_client_config.model_name``
+    so the stored value is always a key AgentServer ``_model_cache`` can look up.
+    """
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    from jiuwenswarm.common.config import get_model_config, get_model_names
+
+    entry = get_model_config(value)
+    if entry is not None:
+        mcc = entry.get("model_client_config") or {}
+        canonical = (mcc.get("model_name") or "").strip()
+        return canonical if canonical else value
+    available = get_model_names()
+    hint = ", ".join(available[:20]) if available else "(no models configured)"
+    if len(available) > 20:
+        hint += f" ... and {len(available) - 20} more"
+    raise ValueError(
+        f"Unknown model {value!r}. Available models: {hint}"
+    )
+
+
 def resolve_cron_job_timeout_seconds(job: "CronJob") -> float:
     """Return effective execution timeout for a cron job."""
     raw = getattr(job, "timeout_seconds", None)
@@ -224,6 +251,12 @@ class CronJob:
     delete_after_run: bool = False
     # 单次执行超时（秒）；未配置时普通模式 10 分钟，team 模式 20 分钟
     timeout_seconds: int | None = None
+    # 归属项目 ID；由创建时 project_dir 匹配获得，匹配不到可见项目为空串（默认项目）
+    project_id: str = ""
+    # 最近一次执行产生的会话 ID；调度器在创建执行会话后回写，未执行过为 None
+    last_session_id: str | None = None
+    # 执行时使用的模型；None 表示使用 AgentServer 默认模型
+    model_name: str | None = None
     # 飞书多应用场景：创建该定时任务的 app_id，用于推送时定位到正确的 app 配置
     app_id: str = ""
 
@@ -251,6 +284,13 @@ class CronJob:
             d["delete_after_run"] = bool(self.delete_after_run)
         if self.timeout_seconds is not None:
             d["timeout_seconds"] = int(self.timeout_seconds)
+        # project_id 始终输出（空串表示默认项目，与 SessionInfo.project_id 语义一致）
+        d["project_id"] = self.project_id or ""
+        # last_session_id 仅在非空时输出（与 session_id/chat_type 可选字段策略一致）
+        if self.last_session_id:
+            d["last_session_id"] = self.last_session_id
+        if self.model_name:
+            d["model_name"] = self.model_name
         if self.app_id:
             d["app_id"] = self.app_id
         return d
@@ -332,6 +372,18 @@ class CronJob:
         if timeout_seconds_raw is not None:
             timeout_seconds = normalize_cron_job_timeout_seconds(timeout_seconds_raw)
 
+        # project_id / last_session_id：老数据兜底（无 project_id → ""，无 last_session_id → None）
+        project_id_raw = data.get("project_id", "")
+        project_id = str(project_id_raw).strip() if isinstance(project_id_raw, str) else ""
+        last_session_id_raw = data.get("last_session_id", None)
+        last_session_id = (
+            str(last_session_id_raw).strip()
+            if isinstance(last_session_id_raw, str) and str(last_session_id_raw).strip()
+            else None
+        )
+
+        model_raw = data.get("model_name", None)
+        job_model_name = str(model_raw).strip() if isinstance(model_raw, str) and str(model_raw).strip() else None
         app_id_raw = data.get("app_id", "")
         job_app_id = str(app_id_raw).strip() if isinstance(app_id_raw, str) else ""
 
@@ -352,6 +404,9 @@ class CronJob:
             mode=job_mode,
             delete_after_run=delete_after_run,
             timeout_seconds=timeout_seconds,
+            project_id=project_id,
+            last_session_id=last_session_id,
+            model_name=job_model_name,
             app_id=job_app_id,
         )
 
@@ -376,3 +431,5 @@ class CronRunState:
     session_id: str | None = None
     chat_type: str | None = None
     timezone: str | None = None
+    exec_channel_id: str | None = None
+    exec_session_id: str | None = None

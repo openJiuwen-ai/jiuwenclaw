@@ -18,6 +18,7 @@ from jiuwenswarm.gateway.cron.models import (
     is_valid_target_channel_id,
     normalize_cron_job_mode,
     normalize_target_channel_id,
+    validate_cron_model,
 )
 from jiuwenswarm.server.gateway_push import (
     GatewayPushTransport,
@@ -42,6 +43,7 @@ class CronToolRoute:
     session_id: str | None = None
     chat_type: str | None = None  # "group" 表示群聊, "p2p" 或 None 表示私聊
     app_id: str = ""
+    project_dir: str = ""  # 当前 agent 工作目录，用于 cron 任务归属项目解析
 
 
 class CronTools:
@@ -229,6 +231,13 @@ class CronTools:
         )
         return fallback
 
+    @staticmethod
+    def _resolve_project_id_from_dir(project_dir: Any) -> str:
+        project_dir_val = str(project_dir or "").strip()
+        from jiuwenswarm.server.runtime.session.project_store import resolve_cron_project_id
+
+        return resolve_cron_project_id(project_dir_val)
+
     async def list_jobs(self) -> Any:
         jobs = await self._local_store.list_jobs()
         # 给受保护的 proactive.tick job 标记 protected，让 LLM 在批量操作时
@@ -277,6 +286,18 @@ class CronTools:
         mode_raw = normalized.get("mode")
         if mode_raw is not None and str(mode_raw).strip():
             mode_kw["mode"] = normalize_cron_job_mode(mode_raw)
+        model_kw: dict[str, Any] = {}
+        model_name_raw = normalized.get("model_name")
+        if model_name_raw is not None and str(model_name_raw).strip():
+            model_kw["model_name"] = validate_cron_model(model_name_raw)
+        # project_dir -> project_id follows the same rules as the gateway controller.
+        # 用 key presence 区分「未传」和「显式空串」：显式传 "" 归默认项目，
+        # 未传时从 route 上下文取 project_dir（设计文档 §5.1）。
+        if "project_dir" in normalized:
+            project_dir_val = str(normalized.get("project_dir") or "").strip()
+        else:
+            project_dir_val = str(self._route().project_dir or "").strip()
+        resolved_project_id = self._resolve_project_id_from_dir(project_dir_val)
         job = await self._local_store.create_job(
             job_id=str(normalized.get("id") or "").strip() or None,
             name=str(normalized.get("name") or "").strip(),
@@ -287,11 +308,15 @@ class CronTools:
             enabled=bool(normalized.get("enabled", True)),
             wake_offset_seconds=normalized.get("wake_offset_seconds"),
             delete_after_run=normalized.get("delete_after_run"),
+            project_id=resolved_project_id,
             **session_kw,
             **mode_kw,
+            **model_kw,
         )
         try:
-            await self._send("create", job.to_dict())
+            sync_payload = job.to_dict()
+            sync_payload["project_dir"] = project_dir_val
+            await self._send("create", sync_payload)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CronTools] sync create to gateway failed: %s", exc)
         
@@ -303,24 +328,40 @@ class CronTools:
     async def update_job(self, job_id: str, patch: dict[str, Any]) -> Any:
         normalized_patch = dict(patch or {})
         normalized_patch.pop("session_id", None)
+        normalized_patch.pop("project_id", None)
+        sync_patch = dict(normalized_patch)
         if "cron_expr" in normalized_patch:
             normalized_patch["cron_expr"] = normalize_cron_expr(str(normalized_patch["cron_expr"]).strip())
+            sync_patch["cron_expr"] = normalized_patch["cron_expr"]
         if "targets" in normalized_patch:
             normalized_patch["targets"] = self._normalize_targets_param(normalized_patch.get("targets"))
+            sync_patch["targets"] = normalized_patch["targets"]
             t = str(normalized_patch.get("targets") or "").strip()
             if t.startswith("feishu_enterprise:"):
                 sid = self._route().session_id
                 if isinstance(sid, str) and sid.strip():
                     normalized_patch["session_id"] = sid.strip()
+                    sync_patch["session_id"] = sid.strip()
             else:
                 normalized_patch["session_id"] = None
+                sync_patch["session_id"] = None
         if "mode" in normalized_patch:
             normalized_patch["mode"] = normalize_cron_job_mode(normalized_patch.get("mode"))
+            sync_patch["mode"] = normalized_patch["mode"]
+        if "model_name" in normalized_patch:
+            normalized_patch["model_name"] = validate_cron_model(normalized_patch.get("model_name"))
+            sync_patch["model_name"] = normalized_patch["model_name"] or ""
+        if "project_dir" in normalized_patch:
+            normalized_patch["project_id"] = self._resolve_project_id_from_dir(
+                normalized_patch.get("project_dir")
+            )
+            del normalized_patch["project_dir"]
         chat_type = self._route().chat_type
         normalized_patch["chat_type"] = chat_type if chat_type else None
+        sync_patch["chat_type"] = chat_type if chat_type else None
         job = await self._local_store.update_job(job_id, normalized_patch)
         try:
-            await self._send("update", {"job_id": job_id, "patch": normalized_patch})
+            await self._send("update", {"job_id": job_id, "patch": sync_patch})
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CronTools] sync update to gateway failed: %s", exc)
         
@@ -401,6 +442,11 @@ class CronTools:
         mode = kwargs.get("mode")
         if mode is not None and str(mode).strip():
             params["mode"] = mode
+        model_name = kwargs.get("model_name")
+        if model_name is not None and str(model_name).strip():
+            params["model_name"] = model_name
+        if "project_dir" in kwargs and kwargs.get("project_dir") is not None:
+            params["project_dir"] = str(kwargs.get("project_dir") or "").strip()
         return await self.create_job(params)
 
     async def _update_job_tool(self, job_id: str, patch: dict[str, Any]) -> Any:
@@ -456,6 +502,15 @@ class CronTools:
                                 "(agent, team, ...). Default: agent."
                             ),
                         },
+                        "model_name": {
+                            "type": "string",
+                            "description": "Model name or alias to use. Omit for default.",
+                        },
+                        "project_dir": {
+                            "type": "string",
+                            "description": "Absolute path to the project directory. \
+                                Omit for current session's project.",
+                        },
                     },
                     "required": ["name", "cron_expr", "timezone", "description"],
                 },
@@ -465,7 +520,8 @@ class CronTools:
                 name="cron_update_job",
                 description=(
                     "Update an existing cron job. Pass job_id and a patch dict with fields to update "
-                    "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, targets, mode)."
+                    "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, "
+                    "targets, mode, model_name, project_dir)."
                 ),
                 input_params={
                     "type": "object",
@@ -475,7 +531,7 @@ class CronTools:
                             "type": "object",
                             "description": (
                                 "Fields to update (name, enabled, cron_expr, timezone, "
-                                "description, wake_offset_seconds, targets, mode)"
+                                "description, wake_offset_seconds, targets, mode, model_name, project_dir)"
                             ),
                             "properties": {
                                 "name": {"type": "string"},
@@ -496,6 +552,15 @@ class CronTools:
                                     "type": "string",
                                     "enum": cron_job_modes_for_tools(),
                                     "description": "Agent runtime mode (agent, team, ...)",
+                                },
+                                "model_name": {
+                                    "type": "string",
+                                    "description": "Model name or alias. Set to empty string to reset to default.",
+                                },
+                                "project_dir": {
+                                    "type": "string",
+                                    "description": "Absolute path to the project directory. \
+                                        Set to empty string for default project.",
                                 },
                             },
                         },

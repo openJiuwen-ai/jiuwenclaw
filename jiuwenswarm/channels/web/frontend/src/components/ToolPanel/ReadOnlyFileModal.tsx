@@ -201,7 +201,7 @@ export function ReadOnlyFileModal({ open, filePath, fileName, onClose }: ReadOnl
           <button
             type="button"
             onClick={onClose}
-            className="px-2.5 py-1.5 rounded-md border border-border bg-secondary/50 text-text-muted hover:text-text hover:bg-secondary transition-colors"
+            className="px-2.5 py-1.5 rounded-md border border-border bg-secondary/50 text-text-muted hover:text-text hover:bg-secondary "
           >
             {t('common.close')}
           </button>

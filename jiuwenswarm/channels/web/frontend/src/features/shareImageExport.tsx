@@ -172,6 +172,7 @@ export const ShareImageDocument = forwardRef<HTMLDivElement, ShareImageDocumentP
     const hasConversation = data.messages.length > 0;
     const isTeamMode = data.mode === 'team';
     const hasGroupMessages = data.groupMessages.length > 0;
+    const aiNotice = t('share.aiNotice');
 
     return (
       <div ref={ref} className="share-image-document">
@@ -224,7 +225,7 @@ export const ShareImageDocument = forwardRef<HTMLDivElement, ShareImageDocumentP
         </main>
 
         <footer className="share-image-footer">
-          <div className="share-image-footer__note">{t('share.generatedBy')}</div>
+          <div className="share-image-footer__note">{aiNotice}</div>
           <div className="share-image-links">
             <div className="share-image-link">
               <span>{t('share.website', { url: OPENJIUWEN_WEBSITE_URL })}</span>
