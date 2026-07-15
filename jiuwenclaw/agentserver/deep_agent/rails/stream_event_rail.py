@@ -20,6 +20,7 @@ from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     ToolMessage,
+    UserMessage,
 )
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
@@ -754,12 +755,14 @@ class JiuClawStreamEventRail(DeepAgentRail):
 
     async def _fix_incomplete_tool_context(self, context: Any, *, session_id: str = "") -> None:
         """Fix incomplete context: ensure assistant messages with tool_calls have matching tool messages."""
+        original_messages: list = []
         try:
             messages = context.get_messages()
             len_messages = len(messages)
             if len_messages == 0:
                 return
 
+            original_messages = list(messages)
             messages = context.pop_messages(size=len_messages)
             tool_message_cache: dict = {}
             tool_id_cache: list = []
@@ -871,5 +874,34 @@ class JiuClawStreamEventRail(DeepAgentRail):
                             tool_call_id,
                             tc_info.get("invalid_reason"),
                         ))
+
+            rebuilt = context.get_messages()
+            if rebuilt and not any(
+                isinstance(m, (UserMessage, ToolMessage))
+                or getattr(m, "role", None) in ("user", "tool")
+                for m in rebuilt
+            ):
+                logger.error(
+                    "[StreamEventRail] context repair rejected: missing user/tool role "
+                    "session_id=%s before=%s after=%s; restoring original messages",
+                    session_id,
+                    len(original_messages),
+                    len(rebuilt),
+                )
+                remaining = context.get_messages()
+                if remaining:
+                    context.pop_messages(size=len(remaining))
+                await context.add_messages(original_messages)
         except Exception as e:
             logger.warning("Failed to fix incomplete tool context: %s", e)
+            try:
+                remaining = context.get_messages()
+                if remaining:
+                    context.pop_messages(size=len(remaining))
+                if original_messages:
+                    await context.add_messages(original_messages)
+            except Exception:
+                logger.warning(
+                    "Failed to restore original messages after context repair error",
+                    exc_info=True,
+                )

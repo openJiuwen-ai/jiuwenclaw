@@ -660,6 +660,13 @@ def _downgrade_orphan_tool(msg: dict, tid: str) -> dict:
     return downgraded
 
 
+def _wire_has_user_or_tool_role(messages: list) -> bool:
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") in ("user", "tool"):
+            return True
+    return False
+
+
 def _sanitize_wire_tool_pairing(params: dict[str, Any]) -> None:
     """Repair ``assistant.tool_calls`` ↔ ``tool`` adjacency on the wire payload, in place.
 
@@ -697,6 +704,7 @@ def _sanitize_wire_tool_pairing(params: dict[str, Any]) -> None:
     if _wire_payload_is_paired(messages):
         return
 
+    original_messages = list(messages)
     before_count = len(messages)
     llm_logger.warning(
         "[tool_pairing] action=repair_triggered layer=wire before_count=%s %s",
@@ -793,6 +801,17 @@ def _sanitize_wire_tool_pairing(params: dict[str, Any]) -> None:
         else:
             repaired.append(seg["head"])
 
+    if repaired and not _wire_has_user_or_tool_role(repaired):
+        llm_logger.error(
+            "[tool_pairing] action=repair_rejected layer=wire reason=missing_user_or_tool_role "
+            "before_count=%s after_count=%s restoring_original %s",
+            before_count,
+            len(repaired),
+            _llm_log_ctx(),
+        )
+        params["messages"] = original_messages
+        return
+
     params["messages"] = repaired
     llm_logger.warning(
         "[tool_pairing] action=repair_summary layer=wire before_count=%s "
@@ -825,6 +844,17 @@ def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
             existing["include_usage"] = True
     _sanitize_wire_tool_arguments(params)
     _sanitize_wire_tool_pairing(params)
+    wire_messages = params.get("messages")
+    if isinstance(wire_messages, list) and wire_messages and not _wire_has_user_or_tool_role(wire_messages):
+        roles = sorted({
+            str(m.get("role"))
+            for m in wire_messages
+            if isinstance(m, dict) and m.get("role")
+        })
+        raise ValueError(
+            "invalid request: LLM messages must contain at least one 'user' or 'tool' role; "
+            f"current roles {set(roles)} are insufficient"
+        )
     # Fallback max_tokens to environment variable if not configured
     if params.get("max_tokens") is None:
         env_max_tokens = os.environ.get("LLM_MAX_TOKENS")

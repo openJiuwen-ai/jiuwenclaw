@@ -28,35 +28,78 @@ _CHART_CANDIDATE_TYPES = {"data", "comparison", "technology", "trend"}
 
 
 def _extract_designer_section(text: str) -> str:
-    """从 designer/SKILL.md 原文提取防溢出约束 + 语义区域指南章节。
+    """从 designer/SKILL.md 原文提取布局约束、视觉规范等关键章节。
 
     文件 IO 由 PrepareNode 通过 read_file 工具完成后传入 text，
     skill_code 中禁止直接做文件 IO（校验器禁止 open/read_text 等）。
     """
     if not text:
         return ""
-    # 提取「防溢出硬性约束」章节到代码块结束
-    start = text.find("### 防溢出硬性约束")
-    if start == -1:
-        return ""
-    # 取到下一个 --- 分隔线或文件末尾
-    end = text.find("\n---", start)
-    if end == -1:
-        end = len(text)
-    css_section = text[start:end]
 
-    # 提取「语义区域」相关内容（main 直接子元素规则）
-    # 限定在 CSS 章节之前搜索，避免误匹配 CSS 章节之后的不相关内容
-    search_end = start  # CSS 章节开始位置作为语义区域搜索上界
+    sections: list[str] = []
+
+    def _extract_section(header: str, alt_header: str = "") -> str:
+        """提取从 header 开始到下一个 --- 分隔线或文件末尾的内容。"""
+        start = text.find(header)
+        if start == -1 and alt_header:
+            start = text.find(alt_header)
+        if start == -1:
+            return ""
+        end = text.find("\n---", start)
+        if end == -1:
+            end = len(text)
+        return text[start:end]
+
+    # 1. 防溢出硬性约束（全局 CSS 约束、图表容器约束等）
+    css_section = _extract_section("### 防溢出硬性约束")
+    if css_section:
+        sections.append(css_section)
+
+    # 2. 弹性布局约束（Grid/Flex 子元素撑满规则、快速决策表格）
+    flex_section = _extract_section(
+        "### 一、弹性布局约束",
+        "弹性布局约束",
+    )
+    if flex_section:
+        sections.append("\n\n### 弹性布局约束（完整）\n" + flex_section)
+
+    # 3. 固定尺寸约束
+    size_section = _extract_section(
+        "### 二、固定尺寸约束",
+        "固定尺寸约束",
+    )
+    if size_section:
+        sections.append("\n\n### 固定尺寸约束\n" + size_section)
+
+    # 4. 文本重叠避免 + 元素遮挡避免
+    overlap_section = _extract_section("### 三、文本重叠避免")
+    if overlap_section:
+        sections.append("\n\n### 文本重叠避免\n" + overlap_section)
+
+    occlusion_section = _extract_section("### 四、元素遮挡避免")
+    if occlusion_section:
+        sections.append("\n\n### 元素遮挡避免\n" + occlusion_section)
+
+    # 5. 色彩系统
+    color_section = _extract_section("### 色彩系统")
+    if color_section:
+        sections.append("\n\n### 色彩系统\n" + color_section)
+
+    # 6. 字体系统
+    font_section = _extract_section("### 字体系统")
+    if font_section:
+        sections.append("\n\n### 字体系统\n" + font_section)
+
+    # 7. 语义区域划分指南
+    search_end = text.find("### 防溢出硬性约束") if "### 防溢出硬性约束" in text else len(text)
     sem_start = text.find("✅ 正确示例 - 单一主视觉页面可只有一个语义区域", 0, search_end)
     if sem_start == -1:
         sem_start = text.find("main 的直接子元素数量由页面叙事决定", 0, search_end)
     sem_end = text.find("---", sem_start) if sem_start != -1 else -1
-    sem_section = ""
     if sem_start != -1 and sem_end != -1:
-        sem_section = "\n\n### 语义区域划分指南\n" + text[sem_start:sem_end]
+        sections.append("\n\n### 语义区域划分指南\n" + text[sem_start:sem_end])
 
-    return css_section + sem_section
+    return "\n".join(sections) if sections else ""
 
 
 _PRESET_STYLE_IDS = {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech"}
@@ -114,13 +157,12 @@ _CDN_HEAD_SNIPPET = (
 
 
 _DESIGN_RULES_DIGEST = (
-    "### 视觉与布局硬约束（精选 18 条）\n"
+    "### 视觉与布局硬约束（精选 22 条）\n"
     "1. 容器：`.ppt-slide { width:1280px; height:720px; overflow:hidden; box-sizing:border-box }`\n"
     "2. 安全区：`.content-safe { width:1220px; height:660px; margin:30px auto }`，主要内容必须放在安全区内；"
     "子元素禁止额外加 padding，否则导致双重边距\n"
-    "3. 三级字号：页面标题 36-48px / 副标题 24-28px / 正文 16-20px"
-    "（除非用户在原始 query 中明确指定了字号，此时以用户指定值为准）；"
-    "但紧凑卡片内（grid 子项或 flex-col 中 ≥3 个并列卡片）标题 ≤18px、正文 ≤14px，"
+    "3. 字号：严格使用风格规范文件中定义的字号值（如 business-classic.md 定义主标题 37px、正文 19px 等），"
+    "不自行调整字号范围（除非用户在原始 query 中明确指定了字号，此时以用户指定值为准）；"
     "同级卡片字号必须一致，禁止个别卡片字号放大导致内容溢出\n"
     "4. 图表类型：时序数据→折线图(line)；对比数据→柱状图/分组柱状图(bar)；"
     "占比数据→饼图(pie)；多维能力对比→雷达图(radar)；禁止用图片占位\n"
@@ -128,9 +170,14 @@ _DESIGN_RULES_DIGEST = (
     "单行初始化，禁止用变量赋值（如 `var chartDom=...; echarts.init(chartDom)`），"
     "禁止 Canvas 渲染器（会导致转 PPTX 后变位图）；"
     "初始化脚本必须写在目标图表容器之后、紧邻 `</body>`，禁止写入 `<head>`（否则 getElementById 得到 null）\n"
-    "4.2 图表最小高度（强制）：图表容器实际渲染高度必须 ≥ 250px（内联 SVG 的 viewBox height ≥ 250），"
-    "否则 Y 轴名称/图例/标签会溢出重叠；"
-    "用 `min-h-[250px]` 或 `flex-1` 确保图表区域有足够空间；禁止把图表挤在高度 < 200px 的容器里\n"
+    "4.2 图表最小高度（强制）：图表容器实际渲染高度必须 ≥ 160px（防塌缩下限），"
+    "用 `min-h-[160px]` 或 `flex-1` 确保图表区域能初始化渲染；"
+    "建议图表可读高度 ≥ 300px，由页面预算保证\n"
+    "4.3 图表颜色（强制）：图表数据系列颜色必须来自风格文件的图表配色表，禁止使用相近色；"
+    "坐标轴标签用深色，分割线用浅色\n"
+    "4.4 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}` 防止数据标签重叠\n"
+    "4.5 图例防叠字：图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`，避免水平挤排叠字\n"
+    "4.6 图表分割线：`splitLine` 建议使用浅色虚线，避免实线在 PPTX 中过于突兀；颜色由风格文件决定\n"
     "5. 步骤/流程页 → 用 HTML/CSS 绘制节点+连线+文字，禁止纯文字描述\n"
     "6. 关键数字必须有放大数字卡片，结论必须有摘要高亮；"
     "数据可视化量化阈值：内容页必须 ≥1 个 ECharts 图表 或 ≥3 个数据卡片"
@@ -139,24 +186,44 @@ _DESIGN_RULES_DIGEST = (
     "6.1 核心要点量化：内容页必须有 6-10 个列表项或卡片（含数据卡片、论点卡片、要点列表），"
     "低于 6 个判定为'核心要点不足'，超过 10 个需合并精简\n"
     "6.2 装饰图标量化：内容页必须 ≥3 个 FontAwesome 图标（class 含 `fa-`），"
-    "用于辅助视觉表达（如卡片标题前缀、数据来源标注等），低于 3 个判定为'缺装饰图标'\n"
+    "用于辅助视觉表达（如卡片标题前缀等），低于 3 个判定为'缺装饰图标'\n"
     "6.3 空白率量化：内容页估算空白率必须 < 30%，"
     "即 1220×660px 内容区内实际有内容（文字/图表/卡片/图标）的面积占比 ≥ 70%；"
     "留白 > 30% 判定为'空白率过高'；通过增加卡片、图表、列表项填充内容，而非放大字号\n"
     "7. 防溢出：单行文字不超容器宽度；连续段落 ≤ 100 字（超过必须拆列表）；"
     "文本容器（p、span、div）必须加 `break-words` 类防止中英混排时英文/数字处不换行溢出\n"
-    "8. 布局结构：严格遵循标准 HTML 骨架——main 用 `grid grid-cols-2 gap-3`，"
-    "恰好 2 个 `<section>` 子元素；header/main/footer 纵向排列在 content-safe 内\n"
-    "9. grid 子元素：必须 `h-full min-h-0 overflow-hidden`\n"
-    "10. flex-col 子元素：必须 `flex-1 min-h-0 overflow-hidden`\n"
+    "8. 布局结构：严格遵循标准 HTML 骨架——main 用 `flex gap-3`，"
+    "恰好 2 个 `<section>` 子元素；"
+    "header/main/footer 纵向排列在 content-safe 内\n"
+    "8.1 禁止使用 CSS Grid：html-to-pptx 转换器不支持 `display:grid`（Grid 仅检测不转换，视为非文本容器），"
+    "所有布局必须用 Flexbox（`flex`、`flex-col`、`flex-[N]`）替代 `grid grid-cols-*`；"
+    "左右分栏用 `flex` + `flex-[3]` / `flex-[2]` 比例分配，不用 `grid grid-cols-[3fr_2fr]`\n"
+    "9. flex 子元素：必须 `flex-1 min-h-0 min-w-0`（水平布局）或 `flex-1 min-h-0`（垂直布局）；"
+    "禁止使用 `overflow-hidden` 隐藏核心内容\n"
+    "10. flex-col 子元素：必须 `flex-1 min-h-0`；禁止使用 `overflow-hidden` 隐藏核心内容；"
+    "注意：`overflow-hidden` 在浏览器中裁剪溢出内容，但 PPTX 导出时不被尊重——"
+    "超出容器边界的内容会直接溢出；因此卡片内容必须通过控制行数和行高确保不超出容器高度\n"
     "10.1 内容预算：flex-col 中有多个子元素时，禁止把大块内容（如完整表格）设 `flex-shrink-0`，"
     "否则会挤压其他 `flex-1` 兄弟元素至高度为 0；大块内容也要参与弹性收缩或拆分\n"
+    "10.2 多栏等高卡片防空白：当使用 `grid-rows-N` + `flex-1` 布局多卡片时，"
+    "每个卡片内容（文字行+图标+数据）必须填充容器高度的 60% 以上；"
+    "若内容不足，改用 `flex-shrink-0` 让卡片按内容自适应高度，"
+    "或将 `grid-rows-N` 改为 `grid-rows-[auto]` 让容器收缩包裹内容，剩余空间分配给其他区域\n"
+    "10.3 多栏卡片防溢出与行高禁令："
+    "① 卡片内正文禁止使用 `leading-loose`（line-height:2），该类使文字高度翻倍，"
+    "在 PPTX 导出时极易导致内容超出卡片边界；正文统一使用 `leading-snug`（1.25）或 `leading-normal`（1.5）\n"
+    "② 多栏等高卡片（如 `grid-rows-N`）中每个卡片的实际内容行数不得超过容器可容纳行数"
+    "（按 660px 内容区 ÷ 行数 - padding 估算）；宁可精简文字，不可溢出\n"
+    "③ 禁止通过添加 `mt-auto` 底部子元素（色块标签、badge 行等）来填充空白——"
+    "这些子元素增加总内容高度，在 PPTX 导出时 `overflow-hidden` 不被尊重会导致溢出\n"
     "11. 配色与字体严格来自风格规范文件，禁止使用未定义的颜色或字体"
     "（除非用户在原始 query 中明确指定了字体或配色，此时以用户指定值为准）；"
     "所有页面 `<body>` 背景色必须统一，从风格规范中取一致的背景色，禁止部分页面用浅灰/灰色背景而其他页用白色\n"
     "12. 页脚：底部必须有数据来源汇总条（如'数据来源：央行、财政部、...'），即使卡片内已有来源标注也必须保留页脚；"
     "禁止页脚出现纯数字页码编号（除非用户在原始 query 中明确要求页码，此时应在用户指定位置添加页码，格式如 3/12）\n"
-    "13. 布局实现：所有区域用 `flex-1 min-h-0` 自动分配高度，禁止手动计算 px 值；子元素用 `h-full min-h-0 overflow-hidden` 防溢出，信任 flex/grid 自动布局\n"
+    "13. 布局实现：所有区域用 `flex-1 min-h-0` 自动分配高度，禁止手动计算 px 值；"
+    "子元素用 `flex-1 min-h-0` 弹性填充，禁止使用 `overflow-hidden` 隐藏核心内容（标题/正文/图表/数据卡片等），"
+    "信任 flex 自动布局\n"
     "13.1 表格禁用 CSS Grid：html-to-pptx 引擎不支持 `display:grid` 渲染表格，grid 表格会被转为低质量截图；"
     "数据表格必须用 `<table><tr><td>` 原生标签或 `flex` 布局替代 `grid grid-cols-N`\n"
     "14. 全局禁止 `rounded-*` 类，所有元素 border-radius:0（饼图/环形图的圆形不受此限制）\n"
@@ -164,10 +231,17 @@ _DESIGN_RULES_DIGEST = (
     "`data-page-role` 不是旧 `type` 属性的替代品，两者并存\n"
     "16. 标题栏、页脚为跨页锚点片段（见风格文件「四、组件样式库」开头的「跨页锚点片段」说明），"
     "必须逐字复用 HTML 结构/class/间距，只改文字内容，禁止自行重新设计\n"
-    "17. 标题、正文、图表标签、数据来源和数据卡片必须完整显示，禁止裁切或隐藏\n"
+    "17. 标题、正文、图表标签、数据来源和数据卡片必须完整显示，禁止裁切或隐藏；"
+    "禁止在核心内容容器上使用 `overflow-hidden`（仅允许在 `.ppt-slide` 画布边界使用）；"
+    "PPTX 导出不尊重 overflow-hidden，卡片内容超出边界会直接溢出，"
+    "必须通过控制文字行数和行高（禁止 leading-loose）确保内容不溢出\n"
     "18. 遮罩层≠底色：`bg-black/50`、`from-black/*`、`bg-gradient-*` 等是遮罩层(overlay)，"
     "必须配合底层 `<img>` 背景图使用以保证文字可读，不是页面/卡片底色；"
     "页面底色必须严格遵循风格规范文件定义的背景色，禁止使用与风格不符的底色\n"
+    "\n"
+    "### html-to-pptx 转换器限制（以下规则源于转换器实际能力，非设计偏好）\n"
+    "19. padding/border 转换缩放：html-to-pptx 转换器对 padding 缩放 0.85（减少 15%）、border-width 缩放 0.65（减少 35%），"
+    "生成 HTML 时需预留余量，避免 PPTX 中内容因缩放溢出或边框过细\n"
 )
 
 
@@ -175,11 +249,11 @@ _HTML_SKELETON = (
     "### 标准 HTML 骨架（所有页面必须遵循，禁止改动结构）\n"
     "```html\n"
     '<div class="ppt-slide" type="content" data-page-role="content">\n'
-    '  <div class="content-safe flex flex-col gap-3 h-full">\n'
+    '  <div class="content-safe flex flex-col h-full">\n'
     '    <header class="flex-shrink-0">标题区</header>\n'
-    '    <main class="flex-1 min-h-0 grid grid-cols-2 gap-3">\n'
-    '      <section class="h-full min-h-0 overflow-hidden">左侧内容</section>\n'
-    '      <section class="h-full min-h-0 overflow-hidden">右侧内容</section>\n'
+    '    <main class="flex-1 min-h-0 flex gap-3">\n'
+    '      <section class="flex-1 min-h-0 min-w-0">左侧内容</section>\n'
+    '      <section class="flex-1 min-h-0 min-w-0">右侧内容</section>\n'
     '    </main>\n'
     '    <footer class="flex-shrink-0">数据来源页脚</footer>\n'
     '  </div>\n'
@@ -188,8 +262,9 @@ _HTML_SKELETON = (
     "规则：\n"
     "- 根节点必须同时携带 `class=\"ppt-slide\"`、`type=\"content\"`、`data-page-role=\"content\"`\n"
     "- `content-safe` 用 `flex flex-col` 纵向排列 header/main/footer 三段\n"
-    "- `main` 用 `grid grid-cols-2` 左右分列，恰好 2 个 `<section>` 直接子元素\n"
+    "- `main` 用 `flex` 左右分列（禁止使用 `grid grid-cols-*`，html-to-pptx 转换器不支持 CSS Grid），恰好 2 个 `<section>` 直接子元素\n"
     "- 禁止把 header/footer 放进 main 内部；禁止 main 只有 1 个子元素\n"
+    "- 禁止在子元素上使用 `overflow-hidden` 隐藏核心内容（标题/正文/图表标签/数据卡片等）；overflow-hidden 仅允许用于 `.ppt-slide` 画布边界\n"
 )
 
 
@@ -234,11 +309,11 @@ _PAGE_LAYOUT_TEMPLATES = {
     "data": (
         "### 参考布局（data 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col gap-3 h-full">\n'
-        '  <header class="flex-shrink-0">4-6 个关键数字卡片，grid grid-cols-6</header>\n'
-        '  <main class="flex-1 min-h-0 grid grid-cols-[3fr_2fr] gap-3">\n'
-        '    <section class="h-full min-h-0 overflow-hidden">6 个核心论点卡片，grid grid-cols-2 grid-rows-3 gap-2</section>\n'
-        '    <section class="h-full min-h-0 overflow-hidden">ECharts 图表 + 对比表格</section>\n'
+        '<div class="content-safe flex flex-col h-full">\n'
+        '  <header class="flex-shrink-0">4-6 个关键数字卡片，flex</header>\n'
+        '  <main class="flex-1 min-h-0 flex gap-3">\n'
+        '    <section class="flex-[3] min-h-0 min-w-0">6 个核心论点卡片，flex flex-col</section>\n'
+        '    <section class="flex-[2] min-h-0 min-w-0">ECharts 图表 + 对比表格</section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
         '</div>\n'
@@ -248,11 +323,11 @@ _PAGE_LAYOUT_TEMPLATES = {
     "trend": (
         "### 参考布局（trend 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col gap-3 h-full">\n'
+        '<div class="content-safe flex flex-col h-full">\n'
         '  <header class="flex-shrink-0">3 个关键数字卡片</header>\n'
-        '  <main class="flex-1 min-h-0 flex gap-3 overflow-hidden">\n'
-        '    <section class="flex-1 min-h-0 overflow-hidden">ECharts 折线图（趋势数据）</section>\n'
-        '    <section class="w-[40%] min-h-0 overflow-hidden">4-6 个核心论点卡片，flex-col gap-2</section>\n'
+        '  <main class="flex-1 min-h-0 flex gap-3">\n'
+        '    <section class="flex-1 min-h-0 min-w-0">ECharts 折线图（趋势数据）</section>\n'
+        '    <section class="w-[40%] min-h-0 min-w-0">4-6 个核心论点卡片，flex-col</section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
         '</div>\n'
@@ -262,11 +337,11 @@ _PAGE_LAYOUT_TEMPLATES = {
     "comparison": (
         "### 参考布局（comparison 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col gap-3 h-full">\n'
-        '  <main class="flex-1 min-h-0 flex flex-col gap-3 overflow-hidden">\n'
-        '    <div class="flex gap-3 flex-1 min-h-0">\n'
-        '      <section class="flex-1 min-h-0 overflow-hidden">对比对象 A 的卡片（grid grid-cols-2 grid-rows-3）</section>\n'
-        '      <section class="flex-1 min-h-0 overflow-hidden">对比对象 B 的卡片（grid grid-cols-2 grid-rows-3）</section>\n'
+        '<div class="content-safe flex flex-col h-full">\n'
+        '  <main class="flex-1 min-h-0 flex flex-col">\n'
+        '    <div class="flex flex-1 min-h-0 gap-3">\n'
+        '      <section class="flex-1 min-h-0 min-w-0">对比对象 A 的卡片（flex flex-col）</section>\n'
+        '      <section class="flex-1 min-h-0 min-w-0">对比对象 B 的卡片（flex flex-col）</section>\n'
         '    </div>\n'
         '    <section class="flex-shrink-0">对比表格</section>\n'
         '  </main>\n'
@@ -278,11 +353,11 @@ _PAGE_LAYOUT_TEMPLATES = {
     "case": (
         "### 参考布局（case 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col gap-3 h-full">\n'
+        '<div class="content-safe flex flex-col h-full">\n'
         '  <header class="flex-shrink-0">3 个关键数字卡片</header>\n'
-        '  <main class="flex-1 min-h-0 grid grid-cols-[2fr_3fr] gap-3">\n'
-        '    <section class="h-full min-h-0 overflow-hidden">6 个核心论点卡片，flex-col gap-2</section>\n'
-        '    <section class="h-full min-h-0 overflow-hidden">ECharts 图表 + 关键数据表格</section>\n'
+        '  <main class="flex-1 min-h-0 flex gap-3">\n'
+        '    <section class="flex-[2] min-h-0 min-w-0">6 个核心论点卡片，flex-col</section>\n'
+        '    <section class="flex-[3] min-h-0 min-w-0">ECharts 图表 + 关键数据表格</section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">案例素材详细描述 + 数据来源页脚</footer>\n'
         '</div>\n'
@@ -291,11 +366,11 @@ _PAGE_LAYOUT_TEMPLATES = {
     "technology": (
         "### 参考布局（technology 类型，可根据内容调整布局比例和区域数量）\n"
         "```html\n"
-        '<div class="content-safe flex flex-col gap-3 h-full">\n'
+        '<div class="content-safe flex flex-col h-full">\n'
         '  <header class="flex-shrink-0">4 个关键数字卡片</header>\n'
-        '  <main class="flex-1 min-h-0 flex flex-col gap-3 overflow-hidden">\n'
-        '    <section class="flex-1 min-h-0 overflow-hidden">ECharts 图表 + 对比表格</section>\n'
-        '    <section class="flex-1 min-h-0 overflow-hidden">6 个核心论点卡片，grid grid-cols-3 grid-rows-2 gap-2</section>\n'
+        '  <main class="flex-1 min-h-0 flex flex-col gap-3">\n'
+        '    <section class="flex-1 min-h-0 min-w-0">ECharts 图表 + 对比表格</section>\n'
+        '    <section class="flex-1 min-h-0 min-w-0">6 个核心论点卡片，flex flex-wrap</section>\n'
         '  </main>\n'
         '  <footer class="flex-shrink-0">数据来源汇总条</footer>\n'
         '</div>\n'
@@ -305,17 +380,6 @@ _PAGE_LAYOUT_TEMPLATES = {
         "多维数据比较→雷达图(radar)；两变量关系→散点图(scatter)；"
         "单一变量分布→直方图(histogram)；数据分布/离群值→箱线图(boxplot)；"
         "层次结构→树状图(treemap)；矩阵数据→热力图(heatmap)\n"
-        "- 双轴图标签防重叠（无论用 echarts.init 还是内联 SVG 都必须遵守）："
-        "柱状图标签放柱顶上方（y 坐标减小），折线图标签放数据点下方（y 坐标增大），"
-        "两组标签垂直间距 ≥15px，禁止两组标签都在数据点上方；"
-        "用 echarts.init 时【强制】每个 series 都必须设 labelLayout:{moveOverlap:'shiftY'}，"
-        "同时配合 label.position:'top'/'bottom' 错开（两者并存，不可二选一）；"
-        "原因：双轴图两轴量程独立，仅靠 position 错开无法保证标签不重叠（数据点屏幕坐标过近时 top/bottom 标签仍会撞），"
-        "moveOverlap:'shiftY' 是 ECharts 原生运行时防重叠算法，渲染时自动检测并向 Y 方向错开重叠标签；"
-        "用内联 SVG 时折线图 text 的 transform translate y = 数据点 y + 12（向下偏移），柱状图 text 的 y = 柱顶 y - 8（向上偏移）\n"
-        "- 图例防叠字（无论用 echarts.init 还是内联 SVG 都必须遵守）："
-        "图例项 ≥3 个时，用 echarts.init 设 legend:{type:'scroll'} 或 legend:{orient:'vertical'}；"
-        "用内联 SVG 时确保图例文字间距 ≥ 每项文字宽度+20px，排不下就换行或竖排；禁止水平挤排叠字\n"
     ),
     "cover": (
         "### 推荐布局（cover 类型，封面页）\n"
@@ -326,7 +390,7 @@ _PAGE_LAYOUT_TEMPLATES = {
         '  <p class="text-[18px] text-center mt-2">日期</p>\n'
         '</div>\n'
         "```\n"
-        "- 低密度页面，允许较高留白，不要求 grid-cols-2、数据卡片或图表\n"
+        "- 低密度页面，允许较高留白，不要求双栏、数据卡片或图表\n"
     ),
     "ending": (
         "### 推荐布局（ending 类型，结束页）\n"
@@ -336,7 +400,7 @@ _PAGE_LAYOUT_TEMPLATES = {
         '  <p class="text-[22px] text-center mt-4">联系方式（可选）</p>\n'
         '</div>\n'
         "```\n"
-        "- 低密度页面，允许较高留白，不要求 grid-cols-2、数据卡片或图表\n"
+        "- 低密度页面，允许较高留白，不要求双栏、数据卡片或图表\n"
     ),
 }
 
@@ -351,31 +415,43 @@ def _detect_page_type(outline_page: str) -> str:
 
 
 _STRUCTURAL_DENSITY_CHECKLIST = (
-    "### 结构页密度检查（4 项，全部必须通过）\n"
+    "### 结构页密度检查（5 项，全部必须通过）\n"
     "1. 完整显示：核心内容未被裁切、滚动、折叠或省略\n"
     "2. 无大段文字：无连续 > 100 字段落\n"
     "3. 视觉层级：标题 → 副标题 → 正文 层级清晰\n"
     "4. 留白质量：留白服务于视觉聚焦，非空洞\n"
+    "5. 溢出风险：卡片/容器内容未超出边界，无 `leading-loose` 导致的高度翻倍\n"
 )
 
 _DENSITY_CHECKLIST_DIGEST = (
-    "### 内容密度检查（12 项，全部必须通过）\n"
+    "### 内容密度检查（16 项，全部必须通过）\n"
     "1. 数据可视化：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式且页面为'数据有限'时可降至 2 个数据卡片）\n"
     "2. 核心要点：6-10 个列表项或卡片\n"
     "3. 装饰图标：≥3 个 FontAwesome 图标（class 含 `fa-`）\n"
-    "4. 空白率：估算 < 30%\n"
+    "4. 留白质量：留白是否服务于层级、聚焦或阅读节奏；"
+    "检查 flex-1 或 grid-rows-N 容器内的每个卡片/子元素，"
+    "若内容（文字行+图表+图标）填充不足容器高度的 50%，判定为'局部空白失衡'\n"
     "5. 数据来源：页脚有标注（机构名 / 资料名）\n"
     "6. 无大段文字：无连续 > 100 字段落\n"
     "7. 视觉层级：标题 → 副标题 → 正文 → 注释 层级清晰\n"
-    "8. 布局正确：main 元素采用双区域布局（如 `grid grid-cols-2`、`grid grid-cols-[3fr_2fr]`、"
-    "`flex gap-4` 等），且恰好 2 个直接子元素（`<section>` 或 `<div>`）；"
+    "8. 布局正确：main 元素采用双区域布局（如 `flex` + `flex-[3]`/`flex-[2]` 等），"
+    "且恰好 2 个直接子元素（`<section>` 或 `<div>`）；"
+    "禁止使用 `grid grid-cols-*`（html-to-pptx 不支持 CSS Grid）；"
     "禁止所有页面使用相同布局，需根据内容叙事选择不同布局比例和方向\n"
-    "9. 完整显示：核心内容未使用 line-clamp、省略号、滚动或折叠隐藏\n"
+    "9. 完整显示：核心内容未使用 line-clamp、省略号、滚动或折叠隐藏；"
+    "核心内容容器（div/section/main 等）禁止使用 `overflow-hidden`（仅 `.ppt-slide` 画布边界允许）\n"
     "10. 内容完整：标题、正文、图表标签、数据来源和数据卡片全部完整显示，无裁切\n"
     "11. ECharts SVG 检查：所有 echarts.init 调用必须包含 `{renderer:'svg'}` 参数，"
     "且使用 `document.getElementById('xxx')` 直接传参，禁止变量赋值\n"
-    "12. grid-cols 合法性：所有 `grid-cols-[...]` 必须为合法 CSS，不存在无单位裸数字"
-    "（正确：`grid-cols-[3fr_2fr]` `grid-cols-[320px_1fr]`，错误：`grid-cols-[3_2]` `grid-cols-[1.2_1]`）\n"
+    "12. grid-cols 合法性：禁止使用 `grid-cols-*`（CSS Grid 不被转换器支持，改用 Flexbox）\n"
+    "13. 字号一致性：同级别卡片/模块必须使用相同字号，字号值来自风格文件\n"
+    "14. 图表颜色：数据系列颜色来自风格文件图表配色表，坐标轴标签用深色，分割线用浅色\n"
+    "15. 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}`；"
+    "图例项 ≥5 个时建议设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`\n"
+    "16. 溢出风险：检查所有 `flex-col` 或 `flex-1` 容器内的卡片，"
+    "若存在 `leading-loose`（line-height:2）或 `mt-auto` 底部子元素（色块标签/badge 行），"
+    "且卡片内容总行数可能超过容器可容纳行数，判定为'内容溢出'；"
+    "PPTX 导出不尊重 overflow-hidden，超出边界的内容会直接溢出\n"
 )
 
 
@@ -399,6 +475,43 @@ def _is_valid_html(text: str) -> bool:
         return False
     lower = text.lower()
     return ("<html" in lower or "<!doctype html" in lower) and "ppt-slide" in lower
+
+
+# 匹配含 ppt-slide 的 div 开始标签
+_PPT_SLIDE_DIV_RE = re.compile(r'<div[^>]*\bclass="[^"]*ppt-slide[^"]*"', re.IGNORECASE)
+
+
+def _truncate_to_single_slide(html: str) -> str:
+    """如果 HTML 包含多个 ppt-slide 容器，截取第一个并保留 HTML 骨架。
+
+    LLM 偶尔会忽略单页约束，将全部页面写入一个 HTML 文件。
+    此函数检测到多 slide 时截取第一个，丢弃其余，并补全闭合标签。
+    """
+    matches = list(_PPT_SLIDE_DIV_RE.finditer(html))
+    if len(matches) <= 1:
+        return html
+
+    # 从第二个 ppt-slide div 往前找 <div 起始位置
+    second_match = matches[1]
+    div_start = html.rfind("<div", 0, second_match.start())
+    if div_start == -1:
+        div_start = second_match.start()
+
+    # 还需要往回找注释标记（如 <!-- P2 ... -->）
+    comment_pos = html.rfind("<!--", 0, div_start)
+    cut_pos = min(comment_pos, div_start) if comment_pos != -1 else div_start
+
+    truncated = html[:cut_pos].rstrip()
+    # 补全闭合标签
+    if "</body>" not in truncated.lower():
+        truncated += "\n</body>\n</html>\n"
+
+    logger.warning(
+        "[P8.1] 检测到 %d 个 ppt-slide 容器，已截取第一个 slide，丢弃其余 %d 个",
+        len(matches),
+        len(matches) - 1,
+    )
+    return truncated
 
 
 # 匹配 <h1>/<h2> 中「第X页」占位符（X 为数字或中文数字）
@@ -503,15 +616,107 @@ def _has_empty_chart_svg(html: str) -> bool:
     return False
 
 
+# --- ECharts 图表容器缺少 echarts.init 初始化检测（P8.1 阶段，P8.2 fix 之前） ---
+# 场景：LLM 生成了 <div id="xxxChart"> + echarts 脚本引用，但遗漏 echarts.init 调用，
+# 导致 P8.2 cli.js fix 将未初始化图表转为空 SVG（页面出现大片空白）。
+# 仅检测"有 ECharts 库但完全没有 echarts.init 调用"——这是最可靠的信号，
+# 不依赖容器 id 命名约定或 init 调用格式，避免误报。
+_ECHARTS_LIB_RE = re.compile(r'<script[^>]*echarts[\w.-]*\.js', re.IGNORECASE)
+_ECHARTS_INIT_RE = re.compile(r'echarts\.init\s*\(', re.IGNORECASE)
+
+
+def _has_chart_without_init(html: str) -> bool:
+    """检测 ECharts 图表容器缺少 echarts.init 初始化脚本。
+
+    在 P8.1 密度检查阶段（P8.2 cli.js fix 之前）运行。
+    检测条件：HTML 引入了 ECharts 库脚本但完全没有 echarts.init 调用。
+    不依赖容器 id 命名或 init 调用格式，避免误报。
+    """
+    if not _ECHARTS_LIB_RE.search(html):
+        return False
+    return not _ECHARTS_INIT_RE.search(html)
+
+
+# 检测 CSS Grid 布局使用（html-to-pptx 不支持 Grid）
+_GRID_USAGE_RE = re.compile(r'\bgrid\s+grid-cols-\S+', re.IGNORECASE)
+
+
+def _has_grid_layout(html: str) -> bool:
+    """检测是否使用了 CSS Grid 布局（html-to-pptx 转换器不支持 Grid）。"""
+    return bool(_GRID_USAGE_RE.search(html))
+
+
+# 检测核心内容容器上的 overflow-hidden（不应裁切核心内容）
+_OVERFLOW_HIDDEN_RE = re.compile(
+    r'<(?:div|section|main|article|aside|header|footer)[^>]*\boverflow-hidden\b[^>]*>',
+    re.IGNORECASE,
+)
+
+
+def _has_overflow_hidden_on_content(html: str) -> bool:
+    """检测核心内容容器（div/section/main 等）上是否使用了 overflow-hidden。
+
+    overflow-hidden 仅允许用于 .ppt-slide 画布边界，不应用于核心内容容器。
+    """
+    # 排除 .ppt-slide 容器本身（画布边界 overflow-hidden 是允许的）
+    matches = _OVERFLOW_HIDDEN_RE.findall(html)
+    for m in matches:
+        if 'ppt-slide' not in m.lower():
+            return True
+    return False
+
+
+# 检测字号一致性：提取所有 text-[Npx] 值
+_FONT_SIZE_RE = re.compile(r'text-\[(\d+)px\]')
+
+
+def _check_font_size_consistency(html: str) -> bool:
+    """检测同页字号是否一致。返回 True 表示不一致。
+
+    规则：同级别的卡片/模块应使用相同字号。
+    如果同页出现 >3 种不同正文字号，判定为不一致。
+    """
+    sizes = [int(m) for m in _FONT_SIZE_RE.findall(html)]
+    if not sizes:
+        return False
+    # 过滤出正文字号范围（14-24px），标题字号（37px+）不参与一致性检查
+    body_sizes = [s for s in sizes if 14 <= s <= 24]
+    if len(set(body_sizes)) > 3:
+        return True
+    return False
+
+
 def _post_check_data_viz(html: str, failed_items: list[str], search_mode: str) -> list[str]:
     """程序化后置校验：对 LLM 判定的'缺数据可视化'做二次确认，移除误判。"""
     if "缺数据可视化" not in failed_items:
         return failed_items
     has_echarts = "echarts" in html.lower()
-    card_count = html.lower().count("card")
+    # 改进卡片计数：只匹配 class 属性中的 card，不匹配文本内容
+    card_count = len(re.findall(r'class="[^"]*\bcard\b[^"]*"', html, re.IGNORECASE))
     threshold = 2 if search_mode == "no_search" else 3
     if has_echarts or card_count >= threshold:
         failed_items = [x for x in failed_items if x != "缺数据可视化"]
+    return failed_items
+
+
+def _post_check_layout_issues(html: str, failed_items: list[str]) -> list[str]:
+    """程序化后置校验：检测 Grid 布局、overflow-hidden、字号不一致、溢出风险等布局问题。
+
+    leading-loose（line-height:2）使文字高度翻倍，在 PPTX 导出时极易导致内容超出卡片边界。
+    PPTX 不尊重 overflow-hidden，超出边界的内容会直接溢出。
+    """
+    # 检测 CSS Grid 使用
+    if _has_grid_layout(html) and "使用了不支持的Grid布局" not in failed_items:
+        failed_items.append("使用了不支持的Grid布局")
+    # 检测核心内容容器上的 overflow-hidden
+    if _has_overflow_hidden_on_content(html) and "核心内容被overflow-hidden裁切" not in failed_items:
+        failed_items.append("核心内容被overflow-hidden裁切")
+    # 检测字号不一致
+    if _check_font_size_consistency(html) and "字号不一致" not in failed_items:
+        failed_items.append("字号不一致")
+    # 检测溢出风险：leading-loose 使文字高度翻倍
+    if "内容溢出" not in failed_items and "leading-loose" in html:
+        failed_items.append("内容溢出")
     return failed_items
 
 
@@ -538,17 +743,43 @@ _REWRITE_ACTIONS = {
     "缺数据可视化": (
         "在页面底部（footer 之前）插入一个 ECharts 图表，按以下规则选择图表类型："
         "时间序列数据用折线图，占比/构成数据用饼图，对比/排名数据用柱状图。"
-        "直接使用页面中已有的数字作为数据点，不要修改现有卡片和布局结构"
+        "直接使用页面中已有的数字作为数据点，不要修改现有卡片和布局结构。"
+        "如果页面已存在图表容器（如 <div id=\"xxxChart\">）但缺少初始化脚本，"
+        "必须在该容器之后紧邻 </body> 补充完整的"
+        " echarts.init(document.getElementById('xxx'), null, {renderer:'svg'}).setOption({...}) 初始化代码"
     ),
     "核心要点不足": "将段落拆分为 6-10 个列表项或卡片，每条 1-2 行加图标",
     "缺装饰图标": "为每个核心要点/卡片添加相关 FontAwesome 图标（class 含 fa-）",
     "空白率过高": "添加总结框（1-2 句概括性陈述），其次添加分隔线、引用块、背景装饰",
+    "局部空白失衡": (
+        "优先调整布局（第一选择）：将空白卡片的容器从 flex-1 改为 flex-shrink-0"
+        "（按内容自适应高度），或将 grid-rows-N 改为更少的行数，"
+        "缩小该区域占比并放大其他区域以消化多余空间\n"
+        "若必须补充内容（第二选择）：在卡片内追加 1-2 行精简描述即可，"
+        "但禁止使用 leading-loose（line-height:2 会翻倍高度导致溢出），"
+        "禁止添加 mt-auto 底部子元素（色块标签/badge 行等，会增加总高度），"
+        "禁止增加已有文字的行高；"
+        "注意：PPTX 导出时不尊重 overflow-hidden，卡片内容超出边界会直接溢出"
+    ),
     "缺数据来源": "在页脚标注'数据来源：XXX'（机构名或资料名）",
     "大段文字": "拆分为多个列表项/小节，添加小标题",
     "视觉层级混乱": "调整字号梯度，建立明确的标题→副标题→正文→注释层级",
-    "布局错误": "main 改为 `grid grid-cols-2 gap-3`，恰好 2 个 `<section>` 子元素；header/footer 放在 main 外部的 content-safe 内",
+    "布局错误": "main 改为 `flex gap-3`，恰好 2 个 `<section>` 子元素；header/footer 放在 main 外部的 content-safe 内",
     "内容被隐藏": "移除 line-clamp、text-overflow:ellipsis、overflow:auto/scroll、max-height 限制等隐藏手段，确保核心内容完整可见",
     "核心内容缺失": "检查标题、正文、图表标签、数据来源和数据卡片是否全部完整显示，补充缺失的内容元素",
+    "使用了不支持的Grid布局": "将所有 `grid grid-cols-*` 改为 Flexbox 布局（`flex` + `flex-[N]` 比例分配），因为 html-to-pptx 转换器不支持 CSS Grid",
+    "核心内容被overflow-hidden裁切": (
+        "移除核心内容容器（div/section/main 等）上的 `overflow-hidden` 类，"
+        "仅保留 `.ppt-slide` 画布边界上的 overflow-hidden"
+    ),
+    "字号不一致": "统一同级别卡片/模块的字号，使用风格文件定义的字号值，确保同级元素字号一致",
+    "图例与轴标题重叠": "图例项过多时设 `legend:{type:'scroll'}` 或 `legend:{orient:'vertical'}`，避免与坐标轴标题重叠",
+    "内容溢出": (
+        "移除 `leading-loose`（改为 `leading-snug` 或 `leading-normal`），"
+        "移除 `mt-auto` 底部子元素（色块标签/badge 行等），"
+        "精简每张卡片的文字行数使其不超过容器可容纳行数；"
+        "若内容确实需要更多空间，将 `flex-col` 改为更少的子元素或改为 `flex-shrink-0` 自适应高度"
+    ),
 }
 
 
@@ -666,9 +897,9 @@ _IMAGE_LAYOUT_TEMPLATES: dict[int, str] = {
         "### 图片布局（2 张图）\n"
         "- 推荐左右对半分或一大一小\n"
         "```html\n"
-        '<div class="grid grid-cols-2 gap-3 flex-1 min-h-0">\n'
-        '  <img src="..." class="w-full h-full object-contain" />\n'
-        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '<div class="flex gap-3 flex-1 min-h-0">\n'
+        '  <img src="..." class="flex-1 h-full object-contain" />\n'
+        '  <img src="..." class="flex-1 h-full object-contain" />\n'
         '</div>\n'
         "```\n"
     ),
@@ -676,9 +907,9 @@ _IMAGE_LAYOUT_TEMPLATES: dict[int, str] = {
         "### 图片布局（3 张图）\n"
         "- 推荐「左 1 右 2」：左侧大图，右侧上下两小图\n"
         "```html\n"
-        '<div class="grid grid-cols-3 gap-3 flex-1 min-h-0">\n'
-        '  <div class="col-span-2"><img src="..." class="w-full h-full object-contain" /></div>\n'
-        '  <div class="flex flex-col gap-2">\n'
+        '<div class="flex gap-3 flex-1 min-h-0">\n'
+        '  <div class="flex-[2] h-full"><img src="..." class="w-full h-full object-contain" /></div>\n'
+        '  <div class="flex-1 flex flex-col min-h-0 gap-2">\n'
         '    <img src="..." class="w-full flex-1 min-h-0 object-contain" />\n'
         '    <img src="..." class="w-full flex-1 min-h-0 object-contain" />\n'
         '  </div>\n'
@@ -687,13 +918,13 @@ _IMAGE_LAYOUT_TEMPLATES: dict[int, str] = {
     ),
     4: (
         "### 图片布局（4 张图）\n"
-        "- 推荐 2×2 宫格\n"
+        "- 推荐 2×2 布局（用 flex flex-wrap 替代 grid）\n"
         "```html\n"
-        '<div class="grid grid-cols-2 grid-rows-2 gap-3 flex-1 min-h-0">\n'
-        '  <img src="..." class="w-full h-full object-contain" />\n'
-        '  <img src="..." class="w-full h-full object-contain" />\n'
-        '  <img src="..." class="w-full h-full object-contain" />\n'
-        '  <img src="..." class="w-full h-full object-contain" />\n'
+        '<div class="flex flex-wrap gap-3 flex-1 min-h-0">\n'
+        '  <img src="..." class="w-[48%] h-[48%] object-contain" />\n'
+        '  <img src="..." class="w-[48%] h-[48%] object-contain" />\n'
+        '  <img src="..." class="w-[48%] h-[48%] object-contain" />\n'
+        '  <img src="..." class="w-[48%] h-[48%] object-contain" />\n'
         '</div>\n'
         "```\n"
     ),
@@ -701,10 +932,10 @@ _IMAGE_LAYOUT_TEMPLATES: dict[int, str] = {
 
 _IMAGE_LAYOUT_TEMPLATE_MANY = (
     "### 图片布局（{n} 张图）\n"
-    "- 推荐网格布局，每行 3-4 张\n"
+    "- 推荐用 flex flex-wrap 布局，每行 3-4 张（禁止使用 grid grid-cols-N）\n"
     "```html\n"
-    '<div class="grid grid-cols-{cols} gap-3 flex-1 min-h-0">\n'
-    '  <!-- {n} 张图片，每张 object-contain -->\n'
+    '<div class="flex flex-wrap gap-3 flex-1 min-h-0">\n'
+    '  <!-- {n} 张图片，每张 w-[31%] object-contain -->\n'
     '</div>\n'
     "```\n"
 )
@@ -730,7 +961,7 @@ def _build_image_section(image_map_page: str) -> str:
         "- `usage=content` → 用作内容配图："
         "`<img src=\"...\" class=\"w-full h-full object-contain\">`\n"
         "- 使用 `<img>` 标签引用 `path` 字段指定的路径（相对路径，直接使用）\n"
-        "- 图片容器用 `min-h-0 overflow-hidden` 防溢出\n"
+        "- 图片容器用 `min-h-0` 防溢出（禁止使用 `overflow-hidden`，图片内容需完整显示）\n"
         f"\n{layout}"
     )
 
@@ -751,12 +982,14 @@ def _build_page_prompt(
     image_map_page: str = "",
     user_query: str = "",
 ) -> str:
-    # 用户原始 query 段（最高优先级，包含用户所有格式/内容/风格要求）
+    # 用户原始 query 段（用于指导内容方向/格式/风格，不改变本任务的页面范围）
     user_query_section = ""
     if user_query:
         user_query_section = (
-            "## 用户原始 query（最高优先级，所有格式/版式/风格要求以此为准）\n"
-            f"{user_query}\n\n"
+            "## 用户原始 query（用于指导内容方向和视觉风格要求）\n"
+            f"{user_query}\n"
+            "⚠️ 用户 query 中的页数/总量要求已由大纲规划完成，本步骤**仅生成第 "
+            f"{page_number} 页**，不生成其他页面。\n\n"
         )
 
     preset_clause = ""
@@ -779,7 +1012,10 @@ def _build_page_prompt(
         rewrite_constraints = (
             "⚠️ **重写约束**：\n"
             "- 仅修复上述不通过项，不要改动其他正常部分\n"
-            "- 布局结构（grid/flex-col、子元素数量）如果上次已正确，严禁改动\n"
+            "- 如果布局使用了 CSS Grid（`grid grid-cols-*`），必须改为 Flexbox（`flex`）布局，"
+            "因为 html-to-pptx 转换器不支持 CSS Grid\n"
+            "- 如果子元素使用了 `overflow-hidden`，且该元素包含核心内容（标题/正文/图表/数据卡片），"
+            "必须移除 `overflow-hidden`\n"
             "- 已通过的检查项对应的代码不要修改\n"
             "- 只在不通过项相关的代码区域做修改，其余部分保持原样\n"
         )
@@ -864,8 +1100,8 @@ def _build_page_prompt(
     if not is_structural:
         diversity_rule = (
             "\n### 布局多样性约束\n"
-            "- 禁止连续两页使用完全相同的 main 布局结构（grid 列数、子元素数量、比例分配）\n"
-            "- 主动使用不同的布局比例（如 `flex-[3]_flex-[2]`、`grid-cols-[3fr_2fr]`、`flex-[5]_flex-[4]` 等）\n"
+            "- 禁止连续两页使用完全相同的 main 布局结构（flex 比例、子元素数量、分栏方向）\n"
+            "- 主动使用不同的布局比例（如 `flex-[3]`/`flex-[2]`、`flex-[5]`/`flex-[4]`、`flex-[2]`/`flex-[3]` 等）\n"
             "- 根据内容叙事选择布局，而非机械套用模板\n"
         )
 
@@ -916,8 +1152,10 @@ def _build_page_prompt(
         "\n"
         "## 5. 任务\n"
         f"你负责生成**第 {page_number} 页** HTML。仅生成该页，直接输出 HTML 原文。"
+        "**HTML 中必须只包含 1 个 `<div class=\"ppt-slide\">` 容器**，"
+        "禁止生成多个 slide 页面。"
         "先产出可运行 HTML，再按密度检查清单做小步修正；禁止在写文件前反复做像素级完整规划。"
-        "生成时必须同时满足上述「内容密度检查（12 项）」全部要求，"
+        "生成时必须同时满足上述「内容密度检查」全部要求，"
         "确保首次生成即通过密度检查，避免后续重写。"
     )
 
@@ -1128,7 +1366,7 @@ class PageWorkerNode(PlanNode):
                 "   - 失败按 gen_retry_round 重试（仅本页）\n"
                 "   - 重试后仍失败 → 进 missing_pages，该页闭环终止\n"
                 "2. 密度判定阶段：调 LLM 做 12 项密度检查（受控 JSON 输出），叠加程序化后置校验（echarts/card 计数）\n"
-                "   - 检查项：数据可视化 / 核心要点 / 装饰图标 / 空白率 / 数据来源 / 大段文字 / 视觉层级 / 布局正确 / 完整显示 / 内容完整\n"
+                "   - 检查项：数据可视化 / 核心要点 / 装饰图标 / 留白质量 / 数据来源 / 大段文字 / 视觉层级 / 布局正确 / 完整显示 / 内容完整 / 溢出风险\n"
                 "   - 数据可视化阈值：≥1 个 ECharts 图表 或 ≥3 个数据卡片（no_search 模式降至 2 个）\n"
                 "3. 不通过 → 修复阶段（按 density_retry_round 轮）：\n"
                 "   a. 分析缺失项，判断是否需要搜索补充数据\n"
@@ -1322,6 +1560,9 @@ class PageWorkerNode(PlanNode):
         if not html:
             return {"missing": True, "low_density": False, "report": {}}
 
+        # 防御：LLM 偶尔忽略单页约束，生成多个 slide，截取第一个
+        html = _truncate_to_single_slide(html)
+
         ok = await self._write_file(path, html)
         if not ok:
             return {"missing": True, "low_density": False, "report": {}}
@@ -1361,6 +1602,8 @@ class PageWorkerNode(PlanNode):
                 low_density = True
                 logger.info("[P8.1] 页面 %d 重写失败，保留当前 HTML，进 low_density", page_num)
                 break
+            # 防御：重写产物也可能包含多个 slide
+            rewritten = _truncate_to_single_slide(rewritten)
             write_ok = await self._write_file(path, rewritten)
             if not write_ok:
                 low_density = True
@@ -1424,7 +1667,7 @@ class PageWorkerNode(PlanNode):
 
         if is_structural:
             checklist = _STRUCTURAL_DENSITY_CHECKLIST
-            failed_enum = "内容被裁切 / 大段文字 / 视觉层级混乱 / 空白失衡"
+            failed_enum = "内容被裁切 / 大段文字 / 视觉层级混乱 / 空白失衡 / 内容溢出"
         else:
             checklist = _DENSITY_CHECKLIST_DIGEST
             no_search_hint = ""
@@ -1434,9 +1677,11 @@ class PageWorkerNode(PlanNode):
                     "数据可视化阈值降至 ≥2 个数据卡片。\n"
                 )
             failed_enum = (
-                "缺数据可视化 / 核心要点不足 / 缺装饰图标 / 空白率过高 / "
+                "缺数据可视化 / 核心要点不足 / 缺装饰图标 / 空白率过高 / 局部空白失衡 / "
                 "缺数据来源 / 大段文字 / 视觉层级混乱 / 布局错误 / "
-                "内容被隐藏 / 核心内容缺失 / grid-cols 非法"
+                "内容被隐藏 / 核心内容缺失 / grid-cols 非法 / "
+                "使用了不支持的Grid布局 / 核心内容被overflow-hidden裁切 / 字号不一致 / "
+                "图例与轴标题重叠 / 内容溢出"
             )
 
         prompt = (
@@ -1470,6 +1715,16 @@ class PageWorkerNode(PlanNode):
                 if _has_empty_chart_svg(html) and "缺数据可视化" not in failed_items:
                     failed_items.append("缺数据可视化")
                     logger.info("[P8.1] 页面 %d 检测到空SVG图表，标记缺数据可视化", page_num)
+                # 主动检测图表容器缺初始化：有 echarts.min.js + 空 div 容器但无 echarts.init 调用
+                if _has_chart_without_init(html) and "缺数据可视化" not in failed_items:
+                    failed_items.append("缺数据可视化")
+                    logger.info("[P8.1] 页面 %d 检测到图表容器缺少echarts.init初始化，标记缺数据可视化", page_num)
+                # 程序化布局检查：Grid 使用、overflow-hidden 裁切、字号不一致、溢出风险（leading-loose）
+                before_count = len(failed_items)
+                failed_items = _post_check_layout_issues(html, failed_items)
+                new_issues = failed_items[before_count:]
+                if new_issues:
+                    logger.info("[P8.1] 页面 %d 程序化布局检查发现问题: %s", page_num, new_issues)
             if len(failed_items) < len(llm_failed):
                 removed = [x for x in llm_failed if x not in failed_items]
                 logger.info(

@@ -68,6 +68,11 @@ class JiuClawSkillEvolutionRail(SkillEvolutionRail):
             result.append(item)
         return result
 
+    @staticmethod
+    def dedup_messages(messages: list[dict]) -> list[dict]:
+        """Remove duplicate messages while preserving order (keep first occurrence)."""
+        return SkillEvolutionRail._dedup_messages(messages)
+
     def _eligible_skill_names(self, skill_names: list[str]) -> list[str]:
         eligible = [name for name in skill_names if not is_bootstrap_builtin_skill(name)]
         excluded = len(skill_names) - len(eligible)
