@@ -190,6 +190,20 @@ def _normalize_tool_args(args: Any) -> dict:
     return {}
 
 
+def _callback_error(ctx: Any) -> Optional[BaseException]:
+    """Return a real exception from callback context, if any.
+
+    Prefers ``ctx.exception`` (agent-core rail contract) and falls back to
+    legacy ``ctx.error``. Ignores auto-created MagicMock attributes so unit
+    tests that only set ``ctx.error=None`` are not treated as failures.
+    """
+    for attr in ("exception", "error"):
+        val = getattr(ctx, attr, None)
+        if isinstance(val, BaseException):
+            return val
+    return None
+
+
 def _extract_model_info(agent: Any) -> tuple[str, str]:
     """Extract (model_name, gen_ai.system) from a BaseAgent/ReActAgent instance.
 
@@ -448,7 +462,7 @@ class TelemetryRail(DeepAgentRail):
         if usage_accum and (usage_accum["input_tokens"] > 0 or usage_accum["output_tokens"] > 0):
             usage_info = f"input_tokens={usage_accum['input_tokens']}, output_tokens={usage_accum['output_tokens']}"
         duration = time.monotonic() - agent_start_time
-        err = getattr(ctx, "error", None)
+        err = _callback_error(ctx)
         status = "error" if err else "success"
         logger.info(
             "[TelemetryRail] Agent 处理完成: agent=%s, status=%s, duration=%.2fs, %s",
@@ -461,7 +475,7 @@ class TelemetryRail(DeepAgentRail):
 
         if agent_span:
             # Check for errors
-            err = getattr(ctx, "error", None)
+            err = _callback_error(ctx)
             if err:
                 agent_span.set_status(StatusCode.ERROR, str(err)[:256])
                 agent_span.record_exception(err)
@@ -737,7 +751,7 @@ class TelemetryRail(DeepAgentRail):
                 input_tokens = getattr(usage, "input_tokens", 0) or 0
                 output_tokens = getattr(usage, "output_tokens", 0) or 0
                 usage_info = f"input_tokens={input_tokens}, output_tokens={output_tokens}"
-        err = getattr(ctx, "error", None)
+        err = _callback_error(ctx)
         status = "error" if err else "success"
         logger.info(
             "[TelemetryRail] 模型调用完成: model=%s, system=%s, status=%s, duration=%.2fs, %s",
@@ -766,9 +780,9 @@ class TelemetryRail(DeepAgentRail):
             self._record_decision(span, result)
 
         # Check for errors
-        if hasattr(ctx, "error") and ctx.error:
-            span.set_status(StatusCode.ERROR, str(ctx.error)[:256])
-            span.record_exception(ctx.error)
+        if err:
+            span.set_status(StatusCode.ERROR, str(err)[:256])
+            span.record_exception(err)
             llm_call_count.add(1, _with_resource_labels({
                 GEN_AI_REQUEST_MODEL: model_name,
                 "status": "error",

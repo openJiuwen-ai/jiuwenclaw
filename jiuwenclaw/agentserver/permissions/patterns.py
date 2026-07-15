@@ -260,6 +260,13 @@ def persist_permission_allow_rule(
     For mcp_exec_command with a command arg, adds a wildcard pattern.
     For other tools, sets the tool to 'allow'.
     """
+    if not str(tool_name or "").strip():
+        logger.warning(
+            "[PermissionEngine] permission.persist.skip tool=%r reason=empty_tool_name",
+            tool_name,
+        )
+        return False
+
     if isinstance(tool_args, str):
         try:
             tool_args = json.loads(tool_args)
@@ -473,6 +480,13 @@ def _set_approval_overrides_after_rules(permissions: dict, overrides: list[Any])
 
 
 def _persist_tiered_tool_allow(permissions: dict, tool_name: str) -> bool:
+    if not str(tool_name or "").strip():
+        logger.warning(
+            "[PermissionEngine] permission.persist.skip tool=%r reason=empty_tool_name "
+            "target=tools",
+            tool_name,
+        )
+        return False
     tools = permissions.get("tools")
     if not isinstance(tools, dict):
         tools = {}
