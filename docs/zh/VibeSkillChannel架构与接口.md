@@ -430,14 +430,47 @@ curl -X POST http://127.0.0.1:19003/api/v1/session \
 
 Standard 模式会额外调用 `ChannelManager.create_agent_session()`，再由 `MessageHandler` 发送 `session.create` 到 AgentServer。
 
-### 5.2 文件接口
+### 5.2 文件与附件接口
 
 | 方法 | 路径 | 状态 | 说明 |
 |------|------|------|------|
 | `GET` | `/api/v1/session/{sessionID}/file` | 已实现 | 调用 `skilldev.file.list`，返回前端 `FileTreeNode[]` |
 | `GET` | `/api/v1/session/{sessionID}/file/content?path={path}` | 已实现 | 调用 `skilldev.file.read`，返回文本内容 |
 | `PUT` | `/api/v1/session/{sessionID}/file/content?path={path}` | 已实现 | 调用 `skilldev.file.write`，覆盖写入文本文件 |
+| `DELETE` | `/api/v1/session/{sessionID}/attachments` | Channel 已实现 | Channel 校验 body 后转发 `skilldev.resource.delete`（按资源身份删除此前 `message.send` 上传的附件）；AgentServer 落盘/解压清理实现待补齐。不改写历史消息 |
 | `GET` | `/api/v1/session/{sessionID}/file/status` | 占位 | 当前返回空数组 |
+
+附件删除请求体示例：
+
+```json
+{
+  "items": [
+    { "type": "file", "filename": "spec.pdf" },
+    { "type": "skill", "filename": "ref.zip" },
+    { "type": "toolDefinition", "pluginId": "bundle.a", "toolName": "do_x" },
+    { "type": "agentDefinition", "agentId": "reviewer" },
+    { "type": "cliDefinition", "name": "my-cli" }
+  ]
+}
+```
+
+附件删除响应示例（HTTP 200，偏成功）：
+
+```json
+{
+  "ok": true,
+  "deleted": [
+    { "type": "file", "filename": "spec.pdf" },
+    { "type": "toolDefinition", "pluginId": "bundle.a", "toolName": "do_x" }
+  ],
+  "notFound": [
+    { "type": "skill", "filename": "ref.zip" }
+  ],
+  "errors": []
+}
+```
+
+语义说明：目标不存在记入 `notFound`，HTTP 仍为 200；非法请求（空 `items`、缺身份字段、未知 type）返回 400，session 不存在返回 404。仅清理 session workspace 内资源与 `resource_state.json`，不删除 OBS 原始上传源，也不擦除 timeline。
 
 文件树转换规则：
 
