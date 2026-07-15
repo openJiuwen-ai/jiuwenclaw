@@ -121,11 +121,6 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
       <td width="50%">External tool integration and Model Context Protocol configuration.</td>
     </tr>
     <tr>
-      <td width="22%"><strong>Swarm Skills</strong></td>
-      <td width="28%"><a href="en/SwarmSkills.md">Swarm Skills</a></td>
-      <td width="50%">Multi-agent collaboration skill encapsulation, orchestration, and reuse mechanisms.</td>
-    </tr>
-    <tr>
       <th colspan="3" align="left" bgcolor="#f3f4f6"><h3>⚙️ Advanced Operations</h3></th>
     </tr>
     <tr>
