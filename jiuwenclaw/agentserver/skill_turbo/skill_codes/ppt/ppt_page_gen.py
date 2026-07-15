@@ -616,6 +616,27 @@ def _has_empty_chart_svg(html: str) -> bool:
     return False
 
 
+# --- ECharts 图表容器缺少 echarts.init 初始化检测（P8.1 阶段，P8.2 fix 之前） ---
+# 场景：LLM 生成了 <div id="xxxChart"> + echarts 脚本引用，但遗漏 echarts.init 调用，
+# 导致 P8.2 cli.js fix 将未初始化图表转为空 SVG（页面出现大片空白）。
+# 仅检测"有 ECharts 库但完全没有 echarts.init 调用"——这是最可靠的信号，
+# 不依赖容器 id 命名约定或 init 调用格式，避免误报。
+_ECHARTS_LIB_RE = re.compile(r'<script[^>]*echarts[\w.-]*\.js', re.IGNORECASE)
+_ECHARTS_INIT_RE = re.compile(r'echarts\.init\s*\(', re.IGNORECASE)
+
+
+def _has_chart_without_init(html: str) -> bool:
+    """检测 ECharts 图表容器缺少 echarts.init 初始化脚本。
+
+    在 P8.1 密度检查阶段（P8.2 cli.js fix 之前）运行。
+    检测条件：HTML 引入了 ECharts 库脚本但完全没有 echarts.init 调用。
+    不依赖容器 id 命名或 init 调用格式，避免误报。
+    """
+    if not _ECHARTS_LIB_RE.search(html):
+        return False
+    return not _ECHARTS_INIT_RE.search(html)
+
+
 # 检测 CSS Grid 布局使用（html-to-pptx 不支持 Grid）
 _GRID_USAGE_RE = re.compile(r'\bgrid\s+grid-cols-\S+', re.IGNORECASE)
 
@@ -722,7 +743,10 @@ _REWRITE_ACTIONS = {
     "缺数据可视化": (
         "在页面底部（footer 之前）插入一个 ECharts 图表，按以下规则选择图表类型："
         "时间序列数据用折线图，占比/构成数据用饼图，对比/排名数据用柱状图。"
-        "直接使用页面中已有的数字作为数据点，不要修改现有卡片和布局结构"
+        "直接使用页面中已有的数字作为数据点，不要修改现有卡片和布局结构。"
+        "如果页面已存在图表容器（如 <div id=\"xxxChart\">）但缺少初始化脚本，"
+        "必须在该容器之后紧邻 </body> 补充完整的"
+        " echarts.init(document.getElementById('xxx'), null, {renderer:'svg'}).setOption({...}) 初始化代码"
     ),
     "核心要点不足": "将段落拆分为 6-10 个列表项或卡片，每条 1-2 行加图标",
     "缺装饰图标": "为每个核心要点/卡片添加相关 FontAwesome 图标（class 含 fa-）",
@@ -1691,6 +1715,10 @@ class PageWorkerNode(PlanNode):
                 if _has_empty_chart_svg(html) and "缺数据可视化" not in failed_items:
                     failed_items.append("缺数据可视化")
                     logger.info("[P8.1] 页面 %d 检测到空SVG图表，标记缺数据可视化", page_num)
+                # 主动检测图表容器缺初始化：有 echarts.min.js + 空 div 容器但无 echarts.init 调用
+                if _has_chart_without_init(html) and "缺数据可视化" not in failed_items:
+                    failed_items.append("缺数据可视化")
+                    logger.info("[P8.1] 页面 %d 检测到图表容器缺少echarts.init初始化，标记缺数据可视化", page_num)
                 # 程序化布局检查：Grid 使用、overflow-hidden 裁切、字号不一致、溢出风险（leading-loose）
                 before_count = len(failed_items)
                 failed_items = _post_check_layout_issues(html, failed_items)
