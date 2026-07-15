@@ -3225,73 +3225,33 @@ class AgentWebSocketServer:
             await send_wire_payload(ws, wire)
 
     async def _handle_team_members_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        """Return the live team member list for /join seat validation.
-
-        Unlike ``team.snapshot`` (a full snapshot for frontend restore), this
-        is an internal unary RPC consumed only by the gateway's /join handler.
-        It calls ``get_member_list()`` (members only, no tasks) and filters
-        down to ``role == "human_agent"``, since the caller only needs the
-        names of seats a human may claim. Not touching ``get_team_snapshot()``
-        keeps /join validation independent of the team task table — a missing
-        ``team_task_*`` table must not block member seat validation.
-        """
-        from jiuwenswarm.agents.harness.team import (
-            get_all_team_managers,
-            get_team_manager,
+        """返回 team human_agent 席位列表 + 真实 team_name 供 /join 校验。"""
+        from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+            query_team_human_members_for_join,
         )
 
         params = request.params if isinstance(request.params, dict) else {}
         session_id = params.get("session_id") or request.session_id or ""
+        team_name = str(params.get("team_name") or "").strip()
         channel_id = request.channel_id or "web"
 
-        # TeamManager 按 channel_id 隔离，但 session_id 全局唯一：/join 的来源
-        # channel（如飞书）可能不同于 team 创建时的 channel（如 web）。因此先按
-        # 请求 channel 取快路径，未命中则遍历所有 manager 找持有该 session 的
-        # monitor，避免跨 channel /join 时查到空列表而误判"团队未就绪"。
-        team_manager = get_team_manager(channel_id)
-        monitor_handler = team_manager.get_monitor_handler(session_id)
-        if monitor_handler is None and session_id:
-            for mgr in get_all_team_managers():
-                if mgr is team_manager:
-                    continue
-                candidate = mgr.get_monitor_handler(session_id)
-                if candidate is not None:
-                    monitor_handler = candidate
-                    break
-
-        if monitor_handler is None or not monitor_handler.is_running:
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=channel_id,
-                ok=True,
-                payload={"members": [], "team_id": None},
-            )
-            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-            async with send_lock:
-                await send_wire_payload(ws, wire)
-            return
-
         try:
-            members_raw = await monitor_handler.get_member_list()
-            members = [
-                m for m in (members_raw or [])
-                if isinstance(m, dict) and m.get("role") == "human_agent"
-            ]
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=channel_id,
-                ok=True,
-                payload={"members": members},
+            members, resolved_team_name = await query_team_human_members_for_join(
+                session_id, team_name,
             )
-        except Exception as e:
-            logger.warning("[AgentWebSocketServer] team.members.get failed: %s", e)
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=channel_id,
-                ok=True,
-                payload={"members": []},
+        except Exception:
+            logger.exception(
+                "[AgentWebSocketServer] team.members.get failed: session=%s team=%s",
+                session_id, team_name,
             )
+            members, resolved_team_name = [], None
 
+        resp = AgentResponse(
+            request_id=request.request_id,
+            channel_id=channel_id,
+            ok=True,
+            payload={"members": members, "team_name": resolved_team_name},
+        )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)

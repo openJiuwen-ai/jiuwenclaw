@@ -7,6 +7,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# 控制台 UTF-8，避免中文 echo 乱码（PowerShell 5.1 默认编码易乱码）
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
+# 项目根 = 脚本所在目录的上一层，基于脚本自身位置推导，换路径不坏
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $ProjectRoot
 
@@ -182,8 +187,13 @@ Write-Host "`n[2/4] Building frontend (jiuwenswarm/channels/web/frontend)..." -F
 Push-Location (Join-Path $ProjectRoot "jiuwenswarm\channels\web\frontend")
 $WebDist = Join-Path $ProjectRoot "jiuwenswarm\channels\web\dist"
 if (Test-Path $WebDist) { Remove-Item $WebDist -Recurse -Force }
-npm install
-if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
+if (Test-Path "node_modules") {
+    Write-Host "[build] node_modules exists, skip npm install" -ForegroundColor Gray
+} else {
+    Write-Host "[build] node_modules missing, running npm install..." -ForegroundColor Gray
+    npm install
+    if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
+}
 npm run build
 if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
 Pop-Location

@@ -267,6 +267,9 @@ function AppContent() {
   const [heartbeatToastVisible, setHeartbeatToastVisible] = useState(false);
   const [heartbeatToastMessage, setHeartbeatToastMessage] = useState('');
   const [saveToastVisible, setSaveToastVisible] = useState(false);
+  const [configChangedConfirmOpen, setConfigChangedConfirmOpen] = useState(false);
+  const [proactiveToastVisible, setProactiveToastVisible] = useState(false);
+  const [proactiveToastMessage, setProactiveToastMessage] = useState('');
   const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
   const [securityAlertVisible, setSecurityAlertVisible] = useState(false);
   const [securityAlertContent, setSecurityAlertContent] = useState('');
@@ -319,6 +322,8 @@ function AppContent() {
   const restartAutoCloseTimerRef = useRef<number | null>(null);
   const heartbeatToastTimerRef = useRef<number | null>(null);
   const saveToastTimerRef = useRef<number | null>(null);
+  const proactiveToastTimerRef = useRef<number | null>(null);
+  const hasChangesRef = useRef(false);
   const lastHeartbeatToastKeyRef = useRef<string | null>(null);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyPrepending, setHistoryPrepending] = useState(false);
@@ -519,6 +524,8 @@ function AppContent() {
   const clearTodos = useTodoStore((s) => s.clearTodos);
   const extensionReady = useHarnessStore((s) => s.runtimes[sessionId]?.extensionReady ?? null);
   const resetHarnessStore = useHarnessStore((s) => s.reset);
+  const proactiveNotificationMessage = useHarnessStore((s) => s.proactiveNotificationMessage);
+  const setProactiveNotification = useHarnessStore((s) => s.setProactiveNotification);
 
   const toolPanelHasContent = useMemo(() => {
     const hasMessages = messages.length > 0;
@@ -552,6 +559,9 @@ function AppContent() {
     },
     onError: (error) => {
       console.error('WebSocket error:', error);
+    },
+    onConfigChanged: () => {
+      handleConfigChanged();
     },
   });
 
@@ -840,6 +850,13 @@ function AppContent() {
     }
   }, []);
 
+  const clearProactiveToastTimer = useCallback(() => {
+    if (proactiveToastTimerRef.current != null) {
+      window.clearTimeout(proactiveToastTimerRef.current);
+      proactiveToastTimerRef.current = null;
+    }
+  }, []);
+
   const showSaveToast = useCallback(() => {
     setSaveToastVisible(true);
     clearSaveToastTimer();
@@ -886,6 +903,18 @@ function AppContent() {
   const handleModelsReplaceAll = useCallback(async (models: ModelEntry[]) => {
     await request('models.replace_all', { models });
   }, [request]);
+
+  const handleConfigChanged = useCallback(() => {
+    if (hasChangesRef.current) {
+      setConfigChangedConfirmOpen(true);
+      return;
+    }
+    void fetchConfig();
+  }, [fetchConfig]);
+
+  const handleHasChangesChange = useCallback((hasChanges: boolean) => {
+    hasChangesRef.current = hasChanges;
+  }, []);
 
   const handleModelsRefresh = useCallback(async () => {
     try {
@@ -1106,8 +1135,9 @@ function AppContent() {
       clearRestartAutoCloseTimer();
       clearHeartbeatToastTimer();
       clearSaveToastTimer();
+      clearProactiveToastTimer();
     };
-  }, [clearHeartbeatToastTimer, clearRestartAutoCloseTimer, clearSaveToastTimer]);
+  }, [clearHeartbeatToastTimer, clearProactiveToastTimer, clearRestartAutoCloseTimer, clearSaveToastTimer]);
 
   useEffect(() => {
     const normalized = heartbeatMessage?.trim();
@@ -1130,6 +1160,19 @@ function AppContent() {
       heartbeatToastTimerRef.current = null;
     }, 15000);
   }, [clearHeartbeatToastTimer, heartbeatMessage, heartbeatUpdatedAt]);
+
+  useEffect(() => {
+    const message = proactiveNotificationMessage?.trim();
+    if (!message) return;
+    setProactiveToastMessage(message);
+    setProactiveToastVisible(true);
+    clearProactiveToastTimer();
+    proactiveToastTimerRef.current = window.setTimeout(() => {
+      setProactiveToastVisible(false);
+      setProactiveNotification(null);
+      proactiveToastTimerRef.current = null;
+    }, 8000);
+  }, [clearProactiveToastTimer, proactiveNotificationMessage, setProactiveNotification]);
 
   useEffect(() => {
     if (!isConnected || initialDataLoaded) {
@@ -1973,6 +2016,7 @@ function AppContent() {
               onModelValidate={validateModelConfig}
               onModelsRefresh={handleModelsRefresh}
               onAgentsTeamsSave={handleAgentsTeamsSave}
+              onHasChangesChange={handleHasChangesChange}
             />
           </div>
         )}
@@ -2079,6 +2123,14 @@ function AppContent() {
         </div>
       )}
 
+      {proactiveToastVisible && proactiveToastMessage && (
+        <div className="app-toast-wrapper app-toast-wrapper--top-center" data-testid="proactive-notification-toast">
+          <div className="bg-warn-subtle text-warn px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+            {proactiveToastMessage}
+          </div>
+        </div>
+      )}
+
       {/* 安全警告提示 */}
       {securityAlertVisible && (
         <div className="app-toast-wrapper app-toast-wrapper--top">
@@ -2159,6 +2211,31 @@ function AppContent() {
                   {t('common.ok')}
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {configChangedConfirmOpen && (
+        <div className="app-restart-modal">
+          <div className="app-restart-modal__backdrop" />
+          <div className="app-restart-modal__panel">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-12 h-12 rounded-full bg-warn-subtle text-warn flex items-center justify-center mb-4">
+                <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                </svg>
+              </div>
+              <h3 className="text-base font-semibold text-text mb-1">{t('config.errors.configChangedTitle')}</h3>
+              <p className="text-sm text-text-muted mb-5">{t('config.errors.configChangedDesc')}</p>
+              <div className="flex gap-3">
+                <button type="button" onClick={() => { setConfigChangedConfirmOpen(false); void fetchConfig(); }} className="btn primary !px-4 !py-2">
+                  {t('config.errors.configChangedConfirm')}
+                </button>
+                <button type="button" onClick={() => setConfigChangedConfirmOpen(false)} className="btn !px-4 !py-2">
+                  {t('config.errors.configChangedCancel')}
+                </button>
+              </div>
             </div>
           </div>
         </div>

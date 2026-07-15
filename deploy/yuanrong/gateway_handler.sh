@@ -10,13 +10,28 @@ gateway_get_config_dir() {
     fi
 }
 
+gateway_resolve_host() {
+    local master_host="${DEPLOY_VARS["MASTER_NODE_IP"]:-}"
+    if [ -z "${master_host}" ]; then
+        if [ -n "${DEPLOY_VARS["CLUSTER_HOSTS"]:-}" ]; then
+            IFS=',' read -ra _gw_host_list <<< "${DEPLOY_VARS["CLUSTER_HOSTS"]}"
+            master_host="${_gw_host_list[0]}"
+        else
+            master_host=$(get_local_ip)
+            info "MASTER_NODE_IP not set, defaulting to local: ${master_host}" >&2
+        fi
+    fi
+    echo "${master_host}"
+}
+
 gateway_compute_extension_dirs() {
     if [ -n "${DEPLOY_VARS["EXTENSION_DIRS"]:-}" ]; then
         info "EXTENSION_DIRS already set: ${DEPLOY_VARS["EXTENSION_DIRS"]}"
         return 0
     fi
 
-    local master_host="${DEPLOY_VARS["MASTER_NODE_IP"]}"
+    local master_host
+    master_host=$(gateway_resolve_host)
     local python_version="${DEPLOY_VARS["YR_PYTHON_VERSION"]}"
 
     local jiuwenswarm_location
@@ -46,7 +61,8 @@ gateway_gen_config() {
 }
 
 gateway_deploy_process() {
-    local master_host="${DEPLOY_VARS["MASTER_NODE_IP"]}"
+    local master_host
+    master_host=$(gateway_resolve_host)
     local instance_name="${DEPLOY_VARS["JIUWENSWARM_INSTANCE_NAME"]}"
 
     info "Deploying gateway in process mode on ${master_host}..."
@@ -95,24 +111,16 @@ gateway_deploy_process() {
 }
 
 gateway_undeploy_process() {
-    local master_host="${DEPLOY_VARS["MASTER_NODE_IP"]}"
+    local master_host
+    master_host=$(gateway_resolve_host)
     local instance_name="${DEPLOY_VARS["JIUWENSWARM_INSTANCE_NAME"]}"
-
-    if [ -z "${master_host}" ]; then
-        if [ -n "${DEPLOY_VARS["CLUSTER_HOSTS"]:-}" ]; then
-            IFS=',' read -ra _gw_host_list <<< "${DEPLOY_VARS["CLUSTER_HOSTS"]}"
-            master_host="${_gw_host_list[0]}"
-        else
-            error "MASTER_NODE_IP is not set. Cannot determine which host to stop gateway on."
-        fi
-    fi
 
     info "Stopping gateway on ${master_host}..."
 
     if [ -n "${instance_name}" ]; then
-        exec_on_host "${master_host}" "pkill -f 'JIUWENSWARM_DATA_DIR=/root/.jiuwenswarm-instances/${instance_name}.*jiuwenswarm-gateway' || true"
+        exec_on_host "${master_host}" "pkill -f 'JIUWENSWARM_DATA_DIR=/root/.jiuwenswarm-instances/${instance_name}.*[j]iuwenswarm-gateway' || true"
     else
-        exec_on_host "${master_host}" "pkill -f 'jiuwenswarm-gateway' || true"
+        exec_on_host "${master_host}" "pkill -f '[j]iuwenswarm-gateway' || true"
     fi
 
     success "Gateway stopped on ${master_host}"

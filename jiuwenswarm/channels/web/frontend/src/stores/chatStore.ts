@@ -165,10 +165,13 @@ function assignMessageRenderKeys(
 interface ChatState {
   runtimes: Record<string, ChatRuntime>;
   activeSessionId: string | null;
+  /** Gateway broadcasts this status without a session id, so it is intentionally app-wide. */
+  globalTaskRunning: boolean;
 
   ensureRuntime: (sessionId: string) => ChatRuntime;
   getRuntime: (sessionId: string | null) => ChatRuntime | undefined;
   setActiveSessionId: (sessionId: string | null) => void;
+  setGlobalTaskRunning: (running: boolean) => void;
   removeRuntime: (sessionId: string) => void;
 
   addMessage: (sessionId: string, message: Message) => void;
@@ -215,6 +218,7 @@ interface ChatState {
 export const useChatStore = create<ChatState>((set, get) => ({
   runtimes: {},
   activeSessionId: null,
+  globalTaskRunning: false,
 
   ensureRuntime: (sessionId) => {
     const existing = get().runtimes[sessionId];
@@ -233,6 +237,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setActiveSessionId: (sessionId) => {
     set({ activeSessionId: sessionId });
+  },
+
+  setGlobalTaskRunning: (running) => {
+    set({ globalTaskRunning: running });
   },
 
   removeRuntime: (sessionId) => {

@@ -1949,7 +1949,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         await channel.send_response(ws, req_id, ok=True, payload=meta)
 
-    async def _session_create(ws, req_id, params, session_id):
+    async def _session_create(ws, req_id, params, session_id, user_id=None):
         """创建一个新 session（在 agent/sessions 下创建一个新目录）。
 
         project_id / project_dir 绑定规则(详见 project_store.resolve_session_project_binding):
@@ -1999,10 +1999,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         # 初始化会话元数据
         from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+        # User identity comes exclusively from the authenticated WebSocket handshake.
         init_session_metadata(
             session_id=session_id_to_create,
             channel_id=params.get("channel_id", ""),
-            user_id=params.get("user_id", ""),
+            user_id=str(user_id or "").strip(),
             title=params.get("title", ""),
             mode=params.get("mode", "unknown"),
             project_dir=project_dir,
@@ -2068,7 +2069,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             ws, req_id, ok=True, payload={"pinned": new_pinned, "pin_order": new_order},
         )
 
-    async def _session_delete(ws, req_id, params, session_id):
+    async def _session_delete(ws, req_id, params, session_id, user_id=None):
         """删除一个 session（在 agent/sessions 下删除一个目录）。"""
         if not isinstance(params, dict):
             await channel.send_response(
@@ -2096,6 +2097,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     session_id=session_id,
                     req_method=ReqMethod.SESSION_DELETE,
                     params=params,
+                    user_id=user_id,
                 )
                 resp = await ac.send_request(env)
                 if resp.ok:

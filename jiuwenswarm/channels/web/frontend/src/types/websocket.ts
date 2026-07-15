@@ -59,6 +59,8 @@ export interface ConnectionAckPayload {
   mode?: string;
   tools?: string[];
   protocol_version?: string;
+  /** 当前全局是否有任务在跑（后端 ack 推送，用于初始化配置保存锁）。 */
+  task_running?: boolean;
 }
 
 export interface ProcessingStatusPayload {

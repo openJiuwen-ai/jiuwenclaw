@@ -21,10 +21,25 @@ class DummyBus:
         return None
 
 
+class _FakeRequestHeaders:
+    def __init__(self, mapping: dict[str, str]) -> None:
+        self._mapping = {k.lower(): v for k, v in mapping.items()}
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        return self._mapping.get(key.lower(), default)
+
+
 class FakeWebSocket:
-    def __init__(self):
+    def __init__(self, *, user_id: str | None = None) -> None:
         self.sent_frames = []
         self.closed = False
+        if user_id is not None:
+            self._gateway_user_id = user_id
+            self.request = type(
+                "Request",
+                (),
+                {"headers": _FakeRequestHeaders({"X-User-Id": user_id})},
+            )()
 
     async def send(self, data):
         self.sent_frames.append(json.loads(data))
@@ -89,6 +104,11 @@ class GatewayServerProbe(GatewayServer):
     def get_acp_pending_request_contexts_for_test(self) -> list[Any]:
         return list(self._acp_bridge.request_contexts)
 
+    @classmethod
+    def extract_ws_user_id_for_test(cls, ws: Any) -> str | None:
+        """Expose _extract_ws_user_id for unit tests (G.CLS.11: subclass wrapper)."""
+        return cls._extract_ws_user_id(ws)
+
 
 def build_server() -> GatewayServerProbe:
     config = GatewayServerConfig(
@@ -129,6 +149,25 @@ def test_normalize_gateway_message_maps_chat_resume_to_interrupt_resume():
     assert normalized.req_method == ReqMethod.CHAT_CANCEL
     assert normalized.params["intent"] == "resume"
     assert normalized.session_id == "sess-1"
+
+
+def test_normalize_gateway_message_preserves_user_id():
+    msg = Message(
+        id="req-chat",
+        type="req",
+        channel_id="tui",
+        session_id="sess-1",
+        params={"session_id": "sess-1", "content": "hi"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.CHAT_SEND,
+        user_id="testuser",
+    )
+
+    normalized = _normalize_gateway_message(msg)
+
+    assert normalized.user_id == "testuser"
+    assert normalized.is_stream is True
 
 
 @pytest.mark.asyncio
@@ -1903,3 +1942,114 @@ async def test_gateway_server_routes_by_params_session_id_when_payload_empty():
 
     assert len(ws.sent_frames) == 1
     assert ws.sent_frames[0]["payload"].get("session_id") is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_handle_raw_message_uses_connection_user_id():
+    server = build_server()
+    ws = FakeWebSocket(user_id="alice")
+    seen = []
+
+    async def on_message(msg):
+        seen.append(msg)
+
+    server.on_message(on_message)
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-user",
+                "method": "chat.send",
+                "params": {
+                    "session_id": "sess-user",
+                    "content": "hello",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        path="/tui",
+    )
+
+    assert len(seen) == 1
+    assert seen[0].user_id == "alice"
+
+
+def test_gateway_server_extract_ws_user_id_case_insensitive():
+    ws_lower = type(
+        "Ws",
+        (),
+        {"request_headers": _FakeRequestHeaders({"x-user-id": "bob"})},
+    )()
+    ws_upper = type(
+        "Ws",
+        (),
+        {"request": type("Request", (), {"headers": _FakeRequestHeaders({"X-User-Id": "  carol  "})})()},
+    )()
+    ws_empty = type("Ws", (), {"request_headers": _FakeRequestHeaders({})})()
+
+    assert GatewayServerProbe.extract_ws_user_id_for_test(ws_lower) == "bob"
+    assert GatewayServerProbe.extract_ws_user_id_for_test(ws_upper) == "carol"
+    assert GatewayServerProbe.extract_ws_user_id_for_test(ws_empty) is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_local_handler_receives_connection_user_id():
+    captured_user_ids = []
+
+    async def _session_list(ws, req_id, params, session_id, user_id=None):
+        captured_user_ids.append(user_id)
+
+    server = build_server()
+    server.config.routes["/tui"].local_handlers["session.list"] = _session_list
+    ws = FakeWebSocket(user_id="alice")
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-sess",
+                "method": "session.list",
+                "params": {},
+            },
+            ensure_ascii=False,
+        ),
+        path="/tui",
+    )
+
+    assert captured_user_ids == ["alice"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_server_ignores_frame_x_user_id_without_handshake_header():
+    server = build_server()
+    ws = FakeWebSocket()
+    seen = []
+
+    async def on_message(msg):
+        seen.append(msg)
+
+    server.on_message(on_message)
+
+    await server.handle_raw_message_public(
+        ws,
+        json.dumps(
+            {
+                "type": "req",
+                "id": "req-user",
+                "method": "chat.send",
+                "X-User-Id": "alice",
+                "params": {
+                    "session_id": "sess-user",
+                    "content": "hello",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        path="/tui",
+    )
+
+    assert len(seen) == 1
+    assert seen[0].user_id is None

@@ -250,6 +250,11 @@ react:
       third_pass_target_tokens: 10000
       truncate_head_ratio: 0.2
       offload_writeback_enabled: false
+    reasoning_tool_loop_compact_config:
+      enabled: true
+      consecutive_threshold: 3
+      reasoning_min_chars: 4
+      reasoning_preview_max_chars: 512
   # Skills 在线自演进配置
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进

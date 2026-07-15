@@ -1170,6 +1170,7 @@ class FeishuChannel(BaseChannel):
         content: str,
         timestamp_ms: int,
         metadata: dict[str, Any],
+        files: list[dict[str, Any]] | None = None,
     ) -> None:
         """将同一用户的连续消息做短暂聚合，再统一交给 gateway 入站链路。"""
         if self._is_control_message(content):
@@ -1198,6 +1199,7 @@ class FeishuChannel(BaseChannel):
                 merged_content=content,
                 timestamp_ms=timestamp_ms,
                 metadata=metadata,
+                files=files,
             )
             return
 
@@ -1218,6 +1220,7 @@ class FeishuChannel(BaseChannel):
                     "content": content,
                     "timestamp_ms": timestamp_ms,
                     "metadata": dict(metadata),
+                    "files": list(files) if files else None,
                 }
             )
 
@@ -1292,12 +1295,19 @@ class FeishuChannel(BaseChannel):
                 len(items),
             )
 
+        # 文件不合并：取末条带 files 的 item（文本已 merge，文件通常单条携带）。
+        merged_files: list[dict[str, Any]] | None = None
+        for item in reversed(items):
+            if item.get("files"):
+                merged_files = list(item["files"])
+                break
         await self._process_batched_message(
             chat_id=batch["chat_id"],
             open_id=batch["open_id"],
             merged_content=merged_content,
             timestamp_ms=int(last_item["timestamp_ms"]),
             metadata=merged_metadata,
+            files=merged_files,
         )
 
     async def _process_batched_message(
@@ -1308,6 +1318,7 @@ class FeishuChannel(BaseChannel):
         merged_content: str,
         timestamp_ms: int,
         metadata: dict[str, Any],
+        files: list[dict[str, Any]] | None = None,
     ) -> None:
         """对单条或合并后的消息做平台整理后转发。"""
         chat_type = metadata.get("chat_type", "")
@@ -1320,6 +1331,9 @@ class FeishuChannel(BaseChannel):
         enriched_metadata["im_sender_user_id"] = open_id
         enriched_metadata["im_thread_id"] = chat_id
 
+        params: dict[str, Any] = {"content": merged_content, "query": merged_content}
+        if files:
+            params["files"] = files
         inbound = FeishuInboundMessage(
             message_id=enriched_metadata.get("message_id", ""),
             chat_id=chat_id,
@@ -1327,6 +1341,7 @@ class FeishuChannel(BaseChannel):
             user_id=open_id,
             bot_id=self.config.app_id or "",
             metadata=enriched_metadata,
+            params=params,
         )
         await self._handle_message(inbound)
 
@@ -2517,12 +2532,10 @@ class FeishuChannel(BaseChannel):
             except Exception:
                 pass
 
-            # 构建消息参数
-            params = {"content": content, "query": content}
-            if file_info:
-                params["files"] = [file_info]
-
             # 构建基础 metadata
+            # feishu_create_time：飞书服务端在消息创建（用户发送）时刻打的毫秒时间戳，
+            # 透传到 ChannelManager 入站日志，与本进程收到回调的时刻对比，即可判断
+            # 该入站消息是用户当下新发（差值小）还是飞书延迟补推的旧消息（差值大）。
             base_metadata = {
                 "message_id": message.message_id,
                 "chat_type": message.chat_type,
@@ -2530,6 +2543,7 @@ class FeishuChannel(BaseChannel):
                 "open_id": open_id,
                 "feishu_open_id": open_id,
                 "feishu_chat_id": getattr(message, "chat_id", None) or "",
+                "feishu_create_time": getattr(message, "create_time", None),
                 **({"file_info": file_info} if file_info else {}),
             }
 
@@ -2564,6 +2578,7 @@ class FeishuChannel(BaseChannel):
                     content=content,
                     timestamp_ms=_ts,
                     metadata=_meta,
+                    files=[file_info] if file_info else None,
                 )
             else:
                 await self._process_batched_message(
@@ -2572,6 +2587,7 @@ class FeishuChannel(BaseChannel):
                     merged_content=content,
                     timestamp_ms=_ts,
                     metadata=_meta,
+                    files=[file_info] if file_info else None,
                 )
 
         except Exception as e:

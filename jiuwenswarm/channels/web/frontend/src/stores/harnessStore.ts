@@ -130,6 +130,9 @@ interface HarnessRuntime {
 interface HarnessState {
   runtimes: Record<string, HarnessRuntime>;
 
+  /** App-wide notification, deliberately separate from session-bound harness state. */
+  proactiveNotificationMessage: string | null;
+
   // Package list from backend (global)
   packages: PackageInfo[];
   // Native version info
@@ -173,6 +176,7 @@ interface HarnessState {
   }) => void;
   setActivateInteraction: (sessionId: string, state: ActivateInteractionState | null) => void;
   reset: (sessionId: string) => void;
+  setProactiveNotification: (message: string | null) => void;
 
   // Global package actions
   setPackages: (packages: PackageInfo[], nativeVersion: NativeVersionInfo, activeIds: string[]) => void;
@@ -265,6 +269,7 @@ function createEmptyRuntime(): HarnessRuntime {
 
 export const useHarnessStore = create<HarnessState>((set, get) => ({
   runtimes: {},
+  proactiveNotificationMessage: null,
 
   packages: [],
   nativeVersion: null,
@@ -595,6 +600,10 @@ export const useHarnessStore = create<HarnessState>((set, get) => ({
         },
       };
     });
+  },
+
+  setProactiveNotification: (message) => {
+    set({ proactiveNotificationMessage: message });
   },
 
   setPackages: (packages, nativeVersion, activeIds) => {
