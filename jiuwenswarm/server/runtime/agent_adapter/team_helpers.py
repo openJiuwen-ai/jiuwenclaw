@@ -574,7 +574,6 @@ async def ensure_monitor_handlers_for_active_runtime(
     team_name: str,
     hide_dm: bool = False,
     enable_swarmflow: bool = False,
-    activation_kind: str = "",
 ) -> None:
     """Attach TeamMonitorHandler and optionally WorkflowMonitorHandler for the active runtime.
 
@@ -1921,7 +1920,6 @@ async def _consume_stream_with_query(
                         ready_team_name,
                         hide_dm=hide_dm,
                         enable_swarmflow=bool(getattr(team_spec, "enable_swarmflow", False)),
-                        activation_kind=activation_kind,
                     )
                     ensure_team_evolution_watcher(
                         channel_id,
