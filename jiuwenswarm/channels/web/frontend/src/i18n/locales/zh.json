@@ -151,7 +151,6 @@
       "tab": "任务规划",
       "progressTitle": "任务进度",
       "token": "Token",
-      "elapsedTime": "已用时 {{value}}",
       "taskList": "任务列表",
       "taskListAria": "{{task}} 任务列表",
       "resources": "任务资源",
@@ -163,6 +162,9 @@
         "list": "列表视图",
         "structure": "结构视图",
         "board": "任务板视图"
+      },
+      "metrics": {
+        "progress": "进度"
       },
       "columns": {
         "waiting": "等待中",
