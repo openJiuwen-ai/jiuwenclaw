@@ -101,14 +101,22 @@ async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
         await ws.send(serialized)
         return True
 
+    _preview = serialized[:1000]
+    if len(serialized) > 1000:
+        _preview += "...(truncated)"
     logger.error(
-        "AgentServer WebSocket response too large: request_id=%s "
-        "response_kind=%s is_stream=%s actual_bytes=%d max_bytes=%d",
+        "AgentServer WebSocket response too large: "
+        "request_id=%s session_id=%s channel=%s type=%s is_stream=%s "
+        "response_kind=%s actual_bytes=%d max_bytes=%d preview=%s",
         wire.get("request_id"),
-        wire.get("response_kind"),
+        wire.get("session_id"),
+        wire.get("channel") or wire.get("channel_id"),
+        wire.get("type"),
         wire.get("is_stream"),
+        wire.get("response_kind"),
         actual_bytes,
         AGENT_WS_SEND_BUDGET_BYTES,
+        _preview,
     )
     fallback = _build_oversized_fallback(wire, actual_bytes)
     fallback_json = json.dumps(fallback, ensure_ascii=False)

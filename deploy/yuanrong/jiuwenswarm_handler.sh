@@ -255,10 +255,12 @@ deploy_jiuwenswarm() {
 }
 
 uninstall_jiuwenswarm() {
-    local hosts_str="${DEPLOY_VARS["CLUSTER_HOSTS"]}"
+    local hosts_str="${DEPLOY_VARS["CLUSTER_HOSTS"]:-}"
 
     if [ -z "${hosts_str}" ]; then
-        error "CLUSTER_HOSTS is not set. Cannot determine master host."
+        hosts_str=$(get_local_ip)
+        DEPLOY_VARS["CLUSTER_HOSTS"]="${hosts_str}"
+        warning "CLUSTER_HOSTS not set, using local IP: ${hosts_str}"
     fi
 
     IFS=',' read -ra JIUWENSWARM_HOST_LIST <<< "${hosts_str}"
@@ -279,7 +281,7 @@ uninstall_jiuwenswarm() {
     info "curl -H \"Content-type: application/json\" -X DELETE ${delete_url}"
 
     local res
-    res=$(curl -s -H "Content-type: application/json" -X DELETE "${delete_url}")
+    res=$(curl -s -H "Content-type: application/json" -X DELETE "${delete_url}" || true)
     info "Function unregistration result: ${res}"
 
     # DELETE 成功返回 {}（无 code 字段）或 code=0；其他视为失败

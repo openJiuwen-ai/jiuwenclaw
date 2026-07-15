@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -544,6 +545,41 @@ async def _team_session_has_runtime(team_manager: TeamManager, session_id: str) 
         or team_manager.is_runtime_pending(session_id)
         or bool(team_manager.has_stream_task(session_id))
     )
+
+
+async def query_team_human_members_for_join(
+    session_id: str, team_name: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """直查 team.db 取 human_agent 席位列表，同时校验 session_id ↔ team_name。
+
+    用 _build_session_scoped_team_name(team_name, session_id) 拼出完整
+    team_name 作为 DB key——key 拼不出来说明 session_id 与 team_name 不一致，
+    DB 自然查不到返回空。不依赖 monitor 是否存活。
+    team_name 为空返回 ([], None)。
+    """
+    if not team_name:
+        return [], None
+
+    # 拼 session-scoped team_name 作为 DB key
+    session_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "").strip()).strip("._-")
+    if session_suffix and not team_name.endswith(f"_{session_suffix}"):
+        full_team_name = f"{team_name}_{session_suffix}"
+    else:
+        full_team_name = team_name
+    try:
+        members_raw = await TeamMonitorHandler.get_member_list_from_db(full_team_name)
+    except Exception as exc:
+        logger.warning(
+            "[TeamHelpers] query_team_human_members_for_join db query failed: "
+            "session=%s team=%s error=%s", session_id, team_name, exc,
+        )
+        members_raw = None
+
+    members = [
+        m for m in (members_raw or [])
+        if isinstance(m, dict) and m.get("role") == "human_agent"
+    ]
+    return members, team_name
 
 
 async def ensure_monitor_handlers_for_active_runtime(
@@ -1528,8 +1564,18 @@ async def process_team_message_stream(
                         else:
                             reason = reason or "gate_closed"
                     if not success and not is_first_request:
+                        final_reason = reason or ""
+                        # gate_closed 是 shutdown race（leader stream 正在收尾），静默结束流
+                        if final_reason == "gate_closed":
+                            yield AgentResponseChunk(
+                                request_id=rid,
+                                channel_id=channel_id,
+                                payload=None,
+                                is_complete=True,
+                            )
+                            return
                         error_msg = _INTERACT_REASON_ERROR_MAP.get(
-                            reason or "",
+                            final_reason,
                             "Failed to send message, please try again later",
                         )
                         yield AgentResponseChunk(

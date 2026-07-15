@@ -51,6 +51,30 @@ export interface InstalledSkillEntry {
   description: string;
 }
 
+/**
+ * 被完全屏蔽的命令名单（单一事实源）。
+ *
+ * 列在这里的命令：不进注册表 → /help 不显示、Tab 补全无、手动输入落到命令分发器
+ * 显示 "Unknown command: /<name>"。包含其别名与子命令（注册时整体跳过）。
+ *
+ * 恢复某个命令：把它的名字从下面集合里删掉即可，无需改命令定义、import 或 app-screen
+ * 入口块——入口块调用 isCommandDisabled(...) 查询本名单，会自动放行。
+ *
+ * 注意：/mcp、/memory 在 app-screen.ts 的 handleSubmit 里有"绕过分发器直接开界面"的
+ * 入口块，那两块同样调用 isCommandDisabled(...) 查询本名单，故增删本名单即同步生效。
+ */
+const DISABLED_COMMANDS = new Set<string>([
+  "diff",
+  "mcp",
+  "sandbox",
+  "memory",
+]);
+
+/** 查询某命令是否被屏蔽（供 app-screen 入口块等处查询，保持单一事实源）。 */
+export function isCommandDisabled(name: string): boolean {
+  return DISABLED_COMMANDS.has(name.toLowerCase());
+}
+
 export class CommandService {
   private commands = new Map<string, SlashCommand>();
   private aliases = new Map<string, string>();
@@ -65,8 +89,9 @@ export class CommandService {
   onInstalledSkillsChange?: (skills: readonly InstalledSkillEntry[]) => void;
 
   register(commands: readonly SlashCommand[]): void {
-    this.topLevelCommands = [...commands];
-    for (const command of commands) {
+    // 屏蔽命令在注册阶段整体跳过：topLevelCommands、commands map、aliases 三者一致地不收录。
+    this.topLevelCommands = [...commands].filter((command) => !isCommandDisabled(command.name));
+    for (const command of this.topLevelCommands) {
       this.registerCommand(command);
     }
   }

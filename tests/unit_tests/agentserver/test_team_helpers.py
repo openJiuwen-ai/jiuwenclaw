@@ -1750,7 +1750,7 @@ async def test_process_team_message_stream_fallback_reuses_first_request_directi
 
 
 @pytest.mark.anyio
-async def test_process_team_message_stream_reports_error_when_shutdown_race_wait_times_out(monkeypatch):
+async def test_process_team_message_stream_silences_gate_closed_when_shutdown_race_times_out(monkeypatch):
     class _FakeManager(_InactiveTeamRuntimeManagerMixin):
         @staticmethod
         def has_stream_task(session_id: str) -> bool:
@@ -1806,11 +1806,12 @@ async def test_process_team_message_stream_reports_error_when_shutdown_race_wait
     ):
         chunks.append(chunk)
 
-    assert chunks[0].payload == {
-        "event_type": "chat.error",
-        "error": "Team is shutting down, please try again later",
-    }
+    # gate_closed 静默处理：不报 chat.error，直接以 is_complete=True 结束流
     assert chunks[-1].is_complete is True
+    assert not any(
+        chunk.payload and chunk.payload.get("event_type") == "chat.error"
+        for chunk in chunks
+    )
 
 
 @pytest.mark.anyio

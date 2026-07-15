@@ -423,6 +423,7 @@ class ForwardRewindE2AParams:
     turn_index: int
     req_method: Any
     error_label: str
+    user_id: str | None = None
 
 
 _CLI_CONFIG_SET_ENV_MAP = {
@@ -1188,7 +1189,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             },
         )
 
-    async def _session_list(ws, req_id, params, session_id):
+    async def _session_list(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
 
@@ -1215,6 +1216,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             params=params or {},
             is_stream=False,
             timestamp=time.time(),
+            user_id=user_id,
         )
         try:
             resp = await _send_tui_agent_request(
@@ -1386,7 +1388,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             mh.trigger_session_start_hook(target, source="tui")
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": target})
 
-    async def _session_delete(ws, req_id, params, session_id):
+    async def _session_delete(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.utils import get_agent_sessions_dir
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -1418,6 +1420,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     params=params,
                     is_stream=False,
                     timestamp=time.time(),
+                    user_id=user_id,
                 )
                 resp = await _send_tui_agent_request(
                     real_client, env, label="session.delete",
@@ -1492,6 +1495,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 params={"session_id": params.target_sid, "turn_index": params.turn_index},
                 is_stream=False,
                 timestamp=time.time(),
+                user_id=params.user_id,
             )
             resp = await _send_tui_agent_request(
                 real_client, env, label=params.error_label,
@@ -1508,7 +1512,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             logger.warning("[cli %s] forward to agent failed, fallback local: %s", params.error_label, e)
             return False
 
-    async def _compact_partial_via_e2a(target_sid: str, turn_index: int, direction: str) -> tuple[Optional[str], int]:
+    async def _compact_partial_via_e2a(
+        target_sid: str,
+        turn_index: int,
+        direction: str,
+        user_id: str | None = None,
+    ) -> tuple[Optional[str], int]:
         """通过 E2A 转发 LLM 摘要请求到 AgentServer。返回 (summary, summarized_count)。"""
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -1530,6 +1539,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 },
                 is_stream=False,
                 timestamp=time.time(),
+                user_id=user_id,
             )
             resp = await _send_tui_agent_request(
                 real_client, env, label="command.compact_partial",
@@ -1545,7 +1555,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         return None, 0
 
-    async def _session_rewind(ws, req_id, params, session_id):
+    async def _session_rewind(ws, req_id, params, session_id, user_id=None):
         """session.rewind: E2A → AgentServer（权威写入者），fallback 本地."""
         from jiuwenswarm.agents.harness.common.session_ops_service import rewind_session
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -1583,6 +1593,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 turn_index=turn_index,
                 req_method=ReqMethod.SESSION_REWIND,
                 error_label="session.rewind failed",
+                user_id=user_id,
             )
         ):
             return
@@ -1612,7 +1623,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         except Exception as e:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
-    async def _session_rewind_and_restore(ws, req_id, params, session_id):
+    async def _session_rewind_and_restore(ws, req_id, params, session_id, user_id=None):
         """session.rewind_and_restore: E2A → AgentServer（权威写入者），fallback 本地."""
         from jiuwenswarm.agents.harness.common.session_ops_service import (
             restore_session_files,
@@ -1653,6 +1664,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 turn_index=turn_index,
                 req_method=ReqMethod.SESSION_REWIND_AND_RESTORE,
                 error_label="session.rewind_and_restore failed",
+                user_id=user_id,
             )
         ):
             return
@@ -1708,7 +1720,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         except Exception as e:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
-    async def _command_rewind_compact(ws, req_id, params, session_id):
+    async def _command_rewind_compact(ws, req_id, params, session_id, user_id=None):
         """command.rewind_compact: LLM 摘要(E2A→AgentServer) + 截断 + 记录写入(AgentServer E2A)。"""
         if not isinstance(params, dict):
             await channel.send_response(
@@ -1742,7 +1754,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             return
 
         try:
-            llm_summary, summarized_count = await _compact_partial_via_e2a(target_sid, turn_index, direction)
+            llm_summary, summarized_count = await _compact_partial_via_e2a(
+                target_sid, turn_index, direction, user_id=user_id
+            )
         except Exception as e:
             logger.warning("[cli command.rewind_compact] LLM summary failed: %s", e)
             llm_summary = None
@@ -1773,6 +1787,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     },
                     is_stream=False,
                     timestamp=time.time(),
+                    user_id=user_id,
                 )
                 resp = await _send_tui_agent_request(
                     real_client, env, label="command.rewind_compact",
@@ -1805,7 +1820,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             logger.exception("[cli command.rewind_compact] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
-    async def _session_rename(ws, req_id, params, session_id):
+    async def _session_rename(ws, req_id, params, session_id, user_id=None):
         """优先经 E2A 转发至 AgentWebSocketServer._handle_session_rename；无 agent 或转发失败时本地回退。"""
         from jiuwenswarm.server.runtime.session.session_rename import apply_session_rename
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
@@ -1822,6 +1837,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     params=params if isinstance(params, dict) else {},
                     is_stream=False,
                     timestamp=time.time(),
+                    user_id=user_id,
                 )
                 resp = await _send_tui_agent_request(
                     real_client, env, label="session.rename",
@@ -2042,7 +2058,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 payload["page_idx"] = params.get("page_idx")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
-    async def _command_model(ws, req_id, params, session_id):
+    async def _command_model(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
 
@@ -2072,6 +2088,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 params={"config": config_payload, "env": {}},
                 is_stream=False,
                 timestamp=time.time(),
+                user_id=user_id,
             )
             try:
                 await _send_tui_agent_request(
@@ -2590,6 +2607,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 },
                 is_stream=False,
                 timestamp=time.time(),
+                user_id=user_id,
             )
             try:
                 await _send_tui_agent_request(

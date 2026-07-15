@@ -205,6 +205,8 @@ interface ConfigPanelProps {
       predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
     }>;
   }, showRestartModal?: boolean) => Promise<void>;
+  /** Reports unsaved drafts so cross-window config updates cannot silently overwrite them. */
+  onHasChangesChange?: (hasChanges: boolean) => void;
 }
 
 interface AgentsTeamsPayload {
@@ -2512,10 +2514,12 @@ export function ConfigPanel({
   onModelValidate,
   onModelsRefresh,
   onAgentsTeamsSave,
+  onHasChangesChange,
 }: ConfigPanelProps) {
   const { t, i18n } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const isProcessing = useChatStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.isProcessing ?? false : false));
+  const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
   const availableModels = useSessionStore((s) => s.availableModels);
   const mode = useSessionStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.mode ?? 'agent.plan' : 'agent.plan'));
   const storeAvailableModels = availableModels;
@@ -2991,6 +2995,9 @@ export function ConfigPanel({
     return false;
   }, [draftAgents, draftTeams, initialAgents, initialTeams]);
   const hasChanges = hasConfigChanges || hasModelChanges || hasAgentsTeamsChanges;
+  useEffect(() => {
+    onHasChangesChange?.(hasChanges);
+  }, [hasChanges, onHasChangesChange]);
   const missingRequiredModelFields = useMemo(
     () => REQUIRED_MODEL_FIELDS.filter((key) => !(draftValues[key] ?? "").trim()),
     [draftValues],
@@ -3317,7 +3324,7 @@ export function ConfigPanel({
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {isProcessing && mode !== 'team' ? (
+            {(isProcessing || globalTaskRunning) && mode !== 'team' ? (
               <span className="text-xs text-warn">{t('config.errors.processingDisabled')}</span>
             ) : null}
             <button
@@ -3331,7 +3338,7 @@ export function ConfigPanel({
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || (isProcessing && mode !== 'team')}
+              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || ((isProcessing || globalTaskRunning) && mode !== 'team')}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? t('common.saving') : t('common.save')}

@@ -21,6 +21,15 @@ if TYPE_CHECKING:
     from jiuwenswarm.common.schema.message import Message
 
 
+def _build_mention_target(names: list[str]) -> dict[str, Any]:
+    """构造 mention intent 的 fan_out 目标 dict（点名指定 member_names）。"""
+    return {
+        "intent": "mention",
+        "mention_all": False,
+        "member_names": tuple(names),
+        "speaker": None,
+    }
+
 
 class ChannelManager(ABC):
     """
@@ -82,9 +91,14 @@ class ChannelManager(ABC):
         注意: 回调本身保持同步签名，避免旧 Channel 调用方（如飞书 webhook）
         产生 "coroutine was never awaited" 错误。
         """
+        # feishu_create_time 为飞书服务端在消息创建（用户发送）时刻打的毫秒时间戳，
+        # 与本行日志时间（我方收到回调时刻）的差值即"飞书侧创建→我方收到"的投递延迟，
+        # 用于排查飞书延迟补推旧消息造成的幽灵 /join、重复通知等问题。
+        # 其他 channel 无此字段时为 None，不影响日志。
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
         logger.info(
-            "[ChannelManager] Channel 消息 -> MessageHandler: id=%s channel_id=%s",
-            msg.id, msg.channel_id,
+            "[ChannelManager] Channel 消息 -> MessageHandler: id=%s channel_id=%s feishu_create_time=%s",
+            msg.id, msg.channel_id, metadata.get("feishu_create_time"),
         )
         if not self._get_channel_by_id(msg.channel_id):
             logger.info(f"[ChannelManager] Channel: {msg.channel_id} closed, cancel this user message.")
@@ -430,15 +444,17 @@ class ChannelManager(ABC):
             return None
 
         _godview_tgt = {"intent": "godview", "mention_all": False, "member_names": [], "speaker": None}
-        _mention_all_tgt = {"intent": "mention", "mention_all": True, "member_names": [], "speaker": None}
 
         targets_hint = msg.metadata.get("send_file_targets")
         if isinstance(targets_hint, str):
             targets_hint = [targets_hint]
         if targets_hint and isinstance(targets_hint, list):
-            # 显式目标：按 channel_id 或 member_name 反查 *人类成员* 订阅（排除 GodView）。
-            # 排除 GodView 是为避免 lookup_member("GodView") 命中全部 godview 订阅，
-            # 导致指定单 channel 时泄漏到其他 godview channel（如 web）。
+            # 显式目标：按 channel_id 或 member_name 反查 *人类成员* 订阅，构造 mention 定向。
+            # 不追加 godview intent——godview intent 在 dispatch 层为全 session 广播
+            # （lookup_member("GodView") 返回所有 channel 的 godview 订阅），一旦追加会把
+            # 文件投给未被点名的 godview（如传 ["feishu"] 却顺带发给 web godview）。故显式
+            # 目标只走 mention 精确定向：点名谁、谁收；未点名的 channel 不收。
+            # 无人类席位匹配（如只传 ["web"] 而 web 仅有 godview 订阅）→ 回退 godview。
             wanted = {str(x).strip() for x in targets_hint if str(x).strip()}
             matched_names: list[str] = []
             for sub in all_subs:
@@ -447,25 +463,26 @@ class ChannelManager(ABC):
                 if sub.member_name in wanted or sub.routing_key.channel_id in wanted:
                     if sub.member_name and sub.member_name not in matched_names:
                         matched_names.append(sub.member_name)
-            if not matched_names:
+            if matched_names:
+                fan_out = [_build_mention_target(matched_names)]
+            else:
                 logger.info(
                     "[ChannelManager] file dispatch: send_file_targets=%s 无匹配人类成员订阅，回退 godview",
                     wanted,
                 )
                 fan_out = [_godview_tgt]
-            else:
-                fan_out = [{
-                    "intent": "mention",
-                    "mention_all": False,
-                    "member_names": tuple(matched_names),
-                    "speaker": None,
-                }]
         else:
-            # 自动模式：godview 覆盖 web 等已注册 GodView 的 channel；
-            # mention_all 覆盖所有 /join 的人类成员席位（飞书/xiaoyi 的 reviewer-N）。
-            # 飞书/xiaoyi 的 GodView 订阅仅在用户后续发消息后才补注册，时序不可靠，
-            # 故用 mention_all 兜底确保人类 channel 必达。
-            fan_out = [_godview_tgt, _mention_all_tgt]
+            # 自动模式（无显式目标）→ 发起者优先。
+            # team 模式下一个 session 复用同一流式任务，file msg 不携带发起者 member_name
+            # （rid 固定为建会话那轮）。此处按 session_id 反查最近一次人类发起者兜底：
+            # - 有 last-originator → 定向到该席位（多 app 不互窜）。
+            # - 无（web 发起 / 无人类 /join / 并发覆盖到另一 human）→ 仅 godview（不误投 feishu）。
+            last_origin = self._message_handler.get_session_last_originator(sid)
+            target_members = [last_origin[1]] if last_origin else []
+            if target_members:
+                fan_out = [_build_mention_target(target_members)]
+            else:
+                fan_out = [_godview_tgt]
 
         msg.metadata["fan_out_targets"] = fan_out
         logger.info(

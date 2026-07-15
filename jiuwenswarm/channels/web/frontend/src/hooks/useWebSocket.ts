@@ -295,6 +295,7 @@ interface UseWebSocketOptions {
   onConnect?: (payload: ConnectionAckPayload) => void;
   onDisconnect?: () => void;
   onError?: (error: string) => void;
+  onConfigChanged?: (updatedKeys?: string[]) => void;
 }
 
 interface UseWebSocketReturn {
@@ -551,6 +552,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onConnect,
     onDisconnect,
     onError,
+    onConfigChanged,
   } = options;
 
   // 同步更新 ref，避免竞态条件
@@ -566,6 +568,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const onConnectRef = useRef(onConnect);
   const onDisconnectRef = useRef(onDisconnect);
   const onErrorRef = useRef(onError);
+  const onConfigChangedRef = useRef(onConfigChanged);
   const sendMessageRef = useRef<typeof sendMessage>();
   const recentEventRef = useRef<Map<string, number>>(new Map());
   const teamToolCallMemberRef = useRef<Map<string, string>>(new Map());
@@ -659,6 +662,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       if (Array.isArray(ackPayload.tools)) {
         setAvailableTools(ackPayload.tools);
       }
+      useChatStore.getState().setGlobalTaskRunning(Boolean(ackPayload.task_running));
       onConnectRef.current?.(ackPayload);
     },
     [setAvailableTools, setConnected]
@@ -956,6 +960,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       resetContextCompressionTurn(sessionId);
       userInputVersionRef.current += 1;
       stopAllTts();
+
+      // A new query supersedes an unanswered inline question for this same session.
+      if (useChatStore.getState().getRuntime(sessionId)?.pendingQuestion) {
+        useChatStore.getState().setPendingQuestion(sessionId, null);
+      }
 
       // 添加用户消息（附带输入栏选中的技能）
       const selectedSkills = useSessionStore.getState().getRuntime(sessionId)?.selectedSkills ?? [];
@@ -1376,7 +1385,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onConnectRef.current = onConnect;
     onDisconnectRef.current = onDisconnect;
     onErrorRef.current = onError;
-  }, [onConnect, onDisconnect, onError]);
+    onConfigChangedRef.current = onConfigChanged;
+  }, [onConfigChanged, onConnect, onDisconnect, onError]);
 
   const shouldDropDuplicatedEvent = useCallback(
     (eventName: string, payload: Record<string, unknown>): boolean => {
@@ -1664,6 +1674,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         const content = normalizeFinalContent(payload);
         finishContextCompressionTurn(sessionId);
+
+        if (typeof payload.source === 'string' && payload.source === 'proactive_notification') {
+          if (content) {
+            useHarnessStore.getState().setProactiveNotification(content);
+          }
+          return;
+        }
 
         // team 模式下，过滤成员输出，只保留外层 leader 回复。
         if (isHiddenTeamTeammateMessagePayload(currentMode ?? 'agent.plan', payload)) {
@@ -2228,6 +2245,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           content,
           timestamp: new Date().toISOString(),
         });
+      }),
+      webClient.on('config.changed', ({ payload }) => {
+        const updatedKeys = Array.isArray(payload?.updated_keys)
+          ? payload.updated_keys.filter((key): key is string => typeof key === 'string')
+          : undefined;
+        onConfigChangedRef.current?.(updatedKeys);
+      }),
+      webClient.on('task.global_running', ({ payload }) => {
+        useChatStore.getState().setGlobalTaskRunning(Boolean(payload?.running));
       }),
       webClient.on('chat.error', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);

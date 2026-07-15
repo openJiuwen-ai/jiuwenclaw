@@ -928,6 +928,11 @@
       "requiredModelFields": "模型配置为必填：{{fields}}。请完整填写后再保存并重启。",
       "saveFailed": "保存失败，请稍后重试",
       "processingDisabled": "任务执行中，请等待任务完成后再保存配置。",
+      "taskRunning": "有任务正在运行，请等待任务完成后再保存配置。",
+      "configChangedTitle": "配置已被其他窗口更新",
+      "configChangedDesc": "是否丢弃本地草稿并加载最新配置？取消则保留当前草稿继续编辑。",
+      "configChangedConfirm": "加载最新配置",
+      "configChangedCancel": "保留草稿",
       "proactiveIntEmpty": "{{field}} 不能为空，需为 {{lo}}-{{hi}} 的正整数",
       "proactiveIntNotInteger": "{{field}} 必须是正整数（{{lo}}-{{hi}}），当前值无效：{{value}}",
       "proactiveIntOutOfRange": "{{field}} 需为 {{lo}}-{{hi}} 的正整数，当前：{{value}}"
@@ -1678,6 +1683,7 @@
     "installNow": "安装并重启",
     "pipUpgrade": "升级",
     "pipRestart": "立即重启",
+    "restoreDefaults": "恢复默认更新源",
     "currentVersion": "当前版本",
     "latestVersion": "最新版本",
     "state": "更新状态",
@@ -1710,11 +1716,11 @@
       "downloadFailed": "下载更新失败",
       "upgradeFailed": "安装更新失败",
       "saveConfigFailed": "保存更新配置失败",
+      "resetSourceFailed": "恢复默认更新源失败",
       "installUnavailable": "当前环境无法直接触发安装，请确认在桌面应用内运行。",
       "installFailed": "启动更新安装失败"
     },
     "fields": {
-      "enabled": "启用更新",
       "releaseApiType": "更新源",
       "releaseApiUrl": "更新地址"
     }
