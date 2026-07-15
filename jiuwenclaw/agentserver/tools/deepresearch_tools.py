@@ -459,6 +459,7 @@ async def deepresearch_stream(
     from jiuwenclaw.agentserver.tools.deepresearch_stream_router import (  # pylint: disable=import-outside-toplevel
         RouterState,
         build_interrupt_prompt,
+        collected_questions,
         is_outline_status_placeholder,
         route_chunk,
     )
@@ -569,6 +570,10 @@ async def deepresearch_stream(
                 # marker 结构化透传:agent 按 (1) §Stage3 读 marker.content/questions/prompt
                 # 建 free_input/preview 卡(OutlineContent→Markdown、outline_ref=conversation_id、meta 轮次)
                 marker = {k: v for k, v in chunk.items() if k != "__deepsearch_status__"}
+                if node_id == "feedback_handler" and not marker.get("questions"):
+                    questions = collected_questions(state)
+                    if questions:
+                        marker["questions"] = questions
                 if (
                     node_id == "outline_interaction"
                     and not marker.get("outline")
@@ -600,7 +605,7 @@ async def deepresearch_stream(
                            "conversation_id": resolved_cid,
                            "node_id": node_id,
                            "marker": marker,
-                           "prompt": build_interrupt_prompt(node_id, state, chunk, query)}
+                           "prompt": build_interrupt_prompt(node_id, state, marker, query)}
                 # The runner emits this marker before its async cleanup persists the
                 # graph checkpoint. Keep consuming to EOF so it can exit naturally;
                 # breaking here makes finally terminate the resumable subprocess.

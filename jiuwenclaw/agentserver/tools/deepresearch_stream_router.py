@@ -53,6 +53,7 @@ _SECTION_PROCESS_NODES = {
 }
 
 _CONTROL_PROCESS_VALUES = {"SUCCESS", "ALL END", "SECTION END"}
+_QUESTION_NODES = {"question_generator", "generate_questions"}
 
 
 @dataclass
@@ -70,6 +71,8 @@ class RouterState:
     interrupt_conversation_id: str = ""
     section_titles: dict[str, str] = field(default_factory=dict)
     authoritative_section_indices: set[str] = field(default_factory=set)
+    question_parts: dict[str, list[str]] = field(default_factory=dict)
+    question_order: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.authoritative_section_indices.update(self.section_titles)
@@ -103,6 +106,30 @@ def _as_text(val) -> str:
         return json.dumps(val, ensure_ascii=False)
     except (TypeError, ValueError):
         return str(val)
+
+
+def collected_questions(state: RouterState) -> str:
+    """Return question-generator message fragments in first-seen message order."""
+    return "".join(
+        "".join(state.question_parts[message_id])
+        for message_id in state.question_order
+    ).strip()
+
+
+def _remember_question_chunk(state: RouterState, chunk: dict, content: Any) -> None:
+    if (
+        str(chunk.get("agent", "")).strip() not in _QUESTION_NODES
+        or str(chunk.get("message_type", "")).strip() != "message_chunk"
+    ):
+        return
+    text = _as_text(content)
+    if not text:
+        return
+    message_id = str(chunk.get("message_id", "")).strip() or "__default__"
+    if message_id not in state.question_parts:
+        state.question_parts[message_id] = []
+        state.question_order.append(message_id)
+    state.question_parts[message_id].append(text)
 
 
 def _chunk_reasoning_content(chunk: dict, content: Any) -> Any:
@@ -213,7 +240,7 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
     职责:① 累积 report 和 outline,为不含正文的 interrupt marker 提供兜底;
          ② 捕获 interrupt chunk 的 node_id/raw_prompt 进 state(interrupt chunk 先于
             interrupted marker 到达,marker 到达时 tool 调 build_interrupt_prompt);
-         ③ 并行章节节点把未经压缩的原始过程按章节写入 chat.reasoning。
+         ③ outline 正文和并行章节未经压缩的原始过程写入 chat.reasoning。
     status marker(__deepsearch_status__)不在此处理(由 tool 主循环识别);interrupted marker
     本体由 tool 主循环捕获后整块传给 build_interrupt_prompt(marker 参数)。
     """
@@ -225,6 +252,7 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
     event = str(chunk.get("event", "")).strip()
     content = chunk.get("content", "")
     message_type = str(chunk.get("message_type", "")).strip()
+    _remember_question_chunk(state, chunk, content)
 
     # 中断 chunk:捕获 raw_prompt + node_id,不转发(interrupted marker 到达时拼 prompt)
     if message_type == "interrupt" or str(chunk.get("event")) == "waiting_user_input":
@@ -272,10 +300,14 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
             frames.append(_section_reasoning(state, chunk, process_content))
         return frames
 
-    # 非并行节点维持已有 reasoning_content 通用透传行为。
-    reasoning = _chunk_reasoning_content(chunk, content)
-    if reasoning:
-        frames.append({"event_type": "chat.reasoning", "content": _as_text(reasoning)})
+    # 大纲正文只读展示在思考过程；其他非并行节点维持 reasoning_content 通用透传。
+    if agent == "outline":
+        for process_content in _raw_process_parts(chunk, content):
+            frames.append({"event_type": "chat.reasoning", "content": process_content})
+    else:
+        reasoning = _chunk_reasoning_content(chunk, content)
+        if reasoning:
+            frames.append({"event_type": "chat.reasoning", "content": _as_text(reasoning)})
 
     # 首次见 → task.start(交互节点也发边界气泡,让用户看到"大纲生成中"等)
     if key not in state.active_nodes:

@@ -403,6 +403,68 @@ async def test_start_returns_interrupted_outcome_from_marker():
 
 
 @pytest.mark.asyncio
+async def test_feedback_interrupt_injects_cached_questions_when_marker_has_none():
+    lines = [
+        json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+        json.dumps({
+            "agent": "question_generator",
+            "message_type": "message_chunk",
+            "message_id": "Q1",
+            "content": "1. 市场？\n2. 时间？",
+        }, ensure_ascii=False),
+        json.dumps({
+            "__deepsearch_status__": "interrupted",
+            "agent": "feedback_handler",
+            "conversation_id": "C1",
+            "content": "Enter your feedback:",
+        }),
+    ]
+    patches = _patch_env(lines)
+    for active_patch in patches:
+        active_patch.start()
+    try:
+        result = await dt.deepresearch_stream._func(
+            action="start", query="X", file_name="r",
+        )
+    finally:
+        for active_patch in patches:
+            active_patch.stop()
+
+    assert json.loads(result)["marker"]["questions"] == "1. 市场？\n2. 时间？"
+
+
+@pytest.mark.asyncio
+async def test_feedback_interrupt_preserves_native_questions():
+    lines = [
+        json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+        json.dumps({
+            "agent": "question_generator",
+            "message_type": "message_chunk",
+            "message_id": "Q1",
+            "content": "缓存问题",
+        }, ensure_ascii=False),
+        json.dumps({
+            "__deepsearch_status__": "interrupted",
+            "agent": "feedback_handler",
+            "conversation_id": "C1",
+            "questions": ["原生问题"],
+        }, ensure_ascii=False),
+    ]
+    patches = _patch_env(lines)
+    for active_patch in patches:
+        active_patch.start()
+    try:
+        result = await dt.deepresearch_stream._func(
+            action="start", query="X", file_name="r",
+        )
+    finally:
+        for active_patch in patches:
+            active_patch.stop()
+
+    assert json.loads(result)["marker"]["questions"] == ["原生问题"]
+
+
+@pytest.mark.asyncio
 async def test_outline_marker_injects_accumulated_outline_when_sdk_omits_it():
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),

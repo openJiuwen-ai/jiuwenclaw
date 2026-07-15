@@ -5,6 +5,7 @@ import json
 from jiuwenclaw.agentserver.tools.deepresearch_stream_router import (
     RouterState,
     build_interrupt_prompt,
+    collected_questions,
     route_chunk,
 )
 
@@ -13,10 +14,10 @@ def test_first_seen_node_emits_task_start():
     state = RouterState()
     chunk = {"agent": "outline", "event": "", "content": "大纲..."}
     frames = route_chunk(chunk, state)
-    assert len(frames) == 1
-    assert frames[0]["event_type"] == "task.start"
-    assert frames[0]["node_name"] == "outline"
-    assert frames[0]["task_id"] == "dr_outline"
+    assert frames[0] == {"event_type": "chat.reasoning", "content": "大纲..."}
+    assert frames[1]["event_type"] == "task.start"
+    assert frames[1]["node_name"] == "outline"
+    assert frames[1]["task_id"] == "dr_outline"
     assert state.active_nodes["outline"]["started"] is True
 
 
@@ -24,7 +25,7 @@ def test_same_node_second_chunk_no_duplicate_start():
     state = RouterState()
     route_chunk({"agent": "outline", "content": "a"}, state)
     frames = route_chunk({"agent": "outline", "content": "b"}, state)
-    assert frames == []  # 已 start,不再发 task.start
+    assert frames == [{"event_type": "chat.reasoning", "content": "b"}]
 
 
 def test_event_done_emits_task_complete():
@@ -334,6 +335,62 @@ def test_reasoning_content_emits_chat_reasoning():
     state = RouterState()
     frames = route_chunk({"agent": "outline", "reasoning_content": "thinking..."}, state)
     assert any(f["event_type"] == "chat.reasoning" and f["content"] == "thinking..." for f in frames)
+
+
+def test_outline_content_emits_chat_reasoning_for_readonly_thinking_display():
+    state = RouterState()
+    frames = route_chunk({
+        "agent": "outline",
+        "event": "message",
+        "content": "# 研究大纲\n\n1. 背景\n2. 方案对比",
+    }, state)
+
+    assert frames[0] == {
+        "event_type": "chat.reasoning",
+        "content": "# 研究大纲\n\n1. 背景\n2. 方案对比",
+    }
+
+
+def test_question_chunks_are_aggregated_by_message_id_in_first_seen_order():
+    state = RouterState()
+    route_chunk({
+        "agent": "question_generator",
+        "message_type": "message_chunk",
+        "message_id": "q1",
+        "content": "1. 关注哪些市场",
+    }, state)
+    route_chunk({
+        "agent": "question_generator",
+        "message_type": "message_chunk",
+        "message_id": "q2",
+        "content": "2. 使用什么时间范围",
+    }, state)
+    route_chunk({
+        "agent": "question_generator",
+        "message_type": "message_chunk",
+        "message_id": "q1",
+        "content": "？\n",
+    }, state)
+
+    assert collected_questions(state) == "1. 关注哪些市场？\n2. 使用什么时间范围"
+
+
+def test_question_cache_ignores_unrelated_chunks():
+    state = RouterState()
+    route_chunk({
+        "agent": "info_collector",
+        "message_type": "message_chunk",
+        "message_id": "noise",
+        "content": "检索过程",
+    }, state)
+    route_chunk({
+        "agent": "question_generator",
+        "message_type": "summary_response",
+        "message_id": "noise-2",
+        "content": "不是问题碎片",
+    }, state)
+
+    assert collected_questions(state) == ""
 
 
 def test_section_node_uses_keyed_state():
