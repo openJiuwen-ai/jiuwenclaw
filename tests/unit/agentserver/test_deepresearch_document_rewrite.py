@@ -124,6 +124,21 @@ def test_prepare_rejects_inference_block(tmp_path):
     assert caught.value.code == "INFERENCE_REWRITE_UNSUPPORTED"
 
 
+def test_prepare_rejects_rendered_inference_resource_link(tmp_path):
+    body = "[结论](report_infer/inference_7.html)需要润色。\n"
+    report, provenance = _write_document(tmp_path, body)
+    provenance["inference_manifest"] = [{
+        "id": "7",
+        "path": "report_infer/inference_7.html",
+        "sha256": "a" * 64,
+    }]
+    report.with_suffix(".provenance.json").write_text(json.dumps(provenance), encoding="utf-8")
+
+    with pytest.raises(RewriteError) as caught:
+        _prepare(tmp_path, report, provenance, "需要润色。")
+    assert caught.value.code == "INFERENCE_REWRITE_UNSUPPORTED"
+
+
 def test_prepare_rejects_stale_hash_and_workspace_escape(tmp_path):
     report, provenance = _write_document(tmp_path, "原句。\n")
     provenance["content_sha256"] = "0" * 64

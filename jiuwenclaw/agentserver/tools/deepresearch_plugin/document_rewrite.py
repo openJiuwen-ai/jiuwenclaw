@@ -154,6 +154,17 @@ def _citation_index(provenance: dict) -> tuple[dict[str, dict], dict[str, dict]]
     return by_id, by_key
 
 
+def _block_contains_inference(block_text: str, provenance: dict) -> bool:
+    if "#inference:" in block_text:
+        return True
+    for item in provenance.get("inference_manifest") or []:
+        if isinstance(item, dict):
+            path = str(item.get("path") or "")
+            if path and path in block_text:
+                return True
+    return False
+
+
 def prepare_rewrite(
     *,
     workspace_root: str | Path,
@@ -199,7 +210,7 @@ def prepare_rewrite(
     block = next((item for item in iter_rewrite_blocks(markdown) if item.block_id == block_id), None)
     if block is None:
         raise RewriteError("UNSUPPORTED_SELECTION", "the selected Markdown block is unsupported")
-    if "#inference:" in block.text:
+    if _block_contains_inference(block.text, provenance):
         raise RewriteError("INFERENCE_REWRITE_UNSUPPORTED", "inference-linked text cannot be rewritten")
     if not isinstance(start, int) or not isinstance(end, int) or start < 0 or end <= start or end > len(block.text):
         raise RewriteError("REVISION_CONFLICT", "selection offsets are stale")
