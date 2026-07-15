@@ -462,7 +462,6 @@
     "connectionStatus": "连接状态",
     "version": "版本",
     "language": "语言",
-    "appearance": "外观",
     "moreSettings": "更多设置"
   },
   "heartbeat": {
@@ -1727,9 +1726,6 @@
     "errorTitle": "应用加载出错",
     "unknownError": "未知错误",
     "reload": "刷新页面",
-    "themeSystem": "跟随系统",
-    "themeDark": "深色模式",
-    "themeLight": "浅色模式",
     "configError": "无法通过 WebSocket 获取后端配置，已使用默认配置",
     "configErrorHint": "请先启动 E2E 后端（如",
     "configErrorDefault": "，默认监听 19000）。若后端不在本机或端口不同，可在",

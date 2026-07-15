@@ -588,14 +588,14 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
     <div className="flex-1 min-h-0 relative" data-testid="cron-panel" data-session-id={sessionId}>
       {success && (
         <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20" data-testid="cron-success">
-          <div className="bg-ok text-white px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+          <div className="bg-ok text-text-inverse px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
             {success}
           </div>
         </div>
       )}
       {error && (
         <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20" data-testid="cron-error">
-          <div className="bg-danger text-white px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+          <div className="bg-danger text-text-inverse px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
             {error}
           </div>
         </div>
@@ -677,10 +677,10 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                           <div
                             className="relative inline-block w-10 h-6 align-middle select-none rounded-full cursor-pointer"
                             onClick={() => setNewJob({ ...newJob, enabled: !newJob.enabled })}
-                            style={{ backgroundColor: newJob.enabled ? '#10b981' : '#d1d5db' }}
+                            style={{ backgroundColor: newJob.enabled ? 'var(--color-toggle-enabled)' : 'var(--color-toggle-disabled)' }}
                           >
                             <div
-                              className="absolute left-1 top-1 h-4 w-4 rounded-full bg-white transition-transform"
+                              className="absolute left-1 top-1 h-4 w-4 rounded-full bg-[var(--color-control-thumb)] "
                               style={{ transform: newJob.enabled ? 'translateX(16px)' : 'none' }}
                             />
                           </div>
@@ -829,10 +829,10 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                                   [job.id]: { ...prev[job.id], enabled: !prev[job.id].enabled },
                                 }))}
                                 title={job.id === PROACTIVE_AUTO_JOB_ID ? t('cron.autoManagedToggleDisabled') : undefined}
-                                style={{ backgroundColor: editJob.enabled ? '#10b981' : '#d1d5db' }}
+                                style={{ backgroundColor: editJob.enabled ? 'var(--color-toggle-enabled)' : 'var(--color-toggle-disabled)' }}
                               >
                                 <div
-                                  className="absolute left-1 top-1 h-4 w-4 rounded-full bg-white transition-transform"
+                                  className="absolute left-1 top-1 h-4 w-4 rounded-full bg-[var(--color-control-thumb)] "
                                   style={{ transform: editJob.enabled ? 'translateX(16px)' : 'none' }}
                                 />
                               </div>

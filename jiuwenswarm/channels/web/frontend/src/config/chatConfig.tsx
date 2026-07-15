@@ -1,8 +1,5 @@
 import { CircleAlert } from 'lucide-react';
 import type { AgentMode, Permission } from '../types';
-import clusterIcon from '../assets/chat/cluster.svg';
-import singleAgentIcon from '../assets/chat/single-agent.svg';
-import permissionDefaultIcon from '../assets/chat/permission-default.svg';
 
 export interface ChatOptionDef<T extends string> {
   value: T;
@@ -14,17 +11,17 @@ export interface ChatOptionDef<T extends string> {
 // ── 工作模式图标 ────────────────────────────────────────────────
 
 function ClusterModeIcon({ className }: { className?: string }) {
-  return <img src={clusterIcon} className={className} aria-hidden="true" />;
+  return <span className={`chat-config-icon chat-config-icon--cluster ${className ?? ''}`} aria-hidden="true" />;
 }
 
 function SingleAgentModeIcon({ className }: { className?: string }) {
-  return <img src={singleAgentIcon} className={className} aria-hidden="true" />;
+  return <span className={`chat-config-icon chat-config-icon--single-agent ${className ?? ''}`} aria-hidden="true" />;
 }
 
 // ── 权限图标 ────────────────────────────────────────────────────
 
 function DefaultPermissionIcon({ className }: { className?: string }) {
-  return <img src={permissionDefaultIcon} className={className} aria-hidden="true" />;
+  return <span className={`chat-config-icon chat-config-icon--permission ${className ?? ''}`} aria-hidden="true" />;
 }
 
 function SafeAccessPermissionIcon({ className }: { className?: string }) {

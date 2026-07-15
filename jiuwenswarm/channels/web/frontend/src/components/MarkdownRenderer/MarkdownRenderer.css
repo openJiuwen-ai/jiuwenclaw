@@ -12,19 +12,15 @@
   border-radius: var(--radius-md);
   border: 1px solid transparent;
   background: transparent;
-  color: var(--muted);
-  transition:
-    color var(--duration-fast) ease,
-    background-color var(--duration-fast) ease,
-    border-color var(--duration-fast) ease;
+  color: var(--color-text-secondary);
   cursor: pointer;
   flex-shrink: 0;
 }
 
 .markdown-toolbar-btn:hover {
-  color: var(--text);
-  background: var(--bg-hover);
-  border-color: var(--border);
+  color: var(--color-text-primary);
+  background: var(--color-surface-hover);
+  border-color: var(--color-border-default);
 }
 
 /* Toggle pill */
@@ -38,21 +34,20 @@
   font-size: var(--font-size-xs);
   font-weight: 500;
   white-space: nowrap;
-  transition: all var(--duration-fast) ease;
   cursor: pointer;
   border: 1px solid transparent;
-  color: var(--muted);
+  color: var(--color-text-secondary);
 }
 
 .markdown-toggle-pill:hover {
-  color: var(--text);
+  color: var(--color-text-primary);
 }
 
 .markdown-toggle-pill--active {
-  background: var(--bg-elevated);
-  color: var(--text);
-  box-shadow: var(--shadow-sm);
-  border-color: var(--border);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-primary);
+  box-shadow: var(--effect-shadow-sm);
+  border-color: var(--color-border-default);
 }
 
 /* Mermaid diagram container */
@@ -60,8 +55,8 @@
   container-type: inline-size;
   margin-block: 16px;
   border-radius: var(--radius-xl);
-  border: 1px solid var(--border);
-  background: var(--bg-elevated);
+  border: 1px solid var(--color-border-default);
+  background: var(--color-surface-elevated);
   overflow: hidden;
 }
 
@@ -82,8 +77,8 @@
   justify-content: space-between;
   gap: 8px;
   padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-accent);
+  border-bottom: 1px solid var(--color-border-default);
+  background: var(--color-surface-page-accent);
 }
 
 /* View toggle container */
@@ -91,9 +86,9 @@
   display: inline-flex;
   align-items: center;
   border-radius: var(--radius-lg);
-  background: var(--secondary);
+  background: var(--color-action-secondary);
   padding: 2px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-border-default);
 }
 
 /* Actions container */
@@ -114,7 +109,7 @@
 .mermaid-diagram__toolbar-divider {
   width: 1px;
   height: 16px;
-  background: var(--border);
+  background: var(--color-border-default);
   margin-inline: 2px;
 }
 
@@ -152,8 +147,8 @@
 
 .mermaid-code-view pre {
   font-size: 14px;
-  font-family: var(--mono);
-  color: var(--text);
+  font-family: var(--font-mono);
+  color: var(--color-text-primary);
 }
 
 /* Responsive container queries */

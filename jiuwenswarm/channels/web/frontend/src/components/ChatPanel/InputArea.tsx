@@ -24,16 +24,6 @@ import {
 import { getInputProjectOptions, isDefaultInputProject } from './projectSelection';
 import sendIcon from '../../assets/send.svg';
 import sendActiveIcon from '../../assets/send_active.svg';
-import chatSkillIcon from '../../assets/skillIcon.svg';
-import configIcon from '../../assets/sidebar/config.svg';
-import workAddIcon from '../../assets/work-mode/add-project.svg';
-import workArrowRightIcon from '../../assets/work-mode/arrow-right.svg';
-import workCheckIcon from '../../assets/work-mode/check.svg';
-import workCloseIcon from '../../assets/work-mode/close.svg';
-import workFolderIcon from '../../assets/work-mode/folder.svg';
-import workCollapseIcon from '../../assets/work-mode/collapse.svg';
-import workExpandIcon from '../../assets/work-mode/expand.svg';
-import workSearchIcon from '../../assets/work-mode/search.svg';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
@@ -64,6 +54,7 @@ type InputAreaTeamMember = {
 };
 
 type ComposerSuggestionKind = 'member' | 'role';
+type WorkIconName = 'add' | 'arrow' | 'check' | 'close' | 'collapse' | 'expand' | 'folder' | 'search';
 
 type ComposerSuggestionState = {
   kind: ComposerSuggestionKind;
@@ -92,6 +83,10 @@ function getComposerSuggestionItems(
 
 function getProjectLabel(project: ProjectInfo | null, fallback: string): string {
   return project ? project.name : fallback;
+}
+
+function WorkIcon({ name, className }: { name: WorkIconName; className?: string }) {
+  return <span className={cx('chat-work-icon', `chat-work-icon--${name}`, className)} aria-hidden="true" />;
 }
 
 function isDefaultProject(project: ProjectInfo): boolean {
@@ -1686,13 +1681,11 @@ export function InputArea({
               disabled={isWorkContextLocked}
               title={displayedProject?.project_dir || (isWorkContextLocked ? t('multiSession.project.lockedProjectTitle') : t('multiSession.project.chooseProjectDirectory'))}
             >
-              <img className="chat-work-select__root-icon" src={workFolderIcon} alt="" aria-hidden="true" />
+              <WorkIcon name="folder" className="chat-work-select__root-icon" />
               <span>{getProjectLabel(displayedProject, t('multiSession.project.chooseProjectDirectory'))}</span>
-              <img
+              <WorkIcon
                 className="chat-work-select__chevron"
-                src={workMenuOpen === 'project' ? workCollapseIcon : workExpandIcon}
-                alt=""
-                aria-hidden="true"
+                name={workMenuOpen === 'project' ? 'collapse' : 'expand'}
               />
             </button>
             {displayedProject && !isWorkContextLocked ? (
@@ -1707,7 +1700,7 @@ export function InputArea({
                     setWorkMenuOpen(null);
                   }}
                 >
-                  <img src={workCloseIcon} alt="" aria-hidden="true" />
+                  <WorkIcon name="close" />
                 </button>
               </span>
             ) : null}
@@ -1719,13 +1712,13 @@ export function InputArea({
                       void openProjectCreateDialog(mode);
                     }}
                     itemClassName="chat-work-select__option chat-work-select__option--compact"
-                    blankIcon={<img src={workAddIcon} alt="" aria-hidden="true" />}
-                    existingIcon={<img src={workFolderIcon} alt="" aria-hidden="true" />}
+                    blankIcon={<WorkIcon name="add" />}
+                    existingIcon={<WorkIcon name="folder" />}
                   />
                 ) : (
                   <>
                     <label className="chat-work-select__search-wrap">
-                      <img src={workSearchIcon} alt="" aria-hidden="true" />
+                      <WorkIcon name="search" />
                       <input
                         className="chat-work-select__search"
                         value={projectSearch}
@@ -1748,9 +1741,9 @@ export function InputArea({
                           aria-checked={active}
                           title={project.project_dir}
                         >
-                          <img src={workFolderIcon} alt="" aria-hidden="true" />
+                          <WorkIcon name="folder" />
                           <span>{project.name}</span>
-                          {active ? <img className="chat-work-select__check" src={workCheckIcon} alt="" aria-hidden="true" /> : null}
+                          {active ? <WorkIcon name="check" className="chat-work-select__check" /> : null}
                         </button>
                       );
                     })}
@@ -1793,7 +1786,7 @@ export function InputArea({
                 setWorkDialogOpen(false);
               }}
             >
-              <img src={workCloseIcon} alt="" aria-hidden="true" />
+              <WorkIcon name="close" />
             </button>
             <div className="chat-work-dialog__title">{t('multiSession.project.newProject')}</div>
             <input
@@ -1850,16 +1843,16 @@ function ProjectAddSubmenu({ onCreate }: { onCreate: (mode: ProjectCreateMode) =
         role="menuitem"
         aria-haspopup="menu"
       >
-        <img src={workAddIcon} alt="" aria-hidden="true" />
+        <WorkIcon name="add" />
         <span>{t('multiSession.project.addNewProject')}</span>
-        <img className="chat-work-select__arrow" src={workArrowRightIcon} alt="" aria-hidden="true" />
+        <WorkIcon name="arrow" className="chat-work-select__arrow" />
       </button>
       <div className="chat-work-select__submenu" role="menu">
         <ProjectCreateMenu
           onCreate={onCreate}
           itemClassName="chat-work-select__option chat-work-select__option--compact"
-          blankIcon={<img src={workAddIcon} alt="" aria-hidden="true" />}
-          existingIcon={<img src={workFolderIcon} alt="" aria-hidden="true" />}
+          blankIcon={<WorkIcon name="add" />}
+          existingIcon={<WorkIcon name="folder" />}
         />
       </div>
     </div>
@@ -2358,7 +2351,7 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
       >
         <span className="chat-mode-select__value">
           <span className="chat-mode-select__icon" aria-hidden="true">
-            <img src={chatSkillIcon} alt="" className="w-[14px] h-[14px]" />
+            <span className="chat-config-icon chat-config-icon--skill" />
           </span>
           <span className="chat-mode-select__label">{t('chat.skills')}</span>
         </span>
@@ -2443,7 +2436,7 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
               className="chat-skill-select__manage-btn"
               data-testid="chat-skills-manage"
             >
-              <img src={configIcon} alt="" className="chat-skill-select__manage-icon" />
+              <span className="chat-config-icon chat-config-icon--settings chat-skill-select__manage-icon" aria-hidden="true" />
               <span>{t('chat.skillsManage')}</span>
             </button>
           </div>

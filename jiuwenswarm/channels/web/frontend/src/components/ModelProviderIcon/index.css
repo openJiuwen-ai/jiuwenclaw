@@ -13,8 +13,8 @@
 }
 
 .model-provider-icon--fallback {
-  background: color-mix(in srgb, var(--text) 12%, transparent);
-  color: var(--text);
+  background: color-mix(in srgb, var(--color-text-primary) 12%, transparent);
+  color: var(--color-text-primary);
   font-size: 9px;
   font-weight: 800;
   line-height: 1;

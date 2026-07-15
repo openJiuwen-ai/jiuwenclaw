@@ -7,23 +7,20 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import './SessionSidebar.css';
-import heartbeatIcon from '../../assets/sidebar/heartbeat.svg';
-import channelIcon from '../../assets/sidebar/channel.svg';
-import pluginIcon from '../../assets/sidebar/plugin.svg';
-import configIcon from '../../assets/sidebar/config.svg';
-import webIcon from '../../assets/sidebar/web.svg';
-import plusIcon from '../../assets/sidebar/plus.svg';
+import HeartbeatIcon from '../../assets/sidebar/heartbeat.svg?react';
+import ChannelIcon from '../../assets/sidebar/channel.svg?react';
+import PluginIcon from '../../assets/sidebar/plugin.svg?react';
+import ConfigIcon from '../../assets/sidebar/config.svg?react';
+import WebIcon from '../../assets/sidebar/web.svg?react';
+import PlusIcon from '../../assets/sidebar/plus.svg?react';
 import logoIcon from '/logo.svg';
-import advancedConfigIcon from '../../assets/sidebar/advanced-config-new.svg';
-import updateIcon from '../../assets/sidebar/advanced-config.svg';
-import appearanceSystemIcon from '../../assets/sidebar/appearance-system.svg';
-import appearanceDarkIcon from '../../assets/sidebar/appearance-dark.svg';
-import appearanceLightIcon from '../../assets/sidebar/appearance-light.svg';
-import workIcon from '../../assets/工作.svg';
-import cronDesignIcon from '../../assets/定时任务.svg';
-import skillDesignIcon from '../../assets/技能.svg';
-import agentDesignIcon from '../../assets/智能体.svg';
-import moreDesignIcon from '../../assets/更多.svg';
+import AdvancedConfigIcon from '../../assets/sidebar/advanced-config-new.svg?react';
+import UpdateIcon from '../../assets/sidebar/advanced-config.svg?react';
+import WorkIcon from '../../assets/工作.svg?react';
+import CronDesignIcon from '../../assets/定时任务.svg?react';
+import SkillDesignIcon from '../../assets/技能.svg?react';
+import AgentDesignIcon from '../../assets/智能体.svg?react';
+import MoreDesignIcon from '../../assets/更多.svg?react';
 import { webRequest } from '../../services/webClient';
 
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
@@ -52,20 +49,20 @@ const teamNavIcon = (
 );
 
 const mainNavItems: NavItem[] = [
-  { key: 'chat', labelKey: 'nav.work', icon: <img src={workIcon} alt="" /> },
-  { key: 'cron', labelKey: 'nav.cron', icon: <img src={cronDesignIcon} alt="" /> },
-  { key: 'skills', labelKey: 'nav.skills', icon: <img src={skillDesignIcon} alt="" /> },
-  { key: 'channels', labelKey: 'nav.channels', icon: <img src={channelIcon} alt="" /> },
-  { key: 'agents', labelKey: 'nav.agent', icon: <img src={agentDesignIcon} alt="" /> },
+  { key: 'chat', labelKey: 'nav.work', icon: <WorkIcon aria-hidden /> },
+  { key: 'cron', labelKey: 'nav.cron', icon: <CronDesignIcon aria-hidden /> },
+  { key: 'skills', labelKey: 'nav.skills', icon: <SkillDesignIcon aria-hidden /> },
+  { key: 'channels', labelKey: 'nav.channels', icon: <ChannelIcon aria-hidden /> },
+  { key: 'agents', labelKey: 'nav.agent', icon: <AgentDesignIcon aria-hidden /> },
   { key: 'teams', labelKey: 'nav.teams', icon: teamNavIcon },
 ];
 
 const moreNavItems: NavItem[] = [
-  { key: 'heartbeat', labelKey: 'nav.heartbeat', icon: <img src={heartbeatIcon} alt="" /> },
-  { key: 'extensions', labelKey: 'nav.extensions', icon: <img src={pluginIcon} alt="" /> },
-  { key: 'browserpanel', labelKey: 'nav.browser', icon: <img src={webIcon} alt="" /> },
-  { key: 'configpanel', labelKey: 'nav.config', icon: <img src={configIcon} alt="" /> },
-  { key: 'updatepanel', labelKey: 'nav.update', icon: <img src={updateIcon} alt="" /> },
+  { key: 'heartbeat', labelKey: 'nav.heartbeat', icon: <HeartbeatIcon aria-hidden /> },
+  { key: 'extensions', labelKey: 'nav.extensions', icon: <PluginIcon aria-hidden /> },
+  { key: 'browserpanel', labelKey: 'nav.browser', icon: <WebIcon aria-hidden /> },
+  { key: 'configpanel', labelKey: 'nav.config', icon: <ConfigIcon aria-hidden /> },
+  { key: 'updatepanel', labelKey: 'nav.update', icon: <UpdateIcon aria-hidden /> },
 ];
 
 // Advanced Config Panel Component
@@ -83,7 +80,6 @@ function AdvancedConfigPanel({
   buttonRef: React.RefObject<HTMLButtonElement>;
 }) {
   const { i18n, t } = useTranslation();
-  const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light');
   const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -108,16 +104,6 @@ function AdvancedConfigPanel({
   const handleLanguageChange = (lang: 'zh' | 'en') => {
     i18n.changeLanguage(lang);
     void webRequest('locale.set_conf', { preferred_language: lang }).catch(() => {});
-  };
-
-  const handleThemeChange = (newTheme: string) => {
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'light') {
-      document.documentElement.setAttribute('data-theme', 'light');
-    } else {
-      document.documentElement.removeAttribute('data-theme');
-    }
   };
 
   const isZh = i18n.language.startsWith('zh');
@@ -161,32 +147,6 @@ function AdvancedConfigPanel({
         </div>
       </div>
 
-      <div className="config-row">
-        <span className="config-row__label">{t('sessionSidebar.appearance')}</span>
-        <div className="segmented-control segmented-control--icons">
-          <button
-            className={`segmented-control__btn ${theme === 'system' ? 'segmented-control__btn--active' : ''}`}
-            onClick={() => handleThemeChange('system')}
-            title={t('app.themeSystem')}
-          >
-            <img src={appearanceSystemIcon} alt="" />
-          </button>
-          <button
-            className={`segmented-control__btn ${theme === 'dark' ? 'segmented-control__btn--active' : ''}`}
-            onClick={() => handleThemeChange('dark')}
-            title={t('app.themeDark')}
-          >
-            <img src={appearanceDarkIcon} alt="" />
-          </button>
-          <button
-            className={`segmented-control__btn ${theme === 'light' ? 'segmented-control__btn--active' : ''}`}
-            onClick={() => handleThemeChange('light')}
-            title={t('app.themeLight')}
-          >
-            <img src={appearanceLightIcon} alt="" />
-          </button>
-        </div>
-      </div>
     </div>
   );
 }
@@ -255,7 +215,7 @@ export function SessionSidebar({
           onClick={handleNewSession}
         >
           <span className="icon-rail-nav-item__icon">
-            <img src={plusIcon} alt="" width="16" height="16" />
+            <PlusIcon aria-hidden width="16" height="16" />
           </span>
           <span className="icon-rail-nav-item__label">{t('chat.newSession')}</span>
         </button>
@@ -280,7 +240,7 @@ export function SessionSidebar({
             aria-expanded={isMoreActive}
           >
             <span className="icon-rail-nav-item__icon">
-              <img src={moreDesignIcon} alt="" />
+              <MoreDesignIcon aria-hidden />
             </span>
             <span className="icon-rail-nav-item__label">{t('nav.more')}</span>
           </button>
@@ -313,7 +273,7 @@ export function SessionSidebar({
         aria-label={t('sessionSidebar.moreSettings')}
       >
         <span className="icon-rail-nav-item__icon">
-          <img src={advancedConfigIcon} alt="" width="16" height="16" />
+          <AdvancedConfigIcon aria-hidden width="16" height="16" />
         </span>
       </button>
 

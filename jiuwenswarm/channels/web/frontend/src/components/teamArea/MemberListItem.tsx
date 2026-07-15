@@ -43,7 +43,7 @@ export function MemberListItem({
     <button
       type="button"
       onClick={onClick}
-      className={`flex w-full items-center gap-3 rounded-md text-left transition-colors ${
+      className={`flex w-full items-center gap-3 rounded-md text-left  ${
         compact ? 'p-2' : 'p-3'
       } ${
         selected
@@ -94,7 +94,7 @@ export function MemberListItem({
               cy="16"
               r={radius}
               fill="none"
-              stroke="var(--border)"
+              stroke="var(--color-border-default)"
               strokeWidth={strokeWidth}
             />
             <circle
@@ -102,7 +102,7 @@ export function MemberListItem({
               cy="16"
               r={radius}
               fill="none"
-              stroke="var(--accent)"
+              stroke="var(--color-action-primary)"
               strokeWidth={strokeWidth}
               strokeLinecap="round"
               strokeDasharray={circumference}

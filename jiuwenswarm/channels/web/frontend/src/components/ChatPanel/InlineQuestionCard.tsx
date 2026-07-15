@@ -162,8 +162,8 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
   }
 
   const borderColor = isEvolution
-    ? 'var(--warning, #f59e0b)'
-    : 'var(--accent)';
+    ? 'var(--color-feedback-warning)'
+    : 'var(--color-action-primary)';
 
   return (
     <div className="animate-rise mx-2 my-3">
@@ -171,15 +171,15 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
         className="w-full rounded-xl overflow-hidden"
         style={{
           border: `1px solid ${borderColor}`,
-          backgroundColor: 'var(--card)',
+          backgroundColor: 'var(--color-surface-card)',
         }}
       >
         {/* 标题行 */}
         <div
           className="px-4 py-2.5 flex items-center justify-between"
           style={{
-            borderBottom: '1px solid var(--border)',
-            backgroundColor: 'var(--panel-strong)',
+            borderBottom: '1px solid var(--color-border-default)',
+            backgroundColor: 'var(--color-surface-panel-strong)',
           }}
         >
           <div className="flex items-center gap-2">
@@ -205,7 +205,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                 stroke="currentColor"
                 viewBox="0 0 24 24"
                 strokeWidth={2}
-                style={{ color: 'var(--accent)' }}
+                style={{ color: 'var(--color-action-primary)' }}
               >
                 <path
                   strokeLinecap="round"
@@ -216,14 +216,14 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
             )}
             <span
               className="text-xs font-semibold"
-              style={{ color: isEvolution ? borderColor : 'var(--accent)' }}
+              style={{ color: isEvolution ? borderColor : 'var(--color-action-primary)' }}
             >
               {pendingQuestion.questions[0]?.header ?? t('chatUi.inlineQuestion.header')}
             </span>
             {isBatch && (
               <span
                 className="text-xs"
-                style={{ color: 'var(--muted)' }}
+                style={{ color: 'var(--color-text-secondary)' }}
               >
                 {t('chatUi.inlineQuestion.entryCount', { count: pendingQuestion.questions.length })}
               </span>
@@ -232,10 +232,10 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
           {isBatch && !submitted && (
             <button
               onClick={handleAcceptAll}
-              className="text-xs font-medium px-2.5 py-1 rounded-md transition-opacity hover:opacity-80"
+              className="text-xs font-medium px-2.5 py-1 rounded-md  hover:opacity-80"
               style={{
                 color: 'white',
-                background: 'linear-gradient(135deg, var(--ok), var(--accent))',
+                background: 'linear-gradient(135deg, var(--color-feedback-success), var(--color-action-primary))',
               }}
             >
               {t('chatUi.inlineQuestion.acceptAll')}
@@ -256,14 +256,14 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                 key={qIndex}
                 style={
                   qIndex > 0
-                    ? { borderTop: '1px solid var(--border)' }
+                    ? { borderTop: '1px solid var(--color-border-default)' }
                     : undefined
                 }
               >
                 {/* 问题正文 */}
                 <div
                   className="px-4 pt-3 pb-2 text-sm prose prose-sm max-w-none prose-headings:font-semibold prose-headings:text-sm prose-ul:my-1 prose-li:my-0 prose-li:pl-1"
-                  style={{ color: 'var(--text)' }}
+                  style={{ color: 'var(--color-text-primary)' }}
                 >
                   <ApprovalQuestionContent question={question} />
                 </div>
@@ -288,27 +288,27 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                         key={option.label}
                         onClick={() => handleSelect(qIndex, option)}
                         disabled={submitted}
-                        className="w-full text-left px-4 py-2.5 text-sm font-medium rounded-lg transition-all"
+                        className="w-full text-left px-4 py-2.5 text-sm font-medium rounded-lg "
                         style={{
                           backgroundColor: isSelected
                             ? (isAccept
-                                ? 'var(--ok-subtle, rgba(34,197,94,0.12))'
+                                ? 'var(--color-feedback-success-subtle)'
                                 : isSessionAllow
-                                  ? 'var(--session-allow-subtle, rgba(59,130,246,0.08))'
+                                  ? 'var(--color-feedback-info-subtle)'
                                   : isAlwaysAllow
-                                    ? 'var(--accent-subtle)'
+                                    ? 'var(--color-action-primary-subtle)'
                                     : isReject
-                                      ? 'var(--danger-subtle, rgba(239,68,68,0.12))'
-                                      : 'var(--accent-subtle)')
-                            : 'var(--bg-elevated)',
+                                      ? 'var(--color-feedback-danger-subtle)'
+                                      : 'var(--color-action-primary-subtle)')
+                            : 'var(--color-surface-elevated)',
                           border: `1px solid ${
                             isSelected
-                              ? (isAccept ? 'var(--ok)' : isSessionAllow ? 'var(--session-allow, #3b82f6)' : isAlwaysAllow ? 'var(--accent)' : isReject ? 'var(--danger)' : 'var(--accent)')
-                              : 'var(--border)'
+                              ? (isAccept ? 'var(--color-feedback-success)' : isSessionAllow ? 'var(--color-feedback-info)' : isAlwaysAllow ? 'var(--color-action-primary)' : isReject ? 'var(--color-feedback-danger)' : 'var(--color-action-primary)')
+                              : 'var(--color-border-default)'
                           }`,
                           color: isSelected
-                            ? (isAccept ? 'var(--ok)' : isSessionAllow ? 'var(--session-allow, #3b82f6)' : isAlwaysAllow ? 'var(--accent)' : isReject ? 'var(--danger)' : 'var(--text-strong)')
-                            : 'var(--text)',
+                            ? (isAccept ? 'var(--color-feedback-success)' : isSessionAllow ? 'var(--color-feedback-info)' : isAlwaysAllow ? 'var(--color-action-primary)' : isReject ? 'var(--color-feedback-danger)' : 'var(--color-text-strong)')
+                            : 'var(--color-text-primary)',
                           opacity: submitted ? 0.6 : 1,
                           cursor: submitted ? 'default' : 'pointer',
                         }}
@@ -316,38 +316,38 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                             if (submitted || isSelected) return;
                             const el = e.currentTarget;
                             if (isAccept) {
-                              el.style.backgroundColor = 'var(--ok-subtle, rgba(34,197,94,0.12))';
-                              el.style.borderColor = 'var(--ok)';
-                              el.style.color = 'var(--ok)';
+                              el.style.backgroundColor = 'var(--color-feedback-success-subtle)';
+                              el.style.borderColor = 'var(--color-feedback-success)';
+                              el.style.color = 'var(--color-feedback-success)';
                             } else if (isSessionAllow) {
-                              el.style.backgroundColor = 'var(--session-allow-subtle, rgba(59,130,246,0.08))';
-                              el.style.borderColor = 'var(--session-allow, #3b82f6)';
-                              el.style.color = 'var(--session-allow, #3b82f6)';
+                              el.style.backgroundColor = 'var(--color-feedback-info-subtle)';
+                              el.style.borderColor = 'var(--color-feedback-info)';
+                              el.style.color = 'var(--color-feedback-info)';
                             } else if (isAlwaysAllow) {
-                              el.style.backgroundColor = 'var(--accent-subtle, rgba(59,130,246,0.12))';
-                              el.style.borderColor = 'var(--accent)';
-                              el.style.color = 'var(--accent)';
+                              el.style.backgroundColor = 'var(--color-action-primary-subtle)';
+                              el.style.borderColor = 'var(--color-action-primary)';
+                              el.style.color = 'var(--color-action-primary)';
                             } else if (isReject) {
-                              el.style.backgroundColor = 'var(--danger-subtle, rgba(239,68,68,0.12))';
-                              el.style.borderColor = 'var(--danger)';
-                              el.style.color = 'var(--danger)';
+                              el.style.backgroundColor = 'var(--color-feedback-danger-subtle)';
+                              el.style.borderColor = 'var(--color-feedback-danger)';
+                              el.style.color = 'var(--color-feedback-danger)';
                             } else {
-                              el.style.backgroundColor = 'var(--bg-hover)';
-                              el.style.borderColor = 'var(--border-strong)';
+                              el.style.backgroundColor = 'var(--color-surface-hover)';
+                              el.style.borderColor = 'var(--color-border-strong)';
                             }
                           }}
                         onMouseOut={(e) => {
                           if (submitted || isSelected) return;
                           const el = e.currentTarget;
-                          el.style.backgroundColor = 'var(--bg-elevated)';
-                          el.style.borderColor = 'var(--border)';
-                          el.style.color = 'var(--text)';
+                          el.style.backgroundColor = 'var(--color-surface-elevated)';
+                          el.style.borderColor = 'var(--color-border-default)';
+                          el.style.color = 'var(--color-text-primary)';
                         }}
                       >
                         <div className="flex items-center justify-between gap-3">
                           <span>{option.label}</span>
                           {option.description && (
-                            <span className="text-xs font-normal" style={{ color: 'var(--muted)' }}>
+                            <span className="text-xs font-normal" style={{ color: 'var(--color-text-secondary)' }}>
                               {option.description}
                             </span>
                           )}
@@ -368,12 +368,12 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                         rows={2}
                         className="w-full px-3 py-2 text-sm rounded-lg resize-none focus:outline-none"
                         style={{
-                          backgroundColor: 'var(--bg-elevated)',
-                          border: '1px solid var(--border)',
-                          color: 'var(--text)',
+                          backgroundColor: 'var(--color-surface-elevated)',
+                          border: '1px solid var(--color-border-default)',
+                          color: 'var(--color-text-primary)',
                         }}
-                        onFocus={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; }}
-                        onBlur={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; }}
+                        onFocus={(e) => { e.currentTarget.style.borderColor = 'var(--color-border-focus)'; }}
+                        onBlur={(e) => { e.currentTarget.style.borderColor = 'var(--color-border-default)'; }}
                         onKeyDown={(e) => {
                           if (!isBatch && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                             e.preventDefault();
@@ -390,8 +390,8 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                             className="self-end px-4 py-1.5 text-xs font-medium text-white rounded-lg transition-opacity"
                             style={{
                               background: hasText
-                                ? 'linear-gradient(135deg, var(--accent), var(--accent-2))'
-                                : 'var(--border)',
+                                ? 'linear-gradient(135deg, var(--color-action-primary), var(--color-brand-secondary))'
+                                : 'var(--color-border-default)',
                               opacity: hasText ? 1 : 0.5,
                               cursor: hasText ? 'pointer' : 'not-allowed',
                             }}
@@ -413,24 +413,24 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
           <div
             className="px-4 py-3 flex items-center justify-between"
             style={{
-              borderTop: '1px solid var(--border)',
-              backgroundColor: 'var(--panel-strong)',
+              borderTop: '1px solid var(--color-border-default)',
+              backgroundColor: 'var(--color-surface-panel-strong)',
             }}
           >
             <span
               className="text-xs"
-              style={{ color: 'var(--muted)' }}
+              style={{ color: 'var(--color-text-secondary)' }}
             >
               {selections.size}/{pendingQuestion.questions.length}
             </span>
             <button
               onClick={handleSubmitBatch}
               disabled={!allAnswered}
-              className="px-4 py-1.5 text-xs font-medium text-white rounded-lg transition-opacity"
+              className="px-4 py-1.5 text-xs font-medium text-text-inverse rounded-lg "
               style={{
                 background: allAnswered
-                  ? 'linear-gradient(135deg, var(--accent), var(--accent-2))'
-                  : 'var(--border)',
+                  ? 'linear-gradient(135deg, var(--color-action-primary), var(--color-brand-secondary))'
+                  : 'var(--color-border-default)',
                 opacity: allAnswered ? 1 : 0.5,
                 cursor: allAnswered ? 'pointer' : 'not-allowed',
               }}

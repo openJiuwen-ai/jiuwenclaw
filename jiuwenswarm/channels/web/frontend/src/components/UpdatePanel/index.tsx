@@ -321,7 +321,7 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
               <span className="mono">{progress}%{isPipMode ? '' : ` · ${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`}</span>
             </div>
             <div className="mt-3 h-2 overflow-hidden rounded-full bg-secondary/80">
-              <div className="h-full rounded-full bg-accent transition-all duration-200" style={{ width: `${progress}%` }} />
+              <div className="h-full rounded-full bg-accent  " style={{ width: `${progress}%` }} />
             </div>
             {currentActivity && (
               <div className="mt-2 text-xs font-mono text-text-muted truncate" title={currentActivity}>

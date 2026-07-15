@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CircleAlert, X } from 'lucide-react';
+import { CircleAlert, LoaderCircle, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
 import { webClient } from '../../services/webClient';
@@ -32,21 +32,20 @@ import {
 } from '../../features/workspace/projectDirectoryPicker';
 import './ConversationSidebar.css';
 import '../dialogs/dialogs.css';
-import addProjectIcon from '../../assets/work-mode/add-project.svg';
-import arrowRightIcon from '../../assets/work-mode/arrow-right.svg';
-import collapseIcon from '../../assets/work-mode/collapse.svg';
-import closeIcon from '../../assets/work-mode/close.svg';
-import cronIcon from '../../assets/定时任务.svg';
-import deleteIcon from '../../assets/work-mode/delete.svg';
-import editIcon from '../../assets/work-mode/edit.svg';
-import folderFoldIcon from '../../assets/work-mode/folder-fold.svg';
-import folderIcon from '../../assets/work-mode/folder.svg';
-import moreIcon from '../../assets/work-mode/more-rimless.svg';
-import newTaskIcon from '../../assets/work-mode/new-task.svg';
-import pinIcon from '../../assets/work-mode/pin.svg';
-import plusIcon from '../../assets/work-mode/plus.svg';
-import statusProcessingIcon from '../../assets/work-mode/status-processing.svg';
-import unpinIcon from '../../assets/work-mode/unpin.svg';
+import AddProjectIcon from '../../assets/work-mode/add-project.svg?react';
+import ArrowRightIcon from '../../assets/work-mode/arrow-right.svg?react';
+import CollapseIcon from '../../assets/work-mode/collapse.svg?react';
+import CloseIcon from '../../assets/work-mode/close.svg?react';
+import CronIcon from '../../assets/定时任务.svg?react';
+import DeleteIcon from '../../assets/work-mode/delete.svg?react';
+import EditIcon from '../../assets/work-mode/edit.svg?react';
+import FolderFoldIcon from '../../assets/work-mode/folder-fold.svg?react';
+import FolderIcon from '../../assets/work-mode/folder.svg?react';
+import MoreIcon from '../../assets/work-mode/more-rimless.svg?react';
+import NewTaskIcon from '../../assets/work-mode/new-task.svg?react';
+import PinIcon from '../../assets/work-mode/pin.svg?react';
+import PlusIcon from '../../assets/work-mode/plus.svg?react';
+import UnpinIcon from '../../assets/work-mode/unpin.svg?react';
 
 const UNREAD_KEY = 'jiuwenswarm_session_unread';
 const RELATIVE_TIME_REFRESH_MS = 60_000;
@@ -118,14 +117,14 @@ function getSessionTitle(session: Session, fallback: string): string {
   return session.display_title?.trim() || session.title?.trim() || fallback;
 }
 
-const menuIconByAction: Record<SidebarMenuAction, string> = {
-  pin: pinIcon,
-  rename: editIcon,
-  delete: deleteIcon,
+const menuIconByAction: Record<SidebarMenuAction, React.ComponentType<React.SVGProps<SVGSVGElement>>> = {
+  pin: PinIcon,
+  rename: EditIcon,
+  delete: DeleteIcon,
 };
 
-function getMenuIcon(item: SidebarMenuItem): string {
-  if (item.action === 'pin' && item.pinned) return unpinIcon;
+function getMenuIcon(item: SidebarMenuItem): React.ComponentType<React.SVGProps<SVGSVGElement>> {
+  if (item.action === 'pin' && item.pinned) return UnpinIcon;
   return menuIconByAction[item.action];
 }
 
@@ -140,8 +139,10 @@ function SidebarMenu({
 }) {
   return (
     <div className="conversation-list-item__menu" role="menu">
-      {items.map((item) => (
-        <button
+      {items.map((item) => {
+        const MenuIcon = getMenuIcon(item);
+        return (
+          <button
           key={item.action}
           type="button"
           className={`conversation-list-item__menu-item${item.danger ? ' conversation-list-item__menu-item--danger' : ''}`}
@@ -149,10 +150,11 @@ function SidebarMenu({
           onClick={() => onAction(item.action)}
           role="menuitem"
         >
-          <img src={getMenuIcon(item)} alt="" aria-hidden="true" />
+          <MenuIcon aria-hidden />
           <span>{item.label}</span>
-        </button>
-      ))}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -196,7 +198,11 @@ function ConversationListItem({
       </span>
     );
   } else if (indicator === 'processing') {
-    status = <img className="conversation-list-item__status-icon" src={statusProcessingIcon} alt="" title={getTaskStatusLabel(indicator, t)} aria-hidden="true" />;
+    status = (
+      <span title={getTaskStatusLabel(indicator, t)}>
+        <LoaderCircle className="conversation-list-item__loader" aria-hidden="true" />
+      </span>
+    );
   } else if (indicator === 'unread') {
     status = <span className="conversation-list-item__status-dot" title={t('multiSession.completedUnread')} aria-hidden="true" />;
   } else if (indicator === 'error') {
@@ -253,7 +259,7 @@ function ConversationListItem({
         aria-haspopup="menu"
         aria-expanded={menuOpen}
       >
-        <img src={moreIcon} alt="" aria-hidden="true" />
+        <MoreIcon aria-hidden />
       </button>
       <button
         type="button"
@@ -266,7 +272,7 @@ function ConversationListItem({
         aria-label={session.pinned ? t('multiSession.project.unpinConversation') : t('multiSession.project.pinConversation')}
         data-tooltip={session.pinned ? t('multiSession.project.unpinConversation') : t('multiSession.project.pinConversation')}
       >
-        <img src={session.pinned ? unpinIcon : pinIcon} alt="" aria-hidden="true" />
+        {session.pinned ? <UnpinIcon aria-hidden /> : <PinIcon aria-hidden />}
       </button>
       {menuOpen ? (
         <SidebarMenu
@@ -339,13 +345,13 @@ function ProjectEntityRow({
     <div ref={rowRef} className={`conversation-entity-row${menuOpen ? ' is-menu-open' : ''}`}>
       <button type="button" className="conversation-entity-row__main" onClick={onToggle} title={title}>
         <span className="conversation-entity-row__icon">
-          <img src={isExpanded ? folderFoldIcon : folderIcon} alt="" aria-hidden="true" />
+          {isExpanded ? <FolderFoldIcon aria-hidden /> : <FolderIcon aria-hidden />}
         </span>
         <span className="conversation-entity-row__text">
           <span className="conversation-entity-row__title">{title}</span>
         </span>
-        <img className="conversation-entity-row__chevron" src={isExpanded ? collapseIcon : arrowRightIcon} alt="" aria-hidden="true" />
-        {isPinned ? <img src={pinIcon} className="conversation-entity-row__pin" alt="" aria-hidden="true" /> : null}
+        {isExpanded ? <CollapseIcon className="conversation-entity-row__chevron" aria-hidden /> : <ArrowRightIcon className="conversation-entity-row__chevron" aria-hidden />}
+        {isPinned ? <PinIcon className="conversation-entity-row__pin" aria-hidden /> : null}
       </button>
       <button
         type="button"
@@ -358,7 +364,7 @@ function ProjectEntityRow({
         aria-label={newLabel || t('multiSession.project.newConversation')}
         data-tooltip={newLabel || t('multiSession.project.newConversation')}
       >
-        <img src={plusIcon} alt="" aria-hidden="true" />
+        <PlusIcon aria-hidden />
       </button>
       {hideActions ? null : (
         <button
@@ -373,7 +379,7 @@ function ProjectEntityRow({
           aria-haspopup="menu"
           aria-expanded={menuOpen}
         >
-          <img src={moreIcon} alt="" aria-hidden="true" />
+          <MoreIcon aria-hidden />
         </button>
       )}
       {!hideActions && menuOpen ? (
@@ -467,8 +473,8 @@ function ProjectAddMenu({
           }
         }}
         itemClassName="conversation-list-item__menu-item"
-        blankIcon={<img src={addProjectIcon} alt="" aria-hidden="true" />}
-        existingIcon={<img src={folderIcon} alt="" aria-hidden="true" />}
+        blankIcon={<AddProjectIcon aria-hidden />}
+        existingIcon={<FolderIcon aria-hidden />}
       />
     </div>
   );
@@ -512,7 +518,7 @@ function ProjectCreateDialog({
           aria-label={t('common.close')}
           onClick={onCancel}
         >
-          <img src={closeIcon} alt="" aria-hidden="true" />
+          <CloseIcon aria-hidden />
         </button>
         <div className="conversation-path-dialog__title">{t('multiSession.project.newProject')}</div>
         <input
@@ -945,7 +951,7 @@ export function ConversationSidebar({
           }}
           title={job.name}
         >
-          <img className="conversation-sidebar__cron-row-icon" src={cronIcon} alt="" aria-hidden="true" />
+          <CronIcon className="conversation-sidebar__cron-row-icon" aria-hidden />
           <span className="conversation-sidebar__cron-row-name">{job.name}</span>
           <button
             type="button"
@@ -958,9 +964,9 @@ export function ConversationSidebar({
             aria-label={t('multiSession.project.deleteCronJob')}
             data-tooltip={t('multiSession.project.deleteCronJob')}
           >
-            <img src={deleteIcon} alt="" aria-hidden="true" />
+            <DeleteIcon aria-hidden />
           </button>
-          <img className="conversation-sidebar__cron-row-chevron" src={cronExpanded ? collapseIcon : arrowRightIcon} alt="" aria-hidden="true" />
+          {cronExpanded ? <CollapseIcon className="conversation-sidebar__cron-row-chevron" aria-hidden /> : <ArrowRightIcon className="conversation-sidebar__cron-row-chevron" aria-hidden />}
         </div>
         {cronExpanded ? (
           <div className="conversation-sidebar__cron-sessions">
@@ -1089,7 +1095,7 @@ export function ConversationSidebar({
           setPinError(null);
           onNew();
         }}>
-          <img src={newTaskIcon} alt="" aria-hidden="true" />
+          <NewTaskIcon aria-hidden />
           <span>{t('multiSession.newConversation')}</span>
         </button>
       </div>
@@ -1135,7 +1141,7 @@ export function ConversationSidebar({
               aria-haspopup="menu"
               aria-expanded={projectAddMenuOpen}
             >
-              <img src={plusIcon} alt="" aria-hidden="true" />
+              <PlusIcon aria-hidden />
             </button>
             </div>
           </div>
@@ -1176,7 +1182,7 @@ export function ConversationSidebar({
               aria-label={t('multiSession.project.newConversation')}
               data-tooltip={t('multiSession.project.newConversation')}
             >
-              <img src={plusIcon} alt="" aria-hidden="true" />
+              <PlusIcon aria-hidden />
             </button>
           </div>
           <div className="conversation-sidebar__group-list">

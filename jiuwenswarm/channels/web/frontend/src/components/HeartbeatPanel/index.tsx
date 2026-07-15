@@ -129,13 +129,13 @@ export function HeartbeatPanel() {
     if (heartbeatState === 'ok') {
       return {
         text: t('heartbeat.badges.ok'),
-        className: 'text-ok border-[var(--border-ok)] bg-ok-subtle',
+        className: 'text-ok border-[var(--color-border-success)] bg-ok-subtle',
       };
     }
     if (heartbeatState === 'alert') {
       return {
         text: t('heartbeat.badges.alert'),
-        className: 'text-danger border-[var(--border-danger)] bg-danger-subtle',
+        className: 'text-danger border-[var(--color-border-danger)] bg-danger-subtle',
       };
     }
     return {
@@ -265,7 +265,7 @@ export function HeartbeatPanel() {
       <div className="card main-panel-card w-full h-full flex flex-col">
         {success ? (
           <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20">
-            <div className="bg-ok text-white px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+            <div className="bg-ok text-text-inverse px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
               {success}
             </div>
           </div>
@@ -354,8 +354,8 @@ export function HeartbeatPanel() {
                     >
                       <option value="web">{t('heartbeat.channels.web')}</option>
                       <option value="feishu">{t('heartbeat.channels.feishu')}</option>
-                      <option value="xiaoyi" disabled style={{ color: '#8c8c96ff'}}>{t('heartbeat.channels.xiaoyi')}</option>
-                      <option value="dingtalk" disabled style={{ color: '#8c8c96ff' }}>{t('heartbeat.channels.dingtalk')}</option>
+                      <option value="xiaoyi" disabled style={{ color: 'var(--color-option-disabled)'}}>{t('heartbeat.channels.xiaoyi')}</option>
+                      <option value="dingtalk" disabled style={{ color: 'var(--color-option-disabled)' }}>{t('heartbeat.channels.dingtalk')}</option>
                     </select>
                   </label>
 
@@ -416,15 +416,15 @@ export function HeartbeatPanel() {
                           <button
                             type="button"
                             key={`${item.updatedAt}-${idx}`}
-                            className="w-full text-left flex items-center gap-3 rounded-md border border-border bg-card/60 px-3 py-2.5 mb-1.5 last:mb-0 hover:bg-card/80 transition-colors"
+                            className="w-full text-left flex items-center gap-3 rounded-md border border-border bg-card/60 px-3 py-2.5 mb-1.5 last:mb-0 hover:bg-card/80 "
                             onClick={() => openMessageModal(item.message)}
                           >
                             <span
                               className={`shrink-0 inline-flex h-8 w-12 items-center justify-center rounded-md border text-sm font-bold tracking-wide ${
                                 item.status === 'ok'
-                                  ? 'text-ok border-[var(--border-ok)] bg-ok-subtle'
+                                  ? 'text-ok border-[var(--color-border-success)] bg-ok-subtle'
                                   : item.status === 'alert'
-                                    ? 'text-ok border-[var(--border-ok)] bg-ok-subtle'
+                                    ? 'text-ok border-[var(--color-border-success)] bg-ok-subtle'
                                     : 'text-text-muted border-border bg-secondary/60'
                               }`}
                             >

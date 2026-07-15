@@ -173,15 +173,15 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
       <div
         className="relative w-full max-w-2xl max-h-[85vh] overflow-hidden rounded-xl animate-rise"
         style={{
-          backgroundColor: 'var(--card)',
-          boxShadow: 'var(--shadow-xl)',
+          backgroundColor: 'var(--color-surface-card)',
+          boxShadow: 'var(--effect-shadow-xl)',
         }}
       >
         <div
           className="px-6 py-4 flex items-center justify-between"
           style={{
-            backgroundColor: 'var(--panel-strong)',
-            borderBottom: '1px solid var(--border)',
+            backgroundColor: 'var(--color-surface-panel-strong)',
+            borderBottom: '1px solid var(--color-border-default)',
           }}
         >
           <div className="flex items-center gap-4">
@@ -190,14 +190,14 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
             <div>
               <h2
                 className="text-lg font-semibold font-mono"
-                style={{ color: 'var(--text-strong)' }}
+                style={{ color: 'var(--color-text-strong)' }}
               >
                 {toolCall.name}
               </h2>
               {toolCall.formatted_args && (
                 <p
                   className="text-sm font-mono mt-1"
-                  style={{ color: 'var(--muted)' }}
+                  style={{ color: 'var(--color-text-secondary)' }}
                 >
                   {toolCall.formatted_args}
                 </p>
@@ -207,15 +207,15 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
 
           <button
             onClick={onClose}
-            className="p-2 rounded-lg transition-colors"
-            style={{ color: 'var(--muted)' }}
+            className="p-2 rounded-lg "
+            style={{ color: 'var(--color-text-secondary)' }}
             onMouseEnter={(event) => {
-              event.currentTarget.style.backgroundColor = 'var(--bg-hover)';
-              event.currentTarget.style.color = 'var(--text)';
+              event.currentTarget.style.backgroundColor = 'var(--color-surface-hover)';
+              event.currentTarget.style.color = 'var(--color-text-primary)';
             }}
             onMouseLeave={(event) => {
               event.currentTarget.style.backgroundColor = 'transparent';
-              event.currentTarget.style.color = 'var(--muted)';
+              event.currentTarget.style.color = 'var(--color-text-secondary)';
             }}
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
@@ -232,7 +232,7 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
             <div className="mb-6">
               <div
                 className="flex items-center gap-2 mb-3"
-                style={{ color: 'var(--text-strong)' }}
+                style={{ color: 'var(--color-text-strong)' }}
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
@@ -242,12 +242,12 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
               <pre
                 className="p-4 rounded-lg overflow-auto whitespace-pre-wrap break-all"
                 style={{
-                  fontFamily: 'var(--mono)',
+                  fontFamily: 'var(--font-mono)',
                   fontSize: 'var(--font-size-sm)',
                   lineHeight: '1.5',
-                  backgroundColor: 'var(--bg-elevated)',
-                  border: '1px solid var(--border)',
-                  color: 'var(--text)',
+                  backgroundColor: 'var(--color-surface-elevated)',
+                  border: '1px solid var(--color-border-default)',
+                  color: 'var(--color-text-primary)',
                   wordBreak: 'break-word',
                 }}
               >
@@ -262,8 +262,8 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
                 className="flex items-center gap-2 mb-3"
                 style={{
                   color: resultSuccess
-                    ? 'var(--ok)'
-                    : 'var(--danger)',
+                    ? 'var(--color-feedback-success)'
+                    : 'var(--color-feedback-danger)',
                 }}
               >
                 <ToolStatusIcon tone={resultSuccess ? 'success' : 'error'} />
@@ -273,8 +273,8 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
                     <span
                       className="ml-2 px-2 py-0.5 rounded text-xs font-medium"
                       style={{
-                        backgroundColor: 'var(--danger-subtle)',
-                        color: 'var(--danger)',
+                        backgroundColor: 'var(--color-feedback-danger-subtle)',
+                        color: 'var(--color-feedback-danger)',
                       }}
                     >
                       {t('chatUi.toolResult.failed')}
@@ -292,14 +292,14 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
                     result.skillTree && 'mt-4'
                   )}
                   style={{
-                    fontFamily: 'var(--mono)',
+                    fontFamily: 'var(--font-mono)',
                     fontSize: 'var(--font-size-sm)',
                     lineHeight: '1.5',
-                    backgroundColor: 'var(--bg-elevated)',
-                    border: '1px solid var(--border)',
+                    backgroundColor: 'var(--color-surface-elevated)',
+                    border: '1px solid var(--color-border-default)',
                     color: resultSuccess
-                      ? 'var(--text)'
-                      : 'var(--danger)',
+                      ? 'var(--color-text-primary)'
+                      : 'var(--color-feedback-danger)',
                     wordBreak: 'break-word',
                   }}
                 >
@@ -313,9 +313,9 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
             <div
               className="flex items-center gap-3 p-4 rounded-lg"
               style={{
-                backgroundColor: 'var(--warn-subtle)',
-                border: '1px solid var(--warn)',
-                color: 'var(--warn)',
+                backgroundColor: 'var(--color-feedback-warning-subtle)',
+                border: '1px solid var(--color-feedback-warning)',
+                color: 'var(--color-feedback-warning)',
               }}
             >
               <ToolStatusIcon tone="warning" />
@@ -327,9 +327,9 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
             <div
               className="flex items-center gap-3 p-4 rounded-lg"
               style={{
-                backgroundColor: 'var(--accent-subtle)',
-                border: '1px solid var(--accent)',
-                color: 'var(--accent)',
+                backgroundColor: 'var(--color-action-primary-subtle)',
+                border: '1px solid var(--color-action-primary)',
+                color: 'var(--color-action-primary)',
               }}
             >
               <ToolStatusIcon tone="pending" />

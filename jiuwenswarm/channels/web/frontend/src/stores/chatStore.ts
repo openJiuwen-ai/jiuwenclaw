@@ -411,21 +411,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
-      if (!status && runtime.messages.some((msg) => msg.isStreaming)) {
-        return {
-          runtimes: {
-            ...state.runtimes,
-            [sessionId]: {
-              ...runtime,
-              isProcessing: status,
-              executionError: status ? null : runtime.executionError,
-              messages: runtime.messages.map((msg) =>
-                msg.isStreaming ? { ...msg, isStreaming: false } : msg
-              ),
-            },
-          },
-        };
-      }
       return {
         runtimes: {
           ...state.runtimes,

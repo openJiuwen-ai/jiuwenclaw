@@ -37,7 +37,6 @@
 .share-image-document *::after {
   box-sizing: border-box;
   animation: none !important;
-  transition: none !important;
 }
 
 .share-image-header {

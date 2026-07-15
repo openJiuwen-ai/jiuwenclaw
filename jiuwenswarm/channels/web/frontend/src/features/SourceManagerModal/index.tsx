@@ -121,7 +121,7 @@ export function SourceManagerModal({
           <button
             type="button"
             onClick={onClose}
-            className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong transition-colors"
+            className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong "
             aria-label={t("sourceManager.closeAria")}
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -137,9 +137,9 @@ export function SourceManagerModal({
               <button
                 type="button"
                 onClick={() => handleSourceSelect("skillnet")}
-                className={`flex-1 py-3 px-4 rounded-lg border transition-all ${
+                className={`flex-1 py-3 px-4 rounded-lg border  ${
                   selectedSource === "skillnet"
-                    ? "border-[#191919] bg-[#EAEAEB] text-[#191919]"
+                    ? "border-text bg-[var(--color-source-selected-surface)] text-text"
                     : "border-border bg-card text-text-muted hover:border-gray-400"
                 }`}
               >
@@ -151,9 +151,9 @@ export function SourceManagerModal({
               <button
                 type="button"
                 onClick={() => handleSourceSelect("clawhub")}
-                className={`flex-1 py-3 px-4 rounded-lg border transition-all ${
+                className={`flex-1 py-3 px-4 rounded-lg border  ${
                   selectedSource === "clawhub"
-                    ? "border-[#191919] bg-[#EAEAEB] text-[#191919]"
+                    ? "border-text bg-[var(--color-source-selected-surface)] text-text"
                     : "border-border bg-card text-text-muted hover:border-gray-400"
                 }`}
               >
@@ -203,10 +203,10 @@ export function SourceManagerModal({
                         type="button"
                         onClick={() => void handleSaveToken()}
                         disabled={tokenSaving || !clawhubToken.trim()}
-                        className={`ml-auto w-[76px] h-[28px] rounded-[24px] text-sm transition-colors ${
+                        className={`ml-auto w-[76px] h-[28px] rounded-[24px] text-sm  ${
                           tokenSaving || !clawhubToken.trim()
                             ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                            : "bg-[#191919] text-white hover:bg-gray-800"
+                            : "bg-control-emphasis text-control-emphasis-foreground hover:bg-control-emphasis-hover"
                         }`}
                       >
                         {tokenSaving ? t("common.saving") : t("common.save")}
