@@ -61,6 +61,8 @@ DeepAgent 在流式文本 iteration 结束时可能发出 **content 为空** 的
 直至新一轮 ``chat.delta`` 表明 Agent 已继续执行。
 每路真正完成时打印 ``[done]`` 行（含 idx / session_id / 耗时）。Agent 弹出权限/追问（``chat.ask_user_question``）
 时自动全部允许（权限类选「总是允许」）。长任务可通过 ``--final-timeout`` 调整上限。
+资源打满（100001/100002）时 Gateway 常提前 ``is_processing=false`` 且不一定下发
+``chat.error``；脚本会识别 payload 错误关键字，并将「未交付即 idle」记为失败，避免挂死。
 若仅需验证 Gateway 接受请求、不等 Agent 跑完，加 ``--accept-only``；禁用自动放行加 ``--no-auto-allow``。
 排查权限/追问 WS 事件时加 ``--ws-event-log``，会打印每路收到的 event 名（含 frame.event
 与 payload.event_type 对照，便于发现事件名不匹配）。
@@ -460,10 +462,16 @@ def _is_invoke_terminal_event(event: str | None, payload: dict[str, Any]) -> boo
 def _loadtest_terminal_ready(
     *,
     saw_deliverable_file: bool,
-    saw_post_deliverable_text: bool,
+    saw_post_deliverable_text: bool = False,
 ) -> bool:
-    """loadtest 小说场景：文件已交付且 stage 8 收尾文本已出现。"""
-    return saw_deliverable_file and saw_post_deliverable_text
+    """loadtest 小说场景：已交付文件即可收尾。
+
+    收尾文本（stage 8）仍会记录到 saw_post_deliverable_text 便于诊断，
+    但不作为完成硬条件——短子流里 usage_summary 可能抢在收尾 delta 前/后，
+    强依赖 post-text 会导致假超时（如 idx=5）。
+    """
+    _ = saw_post_deliverable_text
+    return saw_deliverable_file
 
 
 def _should_complete_invoke(
@@ -473,7 +481,7 @@ def _should_complete_invoke(
     hitl_paused: bool,
     hitl_await_agent_resume: bool,
     saw_deliverable_file: bool,
-    saw_post_deliverable_text: bool,
+    saw_post_deliverable_text: bool = False,
     event: str | None,
     payload: dict[str, Any],
 ) -> bool:
@@ -505,7 +513,7 @@ def _should_complete_on_processing_idle(
     hitl_suppress_next_idle: bool,
     hitl_await_agent_resume: bool,
     saw_deliverable_file: bool,
-    saw_post_deliverable_text: bool,
+    saw_post_deliverable_text: bool = False,
     payload: dict[str, Any],
 ) -> bool:
     if not accepted or not saw_agent_output:
@@ -513,6 +521,85 @@ def _should_complete_on_processing_idle(
     if hitl_paused or hitl_suppress_next_idle or hitl_await_agent_resume:
         return False
     if not _loadtest_terminal_ready(
+        saw_deliverable_file=saw_deliverable_file,
+        saw_post_deliverable_text=saw_post_deliverable_text,
+    ):
+        return False
+    return _is_processing_idle(payload)
+
+
+_RUNTIME_CAPACITY_ERROR_MARKERS = (
+    "资源已满",
+    "服务并发度超过上限",
+    "无足够并发",
+    "服务启动失败",
+    "100001",
+    "100002",
+)
+
+
+def _payload_text_blob(payload: dict[str, Any]) -> str:
+    """把 payload 关键为便于关键字扫描的文本。"""
+    parts: list[str] = []
+    for key in ("error", "message", "content", "detail", "reason", "code", "error_code"):
+        val = payload.get(key)
+        if val is not None and val != "":
+            parts.append(str(val))
+    try:
+        parts.append(json.dumps(payload, ensure_ascii=False))
+    except (TypeError, ValueError):
+        parts.append(str(payload))
+    return " ".join(parts)
+
+
+def _extract_runtime_failure(event: str | None, payload: dict[str, Any]) -> str | None:
+    """识别应立即失败的运行时错误（含资源打满 100001/100002）。
+
+    Gateway 在资源拒绝时经常只下发带 error 的 chunk / chat.error，或甚至只有
+    processing idle；脚本必须显式识别，不能干等到 --final-timeout。
+    """
+    if not isinstance(payload, dict):
+        return None
+
+    code = payload.get("code", payload.get("error_code"))
+    code_s = str(code).strip() if code is not None else ""
+    blob = _payload_text_blob(payload)
+    is_capacity = code_s in {"100001", "100002"} or any(
+        marker in blob for marker in _RUNTIME_CAPACITY_ERROR_MARKERS
+    )
+
+    if event == "chat.error" or payload.get("error") not in (None, ""):
+        err = payload.get("error") or payload.get("message") or blob
+        prefix = "capacity_error" if is_capacity else "runtime_error"
+        return f"{prefix}: {err}"
+
+    if is_capacity:
+        return f"capacity_error: {blob}"
+
+    return None
+
+
+def _should_fail_on_premature_idle(
+    *,
+    accepted: bool,
+    hitl_paused: bool,
+    hitl_suppress_next_idle: bool,
+    hitl_await_agent_resume: bool,
+    saw_deliverable_file: bool,
+    saw_post_deliverable_text: bool = False,
+    payload: dict[str, Any],
+) -> bool:
+    """processing idle 已到，但交付未完成 → 视为失败（避免资源拒绝后挂死）。
+
+    - HITL 等待用户作答（paused 且尚未放行）时仍可能出现 idle，不能当失败。
+    - 紧随 auto-allow 的假 idle 由 suppress 分支吞掉，不进入本判断。
+    - 放行后仍 await resume、却一直未交付就收到 idle：Agent 流已死，应失败。
+    """
+    if not accepted or hitl_suppress_next_idle:
+        return False
+    if hitl_paused and not hitl_await_agent_resume:
+        return False
+    if _loadtest_terminal_ready(
         saw_deliverable_file=saw_deliverable_file,
         saw_post_deliverable_text=saw_post_deliverable_text,
     ):
@@ -531,9 +618,11 @@ _AGENT_ACTIVITY_EVENTS = frozenset({
     "chat.final",
 })
 
-# 权限放行后仅 chat.delta 表示新一轮 LLM 文本输出已开始；tool_call 可能仍是同一子流尾部。
+# 权限放行后：chat.delta 表示新一轮文本；chat.file 表示交付已落地（Agent 已恢复）。
+# tool_call / tool_result 可能仍是同一子流尾部，故意不清除 await。
 _HITL_RESUME_CLEAR_EVENTS = frozenset({
     "chat.delta",
+    "chat.file",
 })
 
 
@@ -847,6 +936,16 @@ async def _run_single_request(
                                 resolved_event=event,
                                 payload=payload,
                             )
+                        failure = _extract_runtime_failure(event, payload)
+                        if failure:
+                            result.error = failure
+                            result.total_ms = (time.perf_counter() - t0) * 1000
+                            await _log_terminal(
+                                success=False,
+                                event="fail",
+                                detail=f"error={result.error}",
+                            )
+                            return result
                         if auto_allow and event == "chat.ask_user_question":
                             allowed = await _send_auto_allow(
                                 ws,
@@ -880,6 +979,7 @@ async def _run_single_request(
                                 hitl_await_agent_resume = False
                             if event == "chat.file":
                                 hitl_paused = False
+                                hitl_await_agent_resume = False
                                 saw_deliverable_file = True
                             elif event == "chat.delta" and saw_deliverable_file:
                                 saw_post_deliverable_text = True
@@ -915,7 +1015,33 @@ async def _run_single_request(
                                     await _log_terminal(
                                         success=True,
                                         event="done",
-                                        detail="reason=processing_status_idle",
+                                        detail=(
+                                            "reason=processing_status_idle "
+                                            f"file={saw_deliverable_file} post={saw_post_deliverable_text}"
+                                        ),
+                                    )
+                                    return result
+                                if _should_fail_on_premature_idle(
+                                    accepted=accepted,
+                                    hitl_paused=hitl_paused,
+                                    hitl_suppress_next_idle=False,
+                                    hitl_await_agent_resume=hitl_await_agent_resume,
+                                    saw_deliverable_file=saw_deliverable_file,
+                                    saw_post_deliverable_text=saw_post_deliverable_text,
+                                    payload=payload,
+                                ):
+                                    result.error = (
+                                        "premature_idle: Agent 已 is_processing=false，但未完成交付 "
+                                        f"(file={saw_deliverable_file} post={saw_post_deliverable_text} "
+                                        f"agent_output={saw_agent_output} "
+                                        f"hitl_await={hitl_await_agent_resume} hitl_paused={hitl_paused})；"
+                                        "常见于资源已满(100001)/无法预留 session(100002) 后流提前结束"
+                                    )
+                                    result.total_ms = (time.perf_counter() - t0) * 1000
+                                    await _log_terminal(
+                                        success=False,
+                                        event="fail",
+                                        detail=f"error={result.error}",
                                     )
                                     return result
                             continue
@@ -945,13 +1071,11 @@ async def _run_single_request(
                             await _log_terminal(
                                 success=True,
                                 event="done",
-                                detail=f"reason={event}",
+                                detail=(
+                                    f"reason={event} file={saw_deliverable_file} "
+                                    f"post={saw_post_deliverable_text}"
+                                ),
                             )
-                            return result
-                        if event == "chat.error":
-                            result.error = json.dumps(payload, ensure_ascii=False)
-                            result.total_ms = (time.perf_counter() - t0) * 1000
-                            await _log_terminal(success=False, event="fail", detail=f"chat.error={result.error}")
                             return result
                         continue
 
@@ -959,7 +1083,9 @@ async def _run_single_request(
                     result.error = "超时：未收到 chat.send 确认"
                 elif not accept_only:
                     result.error = (
-                        "超时：已接受但未收到交付文件+收尾文本后的 processing idle / usage_summary / chat.final"
+                        "超时：已接受但未收到交付文件后的 processing idle / usage_summary / chat.final "
+                        f"(file={saw_deliverable_file} post={saw_post_deliverable_text} "
+                        f"hitl_await={hitl_await_agent_resume} hitl_paused={hitl_paused})"
                     )
                 result.total_ms = (time.perf_counter() - t0) * 1000
                 await _log_terminal(success=False, event="timeout", detail=result.error)

@@ -147,12 +147,14 @@ def test_build_route_plan_default_unique_user_per_idx():
         "loadtest_user_02",
     ]
 
+
+def test_loadtest_terminal_ready_requires_file_only():
     mod = _load_module()
     assert not mod._loadtest_terminal_ready(
         saw_deliverable_file=False,
         saw_post_deliverable_text=True,
     )
-    assert not mod._loadtest_terminal_ready(
+    assert mod._loadtest_terminal_ready(
         saw_deliverable_file=True,
         saw_post_deliverable_text=False,
     )
@@ -160,6 +162,12 @@ def test_build_route_plan_default_unique_user_per_idx():
         saw_deliverable_file=True,
         saw_post_deliverable_text=True,
     )
+
+
+def test_hitl_resume_clear_includes_chat_file():
+    mod = _load_module()
+    assert "chat.delta" in mod._HITL_RESUME_CLEAR_EVENTS
+    assert "chat.file" in mod._HITL_RESUME_CLEAR_EVENTS
 
 
 def test_usage_summary_blocked_before_deliverable_milestone():
@@ -190,6 +198,21 @@ def test_usage_summary_completes_after_deliverable_milestone():
     )
 
 
+def test_usage_summary_completes_after_file_without_post_text():
+    """短 allow 子流：file 后可能几乎没有 stage8 delta，仍应完成。"""
+    mod = _load_module()
+    assert mod._should_complete_invoke(
+        accepted=True,
+        saw_agent_output=True,
+        hitl_paused=False,
+        hitl_await_agent_resume=False,
+        saw_deliverable_file=True,
+        saw_post_deliverable_text=False,
+        event="chat.usage_summary",
+        payload={},
+    )
+
+
 def test_processing_idle_blocked_at_stage3_without_file():
     mod = _load_module()
     assert not mod._should_complete_on_processing_idle(
@@ -204,9 +227,9 @@ def test_processing_idle_blocked_at_stage3_without_file():
     )
 
 
-def test_processing_idle_blocked_after_file_before_stage8_text():
+def test_processing_idle_completes_after_file_without_stage8_text():
     mod = _load_module()
-    assert not mod._should_complete_on_processing_idle(
+    assert mod._should_complete_on_processing_idle(
         accepted=True,
         saw_agent_output=True,
         hitl_paused=False,
@@ -229,4 +252,105 @@ def test_usage_summary_blocked_during_hitl_resume_wait():
         saw_post_deliverable_text=True,
         event="chat.usage_summary",
         payload={},
+    )
+
+
+def test_extract_runtime_failure_chat_error():
+    mod = _load_module()
+    err = mod._extract_runtime_failure(
+        "chat.error",
+        {"error": "boom", "event_type": "chat.error"},
+    )
+    assert err is not None
+    assert "boom" in err
+    assert err.startswith("runtime_error:")
+
+
+def test_extract_runtime_failure_capacity_code_100001():
+    mod = _load_module()
+    err = mod._extract_runtime_failure(
+        "chat.error",
+        {"code": 100001, "error": "服务并发度超过上限，消息请求失败"},
+    )
+    assert err is not None
+    assert err.startswith("capacity_error:")
+    assert "100001" in err or "服务并发度超过上限" in err
+
+
+def test_extract_runtime_failure_capacity_code_100002_without_chat_error_event():
+    mod = _load_module()
+    err = mod._extract_runtime_failure(
+        "chat.delta",
+        {"code": "100002", "message": "无足够并发为新 session 预留"},
+    )
+    assert err is not None
+    assert err.startswith("capacity_error:")
+    assert "无足够并发" in err
+
+
+def test_extract_runtime_failure_ignores_normal_payload():
+    mod = _load_module()
+    assert mod._extract_runtime_failure("chat.delta", {"content": "hello"}) is None
+    assert mod._extract_runtime_failure("chat.file", {"path": "/tmp/a.md"}) is None
+
+
+def test_premature_idle_fails_when_accepted_without_deliverable():
+    """资源拒绝后 Gateway 只补 is_processing=false 时应立即失败。"""
+    mod = _load_module()
+    assert mod._should_fail_on_premature_idle(
+        accepted=True,
+        hitl_paused=False,
+        hitl_suppress_next_idle=False,
+        hitl_await_agent_resume=False,
+        saw_deliverable_file=False,
+        saw_post_deliverable_text=False,
+        payload={"is_processing": False},
+    )
+
+
+def test_premature_idle_fails_after_allow_when_agent_never_resumes():
+    mod = _load_module()
+    assert mod._should_fail_on_premature_idle(
+        accepted=True,
+        hitl_paused=False,
+        hitl_suppress_next_idle=False,
+        hitl_await_agent_resume=True,
+        saw_deliverable_file=False,
+        payload={"is_processing": False},
+    )
+
+
+def test_premature_idle_not_while_waiting_user_answer():
+    mod = _load_module()
+    assert not mod._should_fail_on_premature_idle(
+        accepted=True,
+        hitl_paused=True,
+        hitl_suppress_next_idle=False,
+        hitl_await_agent_resume=False,
+        saw_deliverable_file=False,
+        payload={"is_processing": False},
+    )
+
+
+def test_premature_idle_not_when_suppressing_post_allow_idle():
+    mod = _load_module()
+    assert not mod._should_fail_on_premature_idle(
+        accepted=True,
+        hitl_paused=False,
+        hitl_suppress_next_idle=True,
+        hitl_await_agent_resume=True,
+        saw_deliverable_file=False,
+        payload={"is_processing": False},
+    )
+
+
+def test_premature_idle_not_after_deliverable():
+    mod = _load_module()
+    assert not mod._should_fail_on_premature_idle(
+        accepted=True,
+        hitl_paused=False,
+        hitl_suppress_next_idle=False,
+        hitl_await_agent_resume=False,
+        saw_deliverable_file=True,
+        payload={"is_processing": False},
     )
