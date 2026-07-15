@@ -23,6 +23,10 @@ wait_k8s_resource_ready() {
 #   3: namespace (optional, default: default)
 # Return: 0 = exists, 1 = not exists
 check_k8s_resource_exists() {
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+        return 0
+    fi
+
     local kind="$1"
     local name="$2"
     local namespace="${3:-default}"

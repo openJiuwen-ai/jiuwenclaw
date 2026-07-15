@@ -197,7 +197,7 @@ data:
             #    敏感 key：password / passwd / pwd / secret / token / api_key /
             #    access_token / refresh_token / authorization / credential /
             #    private_key / user_id（(?i) 大小写不敏感）
-            msg = replace(msg, r'(?i)([\x22\x27]?[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|credential|private[_-]?key|user[_-]?id)[\w.-]*[\x22\x27]?\s*[:=]\s*)(\x22[^\x22]*\x22|\x27[^\x27]*\x27|[^,\s\x22\x27\}\]]+)', "$${1}******")
+            msg = replace(msg, r'(?i)([\x22\x27]?[\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|credential|private[_-]?key|user[_-]?id)[\w.-]*[\x22\x27]?\s*[:=]\s*)(\x22[^\x22]*\x22|\x27[^\x27]*\x27|[^,\s\x22\x27\}]]+)', "$${1}******")
 
             .message = msg
           }

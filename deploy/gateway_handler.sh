@@ -30,13 +30,6 @@ gen_gateway_config_file() {
     local conf_name="${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
     local conf_file="${CONFIG["GATEWAY_CONFIG_FILE"]}"
     
-    info "AGENT_RUNTIME: ${client_type}"
-    if [ "${client_type}" == "yuanrong" ]; then
-        collect_oyr_info
-        field_name="feishu_enterprise"
-    fi
-
-    
     info "GATEWAY_CONFIG_TEMPLATE_FILE: ${template_file}"
     render_config_template ${template_file} ${file} "DEPLOY_VARS"
 

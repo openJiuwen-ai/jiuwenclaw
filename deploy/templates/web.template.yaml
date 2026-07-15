@@ -27,7 +27,6 @@ spec:
               containerPort: <<ENTERPRISE_WEB_WS_PORT>>
               protocol: TCP
           envFrom:
-            # 密码密钥变量
             - secretRef:
                 name: <<SECRET_CM_NAME>>
           env:
