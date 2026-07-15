@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CircleAlert, LoaderCircle, X } from 'lucide-react';
+import { CircleAlert, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
 import { webClient } from '../../services/webClient';
@@ -577,38 +577,6 @@ function ProjectDeleteDialog({
   );
 }
 
-function CronJobDeleteDialog({
-  job,
-  error,
-  deleting,
-  onCancel,
-  onDelete,
-}: {
-  job: SidebarCronJob;
-  error?: string | null;
-  deleting: boolean;
-  onCancel: () => void;
-  onDelete: () => void;
-}) {
-  const { t } = useTranslation();
-  const title = t('multiSession.delete');
-  return (
-    <div className="conversation-dialog" role="dialog" aria-modal="true" aria-label={title}>
-      <button type="button" className="conversation-dialog__backdrop" onClick={onCancel} aria-label={t('common.cancel')} />
-      <div className="conversation-dialog__panel">
-        <button type="button" className="conversation-dialog__close" onClick={onCancel} aria-label={t('common.close')}><X size={16} /></button>
-        <h2>{title}</h2>
-        <p>{t('multiSession.project.deleteCronJobConfirm', { name: job.name })}</p>
-        {error ? <div className="conversation-dialog__error">{error}</div> : null}
-        <div className="conversation-dialog__actions">
-          <button type="button" onClick={onCancel}>{t('common.cancel')}</button>
-          <button type="button" className="is-danger" disabled={deleting} onClick={onDelete}>{t('multiSession.delete')}</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 type RenameTarget =
   | { kind: 'project'; id: string; value: string }
   | { kind: 'session'; id: string; value: string };
@@ -633,9 +601,6 @@ export function ConversationSidebar({
   const [deleteProjectTarget, setDeleteProjectTarget] = useState<ProjectInfo | null>(null);
   const [deleteProjectBusy, setDeleteProjectBusy] = useState(false);
   const [deleteProjectError, setDeleteProjectError] = useState<string | null>(null);
-  const [deleteCronTarget, setDeleteCronTarget] = useState<SidebarCronJob | null>(null);
-  const [deleteCronBusy, setDeleteCronBusy] = useState(false);
-  const [deleteCronError, setDeleteCronError] = useState<string | null>(null);
   const [projectAddMenuOpen, setProjectAddMenuOpen] = useState(false);
   const addMenuRef = useRef<HTMLDivElement>(null);
   const previousProcessing = useRef<Record<string, boolean>>({});
@@ -666,7 +631,6 @@ export function ConversationSidebar({
   const cronSessions = useCronStore((s) => s.cronSessions);
   const cronSessionsLoading = useCronStore((s) => s.cronSessionsLoading);
   const loadCronSessions = useCronStore((s) => s.loadCronSessions);
-  const deleteJob = useCronStore((s) => s.deleteJob);
 
   useEffect(() => {
     void loadCronJobs();
@@ -893,20 +857,6 @@ export function ConversationSidebar({
     }
   }
 
-  async function handleDeleteCronJob() {
-    if (!deleteCronTarget) return;
-    setDeleteCronBusy(true);
-    setDeleteCronError(null);
-    try {
-      await deleteJob(deleteCronTarget.id);
-      setDeleteCronTarget(null);
-    } catch (error) {
-      setDeleteCronError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setDeleteCronBusy(false);
-    }
-  }
-
   function renderSession(session: Session, options: { nested?: boolean; projectMenu?: boolean } = {}) {
     const nested = options.nested === true;
     const projectMenu = options.projectMenu === true;
@@ -953,19 +903,6 @@ export function ConversationSidebar({
         >
           <CronIcon className="conversation-sidebar__cron-row-icon" aria-hidden />
           <span className="conversation-sidebar__cron-row-name">{job.name}</span>
-          <button
-            type="button"
-            className="conversation-sidebar__cron-row-delete"
-            onClick={(event) => {
-              event.stopPropagation();
-              setDeleteCronTarget(job);
-            }}
-            title={t('multiSession.project.deleteCronJob')}
-            aria-label={t('multiSession.project.deleteCronJob')}
-            data-tooltip={t('multiSession.project.deleteCronJob')}
-          >
-            <DeleteIcon aria-hidden />
-          </button>
           {cronExpanded ? <CollapseIcon className="conversation-sidebar__cron-row-chevron" aria-hidden /> : <ArrowRightIcon className="conversation-sidebar__cron-row-chevron" aria-hidden />}
         </div>
         {cronExpanded ? (
@@ -1231,18 +1168,6 @@ export function ConversationSidebar({
             setDeleteProjectTarget(null);
           }}
           onDelete={() => { void handleRemoveProject(); }}
-        />
-      ) : null}
-      {deleteCronTarget ? (
-        <CronJobDeleteDialog
-          job={deleteCronTarget}
-          deleting={deleteCronBusy}
-          error={deleteCronError}
-          onCancel={() => {
-            setDeleteCronError(null);
-            setDeleteCronTarget(null);
-          }}
-          onDelete={() => { void handleDeleteCronJob(); }}
         />
       ) : null}
     </aside>

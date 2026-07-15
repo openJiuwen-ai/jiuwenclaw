@@ -36,6 +36,7 @@ import {
   useSessionStore,
   useHarnessStore,
   useWorkspaceStore,
+  useCronStore,
 } from '../stores';
 import type { TeamTask, TeamTaskStatus } from '../stores/sessionStore';
 import { webClient } from '../services/webClient';
@@ -1561,8 +1562,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         handleConnectionAck(payload);
       }),
       webClient.on('chat.delta', ({ payload }) => {
-        const sessionId = resolveEventSessionId(payload);
-        if (!sessionId) return;
+          const sessionId = resolveEventSessionId(payload);
+          if (!sessionId) return;
 
         // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
         if (!useChatStore.getState().getRuntime(sessionId)?.isProcessing && !useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) {
@@ -1633,8 +1634,30 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
       }),
       webClient.on('chat.final', ({ payload }) => {
-        const sessionId = resolveEventSessionId(payload);
+        if (shouldDropDuplicatedEvent('chat.final', payload)) return;
+
+        const cronMeta = payload.cron as Record<string, unknown> | undefined;
+
+        let sessionId = resolveEventSessionId(payload);
+        // cron 广播 session_id 为空（后端置空让消息进当前活跃会话流），fallback 到当前活跃 session
+        if (!sessionId && cronMeta) {
+          sessionId = useSessionStore.getState().currentSession?.session_id ?? null;
+          if (sessionId) {
+            ensureSessionRuntimes(sessionId);
+          }
+        }
         if (!sessionId) return;
+
+        // cron 广播处理：结果到达时刷新触发会话列表
+        if (cronMeta && typeof cronMeta === 'object') {
+          const cronJobId = typeof cronMeta.job_id === 'string' ? cronMeta.job_id.trim() : '';
+          const cronStatus = typeof cronMeta.status === 'string' ? cronMeta.status.trim() : '';
+          if (cronJobId && cronStatus !== 'running') {
+            const cronJob = useCronStore.getState().jobs.find((j) => j.id === cronJobId);
+            const cronProjectId = cronJob?.project_id || 'default';
+            void useCronStore.getState().loadCronSessions(cronProjectId, cronJobId);
+          }
+        }
 
         const memberAction = pickString(payload.member_action);
         const actionMemberName = pickString(payload.member_name);

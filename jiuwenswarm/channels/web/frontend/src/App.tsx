@@ -227,6 +227,11 @@ function downloadDataUrl(dataUrl: string, filename: string): void {
   document.body.removeChild(link);
 }
 
+// 判断 session_id 是否为可恢复/可展示的会话（web 渠道 sess_ 与 cron 触发的 cron_ 前缀均需支持）
+function isRestorableSessionId(sessionId: string): boolean {
+  return sessionId.startsWith('sess_') || sessionId.startsWith('cron_');
+}
+
 async function saveShareImage(dataUrl: string, filename: string): Promise<boolean> {
   const pywebviewApi = (window as WindowWithPyWebview).pywebview?.api;
   if (pywebviewApi?.save_data_url) {
@@ -468,7 +473,7 @@ function AppContent() {
   const messages = useChatStore((s) => s.runtimes[sessionId]?.messages ?? []);
   const isLoadingHistory = useChatStore((s) => s.runtimes[sessionId]?.isLoadingHistory ?? false);
   const replaceHistoryMessages = useChatStore((s) => s.replaceHistoryMessages);
-  const isRestoringHistorySession = sessionId.startsWith('sess_') && isLoadingHistory && !historyPagerMeta && messages.length === 0;
+  const isRestoringHistorySession = isRestorableSessionId(sessionId) && isLoadingHistory && !historyPagerMeta && messages.length === 0;
   const isRestoringTeamHistory = mode === 'team' && isRestoringHistorySession;
 
   useEffect(() => {
@@ -759,7 +764,7 @@ function AppContent() {
   }, []);
 
   const loadSessionMetadata = useCallback(async (targetSessionId: string): Promise<Session | null> => {
-    if (!targetSessionId.startsWith('sess_')) return null;
+    if (!isRestorableSessionId(targetSessionId)) return null;
     try {
       const session = await request<Session>('session.get_metadata', {
         session_id: targetSessionId,
@@ -1232,7 +1237,7 @@ function AppContent() {
     if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
     
     // 仅处理以 sess_ 开头的会话 ID
-    if (!sessionId.startsWith('sess_')) return;
+    if (!isRestorableSessionId(sessionId)) return;
 
     if (promotedFromNewSessionIdsRef.current.has(sessionId)) {
       setHistoryPagerMeta(sessionId, null);
@@ -1629,7 +1634,7 @@ function AppContent() {
   }, [sendUserAnswer]);
 
   const handleLoadMoreHistory = useCallback(async () => {
-    if (!sessionId.startsWith('sess_') || !historyPagerMeta) return;
+    if (!isRestorableSessionId(sessionId) || !historyPagerMeta) return;
     if (historyLoadingSessionsRef.current.has(sessionId) || historyPagerMeta.loadedPages >= historyPagerMeta.totalPages) return;
 
     const sid = sessionId;
@@ -1675,7 +1680,7 @@ function AppContent() {
 
   const handleRestoreSession = useCallback(
     async (targetSessionId: string, targetMode?: string, targetSession?: Session) => {
-      if (!targetSessionId.startsWith('sess_')) return;
+      if (!isRestorableSessionId(targetSessionId)) return;
 
       const resolvedMode = targetMode ?? targetSession?.mode ?? mode;
       disposeInFlightHistoryHandles(targetSessionId);

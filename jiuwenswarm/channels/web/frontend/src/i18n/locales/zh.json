@@ -1849,8 +1849,6 @@
       "unpinProject": "取消置顶项目",
       "pinConversation": "置顶对话",
       "unpinConversation": "取消置顶",
-      "deleteCronJob": "删除定时任务",
-      "deleteCronJobConfirm": "确定要删除定时任务“{{name}}”吗？",
       "pin": "置顶",
       "unpin": "取消置顶",
       "pinFailed": "置顶操作失败",

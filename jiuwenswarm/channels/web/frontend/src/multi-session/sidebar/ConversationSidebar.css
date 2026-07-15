@@ -859,57 +859,6 @@
   color: var(--color-text-primary);
 }
 
-.conversation-sidebar__cron-row-delete {
-  position: relative;
-  flex: 0 0 auto;
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  opacity: 0;
-}
-
-.conversation-sidebar__cron-row:hover .conversation-sidebar__cron-row-delete {
-  opacity: 1;
-}
-
-.conversation-sidebar__cron-row-delete:hover {
-  background: var(--color-surface-hover);
-  color: var(--color-text-primary);
-}
-
-.conversation-sidebar__cron-row-delete svg {
-  width: 14px;
-  height: 14px;
-}
-
-.conversation-sidebar__cron-row-delete[data-tooltip]:hover::after,
-.conversation-sidebar__cron-row-delete[data-tooltip]:focus-visible::after {
-  position: absolute;
-  right: 0;
-  bottom: 30px;
-  z-index: 60;
-  display: block;
-  width: max-content;
-  height: 40px;
-  padding: 0 14px;
-  border-radius: 8px;
-  background: var(--color-surface-popover);
-  box-shadow: var(--effect-shadow-lg);
-  color: var(--color-text-primary);
-  content: attr(data-tooltip);
-  font-size: 12px;
-  line-height: 40px;
-  text-align: center;
-  white-space: nowrap;
-}
-
 .conversation-sidebar__cron-row-chevron {
   width: 12px;
   height: 12px;
@@ -923,12 +872,6 @@
   flex-direction: column;
   gap: 1px;
   padding-left: 8px;
-}
-
-/* 定时任务触发会话：悬浮不显示背景色 */
-.conversation-sidebar__cron-sessions .conversation-list-item:hover,
-.conversation-sidebar__cron-sessions .conversation-list-item.is-active:hover {
-  background: transparent !important;
 }
 
 .conversation-sidebar__cron-sessions-loading,

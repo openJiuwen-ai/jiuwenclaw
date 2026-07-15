@@ -27,7 +27,6 @@ interface CronState {
   reload: () => Promise<void>;
   toggleCronGroup: (groupId: string) => void;
   loadCronSessions: (projectId: string, cronId: string) => Promise<void>;
-  deleteJob: (jobId: string) => Promise<void>;
   isCronGroupExpanded: (groupId: string) => boolean;
 }
 
@@ -85,10 +84,6 @@ export const useCronStore = create<CronState>((set, get) => ({
     }
   },
 
-  deleteJob: async (jobId: string) => {
-    await webRequest<{ deleted: boolean }>('cron.job.delete', { id: jobId });
-    await get().loadJobs();
-  },
 }));
 
 const DEFAULT_PROJECT_ID = 'default';
