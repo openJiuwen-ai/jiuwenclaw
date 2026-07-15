@@ -1,5 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import json
+import tomllib
 from pathlib import Path
 
 
@@ -27,7 +29,32 @@ def test_websocket_hook_keeps_a2ui_feature_outside_generic_transport():
     assert "sendStructuredChatContent" in source
 
 
-def test_pyinstaller_bundle_includes_a2ui_schema_assets():
+def test_a2ui_build_dependencies_and_lockfiles_are_pinned_for_v08():
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    uv_lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    frontend = json.loads(
+        (ROOT / "jiuwenswarm/channels/web/frontend/package.json").read_text(encoding="utf-8")
+    )
+    frontend_lock = json.loads(
+        (ROOT / "jiuwenswarm/channels/web/frontend/package-lock.json").read_text(encoding="utf-8")
+    )
+
+    locked_sdk_version = None
+    for package in uv_lock["package"]:
+        if package.get("name") == "a2ui-agent-sdk":
+            locked_sdk_version = package.get("version")
+            break
+
+    assert "a2ui-agent-sdk==0.2.1" in pyproject["project"]["dependencies"]
+    assert locked_sdk_version == "0.2.1"
+    assert frontend["dependencies"]["@a2ui/react"] == "0.8.0"
+    assert frontend["dependencies"]["@a2ui/web_core"] == "0.8.0"
+    assert frontend_lock["packages"]["node_modules/@a2ui/react"]["version"] == "0.8.0"
+    assert frontend_lock["packages"]["node_modules/@a2ui/web_core"]["version"] == "0.8.0"
+
+
+def test_pyinstaller_bundle_includes_only_a2ui_v08_schema_assets():
     spec = (ROOT / "scripts/jiuwenswarm.spec").read_text(encoding="utf-8")
 
-    assert 'collect_data_files("a2ui", include_py_files=False)' in spec
+    assert 'includes=["assets/0.8/*.json"]' in spec
+    assert 'collect_data_files("a2ui", include_py_files=False)' not in spec
