@@ -121,11 +121,6 @@
       <td width="50%">外部工具接入，Model Context Protocol 相关配置。</td>
     </tr>
     <tr>
-      <td width="22%"><strong>Swarm 技能</strong></td>
-      <td width="28%"><a href="zh/SwarmSkills.md">Swarm Skills</a></td>
-      <td width="50%">多智能体协作技能的封装、编排与复用机制。</td>
-    </tr>
-    <tr>
       <th colspan="3" align="left" bgcolor="#f3f4f6"><h3>⚙️ 高阶操作</h3></th>
     </tr>
     <tr>
@@ -160,7 +155,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>Agent Team</strong></td>
-      <td width="28%"><a href="zh/AgentTeam.md">Agent Teams</a> / Team Skills / <a href="zh/分布式Team.md">分布式 Team</a></td>
+      <td width="28%"><a href="zh/AgentTeam.md">Agent Teams</a> / <a href="zh/SwarmSkills.md">Swarm Skills</a> / <a href="zh/分布式Team.md">分布式 Team</a></td>
       <td width="50%">支持多智能体团队协作、团队级技能编排与复用，以及多进程分布式 Team 的运行模式。</td>
     </tr>
     <tr>
