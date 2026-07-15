@@ -165,6 +165,7 @@ _ENV_VAR_PLACEHOLDER_RE = re.compile(r"^\$\{([^:}]+)(?::-([^}]*))?\}$")
 _OPENAI_ACCOUNT_LOGIN_MAX_TTL_SECONDS = 5 * 60
 _OPENAI_ACCOUNT_LOGIN_JOBS: dict[str, "_OpenAIAccountLoginJob"] = {}
 _OPENAI_ACCOUNT_LOGIN_JOBS_LOCK = threading.RLock()
+_OPENAI_ACCOUNT_AUTH_OPERATION_LOCK = threading.RLock()
 _OPENAI_ACCOUNT_LOCAL_ERRORS = (OSError, TypeError, ValueError)
 
 
@@ -224,20 +225,26 @@ def _remove_openai_account_login_job(login_id: str) -> None:
         _OPENAI_ACCOUNT_LOGIN_JOBS.pop(login_id, None)
 
 
+def _clear_openai_account_login_jobs() -> None:
+    with _OPENAI_ACCOUNT_LOGIN_JOBS_LOCK:
+        _OPENAI_ACCOUNT_LOGIN_JOBS.clear()
+
+
 def _openai_account_auth_status_payload(
         manager: OpenAIAccountAuthManager | None = None,
 ) -> dict[str, Any]:
-    auth_manager = manager or OpenAIAccountAuthManager()
-    status = auth_manager.status()
-    return {
-        "authenticated": status.authenticated,
-        "auth_path": str(status.auth_path),
-        "has_refresh_token": status.has_refresh_token,
-        "expires_at": status.expires_at,
-        "needs_refresh": status.needs_refresh,
-        "error": status.error,
-        "base_url": auth_manager.base_url,
-    }
+    with _OPENAI_ACCOUNT_AUTH_OPERATION_LOCK:
+        auth_manager = manager or OpenAIAccountAuthManager()
+        status = auth_manager.status()
+        return {
+            "authenticated": status.authenticated,
+            "auth_path": str(status.auth_path),
+            "has_refresh_token": status.has_refresh_token,
+            "expires_at": status.expires_at,
+            "needs_refresh": status.needs_refresh,
+            "error": status.error,
+            "base_url": auth_manager.base_url,
+        }
 
 
 def _openai_account_login_payload(
@@ -263,15 +270,92 @@ def _openai_account_login_payload(
 def _openai_account_pending_login_payload(
         manager: OpenAIAccountAuthManager | None = None,
 ) -> dict[str, Any]:
-    current = time.time()
-    latest_job = _latest_openai_account_login_job(current)
-    if latest_job is None:
+    with _OPENAI_ACCOUNT_AUTH_OPERATION_LOCK:
+        current = time.time()
+        latest_job = _latest_openai_account_login_job(current)
+        if latest_job is None:
+            return {
+                "status": "none",
+                "auth": _openai_account_auth_status_payload(manager),
+            }
+        login_id, job = latest_job
+        return _openai_account_login_payload(login_id, job, manager, current)
+
+
+def _openai_account_start_login_payload() -> dict[str, Any]:
+    with _OPENAI_ACCOUNT_AUTH_OPERATION_LOCK:
+        manager = OpenAIAccountAuthManager()
+        now = time.time()
+        latest_job = _latest_openai_account_login_job(now)
+        if latest_job is not None:
+            login_id, job = latest_job
+            return _openai_account_login_payload(login_id, job, manager, now)
+
+        device_code = manager.start_device_login()
+        now = time.time()
+        raw_expires_in = device_code.expires_in or _OPENAI_ACCOUNT_LOGIN_MAX_TTL_SECONDS
+        expires_in = min(int(raw_expires_in), _OPENAI_ACCOUNT_LOGIN_MAX_TTL_SECONDS)
+        expires_at = now + expires_in
+        login_id = uuid.uuid4().hex
+        job = _OpenAIAccountLoginJob(
+            device_code=device_code,
+            created_at=now,
+            expires_at=expires_at,
+        )
+        _store_openai_account_login_job(login_id, job, now)
+        return _openai_account_login_payload(login_id, job, manager, now)
+
+
+def _openai_account_poll_login_payload(login_id: str) -> dict[str, Any]:
+    with _OPENAI_ACCOUNT_AUTH_OPERATION_LOCK:
+        now = time.time()
+        job = _get_openai_account_login_job(login_id, now)
+        if job is None:
+            return {"status": "expired", "authenticated": False}
+
+        manager = OpenAIAccountAuthManager()
+        try:
+            tokens = manager.poll_device_login(job.device_code)
+        except OpenAIAccountAuthError as exc:
+            if exc.relogin_required:
+                _remove_openai_account_login_job(login_id)
+            raise
+        if tokens is None:
+            return {
+                "status": "pending",
+                "authenticated": False,
+                "expires_at": job.expires_at,
+            }
+
+        _remove_openai_account_login_job(login_id)
         return {
-            "status": "none",
+            "status": "authenticated",
+            "authenticated": True,
             "auth": _openai_account_auth_status_payload(manager),
         }
-    login_id, job = latest_job
-    return _openai_account_login_payload(login_id, job, manager, current)
+
+
+def _openai_account_logout_payload() -> dict[str, Any]:
+    with _OPENAI_ACCOUNT_AUTH_OPERATION_LOCK:
+        manager = OpenAIAccountAuthManager()
+        _clear_openai_account_login_jobs()
+        logged_out = manager.logout()
+        return {
+            "logged_out": logged_out,
+            "auth": _openai_account_auth_status_payload(manager),
+        }
+
+
+def _openai_account_models_payload() -> dict[str, Any]:
+    with _OPENAI_ACCOUNT_AUTH_OPERATION_LOCK:
+        manager = OpenAIAccountAuthManager()
+        catalog = OpenAIAccountModelCatalog(base_url=manager.base_url)
+        models = catalog.list_model_ids(auth_manager=manager)
+        return {
+            "models": models,
+            "base_url": manager.base_url,
+            "auth": _openai_account_auth_status_payload(manager),
+        }
 
 
 def _openai_account_auth_error_payload(exc: OpenAIAccountAuthError) -> dict[str, Any]:
@@ -1990,35 +2074,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _openai_account_auth_start_login(ws, req_id, params, session_id):
         del params, session_id
         try:
-            manager = OpenAIAccountAuthManager()
-            now = time.time()
-            latest_job = _latest_openai_account_login_job(now)
-            if latest_job is not None:
-                login_id, job = latest_job
-                await channel.send_response(
-                    ws,
-                    req_id,
-                    ok=True,
-                    payload=_openai_account_login_payload(login_id, job, manager, now),
-                )
-                return
-            device_code = await asyncio.to_thread(manager.start_device_login)
-            now = time.time()
-            raw_expires_in = device_code.expires_in or _OPENAI_ACCOUNT_LOGIN_MAX_TTL_SECONDS
-            expires_in = min(int(raw_expires_in), _OPENAI_ACCOUNT_LOGIN_MAX_TTL_SECONDS)
-            expires_at = now + expires_in
-            login_id = uuid.uuid4().hex
-            job = _OpenAIAccountLoginJob(
-                device_code=device_code,
-                created_at=now,
-                expires_at=expires_at,
-            )
-            _store_openai_account_login_job(login_id, job, now)
+            payload = await asyncio.to_thread(_openai_account_start_login_payload)
             await channel.send_response(
                 ws,
                 req_id,
                 ok=True,
-                payload=_openai_account_login_payload(login_id, job, manager, now),
+                payload=payload,
             )
         except OpenAIAccountAuthError as exc:
             logger.warning("[openai_account.auth.start_login] %s", exc)
@@ -2039,8 +2100,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _openai_account_auth_pending_login(ws, req_id, params, session_id):
         del params, session_id
         try:
-            manager = OpenAIAccountAuthManager()
-            payload = await asyncio.to_thread(_openai_account_pending_login_payload, manager)
+            payload = await asyncio.to_thread(_openai_account_pending_login_payload)
             await channel.send_response(ws, req_id, ok=True, payload=payload)
         except OpenAIAccountAuthError as exc:
             logger.warning("[openai_account.auth.pending_login] %s", exc)
@@ -2067,46 +2127,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not login_id:
             await channel.send_response(ws, req_id, ok=False, error="login_id is required", code="BAD_REQUEST")
             return
-        now = time.time()
-        job = _get_openai_account_login_job(login_id, now)
-        if job is None:
-            await channel.send_response(
-                ws,
-                req_id,
-                ok=True,
-                payload={"status": "expired", "authenticated": False},
-            )
-            return
         try:
-            manager = OpenAIAccountAuthManager()
-            tokens = await asyncio.to_thread(manager.poll_device_login, job.device_code)
-            if tokens is None:
-                await channel.send_response(
-                    ws,
-                    req_id,
-                    ok=True,
-                    payload={
-                        "status": "pending",
-                        "authenticated": False,
-                        "expires_at": job.expires_at,
-                    },
-                )
-                return
-            _remove_openai_account_login_job(login_id)
+            payload = await asyncio.to_thread(_openai_account_poll_login_payload, login_id)
             await channel.send_response(
                 ws,
                 req_id,
                 ok=True,
-                payload={
-                    "status": "authenticated",
-                    "authenticated": True,
-                    "auth": _openai_account_auth_status_payload(manager),
-                },
+                payload=payload,
             )
         except OpenAIAccountAuthError as exc:
             logger.warning("[openai_account.auth.poll_login] %s", exc)
-            if exc.relogin_required:
-                _remove_openai_account_login_job(login_id)
             await channel.send_response(
                 ws,
                 req_id,
@@ -2124,16 +2154,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _openai_account_auth_logout(ws, req_id, params, session_id):
         del params, session_id
         try:
-            manager = OpenAIAccountAuthManager()
-            logged_out = await asyncio.to_thread(manager.logout)
+            payload = await asyncio.to_thread(_openai_account_logout_payload)
             await channel.send_response(
                 ws,
                 req_id,
                 ok=True,
-                payload={
-                    "logged_out": logged_out,
-                    "auth": _openai_account_auth_status_payload(manager),
-                },
+                payload=payload,
             )
         except OpenAIAccountAuthError as exc:
             logger.warning("[openai_account.auth.logout] %s", exc)
@@ -2154,14 +2180,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _openai_account_models_list(ws, req_id, params, session_id):
         del params, session_id
         try:
-            manager = OpenAIAccountAuthManager()
-            catalog = OpenAIAccountModelCatalog(base_url=manager.base_url)
-            models = await asyncio.to_thread(catalog.list_model_ids, auth_manager=manager)
+            payload = await asyncio.to_thread(_openai_account_models_payload)
             await channel.send_response(
                 ws,
                 req_id,
                 ok=True,
-                payload={"models": models, "base_url": manager.base_url},
+                payload=payload,
             )
         except OpenAIAccountAuthError as exc:
             logger.warning("[openai_account.models.list] %s", exc)

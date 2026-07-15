@@ -834,6 +834,8 @@
       "apiBaseManaged": "OAuth Provider 自动维护，无需手动修改",
       "autoSaving": "登录完成，正在自动保存配置...",
       "autoSaved": "配置已自动保存",
+      "autoSaveDeferred": "登录已完成，仍有其他模型改动待保存，请点击“保存”统一提交。",
+      "newModelSaveDeferred": "登录已完成，请先确认添加该模型，再保存配置。",
       "autoSaveBusy": "配置正在保存，请稍后再试。",
       "autoSaveFailed": "登录成功，但自动保存配置失败：{{error}}"
     },

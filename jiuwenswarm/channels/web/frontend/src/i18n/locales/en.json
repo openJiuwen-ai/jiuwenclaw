@@ -834,6 +834,8 @@
       "apiBaseManaged": "Managed by the OAuth provider. No manual change is needed.",
       "autoSaving": "Login completed. Saving configuration...",
       "autoSaved": "Configuration saved automatically",
+      "autoSaveDeferred": "Login completed. Other model changes are still pending; use Save to apply them.",
+      "newModelSaveDeferred": "Login completed. Confirm this model, then save the configuration.",
       "autoSaveBusy": "Configuration is already being saved. Try again shortly.",
       "autoSaveFailed": "Login succeeded, but automatic configuration save failed: {{error}}"
     },

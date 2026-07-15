@@ -5,6 +5,12 @@ import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore } from '../../stores';
 import type { ModelEntry } from '../../types';
 import { webRequest } from '../../services/webClient';
+import {
+  canAutoSaveOpenAIAccountModel,
+  modelEntriesEqual,
+  patchModelSnapshot,
+  type ModelIdentity,
+} from "./openaiAccountModelState";
 import { PermissionsToolsEditor } from "./PermissionsToolsEditor";
 import { ModelProviderIcon } from '../ModelProviderIcon';
 
@@ -236,6 +242,8 @@ interface ConfigSaveAllPayload {
 interface ModelPatchOptions {
   autoSave?: boolean;
 }
+
+type ModelAutoSaveResult = "saved" | "deferred";
 
 interface ConfigGroup {
   tag: string;
@@ -1069,6 +1077,7 @@ interface OpenAIAccountPollPayload {
 interface OpenAIAccountModelsPayload {
   models?: string[];
   base_url?: string;
+  auth?: OpenAIAccountAuthStatus;
 }
 
 function OpenAIAccountMark() {
@@ -1083,11 +1092,16 @@ function OpenAIAccountAuthPanel({
   model,
   isConnected,
   onModelPatch,
+  autoSaveOnLogin = true,
   t,
 }: {
   model: ModelEntry;
   isConnected: boolean;
-  onModelPatch: (patch: Partial<ModelEntry>, options?: ModelPatchOptions) => Promise<void> | void;
+  onModelPatch: (
+    patch: Partial<ModelEntry>,
+    options?: ModelPatchOptions,
+  ) => Promise<ModelAutoSaveResult> | ModelAutoSaveResult;
+  autoSaveOnLogin?: boolean;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const [status, setStatus] = useState<OpenAIAccountAuthStatus | null>(null);
@@ -1103,7 +1117,7 @@ function OpenAIAccountAuthPanel({
   const [loadingModels, setLoadingModels] = useState(false);
   const [modelsLoadedOnce, setModelsLoadedOnce] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
-  const [autoSaveState, setAutoSaveState] = useState<"idle" | "saving" | "saved">("idle");
+  const [autoSaveState, setAutoSaveState] = useState<"idle" | "saving" | "saved" | "deferred">("idle");
   const [refreshCoolingDown, setRefreshCoolingDown] = useState(false);
   const [loginPollResetToken, setLoginPollResetToken] = useState(0);
   const pollingLoginRef = useRef(false);
@@ -1142,9 +1156,14 @@ function OpenAIAccountAuthPanel({
       baseUrl || status?.base_url || OPENAI_ACCOUNT_DEFAULT_API_BASE,
       modelIds,
     );
-    const shouldAutoSave = Boolean(options?.autoSave && String(patch.model_name || "").trim());
+    const hasModelName = Boolean(String(patch.model_name || "").trim());
+    const shouldAutoSave = Boolean(options?.autoSave && autoSaveOnLogin && hasModelName);
     try {
-      if (options?.autoSave && !shouldAutoSave) {
+      if (options?.autoSave && autoSaveTimerRef.current !== undefined) {
+        window.clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = undefined;
+      }
+      if (options?.autoSave && !hasModelName) {
         setAutoSaveState("idle");
         setModelsError(t("config.openaiAccount.noModelsAvailable"));
       }
@@ -1152,16 +1171,21 @@ function OpenAIAccountAuthPanel({
         setAutoSaveState("saving");
       }
       latestModelRef.current = { ...latestModelRef.current, ...patch };
-      await onModelPatch(patch, shouldAutoSave ? options : undefined);
-      if (shouldAutoSave) {
-        setAutoSaveState("saved");
-        if (autoSaveTimerRef.current !== undefined) {
-          window.clearTimeout(autoSaveTimerRef.current);
+      const saveResult = await onModelPatch(patch, shouldAutoSave ? options : undefined);
+      if (options?.autoSave && hasModelName) {
+        if (shouldAutoSave && saveResult === "saved") {
+          setAutoSaveState("saved");
+          autoSaveTimerRef.current = window.setTimeout(() => {
+            setAutoSaveState("idle");
+            autoSaveTimerRef.current = undefined;
+          }, 3000);
+        } else {
+          setAutoSaveState("deferred");
+          autoSaveTimerRef.current = window.setTimeout(() => {
+            setAutoSaveState("idle");
+            autoSaveTimerRef.current = undefined;
+          }, 5000);
         }
-        autoSaveTimerRef.current = window.setTimeout(() => {
-          setAutoSaveState("idle");
-          autoSaveTimerRef.current = undefined;
-        }, 3000);
       }
     } catch (error) {
       setAutoSaveState("idle");
@@ -1169,9 +1193,10 @@ function OpenAIAccountAuthPanel({
         error: openAIAccountErrorMessage(error, t("config.errors.saveFailed")),
       }));
     }
-  }, [onModelPatch, status?.base_url, t]);
+  }, [autoSaveOnLogin, onModelPatch, status?.base_url, t]);
 
   const refreshModelDefaults = useCallback(async (baseUrl?: string, options?: ModelPatchOptions) => {
+    setModelsLoadedOnce(true);
     setLoadingModels(true);
     setModelsError(null);
     try {
@@ -1184,6 +1209,12 @@ function OpenAIAccountAuthPanel({
         ? payload.models.filter((name): name is string => typeof name === "string" && name.trim().length > 0)
         : [];
       setModelOptions(nextModels);
+      if (payload.auth) {
+        setStatus(payload.auth);
+        if (payload.auth.authenticated && !payload.auth.needs_refresh) {
+          setLogin(null);
+        }
+      }
       if (nextModels.length === 0) {
         setModelsError(t("config.openaiAccount.noModelsAvailable"));
       }
@@ -1253,10 +1284,9 @@ function OpenAIAccountAuthPanel({
   }, [restorePendingLogin]);
 
   useEffect(() => {
-    if (!isConnected || modelsLoadedOnce) return;
-    setModelsLoadedOnce(true);
+    if (!isConnected || modelsLoadedOnce || !status?.authenticated) return;
     void refreshModelDefaults(status?.base_url);
-  }, [isConnected, modelsLoadedOnce, refreshModelDefaults, status?.base_url]);
+  }, [isConnected, modelsLoadedOnce, refreshModelDefaults, status?.authenticated, status?.base_url]);
 
   const pollLoginOnce = useCallback(async (activeLogin: OpenAIAccountLoginPayload) => {
     if (!isConnected) return true;
@@ -1431,7 +1461,7 @@ function OpenAIAccountAuthPanel({
     }
     beginRefreshCooldown(OPENAI_ACCOUNT_STATUS_REFRESH_COOLDOWN_MS);
     const nextStatus = await refreshStatus();
-    if (nextStatus?.authenticated && !nextStatus.needs_refresh) {
+    if (nextStatus?.authenticated) {
       await refreshModelDefaults(nextStatus.base_url);
     }
   };
@@ -1475,6 +1505,9 @@ function OpenAIAccountAuthPanel({
       );
       setStatus(result.auth || null);
       setLogin(null);
+      setModelOptions([]);
+      setModelsLoadedOnce(false);
+      setAutoSaveState("idle");
     } catch (error) {
       setAuthError(openAIAccountErrorMessage(error, t("config.openaiAccount.logoutFailed")));
     } finally {
@@ -1508,7 +1541,8 @@ function OpenAIAccountAuthPanel({
     void onModelPatch({ model_name: modelName });
   };
 
-  const authenticated = Boolean(status?.authenticated && !status?.needs_refresh);
+  const hasStoredAuth = Boolean(status?.authenticated);
+  const authenticated = Boolean(hasStoredAuth && !status?.needs_refresh);
   const statusLabel = authenticated
     ? t("config.openaiAccount.connected")
     : status?.needs_refresh
@@ -1538,6 +1572,10 @@ function OpenAIAccountAuthPanel({
                 ? t("config.openaiAccount.autoSaving")
                 : autoSaveState === "saved"
                   ? t("config.openaiAccount.autoSaved")
+                  : autoSaveState === "deferred"
+                    ? t(autoSaveOnLogin
+                      ? "config.openaiAccount.autoSaveDeferred"
+                      : "config.openaiAccount.newModelSaveDeferred")
                   : status?.auth_path
                     ? t("config.openaiAccount.statusAuthPath", { path: status.auth_path })
                     : t("config.openaiAccount.description")}
@@ -1595,7 +1633,7 @@ function OpenAIAccountAuthPanel({
           <button
             type="button"
             onClick={() => void refreshModelDefaults(status?.base_url)}
-            disabled={!isConnected || loadingModels}
+            disabled={!isConnected || !hasStoredAuth || loadingModels}
             className="inline-flex items-center gap-1 rounded border border-border bg-card px-2 py-1 text-[11px] text-text hover:bg-secondary/60 disabled:opacity-40"
           >
             {loadingModels ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
@@ -1605,7 +1643,7 @@ function OpenAIAccountAuthPanel({
         <select
           value={selectedModelName}
           onChange={(event) => handleModelSelectChange(event.target.value)}
-          disabled={loadingModels || visibleModelOptions.length === 0}
+          disabled={!hasStoredAuth || loadingModels || visibleModelOptions.length === 0}
           className="mt-2 w-full rounded border border-border bg-card px-2 py-1 text-xs text-text disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
         >
           {!selectedModelName ? (
@@ -1688,7 +1726,7 @@ function MultiModelSection({
   agents?: AgentEntry[];
   onDeleteModel?: (idx: number, modelName: string, references: string[]) => void;
   onClearExternalError?: () => void;
-  onModelsAutoSave?: (models: ModelEntry[]) => Promise<void>;
+  onModelsAutoSave?: (models: ModelEntry[], identity: ModelIdentity) => Promise<ModelAutoSaveResult>;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const [validatingModel, setValidatingModel] = useState<number | null>(null);
@@ -1700,6 +1738,13 @@ function MultiModelSection({
   });
   const [localError, setLocalError] = useState<string | null>(null);
   const [validateToast, setValidateToast] = useState<{ show: boolean; success: boolean; message: string }>({ show: false, success: true, message: "" });
+  const modelsRef = useRef(models);
+  modelsRef.current = models;
+
+  const emitModelsChange = useCallback((nextModels: ModelEntry[]) => {
+    modelsRef.current = nextModels;
+    onModelsChange(nextModels);
+  }, [onModelsChange]);
 
   const resetNewModelDraft = () => {
     setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "", reasoning_level: "" });
@@ -1826,18 +1871,26 @@ function MultiModelSection({
         copy[idx] = { ...copy[idx], is_default: false };
       }
     }
-    onModelsChange(copy);
+    emitModelsChange(copy);
   };
 
-  const patchModel = async (idx: number, patch: Partial<ModelEntry>, options?: ModelPatchOptions) => {
+  const patchModel = async (
+    identity: ModelIdentity,
+    patch: Partial<ModelEntry>,
+    options?: ModelPatchOptions,
+  ): Promise<ModelAutoSaveResult> => {
     onClearExternalError?.();
     setLocalError(null);
-    const copy = [...models];
-    copy[idx] = { ...copy[idx], ...patch };
-    onModelsChange(copy);
-    if (options?.autoSave) {
-      await onModelsAutoSave?.(copy);
+    const currentModels = modelsRef.current;
+    const nextModels = patchModelSnapshot(currentModels, identity, patch);
+    if (nextModels === currentModels) {
+      return "deferred";
     }
+    emitModelsChange(nextModels);
+    if (options?.autoSave && onModelsAutoSave) {
+      return onModelsAutoSave(nextModels, identity);
+    }
+    return "deferred";
   };
 
   const removeModel = (idx: number) => {
@@ -1867,7 +1920,7 @@ function MultiModelSection({
       }
     }
     copy.unshift(target);
-    onModelsChange(copy);
+    emitModelsChange(copy);
     setExpandedIdx((prev) => {
       if (prev === null) return null;
       if (prev === idx) return 0;
@@ -1915,7 +1968,7 @@ function MultiModelSection({
         return prev;
       });
     }
-    onModelsChange(copy);
+    emitModelsChange(copy);
   };
 
   const handleAddNew = () => {
@@ -1969,7 +2022,7 @@ function MultiModelSection({
       model_name: name,
       is_default: !sameNameExists,
     };
-    onModelsChange([...models, entry]);
+    emitModelsChange([...models, entry]);
     setExpandedIdx(models.length); // 自动展开新增的条目
     setAddingNew(false);
     setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "", reasoning_level: "" });
@@ -2130,7 +2183,10 @@ function MultiModelSection({
                     <OpenAIAccountAuthPanel
                       model={model}
                       isConnected={isConnected}
-                      onModelPatch={(patch, options) => patchModel(idx, patch, options)}
+                      onModelPatch={(patch, options) => patchModel({
+                        originIndex: model.origin_index,
+                        fallbackIndex: idx,
+                      }, patch, options)}
                       t={t}
                     />
                   ) : null}
@@ -2207,7 +2263,11 @@ function MultiModelSection({
               <OpenAIAccountAuthPanel
                 model={newModel}
                 isConnected={isConnected}
-                onModelPatch={(patch) => setNewModel((prev) => ({ ...prev, ...patch }))}
+                autoSaveOnLogin={false}
+                onModelPatch={(patch) => {
+                  setNewModel((prev) => ({ ...prev, ...patch }));
+                  return "deferred";
+                }}
                 t={t}
               />
             ) : null}
@@ -3287,6 +3347,8 @@ export function ConfigPanel({
   const availableModels = useSessionStore((s) => s.availableModels);
   const mode = useSessionStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.mode ?? 'agent' : 'agent'));
   const storeAvailableModels = availableModels;
+  const storeAvailableModelsRef = useRef(storeAvailableModels);
+  storeAvailableModelsRef.current = storeAvailableModels;
   const [draftValues, setDraftValues] = useState<Record<string, string>>(() => {
     if (!config) return {};
     const next: Record<string, string> = {};
@@ -3709,16 +3771,9 @@ export function ConfigPanel({
   }, [draftValues, normalizedConfig]);
   const hasModelChanges = useMemo(() => {
     if (draftModels.length !== storeAvailableModels.length) return true;
-    return draftModels.some((dm, i) => {
-      const om = storeAvailableModels[i];
-      if (!om) return true;
-      return dm.model_name !== om.model_name || dm.api_base !== om.api_base
-        || dm.api_key !== om.api_key || dm.model_provider !== om.model_provider
-        || (dm.alias ?? "") !== (om.alias ?? "")
-        || (dm.reasoning_level ?? "") !== (om.reasoning_level ?? "")
-        || dm.is_default !== om.is_default
-        || (dm.temperature ?? 0.95) !== (om.temperature ?? 0.95)
-        || (dm.timeout ?? 1800) !== (om.timeout ?? 1800);
+    return draftModels.some((draftModel, index) => {
+      const persistedModel = storeAvailableModels[index];
+      return !persistedModel || !modelEntriesEqual(draftModel, persistedModel);
     });
   }, [draftModels, storeAvailableModels]);
 
@@ -3896,7 +3951,13 @@ export function ConfigPanel({
     }
   };
 
-  const handleModelsAutoSave = async (models: ModelEntry[]) => {
+  const handleModelsAutoSave = async (
+    models: ModelEntry[],
+    identity: ModelIdentity,
+  ): Promise<ModelAutoSaveResult> => {
+    if (!canAutoSaveOpenAIAccountModel(models, storeAvailableModelsRef.current, identity)) {
+      return "deferred";
+    }
     if (saving) {
       throw new Error(t("config.openaiAccount.autoSaveBusy"));
     }
@@ -3914,6 +3975,7 @@ export function ConfigPanel({
       if (onModelsRefresh) {
         await onModelsRefresh();
       }
+      return "saved";
     } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : t("config.errors.saveFailed");
       setModelError(message);
