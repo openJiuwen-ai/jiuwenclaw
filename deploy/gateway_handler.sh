@@ -122,6 +122,7 @@ render_gateway_files() {
         DEPLOY_VARS["AGENT_SERVER_HOME"]="/home/app"
     fi
 
+    render_secret_configmap
     gen_gateway_env_file
     gen_gateway_config_file
     if [ "${DEPLOY_VARS["DEPLOYMENT_MODE"]}" == "active-standby" ]; then
@@ -147,6 +148,7 @@ deploy_gateway() {
     local mount_type="${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}"
     local is_external_pvc="${DEPLOY_VARS["ENABLE_EXTERNAL_PVC"]}"
 
+    ensure_secret_configmap
     exec_cmd kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${env_file}
     exec_cmd kubectl create configmap -n ${namespace} ${conf_name} --from-file=config.yaml=${conf_file}
 

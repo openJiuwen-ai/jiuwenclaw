@@ -96,7 +96,8 @@ JiuwenClaw_deployTool_0.0.74k_arm64/
 ├── update_conf.sh                        # 配置更新、重载处理脚本
 ├── update_docker_registry.py             # 镜像仓库地址批量更新工具
 ├── web_handler.sh                        # Web 前端模块部署、运维脚本
-├── log_handler.sh                        # 日志模块部署、运维脚本
+├── log_handler.sh                        # 日志管理模块部署、运维脚本
+├── configmap_secret_handler.sh           # 处理存放密码的ConfigMap的脚本
 └── templates/                            # 所有 Kubernetes 资源模板配置目录
     ├── gateway-config-jiuwen.template.yaml # 网关业务配置模板
     ├── gateway.template.env                # 网关环境变量配置模板
@@ -111,6 +112,7 @@ JiuwenClaw_deployTool_0.0.74k_arm64/
     ├── postgresql.template.yaml            # PostgreSQL 数据库 Kubernetes 资源模板
     ├── redis.template.yaml                 # Redis 缓存 Kubernetes 资源模板
     ├── log.template.yaml                   # 日志模块 Kubernetes 资源模板
+    ├── configmap-secret.template.yaml      # 专门存放密码的ConfigMap 资源模板
     └── web.template.yaml                   # Web 前端 Kubernetes 部署资源模板
 ```
 
@@ -483,6 +485,27 @@ LOG_TO_FILE_ENABLED=false
 ```
 ./deploy.sh up log          # 部署日志模块（可选部署，也只能部署一次）
 ```
+
+部署完成后，日志采集服务将自动筛选集群内名称前缀为 `jiuwenclaw` 的 Pod 进行日志采集。采集完成后，日志文件按照 `命名空间/Pod名称/容器名称-日期.log` 层级目录结构持久化存储，目录组织示例如下：
+
+```
+└── myns
+    ├── jiuwenclaw-agentserver-3nwipvx8cq-y7cu6
+    │   ├── jiuwenbox-2026-07-14.log
+    │   └── jiuwenclaw-agentserver-2026-07-14.log
+    ├── jiuwenclaw-agentserver-n7iqunzg6h-3l6kf
+    │   ├── jiuwenbox-2026-07-14.log
+    │   └── jiuwenclaw-agentserver-2026-07-14.log
+    ├── jiuwenclaw-gateway-668cccc968-66pxt
+    │   ├── gateway-2026-07-14.log
+    │   └── gateway-2026-07-15.log
+    ├── jiuwenclaw-manager-server-569fc57f7-pn4v6
+    │   └── manager-2026-07-15.log
+    └── jiuwenclaw-web-545f77c477-drfcf
+        └── web-2026-07-14.log
+```
+
+
 
 ## 4 部署JiuwenSwarm企业级服务
 

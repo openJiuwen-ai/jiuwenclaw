@@ -57,6 +57,10 @@ spec:
           containerPort: <<MANAGER_REST_PORT>>
         - name: websocket
           containerPort: <<MANAGER_WS_PORT>>
+        envFrom:
+            # 密码密钥变量
+            - secretRef:
+                name: <<SECRET_CM_NAME>>
         env:
         - name: MANAGER_RABBITMQ_URL
           value: "<<MANAGER_RABBITMQ_URL>>"
@@ -74,8 +78,6 @@ spec:
           value: "<<DB_PORT>>"
         - name: MANAGER_DB_USER
           value: "<<MANAGER_DB_USER>>"
-        - name: MANAGER_DB_PASSWORD
-          value: "<<MANAGER_DB_PASSWORD>>"
         - name: MANAGER_DB_NAME
           value: "<<MANAGER_DB_NAME>>"
         - name: MANAGER_WS_ENABLED
