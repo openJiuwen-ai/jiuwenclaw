@@ -44,7 +44,22 @@
     "config": "Configuration",
     "browser": "Browser Service",
     "logs": "Logs",
-    "update": "Updates"
+    "update": "Updates",
+    "history": "History"
+  },
+  "history": {
+    "title": "Chat History",
+    "newSession": "New chat",
+    "switchUser": "Switch",
+    "userPlaceholder": "username",
+    "subtitle": "Browse conversations archived on Web Pod",
+    "refresh": "Refresh",
+    "loading": "Loading...",
+    "empty": "No history sessions",
+    "emptyMessages": "No messages in this session",
+    "notFound": "Session not found",
+    "back": "Back to list",
+    "messageCount": "{{count}} messages"
   },
   "team": {
     "members": "Team Members",
