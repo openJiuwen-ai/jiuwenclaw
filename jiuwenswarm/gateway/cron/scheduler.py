@@ -435,7 +435,20 @@ class CronSchedulerService:
                 else:
                     logger.warning("[Cron] compute next run failed job=%s: %s", job.id, exc)
                 continue
-            self._schedule_event(wake_dt, "wake", job.id, run_id)
+            # 幂等保护：reload 清空事件队列后重新排入，但同一 run_id
+            # 可能已执行中或已完成（wake_offset 过大时 wake_dt 在过去，
+            # 每次 reload 都会立刻触发）。跳过已活跃 run 的 wake 事件，
+            # 但 push 事件仍需排入——_on_push 内部有 pushed_final 兜底。
+            existing = self._runs.get(run_id)
+            already_active = (
+                existing is not None
+                and existing.status in ("running", "succeeded", "failed")
+            ) or (
+                run_id in self._run_tasks
+                and not self._run_tasks[run_id].done()
+            )
+            if not already_active:
+                self._schedule_event(wake_dt, "wake", job.id, run_id)
             self._schedule_event(push_dt, "push", job.id, run_id)
 
         self._sync_store_mtime()
@@ -759,6 +772,20 @@ class CronSchedulerService:
             )
             self._runs[run_id] = state
 
+        # 幂等保护：reload 可能对同一 run_id 重复排入 wake 事件。
+        # 如果该 run 已完成（succeeded/failed）或已有结果文本，不再重复执行 agent。
+        if state.status in ("succeeded", "failed"):
+            logger.info(
+                "[Cron] _on_wake skipped: already %s run_id=%s job=%s",
+                state.status, run_id, job.id,
+            )
+            return
+        if state.result_text and state.pushed_final:
+            logger.info(
+                "[Cron] _on_wake skipped: result already pushed run_id=%s job=%s",
+                run_id, job.id,
+            )
+            return
         if run_id in self._run_tasks and not self._run_tasks[run_id].done():
             return
 
