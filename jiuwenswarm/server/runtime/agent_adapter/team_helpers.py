@@ -2019,19 +2019,18 @@ async def _consume_stream_with_query(
                 # is preserved.
                 if parsed.get("event_type") == "chat.final":
                     tm_ = get_team_manager(channel_id)
-                    if tm_.has_seen_team_events(session_id) and not tm_.is_workflow_completed(session_id):
-                        continue
-                    _broadcast_event(
-                        channel_id,
-                        session_id,
-                        {
-                            "event_type": "chat.processing_status",
-                            "session_id": session_id,
-                            "rid": round_id,
-                            "is_processing": False,
-                            "is_complete": True,
-                        },
-                    )
+                    if (not tm_.has_seen_team_events(session_id)) or tm_.is_workflow_completed(session_id):
+                        _broadcast_event(
+                            channel_id,
+                            session_id,
+                            {
+                                "event_type": "chat.processing_status",
+                                "session_id": session_id,
+                                "rid": round_id,
+                                "is_processing": False,
+                                "is_complete": True,
+                            },
+                        )
                 _broadcast_event(channel_id, session_id, parsed)
 
         # If stream ended without any chunks, broadcast an error event
@@ -2326,7 +2325,6 @@ async def _consume_workflow_events(
                         _resolve_channel_id(channel_id), session_id, wf_status,
                     )
                     get_team_manager(channel_id).mark_workflow_completed(session_id)
-                    break
                 continue
             for team_ev in _workflow_updated_to_team_events(
                 event, session_id, seen_phase, seen_agent, spawned_members
@@ -2343,8 +2341,6 @@ async def _consume_workflow_events(
                     _resolve_channel_id(channel_id), session_id, wf_status,
                 )
                 get_team_manager(channel_id).mark_workflow_completed(session_id)
-                break
-
         logger.info(
             "[TeamHelpers] workflow event loop ended: channel_id=%s session_id=%s",
             _resolve_channel_id(channel_id),
