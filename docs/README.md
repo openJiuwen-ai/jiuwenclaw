@@ -62,7 +62,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>对话</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="zh/对话.md">对话</a></td>
       <td width="50%">Web 对话入口，支持消息发送、新建会话以及规划 / 性能 / 集群模式切换。</td>
     </tr>
     <tr>
@@ -72,7 +72,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>会话</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="zh/会话.md">会话</a></td>
       <td width="50%">Session 信息管理、历史聊天记录查看与恢复、会话历史删除。</td>
     </tr>
     <tr>
@@ -112,7 +112,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>日志</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="zh/日志.md">日志</a></td>
       <td width="50%">系统日志路径、运行记录与常见排错入口。</td>
     </tr>
     <tr>

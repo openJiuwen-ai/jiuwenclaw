@@ -62,7 +62,7 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Conversation</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="en/Conversation.md">Conversation</a></td>
       <td width="50%">Web conversation entry point, supporting message sending, new sessions, and planning / performance / cluster mode switching.</td>
     </tr>
     <tr>
@@ -72,7 +72,7 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Session</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="en/Session.md">Session</a></td>
       <td width="50%">Session information management, viewing and restoring historical chats, and deleting session history.</td>
     </tr>
     <tr>
@@ -112,7 +112,7 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Logs</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="en/Logs.md">Logs</a></td>
       <td width="50%">System log paths, runtime records, and common troubleshooting entry points.</td>
     </tr>
     <tr>
