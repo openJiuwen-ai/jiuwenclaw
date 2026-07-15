@@ -2107,6 +2107,11 @@ class AgentWebSocketServer:
             canonical_mode if canonical_mode else mode,
             explicit_mode_provided=explicit_mode_provided,
         )
+        if isinstance(project_dir, str) and project_dir.strip():
+            project_dir = project_dir.strip()
+            request.params["project_dir"] = project_dir
+            request.metadata = dict(request.metadata or {})
+            request.metadata["project_dir"] = project_dir
 
         agent = await self._agent_manager.get_agent(
             channel_id=channel_id,
