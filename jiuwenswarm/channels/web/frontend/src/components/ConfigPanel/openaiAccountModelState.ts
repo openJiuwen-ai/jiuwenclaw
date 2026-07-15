@@ -5,6 +5,17 @@ export interface ModelIdentity {
   fallbackIndex: number;
 }
 
+interface AgentModelBinding {
+  provider: string;
+  api_base: string;
+  api_key: string;
+  model: string;
+}
+
+interface AgentWithModelBinding {
+  model: AgentModelBinding;
+}
+
 export function findModelIndex(models: ModelEntry[], identity: ModelIdentity): number {
   if (identity.originIndex !== undefined) {
     const persistedIndex = models.findIndex((model) => model.origin_index === identity.originIndex);
@@ -42,6 +53,62 @@ export function patchModelSnapshot(
   const nextModels = [...models];
   nextModels[targetIndex] = { ...nextModels[targetIndex], ...patch };
   return nextModels;
+}
+
+export function preserveConfiguredModelName(
+  currentModelName: string,
+  discoveredModelIds: string[],
+): string {
+  const configuredModelName = currentModelName.trim();
+  if (configuredModelName) return configuredModelName;
+
+  return discoveredModelIds
+    .map((modelId) => modelId.trim())
+    .find(Boolean) ?? "";
+}
+
+export function syncAgentsWithModelChanges<T extends AgentWithModelBinding>(
+  agents: T[],
+  previousModels: ModelEntry[],
+  nextModels: ModelEntry[],
+): T[] {
+  let changed = false;
+  const nextAgents = agents.map((agent) => {
+    const previousModelIndex = previousModels.findIndex(
+      (model) => model.model_name === agent.model.model
+        && model.model_provider === agent.model.provider
+        && model.api_base === agent.model.api_base,
+    );
+    if (previousModelIndex < 0 || previousModelIndex >= nextModels.length) {
+      return agent;
+    }
+
+    const previousModel = previousModels[previousModelIndex];
+    const nextModel = nextModels[previousModelIndex];
+    const modelChanged = nextModel.model_name !== previousModel.model_name
+      || nextModel.model_provider !== previousModel.model_provider
+      || nextModel.api_base !== previousModel.api_base
+      || nextModel.api_key !== previousModel.api_key;
+    if (!modelChanged) return agent;
+
+    changed = true;
+    return {
+      ...agent,
+      model: {
+        provider: nextModel.model_provider || "",
+        api_base: nextModel.api_base || "",
+        api_key: nextModel.api_key || "",
+        model: nextModel.model_name || "",
+      },
+    };
+  });
+
+  return changed ? nextAgents : agents;
+}
+
+export function shouldContinueOpenAIAccountLoginPoll(error: unknown): boolean {
+  return error instanceof Error
+    && (error as Error & { retriable?: boolean }).retriable === true;
 }
 
 export function canAutoSaveOpenAIAccountModel(

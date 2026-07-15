@@ -4,6 +4,9 @@ import test from "node:test";
 import {
   canAutoSaveOpenAIAccountModel,
   patchModelSnapshot,
+  preserveConfiguredModelName,
+  shouldContinueOpenAIAccountLoginPoll,
+  syncAgentsWithModelChanges,
 } from "../node_modules/.cache/openai-account-model-state/components/ConfigPanel/openaiAccountModelState.js";
 
 const persistedModels = [
@@ -131,4 +134,78 @@ test("defers auto-save for a model that has not been persisted yet", () => {
     ),
     false,
   );
+});
+
+test("preserves a configured model that is absent from refreshed discovery", () => {
+  assert.equal(
+    preserveConfiguredModelName("gpt-configured", ["gpt-new", "gpt-other"]),
+    "gpt-configured",
+  );
+});
+
+test("selects the first discovered model only when no model is configured", () => {
+  assert.equal(
+    preserveConfiguredModelName("", [" gpt-first ", "gpt-second"]),
+    "gpt-first",
+  );
+});
+
+test("updates only agents linked to the changed model entry", () => {
+  const agents = [
+    {
+      name: "coding-agent",
+      model: {
+        provider: "OpenAIAccount",
+        api_base: "https://chatgpt.com/backend-api/codex",
+        api_key: "",
+        model: "gpt-old",
+      },
+      skills: ["coding"],
+    },
+    {
+      name: "web-agent",
+      model: {
+        provider: "OpenAI",
+        api_base: "https://api.example.test/v1",
+        api_key: "secret",
+        model: "other-model",
+      },
+      skills: ["web"],
+    },
+  ];
+  const nextModels = [
+    { ...persistedModels[0], model_name: "gpt-new" },
+    persistedModels[1],
+  ];
+
+  const updated = syncAgentsWithModelChanges(agents, persistedModels, nextModels);
+
+  assert.notEqual(updated, agents);
+  assert.equal(updated[0].model.model, "gpt-new");
+  assert.equal(updated[1], agents[1]);
+});
+
+test("keeps the same agent snapshot when no linked model changed", () => {
+  const agents = [{
+    name: "coding-agent",
+    model: {
+      provider: "OpenAIAccount",
+      api_base: "https://chatgpt.com/backend-api/codex",
+      api_key: "",
+      model: "gpt-old",
+    },
+    skills: [],
+  }];
+
+  assert.equal(
+    syncAgentsWithModelChanges(agents, persistedModels, persistedModels),
+    agents,
+  );
+});
+
+test("continues login polling after a retriable web request error", () => {
+  const error = Object.assign(new Error("request timed out"), { retriable: true });
+
+  assert.equal(shouldContinueOpenAIAccountLoginPoll(error), true);
+  assert.equal(shouldContinueOpenAIAccountLoginPoll(new Error("invalid device code")), false);
 });

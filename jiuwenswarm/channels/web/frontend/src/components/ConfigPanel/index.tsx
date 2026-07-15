@@ -9,6 +9,9 @@ import {
   canAutoSaveOpenAIAccountModel,
   modelEntriesEqual,
   patchModelSnapshot,
+  preserveConfiguredModelName,
+  shouldContinueOpenAIAccountLoginPoll,
+  syncAgentsWithModelChanges,
   type ModelIdentity,
 } from "./openaiAccountModelState";
 import { PermissionsToolsEditor } from "./PermissionsToolsEditor";
@@ -244,6 +247,38 @@ interface ModelPatchOptions {
 }
 
 type ModelAutoSaveResult = "saved" | "deferred";
+
+function buildAgentsTeamsPayload(
+  agents: AgentEntry[],
+  teams: TeamEntry[],
+): AgentsTeamsPayload {
+  const agentsPayload: AgentsTeamsPayload["agents"] = {};
+  for (const agent of agents) {
+    if (!agent.name) continue;
+    agentsPayload[agent.name] = {
+      model: { ...agent.model },
+      skills: agent.skills,
+    };
+  }
+  const validAgentKeys = new Set(Object.keys(agentsPayload));
+  return {
+    agents: agentsPayload,
+    team: teams.map((team) => ({
+      ...team,
+      leader: {
+        ...team.leader,
+        agent_key: validAgentKeys.has(team.leader?.agent_key || "") ? team.leader?.agent_key : "",
+      },
+      teammate: {
+        ...team.teammate,
+        agent_key: validAgentKeys.has(team.teammate?.agent_key || "") ? team.teammate?.agent_key : "",
+      },
+      predefined_members: (team.predefined_members || [])
+        .filter((member) => member.agent_key && validAgentKeys.has(member.agent_key))
+        .map((member) => ({ ...member })),
+    })),
+  };
+}
 
 interface ConfigGroup {
   tag: string;
@@ -988,6 +1023,10 @@ const OPENAI_ACCOUNT_DEFAULT_API_BASE = "https://chatgpt.com/backend-api/codex";
 const OPENAI_ACCOUNT_LOGIN_POLL_COOLDOWN_MS = 15_000;
 const OPENAI_ACCOUNT_STATUS_REFRESH_COOLDOWN_MS = 5_000;
 const OPENAI_ACCOUNT_LOGIN_REFRESH_COOLDOWN_MS = 15_000;
+// Core OAuth calls can queue behind a poll and may perform two network steps sequentially.
+const OPENAI_ACCOUNT_AUTH_REQUEST_TIMEOUT_MS = 45_000;
+const OPENAI_ACCOUNT_MODEL_REQUEST_TIMEOUT_MS = 75_000;
+const OPENAI_ACCOUNT_LOGIN_START_TIMEOUT_MS = 90_000;
 
 const MODEL_PROVIDER_OPTIONS = [
   "OpenAI",
@@ -1014,7 +1053,7 @@ function buildOpenAIAccountModelDefaults(
     ? Array.from(new Set(modelIds.map((name) => name.trim()).filter(Boolean)))
     : undefined;
   const modelName = normalizedModelIds
-    ? (normalizedModelIds.includes(currentModelName) ? currentModelName : normalizedModelIds[0] ?? "")
+    ? preserveConfiguredModelName(currentModelName, normalizedModelIds)
     : currentModelName;
   return {
     model_provider: OPENAI_ACCOUNT_PROVIDER,
@@ -1203,7 +1242,7 @@ function OpenAIAccountAuthPanel({
       const payload = await webRequest<OpenAIAccountModelsPayload>(
         "openai_account.models.list",
         {},
-        { timeoutMs: 20000 },
+        { timeoutMs: OPENAI_ACCOUNT_MODEL_REQUEST_TIMEOUT_MS },
       );
       const nextModels = Array.isArray(payload.models)
         ? payload.models.filter((name): name is string => typeof name === "string" && name.trim().length > 0)
@@ -1234,7 +1273,7 @@ function OpenAIAccountAuthPanel({
       const nextStatus = await webRequest<OpenAIAccountAuthStatus>(
         "openai_account.auth.status",
         {},
-        { timeoutMs: 10000 },
+        { timeoutMs: OPENAI_ACCOUNT_AUTH_REQUEST_TIMEOUT_MS },
       );
       setStatus(nextStatus);
       if (nextStatus.authenticated && !nextStatus.needs_refresh) {
@@ -1260,7 +1299,7 @@ function OpenAIAccountAuthPanel({
       const payload = await webRequest<OpenAIAccountPendingLoginPayload>(
         "openai_account.auth.pending_login",
         {},
-        { timeoutMs: 10000 },
+        { timeoutMs: OPENAI_ACCOUNT_AUTH_REQUEST_TIMEOUT_MS },
       );
       const nextStatus = payload.auth || null;
       setStatus(nextStatus);
@@ -1298,7 +1337,7 @@ function OpenAIAccountAuthPanel({
       const result = await webRequest<OpenAIAccountPollPayload>(
         "openai_account.auth.poll_login",
         { login_id: activeLogin.login_id },
-        { timeoutMs: 30000 },
+        { timeoutMs: OPENAI_ACCOUNT_AUTH_REQUEST_TIMEOUT_MS },
       );
       if (result.status === "authenticated") {
         const nextStatus = result.auth || null;
@@ -1322,8 +1361,11 @@ function OpenAIAccountAuthPanel({
       }
       return false;
     } catch (error) {
-      setLogin(null);
       setAuthError(openAIAccountErrorMessage(error, t("config.openaiAccount.loginFailed")));
+      if (shouldContinueOpenAIAccountLoginPoll(error)) {
+        return false;
+      }
+      setLogin(null);
       return true;
     } finally {
       pollingLoginRef.current = false;
@@ -1480,7 +1522,7 @@ function OpenAIAccountAuthPanel({
       const started = await webRequest<OpenAIAccountLoginPayload>(
         "openai_account.auth.start_login",
         {},
-        { timeoutMs: 30000 },
+        { timeoutMs: OPENAI_ACCOUNT_LOGIN_START_TIMEOUT_MS },
       );
       setLoginPollResetToken(0);
       setLogin(started);
@@ -1501,7 +1543,7 @@ function OpenAIAccountAuthPanel({
       const result = await webRequest<{ auth?: OpenAIAccountAuthStatus }>(
         "openai_account.auth.logout",
         {},
-        { timeoutMs: 10000 },
+        { timeoutMs: OPENAI_ACCOUNT_AUTH_REQUEST_TIMEOUT_MS },
       );
       setStatus(result.auth || null);
       setLogin(null);
@@ -3903,49 +3945,8 @@ export function ConfigPanel({
       setError(null);
     }
 
-    // 自动更新引用模型的agent
-    const updatedAgents = draftAgents.map((agent) => {
-      // 找到agent当前引用的模型在旧模型列表中的索引
-      const oldModelIndex = oldModels.findIndex(
-        (m) => m.model_name === agent.model.model
-          && m.model_provider === agent.model.provider
-          && m.api_base === agent.model.api_base
-      );
-      
-      if (oldModelIndex >= 0 && oldModelIndex < models.length) {
-        const newModel = models[oldModelIndex];
-        const oldModel = oldModels[oldModelIndex];
-        
-        // 检查模型是否有变化
-        const hasModelChanged = 
-          newModel.model_name !== oldModel.model_name ||
-          newModel.model_provider !== oldModel.model_provider ||
-          newModel.api_base !== oldModel.api_base ||
-          newModel.api_key !== oldModel.api_key;
-        
-        if (hasModelChanged) {
-          return {
-            ...agent,
-            model: {
-              provider: newModel.model_provider || "",
-              api_base: newModel.api_base || "",
-              api_key: newModel.api_key || "",
-              model: newModel.model_name || "",
-            },
-          };
-        }
-      }
-      return agent;
-    });
-
-    const hasAgentModelUpdated = updatedAgents.some((agent, idx) => 
-      agent.model.model !== draftAgents[idx].model.model ||
-      agent.model.provider !== draftAgents[idx].model.provider ||
-      agent.model.api_base !== draftAgents[idx].model.api_base ||
-      agent.model.api_key !== draftAgents[idx].model.api_key
-    );
-
-    if (hasAgentModelUpdated) {
+    const updatedAgents = syncAgentsWithModelChanges(draftAgents, oldModels, models);
+    if (updatedAgents !== draftAgents) {
       setDraftAgents(updatedAgents);
       setAgentsTeamsEdited(true);
     }
@@ -3958,6 +3959,15 @@ export function ConfigPanel({
     if (!canAutoSaveOpenAIAccountModel(models, storeAvailableModelsRef.current, identity)) {
       return "deferred";
     }
+    if (agentsTeamsUserEdited) {
+      return "deferred";
+    }
+    const synchronizedAgents = syncAgentsWithModelChanges(draftAgents, draftModels, models);
+    const hasDerivedAgentChanges = synchronizedAgents !== draftAgents
+      || (agentsTeamsEdited && hasAgentsTeamsChanges);
+    if (hasDerivedAgentChanges && !onSaveAllConfig) {
+      return "deferred";
+    }
     if (saving) {
       throw new Error(t("config.openaiAccount.autoSaveBusy"));
     }
@@ -3966,11 +3976,27 @@ export function ConfigPanel({
     setModelError(null);
     try {
       if (onSaveAllConfig) {
-        await onSaveAllConfig({ models });
+        const payload: ConfigSaveAllPayload = { models };
+        if (hasDerivedAgentChanges) {
+          const agentsTeamsPayload = buildAgentsTeamsPayload(synchronizedAgents, draftTeams);
+          payload.agents = agentsTeamsPayload.agents;
+          payload.team = agentsTeamsPayload.team;
+        }
+        await onSaveAllConfig(payload);
       } else if (onModelsReplaceAll) {
         await onModelsReplaceAll(models);
       } else {
         throw new Error(t("config.errors.saveFailed"));
+      }
+      if (hasDerivedAgentChanges) {
+        setDraftAgents(synchronizedAgents);
+        setAgentsTeamsJustSaved(true);
+        savedAgentsRef.current = synchronizedAgents;
+        savedTeamsRef.current = draftTeams;
+        setInitialAgents(synchronizedAgents);
+        setInitialTeams(draftTeams);
+        setAgentsTeamsEdited(false);
+        setAgentsTeamsUserEdited(false);
       }
       if (onModelsRefresh) {
         await onModelsRefresh();
@@ -3995,37 +4021,6 @@ export function ConfigPanel({
     setAgentsTeamsUserEdited(false);
     setError(null);
     setModelError(null);
-  };
-
-  const buildAgentsTeamsPayload = (): AgentsTeamsPayload => {
-    const agentsPayload: AgentsTeamsPayload["agents"] = {};
-    for (const agent of draftAgents) {
-      if (!agent.name) continue;
-      agentsPayload[agent.name] = {
-        model: { ...agent.model },
-        skills: agent.skills,
-      };
-    }
-    const validAgentKeys = new Set(Object.keys(agentsPayload));
-    return {
-      agents: agentsPayload,
-      team: draftTeams.map((t) => ({
-        ...t,
-        leader: {
-          ...t.leader,
-          agent_key: validAgentKeys.has(t.leader?.agent_key || "") ? t.leader?.agent_key : "",
-        },
-        teammate: {
-          ...t.teammate,
-          agent_key: validAgentKeys.has(t.teammate?.agent_key || "") ? t.teammate?.agent_key : "",
-        },
-        predefined_members: (t.predefined_members || [])
-          .filter((m) => m.agent_key && validAgentKeys.has(m.agent_key))
-          .map((m) => ({
-            ...m,
-          })),
-      })),
-    };
   };
 
   const resetEditStateAfterSave = () => {
@@ -4135,7 +4130,7 @@ export function ConfigPanel({
           payload.models = draftModels;
         }
         if (hasAgentsTeamsChanges) {
-          const agentsTeamsPayload = buildAgentsTeamsPayload();
+          const agentsTeamsPayload = buildAgentsTeamsPayload(draftAgents, draftTeams);
           payload.agents = agentsTeamsPayload.agents;
           payload.team = agentsTeamsPayload.team;
         }
@@ -4157,7 +4152,7 @@ export function ConfigPanel({
           if (onModelsRefresh) await onModelsRefresh();
         }
         if (hasAgentsTeamsChanges && onAgentsTeamsSave) {
-          const agentsTeamsPayload = buildAgentsTeamsPayload();
+          const agentsTeamsPayload = buildAgentsTeamsPayload(draftAgents, draftTeams);
           const showRestartModal = !(hasConfigChanges || hasModelChanges);
           await onAgentsTeamsSave(agentsTeamsPayload, showRestartModal);
           setAgentsTeamsJustSaved(true);
