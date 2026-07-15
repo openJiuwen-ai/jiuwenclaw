@@ -36,8 +36,12 @@ const CRON_HISTORY_UI_ENABLED = false;
 interface CronPanelProps {
   sessionId: string;
   onCreateViaChat: (initialInputValue: string) => void;
-  /** 跳转到"触发的会话"，复用工作面板的会话导航逻辑（App.tsx 的 requestSessionNavigation） */
-  onSelectSession: (session: Session) => void;
+  /**
+   * 跳转到"触发的会话"，复用工作面板的会话导航逻辑（App.tsx 的 requestSessionNavigation）。
+   * 传 Session 对象（如"触发的会话"列表里已有完整数据）或直接传 session_id 字符串
+   * （如立即执行返回的 session_id，还没有完整 Session 数据）。
+   */
+  onSelectSession: (session: Session | string) => void;
 }
 
 type TabKey = 'list' | 'template' | 'history';
@@ -339,8 +343,13 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     if (!confirmState || confirmBusy) return;
     setConfirmBusy(true);
     try {
-      await webRequest<{ accepted: boolean; run_id: string; session_id: string }>('cron.job.run_now', { id: confirmState.job.id });
+      const result = await webRequest<{ accepted: boolean; run_id: string; session_id: string }>('cron.job.run_now', { id: confirmState.job.id });
       setSuccess(t('cron.success.runNow'));
+      // 后端首次执行（job 还没有 last_session_id）时 session_id 会是空串，此时不跳转，
+      // 用户仍可通过"触发的会话"列表在会话就绪后手动打开
+      if (result.session_id) {
+        onSelectSession(result.session_id);
+      }
     } catch (runNowError) {
       const message = runNowError instanceof Error ? runNowError.message : t('cron.errors.runNowFailed');
       setError(message);
@@ -505,7 +514,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
             <span className="text-sm font-bold text-text-strong">{t('cron.stats.total', { count: jobs.length })}</span>
             {activeTab === 'list' && (
               <>
-                <StatPill icon={<span className="text-[#0BB8B2]"><RunningIcon size={15} /></span>} label={t('cron.status.running')} count={runningCount} />
+                <StatPill icon={<span className="text-cron-running"><RunningIcon size={15} /></span>} label={t('cron.status.running')} count={runningCount} />
                 <StatPill icon={<span className="text-text-muted"><BoldRingIcon /></span>} label={t('cron.status.paused')} count={pausedCount} />
                 <StatPill icon={<span className="text-amber-600"><BoldRingIcon /></span>} label={t('cron.status.expired')} count={expiredCount} />
               </>
@@ -529,240 +538,244 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
         )}
 
         {/* tab: 任务列表 */}
-        {activeTab === 'list' && (
-          loading ? (
-            <div className="rounded-lg border border-border bg-secondary/30 px-3 py-4 flex items-center justify-center">
-              {t('cron.loading')}
+        {activeTab === 'list' && loading && (
+          <div className="rounded-lg border border-border bg-secondary/30 px-3 py-4 flex items-center justify-center">
+            {t('cron.loading')}
+          </div>
+        )}
+        {activeTab === 'list' && !loading && jobs.length === 0 && (
+          <div className="flex min-h-[70vh] flex-col items-center">
+            {/* 创建定时任务模块保持在可视区域垂直居中 */}
+            <div className="flex flex-1 flex-col items-center justify-center gap-4">
+              <img src={emptyIllustration} alt="" className="h-20 w-20" />
+              <button onClick={() => setDrawer({ mode: 'create' })} className="btn !px-4 !py-2">
+                {t('cron.empty.createButton')}
+              </button>
             </div>
-          ) : jobs.length === 0 ? (
-            <div className="flex min-h-[70vh] flex-col items-center">
-              {/* 创建定时任务模块保持在可视区域垂直居中 */}
-              <div className="flex flex-1 flex-col items-center justify-center gap-4">
-                <img src={emptyIllustration} alt="" className="h-20 w-20" />
-                <button onClick={() => setDrawer({ mode: 'create' })} className="btn !px-4 !py-2">
-                  {t('cron.empty.createButton')}
+            {/* 任务模板模块沉到页面下方，不紧跟在创建按钮下面 */}
+            <div className="w-full pb-4">
+              <div className="mb-3 flex items-center justify-between">
+                <span className="text-sm font-bold text-text-strong">{t('cron.empty.templateSectionTitle')}</span>
+                <button onClick={() => setActiveTab('template')} className="text-xs text-accent hover:text-accent-hover">
+                  {t('cron.empty.templateMore')}
                 </button>
               </div>
-              {/* 任务模板模块沉到页面下方，不紧跟在创建按钮下面 */}
-              <div className="w-full pb-4">
-                <div className="mb-3 flex items-center justify-between">
-                  <span className="text-sm font-bold text-text-strong">{t('cron.empty.templateSectionTitle')}</span>
-                  <button onClick={() => setActiveTab('template')} className="text-xs text-accent hover:text-accent-hover">
-                    {t('cron.empty.templateMore')}
+              <div className="grid grid-cols-3 gap-4">
+                {CRON_TEMPLATES.map((tpl) => (
+                  <button
+                    key={tpl.id}
+                    onClick={() => openTemplateDrawer(tpl)}
+                    className="rounded-lg border border-border bg-card p-4 text-left transition-colors hover:border-accent"
+                  >
+                    <div className="mb-2 flex items-center gap-2">
+                      <TemplateIcon icon={tpl.icon} />
+                      <span className="text-sm font-bold text-text-strong">{t(tpl.titleKey)}</span>
+                    </div>
+                    <p className="line-clamp-3 text-xs leading-relaxed text-text-muted">{t(tpl.descriptionKey)}</p>
                   </button>
-                </div>
-                <div className="grid grid-cols-3 gap-4">
-                  {CRON_TEMPLATES.map((tpl) => (
-                    <button
-                      key={tpl.id}
-                      onClick={() => openTemplateDrawer(tpl)}
-                      className="rounded-lg border border-border bg-card p-4 text-left transition-colors hover:border-accent"
-                    >
-                      <div className="mb-2 flex items-center gap-2">
-                        <TemplateIcon icon={tpl.icon} />
-                        <span className="text-sm font-bold text-text-strong">{t(tpl.titleKey)}</span>
-                      </div>
-                      <p className="line-clamp-3 text-xs leading-relaxed text-text-muted">{t(tpl.descriptionKey)}</p>
-                    </button>
-                  ))}
-                </div>
+                ))}
               </div>
             </div>
-          ) : (
-            <div className="overflow-visible rounded-lg border border-border">
-              <table className="w-full border-collapse text-sm">
-                <thead>
-                  <tr className="border-b border-border bg-bg-muted text-left text-text">
-                    <Th first>{t('cron.table.name')}</Th>
-                    <Th>{t('cron.table.project')}</Th>
-                    <Th>{t('cron.table.schedule')}</Th>
-                    <Th>{t('cron.table.status')}</Th>
-                    <Th>{t('cron.table.timezone')}</Th>
-                    <Th>{t('cron.table.channel')}</Th>
-                    <Th>{t('cron.table.actions')}</Th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredJobs.map((job) => {
-                    const isProactive = job.id === PROACTIVE_AUTO_JOB_ID;
-                    return (
-                      <tr key={job.id} className="border-b border-border last:border-0">
-                        <td className="px-4 py-3 text-text">
-                          <div className="flex items-center gap-1">
-                            {job.name}
-                            {isProactive && (
-                              <span
-                                className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-sky-100 text-sky-700"
-                                title={t('cron.autoManagedHint') ?? undefined}
-                              >
-                                {t('cron.autoManaged')}
-                              </span>
+          </div>
+        )}
+        {activeTab === 'list' && !loading && jobs.length > 0 && (
+          <div className="overflow-visible rounded-lg border border-border">
+            <table className="w-full border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-border bg-bg-muted text-left text-text">
+                  <Th first>{t('cron.table.name')}</Th>
+                  <Th>{t('cron.table.project')}</Th>
+                  <Th>{t('cron.table.schedule')}</Th>
+                  <Th>{t('cron.table.status')}</Th>
+                  <Th>{t('cron.table.timezone')}</Th>
+                  <Th>{t('cron.table.channel')}</Th>
+                  <Th>{t('cron.table.actions')}</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredJobs.map((job) => {
+                  const isProactive = job.id === PROACTIVE_AUTO_JOB_ID;
+                  return (
+                    <tr key={job.id} className="border-b border-border last:border-0">
+                      <td className="px-4 py-3 text-text">
+                        <div className="flex items-center gap-1">
+                          {job.name}
+                          {isProactive && (
+                            <span
+                              className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-sky-100 text-sky-700"
+                              title={t('cron.autoManagedHint') ?? undefined}
+                            >
+                              {t('cron.autoManaged')}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-text">{job.projectName ?? t('cron.table.noProject')}</td>
+                      <td className="px-4 py-3 text-text">{scheduleLabel(job.cronExpr)}</td>
+                      {/* proactive 自动维护 job 的整体开关由 config 控制（关了就删除，不在列表里），
+                          因此这里只有两态：过期 → 过期；否则 → 启用，不显示"禁用"中间态
+                          （沿用 upstream 提交 59cf6de7 的约束） */}
+                      <td className="px-4 py-3">
+                        <StatusBadge enabled={isProactive ? !job.expired : job.enabled} expired={job.expired} />
+                      </td>
+                      <td className="px-4 py-3 text-text">{job.timezone}</td>
+                      <td className="px-4 py-3 text-text">{channelLabel(job.deliveryChannel)}</td>
+                      <td className="relative px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          {job.expired ? (
+                            <span className="text-sm text-text-muted/50 cursor-not-allowed select-none" title={t('cron.errors.expiredCannotRunNow') ?? undefined}>
+                              {t('cron.table.runNow')}
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => setConfirmState({ type: 'runNow', job })}
+                              className="text-sm text-[#1476FF] hover:opacity-80"
+                            >
+                              {t('cron.table.runNow')}
+                            </button>
+                          )}
+                          {isProactive ? (
+                            <span className="text-sm text-text-muted/50 cursor-not-allowed select-none" title={t('cron.autoManagedToggleDisabled') ?? undefined}>
+                              {t('cron.table.stop')}
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => setConfirmState({ type: 'stop', job })}
+                              className="text-sm text-[#1476FF] hover:opacity-80"
+                            >
+                              {t('cron.table.stop')}
+                            </button>
+                          )}
+                          <div className="relative" ref={rowMenuJobId === job.id ? rowMenuRef : undefined}>
+                            <button
+                              onClick={() => setRowMenuJobId(rowMenuJobId === job.id ? null : job.id)}
+                              className="flex items-center gap-0.5 text-sm text-[#1476FF] hover:opacity-80"
+                            >
+                              {t('cron.table.more')} <ChevronDown size={13} />
+                            </button>
+                            {rowMenuJobId === job.id && (
+                              <div className="absolute left-0 top-[calc(100%+4px)] z-20 w-28 rounded-lg border border-border bg-card py-1.5 shadow-lg">
+                                <button
+                                  onClick={() => {
+                                    setRowMenuJobId(null);
+                                    setDrawer({ mode: 'edit', initial: jobToForm(job), jobId: job.id });
+                                  }}
+                                  className="block w-full px-3 py-2 text-left text-sm text-[#1476FF] hover:bg-bg-hover"
+                                >
+                                  {t('cron.table.edit')}
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setRowMenuJobId(null);
+                                    void toggleSessionsPopover(job);
+                                  }}
+                                  className="block w-full px-3 py-2 text-left text-sm text-[#1476FF] hover:bg-bg-hover"
+                                >
+                                  {t('cron.table.triggeredSessions')}
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setRowMenuJobId(null);
+                                    void togglePreviewPopover(job);
+                                  }}
+                                  className="block w-full px-3 py-2 text-left text-sm text-[#1476FF] hover:bg-bg-hover"
+                                >
+                                  {t('cron.previewAction')}
+                                </button>
+                                {isProactive ? (
+                                  <span
+                                    className="block w-full px-3 py-2 text-left text-sm text-text-muted/50 cursor-not-allowed"
+                                    title={t('cron.autoManagedToggleDisabled') ?? undefined}
+                                  >
+                                    {t('cron.delete')}
+                                  </span>
+                                ) : (
+                                  <button
+                                    onClick={() => {
+                                      setRowMenuJobId(null);
+                                      setConfirmState({ type: 'delete', job });
+                                    }}
+                                    className="block w-full px-3 py-2 text-left text-sm text-danger hover:bg-bg-hover"
+                                  >
+                                    {t('cron.delete')}
+                                  </button>
+                                )}
+                                {CRON_HISTORY_UI_ENABLED && (
+                                  <button
+                                    onClick={() => {
+                                      setRowMenuJobId(null);
+                                      setSuccess(t('cron.history.comingSoon'));
+                                    }}
+                                    className="block w-full px-3 py-2 text-left text-sm text-[#1476FF] hover:bg-bg-hover"
+                                  >
+                                    {t('cron.table.history')}
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </div>
-                        </td>
-                        <td className="px-4 py-3 text-text">{job.projectName ?? t('cron.table.noProject')}</td>
-                        <td className="px-4 py-3 text-text">{scheduleLabel(job.cronExpr)}</td>
-                        {/* proactive 自动维护 job 的整体开关由 config 控制（关了就删除，不在列表里），
-                            因此这里只有两态：过期 → 过期；否则 → 启用，不显示"禁用"中间态
-                            （沿用 upstream 提交 59cf6de7 的约束） */}
-                        <td className="px-4 py-3">
-                          <StatusBadge enabled={isProactive ? !job.expired : job.enabled} expired={job.expired} />
-                        </td>
-                        <td className="px-4 py-3 text-text">{job.timezone}</td>
-                        <td className="px-4 py-3 text-text">{channelLabel(job.deliveryChannel)}</td>
-                        <td className="relative px-4 py-3">
-                          <div className="flex items-center gap-3">
-                            {job.expired ? (
-                              <span className="text-sm text-text-muted/50 cursor-not-allowed select-none" title={t('cron.errors.expiredCannotRunNow') ?? undefined}>
-                                {t('cron.table.runNow')}
-                              </span>
-                            ) : (
-                              <button
-                                onClick={() => setConfirmState({ type: 'runNow', job })}
-                                className="text-sm text-[#1476FF] hover:opacity-80"
-                              >
-                                {t('cron.table.runNow')}
-                              </button>
+                        </div>
+                        {sessionsPopoverJobId === job.id && (
+                          <div
+                            ref={sessionsPopoverRef}
+                            className="absolute right-4 top-[calc(100%+4px)] z-20 w-64 rounded-lg border border-border bg-card py-1.5 shadow-lg"
+                          >
+                            <div className="px-3 py-1.5 text-xs font-bold text-text-muted">{t('cron.table.triggeredSessions')}</div>
+                            {triggeredSessionsLoading[job.id] && (
+                              <div className="px-3 py-2 text-sm text-text-muted">{t('common.loading')}</div>
                             )}
-                            {isProactive ? (
-                              <span className="text-sm text-text-muted/50 cursor-not-allowed select-none" title={t('cron.autoManagedToggleDisabled') ?? undefined}>
-                                {t('cron.table.stop')}
-                              </span>
-                            ) : (
-                              <button
-                                onClick={() => setConfirmState({ type: 'stop', job })}
-                                className="text-sm text-[#1476FF] hover:opacity-80"
-                              >
-                                {t('cron.table.stop')}
-                              </button>
+                            {!triggeredSessionsLoading[job.id] && (triggeredSessions[job.id]?.length ?? 0) > 0 && (
+                              <div className="max-h-64 overflow-y-auto">
+                                {triggeredSessions[job.id].map((s) => (
+                                  <button
+                                    key={s.session_id}
+                                    onClick={() => {
+                                      setSessionsPopoverJobId(null);
+                                      onSelectSession(s);
+                                    }}
+                                    className="block w-full truncate px-3 py-2 text-left text-sm text-text hover:bg-bg-hover"
+                                    title={s.title}
+                                  >
+                                    {s.title || s.session_id}
+                                  </button>
+                                ))}
+                              </div>
                             )}
-                            <div className="relative" ref={rowMenuJobId === job.id ? rowMenuRef : undefined}>
-                              <button
-                                onClick={() => setRowMenuJobId(rowMenuJobId === job.id ? null : job.id)}
-                                className="flex items-center gap-0.5 text-sm text-[#1476FF] hover:opacity-80"
-                              >
-                                {t('cron.table.more')} <ChevronDown size={13} />
-                              </button>
-                              {rowMenuJobId === job.id && (
-                                <div className="absolute left-0 top-[calc(100%+4px)] z-20 w-28 rounded-lg border border-border bg-card py-1.5 shadow-lg">
-                                  <button
-                                    onClick={() => {
-                                      setRowMenuJobId(null);
-                                      setDrawer({ mode: 'edit', initial: jobToForm(job), jobId: job.id });
-                                    }}
-                                    className="block w-full px-3 py-2 text-left text-sm text-[#1476FF] hover:bg-bg-hover"
-                                  >
-                                    {t('cron.table.edit')}
-                                  </button>
-                                  <button
-                                    onClick={() => {
-                                      setRowMenuJobId(null);
-                                      void toggleSessionsPopover(job);
-                                    }}
-                                    className="block w-full px-3 py-2 text-left text-sm text-[#1476FF] hover:bg-bg-hover"
-                                  >
-                                    {t('cron.table.triggeredSessions')}
-                                  </button>
-                                  <button
-                                    onClick={() => {
-                                      setRowMenuJobId(null);
-                                      void togglePreviewPopover(job);
-                                    }}
-                                    className="block w-full px-3 py-2 text-left text-sm text-[#1476FF] hover:bg-bg-hover"
-                                  >
-                                    {t('cron.previewAction')}
-                                  </button>
-                                  {isProactive ? (
-                                    <span
-                                      className="block w-full px-3 py-2 text-left text-sm text-text-muted/50 cursor-not-allowed"
-                                      title={t('cron.autoManagedToggleDisabled') ?? undefined}
-                                    >
-                                      {t('cron.delete')}
-                                    </span>
-                                  ) : (
-                                    <button
-                                      onClick={() => {
-                                        setRowMenuJobId(null);
-                                        setConfirmState({ type: 'delete', job });
-                                      }}
-                                      className="block w-full px-3 py-2 text-left text-sm text-danger hover:bg-bg-hover"
-                                    >
-                                      {t('cron.delete')}
-                                    </button>
-                                  )}
-                                  {CRON_HISTORY_UI_ENABLED && (
-                                    <button
-                                      onClick={() => {
-                                        setRowMenuJobId(null);
-                                        setSuccess(t('cron.history.comingSoon'));
-                                      }}
-                                      className="block w-full px-3 py-2 text-left text-sm text-[#1476FF] hover:bg-bg-hover"
-                                    >
-                                      {t('cron.table.history')}
-                                    </button>
-                                  )}
-                                </div>
-                              )}
-                            </div>
+                            {!triggeredSessionsLoading[job.id] && (triggeredSessions[job.id]?.length ?? 0) === 0 && (
+                              <div className="px-3 py-2 text-sm text-text-muted">{t('cron.table.noTriggeredSessions')}</div>
+                            )}
                           </div>
-                          {sessionsPopoverJobId === job.id && (
-                            <div
-                              ref={sessionsPopoverRef}
-                              className="absolute right-4 top-[calc(100%+4px)] z-20 w-64 rounded-lg border border-border bg-card py-1.5 shadow-lg"
-                            >
-                              <div className="px-3 py-1.5 text-xs font-bold text-text-muted">{t('cron.table.triggeredSessions')}</div>
-                              {triggeredSessionsLoading[job.id] ? (
-                                <div className="px-3 py-2 text-sm text-text-muted">{t('common.loading')}</div>
-                              ) : (triggeredSessions[job.id]?.length ?? 0) > 0 ? (
-                                <div className="max-h-64 overflow-y-auto">
-                                  {triggeredSessions[job.id].map((s) => (
-                                    <button
-                                      key={s.session_id}
-                                      onClick={() => {
-                                        setSessionsPopoverJobId(null);
-                                        onSelectSession(s);
-                                      }}
-                                      className="block w-full truncate px-3 py-2 text-left text-sm text-text hover:bg-bg-hover"
-                                      title={s.title}
-                                    >
-                                      {s.title || s.session_id}
-                                    </button>
-                                  ))}
-                                </div>
-                              ) : (
-                                <div className="px-3 py-2 text-sm text-text-muted">{t('cron.table.noTriggeredSessions')}</div>
-                              )}
-                            </div>
-                          )}
-                          {previewPopoverJobId === job.id && (
-                            <div
-                              ref={previewPopoverRef}
-                              className="absolute right-4 top-[calc(100%+4px)] z-20 w-64 rounded-lg border border-border bg-card py-1.5 shadow-lg"
-                            >
-                              <div className="truncate px-3 py-1.5 text-xs font-bold text-text-muted" title={job.name}>{job.name}</div>
-                              {previewLoading[job.id] ? (
-                                <div className="px-3 py-2 text-sm text-text-muted">{t('cron.preview.loading')}</div>
-                              ) : (previewRuns[job.id]?.length ?? 0) > 0 ? (
-                                <div className="px-3 py-2 text-xs text-text">
-                                  {previewRuns[job.id].map((item, index) => (
-                                    <div key={`${job.id}-${index}`} className="py-0.5">
-                                      {t('cron.preview.label', { index: index + 1 })}：{formatPreviewTime(item.push_at)}
-                                    </div>
-                                  ))}
-                                </div>
-                              ) : (
-                                <div className="px-3 py-2 text-sm text-text-muted">{t('cron.preview.empty')}</div>
-                              )}
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )
+                        )}
+                        {previewPopoverJobId === job.id && (
+                          <div
+                            ref={previewPopoverRef}
+                            className="absolute right-4 top-[calc(100%+4px)] z-20 w-64 rounded-lg border border-border bg-card py-1.5 shadow-lg"
+                          >
+                            <div className="truncate px-3 py-1.5 text-xs font-bold text-text-muted" title={job.name}>{job.name}</div>
+                            {previewLoading[job.id] && (
+                              <div className="px-3 py-2 text-sm text-text-muted">{t('cron.preview.loading')}</div>
+                            )}
+                            {!previewLoading[job.id] && (previewRuns[job.id]?.length ?? 0) > 0 && (
+                              <div className="px-3 py-2 text-xs text-text">
+                                {previewRuns[job.id].map((item, index) => (
+                                  <div key={`${job.id}-${index}`} className="py-0.5">
+                                    {t('cron.preview.label', { index: index + 1 })}：{formatPreviewTime(item.push_at)}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {!previewLoading[job.id] && (previewRuns[job.id]?.length ?? 0) === 0 && (
+                              <div className="px-3 py-2 text-sm text-text-muted">{t('cron.preview.empty')}</div>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
 
         {/* tab: 任务模板 */}

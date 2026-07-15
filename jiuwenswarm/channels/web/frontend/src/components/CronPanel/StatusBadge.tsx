@@ -7,7 +7,8 @@ interface StatusBadgeProps {
 
 // "运行中"图标：lucide 里没有贴近设计稿的对应图标（两个相对方括号），手绘还原，颜色用设计稿指定的
 // #0BB8B2（复刻自阶段1 demo 的 __demo__/cron-tasks/StatusBadge.tsx，逐像素核对过设计稿导出资产，
-// 没有现成图标可用，属于图标三级策略的第③级）。
+// 没有现成图标可用，属于图标三级策略的第③级）。颜色已提到 --color-cron-running token（见
+// styles/themes/default/light.css），用 text-cron-running class，不再硬编码 hex。
 export function RunningIcon({ size = 15 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -45,7 +46,7 @@ export default function StatusBadge({ enabled, expired }: StatusBadgeProps) {
   }
   if (enabled) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-sm text-[#0BB8B2]">
+      <span className="inline-flex items-center gap-1.5 text-sm text-cron-running">
         <RunningIcon />
         {t('cron.status.running')}
       </span>

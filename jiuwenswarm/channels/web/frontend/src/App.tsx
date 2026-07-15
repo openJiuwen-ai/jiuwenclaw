@@ -2023,7 +2023,10 @@ function AppContent() {
               <CronPanel
                 sessionId={sessionId}
                 onCreateViaChat={(initialInputValue) => requestSessionNavigation('new', { initialInputValue })}
-                onSelectSession={(session) => requestSessionNavigation(session)}
+                onSelectSession={(session) => {
+                  if (typeof session === 'string') { void handleRestoreSession(session); return; }
+                  requestSessionNavigation(session);
+                }}
               />
             </div>
           </div>
