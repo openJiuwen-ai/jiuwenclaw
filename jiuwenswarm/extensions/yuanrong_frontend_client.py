@@ -11,9 +11,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
@@ -25,11 +27,23 @@ from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class SandboxInfo:
+    """YuanRong sandbox lifecycle record (placeholder until real APIs land)."""
+
+    sandbox_id: str
+    user_id: str
+    agent_type: str
+    status: str = "ready"
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 class YuanrongFrontendAgentClient(AgentServerClient):
     """openYuanRong Frontend HTTP 客户端.
 
     通过 HTTP POST 调用 openYuanRong frontend 的函数 invocation 接口。
     使用 session_id 进行并发控制，不使用 service_id/agent_id。
+    另提供 create_sandbox / delete_sandbox 生命周期占位，供 AgentOS Router 使用。
     """
 
     def __init__(
@@ -78,6 +92,75 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         self._connected = False
         self._server_ready = False
         logger.info("[YuanrongFrontendAgentClient] disconnected")
+
+    async def create_sandbox(
+        self,
+        *,
+        user_id: str,
+        agent_type: str,
+        agent_id: str | None = None,
+        image_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> SandboxInfo:
+        """Create a sandbox via YuanRong (placeholder).
+
+        Both ``swarm`` / ``jiuwenswarm`` and ``3rd`` agent types are expected to
+        provision sandboxes through this API. Real Frontend create calls will
+        replace the local stub below.
+        """
+        self._ensure_connected()
+        normalized_user_id = str(user_id or "").strip()
+        normalized_agent_type = str(agent_type or "").strip().lower()
+        if not normalized_user_id:
+            raise ValueError("user_id is required to create sandbox")
+        if not normalized_agent_type:
+            raise ValueError("agent_type is required to create sandbox")
+
+        sandbox_id = f"sbx_{uuid.uuid4().hex}"
+        info = SandboxInfo(
+            sandbox_id=sandbox_id,
+            user_id=normalized_user_id,
+            agent_type=normalized_agent_type,
+            status="ready",
+            metadata={
+                **dict(metadata or {}),
+                "agent_id": agent_id,
+                "image_name": image_name,
+                "provisioning": "yuanrong_create_sandbox_stub",
+            },
+        )
+        logger.info(
+            "[YuanrongFrontendAgentClient] create_sandbox stub: "
+            "sandbox_id=%s user_id=%s agent_type=%s agent_id=%s",
+            sandbox_id,
+            normalized_user_id,
+            normalized_agent_type,
+            agent_id,
+        )
+        return info
+
+    async def delete_sandbox(
+        self,
+        sandbox_id: str,
+        *,
+        user_id: str | None = None,
+        agent_type: str | None = None,
+    ) -> None:
+        """Delete a sandbox via YuanRong (placeholder).
+
+        Applies to both ``swarm`` / ``jiuwenswarm`` and ``3rd`` sandboxes.
+        """
+        self._ensure_connected()
+        normalized_sandbox_id = str(sandbox_id or "").strip()
+        if not normalized_sandbox_id:
+            raise ValueError("sandbox_id is required to delete sandbox")
+        logger.info(
+            "[YuanrongFrontendAgentClient] delete_sandbox stub: "
+            "sandbox_id=%s user_id=%s agent_type=%s",
+            normalized_sandbox_id,
+            user_id,
+            agent_type,
+        )
 
     def _ensure_connected(self) -> None:
         if not self._connected:
