@@ -1846,8 +1846,6 @@
       "unpinProject": "Unpin project",
       "pinConversation": "Pin conversation",
       "unpinConversation": "Unpin",
-      "deleteCronJob": "Delete cron job",
-      "deleteCronJobConfirm": "Are you sure you want to delete the cron job \"{{name}}\"?",
       "pin": "Pin",
       "unpin": "Unpin",
       "pinFailed": "Pin action failed",
