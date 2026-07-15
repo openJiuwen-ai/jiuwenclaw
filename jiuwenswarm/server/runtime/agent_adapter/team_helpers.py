@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -549,37 +548,24 @@ async def _team_session_has_runtime(team_manager: TeamManager, session_id: str) 
 
 async def query_team_human_members_for_join(
     session_id: str, team_name: str,
-) -> tuple[list[dict[str, Any]], str | None]:
-    """直查 team.db 取 human_agent 席位列表，同时校验 session_id ↔ team_name。
+) -> list[dict[str, Any]]:
+    """直查 team.db 取该 team 的全部成员（未 role 过滤，交调用方过滤）。
 
-    用 _build_session_scoped_team_name(team_name, session_id) 拼出完整
-    team_name 作为 DB key——key 拼不出来说明 session_id 与 team_name 不一致，
-    DB 自然查不到返回空。不依赖 monitor 是否存活。
-    team_name 为空返回 ([], None)。
+    纯查询：session_id↔team_name 一致性校验与对外文案均由 gateway 拼，
+    本函数只查不判。team_name 空、DB miss、DB 异常一律返回空 list。
+    session_id 仅用于日志排查，不参与查询。
     """
     if not team_name:
-        return [], None
-
-    # 拼 session-scoped team_name 作为 DB key
-    session_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "").strip()).strip("._-")
-    if session_suffix and not team_name.endswith(f"_{session_suffix}"):
-        full_team_name = f"{team_name}_{session_suffix}"
-    else:
-        full_team_name = team_name
+        return []
     try:
-        members_raw = await TeamMonitorHandler.get_member_list_from_db(full_team_name)
+        members = await TeamMonitorHandler.get_member_list_from_db(team_name)
     except Exception as exc:
         logger.warning(
             "[TeamHelpers] query_team_human_members_for_join db query failed: "
             "session=%s team=%s error=%s", session_id, team_name, exc,
         )
-        members_raw = None
-
-    members = [
-        m for m in (members_raw or [])
-        if isinstance(m, dict) and m.get("role") == "human_agent"
-    ]
-    return members, team_name
+        return []
+    return members or []
 
 
 async def ensure_monitor_handlers_for_active_runtime(
@@ -588,6 +574,7 @@ async def ensure_monitor_handlers_for_active_runtime(
     team_name: str,
     hide_dm: bool = False,
     enable_swarmflow: bool = False,
+    activation_kind: str = "",
 ) -> None:
     """Attach TeamMonitorHandler and optionally WorkflowMonitorHandler for the active runtime.
 
@@ -1934,6 +1921,7 @@ async def _consume_stream_with_query(
                         ready_team_name,
                         hide_dm=hide_dm,
                         enable_swarmflow=bool(getattr(team_spec, "enable_swarmflow", False)),
+                        activation_kind=activation_kind,
                     )
                     ensure_team_evolution_watcher(
                         channel_id,

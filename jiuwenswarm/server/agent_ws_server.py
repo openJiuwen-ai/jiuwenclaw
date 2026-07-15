@@ -3118,7 +3118,12 @@ class AgentWebSocketServer:
             await send_wire_payload(ws, wire)
 
     async def _handle_team_members_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        """返回 team human_agent 席位列表 + 真实 team_name 供 /join 校验。"""
+        """返回 team human_agent 席位列表供 /join 校验。
+
+        纯查询透传：mismatch 校验与对外文案均在 gateway，server 只查 member、过滤
+        human_agent、回 ok/members。查不到或异常 → ok=False（payload 不带文案，由
+        gateway 拼"team 不存在"）。
+        """
         from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
             query_team_human_members_for_join,
         )
@@ -3129,21 +3134,22 @@ class AgentWebSocketServer:
         channel_id = request.channel_id or "web"
 
         try:
-            members, resolved_team_name = await query_team_human_members_for_join(
-                session_id, team_name,
-            )
+            members_raw = await query_team_human_members_for_join(session_id, team_name)
         except Exception:
             logger.exception(
                 "[AgentWebSocketServer] team.members.get failed: session=%s team=%s",
                 session_id, team_name,
             )
-            members, resolved_team_name = [], None
-
+            members_raw = []
+        members = [
+            m for m in members_raw
+            if isinstance(m, dict) and m.get("role") == "human_agent" and m.get("member_id")
+        ]
         resp = AgentResponse(
             request_id=request.request_id,
             channel_id=channel_id,
-            ok=True,
-            payload={"members": members, "team_name": resolved_team_name},
+            ok=bool(members),
+            payload={"members": members},
         )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
