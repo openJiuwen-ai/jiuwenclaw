@@ -65,6 +65,11 @@ def _prepare(root: Path, report: Path, provenance: dict, selected: str):
     )
 
 
+def test_block_id_matches_frontend_utf8_fnv_contract():
+    block = next(iter_rewrite_blocks("中文 block\n"))
+    assert block.block_id == "block_0_b7c45b70"
+
+
 def test_prepare_and_commit_create_child_revision_without_changing_parent(tmp_path):
     original = "原句需要润色。[[1]](https://example.com/source)\n"
     report, provenance = _write_document(tmp_path, original)

@@ -61,7 +61,11 @@ def _sha256(payload: bytes) -> str:
 
 
 def _block_id(start: int, text: str) -> str:
-    return f"block_{start}_{_sha256(text.encode('utf-8'))[:12]}"
+    digest = 0x811C9DC5
+    for byte in text.encode("utf-8"):
+        digest ^= byte
+        digest = (digest * 0x01000193) & 0xFFFFFFFF
+    return f"block_{start}_{digest:08x}"
 
 
 def _is_unsupported_line(line: str) -> bool:
