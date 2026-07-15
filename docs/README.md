@@ -121,6 +121,11 @@
       <td width="50%">外部工具接入，Model Context Protocol 相关配置。</td>
     </tr>
     <tr>
+      <td width="22%"><strong>Swarm 技能</strong></td>
+      <td width="28%"><a href="zh/SwarmSkills.md">Swarm Skills</a></td>
+      <td width="50%">多智能体协作技能的封装、编排与复用机制。</td>
+    </tr>
+    <tr>
       <th colspan="3" align="left" bgcolor="#f3f4f6"><h3>⚙️ 高阶操作</h3></th>
     </tr>
     <tr>
