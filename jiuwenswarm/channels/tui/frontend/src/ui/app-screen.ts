@@ -233,7 +233,7 @@ const REASONING_LEVEL_OPTIONS = ["", "off", "low", "medium", "high"];
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
 const MAX_API_BASE_LENGTH = 512;
-const MAX_API_KEY_LENGTH = 500;
+const MAX_API_KEY_LENGTH = 2048;
 
 type ToolSelectorState = {
   list: CheckboxList;
