@@ -971,11 +971,17 @@ def test_deepresearch_python_uses_current_jiuwenclaw_interpreter():
     assert dt._resolve_jiuwenclaw_python() == sys.executable
 
 
-def test_get_deepresearch_tools_exposes_only_stream(monkeypatch):
+def test_get_deepresearch_tools_exposes_stream_and_rewrite_tools(monkeypatch):
     monkeypatch.setattr(dt, "enable_deepresearch", lambda: True)
     monkeypatch.setattr(dt, "_deepresearch_dependency_available", lambda: True)
 
-    assert dt.get_deepresearch_tools() == [dt.deepresearch_stream]
+    from jiuwenclaw.agentserver.tools import deepresearch_rewrite_tools as rt
+
+    assert dt.get_deepresearch_tools() == [
+        dt.deepresearch_stream,
+        rt.deepresearch_prepare_rewrite,
+        rt.deepresearch_commit_rewrite,
+    ]
 
 
 def test_resolve_skill_root_env_uses_platform_path_separator(tmp_path, monkeypatch):
