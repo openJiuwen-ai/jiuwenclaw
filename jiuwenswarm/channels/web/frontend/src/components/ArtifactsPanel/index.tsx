@@ -360,7 +360,7 @@ export function ArtifactsPanel({ className }: { className?: string }) {
   return (
     <section className={clsx('flex min-h-0 min-w-0 flex-1 overflow-hidden bg-card', className)}>
       <aside
-        className="flex shrink-0 flex-col overflow-hidden border-r border-border bg-card"
+        className="flex shrink-0 flex-col overflow-hidden border-border bg-card"
         style={{ width: listWidth }}
       >
         <div className="shrink-0 px-4 py-3">
@@ -417,7 +417,7 @@ export function ArtifactsPanel({ className }: { className?: string }) {
       </aside>
 
       <div
-        className="w-1 shrink-0 cursor-col-resize bg-border/70  hover:bg-border-hover"
+        className="resize-divider"
         onMouseDown={handleDividerMouseDown}
       />
 

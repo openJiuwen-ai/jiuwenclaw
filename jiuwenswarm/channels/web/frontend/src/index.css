@@ -16,7 +16,7 @@ body {
 }
 
 html {
-  min-width: 1300px;
+  min-width: 1200px;
 }
 
 body {
@@ -71,6 +71,30 @@ select {
 }
 
 ::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-strong);
+}
+
+.resize-divider {
+  position: relative;
+  flex-shrink: 0;
+  width: 4px;
+  cursor: col-resize;
+}
+
+.resize-divider::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  content: '';
+  background: var(--color-border-default);
+  transform: translateX(-50%);
+}
+
+.resize-divider:hover::before,
+.resize-divider:active::before {
+  width: 2px;
   background: var(--color-border-strong);
 }
 
@@ -853,7 +877,7 @@ select {
 
   /* Chat compose wrapper */
   .chat-compose {
-    width: var(--chat-content-width);
+    width: min(var(--chat-page-max-width), calc(100% - 16px));
     margin-inline: auto;
     padding-top: 4px;
   }
@@ -893,7 +917,7 @@ select {
 
   /* ====== Team Timeline Messages ====== */
   .team-member-message {
-    width: min(95%, 920px);
+    width: min(100%, 920px);
     margin: 12px auto;
     display: grid;
     grid-template-columns: 36px minmax(0, 1fr);
@@ -938,7 +962,7 @@ select {
   }
 
   .team-member-message__plain {
-    max-width: min(82%, 720px);
+    max-width: min(100%, 720px);
     min-width: 0;
     overflow-x: auto;
     color: var(--color-text-primary);

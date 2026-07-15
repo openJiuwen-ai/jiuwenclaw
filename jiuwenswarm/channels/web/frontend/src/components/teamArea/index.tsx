@@ -180,7 +180,7 @@ function ExpandedTeamArea({
             completedTasks={completedTasks}
           />
         ) : activeTab === 'artifacts' ? (
-          <div className="flex min-w-0 flex-1 overflow-hidden mt-0 mx-6 mb-6">
+          <div className="flex min-w-0 flex-1 overflow-hidden">
             <ArtifactsPanel />
           </div>
         ) : (

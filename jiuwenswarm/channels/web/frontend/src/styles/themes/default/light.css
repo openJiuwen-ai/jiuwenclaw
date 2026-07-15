@@ -21,7 +21,6 @@
   --color-surface-panel-hover: #ffffff;
   --color-surface-panel-hover-rgb: 255, 255, 255;
   --color-surface-chrome: rgba(255, 255, 255, 0.95);
-  --color-surface-chrome-strong: rgba(255, 255, 255, 0.98);
   --color-surface-shell: #f3f3f3;
   --color-surface-transparent: transparent;
 
@@ -35,7 +34,6 @@
   --color-text-tertiary: #52525b;
   --color-text-placeholder: #808080;
   --color-text-card: #18181b;
-  --color-text-popover: #18181b;
   --color-text-inverse: #ffffff;
   --color-text-link: #0067d1;
 
@@ -59,7 +57,6 @@
   --color-action-primary-disabled-surface: rgb(133.9606, 173.3011, 249.229);
   --color-action-primary-disabled-border: rgb(123.0658, 161.6244, 237.9767);
   --color-action-primary-hover: #3b82f6;
-  --color-action-primary-muted: #2563eb;
   --color-action-primary-subtle: rgba(37, 99, 235, 0.12);
   --color-action-primary-text: #ffffff;
   --color-action-primary-glow: rgba(37, 99, 235, 0.15);
@@ -67,22 +64,17 @@
   --color-action-secondary-rgb: 244, 244, 245;
   --color-action-secondary-text: #3f3f46;
   --color-brand-secondary: #0d9488;
-  --color-brand-secondary-muted: rgba(13, 148, 136, 0.75);
-  --color-brand-secondary-subtle: rgba(13, 148, 136, 0.12);
 
   /* Feedback */
   --color-feedback-success: #16a34a;
   --color-feedback-success-rgb: 22, 163, 74;
-  --color-feedback-success-muted: rgba(22, 163, 74, 0.75);
   --color-feedback-success-subtle: rgba(22, 163, 74, 0.1);
   --color-feedback-warning: #d97706;
   --color-feedback-warning-rgb: 217, 119, 6;
-  --color-feedback-warning-muted: rgba(217, 119, 6, 0.75);
   --color-feedback-warning-subtle: rgba(217, 119, 6, 0.1);
   --color-feedback-warning-text: #ffffff;
   --color-feedback-danger: #dc2626;
   --color-feedback-danger-rgb: 220, 38, 38;
-  --color-feedback-danger-muted: rgba(220, 38, 38, 0.75);
   --color-feedback-danger-subtle: rgba(220, 38, 38, 0.1);
   --color-feedback-danger-text: #fafafa;
   --color-feedback-info: #2563eb;
@@ -97,16 +89,12 @@
   --color-cron-running: var(--color-feedback-success);
 
   /* Utility color roles */
-  --color-focus: rgba(37, 99, 235, 0.2);
-  --color-grid-line: rgba(0, 0, 0, 0.05);
   --color-backdrop: rgba(0, 0, 0, 0.35);
   --color-backdrop-strong: rgba(0, 0, 0, 0.5);
   --color-scrollbar-thumb: rgba(119, 119, 119, 0.45);
-  --color-scrollbar-track-hover: #e6e6e6;
 
   /* Theme-dependent effects */
   --effect-focus-ring: 0 0 0 2px var(--color-surface-page), 0 0 0 4px var(--color-border-focus);
-  --effect-focus-glow: 0 0 0 2px var(--color-surface-page), 0 0 0 4px var(--color-border-focus), 0 0 16px var(--color-action-primary-glow);
   --effect-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
   --effect-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
   --effect-shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.04);
@@ -127,7 +115,6 @@
   --color-chat-composer-surface-rgb: 255, 255, 255;
   --color-chat-composer-border: rgba(25, 25, 25, 0.1);
   --effect-chat-composer-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
-  --effect-chat-brand-gradient: linear-gradient(-89.29deg, #007eff 0%, #9026f4 100%);
   --color-animation-breath-peak: #e4e4e7;
   --color-chat-bubble-default: var(--color-surface-page);
   --color-chat-bubble-user: var(--color-surface-page);

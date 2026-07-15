@@ -1969,7 +1969,7 @@ function AppContent() {
                 {/* 可拖拽分割线 */}
                 {isTeamAreaExpanded && !showConversationNotFound && (
                   <div
-                    className="shrink-0 w-1 cursor-col-resize bg-[var(--color-surface-page)] hover:bg-gray-400 active:bg-gray-500 "
+                    className="resize-divider"
                     onMouseDown={handleDividerMouseDown}
                   />
                 )}
