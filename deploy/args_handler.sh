@@ -61,9 +61,6 @@ parse_args() {
 
 process_modules() {
     MODULES=("GATEWAY")
-    if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "yuanrong" ]; then
-        MODULES+=("YR_CLAW")
-    fi
 }
 
 # Print help info and exit
