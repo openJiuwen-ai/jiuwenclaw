@@ -188,12 +188,7 @@ async def skill_turbo(query: str) -> dict[str, Any]:
     """执行 SkillAccelerationExec 任务。
 
     Args:
-        query: 对单个任务的忠实总结，须严格基于用户原话与历史上下文中已有的信息，
-            不得自行扩写、脑补或补充用户未提及的内容细节（如擅自罗列章节大纲、
-            技术要点、子主题等）。仅在用户表达零散时做必要的凝练与指代消解，
-            确保任务目标、产物与约束完整可执行，但不新增任何信息。
-            每次调用只处理一个任务；若用户要求多个任务，必须串行调用：
-            等待前一次调用完成并收到返回结果后，再发起下一次调用。
+        query: 对单个任务的忠实总结，须严格基于用户原话与历史上下文中已有的信息，不得自行扩写、脑补或补充用户未提及的内容细节（如擅自罗列章节大纲、技术要点、子主题等）。仅在用户表达零散时做必要的凝练与指代消解，确保任务目标、产物与约束完整可执行，但不新增任何信息。每次调用只处理一个任务；若用户要求多个任务，必须串行调用：等待前一次调用完成并收到返回结果后，再发起下一次调用。
     """
     from jiuwenclaw.agentserver.skill_turbo.agent import SkillTurbo, SkillTurboNotHandled
     from jiuwenclaw.agentserver.tools.subagent_executor import get_subagent_parent_session
