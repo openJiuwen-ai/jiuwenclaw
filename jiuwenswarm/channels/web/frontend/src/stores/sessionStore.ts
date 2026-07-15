@@ -147,8 +147,9 @@ export interface TeamTaskEvent {
 export type TeamTaskStatus =
   | 'pending'
   | 'blocked'
-  | 'claimed'
-  | 'plan_approved'
+  | 'planning'
+  | 'in_progress'
+  | 'in_review'
   | 'completed'
   | 'cancelled';
 
@@ -163,6 +164,10 @@ export interface TeamTask {
   skills?: string[];
   files?: string[];
 }
+
+// Upsert input: a task event may omit status (e.g. a content-only update).
+// The store then preserves the task's existing status instead of resetting it.
+export type TeamTaskUpsert = Omit<TeamTask, 'status'> & { status?: TeamTaskStatus };
 
 interface TeamMember {
   id: string;
@@ -308,7 +313,7 @@ interface SessionState {
   setTeamTaskEvents: (sessionId: string, events: TeamTaskEvent[]) => void;
   addTeamTaskEvent: (sessionId: string, event: TeamTaskEvent) => void;
   setTeamTasks: (sessionId: string, tasks: TeamTask[]) => void;
-  upsertTeamTask: (sessionId: string, task: TeamTask) => void;
+  upsertTeamTask: (sessionId: string, task: TeamTaskUpsert) => void;
   updateTeamTask: (sessionId: string, taskId: string, patch: Partial<TeamTask>) => void;
   setTeamMembers: (sessionId: string, members: TeamMember[]) => void;
   setTeamLeaderMemberIds: (sessionId: string, memberIds: string[]) => void;
@@ -637,16 +642,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         (item) => item.task_id === task.task_id
       );
       if (existingIndex >= 0) {
+        const existing = runtime.teamTasks[existingIndex];
         const updatedTasks = [...runtime.teamTasks];
         updatedTasks[existingIndex] = {
-          ...updatedTasks[existingIndex],
+          ...existing,
           ...task,
-          title: task.title ?? updatedTasks[existingIndex].title,
-          content: task.content ?? updatedTasks[existingIndex].content,
-          assignee: task.assignee ?? updatedTasks[existingIndex].assignee,
-          team_id: task.team_id ?? updatedTasks[existingIndex].team_id,
-          skills: task.skills ?? updatedTasks[existingIndex].skills,
-          files: task.files ?? updatedTasks[existingIndex].files,
+          // An event without an explicit status (e.g. a content-only update)
+          // must not reset the task; keep the existing status.
+          status: task.status ?? existing.status,
+          title: task.title ?? existing.title,
+          content: task.content ?? existing.content,
+          assignee: task.assignee ?? existing.assignee,
+          team_id: task.team_id ?? existing.team_id,
+          skills: task.skills ?? existing.skills,
+          files: task.files ?? existing.files,
         };
         return {
           runtimes: {
@@ -656,9 +665,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         };
       }
       return {
-        runtimes: {
+       runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, teamTasks: [task, ...runtime.teamTasks] },
+          [sessionId]: { ...runtime, teamTasks: [{ ...task, status: task.status ?? 'pending' }, ...runtime.teamTasks],
+      },
         },
       };
     });

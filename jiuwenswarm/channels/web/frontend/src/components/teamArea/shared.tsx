@@ -124,8 +124,11 @@ export const BOARD_COLUMNS: Array<{
 const TASK_STATUS_TO_COLUMN: Record<TeamTaskStatus, TaskColumnKey> = {
   pending: 'waiting',
   blocked: 'waiting',
-  claimed: 'running',
-  plan_approved: 'running',
+  // Both optional gates (planning / in_review) and the execution state fold
+  // into the single "running" column per product decision.
+  planning: 'running',
+  in_progress: 'running',
+  in_review: 'running',
   completed: 'completed',
   cancelled: 'cancelled',
 };
@@ -139,8 +142,21 @@ export const getMemberDisplayName = (member: TeamMember | string): string => {
 
 export const normalizeTaskStatus = (status?: string, type?: string): TaskStatus => {
   const raw = `${status || ''} ${type || ''}`.toLowerCase();
-  if (raw.includes('completed') || raw.includes('done') || raw.includes('success')) return 'completed';
-  if (raw.includes('claimed') || raw.includes('progress') || raw.includes('running') || raw.includes('busy')) return 'in_progress';
+  if (raw.includes('completed') || raw.includes('done') || raw.includes('success') || raw.includes('verified')) return 'completed';
+  // Running family: the execution state plus the planning / in_review gates.
+  // Matches on either the status value or the event type substring (e.g. the
+  // "team.task.claimed" / "team.task.started" event types).
+  if (
+    raw.includes('claimed') ||
+    raw.includes('progress') ||
+    raw.includes('running') ||
+    raw.includes('busy') ||
+    raw.includes('planning') ||
+    raw.includes('review') ||
+    raw.includes('started')
+  ) {
+    return 'in_progress';
+  }
   if (raw.includes('cancel')) return 'cancelled';
   if (raw.includes('error') || raw.includes('fail')) return 'error';
   return 'pending';
@@ -149,8 +165,9 @@ export const normalizeTaskStatus = (status?: string, type?: string): TaskStatus 
 const normalizeTeamTaskStatus = (status?: string): TeamTaskStatus => {
   if (
     status === 'blocked' ||
-    status === 'claimed' ||
-    status === 'plan_approved' ||
+    status === 'planning' ||
+    status === 'in_progress' ||
+    status === 'in_review' ||
     status === 'completed' ||
     status === 'cancelled'
   ) {

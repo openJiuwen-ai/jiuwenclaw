@@ -24,7 +24,7 @@ import './ToolPanel.css';
 function todoItemToTeamTask(todo: TodoItem): TeamTask {
   const statusMap: Record<TodoStatus, TeamTaskStatus> = {
     pending: 'pending',
-    in_progress: 'claimed',
+    in_progress: 'in_progress',
     completed: 'completed',
   };
   const ts = todo.updatedAt ? Date.parse(todo.updatedAt) : NaN;

@@ -2149,12 +2149,16 @@ async def _consume_monitor_events(
 #
 # member_id / task_id 均以 run_id 前缀做命名空间，避免与真实 teammate/task 冲突。
 
-_WF_PHASE_STATUS_TO_TASK_TYPE: dict[str, str] = {
-    "planned": "team.task.created",
-    "running": "team.task.claimed",
-    "completed": "team.task.completed",
-    "failed": "team.task.cancelled",
-    "stopped": "team.task.cancelled",
+# swarmflow phase status -> (web team.task event type, authoritative TeamTaskStatus).
+# The status is resolved here (server-side) so the web frontend consumes it
+# directly, consistent with TeamMonitorHandler's convergence. The event ``type``
+# only drives the activity-log label; ``status`` alone decides the board column.
+_WF_PHASE_STATUS_TO_TASK: dict[str, tuple[str, str]] = {
+    "planned": ("team.task.created", "pending"),
+    "running": ("team.task.claimed", "in_progress"),
+    "completed": ("team.task.completed", "completed"),
+    "failed": ("team.task.cancelled", "cancelled"),
+    "stopped": ("team.task.cancelled", "cancelled"),
 }
 
 
@@ -2198,8 +2202,9 @@ def _workflow_updated_to_team_events(
         task_id = f"{run_id}:{phase_id}"
         if seen_phase.get(task_id) != status:
             seen_phase[task_id] = status
-            task_type = _WF_PHASE_STATUS_TO_TASK_TYPE.get(status)
-            if task_type is not None:
+            mapping = _WF_PHASE_STATUS_TO_TASK.get(status)
+            if mapping is not None:
+                task_type, task_status = mapping
                 out.append(
                     _team_event_envelope(
                         "team.task",
@@ -2209,7 +2214,7 @@ def _workflow_updated_to_team_events(
                             "team_id": team_id,
                             "task_id": task_id,
                             "title": phase.get("name") or phase_id,
-                            "status": status,
+                            "status": task_status,
                         },
                     )
                 )

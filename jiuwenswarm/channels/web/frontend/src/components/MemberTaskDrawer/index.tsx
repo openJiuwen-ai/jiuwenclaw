@@ -58,7 +58,10 @@ const TaskStatusIcon = ({ status }: { status: string }) => {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
         </svg>
       );
+    // Running family: execution plus the planning / in_review gates.
     case 'in_progress':
+    case 'planning':
+    case 'in_review':
       return (
         <svg className="w-4 h-4 text-blue-500 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -159,8 +162,9 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
     return Array.from(taskMap.values());
   }, [todos, teamTaskEvents, memberId]);
 
-  // 按状态分组
-  const inProgressTasks = memberTasks.filter(t => t.status === 'in_progress');
+  // 按状态分组：planning / in_review 两个门控态归入"进行中"
+  const inProgressStatuses = new Set(['in_progress', 'planning', 'in_review']);
+  const inProgressTasks = memberTasks.filter(t => inProgressStatuses.has(t.status));
   const completedTasks = memberTasks.filter(t => t.status === 'completed');
   const pendingTasks = memberTasks.filter(t => t.status === 'pending' || t.status === 'queued');
 

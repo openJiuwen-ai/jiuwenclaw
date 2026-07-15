@@ -38,7 +38,7 @@ import {
   useWorkspaceStore,
   useCronStore,
 } from '../stores';
-import type { TeamTask, TeamTaskStatus } from '../stores/sessionStore';
+import type { TeamTask, TeamTaskStatus, TeamTaskUpsert } from '../stores/sessionStore';
 import { webClient } from '../services/webClient';
 import {
   fetchTtsAudio,
@@ -80,8 +80,9 @@ function getConnectSignature(options: WebConnectOptions): string {
 const TEAM_TASK_STATUS_SET = new Set<TeamTaskStatus>([
   'pending',
   'blocked',
-  'claimed',
-  'plan_approved',
+  'planning',
+  'in_progress',
+  'in_review',
   'completed',
   'cancelled',
 ]);
@@ -166,15 +167,7 @@ function normalizeStringArray(value: unknown): string[] | undefined {
   return normalized.length ? normalized : undefined;
 }
 
-function statusFromTaskEventType(type: string, explicitStatus: unknown): TeamTaskStatus {
-  if (type === 'team.task.claimed') return normalizeTeamTaskStatus(explicitStatus, 'claimed');
-  if (type === 'team.task.completed') return normalizeTeamTaskStatus(explicitStatus, 'completed');
-  if (type === 'team.task.cancelled') return normalizeTeamTaskStatus(explicitStatus, 'cancelled');
-  if (type === 'team.task.unblocked') return normalizeTeamTaskStatus(explicitStatus, 'pending');
-  return normalizeTeamTaskStatus(explicitStatus);
-}
-
-function normalizeTaskEvent(value: unknown): TeamTask | null {
+function normalizeTaskEvent(value: unknown): TeamTaskUpsert | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
@@ -183,14 +176,15 @@ function normalizeTaskEvent(value: unknown): TeamTask | null {
   if (!taskId) {
     return null;
   }
-  const type = pickString(raw.type) || '';
-  const explicitTitle = pickString(raw.title, raw.name, raw.description);
-  const content = pickString(raw.content);
+  // Status is resolved server-side (swarm layer) and read directly here — the
+  // frontend no longer derives it from the event type. An absent status means
+  // "no change"; the store preserves the task's existing status.
+  const rawStatus = pickString(raw.status);
   return {
     task_id: taskId,
-    title: explicitTitle,
-    content,
-    status: statusFromTaskEventType(type, raw.status),
+    title: pickString(raw.title, raw.name, raw.description),
+    content: pickString(raw.content),
+    status: rawStatus ? normalizeTeamTaskStatus(rawStatus) : undefined,
     assignee: pickString(raw.assignee, raw.member_id, raw.claimed_by, raw.claimedBy, raw.from_member),
     team_id: pickString(raw.team_id),
     timestamp: typeof raw.timestamp === 'number' ? raw.timestamp : Date.now(),
