@@ -296,14 +296,14 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
         <button
           type="button"
           onClick={() => toggleDirectory(entry.path)}
-          className="w-full min-h-9 flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-text-muted hover:bg-secondary/40 hover:text-text transition-colors"
+          className="w-full min-h-9 flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-text-muted hover:bg-secondary/40 hover:text-text "
           style={{ paddingLeft: `${depth * 12 + 6}px` }}
           title={entry.name}
         >
           <span className="w-4 h-4 flex items-center justify-center text-text-muted/80">
             {hasChildren ? (
               <svg
-                className={`w-3 h-3 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+                className={`w-3 h-3  ${isExpanded ? 'rotate-90' : ''}`}
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
@@ -344,9 +344,9 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
       <button
         key={file.path}
         type="button"
-        className={`w-full min-h-9 flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors ${
+        className={`w-full min-h-9 flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px]  ${
           selected
-            ? 'bg-accent-subtle text-text border border-[var(--border-accent)]'
+            ? 'bg-accent-subtle text-text border border-[var(--color-border-accent)]'
             : previewable
               ? 'text-text-muted hover:bg-secondary/40 hover:text-text border border-transparent'
               : 'text-text-muted/60 border border-transparent cursor-not-allowed'
@@ -379,7 +379,7 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
                 type="button"
                 onClick={handleExport}
                 disabled={exporting}
-                className="px-2 py-1 rounded-md border border-border bg-secondary/50 text-text-muted hover:text-text hover:bg-secondary transition-colors text-xs disabled:opacity-50"
+                className="px-2 py-1 rounded-md border border-border bg-secondary/50 text-text-muted hover:text-text hover:bg-secondary  text-xs disabled:opacity-50"
                 title={t('harnessPackage.export')}
               >
                 {exporting ? t('harnessPackage.exporting') : t('harnessPackage.export')}
@@ -389,7 +389,7 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
               type="button"
               onClick={handleRefresh}
               disabled={loading}
-              className="px-2 py-1 rounded-md border border-border bg-secondary/50 text-text-muted hover:text-text hover:bg-secondary transition-colors text-xs disabled:opacity-50"
+              className="px-2 py-1 rounded-md border border-border bg-secondary/50 text-text-muted hover:text-text hover:bg-secondary  text-xs disabled:opacity-50"
               title={t('toolPanel.refreshFiles')}
             >
               {loading ? t('common.refreshing') : t('common.refresh')}

@@ -621,7 +621,7 @@ export const MessageItem = memo(function MessageItem({
             {showCopy && (
               <button
                 onClick={handleCopy}
-                className="p-1.5 rounded-md transition-colors hover:text-accent hover:bg-secondary"
+                className="p-1.5 rounded-md  hover:text-accent hover:bg-secondary"
                 title={t('chatUi.copyMessage')}
               >
                 <Copy className="w-4 h-4" strokeWidth={1.5} />
@@ -632,7 +632,7 @@ export const MessageItem = memo(function MessageItem({
               <button
                 onClick={handleSpeak}
                 className={clsx(
-                  'p-1.5 rounded-md transition-colors',
+                  'p-1.5 rounded-md ',
                   isPlaying
                     ? 'text-accent bg-accent/10'
                     : 'hover:text-accent hover:bg-secondary'
@@ -763,7 +763,7 @@ function FileDownloadList({
           <div
             key={`${file.name}-${index}`}
             className={clsx(
-              'flex items-center gap-3 rounded-lg border px-3 py-2.5 transition-all duration-fast',
+              'flex items-center gap-3 rounded-lg border px-3 py-2.5  ',
               expired
                 ? 'border-border/50 bg-card/50 cursor-not-allowed opacity-60'
                 : 'border-border bg-card hover:shadow-md hover:border-border-hover cursor-pointer group'
@@ -793,7 +793,7 @@ function FileDownloadList({
             </div>
             <div
               className={clsx(
-                'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center transition-colors duration-fast',
+                'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center  ',
                 expired
                   ? 'text-text-muted/40'
                   : 'text-text-muted group-hover:text-accent group-hover:bg-accent-subtle'

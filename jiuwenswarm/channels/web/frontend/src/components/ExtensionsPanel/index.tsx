@@ -167,7 +167,7 @@ export function ExtensionsPanel({ isConnected }: ExtensionsPanelProps) {
                 flex: 1,
                 padding: '0.5rem',
                 borderRadius: '4px',
-                border: '1px solid #ccc',
+                border: '1px solid var(--color-extension-input-border)',
                 fontSize: '14px',
               }}
             />

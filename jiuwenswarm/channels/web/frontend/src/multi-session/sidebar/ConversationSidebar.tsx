@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CircleAlert } from 'lucide-react';
+import { CircleAlert, LoaderCircle, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
-import { PROJECT_SESSION_PAGE_SIZE, useWorkspaceStore } from '../../stores';
+import { webClient } from '../../services/webClient';
+import {
+  PROJECT_SESSION_PAGE_SIZE,
+  useWorkspaceStore,
+  useCronStore,
+  filterJobsForProject,
+  type SidebarCronJob,
+} from '../../stores';
 import type { ProjectInfo, Session } from '../../types';
 import {
   getConversationMenuItems,
@@ -24,20 +31,21 @@ import {
   selectProjectDirectory,
 } from '../../features/workspace/projectDirectoryPicker';
 import './ConversationSidebar.css';
-import addProjectIcon from '../../assets/work-mode/add-project.svg';
-import arrowRightIcon from '../../assets/work-mode/arrow-right.svg';
-import collapseIcon from '../../assets/work-mode/collapse.svg';
-import closeIcon from '../../assets/work-mode/close.svg';
-import deleteIcon from '../../assets/work-mode/delete.svg';
-import editIcon from '../../assets/work-mode/edit.svg';
-import folderFoldIcon from '../../assets/work-mode/folder-fold.svg';
-import folderIcon from '../../assets/work-mode/folder.svg';
-import moreIcon from '../../assets/work-mode/more-rimless.svg';
-import newTaskIcon from '../../assets/work-mode/new-task.svg';
-import pinIcon from '../../assets/work-mode/pin.svg';
-import plusIcon from '../../assets/work-mode/plus.svg';
-import statusProcessingIcon from '../../assets/work-mode/status-processing.svg';
-import unpinIcon from '../../assets/work-mode/unpin.svg';
+import '../dialogs/dialogs.css';
+import AddProjectIcon from '../../assets/work-mode/add-project.svg?react';
+import ArrowRightIcon from '../../assets/work-mode/arrow-right.svg?react';
+import CollapseIcon from '../../assets/work-mode/collapse.svg?react';
+import CloseIcon from '../../assets/work-mode/close.svg?react';
+import CronIcon from '../../assets/定时任务.svg?react';
+import DeleteIcon from '../../assets/work-mode/delete.svg?react';
+import EditIcon from '../../assets/work-mode/edit.svg?react';
+import FolderFoldIcon from '../../assets/work-mode/folder-fold.svg?react';
+import FolderIcon from '../../assets/work-mode/folder.svg?react';
+import MoreIcon from '../../assets/work-mode/more-rimless.svg?react';
+import NewTaskIcon from '../../assets/work-mode/new-task.svg?react';
+import PinIcon from '../../assets/work-mode/pin.svg?react';
+import PlusIcon from '../../assets/work-mode/plus.svg?react';
+import UnpinIcon from '../../assets/work-mode/unpin.svg?react';
 
 const UNREAD_KEY = 'jiuwenswarm_session_unread';
 const RELATIVE_TIME_REFRESH_MS = 60_000;
@@ -109,14 +117,14 @@ function getSessionTitle(session: Session, fallback: string): string {
   return session.display_title?.trim() || session.title?.trim() || fallback;
 }
 
-const menuIconByAction: Record<SidebarMenuAction, string> = {
-  pin: pinIcon,
-  rename: editIcon,
-  delete: deleteIcon,
+const menuIconByAction: Record<SidebarMenuAction, React.ComponentType<React.SVGProps<SVGSVGElement>>> = {
+  pin: PinIcon,
+  rename: EditIcon,
+  delete: DeleteIcon,
 };
 
-function getMenuIcon(item: SidebarMenuItem): string {
-  if (item.action === 'pin' && item.pinned) return unpinIcon;
+function getMenuIcon(item: SidebarMenuItem): React.ComponentType<React.SVGProps<SVGSVGElement>> {
+  if (item.action === 'pin' && item.pinned) return UnpinIcon;
   return menuIconByAction[item.action];
 }
 
@@ -131,8 +139,10 @@ function SidebarMenu({
 }) {
   return (
     <div className="conversation-list-item__menu" role="menu">
-      {items.map((item) => (
-        <button
+      {items.map((item) => {
+        const MenuIcon = getMenuIcon(item);
+        return (
+          <button
           key={item.action}
           type="button"
           className={`conversation-list-item__menu-item${item.danger ? ' conversation-list-item__menu-item--danger' : ''}`}
@@ -140,10 +150,11 @@ function SidebarMenu({
           onClick={() => onAction(item.action)}
           role="menuitem"
         >
-          <img src={getMenuIcon(item)} alt="" aria-hidden="true" />
+          <MenuIcon aria-hidden />
           <span>{item.label}</span>
-        </button>
-      ))}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -187,7 +198,11 @@ function ConversationListItem({
       </span>
     );
   } else if (indicator === 'processing') {
-    status = <img className="conversation-list-item__status-icon" src={statusProcessingIcon} alt="" title={getTaskStatusLabel(indicator, t)} aria-hidden="true" />;
+    status = (
+      <span title={getTaskStatusLabel(indicator, t)}>
+        <LoaderCircle className="conversation-list-item__loader" aria-hidden="true" />
+      </span>
+    );
   } else if (indicator === 'unread') {
     status = <span className="conversation-list-item__status-dot" title={t('multiSession.completedUnread')} aria-hidden="true" />;
   } else if (indicator === 'error') {
@@ -244,7 +259,7 @@ function ConversationListItem({
         aria-haspopup="menu"
         aria-expanded={menuOpen}
       >
-        <img src={moreIcon} alt="" aria-hidden="true" />
+        <MoreIcon aria-hidden />
       </button>
       <button
         type="button"
@@ -257,7 +272,7 @@ function ConversationListItem({
         aria-label={session.pinned ? t('multiSession.project.unpinConversation') : t('multiSession.project.pinConversation')}
         data-tooltip={session.pinned ? t('multiSession.project.unpinConversation') : t('multiSession.project.pinConversation')}
       >
-        <img src={session.pinned ? unpinIcon : pinIcon} alt="" aria-hidden="true" />
+        {session.pinned ? <UnpinIcon aria-hidden /> : <PinIcon aria-hidden />}
       </button>
       {menuOpen ? (
         <SidebarMenu
@@ -330,13 +345,13 @@ function ProjectEntityRow({
     <div ref={rowRef} className={`conversation-entity-row${menuOpen ? ' is-menu-open' : ''}`}>
       <button type="button" className="conversation-entity-row__main" onClick={onToggle} title={title}>
         <span className="conversation-entity-row__icon">
-          <img src={isExpanded ? folderFoldIcon : folderIcon} alt="" aria-hidden="true" />
+          {isExpanded ? <FolderFoldIcon aria-hidden /> : <FolderIcon aria-hidden />}
         </span>
         <span className="conversation-entity-row__text">
           <span className="conversation-entity-row__title">{title}</span>
         </span>
-        <img className="conversation-entity-row__chevron" src={isExpanded ? collapseIcon : arrowRightIcon} alt="" aria-hidden="true" />
-        {isPinned ? <img src={pinIcon} className="conversation-entity-row__pin" alt="" aria-hidden="true" /> : null}
+        {isExpanded ? <CollapseIcon className="conversation-entity-row__chevron" aria-hidden /> : <ArrowRightIcon className="conversation-entity-row__chevron" aria-hidden />}
+        {isPinned ? <PinIcon className="conversation-entity-row__pin" aria-hidden /> : null}
       </button>
       <button
         type="button"
@@ -349,7 +364,7 @@ function ProjectEntityRow({
         aria-label={newLabel || t('multiSession.project.newConversation')}
         data-tooltip={newLabel || t('multiSession.project.newConversation')}
       >
-        <img src={plusIcon} alt="" aria-hidden="true" />
+        <PlusIcon aria-hidden />
       </button>
       {hideActions ? null : (
         <button
@@ -364,7 +379,7 @@ function ProjectEntityRow({
           aria-haspopup="menu"
           aria-expanded={menuOpen}
         >
-          <img src={moreIcon} alt="" aria-hidden="true" />
+          <MoreIcon aria-hidden />
         </button>
       )}
       {!hideActions && menuOpen ? (
@@ -458,8 +473,8 @@ function ProjectAddMenu({
           }
         }}
         itemClassName="conversation-list-item__menu-item"
-        blankIcon={<img src={addProjectIcon} alt="" aria-hidden="true" />}
-        existingIcon={<img src={folderIcon} alt="" aria-hidden="true" />}
+        blankIcon={<AddProjectIcon aria-hidden />}
+        existingIcon={<FolderIcon aria-hidden />}
       />
     </div>
   );
@@ -503,7 +518,7 @@ function ProjectCreateDialog({
           aria-label={t('common.close')}
           onClick={onCancel}
         >
-          <img src={closeIcon} alt="" aria-hidden="true" />
+          <CloseIcon aria-hidden />
         </button>
         <div className="conversation-path-dialog__title">{t('multiSession.project.newProject')}</div>
         <input
@@ -562,6 +577,38 @@ function ProjectDeleteDialog({
   );
 }
 
+function CronJobDeleteDialog({
+  job,
+  error,
+  deleting,
+  onCancel,
+  onDelete,
+}: {
+  job: SidebarCronJob;
+  error?: string | null;
+  deleting: boolean;
+  onCancel: () => void;
+  onDelete: () => void;
+}) {
+  const { t } = useTranslation();
+  const title = t('multiSession.delete');
+  return (
+    <div className="conversation-dialog" role="dialog" aria-modal="true" aria-label={title}>
+      <button type="button" className="conversation-dialog__backdrop" onClick={onCancel} aria-label={t('common.cancel')} />
+      <div className="conversation-dialog__panel">
+        <button type="button" className="conversation-dialog__close" onClick={onCancel} aria-label={t('common.close')}><X size={16} /></button>
+        <h2>{title}</h2>
+        <p>{t('multiSession.project.deleteCronJobConfirm', { name: job.name })}</p>
+        {error ? <div className="conversation-dialog__error">{error}</div> : null}
+        <div className="conversation-dialog__actions">
+          <button type="button" onClick={onCancel}>{t('common.cancel')}</button>
+          <button type="button" className="is-danger" disabled={deleting} onClick={onDelete}>{t('multiSession.delete')}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 type RenameTarget =
   | { kind: 'project'; id: string; value: string }
   | { kind: 'session'; id: string; value: string };
@@ -586,6 +633,9 @@ export function ConversationSidebar({
   const [deleteProjectTarget, setDeleteProjectTarget] = useState<ProjectInfo | null>(null);
   const [deleteProjectBusy, setDeleteProjectBusy] = useState(false);
   const [deleteProjectError, setDeleteProjectError] = useState<string | null>(null);
+  const [deleteCronTarget, setDeleteCronTarget] = useState<SidebarCronJob | null>(null);
+  const [deleteCronBusy, setDeleteCronBusy] = useState(false);
+  const [deleteCronError, setDeleteCronError] = useState<string | null>(null);
   const [projectAddMenuOpen, setProjectAddMenuOpen] = useState(false);
   const addMenuRef = useRef<HTMLDivElement>(null);
   const previousProcessing = useRef<Record<string, boolean>>({});
@@ -608,6 +658,43 @@ export function ConversationSidebar({
     pinSession,
     renameSession,
   } = useWorkspaceStore();
+
+  const cronJobs = useCronStore((s) => s.jobs);
+  const loadCronJobs = useCronStore((s) => s.loadJobs);
+  const expandedCronGroups = useCronStore((s) => s.expandedCronGroups);
+  const toggleCronGroup = useCronStore((s) => s.toggleCronGroup);
+  const cronSessions = useCronStore((s) => s.cronSessions);
+  const cronSessionsLoading = useCronStore((s) => s.cronSessionsLoading);
+  const loadCronSessions = useCronStore((s) => s.loadCronSessions);
+  const deleteJob = useCronStore((s) => s.deleteJob);
+
+  useEffect(() => {
+    void loadCronJobs();
+  }, [loadCronJobs]);
+
+  // 监听 agent 工具调用结果：当 cron 相关工具执行后刷新侧边栏定时任务
+  useEffect(() => {
+    const CRON_TOOL_PREFIX = 'cron_';
+    const unsubscribe = webClient.on('chat.tool_result', (event) => {
+      const payload = event.payload as Record<string, unknown>;
+      const inner = (payload?.tool_result as Record<string, unknown>) ?? payload;
+      const toolName = String(inner?.tool_name ?? inner?.name ?? '');
+      if (toolName.startsWith(CRON_TOOL_PREFIX)) {
+        void loadCronJobs();
+      }
+    });
+    return unsubscribe;
+  }, [loadCronJobs]);
+
+  // 按项目归属定时任务
+  const jobsByProject = useMemo(() => {
+    const map = new Map<string, SidebarCronJob[]>();
+    for (const project of projects) {
+      const jobs = filterJobsForProject(cronJobs, project.project_id);
+      if (jobs.length > 0) map.set(project.project_id, jobs);
+    }
+    return map;
+  }, [cronJobs, projects]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setRelativeTimeNow(Date.now()), RELATIVE_TIME_REFRESH_MS);
@@ -712,6 +799,15 @@ export function ConversationSidebar({
       await pinSession(session.session_id, !session.pinned);
     } catch (error) {
       setPinError(error instanceof Error ? error.message : String(error));
+    } finally {
+      // 置顶/取消置顶后刷新所有展开的定时任务触发列表，保证触发会话实时回归/移除
+      for (const [groupId, isOpen] of Object.entries(expandedCronGroups)) {
+        if (!isOpen) continue;
+        const cronId = groupId.startsWith('cron-') ? groupId.slice(5) : groupId;
+        const job = cronJobs.find((j) => j.id === cronId);
+        if (!job) continue;
+        void loadCronSessions(job.project_id || 'default', cronId);
+      }
     }
   }
 
@@ -797,6 +893,20 @@ export function ConversationSidebar({
     }
   }
 
+  async function handleDeleteCronJob() {
+    if (!deleteCronTarget) return;
+    setDeleteCronBusy(true);
+    setDeleteCronError(null);
+    try {
+      await deleteJob(deleteCronTarget.id);
+      setDeleteCronTarget(null);
+    } catch (error) {
+      setDeleteCronError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDeleteCronBusy(false);
+    }
+  }
+
   function renderSession(session: Session, options: { nested?: boolean; projectMenu?: boolean } = {}) {
     const nested = options.nested === true;
     const projectMenu = options.projectMenu === true;
@@ -821,6 +931,74 @@ export function ConversationSidebar({
           value: getSessionTitle(session, t('multiSession.untitled')),
         })}
       />
+    );
+  }
+
+  function renderCronJob(job: SidebarCronJob, projectId: string, nested = false) {
+    const cronGroupId = `cron-${job.id}`;
+    const cronExpanded = expandedCronGroups[cronGroupId] ?? false;
+    const triggerSessions = cronSessions[job.id] || [];
+    const isCronSessionsLoading = cronSessionsLoading[job.id] ?? false;
+    return (
+      <div key={`cron-wrapper-${job.id}`} className={`conversation-sidebar__session-wrapper${nested ? ' conversation-sidebar__session-wrapper--nested' : ''}`}>
+        <div
+          className={`conversation-sidebar__cron-row${cronExpanded ? ' is-expanded' : ''}`}
+          onClick={() => {
+            toggleCronGroup(cronGroupId);
+            if (!cronExpanded) {
+              void loadCronSessions(projectId, job.id);
+            }
+          }}
+          title={job.name}
+        >
+          <CronIcon className="conversation-sidebar__cron-row-icon" aria-hidden />
+          <span className="conversation-sidebar__cron-row-name">{job.name}</span>
+          <button
+            type="button"
+            className="conversation-sidebar__cron-row-delete"
+            onClick={(event) => {
+              event.stopPropagation();
+              setDeleteCronTarget(job);
+            }}
+            title={t('multiSession.project.deleteCronJob')}
+            aria-label={t('multiSession.project.deleteCronJob')}
+            data-tooltip={t('multiSession.project.deleteCronJob')}
+          >
+            <DeleteIcon aria-hidden />
+          </button>
+          {cronExpanded ? <CollapseIcon className="conversation-sidebar__cron-row-chevron" aria-hidden /> : <ArrowRightIcon className="conversation-sidebar__cron-row-chevron" aria-hidden />}
+        </div>
+        {cronExpanded ? (
+          <div className="conversation-sidebar__cron-sessions">
+            {isCronSessionsLoading ? (
+              <div className="conversation-sidebar__cron-sessions-loading">{t('common.loading')}</div>
+            ) : triggerSessions.length > 0 ? (
+              triggerSessions.map((ts) => (
+                <ConversationListItem
+                  key={ts.session_id}
+                  session={ts}
+                  runtime={runtimes[ts.session_id]}
+                  active={activeSessionId === ts.session_id}
+                  nested={false}
+                  unread={unreadSessions.has(ts.session_id)}
+                  now={relativeTimeNow}
+                  onSelect={() => onSelect(ts)}
+                  onDelete={() => onDelete(ts)}
+                  onPin={() => void handlePinSession(ts)}
+                  menuItems={getConversationMenuItems(Boolean(ts.pinned), t)}
+                  onRename={() => setRenameTarget({
+                    kind: 'session',
+                    id: ts.session_id,
+                    value: getSessionTitle(ts, t('multiSession.untitled')),
+                  })}
+                />
+              ))
+            ) : (
+              <div className="conversation-sidebar__cron-sessions-empty">{t('multiSession.project.noSessions')}</div>
+            )}
+          </div>
+        ) : null}
+      </div>
     );
   }
 
@@ -895,8 +1073,9 @@ export function ConversationSidebar({
         />
         {expanded ? (
           <div className="conversation-sidebar__group-list">
+            {(jobsByProject.get(project.project_id) || []).map((job) => renderCronJob(job, project.project_id, true))}
             {sessionsForProject.length > 0 ? sessionsForProject.map((session) => renderSession(session, { nested: true, projectMenu: true })) : (
-              <div className="conversation-sidebar__empty">{t('multiSession.project.noConversations')}</div>
+              (jobsByProject.get(project.project_id) || []).length === 0 ? <div className="conversation-sidebar__empty">{t('multiSession.project.noConversations')}</div> : null
             )}
             {renderSessionPagination(project.project_id, true)}
           </div>
@@ -916,7 +1095,7 @@ export function ConversationSidebar({
           setPinError(null);
           onNew();
         }}>
-          <img src={newTaskIcon} alt="" aria-hidden="true" />
+          <NewTaskIcon aria-hidden />
           <span>{t('multiSession.newConversation')}</span>
         </button>
       </div>
@@ -929,7 +1108,9 @@ export function ConversationSidebar({
             <div className="conversation-sidebar__group-list">
               {orderedPinnedSessions.map((session) => {
                 const project = getSessionProject(session);
-                return renderSession(session, { projectMenu: Boolean(project && !isDefaultProject(project)) });
+                return renderSession(session, {
+                  projectMenu: Boolean(project && !isDefaultProject(project)),
+                });
               })}
               {pinnedProjects.map((project) => renderProject(project))}
             </div>
@@ -960,7 +1141,7 @@ export function ConversationSidebar({
               aria-haspopup="menu"
               aria-expanded={projectAddMenuOpen}
             >
-              <img src={plusIcon} alt="" aria-hidden="true" />
+              <PlusIcon aria-hidden />
             </button>
             </div>
           </div>
@@ -986,7 +1167,7 @@ export function ConversationSidebar({
             {regularProjects.map((project) => renderProject(project))}
           </div>
         </div>
-        <div className="conversation-sidebar__group">
+        <div className="conversation-sidebar__group conversation-sidebar__group--conversations">
           <div className="conversation-sidebar__section-heading">
             <span className="conversation-sidebar__label">{t('multiSession.conversations')}</span>
             <button
@@ -1001,12 +1182,13 @@ export function ConversationSidebar({
               aria-label={t('multiSession.project.newConversation')}
               data-tooltip={t('multiSession.project.newConversation')}
             >
-              <img src={plusIcon} alt="" aria-hidden="true" />
+              <PlusIcon aria-hidden />
             </button>
           </div>
           <div className="conversation-sidebar__group-list">
+            {defaultProject ? (jobsByProject.get(defaultProject.project_id) || []).map((job) => renderCronJob(job, defaultProject.project_id)) : null}
             {conversationSessions.length > 0 ? conversationSessions.map((session) => renderSession(session)) : (
-              <div className="conversation-sidebar__empty">{t('multiSession.project.noConversations')}</div>
+              (!defaultProject || (jobsByProject.get(defaultProject.project_id) || []).length === 0) ? <div className="conversation-sidebar__empty">{t('multiSession.project.noConversations')}</div> : null
             )}
             {defaultProject ? renderSessionPagination(defaultProject.project_id, false) : null}
           </div>
@@ -1049,6 +1231,18 @@ export function ConversationSidebar({
             setDeleteProjectTarget(null);
           }}
           onDelete={() => { void handleRemoveProject(); }}
+        />
+      ) : null}
+      {deleteCronTarget ? (
+        <CronJobDeleteDialog
+          job={deleteCronTarget}
+          deleting={deleteCronBusy}
+          error={deleteCronError}
+          onCancel={() => {
+            setDeleteCronError(null);
+            setDeleteCronTarget(null);
+          }}
+          onDelete={() => { void handleDeleteCronJob(); }}
         />
       ) : null}
     </aside>

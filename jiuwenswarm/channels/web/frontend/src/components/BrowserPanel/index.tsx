@@ -175,12 +175,12 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
         </div>
 
         {error ? (
-          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {error}
           </div>
         ) : null}
         {success ? (
-          <div className="mb-4 rounded-md border border-[var(--border-ok)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+          <div className="mb-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
             {success}
           </div>
         ) : null}

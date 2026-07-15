@@ -6,8 +6,9 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { webRequest } from '../../services/webClient';
+import { webRequest, webClient } from '../../services/webClient';
 import { useSessionStore } from '../../stores/sessionStore';
+import { useCronStore } from '../../stores';
 
 const DEFAULT_CRON_TIMEZONE = 'Asia/Shanghai';
 const DEFAULT_CRON_TARGET = 'web';
@@ -46,6 +47,8 @@ interface CronJob {
   wake_mode?: string;
   compat_mode?: string;
   model_name?: string | null;
+  project_id?: string;
+  session_id?: string;
   created_at: number | string | null;
   updated_at: number | string | null;
 }
@@ -262,6 +265,7 @@ function buildLegacyJobInput(job: CronJobInput | UpdateCronJob, mode?: string): 
 export default function CronPanel({ sessionId }: CronPanelProps) {
   const { t } = useTranslation();
   const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent.plan');
+  const reloadCronStore = useCronStore((s) => s.reload);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -340,6 +344,21 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
     void fetchChannels();
   }, [loadJobs, fetchChannels]);
 
+  // 监听 agent 工具调用结果：当 cron 相关工具执行后刷新面板
+  useEffect(() => {
+    const CRON_TOOL_PREFIX = 'cron_';
+    const unsubscribe = webClient.on('chat.tool_result', (event) => {
+      const payload = event.payload as Record<string, unknown>;
+      const inner = (payload?.tool_result as Record<string, unknown>) ?? payload;
+      const toolName = String(inner?.tool_name ?? inner?.name ?? '');
+      if (toolName.startsWith(CRON_TOOL_PREFIX)) {
+        void loadJobs();
+        void reloadCronStore();
+      }
+    });
+    return unsubscribe;
+  }, [loadJobs, reloadCronStore]);
+
   // 成功消息自动消失
   useEffect(() => {
     if (!success) return;
@@ -395,6 +414,7 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
       setIsCreating(false);
       setNewJob(createEmptyJobInput());
       await loadJobs();
+      void reloadCronStore();
     } catch (createError) {
       const message = createError instanceof Error ? createError.message : t('cron.errors.createFailed');
       setError(message);
@@ -415,6 +435,7 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
       });
       setSuccess(t('cron.success.statusUpdated'));
       await loadJobs();
+      void reloadCronStore();
     } catch (toggleError) {
       const message = toggleError instanceof Error ? toggleError.message : t('cron.errors.toggleFailed');
       setError(message);
@@ -429,6 +450,7 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
       await webRequest<{ deleted: boolean }>('cron.job.delete', { id });
       setSuccess(t('cron.success.deleted'));
       await loadJobs();
+      void reloadCronStore();
     } catch (deleteError) {
       const message = deleteError instanceof Error ? deleteError.message : t('cron.errors.deleteFailed');
       setError(message);
@@ -555,6 +577,7 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
         return next;
       });
       await loadJobs();
+      void reloadCronStore();
     } catch (updateError) {
       const message = updateError instanceof Error ? updateError.message : t('cron.errors.updateFailed');
       setError(message);
@@ -565,14 +588,14 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
     <div className="flex-1 min-h-0 relative" data-testid="cron-panel" data-session-id={sessionId}>
       {success && (
         <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20" data-testid="cron-success">
-          <div className="bg-ok text-white px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+          <div className="bg-ok text-text-inverse px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
             {success}
           </div>
         </div>
       )}
       {error && (
         <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20" data-testid="cron-error">
-          <div className="bg-danger text-white px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+          <div className="bg-danger text-text-inverse px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
             {error}
           </div>
         </div>
@@ -654,10 +677,10 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                           <div
                             className="relative inline-block w-10 h-6 align-middle select-none rounded-full cursor-pointer"
                             onClick={() => setNewJob({ ...newJob, enabled: !newJob.enabled })}
-                            style={{ backgroundColor: newJob.enabled ? '#10b981' : '#d1d5db' }}
+                            style={{ backgroundColor: newJob.enabled ? 'var(--color-toggle-enabled)' : 'var(--color-toggle-disabled)' }}
                           >
                             <div
-                              className="absolute left-1 top-1 h-4 w-4 rounded-full bg-white transition-transform"
+                              className="absolute left-1 top-1 h-4 w-4 rounded-full bg-[var(--color-control-thumb)] "
                               style={{ transform: newJob.enabled ? 'translateX(16px)' : 'none' }}
                             />
                           </div>
@@ -806,10 +829,10 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                                   [job.id]: { ...prev[job.id], enabled: !prev[job.id].enabled },
                                 }))}
                                 title={job.id === PROACTIVE_AUTO_JOB_ID ? t('cron.autoManagedToggleDisabled') : undefined}
-                                style={{ backgroundColor: editJob.enabled ? '#10b981' : '#d1d5db' }}
+                                style={{ backgroundColor: editJob.enabled ? 'var(--color-toggle-enabled)' : 'var(--color-toggle-disabled)' }}
                               >
                                 <div
-                                  className="absolute left-1 top-1 h-4 w-4 rounded-full bg-white transition-transform"
+                                  className="absolute left-1 top-1 h-4 w-4 rounded-full bg-[var(--color-control-thumb)] "
                                   style={{ transform: editJob.enabled ? 'translateX(16px)' : 'none' }}
                                 />
                               </div>

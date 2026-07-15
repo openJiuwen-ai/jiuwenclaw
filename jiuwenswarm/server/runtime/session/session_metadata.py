@@ -433,6 +433,7 @@ def sync_session_request_metadata(
     project_id: str | None = None,
     cron_id: str | None = None,
     last_user_message_at: float | None = None,
+    is_chat_turn: bool = True,
     explicit_mode_provided: bool = False,
     explicit_model_provided: bool = False,
 ) -> str | None:
@@ -448,7 +449,12 @@ def sync_session_request_metadata(
       - model：**显式覆盖式**——仅当请求方显式携带 model（explicit_model_provided=True）
         时才覆盖磁盘值；未显式携带（如只读 RPC）则保持磁盘原值，不把进程 MODEL_NAME
         默认值回写覆盖用户在该会话用 /model 切换过的模型。
-      - last_user_message_at：**覆盖式**，调用方传入则刷新。
+      - last_user_message_at：**仅 chat 轮次刷新**——``last_user_message_at=None`` 时
+        不覆盖磁盘值（调用方对只读 RPC 应传 None）。
+      - last_message_at：**仅 chat 轮次刷新**（``is_chat_turn=True``）。其语义为
+        「agent 最后输出时间」，只读 RPC 无 agent 输出，不应刷新；否则点击技能按钮等
+        只读查询会把历史会话的 ``last_message_at``/排序时间刷新成「现在」，导致旧会话
+        被置顶。
       - mode：**显式覆盖式**——仅当请求方显式携带 mode（explicit_mode_provided=True）
         时才覆盖磁盘值；未显式携带（如只读 RPC 用默认推断值）则保持磁盘原值，不腐蚀
         已锁定的会话 mode（如 team 会话被只读 RPC 默认推断成 agent）。调用方应传入
@@ -460,6 +466,8 @@ def sync_session_request_metadata(
         project_dir: 请求携带的项目目录候选值，用于首次锁定
         explicit_mode_provided: 请求是否「显式」携带了 mode；False 时 mode 字段不写盘
         explicit_model_provided: 请求是否「显式」携带了 model；False 时 model 字段不写盘
+        is_chat_turn: 本次请求是否为真实 chat 轮次（CHAT_SEND/CHAT_RESUME/CHAT_ANSWER）；
+            False 时 ``last_message_at`` 不刷新。默认 True（向后兼容存量调用方）。
 
     Returns:
         本会话**生效**的 project_dir：磁盘已锁定则返回锁定值，否则返回请求候选值
@@ -540,7 +548,11 @@ def sync_session_request_metadata(
             metadata["mode"] = mode
         if channel_id is not None:
             metadata["channel_id"] = channel_id
-        metadata["last_message_at"] = _current_timestamp()
+        # last_message_at：仅 chat 轮次刷新。语义为「agent 最后输出时间」，
+        # 只读 RPC 无 agent 输出，不应刷新——否则只读查询会把历史会话的排序时间
+        # 刷新成「现在」，导致旧会话被置顶。
+        if is_chat_turn:
+            metadata["last_message_at"] = _current_timestamp()
 
     _enqueue_write(session_id, metadata, preserve_pin_fields=True)
     return effective_project_dir

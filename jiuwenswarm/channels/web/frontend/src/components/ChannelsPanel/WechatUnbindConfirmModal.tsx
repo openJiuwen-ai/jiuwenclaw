@@ -61,7 +61,7 @@ export function WechatUnbindConfirmModal({
             </button>
             <button
               type="button"
-              className="btn !px-3 !py-1.5 border border-[var(--destructive)] text-[var(--destructive)] hover:bg-[var(--destructive)]/10 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="btn !px-3 !py-1.5 border border-[var(--color-feedback-danger)] text-[var(--color-feedback-danger)] hover:bg-[var(--color-feedback-danger)]/10 disabled:opacity-50 disabled:cursor-not-allowed"
               onClick={onConfirm}
               disabled={confirming}
             >

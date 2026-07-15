@@ -462,7 +462,6 @@
     "connectionStatus": "连接状态",
     "version": "版本",
     "language": "语言",
-    "appearance": "外观",
     "moreSettings": "更多设置"
   },
   "heartbeat": {
@@ -1727,9 +1726,6 @@
     "errorTitle": "应用加载出错",
     "unknownError": "未知错误",
     "reload": "刷新页面",
-    "themeSystem": "跟随系统",
-    "themeDark": "深色模式",
-    "themeLight": "浅色模式",
     "configError": "无法通过 WebSocket 获取后端配置，已使用默认配置",
     "configErrorHint": "请先启动 E2E 后端（如",
     "configErrorDefault": "，默认监听 19000）。若后端不在本机或端口不同，可在",
@@ -1813,6 +1809,7 @@
     "waitingReply": "等待确认",
     "completedUnread": "后台任务已完成",
     "moreActions": "更多操作",
+    "cronJobs": "定时任务",
     "delete": "删除",
     "deleteRunningDisabled": "运行中或等待回复的对话不能删除",
     "status": {
@@ -1840,11 +1837,14 @@
       "noProjectMatches": "暂无匹配项目",
       "noProjects": "暂无项目",
       "noConversations": "暂无会话",
+      "noSessions": "暂无触发记录",
       "startConversation": "从{{projectName}}开始新对话",
       "pinProject": "置顶项目",
       "unpinProject": "取消置顶项目",
       "pinConversation": "置顶对话",
       "unpinConversation": "取消置顶",
+      "deleteCronJob": "删除定时任务",
+      "deleteCronJobConfirm": "确定要删除定时任务“{{name}}”吗？",
       "pin": "置顶",
       "unpin": "取消置顶",
       "pinFailed": "置顶操作失败",
@@ -1861,7 +1861,7 @@
       "confirm": "确定"
     },
     "runtime": { "processing": "处理中" },
-    "deleteDialog": { "title": "删除对话", "description": "确定删除“{{title}}”吗？此操作不可撤销。" },
+    "deleteDialog": { "title": "删除", "description": "确定删除“{{title}}”吗？此操作不可撤销。" },
     "notFound": { "title": "对话不存在或已删除", "newConversation": "新建对话" },
     "errors": { "delete": "删除对话失败", "create": "创建对话失败", "send": "发送消息失败" }
   },

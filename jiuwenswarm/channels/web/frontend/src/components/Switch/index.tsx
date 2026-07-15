@@ -21,18 +21,18 @@ export function Switch({ checked, onChange, disabled = false, title }: SwitchPro
       title={title}
       className={`
         relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full 
-        border-2 transition-colors duration-200 ease-in-out
+        border-2   
         focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2
         ${checked 
           ? 'bg-accent border-accent' 
-          : 'bg-gray-200 dark:bg-gray-600 border-gray-300 dark:border-gray-500'}
+          : 'bg-secondary border-border'}
         ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
       `}
     >
       <span
         className={`
-          pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow
-          transition duration-200 ease-in-out
+          pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow
+            
           ${checked ? 'translate-x-4' : 'translate-x-0.5'}
         `}
       />

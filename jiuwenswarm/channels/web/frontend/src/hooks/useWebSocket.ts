@@ -980,6 +980,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
       // 正常调用接口
       const selectedModel = useSessionStore.getState().getRuntime(sessionId)?.selectedModelName;
+      const currentSessionState = useSessionStore.getState();
+      const currentSession = currentSessionState.currentSession?.session_id === sessionId
+        ? currentSessionState.currentSession
+        : currentSessionState.sessions.find((s) => s.session_id === sessionId);
+      const projectDir = currentSession?.project_dir || undefined;
       if (currentMode === 'auto_harness') {
         useHarnessStore.getState().reset(sessionId);
       }
@@ -1011,6 +1016,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(outgoingFiles ? { files: outgoingFiles } : {}),
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
+          ...(projectDir ? { project_dir: projectDir } : {}),
           skills: selectedSkills,
         });
         return true;
@@ -1049,8 +1055,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       useChatStore.getState().setProcessing(sessionId, true);
       useChatStore.getState().setThinking(sessionId, true);
 
-      const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
-      const selectedModel = useSessionStore.getState().getRuntime(sessionId)?.selectedModelName;
+      const currentSessionState = useSessionStore.getState();
+      const currentSession = currentSessionState.currentSession?.session_id === sessionId
+        ? currentSessionState.currentSession
+        : currentSessionState.sessions.find((s) => s.session_id === sessionId);
+      const projectDir = currentSession?.project_dir || undefined;
+      const currentMode = currentSessionState.getRuntime(sessionId)?.mode;
+      const selectedModel = currentSessionState.getRuntime(sessionId)?.selectedModelName;
       if (currentMode === 'auto_harness') {
         useHarnessStore.getState().reset(sessionId);
       }
@@ -1063,6 +1074,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           content,
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
+          ...(projectDir ? { project_dir: projectDir } : {}),
         });
       } catch (error) {
         const webError = error as WebError;
@@ -1678,7 +1690,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             ? findActiveTeamLeaderMessage(sessionId)
             : undefined;
         // Defensive: chat.final is the definitive end-of-response marker.
-        // The primary transition is driven by chat.processing_status
+        // The primary state change is driven by chat.processing_status
         // (is_processing=false), but if that frame is lost the UI would be stuck
         // showing the stop button.
         // In team mode the backend suppresses chat.final while the team is
