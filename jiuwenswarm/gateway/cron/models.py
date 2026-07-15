@@ -65,11 +65,11 @@ def _normalize_targets_str(raw: str) -> str:
 # Cron job execution modes (passed to AgentServer as chat.send params["mode"]).
 CRON_JOB_MODES: frozenset[str] = frozenset(
     {
-        "agent",       # default → agent.plan at runtime
-        "plan",        # legacy shorthand (AgentServer resolves separately)
+        "agent",       # 合并后的单一 agent 模式
+        "plan",        # legacy shorthand（归一到 agent）
         "team",        # multi-agent team mode
-        "agent.plan",
-        "agent.fast",
+        "agent.plan",  # legacy（归一到 agent）
+        "agent.fast",  # legacy（归一到 agent）
         "team.plan",
         "code.team",
         # 不走 chat.send，scheduler 消费时直接发 PROACTIVE_TICK WS 请求
@@ -80,11 +80,21 @@ CRON_JOB_MODES: frozenset[str] = frozenset(
 
 
 # Canonical default when create/update/runtime do not specify mode.
-CRON_JOB_DEFAULT_MODE: str = "agent.fast"
+CRON_JOB_DEFAULT_MODE: str = "agent"
+
+_CRON_JOB_MODE_ALIASES: dict[str, str] = {
+    "plan": "agent",
+    "agent.plan": "agent",
+    "agent.fast": "agent",
+}
 
 
 def normalize_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> str:
-    """Normalize and validate a cron job execution mode (strict, for create/update APIs)."""
+    """Normalize and validate a cron job execution mode (strict, for create/update APIs).
+
+    legacy 别名（plan / agent.plan / agent.fast）在此处即归一为 "agent" 后落库，
+    而非仅依赖运行时（AgentServer 侧）兜底归一。
+    """
     if raw is None:
         return default
     value = str(raw).strip().lower()
@@ -95,7 +105,7 @@ def normalize_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -
             f"Invalid cron job mode {raw!r}. "
             f"Valid: {', '.join(sorted(CRON_JOB_MODES))}"
         )
-    return value
+    return _CRON_JOB_MODE_ALIASES.get(value, value)
 
 
 def coerce_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> str:
@@ -105,9 +115,7 @@ def coerce_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> s
     value = str(raw).strip().lower()
     if not value:
         return default
-    if value in CRON_JOB_MODES:
-        return value
-    return value
+    return _CRON_JOB_MODE_ALIASES.get(value, value)
 
 
 def cron_job_modes_for_tools() -> list[str]:
@@ -210,7 +218,7 @@ class CronJob:
     updated_at: float | None = None
     # 记录定时任务是在群聊("group")还是私聊("p2p")中创建的，用于推送时决定是否走 IMOutboundPipeline
     chat_type: str | None = None
-    # 定时任务执行时使用的 Agent 模式；未指定时默认 agent.fast
+    # 定时任务执行时使用的 Agent 模式；未指定时默认 agent（plan/fast 已合并）
     mode: str = CRON_JOB_DEFAULT_MODE
     # 执行一次后自动删除（用于提醒类任务）
     delete_after_run: bool = False

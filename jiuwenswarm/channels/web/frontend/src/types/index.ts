@@ -28,7 +28,7 @@ export interface Session {
   last_message_at?: number;    // 最近对话时间(Unix时间戳)
 }
 
-export type AgentMode = 'agent.fast' | 'agent.plan' | 'team' | 'auto_harness';
+export type AgentMode = 'agent' | 'team' | 'auto_harness';
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'interrupted';
 
 export interface ModelEntry {

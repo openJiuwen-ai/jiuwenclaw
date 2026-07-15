@@ -227,8 +227,7 @@
     },
     "newSession": "New Session",
     "sessionCreated": "Session created",
-    "modePlan": "Planning Mode",
-    "modeAgent": "Performance Mode",
+    "modeAgentSingle": "Agent Mode",
     "modeAgentTeam": "Cluster Mode",
     "modeAutoHarness": "Auto-Harness Mode",
     "modeAutoHarnessDesc": "Automatically analyze and optimize target repository",
@@ -764,7 +763,7 @@
       "modelNameTooLong": "Model name is too long, please keep it under 100 characters",
       "aliasTooLong": "Alias is too long, please keep it under 100 characters",
       "apiBaseTooLong": "API Base URL is too long, please keep it under 512 characters",
-      "apiKeyTooLong": "API Key is too long, please keep it under 500 characters",
+      "apiKeyTooLong": "API Key is too long, please keep it under 2048 characters",
       "reasoningDefault": "Use default",
       "alias": "Alias",
       "aliasPlaceholder": "Optional, defaults to empty"

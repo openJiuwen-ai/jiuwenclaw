@@ -5,7 +5,7 @@ source: jiuwenswarm/server/agent_ws_server.py
 source_role: runtime_source
 audit_scope: default_health_audit
 class: AgentWebSocketServer
-signature: "_handle_session_delete(ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None"
+signature: "_handle_session_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None"
 health:
   overall: risky
   name_behavior_match: good
@@ -22,13 +22,14 @@ health:
   dependency_coupling: high
   test_coverage: partial
   observability: partial
-  performance_risk: low
+  performance_risk: medium
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:38:06Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:9b07813e7aeda9e4ab9dc109c7b1c914feb6cba5dd0eeed71fb8e2ccbeb0edf6
   confidence: confirmed
   expired_reason: null
 issues:
@@ -36,48 +37,46 @@ issues:
     dimension: boundary_safety
     severity: high
     status: open
-    summary: "Unvalidated session_id is recursively deleted."
-    evidence: "target is only stripped before get_agent_sessions_dir() / target reaches shutil.rmtree; no absolute path, separator, '..', reparse-link, or containment guard was found."
-    suggested_action: "Validate session IDs as single safe names, verify the delete target stays under the sessions root, and add traversal/absolute-path tests."
+    summary: "Unvalidated session_id reaches recursive deletion."
+    evidence: "Lines 2594-2606 only strip params.session_id before computing get_agent_sessions_dir() / target.. See AgentWebSocketServer._handle_session_delete/risks.md#issue-001."
+    suggested_action: "Require a safe single-name ID, enforce resolved-root containment, and test traversal and absolute paths."
   - id: ISSUE-002
     dimension: state_mutation
     severity: medium
     status: open
-    summary: "Successful delete does not clear all session-scoped in-process state."
-    evidence: "The handler clears _plan_exited_sessions and metadata cache only; _session_mode_sync_locks has no observed pop, and _session_stream_tasks are only popped by stream finalization."
-    suggested_action: "On successful deletion, remove safe session-scoped locks and define/cancel active stream-task behavior."
+    summary: "Delete leaves some session-scoped runtime uncoordinated."
+    evidence: "The handler does not cancel/await _session_stream_tasks or remove _session_mode_sync_locks. For non-team. See AgentWebSocketServer._handle_session_delete/risks.md#issue-002."
+    suggested_action: "Define idempotent ordering for active work, adapter cleanup, locks, and caches under concurrent chat traffic."
   - id: ISSUE-003
     dimension: error_handling
     severity: medium
     status: open
-    summary: "Filesystem deletion failure lacks a delete-specific response."
-    evidence: "Runtime cleanup maps to DELETE_FAILED, but shutil.rmtree(session_dir) is outside that try; failures fall to the generic dispatcher after runtime cleanup may have occurred."
-    suggested_action: "Catch rmtree errors locally, return a stable error code, and clear metadata/global state only after confirmed filesystem deletion."
+    summary: "Filesystem failure can leave a partial delete with a generic error."
+    evidence: "Runtime/team cleanup is attempted first at lines 2630-2646, but shutil.rmtree at line 2657 is outside. See AgentWebSocketServer._handle_session_delete/risks.md#issue-003."
+    suggested_action: "Map filesystem errors locally and make partial cleanup observable and retry-safe."
   - id: ISSUE-004
     dimension: test_coverage
     severity: medium
     status: open
-    summary: "Handler-level team-session delete and destructive-path edge cases are not directly covered."
-    evidence: "Direct handler tests cover agent-mode success and checkpointer rejection; team deletion is covered mostly through _handle_team_delete and TeamManager.delete_session_runtime."
-    suggested_action: "Add direct tests for team-mode success/failure, missing and non-directory sessions, path containment, runtime cleanup failure, and rmtree failure."
-confidence: confirmed
-details: {}
+    summary: "Direct tests cover only ordinary success and the checkpointer gate."
+    evidence: "Two direct tests in test_agentserver_acp.py cover ordinary success and checkpointer rejection. Team. See AgentWebSocketServer._handle_session_delete/risks.md#issue-004."
+    suggested_action: "Add handler tests for those branches and failure modes."
+  - id: ISSUE-005
+    dimension: performance_risk
+    severity: medium
+    status: open
+    summary: "Recursive filesystem deletion blocks the AgentServer event loop."
+    evidence: "shutil.rmtree(session_dir) runs synchronously inside this async WebSocket handler. A large or slow. See AgentWebSocketServer._handle_session_delete/risks.md#issue-005."
+    suggested_action: "Run bounded recursive deletion in a worker thread after containment validation, and expose progress/timeout behavior if."
 ---
 
-# `AgentWebSocketServer._handle_session_delete`
+# AgentWebSocketServer._handle_session_delete
 
 ## Actual Role
 
-Handles AgentServer `session.delete` for one session: validates `params.session_id`, checks the session directory, requires persistent checkpointer availability, releases runtime state, deletes the directory, clears selected in-process/cache state, and sends one E2A response.
+The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
 
-## Key Signals
+## Audit Details
 
-- Input: `AgentRequest.params.session_id`; metadata `mode == "team"` chooses team-runtime deletion.
-- Output: Coded validation/checkpointer/runtime cleanup errors, or success payload `{session_id: target}`.
-- Main side effects: Deletes runtime/checkpointer state, removes a local session directory, discards `_plan_exited_sessions`, and clears metadata cache.
-- Main risk: A caller-controlled session id reaches recursive deletion without containment validation, and some cleanup failures happen after runtime release.
-- Related tests: Direct tests cover non-team success and checkpointer failure; adjacent tests cover TeamManager delete-session runtime and team.delete.
-
-## Detail Index
-
-- Detail docs pending.
+- [Reviewed behavior](AgentWebSocketServer._handle_session_delete/actual-behavior.md)
+- [Full issue evidence](AgentWebSocketServer._handle_session_delete/risks.md)

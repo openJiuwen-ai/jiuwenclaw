@@ -685,14 +685,26 @@ def _harness_error_code(exc: BaseException) -> str:
 
 
 def resolve_agent_request_mode(raw_mode: Any) -> tuple[str, str | None, str]:
-    """Resolve request params.mode into manager mode, sub_mode, and canonical value."""
+    """Resolve request params.mode into manager mode, sub_mode, and canonical value.
+
+    plan / fast 已合并为单一 ``agent`` 模式：任何 ``agent`` / ``agent.plan`` /
+    ``agent.fast`` 请求都归一到 ``agent``（sub_mode=None）。历史裸 ``plan`` /
+    ``fast``（无 ``agent.`` 前缀，如旧 cron job 存量数据）同样归一到 ``agent``，
+    与 CLI ``MODE_ALIASES``、记忆配置 ``_resolve_mode_memory`` 的裸 token 处理保持一致。
+    """
     raw_value = getattr(raw_mode, "value", raw_mode)
     mode_text = raw_value.strip().lower() if isinstance(raw_value, str) else ""
     if not mode_text:
-        mode_text = "agent.plan"
+        mode_text = "agent"
+
+    if mode_text in ("plan", "fast"):
+        return "agent", None, "agent"
 
     parts = mode_text.split(".")
     mode = parts[0] or "agent"
+    if mode == "agent":
+        # 合并模式：忽略历史子模式（plan / fast），统一 canonical "agent"。
+        return "agent", None, "agent"
     if mode == "team":
         sub_mode = parts[1] if len(parts) > 1 and parts[1] else None
         if sub_mode not in {None, "plan"}:
@@ -703,7 +715,6 @@ def resolve_agent_request_mode(raw_mode: Any) -> tuple[str, str | None, str]:
         return "team", sub_mode, canonical_mode
 
     default_sub_modes = {
-        "agent": "plan",
         "code": "normal",
     }
     sub_mode = parts[1] if len(parts) > 1 and parts[1] else default_sub_modes.get(mode)
@@ -715,7 +726,7 @@ def resolve_agent_request_mode(raw_mode: Any) -> tuple[str, str | None, str]:
 
 def _apply_resolved_mode_to_request(request: AgentRequest) -> tuple[str, str | None]:
     mode, sub_mode, canonical_mode = resolve_agent_request_mode(
-        request.params.get("mode", "agent.plan")
+        request.params.get("mode", "agent")
     )
     request.params["mode"] = canonical_mode
     return mode, sub_mode
@@ -3480,7 +3491,7 @@ class AgentWebSocketServer:
             params = request.params or {}
 
             channel_id = request.channel_id or "default"
-            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent.plan"))
+            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
             agent_mode = "agent" if mode == "auto_harness" else mode
             agent = await self._agent_manager.get_agent(
                 channel_id=channel_id,
@@ -3535,7 +3546,7 @@ class AgentWebSocketServer:
                         timestamp=_dt.datetime.now().timestamp(),
                         trigger="manual",
                         stats=stats,
-                        mode=params.get("mode", "agent.plan"),
+                        mode=params.get("mode", "agent"),
                     )
                     compression_state_payload: dict[str, Any] = {
                         **state,
@@ -3589,7 +3600,7 @@ class AgentWebSocketServer:
             direction = str(params.get("direction") or "from").strip()
 
             channel_id = request.channel_id or "default"
-            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent.plan"))
+            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
             agent_mode = "agent" if mode == "auto_harness" else mode
             agent = await self._agent_manager.get_agent(
                 channel_id=channel_id,
@@ -3636,7 +3647,7 @@ class AgentWebSocketServer:
             params = request.params or {}
 
             channel_id = request.channel_id or "default"
-            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent.plan"))
+            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
             agent_mode = "agent" if mode == "auto_harness" else mode
             agent = await self._agent_manager.get_agent(
                 channel_id=channel_id,
@@ -3674,7 +3685,7 @@ class AgentWebSocketServer:
             session_id = request.session_id or "default"
             params = request.params or {}
             channel_id = request.channel_id or "default"
-            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent.plan"))
+            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
             agent_mode = "agent" if mode == "auto_harness" else mode
 
             agent = await self._agent_manager.get_agent(
@@ -3743,7 +3754,7 @@ class AgentWebSocketServer:
                     await send_wire_payload(ws, wire)
                 return
 
-            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent.plan"))
+            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
             agent_mode = "agent" if mode == "auto_harness" else mode
 
             agent = await self._agent_manager.get_agent(
@@ -6256,7 +6267,7 @@ class AgentWebSocketServer:
         try:
             channel_id = request.channel_id or "default"
             params = request.params if isinstance(request.params, dict) else {}
-            mode, _, _ = resolve_agent_request_mode(params.get("mode", "agent.plan"))
+            mode, _, _ = resolve_agent_request_mode(params.get("mode", "agent"))
             explicit_session_id = params.get("session_id")
             session_id = await self._agent_manager.create_session(
                 channel_id=channel_id,

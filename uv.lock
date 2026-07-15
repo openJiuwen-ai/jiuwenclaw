@@ -1698,7 +1698,7 @@ wheels = [
 
 [[package]]
 name = "jiuwenswarm"
-version = "0.2.3b1"
+version = "0.2.3"
 source = { editable = "." }
 dependencies = [
     { name = "a2ui-agent-sdk" },
@@ -1826,7 +1826,7 @@ requires-dist = [
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mutagen", specifier = ">=1.47.0" },
     { name = "numpy", specifier = ">=1.24.0" },
-    { name = "openjiuwen", git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop" },
+    { name = "openjiuwen", specifier = "==0.1.16" },
     { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'" },
     { name = "opentelemetry-api", specifier = ">=1.28.0" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.28.0" },
@@ -1896,7 +1896,7 @@ test = [
 
 [[package]]
 name = "jiuwenswarm-tui"
-version = "0.2.3b1"
+version = "0.2.3"
 source = { directory = "packages/jiuwenswarm-tui" }
 
 [[package]]
@@ -2686,8 +2686,8 @@ wheels = [
 
 [[package]]
 name = "openjiuwen"
-version = "0.1.15"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop#fd6febc5642c2ca48c978aea9a3b52b38e5d82ad" }
+version = "0.1.16"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -2724,6 +2724,10 @@ dependencies = [
     { name = "tenacity" },
     { name = "tiktoken" },
     { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f2/c0/f2ec3dbd8935747824f8838a8cd866548deb1930c390c88b745682c233b1/openjiuwen-0.1.16.tar.gz", hash = "sha256:8ba6f6a8b1502cc95688c55e7705b38db253f22498e68a3ce9887181b6427162", size = 3247203, upload-time = "2026-07-14T14:16:49.219Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/15/dc/d8af70176d6b3f80fa3d167561f12fe32dd3dc438e00e9a101207d046c0c/openjiuwen-0.1.16-py3-none-any.whl", hash = "sha256:cbdf01cf7d0fd8d5137841a029161d49c0bf493ebf8d65eedb3496ff524af57f", size = 4253638, upload-time = "2026-07-14T14:16:46.715Z" },
 ]
 
 [package.optional-dependencies]

@@ -7,7 +7,7 @@ audit_scope: default_health_audit
 class: AgentWebSocketServer
 signature: "host(self) -> str"
 health:
-  overall: watch
+  overall: healthy
   name_behavior_match: good
   responsibility_focus: single
   length: short
@@ -31,14 +31,7 @@ audit:
   audited_source_hash: null
   confidence: confirmed
   expired_reason: null
-issues:
-  - id: ISSUE-001
-    dimension: test_coverage
-    severity: low
-    status: open
-    summary: "No direct test asserts the host accessor returns the configured bind host."
-    evidence: "No .host property test was found; startup uses _host directly and existing server tests use fakes or mocks."
-    suggested_action: "Add a tiny constructor/accessor test if host configuration becomes externally relied on."
+issues: []
 confidence: confirmed
 details: {}
 ---
@@ -47,15 +40,15 @@ details: {}
 
 ## Actual Role
 
-Read-only property that returns the WebSocket server bind host stored in `self._host`. Startup binds with `_host` directly, so this method exposes configured state rather than participating in the listener startup path.
+Read-only property that returns the constructor-supplied WebSocket bind host stored in `self._host`. Repository search found no production consumer of this accessor; `start` binds with `_host` directly, so the property only exposes immutable configured state.
 
 ## Key Signals
 
 - Input: Initialized `AgentWebSocketServer` instance.
 - Output: Configured host string.
 - Main side effects: None.
-- Main risk: The accessor relies on constructor-initialized state and currently has no direct regression test.
-- Related tests: No direct `.host` property coverage was found; constructor paths are only exercised indirectly.
+- Main risk: None material in the current call graph; a future consumer would rely on the constructor preserving the host value verbatim.
+- Related tests: `tests/unit_tests/agentserver/test_agent_reload_scope.py` constructs the server with its default host but does not read `.host`; no direct accessor or custom-host assertion was found.
 
 ## Detail Index
 

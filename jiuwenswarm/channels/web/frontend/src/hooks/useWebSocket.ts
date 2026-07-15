@@ -382,12 +382,12 @@ interface PendingContextCompressionStart {
 }
 
 function normalizeAgentMode(rawMode: unknown): AgentMode {
-  if (typeof rawMode !== 'string') return 'agent.plan';
+  if (typeof rawMode !== 'string') return 'agent';
   const normalized = rawMode.trim().toLowerCase();
-  if (normalized === 'agent.fast') return 'agent.fast';
   if (normalized === 'team') return 'team';
   if (normalized === 'auto_harness') return 'auto_harness';
-  return 'agent.plan';
+  // plan / fast 已合并为单一 agent（历史 agent.plan / agent.fast 归一）。
+  return 'agent';
 }
 
 function unsupportedEvolutionModeMessage(content: string, mode: AgentMode): string | null {
@@ -397,7 +397,7 @@ function unsupportedEvolutionModeMessage(content: string, mode: AgentMode): stri
     trimmed.startsWith('/evolve ') ||
     trimmed === '/evolve_simplify' ||
     trimmed.startsWith('/evolve_simplify ');
-  if (!isEvolutionCommand || mode === 'agent.plan' || mode === 'team') {
+  if (!isEvolutionCommand || mode === 'agent' || mode === 'team') {
     return null;
   }
   return `${mode} 模式下演进功能不可用。`;
@@ -695,6 +695,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
       // 用后端 ack 携带的 task_running 初始化全局运行态，让新连接/重连窗口立即知道是否有任务在跑。
       setGlobalTaskRunning(Boolean(ackPayload.task_running));
+      // 调试日志：保存锁卡禁用时据此判断是否由 ack 初值导致（新连接/重连窗口）。
+      console.info(
+        '[task.global_running] connection.ack 初始化 task_running=',
+        Boolean(ackPayload.task_running),
+      );
       onConnectRef.current?.(ackPayload);
     },
     [setAvailableTools, setConnected, setGlobalTaskRunning]
@@ -991,6 +996,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       resetContextCompressionTurn();
       userInputVersionRef.current += 1;
       stopAllTts();
+
+      // 用户忽略未回答的提问器、直接发新 query：清掉残留的内联提问卡片。
+      // 否则该卡片作为时间线最后一个元素会一直钉在最底部（issue #2091）。
+      if (useChatStore.getState().pendingQuestion) {
+        useChatStore.getState().setPendingQuestion(null);
+      }
 
       // 添加用户消息
       addMessage({
@@ -1684,6 +1695,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const currentMode = useSessionStore.getState().mode;
         const content = normalizeFinalContent(payload);
 
+        // 上限提醒（source=proactive_notification）：不进会话历史，改走全局弹窗。
+        // 后端每次命中每日上限都推一次，前端用 store 信号驱动 banner 显示 + 定时消失。
+        // 必须在 team 模式消息处理之前拦截，否则 team 模式下会被当成 team leader
+        // 系统消息进会话历史（与"从会话改到弹窗"的设计意图相反）。
+        const source = typeof payload.source === 'string' ? payload.source : '';
+        if (source === 'proactive_notification') {
+          if (content) {
+            useHarnessStore.getState().setProactiveNotification(content);
+          }
+          return;
+        }
+
         // team 模式下，过滤成员输出，只保留外层 leader 回复。
         if (isHiddenTeamTeammateMessagePayload(currentMode, payload)) {
           const memberId = getTeamPayloadMemberName(payload);
@@ -1748,8 +1771,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const payloadSessionId =
           typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
 
-        // 检查是否为主动推荐消息
-        const source = typeof payload.source === 'string' ? payload.source : '';
+        // 检查是否为主动推荐消息（source 已在 team 处理前提取）
         const isProactiveRecommendation = source === 'proactive_recommendation';
         const proactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
 
@@ -2125,7 +2147,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const currentMode = useSessionStore.getState().mode;
           const { taskQueue } = useChatStore.getState();
           if (
-            currentMode === 'agent.fast' &&
+            currentMode === 'agent' &&
             !resumeAlreadyCompleted &&
             taskQueue.length > 0
           ) {
@@ -2152,7 +2174,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       // 全局任务运行态快照：后端在任务起止时广播，用于跨窗口配置保存锁。
       // 不走 shouldHandleSessionEvent 过滤（运行态是全局的，不带 session_id）。
       webClient.on('task.global_running', ({ payload }) => {
-        setGlobalTaskRunning(Boolean(payload?.running));
+        const running = Boolean(payload?.running);
+        setGlobalTaskRunning(running);
+        // 调试日志：保存锁卡禁用时据此核对前端收到的快照与后端广播是否一致。
+        console.info(
+          '[task.global_running] 收到广播 running=',
+          running,
+          'count=',
+          payload?.count,
+        );
       }),
       webClient.on('chat.symphony_status', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
@@ -2352,7 +2382,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               // 任务已完成时，检查并触发队列中的下一个任务
               const currentMode = useSessionStore.getState().mode;
               const { taskQueue } = useChatStore.getState();
-              if (currentMode === 'agent.fast' && taskQueue.length > 0) {
+              if (currentMode === 'agent' && taskQueue.length > 0) {
                 const nextTask = taskQueue[0];
                 if (nextTask && activeSessionIdRef.current && sendMessageRef.current) {
                   removeFromTaskQueue(nextTask.id);

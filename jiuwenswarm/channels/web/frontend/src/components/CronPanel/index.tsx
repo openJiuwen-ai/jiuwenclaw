@@ -521,7 +521,7 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
       // proactive 自动维护 job 的 enabled 由 ConfigPanel 开关驱动，
       // 面板编辑提交时不带 enabled，避免与配置侧开关冲突。
       // 同样不带 mode——proactive.tick 的 mode 必须保持 proactive.tick，
-      // 否则会被会话 mode（agent.plan）覆盖，导致走普通 cron 流程而非引擎。
+      // 否则会被会话 mode（agent）覆盖，导致走普通 cron 流程而非引擎。
       // 不带 wake_offset_seconds——proactive.tick 到点就执行，偏移由后端强制 0。
       if (jobId === PROACTIVE_AUTO_JOB_ID) {
         // proactive job 只允许改 cron_expr 和 timezone，其余由 ConfigPanel/cron_sync 管

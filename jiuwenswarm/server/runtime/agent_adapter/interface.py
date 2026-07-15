@@ -508,7 +508,7 @@ The command receives this JSON via stdin every 2 seconds:
 | session_id | Current session ID |
 | session_name | Session title (set via /rename) |
 | cwd | Current working directory |
-| mode | Current mode (agent.plan / agent.fast / code.normal / code.team / team) |
+| mode | Current mode (agent / code.normal / code.team / team) |
 | model | Current model name |
 | provider | Model provider |
 | version | jiuwenswarm version |
@@ -2475,13 +2475,15 @@ class JiuWenSwarm:
 
     async def cleanup_session_runtime(self, session_id: str) -> bool:
         """Release in-memory runtime owned by one session while keeping persisted history."""
+        processor_cleaned = await self._session_manager.close_session(session_id)
         adapter = self._adapter
         if adapter is None:
-            return False
+            return processor_cleaned
         cleanup_fn = getattr(adapter, "cleanup_session_adapter", None)
         if not callable(cleanup_fn):
-            return False
-        return bool(await cleanup_fn(session_id))
+            return processor_cleaned
+        adapter_cleaned = bool(await cleanup_fn(session_id))
+        return processor_cleaned or adapter_cleaned
 
     async def cancel_inflight_work(self, log_prefix: str = "[gateway disconnect] ") -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时调用：取消 session 流式任务并中止 adapter 内层循环。"""
@@ -2504,6 +2506,7 @@ class JiuWenSwarm:
         不清理记忆数据（记忆数据保留在文件系统中）。
         """
         logger.info("[JiuWenSwarm] cleanup: 清理资源")
+        await self._session_manager.close_all_sessions()
 
         if self._adapter is not None:
             try:

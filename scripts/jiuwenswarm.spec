@@ -139,6 +139,11 @@ datas += copy_metadata("mcp", recursive=True)
 datas += copy_metadata("openjiuwen", recursive=True)
 datas += collect_data_files("openjiuwen", include_py_files=False, excludes=OPENJIUWEN_DATA_EXCLUDES)
 datas += collect_data_files(
+    "a2ui",
+    include_py_files=False,
+    includes=["assets/0.8/*.json"],
+)
+datas += collect_data_files(
     "jiuwenswarm.extensions",
     include_py_files=True,
     includes=EXTENSION_DATA_FILE_PATTERNS,
@@ -325,8 +330,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "JiuwenSwarm",
             "CFBundleDisplayName": "JiuwenSwarm",
-            "CFBundleShortVersionString": "0.2.3.beta1",
-            "CFBundleVersion": "0.2.3.beta1",
+            "CFBundleShortVersionString": "0.2.3",
+            "CFBundleVersion": "0.2.3",
             "NSHighResolutionCapable": "True",
         },
     )

@@ -119,6 +119,11 @@ interface HarnessState {
   // Activate interaction pending state
   activateInteraction: ActivateInteractionState | null;
 
+  // Proactive notification message (e.g. "今日主动推荐已达每日上限...")
+  // 由后端推送 source=proactive_notification 的 chat.final 帧触发；
+  // 前端拦截后不走会话气泡，改走 ChatPanel 顶部弹窗。非空即显示。
+  proactiveNotificationMessage: string | null;
+
   // Package list from backend
   packages: PackageInfo[];
   // Native version info
@@ -156,6 +161,7 @@ interface HarnessState {
     messages?: string[];
   }) => void;
   setActivateInteraction: (state: ActivateInteractionState | null) => void;
+  setProactiveNotification: (message: string | null) => void;
   reset: () => void;
 
   setPackages: (packages: PackageInfo[], nativeVersion: NativeVersionInfo, activeIds: string[]) => void;
@@ -242,6 +248,7 @@ export const useHarnessStore = create<HarnessState>((set, get) => ({
   extensionOrder: [],
   extensionsByName: {},
   activateInteraction: null,
+  proactiveNotificationMessage: null,
 
   packages: [],
   nativeVersion: null,
@@ -457,6 +464,10 @@ export const useHarnessStore = create<HarnessState>((set, get) => ({
     });
   },
 
+  setProactiveNotification: (message) => {
+    set({ proactiveNotificationMessage: message });
+  },
+
   reset: () => {
     set({
       stageDefinitions: [],
@@ -471,6 +482,7 @@ export const useHarnessStore = create<HarnessState>((set, get) => ({
       extensionOrder: [],
       extensionsByName: {},
       activateInteraction: null,
+      proactiveNotificationMessage: null,
       packages: [],
       nativeVersion: null,
       activePackageIds: [],

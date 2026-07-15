@@ -1046,7 +1046,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # ── 自定义 agent 不加入 deep_config.subagents ──
         # Code 模式下，自定义 agent 由 CodeAgentRail 的 Agent 工具管理，
         # 不走 SubagentRail 的 task_tool 路径。
-        # （agent.plan / agent.fast 模式仍由 interface_deep.py 的 _load_custom_subagents 管理）
+        # （agent 模式仍由 interface_deep.py 的 _load_custom_subagents 管理）
 
         return subagents or None, False
 

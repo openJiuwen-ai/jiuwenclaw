@@ -90,13 +90,22 @@ def _make_proactive_agent(tick_responses: list[dict]):
 
 # Capture _trigger_main_agent calls (session_id, channel_id, query, decision)
 def _capture_trigger(triggered_list):
-    async def _trigger(session_id, channel_id, query, decision):
+    async def _trigger(session_id, channel_id, query, decision, on_delivered=None):
         triggered_list.append({
             "session_id": session_id,
             "channel_id": channel_id,
             "query": query,
             "decision": decision,
         })
+        # 真实 trigger_main_agent 是 fire-and-forget：主 agent 跑完才回调 on_delivered
+        # 做 Step 7（计数 + save_recommendation_state）。测试 mock 这里同步模拟"后台送达"，
+        # 立即回调，让 history/count 断言能验证 Step 7 逻辑。
+        if on_delivered is not None:
+            try:
+                on_delivered()
+            except Exception:
+                # 测试只关心触发与 history，回调异常不掩盖触发本身
+                pass
         return True
     return _trigger
 
@@ -355,9 +364,9 @@ async def test_skip_when_main_agent_busy():
 
     triggered = []
 
-    async def _busy_trigger(session_id, channel_id, query, decision):
+    async def _busy_trigger(session_id, channel_id, query, decision, on_delivered=None):
         triggered.append((session_id, channel_id, decision))
-        return False  # session 正忙
+        return False  # session 正忙（不触发，on_delivered 不该被调）
 
     with tempfile.TemporaryDirectory() as ws:
         ws_path = Path(ws)
@@ -440,7 +449,11 @@ def _capture_notifications(notified_list):
 
 @pytest.mark.asyncio
 async def test_daily_limit_pushes_notification_once():
-    """达到每日上限时，应推送一次"已达上限"通知；同日再次 tick 不再刷屏。"""
+    """达到每日上限时，每次 tick 命中上限都推送一次"已达上限"通知。
+
+    旧实现按天去重（每天最多推一次）；新行为改为前端弹窗 + 每次命中都推，
+    故同日多次命中上限会多次推送（去重交由前端 toast 的自动消失处理）。
+    """
     notified = []
 
     with tempfile.TemporaryDirectory() as ws:
@@ -464,10 +477,10 @@ async def test_daily_limit_pushes_notification_once():
             assert "已达每日上限" in notified[0]["text"]
             assert "1 条" in notified[0]["text"]
 
-            # 第二次 tick：同日已达上限 → 不再刷屏
+            # 第二次 tick：同日仍命中上限 → 再次推送（每次命中都推，前端弹窗负责消失）
             pushed2 = await engine.tick_now()
             assert pushed2 is False
-            assert len(notified) == 1, f"同日不应重复推送，实际累计 {len(notified)} 次"
+            assert len(notified) == 2, f"同日再次命中上限应再次推送，实际累计 {len(notified)} 次"
 
 
 @pytest.mark.asyncio

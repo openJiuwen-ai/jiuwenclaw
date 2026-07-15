@@ -37,21 +37,21 @@ issues:
     severity: medium
     status: open
     summary: "Reset clears only the singleton reference, not the live server lifecycle."
-    evidence: "reset_instance assigns cls._instance = None, while stop() owns server and JiuwenBox cleanup and get_instance() can create a replacement afterward."
+    evidence: "reset_instance only assigns cls._instance = None. It does not call the async stop(), which closes the WebSocket listener and JiuwenBox runner; a later get_instance() can therefore create a replacement while resources owned by the old object remain live."
     suggested_action: "Keep this helper test-only or require await server.stop() before reset; consider a lifecycle-safe reset helper if production reset is needed."
   - id: ISSUE-002
     dimension: state_mutation
     severity: low
     status: open
     summary: "Reset does not clear the constructor-registered ACP push callback."
-    evidence: "The constructor registers an AcpOutputManager callback that closes over self, but reset_instance only drops the class-level _instance reference."
+    evidence: "The constructor registers an AcpOutputManager callback whose lambda closes over self. reset_instance leaves that callback installed, retaining and targeting the old server until another construction overwrites it."
     suggested_action: "Tests touching ACP output should clear or replace the callback during fixture cleanup, or lifecycle reset should own that callback state."
   - id: ISSUE-003
     dimension: test_coverage
     severity: low
     status: open
     summary: "No focused singleton reset test covers the helper's limited cleanup contract."
-    evidence: "No direct AgentWebSocketServer.reset_instance test was found; existing app server tests mock get_instance instead."
+    evidence: "No repository caller or direct AgentWebSocketServer.reset_instance test was found. tests/unit_tests/test_app_agentserver.py replaces get_instance with a fake and does not exercise reset behavior."
     suggested_action: "Add a small lifecycle test that asserts reset creates a fresh singleton and documents that old runtime resources are not stopped."
 confidence: confirmed
 details: {}
@@ -61,7 +61,7 @@ details: {}
 
 ## Actual Role
 
-Classmethod test-oriented singleton reset helper. It only drops the class-level cached `AgentWebSocketServer` reference by assigning `cls._instance = None`; it does not stop a running WebSocket server, close active connections, clear runtime tasks, or unregister constructor-installed global callbacks.
+Classmethod declared as test-only that unconditionally assigns `None` to the class-level cached `AgentWebSocketServer` reference. It performs no instance lifecycle work: a running listener, active work, JiuwenBox runner, and constructor-installed ACP push callback remain owned by or bound to the old object.
 
 ## Key Signals
 
@@ -69,7 +69,7 @@ Classmethod test-oriented singleton reset helper. It only drops the class-level 
 - Output: None.
 - Main side effects: Mutates process-global singleton state by clearing `AgentWebSocketServer._instance`.
 - Main risk: Using it outside controlled test isolation can orphan a live server instance and leave global callback state pointing at the old object.
-- Related tests: No direct reset test was found; existing app-level server tests mock `AgentWebSocketServer.get_instance`.
+- Related tests: No repository caller or direct reset test was found; `tests/unit_tests/test_app_agentserver.py` mocks `AgentWebSocketServer.get_instance` instead.
 
 ## Detail Index
 

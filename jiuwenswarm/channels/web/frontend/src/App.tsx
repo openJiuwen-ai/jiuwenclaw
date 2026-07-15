@@ -245,6 +245,8 @@ function AppContent() {
   const [saveToastVisible, setSaveToastVisible] = useState(false);
   // 配置被其他窗口更新后，本窗口若正编辑草稿则弹覆盖确认；无草稿则静默 fetchConfig。
   const [configChangedConfirmOpen, setConfigChangedConfirmOpen] = useState(false);
+  const [proactiveToastVisible, setProactiveToastVisible] = useState(false);
+  const [proactiveToastMessage, setProactiveToastMessage] = useState('');
   const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
   const [securityAlertVisible, setSecurityAlertVisible] = useState(false);
   const [securityAlertContent, setSecurityAlertContent] = useState('');
@@ -283,6 +285,7 @@ function AppContent() {
   const saveToastTimerRef = useRef<number | null>(null);
   /** ConfigPanel 草稿是否有未保存改动（由 onHasChangesChange 上报）；config.changed 广播到达时判断是否覆盖草稿。 */
   const hasChangesRef = useRef(false);
+  const proactiveToastTimerRef = useRef<number | null>(null);
   const lastHeartbeatToastKeyRef = useRef<string | null>(null);
   /** 自「恢复会话」加载 history 后的分页元数据；用于聊天区顶部加载更早消息 */
   const [historyPagerMeta, setHistoryPagerMeta] = useState<{
@@ -382,6 +385,8 @@ function AppContent() {
   useEffect(() => () => disposeInFlightHistoryHandles(), [disposeInFlightHistoryHandles]);
   const { todos, clearTodos } = useTodoStore();
   const { extensionReady, reset: resetHarnessStore } = useHarnessStore();
+  const proactiveNotificationMessage = useHarnessStore((s) => s.proactiveNotificationMessage);
+  const setProactiveNotification = useHarnessStore((s) => s.setProactiveNotification);
 
   const toolPanelHasContent = useMemo(() => {
     const hasMessages = messages.length > 0;
@@ -558,6 +563,13 @@ function AppContent() {
     if (saveToastTimerRef.current != null) {
       window.clearTimeout(saveToastTimerRef.current);
       saveToastTimerRef.current = null;
+    }
+  }, []);
+
+  const clearProactiveToastTimer = useCallback(() => {
+    if (proactiveToastTimerRef.current != null) {
+      window.clearTimeout(proactiveToastTimerRef.current);
+      proactiveToastTimerRef.current = null;
     }
   }, []);
 
@@ -836,6 +848,24 @@ function AppContent() {
       heartbeatToastTimerRef.current = null;
     }, 15000);
   }, [clearHeartbeatToastTimer, heartbeatMessage, heartbeatUpdatedAt]);
+
+  // 主动推荐上限提醒：后端推送 source=proactive_notification 的 chat.final 帧
+  // 被 useWebSocket 拦截后写入 useHarnessStore.proactiveNotificationMessage；
+  // 此处订阅并显示全局 fixed toast（任何面板都可见），8 秒后自动消失。
+  useEffect(() => {
+    const normalized = proactiveNotificationMessage?.trim();
+    if (!normalized) {
+      return;
+    }
+    setProactiveToastMessage(normalized);
+    setProactiveToastVisible(true);
+    clearProactiveToastTimer();
+    proactiveToastTimerRef.current = window.setTimeout(() => {
+      setProactiveToastVisible(false);
+      setProactiveNotification(null);
+      proactiveToastTimerRef.current = null;
+    }, 8000);
+  }, [clearProactiveToastTimer, proactiveNotificationMessage, setProactiveNotification]);
 
   useEffect(() => {
     if (!isConnected || initialDataLoaded) {
@@ -1757,6 +1787,15 @@ function AppContent() {
                 {heartbeatToastPreview}
               </span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* 主动推荐上限提醒（全局 fixed toast，任何面板都可见） */}
+      {proactiveToastVisible && proactiveToastMessage && (
+        <div className="app-toast-wrapper app-toast-wrapper--top-center" data-testid="proactive-notification-toast">
+          <div className="bg-amber-500 text-white px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+            {proactiveToastMessage}
           </div>
         </div>
       )}

@@ -1,22 +1,19 @@
 {
   "calls": [
     {
-      "tool_name": "multi_agent_v1.spawn_agent",
+      "tool_name": "collaboration.followup_task",
       "raw_input": {
-        "agent_id": "019f407b-c481-7b42-b103-f4decc9aef3c",
-        "agent_type": "explorer",
+        "target": "/root/reaudit_proactive",
         "symbol_id": "AgentWebSocketServer._resolve_rewind_agent",
-        "assignment": "Audit exactly one symbol: AgentWebSocketServer._resolve_rewind_agent in jiuwenswarm/server/agent_ws_server.py."
+        "assignment": "Re-audit exactly one expired symbol against current source."
       }
     },
     {
-      "tool_name": "multi_agent_v1.wait_agent",
+      "tool_name": "collaboration.wait_agent",
       "raw_input": {
-        "agent_id": "019f407b-c481-7b42-b103-f4decc9aef3c",
-        "nickname": "Faraday",
+        "target": "/root/reaudit_proactive",
         "symbol_id": "AgentWebSocketServer._resolve_rewind_agent",
-        "completed": true,
-        "finding_count": 3
+        "completed": true
       }
     }
   ]

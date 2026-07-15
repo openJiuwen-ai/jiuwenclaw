@@ -65,7 +65,7 @@ function normalizeMode(records: unknown[]): string {
     .filter(isRecord)
     .map((record) => typeof record.mode === 'string' ? record.mode.trim().toLowerCase() : '')
     .filter(Boolean);
-  return modes.includes('team') ? 'team' : modes[0] || 'agent.plan';
+  return modes.includes('team') ? 'team' : modes[0] || 'agent';
 }
 
 function readableDate(value?: string): string {

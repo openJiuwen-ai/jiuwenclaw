@@ -100,7 +100,7 @@ def test_extract_legacy_params_context_mode_takes_priority_over_payload() -> Non
 
     out = _extract_legacy_params(payload, context=context, require_schedule=True)
 
-    assert out["mode"] == "agent.fast"
+    assert out["mode"] == "agent"
 
 
 def test_extract_legacy_params_inherits_context_mode_when_missing() -> None:
@@ -115,7 +115,7 @@ def test_extract_legacy_params_inherits_context_mode_when_missing() -> None:
     assert out["mode"] == "team"
 
 
-def test_extract_legacy_params_defaults_to_agent_fast_without_context_mode() -> None:
+def test_extract_legacy_params_defaults_to_agent_without_context_mode() -> None:
     context = SimpleNamespace(channel_id="web", session_id="sess-1")
     payload = {
         "schedule": {"kind": "cron", "expr": "0 9 * * *"},
@@ -124,7 +124,7 @@ def test_extract_legacy_params_defaults_to_agent_fast_without_context_mode() -> 
 
     out = _extract_legacy_params(payload, context=context, require_schedule=True)
 
-    assert out["mode"] == "agent.fast"
+    assert out["mode"] == "agent"
 
 
 def test_extract_legacy_params_passthrough_unknown_mode() -> None:

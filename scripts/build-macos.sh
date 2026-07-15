@@ -7,7 +7,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="JiuwenSwarm.app"
 APP_PATH="$PROJECT_ROOT/dist/$APP_NAME"
 DMG_ROOT="$PROJECT_ROOT/dist/dmg-root"
-VERSION="0.2.3.beta1"
+VERSION="0.2.3"
 DMG_PATH="$PROJECT_ROOT/dist/JiuwenSwarm-$VERSION.dmg"
 
 # ── 内置 Node 运行时（单架构，M 系列优先 arm64）─────────────────

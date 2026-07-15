@@ -453,7 +453,7 @@ class CronTools:
                             "enum": cron_job_modes_for_tools(),
                             "description": (
                                 "Agent runtime mode when the job runs "
-                                "(agent, team, agent.plan, agent.fast, ...). Default: agent.fast."
+                                "(agent, team, ...). Default: agent."
                             ),
                         },
                     },
@@ -495,7 +495,7 @@ class CronTools:
                                 "mode": {
                                     "type": "string",
                                     "enum": cron_job_modes_for_tools(),
-                                    "description": "Agent runtime mode (agent, team, agent.plan, ...)",
+                                    "description": "Agent runtime mode (agent, team, ...)",
                                 },
                             },
                         },

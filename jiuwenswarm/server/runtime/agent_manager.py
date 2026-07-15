@@ -375,7 +375,7 @@ class AgentManager:
         channel_id: str | None = None,
         skip_instance: Any | None = None,
     ) -> None:
-        """Broadcast package change to agent.fast and agent.plan instances only.
+        """Broadcast package change to single-agent (agent mode) instances only.
 
         This ensures deactivation affects all relevant agent instances, not just the current one.
         Does NOT affect team mode agents.
@@ -387,6 +387,7 @@ class AgentManager:
             channel_id: Optional channel ID to limit broadcast scope.
             skip_instance: Optional agent instance to skip (already processed by caller).
         """
+        # plan / fast 已合并为单一 agent；agent.fast / agent.plan 作为历史 token 仍兼容匹配。
         target_modes = {"agent", "agent.fast", "agent.plan"}
 
         for channel_key, channel_agents in self.agents.items():
@@ -633,7 +634,7 @@ class AgentManager:
         try:
             channel_id = getattr(request, "channel_id", "")
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
-            mode_full = params.get("mode", "agent.plan")
+            mode_full = params.get("mode", "agent")
             mode = str(mode_full).split(".")[0] if mode_full else "agent"
             workspace_dir = params.get("workspace_dir")
 
@@ -662,7 +663,7 @@ class AgentManager:
         try:
             channel_id = getattr(request, "channel_id", "")
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
-            mode_full = params.get("mode", "agent.plan")
+            mode_full = params.get("mode", "agent")
             mode = str(mode_full).split(".")[0] if mode_full else "agent"
             workspace_dir = params.get("workspace_dir")
 

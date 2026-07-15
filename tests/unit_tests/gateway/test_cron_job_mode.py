@@ -20,14 +20,15 @@ from jiuwenswarm.gateway.cron.models import (
 
 @pytest.mark.parametrize("mode", sorted(CRON_JOB_MODES))
 def test_normalize_cron_job_mode_accepts_supported_values(mode: str) -> None:
-    assert normalize_cron_job_mode(mode) == mode
-    assert normalize_cron_job_mode(mode.upper()) == mode
+    expected = "agent" if mode in {"plan", "agent.plan", "agent.fast"} else mode
+    assert normalize_cron_job_mode(mode) == expected
+    assert normalize_cron_job_mode(mode.upper()) == expected
 
 
-def test_normalize_cron_job_mode_defaults_to_agent_fast() -> None:
+def test_normalize_cron_job_mode_defaults_to_agent() -> None:
     assert normalize_cron_job_mode(None) == CRON_JOB_DEFAULT_MODE
     assert normalize_cron_job_mode("") == CRON_JOB_DEFAULT_MODE
-    assert CRON_JOB_DEFAULT_MODE == "agent.fast"
+    assert CRON_JOB_DEFAULT_MODE == "agent"
 
 
 def test_normalize_cron_job_mode_rejects_unknown() -> None:

@@ -141,6 +141,21 @@ class RuntimePromptRail(DeepAgentRail):
     def _same_path(left: str, right: str) -> bool:
         return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
 
+    @staticmethod
+    def _configured_model_names() -> list[str]:
+        """Read configured model names from config.yaml as a runtime fallback."""
+        try:
+            from jiuwenswarm.common.config import get_model_names
+
+            return [
+                str(name).strip()
+                for name in get_model_names()
+                if str(name).strip()
+            ]
+        except Exception as exc:
+            logger.debug("Failed to read configured model names: %s", exc)
+            return []
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         if not self.system_prompt_builder:
             return
@@ -186,8 +201,24 @@ class RuntimePromptRail(DeepAgentRail):
         except Exception as e:
             logger.warning("Failed to read runtime state file %s: %s", state_path, e)
 
-        model = (runtime_state.get("model") or self._model_name or "unknown").strip()
-        available_models: list[str] = runtime_state.get("available_models") or []
+        configured_models: list[str] = []
+        raw_available_models = runtime_state.get("available_models") or []
+        available_models: list[str] = [
+            str(item).strip()
+            for item in raw_available_models
+            if str(item).strip()
+        ] if isinstance(raw_available_models, list) else []
+        if not available_models or not runtime_state.get("model"):
+            configured_models = self._configured_model_names()
+        if not available_models:
+            available_models = configured_models
+        fallback_model = configured_models[0] if configured_models else ""
+        model = str(
+            runtime_state.get("model")
+            or self._model_name
+            or fallback_model
+            or "unknown"
+        ).strip()
         available_models_str = ", ".join(available_models) if available_models else model
         mode = (runtime_state.get("mode") or self._mode or "unknown").strip()
         language_val = (

@@ -101,6 +101,8 @@ def apply_a2ui_text_fallback_to_gateway_payload(
 
 
 class ChannelMode(str, Enum):
+    AGENT = "agent"
+    # 历史值：plan / fast 已合并为 agent，保留以兼容旧持久化 channel state。
     AGENT_PLAN = "agent.plan"
     AGENT_FAST = "agent.fast"
     CODE_PLAN = "code.plan"
@@ -118,7 +120,7 @@ class ChannelMode(str, Enum):
 @dataclass
 class ChannelControlState:
     session_id: str | None = None
-    mode: ChannelMode = ChannelMode.AGENT_PLAN
+    mode: ChannelMode = ChannelMode.AGENT
 
 
 @dataclass
@@ -198,6 +200,10 @@ class MessageHandler(ABC):
         self._fire_and_forget_tasks: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
         self._evolution_approval = EvolutionApprovalCoordinator()
         self._session_last_user_query: dict[str, str] = {}
+        # session_id -> 最近一次人类发起请求的 (channel_id, member_name)。
+        # team 模式下 file msg 不携带发起者身份（rid 固定为建会话那轮），send_file 定向
+        # 投递时按 session_id 取最近发起者兜底（并发时可能取到另一 human，仅投错人不泄漏）。
+        self._session_last_originator: dict[str, tuple[str, str]] = {}
         self._acp_session_aliases: dict[str, str] = {}  # external_session_id -> internal_session_id
         self._acp_session_alias_lock = asyncio.Lock()
 
@@ -431,11 +437,30 @@ class MessageHandler(ABC):
         if not query:
             return
         self._session_last_user_query[session_id] = query[:8000]
+        # 记录最近人类发起者身份（member_name 由 resolve_member_by_user 注入 msg.metadata），
+        # 供 send_file 在 file msg 不携带发起者时按 session_id 反查定向。
+        # 排除 GodView：它是通道级自动注册的伪 member，非真实 /join 人类席位，不应作为发起者定向。
+        # 无 member_name 的入站（如 web：web 不 /join，resolve_member_by_user 不命中）→ 清空
+        # last-originator，避免 web 发起时残留上一次 feishu 用户导致文件误投到 feishu。
+        origin_member = str((msg.metadata or {}).get("member_name") or "").strip()
+        if origin_member and origin_member != SubRole.GODVIEW:
+            self._session_last_originator[session_id] = (
+                str(msg.channel_id or "").strip(),
+                origin_member,
+            )
+        else:
+            self._session_last_originator.pop(session_id, None)
 
     def _get_session_last_user_query(self, session_id: str | None) -> str:
         if not session_id:
             return ""
         return self._session_last_user_query.get(str(session_id), "")
+
+    def get_session_last_originator(self, session_id: str | None) -> tuple[str, str] | None:
+        """返回该 session 最近一次人类发起请求的 (channel_id, member_name)，供 send_file 定向。"""
+        if not session_id:
+            return None
+        return self._session_last_originator.get(str(session_id))
 
     def _attach_original_request_to_ask_user_answer(self, msg: "Message") -> "Message":
         if not isinstance(msg.params, dict):
@@ -499,17 +524,19 @@ class MessageHandler(ABC):
         # 若未在 config 中指定默认 session_id，为该 channel 生成一个带时间戳的新 session_id
         if not sid:
             sid = self._generate_channel_session_id(channel_id)
-        mode_raw = str(ch_cfg.get("default_mode") or "agent.plan").strip().lower()
+        mode_raw = str(ch_cfg.get("default_mode") or "agent").strip().lower()
         mode_map = {
-            "agent.plan": ChannelMode.AGENT_PLAN,
-            "agent.fast": ChannelMode.AGENT_FAST,
+            "agent": ChannelMode.AGENT,
+            # plan / fast 已合并：历史 default_mode 归一到 agent。
+            "agent.plan": ChannelMode.AGENT,
+            "agent.fast": ChannelMode.AGENT,
             "code.plan": ChannelMode.CODE_PLAN,
             "code.normal": ChannelMode.CODE_NORMAL,
             "code.team": ChannelMode.CODE_TEAM,
             "team": ChannelMode.TEAM,
             "team.plan": ChannelMode.TEAM_PLAN,
         }
-        mode = mode_map.get(mode_raw, ChannelMode.AGENT_PLAN)
+        mode = mode_map.get(mode_raw, ChannelMode.AGENT)
         return ChannelControlState(session_id=sid, mode=mode)
 
     def _get_channel_state_key(self, channel_id: str, conversation_id: str | None) -> str:
@@ -1342,15 +1369,15 @@ class MessageHandler(ABC):
             old_mode = state.mode
             old_sid = state.session_id
             if mode_str == "agent":
-                state.mode = ChannelMode.AGENT_PLAN
+                state.mode = ChannelMode.AGENT
             elif mode_str == "code":
                 state.mode = ChannelMode.CODE_NORMAL
             elif mode_str == "team":
                 state.mode = ChannelMode.TEAM
             elif mode_str == "agent.plan":
-                state.mode = ChannelMode.AGENT_PLAN
+                state.mode = ChannelMode.AGENT
             elif mode_str == "agent.fast":
-                state.mode = ChannelMode.AGENT_FAST
+                state.mode = ChannelMode.AGENT
             elif mode_str == "code.plan":
                 state.mode = ChannelMode.CODE_PLAN
             elif mode_str == "code.normal":
@@ -1387,8 +1414,13 @@ class MessageHandler(ABC):
             switch_str = parsed.switch_subcommand or ""
             target_mode: ChannelMode | None = None
             if switch_str == "plan":
-                if state.mode in (ChannelMode.AGENT_PLAN, ChannelMode.AGENT_FAST):
-                    target_mode = ChannelMode.AGENT_PLAN
+                # agent 下 plan / fast 已合并：/switch plan 保持 agent 。
+                if state.mode in (
+                    ChannelMode.AGENT,
+                    ChannelMode.AGENT_PLAN,
+                    ChannelMode.AGENT_FAST,
+                ):
+                    target_mode = ChannelMode.AGENT
                 elif state.mode in (
                     ChannelMode.CODE_PLAN,
                     ChannelMode.CODE_NORMAL,
@@ -1396,8 +1428,13 @@ class MessageHandler(ABC):
                 ):
                     target_mode = ChannelMode.CODE_PLAN
             elif switch_str == "fast":
-                if state.mode in (ChannelMode.AGENT_PLAN, ChannelMode.AGENT_FAST):
-                    target_mode = ChannelMode.AGENT_FAST
+                # agent 下 plan / fast 已合并：/switch fast 保持 agent 。
+                if state.mode in (
+                    ChannelMode.AGENT,
+                    ChannelMode.AGENT_PLAN,
+                    ChannelMode.AGENT_FAST,
+                ):
+                    target_mode = ChannelMode.AGENT
             elif switch_str == "normal":
                 if state.mode in (
                     ChannelMode.CODE_PLAN,
@@ -1972,6 +2009,22 @@ class MessageHandler(ABC):
             for mode in self._iter_active_stream_modes()
         )
 
+    def active_non_team_modes(self) -> list[tuple[str, str]]:
+        """非 team 活跃任务的 (request_id, mode) 明细（只读，调试/日志用）。
+
+        流式 rid 来自 ``_stream_modes``，非流式 chat rid 来自
+        ``_active_chat_tasks``；两者 key 集合互补，组合后覆盖全部活跃任务。
+        供保存锁拒绝日志定位“是哪个 rid 让运行态误判为 true”。
+        """
+        result: list[tuple[str, str]] = []
+        for rid, mode in self._stream_modes.items():
+            if not ChannelMode.is_team_mode(mode):
+                result.append((rid, mode))
+        for rid, mode in self._active_chat_tasks.items():
+            if not ChannelMode.is_team_mode(mode):
+                result.append((rid, mode))
+        return result
+
     async def _broadcast_task_global_running(self) -> None:
         """向所有 web ws 客户端广播当前全局运行态快照（task.global_running）。
 
@@ -1982,15 +2035,31 @@ class MessageHandler(ABC):
         try:
             web_channel = self._resolve_web_channel()
             if web_channel is not None:
+                all_modes = self._iter_active_stream_modes()
                 count = sum(
-                    1 for mode in self._iter_active_stream_modes()
+                    1 for mode in all_modes
                     if not ChannelMode.is_team_mode(mode)
                 )
+                # 非团队活跃 mode 明细，供排查“保存锁卡禁用”时定位是哪个 rid 残留。
+                non_team_modes = [m for m in all_modes if not ChannelMode.is_team_mode(m)]
+                team_modes = [m for m in all_modes if ChannelMode.is_team_mode(m)]
                 await web_channel.broadcast_event("task.global_running", {
                     "event_type": "task.global_running",
                     "running": bool(count),
                     "count": count,
                 })
+                logger.info(
+                    "[task.global_running] broadcast: running=%s non_team_count=%d "
+                    "non_team_modes=%s team_modes=%s stream_rids=%d active_chat_rids=%d",
+                    bool(count), count, non_team_modes, team_modes,
+                    len(self._stream_modes), len(self._active_chat_tasks),
+                )
+            else:
+                logger.info(
+                    "[task.global_running] skip broadcast: web channel 未就绪 "
+                    "(stream_rids=%d active_chat_rids=%d)",
+                    len(self._stream_modes), len(self._active_chat_tasks),
+                )
         except Exception:
             logger.debug("[task.global_running] broadcast failed", exc_info=True)
 
@@ -3740,6 +3809,27 @@ class MessageHandler(ABC):
             if session_id is not None and session_id not in self._stream_sessions.values():
                 # Fallback cleanup when stream exits unexpectedly without evolution end signal.
                 self._evolution_approval.clear_session_in_progress(session_id)
+            # 标注本 rid 退出后是否还会触发 task.global_running 广播。
+            # 若以下分支均不进入 _send_processing_status（其内部会广播），
+            # 则前端保存锁可能卡在最后一次广播值，仅靠重连自愈。
+            _will_broadcast = (
+                emit_processing_status
+                and not cancelled
+                and not has_processing_status_false
+                and not any(
+                    sid == session_id
+                    and self._stream_emits_processing_status.get(active_rid, True)
+                    for active_rid, sid in self._stream_sessions.items()
+                )
+            )
+            logger.info(
+                "[task.global_running] stream 退出: rid=%s cancelled=%s emit=%s "
+                "has_status_false=%s remaining_stream=%d remaining_chat=%d "
+                "will_broadcast_processing_status=%s",
+                rid, cancelled, emit_processing_status, has_processing_status_false,
+                len(self._stream_modes), len(self._active_chat_tasks),
+                _will_broadcast,
+            )
             logger.debug(
                 "[MessageHandler] Stream 任务状态已清理: request_id=%s",
                 rid,

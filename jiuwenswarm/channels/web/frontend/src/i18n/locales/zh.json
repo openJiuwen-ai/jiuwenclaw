@@ -227,8 +227,7 @@
     },
     "newSession": "新建会话",
     "sessionCreated": "已新建会话",
-    "modePlan": "规划模式",
-    "modeAgent": "性能模式",
+    "modeAgentSingle": "Agent模式",
     "modeAgentTeam": "集群模式",
     "modeAutoHarness": "自优化模式",
     "modeAutoHarnessDesc": "自动分析并优化目标仓库",
@@ -763,7 +762,7 @@
       "modelNameTooLong": "模型名称过长，请控制在 100 字符以内",
       "aliasTooLong": "别名过长，请控制在 100 字符以内",
       "apiBaseTooLong": "API Base URL 过长，请控制在 512 字符以内",
-      "apiKeyTooLong": "API Key 过长，请控制在 500 字符以内",
+      "apiKeyTooLong": "API Key 过长，请控制在 2048 字符以内",
       "reasoningDefault": "使用默认值",
       "alias": "别名",
       "aliasPlaceholder": "选填，默认为空"

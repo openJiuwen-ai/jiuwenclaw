@@ -37,21 +37,21 @@ issues:
     severity: medium
     status: open
     summary: "Failed scheduler stop discards the service reference."
-    evidence: "_stop_scheduler catches any Exception from stop_scheduler(), logs a warning, and still sets self._scheduler_service = None in the final assignment."
-    suggested_action: "Clear the reference only after confirmed stop, or retain/report failed-stop state so callers can retry or inspect the failure."
+    evidence: "_stop_scheduler catches any Exception from AutoHarnessService.stop_scheduler(), logs a warning, and still sets self._scheduler_service = None. The next schedule request then creates and starts a new service even though the old scheduler may still be running after its failed stop."
+    suggested_action: "Clear the reference only after confirmed stop, or retain explicit failed-stop state so cleanup can be retried before another scheduler service is created."
   - id: ISSUE-002
     dimension: state_mutation
     severity: medium
     status: open
-    summary: "Scheduler shutdown is wired through per-connection cleanup instead of server stop."
-    evidence: "_connection_handler finally calls _stop_scheduler(), while AgentWebSocketServer.stop() closes the server and JiuwenBox runner without calling _stop_scheduler()."
-    suggested_action: "Document and test the connection-scoped scheduler lifetime, or move scheduler cleanup into explicit server shutdown."
+    summary: "Any WebSocket disconnect stops the server-wide scheduler service."
+    evidence: "_scheduler_service is a single AgentWebSocketServer field lazily shared by schedule requests, but its only _stop_scheduler caller is each _connection_handler.finally. AgentWebSocketServer.stop() closes the listener and JiuwenBox runner without calling this helper."
+    suggested_action: "Move scheduler cleanup into explicit server shutdown, or document and enforce a single-connection lifecycle if disconnect-scoped scheduling is intentional."
   - id: ISSUE-003
     dimension: test_coverage
     severity: medium
     status: open
     summary: "No direct tests cover scheduler stop success, failure, no-service, or lifecycle caller behavior."
-    evidence: "No direct _stop_scheduler test was found; related shutdown tests use fake server paths or cover message handling rather than this cleanup method."
+    evidence: "No `_stop_scheduler` or `AutoHarnessService.stop_scheduler` reference was found under tests; existing connection-close and app shutdown tests do not assert scheduler-service cleanup."
     suggested_action: "Add focused async tests with a fake scheduler service for success, raised exception, no-op, and stop()/connection cleanup interaction."
 confidence: confirmed
 details: {}
@@ -61,15 +61,15 @@ details: {}
 
 ## Actual Role
 
-Stops the server-held `AutoHarnessService` scheduler when `self._scheduler_service` is set. It awaits `stop_scheduler()`, logs success or failure, and then clears the server's scheduler-service reference.
+If the server-wide `_scheduler_service` reference is set, awaits that `AutoHarnessService` object's `stop_scheduler()`, logs success or a swallowed `Exception`, and then clears the reference in either outcome. If no service is set, it returns without logging or mutation.
 
 ## Key Signals
 
 - Input: Implicit shared state in `self._scheduler_service`.
 - Output: None.
 - Main side effects: Awaits scheduler shutdown, writes logs, and mutates `self._scheduler_service`.
-- Main risk: A failed stop is swallowed and the service reference is discarded, which can hide incomplete scheduler cleanup.
-- Related tests: No direct `_stop_scheduler` or `AutoHarnessService.stop_scheduler` lifecycle tests were found.
+- Main risk: A failed stop can orphan a live scheduler before lazy re-creation, and the current per-connection caller can stop the shared scheduler while the server remains available.
+- Related tests: No direct `_stop_scheduler`, service-stop, or connection/server lifecycle assertion was found.
 
 ## Detail Index
 
