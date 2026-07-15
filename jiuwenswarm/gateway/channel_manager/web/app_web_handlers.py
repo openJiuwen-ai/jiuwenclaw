@@ -2040,16 +2040,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             channels = []
         await channel.send_response(ws, req_id, ok=True, payload={"channels": channels})
 
-    async def _send_openai_account_unexpected_error(ws, req_id, method: str, exc: Exception) -> None:
-        logger.exception("[%s] unexpected error", method)
-        await channel.send_response(
-            ws,
-            req_id,
-            ok=False,
-            error=str(exc) or "Unexpected OpenAI account error",
-            code="INTERNAL_ERROR",
-        )
-
     async def _openai_account_auth_status(ws, req_id, params, session_id):
         del params, session_id
         try:
@@ -2068,8 +2058,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.status] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-        except Exception as exc:  # noqa: BLE001
-            await _send_openai_account_unexpected_error(ws, req_id, "openai_account.auth.status", exc)
 
     async def _openai_account_auth_start_login(ws, req_id, params, session_id):
         del params, session_id
@@ -2094,8 +2082,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.start_login] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-        except Exception as exc:  # noqa: BLE001
-            await _send_openai_account_unexpected_error(ws, req_id, "openai_account.auth.start_login", exc)
 
     async def _openai_account_auth_pending_login(ws, req_id, params, session_id):
         del params, session_id
@@ -2115,8 +2101,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.pending_login] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-        except Exception as exc:  # noqa: BLE001
-            await _send_openai_account_unexpected_error(ws, req_id, "openai_account.auth.pending_login", exc)
 
     async def _openai_account_auth_poll_login(ws, req_id, params, session_id):
         del session_id
@@ -2148,8 +2132,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.poll_login] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-        except Exception as exc:  # noqa: BLE001
-            await _send_openai_account_unexpected_error(ws, req_id, "openai_account.auth.poll_login", exc)
 
     async def _openai_account_auth_logout(ws, req_id, params, session_id):
         del params, session_id
@@ -2174,8 +2156,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.auth.logout] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-        except Exception as exc:  # noqa: BLE001
-            await _send_openai_account_unexpected_error(ws, req_id, "openai_account.auth.logout", exc)
 
     async def _openai_account_models_list(ws, req_id, params, session_id):
         del params, session_id
@@ -2203,8 +2183,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except _OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
             logger.warning("[openai_account.models.list] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
-        except Exception as exc:  # noqa: BLE001
-            await _send_openai_account_unexpected_error(ws, req_id, "openai_account.models.list", exc)
 
     async def _updater_get_status(ws, req_id, params, session_id):
         service = updater_service or UpdaterService()
