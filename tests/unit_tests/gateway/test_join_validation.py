@@ -4,7 +4,7 @@
 
 替代被删的 test_team_member_lookup.py。路线 B 下 mismatch 校验上移到 gateway
 本地（join_slash_handler），文案单一真相源在 join_exit_handlers 模块级
-_join_err_*。mismatch 判定复用 TeamManager._build_session_scoped_team_name：
+_join_err_*。mismatch 判定复用 TeamManager.build_session_scoped_team_name：
 team_name 已是 scoped 形式 ⟺ 等于拼接结果。
 
 覆盖用户给出的三 case：
@@ -28,7 +28,7 @@ def _is_mismatch(team_name: str, session_id: str) -> bool:
     """复刻 join_slash_handler 的本地 mismatch 判定（路线 B）。"""
     if not team_name:
         return True
-    return team_name != TeamManager._build_session_scoped_team_name(team_name, session_id)
+    return team_name != TeamManager.build_session_scoped_team_name(team_name, session_id)
 
 
 # ── 文案 helper ──

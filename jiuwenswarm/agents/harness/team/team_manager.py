@@ -454,7 +454,11 @@ class TeamManager:
         return normalized_cfg
 
     @staticmethod
-    def _build_session_scoped_team_name(team_name: str, session_id: str) -> str:
+    def build_session_scoped_team_name(team_name: str, session_id: str) -> str:
+        """构造 session 作用域的 team_name（对外公开 API）。
+
+        供网关等外部模块做 team/session 一致性校验时复用，避免直接访问受保护成员。
+        """
         base_name = str(team_name or "").strip() or "team"
         session_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "").strip())
         session_suffix = session_suffix.strip("._-")
@@ -470,7 +474,7 @@ class TeamManager:
         *,
         session_id: str,
     ) -> None:
-        spec.team_name = TeamManager._build_session_scoped_team_name(
+        spec.team_name = TeamManager.build_session_scoped_team_name(
             spec.team_name,
             session_id,
         )

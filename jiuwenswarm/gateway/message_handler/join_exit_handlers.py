@@ -166,12 +166,12 @@ class JoinExitHandlers:
                     return
         # ── team/session 一致性校验（mismatch 本地判）+ 成员名校验 ──
         # team_name 与 session_id 都从同一 session_ref 解析、同源。mismatch 判定是
-        # 纯字符串后缀比对：team_name 须已是 _build_session_scoped_team_name 拼出的
+        # 纯字符串后缀比对：team_name 须已是 build_session_scoped_team_name 拼出的
         # scoped 形式（即等于拼接结果）。后缀不匹配即 session_ref 里 team 与 session
         # 错配，本地直接报错，不走 RPC。文案单一真相源在本模块。
         _join_team_name = self._h.extract_team_name_from_ref(parsed.session_ref)
         from jiuwenswarm.agents.harness.team.team_manager import TeamManager
-        if _join_team_name and _join_team_name != TeamManager._build_session_scoped_team_name(
+        if _join_team_name and _join_team_name != TeamManager.build_session_scoped_team_name(
             _join_team_name, sid,
         ):
             await self._h.send_channel_notice(
