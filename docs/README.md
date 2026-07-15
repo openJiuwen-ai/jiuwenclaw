@@ -97,7 +97,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>频道</strong></td>
-      <td width="28%"><a href="zh/频道.md">频道</a> / <a href="zh/ACP插件使用.md">ACP 插件使用</a> / <a href="zh/TUI使用指南.md">TUI 使用指南</a></td>
+      <td width="28%"><a href="zh/频道.md">频道</a></td>
       <td width="50%">JiuwenSwarm 的多渠道接入与交互。</td>
     </tr>
     <tr>

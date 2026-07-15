@@ -97,7 +97,7 @@ This page collects common JiuwenSwarm usage instructions, feature documentation,
     </tr>
     <tr>
       <td width="22%"><strong>Channels</strong></td>
-      <td width="28%"><a href="en/Channels.md">Channels</a> / <a href="en/ACP_Client_Config.md">ACP Plugin Usage</a> / <a href="en/CLI.md">TUI User Guide</a></td>
+      <td width="28%"><a href="en/Channels.md">Channels</a></td>
       <td width="50%">JiuwenSwarm multi-channel access and interaction.</td>
     </tr>
     <tr>
