@@ -1015,11 +1015,23 @@ def run_chat(args: argparse.Namespace) -> int:
         logger.error("no prompt provided and stdin is empty")
         return 2
 
-    # Check for newly persisted dirs before sending the message,
-    # so the user gets a chance to clean up from previous sessions.
-    _prompt_and_cleanup_dirs()
+    # Ctrl+C during the synchronous startup phase (before _run_interactive_loop
+    # installs its async SIGINT handler) would otherwise bubble up as a raw
+    # KeyboardInterrupt traceback. Mirror the TUI's keymap.ts behavior: print
+    # a friendly hint and exit with the conventional 128+SIGINT code instead.
+    # The TUI uses a 3-second double-press-to-exit window, but that requires
+    # an event loop already pumping input — the CLI sync phase has none, so a
+    # single Ctrl+C exits cleanly. Once asyncio.run starts, the in-loop
+    # handler takes over with its own double-press semantics.
+    try:
+        # Check for newly persisted dirs before sending the message,
+        # so the user gets a chance to clean up from previous sessions.
+        _prompt_and_cleanup_dirs()
 
-    return asyncio.run(_run_chat(args, prompt))
+        return asyncio.run(_run_chat(args, prompt))
+    except KeyboardInterrupt:
+        logger.warning("Interrupted. Exiting (press Ctrl+C again during chat to cancel a running task).")
+        return 130
 
 
 def _run_repl(args: argparse.Namespace) -> int:
