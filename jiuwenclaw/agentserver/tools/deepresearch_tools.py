@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import importlib.util
 import json
 import logging
 import os
 import sys
+import tempfile
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from openjiuwen.core.foundation.tool import tool
@@ -92,8 +96,44 @@ def _write_report_markdown(final_result: dict, file_name: str, conversation_id: 
     report_path = Path(output_dir).expanduser().resolve() / f"{safe_stem}.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     bundle = build_report_bundle(final_result, report_path.with_suffix(""))
-    report_path.write_text(bundle.markdown_text, encoding="utf-8")
+    markdown_bytes = bundle.markdown_text.encode("utf-8")
+    provenance = {
+        "schema_version": 1,
+        "document_id": f"doc_{uuid.uuid4().hex}",
+        "revision_id": f"rev_{uuid.uuid4().hex}",
+        "parent_revision_id": None,
+        "conversation_id": conversation_id,
+        "markdown_path": str(report_path),
+        "content_sha256": hashlib.sha256(markdown_bytes).hexdigest(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "operation": {"action": "deepresearch_generate"},
+        "citations": bundle.citations,
+        "inference_manifest": bundle.inference_manifest,
+        "chart_manifest": bundle.chart_manifest,
+        "rewrite_history": [],
+    }
+    _atomic_write_bytes(report_path, markdown_bytes)
+    _atomic_write_bytes(
+        report_path.with_suffix(".provenance.json"),
+        json.dumps(provenance, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
     return str(report_path)
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    """Atomically replace one file without exposing a partially written artifact."""
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, path)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
 
 
 def _deepresearch_dependency_available() -> bool:

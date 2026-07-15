@@ -6,6 +6,7 @@
 """
 import asyncio
 import base64
+import hashlib
 import json
 
 import os
@@ -243,6 +244,21 @@ def test_write_report_markdown_builds_inference_bundle_and_strips_internal_marke
             "html_base64": base64.b64encode(b"<html>trace</html>").decode("ascii"),
         }],
         "chart_messages": [],
+        "citation_messages": {
+            "code": 0,
+            "msg": "success",
+            "data": [{
+                "id": 3,
+                "reference_index": 1,
+                "url": "https://example.com/source",
+                "title": "Source",
+                "content": "evidence",
+                "chunk": "evidence chunk",
+                "source": "web",
+                "publish_time": "2026-07-15",
+                "score": 0.9,
+            }],
+        },
     }
     with patch(
         "jiuwenclaw.agentserver.tools.subagent_executor.context_vars.get_effective_request_output_dir",
@@ -256,6 +272,16 @@ def test_write_report_markdown_builds_inference_bundle_and_strips_internal_marke
     assert "[观点](研究报告_infer/inference_7.html)" in report
     assert "[[1]](https://example.com/source)" in report
     assert (tmp_path / "研究报告_infer" / "inference_7.html").read_bytes() == b"<html>trace</html>"
+    provenance = json.loads((tmp_path / "研究报告.provenance.json").read_text(encoding="utf-8"))
+    assert provenance["schema_version"] == 1
+    assert provenance["document_id"].startswith("doc_")
+    assert provenance["revision_id"].startswith("rev_")
+    assert provenance["parent_revision_id"] is None
+    assert provenance["conversation_id"] == "C1"
+    assert provenance["content_sha256"] == hashlib.sha256(report.encode("utf-8")).hexdigest()
+    assert provenance["citations"] == final_result["citation_messages"]["data"]
+    assert provenance["inference_manifest"][0]["id"] == "7"
+    assert "html_base64" not in json.dumps(provenance)
 
 
 @pytest.mark.asyncio

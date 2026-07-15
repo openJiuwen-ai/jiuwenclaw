@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,9 @@ class ReportBundle:
     markdown_text: str
     infer_dir: str | None
     chart_dir: str | None
+    citations: list[dict]
+    inference_manifest: list[dict]
+    chart_manifest: list[dict]
 
 
 def _decode_base64_payload(payload: str, field_name: str) -> bytes:
@@ -65,6 +69,31 @@ def _validate_final_result(final_result: dict) -> tuple[str, list[dict], list[di
     infer_messages = _validate_message_list(final_result, "infer_messages")
     chart_messages = _validate_message_list(final_result, "chart_messages")
     return response_content, infer_messages, chart_messages
+
+
+def _extract_citations(final_result: dict) -> list[dict]:
+    citation_messages = final_result.get("citation_messages") or {}
+    if not isinstance(citation_messages, dict):
+        raise ValueError("citation_messages must be a dictionary")
+    citations = citation_messages.get("data") or []
+    if not isinstance(citations, list) or any(not isinstance(item, dict) for item in citations):
+        raise ValueError("citation_messages.data must be a list of dictionaries")
+    return citations
+
+
+def _resource_manifest(directory: str | None, pattern: str, id_prefix: str = "") -> list[dict]:
+    if not directory:
+        return []
+    root = Path(directory)
+    manifest: list[dict] = []
+    for path in sorted(root.glob(pattern)):
+        resource_id = path.stem.removeprefix(id_prefix)
+        manifest.append({
+            "id": resource_id,
+            "path": f"{root.name}/{path.name}",
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        })
+    return manifest
 
 
 def _write_inference_html_files(
@@ -174,6 +203,7 @@ def build_report_bundle(
     max_single_html_base64_bytes: int = 5 * 1024 * 1024,
 ) -> ReportBundle:
     response_content, infer_messages, chart_messages = _validate_final_result(final_result)
+    citations = _extract_citations(final_result)
 
     report_base_path = Path(report_base)
     infer_dir, infer_ids = _write_inference_html_files(
@@ -200,4 +230,7 @@ def build_report_bundle(
         markdown_text=markdown_text,
         infer_dir=infer_dir,
         chart_dir=chart_dir,
+        citations=citations,
+        inference_manifest=_resource_manifest(infer_dir, "inference_*.html", "inference_"),
+        chart_manifest=_resource_manifest(chart_dir, "*.png"),
     )
