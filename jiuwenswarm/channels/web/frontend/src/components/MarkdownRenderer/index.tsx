@@ -23,22 +23,7 @@ const MERMAID_CONFIG: MermaidConfig = {
   securityLevel: 'strict',
   htmlLabels: false,
   flowchart: { useMaxWidth: false },
-  theme: 'base',
-  themeVariables: {
-    primaryColor: 'var(--color-surface-card)',
-    primaryTextColor: 'var(--color-text-primary)',
-    primaryBorderColor: 'var(--color-border-default)',
-    lineColor: 'var(--color-text-secondary)',
-    secondaryColor: 'var(--color-surface-muted)',
-    tertiaryColor: 'var(--color-surface-page)',
-    clusterBkg: 'var(--color-surface-card)',
-    clusterBorder: 'var(--color-border-default)',
-    edgeLabelBackground: 'var(--color-surface-card)',
-    titleColor: 'var(--color-text-primary)',
-    mainBkg: 'var(--color-surface-card)',
-    nodeBorder: 'var(--color-border-default)',
-    nodeTextColor: 'var(--color-text-primary)',
-  },
+  theme: 'default',
 };
 
 function ToolbarButton({ title, onClick, children }: { title: string; onClick: () => void; children: React.ReactNode }) {
