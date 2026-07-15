@@ -26,6 +26,10 @@ spec:
             - name: websocket
               containerPort: <<ENTERPRISE_WEB_WS_PORT>>
               protocol: TCP
+          envFrom:
+            # 密码密钥变量
+            - secretRef:
+                name: <<SECRET_CM_NAME>>
           env:
             - name: JIUWENCLAW_WEB_HOST
               value: "0.0.0.0"

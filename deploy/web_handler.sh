@@ -24,10 +24,6 @@ gen_web_file() {
                 "value": "'"${DEPLOY_VARS["MINIO_ROOT_USER"]}"'"
             },
             {
-                "name": "JIUWENCLAW_MINIO_SECRET_KEY",
-                "value": "'"${DEPLOY_VARS["MINIO_ROOT_PASSWORD"]}"'"
-            },
-            {
                 "name": "JIUWENCLAW_MINIO_BUCKET",
                 "value": "'"${DEPLOY_VARS["OBS_BUCKET"]}"'"
             },
@@ -50,6 +46,7 @@ gen_web_file() {
 }
 
 render_web_files() {
+    ensure_secret_configmap
     ensure_available_port "WEB_NODE_PORT"
     gen_web_file
 }
@@ -59,6 +56,7 @@ deploy_web() {
     local web_name="${DEPLOY_VARS["WEB_NAME"]}"
     local file="${CONFIG["WEB_FILE"]}"
 
+    ensure_secret_configmap
     exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "deployment" "${web_name}" "${namespace}"
     success "WEB_NODE_PORT: ${DEPLOY_VARS["WEB_NODE_PORT"]}"

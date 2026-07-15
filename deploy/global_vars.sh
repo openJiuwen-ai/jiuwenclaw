@@ -11,40 +11,38 @@ CONFIG_DIR="${SCRIPT_DIR}/conf"
 
 # ===== Core project configuration (paths, ports, commands, OS info) =====
 declare -A CONFIG=(
-    ["GATEWAY_CONFIG_FILE"]="${CONFIG_DIR}/gateway-config.yaml"
-
-    ["GATEWAY_ENV_TEMPLATE_FILE"]="${TEMPLATE_DIR}/gateway.template.env"
-    ["GATEWAY_ENV_FILE"]="${CONFIG_DIR}/gateway.env"
-
-    ["GATEWAY_TEMPLATE_FILE"]="${TEMPLATE_DIR}/gateway.template.yaml"
-    ["GATEWAY_FILE"]="${CONFIG_DIR}/gateway.yaml"
-
-    ["CLAW_PVC_TEMPLATE_FILE"]="${TEMPLATE_DIR}/claw-pvc.template.yaml"
-    ["CLAW_PVC_FILE"]="${CONFIG_DIR}/claw-pvc.yaml"
-
     ["NFS_TEMPLATE_FILE"]="${TEMPLATE_DIR}/nfs.template.yaml"
     ["NFS_FILE"]="${CONFIG_DIR}/nfs.yaml"
 
     ["NFS_SC_TEMPLATE_FILE"]="${TEMPLATE_DIR}/nfs-sc.template.yaml"
     ["NFS_SC_FILE"]="${CONFIG_DIR}/nfs-sc.yaml"
 
-    ["RABBITMQ_TEMPLATE_FILE"]="${TEMPLATE_DIR}/rabbitmq.template.yaml"
-    ["RABBITMQ_FILE"]="${CONFIG_DIR}/rabbitmq.yaml"
-
     ["MYSQL_TEMPLATE_FILE"]="${TEMPLATE_DIR}/mysql.template.yaml"
     ["MYSQL_FILE"]="${CONFIG_DIR}/mysql.yaml"
 
-    ["REDIS_TEMPLATE_FILE"]="${TEMPLATE_DIR}/redis.template.yaml"
-    ["REDIS_FILE"]="${CONFIG_DIR}/redis.yaml"
-
     ["POSTGRES_TEMPLATE_FILE"]="${TEMPLATE_DIR}/postgresql.template.yaml"
     ["POSTGRES_FILE"]="${CONFIG_DIR}/postgresql.yaml"
+
+    ["RABBITMQ_TEMPLATE_FILE"]="${TEMPLATE_DIR}/rabbitmq.template.yaml"
+    ["RABBITMQ_FILE"]="${CONFIG_DIR}/rabbitmq.yaml"
+
+    ["REDIS_TEMPLATE_FILE"]="${TEMPLATE_DIR}/redis.template.yaml"
+    ["REDIS_FILE"]="${CONFIG_DIR}/redis.yaml"
 
     ["MINIO_TEMPLATE_FILE"]="${TEMPLATE_DIR}/minio.template.yaml"
     ["MINIO_FILE"]="${CONFIG_DIR}/minio.yaml"
 
     ["LOG_TEMPLATE_FILE"]="${TEMPLATE_DIR}/log.template.yaml"
     ["LOG_FILE"]="${CONFIG_DIR}/log.yaml"
+
+    ["SECRET_CM_TEMPLATE_FILE"]="${TEMPLATE_DIR}/configmap-secret.template.yaml"
+    ["SECRET_CM_FILE"]="${CONFIG_DIR}/configmap-secret.yaml"
+
+    ["GATEWAY_CONFIG_FILE"]="${CONFIG_DIR}/gateway-config.yaml"
+    ["GATEWAY_ENV_TEMPLATE_FILE"]="${TEMPLATE_DIR}/gateway.template.env"
+    ["GATEWAY_ENV_FILE"]="${CONFIG_DIR}/gateway.env"
+    ["GATEWAY_TEMPLATE_FILE"]="${TEMPLATE_DIR}/gateway.template.yaml"
+    ["GATEWAY_FILE"]="${CONFIG_DIR}/gateway.yaml"
 
     ["WEB_TEMPLATE_FILE"]="${TEMPLATE_DIR}/web.template.yaml"
     ["WEB_FILE"]="${CONFIG_DIR}/web.yaml"
@@ -55,14 +53,17 @@ declare -A CONFIG=(
     ["MANAGER_WEB_TEMPLATE_FILE"]="${TEMPLATE_DIR}/manager-web.template.yaml"
     ["MANAGER_WEB_FILE"]="${CONFIG_DIR}/manager-web.yaml"
 
+    ["START_PORT"]="30000"
+    ["END_PORT"]="32767"
+
+    ["CLAW_PVC_TEMPLATE_FILE"]="${TEMPLATE_DIR}/claw-pvc.template.yaml"
+    ["CLAW_PVC_FILE"]="${CONFIG_DIR}/claw-pvc.yaml"
+
     ["PV_TEMPLATE_FILE"]="${TEMPLATE_DIR}/pv-nfs.template.yaml"
     ["PV_FILE"]="${CONFIG_DIR}/pv-nfs.yaml"
 
     ["PVC_TEMPLATE_FILE"]="${TEMPLATE_DIR}/pvc-nfs.template.yaml"
     ["PVC_FILE"]="${CONFIG_DIR}/pvc-nfs.yaml"
-
-    ["START_PORT"]="30000"
-    ["END_PORT"]="32767"
 )
 
 
@@ -188,6 +189,7 @@ declare -A DEPLOY_VARS=(
     ["RENDER_ONLY"]="false"
     ["RUNTIME_CODE_PATH"]=""
     ["RUNTIME_CODE_POD_PATH"]="/usr/local/lib/python3.11/site-packages/openjiuwen_runtime"
+    ["SECRET_CM_NAME"]="jiuwenclaw-secret-configmap"
     ["TIMEZONE"]="Asia/Shanghai"
     ["VECTOR_NAME"]="vector-receiver"
     ["VECTOR_IMAGE"]="timberio/vector:0.40.0-alpine"

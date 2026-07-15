@@ -24,6 +24,7 @@ gen_manager_server_file() {
 render_manager_files() {
     local is_up_web="${DEPLOY_VARS["IS_UP_MANAGER_WEB"]}"
 
+    render_secret_configmap
     ensure_available_port "MANAGER_SERVER_NODE_PORT" "MANAGER_WEB_NODE_PORT"
     gen_manager_server_file
 
@@ -42,7 +43,7 @@ deploy_manager() {
     local manager_server_file="${CONFIG["MANAGER_SERVER_FILE"]}"
     local is_up_web="${DEPLOY_VARS["IS_UP_MANAGER_WEB"]}"
 
-    
+    ensure_secret_configmap
     exec_cmd kubectl apply -f ${manager_server_file}
     wait_k8s_resource_ready "deployment" "${manager_server_name}" "${namespace}"
     success "MANAGER_SERVER_NODE_PORT: ${DEPLOY_VARS["MANAGER_SERVER_NODE_PORT"]}"
