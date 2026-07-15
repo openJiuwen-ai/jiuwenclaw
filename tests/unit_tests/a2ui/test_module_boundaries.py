@@ -25,3 +25,9 @@ def test_websocket_hook_keeps_a2ui_feature_outside_generic_transport():
     assert "../features/a2ui/" not in source
     assert "sendA2UIClientEvent" not in source
     assert "sendStructuredChatContent" in source
+
+
+def test_pyinstaller_bundle_includes_a2ui_schema_assets():
+    spec = (ROOT / "scripts/jiuwenswarm.spec").read_text(encoding="utf-8")
+
+    assert 'collect_data_files("a2ui", include_py_files=False)' in spec
