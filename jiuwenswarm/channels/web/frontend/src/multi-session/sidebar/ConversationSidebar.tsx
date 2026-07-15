@@ -46,7 +46,6 @@ import NewTaskIcon from '../../assets/work-mode/new-task.svg?react';
 import PinIcon from '../../assets/work-mode/pin.svg?react';
 import PlusIcon from '../../assets/work-mode/plus.svg?react';
 import UnpinIcon from '../../assets/work-mode/unpin.svg?react';
-import statusProcessingIcon from '../../assets/work-mode/status-loading.svg';
 
 const UNREAD_KEY = 'jiuwenswarm_session_unread';
 const RELATIVE_TIME_REFRESH_MS = 60_000;

@@ -9,6 +9,8 @@ import statusProcessingIcon from '../../assets/work-mode/status-processing.svg';
 import statusSuccessIcon from '../../assets/work-mode/status-success.svg';
 import statusWaitingIcon from '../../assets/work-mode/status-waiting.svg';
 import statusWarningIcon from '../../assets/work-mode/status-warning.svg';
+import ListViewIcon from '../../assets/work-mode/view-list.svg?react';
+import BoardViewIcon from '../../assets/work-mode/view-board.svg?react';
 import {
   BOARD_COLUMNS,
   getBoardTaskContent,
@@ -43,32 +45,6 @@ const compactStatusIcons: Record<TaskColumnKey, string> = {
   waiting: statusWaitingIcon,
   cancelled: statusWarningIcon,
 };
-
-function ListViewIcon() {
-  return (
-    <svg width={16} height={16} viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M0.5 0C0.223858 0 0 0.223858 0 0.5C0 0.776142 0.223858 1 0.5 1C0.776142 1 1 0.776142 1 0.5C1 0.223858 0.776142 0 0.5 0ZM2.5 0.5C2.5 0.78 2.72 1 3 1L12 1C12.28 1 12.5 0.78 12.5 0.5C12.5 0.22 12.28 0 12 0L3 0C2.72 0 2.5 0.22 2.5 0.5ZM0 5.5C0 5.22386 0.223858 5 0.5 5C0.776142 5 1 5.22386 1 5.5C1 5.77614 0.776142 6 0.5 6C0.223858 6 0 5.77614 0 5.5ZM3 6L12 6C12.28 6 12.5 5.78 12.5 5.5C12.5 5.22 12.28 5 12 5L3 5C2.72 5 2.5 5.22 2.5 5.5C2.5 5.78 2.72 6 3 6ZM0.5 10C0.223858 10 0 10.2239 0 10.5C0 10.7761 0.223858 11 0.5 11C0.776142 11 1 10.7761 1 10.5C1 10.2239 0.776142 10 0.5 10ZM12 10L3 10C2.72 10 2.5 10.22 2.5 10.5C2.5 10.78 2.72 11 3 11L12 11C12.28 11 12.5 10.78 12.5 10.5C12.5 10.22 12.28 10 12 10Z"
-        transform="matrix(1,0,0,-1,1.7998,13.5)"
-        fill="currentColor"
-        fillRule="evenodd"
-      />
-    </svg>
-  );
-}
-
-function BoardViewIcon() {
-  return (
-    <svg width={16} height={16} viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M12 0C13.1046 0 14 0.89543 14 2L14 10C14 11.1046 13.1046 12 12 12L2 12C0.89543 12 0 11.1046 0 10L0 2C0 0.89543 0.89543 0 2 0L12 0ZM9 1L5 1L5 11L9 11L9 1ZM10 11L10 1L12 1C12.5523 1 13 1.44772 13 2L13 10C13 10.5523 12.5523 11 12 11L10 11ZM2 1L4 1L4 11L2 11C1.44772 11 1 10.5523 1 10L1 2C1 1.44772 1.44772 1 2 1Z"
-        transform="matrix(1,0,0,-1,1,14)"
-        fill="currentColor"
-        fillRule="evenodd"
-      />
-    </svg>
-  );
-}
 
 export function TaskPlanningPanel({
   variant,
@@ -244,7 +220,7 @@ export function TaskPlanningPanel({
         title={t('team.planning.views.list')}
         aria-pressed={view === 'list'}
       >
-        <ListViewIcon />
+        <ListViewIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
       </button>
       <button
         type="button"
@@ -254,7 +230,7 @@ export function TaskPlanningPanel({
         title={t('team.planning.views.board')}
         aria-pressed={view === 'board'}
       >
-        <BoardViewIcon />
+        <BoardViewIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
       </button>
     </div>
   );
