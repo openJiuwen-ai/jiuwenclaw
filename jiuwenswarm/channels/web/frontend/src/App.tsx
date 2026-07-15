@@ -50,6 +50,7 @@ import {
   useTodoStore,
   useHarnessStore,
   useWorkspaceStore,
+  useCronStore,
 } from './stores';
 import { useChatRoute } from './multi-session/routing/useChatRoute';
 import { ConversationSidebar, type NewConversationOptions } from './multi-session/sidebar/ConversationSidebar';
@@ -1768,6 +1769,14 @@ function AppContent() {
       const deletingCurrent = sessionIdRef.current === deleteTarget.session_id;
       setDeleteTarget(null);
       await useWorkspaceStore.getState().refreshSessionWorkspace(deletedSession);
+      // 删除 session 后刷新所属定时任务的触发会话列表
+      const cronStore = useCronStore.getState();
+      for (const [jobId, sessions] of Object.entries(cronStore.cronSessions)) {
+        if (sessions.some((s) => s.session_id === deletedSession.session_id)) {
+          const job = cronStore.jobs.find((j) => j.id === jobId);
+          void cronStore.loadCronSessions(job?.project_id || 'default', jobId);
+        }
+      }
       if (deletingCurrent) {
         enterNewConversation();
       }
