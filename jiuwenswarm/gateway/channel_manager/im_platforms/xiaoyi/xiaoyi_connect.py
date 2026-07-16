@@ -32,6 +32,9 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.format
     should_send_as_status_update,
     should_send_as_text,
 )
+from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.a2a_vars import (
+    extract_model_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -936,6 +939,11 @@ class XiaoyiChannel(BaseChannel):
         params = {"query": text, "task_id": task_id}
         if media_payload:
             params["files"] = media_payload
+        # Per-request model (same key as Web chat.send); agent last-mile overrides model=
+        model_name = extract_model_name(parts)
+        if model_name:
+            params["model_name"] = model_name
+            logger.info("[Xiaoyi] Found modelName: %s", model_name)
 
         user_message = Message(
             id=message.get("id", ""),
