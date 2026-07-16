@@ -446,7 +446,7 @@ async def deepresearch_stream(
           {"status":"interrupted","conversation_id":"...","node_id":"...","marker":{...},"prompt":"..."}
             marker 结构化透传(agent 按 (1) §Stage3 读 marker.content(OutlineContent→preview 卡)
             /marker.questions/marker.prompt 建 free_input/preview 卡);prompt 扁平字符串 fallback。
-          {"status":"completed","conversation_id":"...","report_delivered":true,"report_path":"...md"}
+          {"status":"completed","conversation_id":"...","report_delivered":true,"report_chars":123}
             正常 chat 路由下报告已通过 chat.file 作为 Markdown 文件交付,不进入 tool outcome。
           {"status":"error","error":"..."}
     """
@@ -675,7 +675,6 @@ async def deepresearch_stream(
                         "status": "completed",
                         "conversation_id": chunk.get("conversation_id", outcome_cid),
                         "report_delivered": True,
-                        "report_path": report_path,
                         "report_chars": len(response_content),
                     }
                 elif response_content and has_chat_route:

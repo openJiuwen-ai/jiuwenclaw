@@ -311,7 +311,6 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
         "status": "completed",
         "conversation_id": "C1",
         "report_delivered": True,
-        "report_path": "/tmp/r.md",
         "report_chars": len(report_content),
     }
 
