@@ -15,10 +15,12 @@ from openjiuwen.core.context_engine.qa_block.registry import load_registry
 from openjiuwen.core.context_engine.qa_block.selector import resolve_summarizer_model
 from openjiuwen.core.context_engine.qa_block.store import QABlockStore
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
+    post_agent_execute_for_session,
     resolve_actual_session,
     resolve_context_engine,
 )
@@ -130,6 +132,17 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             native_messages=native_messages,
         )
 
+    async def _persist_freeze_checkpoint(self, session: Any, *, session_id: str) -> None:
+        """Flush registry after freeze; inner ReAct post_run may have checkpointed early."""
+        try:
+            await post_agent_execute_for_session(session)
+        except Exception as exc:
+            logger.warning(
+                "[QABlockFreezeRail] freeze checkpoint flush failed session_id=%s: %s",
+                session_id,
+                exc,
+            )
+
     def _on_freeze_commit(self, session: Any, context: Any, commit: FreezeCommitResult) -> None:
         try:
             loop = asyncio.get_running_loop()
@@ -204,6 +217,7 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
         if entry is not None:
             clear_assembly_committed_qa_id(actual_session)
             await context_engine.save_contexts(actual_session)
+            await self._persist_freeze_checkpoint(actual_session, session_id=session_id)
             logger.info(
                 "[QABlockFreezeRail] cancel sync freeze done session_id=%s qa_id=%s status=%s",
                 session_id,
@@ -242,12 +256,20 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             logger.info("[QABlockFreezeRail] skip freeze for ask_user_question interrupt session_id=%s", session_id)
             return
 
-        # 弹窗确认恢复请求，未产生最终结果前不卸载QA
-        # 避免恢复失败时把第一请求保留的上下文也冻掉
+        # 弹窗确认恢复：仅当仍处于中断时跳过 freeze。
+        # stream 外层 result 常为 None，不能再据此 skip，否则成功收尾会留下孤儿 QA。
+        # invoke 看 result_type=interrupt；stream 以 session INTERRUPTION_KEY 为准。
         if isinstance(ctx.inputs, InvokeInputs) and isinstance(ctx.inputs.query, InteractiveInput):
             result = getattr(ctx.inputs, "result", None)
-            if result is None or (isinstance(result, dict) and result.get("result_type") == "interrupt"):
-                logger.info("[QABlockFreezeRail] skip freeze for popup confirmation resume session_id=%s", session_id)
+            still_interrupted = (
+                (isinstance(result, dict) and result.get("result_type") == "interrupt")
+                or bool(session.get_state(INTERRUPTION_KEY))
+            )
+            if still_interrupted:
+                logger.info(
+                    "[QABlockFreezeRail] skip freeze for popup confirmation resume session_id=%s",
+                    session_id,
+                )
                 return
 
         workspace_root = ""
@@ -280,6 +302,7 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
         clear_assembly_committed_qa_id(session)
         ctx.extra[_FREEZE_DONE_KEY] = entry.qa_id
         await context_engine.save_contexts(session)
+        await self._persist_freeze_checkpoint(session, session_id=session_id)
         logger.info(
             "[QABlockFreezeRail] freeze committed session_id=%s qa_id=%s status=%s persist=%s",
             session_id,
