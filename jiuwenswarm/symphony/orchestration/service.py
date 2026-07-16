@@ -21,11 +21,9 @@ async def plan_from_score(
     query: str,
     llm_config: LLMConfig | None = None,
     *,
-    top_k: int = 3,
     max_depth: int = 4,
     min_edge_confidence: float = 0.7,
     llm_client: Any | None = None,
-    ranker: Any | None = None,
     orchestration_config: SymphonyOrchestrationConfig | None = None,
     candidate_skill_ids: Sequence[str] | None = None,
     disabled_skill_names: Sequence[str] | None = None,
@@ -33,7 +31,6 @@ async def plan_from_score(
     """Run online planning from an existing Symphony score."""
 
     if orchestration_config is not None:
-        top_k = orchestration_config.top_k
         min_edge_confidence = orchestration_config.min_edge_confidence
     mode = orchestration_config.mode if orchestration_config is not None else "fast"
 
@@ -53,7 +50,10 @@ async def plan_from_score(
         llm_config=llm_config,
         llm_client=llm_client,
         min_edge_confidence=clamp(min_edge_confidence),
-        top_k=max(1, int(top_k)),
+        max_depth=max(
+            1,
+            int(orchestration_config.max_depth if orchestration_config else max_depth),
+        ),
         candidate_skill_ids=selected_candidate_skill_ids,
     ).plan(query)
     result["skill_retrieval"] = skill_retrieval

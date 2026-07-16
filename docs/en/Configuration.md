@@ -383,7 +383,6 @@ Common settings:
 | `symphony.build.require_consensus` | `false` | Whether multiple judgments must agree before accepting a relationship |
 | `symphony.build.min_edge_confidence` | `0.1` | Minimum edge confidence written into the skill score |
 | `symphony.orchestration.mode` | `fast` | Orchestration mode. The current runtime uses the fast orchestration path |
-| `symphony.orchestration.top_k` | `3` | Maximum number of candidate routes retained during orchestration |
 | `symphony.orchestration.max_depth` | `4` | Maximum skill-chain search depth |
 | `symphony.orchestration.min_edge_confidence` | `0.3` | Minimum skill-score edge confidence preferred by orchestration |
 | `symphony.skill_retrieval.artifact_root` | Empty string | Skill index artifact directory; empty means the default workspace is used; can be supplied by `SYMPHONY_SKILL_RETRIEVAL_ROOT` |

@@ -39,7 +39,6 @@ symphony:
 
   orchestration:
     mode: fast
-    top_k: 3
     max_depth: 4
     min_edge_confidence: 0.3
 

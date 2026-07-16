@@ -1,5 +1,4 @@
 import json
-from types import SimpleNamespace
 
 import pytest
 
@@ -117,7 +116,6 @@ async def test_plan_from_score_fast_uses_one_shot_planner(monkeypatch, tmp_path)
         llm_client=llm,
         orchestration_config=SymphonyOrchestrationConfig(
             mode="fast",
-            top_k=2,
             min_edge_confidence=0.7,
         ),
     )
@@ -135,6 +133,7 @@ async def test_plan_from_score_fast_uses_one_shot_planner(monkeypatch, tmp_path)
     assert result["execution_graph"]["edges"][0]["source"] == "skill-a"
 
     prompt_payload = json.loads(llm.calls[0]["user_content"])
+    assert set(prompt_payload) == {"query", "skills", "can_feed_edges"}
     assert prompt_payload["can_feed_edges"] == [
         {
             "source_id": "skill-a",
@@ -147,6 +146,14 @@ async def test_plan_from_score_fast_uses_one_shot_planner(monkeypatch, tmp_path)
     ]
     assert all("inputs" not in skill for skill in prompt_payload["skills"])
     assert all("outputs" not in skill for skill in prompt_payload["skills"])
+    system_prompt = llm.calls[0]["system_prompt"]
+    assert "Infer a missing relationship only when needed" in system_prompt
+    assert "explicitly including an inferred edge" in system_prompt
+    assert "Symphony infers adjacent step edges during validation" in system_prompt
+    assert "missing_inputs does not describe a Skill I/O schema" in system_prompt
+    assert llm.calls[0]["request_overrides"] == {
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
 
 
 async def test_plan_from_score_fast_accepts_prefixed_graph_skill_ids(
@@ -239,7 +246,7 @@ async def test_plan_from_score_fast_no_plan_calls_llm_once(monkeypatch, tmp_path
     assert result["execution_graph"]["nodes"] == []
 
 
-async def test_plan_from_score_fast_rejects_low_confidence_edge_once(
+async def test_plan_from_score_fast_accepts_low_confidence_edge_as_inferred(
     monkeypatch,
     tmp_path,
 ):
@@ -253,7 +260,11 @@ async def test_plan_from_score_fast_rejects_low_confidence_edge_once(
                 {"skill_id": "skill-c"},
             ],
             "can_feed_edges": [
-                {"source_id": "skill-a", "target_id": "skill-c"},
+                {
+                    "source_id": "skill-a",
+                    "target_id": "skill-c",
+                    "reason": "The selected capabilities should run in sequence.",
+                },
             ],
         }
     )
@@ -281,8 +292,11 @@ async def test_plan_from_score_fast_rejects_low_confidence_edge_once(
             "target_id": "skill-c",
         },
     ]
-    assert result["success"] is False
-    assert "illegal can_feed edges" in result["detail"]
+    inferred_edge = result["recommended_plans"][0]["can_feed_edges"][0]
+    assert inferred_edge["method"] == "fast_llm_inferred"
+    assert inferred_edge["confidence"] is None
+    assert inferred_edge["reason"] == "The selected capabilities should run in sequence."
+    assert result["execution_graph"]["edges"][0]["method"] == "fast_llm_inferred"
 
 
 async def test_plan_from_score_fast_uses_input_candidates_and_neighbors(
@@ -513,192 +527,318 @@ async def test_plan_from_score_rejects_non_fast_mode(monkeypatch, tmp_path):
             tmp_path,
             "beam plan",
             llm_client=object(),
-            ranker=object(),
             orchestration_config=SymphonyOrchestrationConfig(mode="beam"),
         )
 
 
-def test_orchestration_skill_retrieval_filters_unknown_ids(
-    monkeypatch,
-    tmp_path,
-):
-    from jiuwenswarm.symphony.orchestration import skill_retrieval as retrieval_module
-
-    artifacts = _artifacts(tmp_path)
-    settings = SimpleNamespace(
-        enabled=True,
-        llm=SimpleNamespace(model="model", api_key="key"),
-        retrieve=SimpleNamespace(top_k=2),
-    )
-    result = SimpleNamespace(
-        candidate_records=[
-            {"rank": 1, "worker_id": "missing-skill", "score": 0.9},
-            {"rank": 2, "worker_id": "skill-b", "score": 0.8},
+def _custom_artifacts(tmp_path, skill_ids, edges):
+    return ScoreArtifacts(
+        score_dir=tmp_path,
+        manifest={},
+        skills=[
+            {
+                "id": current_skill_id,
+                "name": current_skill_id,
+                "description": f"Capability {current_skill_id}",
+                "inputs": [],
+                "outputs": [],
+            }
+            for current_skill_id in skill_ids
         ],
-        payloads=["missing-skill", "skill-b"],
-    )
-    monkeypatch.setattr(retrieval_module, "load_settings", lambda: settings)
-    monkeypatch.setattr(
-        retrieval_module,
-        "_skill_retrieval_status",
-        lambda: {
-            "index_exists": True,
-            "fresh": True,
-            "index_dir": str(tmp_path),
-        },
-    )
-    monkeypatch.setattr(
-        retrieval_module,
-        "run_structured_skill_retrieve",
-        lambda **kwargs: result,
+        graph={"edges": edges},
+        lookup={},
     )
 
-    selection = retrieval_module.select_orchestration_skill_candidates(
-        query="use beta",
-        artifacts=artifacts,
+
+def _score_edge(source, target, confidence=0.9):
+    return {
+        "type": "can_feed",
+        "source": source,
+        "target": target,
+        "confidence": confidence,
+        "method": "test",
+        "evidence": {"reasons": [f"{source} feeds {target}"]},
+    }
+
+
+async def test_retrieval_forest_prefers_shortest_path(monkeypatch, tmp_path):
+    artifacts = _custom_artifacts(
+        tmp_path,
+        ["seed-a", "seed-b", "bridge", "incoming", "outgoing"],
+        [
+            _score_edge("seed-a", "seed-b", 0.71),
+            _score_edge("seed-a", "bridge", 0.99),
+            _score_edge("bridge", "seed-b", 0.99),
+            _score_edge("incoming", "seed-a", 0.98),
+            _score_edge("seed-b", "outgoing", 0.97),
+        ],
+    )
+    llm = _FakeLLMClient(
+        {
+            "status": "ready",
+            "steps": [{"skill_id": "seed-a"}, {"skill_id": "seed-b"}],
+            "can_feed_edges": [
+                {"source_id": "seed-a", "target_id": "seed-b"},
+            ],
+        }
+    )
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    await service.plan_from_score(
+        tmp_path,
+        "connect seeds",
+        llm_client=llm,
+        orchestration_config=SymphonyOrchestrationConfig(mode="fast", max_depth=3),
+        candidate_skill_ids=["seed-a", "seed-b"],
     )
 
-    assert selection.used is True
-    assert selection.candidate_skill_ids == ("skill-b",)
-    assert selection.candidate_count == 1
+    prompt = json.loads(llm.calls[0]["user_content"])
+    assert [skill["id"] for skill in prompt["skills"]] == ["seed-a", "seed-b"]
+    assert prompt["can_feed_edges"] == [
+        {"source_id": "seed-a", "target_id": "seed-b"}
+    ]
 
 
-def test_orchestration_skill_retrieval_falls_back_when_all_ids_are_stale(
+async def test_retrieval_forest_prefers_higher_confidence_for_equal_hops(
     monkeypatch,
     tmp_path,
 ):
-    from jiuwenswarm.symphony.orchestration import skill_retrieval as retrieval_module
+    artifacts = _custom_artifacts(
+        tmp_path,
+        ["seed-a", "seed-b", "weak", "strong"],
+        [
+            _score_edge("seed-a", "weak", 0.8),
+            _score_edge("weak", "seed-b", 0.8),
+            _score_edge("seed-a", "strong", 0.9),
+            _score_edge("strong", "seed-b", 0.9),
+        ],
+    )
+    llm = _FakeLLMClient({"status": "ready", "steps": [{"skill_id": "strong"}]})
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
 
-    artifacts = _artifacts(tmp_path)
-    settings = SimpleNamespace(
-        enabled=True,
-        llm=SimpleNamespace(model="model", api_key="key"),
-        retrieve=SimpleNamespace(top_k=1),
-    )
-    result = SimpleNamespace(
-        candidate_records=[{"rank": 1, "worker_id": "missing-skill"}],
-        payloads=["missing-skill"],
-    )
-    monkeypatch.setattr(retrieval_module, "load_settings", lambda: settings)
-    monkeypatch.setattr(
-        retrieval_module,
-        "_skill_retrieval_status",
-        lambda: {
-            "index_exists": True,
-            "fresh": True,
-            "index_dir": str(tmp_path),
-        },
-    )
-    monkeypatch.setattr(
-        retrieval_module,
-        "run_structured_skill_retrieve",
-        lambda **kwargs: result,
+    await service.plan_from_score(
+        tmp_path,
+        "connect seeds",
+        llm_client=llm,
+        orchestration_config=SymphonyOrchestrationConfig(mode="fast", max_depth=2),
+        candidate_skill_ids=["seed-a", "seed-b"],
     )
 
-    selection = retrieval_module.select_orchestration_skill_candidates(
-        query="use beta",
-        artifacts=artifacts,
-    )
+    prompt = json.loads(llm.calls[0]["user_content"])
+    assert [skill["id"] for skill in prompt["skills"]] == [
+        "seed-a",
+        "seed-b",
+        "strong",
+    ]
+    assert prompt["can_feed_edges"] == [
+        {"source_id": "seed-a", "target_id": "strong"},
+        {"source_id": "strong", "target_id": "seed-b"},
+    ]
 
-    assert selection.used is False
-    assert selection.candidate_skill_ids == ()
-    assert "no candidates present" in selection.fallback_reason
 
-
-def test_orchestration_skill_retrieval_falls_back_when_index_missing(
+async def test_retrieval_forest_keeps_components_beyond_max_depth(
     monkeypatch,
     tmp_path,
 ):
-    from jiuwenswarm.symphony.orchestration import skill_retrieval as retrieval_module
+    artifacts = _custom_artifacts(
+        tmp_path,
+        ["seed-a", "seed-b", "bridge"],
+        [
+            _score_edge("seed-a", "bridge"),
+            _score_edge("bridge", "seed-b"),
+        ],
+    )
+    llm = _FakeLLMClient({"status": "ready", "steps": [{"skill_id": "seed-a"}]})
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
 
+    await service.plan_from_score(
+        tmp_path,
+        "keep separate",
+        llm_client=llm,
+        orchestration_config=SymphonyOrchestrationConfig(mode="fast", max_depth=1),
+        candidate_skill_ids=["seed-a", "seed-b"],
+    )
+
+    prompt = json.loads(llm.calls[0]["user_content"])
+    assert {skill["id"] for skill in prompt["skills"]} == {
+        "seed-a",
+        "seed-b",
+        "bridge",
+    }
+    assert prompt["can_feed_edges"] == [
+        {"source_id": "seed-a", "target_id": "bridge"}
+    ]
+
+
+async def test_fast_default_subgraph_has_no_skill_or_edge_limit(monkeypatch, tmp_path):
+    skill_ids = [f"skill-{index:02d}" for index in range(42)]
+    edges = []
+    for source_index in range(len(skill_ids)):
+        for target_index in range(source_index + 1, len(skill_ids)):
+            edges.append(_score_edge(skill_ids[source_index], skill_ids[target_index]))
+            if len(edges) == 82:
+                break
+        if len(edges) == 82:
+            break
+    artifacts = _custom_artifacts(tmp_path, skill_ids, edges)
+    llm = _FakeLLMClient({"status": "ready", "steps": [{"skill_id": skill_ids[0]}]})
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    result = await service.plan_from_score(tmp_path, "all candidates", llm_client=llm)
+
+    prompt = json.loads(llm.calls[0]["user_content"])
+    assert len(prompt["skills"]) == 42
+    assert len(prompt["can_feed_edges"]) == 82
+    assert result["candidate_skill_count"] == 42
+    assert result["candidate_edge_count"] == 82
+
+
+async def test_fast_retrieval_forest_has_no_skill_limit(monkeypatch, tmp_path):
+    skill_ids = [f"skill-{index:02d}" for index in range(42)]
+    edges = [
+        _score_edge(skill_ids[index], skill_ids[index + 1])
+        for index in range(len(skill_ids) - 1)
+    ]
+    edge_keys = {(edge["source"], edge["target"]) for edge in edges}
+    for source_index in range(len(skill_ids)):
+        for target_index in range(source_index + 1, len(skill_ids)):
+            key = (skill_ids[source_index], skill_ids[target_index])
+            if key not in edge_keys:
+                edges.append(_score_edge(*key))
+                edge_keys.add(key)
+            if len(edges) == 82:
+                break
+        if len(edges) == 82:
+            break
+    artifacts = _custom_artifacts(tmp_path, skill_ids, edges)
+    llm = _FakeLLMClient({"status": "ready", "steps": [{"skill_id": skill_ids[0]}]})
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    result = await service.plan_from_score(
+        tmp_path,
+        "all retrieved candidates",
+        llm_client=llm,
+        candidate_skill_ids=skill_ids,
+    )
+
+    prompt = json.loads(llm.calls[0]["user_content"])
+    assert len(edges) == 82
+    assert len(prompt["skills"]) == 42
+    assert result["candidate_skill_count"] == 42
+
+
+async def test_fast_default_subgraph_uses_all_skills_without_edges(monkeypatch, tmp_path):
+    skill_ids = [f"skill-{index:02d}" for index in range(45)]
+    artifacts = _custom_artifacts(tmp_path, skill_ids, [])
+    llm = _FakeLLMClient({"status": "ready", "steps": [{"skill_id": skill_ids[0]}]})
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    await service.plan_from_score(tmp_path, "all skills", llm_client=llm)
+
+    prompt = json.loads(llm.calls[0]["user_content"])
+    assert len(prompt["skills"]) == 45
+    assert prompt["can_feed_edges"] == []
+
+
+async def test_fast_plan_materializes_existing_and_inferred_edges(monkeypatch, tmp_path):
     artifacts = _artifacts(tmp_path)
-    settings = SimpleNamespace(
-        enabled=True,
-        llm=SimpleNamespace(model="model", api_key="key"),
+    artifacts.graph["edges"] = artifacts.graph["edges"][:1]
+    llm = _FakeLLMClient(
+        {
+            "status": "ready",
+            "steps": [
+                {"skill_id": "skill-a"},
+                {"skill_id": "skill-b"},
+                {"skill_id": "skill-c"},
+            ],
+            "can_feed_edges": [
+                {"source_id": "skill-a", "target_id": "skill-b"},
+                {
+                    "source_id": "skill-b",
+                    "target_id": "skill-c",
+                    "reason": "Continue with the selected publisher.",
+                },
+            ],
+        }
     )
-    monkeypatch.setattr(retrieval_module, "load_settings", lambda: settings)
-    monkeypatch.setattr(
-        retrieval_module,
-        "_skill_retrieval_status",
-        lambda: {"index_exists": False, "fresh": False},
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    result = await service.plan_from_score(
+        tmp_path,
+        "mixed edges",
+        llm_client=llm,
+        candidate_skill_ids=["skill-a", "skill-b", "skill-c"],
     )
 
-    selection = retrieval_module.select_orchestration_skill_candidates(
-        query="use beta",
-        artifacts=artifacts,
+    edges = result["recommended_plans"][0]["can_feed_edges"]
+    assert [edge["method"] for edge in edges] == ["llm", "fast_llm_inferred"]
+    assert result["execution_graph"]["edges"][1]["method"] == "fast_llm_inferred"
+
+
+async def test_fast_plan_infers_adjacent_edges_when_omitted(monkeypatch, tmp_path):
+    artifacts = _artifacts(tmp_path)
+    llm = _FakeLLMClient(
+        {
+            "status": "ready",
+            "steps": [{"skill_id": "skill-a"}, {"skill_id": "skill-c"}],
+        }
     )
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
 
-    assert selection.used is False
-    assert selection.fallback_reason == "skill retrieval index does not exist"
+    result = await service.plan_from_score(tmp_path, "infer adjacency", llm_client=llm)
+
+    edge = result["recommended_plans"][0]["can_feed_edges"][0]
+    assert edge["source_id"] == "skill-a"
+    assert edge["target_id"] == "skill-c"
+    assert edge["method"] == "fast_llm_inferred"
 
 
-def test_orchestration_skill_retrieval_falls_back_when_llm_config_missing(
+@pytest.mark.parametrize(
+    ("steps", "edges", "detail"),
+    [
+        (
+            ["skill-a", "skill-b"],
+            [{"source_id": "skill-a", "target_id": "skill-c"}],
+            "outside plan steps",
+        ),
+        (
+            ["skill-a", "skill-b"],
+            [{"source_id": "skill-b", "target_id": "skill-a"}],
+            "violate step order",
+        ),
+        (
+            ["skill-a"],
+            [{"source_id": "skill-a", "target_id": "skill-a"}],
+            "malformed can_feed edges",
+        ),
+        (
+            ["skill-a", "skill-b"],
+            [
+                {"source_id": "skill-a", "target_id": "skill-b"},
+                {"source_id": "skill-a", "target_id": "skill-b"},
+            ],
+            "duplicate can_feed edges",
+        ),
+    ],
+)
+async def test_fast_plan_rejects_invalid_inferred_edges(
     monkeypatch,
     tmp_path,
+    steps,
+    edges,
+    detail,
 ):
-    from jiuwenswarm.symphony.orchestration import skill_retrieval as retrieval_module
-
     artifacts = _artifacts(tmp_path)
-    settings = SimpleNamespace(
-        enabled=True,
-        llm=SimpleNamespace(model="", api_key=""),
+    llm = _FakeLLMClient(
+        {
+            "status": "ready",
+            "steps": [{"skill_id": skill} for skill in steps],
+            "can_feed_edges": edges,
+        }
     )
-    monkeypatch.setattr(retrieval_module, "load_settings", lambda: settings)
-    monkeypatch.setattr(
-        retrieval_module,
-        "_skill_retrieval_status",
-        lambda: {
-            "index_exists": True,
-            "fresh": True,
-            "index_dir": str(tmp_path),
-        },
-    )
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
 
-    selection = retrieval_module.select_orchestration_skill_candidates(
-        query="use beta",
-        artifacts=artifacts,
-    )
+    result = await service.plan_from_score(tmp_path, "invalid edge", llm_client=llm)
 
-    assert selection.used is False
-    assert selection.fallback_reason == "skill retrieval LLM config is missing"
-
-
-def test_orchestration_skill_retrieval_falls_back_when_retrieve_raises(
-    monkeypatch,
-    tmp_path,
-):
-    from jiuwenswarm.symphony.orchestration import skill_retrieval as retrieval_module
-
-    artifacts = _artifacts(tmp_path)
-    settings = SimpleNamespace(
-        enabled=True,
-        llm=SimpleNamespace(model="model", api_key="key"),
-    )
-
-    def raise_retrieve(**kwargs):
-        del kwargs
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(retrieval_module, "load_settings", lambda: settings)
-    monkeypatch.setattr(
-        retrieval_module,
-        "_skill_retrieval_status",
-        lambda: {
-            "index_exists": True,
-            "fresh": True,
-            "index_dir": str(tmp_path),
-        },
-    )
-    monkeypatch.setattr(
-        retrieval_module,
-        "run_structured_skill_retrieve",
-        raise_retrieve,
-    )
-
-    selection = retrieval_module.select_orchestration_skill_candidates(
-        query="use beta",
-        artifacts=artifacts,
-    )
-
-    assert selection.used is False
-    assert selection.fallback_reason == "skill retrieval failed: boom"
+    assert result["success"] is False
+    assert detail in result["detail"]
