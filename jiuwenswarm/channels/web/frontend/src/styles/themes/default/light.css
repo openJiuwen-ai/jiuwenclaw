@@ -74,6 +74,7 @@
   /* Feature accents whose identity is stable across color modes */
   --color-chat-accent: #1476ff;
   --color-chat-accent-subtle: #deecff;
+  --color-cron-running: #0bb8b2;
 
   /* Utility color roles */
   --color-focus: rgba(37, 99, 235, 0.2);

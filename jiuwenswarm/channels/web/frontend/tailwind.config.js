@@ -74,6 +74,9 @@ export default {
           subtle: color('--color-feedback-danger-subtle'),
         },
         info: color('--color-feedback-info'),
+        cron: {
+          running: color('--color-cron-running'),
+        },
         muted: {
           DEFAULT: color('--color-text-secondary'),
           foreground: color('--color-text-secondary'),
