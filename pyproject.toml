@@ -52,7 +52,7 @@ dependencies = [
     "pytest-timeout==2.4.0",
     "sqlite-vec==0.1.6",
     "asyncpg>=0.29",
-    "openjiuwen_deepsearch @ git+https://gitcode.com/openJiuwen/deepsearch.git@enterprise_dev",
+    "openjiuwen_deepsearch @ git+https://gitcode.com/openJiuwen/deepsearch.git@enterprise_kub_release",
     "pypandoc",
     "markdown",
     "minio>=7.2.0",
