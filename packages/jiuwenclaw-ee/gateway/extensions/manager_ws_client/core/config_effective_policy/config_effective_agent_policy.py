@@ -25,6 +25,7 @@ from ...schemas.config_effective_policy_schemas import (
     ConfigEffectiveAgentPolicyCreateRequest,
     ConfigEffectiveAgentPolicyUpdateRequest,
 )
+from ..enterprise_config.expressions import validate_match_expr
 from .config_record_ops import (
     apply_create_from_row_builder,
     apply_delete_by_id,
@@ -93,6 +94,9 @@ async def update_config_effective_agent_policy_record(
         if not field_updates["service_policy_id"]:
             raise ValueError("service_policy_id cannot be empty")
 
+    if "match_expr" in field_updates:
+        validate_match_expr(field_updates["match_expr"])
+
     next_service_policy_id = field_updates.get(
         "service_policy_id", getattr(existing, "service_policy_id")
     )
@@ -120,6 +124,7 @@ def _build_row_from_sync_policy(
     now: Any,
 ) -> dict[str, Any]:
     req = ConfigEffectiveAgentPolicyCreateRequest.model_validate(policy)
+    validate_match_expr(req.match_expr)
     return {
         "jiuwenclaw_id": jiuwenclaw_id,
         "policy_id": req.policy_id,

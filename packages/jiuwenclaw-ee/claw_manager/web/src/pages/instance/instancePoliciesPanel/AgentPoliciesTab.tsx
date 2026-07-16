@@ -210,7 +210,12 @@ export function AgentPoliciesTab({ instanceId }: { instanceId: string }) {
     }
     const matchExprErr = validateMatchExprModel(parseMatchExpr(form.match_expr));
     if (matchExprErr) {
-      toast('warn', t('policies.matchExpr.invalid'));
+      toast(
+        'warn',
+        matchExprErr === 'match_expr_invalid_syntax'
+          ? t('policies.matchExpr.invalidSyntax')
+          : t('policies.matchExpr.invalid'),
+      );
       return;
     }
     const singleValueViolation = findSingleValueTemplateRefViolation(form.template_ref);

@@ -15,6 +15,7 @@ from jiuwenclaw_manager.infrastructure.common import (
     resolve_order_by,
 )
 from jiuwenclaw_manager.infrastructure.jiuwenclaw_id import validate_jiuwenclaw_id
+from jiuwenclaw_manager.infrastructure.match_expr import validate_match_expr
 from jiuwenclaw_manager.infrastructure.utils import (
     iso_datetime,
     new_uuid4,
@@ -217,6 +218,7 @@ class ConfigEffectiveAgentPolicyService:
             jiuwenclaw_id=normalized,
             service_policy_id=body.service_policy_id,
         )
+        validate_match_expr(body.match_expr)
 
         now = utc_now()
         template_ref = normalize_template_ref(body.template_ref)
@@ -375,6 +377,9 @@ class ConfigEffectiveAgentPolicyService:
             updates["service_policy_id"] = str(updates["service_policy_id"]).strip()
             if not updates["service_policy_id"]:
                 raise ValueError("service_policy_id cannot be empty")
+
+        if "match_expr" in updates:
+            validate_match_expr(updates["match_expr"])
 
         next_service_policy_id = updates.get("service_policy_id", row.service_policy_id)
         if "service_policy_id" in updates:
