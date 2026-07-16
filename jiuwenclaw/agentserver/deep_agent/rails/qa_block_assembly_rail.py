@@ -52,6 +52,9 @@ _LAYER_KEY = "_qa_block_layer"
 _PRELOADED_QA_IDS_KEY = "_preloaded_qa_ids"
 _PENDING_ORPHAN_SALVAGE_KEY = "_qa_block_pending_orphan_salvage"
 _ASSEMBLY_COMMITTED_QA_ID_KEY = "_qa_block_assembly_committed_qa_id"
+# Set in before_invoke for InteractiveInput resume turns. before_model_call runs with
+# ModelCallInputs (query already replaced), so popup/resume identity must live on session.
+_INTERRUPT_RESUME_TURN_KEY = "_qa_block_interrupt_resume_turn"
 
 
 def _is_resume_invoke(ctx: AgentCallbackContext) -> bool:
@@ -61,12 +64,57 @@ def _is_resume_invoke(ctx: AgentCallbackContext) -> bool:
     return False
 
 
+def _set_interrupt_resume_turn(session: Any, *, enabled: bool) -> None:
+    updater = getattr(session, "update_state", None)
+    if callable(updater):
+        updater({_INTERRUPT_RESUME_TURN_KEY: bool(enabled)})
+
+
+def _is_interrupt_resume_turn(session: Any) -> bool:
+    getter = getattr(session, "get_state", None)
+    if not callable(getter):
+        return False
+    return bool(getter(_INTERRUPT_RESUME_TURN_KEY))
+
+
 def _is_popup_confirmation_resume(ctx: AgentCallbackContext) -> bool:
     """检测弹窗确认恢复场景(如工具权限"本次允许")。
+
     仅当 resume 的 result 标记为 interrupt 且包含 interrupt_ids 时，
-    才认为是弹窗恢复，跳过QA组装。普通 InteractiveInput resume（如 stale pointer 空上下文场景）仍需要走正常组装流程。
+    才认为是弹窗恢复，跳过QA组装。普通 InteractiveInput resume（如 stale pointer
+    空上下文场景）仍需要走正常组装流程。
+
+    注意：``before_model_call`` 时 ``ctx.inputs`` 通常已是 ``ModelCallInputs``，
+    本函数在该钩子里几乎恒为 False；真正的 keep-current 依赖
+    ``_should_keep_current_qa_on_interrupt_resume``（session 标记）。
     """
     return is_ask_user_question_interrupt(ctx)
+
+
+def _should_keep_current_qa_on_interrupt_resume(
+    ctx: AgentCallbackContext,
+    session: Any,
+    registry: QABlockRegistry,
+) -> bool:
+    """Permission/HITL resume 后继续沿用未冻结的进行中 QA，避免错误新开轮次。
+
+    ``before_model_call`` 看不到 InteractiveInput，因此用 before_invoke 写入的
+    session 标记识别 resume 轮。空上下文 + 无 assembly commit 的 stale 指针
+    仍放行给后续清理/组装逻辑。
+    """
+    if not _is_interrupt_resume_turn(session):
+        return False
+    active_qa_id = registry.current_qa_id
+    if not active_qa_id:
+        return False
+    entry = registry.blocks.get(active_qa_id)
+    if _is_frozen_entry(entry):
+        return False
+    if _get_assembly_committed_qa_id(session) == active_qa_id:
+        return True
+    if _context_has_active_qa_work(ctx, active_qa_id):
+        return True
+    return False
 
 
 def _is_frozen_entry(entry: QABlockEntry | None) -> bool:
@@ -212,14 +260,20 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
         """
         if not self._config.enabled:
             return
-        if _is_resume_invoke(ctx):
-            logger.debug("[QABlockAssemblyRail] before_invoke skipped: resume invoke")
-            return
 
         session = resolve_actual_session(ctx.session)
         if session is None:
             logger.debug("[QABlockAssemblyRail] before_invoke skipped: no session")
             return
+
+        if _is_resume_invoke(ctx):
+            # Mark resume turn so before_model_call (ModelCallInputs) can keep
+            # the in-progress QA instead of allocating a new one after tool resume.
+            _set_interrupt_resume_turn(session, enabled=True)
+            logger.debug("[QABlockAssemblyRail] before_invoke skipped: resume invoke")
+            return
+
+        _set_interrupt_resume_turn(session, enabled=False)
         clear_assembly_committed_qa_id(session)
 
         session_id = session_id_from_session(session)
@@ -348,6 +402,21 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
             logger.info(
                 "[QABlockAssemblyRail] skip assembly for popup confirmation resume "
                 "session_id=%s", session_id,
+            )
+            return
+
+        registry = load_registry(session)
+        # Permission/HITL resume: after tool re-executes, the next model call uses
+        # ModelCallInputs so popup detection above is dead. Keep the unfrozen QA
+        # that holds prior ask_user_question answers.
+        if _should_keep_current_qa_on_interrupt_resume(ctx, session, registry):
+            logger.info(
+                "[QABlockAssemblyRail] keep current QA on interrupt resume "
+                "session_id=%s active_qa_id=%s committed=%s has_native_work=%s",
+                session_id,
+                registry.current_qa_id,
+                _get_assembly_committed_qa_id(session) == registry.current_qa_id,
+                _context_has_active_qa_work(ctx, registry.current_qa_id or ""),
             )
             return
 
