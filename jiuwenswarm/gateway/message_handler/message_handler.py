@@ -48,7 +48,7 @@ from jiuwenswarm.extensions.hook_event import GatewayHookEvents
 from jiuwenswarm.extensions.hooks_context import GatewayChatHookContext
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.gateway.hooks.handler import GatewayHookHandler
-from jiuwenswarm.gateway.routing.keys import DeliveryTarget, RoutingKey, AgentRef, make_delivery_target
+from jiuwenswarm.gateway.routing.keys import RoutingKey, AgentRef, make_delivery_target
 from jiuwenswarm.gateway.routing.session_sharing import SessionSharingRegistry, SubRole
 
 logger = logging.getLogger(__name__)
@@ -83,6 +83,16 @@ _INTERRUPT_RESUME_SOURCES = frozenset({
     "evolution_interrupt",
 })
 _A2UI_OPEN_TAG_MARKER = "<a2ui-json>"
+_DELIVERY_IDENTITY_METADATA_KEYS = frozenset({
+    "app_id",
+    "chat_type",
+    "im_chat_type",
+    "feishu_chat_id",
+    "feishu_open_id",
+    "open_id",
+    "im_sender_user_id",
+    "im_thread_id",
+})
 
 
 def apply_a2ui_text_fallback_to_gateway_payload(
@@ -2439,6 +2449,9 @@ class MessageHandler(ABC):
         if not req_md and not resp_md:
             return None
         merged: dict[str, Any] = {**req_md, **resp_md}
+        for key in _DELIVERY_IDENTITY_METADATA_KEYS:
+            if key in req_md:
+                merged[key] = req_md[key]
         return merged
 
     @staticmethod
