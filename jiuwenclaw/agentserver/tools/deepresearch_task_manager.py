@@ -10,6 +10,7 @@ import re
 import secrets
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -25,9 +26,8 @@ from openjiuwen_deepsearch.utils.log_utils.log_common import session_id_ctx
 from openjiuwen_deepsearch.utils.log_utils.log_manager import LogManager
 
 from jiuwenclaw.agentserver.gateway_push import GatewayPushTransport, WebSocketGatewayPushTransport
-from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_docx_offline import convert_md_to_docx
-from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline import convert_md_to_html
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import build_report_bundle
+from jiuwenclaw.agentserver.tools.deepresearch_plugin.styled_html_export import export_styled_html
 from jiuwenclaw.local_env_config import read_default_headers_raw
 from jiuwenclaw.utils import get_logs_dir
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_workspace_dir
@@ -209,6 +209,24 @@ class DeepResearchTaskManager:
         return configured_engines
 
     @staticmethod
+    def _build_general_llm_configs(
+        config: Dict[str, str],
+        extension: dict,
+    ) -> tuple[dict, dict]:
+        """Build isolated LLM configs for the workflow and report styling."""
+
+        def build_config() -> dict:
+            return {
+                "model_name": config["LLM_MODEL_NAME"],
+                "model_type": config["LLM_MODEL_TYPE"],
+                "base_url": config["LLM_BASE_URL"],
+                "extension": extension,
+                "api_key": bytearray(config["LLM_API_KEY"], encoding="utf-8"),
+            }
+
+        return build_config(), build_config()
+
+    @staticmethod
     def _load_config() -> Dict[str, str]:
         """从环境变量加载 DeepSearch 配置.
 
@@ -296,7 +314,7 @@ class DeepResearchTaskManager:
             "WORKFLOW_HUMAN_IN_THE_LOOP": "False",
             "OUTLINE_INTERACTION_ENABLED": "False",
             "SOURCE_TRACER_INFER_SWITCHES": "True",
-            "VLM_CHART_GENERATOR_ENABLE": vlm_chart_generator_enable,
+            "VLM_CHART_GENERATOR_ENABLE": "False",
             "VLM_CHART_GENERATOR_MAX_ITERATIONS": 3,
             "VISION_API_KEY": vision_api_key,
             "VISION_API_URL": vision_api_base,
@@ -551,15 +569,16 @@ class DeepResearchTaskManager:
         return str(data), infer_dir, chart_dir
 
     @staticmethod
-    def _write_report_artifacts(
+    async def _write_report_artifacts(
         data: Any,
         file_name: str,
         output_dir: str = SAVE_REPORT_PATH,
         *,
         task_id: str = "",
         cancel_event: threading.Event | None = None,
+        llm_config: dict,
     ) -> dict[str, str]:
-        """写出 markdown/html/docx 报告及推理图目录（支持协作取消）."""
+        """写出 Markdown/HTML 报告及推理图目录（支持协作取消）."""
         # 检查取消状态
         if cancel_event and cancel_event.is_set():
             logger.info("[DeepResearchTaskManager] 任务已取消，跳过报告写出 task_id=%s", task_id)
@@ -576,11 +595,12 @@ class DeepResearchTaskManager:
                 file_name,
                 exc,
             )
-            safe_base_name = f"report_{task_id or 'default'}"
+            safe_base_name = task_id or "default"
 
-
-        report_file = os.path.join(output_dir, 
-                                   f"report_{safe_base_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
+        report_file = os.path.join(
+            output_dir,
+            f"{safe_base_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+        )
 
         # 路径 containment 校验
         if not DeepResearchTaskManager._verify_path_containment(output_dir, report_file):
@@ -588,17 +608,23 @@ class DeepResearchTaskManager:
 
         report_file_md = f"{report_file}.md"
         report_file_html = f"{report_file}.html"
-        report_file_docx = f"{report_file}.docx"
 
-        report_content, infer_dir, chart_dir = DeepResearchTaskManager._build_report_content(data, report_file)
+        report_content, infer_dir, chart_dir = await asyncio.to_thread(
+            DeepResearchTaskManager._build_report_content,
+            data,
+            report_file,
+        )
 
         # 再次检查取消状态
         if cancel_event and cancel_event.is_set():
             logger.info("[DeepResearchTaskManager] 任务已取消，跳过报告文件写入 task_id=%s", task_id)
             return {}
 
-        with open(report_file_md, "w", encoding="utf-8") as f:
-            f.write(report_content)
+        await asyncio.to_thread(
+            Path(report_file_md).write_text,
+            report_content,
+            encoding="utf-8",
+        )
 
         artifacts = {"md": report_file_md}
         if infer_dir:
@@ -611,36 +637,47 @@ class DeepResearchTaskManager:
             logger.info("[DeepResearchTaskManager] 任务已取消，跳过HTML转换 task_id=%s", task_id)
             return artifacts
 
+        html_infer_dir = f"{report_file}_infer"
+        html_chart_dir = f"{report_file}_charts"
+        html_export_started_at = time.monotonic()
+        logger.info(
+            "[DeepResearchTaskManager] Styled html report export started "
+            "task_id=%s output=%s",
+            task_id,
+            report_file_html,
+        )
         try:
-            convert_md_to_html(report_file_md, report_file_html)
+            styled_result = await export_styled_html(
+                data,
+                llm_config,
+                html_path=report_file_html,
+            )
         except Exception as exc:
             logger.warning(
-                "[DeepResearchTaskManager] Optional html report generation failed. "
-                "task_id=%s output=%s error=%s",
+                "[DeepResearchTaskManager] Styled html report generation failed. "
+                "task_id=%s elapsed_seconds=%.3f output=%s error=%s: %s",
                 task_id,
+                time.monotonic() - html_export_started_at,
                 report_file_html,
+                type(exc).__name__,
                 exc,
             )
         else:
             artifacts["html"] = report_file_html
-
-        # DOCX转换前检查取消状态
-        if cancel_event and cancel_event.is_set():
-            logger.info("[DeepResearchTaskManager] 任务已取消，跳过DOCX转换 task_id=%s", task_id)
-            return artifacts
-
-        try:
-            convert_md_to_docx(report_file_md, report_file_docx)
-        except Exception as exc:
-            logger.warning(
-                "[DeepResearchTaskManager] Optional docx report generation failed. "
-                "task_id=%s output=%s error=%s",
+            if Path(html_infer_dir).is_dir() and any(Path(html_infer_dir).iterdir()):
+                artifacts["infer_dir"] = html_infer_dir.replace("\\", "/")
+            if Path(html_chart_dir).is_dir() and any(Path(html_chart_dir).iterdir()):
+                artifacts["chart_dir"] = html_chart_dir.replace("\\", "/")
+            logger.info(
+                "[DeepResearchTaskManager] Styled html report exported "
+                "task_id=%s style_status=%s style_applied=%s "
+                "elapsed_seconds=%.3f output=%s",
                 task_id,
-                report_file_docx,
-                exc,
+                styled_result.style_status,
+                styled_result.style_applied,
+                time.monotonic() - html_export_started_at,
+                report_file_html,
             )
-        else:
-            artifacts["docx"] = report_file_docx
 
         return artifacts
 
@@ -895,8 +932,6 @@ class DeepResearchTaskManager:
         parts = []
         if report_paths.get("html"):
             parts.append(f"html报告已保存到{report_paths['html']}\n")
-        if report_paths.get("docx"):
-            parts.append(f"docx报告已保存到{report_paths['docx']}\n")
         parts.append(f"markdown报告已保存到{report_paths['md']}\n")
         if report_paths.get("infer_dir"):
             parts.append(f"溯源推理图已保存到{report_paths['infer_dir']}\n")
@@ -930,8 +965,6 @@ class DeepResearchTaskManager:
             query: str,
             agent_config: Dict,
             report_template: str,
-            task_id: str = "",
-            log_output_dir: str = "",
             # 新增路由参数
             session_id: str = "",
             channel_id: str = "",
@@ -944,8 +977,6 @@ class DeepResearchTaskManager:
             query: 用户查询字符串
             agent_config: Agent 配置字典
             report_template: 报告模板
-            task_id: 任务 ID（用于日志文件命名）
-            log_output_dir: 日志输出目录路径（默认为项目日志目录下的 DeepResearch 子文件夹）
             collect_progress: 是否收集进度条目（用于工具输出）。
                 为 True 时返回 (report_content, progress_entries)，否则返回 report_content
 
@@ -953,9 +984,6 @@ class DeepResearchTaskManager:
             collect_progress=False: 最终研究报告内容
             collect_progress=True: (最终研究报告内容, 进度条目列表)
         """
-        # === 日志捕获设置 ===
-        log_capture_context = self._setup_log_capture(task_id, log_output_dir)
-
         try:
             agent_factory = AgentFactory()
             agent = agent_factory.create_agent(agent_config)
@@ -1147,9 +1175,14 @@ class DeepResearchTaskManager:
             )
             raise
 
+    @contextmanager
+    def _log_capture_scope(self, task_id: str, log_output_dir: str = ""):
+        """让工作流执行、结果记录和报告导出共享同一日志生命周期。"""
+        context = self._setup_log_capture(task_id, log_output_dir)
+        try:
+            yield
         finally:
-            # === 清理日志捕获 ===
-            self._teardown_log_capture(log_capture_context)
+            self._teardown_log_capture(context)
 
     @staticmethod
     def _setup_log_capture(
@@ -1345,14 +1378,11 @@ class DeepResearchTaskManager:
 
             # 4. 解析 LLM 配置
             current_agent_config = Config().agent_config.model_dump()
-            current_agent_config["llm_config"]["general"] = {}
-            current_agent_config["llm_config"]["general"]["model_name"] = config["LLM_MODEL_NAME"]
-            current_agent_config["llm_config"]["general"]["model_type"] = config["LLM_MODEL_TYPE"]
-            current_agent_config["llm_config"]["general"]["base_url"] = config["LLM_BASE_URL"]
-            current_agent_config["llm_config"]["general"]["extension"] = config_extension
-            current_agent_config["llm_config"]["general"]["api_key"] = bytearray(config["LLM_API_KEY"],
-                                                                                 encoding="utf-8")
-            current_agent_config["llm_config"]["general"]["verify_ssl"] = False
+            workflow_llm_config, report_style_llm_config = self._build_general_llm_configs(
+                config,
+                config_extension,
+            )
+            current_agent_config["llm_config"]["general"] = workflow_llm_config
 
             # 5. 解析搜索引擎配置
             current_agent_config["web_search_engine_config"]["search_engine_name"] = config["WEB_SEARCH_ENGINE_NAME"]
@@ -1379,45 +1409,34 @@ class DeepResearchTaskManager:
             # 报告目录：用于保存报告文件
             report_dir = os.path.join(get_effective_request_workspace_dir(), "reports")
             # 日志目录：使用项目日志目录下的 DeepResearch 子文件夹（默认行为）
-            data = await self._run_jiuwen_workflow(
-                query,
-                current_agent_config,
-                "",
-                task_id=task_id,
-                log_output_dir="",  # 使用默认日志目录 get_logs_dir() / "DeepResearch"
-            )
-
-            if data:
-                report_paths = await asyncio.to_thread(
-                    self._write_report_artifacts,
-                    data,
-                    file_name,
-                    report_dir,
-                    task_id=task_id,
-                    cancel_event=task.cancel_event,
+            with self._log_capture_scope(task_id):
+                data = await self._run_jiuwen_workflow(
+                    query,
+                    current_agent_config,
+                    "",
                 )
-                result = self._format_report_result(report_paths)
 
-                """
-                    result = (
-                    f"markdown报告已保存到{report_paths['md']}; "
-                    f"html报告已保存到{report_paths['html']}; "
-                    f"docx报告已保存到{report_paths['docx']}"
-                )
-                    if report_paths["infer_dir"]:
-                    result += f"; 溯源推理图已保存到{report_paths['infer_dir']}"
+                if data:
+                    report_paths = await self._write_report_artifacts(
+                        data,
+                        file_name,
+                        report_dir,
+                        task_id=task_id,
+                        cancel_event=task.cancel_event,
+                        llm_config=report_style_llm_config,
+                    )
+                    result = self._format_report_result(report_paths)
 
-                """
-                task.status = TaskStatus.COMPLETED
-                task.result = result
-                logger.info(
-                    "[DeepResearchTaskManager] 任务完成 task_id=%s result=%s",
-                    task_id,
-                    result,
-                    extra={'user_visible': 'critical'}
-                )
-            else:
-                raise ValueError("DeepResearch 返回空结果")
+                    task.status = TaskStatus.COMPLETED
+                    task.result = result
+                    logger.info(
+                        "[DeepResearchTaskManager] 任务完成 task_id=%s result=%s",
+                        task_id,
+                        result,
+                        extra={'user_visible': 'critical'}
+                    )
+                else:
+                    raise ValueError("DeepResearch 返回空结果")
 
         except asyncio.CancelledError:
             task.status = TaskStatus.CANCELLED
@@ -2033,14 +2052,11 @@ class DeepResearchTaskManager:
 
         # 4. 解析 LLM 配置
         current_agent_config = Config().agent_config.model_dump()
-        current_agent_config["llm_config"]["general"] = {}
-        current_agent_config["llm_config"]["general"]["model_name"] = config["LLM_MODEL_NAME"]
-        current_agent_config["llm_config"]["general"]["model_type"] = config["LLM_MODEL_TYPE"]
-        current_agent_config["llm_config"]["general"]["base_url"] = config["LLM_BASE_URL"]
-        current_agent_config["llm_config"]["general"]["extension"] = config_extension
-        current_agent_config["llm_config"]["general"]["api_key"] = bytearray(config["LLM_API_KEY"],
-                                                                              encoding="utf-8")
-        current_agent_config["llm_config"]["general"]["verify_ssl"] = False
+        workflow_llm_config, report_style_llm_config = self._build_general_llm_configs(
+            config,
+            config_extension,
+        )
+        current_agent_config["llm_config"]["general"] = workflow_llm_config
 
         # 5. 解析搜索引擎配置
         current_agent_config["web_search_engine_config"]["search_engine_name"] = config["WEB_SEARCH_ENGINE_NAME"]
@@ -2075,40 +2091,39 @@ class DeepResearchTaskManager:
 
         # 6. 直接执行工作流（阻塞等待，同时收集进度信息）
         report_dir = os.path.join(get_effective_request_workspace_dir(), "reports")
-        data, progress_entries = await self._run_jiuwen_workflow(
-            query,
-            current_agent_config,
-            "",
-            task_id=temp_task_id,
-            log_output_dir="",  # 使用默认日志目录
-            # 传递路由参数用于进度推送
-            session_id=session_id,
-            channel_id=channel_id,
-            request_id=request_id,
-            collect_progress=True,
-        )
+        with self._log_capture_scope(temp_task_id):
+            data, progress_entries = await self._run_jiuwen_workflow(
+                query,
+                current_agent_config,
+                "",
+                # 传递路由参数用于进度推送
+                session_id=session_id,
+                channel_id=channel_id,
+                request_id=request_id,
+                collect_progress=True,
+            )
 
-        if not data:
-            raise ValueError("DeepResearch 返回空结果")
+            if not data:
+                raise ValueError("DeepResearch 返回空结果")
 
-        # 7. 写出报告文件
-        report_paths = await asyncio.to_thread(
-            self._write_report_artifacts,
-            data,
-            file_name,
-            report_dir,
-            task_id=temp_task_id,
-            cancel_event=None,  # 阻塞执行不支持取消
-        )
+            # 7. 写出报告文件
+            report_paths = await self._write_report_artifacts(
+                data,
+                file_name,
+                report_dir,
+                task_id=temp_task_id,
+                cancel_event=None,  # 阻塞执行不支持取消
+                llm_config=report_style_llm_config,
+            )
 
-        result = self._format_progress_result(progress_entries, report_paths)
+            result = self._format_progress_result(progress_entries, report_paths)
 
-        logger.info(
-            "[DeepResearchTaskManager] 阻塞执行任务完成 temp_task_id=%s result=%s",
-            temp_task_id,
-            result,
-            extra={'user_visible': 'critical'}
-        )
+            logger.info(
+                "[DeepResearchTaskManager] 阻塞执行任务完成 temp_task_id=%s result=%s",
+                temp_task_id,
+                result,
+                extra={'user_visible': 'critical'}
+            )
 
         return result
 
