@@ -18,6 +18,12 @@ render_log_files() {
         DEPLOY_VARS["LOG_SINK_INPUT"]="mask_sensitive"
     fi
 
+    rt=$(kubectl get node "${DEPLOY_VARS["CURRENT_NODE_NAME"]}" -o jsonpath='{.status.nodeInfo.containerRuntimeVersion}')
+    case "${rt}" in
+        containerd://*) DEPLOY_VARS["VAR_LIB_DOCKER_PATH"]="/var/lib/containerd" ;;
+        docker://*)     DEPLOY_VARS["VAR_LIB_DOCKER_PATH"]="/var/lib/docker/containers" ;;
+    esac
+
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
 }
 

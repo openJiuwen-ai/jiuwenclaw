@@ -146,6 +146,8 @@ def upload_local_file_to_minio(
         secure=config.secure,
         region=config.region,
     )
+    if "myhuaweicloud." in config.endpoint:
+        client.enable_virtual_style_endpoint()
     if not client.bucket_exists(config.bucket):
         client.make_bucket(config.bucket)
 

@@ -64,10 +64,10 @@ spec:
             - --console-address
             - :9001
           env:
-            - name: MINIO_ROOT_USER
-              value: "<<MINIO_ROOT_USER>>"     
-            - name: MINIO_ROOT_PASSWORD
-              value: "<<MINIO_ROOT_PASSWORD>>"
+            - name: OBS_ACCESS_KEY
+              value: "<<OBS_ACCESS_KEY>>"
+            - name: OBS_SECRET_KEY
+              value: "<<OBS_SECRET_KEY>>"
             - name: TZ
               value: "<<TIMEZONE>>"
           ports:

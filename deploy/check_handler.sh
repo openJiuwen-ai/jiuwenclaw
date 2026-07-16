@@ -50,12 +50,6 @@ check_if_root() {
     fi
 }
 
-check_if_master() {
-    if ! kubectl get node "$(hostname)" -o wide | awk '{print $3}' | grep -qEw "master|control-plane"; then
-        error "This script must be run on master node."
-    fi
-}
-
 # ======== Check if the cluster has at least 2 nodes ======== 
 check_cluster_has_enough_nodes() {
     if [ "${CMD}" == "down"  ]; then
@@ -80,7 +74,6 @@ check_dependency(){
     fi
 
     check_cmds
-    check_if_master
     check_if_root
     check_cluster_has_enough_nodes
 }
@@ -103,8 +96,8 @@ check_if_nfs_up() {
     fi
 
     info "Use built-in NFS server"
-    fetch_master_node_ip
-    DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["MASTER_NODE_IP"]}
+    fetch_current_node_ip
+    DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["CURRENT_NODE_IP"]}
 }
 
 check_if_nfs_sc_up() {
@@ -227,13 +220,13 @@ check_if_db_up() {
     fi
 }
 
-check_if_minio_up() {
+check_if_obs_up() {
     local name="${DEPLOY_VARS["MINIO_NAME"]}"
 
-    # Check if external Minio server
-    if [ -n "${DEPLOY_VARS["MINIO_URL"]:-}" ]; then
-        info "Use external Minio server"
-        DEPLOY_VARS["ENABLE_EXTERNAL_MINIO"]="true"
+    # Check if external OBS server
+    if [ -n "${DEPLOY_VARS["OBS_URL"]:-}" ]; then
+        info "Use external OBS server"
+        DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]="true"
         return
     fi
 
@@ -243,16 +236,6 @@ check_if_minio_up() {
     fi
 
     info "Use built-in Minio server"
-}
-
-check_if_obs_up() {
-    local obs_type="${DEPLOY_VARS["OBS_TYPE"]}"
-
-    info "OBS_TYPE: ${obs_type}"
-    if [ "${obs_type}" != "minio" ]; then
-        return
-    fi
-    check_if_minio_up
 }
 
 check_if_redis_up() {
@@ -316,15 +299,6 @@ check_nfs_up_dependency(){
     if [[ "$arch" =~ ^aarch64 || "$arch" =~ arm ]]; then
         info "ARM arch unsupported for NFS, abort deployment."
     fi
-
-    # Check if NFS client command mount.nfs is installed on all worker nodes
-    for node_ip in "${OTHER_NODE_IPS[@]}"; do
-        if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no ${node_ip} "command -v mount.nfs" >/dev/null 2>&1; then
-            success "Node ${node_ip} - mount.nfs is installed."
-        else
-            error "Node ${node_ip} - mount.nfs is not installed."
-        fi
-    done
 }
 
 check_nfs_sc_up_dependency(){

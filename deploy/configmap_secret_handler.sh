@@ -9,7 +9,7 @@ render_secret_configmap() {
         "GATEWAY_DB_PASSWORD"
         "MANAGER_DB_PASSWORD"
         "REDIS_PASSWORD"
-        "MINIO_ROOT_PASSWORD"
+        "OBS_SECRET_KEY"
         "API_KEY"
     )
     for key in "${secret_keys[@]}"; do
