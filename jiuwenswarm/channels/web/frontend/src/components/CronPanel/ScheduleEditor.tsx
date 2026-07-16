@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import SimpleSelect from './SimpleSelect';
 import TimePicker from './TimePicker';
@@ -44,6 +44,12 @@ function defaultForTopMode(mode: 'period' | 'interval' | 'once'): CronSchedule {
   return { kind: 'daily', time: '' };
 }
 
+function everyHoursTextOf(schedule: CronSchedule): string {
+  return schedule.kind === 'interval' && schedule.everyHours !== undefined
+    ? String(schedule.everyHours)
+    : '';
+}
+
 function WeekdayPicker({ selected, onToggle }: { selected: number[]; onToggle: (day: number) => void }) {
   const { t } = useTranslation();
   return (
@@ -75,7 +81,8 @@ function WeekdayPicker({ selected, onToggle }: { selected: number[]; onToggle: (
 export default function ScheduleEditor({ value, onChange }: ScheduleEditorProps) {
   const { t } = useTranslation();
   const initialParsed = cronExprToSchedule(value);
-  const [schedule, setSchedule] = useState<CronSchedule>(initialParsed ?? { kind: 'daily', time: '' });
+  const initialSchedule = initialParsed ?? { kind: 'daily', time: '' };
+  const [schedule, setSchedule] = useState<CronSchedule>(initialSchedule);
   // 默认 tab：能解析出结构化 schedule 就跟它走；解析不出来时，创建任务（value 为空）默认落在
   // "周期"而不是"Cron表达式"（更符合大多数人的心智，表达式 tab 留给"手写/编辑一条解析不了的旧
   // 表达式"这种进阶场景）；编辑一条解析不出来的已有表达式（value 非空但 parse 失败）则仍然落在
@@ -88,15 +95,7 @@ export default function ScheduleEditor({ value, onChange }: ScheduleEditorProps)
   // 还没打完小数部分的中间态，Number("5.") 会被转成 5，进而把输入框的 value 强制改回"5"，把用户刚
   // 敲的小数点瞬间吞掉，导致小数点根本打不进去。用独立的文本状态只做"显示"，只有能解析成数字时才
   // 同步进 schedule，从根上避免这种"受控输入反噬"。
-  const [everyHoursText, setEveryHoursText] = useState('');
-  useEffect(() => {
-    if (topMode === 'interval' && schedule.kind === 'interval') {
-      setEveryHoursText(schedule.everyHours !== undefined ? String(schedule.everyHours) : '');
-    }
-    // 只在切换到"按间隔"tab 时（或初次挂载即处于该 tab 时）从 schedule 同步一次，
-    // 不依赖 schedule，避免用户打字触发的 updateSchedule 又把文本状态覆盖回去
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [topMode]);
+  const [everyHoursText, setEveryHoursText] = useState(() => everyHoursTextOf(initialSchedule));
 
   const validation = value.trim() ? validateCronExpr(value) : { valid: true };
 
@@ -110,6 +109,7 @@ export default function ScheduleEditor({ value, onChange }: ScheduleEditorProps)
     const parsed = cronExprToSchedule(value);
     const next = parsed && topModeOf(parsed.kind) === mode ? parsed : defaultForTopMode(mode);
     setTopMode(mode);
+    if (mode === 'interval') setEveryHoursText(everyHoursTextOf(next));
     updateSchedule(next);
   }
 

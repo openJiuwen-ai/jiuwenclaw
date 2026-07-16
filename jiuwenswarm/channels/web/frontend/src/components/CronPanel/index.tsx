@@ -214,10 +214,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       await loadJobs(projectList);
       await loadChannels();
     })();
-    // 仅在挂载时初始化一次；loadProjects/loadJobs/loadChannels 每次渲染都会重新创建，
-    // 列入依赖数组会导致该 effect 无限重复触发，因此故意忽略
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadChannels, loadJobs, loadProjects]);
 
   // 监听 Agent 工具调用结果：cron_ 前缀的工具（比如通过聊天创建/改动定时任务）执行完后
   // 自动刷新任务列表，不用用户手动刷新页面（复用的是 upstream 同款监听逻辑，见 progress.md）
@@ -233,8 +230,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       }
     });
     return unsubscribe;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadJobs, projects]);
+  }, [loadJobs, projects, reloadCronStore]);
 
   useEffect(() => {
     if (!success) return;
