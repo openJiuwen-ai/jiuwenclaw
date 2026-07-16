@@ -181,7 +181,6 @@
 - **限制与校验**：
   - `video` / `audio` / `vision` 为多模态专用键，不能通过 `/model <name>` 设置为默认聊天模型，需改用 `/config edit` 或 `/config set`；
   - 删除会拒绝移除**最后一个**模型（返回 `Cannot delete the last model`），索引越界返回 `model index not found`；
-  - 表单字段约束：必填 `model_name` / `api_base` / `api_key` / `model_provider`；`api_base` 须以 `http://` 或 `https://` 开头；`model_provider` 取值限于 `OpenAI` / `OpenRouter` / `DashScope` / `SiliconFlow` / `InferenceAffinity` / `DeepSeek`；`reasoning_level` 取值为留空（default）/ `off` / `low` / `medium` / `high`；`model_name`、`alias` ≤100 字符，`api_base` ≤512，`api_key` ≤2048；`alias` 不可与其他模型的 alias 或 model_name 冲突。
 - **配置写入行为**：
   - 新增 / 编辑 / 删除会改写 `config.yaml` 的 `models.defaults`（兼容旧结构），并触发 Agent 配置重载；
   - 切换模型会校验配置与环境变量占位符，更新 `MODEL_NAME` / `MODEL_PROVIDER` / `API_BASE` / `API_KEY`，并回写 `.env`。

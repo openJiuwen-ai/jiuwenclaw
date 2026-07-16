@@ -179,7 +179,6 @@ Manages model configs defined under `models.defaults` in `config.yaml`. Supports
 - **Limitations & validation**:
   - `video` / `audio` / `vision` are multimodal-only keys and cannot be set as the default chat model via `/model <name>`; use `/config edit` or `/config set` instead;
   - Deleting the **last** remaining model is rejected (`Cannot delete the last model`); an out-of-range index returns `model index not found`;
-  - Form field constraints: required `model_name` / `api_base` / `api_key` / `model_provider`; `api_base` must start with `http://` or `https://`; `model_provider` must be one of `OpenAI` / `OpenRouter` / `DashScope` / `SiliconFlow` / `InferenceAffinity` / `DeepSeek`; `reasoning_level` is one of empty (default) / `off` / `low` / `medium` / `high`; `model_name` & `alias` ≤ 100 chars, `api_base` ≤ 512, `api_key` ≤ 2048; `alias` must not conflict with another model's alias or model_name.
 - **Config write behavior**:
   - Add / edit / delete mutate `models.defaults` in `config.yaml` (compatible with the old structure) and trigger an Agent config reload;
   - Switching model validates config and environment variable placeholders, updates `MODEL_NAME` / `MODEL_PROVIDER` / `API_BASE` / `API_KEY`, writes back to `.env`.
