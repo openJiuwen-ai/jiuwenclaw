@@ -651,7 +651,7 @@ export function ConversationSidebar({
       const payload = event.payload as Record<string, unknown>;
       const inner = (payload?.tool_result as Record<string, unknown>) ?? payload;
       const toolName = String(inner?.tool_name ?? inner?.name ?? '');
-      if (toolName.startsWith(CRON_TOOL_PREFIX)) {
+      if (toolName === 'cron' || toolName.startsWith(CRON_TOOL_PREFIX)) {
         void loadCronJobs();
       }
     });

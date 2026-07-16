@@ -97,6 +97,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
   // multi-session/sidebar/ConversationSidebar.tsx），跟这个面板自己的 jobs state 是两份数据；
   // 在这里创建/编辑/停止/删除任务后也要通知它刷新，否则侧边栏那边的任务文件夹会显示过期数据
   const reloadCronStore = useCronStore((s) => s.reload);
+  const loadCronSessions = useCronStore((s) => s.loadCronSessions);
 
   const [jobs, setJobs] = useState<CronTaskUI[]>([]);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
@@ -224,7 +225,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
       const payload = event.payload as Record<string, unknown>;
       const inner = (payload?.tool_result as Record<string, unknown>) ?? payload;
       const toolName = String(inner?.tool_name ?? inner?.name ?? '');
-      if (toolName.startsWith(CRON_TOOL_PREFIX)) {
+      if (toolName === 'cron' || toolName.startsWith(CRON_TOOL_PREFIX)) {
         void loadJobs(projects);
         void reloadCronStore();
       }
@@ -341,6 +342,11 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     try {
       const result = await webRequest<{ accepted: boolean; run_id: string; session_id: string }>('cron.job.run_now', { id: confirmState.job.id });
       setSuccess(t('cron.success.runNow'));
+      // 刷新左侧栏该定时任务下展开的 session 列表（project.get_cron_sessions）
+      const { id: cronId, projectId } = confirmState.job;
+      if (cronId && projectId) {
+        void loadCronSessions(projectId, cronId);
+      }
       // 后端首次执行（job 还没有 last_session_id）时 session_id 会是空串，此时不跳转，
       // 用户仍可通过"触发的会话"列表在会话就绪后手动打开
       if (result.session_id) {
