@@ -443,6 +443,23 @@ class VibeSkillConfig:
         return http_p == ws_p
 
 
+class _TimelineReplayStore:
+    """No-op persistence boundary for history-only event conversion."""
+
+    async def append_file_ready_obs_url(self, session_id: str, url: str) -> None:
+        return None
+
+    async def set_state(
+        self,
+        session_id: str,
+        state: VibeSkillSessionState,
+    ) -> None:
+        return None
+
+    async def set_exportable(self, session_id: str, exportable: bool) -> None:
+        return None
+
+
 class VibeSkillChannel(BaseChannel):
     """VibeSkill Channel.
 
@@ -3833,12 +3850,14 @@ class VibeSkillChannel(BaseChannel):
         """
         messages: list[dict[str, Any]] = []
         pending_confirms: list[dict[str, Any]] = []
-        replay_ctx_backup = self._message_ctx
-        replay_pending_backup = self._pending_confirms
-        replay_detached_backup = self._detached_tool_parts
-        self._message_ctx = {}
-        self._pending_confirms = {}
-        self._detached_tool_parts = {}
+        # HTTP history replay may overlap a live WebSocket stream. Bind the
+        # existing event handlers to an isolated channel view so replay never
+        # swaps or mutates the live channel's aggregation/persistence state.
+        replay_channel = copy.copy(self)
+        replay_channel._message_ctx = {}
+        replay_channel._pending_confirms = {}
+        replay_channel._detached_tool_parts = {}
+        replay_channel._store = _TimelineReplayStore()
 
         # 需要 replay 的事件类型（使用流式处理器处理）
         replayable_event_keys = (
@@ -3854,7 +3873,7 @@ class VibeSkillChannel(BaseChannel):
             "skilldev.error",
             "skilldev.completed",
         )
-        all_handlers = self._get_skilldev_event_handlers()
+        all_handlers = replay_channel._get_skilldev_event_handlers()
         replayable_handlers = {
             key: handler
             for key, handler in all_handlers.items()
@@ -3879,7 +3898,7 @@ class VibeSkillChannel(BaseChannel):
                 role = "user" if source == "user" else "assistant"
 
                 if event_type in round_boundary_user_events:
-                    self._clear_message_context_for_session(session_id)
+                    replay_channel._clear_message_context_for_session(session_id)
 
                 # skilldev.agent_completed：Agent 单轮结束（Agent 模式专有）。
                 # 仅用于划分回合，不向客户端补发 session.status / 关 WS 等副作用。
@@ -4145,9 +4164,9 @@ class VibeSkillChannel(BaseChannel):
 
             return self._merge_message_update_events(messages)
         finally:
-            self._message_ctx = replay_ctx_backup
-            self._pending_confirms = replay_pending_backup
-            self._detached_tool_parts = replay_detached_backup
+            replay_channel._message_ctx.clear()
+            replay_channel._pending_confirms.clear()
+            replay_channel._detached_tool_parts.clear()
 
     async def http_handler(
         self,
