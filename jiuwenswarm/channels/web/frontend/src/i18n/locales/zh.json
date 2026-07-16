@@ -958,10 +958,181 @@
     "autoManaged": "自动维护",
     "autoManagedHint": "此任务由主动推荐开关自动创建/删除；开关在设置→主动推荐。仅 Cron 表达式与时区可在此面板编辑，其余字段（名称/状态/描述/偏移/频道）不可改；删除请到设置关闭开关。",
     "autoManagedToggleDisabled": "自动维护任务的开关由设置→主动推荐控制，不可在此切换。",
+    "pageTitle": "定时任务",
+    "pageSubtitle": "配置和管理自动化任务，Jiuwen 将按计划执行。",
+    "actions": {
+      "confirm": "确定"
+    },
+    "createMenu": {
+      "trigger": "创建",
+      "manual": "手动创建",
+      "viaChat": "通过聊天创建",
+      "viaChatPrompt": "我们一起来设置一个定时任务吧。首先，说明定时任务在 JiuwenSwarm 中的工作方式。然后询问我需要安排什么，以及应该在什么时候运行。"
+    },
+    "stats": {
+      "total": "任务总数（{{count}}）"
+    },
+    "tabs": {
+      "list": "任务列表",
+      "template": "任务模板",
+      "history": "执行历史"
+    },
+    "search": {
+      "placeholder": "请输入搜索内容"
+    },
+    "table": {
+      "name": "名称",
+      "project": "项目",
+      "schedule": "计划于",
+      "status": "运行状态",
+      "timezone": "时区",
+      "channel": "推送频道",
+      "actions": "操作",
+      "noProject": "–",
+      "runNow": "立即执行",
+      "stop": "停止",
+      "edit": "编辑",
+      "more": "更多",
+      "history": "运行历史",
+      "triggeredSessions": "触发的会话",
+      "noTriggeredSessions": "暂无触发记录"
+    },
+    "empty": {
+      "createButton": "创建定时任务",
+      "templateSectionTitle": "任务模板",
+      "templateMore": "更多"
+    },
+    "history": {
+      "comingSoon": "该功能即将上线"
+    },
+    "confirm": {
+      "deleteTitle": "删除",
+      "deleteMessage": "确定要删除自动化任务\"{{name}}\"吗？",
+      "stopTitle": "停止",
+      "stopMessage": "确定要停止自动化任务\"{{name}}\"吗？",
+      "runNowTitle": "立即执行",
+      "runNowMessage": "确定要立即执行任务\"{{name}}\"吗？"
+    },
+    "drawer": {
+      "titleCreate": "创建定时任务",
+      "titleEdit": "编辑",
+      "titleTemplate": "从模板创建",
+      "switchToManual": "手动创建",
+      "switchToTemplate": "从模板创建",
+      "fieldName": "任务名称",
+      "fieldProject": "项目（可选）",
+      "fieldModel": "模型",
+      "fieldDescription": "描述",
+      "fieldChannel": "推送频道",
+      "fieldTimezone": "时区",
+      "fieldEffectiveDate": "生效周期（可选）",
+      "effectiveDateComingSoon": "该功能即将上线，当前选择暂不影响任务生效",
+      "fieldEnabled": "启用",
+      "placeholderInput": "请输入",
+      "placeholderSelect": "请选择",
+      "placeholderEffectiveDate": "请选择生效日期",
+      "missingFieldsHint": "还需要填写：{{fields}}"
+    },
+    "schedule": {
+      "title": "执行计划",
+      "help": "选择任务的执行频率",
+      "modePeriod": "周期",
+      "modeInterval": "按间隔",
+      "modeOnce": "单次",
+      "modeCronExpr": "Cron表达式",
+      "cronExprPlaceholder": "请输入 Cron 表达式，如 0 0 9 * * ? *",
+      "cronExprHelp": "7段式(Quartz)：秒 分 时 日 月 周 年",
+      "daily": "每天",
+      "weekly": "每周",
+      "monthly": "每月",
+      "yearly": "每年",
+      "selectTime": "请选择时间",
+      "selectMonth": "请选择月份",
+      "selectDay": "请选择日期",
+      "every": "每",
+      "everyHoursPlaceholder": "小时数",
+      "hoursUnit": "小时",
+      "dayOption": "{{day}}日",
+      "monthOption": "{{month}}月",
+      "lastDayOfMonth": "月末最后一天",
+      "listSeparator": "、",
+      "weekday": {
+        "mon": "一",
+        "tue": "二",
+        "wed": "三",
+        "thu": "四",
+        "fri": "五",
+        "sat": "六",
+        "sun": "日"
+      },
+      "summary": {
+        "daily": "每天 {{time}}",
+        "weekly": "每周{{days}} {{time}}",
+        "monthly": "每月{{day}} {{time}}",
+        "monthlyWeekday": "每月{{weekOfMonth}} 周{{days}} {{time}}",
+        "yearly": "每年{{month}}月{{day}}日 {{time}}",
+        "interval": "每{{n}}小时",
+        "intervalWithWeekdays": "每{{n}}小时（{{days}}）",
+        "once": "{{date}} {{time}}",
+        "lastDay": "月末"
+      },
+      "monthlySubMode": {
+        "date": "按日期",
+        "week": "按星期"
+      },
+      "weekOfMonth": {
+        "1": "第一周",
+        "2": "第二周",
+        "3": "第三周",
+        "4": "第四周",
+        "last": "最后一周"
+      }
+    },
+    "modelPicker": {
+      "configured": "已配置",
+      "empty": "暂无可用模型，请先在配置面板添加模型"
+    },
+    "timePicker": {
+      "hour": "时",
+      "minute": "分"
+    },
+    "datePicker": {
+      "prevYear": "上一年",
+      "prevMonth": "上一月",
+      "nextMonth": "下一月",
+      "nextYear": "下一年",
+      "yearMonthHeader": "{{year}}年 {{month}}月",
+      "monthItem": "{{month}}月",
+      "weekday": {
+        "sun": "日",
+        "mon": "一",
+        "tue": "二",
+        "wed": "三",
+        "thu": "四",
+        "fri": "五",
+        "sat": "六"
+      }
+    },
+    "template": {
+      "trend": {
+        "title": "每日行业资讯",
+        "description": "每天早上8点，给我推送当天【你所在行业，例如：人工客服/金融/新能源】点最新行业资讯动态，整理成结构化文档发出。"
+      },
+      "newspaper": {
+        "title": "市场舆情追踪",
+        "description": "每天中午12点，帮我搜索并汇总竞争对手【某公司或某某产品】过去24小时在全网点最新动态和舆情报道"
+      },
+      "briefcase": {
+        "title": "工作周报",
+        "description": "每周五下午6点，帮我根据本周聊天、文档、表格，生成我的周报，任务进度，下周事项工作安排，并且以文档形式发出。"
+      }
+    },
     "status": {
       "enabled": "启用",
       "disabled": "禁用",
-      "expired": "过期"
+      "expired": "过期",
+      "running": "运行中",
+      "paused": "已暂停"
     },
     "columns": {
       "name": "任务名称",
@@ -1022,7 +1193,7 @@
       "cronHourStep": "小时步长需能被24整除",
       "cronDay": "日字段错误（取值 1-31，支持 * ? - ,）",
       "cronMonth": "月字段错误（取值 1-12，支持 * - ,）",
-      "cronWeek": "周字段错误（取值 1-7，支持 * ? - ,，1=SUN）",
+      "cronWeek": "周字段错误（取值 0-6，支持 * ? - ,，0=周日、1=周一...6=周六）",
       "cronYear": "年份字段错误（取值 1970-2099 或 *）",
       "timezoneRequired": "时区不能为空",
       "targetRequired": "推送频道不能为空",

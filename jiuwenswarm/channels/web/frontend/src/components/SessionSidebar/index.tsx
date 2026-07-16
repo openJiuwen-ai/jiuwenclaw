@@ -17,7 +17,6 @@ import logoIcon from '/logo.svg';
 import AdvancedConfigIcon from '../../assets/sidebar/advanced-config-new.svg?react';
 import UpdateIcon from '../../assets/sidebar/advanced-config.svg?react';
 import WorkIcon from '../../assets/工作.svg?react';
-import CronDesignIcon from '../../assets/定时任务.svg?react';
 import SkillDesignIcon from '../../assets/技能.svg?react';
 import AgentDesignIcon from '../../assets/智能体.svg?react';
 import MoreDesignIcon from '../../assets/更多.svg?react';
@@ -50,7 +49,6 @@ const teamNavIcon = (
 
 const mainNavItems: NavItem[] = [
   { key: 'chat', labelKey: 'nav.work', icon: <WorkIcon aria-hidden /> },
-  { key: 'cron', labelKey: 'nav.cron', icon: <CronDesignIcon aria-hidden /> },
   { key: 'skills', labelKey: 'nav.skills', icon: <SkillDesignIcon aria-hidden /> },
   { key: 'channels', labelKey: 'nav.channels', icon: <ChannelIcon aria-hidden /> },
   { key: 'agents', labelKey: 'nav.agent', icon: <AgentDesignIcon aria-hidden /> },
