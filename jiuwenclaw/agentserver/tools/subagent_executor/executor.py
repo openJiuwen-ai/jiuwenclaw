@@ -52,6 +52,8 @@ from jiuwenclaw.agentserver.tools.subagent_executor.rails import (
     ForkMessageInjectionRail,
     SubagentContextRail,
 )
+from jiuwenclaw.agentserver.thinking import adapt_thinking
+from jiuwenclaw.agentserver.thinking.rail import ThinkingInjectRail
 from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
 from jiuwenclaw.perf.request_summary_rail import RequestSummaryRail
 from jiuwenclaw.agentserver.tools.subagent_executor.skill_use_rail_subagent import (
@@ -398,6 +400,38 @@ class ForkAgentExecutor:
         if self._resolve_model is None:
             return self._model, None
         return self._resolve_model(model_name=model_name, model_tier=model_tier)
+
+    @staticmethod
+    def _build_thinking_inject_rail(
+        thinking: str,
+        model: Model | None,
+        *,
+        role_id: str = "",
+        agent_id: str = "",
+    ) -> ThinkingInjectRail:
+        """Freeze thinking kwargs once for the subagent lifetime."""
+        from jiuwenclaw.agentserver.thinking.types import kwargs_digest
+
+        profile = adapt_thinking(thinking, model)
+        logger.info(
+            "[Thinking] subagent_thinking_profile role_id=%s agent_id=%s "
+            "thinking=%s model=%r injected=%s degraded=%s reason=%s "
+            "vendor_style=%s digest=%s",
+            role_id or "",
+            agent_id or "",
+            profile.thinking,
+            profile.model_name,
+            profile.injected,
+            profile.degraded,
+            profile.reason,
+            profile.vendor_style,
+            kwargs_digest(profile.llm_call_kwargs),
+        )
+        return ThinkingInjectRail(
+            profile,
+            role_id=role_id or "",
+            agent_id=agent_id or "",
+        )
 
     @staticmethod
     def _resolve_subagent_workspace_dir() -> tuple[str, str]:
@@ -953,6 +987,12 @@ Approach each task methodically and deliver high-quality results.
                 parent_session=parent_session,
                 workspace=workspace_obj,  # Pass workspace for artifact path detection
             ),
+            self._build_thinking_inject_rail(
+                task.thinking,
+                model or self._model,
+                role_id=getattr(task, "role_id", "") or "",
+                agent_id=getattr(task, "task_id", "") or "",
+            ),
             # active-skill body 的 lift/pin 由 rail.after_tool_call 触发；
             # include_tools=False：read_file/code/bash 已由 FileSystemRail 注册；
             # include_skill_body_tools=True：子代理自行注册 skill_tool/skill_complete，
@@ -1142,6 +1182,12 @@ Execute the given task using inherited context and available tools.
                 subagent_id=task.task_id,
                 parent_session=parent_session,
                 workspace=workspace_obj,  # Pass workspace for artifact path detection
+            ),
+            self._build_thinking_inject_rail(
+                task.thinking,
+                model or self._model,
+                role_id=getattr(task, "role_id", "") or "",
+                agent_id=getattr(task, "task_id", "") or "",
             ),
             # 与 spawn 路径同样：include_tools=False（FileSystemRail 已注册 fs 工具）；
             # include_skill_body_tools=True：子代理自行注册 skill_tool/skill_complete，
