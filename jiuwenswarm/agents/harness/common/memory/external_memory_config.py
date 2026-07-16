@@ -60,7 +60,7 @@ def get_external_memory_config(
         ext = {}
 
     return {
-        "provider": (ext.get("provider") or "").strip(),
+        "provider": (ext.get("provider") or "").strip().lower(),
         "user_id": ext.get("user_id") or _DEFAULT_USER,
         "scope_id": ext.get("scope_id") or _DEFAULT_SCOPE,
         "allowed_plugins": ext.get("allowed_plugins") or [],
@@ -68,6 +68,7 @@ def get_external_memory_config(
         "mem0": ext.get("mem0") or {},
         "openviking": ext.get("openviking") or {},
         "lakebase": ext.get("lakebase") or {},
+        "celia": ext.get("celia") or {},
     }
 
 

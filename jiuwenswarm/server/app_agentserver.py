@@ -195,6 +195,14 @@ async def _run(host: str, port: int) -> None:
             except Exception as exc:
                 logger.warning("[AgentServer] teammate bootstrap daemon stop failed: %s", exc)
         await server.stop()
+        try:
+            from jiuwenswarm.agents.harness.common.memory.celia.client_manager import (
+                get_celia_client_manager,
+            )
+
+            await get_celia_client_manager().close_all()
+        except Exception as exc:
+            logger.warning("[AgentServer] Celia shutdown failed: %s", exc)
         # Shutdown team observability (flush & close spans)
         try:
             from jiuwenswarm.agents.harness.team.team_manager import shutdown_team_observability
