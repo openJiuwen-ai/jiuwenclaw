@@ -25,6 +25,7 @@ import {
 } from './features/tool-events/toolEventNormalizer';
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
+import { fetchSessions as fetchDbSessions, fetchSessionDetail as fetchDbSessionDetail, type HistorySession } from './services/api';
 import { AgentMode, UserAnswer, ChatSendFile, ModelEntry } from './types';
 import {
   useSessionStore,
@@ -227,7 +228,8 @@ function AppContent() {
     const stored = getStoredSessionId();
     return stored || 'new';
   });
-  const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
+  const [activeNav] = useState<MainNavKey>('chat');
+  const [dbSessions, setDbSessions] = useState<HistorySession[]>([]);
   const [serverConfig, setServerConfig] = useState<Record<string, unknown> | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [initialDataLoaded, setInitialDataLoaded] = useState(false);
@@ -550,6 +552,9 @@ function AppContent() {
 
   // 页面加载或切换会话时尝试恢复历史；用户开始实时对话后不再自动恢复
   useEffect(() => {
+    // 改用 DB 恢复（handleRestoreSession → /api/sessions/{id}），不再走 WS historyRestore
+    return;
+
     if (!isConnected || !sessionId || sessionId === 'new') return;
 
     // 仅处理以 sess_ 开头的会话 ID
@@ -747,6 +752,49 @@ function AppContent() {
   }, [isConnected, sessionId, request, disposeInFlightHistoryHandles]);
 
   // 新建会话：立即生成可用的 session_id，避免停留在 'new' 导致无法发送消息
+  const restoreSeqRef = useRef(0);
+
+  const loadDbSessions = useCallback(async () => {
+    try {
+      setDbSessions(await fetchDbSessions(50, 0, extUserId || undefined));
+    } catch (e) {
+      console.error('loadDbSessions failed', e);
+    }
+  }, [extUserId]);
+
+  useEffect(() => {
+    void loadDbSessions();
+  }, [loadDbSessions]);
+
+  const handleRestoreSession = useCallback(
+    async (sid: string) => {
+      if (!sid) return;
+      restoreSeqRef.current += 1;
+      const seq = restoreSeqRef.current;
+      clearMessages();
+      try {
+        const detail = await fetchDbSessionDetail(sid, extUserId || undefined);
+        if (seq !== restoreSeqRef.current) return; // 期间又点了别的会话，丢弃本次旧请求
+        if (detail && detail.messages) {
+          const chatStore = useChatStore.getState();
+          for (const m of detail.messages) {
+            chatStore.addMessage({
+              id: m.request_id || `hist-${sid}-${m.timestamp}`,
+              role: m.role,
+              content: m.content,
+              timestamp: new Date(m.timestamp * 1000).toISOString(),
+            });
+          }
+        }
+      } catch (e) {
+        console.error('handleRestoreSession failed', e);
+      }
+      setSessionId(sid);
+      storeSessionId(sid);
+    },
+    [extUserId, clearMessages],
+  );
+
   const handleNewSession = useCallback(async () => {
     disposeInFlightHistoryHandles();
     setHistoryPagerMeta(null);
@@ -879,8 +927,9 @@ function AppContent() {
       const sid = await ensureSessionForSend();
       if (!sid) return;
       await sendMessage(content, sid, files);
+      void loadDbSessions();
     })();
-  }, [disposeInFlightHistoryHandles, ensureSessionForSend, sendMessage]);
+  }, [disposeInFlightHistoryHandles, ensureSessionForSend, sendMessage, loadDbSessions]);
 
   const handleInterrupt = useCallback((newInput?: string, files?: ChatSendFile[]) => {
     if (!sessionId || sessionId === 'new') return;
@@ -1025,10 +1074,6 @@ function AppContent() {
     sessionId,
   ]);
 
-  const handleNavigate = useCallback((nav: MainNavKey) => {
-    setActiveNav(nav);
-  }, []);
-
   const heartbeatToastPreviewRaw = heartbeatToastMessage.replace(/\s+/g, ' ').trim();
   const heartbeatToastPreview = heartbeatToastPreviewRaw.length > 120
     ? `${heartbeatToastPreviewRaw.slice(0, 120)}...`
@@ -1067,8 +1112,10 @@ function AppContent() {
 
       {/* Navigation Sidebar */}
       <SessionSidebar
-        activeNav={activeNav}
-        onNavigate={handleNavigate}
+        sessions={dbSessions}
+        currentSessionId={sessionId}
+        onSelect={handleRestoreSession}
+        onNewSession={handleNewSession}
         appVersion={typeof serverConfig?.app_version === 'string' ? serverConfig.app_version : '0.1.7'}
       />
 

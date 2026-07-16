@@ -44,7 +44,20 @@
     "config": "配置信息",
     "browser": "浏览器服务",
     "logs": "日志",
-    "update": "更新"
+    "update": "更新",
+    "history": "历史"
+  },
+  "history": {
+    "title": "历史会话",
+    "subtitle": "浏览 Web Pod 本地归档的对话",
+    "refresh": "刷新",
+    "loading": "加载中...",
+    "empty": "暂无历史会话",
+    "emptyMessages": "该会话没有消息",
+    "notFound": "未找到该会话",
+    "back": "返回列表",
+    "newSession": "新建会话",
+    "messageCount": "{{count}} 条消息"
   },
   "team": {
     "members": "团队成员",

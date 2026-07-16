@@ -279,6 +279,9 @@ def make_history_callback(store: ChatHistoryStore) -> FrameCallback:
 
         if event not in _FINAL_EVENTS:
             return  # 中间事件（*.delta / tool_call / processing_status 等）—— 不采集
+        # historyRestore(history.get)的错误响应(request_id 以 history- 开头)不是 AI 回复，不采集
+        if event == "chat.error" and isinstance(request_id, str) and request_id.startswith("history-"):
+            return
         session_id = payload.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             logger.warning(
