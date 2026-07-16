@@ -289,6 +289,17 @@ async def _ask_user_question_impl(questions: Any, max_options: int | None = None
     if not stream_rid:
         return {"status": "error", "message": "内部错误：缺少 stream_request_id，无法发送追问。", "answers": []}
 
+    # 大纲预览：仍受引导模式控制；关闭时不弹窗，直接跳过大纲确认继续执行。
+    if not interactive:
+        first_preview = _first_outline_preview(normalized)
+        if first_preview is not None:
+            return {
+                "status": "skipped",
+                "message": "未开启引导式交互，跳过大纲确认，使用生成的大纲继续。",
+                "answers": [],
+                "original_content": str(first_preview.get("text") or "").strip(),
+            }
+
     ask_id = f"{ASK_REQUEST_PREFIX}{uuid.uuid4().hex}"
     payload: dict[str, Any] = {
         "event_type": "chat.ask_user_question",
@@ -334,8 +345,8 @@ _ASK_TOOL_CARD = ToolCard(
         "options[{label, description?, id?, free_input?}]、可选 header、multi_select；free_input=true 的选项 label 自动设为「其他」；"
         "可选 max_options 指定每题选项数量上限（默认4），当用户明确要求N个选项时应设为N，未指定时使用默认值；"
         "可选 preview{text,title?,format?,editable?,outline_ref?,meta?} "
-        "用于大纲 Markdown 审阅（将注入 outline_confirm / outline_use_edited 选项），"
-        "无论是否开启引导模式都会推送并等待用户真实作答。"
+        "用于 PPT 大纲 Markdown 审阅（将注入 outline_confirm / outline_use_edited 选项）；"
+        "仅带 preview 的大纲确认受引导模式约束，未开启引导时返回 skipped 不弹窗。"
     ),
     input_params={
         "type": "object",
