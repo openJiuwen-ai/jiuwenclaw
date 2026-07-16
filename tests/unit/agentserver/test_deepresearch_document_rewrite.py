@@ -75,6 +75,7 @@ def _prepare(root: Path, report: Path, provenance: dict, selected: str):
         document_id=provenance["document_id"],
         revision_id=provenance["revision_id"],
         content_sha256=provenance["content_sha256"],
+        action_category="synonym_rewrite",
         action="polish",
         block_id=block.block_id,
         start=start,
@@ -90,6 +91,27 @@ def _prepare(root: Path, report: Path, provenance: dict, selected: str):
 def test_block_id_matches_frontend_utf8_fnv_contract():
     block = next(iter_rewrite_blocks("中文 block\n"))
     assert block.block_id == "block_0_b7c45b70"
+
+
+def test_prepare_rejects_non_synonym_rewrite_category(tmp_path):
+    report, provenance = _write_document(tmp_path, "原句。\n")
+    block = next(iter_rewrite_blocks(report.read_text(encoding="utf-8")))
+    with pytest.raises(RewriteError) as caught:
+        prepare_rewrite(
+            workspace_root=tmp_path,
+            report_path=report,
+            document_id=provenance["document_id"],
+            revision_id=provenance["revision_id"],
+            content_sha256=provenance["content_sha256"],
+            action_category="supplementary_search",
+            action="polish",
+            block_id=block.block_id,
+            start=0,
+            end=3,
+            selected_text="原句。",
+            session_id="S1",
+        )
+    assert caught.value.code == "BAD_REQUEST"
 
 
 def test_prepare_and_commit_create_child_revision_without_changing_parent(tmp_path):

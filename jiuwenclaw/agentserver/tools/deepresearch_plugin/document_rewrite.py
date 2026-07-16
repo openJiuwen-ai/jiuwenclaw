@@ -198,6 +198,7 @@ def prepare_rewrite(
     document_id: str,
     revision_id: str,
     content_sha256: str,
+    action_category: str,
     action: str,
     block_id: str,
     start: int,
@@ -214,6 +215,8 @@ def prepare_rewrite(
         raise RewriteError("BAD_REQUEST", "report path is outside the current workspace")
     if not SAFE_ID_RE.fullmatch(document_id) or not SAFE_ID_RE.fullmatch(revision_id):
         raise RewriteError("BAD_REQUEST", "invalid document or revision id")
+    if action_category != "synonym_rewrite":
+        raise RewriteError("BAD_REQUEST", "unsupported rewrite action category")
     if action not in {"rewrite", "expand", "polish"}:
         raise RewriteError("BAD_REQUEST", "unsupported rewrite action")
     if not selected_text or len(selected_text) > 12_000 or len(instruction) > 2_000:
@@ -273,6 +276,7 @@ def prepare_rewrite(
         _CONTEXTS[token] = context
     return {
         "context_token": token,
+        "action_category": action_category,
         "action": action,
         "selected_text": selected_text,
         "block_context": block.text,
