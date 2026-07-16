@@ -35,6 +35,8 @@ ALLOWED_ENV_KEYS: Set[str] = {
     # Skill 服务配置
     "SKILL_SEARCH_URL",
     "SKILL_SCAN_URL",
+    # Agent runtime
+    "AGENT_RUNTIME_MCP_RUN"
 }
 
 # 禁止覆盖的系统/基础设施变量
