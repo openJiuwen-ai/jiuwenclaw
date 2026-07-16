@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo >/dev/null 2>&1
 
+check_if_master() {
+    if ! kubectl get node "$(hostname)" -o wide | awk '{print $3}' | grep -qEw "master|control-plane"; then
+        error "This script must be run on master node."
+    fi
+}
+
 # Wait for kubernetes resource rollout ready
 # Args:
 #   1: resource kind
@@ -137,19 +143,55 @@ wait_pod_terminated() {
   success "Pod has been fully terminated and cleaned up!"
 }
 
-fetch_master_node_ip() {
-    if [ -n "${DEPLOY_VARS["MASTER_NODE_IP"]:-}" ]; then
+fetch_current_node_ip() {
+    if [ -n "${DEPLOY_VARS["CURRENT_NODE_IP"]:-}" ]; then
         return
     fi
 
     # Get InternalIP of current master node
-    DEPLOY_VARS["MASTER_NODE_IP"]=$(kubectl get node "${DEPLOY_VARS["MASTER_NODE_NAME"]}" -o json | \
+    DEPLOY_VARS["CURRENT_NODE_IP"]=$(kubectl get node "${DEPLOY_VARS["CURRENT_NODE_NAME"]}" -o json | \
         jq -r '.status.addresses[] | 
             select(.type == "InternalIP") | 
             .address')
-    info "MASTER_NODE_IP: ${DEPLOY_VARS["MASTER_NODE_IP"]}"
+    info "CURRENT_NODE_IP: ${DEPLOY_VARS["CURRENT_NODE_IP"]}"
 }
 
+
+fetch_current_node_name() {
+    # 用户已自行定义
+    if [ -n "${DEPLOY_VARS["CURRENT_NODE_NAME"]:-}" ]; then
+        info "CURRENT_NODE_NAME defined: ${DEPLOY_VARS["CURRENT_NODE_NAME"]}"
+        return
+    fi
+
+    # 默认用hostname尝试自动获取
+    # 注意: kubectl 内置 JSONPath 不支持嵌套过滤 [?(...[?(...)])],
+    # 会报 "unterminated filter"，因此改用 jq（与本文件其它地方一致）
+    DEPLOY_VARS["CURRENT_NODE_NAME"]=$(kubectl get nodes -o json | \
+        jq -r --arg HOST "$(hostname)" \
+        '.items[] |
+            select(.status.addresses[] | select(.type=="Hostname") | .address == $HOST) |
+            .metadata.name')
+    if [ -n "${DEPLOY_VARS["CURRENT_NODE_NAME"]:-}" ]; then
+        info "CURRENT_NODE_NAME: ${DEPLOY_VARS["CURRENT_NODE_NAME"]}"
+        return
+    fi
+
+    # 尝试用IP获取
+    for ip in $(hostname -I); do
+        DEPLOY_VARS["CURRENT_NODE_NAME"]=$(kubectl get nodes -o json | \
+            jq -r --arg IP "$ip" \
+            '.items[] |
+                select(.status.addresses[] | select(.type=="InternalIP") | .address == $IP) |
+                .metadata.name')
+        if [ -n "${DEPLOY_VARS["CURRENT_NODE_NAME"]:-}" ]; then
+            info "CURRENT_NODE_NAME: ${DEPLOY_VARS["CURRENT_NODE_NAME"]}"
+            return
+        fi
+    done
+
+    error "无法自动获取节点名，请手动赋值 CURRENT_NODE_NAME"
+}
 
 # Collect Kubernetes cluster information:
 #     current master IP
@@ -157,51 +199,8 @@ fetch_master_node_ip() {
 #     worker IPs
 #     other master IPs
 collect_k8s_cluster_info() {
-    # Get node name of current master node
-    if [ -z "${DEPLOY_VARS["MASTER_NODE_NAME"]:-}" ]; then
-        DEPLOY_VARS["MASTER_NODE_NAME"]=$(hostname)
-        info "MASTER_NODE_NAME: ${DEPLOY_VARS["MASTER_NODE_NAME"]}"
-    fi
-
-    fetch_master_node_ip
-
-    # Get Ready worker node IPs (nodes without control-plane or master role)
-    if [ -z "${DEPLOY_VARS["WORKER_NODE_IPS"]:-}" ]; then
-        WORKER_NODE_IPS=($(kubectl get nodes -o json | \
-            jq -r '.items[] | 
-                select(
-                    (.metadata.labels["node-role.kubernetes.io/control-plane"] == null and
-                    .metadata.labels["node-role.kubernetes.io/master"] == null) and
-                    (.status.conditions[] | select(.type=="Ready") | .status) == "True"
-                ) | 
-                .status.addresses[] | 
-                select(.type=="InternalIP") | 
-                .address'))
-
-        info "WORKER_NODE_IPS: ${WORKER_NODE_IPS[*]}"
-    fi
-
-    # Get OTHER MASTER IPS (control-plane nodes EXCEPT current master)
-    if [ -z "${DEPLOY_VARS["OTHER_MASTER_IPS"]:-}" ]; then
-        OTHER_MASTER_IPS=($(kubectl get nodes -o json | \
-            jq -r --arg CURRENT_NODE "${DEPLOY_VARS["MASTER_NODE_NAME"]}" \
-            '.items[] | 
-                select(
-                    (.metadata.labels["node-role.kubernetes.io/control-plane"] != null or
-                    .metadata.labels["node-role.kubernetes.io/master"] != null) and
-                    .metadata.name != $CURRENT_NODE and
-                    (.status.conditions[] | select(.type=="Ready") | .status) == "True"
-                ) | 
-                .status.addresses[] | 
-                select(.type=="InternalIP") | 
-                .address'))
-        info "OTHER_MASTER_IPS: ${OTHER_MASTER_IPS[*]}"
-    fi
-
-    if [ -z "${DEPLOY_VARS["OTHER_NODE_IPS"]:-}" ]; then
-        OTHER_NODE_IPS=("${WORKER_NODE_IPS[@]}" "${OTHER_MASTER_IPS[@]}")
-        info "OTHER_NODE_IPS: ${OTHER_NODE_IPS[*]}"
-    fi
+    fetch_current_node_name
+    fetch_current_node_ip
 }
 
 

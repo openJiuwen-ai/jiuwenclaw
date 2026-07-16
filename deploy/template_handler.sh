@@ -70,8 +70,7 @@ enable_dev_mode_if_needed() {
     mount_runtime_code_path "${file}"
 
     # Force pod to be scheduled on current master node
-    yq eval 'select(.kind == "Deployment").spec.template.spec.nodeName = "'"${DEPLOY_VARS["MASTER_NODE_NAME"]}"'"' -i "${file}"
-
+    yq eval 'select(.kind == "Deployment").spec.template.spec.nodeName = "'"${DEPLOY_VARS["CURRENT_NODE_NAME"]}"'"' -i "${file}"
     # Security context adaptation for root user
     yq eval 'select(.kind == "Deployment").spec.template.spec.securityContext.fsGroup = 0' -i "${file}"
     yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation = true' -i "${file}"
