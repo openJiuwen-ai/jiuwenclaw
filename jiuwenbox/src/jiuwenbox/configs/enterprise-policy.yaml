@@ -120,7 +120,7 @@ namespace:
   # user:
   #   true: create a new user namespace
   #   false: reuse the current user namespace
-  user: true
+  user: false
 
   # pid:
   #   true: create a new PID namespace
