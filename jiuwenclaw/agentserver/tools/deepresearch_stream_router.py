@@ -55,6 +55,29 @@ _SECTION_PROCESS_NODES = {
 _CONTROL_PROCESS_VALUES = {"SUCCESS", "ALL END", "SECTION END"}
 _QUESTION_NODES = {"question_generator", "generate_questions"}
 
+DEEPRESEARCH_STAGES: tuple[str, ...] = (
+    "研究主题澄清",
+    "大纲生成与确认",
+    "并行调研与章节撰写",
+    "报告整合",
+    "引用溯源与校验",
+    "报告交付",
+)
+
+_NODE_STAGE: dict[str, int] = {
+    "intent_recognition": 1,
+    "question_generator": 1,
+    "generate_questions": 1,
+    "feedback_handler": 1,
+    "outline": 2,
+    "outline_interaction": 2,
+    "editor_team": 3,
+    "reporter": 4,
+    "vlm_chart_generator": 4,
+    "source_tracer": 5,
+    "source_tracer_infer": 5,
+}
+
 
 @dataclass
 class RouterState:
@@ -73,6 +96,9 @@ class RouterState:
     authoritative_section_indices: set[str] = field(default_factory=set)
     question_parts: dict[str, list[str]] = field(default_factory=dict)
     question_order: list[str] = field(default_factory=list)
+    current_stage: int = 0
+    stages_completed: bool = False
+    parallel_stage_open: bool = False
 
     def __post_init__(self) -> None:
         self.authoritative_section_indices.update(self.section_titles)
@@ -93,6 +119,54 @@ def _task_frame(event_type: str, agent: str, section_idx: str, display: tuple[st
         "section_idx": section_idx,
         "display_name": display[0],
         "description": display[1],
+    }
+
+
+def _stage_boundary(event_type: str, stage: int) -> dict:
+    return {
+        "event_type": event_type,
+        "task_id": f"deepresearch_stage_{stage}",
+        "task_content": DEEPRESEARCH_STAGES[stage - 1],
+    }
+
+
+def advance_stage(state: RouterState, stage: int, *, complete: bool = False) -> dict | None:
+    """Advance the six-stage task snapshot without allowing regressions."""
+    if complete:
+        if state.stages_completed:
+            return None
+        state.current_stage = len(DEEPRESEARCH_STAGES)
+        state.stages_completed = True
+    else:
+        if state.stages_completed or stage <= state.current_stage:
+            return None
+        if stage < 1 or stage > len(DEEPRESEARCH_STAGES):
+            raise ValueError(f"invalid deepresearch stage: {stage}")
+        state.current_stage = stage
+
+    tasks = []
+    for index, title in enumerate(DEEPRESEARCH_STAGES, start=1):
+        if state.stages_completed or index < state.current_stage:
+            status = "completed"
+        elif index == state.current_stage:
+            status = "in_progress"
+        else:
+            status = "pending"
+        tasks.append({
+            "task_id": f"deepresearch_stage_{index}",
+            "task_content": title,
+            "status": status,
+        })
+
+    completed = len(DEEPRESEARCH_STAGES) if state.stages_completed else state.current_stage - 1
+    in_progress = 0 if state.stages_completed else 1
+    return {
+        "event_type": "task.update",
+        "tasks": tasks,
+        "total_tasks": len(DEEPRESEARCH_STAGES),
+        "completed_tasks": completed,
+        "in_progress_tasks": in_progress,
+        "pending_tasks": len(DEEPRESEARCH_STAGES) - completed - in_progress,
     }
 
 
@@ -179,6 +253,7 @@ def _section_reasoning(state: RouterState, chunk: dict, content: str) -> dict:
         "event_type": "chat.reasoning",
         "task_id": f"deepresearch_section_{section_idx}",
         "task_content": section_title or f"章节 {section_idx}",
+        "stream_source_id": f"deepresearch_section_{section_idx}",
         "content": content,
     }
     task_index = _positive_int(section_idx)
@@ -254,6 +329,19 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
     message_type = str(chunk.get("message_type", "")).strip()
     _remember_question_chunk(state, chunk, content)
 
+    section_idx = str(chunk.get("section_idx", "0"))
+    target_stage = 3 if agent in _SECTION_PROCESS_NODES and section_idx != "0" else _NODE_STAGE.get(agent)
+    if target_stage is not None:
+        if state.parallel_stage_open and target_stage > 3:
+            frames.append(_stage_boundary("task.complete", 3))
+            state.parallel_stage_open = False
+        stage_update = advance_stage(state, target_stage)
+        if stage_update is not None:
+            frames.append(stage_update)
+        if target_stage == 3 and state.current_stage == 3 and not state.parallel_stage_open:
+            frames.append(_stage_boundary("task.start", 3))
+            state.parallel_stage_open = True
+
     # 中断 chunk:捕获 raw_prompt + node_id,不转发(interrupted marker 到达时拼 prompt)
     if message_type == "interrupt" or str(chunk.get("event")) == "waiting_user_input":
         state.interrupt_node_id = agent
@@ -271,7 +359,6 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
     if not agent or agent in _SKIP_NODES:
         return frames
 
-    section_idx = str(chunk.get("section_idx", "0"))
     key = _node_key(agent, section_idx)
     display = NODE_DISPLAY_INFO.get(agent)
     if not display:
@@ -302,8 +389,16 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
 
     # 大纲正文只读展示在思考过程；其他非并行节点维持 reasoning_content 通用透传。
     if agent == "outline":
+        task_content = display[0] + (f" - {display[1]}" if display[1] else "")
         for process_content in _raw_process_parts(chunk, content):
-            frames.append({"event_type": "chat.reasoning", "content": process_content})
+            frames.append({
+                "event_type": "chat.reasoning",
+                "task_id": "deepresearch_stage_2",
+                "task_content": task_content,
+                "stream_source_id": "dr_outline",
+                "content": process_content,
+            })
+        return frames
     else:
         reasoning = _chunk_reasoning_content(chunk, content)
         if reasoning:

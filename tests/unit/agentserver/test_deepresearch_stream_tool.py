@@ -151,8 +151,20 @@ def _patch_env(tool_lines):
     ]
 
 
+def _task_updates(payloads):
+    return [payload for payload in payloads if payload.get("event_type") == "task.update"]
+
+
+def _active_stage(update):
+    active = [
+        index for index, task in enumerate(update["tasks"], start=1)
+        if task["status"] == "in_progress"
+    ]
+    return active[0] if active else None
+
+
 @pytest.mark.asyncio
-async def test_tool_sends_section_scoped_raw_reasoning_without_task_updates():
+async def test_tool_sends_nested_section_reasoning_without_task_snapshots():
     raw_process = "原始检索过程第一行\n\n原始检索过程第二行" + "完整内容" * 40
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
@@ -196,6 +208,7 @@ async def test_tool_sends_section_scoped_raw_reasoning_without_task_updates():
     reasoning = [
         payload for payload in payloads if payload.get("event_type") == "chat.reasoning"
     ]
+    task_updates = _task_updates(payloads)
     assert json.loads(result)["status"] == "completed"
     assert reasoning == [
         {
@@ -204,6 +217,7 @@ async def test_tool_sends_section_scoped_raw_reasoning_without_task_updates():
             "task_content": "真实标题",
             "task_index": 1,
             "total_tasks": 1,
+            "stream_source_id": "deepresearch_section_1",
             "content": "资料检索开始\n",
         },
         {
@@ -212,6 +226,7 @@ async def test_tool_sends_section_scoped_raw_reasoning_without_task_updates():
             "task_content": "真实标题",
             "task_index": 1,
             "total_tasks": 1,
+            "stream_source_id": "deepresearch_section_1",
             "content": raw_process,
         },
         {
@@ -220,10 +235,12 @@ async def test_tool_sends_section_scoped_raw_reasoning_without_task_updates():
             "task_content": "真实章节标题",
             "task_index": 1,
             "total_tasks": 1,
+            "stream_source_id": "deepresearch_section_1",
             "content": "章节撰写完成\n",
         },
     ]
-    assert not any(payload.get("event_type", "").startswith("task.") for payload in payloads)
+    assert [_active_stage(update) for update in task_updates] == [1, 3, 6, None]
+    assert all(task["status"] == "completed" for task in task_updates[-1]["tasks"])
     assert any(
         payload.get("event_type") == "chat.processing_status"
         and payload.get("is_processing") is True
@@ -289,6 +306,7 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
     assert report_frames == []
     write_report.assert_called_once_with(final_result, "r", "C1")
     assert {"event_type": "chat.file", "files": [{"path": "/tmp/r.md", "name": "r.md"}]} in payloads
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 6, None]
     assert json.loads(result) == {
         "status": "completed",
         "conversation_id": "C1",
@@ -309,7 +327,12 @@ async def test_completed_report_does_not_fall_back_to_chat_when_file_delivery_fa
         }),
     ]
     push = AsyncMock()
-    push.send_push.side_effect = [None, RuntimeError("push failed")]
+
+    async def _fail_file(message):
+        if message["payload"].get("event_type") == "chat.file":
+            raise RuntimeError("push failed")
+
+    push.send_push.side_effect = _fail_file
     with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
          patch.object(dt, "_resolve_run_script", return_value="/s"), \
          patch.object(dt, "_get_route", return_value={
@@ -327,10 +350,12 @@ async def test_completed_report_does_not_fall_back_to_chat_when_file_delivery_fa
     assert outcome["status"] == "error"
     assert outcome["error_code"] == "report_file_delivery_failed"
     assert "report_content" not in outcome
+    payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 6]
 
 
 @pytest.mark.asyncio
-async def test_tool_does_not_send_task_update_when_research_fails():
+async def test_tool_keeps_current_workflow_stage_in_progress_when_research_fails():
     lines = [
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
         json.dumps({
@@ -359,7 +384,7 @@ async def test_tool_does_not_send_task_update_when_research_fails():
         await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
 
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
-    assert not any(payload.get("event_type") == "task.update" for payload in payloads)
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 3]
 
 
 @pytest.mark.asyncio
@@ -390,7 +415,7 @@ async def test_start_returns_interrupted_outcome_from_marker():
     assert out["status"] == "interrupted"
     assert out["conversation_id"] == "C1"
     assert out["node_id"] == "outline_interaction"
-    # marker 结构化透传:agent 按 (1) §Stage3(b) 读 marker.content 建 preview 卡
+    # marker 结构化透传:agent 按通用中断规则读 marker.content。
     assert out["marker"]["content"] == "第一章 来自marker\n第二章 来自marker"
     assert out["marker"]["prompt"] == "请审阅大纲"
     assert out["marker"]["conversation_id"] == "C1"
@@ -399,7 +424,7 @@ async def test_start_returns_interrupted_outcome_from_marker():
     assert "来自marker" in out["prompt"]
     assert "累积的旧大纲" not in out["prompt"]
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
-    assert not any(payload.get("event_type") == "task.update" for payload in payloads)
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 2]
 
 
 @pytest.mark.asyncio
@@ -574,6 +599,10 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume():
         payload["task_content"] == "RAG技术演进与主流框架全景概览"
         for payload in section_payloads
     )
+    payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
+    assert [_active_stage(update) for update in _task_updates(payloads)] == [
+        1, 2, 2, 3, 6, None,
+    ]
 
 
 @pytest.mark.asyncio

@@ -458,6 +458,7 @@ async def deepresearch_stream(
     )
     from jiuwenclaw.agentserver.tools.deepresearch_stream_router import (  # pylint: disable=import-outside-toplevel
         RouterState,
+        advance_stage,
         build_interrupt_prompt,
         collected_questions,
         is_outline_status_placeholder,
@@ -561,6 +562,14 @@ async def deepresearch_stream(
                 cid = chunk.get("conversation_id", "")
                 if cid:
                     outcome_cid = cid
+                initial_stage = 1
+                if action == "resume" and node == "outline_interaction":
+                    initial_stage = 2
+                elif action == "resume" and node == "user_feedback_processor":
+                    initial_stage = 6
+                stage_update = advance_stage(state, initial_stage)
+                if stage_update is not None:
+                    await _send(stage_update)
                 await _send({"event_type": "chat.processing_status",
                              "is_processing": True,
                              "current_task": status})
@@ -611,6 +620,9 @@ async def deepresearch_stream(
                 # breaking here makes finally terminate the resumable subprocess.
                 continue
             if status == "completed":
+                delivery_update = advance_stage(state, 6)
+                if delivery_update is not None:
+                    await _send(delivery_update)
                 final_result = chunk.get("final_result")
                 response_content = (
                     final_result.get("response_content", "")
@@ -656,6 +668,9 @@ async def deepresearch_stream(
                     break
 
                 if report_delivered:
+                    completed_update = advance_stage(state, 6, complete=True)
+                    if completed_update is not None:
+                        await _send(completed_update)
                     outcome = {
                         "status": "completed",
                         "conversation_id": chunk.get("conversation_id", outcome_cid),
