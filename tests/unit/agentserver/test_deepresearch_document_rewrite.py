@@ -15,14 +15,36 @@ from jiuwenclaw.agentserver.tools.deepresearch_plugin.document_rewrite import (
 def _write_document(root: Path, body: str) -> tuple[Path, dict]:
     report = root / "report.md"
     report.write_text(body, encoding="utf-8")
+    authoritative_citation = {
+        "id": 3,
+        "reference_index": 1,
+        "url": "https://example.com/source",
+        "title": "Source",
+        "content": "authoritative snapshot evidence",
+        "chunk": "authoritative snapshot chunk",
+        "source": "web",
+    }
+    snapshot = {
+        "response_content": body,
+        "citation_messages": {"code": 0, "msg": "success", "data": [authoritative_citation]},
+        "infer_messages": [],
+        "chart_messages": [],
+    }
+    snapshot_bytes = json.dumps(
+        snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    snapshot_path = report.with_suffix(".final-result.json")
+    snapshot_path.write_bytes(snapshot_bytes)
     provenance = {
-        "schema_version": 1,
+        "schema_version": 2,
         "document_id": "doc_test",
         "revision_id": "rev_parent",
         "parent_revision_id": None,
         "conversation_id": "C1",
         "markdown_path": str(report),
         "content_sha256": hashlib.sha256(body.encode()).hexdigest(),
+        "final_result_path": snapshot_path.name,
+        "final_result_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
         "created_at": "2026-07-15T00:00:00+00:00",
         "operation": {"action": "deepresearch_generate"},
         "citations": [{
@@ -30,8 +52,8 @@ def _write_document(root: Path, body: str) -> tuple[Path, dict]:
             "reference_index": 1,
             "url": "https://example.com/source",
             "title": "Source",
-            "content": "evidence",
-            "chunk": "evidence chunk",
+            "content": "stale sidecar evidence",
+            "chunk": "stale sidecar chunk",
             "source": "web",
         }],
         "inference_manifest": [],
@@ -77,6 +99,7 @@ def test_prepare_and_commit_create_child_revision_without_changing_parent(tmp_pa
     prepared = _prepare(tmp_path, report, provenance, "原句需要润色。")
     assert prepared["allowed_source_ids"] == ["3"]
     assert prepared["selected_text"] == "原句需要润色。"
+    assert prepared["citation_evidence"][0]["content"] == "authoritative snapshot evidence"
 
     result = commit_rewrite(
         context_token=prepared["context_token"],
@@ -152,6 +175,48 @@ def test_prepare_rejects_stale_hash_and_workspace_escape(tmp_path):
     outside.with_suffix(".provenance.json").write_text(json.dumps(outside_provenance), encoding="utf-8")
     with pytest.raises(RewriteError) as caught:
         _prepare(tmp_path, outside, outside_provenance, "原句。")
+    assert caught.value.code == "BAD_REQUEST"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ("missing", "DOCUMENT_NOT_FOUND"),
+        ("changed", "REVISION_CONFLICT"),
+        ("malformed", "DOCUMENT_NOT_FOUND"),
+    ],
+)
+def test_prepare_rejects_invalid_final_result_snapshot(tmp_path, mutation, expected_code):
+    report, provenance = _write_document(tmp_path, "原句。\n")
+    snapshot_path = report.with_name(provenance["final_result_path"])
+    if mutation == "missing":
+        snapshot_path.unlink()
+    elif mutation == "changed":
+        snapshot_path.write_text("{}", encoding="utf-8")
+    else:
+        malformed = {"response_content": "原句。", "citation_messages": {"data": "invalid"}}
+        snapshot_bytes = json.dumps(
+            malformed, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        snapshot_path.write_bytes(snapshot_bytes)
+        provenance["final_result_sha256"] = hashlib.sha256(snapshot_bytes).hexdigest()
+        report.with_suffix(".provenance.json").write_text(json.dumps(provenance), encoding="utf-8")
+
+    with pytest.raises(RewriteError) as caught:
+        _prepare(tmp_path, report, provenance, "原句。")
+    assert caught.value.code == expected_code
+
+
+def test_prepare_rejects_final_result_snapshot_outside_workspace(tmp_path):
+    report, provenance = _write_document(tmp_path, "原句。\n")
+    outside = tmp_path.parent / "outside-final-result.json"
+    outside.write_text("{}", encoding="utf-8")
+    provenance["final_result_path"] = str(outside)
+    provenance["final_result_sha256"] = hashlib.sha256(outside.read_bytes()).hexdigest()
+    report.with_suffix(".provenance.json").write_text(json.dumps(provenance), encoding="utf-8")
+
+    with pytest.raises(RewriteError) as caught:
+        _prepare(tmp_path, report, provenance, "原句。")
     assert caught.value.code == "BAD_REQUEST"
 
 

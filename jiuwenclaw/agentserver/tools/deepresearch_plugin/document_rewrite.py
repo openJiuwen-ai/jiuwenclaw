@@ -138,12 +138,38 @@ def _load_provenance(report_path: Path) -> dict:
     return value
 
 
-def _citation_index(provenance: dict) -> tuple[dict[str, dict], dict[str, dict]]:
+def _load_final_result_citations(report_path: Path, provenance: dict, root: Path) -> list[dict]:
+    raw_path = provenance.get("final_result_path")
+    expected_hash = provenance.get("final_result_sha256")
+    if not isinstance(raw_path, str) or not raw_path or not isinstance(expected_hash, str):
+        raise RewriteError("DOCUMENT_NOT_FOUND", "report final result is unavailable")
+    snapshot_path = Path(raw_path).expanduser()
+    if not snapshot_path.is_absolute():
+        snapshot_path = report_path.parent / snapshot_path
+    snapshot_path = snapshot_path.resolve()
+    if not _inside(snapshot_path, root):
+        raise RewriteError("BAD_REQUEST", "report final result is outside the current workspace")
+    try:
+        snapshot_bytes = snapshot_path.read_bytes()
+    except OSError as exc:
+        raise RewriteError("DOCUMENT_NOT_FOUND", "report final result is unavailable") from exc
+    if _sha256(snapshot_bytes) != expected_hash:
+        raise RewriteError("REVISION_CONFLICT", "the report final result changed")
+    try:
+        snapshot = json.loads(snapshot_bytes)
+    except json.JSONDecodeError as exc:
+        raise RewriteError("DOCUMENT_NOT_FOUND", "report final result is invalid") from exc
+    citation_messages = snapshot.get("citation_messages") if isinstance(snapshot, dict) else None
+    citations = citation_messages.get("data") if isinstance(citation_messages, dict) else None
+    if not isinstance(citations, list) or any(not isinstance(item, dict) for item in citations):
+        raise RewriteError("DOCUMENT_NOT_FOUND", "report citation data is invalid")
+    return citations
+
+
+def _citation_index(citations: list[dict]) -> tuple[dict[str, dict], dict[str, dict]]:
     by_id: dict[str, dict] = {}
     by_key: dict[str, dict] = {}
-    for item in provenance.get("citations") or []:
-        if not isinstance(item, dict):
-            continue
+    for item in citations:
         source_id = str(item.get("id", ""))
         url = str(item.get("url", ""))
         reference_index = str(item.get("reference_index", ""))
@@ -206,6 +232,7 @@ def prepare_rewrite(
         or actual_hash != content_sha256
     ):
         raise RewriteError("REVISION_CONFLICT", "the report revision changed")
+    final_result_citations = _load_final_result_citations(report, provenance, root)
 
     block = next((item for item in iter_rewrite_blocks(markdown) if item.block_id == block_id), None)
     if block is None:
@@ -221,7 +248,7 @@ def prepare_rewrite(
     if suffix and block.text[end:end + len(suffix)] != suffix:
         raise RewriteError("REVISION_CONFLICT", "selection suffix no longer matches")
 
-    _, by_key = _citation_index(provenance)
+    _, by_key = _citation_index(final_result_citations)
     allowed: dict[str, dict] = {}
     for match in CITATION_RE.finditer(block.text):
         citation = by_key.get(f"{match.group('index')}\0{match.group('url')}")
