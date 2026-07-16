@@ -98,7 +98,6 @@ class RouterState:
     question_order: list[str] = field(default_factory=list)
     current_stage: int = 0
     stages_completed: bool = False
-    parallel_stage_open: bool = False
 
     def __post_init__(self) -> None:
         self.authoritative_section_indices.update(self.section_titles)
@@ -122,11 +121,14 @@ def _task_frame(event_type: str, agent: str, section_idx: str, display: tuple[st
     }
 
 
-def _stage_boundary(event_type: str, stage: int) -> dict:
+def _stage_child_reasoning(stage: int, agent: str, display: tuple[str, str], content: str) -> dict:
+    task_content = display[0] + (f" - {display[1]}" if display[1] else "")
     return {
-        "event_type": event_type,
+        "event_type": "chat.reasoning",
         "task_id": f"deepresearch_stage_{stage}",
-        "task_content": DEEPRESEARCH_STAGES[stage - 1],
+        "task_content": task_content,
+        "stream_source_id": f"dr_{agent}",
+        "content": content,
     }
 
 
@@ -251,7 +253,7 @@ def _section_reasoning(state: RouterState, chunk: dict, content: str) -> dict:
     section_title = _remember_section_title(state, section_idx, chunk.get("section_title"))
     payload = {
         "event_type": "chat.reasoning",
-        "task_id": f"deepresearch_section_{section_idx}",
+        "task_id": "deepresearch_stage_3",
         "task_content": section_title or f"章节 {section_idx}",
         "stream_source_id": f"deepresearch_section_{section_idx}",
         "content": content,
@@ -332,15 +334,9 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
     section_idx = str(chunk.get("section_idx", "0"))
     target_stage = 3 if agent in _SECTION_PROCESS_NODES and section_idx != "0" else _NODE_STAGE.get(agent)
     if target_stage is not None:
-        if state.parallel_stage_open and target_stage > 3:
-            frames.append(_stage_boundary("task.complete", 3))
-            state.parallel_stage_open = False
         stage_update = advance_stage(state, target_stage)
         if stage_update is not None:
             frames.append(stage_update)
-        if target_stage == 3 and state.current_stage == 3 and not state.parallel_stage_open:
-            frames.append(_stage_boundary("task.start", 3))
-            state.parallel_stage_open = True
 
     # 中断 chunk:捕获 raw_prompt + node_id,不转发(interrupted marker 到达时拼 prompt)
     if message_type == "interrupt" or str(chunk.get("event")) == "waiting_user_input":
@@ -399,10 +395,32 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
                 "content": process_content,
             })
         return frames
-    else:
+
+    if target_stage in {2, 3, 4, 5}:
+        node_state = state.active_nodes.get(key)
+        if node_state is None:
+            node_state = {
+                "started": True,
+                "done": False,
+                "agent_name": agent,
+                "section_idx": section_idx,
+            }
+            state.active_nodes[key] = node_state
+            if event != "done":
+                frames.append(_stage_child_reasoning(target_stage, agent, display, f"{display[0]}开始\n"))
+
         reasoning = _chunk_reasoning_content(chunk, content)
         if reasoning:
-            frames.append({"event_type": "chat.reasoning", "content": _as_text(reasoning)})
+            frames.append(_stage_child_reasoning(target_stage, agent, display, _as_text(reasoning)))
+
+        if event == "done" and not node_state["done"]:
+            node_state["done"] = True
+            frames.append(_stage_child_reasoning(target_stage, agent, display, f"{display[0]}完成\n"))
+        return frames
+
+    reasoning = _chunk_reasoning_content(chunk, content)
+    if reasoning:
+        frames.append({"event_type": "chat.reasoning", "content": _as_text(reasoning)})
 
     # 首次见 → task.start(交互节点也发边界气泡,让用户看到"大纲生成中"等)
     if key not in state.active_nodes:

@@ -213,7 +213,7 @@ async def test_tool_sends_nested_section_reasoning_without_task_snapshots():
     assert reasoning == [
         {
             "event_type": "chat.reasoning",
-            "task_id": "deepresearch_section_1",
+            "task_id": "deepresearch_stage_3",
             "task_content": "真实标题",
             "task_index": 1,
             "total_tasks": 1,
@@ -222,7 +222,7 @@ async def test_tool_sends_nested_section_reasoning_without_task_snapshots():
         },
         {
             "event_type": "chat.reasoning",
-            "task_id": "deepresearch_section_1",
+            "task_id": "deepresearch_stage_3",
             "task_content": "真实标题",
             "task_index": 1,
             "total_tasks": 1,
@@ -231,7 +231,7 @@ async def test_tool_sends_nested_section_reasoning_without_task_snapshots():
         },
         {
             "event_type": "chat.reasoning",
-            "task_id": "deepresearch_section_1",
+            "task_id": "deepresearch_stage_3",
             "task_content": "真实章节标题",
             "task_index": 1,
             "total_tasks": 1,
@@ -592,7 +592,8 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume():
     section_payloads = [
         call.args[0]["payload"]
         for call in push.send_push.await_args_list
-        if call.args[0]["payload"].get("task_id") == "deepresearch_section_1"
+        if call.args[0]["payload"].get("task_id") == "deepresearch_stage_3"
+        and call.args[0]["payload"].get("stream_source_id") == "deepresearch_section_1"
     ]
     assert section_payloads
     assert all(
