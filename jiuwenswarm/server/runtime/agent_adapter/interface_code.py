@@ -511,6 +511,16 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         )
 
         await self._instance.ensure_initialized()
+
+        # ---- structural verification enforcement for code agents ----
+        # Prevents the ReAct loop from terminating with result_type="answer"
+        # unless at least one verification tool call (test / execute / inspect)
+        # has been made during the session.
+        react_agent = getattr(self._instance, "react_agent", None)
+        if react_agent is not None and hasattr(react_agent, "_config"):
+            react_agent._config.require_verification = True
+        # ------------------------------------------------------------
+
         # 修正 .agent_history 写入路径：openjiuwen 文件工具默认将
         # .agent_history 写到 Workspace.root_path（即项目目录），
         # 这里覆写为 agent 系统 workspace，避免污染用户项目目录。

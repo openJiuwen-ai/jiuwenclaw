@@ -34,6 +34,37 @@ class ReActAgentEvolve(BaseAgent):
         Use agent.invoke() directly with a session parameter.
     """
 
+    _VERIFICATION_TOOL_NAMES: set[str] = {"bash", "python", "node", "npm", "pytest", "test"}
+    _VERIFICATION_CMD_PATTERNS: tuple[str, ...] = (
+        "pytest", "test", "python", "node", "npm", "curl", "cat",
+        "verify", "check", "run", "execute", "make", "build",
+    )
+
+    def _mark_verification_if_applicable(self, tool_name: str, tool_args: dict[str, Any]) -> None:
+        """Track whether a tool call constitutes verification."""
+        if not self._config.require_verification:
+            return
+        t_lower = tool_name.lower()
+        if t_lower in self._VERIFICATION_TOOL_NAMES:
+            cmd = str(tool_args.get("command", "")).lower()
+            if any(p in cmd for p in self._VERIFICATION_CMD_PATTERNS):
+                self._verification_done = True
+                logger.info("ReActAgentEvolve: verification tool call detected (%s)", tool_name)
+        elif t_lower in {"file_read", "read"}:
+            path = str(tool_args.get("path", "")).lower()
+            if any(ext in path for ext in ("output", "result", "log", "report")):
+                self._verification_done = True
+                logger.info("ReActAgentEvolve: verification file read detected (%s)", path)
+
+    def _force_verification_message(self) -> SystemMessage:
+        """Return a system message that forces the agent to verify before completing."""
+        return SystemMessage(
+            content="[SYSTEM ENFORCEMENT] You have not yet verified your work. "
+            "Before reporting completion, you MUST use a tool call to run tests, "
+            "execute the script, read the output, or otherwise confirm the result. "
+            "Do not return a final answer without making at least one verification tool call."
+        )
+
     def __init__(
         self,
         card: AgentCard,
@@ -259,6 +290,9 @@ class ReActAgentEvolve(BaseAgent):
 
         result = None
 
+        # Verification tracking (per-invoke)
+        self._verification_done = False
+
         # ReAct loop
         for iteration in range(self._config.max_iterations):
             logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
@@ -323,6 +357,11 @@ class ReActAgentEvolve(BaseAgent):
                     logger.info(f"Tool result: {tool_result}")
                     await context.add_messages(tool_msg)
 
+                    # Track verification tool calls
+                    if ai_message.tool_calls and idx < len(ai_message.tool_calls):
+                        tc = ai_message.tool_calls[idx]
+                        self._mark_verification_if_applicable(tc.name, tc.arguments)
+
                     # Hook: after tool call
                     tool_call = ai_message.tool_calls[idx]
                     await self._execute_callbacks(
@@ -335,6 +374,17 @@ class ReActAgentEvolve(BaseAgent):
                     )
             else:
                 # No tool calls, return AI response
+                # ENFORCEMENT: if verification is required but not done, force another turn
+                if self._config.require_verification and not self._verification_done:
+                    logger.warning(
+                        "ReActAgentEvolve iteration %s: agent attempted to return answer without verification; forcing another turn",
+                        iteration + 1
+                    )
+                    # Evolution agent doesn't have direct system_messages list like react_agent,
+                    # but context_window already includes skill_messages. Inject via context.
+                    await context.add_messages(self._force_verification_message())
+                    continue  # skip to next iteration
+
                 await self.context_engine.save_contexts(session)
                 result = {
                     "output": ai_message.content,
