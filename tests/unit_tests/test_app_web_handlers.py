@@ -11,8 +11,6 @@ import pytest
 from jiuwenswarm.gateway.channel_manager.web import app_web_handlers
 from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     WebHandlersBindParams,
-    _FEISHU_APP_DEFAULTS,
-    _XIAOYI_APP_DEFAULTS,
     _flatten_modes_team_for_config_panel,
     _flatten_symphony_for_config_panel,
     _normalize_feishu_conf,
