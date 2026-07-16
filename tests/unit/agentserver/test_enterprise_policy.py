@@ -55,6 +55,7 @@ RoutingContext = schemas.RoutingContext
 normalize_template_ref = _utils.normalize_template_ref
 fill_missing_template_ref_slots = _utils.fill_missing_template_ref_slots
 evaluate_match_expr = expressions.evaluate_match_expr
+validate_match_expr = expressions.validate_match_expr
 resolve_slot_template_id_map = expressions.resolve_slot_template_id_map
 resolve_template_slot_ref = expressions.resolve_template_slot_ref
 substitute_template = expressions.substitute_template
@@ -315,6 +316,36 @@ def test_match_expr_empty_is_true(sales_ctx: RoutingContext) -> None:
     assert evaluate_match_expr(None, sales_ctx) is True
     assert evaluate_match_expr([], sales_ctx) is True
     assert evaluate_match_expr("[]", sales_ctx) is True
+
+
+def test_validate_match_expr_accepts_supported_forms() -> None:
+    validate_match_expr(None)
+    validate_match_expr("")
+    validate_match_expr([])
+    validate_match_expr("[]")
+    validate_match_expr("always")
+    validate_match_expr("group_id == 'g_demo_sales'")
+    validate_match_expr("user_id == 'alice' and group_id == 'g_demo_sales'")
+    validate_match_expr("group_id == 'g_demo_sales' or group_id == 'g_vip'")
+    validate_match_expr(["group_id == 'g_demo_sales'", "group_id == 'g_vip'"])
+    validate_match_expr('["group_id == \'g_demo_sales\'", "group_id == \'g_vip\'"]')
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "group_id === 'g'",
+        "group_id > 'g'",
+        "service_id == 'x'",
+        "${user::carol}",
+        "len(user_id) == 1",
+        "user_id == 'a' + 'b'",
+        "[",
+    ],
+)
+def test_validate_match_expr_rejects_invalid(expr: str) -> None:
+    with pytest.raises(ValueError, match="invalid match_expr"):
+        validate_match_expr(expr)
 
 
 @pytest.mark.asyncio

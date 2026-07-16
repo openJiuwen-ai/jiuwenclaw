@@ -24,6 +24,7 @@ from ...schemas.config_effective_policy_schemas import (
     ConfigEffectiveServicePolicyCreateRequest,
     ConfigEffectiveServicePolicyUpdateRequest,
 )
+from ..enterprise_config.expressions import validate_match_expr
 from .config_record_ops import (
     apply_create_from_row_builder,
     apply_delete_by_id,
@@ -52,6 +53,8 @@ async def update_config_effective_service_policy_record(
         field_updates["service_id"] = field_updates["service_id"].strip()
         if not field_updates["service_id"]:
             raise ValueError("service_id cannot be empty")
+    if "match_expr" in field_updates:
+        validate_match_expr(field_updates["match_expr"])
 
     if not field_updates:
         raise ValueError("请求未包含任何可更新的业务字段")
@@ -70,6 +73,7 @@ def _build_row_from_sync_policy(
     now: Any,
 ) -> dict[str, Any]:
     req = ConfigEffectiveServicePolicyCreateRequest.model_validate(policy)
+    validate_match_expr(req.match_expr)
     return {
         "jiuwenclaw_id": jiuwenclaw_id,
         "policy_id": req.policy_id,
