@@ -86,6 +86,16 @@ from jiuwenswarm.common.config import get_config
 
 logger = logging.getLogger(__name__)
 
+
+@pytest.mark.parametrize("mode", ["team", "team.plan", "code.team"])
+def test_member_runtime_prompt_rail_binds_request_identity(mode: str) -> None:
+    context = SwarmBuildContext(session_id="session-123", mode=mode)
+
+    rail = member_rails._build_runtime_prompt_rail({}, context)
+
+    assert rail._session_id == "session-123"
+    assert rail._mode == mode
+
 # Rail provider names shared by both roles (no role-specific evolution rails).
 # Sourced from the registry symbols so the test tracks renames automatically.
 _COMMON_RAIL_NAMES: frozenset[str] = frozenset(

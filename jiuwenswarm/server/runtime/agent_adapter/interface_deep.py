@@ -520,6 +520,8 @@ _MODE_DISPLAY_MAP: dict[str, dict[str, str]] = {
     "agent.plan": {"cn": "智能体模式", "en": "Agent Mode"},
     "agent.fast": {"cn": "智能体模式", "en": "Agent Mode"},
     "team": {"cn": "集群模式", "en": "Cluster Mode"},
+    "team.plan": {"cn": "集群计划模式", "en": "Cluster Plan Mode"},
+    "code.team": {"cn": "代码集群模式", "en": "Code Team Mode"},
 }
 
 

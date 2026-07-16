@@ -213,7 +213,7 @@ MODE_ALIASES: dict[str, str] = {
 
 # plan / fast 已合并为单一 agent 模式；agent.plan / agent.fast 作为历史别名仍可接受，归一到 agent。
 VALID_MODES = frozenset({
-    "agent", "agent.plan", "agent.fast", "code.plan", "code.normal", "code.team", "team",
+    "agent", "agent.plan", "agent.fast", "code.plan", "code.normal", "code.team", "team", "team.plan",
 })
 
 # Sources that require the answer to be sent via ``chat.send`` (streaming) to
@@ -262,7 +262,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--mode", default="code.normal",
-        help="Execution mode: agent|code|team|code.plan|code.normal|code.team"
+        help="Execution mode: agent|code|team|team.plan|code.plan|code.normal|code.team"
              " (default: code.normal).",
     )
     p.add_argument(
