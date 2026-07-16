@@ -142,6 +142,51 @@ def test_config_default_auto_save_true(adapter, monkeypatch):
     assert captured_kwargs[0].get("auto_save") is True
 
 
+@pytest.mark.unit
+def test_build_skill_evolution_rail_wires_file_trajectory_store(adapter, monkeypatch):
+    """trajectory_store must be passed into JiuClawSkillEvolutionRail for disk persistence."""
+    captured_args: list[tuple] = []
+    captured_kwargs: list[dict] = []
+    captured_trajectory_paths: list[Path] = []
+
+    def mock_skill_evolution_rail(*args, **kwargs):
+        captured_args.append(args)
+        captured_kwargs.append(kwargs)
+        return MagicMock()
+
+    def mock_file_trajectory_store(path: Path):
+        captured_trajectory_paths.append(path)
+        return MagicMock(name="trajectory_store_instance")
+
+    monkeypatch.setattr(
+        interface_deep_module,
+        "JiuClawSkillEvolutionRail",
+        mock_skill_evolution_rail,
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "FileTrajectoryStore",
+        mock_file_trajectory_store,
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "get_agent_registered_skill_dirs",
+        lambda: [Path("mock_skills_dir")],
+    )
+
+    mock_trajectory_dir = Path("/mock/trajectory/path")
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_resolve_evolution_trajectory_dir",
+        lambda self: mock_trajectory_dir,
+    )
+
+    adapter.build_skill_evolution_rail_for_test({"evolution": {"auto_scan": False}})
+
+    assert captured_trajectory_paths == [mock_trajectory_dir]
+    assert captured_kwargs[0]["trajectory_store"]._mock_name == "trajectory_store_instance"
+
+
 class _FakeEvolutionStore:
     def __init__(self, *, exists: bool = True, with_persist_mocks: bool = False) -> None:
         self.exists = exists
