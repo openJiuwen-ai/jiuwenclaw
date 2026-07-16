@@ -72,6 +72,8 @@ export class MemoryViewController {
   private showFullPath = false;
   /** 底部通知行：显示最新一次操作结果，新覆盖旧 */
   private statusMessage: string | null = null;
+  /** 上一次 open 的目录绝对路径；Ctrl+O 切换时据此重算 statusMessage 的显示格式 */
+  private lastOpenedPath: string | null = null;
 
   constructor(
     private appState: CliPiAppState,
@@ -141,6 +143,7 @@ export class MemoryViewController {
   async open(tab?: MemoryViewTab): Promise<void> {
     this.showFullPath = false;
     this.statusMessage = null;
+    this.lastOpenedPath = null;
     const ctx = this.appState.getCommandContext();
     const fullMode = ctx.mode ?? "code.normal";
     const projectDir = ctx.getCurrentProjectDir() || process.cwd();
@@ -223,6 +226,7 @@ export class MemoryViewController {
       case "memory:toggleFullPath":
         this.showFullPath = !this.showFullPath;
         this.rebuildTabList();
+        this.reformatLastOpenedStatus();
         return true;
       default:
         break;
@@ -289,7 +293,29 @@ export class MemoryViewController {
     this.state.tab = tabs[next];
     this.showFullPath = false;
     this.statusMessage = null;
+    this.lastOpenedPath = null;
     this.rebuildTabList();
+    this.tui.requestRender();
+  }
+
+  /**
+   * Ctrl+O 切换 full-path 显示后,重算底部 statusMessage 里上一次 open
+   * 操作的路径显示格式,使提示行与列表项的格式保持一致。
+   * 仅在 open tab 有 lastOpenedPath 时生效,其他场景静默跳过。
+   */
+  private reformatLastOpenedStatus(): void {
+    if (!this.state || !this.lastOpenedPath) return;
+    const projectDir = this.state.projectDir ?? "";
+    const gitRoot = this.state.gitRoot ?? null;
+    const displayPath = this.showFullPath
+      ? this.lastOpenedPath.replace(/\\/g, "/")
+      : getDisplayPath(this.lastOpenedPath, projectDir, gitRoot);
+    // 保留原有 "Opened:" / "No GUI explorer detected. ..." 前缀,只替换显示路径
+    if (this.statusMessage?.startsWith("Opened: ")) {
+      this.statusMessage = `Opened: ${displayPath}`;
+    } else if (this.statusMessage?.startsWith("No GUI explorer detected. Path: ")) {
+      this.statusMessage = `No GUI explorer detected. Path: ${displayPath}`;
+    }
     this.tui.requestRender();
   }
 
@@ -440,7 +466,26 @@ export class MemoryViewController {
       return;
     }
     if (tab === "open" && item.value && item.value !== "__display__") {
-      openFolderInExplorer(item.value);
+      const opened = openFolderInExplorer(item.value);
+      // Remember the absolute path so Ctrl+O can reformat the statusMessage
+      // later without re-opening the folder.
+      this.lastOpenedPath = item.value;
+      // Display path follows the showFullPath toggle (Ctrl+O), matching
+      // the format used by buildOpenItems so the hint stays consistent
+      // with what the user sees in the list.
+      const projectDir = this.state?.projectDir ?? "";
+      const gitRoot = this.state?.gitRoot ?? null;
+      const displayPath = this.showFullPath
+        ? item.value.replace(/\\/g, "/")
+        : getDisplayPath(item.value, projectDir, gitRoot);
+      if (opened) {
+        this.statusMessage = `Opened: ${displayPath}`;
+      } else {
+        // No GUI explorer (e.g. headless Linux server): show a copyable
+        // path hint instead of silently failing.
+        this.statusMessage = `No GUI explorer detected. Path: ${displayPath}`;
+      }
+      this.tui.requestRender();
       return;
     }
     // status 只读，无操作

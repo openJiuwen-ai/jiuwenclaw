@@ -105,8 +105,11 @@ export interface CommandContext {
   ) => void;
   enterStatusView?: (tab?: StatusViewTab) => void;
   openInEditor?: (filePath: string) => void;
-  /** Open a folder in system file explorer (Windows: explorer, macOS: open -R, Linux: xdg-open) */
-  openFolder?: (folderPath: string) => void;
+  /** Open a folder in system file explorer (Windows: explorer, macOS: open -R, Linux: xdg-open).
+   * Returns true if an explorer was launched; false if no GUI explorer is
+   * available (e.g. headless Linux server), so the caller can fall back to
+   * a path hint instead of claiming the folder was opened. */
+  openFolder?: (folderPath: string) => boolean;
   /** Enter FileViewer mode to view large content (e.g., formatted logs) */
   enterFileViewer?: (content: string, title: string, source: string) => void;
   /** Enter DiffViewer mode to browse git/turn diffs interactively */

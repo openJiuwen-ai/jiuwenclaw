@@ -3157,7 +3157,7 @@ export class AppScreen implements Component, Focusable {
             openInExternalEditor(this.tui, filePath);
           },
           openFolder: (folderPath: string) => {
-            openFolderInExplorer(folderPath);
+            return openFolderInExplorer(folderPath);
           },
           enterFileViewer: (content, title, source) => {
             this.enterFileViewer(content, title, source);
