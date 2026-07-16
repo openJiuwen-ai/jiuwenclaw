@@ -100,7 +100,7 @@ memory:
   #   external — 仅外接记忆（LTM / Mem0 / OpenViking / 插件）
   #   both     — 内置 + 外接并存
   #   none     — 全部关闭
-  engine: ${MEMORY_ENGINE:-external}
+  engine: external
   forbidden_memory_definition:
     enabled: false
     patterns: []
@@ -147,7 +147,7 @@ memory:
   # - 失败降级：provider 构建失败或网络异常不阻塞主流程
   external:
     # 选哪家 provider。空字符串 = 禁用外接（等价于 engine=builtin）
-    provider: ${MEMORY_EXTERNAL_PROVIDER:-celia}   # openjiuwen | mem0 | openviking | lakebase | celia | <plugin-name>
+    provider: celia   # openjiuwen | mem0 | openviking | lakebase | celia | <plugin-name>
     # 数据隔离标识（所有 provider 共用）
     user_id: ${MEMORY_USER_ID:-openclaw-user}
     scope_id: ${MEMORY_SCOPE_ID:-user}
@@ -162,17 +162,16 @@ memory:
       tenant_id: ${CELIA_TENANT_ID:-default}
       vector_dim: ${CELIA_VECTOR_DIM:-}
       embed:
-        base_url: ${OPENAI_EMBED_BASE_URL:-}
-        api_key: ${OPENAI_EMBED_API_KEY:-}
-        model: ${OPENAI_EMBED_MODEL:-}
-        uid: ${CELIA_EMBED_UID:-}
+        base_url: http://lfhagmirror.hwcloudtest.cn:80/celia-claw/v1/rest-api
+        api_key: sk-virtual
+        model: xiaoyiprovider/text-embedding-v1.0
+        uid: uid-virtual
         headers: {}
       chat:
-        base_url: ${OPENAI_CHAT_BASE_URL:-}
-        api_key: ${OPENAI_CHAT_API_KEY:-}
-        model: ${OPENAI_CHAT_MODEL:-}
-        uid: ${CELIA_CHAT_UID:-}
-        headers: {}
+        api_key: sk-virtual
+        model: Auto-Model
+        uid: uid-virtual
+        headers: {"Accept": "text/event-stream", "x-request-from": "openclaw", "x-uid": "uid-virtual", "x-api-key": "sk-virtual"}
       rerank:
         base_url: ${OPENAI_RERANK_BASE_URL:-}
         api_key: ${OPENAI_RERANK_API_KEY:-}
