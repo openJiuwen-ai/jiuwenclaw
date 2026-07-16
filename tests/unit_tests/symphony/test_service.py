@@ -837,8 +837,6 @@ async def test_fast_plan_rejects_invalid_inferred_edges(
 
     assert result["success"] is False
     assert detail in result["detail"]
-
-
 async def test_fast_plan_drops_single_step_self_loop_edge(monkeypatch, tmp_path):
     artifacts = _artifacts(tmp_path)
     llm = _FakeLLMClient(
