@@ -103,7 +103,7 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
   const lockedTitle = proactiveLocked ? t('cron.autoManagedToggleDisabled') ?? undefined : undefined;
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end bg-black/30" onClick={onClose}>
+    <div className="fixed inset-0 z-40 flex justify-end bg-overlay-cron-drawer" onClick={onClose}>
       <div
         className="relative flex h-full w-[560px] flex-col overflow-y-auto bg-card p-6 shadow-xl animate-slide-in-right"
         onClick={(e) => e.stopPropagation()}
@@ -227,7 +227,7 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
               className={`inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${form.enabled ? 'bg-accent' : 'bg-border-strong'}`}
             >
               <span
-                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${form.enabled ? 'translate-x-6' : 'translate-x-1'}`}
+                className={`inline-block h-4 w-4 transform rounded-full bg-card transition-transform ${form.enabled ? 'translate-x-6' : 'translate-x-1'}`}
               />
             </button>
             <span className="text-sm font-bold text-text">
@@ -241,13 +241,13 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
             onClick={() => onSubmit(form)}
             disabled={!canSubmit}
             title={missingFieldsHint}
-            className="rounded-full bg-[#141414] px-10 py-1.5 text-sm font-bold text-white hover:bg-black disabled:opacity-50"
+            className="rounded-full bg-cron-action px-10 py-1.5 text-sm font-bold text-cron-action-foreground hover:bg-cron-action-hover disabled:opacity-50"
           >
             {t('cron.actions.confirm')}
           </button>
           <button
             onClick={onClose}
-            className="rounded-full border border-border bg-white px-10 py-1.5 text-sm font-bold text-text hover:bg-bg-hover"
+            className="rounded-full border border-border bg-card px-10 py-1.5 text-sm font-bold text-text hover:bg-bg-hover"
           >
             {t('common.cancel')}
           </button>

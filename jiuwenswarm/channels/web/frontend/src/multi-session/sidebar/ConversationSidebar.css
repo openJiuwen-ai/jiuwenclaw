@@ -65,11 +65,11 @@
 
 /* 选中态沿用 .conversation-list-item.is-active 的配色约定 */
 .conversation-sidebar__new.is-active {
-  background: #E6E6E6;
+  background: var(--color-sidebar-nav-active);
 }
 
 .conversation-sidebar__new.is-active:hover {
-  background: #DEDEE0;
+  background: var(--color-sidebar-nav-active-hover);
 }
 
 .conversation-sidebar__body {
@@ -921,4 +921,3 @@
   background: var(--color-feedback-warning-subtle);
   color: var(--color-feedback-warning);
 }
-

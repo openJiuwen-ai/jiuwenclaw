@@ -74,7 +74,7 @@
   /* Feature accents whose identity is stable across color modes */
   --color-chat-accent: #1476ff;
   --color-chat-accent-subtle: #deecff;
-  --color-cron-running: #0bb8b2;
+  --color-cron-running: var(--color-feedback-success);
 
   /* Utility color roles */
   --color-focus: rgba(37, 99, 235, 0.2);
@@ -213,6 +213,14 @@
   --color-control-emphasis-hover-strong: #333333;
   --color-config-team-icon: rgb(217, 70, 239);
   --color-channel-backdrop: rgba(0, 0, 0, 0.45);
+  --color-cron-action: #141414;
+  --color-cron-action-hover: #000000;
+  --color-cron-action-foreground: #ffffff;
+  --color-cron-action-link: #1476ff;
+  --color-cron-auto-managed-surface: #e0f2fe;
+  --color-cron-auto-managed-text: #0369a1;
+  --color-overlay-cron-dialog: rgba(0, 0, 0, 0.4);
+  --color-overlay-cron-drawer: rgba(0, 0, 0, 0.3);
 
   color-scheme: light;
 }

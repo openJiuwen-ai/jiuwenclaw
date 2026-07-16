@@ -433,12 +433,12 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     <div className="flex-1 min-h-0 relative overflow-y-auto" data-testid="cron-panel" data-session-id={sessionId}>
       {success && (
         <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20" data-testid="cron-success">
-          <div className="bg-ok text-white px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">{success}</div>
+          <div className="bg-ok px-4 py-2 text-sm text-text-inverse rounded-lg shadow-lg animate-rise">{success}</div>
         </div>
       )}
       {error && (
         <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20" data-testid="cron-error">
-          <div className="bg-danger text-white px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">{error}</div>
+          <div className="bg-danger px-4 py-2 text-sm text-text-inverse rounded-lg shadow-lg animate-rise">{error}</div>
         </div>
       )}
 
@@ -454,7 +454,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
           <div className="relative" ref={createMenuRef}>
             <button
               onClick={() => setCreateMenuOpen((v) => !v)}
-              className="flex items-center gap-2 rounded-full bg-[#141414] px-6 py-1.5 text-sm font-bold text-white hover:bg-black"
+              className="flex items-center gap-2 rounded-full bg-cron-action px-6 py-1.5 text-sm font-bold text-cron-action-foreground hover:bg-cron-action-hover"
               data-testid="cron-create-toggle"
             >
               {t('cron.createMenu.trigger')} <ChevronDown size={14} />
@@ -516,7 +516,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
               <>
                 <StatPill icon={<span className="text-cron-running"><RunningIcon size={15} /></span>} label={t('cron.status.running')} count={runningCount} />
                 <StatPill icon={<span className="text-text-muted"><BoldRingIcon /></span>} label={t('cron.status.paused')} count={pausedCount} />
-                <StatPill icon={<span className="text-amber-600"><BoldRingIcon /></span>} label={t('cron.status.expired')} count={expiredCount} />
+                <StatPill icon={<span className="text-warn"><BoldRingIcon /></span>} label={t('cron.status.expired')} count={expiredCount} />
               </>
             )}
           </div>
@@ -602,7 +602,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                           {job.name}
                           {isProactive && (
                             <span
-                              className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-sky-100 text-sky-700"
+                              className="inline-flex shrink-0 items-center rounded-full bg-cron-auto-managed-surface px-1.5 py-0.5 text-[10px] font-medium text-cron-auto-managed-text"
                               title={t('cron.autoManagedHint') ?? undefined}
                             >
                               {t('cron.autoManaged')}
@@ -629,7 +629,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                           ) : (
                             <button
                               onClick={() => setConfirmState({ type: 'runNow', job })}
-                              className="text-sm text-[#1476FF] hover:opacity-80"
+                              className="text-sm text-cron-action-link hover:opacity-80"
                             >
                               {t('cron.table.runNow')}
                             </button>
@@ -641,7 +641,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                           ) : (
                             <button
                               onClick={() => setConfirmState({ type: 'stop', job })}
-                              className="text-sm text-[#1476FF] hover:opacity-80"
+                              className="text-sm text-cron-action-link hover:opacity-80"
                             >
                               {t('cron.table.stop')}
                             </button>
@@ -649,7 +649,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                           <div className="relative" ref={rowMenuJobId === job.id ? rowMenuRef : undefined}>
                             <button
                               onClick={() => setRowMenuJobId(rowMenuJobId === job.id ? null : job.id)}
-                              className="flex items-center gap-0.5 text-sm text-[#1476FF] hover:opacity-80"
+                              className="flex items-center gap-0.5 text-sm text-cron-action-link hover:opacity-80"
                             >
                               {t('cron.table.more')} <ChevronDown size={13} />
                             </button>
@@ -660,7 +660,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                                     setRowMenuJobId(null);
                                     setDrawer({ mode: 'edit', initial: jobToForm(job), jobId: job.id });
                                   }}
-                                  className="block w-full px-3 py-2 text-left text-sm text-[#1476FF] hover:bg-bg-hover"
+                                  className="block w-full px-3 py-2 text-left text-sm text-cron-action-link hover:bg-bg-hover"
                                 >
                                   {t('cron.table.edit')}
                                 </button>
@@ -669,7 +669,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                                     setRowMenuJobId(null);
                                     void toggleSessionsPopover(job);
                                   }}
-                                  className="block w-full px-3 py-2 text-left text-sm text-[#1476FF] hover:bg-bg-hover"
+                                  className="block w-full px-3 py-2 text-left text-sm text-cron-action-link hover:bg-bg-hover"
                                 >
                                   {t('cron.table.triggeredSessions')}
                                 </button>
@@ -678,7 +678,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                                     setRowMenuJobId(null);
                                     void togglePreviewPopover(job);
                                   }}
-                                  className="block w-full px-3 py-2 text-left text-sm text-[#1476FF] hover:bg-bg-hover"
+                                  className="block w-full px-3 py-2 text-left text-sm text-cron-action-link hover:bg-bg-hover"
                                 >
                                   {t('cron.previewAction')}
                                 </button>
@@ -706,7 +706,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                                       setRowMenuJobId(null);
                                       setSuccess(t('cron.history.comingSoon'));
                                     }}
-                                    className="block w-full px-3 py-2 text-left text-sm text-[#1476FF] hover:bg-bg-hover"
+                                    className="block w-full px-3 py-2 text-left text-sm text-cron-action-link hover:bg-bg-hover"
                                   >
                                     {t('cron.table.history')}
                                   </button>

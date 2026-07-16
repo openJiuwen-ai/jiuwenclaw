@@ -8,26 +8,11 @@
 }
 
 .share-image-document {
-  --accent-subtle: #eef4ff;
-  --accent: #3370ff;
-  --bg: #f5f7f9;
-  --bg-muted: #ffffff;
-  --bg-content: #ffffff;
-  --border: #dde4ee;
-  --card: #ffffff;
-  --chat-text: #1f2937;
-  --muted: #667085;
-  --radius-full: 999px;
-  --radius-lg: 8px;
-  --secondary: #f2f4f7;
-  --text: #1f2937;
-  --text-strong: #101828;
-
   width: 750px;
   min-height: 1px;
   box-sizing: border-box;
-  background: #f5f7f9;
-  color: var(--text);
+  background: var(--color-surface-page);
+  color: var(--color-text-primary);
   padding: 26px 18px 28px;
   font-family: var(--font-body);
 }
@@ -64,7 +49,7 @@
 }
 
 .share-image-brand__name {
-  color: var(--text-strong);
+  color: var(--color-text-strong);
   font-size: 24px;
   font-weight: 800;
   line-height: 1;
@@ -72,21 +57,21 @@
 }
 
 .share-image-content {
-  border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border-default) 86%, transparent);
   border-radius: 8px;
-  background: var(--bg-content);
+  background: var(--color-surface-content);
   padding: 26px 28px 30px;
 }
 
 .share-image-content-header {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-border-default);
   padding-bottom: 22px;
   margin-bottom: 26px;
 }
 
 .share-image-content-header h1 {
   margin: 0;
-  color: var(--text-strong);
+  color: var(--color-text-strong);
   font-size: 20px;
   font-weight: 750;
   line-height: 1.25;
@@ -101,7 +86,7 @@
   flex-wrap: wrap;
   gap: 8px 14px;
   margin-top: 12px;
-  color: var(--muted);
+  color: var(--color-text-secondary);
   font-size: 15px;
   line-height: 1.4;
 }
@@ -115,7 +100,7 @@
   align-items: center;
   gap: 10px;
   margin-bottom: 18px;
-  color: var(--text-strong);
+  color: var(--color-text-strong);
   font-size: 20px;
   font-weight: 750;
   line-height: 1.2;
@@ -125,13 +110,13 @@
   width: 6px;
   height: 22px;
   border-radius: 3px;
-  background: #3370ff;
-  content: "";
+  background: var(--color-action-primary);
+  content: '';
 }
 
 .share-image-section--group {
   margin-top: 30px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--color-border-default);
   padding-top: 28px;
 }
 
@@ -141,12 +126,12 @@
   justify-content: space-between;
   gap: 20px;
   padding: 18px 16px 0;
-  color: var(--muted);
+  color: var(--color-text-secondary);
 }
 
 .share-image-footer__note {
   flex: 0 0 auto;
-  color: color-mix(in srgb, var(--muted) 88%, var(--text));
+  color: color-mix(in srgb, var(--color-text-secondary) 88%, var(--color-text-primary));
   font-size: 11px;
   font-weight: 600;
   line-height: 1.35;
@@ -159,7 +144,7 @@
   min-width: 0;
   max-width: 430px;
   gap: 9px;
-  color: color-mix(in srgb, var(--muted) 72%, var(--text));
+  color: color-mix(in srgb, var(--color-text-secondary) 72%, var(--color-text-primary));
   font-size: 10px;
   font-weight: 500;
   line-height: 1.3;
@@ -184,11 +169,11 @@
   width: 1px;
   height: 12px;
   flex: 0 0 auto;
-  background: color-mix(in srgb, var(--muted) 28%, transparent);
+  background: color-mix(in srgb, var(--color-text-secondary) 28%, transparent);
 }
 
 .share-image-empty {
-  color: var(--muted);
+  color: var(--color-text-secondary);
   font-size: 16px;
 }
 
@@ -210,7 +195,7 @@
 .share-image-document .chat-bubble,
 .share-image-document .chat-text,
 .share-image-document .chat-markdown {
-  color: var(--chat-text);
+  color: var(--color-text-primary);
 }
 
 .share-image-document .chat-markdown pre,
@@ -265,7 +250,7 @@
   gap: 7px;
   max-width: 100%;
   margin-bottom: 5px;
-  color: var(--muted);
+  color: var(--color-text-secondary);
   font-size: 13px;
   line-height: 1.4;
 }
@@ -275,12 +260,12 @@
 }
 
 .share-image-group-message__member {
-  color: var(--text-strong);
+  color: var(--color-text-strong);
   font-weight: 700;
 }
 
 .share-image-group-message__time {
-  color: var(--muted);
+  color: var(--color-text-secondary);
   font-size: 12px;
   font-weight: 500;
 }
@@ -292,13 +277,13 @@
   border-radius: 0;
   background: transparent;
   padding: 0;
-  color: var(--text);
+  color: var(--color-text-primary);
 }
 
 .share-image-group-message.is-user .share-image-group-message__bubble {
   border-color: transparent;
   border-radius: 8px;
-  background: var(--accent-subtle);
+  background: var(--color-action-primary-subtle);
   padding: 8px 12px;
 }
 
@@ -309,9 +294,9 @@
   margin-right: 6px;
   margin-bottom: 4px;
   border-radius: 999px;
-  background: rgba(51, 112, 255, 0.11);
+  background: var(--color-action-primary-subtle);
   padding: 2px 8px;
-  color: #2458cc;
+  color: var(--color-text-link);
   font-size: 13px;
 }
 

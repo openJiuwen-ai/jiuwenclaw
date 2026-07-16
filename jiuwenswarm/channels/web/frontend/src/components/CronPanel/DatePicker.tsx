@@ -203,7 +203,7 @@ export default function DatePicker({ value, onChange, placeholder, className = '
                     type="button"
                     onClick={() => pick(day)}
                     className={`h-9 w-9 rounded-full text-sm transition-colors ${
-                      isSelected ? 'bg-accent text-white' : 'text-text hover:bg-bg-hover'
+                      isSelected ? 'bg-accent text-accent-foreground' : 'text-text hover:bg-bg-hover'
                     }`}
                   >
                     {day}
@@ -240,7 +240,7 @@ export default function DatePicker({ value, onChange, placeholder, className = '
                 type="button"
                 onClick={() => pickYear(y)}
                 className={`rounded-md py-2 text-sm transition-colors ${
-                  y === cursor.year ? 'bg-accent text-white' : 'text-text hover:bg-bg-hover'
+                  y === cursor.year ? 'bg-accent text-accent-foreground' : 'text-text hover:bg-bg-hover'
                 }`}
               >
                 {y}

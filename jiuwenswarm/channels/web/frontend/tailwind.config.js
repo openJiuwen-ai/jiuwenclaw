@@ -76,6 +76,16 @@ export default {
         info: color('--color-feedback-info'),
         cron: {
           running: color('--color-cron-running'),
+          action: color('--color-cron-action'),
+          'action-hover': color('--color-cron-action-hover'),
+          'action-foreground': color('--color-cron-action-foreground'),
+          'action-link': color('--color-cron-action-link'),
+          'auto-managed-surface': color('--color-cron-auto-managed-surface'),
+          'auto-managed-text': color('--color-cron-auto-managed-text'),
+        },
+        overlay: {
+          'cron-dialog': color('--color-overlay-cron-dialog'),
+          'cron-drawer': color('--color-overlay-cron-drawer'),
         },
         muted: {
           DEFAULT: color('--color-text-secondary'),
