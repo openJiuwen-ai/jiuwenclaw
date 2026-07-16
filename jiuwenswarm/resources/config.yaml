@@ -1020,6 +1020,11 @@ modes:
       spawn_mode: inprocess
       enable_swarmflow: false
 
+      # Enable the host-managed worktree capability used by team members and
+      # SwarmFlow agent calls with options.isolation="worktree".
+      worktree:
+        enabled: true
+
       # Team-specific permission control.
       enable_permissions: false
 
