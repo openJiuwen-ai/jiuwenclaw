@@ -2336,23 +2336,53 @@ class JiuWenSwarmDeepAdapter:
             return self._model_cache[requested]
         return self._model
 
-    def _apply_model_to_react_agent(self, model: Model) -> None:
+    @staticmethod
+    def _request_model_name_override(request: AgentRequest) -> str | None:
+        """Return per-request model_name from params, if present."""
+        if not isinstance(getattr(request, "params", None), dict):
+            return None
+        name = str(request.params.get("model_name") or "").strip()
+        return name or None
+
+    def _apply_model_to_react_agent(
+        self,
+        model: Model,
+        *,
+        model_name_override: str | None = None,
+    ) -> None:
         """将指定模型应用到 react_agent 实例（替换 _llm 和 _config 字段）。
 
         react_agent._railed_model_call 使用 self._config.model_name 作为 model= 参数，
         因此需要同时替换 _llm 和 _config 中的模型相关字段。
+
+        model_name_override: 可选。用于 Xiaoyi/Web 动态模型 ID（可能不在本地
+        cache）：保留默认客户端凭证，仅覆盖发出去的 model= 名称（对齐 OpenClaw
+        覆盖 model.id）。不原地修改共享 ``_model_cache`` 中的 model_config。
         """
         react_agent = getattr(self._instance, "_react_agent", None)
         if react_agent is None:
             return
         if callable(getattr(react_agent, "set_llm", None)):
             react_agent.set_llm(model)
+        override = (model_name_override or "").strip() or None
+        base_name = getattr(model.model_config, "model_name", None)
+        effective_name = override or base_name
+        request_config = model.model_config
+        if override and request_config is not None:
+            request_config = copy.copy(request_config)
+            request_config.model_name = override
         config = getattr(react_agent, "_config", None)
         if config is not None:
-            config.model_name = model.model_config.model_name
+            config.model_name = effective_name
             config.model_client_config = model.model_client_config
-            config.model_config_obj = model.model_config
-        self._model_request_config = model.model_config
+            config.model_config_obj = request_config
+        self._model_request_config = request_config
+        if override:
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] model_name override=%s (base=%s)",
+                override,
+                base_name,
+            )
 
     @staticmethod
     def _resolve_skill_mode(config: dict[str, Any]) -> str:
@@ -5646,7 +5676,10 @@ class JiuWenSwarmDeepAdapter:
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
+        self._apply_model_to_react_agent(
+            resolved_model,
+            model_name_override=self._request_model_name_override(request),
+        )
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         if self._stream_event_rail is not None:
@@ -5758,7 +5791,10 @@ class JiuWenSwarmDeepAdapter:
             from jiuwenswarm.server.runtime.agent_adapter.team_helpers import process_team_message_stream
 
             resolved_model = self._resolve_model_for_request(request)
-            self._apply_model_to_react_agent(resolved_model)
+            self._apply_model_to_react_agent(
+                resolved_model,
+                model_name_override=self._request_model_name_override(request),
+            )
             resolved_language = self._resolve_runtime_language()
             resolved_channel = str(cid or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
             if self._runtime_prompt_rail:
@@ -5907,7 +5943,10 @@ class JiuWenSwarmDeepAdapter:
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
+        self._apply_model_to_react_agent(
+            resolved_model,
+            model_name_override=self._request_model_name_override(request),
+        )
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         stream_consumer_cancelled = False
