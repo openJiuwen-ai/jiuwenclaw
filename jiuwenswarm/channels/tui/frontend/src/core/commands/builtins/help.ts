@@ -1,5 +1,4 @@
 import { CommandKind, type SlashCommand, type SlashCommandListProvider } from "../types.js";
-import { isCommandDisabled } from "../CommandService.js";
 import { makeItem } from "../helpers.js";
 
 const COMMAND_GROUPS: Record<string, { name: string; commands: string[] }> = {
@@ -47,12 +46,7 @@ export function createHelpCommand(getCommands: SlashCommandListProvider): SlashC
     example: "/help",
     kind: CommandKind.BUILT_IN,
     action: (ctx) => {
-      // 过滤：hidden 命令 + 被 DISABLED_COMMANDS 屏蔽的命令都不展示。
-      // getCommands() 返回的是注册前原始数组（未过滤屏蔽名单），故需在此显式排除，
-      // 否则 /help 会列出已被屏蔽的命令（diff/mcp/sandbox/memory），与"输入报 Unknown"割裂。
-      const commands = getCommands().filter(
-        (command) => !command.hidden && !isCommandDisabled(command.name),
-      );
+      const commands = getCommands().filter((command) => !command.hidden);
 
       const groupedCommands: Record<string, Array<{ label: string; value?: string; description: string }>> = {};
       const ungroupedCommands: Array<{ label: string; value?: string; description: string }> = [];
