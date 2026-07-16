@@ -92,7 +92,7 @@ function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
 
 export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession }: CronPanelProps) {
   const { t } = useTranslation();
-  const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent.plan');
+  const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent');
   // 工作面板侧边栏的"按项目分组展示定时任务"用的是独立的 useCronStore（见
   // multi-session/sidebar/ConversationSidebar.tsx），跟这个面板自己的 jobs state 是两份数据；
   // 在这里创建/编辑/停止/删除任务后也要通知它刷新，否则侧边栏那边的任务文件夹会显示过期数据
