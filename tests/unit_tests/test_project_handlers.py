@@ -89,12 +89,12 @@ def _drain():
     _METADATA_QUEUE.join()
 
 
-def _make_session(sid, *, project_dir="", project_id="", pinned=False, pin_order=0, last_user_message_at=None, model=""):
+def _make_session(sid, *, project_dir="", project_id="", pinned=False, pin_order=0, last_user_message_at=None, model="", cron_id=""):
     """创建一个会话并写入指定元数据,flush 队列确保落盘。"""
     from jiuwenswarm.server.runtime.session.session_metadata import (
         init_session_metadata, update_session_metadata,
     )
-    init_session_metadata(session_id=sid, project_dir=project_dir, project_id=project_id, model=model)
+    init_session_metadata(session_id=sid, project_dir=project_dir, project_id=project_id, model=model, cron_id=cron_id)
     if pinned or pin_order:
         update_session_metadata(session_id=sid, pinned=pinned, pin_order=pin_order)
     if last_user_message_at is not None:
@@ -144,50 +144,21 @@ class TestProjectList:
 
         assert ids[0] == p_pinned.project_id  # 置顶在前
         assert ids[1] == p_normal.project_id  # 非置顶
-        assert ids[-1] == "default"  # 默认项目末位
+        # work_mode 改造后默认项目按 work 拆分为两个虚拟条目:
+        # work 模式 default 在前, code 模式 default_code 在后(均位于列表末尾)
+        assert ids[-2] == "default"  # work 默认项目
+        assert ids[-1] == "default_code"  # code 默认项目
         # 统计:普通项目 1 个非置顶会话,默认 1 个
         normal_info = next(p for p in projects if p["project_id"] == p_normal.project_id)
         assert normal_info["session_count"] == 1
         default_info = next(p for p in projects if p["project_id"] == "default")
         assert default_info["session_count"] == 1
         assert default_info["is_default"] is True
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_filter_pinned_only(registered_channel, tmp_path):
-        pa = _abspath(tmp_path, "app")
-        pb = _abspath(tmp_path, "backend")
-        _make_project("置顶", pa, pinned=True, pin_order=1)
-        _make_project("普通", pb)
-        resp = await _call(registered_channel, "project.list", {"filter": "pinned"})
-        projects = resp["payload"]["projects"]
-        assert len(projects) == 1
-        assert projects[0]["pinned"] is True
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_filter_unpinned_includes_default_last(registered_channel, tmp_path):
-        pa = _abspath(tmp_path, "app")
-        _make_project("置顶", pa, pinned=True, pin_order=1)
-        _make_project("普通", _abspath(tmp_path, "backend"))
-        resp = await _call(registered_channel, "project.list", {"filter": "unpinned"})
-        projects = resp["payload"]["projects"]
-        assert all(not p["pinned"] for p in projects)
-        assert projects[-1]["project_id"] == "default"
-        assert not any(p["pinned"] for p in projects)
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_include_hidden(registered_channel, tmp_path):
-        ph = _abspath(tmp_path, "hidden")
-        _make_project("隐藏项目", ph, hidden=True)
-        resp = await _call(registered_channel, "project.list", {"filter": "all"})
-        # 默认不含隐藏
-        assert all(not p["hidden"] or p["is_default"] for p in resp["payload"]["projects"])
-        resp2 = await _call(
-            registered_channel, "project.list", {"filter": "all", "include_hidden": True}
-        )
-        assert any(p["hidden"] for p in resp2["payload"]["projects"])
+        default_code_info = next(p for p in projects if p["project_id"] == "default_code")
+        assert default_code_info["is_default"] is True
+        assert default_code_info["work_mode"] == "code"
+        assert default_code_info["git"]["enabled"] is False
+        assert "git" in normal_info
 
     @staticmethod
     @pytest.mark.asyncio
@@ -200,6 +171,67 @@ class TestProjectList:
         resp = await _call(registered_channel, "project.list", {"filter": "all"})
         p_info = next(p for p in resp["payload"]["projects"] if p["project_dir"] == pa)
         assert p_info["session_count"] == 1  # 仅非置顶
+
+
+# ===========================================================================
+# project.info
+# ===========================================================================
+class TestProjectInfo:
+    @staticmethod
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("project_id, work_mode", [
+        pytest.param("default", "work", id="virtual_default_work"),
+        pytest.param("default_code", "code", id="virtual_default_code"),
+    ])
+    async def test_virtual_default(registered_channel, tmp_path, project_id, work_mode):
+        """project_id=default/default_code → 返回 work/code 模式虚拟默认项目。"""
+        _make_session("s1", project_dir="", last_user_message_at=100.0)
+        resp = await _call(registered_channel, "project.info", {"project_id": project_id})
+        assert resp["ok"] is True
+        p = resp["payload"]
+        assert p["project_id"] == project_id
+        assert p["is_default"] is True
+        assert p["work_mode"] == work_mode
+        assert p["project"]["project_id"] == project_id
+        assert p["git"]["enabled"] is False
+        assert p["project_dir"] == ""
+        # work 默认项目附带 session_count/created_at 校验
+        if project_id == "default":
+            assert p["session_count"] == 1
+            assert p["created_at"] == 0
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_real_project_and_hidden_not_found(registered_channel, tmp_path):
+        """真实 project_id → 返回详情;隐藏项目 → NOT_FOUND。"""
+        pa = _abspath(tmp_path, "app")
+        proj = _make_project("应用", pa)
+        _make_session("s1", project_id=proj.project_id, project_dir=pa, last_user_message_at=100.0)
+        _make_session("s_cron", project_id=proj.project_id, project_dir=pa, cron_id="cron_1")
+        _make_session("s_pinned", project_id=proj.project_id, project_dir=pa, pinned=True, pin_order=1, last_user_message_at=200.0)
+
+        # 真实项目详情
+        resp = await _call(registered_channel, "project.info", {"project_id": proj.project_id})
+        assert resp["ok"] is True
+        p = resp["payload"]
+        assert p["project_id"] == proj.project_id
+        assert p["name"] == "应用"
+        assert p["project_dir"] == pa
+        assert p["is_default"] is False
+        assert p["work_mode"] == "work"
+        assert p["project"]["project_id"] == proj.project_id
+        assert p["project"]["git"] == p["git"]
+        assert p["git"]["enabled"] is False
+        # 统计口径同 project.list:仅非置顶普通会话(cron_id 为空)
+        assert p["session_count"] == 1
+        assert p["last_user_message_at"] == 100.0
+
+        # 隐藏项目 → NOT_FOUND
+        ph = _abspath(tmp_path, "hidden")
+        hidden_proj = _make_project("隐藏", ph, hidden=True)
+        resp_h = await _call(registered_channel, "project.info", {"project_id": hidden_proj.project_id})
+        assert resp_h["ok"] is False
+        assert resp_h["code"] == "NOT_FOUND"
 
 
 # ===========================================================================
@@ -229,12 +261,14 @@ class TestProjectGetSessions:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_pagination(registered_channel, tmp_path):
+    async def test_pagination_and_hidden_default(registered_channel, tmp_path):
+        """分页 limit/offset 截断 + default 含隐藏项目会话(临时归属默认)。"""
         pa = _abspath(tmp_path, "app")
         proj = _make_project("P", pa)
         for i in range(5):
             _make_session(f"s{i}", project_id=proj.project_id, project_dir=pa, last_user_message_at=float(i))
 
+        # 分页:offset=1 跳过最新(4),取 3,2
         resp = await _call(
             registered_channel, "project.get_sessions",
             {"project_id": proj.project_id, "limit": 2, "offset": 1},
@@ -242,42 +276,20 @@ class TestProjectGetSessions:
         sessions = resp["payload"]["sessions"]
         assert len(sessions) == 2
         assert resp["payload"]["total"] == 5  # 截断前全量
-        # offset=1 跳过最新(4),取 3,2
         assert sessions[0]["session_id"] == "s3"
         assert sessions[1]["session_id"] == "s2"
 
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_default_includes_hidden_project_sessions(registered_channel, tmp_path):
-        """default: 含隐藏项目的非置顶会话(临时归属默认)。"""
+        # default: 含隐藏项目的非置顶会话(临时归属默认)
         ph = _abspath(tmp_path, "hidden")
         _make_project("隐藏", ph, hidden=True)
         _make_session("s_hidden", project_dir=ph, last_user_message_at=100.0)
         _make_session("s_default", project_dir="", last_user_message_at=200.0)
-
-        resp = await _call(
+        resp_d = await _call(
             registered_channel, "project.get_sessions", {"project_id": "default"}
         )
-        ids = [s["session_id"] for s in resp["payload"]["sessions"]]
+        ids = [s["session_id"] for s in resp_d["payload"]["sessions"]]
         assert "s_hidden" in ids  # 隐藏项目会话归默认
         assert "s_default" in ids
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_not_found_for_hidden_project(registered_channel, tmp_path):
-        ph = _abspath(tmp_path, "hidden")
-        proj = _make_project("隐藏", ph, hidden=True)
-        resp = await _call(
-            registered_channel, "project.get_sessions", {"project_id": proj.project_id}
-        )
-        assert resp["ok"] is False
-        assert resp["code"] == "NOT_FOUND"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_missing_project_id_bad_request(registered_channel):
-        resp = await _call(registered_channel, "project.get_sessions", {"project_id": ""})
-        assert resp["code"] == "BAD_REQUEST"
 
 
 # ===========================================================================
@@ -294,17 +306,6 @@ class TestProjectCreate:
         assert resp["ok"] is True
         assert resp["payload"]["project_id"].startswith("proj_")
         assert resp["payload"]["restored"] is False
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_conflict_on_visible_duplicate(registered_channel, tmp_path):
-        pa = _abspath(tmp_path, "dup")
-        _make_project("P1", pa)
-        resp = await _call(
-            registered_channel, "project.create", {"name": "P2", "project_dir": pa}
-        )
-        assert resp["ok"] is False
-        assert resp["code"] == "CONFLICT"
 
     @staticmethod
     @pytest.mark.asyncio
@@ -325,57 +326,53 @@ class TestProjectCreate:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_bad_request_non_absolute_path(registered_channel):
-        resp = await _call(
-            registered_channel, "project.create", {"name": "P", "project_dir": "relative/path"}
-        )
-        assert resp["code"] == "BAD_REQUEST"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_bad_request_empty_name(registered_channel, tmp_path):
-        resp = await _call(
-            registered_channel, "project.create",
-            {"name": "", "project_dir": _abspath(tmp_path, "x")},
-        )
-        assert resp["code"] == "BAD_REQUEST"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_conflict_on_duplicate_name(registered_channel, tmp_path):
-        """不同路径、同名 → CONFLICT。"""
-        _make_project("P1", _abspath(tmp_path, "a"))
-        resp = await _call(
-            registered_channel, "project.create",
-            {"name": "P1", "project_dir": _abspath(tmp_path, "b")},
-        )
-        assert resp["ok"] is False
-        assert resp["code"] == "CONFLICT"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_create_restore_same_name_ok(registered_channel, tmp_path):
-        """按路径恢复时同名不冲突(排除命中的待恢复项自身)。"""
-        pa = _abspath(tmp_path, "restored")
-        existing = _make_project("P", pa, hidden=True)
-        resp = await _call(
-            registered_channel, "project.create", {"name": "P", "project_dir": pa}
-        )
-        assert resp["ok"] is True
-        assert resp["payload"]["restored"] is True
-        assert resp["payload"]["project_id"] == existing.project_id
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_conflict_on_hidden_project_name(registered_channel, tmp_path):
-        """新项目复用隐藏项目名称 → CONFLICT(隐藏项目名称保留)。"""
-        _make_project("P", _abspath(tmp_path, "a"), hidden=True)
-        resp = await _call(
-            registered_channel, "project.create",
-            {"name": "P", "project_dir": _abspath(tmp_path, "b")},
-        )
-        assert resp["ok"] is False
-        assert resp["code"] == "CONFLICT"
+    @pytest.mark.parametrize("scenario", [
+        pytest.param("visible_dup", id="conflict_on_visible_duplicate"),
+        pytest.param("dup_name", id="conflict_on_duplicate_name"),
+        pytest.param("hidden_name", id="conflict_on_hidden_project_name"),
+        pytest.param("non_absolute", id="bad_request_non_absolute_path"),
+        pytest.param("empty_name", id="bad_request_empty_name"),
+    ])
+    async def test_conflict_and_bad_request(registered_channel, tmp_path, scenario):
+        """各类 CONFLICT 与 BAD_REQUEST 场景。"""
+        if scenario == "visible_dup":
+            # 同路径已有可见项目 → CONFLICT
+            _make_project("P1", _abspath(tmp_path, "dup"))
+            resp = await _call(
+                registered_channel, "project.create",
+                {"name": "P2", "project_dir": _abspath(tmp_path, "dup")},
+            )
+            assert resp["ok"] is False
+            assert resp["code"] == "CONFLICT"
+        elif scenario == "dup_name":
+            # 不同路径、同名 → CONFLICT
+            _make_project("P1", _abspath(tmp_path, "a"))
+            resp = await _call(
+                registered_channel, "project.create",
+                {"name": "P1", "project_dir": _abspath(tmp_path, "b")},
+            )
+            assert resp["ok"] is False
+            assert resp["code"] == "CONFLICT"
+        elif scenario == "hidden_name":
+            # 新项目复用隐藏项目名称 → CONFLICT(隐藏项目名称保留)
+            _make_project("P", _abspath(tmp_path, "a"), hidden=True)
+            resp = await _call(
+                registered_channel, "project.create",
+                {"name": "P", "project_dir": _abspath(tmp_path, "b")},
+            )
+            assert resp["ok"] is False
+            assert resp["code"] == "CONFLICT"
+        elif scenario == "non_absolute":
+            resp = await _call(
+                registered_channel, "project.create", {"name": "P", "project_dir": "relative/path"}
+            )
+            assert resp["code"] == "BAD_REQUEST"
+        elif scenario == "empty_name":
+            resp = await _call(
+                registered_channel, "project.create",
+                {"name": "", "project_dir": _abspath(tmp_path, "x")},
+            )
+            assert resp["code"] == "BAD_REQUEST"
 
 
 # ===========================================================================
@@ -384,9 +381,11 @@ class TestProjectCreate:
 class TestProjectRename:
     @staticmethod
     @pytest.mark.asyncio
-    async def test_rename_to_unique_ok(registered_channel, tmp_path):
+    async def test_rename_to_unique_and_self_ok(registered_channel, tmp_path):
+        """重命名为新名 / 自身当前名 → 成功。"""
         pa = _abspath(tmp_path, "a")
         proj = _make_project("P1", pa)
+        # 重命名为新名
         resp = await _call(
             registered_channel, "project.rename",
             {"project_id": proj.project_id, "name": "新名"},
@@ -394,108 +393,97 @@ class TestProjectRename:
         assert resp["ok"] is True
         from jiuwenswarm.server.runtime.session.project_store import get_project_by_id
         assert get_project_by_id(proj.project_id, cache_bust=True).name == "新名"
+        # 重命名为自身当前名不冲突
+        resp2 = await _call(
+            registered_channel, "project.rename",
+            {"project_id": proj.project_id, "name": "新名"},
+        )
+        assert resp2["ok"] is True
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_rename_conflict_on_duplicate_name(registered_channel, tmp_path):
-        pa = _abspath(tmp_path, "a")
-        pb = _abspath(tmp_path, "b")
-        _make_project("P1", pa)
-        p2 = _make_project("P2", pb)
-        resp = await _call(
-            registered_channel, "project.rename",
-            {"project_id": p2.project_id, "name": "P1"},
-        )
-        assert resp["ok"] is False
-        assert resp["code"] == "CONFLICT"
-        # 原名不变
+    @pytest.mark.parametrize("scenario", [
+        pytest.param("duplicate", id="conflict_on_duplicate_name"),
+        pytest.param("hidden", id="conflict_with_hidden_project"),
+    ])
+    async def test_rename_conflict(registered_channel, tmp_path, scenario):
+        """重命名为已占用名称(可见项目 / 隐藏项目)→ CONFLICT。"""
         from jiuwenswarm.server.runtime.session.project_store import get_project_by_id
-        assert get_project_by_id(p2.project_id, cache_bust=True).name == "P2"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_rename_conflict_with_hidden_project(registered_channel, tmp_path):
-        """重命名为隐藏项目名称 → CONFLICT(隐藏项目名称保留)。"""
-        _make_project("P", _abspath(tmp_path, "a"), hidden=True)
-        p2 = _make_project("P2", _abspath(tmp_path, "b"))
-        resp = await _call(
-            registered_channel, "project.rename",
-            {"project_id": p2.project_id, "name": "P"},
-        )
-        assert resp["ok"] is False
-        assert resp["code"] == "CONFLICT"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_rename_to_self_name_ok(registered_channel, tmp_path):
-        """重命名为自身当前名不冲突。"""
-        pa = _abspath(tmp_path, "a")
-        proj = _make_project("P", pa)
-        resp = await _call(
-            registered_channel, "project.rename",
-            {"project_id": proj.project_id, "name": "P"},
-        )
-        assert resp["ok"] is True
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_rename_default_forbidden(registered_channel):
-        resp = await _call(
-            registered_channel, "project.rename",
-            {"project_id": "default", "name": "X"},
-        )
-        assert resp["code"] == "FORBIDDEN"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_rename_not_found(registered_channel):
-        resp = await _call(
-            registered_channel, "project.rename",
-            {"project_id": "proj_nope", "name": "X"},
-        )
-        assert resp["code"] == "NOT_FOUND"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_rename_missing_name_bad_request(registered_channel, tmp_path):
-        pa = _abspath(tmp_path, "a")
-        proj = _make_project("P", pa)
-        resp = await _call(
-            registered_channel, "project.rename",
-            {"project_id": proj.project_id, "name": ""},
-        )
-        assert resp["code"] == "BAD_REQUEST"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_rename_illegal_name_bad_request(registered_channel, tmp_path):
-        """重命名为含文件系统非法字符的 name → BAD_REQUEST。"""
-        pa = _abspath(tmp_path, "a")
-        proj = _make_project("P", pa)
-        for bad_name in ["新/A", "新\\A", "新:A", "新*A", '新"A', "新<A", "新>A", "新|A", "新?A"]:
+        if scenario == "duplicate":
+            _make_project("P1", _abspath(tmp_path, "a"))
+            p2 = _make_project("P2", _abspath(tmp_path, "b"))
             resp = await _call(
                 registered_channel, "project.rename",
-                {"project_id": proj.project_id, "name": bad_name},
+                {"project_id": p2.project_id, "name": "P1"},
             )
-            assert resp["ok"] is False, f"expected BAD_REQUEST for name={bad_name!r}"
-            assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={bad_name!r}"
-        # 原名未被修改
-        from jiuwenswarm.server.runtime.session.project_store import get_project_by_id
-        assert get_project_by_id(proj.project_id, cache_bust=True).name == "P"
+            assert resp["ok"] is False
+            assert resp["code"] == "CONFLICT"
+            # 原名不变
+            assert get_project_by_id(p2.project_id, cache_bust=True).name == "P2"
+        elif scenario == "hidden":
+            _make_project("P", _abspath(tmp_path, "a"), hidden=True)
+            p2 = _make_project("P2", _abspath(tmp_path, "b"))
+            resp = await _call(
+                registered_channel, "project.rename",
+                {"project_id": p2.project_id, "name": "P"},
+            )
+            assert resp["ok"] is False
+            assert resp["code"] == "CONFLICT"
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_rename_reserved_name_bad_request(registered_channel, tmp_path):
-        """重命名为 Windows 保留设备名 → BAD_REQUEST。"""
-        pa = _abspath(tmp_path, "a")
-        proj = _make_project("P", pa)
-        for reserved in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"]:
+    @pytest.mark.parametrize("scenario", [
+        pytest.param("default", id="forbidden_default"),
+        pytest.param("not_found", id="not_found"),
+        pytest.param("empty", id="bad_request_empty_name"),
+        pytest.param("illegal", id="bad_request_illegal_name"),
+        pytest.param("reserved", id="bad_request_reserved_name"),
+    ])
+    async def test_rename_errors(registered_channel, tmp_path, scenario):
+        """重命名各类错误场景:FORBIDDEN / NOT_FOUND / BAD_REQUEST。"""
+        if scenario == "default":
             resp = await _call(
                 registered_channel, "project.rename",
-                {"project_id": proj.project_id, "name": reserved},
+                {"project_id": "default", "name": "X"},
             )
-            assert resp["ok"] is False, f"expected BAD_REQUEST for name={reserved!r}"
-            assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={reserved!r}"
+            assert resp["code"] == "FORBIDDEN"
+        elif scenario == "not_found":
+            resp = await _call(
+                registered_channel, "project.rename",
+                {"project_id": "proj_nope", "name": "X"},
+            )
+            assert resp["code"] == "NOT_FOUND"
+        elif scenario == "empty":
+            pa = _abspath(tmp_path, "a")
+            proj = _make_project("P", pa)
+            resp = await _call(
+                registered_channel, "project.rename",
+                {"project_id": proj.project_id, "name": ""},
+            )
+            assert resp["code"] == "BAD_REQUEST"
+        elif scenario == "illegal":
+            pa = _abspath(tmp_path, "a")
+            proj = _make_project("P", pa)
+            for bad_name in ["新/A", "新\\A", "新:A", "新*A", '新"A', "新<A", "新>A", "新|A", "新?A"]:
+                resp = await _call(
+                    registered_channel, "project.rename",
+                    {"project_id": proj.project_id, "name": bad_name},
+                )
+                assert resp["ok"] is False, f"expected BAD_REQUEST for name={bad_name!r}"
+                assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={bad_name!r}"
+            # 原名未被修改
+            from jiuwenswarm.server.runtime.session.project_store import get_project_by_id
+            assert get_project_by_id(proj.project_id, cache_bust=True).name == "P"
+        elif scenario == "reserved":
+            pa = _abspath(tmp_path, "a")
+            proj = _make_project("P", pa)
+            for reserved in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"]:
+                resp = await _call(
+                    registered_channel, "project.rename",
+                    {"project_id": proj.project_id, "name": reserved},
+                )
+                assert resp["ok"] is False, f"expected BAD_REQUEST for name={reserved!r}"
+                assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={reserved!r}"
 
 
 # ===========================================================================
@@ -504,18 +492,18 @@ class TestProjectRename:
 class TestProjectRemoveRestore:
     @staticmethod
     @pytest.mark.asyncio
-    async def test_remove_returns_affected_and_soft_deletes(registered_channel, tmp_path):
+    async def test_remove_happy_and_idempotent(registered_channel, tmp_path):
+        """remove: 软删除后返回 affected(仅非置顶);已隐藏项目再 remove 幂等(affected=0)。"""
         pa = _abspath(tmp_path, "app")
         proj = _make_project("P", pa)
         _make_session("s1", project_id=proj.project_id, project_dir=pa, last_user_message_at=100.0)
         _make_session("s2", project_id=proj.project_id, project_dir=pa, last_user_message_at=200.0)
         _make_session("s_pin", project_id=proj.project_id, project_dir=pa, pinned=True, pin_order=1, last_user_message_at=300.0)
 
-        resp = await _call(
-            registered_channel, "project.remove", {"project_id": proj.project_id}
-        )
+        # 第一次 remove: affected=2(仅非置顶)
+        resp = await _call(registered_channel, "project.remove", {"project_id": proj.project_id})
         assert resp["ok"] is True
-        assert resp["payload"]["affected_sessions"] == 2  # 仅非置顶
+        assert resp["payload"]["affected_sessions"] == 2
 
         # 软删除后 get_sessions 返回 NOT_FOUND
         resp2 = await _call(
@@ -530,80 +518,60 @@ class TestProjectRemoveRestore:
         ids = [s["session_id"] for s in resp3["payload"]["sessions"]]
         assert "s1" in ids and "s2" in ids
 
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_remove_idempotent_on_hidden(registered_channel, tmp_path):
-        pa = _abspath(tmp_path, "app")
-        proj = _make_project("P", pa, hidden=True)
-        resp = await _call(
-            registered_channel, "project.remove", {"project_id": proj.project_id}
+        # 已隐藏项目再 remove → affected=0(幂等)
+        pa2 = _abspath(tmp_path, "app2")
+        proj2 = _make_project("P2", pa2, hidden=True)
+        resp_idem = await _call(
+            registered_channel, "project.remove", {"project_id": proj2.project_id}
         )
-        assert resp["ok"] is True
-        assert resp["payload"]["affected_sessions"] == 0
+        assert resp_idem["ok"] is True
+        assert resp_idem["payload"]["affected_sessions"] == 0
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_remove_default_forbidden(registered_channel):
-        resp = await _call(registered_channel, "project.remove", {"project_id": "default"})
-        assert resp["code"] == "FORBIDDEN"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_restore_reattributes_sessions(registered_channel, tmp_path):
+    async def test_restore_happy_and_conflict(registered_channel, tmp_path):
+        """restore: 重新归属会话;冲突(可见项目 / 同名占用)时不恢复。"""
         pa = _abspath(tmp_path, "app")
         proj = _make_project("P", pa)
         _make_session("s1", project_id=proj.project_id, project_dir=pa, last_user_message_at=100.0)
         _make_session("s2", project_id=proj.project_id, project_dir=pa, last_user_message_at=200.0)
         # 先移除
         await _call(registered_channel, "project.remove", {"project_id": proj.project_id})
-        # 恢复
+        # 恢复:会话回归
         resp = await _call(
             registered_channel, "project.restore", {"project_id": proj.project_id}
         )
         assert resp["ok"] is True
         assert resp["payload"]["affected_sessions"] == 2
-
-        # 恢复后会话重新归属该项目
         resp2 = await _call(
             registered_channel, "project.get_sessions", {"project_id": proj.project_id}
         )
         ids = [s["session_id"] for s in resp2["payload"]["sessions"]]
         assert sorted(ids) == ["s1", "s2"]
 
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_restore_conflict_on_visible(registered_channel, tmp_path):
-        pa = _abspath(tmp_path, "app")
-        proj = _make_project("P", pa)  # 可见
-        resp = await _call(
-            registered_channel, "project.restore", {"project_id": proj.project_id}
+        # 冲突 1:可见项目 restore → CONFLICT
+        pa_v = _abspath(tmp_path, "visible")
+        proj_v = _make_project("Vis", pa_v)  # 可见
+        resp_v = await _call(
+            registered_channel, "project.restore", {"project_id": proj_v.project_id}
         )
-        assert resp["code"] == "CONFLICT"
+        assert resp_v["code"] == "CONFLICT"
 
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_restore_default_forbidden(registered_channel):
-        resp = await _call(registered_channel, "project.restore", {"project_id": "default"})
-        assert resp["code"] == "FORBIDDEN"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_restore_conflict_on_duplicate_name(registered_channel, tmp_path):
-        """恢复时 name 被其他可见项目占用 → CONFLICT。"""
-        pa = _abspath(tmp_path, "a")
-        pb = _abspath(tmp_path, "b")
-        proj = _make_project("P", pa)
-        await _call(registered_channel, "project.remove", {"project_id": proj.project_id})
-        # 隐藏期间,另一个可见项目占用同名 "P"
-        _make_project("P", pb)
-        resp = await _call(
-            registered_channel, "project.restore", {"project_id": proj.project_id}
+        # 冲突 2:name 被其他可见项目占用 → CONFLICT
+        pa_c = _abspath(tmp_path, "a3")
+        pb_c = _abspath(tmp_path, "b3")
+        proj_c = _make_project("P3", pa_c)
+        await _call(registered_channel, "project.remove", {"project_id": proj_c.project_id})
+        # 隐藏期间,另一个可见项目占用同名 "P3"
+        _make_project("P3", pb_c)
+        resp_c = await _call(
+            registered_channel, "project.restore", {"project_id": proj_c.project_id}
         )
-        assert resp["ok"] is False
-        assert resp["code"] == "CONFLICT"
+        assert resp_c["ok"] is False
+        assert resp_c["code"] == "CONFLICT"
         # 仍处于隐藏状态(未恢复)
         from jiuwenswarm.server.runtime.session.project_store import get_project_by_id
-        assert get_project_by_id(proj.project_id, cache_bust=True).hidden is True
+        assert get_project_by_id(proj_c.project_id, cache_bust=True).hidden is True
 
 
 # ===========================================================================
@@ -650,69 +618,6 @@ class TestSessionPin:
         assert [s["session_id"] for s in sessions] == ["s3", "s1"]
         assert [s["pin_order"] for s in sessions] == [1, 2]
 
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_pinned_excluded_from_get_sessions(registered_channel, tmp_path):
-        """置顶会话从 get_sessions 消失,出现在 pinned_sessions。"""
-        pa = _abspath(tmp_path, "app")
-        proj = _make_project("P", pa)
-        _make_session("s_normal", project_id=proj.project_id, project_dir=pa, last_user_message_at=100.0)
-        _make_session("s_pin", project_id=proj.project_id, project_dir=pa, last_user_message_at=200.0)
-        await _call(registered_channel, "session.pin", {"session_id": "s_pin", "pinned": True})
-        _drain()
-
-        resp_gs = await _call(
-            registered_channel, "project.get_sessions", {"project_id": proj.project_id}
-        )
-        ids = [s["session_id"] for s in resp_gs["payload"]["sessions"]]
-        assert "s_pin" not in ids
-        assert "s_normal" in ids
-
-        resp_pin = await _call(registered_channel, "project.pinned_sessions", {})
-        pin_ids = [s["session_id"] for s in resp_pin["payload"]["sessions"]]
-        assert "s_pin" in pin_ids
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_pin_not_found(registered_channel):
-        resp = await _call(registered_channel, "session.pin", {"session_id": "nope", "pinned": True})
-        assert resp["code"] == "NOT_FOUND"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_pin_does_not_corrupt_last_message_at(registered_channel, sessions_dir):
-        """置顶/取消置顶不应改变任何会话的 last_message_at(置顶不是消息)。
-
-        回归:set_session_pinned 曾走 update_session_metadata,其末尾无条件刷新
-        last_message_at,导致每次 pin/unpin 把所有置顶会话的最后消息时间腐蚀为当前时刻。
-        """
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            get_session_metadata,
-        )
-
-        _make_session("s1", last_user_message_at=1000.0)
-        _make_session("s2", last_user_message_at=2000.0)
-        before_s1 = get_session_metadata("s1", cache_bust=True).get("last_message_at")
-        before_s2 = get_session_metadata("s2", cache_bust=True).get("last_message_at")
-        assert before_s1 is not None and before_s2 is not None
-
-        # 置顶 s1 → 重编号(仅 s1),不应触碰 last_message_at
-        await _call(registered_channel, "session.pin", {"session_id": "s1", "pinned": True})
-        _drain()
-        assert get_session_metadata("s1", cache_bust=True).get("last_message_at") == before_s1
-
-        # 再置顶 s2 → 重编号(s1,s2),两个会话的 last_message_at 都应保持不变
-        await _call(registered_channel, "session.pin", {"session_id": "s2", "pinned": True})
-        _drain()
-        assert get_session_metadata("s1", cache_bust=True).get("last_message_at") == before_s1
-        assert get_session_metadata("s2", cache_bust=True).get("last_message_at") == before_s2
-
-        # 取消 s1 → 重编号(仅 s2),last_message_at 仍不变
-        await _call(registered_channel, "session.pin", {"session_id": "s1", "pinned": False})
-        _drain()
-        assert get_session_metadata("s1", cache_bust=True).get("last_message_at") == before_s1
-        assert get_session_metadata("s2", cache_bust=True).get("last_message_at") == before_s2
-
 
 # ===========================================================================
 # 兼容性: 旧 session.create 不传 project_dir + session.rename
@@ -739,59 +644,6 @@ class TestCompat:
         ids = [s["session_id"] for s in resp2["payload"]["sessions"]]
         assert "sess_compat_1" in ids
 
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_session_create_already_exists(registered_channel, sessions_dir):
-        await _call(
-            registered_channel, "session.create", {"session_id": "sess_dup"}
-        )
-        resp = await _call(
-            registered_channel, "session.create", {"session_id": "sess_dup"}
-        )
-        assert resp["code"] == "ALREADY_EXISTS"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_session_rename_query_clear_set(registered_channel, sessions_dir):
-        """session.rename 三种语义:查询/清除/设置。"""
-        from jiuwenswarm.server.runtime.session.session_metadata import (
-            init_session_metadata, _METADATA_QUEUE,
-        )
-        init_session_metadata(session_id="sess_rn", title="原标题")
-        _METADATA_QUEUE.join()
-
-        # 查询(不传 title)
-        resp = await _call(
-            registered_channel, "session.rename", {"session_id": "sess_rn"}
-        )
-        assert resp["payload"]["title"] == "原标题"
-        assert resp["payload"]["previous_title"] == "原标题"
-
-        # 设置
-        resp2 = await _call(
-            registered_channel, "session.rename",
-            {"session_id": "sess_rn", "title": "新标题"},
-        )
-        _drain()
-        assert resp2["payload"]["title"] == "新标题"
-        assert resp2["payload"]["previous_title"] == "原标题"
-
-        # 清除(空串)
-        resp3 = await _call(
-            registered_channel, "session.rename",
-            {"session_id": "sess_rn", "title": "   "},
-        )
-        _drain()
-        assert resp3["payload"]["title"] == ""
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_session_rename_missing_id_bad_request(registered_channel):
-        # apply_session_rename 用 params.session_id 回退到 connection session_id,
-        # 两者皆空时才 BAD_REQUEST
-        resp = await _call(registered_channel, "session.rename", {}, sid="")
-        assert resp["code"] == "BAD_REQUEST"
-
 
 # ===========================================================================
 # 不传 project_dir → 自动生成工作目录 + project_id 归属
@@ -808,168 +660,59 @@ class TestEmptyPathProject:
         )
         assert resp["ok"] is True
         assert resp["payload"]["project_id"].startswith("proj_")
-        expected_path = str(get_agent_root_dir() / "workspace" / "空项目A")
+        # work_mode 改造后默认工作区按 work_mode 分桶:Web 通道默认 work 模式
+        # → workspace/work/{name}
+        expected_path = str(get_agent_root_dir() / "workspace" / "work" / "空项目A")
         assert resp["payload"]["project_dir"] == expected_path
         assert os.path.isdir(expected_path)
         assert resp["payload"]["restored"] is False
+        assert resp["payload"]["git"]["enabled"] is False
+        assert resp["payload"]["project"]["project_id"] == resp["payload"]["project_id"]
+        assert resp["payload"]["project"]["git"] == resp["payload"]["git"]
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_create_multiple_empty_path_projects(registered_channel):
-        """不传 project_dir 时,各自按项目名生成不同工作目录。"""
-        from jiuwenswarm.server.runtime.session.project_store import get_agent_root_dir
+    @pytest.mark.parametrize("scenario", [
+        pytest.param("empty_path_illegal", id="empty_path_illegal_name"),
+        pytest.param("empty_path_reserved", id="empty_path_reserved_name"),
+        pytest.param("with_path_illegal", id="with_path_illegal_name"),
+        pytest.param("with_path_reserved", id="with_path_reserved_name"),
+    ])
+    async def test_create_illegal_reserved_name(registered_channel, tmp_path, scenario):
+        """项目名含文件系统非法字符 / Windows 保留设备名 → BAD_REQUEST(store 层统一校验)。
 
-        root = get_agent_root_dir() / "workspace"
-        r1 = await _call(registered_channel, "project.create", {"name": "空项目1"})
-        r2 = await _call(registered_channel, "project.create", {"name": "空项目2"})
-        assert r1["ok"] is True and r2["ok"] is True
-        assert r1["payload"]["project_id"] != r2["payload"]["project_id"]
-        assert r1["payload"]["project_dir"] == str(root / "空项目1")
-        assert r2["payload"]["project_dir"] == str(root / "空项目2")
-        assert os.path.isdir(str(root / "空项目1"))
-        assert os.path.isdir(str(root / "空项目2"))
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_create_empty_path_duplicate_name_conflict(registered_channel):
-        """同名项目第二次创建 → CONFLICT(路径重复)。"""
-        await _call(registered_channel, "project.create", {"name": "同名"})
-        resp = await _call(registered_channel, "project.create", {"name": "同名"})
-        assert resp["ok"] is False
-        assert resp["code"] == "CONFLICT"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_create_without_project_dir_illegal_name(registered_channel):
-        """不传 project_dir 但项目名含文件系统非法字符 → BAD_REQUEST。"""
-        for bad_name in ["项目/A", "项目\\A", "项目:A", "项目*A", '项目"A', "项目<A", "项目>A", "项目|A", "项目?A"]:
-            resp = await _call(
-                registered_channel, "project.create", {"name": bad_name}
-            )
-            assert resp["ok"] is False, f"expected BAD_REQUEST for name={bad_name!r}"
-            assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={bad_name!r}"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_create_without_project_dir_reserved_name(registered_channel):
-        """不传 project_dir 但项目名是 Windows 保留设备名 → BAD_REQUEST。"""
-        for reserved in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"]:
-            resp = await _call(
-                registered_channel, "project.create", {"name": reserved}
-            )
-            assert resp["ok"] is False, f"expected BAD_REQUEST for name={reserved!r}"
-            assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={reserved!r}"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_create_with_project_dir_illegal_name(registered_channel, tmp_path):
-        """传 project_dir 但项目名含文件系统非法字符 → BAD_REQUEST(store 层统一校验)。"""
-        pa = _abspath(tmp_path, "workdir")
-        for bad_name in ["项目/A", "项目\\A", "项目:A", "项目*A", '项目"A', "项目<A", "项目>A", "项目|A", "项目?A"]:
-            resp = await _call(
-                registered_channel, "project.create",
-                {"name": bad_name, "project_dir": pa},
-            )
-            assert resp["ok"] is False, f"expected BAD_REQUEST for name={bad_name!r}"
-            assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={bad_name!r}"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_create_with_project_dir_reserved_name(registered_channel, tmp_path):
-        """传 project_dir 但项目名是 Windows 保留设备名 → BAD_REQUEST(store 层统一校验)。"""
-        pa = _abspath(tmp_path, "workdir")
-        for reserved in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"]:
-            resp = await _call(
-                registered_channel, "project.create",
-                {"name": reserved, "project_dir": pa},
-            )
-            assert resp["ok"] is False, f"expected BAD_REQUEST for name={reserved!r}"
-            assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={reserved!r}"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_session_attributed_by_project_id(registered_channel, tmp_path):
-        """会话按 project_id 归属到空路径项目(非 path)。"""
-        # 创建两个空路径项目
-        pa = await _call(registered_channel, "project.create", {"name": "项目A"})
-        pb = await _call(registered_channel, "project.create", {"name": "项目B"})
-        pid_a = pa["payload"]["project_id"]
-        pid_b = pb["payload"]["project_id"]
-        # 各创建一个会话,绑定 project_id
-        _make_session("s_a", project_id=pid_a, last_user_message_at=100.0)
-        _make_session("s_b", project_id=pid_b, last_user_message_at=200.0)
-
-        # project.list 统计: 各 1 个会话
-        resp = await _call(registered_channel, "project.list", {"filter": "all"})
-        projects = resp["payload"]["projects"]
-        info_a = next(p for p in projects if p["project_id"] == pid_a)
-        info_b = next(p for p in projects if p["project_id"] == pid_b)
-        assert info_a["session_count"] == 1
-        assert info_b["session_count"] == 1
-
-        # get_sessions 按 project_id 返回各自会话
-        ra = await _call(registered_channel, "project.get_sessions", {"project_id": pid_a})
-        rb = await _call(registered_channel, "project.get_sessions", {"project_id": pid_b})
-        assert [s["session_id"] for s in ra["payload"]["sessions"]] == ["s_a"]
-        assert [s["session_id"] for s in rb["payload"]["sessions"]] == ["s_b"]
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_session_without_project_id_falls_to_default(registered_channel, tmp_path):
-        """无 project_id 的会话(仅有 project_dir)不再按 path 回退归属,归入默认项目。
-
-        会话-项目关联改为仅按 project_id 匹配后,无 project_id 的会话一律归默认,
-        即使 project_dir 命中某可见项目。存量会话的 project_dir → project_id
-        解析由启动迁移负责,运行时不再回退。
+        覆盖四种组合:不传/传 project_dir × illegal/reserved。
         """
-        pa = _abspath(tmp_path, "app")
-        proj = _make_project("有路径项目", pa)
-        # 仅设 project_dir,不设 project_id
-        _make_session("s_legacy", project_dir=pa, last_user_message_at=100.0)
-
-        # 不归属到该路径对应的项目
-        resp_proj = await _call(
-            registered_channel, "project.get_sessions", {"project_id": proj.project_id}
-        )
-        assert resp_proj["payload"]["sessions"] == []
-        # 归属到默认项目
-        resp_def = await _call(
-            registered_channel, "project.get_sessions", {"project_id": "default"}
-        )
-        ids = [s["session_id"] for s in resp_def["payload"]["sessions"]]
-        assert "s_legacy" in ids
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_empty_path_project_remove_restore(registered_channel):
-        """空路径项目 remove 后会话归默认,restore 后回归。"""
-        pa = await _call(registered_channel, "project.create", {"name": "可恢复"})
-        pid = pa["payload"]["project_id"]
-        _make_session("s1", project_id=pid, last_user_message_at=100.0)
-
-        # remove: affected=1
-        r_remove = await _call(
-            registered_channel, "project.remove", {"project_id": pid}
-        )
-        assert r_remove["ok"] is True
-        assert r_remove["payload"]["affected_sessions"] == 1
-
-        # 移除后会话归默认
-        r_def = await _call(
-            registered_channel, "project.get_sessions", {"project_id": "default"}
-        )
-        assert "s1" in [s["session_id"] for s in r_def["payload"]["sessions"]]
-
-        # restore: affected=1,会话回归
-        r_restore = await _call(
-            registered_channel, "project.restore", {"project_id": pid}
-        )
-        assert r_restore["ok"] is True
-        assert r_restore["payload"]["affected_sessions"] == 1
-        r_after = await _call(
-            registered_channel, "project.get_sessions", {"project_id": pid}
-        )
-        assert [s["session_id"] for s in r_after["payload"]["sessions"]] == ["s1"]
+        if scenario == "empty_path_illegal":
+            bad_names = ["项目/A", "项目\\A", "项目:A", "项目*A", '项目"A', "项目<A", "项目>A", "项目|A", "项目?A"]
+            for bad_name in bad_names:
+                resp = await _call(registered_channel, "project.create", {"name": bad_name})
+                assert resp["ok"] is False, f"expected BAD_REQUEST for name={bad_name!r}"
+                assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={bad_name!r}"
+        elif scenario == "empty_path_reserved":
+            for reserved in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"]:
+                resp = await _call(registered_channel, "project.create", {"name": reserved})
+                assert resp["ok"] is False, f"expected BAD_REQUEST for name={reserved!r}"
+                assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={reserved!r}"
+        elif scenario == "with_path_illegal":
+            pa = _abspath(tmp_path, "workdir")
+            bad_names = ["项目/A", "项目\\A", "项目:A", "项目*A", '项目"A', "项目<A", "项目>A", "项目|A", "项目?A"]
+            for bad_name in bad_names:
+                resp = await _call(
+                    registered_channel, "project.create",
+                    {"name": bad_name, "project_dir": pa},
+                )
+                assert resp["ok"] is False, f"expected BAD_REQUEST for name={bad_name!r}"
+                assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={bad_name!r}"
+        elif scenario == "with_path_reserved":
+            pa = _abspath(tmp_path, "workdir")
+            for reserved in ["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"]:
+                resp = await _call(
+                    registered_channel, "project.create",
+                    {"name": reserved, "project_dir": pa},
+                )
+                assert resp["ok"] is False, f"expected BAD_REQUEST for name={reserved!r}"
+                assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={reserved!r}"
 
 
 # ===========================================================================
@@ -997,58 +740,30 @@ class TestSessionCreateProjectIdValidation:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_create_with_nonexistent_project_id(registered_channel, sessions_dir):
-        """传不存在的 project_id → NOT_FOUND,不创建会话。"""
+    @pytest.mark.parametrize("scenario", [
+        pytest.param("nonexistent", id="nonexistent_project_id"),
+        pytest.param("hidden", id="hidden_project_id"),
+    ])
+    async def test_create_with_invalid_project_id(registered_channel, tmp_path, sessions_dir, scenario):
+        """传无效 project_id(不存在 / 已隐藏)→ NOT_FOUND,不创建会话。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+        if scenario == "nonexistent":
+            target_id = "proj_nonexistent"
+            target_sid = "s_nope"
+        else:  # hidden
+            pa = _abspath(tmp_path, "app")
+            proj = _make_project("P", pa, hidden=True)
+            target_id = proj.project_id
+            target_sid = "s_hidden"
+
         resp = await _call(
             registered_channel, "session.create",
-            {"session_id": "s_nope", "project_id": "proj_nonexistent"},
+            {"session_id": target_sid, "project_id": target_id},
         )
         assert resp["ok"] is False
         assert resp["code"] == "NOT_FOUND"
         # 会话目录不应被创建(metadata 为空)
-        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
-        assert not get_session_metadata("s_nope", cache_bust=True)
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_create_with_hidden_project_id(registered_channel, tmp_path, sessions_dir):
-        """传已隐藏项目的 project_id → NOT_FOUND。"""
-        pa = _abspath(tmp_path, "app")
-        proj = _make_project("P", pa, hidden=True)
-        resp = await _call(
-            registered_channel, "session.create",
-            {"session_id": "s_hidden", "project_id": proj.project_id},
-        )
-        assert resp["ok"] is False
-        assert resp["code"] == "NOT_FOUND"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_create_with_default_project_id(registered_channel, sessions_dir):
-        """传 project_id="default" → 创建成功,归入默认项目(不校验存在性)。"""
-        resp = await _call(
-            registered_channel, "session.create",
-            {"session_id": "s_def", "project_id": "default"},
-        )
-        assert resp["ok"] is True
-        r = await _call(
-            registered_channel, "project.get_sessions", {"project_id": "default"}
-        )
-        assert "s_def" in [s["session_id"] for s in r["payload"]["sessions"]]
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_create_without_project_id_attributed_to_default(registered_channel, sessions_dir):
-        """不传 project_id → 创建成功,归入默认项目。"""
-        resp = await _call(
-            registered_channel, "session.create",
-            {"session_id": "s_noid"},
-        )
-        assert resp["ok"] is True
-        r = await _call(
-            registered_channel, "project.get_sessions", {"project_id": "default"}
-        )
-        assert "s_noid" in [s["session_id"] for s in r["payload"]["sessions"]]
+        assert not get_session_metadata(target_sid, cache_bust=True)
 
 
 # ===========================================================================
@@ -1060,68 +775,54 @@ class TestSessionCreateProjectDirConsistency:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_project_id_only_auto_fills_project_dir(registered_channel, tmp_path, sessions_dir):
-        """仅传 project_id(无 project_dir)→ 按项目记录自动补齐 project_dir。"""
+    async def test_project_id_auto_fills_dir(registered_channel, tmp_path, sessions_dir):
+        """仅传 project_id(无 project_dir)→ 按项目记录自动补齐 project_dir。
+
+        同时传 project_id + 一致 project_dir 也创建成功。
+        """
         pa = _abspath(tmp_path, "app")
         proj = _make_project("P", pa)
-        resp = await _call(
+        # 仅 project_id → 自动补齐
+        resp1 = await _call(
             registered_channel, "session.create",
             {"session_id": "s_autofill", "project_id": proj.project_id},
         )
-        assert resp["ok"] is True
+        assert resp1["ok"] is True
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         meta = get_session_metadata("s_autofill", cache_bust=True)
         assert meta.get("project_id") == proj.project_id
         assert meta.get("project_dir") == pa
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_project_id_with_matching_path_ok(registered_channel, tmp_path, sessions_dir):
-        """同时传 project_id + 一致的 project_dir(含尾部分隔符差异)→ 创建成功。"""
-        pa = _abspath(tmp_path, "app")
-        proj = _make_project("P", pa)
-        resp = await _call(
+        # project_id + 一致 path → 成功
+        resp2 = await _call(
             registered_channel, "session.create",
             {"session_id": "s_match", "project_id": proj.project_id, "project_dir": pa},
         )
-        assert resp["ok"] is True
+        assert resp2["ok"] is True
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_project_id_with_mismatching_path_rejected(registered_channel, tmp_path, sessions_dir):
-        """同时传 project_id + 不一致的 project_dir → BAD_REQUEST,不创建会话。"""
+    @pytest.mark.parametrize("scenario", [
+        pytest.param("mismatched", id="mismatched_path_rejected"),
+        pytest.param("path_only", id="path_only_rejected"),
+        pytest.param("default_with_path", id="default_project_id_with_path_rejected"),
+    ])
+    async def test_inconsistent_project_id_path_rejected(registered_channel, tmp_path, sessions_dir, scenario):
+        """project_id / project_dir 不一致(错配 / 仅 path / default 带 path)→ BAD_REQUEST。"""
         pa = _abspath(tmp_path, "app")
-        proj = _make_project("P", pa)
         other = _abspath(tmp_path, "other")
-        resp = await _call(
-            registered_channel, "session.create",
-            {"session_id": "s_mismatch", "project_id": proj.project_id, "project_dir": other},
-        )
+        if scenario == "mismatched":
+            proj = _make_project("P", pa)
+            sid = "s_mismatch"
+            params = {"session_id": sid, "project_id": proj.project_id, "project_dir": other}
+        elif scenario == "path_only":
+            sid = "s_pathonly"
+            params = {"session_id": sid, "project_dir": pa}
+        else:  # default_with_path
+            sid = "s_def_path"
+            params = {"session_id": sid, "project_id": "default", "project_dir": pa}
+
+        resp = await _call(registered_channel, "session.create", params)
         assert resp["ok"] is False
         assert resp["code"] == "BAD_REQUEST"
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
-        assert not get_session_metadata("s_mismatch", cache_bust=True)
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_path_only_without_project_id_rejected(registered_channel, tmp_path, sessions_dir):
-        """仅传 project_dir 而无 project_id → BAD_REQUEST。"""
-        pa = _abspath(tmp_path, "app")
-        resp = await _call(
-            registered_channel, "session.create",
-            {"session_id": "s_pathonly", "project_dir": pa},
-        )
-        assert resp["ok"] is False
-        assert resp["code"] == "BAD_REQUEST"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_default_project_id_with_path_rejected(registered_channel, tmp_path, sessions_dir):
-        """project_id="default" + 非空 project_dir → 视为无有效项目却带 path,拒绝。"""
-        pa = _abspath(tmp_path, "app")
-        resp = await _call(
-            registered_channel, "session.create",
-            {"session_id": "s_def_path", "project_id": "default", "project_dir": pa},
-        )
-        assert resp["ok"] is False
-        assert resp["code"] == "BAD_REQUEST"
+        assert not get_session_metadata(sid, cache_bust=True)

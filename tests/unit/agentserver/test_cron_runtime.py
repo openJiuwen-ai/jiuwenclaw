@@ -287,9 +287,15 @@ async def test_cron_tools_update_job_resolves_project_dir_and_syncs_public_patch
 
     assert job["project_id"] == project.project_id
     synced_patch = push.payloads[-1]["body"]["data"]["patch"]
-    assert synced_patch["project_dir"] == str(project_dir)
-    assert "project_id" not in synced_patch
-    assert "project_dir" not in (await tools._local_store.get_job("job-1")).to_dict()
+    # work_mode 改造后:project_dir 已被消费删除,project_id 由 agent 侧解析后
+    # 写入 sync_patch 供 gateway 直接持久化(避免 gateway 重复解析)。
+    assert "project_dir" not in synced_patch
+    assert synced_patch["project_id"] == project.project_id
+    assert synced_patch["work_mode"] == project.work_mode
+    # 本地 job 不应存储 project_dir 字段(CronJob 无此字段)
+    local_job = (await tools._local_store.get_job("job-1")).to_dict()
+    assert "project_dir" not in local_job
+    assert local_job["project_id"] == project.project_id
 
 
 @pytest.mark.asyncio
@@ -342,3 +348,100 @@ async def test_cron_tools_create_job_tool_preserves_explicit_empty_project_dir(
     assert job["project_id"] == ""
     synced = push.payloads[-1]["body"]["data"]
     assert synced["project_dir"] == ""
+
+
+_BASE_JOB = {
+    "id": "job-wm",
+    "name": "daily",
+    "cron_expr": "0 9 * * *",
+    "timezone": "Asia/Shanghai",
+    "description": "hello",
+    "targets": "web",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario, expected_wm, expected_pid", [
+    pytest.param("web_default", "work", None, id="web_default_work"),
+    pytest.param("explicit_project_id", "code", "code_proj", id="project_id_injects_code"),
+    pytest.param("default_code", "code", "default_code", id="default_code_project"),
+    pytest.param("invalid", None, None, id="rejects_invalid_work_mode"),
+])
+async def test_cron_tools_create_job_work_mode(tmp_path, monkeypatch, scenario, expected_wm, expected_pid):
+    project_store = _setup_project_store(tmp_path, monkeypatch)
+    tools, push = _make_cron_tools(tmp_path, monkeypatch)
+    base = dict(_BASE_JOB)
+    code_project = None
+    if scenario == "explicit_project_id":
+        pd = tmp_path / "code-proj"
+        pd.mkdir()
+        code_project = project_store.create_project("CodeProj", str(pd), work_mode="code")
+        base["project_id"] = code_project.project_id
+    elif scenario == "default_code":
+        base["project_id"] = "default_code"
+    elif scenario == "invalid":
+        base["work_mode"] = "invalid_mode"
+
+    if scenario == "invalid":
+        with pytest.raises(ValueError, match="invalid work_mode"):
+            await tools.create_job(base)
+        assert push.payloads == []
+        return
+
+    job = await tools.create_job(base)
+    synced = push.payloads[-1]["body"]["data"]
+    assert job["work_mode"] == expected_wm
+    assert synced["work_mode"] == expected_wm
+    if expected_pid == "code_proj":
+        assert job["project_id"] == code_project.project_id
+    elif expected_pid:
+        assert job["project_id"] == expected_pid
+        assert synced["project_id"] == expected_pid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", [
+    pytest.param("patch_project_id", id="patch_pid_injects_work_mode"),
+    pytest.param("patch_project_dir", id="patch_dir_re_resolves_with_work_mode"),
+])
+async def test_cron_tools_update_job_injects_work_mode(tmp_path, monkeypatch, scenario):
+    project_store = _setup_project_store(tmp_path, monkeypatch)
+    pd = tmp_path / "code-proj"
+    pd.mkdir()
+    project = project_store.create_project("CodeProj", str(pd), work_mode="code")
+    tools, push = _make_cron_tools(tmp_path, monkeypatch)
+    create_kwargs = {"work_mode": "code"} if scenario == "patch_project_dir" else {}
+    await tools._local_store.create_job(
+        job_id="job-update", name="daily", cron_expr="0 9 * * *",
+        timezone="Asia/Shanghai", description="hello", targets="web", **create_kwargs,
+    )
+    patch = (
+        {"project_dir": str(pd)} if scenario == "patch_project_dir"
+        else {"project_id": project.project_id}
+    )
+    job = await tools.update_job("job-update", patch)
+    assert job["project_id"] == project.project_id
+    assert job["work_mode"] == "code"
+    synced_patch = push.payloads[-1]["body"]["data"]["patch"]
+    assert synced_patch["project_id"] == project.project_id
+    assert synced_patch["work_mode"] == "code"
+    if scenario == "patch_project_dir":
+        assert "project_dir" not in synced_patch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("patch, match", [
+    pytest.param({"project_id": "proj_missing"}, "project not found", id="unknown_project_id"),
+    pytest.param({"work_mode": "code"}, "work_mode cannot be patched alone", id="work_mode_alone"),
+    pytest.param({"work_mode": "invalid"}, "invalid work_mode", id="invalid_work_mode"),
+])
+async def test_cron_tools_update_job_rejects_invalid_patch(tmp_path, monkeypatch, patch, match):
+    _setup_project_store(tmp_path, monkeypatch)
+    tools, push = _make_cron_tools(tmp_path, monkeypatch)
+    await tools._local_store.create_job(
+        job_id="job-reject", name="daily", cron_expr="0 9 * * *",
+        timezone="Asia/Shanghai", description="hello", targets="web",
+    )
+    with pytest.raises(ValueError, match=match):
+        await tools.update_job("job-reject", patch)
+    assert push.payloads == []

@@ -17,6 +17,11 @@ from jiuwenswarm.gateway.cron.models import (
     normalize_cron_job_timeout_seconds,
 )
 from jiuwenswarm.common.utils import get_cron_jobs_path
+from jiuwenswarm.common.work_mode import (
+    DEFAULT_TUI_WORK_MODE,
+    DEFAULT_WEB_WORK_MODE,
+    normalize_work_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +33,24 @@ _PROACTIVE_TICK_MODE = "proactive.tick"
 _PROACTIVE_UPDATE_ALLOWED_KEYS: frozenset[str] = frozenset(
     {"cron_expr", "timezone", "expired", "updated_at"}
 )
+
+
+def _infer_work_mode_from_targets(job_item: dict[str, Any]) -> str:
+    """按 job 的 targets.channel_id 推断 work_mode(迁移兜底,修复 C2)。
+
+    当 project_id 反查失败(默认项目/不存在/list_projects 失败)时,按 targets 的
+    channel_id 推断:
+      - 含 tui 通道 → "code"(TUI 创建的 job 通常为 code 模式)
+      - 其他 → "work"(Web/IM 等创建的 job 通常为 work 模式)
+    """
+    targets = job_item.get("targets")
+    if isinstance(targets, list):
+        for t in targets:
+            if isinstance(t, dict):
+                ch = str(t.get("channel_id") or "").strip().lower()
+                if ch == "tui":
+                    return DEFAULT_TUI_WORK_MODE
+    return DEFAULT_WEB_WORK_MODE
 
 
 class _ProactiveJobProtected(RuntimeError):
@@ -94,6 +117,7 @@ class CronJobStore:
         project_id: str = "",
         model_name: str | None = None,
         app_id: str = "",
+        work_mode: str = DEFAULT_WEB_WORK_MODE,
     ) -> CronJob:
         now = time.time()
         sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
@@ -130,6 +154,7 @@ class CronJobStore:
             project_id=pid,
             model_name=model_name_val,
             app_id=str(app_id or "").strip(),
+            work_mode=normalize_work_mode(work_mode, default=DEFAULT_WEB_WORK_MODE),
         )
         # validate via round-trip
         CronJob.from_dict(job.to_dict())
@@ -227,6 +252,13 @@ class CronJobStore:
                 else None
             )
             updated = replace(updated, model_name=new_model_name)
+        if "work_mode" in patch:
+            # work_mode 由 controller 从 project_dir + work_mode 重解析后注入,
+            # 或由 project_id 变更时从 Project 记录注入。store 层仅做规范化写入。
+            updated = replace(
+                updated,
+                work_mode=normalize_work_mode(patch.get("work_mode"), default=DEFAULT_WEB_WORK_MODE),
+            )
 
         updated.updated_at = time.time()
         CronJob.from_dict(updated.to_dict())
@@ -291,6 +323,87 @@ class CronJobStore:
             data["version"] = int(data.get("version") or 1)
             data["jobs"] = out
             self._write_json_unlocked(data)
+
+    async def migrate_legacy_jobs_at_startup(self) -> int:
+        """启动迁移：给老 cron_jobs.json 中的 job 补全 work_mode 字段并写回磁盘。
+
+        迁移规则（按优先级）：
+          1. 磁盘已有合法 work_mode（"code" / "work"）→ 保留不动
+          2. 缺 work_mode 或非法值 → 按 project_id 反查 ProjectStore：
+             - 命中真实可见 Project → 用该 Project 的 work_mode
+             - 未命中（默认项目或不存在的 project_id）→ 按 targets 的 channel_id 推断:
+               - 含 tui 通道 → "code"(TUI 创建的 job 通常为 code 模式)
+               - 其他 → "work"(Web/IM 等创建的 job 通常为 work 模式)
+          3. proactive.tick job 也走同一规则（其 project_id 通常为 "" → 按 channel_id 推断）
+
+        迁移只补缺/非法值，不覆盖已有合法值；写回失败的单个 job 仅记 warning，不阻断其它 job。
+
+        Returns:
+            迁移成功（写回磁盘）的 job 数量。
+        """
+        # 构建 project_id → work_mode 映射(含隐藏项目,与 session 迁移一致)
+        # list_projects 失败时降级为空映射:所有缺 work_mode 的老 job 会按
+        # targets.channel_id 推断 work_mode(修复 C2:避免 TUI/code 模式创建的老 job
+        # 被错误标记为 "work" 导致 default_code 过滤漏掉)。
+        try:
+            from jiuwenswarm.server.runtime.session.project_store import list_projects
+            id_to_work_mode: dict[str, str] = {
+                p.project_id: p.work_mode
+                for p in list_projects(include_hidden=True, cache_bust=True)
+                if p.project_id
+            }
+        except ImportError as exc:
+            logger.warning(
+                "Cron 启动迁移: 无法导入 list_projects (%s),"
+                "老 job 的 work_mode 将按 targets.channel_id 推断(可能不准确)",
+                exc,
+            )
+            id_to_work_mode = {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Cron 启动迁移: list_projects 失败 (%s),"
+                "老 job 的 work_mode 将按 targets.channel_id 推断(可能不准确)",
+                exc,
+            )
+            id_to_work_mode = {}
+
+        migrated = 0
+        async with self._lock:
+            data = self._read_json_unlocked()
+            jobs_raw = data.get("jobs") or []
+            if not isinstance(jobs_raw, list):
+                return 0
+
+            changed = False
+            for item in jobs_raw:
+                if not isinstance(item, dict):
+                    continue
+                # 判断是否需要补全：缺 key 或非法值
+                existing_wm = item.get("work_mode")
+                if isinstance(existing_wm, str) and existing_wm.strip() in {"code", "work"}:
+                    continue
+                # 按 project_id 反查
+                pid = str(item.get("project_id") or "").strip()
+                if pid in id_to_work_mode:
+                    resolved_wm = id_to_work_mode[pid]
+                else:
+                    # project_id 未命中(默认项目/不存在/list_projects 失败):
+                    # 按 targets.channel_id 推断(修复 C2)
+                    resolved_wm = _infer_work_mode_from_targets(item)
+                item["work_mode"] = resolved_wm
+                changed = True
+                migrated += 1
+
+            if changed:
+                try:
+                    self._write_json_unlocked(data)
+                except (OSError, ValueError, TypeError) as exc:
+                    logger.warning("Cron 启动迁移写回 cron_jobs.json 失败: %s", exc)
+                    return 0
+
+        if migrated:
+            logger.info("Cron 启动迁移: 已补全 %d 个老 job 的 work_mode 字段", migrated)
+        return migrated
 
     async def _read_json(self) -> dict[str, Any]:
         async with self._lock:

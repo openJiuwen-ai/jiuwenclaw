@@ -23,6 +23,7 @@ from jiuwenswarm.gateway.cron.store import CronJobStore
 from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE
 
 logger = logging.getLogger(__name__)
 
@@ -828,6 +829,7 @@ class CronSchedulerService:
                     "cron_id": job.id,
                     "project_id": job.project_id or "",
                     "project_dir": exec_project_dir,
+                    "work_mode": job.work_mode or DEFAULT_WEB_WORK_MODE,
                 }
                 if job.model_name:
                     params["model_name"] = job.model_name

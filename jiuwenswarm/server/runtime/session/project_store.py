@@ -20,12 +20,23 @@ import secrets
 import sys
 import threading
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, TypeVar
 
 from jiuwenswarm.common.utils import get_agent_root_dir
+from jiuwenswarm.common.work_mode import (
+    DEFAULT_PROJECT_ID_CODE,
+    DEFAULT_PROJECT_ID_WORK,
+    DEFAULT_TUI_WORK_MODE,
+    DEFAULT_WEB_WORK_MODE,
+    is_default_project_id,
+    normalize_work_mode,
+)
+from jiuwenswarm.server.runtime.session.work_mode import (
+    infer_legacy_project_work_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,12 +120,22 @@ class Project:
     hidden: bool = False
     created_at: float = 0.0
     updated_at: float = 0.0
+    # 工作模式："code" 或 "work"；旧数据兜底为 "work"
+    work_mode: str = DEFAULT_WEB_WORK_MODE
+    # Git 状态快照，由 ProjectGitService 写入，ProjectStore 不主动维护其内容
+    # 子字段：enabled/repo_root/initialized_by_jiuwenswarm/detected_at/branch/status/error/is_dirty
+    git: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Project":
+        # work_mode：旧数据缺失时通过 infer_legacy_project_work_mode 兜底推断
+        work_mode = infer_legacy_project_work_mode(d) if isinstance(d, dict) else DEFAULT_WEB_WORK_MODE
+        # git：缺失时初始化为空 dict
+        git_raw = d.get("git", {}) if isinstance(d, dict) else {}
+        git = dict(git_raw) if isinstance(git_raw, dict) else {}
         return cls(
             project_id=str(d.get("project_id", "")),
             name=str(d.get("name", "")),
@@ -124,7 +145,20 @@ class Project:
             hidden=bool(d.get("hidden", False)),
             created_at=float(d.get("created_at", 0.0)),
             updated_at=float(d.get("updated_at", 0.0)),
+            work_mode=work_mode,
+            git=git,
         )
+
+
+@dataclass(frozen=True)
+class CronProjectBinding:
+    """Resolved project ownership for cron jobs."""
+
+    project_id: str
+    work_mode: str
+    error: str | None = None
+    code: str | None = None
+    hidden: bool = False
 
 
 # ── 内部读写(均在已持有文件锁时调用) ─────────────────────────────────────────
@@ -245,9 +279,102 @@ def get_project_by_dir(
     """按 project_dir 查找项目(不限 hidden 状态,由调用方判断)。
 
     用于 project.create 的冲突检测与隐藏项目自动恢复。
+
+    .. deprecated::
+        本函数按全局路径匹配,不区分 ``work_mode``,在跨模式项目隔离场景下
+        会命中其他模式的项目,不应再用于新业务路径的归属判断。
+        新代码请用 :func:`get_project_by_dir_and_mode`,或在需要 mode-aware
+        查询时显式传入 ``work_mode``。本函数仅保留给 legacy/诊断路径。
     """
     for p in _load_cache(cache_bust):
         if p.get("project_dir") == project_dir:
+            return Project.from_dict(p)
+    return None
+
+
+def _normalize_path_for_match(path: str) -> str:
+    """规范化路径用于跨平台匹配(容忍尾部分隔符/大小写差异)。
+
+    与 :func:`resolve_session_project_binding` 的路径比较保持一致。
+    """
+    return os.path.normcase(os.path.normpath(str(path or "")))
+
+
+def _normalize_work_mode_value(work_mode: str) -> str:
+    """规范化 work_mode 参数,非法值兜底为 ``"work"``。
+
+    与 :func:`jiuwenswarm.common.work_mode.normalize_work_mode` 一致,
+    仅在 store 内部调用时兜底非法入参;公开入口应使用严格解析。
+    """
+    return normalize_work_mode(work_mode, default=DEFAULT_WEB_WORK_MODE)
+
+
+def _wm(raw: dict[str, Any]) -> str:
+    """归一化 raw dict 中的 work_mode，旧数据缺失时兜底为 ``"work"``。
+
+    用于所有直接从 ``projects.json`` dict 读取 ``work_mode`` 做比较的场景，
+    统一兜底逻辑,避免旧记录因缺 ``work_mode`` 字段而被 mode-aware 查询漏掉。
+    """
+    return normalize_work_mode(raw.get("work_mode"), default=DEFAULT_WEB_WORK_MODE)
+
+
+def get_project_by_dir_and_mode(
+    project_dir: str,
+    work_mode: str,
+    *,
+    cache_bust: bool = False,
+) -> Project | None:
+    """按 ``(work_mode, normalized project_dir)`` 查找项目(不限 hidden 状态)。
+
+    用于跨模式隔离场景下的归属判断与冲突检测。同一 ``project_dir`` 在
+    ``code`` / ``work`` 两个模式下可分别对应不同 ``project_id``。
+
+    Args:
+        project_dir: 项目目录绝对路径。
+        work_mode: 工作模式,``"code"`` / ``"work"``(非法值兜底为 ``"work"``)。
+        cache_bust: 是否强制读盘。
+
+    Returns:
+        命中的 :class:`Project`,未命中返回 ``None``。
+    """
+    mode = _normalize_work_mode_value(work_mode)
+    if not project_dir:
+        return None
+    norm = _normalize_path_for_match(project_dir)
+    for p in _load_cache(cache_bust):
+        pdir = p.get("project_dir") or ""
+        if not pdir:
+            continue
+        if (
+            _wm(p) == mode
+            and _normalize_path_for_match(pdir) == norm
+        ):
+            return Project.from_dict(p)
+    return None
+
+
+def get_project_by_name_and_mode(
+    name: str,
+    work_mode: str,
+    *,
+    cache_bust: bool = False,
+) -> Project | None:
+    """按 ``(work_mode, name)`` 查找项目(不限 hidden 状态)。
+
+    用于跨模式隔离场景下的名称冲突检测。同一 ``name`` 在 ``code`` / ``work``
+    两个模式下可分别对应不同 ``project_id``。
+
+    Args:
+        name: 项目展示名。
+        work_mode: 工作模式,``"code"`` / ``"work"``(非法值兜底为 ``"work"``)。
+        cache_bust: 是否强制读盘。
+
+    Returns:
+        命中的 :class:`Project`,未命中返回 ``None``。
+    """
+    mode = _normalize_work_mode_value(work_mode)
+    for p in _load_cache(cache_bust):
+        if p.get("name") == name and _wm(p) == mode:
             return Project.from_dict(p)
     return None
 
@@ -278,7 +405,9 @@ def resolve_session_project_binding(
     if project_dir and not os.path.isabs(project_dir):
         return "", "", "project_dir must be an absolute path", "BAD_REQUEST"
 
-    has_real_project_id = bool(project_id) and project_id != "default"
+    # 真实 project_id 判定扩展:空串 / "default" / "default_code" 均视为无项目
+    # (旧实现只把 "default" 视为默认项目,引入 default_code 后必须同时识别)
+    has_real_project_id = bool(project_id) and not is_default_project_id(project_id)
 
     # 规则3: 仅传 project_dir 而无有效 project_id → 拒绝
     if project_dir and not has_real_project_id:
@@ -323,33 +452,211 @@ def list_projects(
     return result
 
 
-def resolve_cron_project_id(project_dir: str) -> str:
-    """cron 侧独立实现的 project_dir → project_id 解析。
+def resolve_cron_project_id(
+    project_dir: str, work_mode: str = DEFAULT_WEB_WORK_MODE
+) -> str:
+    """cron 侧独立实现的 ``(work_mode, project_dir) → project_id`` 解析。
 
-    与 ``resolve_session_project_binding`` 的路径规范化一致(容忍尾部分隔符 /
-    大小写差异)，但仅按 ``project_dir`` 匹配可见项目，不接收 ``project_id`` 入参。
+    与 :func:`resolve_session_project_binding` 的路径规范化一致(容忍尾部分隔符 /
+    大小写差异),但仅按 ``(work_mode, project_dir)`` 匹配可见项目,不接收
+    ``project_id`` 入参。
 
-    规则(设计文档 §6.1):
-      1. ``project_dir`` 为空 → 返回 ``""``(默认项目)。
+    规则(设计文档 §6.1 + work_mode 隔离):
+      1. ``project_dir`` 为空 → 返回 ``""``(默认项目,由调用方按 work_mode 映射)。
       2. ``project_dir`` 非空且非绝对路径 → 抛 ``ValueError``(调用方转 BAD_REQUEST)。
-      3. ``project_dir`` 非空绝对路径 → 规范化后遍历全部项目(含隐藏)，
-         命中可见项目返回其 ``project_id``；命中隐藏项目 / 无命中返回 ``""``(默认项目兜底)。
+      3. ``project_dir`` 非空绝对路径 → 规范化后遍历全部项目(含隐藏),
+         命中**同 work_mode 的可见项目**返回其 ``project_id``；
+         命中隐藏项目 / 无命中返回 ``""``(默认项目兜底)。
 
-    不使用 ``get_project_by_dir``(精确字符串匹配、不规范化、不限 hidden)。
+    Args:
+        project_dir: 项目目录绝对路径。
+        work_mode: 工作模式,``"code"`` / ``"work"``(非法值兜底为 ``"work"``)。
+            默认 ``"work"`` 保持与旧调用方兼容(旧数据绝大多数为 work 模式)。
     """
+    mode = _normalize_work_mode_value(work_mode)
     project_dir = str(project_dir or "").strip()
     if not project_dir:
         return ""
     if not os.path.isabs(project_dir):
         raise ValueError("project_dir must be an absolute path")
-    norm = os.path.normcase(os.path.normpath(project_dir))
+    norm = _normalize_path_for_match(project_dir)
     for p in list_projects(include_hidden=True, cache_bust=True):
         pdir = p.project_dir or ""
         if not pdir:
             continue
-        if os.path.normcase(os.path.normpath(pdir)) == norm and not p.hidden:
+        if (
+            p.work_mode == mode
+            and _normalize_path_for_match(pdir) == norm
+            and not p.hidden
+        ):
             return p.project_id
     return ""
+
+
+def resolve_cron_project_binding(
+    project_id: Any,
+    project_dir: Any,
+    work_mode: str = DEFAULT_WEB_WORK_MODE,
+) -> CronProjectBinding:
+    """Resolve cron job project ownership from project_id/project_dir/work_mode.
+
+    Rules are shared by agent-side cron tools and gateway cron controller:
+      1. explicit default project ids map directly to their default work_mode;
+      2. explicit real project ids must exist and be visible, then inject the
+         project's stored work_mode;
+      3. without project_id, resolve visible project by (work_mode, project_dir);
+      4. empty/unmatched project_dir falls back to the caller's effective
+         work_mode and empty project_id.
+
+    ``resolve_cron_project_id`` still owns absolute-path validation and raises
+    ``ValueError`` for relative paths, preserving existing caller behavior.
+    """
+    input_mode = str(work_mode or DEFAULT_WEB_WORK_MODE).strip() or DEFAULT_WEB_WORK_MODE
+    match_mode = _normalize_work_mode_value(work_mode)
+    raw_project_id = str(project_id or "").strip()
+    if raw_project_id in (DEFAULT_PROJECT_ID_WORK, DEFAULT_PROJECT_ID_CODE):
+        return CronProjectBinding(
+            project_id=raw_project_id,
+            work_mode=(
+                DEFAULT_TUI_WORK_MODE
+                if raw_project_id == DEFAULT_PROJECT_ID_CODE
+                else DEFAULT_WEB_WORK_MODE
+            ),
+        )
+
+    if raw_project_id:
+        proj = get_project_by_id(raw_project_id, cache_bust=True)
+        if proj is None:
+            return CronProjectBinding(
+                project_id="",
+                work_mode=input_mode,
+                error=f"project not found: {raw_project_id!r}",
+                code="NOT_FOUND",
+            )
+        if proj.hidden:
+            return CronProjectBinding(
+                project_id="",
+                work_mode=input_mode,
+                error=f"project is hidden: {raw_project_id!r}",
+                code="NOT_FOUND",
+                hidden=True,
+            )
+        return CronProjectBinding(
+            project_id=raw_project_id,
+            work_mode=proj.work_mode or DEFAULT_WEB_WORK_MODE,
+        )
+
+    project_dir_val = str(project_dir or "").strip()
+    resolved_project_id = resolve_cron_project_id(project_dir_val, match_mode)
+    resolved_work_mode = input_mode
+    if not is_default_project_id(resolved_project_id):
+        proj = get_project_by_id(resolved_project_id, cache_bust=True)
+        if proj is not None:
+            resolved_work_mode = proj.work_mode or DEFAULT_WEB_WORK_MODE
+    elif resolved_project_id == DEFAULT_PROJECT_ID_CODE:
+        resolved_work_mode = DEFAULT_TUI_WORK_MODE
+    elif resolved_project_id == DEFAULT_PROJECT_ID_WORK:
+        resolved_work_mode = DEFAULT_WEB_WORK_MODE
+    return CronProjectBinding(
+        project_id=resolved_project_id,
+        work_mode=resolved_work_mode,
+    )
+
+
+def resolve_cron_project_work_mode(
+    project_id: Any,
+    work_mode: str = DEFAULT_WEB_WORK_MODE,
+) -> CronProjectBinding:
+    """Resolve work_mode from a cron job project_id only."""
+    return resolve_cron_project_binding(project_id, "", work_mode)
+
+
+def resolve_cron_job_patch(
+    patch: dict[str, Any],
+    existing_work_mode: str,
+    *,
+    resolve_work_mode_fn: Any | None = None,
+    channel_id: str | None = None,
+) -> dict[str, Any]:
+    """重解析 cron job patch 中的 work_mode / project_id / project_dir(共享 helper)。
+
+    被 ``CronController.update_job`` 和 ``cron_tools.py update_job`` 共用,
+    确保两条链路(Web RPC / AgentTool)的重解析逻辑一致。
+
+    规则(设计文档 §5.3 + §5.4.4):
+      1. 拒绝直接 patch work_mode 作为独立字段(剥离后忽略)
+      2. work_mode 仅能伴随 project_dir/project_id 重解析生效;单独 patch
+         work_mode → ValueError
+      3. patch 含 project_dir → 按 (work_mode, project_dir) 重解析 project_id,
+         从 patch 删除 project_dir,写入 project_id + work_mode
+      4. patch 含 project_id(无 project_dir)→ 从 Project 记录注入 work_mode
+
+    Args:
+        patch: 待修改的 patch dict(原地修改并返回)。
+        existing_work_mode: 现有 job 的 work_mode(用于 fallback)。
+        resolve_work_mode_fn: 校验显式 work_mode 的函数,
+            签名 ``(params, channel_id) -> (work_mode, error)``。
+            若为 ``None`` 则使用 ``resolve_request_work_mode``。
+        channel_id: 传给 ``resolve_work_mode_fn`` 的 channel_id。
+
+    Returns:
+        修改后的 patch dict。
+
+    Raises:
+        ValueError: work_mode 非法、单独 patch work_mode、或 project 绑定失败。
+    """
+    from jiuwenswarm.server.runtime.session.work_mode import resolve_request_work_mode
+
+    if resolve_work_mode_fn is None:
+        resolve_work_mode_fn = resolve_request_work_mode
+
+    # 剥离直接 patch 的 work_mode(设计文档明确拒绝独立字段)
+    explicit_work_mode = patch.pop("work_mode", None)
+    if explicit_work_mode is not None and str(explicit_work_mode).strip():
+        wm_val, wm_err = resolve_work_mode_fn(
+            {"work_mode": explicit_work_mode}, channel_id=channel_id or "web",
+        )
+        if wm_err is not None:
+            raise ValueError(f"invalid work_mode: {explicit_work_mode!r}")
+        # work_mode 仅能伴随 project_dir/project_id 重解析生效;单独 patch
+        # work_mode 无法确定项目归属,显式拒绝而非静默忽略
+        if "project_dir" not in patch and "project_id" not in patch:
+            raise ValueError(
+                "work_mode cannot be patched alone; "
+                "provide project_dir or project_id together"
+            )
+        effective_work_mode = wm_val
+    else:
+        effective_work_mode = existing_work_mode or DEFAULT_WEB_WORK_MODE
+
+    if "project_dir" in patch:
+        # project_dir 存在时,project_id 必须由解析产生,不允许直接传入
+        patch.pop("project_id", None)
+        pd_raw = patch.get("project_dir")
+        pd_val = (
+            str(pd_raw).strip()
+            if isinstance(pd_raw, str) and pd_raw.strip()
+            else ""
+        )
+        binding = resolve_cron_project_binding("", pd_val, effective_work_mode)
+        if binding.error is not None:
+            raise ValueError(binding.error)
+        resolved_pid = binding.project_id
+        effective_work_mode = binding.work_mode
+        patch["project_id"] = resolved_pid
+        del patch["project_dir"]
+        patch["work_mode"] = effective_work_mode
+    elif "project_id" in patch:
+        # 允许直接 patch project_id(修改计划 §5.4.4):从 Project 记录注入 work_mode。
+        raw_pid = patch.get("project_id")
+        pid_val = str(raw_pid).strip() if isinstance(raw_pid, str) else ""
+        binding = resolve_cron_project_work_mode(pid_val, effective_work_mode)
+        if binding.error is not None:
+            raise ValueError(binding.error)
+        effective_work_mode = binding.work_mode
+        patch["work_mode"] = effective_work_mode
+
+    return patch
 
 
 def get_project_dir_by_id(project_id: str) -> str:
@@ -427,15 +734,22 @@ def validate_project_dir_name(name: str) -> str:
     return s
 
 
-def resolve_default_project_dir(name: str) -> str:
-    """根据项目名在默认工作区下生成工作目录绝对路径。
+def resolve_default_project_dir(
+    name: str, work_mode: str = DEFAULT_WEB_WORK_MODE
+) -> str:
+    """根据项目名 + work_mode 在默认工作区下生成工作目录绝对路径。
 
     创建项目未指定 ``project_dir`` 时,在
-    ``~/.jiuwenswarm/agent/workspace/{name}`` 下按项目名生成工作目录。
+    ``~/.jiuwenswarm/agent/workspace/{code|work}/{name}`` 下按项目名生成工作目录。
+    ``code`` 与 ``work`` 模式使用不同子目录,使默认创建路径与跨模式项目隔离
+    目标一致,避免同名 code/work 项目默认创建落到同一路径。
+
     调用方负责 ``mkdir``;本函数仅返回路径并校验名称合法性。
 
     Args:
         name: 项目展示名(已 strip)。
+        work_mode: 工作模式,``"code"`` / ``"work"``(非法值兜底为 ``"work"``)。
+            默认 ``"work"`` 保持与旧调用方兼容。
 
     Returns:
         工作目录绝对路径字符串。
@@ -444,16 +758,29 @@ def resolve_default_project_dir(name: str) -> str:
         ValueError: 名称含文件系统非法字符(详见 :func:`validate_project_dir_name`)。
     """
     dir_name = validate_project_dir_name(name)
-    return str(get_agent_root_dir() / "workspace" / dir_name)
+    mode = _normalize_work_mode_value(work_mode)
+    return str(get_agent_root_dir() / "workspace" / mode / dir_name)
 
 
-def create_project(name: str, project_dir: str) -> Project:
+def create_project(
+    name: str,
+    project_dir: str,
+    work_mode: str = DEFAULT_WEB_WORK_MODE,
+) -> Project:
     """新建项目并持久化(不做 ``project_dir`` 去重,供内部/测试使用)。
 
     本函数不检测 ``project_dir`` 是否与已有项目重复,调用方需自行保证;
     ``project_id`` 在锁内查重+重生成,避免碰撞。生产路径请用
-    ``create_or_restore_project``(原子完成查重/恢复/新建,无 TOCTOU 窗口)。
+    :func:`create_or_restore_project`(原子完成查重/恢复/新建,无 TOCTOU 窗口)。
+
+    Args:
+        name: 项目展示名(已 strip)。
+        project_dir: 项目目录绝对路径。
+        work_mode: 工作模式,``"code"`` / ``"work"``(非法值兜底为 ``"work"``)。
+            默认 ``"work"`` 保持与旧调用方兼容。
     """
+    mode = _normalize_work_mode_value(work_mode)
+
     def _do(projects: list[dict[str, Any]]) -> Project:
         now = _now()
         proj = Project(
@@ -462,6 +789,7 @@ def create_project(name: str, project_dir: str) -> Project:
             project_dir=project_dir,
             created_at=now,
             updated_at=now,
+            work_mode=mode,
         )
         projects.append(proj.to_dict())
         return proj
@@ -469,48 +797,75 @@ def create_project(name: str, project_dir: str) -> Project:
     return _mutate(_do)
 
 
-def create_or_restore_project(name: str, project_dir: str) -> tuple[Project, bool]:
+def create_or_restore_project(
+    name: str,
+    project_dir: str,
+    work_mode: str = DEFAULT_WEB_WORK_MODE,
+) -> tuple[Project, bool]:
     """原子地新建或恢复项目(在文件锁内完成查重/恢复/新建,关闭 TOCTOU 窗口)。
 
+    冲突检测按 ``work_mode`` 隔离:同一 ``(work_mode, project_dir)`` /
+    ``(work_mode, name)`` 在同模式内才视为冲突;不同 ``work_mode`` 的同目录/同名
+    项目视为独立项目。
+
     - ``project_dir`` 为空时:跳过路径匹配/恢复/冲突,直接新建(允许多个空路径
-      项目,靠 ``project_id`` + ``name`` 区分,会话按 ``project_id`` 归属);
-    - ``project_dir`` 非空且命中已隐藏项目 → 恢复(置 ``hidden=False``,更新
-      ``name``),返回 ``(proj, True)``;
-    - ``project_dir`` 非空且命中可见项目 → 抛 ``ProjectDirConflict``;
-    - ``name`` 与其他项目(含隐藏项目、非命中的待恢复项)重复 → 抛 ``ProjectNameConflict``;
+      项目,靠 ``project_id`` + ``name`` + ``work_mode`` 区分,会话按 ``project_id`` 归属);
+    - ``project_dir`` 非空且命中**同 work_mode 的已隐藏项目** → 恢复(置 ``hidden=False``,
+      更新 ``name``),返回 ``(proj, True)``;
+    - ``project_dir`` 非空且命中**同 work_mode 的可见项目** → 抛 :class:`ProjectDirConflict`;
+    - ``name`` 与**同 work_mode 的其他项目**(含隐藏项目、非命中的待恢复项)重复 →
+      抛 :class:`ProjectNameConflict`;
     - ``name`` 含文件系统非法字符 / 为保留设备名 → 抛 ``ValueError``;
     - 无匹配 → 新建(``project_id`` 锁内查重+重生成),返回 ``(proj, False)``。
 
     整个操作在单次 ``_mutate`` 内完成,查重与写入同锁,无 check-then-use 窗口。
+
+    Args:
+        name: 项目展示名(已 strip)。
+        project_dir: 项目目录绝对路径。
+        work_mode: 工作模式,``"code"`` / ``"work"``(非法值兜底为 ``"work"``)。
+            默认 ``"work"`` 保持与旧调用方兼容(旧数据绝大多数为 work 模式)。
     """
     # 统一校验 name 可作为目录名(所有创建入口的兜底,含非法字符/保留名时抛 ValueError)
     validate_project_dir_name(name)
+    mode = _normalize_work_mode_value(work_mode)
 
     def _do(projects: list[dict[str, Any]]) -> tuple[Project, bool]:
         # 空 project_dir: 不做路径匹配/恢复/冲突,直接走新建分支(允许多个空路径项目)
         path_match = None
         if project_dir:
+            norm_pd = _normalize_path_for_match(project_dir)
             for p in projects:
-                if p.get("project_dir") == project_dir:
+                pdir = p.get("project_dir") or ""
+                if not pdir:
+                    continue
+                # 同 work_mode + 规范化路径匹配
+                if (
+                    _wm(p) == mode
+                    and _normalize_path_for_match(pdir) == norm_pd
+                ):
                     path_match = p
                     break
 
-        # 名称唯一性: 与其他项目(含隐藏项目、非命中的待恢复项)的 name 重复时冲突。
+        # 名称唯一性: 与同 work_mode 的其他项目(含隐藏项目、非命中的待恢复项)的
+        # name 重复时冲突。不同 work_mode 的同名项目视为独立。
         # 隐藏项目的名称同样保留,防止隐藏期间被新项目复用造成恢复后重名。
         for p in projects:
             if p is path_match:
+                continue
+            if _wm(p) != mode:
                 continue
             if p.get("name") == name:
                 raise ProjectNameConflict(name)
 
         if path_match is not None:
             if path_match.get("hidden"):
-                # 命中隐藏项目 → 自动恢复
+                # 命中同 work_mode 的隐藏项目 → 自动恢复
                 path_match["hidden"] = False
                 path_match["name"] = name
                 path_match["updated_at"] = _now()
                 return Project.from_dict(path_match), True
-            # 命中可见项目 → 冲突
+            # 命中同 work_mode 的可见项目 → 冲突
             raise ProjectDirConflict(project_dir)
         # 无匹配 → 新建
         now = _now()
@@ -520,6 +875,7 @@ def create_or_restore_project(name: str, project_dir: str) -> tuple[Project, boo
             project_dir=project_dir,
             created_at=now,
             updated_at=now,
+            work_mode=mode,
         )
         projects.append(proj.to_dict())
         return proj, False
@@ -548,7 +904,9 @@ def save_project(project: Project) -> Project:
 def rename_project(project_id: str, name: str) -> Project | None:
     """原子地重命名项目(锁内完成名称冲突检测与写入,关闭 TOCTOU 窗口)。
 
-    与其他项目(含隐藏项目、非自身)的 ``name`` 重复时抛 ``ProjectNameConflict``。
+    冲突检测按 target 的 ``work_mode`` 隔离:仅与**同 work_mode 的其他项目**
+    (含隐藏项目、非自身)的 ``name`` 重复时抛 :class:`ProjectNameConflict`。
+    不同 ``work_mode`` 的同名项目视为独立,不视为冲突。
     ``name`` 含文件系统非法字符 / 为保留设备名时抛 ``ValueError``。
     隐藏项目的名称同样保留。项目不存在时返回 ``None``(调用方通常已预检存在性)。
     """
@@ -563,9 +921,13 @@ def rename_project(project_id: str, name: str) -> Project | None:
                 break
         if target is None:
             return None
-        # 名称唯一性: 与其他项目(含隐藏项目、非自身)的 name 重复时冲突
+        # 名称唯一性: 仅与同 work_mode 的其他项目(含隐藏项目、非自身)的
+        # name 重复时冲突。不同 work_mode 的同名项目视为独立。
+        target_mode = _wm(target)
         for p in projects:
             if p is target:
+                continue
+            if _wm(p) != target_mode:
                 continue
             if p.get("name") == name:
                 raise ProjectNameConflict(name)
@@ -579,7 +941,9 @@ def rename_project(project_id: str, name: str) -> Project | None:
 def restore_project(project_id: str) -> Project | None:
     """原子地恢复已软删除项目(锁内完成名称冲突检测与恢复,关闭 TOCTOU 窗口)。
 
-    恢复后 ``name`` 与其他项目(含隐藏项目、非自身)重复时抛 ``ProjectNameConflict``。
+    冲突检测按 target 的 ``work_mode`` 隔离:仅与**同 work_mode 的其他项目**
+    (含隐藏项目、非自身)的 ``name`` 重复时抛 :class:`ProjectNameConflict`。
+    不同 ``work_mode`` 的同名项目视为独立,不视为冲突。
     项目不存在或已是可见时返回 ``None``(调用方通常已预检存在性与隐藏状态)。
     """
     def _do(projects: list[dict[str, Any]]) -> Project | None:
@@ -592,12 +956,17 @@ def restore_project(project_id: str) -> Project | None:
             return None
         if not target.get("hidden"):
             return None
-        # 名称唯一性: 与其他项目(含隐藏项目、非自身)的 name 重复时冲突
+        # 名称唯一性: 仅与同 work_mode 的其他项目(含隐藏项目、非自身)的
+        # name 重复时冲突。不同 work_mode 的同名项目视为独立。
+        target_mode = _wm(target)
+        target_name = target.get("name")
         for p in projects:
             if p is target:
                 continue
-            if p.get("name") == target.get("name"):
-                raise ProjectNameConflict(str(target.get("name", "")))
+            if _wm(p) != target_mode:
+                continue
+            if p.get("name") == target_name:
+                raise ProjectNameConflict(str(target_name or ""))
         target["hidden"] = False
         target["updated_at"] = _now()
         return Project.from_dict(target)
@@ -656,3 +1025,75 @@ def invalidate_cache() -> None:
     global _CACHE
     with _CACHE_LOCK:
         _CACHE = None
+
+
+def find_or_create_code_project_for_dir(project_dir: str) -> Project | None:
+    """TUI 前置归属解析:按 ``work_mode="code"`` 查找/创建目录对应的 code 项目。
+
+    TUI 请求只携带 ``project_dir``/cwd,不携带真实 ``project_id``;而
+    ``resolve_session_project_binding`` 会拒绝"仅传 project_dir 无真实
+    project_id"的请求。因此 TUI 入口必须先固定 ``work_mode="code"`` 解析或
+    创建 code 项目,再把真实 ``project_id`` 注入 ``session.create``。
+
+    同名不同目录冲突时(``ProjectNameConflict``),用目录路径哈希后缀重试一次,
+    保证 TUI 会话创建不因项目命名冲突而失败。
+
+    Args:
+        project_dir: 候选项目目录;必须为非空绝对路径,否则返回 ``None``。
+
+    Returns:
+        解析/创建得到的 ``Project``;``project_dir`` 不可用时返回 ``None``。
+
+    Raises:
+        创建失败时向上抛出(目录冲突/非法名等),由调用方决定回退策略。
+    """
+    import hashlib
+
+    pd = str(project_dir or "").strip()
+    if not pd or not os.path.isabs(pd):
+        return None
+
+    proj = get_project_by_dir_and_mode(
+        pd, DEFAULT_TUI_WORK_MODE, cache_bust=True,
+    )
+    if proj is not None and not proj.hidden:
+        return proj
+
+    name = os.path.basename(pd.rstrip("/\\")) or "untitled"
+    restored = False
+    try:
+        proj, restored = create_or_restore_project(
+            name=name, project_dir=pd, work_mode=DEFAULT_TUI_WORK_MODE,
+        )
+    except ProjectNameConflict:
+        suffix = hashlib.sha1(pd.encode("utf-8", errors="replace")).hexdigest()[:6]
+        proj, restored = create_or_restore_project(
+            name=f"{name}-{suffix}", project_dir=pd, work_mode=DEFAULT_TUI_WORK_MODE,
+        )
+    # 新建(非恢复)的 code 项目需要 auto git init(与 WEB project.create 路径一致)
+    # 恢复的隐藏项目也需要重新探测 Git:被隐藏期间 .git 可能被删除或分支被外部
+    # 切换,持久化的 git 快照会过期。
+    from jiuwenswarm.server.runtime.session.project_git import get_project_git_service
+    try:
+        if not restored:
+            get_project_git_service().ensure_on_project_create(proj)
+        else:
+            # 恢复项目:做一次轻量 probe 刷新 git 快照,不自动 init
+            # (恢复场景下用户可能有意删除 .git,不应自动重建)
+            get_project_git_service().probe(proj)
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "[ProjectStore] git probe/ensure failed for dir=%s restored=%s",
+            pd, restored, exc_info=True,
+        )
+    return proj
+
+
+def find_or_create_code_project_for_tui_params(params: dict[str, Any]) -> Project | None:
+    """Find or create the code project for TUI session params."""
+    if not isinstance(params, dict):
+        return None
+    candidate_dir = str(params.get("project_dir") or params.get("cwd") or "").strip()
+    if not candidate_dir:
+        return None
+    return find_or_create_code_project_for_dir(candidate_dir)

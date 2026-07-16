@@ -747,6 +747,7 @@ def _sync_chat_request_metadata(
             is_chat_turn=is_chat_turn,
             explicit_mode_provided=explicit_mode_provided,
             explicit_model_provided=explicit_model_provided,
+            work_mode=params.get("work_mode"),
         )
     except (OSError, ValueError) as exc:
         logger.warning("[AgentWebSocketServer] 同步 chat 请求元数据失败: %s", exc)
@@ -2452,36 +2453,51 @@ class AgentWebSocketServer:
         )
 
     async def _handle_session_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        """处理 session.list 请求：扫描 sessions 目录，返回历史会话基础信息列表."""
-        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+        """处理 session.list 请求：返回历史会话基础信息列表。
 
-        sessions_dir = get_agent_sessions_dir()
-        sessions = []
+        响应格式与 Web fallback ``_session_list`` 保持一致:
+        ``{"sessions": [...], "total": int, "limit": int, "offset": int}``,
+        确保按新接口接入分页的 Web 前端能拿到分页元信息。
+        """
+        # 解析 limit/offset(与 Web fallback 一致的宽松解析)
+        params = request.params if isinstance(request.params, dict) else {}
+        limit = 20
+        offset = 0
+        raw_limit = params.get("limit")
+        if isinstance(raw_limit, int) and not isinstance(raw_limit, bool):
+            limit = raw_limit
+        elif isinstance(raw_limit, float) and raw_limit.is_integer():
+            limit = int(raw_limit)
+        elif isinstance(raw_limit, str) and raw_limit.strip().isdigit():
+            limit = int(raw_limit.strip())
+
+        raw_offset = params.get("offset")
+        if isinstance(raw_offset, int) and not isinstance(raw_offset, bool):
+            offset = raw_offset
+        elif isinstance(raw_offset, float) and raw_offset.is_integer():
+            offset = int(raw_offset)
+        elif isinstance(raw_offset, str) and raw_offset.strip().isdigit():
+            offset = int(raw_offset.strip())
+
+        limit = max(1, min(limit, 200))
+        offset = max(0, offset)
 
         try:
-            if sessions_dir.exists():
-                for entry in sorted(sessions_dir.iterdir(), key=lambda e: e.stat().st_mtime, reverse=True):
-                    if not entry.is_dir():
-                        continue
-                    # 强制跳过缓存，确保获取跨进程写入的最新数据（如 Gateway 的 /color 设置）
-                    meta = get_session_metadata(entry.name, cache_bust=True)
-                    if not meta:
-                        meta = {
-                            "session_id": entry.name,
-                            "channel_id": "",
-                            "title": "",
-                            "message_count": 0,
-                            "last_message_at": entry.stat().st_mtime,
-                        }
-                    sessions.append(meta)
+            sessions, total = get_all_sessions_metadata(limit=limit, offset=offset)
         except Exception as exc:
-            logger.warning("[AgentWebSocketServer] 扫描 sessions 目录失败: %s", exc)
+            logger.warning("[AgentWebSocketServer] 获取会话列表失败: %s", exc)
+            sessions, total = [], 0
 
         resp = AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
             ok=True,
-            payload={"sessions": sessions},
+            payload={
+                "sessions": sessions,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            },
             metadata=request.metadata,
         )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
@@ -6396,13 +6412,28 @@ class AgentWebSocketServer:
                 session_id=str(explicit_session_id).strip() if isinstance(explicit_session_id, str) else None,
             )
 
+            # Step 1: 归一化 work_mode / project_id / project_dir 三元组
+            # (与 web _session_create 共用同一 helper，保持主路径/fallback 一致)
+            from jiuwenswarm.server.runtime.session.work_mode import resolve_session_work_mode_params
+            binding = resolve_session_work_mode_params(params, channel_id=channel_id)
+            if binding.error:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": binding.error, "code": binding.code},
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await send_wire_payload(ws, wire)
+                return
+
             # 校验并解析 project_id / project_dir 绑定关系:
             # 一致性校验、按 project_id 自动补齐 project_dir、禁止单传 project_dir
             from jiuwenswarm.server.runtime.session import project_store
-            project_id = str(params.get("project_id") or "").strip()
-            project_dir = str(params.get("project_dir") or "").strip()
+            from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE, is_default_project_id
             project_id, project_dir, p_err, p_code = project_store.resolve_session_project_binding(
-                project_id, project_dir
+                binding.project_id, binding.project_dir
             )
             if p_err:
                 resp = AgentResponse(
@@ -6415,6 +6446,69 @@ class AgentWebSocketServer:
                 async with send_lock:
                     await send_wire_payload(ws, wire)
                 return
+
+            # Step 3: 确定最终 work_mode
+            # 对真实 project_id: 最终 work_mode 以 Project 记录为准;若请求显式传了
+            # work_mode 且与 Project 不一致 → BAD_REQUEST(设计文档 §4.1.6)
+            # 对默认项目: 使用 binding 归一化的 work_mode
+            #
+            # has_explicit_work_mode 判定逻辑:
+            # - gateway 路径: params 含 _work_mode_explicit marker(由 gateway 注入),
+            #   消费后立即 pop。marker=True 表示用户显式传了 work_mode(需一致性校验);
+            #   marker=False 表示 gateway 注入的通道默认值(跳过校验)。
+            # - 直连路径(非 gateway): marker 缺失,使用 binding.has_explicit_work_mode
+            #   (此时 params 为原始值,binding 计算结果正确)。
+            explicit_work_mode_marker = params.pop("_work_mode_explicit", None)
+            if isinstance(explicit_work_mode_marker, bool):
+                has_explicit_work_mode = explicit_work_mode_marker
+            else:
+                # marker 缺失:直连 AgentServer 调用方,params 为原始值,
+                # binding.has_explicit_work_mode 正确反映用户是否显式传了 work_mode
+                has_explicit_work_mode = binding.has_explicit_work_mode
+            if not is_default_project_id(project_id):
+                proj = project_store.get_project_by_id(project_id, cache_bust=True)
+                if proj is not None:
+                    project_work_mode = proj.work_mode or DEFAULT_WEB_WORK_MODE
+                    if has_explicit_work_mode and project_work_mode != binding.work_mode:
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={
+                                "error": f"work_mode mismatch: project is '{project_work_mode}' \
+                                    but request specified '{binding.work_mode}'",
+                                "code": "BAD_REQUEST",
+                            },
+                        )
+                        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                        async with send_lock:
+                            await send_wire_payload(ws, wire)
+                        return
+                    final_work_mode = project_work_mode
+                else:
+                    # 竞态: project 已被其他进程删除/隐藏。
+                    # 不创建指向不存在项目的会话,返回 NOT_FOUND 由调用方决定回退策略。
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload={
+                            "error": f"project not found: {project_id}",
+                            "code": "NOT_FOUND",
+                        },
+                    )
+                    wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                    async with send_lock:
+                        await send_wire_payload(ws, wire)
+                    return
+            else:
+                final_work_mode = binding.work_mode
+
+            # 将解析后的字段回写 params,保持与 fallback 路径(app_web_handlers)一致,
+            # 后续若读取 params.project_id/project_dir/work_mode 可直接拿到规范化值
+            params["project_id"] = project_id
+            params["project_dir"] = project_dir
+            params["work_mode"] = final_work_mode
 
             # 会话目录已存在则拒绝,避免覆盖既有会话元数据(与 web 本地 handler 一致)
             session_dir = get_agent_sessions_dir() / session_id
@@ -6440,6 +6534,7 @@ class AgentWebSocketServer:
                 mode=mode,
                 project_dir=project_dir,
                 project_id=project_id,
+                work_mode=final_work_mode,
             )
 
             if mode == "team":
@@ -6462,7 +6557,12 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=True,
-                payload={"sessionId": session_id},
+                payload={
+                    "sessionId": session_id,
+                    "projectId": project_id,
+                    "projectDir": project_dir,
+                    "workMode": final_work_mode,
+                },
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:

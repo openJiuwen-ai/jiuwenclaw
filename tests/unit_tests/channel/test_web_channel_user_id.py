@@ -51,6 +51,10 @@ class FakeWebSocket:
 
 
 class FakeWebChannelForHandlers:
+    # 与真实 WebChannel.channel_id 保持一致(production handler 通过
+    # ``channel.channel_id`` 读取,见 app_web_handlers._session_create)
+    channel_id = "web"
+
     def __init__(self) -> None:
         self.methods: dict[str, object] = {}
         self.responses: list[dict[str, Any]] = []

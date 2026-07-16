@@ -36,6 +36,7 @@ from jiuwenswarm.common.config import (
     update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.common.work_mode import DEFAULT_PROJECT_ID_CODE
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -1362,6 +1363,26 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
             )
             return
+        # TUI 前置归属解析(设计文档 §4.1.6):按 cwd/project_dir 固定 work_mode="code"
+        # 查找/创建 code 项目并绑定真实 project_id;无目录或解析失败归 default_code
+        resolved_project_id = ""
+        resolved_project_dir = ""
+        work_mode = "code"
+        try:
+            from jiuwenswarm.server.runtime.session.project_store import (
+                find_or_create_code_project_for_tui_params,
+            )
+            proj = find_or_create_code_project_for_tui_params(params)
+            if proj is not None:
+                resolved_project_id = proj.project_id
+                resolved_project_dir = proj.project_dir
+                work_mode = proj.work_mode or "code"
+        except Exception:  # noqa: BLE001
+            # 解析失败(冲突/权限等)不阻断会话创建,会话归 default_code
+            logger.debug(
+                "[TUI] session.create project pre-resolution failed",
+                exc_info=True,
+            )
         workspace_session_dir = get_agent_sessions_dir()
         workspace_session_dir.mkdir(parents=True, exist_ok=True)
         session_dir = workspace_session_dir / target
@@ -1381,12 +1402,21 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             channel_id="tui",
             title=str(params.get("title") or "").strip(),
             mode=params.get("mode", "code.normal"),
+            project_dir=resolved_project_dir,
+            project_id=resolved_project_id,
+            work_mode=work_mode,
         )
         # 触发 SessionStart hook
         mh = bind.message_handler
         if mh:
             mh.trigger_session_start_hook(target, source="tui")
-        await channel.send_response(ws, req_id, ok=True, payload={"session_id": target})
+        # 响应带最终归属(设计文档 §4.1.6):未绑定真实项目时归 default_code
+        await channel.send_response(ws, req_id, ok=True, payload={
+            "session_id": target,
+            "project_id": resolved_project_id or DEFAULT_PROJECT_ID_CODE,
+            "project_dir": resolved_project_dir,
+            "work_mode": work_mode,
+        })
 
     async def _session_delete(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.utils import get_agent_sessions_dir
