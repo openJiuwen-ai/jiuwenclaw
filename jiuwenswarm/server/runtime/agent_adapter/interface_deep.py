@@ -3866,6 +3866,19 @@ class JiuWenSwarmDeepAdapter:
                 )
         except Exception as e:
             logger.warning("[JiuWenSwarmDeepAdapter] Failed to load UserHookRail: %s", e)
+        # Observability rail: opens an agent-layer span (agent.<name>.task_iteration.<n>
+        # for task-loop runs, or agent.<name>.invoke for single-round) under the root
+        # run span per iteration/round. It is the only thing that creates the
+        # task_iteration / invoke spans that llm.call + tool.* nest under. It
+        # self-disables (before_* returns early when get_team_span() is None), so
+        # attaching it unconditionally is safe and also adapts to runtime
+        # enable/disable of agent_observability without rebuilding the agent.
+        try:
+            from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+            rails_list.append(ObservabilityRail())
+            logger.info("[JiuWenSwarmDeepAdapter] ObservabilityRail attached")
+        except Exception as e:
+            logger.warning("[JiuWenSwarmDeepAdapter] Failed to attach ObservabilityRail: %s", e)
         return rails_list
 
     @staticmethod
@@ -6209,6 +6222,7 @@ class JiuWenSwarmDeepAdapter:
         if self._stream_event_rail is not None:
             self._stream_event_rail.reset_abort(session_id)
         image_files_token = None
+        _run_span: Any = None
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -6245,6 +6259,16 @@ class JiuWenSwarmDeepAdapter:
             image_files_token = set_current_multimodal_image_files(
                 inputs.pop("_multimodal_image_files", []) or []
             )
+            # Sync single-agent / coding-agent observability with current
+            # config before running, and open a root span so OtelCallbackHandler
+            # has a parent for LLM/tool spans (see streaming path for details).
+            from jiuwenswarm.agents.harness.agent_observability import (
+                close_agent_run_span,
+                open_agent_run_span,
+                sync_agent_observability,
+            )
+            sync_agent_observability()
+            _run_span = open_agent_run_span(session_id=session_id, mode=mode)
             result = await Runner.run_agent(agent=self._instance, inputs=inputs)
         except asyncio.CancelledError:
             logger.info(
@@ -6257,6 +6281,7 @@ class JiuWenSwarmDeepAdapter:
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
+            close_agent_run_span(_run_span)
             if image_files_token is not None:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                     reset_current_multimodal_image_files,
@@ -6478,6 +6503,8 @@ class JiuWenSwarmDeepAdapter:
         self._register_session_agent_task(session_id)
         stream_consumer_cancelled = False
         image_files_token = None
+        _run_span: Any = None
+        _debug_logger = None
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -6528,7 +6555,64 @@ class JiuWenSwarmDeepAdapter:
             image_files_token = set_current_multimodal_image_files(
                 inputs.pop("_multimodal_image_files", []) or []
             )
+            # Resolve debug-trace settings early: its otel_enabled drives the
+            # OTel force-enable below. Best-effort (config read never raises).
+            from jiuwenswarm.server.runtime.debug_trace.config import (
+                resolve_debug_trace_settings,
+            )
+            _dbg_settings = resolve_debug_trace_settings(
+                mode=mode, request_debug=bool(inputs.get("_request_debug"))
+            )
+            # Sync single-agent / coding-agent observability with current config
+            # before running. init_observability() wires the global
+            # OtelCallbackHandler so LLM/tool spans are emitted automatically.
+            # force=True (a /debug run with debug_trace.<mode>.otel_enabled) pulls
+            # up OTel even when agent_observability.enabled is false.
+            from jiuwenswarm.agents.harness.agent_observability import (
+                close_agent_run_span,
+                open_agent_run_span,
+                sync_agent_observability,
+            )
+            sync_agent_observability(force=_dbg_settings.otel_enabled)
+            # Open a root span so OtelCallbackHandler has a parent for LLM/tool
+            # spans. Closed in the finally below.
+            _run_span = open_agent_run_span(session_id=session_id, mode=mode)
+            # Capture OTel trace/span ids (empty when no span was opened, e.g.
+            # OTel not enabled) so the dump can be cross-referenced with a trace.
+            _otel_trace_id = ""
+            _otel_span_id = ""
+            if _run_span is not None:
+                try:
+                    _span_ctx = _run_span.get_span_context()
+                    _otel_trace_id = format(_span_ctx.trace_id, "032x")
+                    _otel_span_id = format(_span_ctx.span_id, "016x")
+                except Exception:
+                    pass
+            # --- debug trace dump (request-level /debug OR config-level, best-effort) ---
+            try:
+                from jiuwenswarm.server.runtime.debug_trace.paths import debug_trace_file
+                from jiuwenswarm.server.runtime.debug_trace.stream_logger import (
+                    DebugTraceLogger,
+                )
+                if _dbg_settings.enabled and _dbg_settings.dump_enabled:
+                    _debug_logger = DebugTraceLogger(
+                        file_path=debug_trace_file(mode, session_id),
+                        mode=mode,
+                        session_id=session_id,
+                        request_id=rid,
+                        settings=_dbg_settings,
+                    )
+                    _debug_logger.start_run(
+                        input_text=inputs.get("query"),
+                        otel_trace_id=_otel_trace_id,
+                        otel_span_id=_otel_span_id,
+                    )
+            except Exception as _dbg_exc:
+                logger.warning("[JiuWenSwarmDeepAdapter] debug trace init failed: %s", _dbg_exc)
+                _debug_logger = None
             async for chunk in Runner.run_agent_streaming(self._instance, inputs):
+                if _debug_logger is not None:
+                    _debug_logger.feed(chunk)
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                     parsed = self._parse_stream_chunk(chunk)
                     if parsed is not None:
@@ -6723,6 +6807,8 @@ class JiuWenSwarmDeepAdapter:
                 )
                 task.add_done_callback(self._on_evolution_watcher_done)
                 self._evolution_watcher_tasks.add(task)
+            if _debug_logger is not None:
+                _debug_logger.end_run(status="ok")
         except asyncio.CancelledError:
             stream_consumer_cancelled = True
             logger.info(
@@ -6737,9 +6823,13 @@ class JiuWenSwarmDeepAdapter:
                 self._resolve_interrupt_session_id(session_id),
                 "stream_cancel",
             )
+            if _debug_logger is not None:
+                _debug_logger.end_run(status="cancelled")
             raise
         except Exception as exc:
             logger.exception("[JiuWenSwarmDeepAdapter] 流式任务异常: %s", exc)
+            if _debug_logger is not None:
+                _debug_logger.end_run(status="error", error=exc)
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
@@ -6751,6 +6841,9 @@ class JiuWenSwarmDeepAdapter:
                 is_complete=False,
             )
         finally:
+            close_agent_run_span(_run_span)
+            if _debug_logger is not None:
+                _debug_logger.flush()
             if image_files_token is not None:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                     reset_current_multimodal_image_files,

@@ -914,6 +914,16 @@ class JiuWenSwarm:
         query = params.get("query")
         if query is None or query == "":
             query = params.get("content", "")
+        # /debug 请求级指令：仅 agent/code 在此剥离前缀；team 自行从原始
+        # query 解析 /debug（process_message_stream 用 raw_query 覆写
+        # inputs["query"]），故此处对 team 不剥离。
+        _request_debug = False
+        _dbg_mode = params.get("mode")
+        _dbg_mode_s = _dbg_mode.strip().lower() if isinstance(_dbg_mode, str) else ""
+        if not (params.get("team") or _dbg_mode_s in {"team", "team.plan", "code.team"}):
+            if isinstance(query, str):
+                from jiuwenswarm.server.runtime.debug_trace.directives import strip_debug_directive
+                query, _request_debug = strip_debug_directive(query)
         if self._is_malformed_team_plan_approval_payload(params):
             raise _TeamPlanApprovalPayloadError(self._team_plan_approval_payload_error_message())
         channel = request.channel_id or (request.session_id.split('_')[0] if request.session_id else "web")
@@ -1010,6 +1020,8 @@ class JiuWenSwarm:
             "channel": channel,
             "language": language,
         }
+        if _request_debug:
+            inputs["_request_debug"] = True
         if request.metadata and request.metadata.get("skip_a2ui") is True:
             inputs["skip_a2ui"] = True
 

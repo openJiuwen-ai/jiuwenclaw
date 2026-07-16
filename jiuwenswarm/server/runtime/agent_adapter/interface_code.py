@@ -667,6 +667,19 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 )
         except Exception as e:
             logger.warning("[JiuwenSwarmCodeAdapter] Failed to load UserHookRail: %s", e)
+        # Observability rail: opens an agent-layer span (agent.<name>.task_iteration.<n>
+        # for task-loop runs, or agent.<name>.invoke for single-round) under the root
+        # run span per iteration/round. It is the only thing that creates the
+        # task_iteration / invoke spans that llm.call + tool.* nest under. It
+        # self-disables (before_* returns early when get_team_span() is None), so
+        # attaching it unconditionally is safe and also adapts to runtime
+        # enable/disable of agent_observability without rebuilding the agent.
+        try:
+            from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+            rails_list.append(ObservabilityRail())
+            logger.info("[JiuwenSwarmCodeAdapter] ObservabilityRail attached")
+        except Exception as e:
+            logger.warning("[JiuwenSwarmCodeAdapter] Failed to attach ObservabilityRail: %s", e)
         return rails_list
 
     # ─── Code 专属 Rail 构建 ────────────────

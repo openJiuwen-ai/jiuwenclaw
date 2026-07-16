@@ -95,7 +95,12 @@ _STREAM_TRACE_ENV_KEY = "JIUWENSWARM_TEAM_STREAM_TRACE"
 # When set to "true", non-leader teammate frames are filtered out in team
 # streaming so the frontend only receives leader output.
 _HIDE_TEAMMATE_ENV_KEY = "JIUWENSWARM_TEAM_HIDE_TEAMMATE"
-_DEBUG_PREFIX = "/debug"
+# /debug 剥离原语与 Agent/Code 共享（debug_trace.directives），消除两份实现。
+# 别名保持 _DEBUG_PREFIX / _strip_directive 不变，_extract_query_directives 零改动。
+from jiuwenswarm.server.runtime.debug_trace.directives import (
+    DEBUG_PREFIX as _DEBUG_PREFIX,
+    strip_slash_directive as _strip_directive,
+)
 _FOLLOWUP_INTERACT_RETRY_TIMEOUT_SEC = 1.0
 _FOLLOWUP_INTERACT_RACE_WAIT_TIMEOUT_SEC = 3.0
 _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC = 0.05
@@ -311,20 +316,6 @@ def _build_team_event_chunk_meta(event: Any) -> tuple[dict | None, dict]:
     fan_out = _build_logical_targets(event)
     metadata = {"fan_out_targets": fan_out} if fan_out else {}
     return agent_ref, metadata
-
-
-def _strip_directive(query: str, prefix: str) -> tuple[str, bool]:
-    """Strip a leading slash directive from a query string.
-
-    Returns the cleaned query and whether the directive was present.
-    """
-    stripped = query.lstrip()
-    if not stripped.startswith(prefix):
-        return query, False
-    remainder = stripped[len(prefix):]
-    if remainder and not remainder[0].isspace():
-        return query, False
-    return remainder.lstrip(), True
 
 
 def _extract_query_directives(query: str) -> tuple[str, bool, bool]:

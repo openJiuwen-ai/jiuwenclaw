@@ -48,6 +48,7 @@ import { createThemeCommand } from "./builtins/theme.js";
 import { createWorkspaceCommand } from "./builtins/workspace-dir.js";
 import { createUsageCommand } from "./builtins/usage.js";
 import { createReviewCommand } from "./builtins/review.js";
+import { createDebugCommand } from "./builtins/debug.js";
 import { createSecurityReviewCommand } from "./builtins/security-review.js";
 
 export function createBuiltinCommands(): SlashCommand[] {
@@ -95,6 +96,7 @@ export function createBuiltinCommands(): SlashCommand[] {
     createWorkspaceCommand(),
     createUsageCommand(),
     createReviewCommand(),
+    createDebugCommand(),
     createSecurityReviewCommand(),
     createMemoryCommand(),
     createPluginCommand(),
