@@ -81,6 +81,7 @@ def _write_report_markdown(final_result: dict, file_name: str, conversation_id: 
     )
     from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import (
         build_report_bundle,
+        serialize_final_result_snapshot,
     )
     from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
         get_effective_request_output_dir,
@@ -97,14 +98,18 @@ def _write_report_markdown(final_result: dict, file_name: str, conversation_id: 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     bundle = build_report_bundle(final_result, report_path.with_suffix(""))
     markdown_bytes = bundle.markdown_text.encode("utf-8")
+    snapshot_path = report_path.with_suffix(".final-result.json")
+    snapshot_bytes = serialize_final_result_snapshot(bundle.final_result_snapshot)
     provenance = {
-        "schema_version": 1,
+        "schema_version": 2,
         "document_id": f"doc_{uuid.uuid4().hex}",
         "revision_id": f"rev_{uuid.uuid4().hex}",
         "parent_revision_id": None,
         "conversation_id": conversation_id,
         "markdown_path": str(report_path),
         "content_sha256": hashlib.sha256(markdown_bytes).hexdigest(),
+        "final_result_path": snapshot_path.name,
+        "final_result_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "operation": {"action": "deepresearch_generate"},
         "citations": bundle.citations,
@@ -112,11 +117,12 @@ def _write_report_markdown(final_result: dict, file_name: str, conversation_id: 
         "chart_manifest": bundle.chart_manifest,
         "rewrite_history": [],
     }
-    _atomic_write_bytes(report_path, markdown_bytes)
+    _atomic_write_bytes(snapshot_path, snapshot_bytes)
     _atomic_write_bytes(
         report_path.with_suffix(".provenance.json"),
         json.dumps(provenance, ensure_ascii=False, indent=2).encode("utf-8"),
     )
+    _atomic_write_bytes(report_path, markdown_bytes)
     return str(report_path)
 
 

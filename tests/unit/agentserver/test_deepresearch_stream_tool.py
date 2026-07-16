@@ -243,7 +243,12 @@ def test_write_report_markdown_builds_inference_bundle_and_strips_internal_marke
             "id": "7",
             "html_base64": base64.b64encode(b"<html>trace</html>").decode("ascii"),
         }],
-        "chart_messages": [],
+        "chart_messages": [{
+            "chart_id": "chart-1",
+            "chart_title": "趋势图",
+            "base64": base64.b64encode(b"png-bytes").decode("ascii"),
+        }],
+        "request_metadata": {"trace_id": "trace-1"},
         "citation_messages": {
             "code": 0,
             "msg": "success",
@@ -273,12 +278,23 @@ def test_write_report_markdown_builds_inference_bundle_and_strips_internal_marke
     assert "[[1]](https://example.com/source)" in report
     assert (tmp_path / "研究报告_infer" / "inference_7.html").read_bytes() == b"<html>trace</html>"
     provenance = json.loads((tmp_path / "研究报告.provenance.json").read_text(encoding="utf-8"))
-    assert provenance["schema_version"] == 1
+    snapshot_path = tmp_path / "研究报告.final-result.json"
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert snapshot["response_content"] == final_result["response_content"]
+    assert snapshot["citation_messages"] == final_result["citation_messages"]
+    assert snapshot["request_metadata"] == {"trace_id": "trace-1"}
+    assert "html_base64" not in snapshot["infer_messages"][0]
+    assert snapshot["infer_messages"][0]["artifact_path"] == "研究报告_infer/inference_7.html"
+    assert "base64" not in snapshot["chart_messages"][0]
+    assert snapshot["chart_messages"][0]["artifact_path"] == "研究报告_charts/chart-1.png"
+    assert provenance["schema_version"] == 2
     assert provenance["document_id"].startswith("doc_")
     assert provenance["revision_id"].startswith("rev_")
     assert provenance["parent_revision_id"] is None
     assert provenance["conversation_id"] == "C1"
     assert provenance["content_sha256"] == hashlib.sha256(report.encode("utf-8")).hexdigest()
+    assert provenance["final_result_path"] == snapshot_path.name
+    assert provenance["final_result_sha256"] == hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
     assert provenance["citations"] == final_result["citation_messages"]["data"]
     assert provenance["inference_manifest"][0]["id"] == "7"
     assert "html_base64" not in json.dumps(provenance)
