@@ -117,6 +117,40 @@ def test_prepare_and_commit_create_child_revision_without_changing_parent(tmp_pa
     child_provenance = json.loads(Path(result["provenance_path"]).read_text(encoding="utf-8"))
     assert child_provenance["parent_revision_id"] == "rev_parent"
     assert child_provenance["operation"]["action"] == "polish"
+    assert result["citation_integrity_status"] == "verified"
+    assert result["citation_semantic_status"] == "not_verified"
+    assert "citation_status" not in result
+
+
+def test_child_revision_can_be_rewritten_again(tmp_path):
+    report, provenance = _write_document(tmp_path, "原句。\n")
+    prepared = _prepare(tmp_path, report, provenance, "原句。")
+    first = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result={
+            "segments": [{"text": "第一版句子。", "source_ids": []}],
+            "facts_added": False,
+        },
+    )
+
+    first_report = Path(first["report_path"])
+    first_provenance = json.loads(Path(first["provenance_path"]).read_text(encoding="utf-8"))
+    second_prepared = _prepare(tmp_path, first_report, first_provenance, "第一版句子。")
+    second = commit_rewrite(
+        context_token=second_prepared["context_token"],
+        session_id="S1",
+        structured_result={
+            "segments": [{"text": "第二版句子。", "source_ids": []}],
+            "facts_added": False,
+        },
+    )
+
+    second_provenance = json.loads(Path(second["provenance_path"]).read_text(encoding="utf-8"))
+    assert first_provenance["final_result_path"] == provenance["final_result_path"]
+    assert second_provenance["final_result_sha256"] == provenance["final_result_sha256"]
+    assert second_provenance["parent_revision_id"] == first_provenance["revision_id"]
+    assert len(second_provenance["rewrite_history"]) == 2
 
 
 @pytest.mark.parametrize(

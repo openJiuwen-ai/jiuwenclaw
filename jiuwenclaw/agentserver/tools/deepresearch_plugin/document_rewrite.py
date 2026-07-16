@@ -399,5 +399,6 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
         "parent_revision_id": context.provenance["revision_id"],
         "report_path": str(child_path),
         "provenance_path": str(provenance_path),
-        "citation_status": "verified",
+        "citation_integrity_status": "verified",
+        "citation_semantic_status": "not_verified",
     }

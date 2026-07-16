@@ -14,14 +14,27 @@ def _document(root: Path):
     body = "原句。\n"
     report = root / "report.md"
     report.write_text(body, encoding="utf-8")
+    snapshot = {
+        "response_content": body,
+        "citation_messages": {"code": 0, "msg": "success", "data": []},
+        "infer_messages": [],
+        "chart_messages": [],
+    }
+    snapshot_bytes = json.dumps(
+        snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    snapshot_path = report.with_suffix(".final-result.json")
+    snapshot_path.write_bytes(snapshot_bytes)
     provenance = {
-        "schema_version": 1,
+        "schema_version": 2,
         "document_id": "doc_test",
         "revision_id": "rev_parent",
         "parent_revision_id": None,
         "conversation_id": "C1",
         "markdown_path": str(report),
         "content_sha256": hashlib.sha256(body.encode()).hexdigest(),
+        "final_result_path": snapshot_path.name,
+        "final_result_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
         "created_at": "2026-07-15T00:00:00+00:00",
         "operation": {"action": "deepresearch_generate"},
         "citations": [],
@@ -72,6 +85,9 @@ async def test_prepare_and_commit_tools_return_short_outcomes_and_deliver_file(t
     committed = json.loads(committed_raw)
     assert prepared["status"] == "prepared"
     assert committed["status"] == "completed"
+    assert committed["citation_integrity_status"] == "verified"
+    assert committed["citation_semantic_status"] == "not_verified"
+    assert "citation_status" not in committed
     assert Path(committed["report_path"]).is_file()
     push.send_push.assert_awaited_once()
     assert push.send_push.await_args.args[0]["payload"]["event_type"] == "chat.file"
