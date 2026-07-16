@@ -168,6 +168,7 @@ memory:
         uid: uid-virtual
         headers: {}
       chat:
+        base_url: http://lfhagmirror.hwcloudtest.cn:80/celia-claw/v1/sse-api
         api_key: sk-virtual
         model: Auto-Model
         uid: uid-virtual
