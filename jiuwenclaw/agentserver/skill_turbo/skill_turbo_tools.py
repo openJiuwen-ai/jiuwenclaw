@@ -182,6 +182,10 @@ def _wrap_skill_turbo_result(
         "【重要】每次调用仅处理一个独立任务。若用户要求生成多个同类产物（如多份不同主题的 PPT），"
         "必须为每个产物分别发起独立调用，且严格串行：等待前一次调用完全结束并收到返回结果后，"
         "才能发起下一次调用。严禁在同一轮对话中并行发起多次调用。"
+        "【临时排除】当用户消息中包含自定义模板路径信息（如出现 模板目录路径、"
+        "模板主文件路径 等模板路径字段，或含 pack_dir）时，不要调用此工具——"
+        "当前 skill 加速器暂未适配模板包功能，此类请求应改用 skill_tool 走 pptx-craft 标准流程。"
+        "此排除规则为临时措施，待 skill 加速器适配模板功能后移除。"
     ),
 )
 async def skill_turbo(query: str) -> dict[str, Any]:
@@ -190,6 +194,25 @@ async def skill_turbo(query: str) -> dict[str, Any]:
     Args:
         query: 对单个任务的忠实总结，须严格基于用户原话与历史上下文中已有的信息，不得自行扩写、脑补或补充用户未提及的内容细节（如擅自罗列章节大纲、技术要点、子主题等）。仅在用户表达零散时做必要的凝练与指代消解，确保任务目标、产物与约束完整可执行，但不新增任何信息。每次调用只处理一个任务；若用户要求多个任务，必须串行调用：等待前一次调用完成并收到返回结果后，再发起下一次调用。
     """
+    # ── [TEMP-TEMPLATE-BYPASS] 模板请求拦截（临时措施，待 skill 加速器适配模板功能后删除整块）──
+    # 前端选择自定义风格模板时，会在用户消息中附带模板路径信息（模板目录路径/模板主文件路径）。
+    # skill 加速器暂未适配此能力，拦截后引导 LLM 改用 skill_tool 走 pptx-craft 标准流程。
+    # 删除方式：搜索 [TEMP-TEMPLATE-BYPASS] 删除本标记块即可。
+    _template_path_markers = ("模板目录路径", "模板主文件路径")
+    if any(marker in query for marker in _template_path_markers):
+        logger.info(
+            "[SkillTurboTool] 检测到自定义模板路径，跳过 skill 加速器，建议改用 skill_tool"
+        )
+        return _wrap_skill_turbo_result({
+            "success": False,
+            "error": (
+                "检测到用户提供了自定义模板路径，当前 skill 加速器暂未适配模板包功能。"
+                "请改用 skill_tool 走 pptx-craft 标准流程处理此请求"
+                "（直接执行，无需再调用 skill_acceleration_exec）。"
+            ),
+        })
+    # ── [/TEMP-TEMPLATE-BYPASS] ──
+
     from jiuwenclaw.agentserver.skill_turbo.agent import SkillTurbo, SkillTurboNotHandled
     from jiuwenclaw.agentserver.tools.subagent_executor import get_subagent_parent_session
     from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
