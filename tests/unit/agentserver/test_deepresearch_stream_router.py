@@ -494,6 +494,28 @@ def test_sub_reporter_success_response_does_not_restart_reasoning():
     assert frames == []
 
 
+def test_sub_reporter_forwards_reasoning_without_streaming_chapter_body():
+    state = RouterState()
+    frames = route_chunk(
+        {
+            "agent": "sub_reporter",
+            "section_idx": "1",
+            "section_title": "第一章",
+            "section_total": 1,
+            "event": "message",
+            "reasoning_content": "正在组织章节结构",
+            "content": "# 第一章\n\n这是完整章节正文。",
+        },
+        state,
+    )
+
+    reasoning = [frame for frame in frames if frame["event_type"] == "chat.reasoning"]
+    assert [frame["content"] for frame in reasoning] == [
+        "章节撰写开始\n",
+        "正在组织章节结构",
+    ]
+
+
 def test_interrupt_chunk_not_forwarded():
     state = RouterState()
     frames = route_chunk({"agent": "outline_interaction", "message_type": "interrupt"}, state)

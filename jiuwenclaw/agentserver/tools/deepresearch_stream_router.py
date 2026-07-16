@@ -219,10 +219,13 @@ def _chunk_reasoning_content(chunk: dict, content: Any) -> Any:
     return parsed.get("reasoning_content") if isinstance(parsed, dict) else reasoning
 
 
-def _raw_process_parts(chunk: dict, content: Any) -> list[str]:
+def _raw_process_parts(chunk: dict, content: Any, *, include_content: bool = True) -> list[str]:
     """Return original process bodies without compaction or semantic summarization."""
     parts: list[str] = []
-    for value in (_chunk_reasoning_content(chunk, content), content):
+    values = [_chunk_reasoning_content(chunk, content)]
+    if include_content:
+        values.append(content)
+    for value in values:
         text = _as_text(value)
         if not text or not text.strip() or text.strip() in _CONTROL_PROCESS_VALUES:
             continue
@@ -361,7 +364,11 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
         return frames  # 未知节点不推(避免噪声)
 
     if agent in _SECTION_PROCESS_NODES and section_idx != "0":
-        process_parts = _raw_process_parts(chunk, content)
+        process_parts = _raw_process_parts(
+            chunk,
+            content,
+            include_content=agent != "sub_reporter",
+        )
         _remember_section_title(state, section_idx, chunk.get("section_title"))
         node_state = state.active_nodes.get(key)
         if node_state is None:
