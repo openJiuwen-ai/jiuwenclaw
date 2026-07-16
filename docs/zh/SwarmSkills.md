@@ -497,6 +497,8 @@ Swarm Skills 采用标准化的结构定义（5 文件规范），具备跨框�
 
 **阶段二：专家评估（并行）**
 
+![专家评估](../assets/images/jiuwenswarm专家评估.png)
+
 ```
 [internist] 评估内科方面：
 - ST段抬高提示心肌损伤可能
@@ -524,8 +526,6 @@ Swarm Skills 采用标准化的结构定义（5 文件规范），具备跨框�
 ```
 
 **阶段四：输出结果**
-
-以下截图展示了医疗会诊 Swarm Skill 在 JiuwenSwarm 中输出的结构化会诊报告：
 
 ![医疗会诊报告概览](../assets/images/jiuwenswarm医疗就诊案例.png)
 
