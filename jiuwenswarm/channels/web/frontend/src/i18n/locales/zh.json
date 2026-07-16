@@ -951,7 +951,7 @@
     "update": "更新",
     "delete": "删除",
     "runNow": "立即执行",
-    "previewAction": "预览",
+    "previewAction": "未来执行计划",
     "enable": "启动",
     "disable": "停用",
     "loading": "正在加载任务列表...",
@@ -993,10 +993,11 @@
       "noProject": "–",
       "runNow": "立即执行",
       "stop": "停止",
+      "start": "启动",
       "edit": "编辑",
       "more": "更多",
       "history": "运行历史",
-      "triggeredSessions": "触发的会话",
+      "triggeredSessions": "执行记录",
       "noTriggeredSessions": "暂无触发记录"
     },
     "empty": {
@@ -1033,7 +1034,8 @@
       "placeholderInput": "请输入",
       "placeholderSelect": "请选择",
       "placeholderEffectiveDate": "请选择生效日期",
-      "missingFieldsHint": "还需要填写：{{fields}}"
+      "missingFieldsHint": "还需要填写：{{fields}}",
+      "scheduleAlreadyExpiredHint": "所选的执行时间已经过去，请重新选择"
     },
     "schedule": {
       "title": "执行计划",
@@ -1053,7 +1055,13 @@
       "selectDay": "请选择日期",
       "every": "每",
       "everyHoursPlaceholder": "小时数",
+      "everyMinutesPlaceholder": "分钟数",
       "hoursUnit": "小时",
+      "minutesUnit": "分钟",
+      "intervalUnit": {
+        "hours": "小时",
+        "minutes": "分钟"
+      },
       "dayOption": "{{day}}日",
       "monthOption": "{{month}}月",
       "lastDayOfMonth": "月末最后一天",
@@ -1074,7 +1082,9 @@
         "monthlyWeekday": "每月{{weekOfMonth}} 周{{days}} {{time}}",
         "yearly": "每年{{month}}月{{day}}日 {{time}}",
         "interval": "每{{n}}小时",
-        "intervalWithWeekdays": "每{{n}}小时（{{days}}）",
+        "intervalWithWeekdays": "每{{n}}小时 周{{days}}",
+        "intervalMinutes": "每{{n}}分钟",
+        "intervalMinutesWithWeekdays": "每{{n}}分钟 周{{days}}",
         "once": "{{date}} {{time}}",
         "lastDay": "月末"
       },
@@ -1184,6 +1194,7 @@
       "previewFailed": "预览触发时间失败",
       "runNowFailed": "立即执行失败",
       "expiredCannotRunNow": "任务过期，无法执行",
+      "disabledCannotRunNow": "任务已停止，无法执行",
       "expiredCannotEnable": "任务过期，无法启动",
       "loadDetailFailed": "获取任务详情失败",
       "nameRequired": "任务名称不能为空",

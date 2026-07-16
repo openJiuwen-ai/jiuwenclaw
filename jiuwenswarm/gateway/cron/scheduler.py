@@ -410,13 +410,14 @@ class CronSchedulerService:
 
         now = self._now_fn()
         for job in jobs:
-            if not job.enabled:
-                continue
             try:
                 push_dt, wake_dt, run_id = self._compute_next_run(job, now_ts=now)
             except Exception as exc:  # noqa: BLE001
                 if self._is_croniter_no_next_date(exc):
-                    # 已过期的 one-shot：标记 expired 并停用，避免 UI 仍显示 enabled。
+                    # 已过期的 one-shot：标记 expired 并停用，避免 UI 仍显示"运行中/已暂停"。
+                    # 这里故意不提前 continue 掉 disabled 的任务——一个单次任务如果在到期前
+                    # 被手动暂停，同样需要能被检测到"已经没有下一次执行时间"从而转入过期态，
+                    # 否则会永远卡在"已暂停"（见 2026-07-16 bugfix）。
                     # proactive job 的 enabled 由 ConfigPanel 开关管，scheduler 不碰。
                     try:
                         is_proactive = getattr(job, "mode", "") == "proactive.tick"
@@ -434,6 +435,8 @@ class CronSchedulerService:
                         )
                 else:
                     logger.warning("[Cron] compute next run failed job=%s: %s", job.id, exc)
+                continue
+            if not job.enabled:
                 continue
             # 幂等保护：reload 清空事件队列后重新排入，但同一 run_id
             # 可能已执行中或已完成（wake_offset 过大时 wake_dt 在过去，

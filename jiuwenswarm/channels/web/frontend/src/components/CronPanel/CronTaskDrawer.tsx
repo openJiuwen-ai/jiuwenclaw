@@ -7,6 +7,7 @@ import DatePicker from './DatePicker';
 import SimpleSelect from './SimpleSelect';
 import TemplateClusterIcon from './TemplateClusterIcon';
 import { validateCronExpr } from './cronExprValidation';
+import { cronExprToSchedule, isOnceScheduleExpired } from './scheduleConvert';
 import { TIMEZONE_OPTIONS } from './constants';
 import type { CronTaskUI, CronTemplateUI } from '../../types/cron';
 import type { ProjectInfo } from '../../features/workspace/projectTypes';
@@ -97,9 +98,18 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
   // 必填项缺失时，收集清单用来在"确定"按钮旁给出具体提示（而不是只让按钮变灰、不说原因）
   const missingFieldLabels: string[] = [];
   if (!form.name.trim()) missingFieldLabels.push(t('cron.drawer.fieldName'));
+  if (!form.description.trim()) missingFieldLabels.push(t('cron.drawer.fieldDescription'));
   if (!form.cronExpr.trim() || !validateCronExpr(form.cronExpr).valid) missingFieldLabels.push(t('cron.schedule.title'));
-  const canSubmit = missingFieldLabels.length === 0;
-  const missingFieldsHint = canSubmit ? undefined : t('cron.drawer.missingFieldsHint', { fields: missingFieldLabels.join(t('cron.schedule.listSeparator')) });
+  // "单次"排班选的日期时间已经过去：字段本身不是"没填"，属于另一类校验失败，
+  // 单独提示（而不是塞进"还需要填写"的缺失字段列表里，语义对不上）
+  const parsedSchedule = form.cronExpr.trim() ? cronExprToSchedule(form.cronExpr) : null;
+  const scheduleAlreadyExpired = parsedSchedule ? isOnceScheduleExpired(parsedSchedule, form.timezone) : false;
+  const canSubmit = missingFieldLabels.length === 0 && !scheduleAlreadyExpired;
+  const missingFieldsHint = missingFieldLabels.length > 0
+    ? t('cron.drawer.missingFieldsHint', { fields: missingFieldLabels.join(t('cron.schedule.listSeparator')) })
+    : scheduleAlreadyExpired
+      ? t('cron.drawer.scheduleAlreadyExpiredHint')
+      : undefined;
   const lockedTitle = proactiveLocked ? t('cron.autoManagedToggleDisabled') ?? undefined : undefined;
 
   return (
@@ -173,7 +183,9 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
           </div>
 
           <div>
-            <label className="mb-1.5 block text-sm font-bold text-text-strong">{t('cron.drawer.fieldDescription')}</label>
+            <label className="mb-1.5 block text-sm font-bold text-text-strong">
+              {t('cron.drawer.fieldDescription')} <span className="text-danger">*</span>
+            </label>
             <textarea
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
@@ -195,7 +207,7 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
             />
           </div>
 
-          <ScheduleEditor value={form.cronExpr} onChange={(cronExpr) => setForm({ ...form, cronExpr })} />
+          <ScheduleEditor value={form.cronExpr} onChange={(cronExpr) => setForm({ ...form, cronExpr })} timezone={form.timezone} />
 
           <div>
             <label className="mb-1.5 block text-sm font-bold text-text-strong">{t('cron.drawer.fieldTimezone')}</label>

@@ -1,15 +1,16 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import SimpleSelect from './SimpleSelect';
 import TimePicker from './TimePicker';
 import DatePicker from './DatePicker';
 import { validateCronExpr } from './cronExprValidation';
-import { scheduleToCronExpr, cronExprToSchedule } from './scheduleConvert';
+import { scheduleToCronExpr, cronExprToSchedule, nowWallClock } from './scheduleConvert';
 import type { CronSchedule, CronScheduleKind } from '../../types/cron';
 
 interface ScheduleEditorProps {
   value: string; // cron_expr 原文，唯一提交给后端的数据
   onChange: (v: string) => void;
+  timezone: string; // "单次"tab 用来算"今天/现在"，禁掉已经过去的日期和时间点（见 2026-07-16 bugfix）
 }
 
 type TopMode = 'period' | 'interval' | 'once' | 'cronExpr';
@@ -39,15 +40,16 @@ function topModeOf(kind: CronScheduleKind): TopMode {
 }
 
 function defaultForTopMode(mode: 'period' | 'interval' | 'once'): CronSchedule {
-  if (mode === 'interval') return { kind: 'interval', everyHours: 1 };
+  if (mode === 'interval') return { kind: 'interval', intervalUnit: 'hours', everyHours: 1 };
   if (mode === 'once') return { kind: 'once', time: '', date: '' };
   return { kind: 'daily', time: '' };
 }
 
-function everyHoursTextOf(schedule: CronSchedule): string {
-  return schedule.kind === 'interval' && schedule.everyHours !== undefined
-    ? String(schedule.everyHours)
-    : '';
+// "按间隔"的数字输入：按当前单位（小时/分钟）取对应字段的文本表示，两者二选一
+function intervalNumberTextOf(schedule: CronSchedule): string {
+  if (schedule.kind !== 'interval') return '';
+  const n = schedule.intervalUnit === 'minutes' ? schedule.everyMinutes : schedule.everyHours;
+  return n !== undefined ? String(n) : '';
 }
 
 function WeekdayPicker({ selected, onToggle }: { selected: number[]; onToggle: (day: number) => void }) {
@@ -78,7 +80,7 @@ function WeekdayPicker({ selected, onToggle }: { selected: number[]; onToggle: (
 // 高保真设计的执行计划编辑器有 4 个 tab：周期/按间隔/单次/Cron表达式。前 3 个是结构化编辑，
 // 最后一个是直接编辑 cron_expr 原文的兜底/高级模式（编辑任务时若原表达式无法结构化识别，
 // 或用户手动切到这个 tab，都以它为准，见 scheduleConvert.ts 的反向解析策略）。
-export default function ScheduleEditor({ value, onChange }: ScheduleEditorProps) {
+export default function ScheduleEditor({ value, onChange, timezone }: ScheduleEditorProps) {
   const { t } = useTranslation();
   const initialParsed = cronExprToSchedule(value);
   const initialSchedule = initialParsed ?? { kind: 'daily', time: '' };
@@ -90,27 +92,60 @@ export default function ScheduleEditor({ value, onChange }: ScheduleEditorProps)
   const [topMode, setTopMode] = useState<TopMode>(
     initialParsed ? topModeOf(initialParsed.kind) : value.trim() ? 'cronExpr' : 'period',
   );
-  // "按间隔"小时数输入框单独存一份文本状态：如果直接把 <input> 的 value 绑定到 schedule.everyHours
-  // （number 类型），每次 onChange 都会把输入值转成数字再写回 schedule，一旦用户刚打出的是"5."这种
-  // 还没打完小数部分的中间态，Number("5.") 会被转成 5，进而把输入框的 value 强制改回"5"，把用户刚
-  // 敲的小数点瞬间吞掉，导致小数点根本打不进去。用独立的文本状态只做"显示"，只有能解析成数字时才
-  // 同步进 schedule，从根上避免这种"受控输入反噬"。
-  const [everyHoursText, setEveryHoursText] = useState(() => everyHoursTextOf(initialSchedule));
+  // "按间隔"数字输入框单独存一份文本状态，只做"显示"，输入时先过滤掉非数字字符（小时步长/分钟步长
+  // 在 croniter 里都只支持整数，见 cronExprValidation.ts），能解析成数字才同步进 schedule。
+  const [intervalNumberText, setIntervalNumberText] = useState(() => intervalNumberTextOf(initialSchedule));
+
+  // 切 tab 时的"上一次编辑内容"缓存：按 topMode 分桶各存一份 schedule。原实现切走一个 tab 时
+  // 直接用 defaultForTopMode 把 value（唯一数据源）整个覆盖成空白默认值，原 tab 的数据没有任何
+  // 备份，切回来自然拿不到（见 2026-07-16 bugfix）。这里给"周期/按间隔/单次"三个 tab 各留一份
+  // 记忆，切换时优先用缓存恢复，缓存没有（该 tab 还没被访问过）才用默认值。
+  const savedByModeRef = useRef<Partial<Record<'period' | 'interval' | 'once', CronSchedule>>>(
+    initialParsed ? { [topModeOf(initialParsed.kind)]: initialParsed } : {},
+  );
 
   const validation = value.trim() ? validateCronExpr(value) : { valid: true };
 
-  function updateSchedule(next: CronSchedule) {
+  // "单次"tab 用："今天"之前的日期整体不可选；选中日期正好是今天时，"现在"之前的时间点也不可选
+  // （见 2026-07-16 bugfix：与其等提交时才提示已过期，不如直接不让选上）
+  const nowStr = nowWallClock(timezone);
+  const todayStr = nowStr.slice(0, 10);
+  const nowTimeStr = nowStr.slice(11, 16);
+
+  // cacheMode 默认取当前 topMode——这对绝大多数调用（在同一个 tab 内编辑字段）是对的。
+  // 但 switchTopMode 里 setTopMode(mode) 是异步的，这个函数体内闭包捕获的 topMode 在同一次
+  // 事件处理里仍是切换前的旧值；如果这里继续按闭包里的旧 topMode 去写缓存，会把"即将切入的新
+  // schedule"错误地存进"切走的旧 tab"的缓存桶，污染旧桶，且新 tab 自己的桶始终没被正确写入——
+  // 多切几次 tab 后 topMode 和 schedule.kind 就会彻底对不上，导致 tab 内容整个不渲染
+  // （见 2026-07-16 bugfix）。所以 switchTopMode 必须显式把"即将切入的 mode"传进来。
+  function updateSchedule(next: CronSchedule, cacheMode: TopMode = topMode) {
     setSchedule(next);
+    if (cacheMode !== 'cronExpr') savedByModeRef.current[cacheMode] = next;
     onChange(scheduleToCronExpr(next));
   }
 
   function switchTopMode(mode: 'period' | 'interval' | 'once') {
     if (mode === topMode) return; // 已经在这个 tab 上，不要用当前（可能不完整）的 value 重新解析覆盖
+    // 优先级：当前 value 能直接解析成目标 tab 的形状（比如用户在"Cron表达式"tab 手写后切回结构化
+    // tab）> 该 tab 之前编辑过的缓存 > 默认值
     const parsed = cronExprToSchedule(value);
-    const next = parsed && topModeOf(parsed.kind) === mode ? parsed : defaultForTopMode(mode);
+    const next = parsed && topModeOf(parsed.kind) === mode
+      ? parsed
+      : savedByModeRef.current[mode] ?? defaultForTopMode(mode);
     setTopMode(mode);
-    if (mode === 'interval') setEveryHoursText(everyHoursTextOf(next));
-    updateSchedule(next);
+    if (mode === 'interval') setIntervalNumberText(intervalNumberTextOf(next));
+    updateSchedule(next, mode);
+  }
+
+  // "按间隔"的小时/分钟单位切换：数字重置为空，避免"同一串数字换个单位该怎么解读"的歧义
+  function setIntervalUnit(unit: 'hours' | 'minutes') {
+    if (schedule.kind !== 'interval' || (schedule.intervalUnit ?? 'hours') === unit) return;
+    setIntervalNumberText('');
+    updateSchedule(
+      unit === 'minutes'
+        ? { kind: 'interval', intervalUnit: 'minutes', everyMinutes: undefined, weekdays: schedule.weekdays }
+        : { kind: 'interval', intervalUnit: 'hours', everyHours: undefined, weekdays: schedule.weekdays },
+    );
   }
 
   function setPeriodKind(kind: Extract<CronScheduleKind, 'daily' | 'weekly' | 'monthly' | 'yearly'>) {
@@ -309,23 +344,42 @@ export default function ScheduleEditor({ value, onChange }: ScheduleEditorProps)
         <div className="flex flex-nowrap items-center gap-2">
           <span className="shrink-0 text-sm text-text-muted">{t('cron.schedule.every')}</span>
           <input
-            type="number"
-            step="any"
-            value={everyHoursText}
+            type="text"
+            inputMode="numeric"
+            value={intervalNumberText}
             onChange={(e) => {
-              const raw = e.target.value;
-              setEveryHoursText(raw);
-              if (raw.trim() === '') {
-                updateSchedule({ ...schedule, everyHours: undefined });
+              // 小时/分钟步长在 croniter 里都只支持正整数，从输入源头过滤掉非数字字符
+              // （而不是允许打小数、事后校验失败再把确定按钮悄悄置灰，见 2026-07-16 bugfix）
+              const raw = e.target.value.replace(/\D/g, '');
+              setIntervalNumberText(raw);
+              const isMinutes = schedule.intervalUnit === 'minutes';
+              if (raw === '') {
+                updateSchedule(isMinutes ? { ...schedule, everyMinutes: undefined } : { ...schedule, everyHours: undefined });
                 return;
               }
               const n = Number(raw);
-              if (!Number.isNaN(n)) updateSchedule({ ...schedule, everyHours: n });
+              updateSchedule(isMinutes ? { ...schedule, everyMinutes: n } : { ...schedule, everyHours: n });
             }}
-            placeholder={t('cron.schedule.everyHoursPlaceholder') ?? undefined}
+            placeholder={t(schedule.intervalUnit === 'minutes' ? 'cron.schedule.everyMinutesPlaceholder' : 'cron.schedule.everyHoursPlaceholder') ?? undefined}
             className="w-16 shrink-0 rounded-md border border-border bg-card px-2 py-1.5 text-sm text-text outline-none focus:border-accent"
           />
-          <span className="shrink-0 text-sm text-text-muted">{t('cron.schedule.hoursUnit')}</span>
+          <div className="inline-flex w-fit shrink-0 rounded-md bg-bg-muted p-0.5">
+            {(['hours', 'minutes'] as const).map((unit) => {
+              const active = (schedule.intervalUnit ?? 'hours') === unit;
+              return (
+                <button
+                  key={unit}
+                  type="button"
+                  onClick={() => setIntervalUnit(unit)}
+                  className={`rounded px-1.5 py-0.5 text-xs transition-colors ${
+                    active ? 'bg-card font-bold text-text-strong shadow-sm' : 'text-text-muted hover:text-text'
+                  }`}
+                >
+                  {t(`cron.schedule.intervalUnit.${unit}`)}
+                </button>
+              );
+            })}
+          </div>
           <WeekdayPicker selected={schedule.weekdays ?? []} onToggle={toggleWeekday} />
         </div>
       )}
@@ -337,11 +391,13 @@ export default function ScheduleEditor({ value, onChange }: ScheduleEditorProps)
             onChange={(v) => updateSchedule({ ...schedule, time: v })}
             className="w-32 shrink-0"
             placeholder={t('cron.schedule.selectTime') ?? undefined}
+            minTime={schedule.date === todayStr ? nowTimeStr : undefined}
           />
           <DatePicker
             value={schedule.date ?? ''}
             onChange={(v) => updateSchedule({ ...schedule, date: v })}
             className="min-w-0 flex-1"
+            minDate={todayStr}
           />
         </div>
       )}

@@ -335,6 +335,19 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     }
   }
 
+  // "启动"（恢复已暂停任务）是低风险操作，不需要像"停止"那样二次确认弹窗
+  async function handleStart(job: CronTaskUI) {
+    try {
+      await webRequest<{ job: CronJobDTO }>('cron.job.toggle', { id: job.id, enabled: true });
+      setSuccess(t('cron.success.statusUpdated'));
+      await loadJobs(projects);
+      void reloadCronStore();
+    } catch (toggleError) {
+      const message = toggleError instanceof Error ? toggleError.message : t('cron.errors.toggleFailed');
+      setError(message);
+    }
+  }
+
   async function handleRunNowConfirm() {
     if (!confirmState || confirmBusy) return;
     setConfirmBusy(true);
@@ -618,8 +631,13 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                       <td className="px-4 py-3 text-text">{channelLabel(job.deliveryChannel)}</td>
                       <td className="relative px-4 py-3">
                         <div className="flex items-center gap-3">
-                          {job.expired ? (
-                            <span className="text-sm text-text-muted/50 cursor-not-allowed select-none" title={t('cron.errors.expiredCannotRunNow') ?? undefined}>
+                          {/* proactive job 没有真正的"停止"态（enabled 由 config 驱动，不是用户可切的
+                              开关，同 StatusBadge 的 enabled 判断），立即执行的禁用条件不看它的 enabled */}
+                          {job.expired || (!isProactive && !job.enabled) ? (
+                            <span
+                              className="text-sm text-text-muted/50 cursor-not-allowed select-none"
+                              title={t(job.expired ? 'cron.errors.expiredCannotRunNow' : 'cron.errors.disabledCannotRunNow') ?? undefined}
+                            >
                               {t('cron.table.runNow')}
                             </span>
                           ) : (
@@ -630,16 +648,33 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                               {t('cron.table.runNow')}
                             </button>
                           )}
+                          <button
+                            onClick={() => setDrawer({ mode: 'edit', initial: jobToForm(job), jobId: job.id })}
+                            className="text-sm text-cron-action-link hover:opacity-80"
+                          >
+                            {t('cron.table.edit')}
+                          </button>
                           {isProactive ? (
                             <span className="text-sm text-text-muted/50 cursor-not-allowed select-none" title={t('cron.autoManagedToggleDisabled') ?? undefined}>
                               {t('cron.table.stop')}
                             </span>
-                          ) : (
+                          ) : job.expired ? (
+                            <span className="text-sm text-text-muted/50 cursor-not-allowed select-none" title={t('cron.errors.expiredCannotEnable') ?? undefined}>
+                              {t('cron.table.start')}
+                            </span>
+                          ) : job.enabled ? (
                             <button
                               onClick={() => setConfirmState({ type: 'stop', job })}
                               className="text-sm text-cron-action-link hover:opacity-80"
                             >
                               {t('cron.table.stop')}
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => void handleStart(job)}
+                              className="text-sm text-cron-action-link hover:opacity-80"
+                            >
+                              {t('cron.table.start')}
                             </button>
                           )}
                           <div className="relative" ref={rowMenuJobId === job.id ? rowMenuRef : undefined}>
@@ -651,15 +686,6 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
                             </button>
                             {rowMenuJobId === job.id && (
                               <div className="absolute left-0 top-[calc(100%+4px)] z-20 w-28 rounded-lg border border-border bg-card py-1.5 shadow-lg">
-                                <button
-                                  onClick={() => {
-                                    setRowMenuJobId(null);
-                                    setDrawer({ mode: 'edit', initial: jobToForm(job), jobId: job.id });
-                                  }}
-                                  className="block w-full px-3 py-2 text-left text-sm text-cron-action-link hover:bg-bg-hover"
-                                >
-                                  {t('cron.table.edit')}
-                                </button>
                                 <button
                                   onClick={() => {
                                     setRowMenuJobId(null);

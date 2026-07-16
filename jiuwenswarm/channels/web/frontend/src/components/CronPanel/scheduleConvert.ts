@@ -106,10 +106,14 @@ export function scheduleToCronExpr(schedule: CronSchedule): string {
       return `0 ${t.m} ${t.h} ${schedule.day} ${schedule.month} ? *`;
     }
     case 'interval': {
-      if (!schedule.everyHours) return '';
       const days = schedule.weekdays && schedule.weekdays.length > 0
         ? Array.from(new Set(schedule.weekdays)).sort((a, b) => a - b).join(',')
         : '*';
+      if (schedule.intervalUnit === 'minutes') {
+        if (!schedule.everyMinutes) return '';
+        return `0 */${schedule.everyMinutes} * * * ${days} *`;
+      }
+      if (!schedule.everyHours) return '';
       return `0 0 */${schedule.everyHours} * * ${days} *`;
     }
     case 'once': {
@@ -129,7 +133,12 @@ export function cronExprToSchedule(expr: string): CronSchedule | null {
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 7) return null;
   const [second, minute, hour, day, month, week, year] = parts;
-  if (second !== '0') return null;
+  // 秒字段只要求"是单个具体数字"（不含 */,- 等形状），具体数值不参与结构化模型——
+  // 结构化 tab 本身不提供秒级精度，生成时永远写 0；但识别时不应该因为秒不是 0
+  // 就整体拒绝，否则像 Agent 工具/OpenClaw "at" 调度产生的、秒字段带着原始时间戳
+  // 秒数的单次 cron（如 `2 4 12 16 7 ? 2026`）会被误判成"识别不了"而只能看 Cron
+  // 表达式原文，实际上它的日/月/年形状清楚地是"单次"（见 2026-07-16 bugfix）。
+  if (parseSingleInt(second) === null) return null;
 
   const min = parseSingleInt(minute);
   const hr = parseSingleInt(hour);
@@ -144,17 +153,29 @@ export function cronExprToSchedule(expr: string): CronSchedule | null {
     return { kind: 'once', time: `${pad2(hr)}:${pad2(min)}`, date: `${y}-${pad2(mo)}-${pad2(d)}` };
   }
 
-  // interval：小时字段带步长
+  // interval：小时字段带步长（每N小时）
   if (hour.startsWith('*/')) {
     if (minute !== '0') return null;
     const n = parseSingleInt(hour.slice(2));
     if (n === null || !isWildcard(day) || month !== '*') return null;
     if (isWildcard(week)) {
-      return { kind: 'interval', everyHours: n };
+      return { kind: 'interval', intervalUnit: 'hours', everyHours: n };
     }
     const days = parseIntList(week);
     if (!days) return null;
-    return { kind: 'interval', everyHours: n, weekdays: days };
+    return { kind: 'interval', intervalUnit: 'hours', everyHours: n, weekdays: days };
+  }
+
+  // interval：分钟字段带步长、小时字段通配（每N分钟）
+  if (minute.startsWith('*/') && hour === '*') {
+    const n = parseSingleInt(minute.slice(2));
+    if (n === null || !isWildcard(day) || month !== '*') return null;
+    if (isWildcard(week)) {
+      return { kind: 'interval', intervalUnit: 'minutes', everyMinutes: n };
+    }
+    const days = parseIntList(week);
+    if (!days) return null;
+    return { kind: 'interval', intervalUnit: 'minutes', everyMinutes: n, weekdays: days };
   }
 
   if (hr === null || min === null) return null;
@@ -189,6 +210,28 @@ export function cronExprToSchedule(expr: string): CronSchedule | null {
   }
 
   return null;
+}
+
+/**
+ * 给定时区当前的墙钟时间，格式为 "YYYY-MM-DDTHH:mm"（零填充）。
+ * 用来跟"单次"排班的 date+time 做字符串比较——两者都是零填充的 ISO 前缀，
+ * 按字典序比较等价于按时间先后比较，不需要引入日期库做时区换算。
+ * 用 hourCycle: 'h23' 而不是 hour12: false，避免个别引擎在午夜把小时格式化成 "24" 而不是 "00"。
+ */
+export function nowWallClock(timezone: string): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date());
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
+}
+
+/** "单次"排班的日期+时间是否已经过去（按 schedule 所在时区的当前墙钟时间比较）。 */
+export function isOnceScheduleExpired(schedule: CronSchedule, timezone: string): boolean {
+  if (schedule.kind !== 'once' || !schedule.date || !schedule.time) return false;
+  return `${schedule.date}T${schedule.time}` <= nowWallClock(timezone);
 }
 
 type TFn = (key: string, options?: Record<string, unknown>) => string;
@@ -237,10 +280,15 @@ export function summarizeSchedule(schedule: CronSchedule, t: TFn): string {
         day: schedule.day ?? '',
         time: schedule.time ?? '',
       });
-    case 'interval':
+    case 'interval': {
+      const isMinutes = schedule.intervalUnit === 'minutes';
+      const n = isMinutes ? schedule.everyMinutes ?? 1 : schedule.everyHours ?? 1;
+      const withWeekdaysKey = isMinutes ? 'cron.schedule.summary.intervalMinutesWithWeekdays' : 'cron.schedule.summary.intervalWithWeekdays';
+      const plainKey = isMinutes ? 'cron.schedule.summary.intervalMinutes' : 'cron.schedule.summary.interval';
       return schedule.weekdays && schedule.weekdays.length > 0
-        ? t('cron.schedule.summary.intervalWithWeekdays', { n: schedule.everyHours ?? 1, days: joinWeekdays(schedule.weekdays, t) })
-        : t('cron.schedule.summary.interval', { n: schedule.everyHours ?? 1 });
+        ? t(withWeekdaysKey, { n, days: joinWeekdays(schedule.weekdays, t) })
+        : t(plainKey, { n });
+    }
     case 'once':
       return t('cron.schedule.summary.once', { date: schedule.date ?? '', time: schedule.time ?? '' });
     default:

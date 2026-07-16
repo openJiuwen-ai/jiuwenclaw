@@ -69,5 +69,7 @@ export interface CronSchedule {
   weekOfMonth?: number | 'L'; // monthlyWeekday 用：1-4，或 'L' 表示最后一周（不支持"第五周"，见 §2.3.8）
   month?: number; // 1-12，yearly 用
   date?: string; // YYYY-MM-DD，once 用
-  everyHours?: number; // interval 用；暂不限制取值范围/是否整数，交给 cron_expr 整体校验兜底（见 2026-07-14 progress.md）
+  intervalUnit?: 'hours' | 'minutes'; // interval 用：数字的单位，默认 'hours'（兼容旧数据/旧生成结果）
+  everyHours?: number; // interval 用，intervalUnit 为 'hours' 时的取值；只允许正整数（croniter 小时步长不支持小数）
+  everyMinutes?: number; // interval 用，intervalUnit 为 'minutes' 时的取值；只允许正整数且需整除 60
 }
