@@ -44,6 +44,7 @@ FrameCallback = Callable[[str, str, "str | None"], Awaitable[None]]
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     session_id     TEXT PRIMARY KEY,
+    user           TEXT,
     title          TEXT,
     message_count  INTEGER DEFAULT 0,
     last_preview   TEXT,
@@ -64,8 +65,8 @@ CREATE INDEX IF NOT EXISTS idx_msg_session_ts ON messages(session_id, timestamp)
 """
 
 _UPSERT_SESSION = """
-INSERT INTO sessions (session_id, title, message_count, last_preview, created_at, updated_at)
-VALUES (?, ?, 1, ?, ?, ?)
+INSERT INTO sessions (session_id, user, title, message_count, last_preview, created_at, updated_at)
+VALUES (?, ?, ?, 1, ?, ?, ?)
 ON CONFLICT(session_id) DO UPDATE SET
     message_count = message_count + 1,
     last_preview  = excluded.last_preview,
@@ -95,15 +96,23 @@ class ChatHistoryStore:
             await conn.execute("PRAGMA journal_mode=WAL")
             await conn.execute("PRAGMA foreign_keys=ON")
             await conn.executescript(_SCHEMA)
+            # 兼容旧库：sessions 无 user 列时补上（已有则忽略）
+            try:
+                await conn.execute("ALTER TABLE sessions ADD COLUMN user TEXT")
+            except Exception:
+                pass
+            # 迁移：多租户前的旧会话（user 为 NULL）归默认 guest
+            await conn.execute("UPDATE sessions SET user = 'guest' WHERE user IS NULL")
             await conn.commit()
             self._db = conn
             logger.info("[history] store 初始化完成: db=%s", self._db_path)
         return self._db
 
     async def record_user(
-        self, *, request_id: str, session_id: str, query: str, ts: float
+        self, *, request_id: str, session_id: str, query: str, ts: float,
+        user: str | None = None,
     ) -> bool:
-        """落盘一条 user 消息。重发幂等（UNIQUE 命中则不增计数）。返回是否真正写入。"""
+        """落盘一条 user 消息。重发幂等（UNIQUE 命中则不增计数）。user 写 sessions.user（首条定）。"""
         conn = await self._ensure()
         cur = await conn.execute(
             "INSERT OR IGNORE INTO messages (session_id, request_id, role, content, event_type, timestamp) "
@@ -114,13 +123,13 @@ class ChatHistoryStore:
         if inserted:
             await conn.execute(
                 _UPSERT_SESSION,
-                (session_id, query[:_TITLE_LEN], query[:_PREVIEW_LEN], ts, ts),
+                (session_id, user, query[:_TITLE_LEN], query[:_PREVIEW_LEN], ts, ts),
             )
         await conn.commit()
         if inserted:
             logger.info(
-                "[history] 落盘 user: rid=%s sid=%s len=%d",
-                request_id, session_id, len(query),
+                "[history] 落盘 user: rid=%s sid=%s user=%s len=%d",
+                request_id, session_id, user, len(query),
             )
         return inserted
 
@@ -139,7 +148,7 @@ class ChatHistoryStore:
         if inserted:
             await conn.execute(
                 _UPSERT_SESSION,
-                (session_id, None, content[:_PREVIEW_LEN], ts, ts),
+                (session_id, None, None, content[:_PREVIEW_LEN], ts, ts),
             )
         await conn.commit()
         if inserted:
@@ -149,33 +158,43 @@ class ChatHistoryStore:
             )
         return inserted
 
-    async def list_sessions(self, *, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
-        """按 updated_at 倒序返回会话列表。"""
+    async def list_sessions(self, *, limit: int = 20, offset: int = 0,
+                            user: str | None = None) -> list[dict[str, Any]]:
+        """按 updated_at 倒序返回会话列表。user 非空时按 user 过滤。"""
         conn = await self._ensure()
         limit = max(1, min(limit, _MAX_LIST_LIMIT))
         offset = max(0, offset)
-        cur = await conn.execute(
-            "SELECT session_id, title, message_count, last_preview, created_at, updated_at "
-            "FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-            (limit, offset),
-        )
+        if user:
+            cur = await conn.execute(
+                "SELECT session_id, user, title, message_count, last_preview, created_at, updated_at "
+                "FROM sessions WHERE user = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (user, limit, offset),
+            )
+        else:
+            cur = await conn.execute(
+                "SELECT session_id, user, title, message_count, last_preview, created_at, updated_at "
+                "FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            )
         rows = await cur.fetchall()
-        logger.debug("[history] list_sessions: limit=%d offset=%d -> %d 条", limit, offset, len(rows))
+        logger.debug("[history] list_sessions: limit=%d offset=%d user=%s -> %d 条", limit, offset, user, len(rows))
         return [
             {
-                "session_id": r[0], "title": r[1], "message_count": r[2],
-                "last_preview": r[3], "created_at": r[4], "updated_at": r[5],
+                "session_id": r[0], "user": r[1], "title": r[2], "message_count": r[3],
+                "last_preview": r[4], "created_at": r[5], "updated_at": r[6],
             }
             for r in rows
         ]
 
-    async def get_session_detail(self, session_id: str) -> dict[str, Any] | None:
-        """返回单个会话元数据 + messages（timestamp 升序）；不存在返回 None。"""
+    async def get_session_detail(self, session_id: str, *, user: str | None = None) -> dict[str, Any] | None:
+        """返回单个会话元数据 + messages（timestamp 升序）；不存在返回 None。user 非空时校验归属。"""
         conn = await self._ensure()
+        where = "WHERE session_id = ?" + (" AND user = ?" if user else "")
+        params: tuple = (session_id, user) if user else (session_id,)
         cur = await conn.execute(
-            "SELECT session_id, title, message_count, last_preview, created_at, updated_at "
-            "FROM sessions WHERE session_id = ?",
-            (session_id,),
+            "SELECT session_id, user, title, message_count, last_preview, created_at, updated_at "
+            f"FROM sessions {where}",
+            params,
         )
         s = await cur.fetchone()
         if s is None:
@@ -187,8 +206,8 @@ class ChatHistoryStore:
         )
         msgs = await cur.fetchall()
         return {
-            "session_id": s[0], "title": s[1], "message_count": s[2],
-            "last_preview": s[3], "created_at": s[4], "updated_at": s[5],
+            "session_id": s[0], "user": s[1], "title": s[2], "message_count": s[3],
+            "last_preview": s[4], "created_at": s[5], "updated_at": s[6],
             "messages": [
                 {
                     "role": m[0], "content": m[1], "event_type": m[2],
@@ -212,6 +231,8 @@ def make_history_callback(store: ChatHistoryStore) -> FrameCallback:
     回调内部 catch 所有异常，绝不冒泡到中继（broker 侧另有一层兜底）。
     """
     pending: dict[str, dict[str, Any]] = {}
+    # 流式回复累积：request_id -> 拼接后的 assistant 文本（chat.delta 逐帧累积，chat.final 落盘）
+    assistant_buf: dict[str, str] = {}
 
     async def _handle_browser(data: dict[str, Any]) -> None:
         if data.get("type") != "req":
@@ -227,12 +248,15 @@ def make_history_callback(store: ChatHistoryStore) -> FrameCallback:
         if not isinstance(request_id, str):
             return
         session_id = params.get("session_id")
+        user = params.get("user_id")
+        if not isinstance(user, str):
+            user = None
         ts = time.time()
         if isinstance(session_id, str) and session_id:
-            await store.record_user(request_id=request_id, session_id=session_id, query=query, ts=ts)
+            await store.record_user(request_id=request_id, session_id=session_id, query=query, ts=ts, user=user)
         else:
             # 首条请求常无 session_id（由 AgentServer 生成、从回复回来）—— 暂存等回填。
-            pending[request_id] = {"query": query, "ts": ts, "method": method}
+            pending[request_id] = {"query": query, "ts": ts, "method": method, "user": user}
             logger.debug(
                 "[history] 暂存 pending user(无 sid): rid=%s method=%s pending=%d",
                 request_id, method, len(pending),
@@ -243,11 +267,19 @@ def make_history_callback(store: ChatHistoryStore) -> FrameCallback:
             # 对话流回复走 event；type=res 是非 chat 请求-响应（无对应 user），不采集。
             return
         event = data.get("event")
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        request_id = data.get("request_id")
+
+        # 流式增量：累积 chat.delta（最终回复文本在 delta 里逐帧推送；chat.final 只是终止信号、content 为空）
+        if event == "chat.delta" and isinstance(request_id, str):
+            delta = payload.get("content")
+            if isinstance(delta, str) and delta:
+                assistant_buf[request_id] = assistant_buf.get(request_id, "") + delta
+            return
+
         if event not in _FINAL_EVENTS:
             return  # 中间事件（*.delta / tool_call / processing_status 等）—— 不采集
-        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
         session_id = payload.get("session_id")
-        request_id = data.get("request_id")
         if not isinstance(session_id, str) or not session_id:
             logger.warning(
                 "[history] 终态帧缺 session_id，丢弃: event=%s rid=%s",
@@ -255,9 +287,10 @@ def make_history_callback(store: ChatHistoryStore) -> FrameCallback:
             )
             return
         if event == "chat.final":
-            content = payload.get("content")
+            # 流式：取累积的 delta；非流式兜底：取 payload.content
+            content = assistant_buf.pop(request_id, "") or payload.get("content") or ""
         else:  # chat.error
-            content = payload.get("error") or payload.get("content")
+            content = payload.get("error") or payload.get("content") or assistant_buf.pop(request_id, "")
         if not isinstance(content, str) or not content:
             logger.debug("[history] 终态帧无内容，丢弃: event=%s rid=%s", event, request_id)
             return
@@ -266,7 +299,8 @@ def make_history_callback(store: ChatHistoryStore) -> FrameCallback:
         if isinstance(request_id, str) and request_id in pending:
             p = pending.pop(request_id)
             await store.record_user(
-                request_id=request_id, session_id=session_id, query=p["query"], ts=p["ts"]
+                request_id=request_id, session_id=session_id, query=p["query"], ts=p["ts"],
+                user=p.get("user"),
             )
             logger.info("[history] pending 回填 user: rid=%s sid=%s", request_id, session_id)
         await store.record_assistant(
@@ -301,24 +335,24 @@ def build_history_router(rt: "WebRuntime") -> APIRouter:
     router = APIRouter()
 
     @router.get("/api/sessions")
-    async def list_sessions(limit: int = 20, offset: int = 0) -> JSONResponse:
+    async def list_sessions(limit: int = 20, offset: int = 0, user_id: str | None = None) -> JSONResponse:
         store = rt.history_store
         if store is None:
             return JSONResponse({"error": "history_disabled"}, status_code=503)
         try:
-            rows = await store.list_sessions(limit=limit, offset=offset)
+            rows = await store.list_sessions(limit=limit, offset=offset, user=user_id)
             return JSONResponse({"sessions": rows})
         except Exception:
             logger.exception("[history] list_sessions 失败")
             return JSONResponse({"error": "internal"}, status_code=500)
 
     @router.get("/api/sessions/{session_id}")
-    async def get_session(session_id: str) -> JSONResponse:
+    async def get_session(session_id: str, user_id: str | None = None) -> JSONResponse:
         store = rt.history_store
         if store is None:
             return JSONResponse({"error": "history_disabled"}, status_code=503)
         try:
-            detail = await store.get_session_detail(session_id)
+            detail = await store.get_session_detail(session_id, user=user_id)
             if detail is None:
                 return JSONResponse({"error": "not_found"}, status_code=404)
             return JSONResponse(detail)
