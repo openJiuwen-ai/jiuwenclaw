@@ -33,7 +33,8 @@ class AgentOSRouter(AgentServerClientExtension):
         )
         self._registry_client = RegistryClient(config.registry)
         self._agent_manager = AgentManager(
-            creating_timeout_seconds=config.creating_timeout_seconds
+            creating_timeout_seconds=config.creating_timeout_seconds,
+            key_fields=config.agent_key_fields,
         )
         self._router_client = AgentOSRouterClient(
             self._yuanrong_client,

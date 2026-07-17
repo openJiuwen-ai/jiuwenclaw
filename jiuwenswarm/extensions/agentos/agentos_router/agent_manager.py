@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -13,8 +13,48 @@ from jiuwenswarm.extensions.agentos.agentos_router.models import AgentInfo, Agen
 
 
 AgentCreator = Callable[[AgentInfo], Awaitable[AgentInfo | None]]
-AgentKey = tuple[str, str]
+AgentKey = tuple[str, ...]
 SUPPORTED_AGENT_TYPES = frozenset({"jiuwenswarm", "opencode", "claude"})
+SUPPORTED_AGENT_KEY_FIELDS = frozenset({"user_id", "agent_type", "session_id"})
+DEFAULT_AGENT_KEY_FIELDS = ("user_id", "agent_type")
+
+
+def normalize_agent_key_fields(raw: Any = None) -> tuple[str, ...]:
+    """Normalize configured agent key fields.
+
+    Default is ``user_id + agent_type``. Supported fields:
+    ``user_id``, ``agent_type``, ``session_id``. Both ``user_id`` and
+    ``agent_type`` are always required.
+    """
+
+    if raw is None:
+        fields = list(DEFAULT_AGENT_KEY_FIELDS)
+    elif isinstance(raw, str):
+        text = raw.strip().lower().replace("+", ",").replace("|", ",")
+        fields = [part.strip() for part in text.split(",") if part.strip()]
+    elif isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray)):
+        fields = [str(part).strip().lower() for part in raw if str(part).strip()]
+    else:
+        raise ValueError(
+            "agent_key_fields must be a string or list, "
+            f"got {type(raw).__name__}"
+        )
+
+    if not fields:
+        fields = list(DEFAULT_AGENT_KEY_FIELDS)
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for name in fields:
+        if name not in SUPPORTED_AGENT_KEY_FIELDS:
+            raise ValueError(f"unsupported agent_key_field: {name}")
+        if name not in seen:
+            seen.add(name)
+            unique.append(name)
+
+    if "user_id" not in seen or "agent_type" not in seen:
+        raise ValueError("agent_key_fields must include user_id and agent_type")
+    return tuple(unique)
 
 
 class AgentCreatingTimeout(TimeoutError):
@@ -30,11 +70,8 @@ class AgentRuntime:
     """In-process agent record: business info plus create-wait signaling."""
 
     info: AgentInfo
+    key: AgentKey
     creating_event: asyncio.Event = field(default_factory=asyncio.Event)
-
-    @property
-    def key(self) -> AgentKey:
-        return self.info.user_id, self.info.agent_type
 
     def is_ready(self) -> bool:
         return self.info.status is AgentStatus.READY
@@ -50,7 +87,7 @@ class AgentRuntime:
 
     def snapshot(self) -> AgentRuntime:
         """Return a detached runtime view for callers (info only)."""
-        return AgentRuntime(info=self.info.copy())
+        return AgentRuntime(info=self.info.copy(), key=self.key)
 
     def attach_to_envelope(self, envelope: E2AEnvelope) -> None:
         envelope.channel_context["agent_id"] = self.info.agent_id
@@ -99,60 +136,136 @@ class AgentRuntime:
         await asyncio.wait_for(self.creating_event.wait(), timeout=timeout)
 
     @staticmethod
-    def normalize_key(user_id: str, agent_type: str) -> AgentKey:
-        normalized_user_id = str(user_id or "").strip()
-        if not normalized_user_id:
-            raise ValueError("user_id is required")
-        return normalized_user_id, AgentRuntime.normalize_agent_type(agent_type)
-
-    @staticmethod
     def normalize_agent_type(raw: Any) -> str:
         agent_type = str(raw or "jiuwenswarm").strip().lower()
         if agent_type not in SUPPORTED_AGENT_TYPES:
             raise ValueError(f"unsupported agent_type: {agent_type}")
         return agent_type
 
+    @staticmethod
+    def normalize_session_id(raw: Any) -> str:
+        session_id = str(raw or "").strip()
+        if not session_id:
+            raise ValueError("session_id is required by agent_key_fields")
+        return session_id
+
+    @staticmethod
+    def normalize_key_value(field_name: str, raw: Any) -> str:
+        if field_name == "user_id":
+            value = str(raw or "").strip()
+            if not value:
+                raise ValueError("user_id is required")
+            return value
+        if field_name == "agent_type":
+            return AgentRuntime.normalize_agent_type(raw)
+        if field_name == "session_id":
+            return AgentRuntime.normalize_session_id(raw)
+        value = str(raw or "").strip()
+        if not value:
+            raise ValueError(f"{field_name} is required by agent_key_fields")
+        return value
+
+    @staticmethod
+    def format_key(key: AgentKey, key_fields: Sequence[str]) -> str:
+        parts = [
+            f"{field_name}={value}"
+            for field_name, value in zip(key_fields, key, strict=False)
+        ]
+        return " ".join(parts)
+
+    @classmethod
+    def build_key(
+        cls,
+        key_fields: Sequence[str],
+        *,
+        user_id: str,
+        agent_type: str,
+        key_values: Mapping[str, Any] | None = None,
+    ) -> AgentKey:
+        values: dict[str, Any] = {
+            "user_id": user_id,
+            "agent_type": agent_type,
+            **dict(key_values or {}),
+        }
+        return tuple(
+            cls.normalize_key_value(name, values.get(name)) for name in key_fields
+        )
+
     @classmethod
     def for_key(
         cls,
         key: AgentKey,
         *,
+        user_id: str,
+        agent_type: str,
         metadata: dict[str, Any] | None = None,
     ) -> AgentRuntime:
         return cls(
+            key=key,
             info=AgentInfo(
-                user_id=key[0],
-                agent_type=key[1],
+                user_id=user_id,
+                agent_type=agent_type,
                 metadata=dict(metadata or {}),
-            )
+            ),
         )
 
 
 class AgentManager:
-    """In-memory Agent store keyed by (user_id, agent_type) with single-flight creation."""
+    """In-memory Agent store with configurable key fields and single-flight creation."""
 
-    def __init__(self, *, creating_timeout_seconds: float = 60.0) -> None:
+    def __init__(
+        self,
+        *,
+        creating_timeout_seconds: float = 60.0,
+        key_fields: Sequence[str] | str | None = None,
+    ) -> None:
+        self._key_fields = normalize_agent_key_fields(key_fields)
         self._runtimes: dict[AgentKey, AgentRuntime] = {}
         self._runtimes_lock = asyncio.Lock()
         self._creating_timeout_seconds = max(0.1, float(creating_timeout_seconds))
+
+    @property
+    def key_fields(self) -> tuple[str, ...]:
+        return self._key_fields
+
+    def _make_key(
+        self,
+        user_id: str,
+        agent_type: str,
+        *,
+        key_values: Mapping[str, Any] | None = None,
+    ) -> AgentKey:
+        return AgentRuntime.build_key(
+            self._key_fields,
+            user_id=user_id,
+            agent_type=agent_type,
+            key_values=key_values,
+        )
+
+    def _identity_from_key(self, key: AgentKey) -> tuple[str, str]:
+        values = dict(zip(self._key_fields, key, strict=False))
+        return values["user_id"], values["agent_type"]
 
     async def get_or_create_agent(
         self,
         user_id: str,
         agent_type: str,
         *,
+        key_values: Mapping[str, Any] | None = None,
         creator: AgentCreator | None = None,
         timeout_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AgentRuntime:
         """Get a READY Agent runtime or create one, waiting for in-flight creation."""
 
-        key = AgentRuntime.normalize_key(user_id, agent_type)
+        key = self._make_key(user_id, agent_type, key_values=key_values)
+        key_user_id, key_agent_type = self._identity_from_key(key)
         wait_timeout = (
             self._creating_timeout_seconds
             if timeout_seconds is None
             else max(0.1, float(timeout_seconds))
         )
+        key_desc = AgentRuntime.format_key(key, self._key_fields)
 
         while True:
             owner = False
@@ -162,7 +275,12 @@ class AgentManager:
                     return existing.snapshot()
 
                 if existing is None:
-                    runtime = AgentRuntime.for_key(key, metadata=metadata)
+                    runtime = AgentRuntime.for_key(
+                        key,
+                        user_id=key_user_id,
+                        agent_type=key_agent_type,
+                        metadata=metadata,
+                    )
                     self._runtimes[key] = runtime
                     owner = True
                 else:
@@ -181,22 +299,31 @@ class AgentManager:
                 await runtime.wait_until_settled(wait_timeout)
             except asyncio.TimeoutError as exc:
                 raise AgentCreatingTimeout(
-                    f"AGENT_CREATING_TIMEOUT: user_id={key[0]} "
-                    f"agent_type={key[1]}"
+                    f"AGENT_CREATING_TIMEOUT: {key_desc}"
                 ) from exc
             if runtime.is_deleted():
-                raise AgentDeleted(
-                    f"AGENT_DELETED: user_id={key[0]} agent_type={key[1]}"
-                )
+                raise AgentDeleted(f"AGENT_DELETED: {key_desc}")
 
-    async def get_agent(self, user_id: str, agent_type: str) -> AgentRuntime | None:
-        key = AgentRuntime.normalize_key(user_id, agent_type)
+    async def get_agent(
+        self,
+        user_id: str,
+        agent_type: str,
+        *,
+        key_values: Mapping[str, Any] | None = None,
+    ) -> AgentRuntime | None:
+        key = self._make_key(user_id, agent_type, key_values=key_values)
         async with self._runtimes_lock:
             runtime = self._runtimes.get(key)
             return runtime.snapshot() if runtime is not None else None
 
-    async def delete_agent(self, user_id: str, agent_type: str) -> None:
-        key = AgentRuntime.normalize_key(user_id, agent_type)
+    async def delete_agent(
+        self,
+        user_id: str,
+        agent_type: str,
+        *,
+        key_values: Mapping[str, Any] | None = None,
+    ) -> None:
+        key = self._make_key(user_id, agent_type, key_values=key_values)
         async with self._runtimes_lock:
             runtime = self._runtimes.pop(key, None)
         if runtime is not None:
@@ -207,8 +334,8 @@ class AgentManager:
         async with self._runtimes_lock:
             return [
                 runtime.snapshot()
-                for (uid, _), runtime in self._runtimes.items()
-                if uid == normalized_user_id
+                for runtime in self._runtimes.values()
+                if runtime.info.user_id == normalized_user_id
             ]
 
     async def _mark_creator_failed(
@@ -231,14 +358,13 @@ class AgentManager:
         *,
         owner_runtime: AgentRuntime,
     ) -> AgentRuntime:
+        key_desc = AgentRuntime.format_key(key, self._key_fields)
         try:
             created = await creator(agent.copy()) if creator is not None else agent
             resolved = AgentRuntime.apply_creator_result(created, base=agent)
             async with self._runtimes_lock:
                 if self._runtimes.get(key) is not owner_runtime:
-                    raise AgentDeleted(
-                        f"AGENT_DELETED: user_id={key[0]} agent_type={key[1]}"
-                    )
+                    raise AgentDeleted(f"AGENT_DELETED: {key_desc}")
                 owner_runtime.mark_ready(resolved)
                 return owner_runtime.snapshot()
         except asyncio.CancelledError as exc:

@@ -498,6 +498,12 @@ gateway:
   # AgentOS Router Extension 配置；agent_client.type=agentos_router 时生效。
   agentos:
     creating_timeout_seconds: 60
+    # Agent 复用 key 字段，默认 user_id + agent_type。
+    # 可选字段：user_id、agent_type、session_id（必须包含前两项）。
+    # 示例：加入 session_id 后同一用户每个会话独立 Agent。
+    agent_key_fields:
+      - user_id
+      - agent_type
     registry:
       endpoint:
       request_timeout_s: 10

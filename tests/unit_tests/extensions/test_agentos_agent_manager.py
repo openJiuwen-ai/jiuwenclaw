@@ -8,6 +8,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     AgentCreatingTimeout,
     AgentDeleted,
     AgentManager,
+    normalize_agent_key_fields,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.models import AgentInfo, AgentStatus
 
@@ -160,3 +161,67 @@ async def test_get_or_create_after_delete_during_creation_can_retry() -> None:
     assert recreated.info.status is AgentStatus.READY
     assert recreated.info.sandbox_id == "sandbox-2"
     assert create_calls == 2
+
+
+def test_normalize_agent_key_fields_defaults_and_aliases() -> None:
+    assert normalize_agent_key_fields(None) == ("user_id", "agent_type")
+    assert normalize_agent_key_fields("user_id+agent_type") == (
+        "user_id",
+        "agent_type",
+    )
+    assert normalize_agent_key_fields(
+        ["user_id", "agent_type", "session_id"]
+    ) == ("user_id", "agent_type", "session_id")
+    with pytest.raises(ValueError, match="unsupported agent_key_field"):
+        normalize_agent_key_fields(["user_id", "channel"])
+    with pytest.raises(ValueError, match="must include user_id and agent_type"):
+        normalize_agent_key_fields(["user_id"])
+
+
+@pytest.mark.asyncio
+async def test_session_scoped_key_creates_independent_agents() -> None:
+    agent_manager = AgentManager(
+        key_fields=["user_id", "agent_type", "session_id"]
+    )
+    create_calls = 0
+
+    async def creator(agent: AgentInfo) -> AgentInfo:
+        nonlocal create_calls
+        create_calls += 1
+        agent.sandbox_id = f"sandbox-{create_calls}"
+        return agent
+
+    first = await agent_manager.get_or_create_agent(
+        "u1",
+        "jiuwenswarm",
+        key_values={"session_id": "sess-1"},
+        creator=creator,
+    )
+    second = await agent_manager.get_or_create_agent(
+        "u1",
+        "jiuwenswarm",
+        key_values={"session_id": "sess-2"},
+        creator=creator,
+    )
+    reused = await agent_manager.get_or_create_agent(
+        "u1",
+        "jiuwenswarm",
+        key_values={"session_id": "sess-1"},
+        creator=creator,
+    )
+
+    assert create_calls == 2
+    assert first.info.agent_id != second.info.agent_id
+    assert reused.info.agent_id == first.info.agent_id
+    assert first.key == ("u1", "jiuwenswarm", "sess-1")
+    assert second.key == ("u1", "jiuwenswarm", "sess-2")
+
+    await agent_manager.delete_agent(
+        "u1", "jiuwenswarm", key_values={"session_id": "sess-1"}
+    )
+    assert await agent_manager.get_agent(
+        "u1", "jiuwenswarm", key_values={"session_id": "sess-1"}
+    ) is None
+    assert await agent_manager.get_agent(
+        "u1", "jiuwenswarm", key_values={"session_id": "sess-2"}
+    ) is not None

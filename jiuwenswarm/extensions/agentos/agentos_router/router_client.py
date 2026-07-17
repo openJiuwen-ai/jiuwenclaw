@@ -116,6 +116,7 @@ class AgentOSRouterClient(AgentServerClient):
         return await self._agent_manager.get_or_create_agent(
             user_id,
             agent_type,
+            key_values={"session_id": envelope.session_id},
             creator=self._create_agent,
             metadata={"session_id": envelope.session_id},
         )
@@ -155,12 +156,28 @@ class AgentOSRouterClient(AgentServerClient):
         task.add_done_callback(self._background_tasks.discard)
         return agent_info
 
-    async def delete_agent(self, user_id: str, agent_type: str) -> None:
+    async def delete_agent(
+        self,
+        user_id: str,
+        agent_type: str,
+        *,
+        key_values: dict[str, Any] | None = None,
+    ) -> None:
         """Delete agent mapping and release its YuanRong sandbox."""
-        runtime = await self._agent_manager.get_agent(user_id, agent_type)
+        resolved_key_values = dict(key_values or {})
+        runtime = await self._agent_manager.get_agent(
+            user_id, agent_type, key_values=resolved_key_values or None
+        )
         if runtime is None:
             return
         agent_info = runtime.info
+        if (
+            "session_id" not in resolved_key_values
+            and agent_info.metadata.get("session_id")
+        ):
+            resolved_key_values["session_id"] = agent_info.metadata.get(
+                "session_id"
+            )
         if agent_info.sandbox_id:
             await self._yuanrong.delete_sandbox(
                 agent_info.sandbox_id,
@@ -170,6 +187,7 @@ class AgentOSRouterClient(AgentServerClient):
         await self._agent_manager.delete_agent(
             agent_info.user_id,
             agent_info.agent_type,
+            key_values=resolved_key_values or None,
         )
 
     async def _register_agent(self, agent_info: AgentInfo) -> None:

@@ -2,8 +2,11 @@
 
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
     AgentCreatingTimeout,
+    AgentDeleted,
     AgentManager,
     AgentRuntime,
+    SUPPORTED_AGENT_TYPES,
+    normalize_agent_key_fields,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.extension import AgentOSRouter
 from jiuwenswarm.extensions.agentos.agentos_router.models import (
@@ -24,4 +27,6 @@ __all__ = [
     "AgentStatus",
     "ImageInfo",
     "RegistryClient",
+    "SUPPORTED_AGENT_TYPES",
+    "normalize_agent_key_fields",
 ]

@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
+    DEFAULT_AGENT_KEY_FIELDS,
+    normalize_agent_key_fields,
+)
 from jiuwenswarm.extensions.agentos.agentos_router.registry_client import RegistryConfig
 
 
@@ -16,6 +20,7 @@ class RouterConfig:
     invoke_timeout_s: float
     registry: RegistryConfig
     creating_timeout_seconds: float = 60.0
+    agent_key_fields: tuple[str, ...] = DEFAULT_AGENT_KEY_FIELDS
 
 
 def agentos_router_selected(config: dict[str, Any]) -> bool:
@@ -66,5 +71,8 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
         ),
         creating_timeout_seconds=float(
             agentos.get("creating_timeout_seconds") or 60.0
+        ),
+        agent_key_fields=normalize_agent_key_fields(
+            agentos.get("agent_key_fields")
         ),
     )

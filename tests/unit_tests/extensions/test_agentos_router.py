@@ -8,7 +8,10 @@ import pytest
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import AgentManager
-from jiuwenswarm.extensions.agentos.agentos_router.config import agentos_router_selected
+from jiuwenswarm.extensions.agentos.agentos_router.config import (
+    agentos_router_selected,
+    load_router_config,
+)
 from jiuwenswarm.extensions.agentos.agentos_router.extension import AgentOSRouter
 from jiuwenswarm.extensions.agentos.agentos_router.models import (
     AgentInfo,
@@ -220,6 +223,35 @@ def test_agentos_selected_by_agent_client_type() -> None:
             }
         }
     )
+
+
+def test_load_router_config_agent_key_fields() -> None:
+    config = {
+        "gateway": {
+            "agent_client": {
+                "type": "agentos_router",
+                "frontend_endpoint": "http://yuanrong.test",
+                "function_version_urn": "urn:test",
+            },
+            "agentos": {
+                "agent_key_fields": ["user_id", "agent_type", "session_id"],
+            },
+        }
+    }
+    loaded = load_router_config(config)
+    assert loaded.agent_key_fields == ("user_id", "agent_type", "session_id")
+
+    default_loaded = load_router_config(
+        {
+            "gateway": {
+                "agent_client": {
+                    "frontend_endpoint": "http://yuanrong.test",
+                    "function_version_urn": "urn:test",
+                }
+            }
+        }
+    )
+    assert default_loaded.agent_key_fields == ("user_id", "agent_type")
 
 
 @pytest.mark.asyncio
