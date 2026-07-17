@@ -18,6 +18,23 @@ gen_gateway_env_file() {
     fi
 
     render_config_template "${env_template_file}" "${env_file}" "DEPLOY_VARS"
+
+    echo "CLAW_MOUNT_TYPE=${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" >> "${env_file}"
+    if [ "${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" == "nfs" ]; then
+        echo "CLAW_NFS_SERVER=${DEPLOY_VARS["NFS_SERVER_ADDR"]}" >> "${env_file}"
+        echo "CLAW_NFS_PATH=${DEPLOY_VARS["NFS_SHARE_PATH"]}/jiuwenclaw" >> "${env_file}" 
+    else
+        echo "CLAW_PVC=${DEPLOY_VARS["CLAW_PVC"]}" >> "${env_file}"
+    fi
+
+    # 移除所有注释行、过滤空值行 KEY=、按变量名排序
+    # 注意：不能 sort > 同一个文件，shell 会在管道启动前就截断输出文件，
+    # 导致左侧 grep 读到空。先写临时文件再 mv 覆盖。
+    grep -v '^[[:space:]]*#' "${env_file}" \
+        | grep '=' \
+        | awk -F'=' '$2 != ""' \
+        | sort > "${env_file}.tmp" && mv -f "${env_file}.tmp" "${env_file}"
+
     kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${env_file} --dry-run=client -o yaml | yq eval 'del(.metadata.creationTimestamp)' > ${CONFIG_DIR}/gateway-env.configmap.yaml
 }
 

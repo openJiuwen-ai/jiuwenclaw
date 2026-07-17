@@ -160,9 +160,9 @@ FEISHU_BOTS="
 
 **基础用法**（当未指定模块参数时，部署工具默认操作 gateway 单模块）：
 ```
-./deploy.sh up       # 部署 Gateway 模块
-./deploy.sh down     # 卸载 Gateway 模块
-./deploy.sh restart  # 重启 Gateway 模块
+./deploy.sh up       # 部署 Gateway、Web、Manager 模块
+./deploy.sh down     # 卸载 Manager、Web、Gateway 模块
+./deploy.sh restart  # 重启 Gateway、Web、Manager  模块
 ```
 
 ### 2.2 模块列表（选填）
@@ -679,6 +679,114 @@ pod_logs_20260707_163022/
 
 详情请见["部署日志管理服务"](#35-部署日志管理服务可选部署)
 
+
+## 6 CCE 云集群 JiuwenSwarm 企业级部署
+
+### 方案一：部署脚本 `--render-only` 渲染 YAML 离线部署（推荐，标准化、低门槛）
+
+该方案依托配套部署脚本自动渲染全套 K8s 资源清单，仅生成 YAML 不直接操作集群，适配本地运维机与 CCE 集群分离场景，无需手动编写 / 修改资源模板。
+
+**步骤 1：修改 `.env.custom` 全局配置文件** 
+
+1. 参考 [「业务必选配置修改」](#15-修改配置文件envcustom)，完成大模型接入凭证、飞书机器人对接参数等核心业务参数；
+
+2. 参考 [「基础服务配置」](#3-部署基础依赖服务)，按需配置自身基础服务。
+
+3. 追加离线部署专属配置：
+
+```
+# 本地执行机器≠CCE集群节点，关闭本地宿主机端口占用检测，避免端口状态误判阻断渲染
+NO_CHECK_PORTS=true
+
+# 选取CCE节点的空闲端口（端口区间30000-32767）
+GATEWAY_NODE_PORT=
+MANAGER_SERVER_NODE_PORT=
+MANAGER_WEB_NODE_PORT=
+WEB_NODE_PORT=
+```
+
+**步骤 2：执行脚本渲染全套 K8s 资源 YAML**
+
+1. 登录一台可正常执行`kubectl`的运维机器；
+2. 进入部署脚本根目录，执行仅渲染命令，替换`<命名空间>`为业务目标命名空间：
+```
+./deploy.sh up -n <命名空间> --render-only
+```
+
+>注意：脚本仅基于`.env.custom`变量渲染资源模板，不会发起任何创建 / 更新请求，所有产出 YAML 文件统一输出至 `./conf/` 目录。
+
+**步骤 3：登录CCE 集群云管理平台，按如下文件顺序（资源依赖顺序）创建资源**
+- configmap-secret.yaml
+- gateway-env.configmap.yaml
+- gateway-config.configmap.yaml
+- gateway.yaml
+- web.yaml
+- manager-server.yaml
+- manager-web.yaml
+
+
+### 方案二：基于 Example 模板手动改造 YAML 部署（进阶方案，需具备 K8s 基础）
+
+本方案不依赖自动化部署脚本，完全基于项目内置 examples/ 目录原始 YAML 模板进行人工适配改造，适合需要深度自定义集群资源、脱离部署脚本独立交付的场景。操作人员需具备基础 Kubernetes 资源配置、YAML 语法、环境变量配置能力。
+
+**步骤 1：获取原生模板文件**
+拷贝部署工具根目录下的examples目录中的 所有 K8s 资源 YAML 模板至自定义工作目录，作为本次手动部署的基准文件。模板文件内置统一占位符 `<<变量名>>`，用于替换业务与集群参数。
+
+**步骤 2：依据配置说明书`.env.example`替换所有占位符，生产最终的 YAML 文件**
+所有模板内的 `<<变量名>>`占位符，其含义、取值规范、默认规则、业务用途，均以部署工具根目录`.env.example`配置说明书为准。
+
+**替换规则：** 遍历所有 YAML 文件，将 `<<变量名>>`占位符，对照 `.env.example` 说明替换为当前客户环境的真实参数值。
+
+**替换示例：**
+模板 `gateway-env.configmap.yaml` 存在数据库占位符配置：
+```
+....
+  GATEWAY_DB_HOST: <<DB_HOST>>
+  GATEWAY_DB_NAME: gateway
+  GATEWAY_DB_PORT: <<DB_PORT>>
+  GATEWAY_DB_TYPE: <<DB_TYPE>>
+  GATEWAY_DB_USER: <<DB_USER>>
+....
+```
+查询 `.env.example` 中 `DB_HOST`、`DB_PORT`、`DB_TYPE`、`DB_USER`变量使用规范、取值要求，替换为客户环境中的真实值。
+
+
+**例外：飞书机器人专项配置**
+请在 `gateway-config.configmap.yaml` 配置文件中写入飞书渠道配置，支持单/多机器人同时部署，标准格式及填写规范如下：
+```
+....
+channels:
+      feishu:
+        <<你的机器人名字1>>:
+          app_id: <<你的飞书应用ID1>
+          app_secret: ><你的飞书应用密钥1>>
+          encrypt_key: ""
+          verification_token: ""
+          allow_from: []
+          enable_streaming: true
+          chat_id: ""
+          enabled: true
+        <<你的机器人名字2>>:
+          app_id: <<你的飞书应用ID2>
+          app_secret: <<你的飞书应用密钥2>>
+          encrypt_key: ""
+          verification_token: ""
+          allow_from: []
+          enable_streaming: true
+          chat_id: ""
+          enabled: true
+        ....<更多机器人，请在这继续添加>....
+....
+```
+
+**步骤 3：登录CCE 集群云管理平台，按如下文件顺序（资源依赖顺序）创建资源**
+- configmap-secret.yaml
+- gateway-env.configmap.yaml
+- gateway-config.configmap.yaml
+- gateway.yaml
+- web.yaml
+- manager-server.yaml
+- manager-web.yaml
 
 # FAQ 
 
