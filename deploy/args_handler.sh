@@ -60,7 +60,7 @@ parse_args() {
 }
 
 process_modules() {
-    MODULES=("GATEWAY")
+    MODULES=("GATEWAY" "WEB" "MANAGER")
 }
 
 # Print help info and exit
