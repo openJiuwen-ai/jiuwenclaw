@@ -305,8 +305,9 @@ class _FakeRebuildService:
     next_context: dict[str, Any] | None = {"records": [], "overflow_index": {}}
     complete_rebuild_calls: list[dict[str, Any]] = []
 
-    def __init__(self, *, store: Any) -> None:
+    def __init__(self, *, store: Any, **kwargs: Any) -> None:
         self.store = store
+        self.kwargs = kwargs
 
     async def prepare_rebuild_context(
         self,

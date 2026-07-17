@@ -1429,6 +1429,20 @@ class JiuWenClawDeepAdapter:
             return self._model_request_config.model or "unknown"
         return "unknown"
 
+    def _make_rebuild_service(self, store: Any) -> Any:
+        """Build ExperienceRebuildService with current LLM for changelog classification."""
+        if ExperienceRebuildService is None:
+            raise RuntimeError("ExperienceRebuildService is unavailable")
+        model_name = self._resolve_model_name()
+        if model_name in ("", "unknown"):
+            model_name = (self._config_cache or {}).get("model_name", "gpt-4")
+        return ExperienceRebuildService(
+            store=store,
+            llm=self._model,
+            model=model_name,
+            language="cn",
+        )
+
     @staticmethod
     def _browser_runtime_enabled() -> bool:
         """Whether browser runtime support is enabled for DeepAgent subagent wiring."""
@@ -5944,7 +5958,7 @@ class JiuWenClawDeepAdapter:
                     if kind:
                         subject = {"kind": kind, "name": name}
 
-        rebuild_service = ExperienceRebuildService(store=store)
+        rebuild_service = self._make_rebuild_service(store)
         rebuild_context = await rebuild_service.prepare_rebuild_context(
             subject,
             user_intent=user_intent,
@@ -5983,7 +5997,7 @@ class JiuWenClawDeepAdapter:
         rail = self._skill_evolution_rail
         if rail is None:
             return
-        rebuild_service = ExperienceRebuildService(store=rail.store)
+        rebuild_service = self._make_rebuild_service(rail.store)
         cleared = await rebuild_service.complete_rebuild(rebuild_context)
         logger.info(
             "[JiuWenClawDeepAdapter] rebuild followup finalized for skill=%s cleared=%s",
