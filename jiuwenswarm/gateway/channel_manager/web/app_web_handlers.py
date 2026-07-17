@@ -2124,8 +2124,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         # tokens into reasoning_content while leaving content empty.  Treat a
         # non-empty reasoning_content as a valid response as well.
         reasoning_content = getattr(resp, "reasoning_content", None) if hasattr(resp, "reasoning_content") else None
-        has_valid_response = (isinstance(content, str) and content) or (
-                isinstance(reasoning_content, str) and reasoning_content
+        # Some backends report thinking in a field the client does not map at
+        # all (e.g. Ollama's "reasoning"), leaving both content and
+        # reasoning_content empty.  Generated-token usage still proves the
+        # endpoint, credentials, and model name are all valid.
+        usage = getattr(resp, "usage_metadata", None)
+        output_tokens = usage.get("output_tokens") if isinstance(usage, dict) else getattr(usage, "output_tokens", None)
+        has_valid_response = (
+            (isinstance(content, str) and content)
+            or (isinstance(reasoning_content, str) and reasoning_content)
+            or (isinstance(output_tokens, (int, float)) and output_tokens > 0)
         )
         if not has_valid_response:
             await channel.send_response(
