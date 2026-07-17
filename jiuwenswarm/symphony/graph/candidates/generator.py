@@ -61,7 +61,7 @@ class CandidateGenerator:
     def __init__(
         self,
         *,
-        max_candidates_per_skill_relation: int = 12,
+        max_candidates_per_skill_relation: int = 32,
         max_port_mappings_per_candidate: int = 12,
         generic_io_names: Iterable[str] = IO_NAMES_EXCLUDED_FROM_EDGE_BUILDING,
         max_exact_io_pair_fanout: int = 64,
@@ -330,6 +330,7 @@ class CandidateGenerator:
                 buckets[key],
                 key=lambda item: (
                     -PRIORITY_RANK.get(item.priority, 0),
+                    _candidate_quality_rank(item),
                     item.target_id,
                     ",".join(item.relation_hints),
                 ),
@@ -509,6 +510,38 @@ def _limit_port_mappings_for_candidate(
         candidate_methods=candidate.candidate_methods,
         priority=candidate.priority,
         evidence={**candidate.evidence, "directions": directions},
+    )
+
+
+def _candidate_quality_rank(candidate: RelationCandidate) -> tuple[int, int, int, int]:
+    port_mapping_count = 0
+    content_input_count = 0
+    for evidence in dict(candidate.evidence.get("directions", {})).values():
+        if not isinstance(evidence, dict):
+            continue
+        mappings = [
+            mapping
+            for mapping in evidence.get("port_mappings", [])
+            if isinstance(mapping, dict)
+        ]
+        port_mapping_count += len(mappings)
+        content_input_count += sum(
+            1
+            for mapping in mappings
+            if str(mapping.get("target_input") or "")
+            in GENERIC_CONTENT_INPUT_NAMES
+        )
+        content_input_count += sum(
+            1
+            for item in evidence.get("target_inputs", [])
+            if isinstance(item, dict)
+            and str(item.get("name") or "") in GENERIC_CONTENT_INPUT_NAMES
+        )
+    return (
+        -len(set(candidate.candidate_methods)),
+        -int(port_mapping_count > 0),
+        -port_mapping_count,
+        -content_input_count,
     )
 
 

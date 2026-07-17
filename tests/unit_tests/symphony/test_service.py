@@ -807,11 +807,6 @@ async def test_fast_plan_infers_adjacent_edges_when_omitted(monkeypatch, tmp_pat
             "violate step order",
         ),
         (
-            ["skill-a"],
-            [{"source_id": "skill-a", "target_id": "skill-a"}],
-            "malformed can_feed edges",
-        ),
-        (
             ["skill-a", "skill-b"],
             [
                 {"source_id": "skill-a", "target_id": "skill-b"},
@@ -842,3 +837,55 @@ async def test_fast_plan_rejects_invalid_inferred_edges(
 
     assert result["success"] is False
     assert detail in result["detail"]
+
+
+async def test_fast_plan_drops_single_step_self_loop_edge(monkeypatch, tmp_path):
+    artifacts = _artifacts(tmp_path)
+    llm = _FakeLLMClient(
+        {
+            "status": "ready",
+            "steps": [{"skill_id": "skill-a"}],
+            "can_feed_edges": [
+                {
+                    "source_id": "skill-a",
+                    "target_id": "skill-a",
+                    "reason": "Self reuse should not become a can_feed edge.",
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    result = await service.plan_from_score(tmp_path, "self loop", llm_client=llm)
+
+    assert result["validation"]["valid"] is True
+    plan = result["recommended_plans"][0]
+    assert [step["skill_id"] for step in plan["steps"]] == ["skill-a"]
+    assert plan["can_feed_edges"] == []
+
+
+async def test_fast_plan_drops_self_loop_and_keeps_valid_edge(monkeypatch, tmp_path):
+    artifacts = _artifacts(tmp_path)
+    llm = _FakeLLMClient(
+        {
+            "status": "ready",
+            "steps": [{"skill_id": "skill-a"}, {"skill_id": "skill-b"}],
+            "can_feed_edges": [
+                {
+                    "source_id": "skill-a",
+                    "target_id": "skill-a",
+                    "reason": "Self reuse should not become a can_feed edge.",
+                },
+                {"source_id": "skill-a", "target_id": "skill-b"},
+            ],
+        }
+    )
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    result = await service.plan_from_score(tmp_path, "mixed edges", llm_client=llm)
+
+    assert result["validation"]["valid"] is True
+    edges = result["recommended_plans"][0]["can_feed_edges"]
+    assert [(edge["source_id"], edge["target_id"]) for edge in edges] == [
+        ("skill-a", "skill-b")
+    ]
