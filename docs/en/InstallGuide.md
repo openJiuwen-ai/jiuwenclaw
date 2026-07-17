@@ -164,7 +164,7 @@ uv pip install -e .
 
 ```bash
 # Enter front-end directory (repo root is jiuwenswarm)
-cd jiuwenswarm/channels/web
+cd channels/web/frontend
 
 # Install front-end dependencies
 npm install
@@ -179,7 +179,7 @@ xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
 cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
 
 # Back to repo root
-cd ..
+cd ../..
 ```
 
 **Notes:**
@@ -261,7 +261,7 @@ pip install -e .
 
 ```bash
 # Enter front-end directory (repo root is jiuwenswarm)
-cd jiuwenswarm/channels/web
+cd channels/web/frontend
 
 # Install front-end dependencies
 npm install
@@ -276,7 +276,7 @@ xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
 cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
 
 # Back to repo root
-cd ..
+cd ../..
 ```
 
 **Notes:**
@@ -313,7 +313,7 @@ jiuwenswarm-start
 | Current range | Approach | Notes |
 |---------------|----------|-------|
 | Routine (e.g. 0.1.8 → 0.1.9, does not cross 0.1.7) | [Routine version upgrades](#routine-version-upgrades) | Upgrade directly; no backup required |
-| Major (e.g. &lt;0.1.7 → ≥0.1.7, crosses 0.1.7) | [Major version upgrades](#major-version-upgrades) | Back up data first |
+| Major (e.g. &lt;0.1.7 → &gt;0.1.7, crosses 0.1.7) | [Major version upgrades](#major-version-upgrades) | Back up data first |
 
 ---
 
@@ -340,7 +340,7 @@ git pull
 pip install -e .
 
 # Rebuild the front end (if it was updated)
-cd jiuwenswarm/channels/web
+cd channels/web/frontend
 npm install
 npm run build
 
@@ -350,7 +350,7 @@ xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
 # macOS/Linux:
 cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
 
-cd ..
+cd ../../../
 ```
 
 ---

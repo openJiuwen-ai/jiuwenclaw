@@ -68,6 +68,18 @@ jiuwenswarm chat "你好，介绍一下你自己"
 
 详情见 [命令行指令 / 终端 CLI](命令行指令.md#终端-clijiuwenswarm-chat)。
 
+### 远程访问（可选）
+
+如需远程访问，执行以下命令：
+
+```bash
+# 启动 Web 服务
+jiuwenswarm-web --host 0.0.0.0 --port <custom-port>
+
+# 启动后端服务
+jiuwenswarm-app
+```
+
 **配置目录自动创建**：
 首次启动服务后，系统会自动创建配置目录：
 - **Windows**：`C:\Users\<你的用户名>\.jiuwenswarm`
@@ -94,9 +106,9 @@ jiuwenswarm chat "你好，介绍一下你自己"
 
 - 安装前端依赖
 
-  进入前端目录 jiuwenswarm/channels/web/frontend 安装依赖：
+  进入前端目录 `channels/web/frontend` 安装依赖：
   ```bash
-  cd jiuwenswarm/channels/web/frontend
+  cd channels/web/frontend
   npm install
   ```
 
@@ -106,14 +118,14 @@ jiuwenswarm chat "你好，介绍一下你自己"
   - 静态运行前端服务（适合生产环境部署）
     ```bash
     npm run build
-    cd ../../
+    cd ../../../
     uv run jiuwenswarm-init
     uv run jiuwenswarm-start
     ```
 
   - 动态运行前端服务（适合开发调试）
     ```bash
-    cd ../../
+    cd ../../../
     uv run jiuwenswarm-init
     uv run jiuwenswarm-start dev
     ```
@@ -142,9 +154,9 @@ jiuwenswarm chat "你好，介绍一下你自己"
 
 - 安装前端依赖
 
-  进入前端目录 jiuwenswarm/channels/web/frontend 安装依赖：
+  进入前端目录 `channels/web/frontend` 安装依赖：
   ```bash
-  cd jiuwenswarm/channels/web/frontend
+  cd channels/web/frontend
   npm install
   ```
 
@@ -154,14 +166,14 @@ jiuwenswarm chat "你好，介绍一下你自己"
   - 静态运行前端服务（适合生产环境部署）
     ```bash
     npm run build
-    cd ../../
+    cd ../../../
     jiuwenswarm-init
     jiuwenswarm-start
     ```
 
   - 动态运行前端服务（适合开发调试）
     ```bash
-    cd ../../
+    cd ../../../
     # 直接启动（不使用 uv run）
     jiuwenswarm-init
     jiuwenswarm-start dev
@@ -173,7 +185,7 @@ jiuwenswarm chat "你好，介绍一下你自己"
 
 ## 快速上手
 
-#### 1️⃣ 对话模式
+### 1️⃣ 对话模式
 
 | 方式 | 说明                                        |
 |------|-------------------------------------------|
@@ -181,19 +193,9 @@ jiuwenswarm chat "你好，介绍一下你自己"
 | **小艺频道** | 华为手机用户可直接唤醒小艺，与JiuwenSwarm对话               |
 | **飞书频道** | 完成渠道配置后，在飞书中与JiuwenSwarm畅聊                 |
 
-#### 2️⃣ 配置模型
+### 2️⃣ 配置模型
 
-### 远程访问（可选）
-
-如需远程访问，执行以下命令：
-
-```bash
-# 启动 Web 服务
-jiuwenswarm-web --host 0.0.0.0 --port <custom-port>
-
-# 启动后端服务
-jiuwenswarm-app
-```
+详见下方 [配置模型](#配置模型) 章节。
 
 ## 配置模型
 
