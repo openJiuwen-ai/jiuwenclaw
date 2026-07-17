@@ -195,17 +195,11 @@ def prepare_rewrite(
     *,
     workspace_root: str | Path,
     report_path: str | Path,
-    document_id: str,
-    revision_id: str,
-    content_sha256: str,
-    action_category: str,
     action: str,
     block_id: str,
     start: int,
     end: int,
     selected_text: str,
-    prefix: str = "",
-    suffix: str = "",
     instruction: str = "",
     session_id: str,
 ) -> dict:
@@ -213,10 +207,6 @@ def prepare_rewrite(
     report = Path(report_path).expanduser().resolve()
     if not _inside(report, root) or report.suffix.lower() != ".md":
         raise RewriteError("BAD_REQUEST", "report path is outside the current workspace")
-    if not SAFE_ID_RE.fullmatch(document_id) or not SAFE_ID_RE.fullmatch(revision_id):
-        raise RewriteError("BAD_REQUEST", "invalid document or revision id")
-    if action_category != "synonym_rewrite":
-        raise RewriteError("BAD_REQUEST", "unsupported rewrite action category")
     if action not in {"rewrite", "expand", "polish"}:
         raise RewriteError("BAD_REQUEST", "unsupported rewrite action")
     if not selected_text or len(selected_text) > 12_000 or len(instruction) > 2_000:
@@ -227,13 +217,20 @@ def prepare_rewrite(
     except OSError as exc:
         raise RewriteError("DOCUMENT_NOT_FOUND", "report is unavailable") from exc
     provenance = _load_provenance(report)
-    actual_hash = _sha256(markdown.encode("utf-8"))
+    document_id = provenance.get("document_id")
+    revision_id = provenance.get("revision_id")
+    content_sha256 = provenance.get("content_sha256")
     if (
-        provenance.get("document_id") != document_id
-        or provenance.get("revision_id") != revision_id
-        or provenance.get("content_sha256") != content_sha256
-        or actual_hash != content_sha256
+        not isinstance(document_id, str)
+        or not SAFE_ID_RE.fullmatch(document_id)
+        or not isinstance(revision_id, str)
+        or not SAFE_ID_RE.fullmatch(revision_id)
+        or not isinstance(content_sha256, str)
+        or not re.fullmatch(r"[a-fA-F0-9]{64}", content_sha256)
     ):
+        raise RewriteError("DOCUMENT_NOT_FOUND", "report provenance is invalid")
+    actual_hash = _sha256(markdown.encode("utf-8"))
+    if actual_hash != content_sha256:
         raise RewriteError("REVISION_CONFLICT", "the report revision changed")
     final_result_citations = _load_final_result_citations(report, provenance, root)
 
@@ -246,10 +243,6 @@ def prepare_rewrite(
         raise RewriteError("REVISION_CONFLICT", "selection offsets are stale")
     if block.text[start:end] != selected_text:
         raise RewriteError("REVISION_CONFLICT", "selected text no longer matches the report")
-    if prefix and block.text[max(0, start - len(prefix)):start] != prefix:
-        raise RewriteError("REVISION_CONFLICT", "selection prefix no longer matches")
-    if suffix and block.text[end:end + len(suffix)] != suffix:
-        raise RewriteError("REVISION_CONFLICT", "selection suffix no longer matches")
 
     _, by_key = _citation_index(final_result_citations)
     allowed: dict[str, dict] = {}
@@ -276,7 +269,7 @@ def prepare_rewrite(
         _CONTEXTS[token] = context
     return {
         "context_token": token,
-        "action_category": action_category,
+        "action_category": "synonym_rewrite",
         "action": action,
         "selected_text": selected_text,
         "block_context": block.text,

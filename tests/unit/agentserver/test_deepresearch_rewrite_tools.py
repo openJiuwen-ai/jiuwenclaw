@@ -49,24 +49,18 @@ def _document(root: Path):
 
 @pytest.mark.asyncio
 async def test_prepare_and_commit_tools_return_short_outcomes_and_deliver_file(tmp_path):
-    report, provenance, block = _document(tmp_path)
+    report, _, block = _document(tmp_path)
     route = {"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}
     with patch.object(rt, "_get_route", return_value=route), patch.object(
         rt, "get_effective_request_output_dir", return_value=str(tmp_path)
     ):
         prepared_raw = await rt.deepresearch_prepare_rewrite._func(
             report_path=str(report),
-            document_id=provenance["document_id"],
-            revision_id=provenance["revision_id"],
-            content_sha256=provenance["content_sha256"],
-            action_category="synonym_rewrite",
             action="rewrite",
             block_id=block.block_id,
             start=0,
             end=3,
             selected_text="原句。",
-            prefix="",
-            suffix="",
             instruction="",
         )
         prepared = json.loads(prepared_raw)
@@ -96,16 +90,13 @@ async def test_prepare_and_commit_tools_return_short_outcomes_and_deliver_file(t
 
 @pytest.mark.asyncio
 async def test_prepare_tool_returns_stable_error_code_without_leaking_selection(tmp_path):
-    report, provenance, block = _document(tmp_path)
+    report, _, block = _document(tmp_path)
+    report.write_text("已变化。\n", encoding="utf-8")
     with patch.object(rt, "_get_route", return_value={"session_id": "S1"}), patch.object(
         rt, "get_effective_request_output_dir", return_value=str(tmp_path)
     ):
         raw = await rt.deepresearch_prepare_rewrite._func(
             report_path=str(report),
-            document_id=provenance["document_id"],
-            revision_id=provenance["revision_id"],
-            content_sha256="0" * 64,
-            action_category="synonym_rewrite",
             action="rewrite",
             block_id=block.block_id,
             start=0,

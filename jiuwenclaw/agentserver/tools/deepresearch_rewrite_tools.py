@@ -37,17 +37,11 @@ def _error(exc: RewriteError) -> str:
 )
 async def deepresearch_prepare_rewrite(
     report_path: str,
-    document_id: str,
-    revision_id: str,
-    content_sha256: str,
-    action_category: str,
     action: str,
     block_id: str,
     start: int,
     end: int,
     selected_text: str,
-    prefix: str = "",
-    suffix: str = "",
     instruction: str = "",
 ) -> str:
     route = _get_route()
@@ -63,17 +57,11 @@ async def deepresearch_prepare_rewrite(
         result = prepare_rewrite(
             workspace_root=output_dir,
             report_path=report_path,
-            document_id=document_id,
-            revision_id=revision_id,
-            content_sha256=content_sha256,
-            action_category=action_category,
             action=action,
             block_id=block_id,
             start=start,
             end=end,
             selected_text=selected_text,
-            prefix=prefix,
-            suffix=suffix,
             instruction=instruction,
             session_id=session_id,
         )
