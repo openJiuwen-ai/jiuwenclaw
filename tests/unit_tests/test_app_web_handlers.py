@@ -494,7 +494,7 @@ async def test_config_set_routes_team_payload_to_modes_team_helper(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["true", "false"])
-async def test_config_set_expands_evolution_switch_to_both_triggers(
+async def test_config_set_syncs_auto_scan_to_review_trigger_only(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
     value: str,
@@ -514,12 +514,9 @@ async def test_config_set_expands_evolution_switch_to_both_triggers(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
         lambda: {"evolution": {}},
     )
-    for env_key in (
-        "EVOLUTION_AUTO_SCAN",
-        "EVOLUTION_SIGNAL_TRIGGER",
-        "EVOLUTION_REVIEW_TRIGGER",
-    ):
-        monkeypatch.setenv(env_key, "")
+    monkeypatch.setenv("EVOLUTION_AUTO_SCAN", "")
+    monkeypatch.setenv("EVOLUTION_REVIEW_TRIGGER", "")
+    monkeypatch.setenv("EVOLUTION_SIGNAL_TRIGGER", "manual")
 
     _register_web_handlers(
         WebHandlersBindParams(
@@ -539,17 +536,17 @@ async def test_config_set_expands_evolution_switch_to_both_triggers(
 
     expected = {
         "EVOLUTION_AUTO_SCAN": value,
-        "EVOLUTION_SIGNAL_TRIGGER": value,
         "EVOLUTION_REVIEW_TRIGGER": value,
     }
     assert saved_updates == [expected]
     assert {key: os.environ[key] for key in expected} == expected
+    assert os.environ["EVOLUTION_SIGNAL_TRIGGER"] == "manual"
     assert set((tmp_path / ".env").read_text(encoding="utf-8").splitlines()) == {
         f'{key}="{env_value}"' for key, env_value in expected.items()
     }
     assert channel.responses[-1]["payload"] == {
         "updated": ["evolution_auto_scan"],
-        "applied_without_restart": True,
+        "applied_without_restart": False,
     }
 
 

@@ -1611,9 +1611,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 env_updates[env_key] = str(val).strip()
 
         if "evolution_auto_scan" in params:
-            trigger_value = env_updates["EVOLUTION_AUTO_SCAN"]
-            env_updates["EVOLUTION_SIGNAL_TRIGGER"] = trigger_value
-            env_updates["EVOLUTION_REVIEW_TRIGGER"] = trigger_value
+            env_updates["EVOLUTION_REVIEW_TRIGGER"] = env_updates["EVOLUTION_AUTO_SCAN"]
 
         raw = get_config_raw()
         preferred_lang = raw.get("preferred_language", "zh")
