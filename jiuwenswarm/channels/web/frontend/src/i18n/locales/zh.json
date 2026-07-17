@@ -1755,6 +1755,7 @@
   },
   "chatUi": {
     "copyMessage": "复制消息",
+    "copied": "已复制",
     "stopReading": "停止朗读",
     "readMessage": "朗读消息",
     "fileExpired": "已过期",

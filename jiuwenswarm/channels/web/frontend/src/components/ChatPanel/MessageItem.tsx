@@ -7,6 +7,7 @@
 import { useState, useCallback, useEffect, useRef, memo } from 'react';
 import type { ReactNode } from 'react';
 import {
+  Check,
   Copy,
   Info,
   Square,
@@ -235,6 +236,7 @@ export const MessageItem = memo(function MessageItem({
   const [hasAutoSpoken, setHasAutoSpoken] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   // TTS
@@ -325,6 +327,8 @@ export const MessageItem = memo(function MessageItem({
       document.execCommand('copy');
       document.body.removeChild(textarea);
     }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
   }, [content]);
 
   // 自动朗读新消息（仅助手消息，由父组件通过 autoSpeak 控制）
@@ -619,13 +623,27 @@ export const MessageItem = memo(function MessageItem({
             <span>{formatTimestamp(timestamp)}</span>
             
             {showCopy && (
-              <button
-                onClick={handleCopy}
-                className="p-1.5 rounded-md  hover:text-accent hover:bg-secondary"
-                title={t('chatUi.copyMessage')}
-              >
-                <Copy className="w-4 h-4" strokeWidth={1.5} />
-              </button>
+              <div className="relative">
+                {copied && (
+                  <span className="animate-fade-in absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 whitespace-nowrap rounded-md border border-border bg-card px-2 py-1 text-xs text-text shadow-md">
+                    {t('chatUi.copied')}
+                  </span>
+                )}
+                <button
+                  onClick={handleCopy}
+                  className={clsx(
+                    'p-1.5 rounded-md ',
+                    copied ? 'text-accent' : 'hover:text-accent hover:bg-secondary'
+                  )}
+                  title={t('chatUi.copyMessage')}
+                >
+                  {copied ? (
+                    <Check className="w-4 h-4" strokeWidth={1.5} />
+                  ) : (
+                    <Copy className="w-4 h-4" strokeWidth={1.5} />
+                  )}
+                </button>
+              </div>
             )}
 
             {showTTS && (
