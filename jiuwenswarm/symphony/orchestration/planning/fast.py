@@ -669,7 +669,7 @@ class FastOneShotPlanner:
                 continue
             source = skill_id(item.get("source_id") or item.get("source")).strip()
             target = skill_id(item.get("target_id") or item.get("target")).strip()
-            if not source or not target or source == target:
+            if not source or not target:
                 invalid.append(item)
                 continue
             if source == target:
