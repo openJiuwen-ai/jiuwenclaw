@@ -525,18 +525,15 @@ def _candidate_quality_rank(candidate: RelationCandidate) -> tuple[int, int, int
             if isinstance(mapping, dict)
         ]
         port_mapping_count += len(mappings)
-        content_input_count += sum(
-            1
-            for mapping in mappings
-            if str(mapping.get("target_input") or "")
-            in GENERIC_CONTENT_INPUT_NAMES
-        )
-        content_input_count += sum(
-            1
-            for item in evidence.get("target_inputs", [])
-            if isinstance(item, dict)
-            and str(item.get("name") or "") in GENERIC_CONTENT_INPUT_NAMES
-        )
+        for mapping in mappings:
+            target_input = str(mapping.get("target_input") or "")
+            if target_input in GENERIC_CONTENT_INPUT_NAMES:
+                content_input_count += 1
+        for item in evidence.get("target_inputs", []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("name") or "") in GENERIC_CONTENT_INPUT_NAMES:
+                content_input_count += 1
     return (
         -len(set(candidate.candidate_methods)),
         -int(port_mapping_count > 0),
