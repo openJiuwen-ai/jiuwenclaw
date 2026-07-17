@@ -678,7 +678,7 @@ class XiaoyiChannel(BaseChannel):
 
             try:
                 async for raw in ws:
-                    await self._handle_raw_message(raw)
+                    await self._handle_raw_message(raw, url_key)
             except Exception as e:
                 logger.warning(f"XiaoyiChannel 连接异常 ({url_key}): {e}")
             finally:
@@ -726,7 +726,7 @@ class XiaoyiChannel(BaseChannel):
                 break
             await asyncio.sleep(20)
 
-    async def _handle_raw_message(self, raw: str | bytes) -> None:
+    async def _handle_raw_message(self, raw: str | bytes, url_key: str | None = None) -> None:
         """处理接收到的原始消息，转换为 JiuwenSwarm 内部格式."""
         try:
             if isinstance(raw, bytes):
@@ -736,7 +736,6 @@ class XiaoyiChannel(BaseChannel):
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             logger.warning(f"XiaoyiChannel JSON 解析失败: {e}")
             return
-
         msg_type = message.get("msgType")
         method = message.get("method")
         if is_gui_response_frame:
@@ -761,6 +760,124 @@ class XiaoyiChannel(BaseChannel):
 
         if msg_type == "heartbeat":
             return
+        # MemoryQuery is a command data event (direct or wrapped A2A), not a
+        # normal user message. Consume it before the generic data-event parser.
+        from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.memory_query import (
+            extract_memory_query,
+            handle_memory_query,
+            memory_query_command,
+            configured_runtime_state_path,
+        )
+
+        memory_query = extract_memory_query(message)
+        if memory_query is not None:
+            from jiuwenswarm.common.utils import get_agent_workspace_dir
+
+            answer = await asyncio.to_thread(
+                handle_memory_query,
+                memory_query,
+                workspace_dir=get_agent_workspace_dir(),
+                runtime_state_path=configured_runtime_state_path(),
+            )
+            await self.send_xiaoyi_phone_tools_command(
+                memory_query.session_id,
+                memory_query.task_id,
+                memory_query.message_id,
+                memory_query_command(memory_query.action, answer),
+                final=True,
+            )
+            return
+        # ── A2A CronQuery detection (AgentEvent.CronQuery) ──────────────
+        # Detect CronQuery directives at root level or inside parts directives.
+        # Handle and respond via WebSocket before falling through to normal flow.
+        try:
+            from jiuwenswarm.gateway.cron.cron_query_handler import (
+                extract_cron_query_from_message,
+                dispatch_cron_query,
+                build_a2a_response_envelope,
+            )
+            from jiuwenswarm.gateway.cron.controller import CronController
+
+            cron_payload = extract_cron_query_from_message(message)
+            if cron_payload is not None:
+                logger.info(
+                    "[XiaoyiChannel] CronQuery action=%s detected",
+                    cron_payload.get("action"),
+                )
+                try:
+                    cc = CronController.get_instance()
+                except RuntimeError:
+                    cc = None
+                # session_id_ctx: params.sessionId (conversationId, 带 _CronQuery 后缀)
+                session_id_ctx = ""
+                params_root = message.get("params")
+                if isinstance(params_root, dict):
+                    sid_val = params_root.get("sessionId")
+                    if isinstance(sid_val, str) and sid_val.strip():
+                        session_id_ctx = sid_val.strip()
+                # rpc_id: JSON-RPC request id (用于响应关联)
+                rpc_id = message.get("id") or ""
+                task_id = ""
+                if isinstance(params_root, dict):
+                    task_id = params_root.get("id") or ""
+                result = await dispatch_cron_query(
+                    cron_payload,
+                    cron_controller=cc,
+                    session_id=session_id_ctx,
+                )
+                # dispatch returns {action, status:True, ans} on success,
+                # or {action, ans:{error}} on error (no status field).
+                # build_a2a_response_envelope: status=True → include payload.status;
+                # status=False → omit payload.status (error per protocol doc).
+                is_ok = bool(result.get("status", False))
+                response_envelope = build_a2a_response_envelope(
+                    result.get("action", cron_payload.get("action", "")),
+                    result.get("ans", {}),
+                    status=is_ok,
+                )
+                if url_key:
+                    try:
+                        # CronQuery 信封包装在标准 JSON-RPC artifact-update 响应里，
+                        # 与正常 agent_response 路径一致（jsonrpc/id/result/artifact/parts）。
+                        # 下行响应用 data.commands（与正常消息流一致），元素为 {header, payload} 信封。
+                        cron_rpc_response = {
+                            "jsonrpc": "2.0",
+                            "id": rpc_id,
+                            "result": {
+                                "taskId": task_id,
+                                "kind": "artifact-update",
+                                "append": False,
+                                "lastChunk": True,
+                                "final": True,
+                                "artifact": {
+                                    "artifactId": str(uuid.uuid4()),
+                                    "parts": [
+                                        {
+                                            "kind": "data",
+                                            "data": {"commands": [response_envelope]},
+                                        }
+                                    ],
+                                },
+                            },
+                        }
+                        cron_wrapper = {
+                            "msgType": "agent_response",
+                            "agentId": self.config.agent_id,
+                            "sessionId": session_id_ctx,
+                            "taskId": task_id,
+                            "msgDetail": json.dumps(cron_rpc_response, ensure_ascii=False),
+                        }
+                        await self._safe_ws_send(url_key, cron_wrapper)
+                    except Exception as send_err:
+                        logger.warning(
+                            "[XiaoyiChannel] CronQuery response send failed: %s",
+                            send_err,
+                        )
+                return  # CronQuery handled; do not fall through to message dispatch
+        except ImportError:
+            logger.debug("[XiaoyiChannel] cron_query_handler not available, skipping CronQuery detection")
+        except Exception as exc:
+            logger.warning("[XiaoyiChannel] CronQuery handling error: %s", exc)
 
         # 根级直连 A2A（jsonrpc 2.0）须含 params.sessionId，否则整帧丢弃
         if message.get("jsonrpc") == "2.0":
@@ -2061,3 +2178,4 @@ class XiaoyiChannel(BaseChannel):
                     )
 
         return None
+
