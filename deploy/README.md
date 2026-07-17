@@ -329,6 +329,9 @@ DB_TYPE="sqlite"
 
 若需为该服务挂载外部 NFS 服务实现数据持久化，需在配置文件`.env.custom` 中设置：
 ```
+# nfs：Pod直接通过地址直连NFS服务挂载共享目录
+CLAW_MOUNT_TYPE="nfs"
+
 # 外部 NFS 服务的连接地址
 NFS_SERVER_ADDR=""
 
@@ -410,6 +413,9 @@ REDIS_PASSWORD=""
 
 若需为该服务挂载外部 NFS 服务实现数据持久化，需在配置文件`.env.custom` 中设置：
 ```
+# nfs：Pod直接通过地址直连NFS服务挂载共享目录
+CLAW_MOUNT_TYPE="nfs"
+
 # 外部 NFS 服务的连接地址
 NFS_SERVER_ADDR=""
 
@@ -436,11 +442,11 @@ OBS_BUCKET=""
 OBS_PUBLIC_BASE_URL=""
 
 # 对象存储访问的 AccessKey
-# 本工具内置部署的 MinIO：对应 MinIO 的用户账号；外部 OBS：填写云厂商/兼容S3服务的AccessKey
+# 本工具内置部署的 MinIO：对应 MinIO 的root用户账号；外部 OBS：填写云厂商/兼容S3服务的AccessKey
 OBS_ACCESS_KEY=""
 
 # 对象存储访问的 SecretKey
-# 本工具内置部署的 MinIO：对应 MinIO 的用户密码；外部 OBS：填写云厂商/兼容S3服务的SecretKey
+# 本工具内置部署的 MinIO：对应 MinIO 的root用户密码；外部 OBS：填写云厂商/兼容S3服务的SecretKey
 OBS_SECRET_KEY=""
 
 # 客户端连接是否启用HTTPS
