@@ -636,6 +636,7 @@ select {
   .chat-markdown :where(pre, table) {
     max-width: 100%;
     overflow-x: auto;
+    font-size: 1em;
   }
 
   .chat-markdown :where(pre code) {
@@ -647,6 +648,15 @@ select {
   .chat-markdown :where(:not(pre) > code) {
     overflow-wrap: anywhere;
     white-space: break-spaces;
+    font-size: 1em;
+  }
+
+  /* Typography's own `code { font-size: .857em }` rule comes after its
+     `pre code { font-size: inherit }` reset in the generated CSS, with equal
+     specificity, so it wins and shrinks code-block text too. Override `code`
+     itself (not just `pre`) so both inline and fenced code end up at 1em. */
+  .chat-markdown :where(code) {
+    font-size: 1em;
   }
 
   /* Remove the default prose paragraph margins so single-line messages sit flush
