@@ -419,20 +419,29 @@ class CronSchedulerService:
                     # 被手动暂停，同样需要能被检测到"已经没有下一次执行时间"从而转入过期态，
                     # 否则会永远卡在"已暂停"（见 2026-07-16 bugfix）。
                     # proactive job 的 enabled 由 ConfigPanel 开关管，scheduler 不碰。
-                    try:
-                        is_proactive = getattr(job, "mode", "") == "proactive.tick"
-                        patch = {"expired": True}
-                        if not is_proactive:
-                            patch["enabled"] = False
-                            job.enabled = False
-                        job.expired = True
-                        await self._store.update_job(job.id, patch)
-                    except Exception as update_exc:  # noqa: BLE001
-                        logger.warning(
-                            "[Cron] mark expired failed job=%s: %s",
-                            job.id,
-                            update_exc,
-                        )
+                    # 幂等保护：已经是 expired+disabled 状态的任务不再重复写回——
+                    # store.update_job 每次都会刷 updated_at 和 cron_jobs.json 的 mtime，
+                    # 若对已过期任务每次 reload 都写一次，会形成"mtime 变 → _check_store_changed
+                    # 触发 reload → 又写一次 → mtime 又变"的循环（每 5 秒一轮），导致过期任务的
+                    # updated_at 一直是最新的、永远排在任务列表最前面（PR #3756 review 期间
+                    # 发现的 Bug7 回归）
+                    is_proactive = getattr(job, "mode", "") == "proactive.tick"
+                    already_expired = bool(getattr(job, "expired", False))
+                    already_disabled = is_proactive or not bool(getattr(job, "enabled", True))
+                    if not (already_expired and already_disabled):
+                        try:
+                            patch = {"expired": True}
+                            if not is_proactive:
+                                patch["enabled"] = False
+                                job.enabled = False
+                            job.expired = True
+                            await self._store.update_job(job.id, patch)
+                        except Exception as update_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[Cron] mark expired failed job=%s: %s",
+                                job.id,
+                                update_exc,
+                            )
                 else:
                     logger.warning("[Cron] compute next run failed job=%s: %s", job.id, exc)
                 continue
