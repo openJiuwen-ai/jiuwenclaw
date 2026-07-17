@@ -6473,6 +6473,10 @@ class JiuWenClawDeepAdapter:
             "audio_model_config": self._audio_model_config,
             "video_model_enabled": bool(self._video_model_config),
             "image_gen_enabled": bool(self._image_gen_enabled),
+            # 显式传入主 agent 的 sys_operation，避免 turbo executor 走
+            # get_sys_operation() 无参数路径时取到残留 subagent 的 sysop
+            # （restrict_to_sandbox=True）导致 sandbox 检查误拦截 workspace 写入。
+            "sys_operation": self._sys_operation,
         }
 
     def _create_skill_turbo_fallback_handler(self) -> Any:
