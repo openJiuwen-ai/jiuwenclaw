@@ -176,6 +176,14 @@ export default function ScheduleEditor({ value, onChange, timezone }: ScheduleEd
     { value: 'L', label: t('cron.schedule.lastDayOfMonth') },
   ];
   const monthOptions = Array.from({ length: 12 }, (_, i) => ({ value: String(i + 1), label: t('cron.schedule.monthOption', { month: i + 1 }) }));
+  // "每年"选中具体月份后，日期字段的候选天数必须跟着这个月封顶，否则像"2月31日"这种组合会被
+  // 允许选中——croniter 里 day=31 和 month=2 永远不会同时命中，任务实际上永远不会触发，
+  // 是个"看起来配置成功、实际静默失效"的坑，不只是下拉框太长那种纯 UI 问题。
+  // 2月按平年 28 天封顶（不放到 29）：闰年才会命中的"每年"排班会让用户以为每年都执行，
+  // 三年不触发一次同样是隐性失效，跟"每月"用独立的 'L' 选项处理月末是两回事，这里干脆不引入歧义。
+  const YEARLY_MONTH_DAY_COUNTS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const yearlyMaxDay = schedule.kind === 'yearly' && schedule.month ? YEARLY_MONTH_DAY_COUNTS[schedule.month - 1] : 31;
+  const yearlyDayOptions = dayOptions.filter((o) => o.value !== 'L' && Number(o.value) <= yearlyMaxDay);
   const periodKindOptions = PERIOD_KINDS.map((k) => ({ value: k, label: t(`cron.schedule.${k}`) }));
   const weekOfMonthOptions = WEEK_OF_MONTH_OPTIONS.map((o) => ({ value: o.value, label: t(`cron.schedule.weekOfMonth.${o.key}`) }));
 
@@ -264,7 +272,14 @@ export default function ScheduleEditor({ value, onChange, timezone }: ScheduleEd
               <>
                 <SimpleSelect
                   value={schedule.month ? String(schedule.month) : ''}
-                  onChange={(v) => updateSchedule({ ...schedule, month: Number(v) })}
+                  onChange={(v) => {
+                    const nextMonth = Number(v);
+                    const maxDay = YEARLY_MONTH_DAY_COUNTS[nextMonth - 1];
+                    // 已选的日期超出新月份的天数上限时（比如从"1月31日"切到"2月"），跟着收窄到
+                    // 该月最后一天，而不是留着一个新月份根本不存在的日期
+                    const nextDay = typeof schedule.day === 'number' && schedule.day > maxDay ? maxDay : schedule.day;
+                    updateSchedule({ ...schedule, month: nextMonth, day: nextDay });
+                  }}
                   options={monthOptions}
                   placeholder={t('cron.schedule.selectMonth') ?? undefined}
                   className="min-w-0 flex-1"
@@ -272,7 +287,7 @@ export default function ScheduleEditor({ value, onChange, timezone }: ScheduleEd
                 <SimpleSelect
                   value={schedule.day !== undefined ? String(schedule.day) : ''}
                   onChange={(v) => updateSchedule({ ...schedule, day: Number(v) })}
-                  options={dayOptions.filter((o) => o.value !== 'L')}
+                  options={yearlyDayOptions}
                   placeholder={t('cron.schedule.selectDay') ?? undefined}
                   className="min-w-0 flex-1"
                 />
