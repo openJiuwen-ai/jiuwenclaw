@@ -2114,7 +2114,7 @@
       "rename": "重命名",
       "renamePlaceholder": "输入新名称",
       "deleteProject": "删除项目",
-      "deleteProjectDescription": "确定要移除“{{projectName}}”吗？项目下未置顶会话会临时归入默认项目。",
+      "deleteProjectDescription": "确定要移除“<name>{{projectName}}</name>”吗？项目下未置顶会话会临时归入默认项目。",
       "defaultProjectName": "默认项目",
       "absolutePathError": "请输入绝对路径，例如 /Users/name/work/project",
       "errors": {
@@ -2125,7 +2125,7 @@
       "confirm": "确定"
     },
     "runtime": { "processing": "处理中" },
-    "deleteDialog": { "title": "删除", "description": "确定删除“{{title}}”吗？此操作不可撤销。" },
+    "deleteDialog": { "title": "删除", "description": "确定删除“<name>{{title}}</name>”吗？此操作不可撤销。" },
     "notFound": { "title": "对话不存在或已删除", "newConversation": "新建对话" },
     "errors": { "delete": "删除对话失败", "create": "创建对话失败", "send": "发送消息失败" }
   },

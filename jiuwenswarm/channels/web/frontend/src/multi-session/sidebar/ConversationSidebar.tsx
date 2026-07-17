@@ -3,6 +3,7 @@ import { CircleAlert, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
 import { webClient } from '../../services/webClient';
+import { DeleteDialog } from '../dialogs/Dialogs';
 import {
   PROJECT_SESSION_PAGE_SIZE,
   useWorkspaceStore,
@@ -567,19 +568,16 @@ function ProjectDeleteDialog({
 }) {
   const { t } = useTranslation();
   return (
-    <div className="conversation-path-dialog-backdrop" role="presentation">
-      <div className="conversation-path-dialog" role="dialog" aria-modal="true" aria-labelledby="project-delete-title">
-        <div id="project-delete-title" className="conversation-path-dialog__title">{t('multiSession.project.deleteProject')}</div>
-        <div className="conversation-path-dialog__message">
-          {t('multiSession.project.deleteProjectDescription', { projectName: project.name })}
-        </div>
-        {error ? <div className="conversation-path-dialog__error">{error}</div> : null}
-        <div className="conversation-path-dialog__actions">
-          <button type="button" onClick={onCancel} disabled={deleting}>{t('multiSession.project.cancel')}</button>
-          <button type="button" onClick={onDelete} disabled={deleting}>{t('multiSession.delete')}</button>
-        </div>
-      </div>
-    </div>
+    <DeleteDialog
+      title={project.name}
+      dialogTitle={t('multiSession.project.deleteProject')}
+      descriptionKey="multiSession.project.deleteProjectDescription"
+      descriptionValues={{ projectName: project.name }}
+      deleting={deleting}
+      error={error ?? null}
+      onCancel={onCancel}
+      onDelete={onDelete}
+    />
   );
 }
 

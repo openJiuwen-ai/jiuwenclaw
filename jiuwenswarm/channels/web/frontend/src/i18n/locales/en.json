@@ -2110,7 +2110,7 @@
       "rename": "Rename",
       "renamePlaceholder": "Enter a new name",
       "deleteProject": "Delete project",
-      "deleteProjectDescription": "Remove “{{projectName}}”? Unpinned conversations in this project will temporarily move to the default project.",
+      "deleteProjectDescription": "Remove “<name>{{projectName}}</name>”? Unpinned conversations in this project will temporarily move to the default project.",
       "defaultProjectName": "Default Project",
       "absolutePathError": "Enter an absolute path, for example /Users/name/work/project",
       "errors": {
@@ -2121,7 +2121,7 @@
       "confirm": "Confirm"
     },
     "runtime": { "processing": "Processing" },
-    "deleteDialog": { "title": "Delete", "description": "Delete “{{title}}”? This action cannot be undone." },
+    "deleteDialog": { "title": "Delete", "description": "Delete “<name>{{title}}</name>”? This action cannot be undone." },
     "notFound": { "title": "Conversation not found or deleted", "newConversation": "New conversation" },
     "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
   },

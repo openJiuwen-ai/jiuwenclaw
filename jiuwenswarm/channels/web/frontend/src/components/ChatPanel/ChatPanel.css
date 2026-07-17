@@ -1556,7 +1556,9 @@ overflow: hidden;
 }
 
 .chat-work-select__menu--projects {
+  display: flex;
   width: 160px;
+  flex-direction: column;
 }
 
 .chat-work-select__submenu {
@@ -1605,6 +1607,12 @@ overflow: hidden;
 
 .chat-work-select__search::placeholder {
   color: var(--color-text-secondary);
+}
+
+.chat-work-select__options {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
 }
 
 .chat-work-select__option {
