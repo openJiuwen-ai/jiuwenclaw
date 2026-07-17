@@ -31,6 +31,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.registry_client import (
     resolve_instance_kind,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.router_client import AgentOSRouterClient
+from jiuwenswarm.extensions.agentos.agentos_router.third_agent import AgentOSThirdAgent
 
 __all__ = [
     "AgentCreatingTimeout",
@@ -38,6 +39,7 @@ __all__ = [
     "AgentManager",
     "AgentOSRouter",
     "AgentOSRouterClient",
+    "AgentOSThirdAgent",
     "AgentRuntime",
     "AgentStatus",
     "HeartbeatResult",
