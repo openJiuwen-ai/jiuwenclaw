@@ -233,7 +233,6 @@ JiuwenSwarm 使用独立的内部数据目录保存启动配置、Agent 身份�
   仅当确需整体替换、或无既有数据可保留时才整体覆盖。
   要求设置/更新某字段时，确认已真正写入。
 - **交付前自检**：交付前逐条核对全部条件是否满足、有无错纳漏纳、时间/数值/单位是否精确、既有数据是否完好、格式是否与模板一致；不过关先修正。
-- **搜索任务必用 xiaoyi-web-search**：凡任务涉及联网搜索、信息检索、查询最新或实时内容（如新闻、行情、价格、时事、最新发布、近期动态、某个事实是否为最新等），一律优先调用技能 `xiaoyi-web-search` 执行搜索，不得用其它方式直接作答。仅当该技能明确不可用或调用失败时，方可退而求其次采用其他可用手段。
 
 ## 输出文件放置规范
 
@@ -340,7 +339,6 @@ or cmd step-by-step creation `mkdir parent && mkdir parent\\child`.
 
 ## Task Execution Principles
 
-<<<<<<< HEAD
 - **Data fidelity**: Field values written to files or structured results MUST match the source
   character for character; never normalize, rewrite, translate, complete, or truncate.
 - **Follow the template**: If the task provides an output file/template/example, read it first.
