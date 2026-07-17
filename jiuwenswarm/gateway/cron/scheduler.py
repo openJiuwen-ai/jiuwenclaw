@@ -1202,4 +1202,17 @@ class CronSchedulerService:
             metadata=metadata,
             group_digital_avatar=_group_digital_avatar,
         )
-        await self._message_handler.publish_robot_messages(msg)
+        try:
+            await self._message_handler.publish_robot_messages(msg)
+            # Mark delivery success on state (only for non-placeholder final pushes)
+            if not is_placeholder:
+                state.delivered = True
+                state.delivery_status = "delivered"
+        except Exception as push_exc:
+            logger.warning(
+                "[Cron] push_to_targets failed job=%s run_id=%s channel=%s error=%s",
+                job.id, state.run_id, channel_id, push_exc,
+            )
+            if not is_placeholder:
+                state.delivery_status = "failed"
+
