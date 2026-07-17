@@ -31,8 +31,12 @@ def _visible_selection(raw_selection: str, convention: str) -> str:
         return raw_selection.replace("  \n", "\n")
     if convention == "unit_separator_newline":
         normalized = raw_selection.replace("\r\n", "\n")
-        return re.sub(r"\n+(?:[-+*]\s+)?", "\n", normalized)
-    raise AssertionError(f"accepted fixture uses unknown convention: {convention}")
+        return re.sub(r"\n+(?:\s*[-+*]\s+)?", "\n", normalized)
+    if convention == "table_cells":
+        return re.sub(r"\s*\|\s*", " ", raw_selection)
+    if convention == "image_alt_text":
+        return raw_selection
+    raise AssertionError(f"fixture uses unknown convention: {convention}")
 
 
 def test_utf8_boundary_table_maps_codepoints_and_byte_boundaries():
@@ -120,10 +124,30 @@ def test_protocol_v2_fixture_uses_real_utf8_ranges_and_hashes():
             case["markdown"], case["start_byte"], case["end_byte"]
         ) == case["source_sha256"], case["id"]
 
+        computed_visible = _visible_selection(
+            case["raw_selection"], case["visible_text_convention"]
+        )
+        if (
+            case.get("error_code") == "SELECTION_MAPPING_CONFLICT"
+            and case.get("mismatch_kind") == "visible_text"
+        ):
+            assert computed_visible != case["selected_text"], case["id"]
+        else:
+            assert computed_visible == case["selected_text"], case["id"]
+
         if case["accepted"]:
             assert case["expected_units"], case["id"]
-            assert _visible_selection(
-                case["raw_selection"], case["visible_text_convention"]
-            ) == case["selected_text"], case["id"]
         else:
             assert case["error_code"], case["id"]
+
+    partial_outer = next(
+        case
+        for case in fixture["cases"]
+        if case["id"] == "partial_outer_units_complete_middle"
+    )
+    assert partial_outer["accepted"] is True
+    assert [unit["coverage"] for unit in partial_outer["expected_units"]] == [
+        "partial",
+        "full",
+        "partial",
+    ]

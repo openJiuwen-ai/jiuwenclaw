@@ -225,16 +225,16 @@
       ]
     },
     {
-      "id": "partial_middle_unit_rejected",
-      "markdown": "Alpha tail\n\nMiddle complete required\n\nOmega head\n",
-      "start_byte": 6,
-      "end_byte": 48,
-      "selected_text": "tail\nMiddle partial\nOmega head",
-      "source_sha256": "bc539dd511ca3d06c3bd19f14321a59194e6ea4c99ed6cc6e9ee4aabd32a792f",
+      "id": "selected_text_mismatch_rejected",
+      "markdown": "Actual visible text.\n",
+      "start_byte": 0,
+      "end_byte": 19,
+      "selected_text": "Altered visible text",
+      "source_sha256": "768c75072d4d2bc922f16cfa37bb46c16d1d8fef05c44d5b58177dee79b6d8c3",
       "accepted": false,
-      "raw_selection": "tail\n\nMiddle complete required\n\nOmega head",
-      "visible_text_convention": "unit_separator_newline",
-      "selection_shape": {"first_unit": "partial", "middle_unit": "partial_non_contiguous", "last_unit": "partial"},
+      "raw_selection": "Actual visible text",
+      "visible_text_convention": "literal",
+      "mismatch_kind": "visible_text",
       "error_code": "SELECTION_MAPPING_CONFLICT"
     },
     {
