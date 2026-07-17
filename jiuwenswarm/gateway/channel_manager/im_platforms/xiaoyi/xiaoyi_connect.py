@@ -32,9 +32,6 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.format
     should_send_as_status_update,
     should_send_as_text,
 )
-from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.a2a_vars import (
-    extract_model_name,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -762,6 +759,34 @@ class XiaoyiChannel(BaseChannel):
         if msg_type == "heartbeat":
             return
 
+        # MemoryQuery is a command data event (direct or wrapped A2A), not a
+        # normal user message. Consume it before the generic data-event parser.
+        from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.memory_query import (
+            extract_memory_query,
+            handle_memory_query,
+            memory_query_command,
+            configured_runtime_state_path,
+        )
+
+        memory_query = extract_memory_query(message)
+        if memory_query is not None:
+            from jiuwenswarm.common.utils import get_agent_workspace_dir
+
+            answer = await asyncio.to_thread(
+                handle_memory_query,
+                memory_query,
+                workspace_dir=get_agent_workspace_dir(),
+                runtime_state_path=configured_runtime_state_path(),
+            )
+            await self.send_xiaoyi_phone_tools_command(
+                memory_query.session_id,
+                memory_query.task_id,
+                memory_query.message_id,
+                memory_query_command(memory_query.action, answer),
+                final=True,
+            )
+            return
+
         # 根级直连 A2A（jsonrpc 2.0）须含 params.sessionId，否则整帧丢弃
         if message.get("jsonrpc") == "2.0":
             params_root = message.get("params")
@@ -820,6 +845,7 @@ class XiaoyiChannel(BaseChannel):
         # 缺失时回退到顶层 sessionId。
         session_id = message.get("params", {}).get("sessionId") or message.get("sessionId", "")
         task_id = message.get("params", {}).get("id", ) or ""
+        root_session_id = message.get("sessionId", "")
         user_message = message.get("params", {}).get("message", {})
         parts = user_message.get("parts", [])
 
@@ -929,21 +955,34 @@ class XiaoyiChannel(BaseChannel):
         metadata = {
             "method": "message/stream",
             "xiaoyi_session_id": session_id,
-            "xiaoyi_root_session_id": session_id,
+            "xiaoyi_root_session_id": root_session_id or session_id,
             "xiaoyi_params_session_id": message.get("params", {}).get("sessionId", ""),
             "xiaoyi_task_id": task_id,
             "xiaoyi_rpc_id": str(message.get("id") or ""),
             "xiaoyi_push_id": str(self.config.push_id or ""),
+            "xiaoyi_user_id": str(self.config.uid or ""),
+            "celia_user_id": str(self.config.uid or ""),
+            "conversation_id": session_id,
         }
+        try:
+            from jiuwenswarm.agents.harness.common.memory.celia.runtime_state import update_runtime_info
+            from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.memory_query import (
+                configured_runtime_state_path,
+            )
+
+            await asyncio.to_thread(
+                update_runtime_info,
+                root_session_id or session_id,
+                session_id,
+                task_id,
+                configured_runtime_state_path(),
+            )
+        except OSError:
+            logger.warning("XiaoyiChannel failed to update .xiaoyiruntime", exc_info=True)
         # Add media payload to metadata
         params = {"query": text, "task_id": task_id}
         if media_payload:
             params["files"] = media_payload
-        # Per-request model (same key as Web chat.send); agent last-mile overrides model=
-        model_name = extract_model_name(parts)
-        if model_name:
-            params["model_name"] = model_name
-            logger.info("[Xiaoyi] Found modelName: %s", model_name)
 
         user_message = Message(
             id=message.get("id", ""),
@@ -1480,6 +1519,7 @@ class XiaoyiChannel(BaseChannel):
             task_id: str,
             message_id: str,
             command: dict[str, Any],
+            final: bool = False,
     ) -> bool:
         """发送 Command 指令到手机端（A2A artifact-update 格式）.
 
@@ -1500,7 +1540,7 @@ class XiaoyiChannel(BaseChannel):
                 "kind": "artifact-update",
                 "append": False,
                 "lastChunk": True,
-                "final": False,
+                "final": final,
                 "artifact": {
                     "artifactId": str(uuid.uuid4()),
                     "parts": [{"kind": "data", "data": {"commands": [command]}}],

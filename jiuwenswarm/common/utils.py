@@ -35,6 +35,7 @@ import sys
 import datetime
 import shutil
 import socket
+import tempfile
 import time
 from pathlib import Path
 from dataclasses import dataclass
@@ -992,6 +993,33 @@ def prepare_workspace(
     cumulative_diff = CopyDiffResult([], [], [])
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
+    # ``init -f`` rebuilds the DeepAgent workspace. Celia compatibility data
+    # is durable user state, so preserve it across that existing reset flow.
+    celia_preserve: tempfile.TemporaryDirectory[str] | None = None
+    celia_preserved_paths: list[Path] = []
+    if overwrite:
+        durable_relatives = [
+            Path("agent/workspace/USER.md"),
+            Path("agent/workspace/MEMORY.md"),
+            Path("agent/workspace/memory/celia_memory"),
+        ]
+        if any((workspace_dir / relative).exists() for relative in durable_relatives):
+            celia_preserve = tempfile.TemporaryDirectory(
+                prefix=".celia-init-preserve-", dir=workspace_dir
+            )
+            preserve_root = Path(celia_preserve.name)
+            for relative in durable_relatives:
+                source = workspace_dir / relative
+                if not source.exists():
+                    continue
+                target = preserve_root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if source.is_dir():
+                    shutil.copytree(source, target)
+                else:
+                    shutil.copy2(source, target)
+                celia_preserved_paths.append(relative)
+
     # Migrate from legacy jiuwenclaw_workspace directory name to workspace
     _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir)
 
@@ -1210,6 +1238,24 @@ def prepare_workspace(
 
     migrate_config_from_template(config_yaml_src, config_yaml_dest)
     set_preferred_language_in_config_file(config_yaml_dest, resolved_lang)
+
+    if celia_preserve is not None:
+        preserve_root = Path(celia_preserve.name)
+        for relative in celia_preserved_paths:
+            source = preserve_root / relative
+            target = workspace_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
+                shutil.copytree(source, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(source, target)
+        celia_preserve.cleanup()
+
+    # OpenClaw compatibility state is incremental user data. Never overwrite
+    # existing DB/Markdown/marker content during normal initialization.
+    from jiuwenswarm.common.celia_setup import initialize_celia_compatibility
+
+    initialize_celia_compatibility(package_root, workspace_dir, deepagent_workspace)
 
     # ----- 默认安装内置技能: skill-creator 和 swarmskill-creator -----
     _install_default_builtin_skills(

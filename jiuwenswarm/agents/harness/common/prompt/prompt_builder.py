@@ -240,7 +240,6 @@ def _identity_prompt(
 - **高效查询**：访问数据库优先用聚合查询（如 `GROUP BY`）一次取回，避免逐行/重复查询及反复列目录、重读文件等冗余操作。
 - **写入范围匹配意图**：写操作的影响范围要与任务意图一致。只需改动部分数据、或须保留既有数据时，仅增改目标记录，不要用整体覆盖/清空/重建去完成局部改动而误伤其他数据；调用写入或导入类工具前，先确认并显式设置写入模式等关键参数，不要盲信默认。仅当确需整体替换、或无既有数据可保留时才整体覆盖。要求设置/更新某字段时，确认已真正写入。
 - **交付前自检**：交付前逐条核对全部条件是否满足、有无错纳漏纳、时间/数值/单位是否精确、既有数据是否完好、格式是否与模板一致；不过关先修正。
-- **搜索任务必用 xiaoyi-web-search**：凡任务涉及联网搜索、信息检索、查询最新或实时内容（如新闻、行情、价格、时事、最新发布、近期动态、某个事实是否为最新等），一律优先调用技能 `xiaoyi-web-search` 执行搜索，不得用其它方式直接作答。仅当该技能明确不可用或调用失败时，方可退而求其次采用其他可用手段。
 
 ## 输出文件放置规范
 执行用户任务时产生的生成产物（如代码文件、文档、数据文件等），若用户未指定存放位置，请遵循以下规则：
@@ -314,7 +313,6 @@ Common command differences:
 - **Efficient queries**: Prefer aggregate queries (e.g. `GROUP BY`) to fetch in one shot; avoid per-row/repeated queries and redundant listing or re-reading of files.
 - **Match write scope to intent**: A write's impact should match the task's intent. When only part of the data changes or existing data must be kept, modify just the target records — don't use a wholesale overwrite/clear/rebuild for a partial change and harm other data; before any write or import tool, confirm and explicitly set its write mode and other key parameters rather than trusting defaults. Do a full replace only when truly required or there is no existing data to keep. When setting/updating a field, confirm it was actually written.
 - **Self-check before delivery**: Before delivering, verify item by item that all conditions hold, nothing is wrongly included/omitted, times/numbers/units are exact, existing data is intact, and the format matches the template; fix any failure first.
-- **Use xiaoyi-web-search for search tasks**: Whenever a task involves web search, information retrieval, or looking up latest/real-time content (news, market quotes, prices, current events, recent releases, recent developments, or whether a given fact is still current), you MUST invoke the `xiaoyi-web-search` skill to perform the search; do not answer directly by other means. Only when this skill is clearly unavailable or its invocation fails may you fall back to other available approaches.
 
 ## Output File Placement
 Generated artifacts (code files, documents, data files, etc.) produced during user task execution should follow these placement rules unless the user specifies otherwise:
