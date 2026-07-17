@@ -66,13 +66,13 @@ def _write_document(root: Path, body: str) -> tuple[Path, dict]:
     return report, provenance
 
 
-def _prepare(root: Path, report: Path, selected: str):
+def _prepare(root: Path, report: Path, selected: str, action: str = "shorten"):
     block = next(iter_rewrite_blocks(report.read_text(encoding="utf-8")))
     start = block.text.index(selected)
     return prepare_rewrite(
         workspace_root=root,
         report_path=report,
-        action="polish",
+        action=action,
         block_id=block.block_id,
         start=start,
         end=start + len(selected),
@@ -111,10 +111,17 @@ def test_prepare_and_commit_create_child_revision_without_changing_parent(tmp_pa
     assert "这句话的表达更加清晰。[[1]](https://example.com/source)" in child.read_text(encoding="utf-8")
     child_provenance = json.loads(Path(result["provenance_path"]).read_text(encoding="utf-8"))
     assert child_provenance["parent_revision_id"] == "rev_parent"
-    assert child_provenance["operation"]["action"] == "polish"
+    assert child_provenance["operation"]["action"] == "shorten"
     assert result["citation_integrity_status"] == "verified"
     assert result["citation_semantic_status"] == "not_verified"
     assert "citation_status" not in result
+
+
+def test_prepare_rejects_legacy_rewrite_action(tmp_path):
+    report, _ = _write_document(tmp_path, "原句。\n")
+    with pytest.raises(RewriteError) as caught:
+        _prepare(tmp_path, report, "原句。", action="rewrite")
+    assert caught.value.code == "BAD_REQUEST"
 
 
 def test_child_revision_can_be_rewritten_again(tmp_path):

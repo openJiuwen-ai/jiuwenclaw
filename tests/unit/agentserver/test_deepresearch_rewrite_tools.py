@@ -56,7 +56,7 @@ async def test_prepare_and_commit_tools_return_short_outcomes_and_deliver_file(t
     ):
         prepared_raw = await rt.deepresearch_prepare_rewrite._func(
             report_path=str(report),
-            action="rewrite",
+            action="shorten",
             block_id=block.block_id,
             start=0,
             end=3,
@@ -97,7 +97,7 @@ async def test_prepare_tool_returns_stable_error_code_without_leaking_selection(
     ):
         raw = await rt.deepresearch_prepare_rewrite._func(
             report_path=str(report),
-            action="rewrite",
+            action="shorten",
             block_id=block.block_id,
             start=0,
             end=3,

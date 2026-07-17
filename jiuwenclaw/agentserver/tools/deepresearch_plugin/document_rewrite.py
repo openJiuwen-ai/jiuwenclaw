@@ -207,7 +207,7 @@ def prepare_rewrite(
     report = Path(report_path).expanduser().resolve()
     if not _inside(report, root) or report.suffix.lower() != ".md":
         raise RewriteError("BAD_REQUEST", "report path is outside the current workspace")
-    if action not in {"rewrite", "expand", "polish"}:
+    if action not in {"shorten", "expand", "polish"}:
         raise RewriteError("BAD_REQUEST", "unsupported rewrite action")
     if not selected_text or len(selected_text) > 12_000 or len(instruction) > 2_000:
         raise RewriteError("BAD_REQUEST", "selection or instruction size is invalid")
