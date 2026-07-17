@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from openjiuwen.agent_evolving.signal import EvolutionSignal
@@ -71,7 +72,15 @@ class JiuClawSkillEvolutionRail(SkillEvolutionRail):
     @staticmethod
     def dedup_messages(messages: list[dict]) -> list[dict]:
         """Remove duplicate messages while preserving order (keep first occurrence)."""
-        return SkillEvolutionRail._dedup_messages(messages)
+        seen: set[str] = set()
+        result: list[dict] = []
+        for message in messages:
+            key = json.dumps(message, sort_keys=True, ensure_ascii=False, default=str)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(message)
+        return result
 
     def _eligible_skill_names(self, skill_names: list[str]) -> list[str]:
         eligible = [name for name in skill_names if not is_bootstrap_builtin_skill(name)]
