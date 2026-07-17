@@ -19,7 +19,7 @@
       "accepted": true,
       "raw_selection": "重复目标",
       "visible_text_convention": "literal",
-      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial"}]
     },
     {
       "id": "emoji_before_selection",
@@ -31,7 +31,7 @@
       "accepted": true,
       "raw_selection": "target",
       "visible_text_convention": "literal",
-      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial"}]
     },
     {
       "id": "cjk_selection",
@@ -43,7 +43,7 @@
       "accepted": true,
       "raw_selection": "中文",
       "visible_text_convention": "literal",
-      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial"}]
     },
     {
       "id": "combining_character_selection",
@@ -55,7 +55,7 @@
       "accepted": true,
       "raw_selection": "é",
       "visible_text_convention": "literal",
-      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial"}]
     },
     {
       "id": "lf_document",
@@ -67,7 +67,7 @@
       "accepted": true,
       "raw_selection": "乙段",
       "visible_text_convention": "literal",
-      "expected_units": [{"kind": "paragraph", "index": 1, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "paragraph", "index": 1, "coverage": "partial"}]
     },
     {
       "id": "crlf_document",
@@ -79,7 +79,7 @@
       "accepted": true,
       "raw_selection": "乙段",
       "visible_text_convention": "literal",
-      "expected_units": [{"kind": "paragraph", "index": 1, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "paragraph", "index": 1, "coverage": "partial"}]
     },
     {
       "id": "strong_content_only",
@@ -91,7 +91,7 @@
       "accepted": true,
       "raw_selection": "bold",
       "visible_text_convention": "literal",
-      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial"}]
     },
     {
       "id": "emphasis_content_only",
@@ -103,7 +103,7 @@
       "accepted": true,
       "raw_selection": "emphasis",
       "visible_text_convention": "literal",
-      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial"}]
     },
     {
       "id": "ordinary_link_label_only",
@@ -115,7 +115,7 @@
       "accepted": true,
       "raw_selection": "guide",
       "visible_text_convention": "literal",
-      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial"}]
     },
     {
       "id": "multiple_citations_between_endpoints",
@@ -127,7 +127,7 @@
       "accepted": true,
       "raw_selection": "alpha [[1]](https://a.example) and [[2]](https://b.example) omega",
       "visible_text_convention": "citation_link_labels",
-      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial"}]
     },
     {
       "id": "soft_break_normalizes_to_space",
@@ -139,7 +139,7 @@
       "accepted": true,
       "raw_selection": "first\nsoft second",
       "visible_text_convention": "soft_break_as_space",
-      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial"}]
     },
     {
       "id": "hard_break_between_endpoints",
@@ -151,7 +151,7 @@
       "accepted": true,
       "raw_selection": "first  \nhard second",
       "visible_text_convention": "hard_break_as_newline",
-      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial"}]
     },
     {
       "id": "heading_partial",
@@ -163,7 +163,7 @@
       "accepted": true,
       "raw_selection": "Heading",
       "visible_text_convention": "literal",
-      "expected_units": [{"kind": "heading", "index": 0, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "heading", "index": 0, "coverage": "partial", "level": 2}]
     },
     {
       "id": "paragraph_partial",
@@ -175,7 +175,7 @@
       "accepted": true,
       "raw_selection": "editable",
       "visible_text_convention": "literal",
-      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial", "level": 0}]
+      "expected_units": [{"kind": "paragraph", "index": 0, "coverage": "partial"}]
     },
     {
       "id": "same_level_list_items",
@@ -188,8 +188,8 @@
       "raw_selection": "first item\n- second item",
       "visible_text_convention": "unit_separator_newline",
       "expected_units": [
-        {"kind": "list_item", "index": 0, "coverage": "full", "level": 0},
-        {"kind": "list_item", "index": 1, "coverage": "full", "level": 0}
+        {"kind": "list_item", "index": 0, "coverage": "full", "depth": 0, "marker": "-"},
+        {"kind": "list_item", "index": 1, "coverage": "full", "depth": 0, "marker": "-"}
       ]
     },
     {
@@ -203,9 +203,9 @@
       "raw_selection": "Head\n\nPara text\n\n- Item text",
       "visible_text_convention": "unit_separator_newline",
       "expected_units": [
-        {"kind": "heading", "index": 0, "coverage": "full", "level": 0},
-        {"kind": "paragraph", "index": 1, "coverage": "full", "level": 0},
-        {"kind": "list_item", "index": 2, "coverage": "full", "level": 0}
+        {"kind": "heading", "index": 0, "coverage": "full", "level": 2},
+        {"kind": "paragraph", "index": 1, "coverage": "full"},
+        {"kind": "list_item", "index": 2, "coverage": "full", "depth": 0, "marker": "-"}
       ]
     },
     {
@@ -219,9 +219,9 @@
       "raw_selection": "tail\n\nMiddle complete required\n\nOmega head",
       "visible_text_convention": "unit_separator_newline",
       "expected_units": [
-        {"kind": "paragraph", "index": 0, "coverage": "partial", "level": 0},
-        {"kind": "paragraph", "index": 1, "coverage": "full", "level": 0},
-        {"kind": "paragraph", "index": 2, "coverage": "partial", "level": 0}
+        {"kind": "paragraph", "index": 0, "coverage": "partial"},
+        {"kind": "paragraph", "index": 1, "coverage": "full"},
+        {"kind": "paragraph", "index": 2, "coverage": "partial"}
       ]
     },
     {

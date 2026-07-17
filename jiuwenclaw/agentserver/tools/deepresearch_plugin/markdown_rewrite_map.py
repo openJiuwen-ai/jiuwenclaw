@@ -53,7 +53,11 @@ class Utf8BoundaryTable:
 
 
 def sha256_byte_range(text: str, start_byte: int, end_byte: int) -> str:
-    """Hash a valid half-open UTF-8 byte range from ``text``."""
+    """Hash a valid half-open UTF-8 byte range, including an empty range.
+
+    This byte-level helper permits ``start_byte == end_byte``. Higher-level
+    rewrite preparation is responsible for requiring a non-empty user selection.
+    """
     table = Utf8BoundaryTable(text)
     table.require_byte_boundary(start_byte)
     table.require_byte_boundary(end_byte)
