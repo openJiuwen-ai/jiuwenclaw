@@ -1998,7 +1998,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
       }),
       webClient.on('chat.tool_update', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
+        const sessionId = resolveEventSessionId(payload);
+        if (!sessionId) return;
         const update = normalizeToolUpdatePayload(payload);
         if (!update.toolCallId || !update.beamSearch) return;
         useChatStore.getState().updateToolProgress(sessionId, update.toolCallId, {

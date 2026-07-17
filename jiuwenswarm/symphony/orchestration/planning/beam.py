@@ -17,7 +17,6 @@ from jiuwenswarm.symphony.orchestration.language import (
     planner_language_instruction,
     resolve_orchestration_language,
 )
-from jiuwenswarm.symphony.orchestration.planning.fast import FAST_PLANNER_MAX_SKILLS
 from jiuwenswarm.symphony.orchestration.planning.models import (
     GroundedQuery,
     OrchestrationPlan,
@@ -32,6 +31,7 @@ from jiuwenswarm.symphony.orchestration.planning.utils import skill_id
 
 SEMANTIC_SCORE_THRESHOLD = 0.5
 DEFAULT_MAX_CONCURRENT_JUDGES = 3
+BEAM_DEFAULT_MAX_SKILLS = 40
 BeamProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 logger = logging.getLogger(__name__)
 
@@ -704,11 +704,11 @@ class BidirectionalBeamPlanner:
                 ):
                     seen.add(current_skill_id)
                     output.append(current_skill_id)
-                if len(output) >= FAST_PLANNER_MAX_SKILLS:
+                if len(output) >= BEAM_DEFAULT_MAX_SKILLS:
                     return tuple(output)
         if output:
             return tuple(output)
-        for skill in self.artifacts.skills[:FAST_PLANNER_MAX_SKILLS]:
+        for skill in self.artifacts.skills[:BEAM_DEFAULT_MAX_SKILLS]:
             current_skill_id = str(skill.get("id") or "").strip()
             if current_skill_id:
                 output.append(current_skill_id)
