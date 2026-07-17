@@ -6,6 +6,10 @@ These rules apply only to newly added or modified code.
 
 Do not trigger a repository-wide scan or migration solely because of these rules. When a feature changes an existing file, apply these rules to the touched code. Plan large-scale legacy cleanup as a separate, explicitly scoped task.
 
+## Browser compatibility
+
+- Chrome/Chromium 107 is the minimum supported browser baseline. Newly added or modified HTML, CSS, and JavaScript must render and run correctly in Chrome 107 and later.
+
 ## Formatting
 
 - Follow `.prettierrc.cjs`.

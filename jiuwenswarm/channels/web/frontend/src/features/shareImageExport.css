@@ -8,6 +8,8 @@
 }
 
 .share-image-document {
+  --share-image-footer-note-color: rgb(107.72, 107.72, 107.72);
+  --share-image-link-color: rgb(92.68, 92.68, 92.68);
   width: 750px;
   min-height: 1px;
   box-sizing: border-box;
@@ -57,7 +59,7 @@
 }
 
 .share-image-content {
-  border: 1px solid color-mix(in srgb, var(--color-border-default) 86%, transparent);
+  border: 1px solid rgba(var(--color-border-default-rgb), 0.86);
   border-radius: 8px;
   background: var(--color-surface-content);
   padding: 26px 28px 30px;
@@ -131,7 +133,7 @@
 
 .share-image-footer__note {
   flex: 0 0 auto;
-  color: color-mix(in srgb, var(--color-text-secondary) 88%, var(--color-text-primary));
+  color: var(--share-image-footer-note-color);
   font-size: 16px;
   font-weight: 600;
   line-height: 1.35;
@@ -144,7 +146,7 @@
   min-width: 0;
   max-width: 430px;
   gap: 9px;
-  color: color-mix(in srgb, var(--color-text-secondary) 72%, var(--color-text-primary));
+  color: var(--share-image-link-color);
   font-size: 10px;
   font-weight: 500;
   line-height: 1.3;
@@ -169,7 +171,7 @@
   width: 1px;
   height: 12px;
   flex: 0 0 auto;
-  background: color-mix(in srgb, var(--color-text-secondary) 28%, transparent);
+  background: rgba(var(--color-text-secondary-rgb), 0.28);
 }
 
 .share-image-empty {

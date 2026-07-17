@@ -497,8 +497,8 @@ select {
   }
 
   .btn.primary:disabled {
-    background: color-mix(in oklab, var(--color-action-primary) 55%, var(--color-surface-elevated));
-    border-color: color-mix(in oklab, var(--color-action-primary) 55%, var(--color-border-default));
+    background: var(--color-action-primary-disabled-surface);
+    border-color: var(--color-action-primary-disabled-border);
   }
 
   /* Form Fields */
@@ -720,7 +720,11 @@ select {
     width: calc(100% - 48px);
     border: 1px solid var(--color-chat-task-queue-border);
     border-radius: 18px 18px 0 0;
-    background: color-mix(in srgb, var(--color-chat-composer-surface) 96%, var(--color-surface-page) 4%);
+    background-color: var(--color-surface-page);
+    background-image: linear-gradient(
+      rgba(var(--color-chat-composer-surface-rgb), 0.96),
+      rgba(var(--color-chat-composer-surface-rgb), 0.96)
+    );
     box-shadow: var(--effect-chat-task-queue-highlight);
     animation: rise 0.3s var(--ease-out);
   }
@@ -797,7 +801,7 @@ select {
   }
 
   .chat-input-task-item:hover {
-    background: color-mix(in srgb, var(--color-surface-panel-hover) 56%, transparent);
+    background: rgba(var(--color-surface-panel-hover-rgb), 0.56);
   }
 
   .chat-input-task-content {
@@ -920,7 +924,7 @@ select {
     min-width: 0;
     border-radius: var(--radius-lg);
     border: 1px solid var(--color-border-default);
-    background: color-mix(in srgb, var(--color-action-secondary) 72%, transparent);
+    background: rgba(var(--color-action-secondary-rgb), 0.72);
     padding: 10px 12px;
     color: var(--color-text-primary);
     font-size: var(--font-size-sm);
@@ -1001,7 +1005,7 @@ select {
   }
 
   .team-event-group-summary:hover {
-    background: color-mix(in srgb, var(--color-action-secondary) 65%, transparent);
+    background: rgba(var(--color-action-secondary-rgb), 0.65);
   }
 
   .team-event-group-summary__main {
@@ -1071,11 +1075,11 @@ select {
   }
 
   .team-event-group-row--activity + .team-event-group-row--activity {
-    border-top: 1px solid color-mix(in srgb, var(--color-border-default) 64%, transparent);
+    border-top: 1px solid rgba(var(--color-border-default-rgb), 0.64);
   }
 
   .team-event-group-chip--status {
-    background: color-mix(in srgb, var(--color-action-primary) 12%, transparent);
+    background: rgba(var(--color-action-primary-rgb), 0.12);
     color: var(--color-action-primary);
   }
 
@@ -1104,7 +1108,7 @@ select {
   }
 
   button.team-event-group-row:hover {
-    background: color-mix(in srgb, var(--color-action-secondary) 54%, transparent);
+    background: rgba(var(--color-action-secondary-rgb), 0.54);
   }
 
   .team-event-group-row__avatar {
@@ -1188,7 +1192,7 @@ select {
   }
 
   .team-event-group-chip--p2p {
-    background: color-mix(in srgb, var(--color-feedback-info) 16%, transparent);
+    background: rgba(var(--color-feedback-info-rgb), 0.16);
     color: var(--color-feedback-info);
   }
 

@@ -1,7 +1,23 @@
 import typography from '@tailwindcss/typography';
 
-const color = (token) => ({ opacityValue = '1' }) =>
-  `color-mix(in srgb, var(${token}) calc(${opacityValue} * 100%), transparent)`;
+/**
+ * Normal utilities use the semantic color token directly. Opacity modifiers
+ * such as `bg-secondary/30` use its RGB channels, which Chrome 107 supports.
+ */
+function color(token) {
+  return ({ opacityValue = '1', opacityVariable }) => {
+    if (opacityVariable) return `var(${token})`;
+    return `rgba(var(${token}-rgb), ${opacityValue})`;
+  };
+}
+
+/** Use only for semantic tokens whose base value already has transparency. */
+function translucentColor(token) {
+  return ({ opacityValue = '1', opacityVariable }) => {
+    if (opacityVariable) return `var(${token})`;
+    return `rgba(var(${token}-rgb), calc(var(${token}-alpha) * ${opacityValue}))`;
+  };
+}
 
 /** @type {import('tailwindcss').Config} */
 export default {
@@ -41,7 +57,7 @@ export default {
           DEFAULT: color('--color-border-default'),
           strong: color('--color-border-strong'),
           hover: color('--color-border-hover'),
-          accent: color('--color-border-accent'),
+          accent: translucentColor('--color-border-accent'),
         },
         accent: {
           DEFAULT: color('--color-action-primary'),

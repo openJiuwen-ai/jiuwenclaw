@@ -40,7 +40,11 @@
   border-radius: 18px 18px 0 0;
   border-color: var(--color-chat-composer-border, var(--color-border-default));
   /* 比输入框正文稍深一档，保持吸附区域层次。 */
-  background: color-mix(in srgb, var(--color-surface-card) 50%, var(--color-action-secondary) 50%);
+  background-color: var(--color-action-secondary);
+  background-image: linear-gradient(
+    rgba(var(--color-surface-card-rgb), 0.5),
+    rgba(var(--color-surface-card-rgb), 0.5)
+  );
   box-shadow: var(--effect-interaction-attached-highlight);
   padding-bottom: 1px;
 }
@@ -56,7 +60,7 @@
 }
 
 .auth-prompt__bar:focus-visible {
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--color-action-primary) 30%, transparent);
+  box-shadow: inset 0 0 0 2px rgba(var(--color-action-primary-rgb), 0.3);
   border-radius: 12px;
 }
 
@@ -134,7 +138,7 @@
 
 .auth-prompt__btn--reject:hover:not(:disabled) {
   color: var(--color-text-primary);
-  background: color-mix(in srgb, var(--color-text-primary) 6%, transparent);
+  background: rgba(var(--color-text-primary-rgb), 0.06);
 }
 
 /* 总是允许 / 授权单次 / 其它：主按钮（深色填充） */
@@ -230,7 +234,11 @@
   gap: 8px;
   padding: 10px 16px;
   /* 与授权条 .auth-prompt 吸附态一致，并与正文区拉开一档层次。 */
-  background: color-mix(in srgb, var(--color-surface-card) 50%, var(--color-action-secondary) 50%);
+  background-color: var(--color-action-secondary);
+  background-image: linear-gradient(
+    rgba(var(--color-surface-card-rgb), 0.5),
+    rgba(var(--color-surface-card-rgb), 0.5)
+  );
   border-bottom: 1px solid var(--color-border-default);
 }
 
@@ -270,7 +278,7 @@
 }
 
 .ix-prompt__pager-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-text-primary) 8%, transparent);
+  background: rgba(var(--color-text-primary-rgb), 0.08);
   color: var(--color-text-primary);
 }
 
@@ -325,7 +333,7 @@
 }
 
 .ix-option:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+  background: rgba(var(--color-text-primary-rgb), 0.05);
 }
 
 .ix-option--selected {
@@ -437,13 +445,13 @@
 
 .ix-btn--ghost {
   background: transparent;
-  border-color: color-mix(in srgb, var(--color-text-primary) 22%, transparent);
+  border-color: rgba(var(--color-text-primary-rgb), 0.22);
   color: var(--color-text-primary);
 }
 
 .ix-btn--ghost:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--color-text-primary) 40%, transparent);
-  background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+  border-color: rgba(var(--color-text-primary-rgb), 0.4);
+  background: rgba(var(--color-text-primary-rgb), 0.05);
 }
 
 .ix-btn--primary {
@@ -475,7 +483,11 @@
   gap: 7px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--color-border-default);
-  background: color-mix(in srgb, var(--color-surface-card) 50%, var(--color-action-secondary) 50%);
+  background-color: var(--color-action-secondary);
+  background-image: linear-gradient(
+    rgba(var(--color-surface-card-rgb), 0.5),
+    rgba(var(--color-surface-card-rgb), 0.5)
+  );
   font-size: 13px;
   font-weight: 600;
   color: var(--color-text-strong);

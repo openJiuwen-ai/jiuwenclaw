@@ -119,7 +119,7 @@
 }
 
 .app-heartbeat-toast__content:hover {
-  background: color-mix(in oklab, var(--color-action-secondary) 60%, transparent);
+  background: rgba(var(--color-action-secondary-rgb), 0.6);
 }
 
 .app-heartbeat-toast__preview {
