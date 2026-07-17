@@ -174,9 +174,6 @@ hiddenimports = webview_hiddenimports + [
     "ruamel.yaml.reader",
     "ruamel.yaml.representer",
     "ruamel.yaml.nodes",
-    "chromadb",
-    "chromadb.config",
-    "chromadb.telemetry",
     "openjiuwen",
     "psutil",
     "aiosqlite",
@@ -267,6 +264,30 @@ if _sp_dir:
     for _pyd in _glob.glob(os.path.join(_sp_dir, "*__mypyc*.pyd")):
         _mypyc_binaries.append((_pyd, "."))
 _bundled_binaries = _bundled_binaries + _mypyc_binaries
+
+# Bundle chromadb fully. chromadb 1.x is config-driven: it stores fully-qualified
+# class names as strings (chromadb.config.Settings.chroma_api_impl defaults to
+# "chromadb.api.rust.RustBindingsAPI", chroma_product_telemetry_impl to
+# "chromadb.telemetry.product.posthog.Posthog") and resolves them at runtime via
+# importlib.import_module(). PyInstaller's static analysis cannot follow these
+# string references, so manually listing "chromadb"/"chromadb.config"/
+# "chromadb.telemetry" misses the api.rust and telemetry.product.posthog
+# submodules — OpenJiuwenMemoryProvider then crashes on vector-store init with
+# ModuleNotFoundError and falls back to no-Provider. collect_all grabs every
+# submodule + data file (log_config.yml, migrations/, etc.) in one shot.
+_chroma_datas, _chroma_binaries, _chroma_hidden = collect_all("chromadb")
+datas += _chroma_datas
+hiddenimports += _chroma_hidden
+_bundled_binaries = _bundled_binaries + _chroma_binaries
+
+# chromadb.api.rust does `import chromadb_rust_bindings` — a C extension shipping
+# a .pyd under a top-level package of the same name. collect_all("chromadb")
+# won't touch a separate top-level package, so collect it explicitly or the rust
+# API path raises ModuleNotFoundError on the .pyd at runtime.
+_rust_datas, _rust_binaries, _rust_hidden = collect_all("chromadb_rust_bindings")
+datas += _rust_datas
+hiddenimports += _rust_hidden
+_bundled_binaries = _bundled_binaries + _rust_binaries
 
 a = Analysis(
     [entry_script],
