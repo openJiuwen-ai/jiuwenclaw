@@ -78,6 +78,15 @@ class MarkdownRewriteMap:
     source: str
     units: tuple[RewriteUnit, ...]
     unsupported_regions: tuple[UnsupportedRegion, ...]
+    source_sha256: str = field(default="", repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.source_sha256:
+            object.__setattr__(
+                self,
+                "source_sha256",
+                hashlib.sha256(self.source.encode("utf-8")).hexdigest(),
+            )
 
 
 class RewriteMapError(ValueError):
@@ -395,12 +404,7 @@ class _InlineScanner:
         if not self.raw.startswith("[", self.cursor):
             raise _InlineTopologyError("only explicit inline links are supported")
         link_end = self._find_atomic_end(link_start, expected)
-        label_text = "".join(
-            token.content
-            for token in self.children[index + 1 : close_index]
-            if token.type == "text"
-        )
-        if label_text.startswith("#inference:"):
+        if href.startswith("#inference:"):
             self.cursor = link_end
             self._add_anchor("inference", link_start, link_end)
             return close_index + 1
@@ -840,16 +844,107 @@ def reconstruct_markdown(
     rewrite_map: MarkdownRewriteMap,
     slot_texts: dict[str, str] | None = None,
 ) -> str:
-    """Round-trip an unchanged map; arbitrary replacements are a later stage."""
+    """Validate and reconstruct an unchanged map from its exact source spans."""
+
+    def conflict(message: str) -> None:
+        raise RewriteMapError("SELECTION_MAPPING_CONFLICT", message)
+
+    if not isinstance(rewrite_map.source, str):
+        conflict("rewrite map source must be text")
+    if rewrite_map.source_sha256 != hashlib.sha256(
+        rewrite_map.source.encode("utf-8")
+    ).hexdigest():
+        conflict("rewrite map source digest does not match its source")
+    if rewrite_map.unsupported_regions:
+        conflict("cannot reconstruct a map containing unsupported regions")
 
     expected = {
         slot.slot_id: slot.text
         for unit in rewrite_map.units
         for slot in unit.slots
     }
-    if slot_texts is not None and slot_texts != expected:
-        raise RewriteMapError(
-            "SELECTION_MAPPING_CONFLICT",
-            "inline reconstruction currently accepts unchanged slot text only",
-        )
-    return rewrite_map.source
+    requests = expected if slot_texts is None else slot_texts
+    if not isinstance(requests, dict) or requests != expected:
+        conflict("inline reconstruction requires every unchanged slot exactly once")
+
+    source_bytes = rewrite_map.source.encode("utf-8")
+    boundaries = Utf8BoundaryTable(rewrite_map.source)
+    segments: list[tuple[int, int, Literal["slot", "protected"], object]] = []
+    for unit in rewrite_map.units:
+        for slot in unit.slots:
+            segments.append((slot.start_byte, slot.end_byte, "slot", slot))
+        for anchor in unit.protected:
+            segments.append(
+                (anchor.start_byte, anchor.end_byte, "protected", anchor)
+            )
+    segments.sort(key=lambda segment: (segment[0], segment[1]))
+
+    output = bytearray()
+    previous_end = 0
+    for start_byte, end_byte, segment_kind, segment in segments:
+        try:
+            boundaries.require_byte_boundary(start_byte)
+            boundaries.require_byte_boundary(end_byte)
+        except RewriteMapError:
+            conflict("inline range is not on a UTF-8 boundary")
+        if start_byte < previous_end or start_byte > end_byte:
+            conflict("inline ranges must be ordered and non-overlapping")
+        output.extend(source_bytes[previous_end:start_byte])
+
+        if segment_kind == "protected":
+            anchor = segment
+            if not isinstance(anchor, ProtectedAnchor):
+                conflict("invalid protected anchor")
+            anchor_bytes = anchor.source.encode("utf-8")
+            if source_bytes[start_byte:end_byte] != anchor_bytes:
+                conflict("protected anchor source does not match its byte range")
+            output.extend(anchor_bytes)
+        else:
+            slot = segment
+            if not isinstance(slot, RewriteSlot):
+                conflict("invalid rewrite slot")
+            visible_boundaries = slot.visible_boundary_to_byte
+            if (
+                len(visible_boundaries) != len(slot.text) + 1
+                or not visible_boundaries
+                or visible_boundaries[0] != start_byte
+                or visible_boundaries[-1] != end_byte
+            ):
+                conflict("slot visible boundaries do not cover its byte range")
+            for index, character in enumerate(slot.text):
+                visible_start = visible_boundaries[index]
+                visible_end = visible_boundaries[index + 1]
+                try:
+                    boundaries.require_byte_boundary(visible_start)
+                    boundaries.require_byte_boundary(visible_end)
+                except RewriteMapError:
+                    conflict("slot visible range is not on a UTF-8 boundary")
+                if not start_byte <= visible_start < visible_end <= end_byte:
+                    conflict("slot visible boundaries must be strictly ordered")
+                raw_visible = source_bytes[visible_start:visible_end].decode("utf-8")
+                literal = raw_visible == character
+                escaped = (
+                    len(raw_visible) == 2
+                    and raw_visible[0] == "\\"
+                    and raw_visible[1] == character
+                    and character in _ESCAPABLE
+                )
+                soft_break = character == " " and re.fullmatch(
+                    r"[ \t]*(?:\r\n|\r|\n)", raw_visible
+                )
+                if not (literal or escaped or soft_break):
+                    conflict("slot visible text does not match its source bytes")
+            output.extend(source_bytes[start_byte:end_byte])
+        previous_end = end_byte
+
+    output.extend(source_bytes[previous_end:])
+    try:
+        reconstructed = output.decode("utf-8")
+    except UnicodeDecodeError:
+        conflict("reconstructed markdown is not valid UTF-8")
+    if reconstructed != rewrite_map.source:
+        conflict("reconstructed markdown differs from the original source")
+    rebuilt = build_rewrite_map(rewrite_map.source)
+    if rebuilt != rewrite_map:
+        conflict("rewrite map no longer matches its source")
+    return reconstructed

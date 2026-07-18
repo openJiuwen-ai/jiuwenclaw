@@ -1,7 +1,7 @@
 import hashlib
 import json
 import re
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
@@ -458,7 +458,7 @@ def test_soft_break_is_editable_space_and_hard_breaks_are_protected(
 
 
 def test_atomic_inline_constructs_are_protected_but_mixed_unit_remains():
-    markdown = "before `code` ![alt](x.png) [#inference:claim](proof://1) after"
+    markdown = "before `code` ![alt](x.png) [claim](#inference:proof-1) after"
 
     rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
     unit = rewrite_map.units[0]
@@ -468,7 +468,32 @@ def test_atomic_inline_constructs_are_protected_but_mixed_unit_remains():
     assert [(anchor.kind, anchor.source) for anchor in unit.protected] == [
         ("inline_code", "`code`"),
         ("image", "![alt](x.png)"),
-        ("inference", "[#inference:claim](proof://1)"),
+        ("inference", "[claim](#inference:proof-1)"),
+    ]
+
+
+def test_inference_link_is_identified_by_destination_and_is_fully_protected():
+    markdown = "before [evidence](#inference:claim-1) after"
+
+    unit = rewrite_map_module.build_rewrite_map(markdown).units[0]
+
+    assert [slot.text for slot in unit.slots] == ["before ", " after"]
+    assert [(anchor.kind, anchor.source) for anchor in unit.protected] == [
+        ("inference", "[evidence](#inference:claim-1)")
+    ]
+
+
+def test_inference_like_label_with_ordinary_href_remains_editable_link():
+    markdown = "[#inference: documentation](https://ordinary.example)"
+
+    unit = rewrite_map_module.build_rewrite_map(markdown).units[0]
+
+    assert [(slot.text, slot.formats, slot.link_id) for slot in unit.slots] == [
+        ("#inference: documentation", ("link",), f"{unit.unit_id}:link:0")
+    ]
+    assert [anchor.kind for anchor in unit.protected] == [
+        "syntax",
+        "link_destination",
     ]
 
 
@@ -588,6 +613,101 @@ def test_reconstruct_unchanged_slots_is_byte_identical(markdown):
     }
 
     assert rewrite_map_module.reconstruct_markdown(rewrite_map, unchanged) == markdown
+
+
+def test_reconstruct_walks_escape_softbreak_link_and_citation_ranges():
+    markdown = (
+        "escaped \\* first\n"
+        "[label](https://example.com) [[1]](https://source.example)"
+    )
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+    unchanged = {
+        slot.slot_id: slot.text
+        for unit in rewrite_map.units
+        for slot in unit.slots
+    }
+
+    assert rewrite_map_module.reconstruct_markdown(rewrite_map, unchanged) == markdown
+
+
+def _replace_first_unit(rewrite_map, **changes):
+    return replace(
+        rewrite_map,
+        units=(replace(rewrite_map.units[0], **changes), *rewrite_map.units[1:]),
+    )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["source", "source_gap", "anchor_source", "slot_range", "boundary"],
+)
+def test_reconstruct_rejects_tampered_map(tamper):
+    markdown = (
+        "alpha\n \nbeta"
+        if tamper == "source_gap"
+        else "escaped \\* first\n[label](https://example.com)"
+    )
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+    unit = rewrite_map.units[0]
+    unchanged = {
+        slot.slot_id: slot.text
+        for current_unit in rewrite_map.units
+        for slot in current_unit.slots
+    }
+
+    if tamper == "source":
+        damaged = replace(rewrite_map, source=markdown.replace("escaped", "altered"))
+    elif tamper == "source_gap":
+        damaged = replace(rewrite_map, source=markdown.replace(" ", "\t"))
+    elif tamper == "anchor_source":
+        anchors = (
+            replace(unit.protected[0], source="{"),
+            *unit.protected[1:],
+        )
+        damaged = _replace_first_unit(rewrite_map, protected=anchors)
+    elif tamper == "slot_range":
+        slots = (
+            replace(unit.slots[0], end_byte=unit.slots[0].end_byte - 1),
+            *unit.slots[1:],
+        )
+        damaged = _replace_first_unit(rewrite_map, slots=slots)
+    else:
+        boundaries = unit.slots[0].visible_boundary_to_byte
+        slots = (
+            replace(
+                unit.slots[0],
+                visible_boundary_to_byte=(boundaries[0], *boundaries[2:]),
+            ),
+            *unit.slots[1:],
+        )
+        damaged = _replace_first_unit(rewrite_map, slots=slots)
+
+    with pytest.raises(RewriteMapError) as caught:
+        rewrite_map_module.reconstruct_markdown(damaged, unchanged)
+
+    assert caught.value.code == "SELECTION_MAPPING_CONFLICT"
+
+
+@pytest.mark.parametrize("request_kind", ["missing", "extra", "changed"])
+def test_reconstruct_requires_exact_unchanged_slot_requests(request_kind):
+    rewrite_map = rewrite_map_module.build_rewrite_map("alpha **beta**")
+    unchanged = {
+        slot.slot_id: slot.text
+        for unit in rewrite_map.units
+        for slot in unit.slots
+    }
+    if request_kind == "missing":
+        unchanged.pop(next(iter(unchanged)))
+    elif request_kind == "extra":
+        unchanged["unknown-slot"] = "text"
+    else:
+        first_id = next(iter(unchanged))
+        unchanged[first_id] = "changed"
+
+    with pytest.raises(RewriteMapError) as caught:
+        rewrite_map_module.reconstruct_markdown(rewrite_map, unchanged)
+
+    assert caught.value.code == "SELECTION_MAPPING_CONFLICT"
 
 
 def test_build_rewrite_map_returns_empty_immutable_collections_for_empty_source():
