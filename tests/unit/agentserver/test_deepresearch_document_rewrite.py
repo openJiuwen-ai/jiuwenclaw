@@ -95,6 +95,26 @@ def _prepare(
     )
 
 
+def _structured_payload(prepared, replacements=None):
+    replacements = replacements or {}
+    return {
+        "units": [
+            {
+                "unit_id": unit["unit_id"],
+                "slots": [
+                    {
+                        "slot_id": slot["slot_id"],
+                        "text": replacements.get(slot["slot_id"], slot["text"]),
+                    }
+                    for slot in unit["slots"]
+                ],
+            }
+            for unit in prepared["units"]
+        ],
+        "facts_added": False,
+    }
+
+
 @pytest.mark.parametrize(
     "selection",
     [None, [], {}, {"protocol_version": 1}, {"protocol_version": True}, {"protocol_version": "2"},
@@ -392,13 +412,16 @@ def test_prepare_multi_unit_mapping_never_uses_tuple_index(tmp_path, monkeypatch
     assert len(prepared["units"]) == 200
 
 
-def test_prepare_and_commit_simple_unit_remain_compatible(tmp_path):
+def test_commit_accepts_exact_structured_unit_and_slot_output(tmp_path):
     original = "原句需要润色。[[1]](https://example.com/source)\n"
     report, provenance = _write_document(tmp_path, original)
     prepared = _prepare(tmp_path, report, "原句需要润色。")
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
     result = commit_rewrite(
         context_token=prepared["context_token"], session_id="S1",
-        structured_result={"segments": [{"text": "这句话更加清晰。", "source_ids": []}], "facts_added": False},
+        structured_result=_structured_payload(
+            prepared, {slot_id: "这句话更加清晰。"}
+        ),
     )
     child = Path(result["report_path"])
     assert report.read_text(encoding="utf-8") == original
@@ -408,32 +431,220 @@ def test_prepare_and_commit_simple_unit_remain_compatible(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("body", "raw", "visible"),
+    "mutation",
     [
-        ("before **bold** after\n", "bold** after", "bold after"),
-        ("first tail\n\nsecond head\n", "tail\n\nsecond", "tail\nsecond"),
+        "missing_unit",
+        "extra_unit",
+        "reordered_units",
+        "duplicate_unit",
+        "missing_slot",
+        "extra_slot",
+        "reordered_slots",
+        "duplicate_slot",
     ],
 )
-def test_legacy_commit_fails_closed_for_complex_v2_context(
-    tmp_path, body, raw, visible
-):
+def test_commit_rejects_non_exact_model_output_ids(tmp_path, mutation):
+    body = "first **bold** tail\n\nsecond paragraph\n"
     report, _ = _write_document(tmp_path, body)
-    prepared = _prepare(tmp_path, report, raw, visible=visible)
-    before_children = set(tmp_path.glob("report-rev-*.md"))
+    prepared = _prepare(
+        tmp_path,
+        report,
+        body.rstrip("\n"),
+        visible="first bold tail\nsecond paragraph",
+    )
+    payload = _structured_payload(prepared)
+    units = payload["units"]
+    if mutation == "missing_unit":
+        units.pop()
+    elif mutation == "extra_unit":
+        units.append({"unit_id": "extra", "slots": []})
+    elif mutation == "reordered_units":
+        units.reverse()
+    elif mutation == "duplicate_unit":
+        units[1] = dict(units[0], slots=list(units[0]["slots"]))
+    elif mutation == "missing_slot":
+        units[0]["slots"].pop()
+    elif mutation == "extra_slot":
+        units[0]["slots"].append({"slot_id": "extra", "text": "text"})
+    elif mutation == "reordered_slots":
+        units[0]["slots"].reverse()
+    else:
+        units[0]["slots"][1] = dict(units[0]["slots"][0])
 
     with pytest.raises(RewriteError) as caught:
         commit_rewrite(
             context_token=prepared["context_token"],
             session_id="S1",
-            structured_result={
-                "segments": [{"text": "replacement", "source_ids": []}],
-                "facts_added": False,
-            },
+            structured_result=payload,
         )
 
     assert caught.value.code == "MODEL_OUTPUT_INVALID"
-    assert report.read_text(encoding="utf-8") == body
-    assert set(tmp_path.glob("report-rev-*.md")) == before_children
+
+
+@pytest.mark.parametrize(
+    ("text", "facts_added"),
+    [
+        ("valid", True),
+        ("", False),
+        (" \t\n", False),
+        ("x" * 24_001, False),
+        ("visit https://example.com", False),
+        ("email mailto:user@example.com", False),
+        ("[label](destination)", False),
+        ("[label][reference]", False),
+        ("[label]: destination", False),
+        ("<span>text</span>", False),
+        ("![alt](image.png)", False),
+        ("#Inference:claim", False),
+    ],
+)
+def test_commit_rejects_unsafe_or_invalid_model_output(
+    tmp_path, text, facts_added
+):
+    report, _ = _write_document(tmp_path, "original\n")
+    prepared = _prepare(tmp_path, report, "original")
+    payload = _structured_payload(prepared)
+    payload["facts_added"] = facts_added
+    payload["units"][0]["slots"][0]["text"] = text
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=payload,
+        )
+
+    assert caught.value.code == "MODEL_OUTPUT_INVALID"
+
+
+def test_commit_reconstructs_complex_units_and_preserves_protected_bytes(tmp_path):
+    body = (
+        "outside before\n\n"
+        "## Market **grows** and *moves* ~~now~~ "
+        "[source](https://ordinary.example/report \"title\") "
+        "[[1]](https://example.com/source) hard  \n`code` tail\n\n"
+        "- item one\n"
+        "- item two\n\n"
+        "outside after\n"
+    )
+    report, _ = _write_document(tmp_path, body)
+    raw = body[body.index("Market") : body.index("item two") + len("item two")]
+    visible = "Market grows and moves now source [1] hard\ncode tail\nitem one\nitem two"
+    prepared = _prepare(tmp_path, report, raw, visible=visible)
+    replacements = {}
+    replacement_text = {
+        "Market ": "Sector ",
+        "grows": "expands",
+        "moves": "shifts",
+        "now": "today",
+        "source": "report",
+        " tail": " ending",
+        "item one": "entry one",
+        "item two": "entry two",
+    }
+    for unit in prepared["units"]:
+        for slot in unit["slots"]:
+            if slot["text"] in replacement_text:
+                replacements[slot["slot_id"]] = replacement_text[slot["text"]]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, replacements),
+    )
+
+    child_bytes = Path(result["report_path"]).read_bytes()
+    original_bytes = body.encode("utf-8")
+    selection = _selection(body, raw, visible)
+    assert child_bytes[: selection["start_byte"]] == original_bytes[: selection["start_byte"]]
+    assert child_bytes[-len("\n\noutside after\n".encode()):] == b"\n\noutside after\n"
+    child = child_bytes.decode("utf-8")
+    assert "## Sector **expands** and *shifts* ~~today~~" in child
+    assert "[report](https://ordinary.example/report \"title\")" in child
+    assert "[[1]](https://example.com/source) hard  \n`code` ending" in child
+    assert "- entry one\n- entry two" in child
+
+
+def test_commit_preserves_unsupported_regions_outside_selection(tmp_path):
+    body = "> untouched quote\n\ntarget text\n"
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(tmp_path, report, "target text")
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, {slot_id: "changed text"}),
+    )
+
+    assert Path(result["report_path"]).read_text(encoding="utf-8") == (
+        "> untouched quote\n\nchanged text\n"
+    )
+
+
+def test_commit_deletes_an_empty_strong_wrapper(tmp_path):
+    body = "before **bold** after\n"
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(tmp_path, report, "bold** after", visible="bold after")
+    replacements = {
+        slot["slot_id"]: "" if slot["format"] == ["strong"] else " ending"
+        for slot in prepared["units"][0]["slots"]
+    }
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, replacements),
+    )
+
+    assert Path(result["report_path"]).read_text(encoding="utf-8") == (
+        "before  ending\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("replacement", "code"),
+    [
+        ("new\n\n# heading", "STRUCTURE_CONFLICT"),
+        ("> protected\n\nnew", "STRUCTURE_CONFLICT"),
+        ("**new**", "FORMAT_CONFLICT"),
+    ],
+)
+def test_commit_rejects_reparsed_topology_conflicts(tmp_path, replacement, code):
+    report, _ = _write_document(tmp_path, "original\n")
+    prepared = _prepare(tmp_path, report, "original")
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared, {slot_id: replacement}),
+        )
+
+    assert caught.value.code == code
+
+
+def test_commit_revalidates_final_result_hash(tmp_path):
+    body = "claim [[1]](https://example.com/source)\n"
+    report, provenance = _write_document(tmp_path, body)
+    prepared = _prepare(
+        tmp_path,
+        report,
+        "claim",
+    )
+    report.with_name(provenance["final_result_path"]).write_text(
+        "{}", encoding="utf-8"
+    )
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared),
+        )
+
+    assert caught.value.code == "REVISION_CONFLICT"
 
 
 def test_prepare_rejects_legacy_action_stale_hash_and_workspace_escape(tmp_path):
@@ -538,7 +749,8 @@ def test_prepare_rejects_final_result_outside_workspace(tmp_path):
 def test_context_token_is_session_bound_and_single_use(tmp_path):
     report, _ = _write_document(tmp_path, "text\n")
     prepared = _prepare(tmp_path, report, "text")
-    payload = {"segments": [{"text": "new", "source_ids": []}], "facts_added": False}
+    payload = _structured_payload(prepared)
+    payload["units"][0]["slots"][0]["text"] = "new"
     with pytest.raises(RewriteError) as caught:
         commit_rewrite(context_token=prepared["context_token"], session_id="S2", structured_result=payload)
     assert caught.value.code == "CONTEXT_EXPIRED"
@@ -555,7 +767,7 @@ def test_context_token_expires_after_ttl(tmp_path):
     with pytest.raises(RewriteError) as caught:
         commit_rewrite(
             context_token=prepared["context_token"], session_id="S1",
-            structured_result={"segments": [{"text": "new", "source_ids": []}], "facts_added": False},
+            structured_result=_structured_payload(prepared),
         )
     assert caught.value.code == "CONTEXT_EXPIRED"
 

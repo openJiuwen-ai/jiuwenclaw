@@ -688,8 +688,8 @@ def test_reconstruct_rejects_tampered_map(tamper):
     assert caught.value.code == "SELECTION_MAPPING_CONFLICT"
 
 
-@pytest.mark.parametrize("request_kind", ["missing", "extra", "changed"])
-def test_reconstruct_requires_exact_unchanged_slot_requests(request_kind):
+@pytest.mark.parametrize("request_kind", ["missing", "extra"])
+def test_reconstruct_requires_exact_slot_requests(request_kind):
     rewrite_map = rewrite_map_module.build_rewrite_map("alpha **beta**")
     unchanged = {
         slot.slot_id: slot.text
@@ -700,14 +700,30 @@ def test_reconstruct_requires_exact_unchanged_slot_requests(request_kind):
         unchanged.pop(next(iter(unchanged)))
     elif request_kind == "extra":
         unchanged["unknown-slot"] = "text"
-    else:
-        first_id = next(iter(unchanged))
-        unchanged[first_id] = "changed"
-
     with pytest.raises(RewriteMapError) as caught:
         rewrite_map_module.reconstruct_markdown(rewrite_map, unchanged)
 
     assert caught.value.code == "SELECTION_MAPPING_CONFLICT"
+
+
+def test_reconstruct_replaces_selected_utf8_subranges_from_back_to_front():
+    markdown = "prefix 中文 middle 😀 suffix"
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+    slot = rewrite_map.units[0].slots[0]
+    ranges = {
+        slot.slot_id: (
+            slot.visible_boundary_to_byte[7],
+            slot.visible_boundary_to_byte[-8],
+        )
+    }
+
+    reconstructed = rewrite_map_module.reconstruct_markdown(
+        rewrite_map,
+        {slot.slot_id: "替换"},
+        selected_ranges=ranges,
+    )
+
+    assert reconstructed == "prefix 替换 suffix"
 
 
 def test_build_rewrite_map_returns_empty_immutable_collections_for_empty_source():

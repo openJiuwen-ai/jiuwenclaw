@@ -847,8 +847,10 @@ def structure_signature(rewrite_map: MarkdownRewriteMap) -> tuple[object, ...]:
 def reconstruct_markdown(
     rewrite_map: MarkdownRewriteMap,
     slot_texts: dict[str, str] | None = None,
+    *,
+    selected_ranges: dict[str, tuple[int, int]] | None = None,
 ) -> str:
-    """Validate and reconstruct an unchanged map from its exact source spans."""
+    """Validate a map and replace requested slot byte ranges from back to front."""
 
     def conflict(message: str) -> None:
         raise RewriteMapError("SELECTION_MAPPING_CONFLICT", message)
@@ -859,7 +861,7 @@ def reconstruct_markdown(
         rewrite_map.source.encode("utf-8")
     ).hexdigest():
         conflict("rewrite map source digest does not match its source")
-    if rewrite_map.unsupported_regions:
+    if rewrite_map.unsupported_regions and selected_ranges is None:
         conflict("cannot reconstruct a map containing unsupported regions")
 
     expected = {
@@ -868,8 +870,20 @@ def reconstruct_markdown(
         for slot in unit.slots
     }
     requests = expected if slot_texts is None else slot_texts
-    if not isinstance(requests, dict) or requests != expected:
-        conflict("inline reconstruction requires every unchanged slot exactly once")
+    if not isinstance(requests, dict) or any(
+        not isinstance(slot_id, str) or not isinstance(text, str)
+        for slot_id, text in requests.items()
+    ):
+        conflict("inline reconstruction requests must map slot IDs to text")
+    if selected_ranges is None:
+        if set(requests) != set(expected):
+            conflict("inline reconstruction requires every slot exactly once")
+    elif (
+        not isinstance(selected_ranges, dict)
+        or set(requests) != set(selected_ranges)
+        or not set(requests).issubset(expected)
+    ):
+        conflict("selected reconstruction ranges must match known slot requests")
 
     source_bytes = rewrite_map.source.encode("utf-8")
     boundaries = Utf8BoundaryTable(rewrite_map.source)
@@ -951,4 +965,84 @@ def reconstruct_markdown(
     rebuilt = build_rewrite_map(rewrite_map.source)
     if rebuilt != rewrite_map:
         conflict("rewrite map no longer matches its source")
-    return reconstructed
+
+    slots_by_id = {
+        slot.slot_id: slot
+        for unit in rewrite_map.units
+        for slot in unit.slots
+    }
+    replacements: list[tuple[int, int, bytes]] = []
+    syntax_anchors = [
+        anchor
+        for unit in rewrite_map.units
+        for anchor in unit.protected
+        if anchor.kind == "syntax" and anchor.source in {"*", "_", "**", "__"}
+    ]
+    for slot_id, replacement in requests.items():
+        slot = slots_by_id[slot_id]
+        if selected_ranges is None:
+            start_byte, end_byte = slot.start_byte, slot.end_byte
+            original_visible = slot.text
+        else:
+            byte_range = selected_ranges[slot_id]
+            if (
+                not isinstance(byte_range, tuple)
+                or len(byte_range) != 2
+                or type(byte_range[0]) is not int
+                or type(byte_range[1]) is not int
+            ):
+                conflict("selected reconstruction range must contain two byte offsets")
+            start_byte, end_byte = byte_range
+            try:
+                visible_start = slot.visible_boundary_to_byte.index(start_byte)
+                visible_end = slot.visible_boundary_to_byte.index(end_byte)
+            except ValueError:
+                conflict("selected reconstruction range is not on a visible boundary")
+            if visible_start > visible_end:
+                conflict("selected reconstruction range is reversed")
+            original_visible = slot.text[visible_start:visible_end]
+        if replacement != original_visible:
+            replacements.append((start_byte, end_byte, replacement.encode("utf-8")))
+        if (
+            selected_ranges is not None
+            and not replacement
+            and start_byte == slot.start_byte
+            and end_byte == slot.end_byte
+            and slot.formats
+            and set(slot.formats) <= {"strong", "emphasis"}
+        ):
+            left = []
+            cursor = start_byte
+            for anchor in reversed(syntax_anchors):
+                if anchor.end_byte == cursor:
+                    left.append(anchor)
+                    cursor = anchor.start_byte
+                    if len(left) == len(slot.formats):
+                        break
+            right = []
+            cursor = end_byte
+            for anchor in syntax_anchors:
+                if anchor.start_byte == cursor:
+                    right.append(anchor)
+                    cursor = anchor.end_byte
+                    if len(right) == len(slot.formats):
+                        break
+            if len(left) == len(right) == len(slot.formats):
+                replacements.extend(
+                    (anchor.start_byte, anchor.end_byte, b"")
+                    for anchor in (*left, *right)
+                )
+
+    replacements.sort(key=lambda item: (item[0], item[1]))
+    if any(
+        left[1] > right[0]
+        for left, right in zip(replacements, replacements[1:])
+    ):
+        conflict("selected reconstruction ranges overlap")
+    result = source_bytes
+    for start_byte, end_byte, replacement in reversed(replacements):
+        result = result[:start_byte] + replacement + result[end_byte:]
+    try:
+        return result.decode("utf-8")
+    except UnicodeDecodeError:
+        conflict("reconstructed markdown is not valid UTF-8")

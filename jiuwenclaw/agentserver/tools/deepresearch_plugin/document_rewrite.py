@@ -20,16 +20,23 @@ from markdown_it import MarkdownIt
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.markdown_rewrite_map import (
     MarkdownRewriteMap,
     ProtectedAnchor,
+    RewriteMapError,
     RewriteSlot,
     RewriteUnit,
     Utf8BoundaryTable,
     build_rewrite_map,
+    reconstruct_markdown,
     structure_signature,
 )
 
 SAFE_ID_RE = re.compile(r"^(?:doc|rev)_[A-Za-z0-9_-]{1,128}$")
 CITATION_RE = re.compile(r"\[\[(?P<index>\d+)\]\]\((?P<url>https?://[^\s)]+)\)")
-FORBIDDEN_OUTPUT_RE = re.compile(r"https?://|\]\s*:\s*\S+|#inference:", re.IGNORECASE)
+FORBIDDEN_OUTPUT_RE = re.compile(
+    r"(?:https?|ftp|file)://|(?:mailto|data):|!\[|\]\s*(?:\(|\[)|"
+    r"^\s*\[[^\]\r\n]+\]\s*:\s*\S+|"
+    r"<[A-Za-z!/][^>]*>|#inference:",
+    re.IGNORECASE | re.MULTILINE,
+)
 LIST_RE = re.compile(r"^\s*(?:[-+*]|\d+[.)])\s+")
 TOKEN_TTL_SECONDS = 10 * 60
 CONTEXT_CACHE_MAX = 1024
@@ -622,66 +629,134 @@ def _take_context(token: str, session_id: str) -> _RewriteContext:
         return context
 
 
-def _require_legacy_commit_safe(context: _RewriteContext) -> None:
-    if len(context.selected_units) != 1:
-        raise RewriteError(
-            "MODEL_OUTPUT_INVALID", "structured multi-unit commit is not yet supported"
-        )
-    selected_unit = context.selected_units[0]
-    if len(selected_unit.slots) != 1:
-        raise RewriteError(
-            "MODEL_OUTPUT_INVALID", "structured multi-slot commit is not yet supported"
-        )
-    selected_slot = selected_unit.slots[0]
+def _validate_structured_units(
+    structured_result: object,
+    expected_units: tuple[_SelectedUnitRange, ...],
+) -> dict[str, str]:
     if (
-        selected_unit.start_byte != context.selection_start_byte
-        or selected_unit.end_byte != context.selection_end_byte
-        or selected_slot.start_byte != context.selection_start_byte
-        or selected_slot.end_byte != context.selection_end_byte
-        or context.protected_anchors
+        not isinstance(structured_result, dict)
+        or set(structured_result) != {"units", "facts_added"}
+        or structured_result.get("facts_added") is not False
     ):
-        raise RewriteError(
-            "MODEL_OUTPUT_INVALID", "protected or partial structured commit is not yet supported"
-        )
-
-
-def _validate_segments(structured_result: object, allowed: dict[str, dict]) -> list[dict]:
-    if not isinstance(structured_result, dict) or structured_result.get("facts_added") is not False:
         raise RewriteError("MODEL_OUTPUT_INVALID", "facts_added must be false")
-    segments = structured_result.get("segments")
-    if not isinstance(segments, list) or not segments or len(segments) > 50:
-        raise RewriteError("MODEL_OUTPUT_INVALID", "segments must be a non-empty list")
+    units = structured_result.get("units")
+    if not isinstance(units, list) or len(units) != len(expected_units):
+        raise RewriteError("MODEL_OUTPUT_INVALID", "unit IDs must match prepared units exactly")
     total = 0
-    normalized: list[dict] = []
-    for segment in segments:
-        if not isinstance(segment, dict):
-            raise RewriteError("MODEL_OUTPUT_INVALID", "each segment must be an object")
-        text = segment.get("text")
-        source_ids = segment.get("source_ids", [])
-        if not isinstance(text, str) or not text.strip() or FORBIDDEN_OUTPUT_RE.search(text):
-            raise RewriteError("MODEL_OUTPUT_INVALID", "segment text is invalid")
-        if not isinstance(source_ids, list) or any(str(item) not in allowed for item in source_ids):
-            raise RewriteError("MODEL_OUTPUT_INVALID", "segment cites a source outside the whitelist")
-        total += len(text)
-        if total > 24_000:
-            raise RewriteError("MODEL_OUTPUT_INVALID", "rewrite output is too large")
-        normalized.append({"text": text, "source_ids": [str(item) for item in source_ids]})
+    normalized: dict[str, str] = {}
+    for unit, expected_unit in zip(units, expected_units):
+        if (
+            not isinstance(unit, dict)
+            or set(unit) != {"unit_id", "slots"}
+            or unit.get("unit_id") != expected_unit.unit_id
+        ):
+            raise RewriteError("MODEL_OUTPUT_INVALID", "unit IDs must match prepared units exactly")
+        slots = unit.get("slots")
+        if not isinstance(slots, list) or len(slots) != len(expected_unit.slots):
+            raise RewriteError("MODEL_OUTPUT_INVALID", "slot IDs must match prepared slots exactly")
+        for slot, expected_slot in zip(slots, expected_unit.slots):
+            if (
+                not isinstance(slot, dict)
+                or set(slot) != {"slot_id", "text"}
+                or slot.get("slot_id") != expected_slot.slot_id
+                or not isinstance(slot.get("text"), str)
+            ):
+                raise RewriteError("MODEL_OUTPUT_INVALID", "slot IDs must match prepared slots exactly")
+            text = slot["text"]
+            if FORBIDDEN_OUTPUT_RE.search(text):
+                raise RewriteError("MODEL_OUTPUT_INVALID", "slot text contains forbidden syntax")
+            total += len(text)
+            if total > 24_000:
+                raise RewriteError("MODEL_OUTPUT_INVALID", "rewrite output is too large")
+            normalized[expected_slot.slot_id] = text
+    if not any(text.strip() for text in normalized.values()):
+        raise RewriteError("MODEL_OUTPUT_INVALID", "rewrite output must not be empty")
     return normalized
 
 
-def _render_segments(segments: list[dict], allowed: dict[str, dict]) -> str:
-    rendered: list[str] = []
-    for segment in segments:
-        citations: list[str] = []
-        seen: set[str] = set()
-        for source_id in segment["source_ids"]:
-            if source_id in seen:
-                continue
-            seen.add(source_id)
-            item = allowed[source_id]
-            citations.append(f"[[{item['reference_index']}]]({item['url']})")
-        rendered.append(segment["text"] + "".join(citations))
-    return "\n\n".join(rendered)
+def _topology_parts(signature: tuple[object, ...]) -> tuple[tuple[object, ...], tuple[object, ...]]:
+    blocks = tuple(item[:4] for item in signature)
+    protected = tuple(item[4:] for item in signature)
+    return blocks, protected
+
+
+def _validate_affected_citations(
+    context: _RewriteContext,
+    original_map: MarkdownRewriteMap,
+    child_map: MarkdownRewriteMap,
+) -> list[str]:
+    citations = _load_final_result_citations(
+        context.report_path, context.provenance, context.workspace_root
+    )
+    _, by_key = _citation_index(citations)
+    selected_ids = {unit.unit_id for unit in context.selected_units}
+    affected_indexes = [
+        index
+        for index, unit in enumerate(original_map.units)
+        if unit.unit_id in selected_ids
+    ]
+
+    def identities(rewrite_map: MarkdownRewriteMap) -> list[tuple[str, str]]:
+        result = []
+        for index in affected_indexes:
+            for anchor in rewrite_map.units[index].protected:
+                if anchor.kind != "citation":
+                    continue
+                match = CITATION_RE.fullmatch(anchor.source)
+                if match is None:
+                    raise RewriteError("FORMAT_CONFLICT", "citation syntax changed")
+                result.append((match.group("index"), match.group("url")))
+        return result
+
+    expected = identities(original_map)
+    if identities(child_map) != expected:
+        raise RewriteError("FORMAT_CONFLICT", "citation identity or order changed")
+    source_ids = []
+    for reference_index, url in expected:
+        item = by_key.get(f"{reference_index}\0{url}")
+        if item is None:
+            raise RewriteError("FORMAT_CONFLICT", "citation is outside the final-result whitelist")
+        source_ids.append(str(item.get("id")))
+    return source_ids
+
+
+def _allows_empty_wrapper_deletion(
+    original_map: MarkdownRewriteMap,
+    context: _RewriteContext,
+    slot_texts: dict[str, str],
+    selected_ranges: dict[str, tuple[int, int]],
+) -> bool:
+    slots = {
+        slot.slot_id: slot
+        for unit in original_map.units
+        for slot in unit.slots
+    }
+    empty_wrappers = {
+        slot_id
+        for slot_id, text in slot_texts.items()
+        if not text
+        and slot_id in slots
+        and selected_ranges[slot_id] == (
+            slots[slot_id].start_byte,
+            slots[slot_id].end_byte,
+        )
+        and slots[slot_id].formats
+        and set(slots[slot_id].formats) <= {"strong", "emphasis"}
+    }
+    if not empty_wrappers:
+        return False
+    placeholders = dict(slot_texts)
+    for slot_id in empty_wrappers:
+        placeholders[slot_id] = "x"
+    try:
+        placeholder_markdown = reconstruct_markdown(
+            original_map, placeholders, selected_ranges=selected_ranges
+        )
+    except RewriteMapError:
+        return False
+    return structure_signature(build_rewrite_map(placeholder_markdown)) == (
+        context.structure_signature
+    )
 
 
 def _atomic_write(path: Path, payload: bytes) -> None:
@@ -701,9 +776,7 @@ def _atomic_write(path: Path, payload: bytes) -> None:
 
 def commit_rewrite(*, context_token: str, session_id: str, structured_result: object) -> dict:
     context = _take_context(context_token, session_id)
-    _require_legacy_commit_safe(context)
-    segments = _validate_segments(structured_result, context.allowed_citations)
-    replacement = _render_segments(segments, context.allowed_citations)
+    slot_texts = _validate_structured_units(structured_result, context.selected_units)
     document_id = str(context.provenance["document_id"])
     with _CONTEXT_LOCK:
         document_lock = _DOCUMENT_LOCKS.setdefault(document_id, threading.Lock())
@@ -712,12 +785,36 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
         parent_hash = _sha256(current_bytes)
         if parent_hash != context.parent_hash:
             raise RewriteError("REVISION_CONFLICT", "the parent report changed")
-        child_bytes = (
-            current_bytes[: context.selection_start_byte]
-            + replacement.encode("utf-8")
-            + current_bytes[context.selection_end_byte :]
-        )
-        child_markdown = child_bytes.decode("utf-8")
+        current_markdown = current_bytes.decode("utf-8")
+        original_map = build_rewrite_map(current_markdown)
+        selected_ranges = {
+            slot.slot_id: (slot.start_byte, slot.end_byte)
+            for unit in context.selected_units
+            for slot in unit.slots
+        }
+        try:
+            child_markdown = reconstruct_markdown(
+                original_map, slot_texts, selected_ranges=selected_ranges
+            )
+        except RewriteMapError as exc:
+            raise RewriteError("STRUCTURE_CONFLICT", str(exc)) from exc
+        child_map = build_rewrite_map(child_markdown)
+        if tuple(region.kind for region in child_map.unsupported_regions) != tuple(
+            region.kind for region in original_map.unsupported_regions
+        ):
+            raise RewriteError(
+                "STRUCTURE_CONFLICT", "rewrite changed unsupported Markdown topology"
+            )
+        expected_blocks, expected_protected = _topology_parts(context.structure_signature)
+        child_blocks, child_protected = _topology_parts(structure_signature(child_map))
+        if child_blocks != expected_blocks:
+            raise RewriteError("STRUCTURE_CONFLICT", "rewrite changed Markdown block topology")
+        if child_protected != expected_protected and not _allows_empty_wrapper_deletion(
+            original_map, context, slot_texts, selected_ranges
+        ):
+            raise RewriteError("FORMAT_CONFLICT", "rewrite changed protected inline topology")
+        source_ids = _validate_affected_citations(context, original_map, child_map)
+        result_bytes = "\n".join(slot_texts.values()).encode("utf-8")
         revision_id = f"rev_{uuid.uuid4().hex}"
         child_path = context.report_path.with_name(
             f"{context.report_path.stem}-rev-{revision_id[4:12]}.md"
@@ -731,8 +828,8 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
             "selection_sha256": _sha256(
                 current_bytes[context.selection_start_byte : context.selection_end_byte]
             ),
-            "result_sha256": _sha256(replacement.encode("utf-8")),
-            "source_ids": sorted(context.allowed_citations),
+            "result_sha256": _sha256(result_bytes),
+            "source_ids": sorted(set(source_ids)),
         })
         child_provenance.update({
             "revision_id": revision_id,
