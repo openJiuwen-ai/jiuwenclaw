@@ -259,14 +259,13 @@ class _InlineScanner:
 
     def __init__(
         self,
-        source: str,
         raw: str,
         raw_start: int,
         unit_id: str,
         children: list[Token],
         parser: MarkdownIt,
+        boundary_table: Utf8BoundaryTable,
     ):
-        self.source = source
         self.raw = raw
         self.raw_start = raw_start
         self.unit_id = unit_id
@@ -276,7 +275,7 @@ class _InlineScanner:
         self.slots: list[RewriteSlot] = []
         self.protected: list[ProtectedAnchor] = []
         self.link_count = 0
-        self.source_boundaries = Utf8BoundaryTable(source).codepoint_to_byte
+        self.source_boundaries = boundary_table.codepoint_to_byte
 
     def _byte(self, local_index: int) -> int:
         return self.source_boundaries[self.raw_start + local_index]
@@ -543,14 +542,14 @@ class _InlineScanner:
 
 def _inline_source_span(
     markdown: str,
+    boundary_table: Utf8BoundaryTable,
     unit_type: UnitType,
     start_byte: int,
     end_byte: int,
     inline: Token,
 ) -> tuple[str, int]:
-    table = Utf8BoundaryTable(markdown)
-    start = table.require_byte_boundary(start_byte)
-    end = table.require_byte_boundary(end_byte)
+    start = boundary_table.require_byte_boundary(start_byte)
+    end = boundary_table.require_byte_boundary(end_byte)
     unit_source = markdown[start:end]
     if unit_type == "paragraph":
         prefix_end = 0
@@ -581,24 +580,26 @@ def _inline_source_span(
 
 def _scan_unit_inline(
     markdown: str,
+    boundary_table: Utf8BoundaryTable,
     unit: RewriteUnit,
     inline: Token,
     parser: MarkdownIt,
 ) -> tuple[tuple[RewriteSlot, ...], tuple[ProtectedAnchor, ...]]:
     raw, raw_start = _inline_source_span(
         markdown,
+        boundary_table,
         unit.unit_type,
         unit.start_byte,
         unit.end_byte,
         inline,
     )
     return _InlineScanner(
-        markdown,
         raw,
         raw_start,
         unit.unit_id,
         inline.children or [],
         parser,
+        boundary_table,
     ).scan()
 
 
@@ -644,6 +645,7 @@ def _list_item_kind(tokens: list[Token], open_index: int, close_index: int) -> s
 
 def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
     """Classify blocks and map supported inline text to exact source bytes."""
+    boundary_table = Utf8BoundaryTable(markdown)
     parser = MarkdownIt("commonmark", {"html": True}).enable(
         ["table", "strikethrough"]
     )
@@ -674,7 +676,9 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
             list_marker=list_marker,
         )
         try:
-            slots, protected = _scan_unit_inline(markdown, unit, inline, parser)
+            slots, protected = _scan_unit_inline(
+                markdown, boundary_table, unit, inline, parser
+            )
         except _InlineTopologyError:
             unsupported.append(
                 UnsupportedRegion("unsupported_inline", start_byte, end_byte)

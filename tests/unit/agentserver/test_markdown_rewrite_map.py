@@ -718,6 +718,65 @@ def test_build_rewrite_map_returns_empty_immutable_collections_for_empty_source(
     assert rewrite_map.unsupported_regions == ()
 
 
+def test_build_and_reconstruct_construct_constant_utf8_boundary_tables(monkeypatch):
+    real_boundary_table = rewrite_map_module.Utf8BoundaryTable
+    construction_count = 0
+
+    class CountingBoundaryTable(real_boundary_table):
+        def __init__(self, text):
+            nonlocal construction_count
+            construction_count += 1
+            super().__init__(text)
+
+    monkeypatch.setattr(
+        rewrite_map_module, "Utf8BoundaryTable", CountingBoundaryTable
+    )
+    markdown = "\n\n".join(
+        f"Paragraph {index}: **growth** [source](https://example.com/{index})."
+        for index in range(400)
+    )
+
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+
+    assert len(rewrite_map.units) == 400
+    assert construction_count == 1
+
+    unchanged = {
+        slot.slot_id: slot.text
+        for unit in rewrite_map.units
+        for slot in unit.slots
+    }
+    assert rewrite_map_module.reconstruct_markdown(rewrite_map, unchanged) == markdown
+    # One for the original build, one for reconstruction validation, and one
+    # for reconstruction's integrity rebuild: all independent of unit count.
+    assert construction_count == 3
+
+
+def test_typical_multisection_report_builds_and_reconstructs_byte_identically():
+    sections = []
+    for index in range(80):
+        sections.append(
+            f"## Section {index}\n\n"
+            f"Market **growth {index}** follows "
+            f"[source](https://example.com/report/{index}) "
+            f"[[{index + 1}]](https://example.com/citation/{index}).\n\n"
+            f"- Primary finding {index}\n"
+            f"- Secondary finding {index}"
+        )
+    markdown = "\n\n".join(sections)
+
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+    unchanged = {
+        slot.slot_id: slot.text
+        for unit in rewrite_map.units
+        for slot in unit.slots
+    }
+
+    assert len(markdown) >= 12_000
+    assert rewrite_map.unsupported_regions == ()
+    assert rewrite_map_module.reconstruct_markdown(rewrite_map, unchanged) == markdown
+
+
 @pytest.mark.parametrize(
     ("class_name", "args", "attribute"),
     [
