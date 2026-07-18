@@ -769,6 +769,13 @@ def _repair_internal_heading_anchor(
     selected_unit_ids: set[str],
 ) -> tuple[str, bool]:
     child_map = build_rewrite_map(child_markdown)
+    if len(child_map.units) != len(original_map.units) or any(
+        original.unit_type != child.unit_type
+        for original, child in zip(original_map.units, child_map.units)
+    ):
+        raise RewriteError(
+            "STRUCTURE_CONFLICT", "rewrite changed Markdown unit mapping"
+        )
     selected_indexes = {
         index
         for index, unit in enumerate(original_map.units)
@@ -791,7 +798,13 @@ def _repair_internal_heading_anchor(
             continue
         old_id = _heading_id(_full_unit_visible_text(original_unit))
         new_id = _heading_id(_full_unit_visible_text(child_unit))
-        if not old_id or not new_id or old_id == new_id:
+        if not old_id or old_id == new_id:
+            continue
+        if not new_id:
+            if old_id in child_anchor_index.parsed_targets:
+                raise RewriteError(
+                    "FORMAT_CONFLICT", "linked heading ID cannot become empty"
+                )
             continue
         if (
             original_anchor_index.ambiguous

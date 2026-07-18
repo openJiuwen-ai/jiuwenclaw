@@ -977,6 +977,57 @@ def test_commit_repairs_unique_same_document_heading_anchor(tmp_path):
 @pytest.mark.parametrize(
     "body",
     [
+        "[go](#old)\n\n## old\n",
+        "[go][target]\n\n[target]: #old\n\n## old\n",
+    ],
+)
+def test_commit_rejects_empty_new_heading_slug_when_old_target_is_linked(
+    tmp_path, body
+):
+    report, _ = _write_document(tmp_path, body)
+    heading_start = body.index("## old")
+    occurrence = body[:heading_start].count("old") + 1
+    prepared = _prepare(tmp_path, report, "old", occurrence=occurrence)
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared, {slot_id: "!!!"}),
+        )
+
+    assert caught.value.code == "FORMAT_CONFLICT"
+
+
+def test_commit_maps_removed_unit_before_heading_anchor_repair(tmp_path):
+    body = "**bold**\n\n## old\n"
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(
+        tmp_path,
+        report,
+        "bold**\n\n## old",
+        visible="bold\nold",
+    )
+    replacements = {
+        slot["slot_id"]: "" if unit["type"] == "paragraph" else "new"
+        for unit in prepared["units"]
+        for slot in unit["slots"]
+    }
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared, replacements),
+        )
+
+    assert caught.value.code == "STRUCTURE_CONFLICT"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
         "[跳转](#旧标题)\n\n## 旧标题\n\n## 旧标题\n",
         "[跳转](#旧标题)\n\n## 旧标题\n\n## 新标题\n",
         "[甲](#旧标题) [乙](#旧标题)\n\n## 旧标题\n",

@@ -114,6 +114,7 @@ class DocumentAnchorIndex:
 
     headings: tuple[DocumentHeading, ...]
     links: tuple[DocumentInternalLink, ...]
+    parsed_targets: tuple[str, ...] = ()
     ambiguous: bool = False
 
 
@@ -949,7 +950,9 @@ def build_document_anchor_index(markdown: str) -> DocumentAnchorIndex:
     links = tuple(candidates[key] for key in sorted(candidates))
     if Counter(link.target for link in links) != Counter(expected_links):
         ambiguous = True
-    return DocumentAnchorIndex(tuple(headings), links, ambiguous)
+    return DocumentAnchorIndex(
+        tuple(headings), links, tuple(expected_links), ambiguous
+    )
 
 
 def structure_signature(rewrite_map: MarkdownRewriteMap) -> tuple[object, ...]:
