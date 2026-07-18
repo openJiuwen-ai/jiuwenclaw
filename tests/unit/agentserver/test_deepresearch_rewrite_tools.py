@@ -83,20 +83,26 @@ _INVOKE_LIFECYCLE_EVENTS = (
     ToolCallEvents.TOOL_CALL_FINISHED,
     ToolCallEvents.TOOL_INVOKE_OUTPUT,
 )
+_INVOKE_AUDIT_EVENTS = _INVOKE_LIFECYCLE_EVENTS + (
+    ToolCallEvents.TOOL_CALL_ERROR,
+)
 
 
 async def _invoke_with_event_probe(tool_instance, payload):
     framework = get_callback_framework()
     observed = []
     callbacks = []
-    for event in _INVOKE_LIFECYCLE_EVENTS:
+    for event in _INVOKE_AUDIT_EVENTS:
         async def capture(*_args, _event=event, **_kwargs):
             observed.append(_event)
 
         framework.register_sync(event, capture, namespace="rewrite-tool-contract-test")
         callbacks.append((event, capture))
     try:
-        result = await tool_instance.invoke(payload)
+        try:
+            result = await tool_instance.invoke(payload)
+        except Exception as exc:  # the probe asserts whether errors escape
+            result = exc
     finally:
         for event, callback in callbacks:
             await framework.unregister(event, callback)
@@ -212,6 +218,75 @@ async def test_prepare_invoke_keeps_full_lifecycle_for_valid_and_invalid_inputs(
     assert core.call_count == 1
     assert set(valid_events) == set(_INVOKE_LIFECYCLE_EVENTS)
     assert invalid_events == valid_events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_instance", "payload", "core_name", "error_code"),
+    [
+        (
+            rt.deepresearch_prepare_rewrite,
+            {
+                "report_path": "/SECRET/report.md",
+                "action": "polish",
+                "selection": _selection(),
+                "extra": "SECRET-extra",
+            },
+            "prepare_rewrite",
+            "BAD_REQUEST",
+        ),
+        (
+            rt.deepresearch_prepare_rewrite,
+            {"report_path": "/SECRET/report.md", "action": "polish"},
+            "prepare_rewrite",
+            "BAD_REQUEST",
+        ),
+        (
+            rt.deepresearch_commit_rewrite,
+            {
+                "context_token": "token",
+                "structured_result": {
+                    "units": [{
+                        "unit_id": "unit_1",
+                        "slots": [{"slot_id": "slot_1", "text": "new"}],
+                    }],
+                    "facts_added": False,
+                },
+                "extra": "SECRET-extra",
+            },
+            "commit_rewrite",
+            "MODEL_OUTPUT_INVALID",
+        ),
+        (
+            rt.deepresearch_commit_rewrite,
+            {"context_token": "SECRET-token"},
+            "commit_rewrite",
+            "MODEL_OUTPUT_INVALID",
+        ),
+    ],
+)
+async def test_top_level_parse_errors_return_safe_json_inside_lifecycle(
+    tool_instance, payload, core_name, error_code
+):
+    with patch.object(rt, core_name, side_effect=AssertionError("core called")) as core:
+        result, events = await _invoke_with_event_probe(tool_instance, payload)
+
+    assert isinstance(result, str)
+    assert json.loads(result) == {
+        "status": "error",
+        "error_code": error_code,
+        "error": "invalid tool input",
+    }
+    assert "SECRET" not in result
+    assert "/SECRET/report.md" not in result
+    core.assert_not_called()
+    assert events == [
+        ToolCallEvents.TOOL_INVOKE_INPUT,
+        ToolCallEvents.TOOL_CALL_STARTED,
+        ToolCallEvents.TOOL_PARSE_STARTED,
+        ToolCallEvents.TOOL_CALL_FINISHED,
+        ToolCallEvents.TOOL_INVOKE_OUTPUT,
+    ]
 
 
 @pytest.mark.asyncio

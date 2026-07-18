@@ -7,7 +7,8 @@ import logging
 import os
 import re
 
-from openjiuwen.core.foundation.tool import tool
+from openjiuwen.core.common.exception.errors import StatusCode, ValidationError
+from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.document_rewrite import (
     RewriteError,
@@ -100,6 +101,47 @@ _COMMIT_INPUT_SCHEMA = {
 }
 
 
+class _SafeInputLocalFunction(LocalFunction):
+    def __init__(self, *, card: ToolCard, func, input_error_code: str):
+        self._input_error_code = input_error_code
+        super().__init__(card=card, func=func)
+
+    async def invoke(self, inputs, **kwargs):
+        try:
+            return await super().invoke(inputs, **kwargs)
+        except ValidationError as exc:
+            if exc.status not in {
+                StatusCode.SCHEMA_VALIDATE_INVALID,
+                StatusCode.SCHEMA_FORMAT_INVALID,
+            }:
+                raise
+            logger.info(
+                "deepresearch tool schema input rejected: tool=%s", self.card.name
+            )
+            return json.dumps({
+                "status": "error",
+                "error_code": self._input_error_code,
+                "error": "invalid tool input",
+            })
+
+
+def _safe_input_tool(
+    *, name: str, description: str, input_params: dict, input_error_code: str
+):
+    def decorator(func):
+        return _SafeInputLocalFunction(
+            card=ToolCard(
+                name=name,
+                description=description,
+                input_params=input_params,
+            ),
+            func=func,
+            input_error_code=input_error_code,
+        )
+
+    return decorator
+
+
 def _error(exc: RewriteError) -> str:
     return json.dumps(
         {"status": "error", "error_code": exc.code, "error": str(exc)},
@@ -187,7 +229,7 @@ def _validate_commit_contract(context_token: object, structured_result: object) 
                 )
 
 
-@tool(
+@_safe_input_tool(
     name="deepresearch_prepare_rewrite",
     description=(
         "准备 DeepResearch Markdown 局部改写。必须在生成任何改写正文前调用；"
@@ -195,6 +237,7 @@ def _validate_commit_contract(context_token: object, structured_result: object) 
         "校验报告 revision、选区和引用白名单，返回一次性 context_token。"
     ),
     input_params=_PREPARE_INPUT_SCHEMA,
+    input_error_code="BAD_REQUEST",
 )
 async def deepresearch_prepare_rewrite(
     report_path: str,
@@ -261,7 +304,7 @@ async def _deliver_report(report_path: str, route: dict[str, object]) -> bool:
     return True
 
 
-@tool(
+@_safe_input_tool(
     name="deepresearch_commit_rewrite",
     description=(
         "提交 DeepResearch 局部改写结果并创建不可变 child revision。"
@@ -269,6 +312,7 @@ async def _deliver_report(report_path: str, route: dict[str, object]) -> bool:
         "禁止直接写报告文件。"
     ),
     input_params=_COMMIT_INPUT_SCHEMA,
+    input_error_code="MODEL_OUTPUT_INVALID",
 )
 async def deepresearch_commit_rewrite(
     context_token: str,
