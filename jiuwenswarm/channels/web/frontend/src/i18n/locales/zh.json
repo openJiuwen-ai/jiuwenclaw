@@ -681,6 +681,21 @@
       "saveGeneric": "保存失败，请稍后重试",
       "wechatNumericInvalid": "{{field}} 需为 {{min}}–{{max}} 之间的有效数值",
       "wechatBackoffOrder": "backoff_max_sec 不得小于 backoff_base_sec"
+    },
+    "feishuApps": {
+      "defaultAppName": "飞书默认应用",
+      "legacyDefaultAppName": "默认应用",
+      "unnamedAppName": "未命名飞书应用",
+      "appNameTemplate": "飞书应用 {{index}}",
+      "appNamePlaceholder": "应用名称",
+      "collapseConfig": "收起应用配置",
+      "expandConfig": "展开应用配置",
+      "defaultBadge": "默认",
+      "setDefault": "设为默认",
+      "setDefaultAria": "设为默认应用",
+      "appIdNotConfigured": "未配置 app_id",
+      "deleteApp": "删除应用",
+      "addApp": "添加应用"
     }
   },
   "config": {
