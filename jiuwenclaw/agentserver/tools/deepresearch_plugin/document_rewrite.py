@@ -15,6 +15,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+from markdown_it import MarkdownIt
+
+from jiuwenclaw.agentserver.tools.deepresearch_plugin.markdown_rewrite_map import (
+    MarkdownRewriteMap,
+    ProtectedAnchor,
+    RewriteSlot,
+    RewriteUnit,
+    Utf8BoundaryTable,
+    build_rewrite_map,
+    structure_signature,
+)
+
 SAFE_ID_RE = re.compile(r"^(?:doc|rev)_[A-Za-z0-9_-]{1,128}$")
 CITATION_RE = re.compile(r"\[\[(?P<index>\d+)\]\]\((?P<url>https?://[^\s)]+)\)")
 FORBIDDEN_OUTPUT_RE = re.compile(r"https?://|\]\s*:\s*\S+|#inference:", re.IGNORECASE)
@@ -43,12 +55,30 @@ class _RewriteContext:
     workspace_root: Path
     report_path: Path
     provenance: dict
-    block: RewriteBlock
-    selection_start: int
-    selection_end: int
+    parent_hash: str
+    selection_start_byte: int
+    selection_end_byte: int
+    selected_units: tuple["_SelectedUnitRange", ...]
+    structure_signature: tuple[object, ...]
+    protected_anchors: tuple[ProtectedAnchor, ...]
     action: str
     instruction: str
     allowed_citations: dict[str, dict]
+
+
+@dataclass(frozen=True, slots=True)
+class _SelectedSlotRange:
+    slot_id: str
+    start_byte: int
+    end_byte: int
+
+
+@dataclass(frozen=True, slots=True)
+class _SelectedUnitRange:
+    unit_id: str
+    start_byte: int
+    end_byte: int
+    slots: tuple[_SelectedSlotRange, ...]
 
 
 _CONTEXTS: dict[str, _RewriteContext] = {}
@@ -191,26 +221,230 @@ def _block_contains_inference(block_text: str, provenance: dict) -> bool:
     return False
 
 
+def _mapping_conflict(message: str) -> None:
+    raise RewriteError("SELECTION_MAPPING_CONFLICT", message)
+
+
+def _intersects(start: int, end: int, other_start: int, other_end: int) -> bool:
+    return start < other_end and other_start < end
+
+
+def _require_selection_protocol(selection: object) -> dict:
+    if not isinstance(selection, dict):
+        raise RewriteError(
+            "SELECTION_PROTOCOL_UNSUPPORTED", "selection protocol version 2 is required"
+        )
+    version = selection.get("protocol_version")
+    if type(version) is not int or version != 2:
+        raise RewriteError(
+            "SELECTION_PROTOCOL_UNSUPPORTED", "selection protocol version 2 is required"
+        )
+    return selection
+
+
+def _validate_selection(selection: object, markdown: str) -> tuple[int, int, str]:
+    selection = _require_selection_protocol(selection)
+    start = selection.get("start_byte")
+    end = selection.get("end_byte")
+    selected_text = selection.get("selected_text")
+    source_hash = selection.get("source_sha256")
+    if type(start) is not int or type(end) is not int or start < 0 or end <= start:
+        _mapping_conflict("selection byte range is invalid")
+    if not isinstance(selected_text, str):
+        _mapping_conflict("selected text must be a string")
+    if not isinstance(source_hash, str) or re.fullmatch(r"[a-fA-F0-9]{64}", source_hash) is None:
+        _mapping_conflict("selection source hash is invalid")
+    boundary_table = Utf8BoundaryTable(markdown)
+    try:
+        boundary_table.require_byte_boundary(start)
+        boundary_table.require_byte_boundary(end)
+    except ValueError as exc:
+        _mapping_conflict(str(exc))
+    source_bytes = markdown.encode("utf-8")
+    if end > len(source_bytes) or _sha256(source_bytes[start:end]) != source_hash.lower():
+        _mapping_conflict("selection source hash does not match the document")
+    return start, end, selected_text
+
+
+def _slot_slice(slot: RewriteSlot, start: int, end: int) -> tuple[str, int, int] | None:
+    boundaries = slot.visible_boundary_to_byte
+    selected_start = max(start, slot.start_byte)
+    selected_end = min(end, slot.end_byte)
+    if selected_start >= selected_end:
+        return None
+    try:
+        visible_start = boundaries.index(selected_start)
+        visible_end = boundaries.index(selected_end)
+    except ValueError:
+        _mapping_conflict("selection endpoint is not a visible text boundary")
+    return slot.text[visible_start:visible_end], selected_start, selected_end
+
+
+def _anchor_visible_text(anchor: ProtectedAnchor) -> str:
+    if anchor.kind == "citation":
+        match = CITATION_RE.fullmatch(anchor.source)
+        return f"[{match.group('index')}]" if match else ""
+    if anchor.kind == "hard_break":
+        return "\n"
+    if anchor.kind == "inline_code":
+        parsed = MarkdownIt("commonmark").parseInline(anchor.source)
+        children = parsed[0].children if parsed else None
+        if children and len(children) == 1 and children[0].type == "code_inline":
+            return children[0].content
+    return ""
+
+
+def _unit_visible_text(unit: RewriteUnit, start: int, end: int) -> str:
+    events: list[tuple[int, int, str]] = []
+    for slot in unit.slots:
+        sliced = _slot_slice(slot, start, end)
+        if sliced is not None:
+            text, selected_start, selected_end = sliced
+            events.append((selected_start, selected_end, text))
+    for anchor in unit.protected:
+        if _intersects(start, end, anchor.start_byte, anchor.end_byte):
+            events.append((anchor.start_byte, anchor.end_byte, _anchor_visible_text(anchor)))
+    return "".join(item[2] for item in sorted(events))
+
+
+def _full_unit_visible_text(unit: RewriteUnit) -> str:
+    return _unit_visible_text(unit, unit.start_byte, unit.end_byte)
+
+
+def _endpoint_is_visible(units: tuple[RewriteUnit, ...], endpoint: int) -> bool:
+    return any(
+        endpoint in slot.visible_boundary_to_byte
+        for unit in units
+        for slot in unit.slots
+    )
+
+
+def _selected_unit_payload(unit: RewriteUnit, start: int, end: int) -> dict:
+    slots = []
+    for slot in unit.slots:
+        sliced = _slot_slice(slot, start, end)
+        if sliced is None:
+            continue
+        text, _, _ = sliced
+        value = {
+            "slot_id": slot.slot_id,
+            "text": text,
+            "format": list(slot.formats),
+        }
+        if slot.link_id is not None:
+            value["link_id"] = slot.link_id
+        slots.append(value)
+    return {
+        "unit_id": unit.unit_id,
+        "type": unit.unit_type,
+        "level": unit.level,
+        "list_depth": unit.list_depth,
+        "list_marker": unit.list_marker,
+        "slots": slots,
+    }
+
+
+def _selected_unit_range(
+    unit: RewriteUnit, start: int, end: int
+) -> _SelectedUnitRange:
+    slots = []
+    for slot in unit.slots:
+        sliced = _slot_slice(slot, start, end)
+        if sliced is not None:
+            _, selected_start, selected_end = sliced
+            slots.append(
+                _SelectedSlotRange(slot.slot_id, selected_start, selected_end)
+            )
+    return _SelectedUnitRange(
+        unit.unit_id,
+        max(start, unit.start_byte),
+        min(end, unit.end_byte),
+        tuple(slots),
+    )
+
+
+def _selected_units(
+    rewrite_map: MarkdownRewriteMap, start: int, end: int, provenance: dict
+) -> tuple[RewriteUnit, ...]:
+    for region in rewrite_map.unsupported_regions:
+        if _intersects(start, end, region.start_byte, region.end_byte):
+            raise RewriteError("UNSUPPORTED_SELECTION", "selection crosses unsupported Markdown")
+    covered = tuple(
+        unit
+        for unit in rewrite_map.units
+        if _intersects(start, end, unit.start_byte, unit.end_byte)
+    )
+    if not covered:
+        raise RewriteError("UNSUPPORTED_SELECTION", "selection does not cover editable Markdown")
+
+    protected = tuple(anchor for unit in covered for anchor in unit.protected)
+    if any(
+        anchor.kind == "inference"
+        and _intersects(start, end, anchor.start_byte, anchor.end_byte)
+        for anchor in protected
+    ):
+        raise RewriteError(
+            "INFERENCE_REWRITE_UNSUPPORTED", "inference-linked text cannot be rewritten"
+        )
+    inference_paths = {
+        item.get("path")
+        for item in provenance.get("inference_manifest") or []
+        if isinstance(item, dict) and isinstance(item.get("path"), str) and item.get("path")
+    }
+    if any(
+        anchor.kind == "link_destination"
+        and _intersects(start, end, anchor.start_byte, anchor.end_byte)
+        and any(path in anchor.source for path in inference_paths)
+        for anchor in protected
+    ):
+        raise RewriteError(
+            "INFERENCE_REWRITE_UNSUPPORTED", "inference-linked text cannot be rewritten"
+        )
+    if any(
+        anchor.kind == "image"
+        and _intersects(start, end, anchor.start_byte, anchor.end_byte)
+        for anchor in protected
+    ):
+        raise RewriteError("UNSUPPORTED_SELECTION", "images cannot be rewritten")
+    if not _endpoint_is_visible(covered, start) or not _endpoint_is_visible(covered, end):
+        raise RewriteError(
+            "UNSUPPORTED_SELECTION", "selection endpoint is not an editable visible boundary"
+        )
+
+    indexes = [rewrite_map.units.index(unit) for unit in covered]
+    if indexes != list(range(indexes[0], indexes[-1] + 1)):
+        raise RewriteError("UNSUPPORTED_SELECTION", "selected units are not continuous")
+    for unit in covered[1:-1]:
+        if not unit.slots:
+            raise RewriteError("UNSUPPORTED_SELECTION", "middle unit is not editable")
+        editable_start = min(slot.visible_boundary_to_byte[0] for slot in unit.slots)
+        editable_end = max(slot.visible_boundary_to_byte[-1] for slot in unit.slots)
+        if start > editable_start or end < editable_end:
+            raise RewriteError("UNSUPPORTED_SELECTION", "middle unit is only partially selected")
+    list_depths = {unit.list_depth for unit in covered if unit.unit_type == "list_item"}
+    if len(list_depths) > 1:
+        raise RewriteError("UNSUPPORTED_SELECTION", "selected list items have different depths")
+    return covered
+
+
 def prepare_rewrite(
     *,
     workspace_root: str | Path,
     report_path: str | Path,
     action: str,
-    block_id: str,
-    start: int,
-    end: int,
-    selected_text: str,
+    selection: object,
     instruction: str = "",
     session_id: str,
 ) -> dict:
     root = Path(workspace_root).expanduser().resolve()
     report = Path(report_path).expanduser().resolve()
+    _require_selection_protocol(selection)
     if not _inside(report, root) or report.suffix.lower() != ".md":
         raise RewriteError("BAD_REQUEST", "report path is outside the current workspace")
     if action not in {"shorten", "expand", "polish"}:
         raise RewriteError("BAD_REQUEST", "unsupported rewrite action")
-    if not selected_text or len(selected_text) > 12_000 or len(instruction) > 2_000:
-        raise RewriteError("BAD_REQUEST", "selection or instruction size is invalid")
+    if not isinstance(instruction, str) or len(instruction) > 2_000:
+        raise RewriteError("BAD_REQUEST", "instruction size is invalid")
 
     try:
         markdown = report.read_text(encoding="utf-8")
@@ -234,22 +468,46 @@ def prepare_rewrite(
         raise RewriteError("REVISION_CONFLICT", "the report revision changed")
     final_result_citations = _load_final_result_citations(report, provenance, root)
 
-    block = next((item for item in iter_rewrite_blocks(markdown) if item.block_id == block_id), None)
-    if block is None:
-        raise RewriteError("UNSUPPORTED_SELECTION", "the selected Markdown block is unsupported")
-    if _block_contains_inference(block.text, provenance):
-        raise RewriteError("INFERENCE_REWRITE_UNSUPPORTED", "inference-linked text cannot be rewritten")
-    if not isinstance(start, int) or not isinstance(end, int) or start < 0 or end <= start or end > len(block.text):
-        raise RewriteError("REVISION_CONFLICT", "selection offsets are stale")
-    if block.text[start:end] != selected_text:
-        raise RewriteError("REVISION_CONFLICT", "selected text no longer matches the report")
+    start, end, selected_text = _validate_selection(selection, markdown)
+    if not selected_text or len(selected_text) > 12_000:
+        raise RewriteError("BAD_REQUEST", "selection size is invalid")
+    rewrite_map = build_rewrite_map(markdown)
+    covered = _selected_units(rewrite_map, start, end, provenance)
+    normalized_visible = "\n".join(
+        _unit_visible_text(unit, start, end) for unit in covered
+    ).replace("\r\n", "\n").replace("\r", "\n")
+    if normalized_visible != selected_text.replace("\r\n", "\n").replace("\r", "\n"):
+        _mapping_conflict("selected text does not match normalized Markdown visibility")
 
     _, by_key = _citation_index(final_result_citations)
     allowed: dict[str, dict] = {}
-    for match in CITATION_RE.finditer(block.text):
-        citation = by_key.get(f"{match.group('index')}\0{match.group('url')}")
-        if citation is not None:
-            allowed[str(citation.get("id"))] = citation
+    selected_anchors = tuple(
+        anchor
+        for unit in covered
+        for anchor in unit.protected
+        if _intersects(start, end, anchor.start_byte, anchor.end_byte)
+    )
+    for anchor in selected_anchors:
+        if anchor.kind != "citation":
+            continue
+        match = CITATION_RE.fullmatch(anchor.source)
+        if match is not None:
+            citation = by_key.get(f"{match.group('index')}\0{match.group('url')}")
+            if citation is not None:
+                allowed[str(citation.get("id"))] = citation
+
+    first_index = rewrite_map.units.index(covered[0])
+    last_index = rewrite_map.units.index(covered[-1])
+    previous = rewrite_map.units[first_index - 1] if first_index else None
+    next_unit = (
+        rewrite_map.units[last_index + 1]
+        if last_index + 1 < len(rewrite_map.units)
+        else None
+    )
+    unit_payloads = tuple(_selected_unit_payload(unit, start, end) for unit in covered)
+    selected_unit_ranges = tuple(
+        _selected_unit_range(unit, start, end) for unit in covered
+    )
 
     token = uuid.uuid4().hex
     context = _RewriteContext(
@@ -258,9 +516,12 @@ def prepare_rewrite(
         workspace_root=root,
         report_path=report,
         provenance=provenance,
-        block=block,
-        selection_start=start,
-        selection_end=end,
+        parent_hash=actual_hash,
+        selection_start_byte=start,
+        selection_end_byte=end,
+        selected_units=selected_unit_ranges,
+        structure_signature=structure_signature(rewrite_map),
+        protected_anchors=selected_anchors,
         action=action,
         instruction=instruction,
         allowed_citations=allowed,
@@ -271,11 +532,17 @@ def prepare_rewrite(
         "context_token": token,
         "action_category": "synonym_rewrite",
         "action": action,
-        "selected_text": selected_text,
-        "block_context": block.text,
+        "units": list(unit_payloads),
+        "readonly_context": {
+            "previous_unit": _full_unit_visible_text(previous) if previous else None,
+            "next_unit": _full_unit_visible_text(next_unit) if next_unit else None,
+        },
         "instruction": instruction,
         "allowed_source_ids": sorted(allowed),
-        "citation_evidence": [allowed[key] for key in sorted(allowed)],
+        "citation_evidence": [
+            {name: allowed[key].get(name) for name in ("id", "title", "content", "chunk", "source")}
+            for key in sorted(allowed)
+        ],
     }
 
 
@@ -352,13 +619,16 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
     with _CONTEXT_LOCK:
         document_lock = _DOCUMENT_LOCKS.setdefault(document_id, threading.Lock())
     with document_lock:
-        current = context.report_path.read_text(encoding="utf-8")
-        parent_hash = _sha256(current.encode("utf-8"))
-        if parent_hash != context.provenance.get("content_sha256"):
+        current_bytes = context.report_path.read_bytes()
+        parent_hash = _sha256(current_bytes)
+        if parent_hash != context.parent_hash:
             raise RewriteError("REVISION_CONFLICT", "the parent report changed")
-        absolute_start = context.block.start + context.selection_start
-        absolute_end = context.block.start + context.selection_end
-        child_markdown = current[:absolute_start] + replacement + current[absolute_end:]
+        child_bytes = (
+            current_bytes[: context.selection_start_byte]
+            + replacement.encode("utf-8")
+            + current_bytes[context.selection_end_byte :]
+        )
+        child_markdown = child_bytes.decode("utf-8")
         revision_id = f"rev_{uuid.uuid4().hex}"
         child_path = context.report_path.with_name(
             f"{context.report_path.stem}-rev-{revision_id[4:12]}.md"
@@ -370,7 +640,7 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
             "action": context.action,
             "parent_revision_id": context.provenance["revision_id"],
             "selection_sha256": _sha256(
-                context.block.text[context.selection_start:context.selection_end].encode("utf-8")
+                current_bytes[context.selection_start_byte : context.selection_end_byte]
             ),
             "result_sha256": _sha256(replacement.encode("utf-8")),
             "source_ids": sorted(context.allowed_citations),
