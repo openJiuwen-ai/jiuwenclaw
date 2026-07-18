@@ -114,11 +114,36 @@ class _SourceLines:
     """Translate markdown-it line maps to exact UTF-8 source byte ranges."""
 
     def __init__(self, source: str):
-        self.lines = source.splitlines(keepends=True)
+        lines = []
+        line_start = 0
+        index = 0
+        while index < len(source):
+            character = source[index]
+            if character == "\n":
+                index += 1
+                lines.append(source[line_start:index])
+                line_start = index
+            elif character == "\r":
+                index += 2 if source[index + 1 : index + 2] == "\n" else 1
+                lines.append(source[line_start:index])
+                line_start = index
+            else:
+                index += 1
+        if line_start < len(source):
+            lines.append(source[line_start:])
+        self.lines = lines
         starts = [0]
         for line in self.lines:
             starts.append(starts[-1] + len(line.encode("utf-8")))
         self.starts = tuple(starts)
+
+    @staticmethod
+    def _content(line: str) -> str:
+        if line.endswith("\r\n"):
+            return line[:-2]
+        if line.endswith(("\n", "\r")):
+            return line[:-1]
+        return line
 
     def byte_range(self, line_map: list[int] | None) -> tuple[int, int] | None:
         if (
@@ -130,7 +155,9 @@ class _SourceLines:
         ):
             return None
         start_line, end_line = line_map
-        while end_line > start_line and not self.lines[end_line - 1].rstrip("\r\n"):
+        while end_line > start_line and not self._content(
+            self.lines[end_line - 1]
+        ).strip(" \t"):
             end_line -= 1
         if end_line == start_line:
             return None
@@ -284,11 +311,25 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
 
         byte_range = source_lines.byte_range(token.map)
         if token.type == "heading_open":
-            if byte_range is None or not token.tag.startswith("h") or not token.tag[1:].isdigit():
+            close_index = _matching_close(tokens, index)
+            inline = tokens[index + 1] if index + 1 < len(tokens) else None
+            valid_shape = (
+                close_index == index + 2
+                and inline is not None
+                and inline.type == "inline"
+                and tokens[close_index].type == "heading_close"
+            )
+            if (
+                byte_range is None
+                or not valid_shape
+                or not token.tag.startswith("h")
+                or not token.tag[1:].isdigit()
+            ):
                 add_unsupported("ambiguous_heading", byte_range)
+            elif _is_image_only(inline):
+                add_unsupported("image_only", byte_range)
             else:
                 add_unit("heading", byte_range, level=int(token.tag[1:]))
-            close_index = _matching_close(tokens, index)
             index = close_index + 1 if close_index is not None else index + 1
             continue
 

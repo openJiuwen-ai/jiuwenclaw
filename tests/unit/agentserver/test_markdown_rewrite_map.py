@@ -227,12 +227,67 @@ def test_build_rewrite_map_uses_utf8_byte_offsets_after_unicode_prefix():
     ]
 
 
+def test_build_rewrite_map_keeps_unicode_line_separator_inside_paragraph_range():
+    markdown = "first\u2028second\n"
+
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+
+    unit = rewrite_map.units[0]
+    assert markdown.encode("utf-8")[unit.start_byte : unit.end_byte].decode() == (
+        "first\u2028second"
+    )
+
+
+def test_build_rewrite_map_excludes_space_tab_only_list_separator_from_item_range():
+    markdown = "- first\n \t \n- second\n"
+
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+
+    source_bytes = markdown.encode("utf-8")
+    assert [
+        source_bytes[unit.start_byte : unit.end_byte].decode()
+        for unit in rewrite_map.units
+    ] == ["- first", "- second"]
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    ["first\r\n\r\nsecond\r\n", "first\r\rsecond\r"],
+)
+def test_build_rewrite_map_maps_crlf_and_lone_cr_source_lines(markdown):
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+
+    source_bytes = markdown.encode("utf-8")
+    assert [
+        source_bytes[unit.start_byte : unit.end_byte].decode()
+        for unit in rewrite_map.units
+    ] == ["first", "second"]
+
+
 def test_build_rewrite_map_keeps_paragraph_with_inline_image_for_later_slot_validation():
     rewrite_map = rewrite_map_module.build_rewrite_map(
         "text ![a](a.png) ![b](b.png) remains text\n"
     )
 
     assert [unit.unit_type for unit in rewrite_map.units] == ["paragraph"]
+    assert rewrite_map.unsupported_regions == ()
+
+
+def test_build_rewrite_map_rejects_image_only_heading():
+    markdown = "# ![alt](x.png)\n"
+
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+
+    assert rewrite_map.units == ()
+    assert [region.kind for region in rewrite_map.unsupported_regions] == ["image_only"]
+
+
+def test_build_rewrite_map_keeps_heading_with_visible_text_and_image():
+    rewrite_map = rewrite_map_module.build_rewrite_map("# text ![alt](x.png)\n")
+
+    assert [(unit.unit_type, unit.level) for unit in rewrite_map.units] == [
+        ("heading", 1)
+    ]
     assert rewrite_map.unsupported_regions == ()
 
 
@@ -287,6 +342,29 @@ def test_build_rewrite_map_marks_unsupported_blocks_without_paragraph_fallback(
     region = rewrite_map.unsupported_regions[0]
     assert region.kind == kind
     assert markdown.encode("utf-8")[region.start_byte : region.end_byte].decode() == raw_region
+
+
+def test_build_rewrite_map_parses_sibling_after_unsupported_nested_list_item():
+    markdown = "- outer\n  - nested\n- sibling\n"
+
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+
+    assert [region.kind for region in rewrite_map.unsupported_regions] == ["nested_list"]
+    assert [(unit.unit_type, unit.list_depth, unit.list_marker) for unit in rewrite_map.units] == [
+        ("list_item", 0, "-")
+    ]
+    sibling = rewrite_map.units[0]
+    assert markdown.encode("utf-8")[sibling.start_byte : sibling.end_byte].decode() == (
+        "- sibling"
+    )
+
+
+def test_build_rewrite_map_returns_empty_immutable_collections_for_empty_source():
+    rewrite_map = rewrite_map_module.build_rewrite_map("")
+
+    assert rewrite_map.source == ""
+    assert rewrite_map.units == ()
+    assert rewrite_map.unsupported_regions == ()
 
 
 @pytest.mark.parametrize(
