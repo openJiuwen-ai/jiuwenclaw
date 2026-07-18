@@ -96,6 +96,65 @@ def _write_report_markdown(final_result: dict, file_name: str, conversation_id: 
     return str(report_path)
 
 
+def _write_report_artifacts_stream(
+    final_result: dict, file_name: str, conversation_id: str
+) -> dict[str, str]:
+    """Build and write the completed report bundle as MD + HTML.
+
+    Follows the same pattern as ``DeepResearchTaskManager._write_report_artifacts``:
+    Markdown is always written; HTML is a best-effort conversion that
+    logs a warning on failure but never blocks the primary MD delivery.
+
+    Returns:
+        dict mapping format key (``"md"``, ``"html"``) to the
+        absolute file path of the generated artifact.  ``"md"`` is always
+        present; ``"html"`` is included only when conversion succeeds.
+    """
+    from jiuwenclaw.agentserver.tools.deepresearch_plugin.conversion_utils import (
+        make_safe_filename_component,
+    )
+    from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import (
+        build_report_bundle,
+    )
+    from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+        get_effective_request_output_dir,
+    )
+
+    output_dir = get_effective_request_output_dir()
+    if not output_dir:
+        raise RuntimeError("current request output_dir is unavailable")
+
+    requested_stem = Path(file_name).stem if file_name else ""
+    fallback_stem = f"deepresearch_{conversation_id or 'report'}"
+    safe_stem = make_safe_filename_component(requested_stem, default=fallback_stem)
+    report_path_md = Path(output_dir).expanduser().resolve() / f"{safe_stem}.md"
+    report_path_md.parent.mkdir(parents=True, exist_ok=True)
+
+    # --- Markdown (always) ---
+    bundle = build_report_bundle(final_result, report_path_md.with_suffix(""))
+    report_path_md.write_text(bundle.markdown_text, encoding="utf-8")
+    artifacts: dict[str, str] = {"md": str(report_path_md)}
+
+    # --- HTML (best-effort) ---
+    report_path_html = report_path_md.with_suffix(".html")
+    try:
+        from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline import (
+            convert_md_to_html,
+        )
+
+        convert_md_to_html(str(report_path_md), str(report_path_html))
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning(
+            "Optional HTML report generation failed. output=%s error=%s",
+            report_path_html,
+            exc,
+        )
+    else:
+        artifacts["html"] = str(report_path_html)
+
+    return artifacts
+
+
 def _deepresearch_dependency_available() -> bool:
     """Return whether DeepResearch optional runtime is importable."""
     return importlib.util.find_spec(_DEEPRESEARCH_DEPENDENCY) is not None
@@ -632,8 +691,8 @@ async def deepresearch_stream(
                 has_chat_route = bool(route.get("session_id") and route.get("channel_id"))
                 if response_content and has_chat_route:
                     try:
-                        report_path = await asyncio.to_thread(
-                            _write_report_markdown,
+                        artifacts = await asyncio.to_thread(
+                            _write_report_artifacts_stream,
                             final_result,
                             file_name,
                             chunk.get("conversation_id", outcome_cid),
@@ -646,9 +705,14 @@ async def deepresearch_stream(
                             "error": str(exc),
                         }
                         break
+                    # Deliver all generated artifacts (MD + HTML)
+                    files_to_deliver = [
+                        {"path": v, "name": os.path.basename(v)}
+                        for v in artifacts.values()
+                    ]
                     report_delivered = await _send({
                         "event_type": "chat.file",
-                        "files": [{"path": report_path, "name": os.path.basename(report_path)}],
+                        "files": files_to_deliver,
                     })
                 elif not response_content:
                     outcome = {
@@ -682,8 +746,8 @@ async def deepresearch_stream(
                         "status": "error",
                         "conversation_id": chunk.get("conversation_id", outcome_cid),
                         "error_code": "report_file_delivery_failed",
-                        "error": "Markdown report file could not be delivered",
-                        "report_path": report_path,
+                        "error": "Report files could not be delivered",
+                        "report_path": artifacts.get("md", ""),
                     }
                 break
             if status == "error":
