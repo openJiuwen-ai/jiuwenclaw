@@ -2603,6 +2603,7 @@ class SkillManager:
                 continue
 
             # 设置内置技能的标记
+            meta["name"] = self._resolve_skill_name(child, md, meta)
             meta["source"] = "builtin"
             meta["is_builtin"] = True
             meta["is_builtin_source"] = True
