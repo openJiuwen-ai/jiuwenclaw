@@ -1043,7 +1043,8 @@
       "history": "Run History"
     },
     "search": {
-      "placeholder": "Search"
+      "placeholder": "Search",
+      "noResults": "No matching templates found. Try a different keyword."
     },
     "table": {
       "name": "Name",
