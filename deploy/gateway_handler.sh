@@ -214,4 +214,5 @@ uninstall_gateway() {
     if [[ "${mount_type}" == "pvc" && -z "${DEPLOY_VARS["CLAW_PVC"]:-}" ]]; then
         exec_cmd kubectl delete -f ${pvc_file}  --ignore-not-found=true
     fi
+    uninstall_secret_configmap
 }

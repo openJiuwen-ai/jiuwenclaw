@@ -49,27 +49,28 @@ gen_web_file() {
 }
 
 render_web_files() {
-    ensure_secret_configmap
+    render_secret_configmap
     ensure_available_port "WEB_NODE_PORT"
     gen_web_file
 }
 
 deploy_web() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-    local web_name="${DEPLOY_VARS["WEB_NAME"]}"
+    local name="${DEPLOY_VARS["WEB_NAME"]}"
     local file="${CONFIG["WEB_FILE"]}"
 
     ensure_secret_configmap
     exec_cmd kubectl apply -f ${file}
-    wait_k8s_resource_ready "deployment" "${web_name}" "${namespace}"
+    wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
     success "WEB_NODE_PORT: ${DEPLOY_VARS["WEB_NODE_PORT"]}"
 }
 
 uninstall_web() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-    local web_name="${DEPLOY_VARS["WEB_NAME"]}"
+    local name="${DEPLOY_VARS["WEB_NAME"]}"
     local file="${CONFIG["WEB_FILE"]}"
 
     exec_cmd kubectl delete -f ${file} --ignore-not-found=true
-    wait_pod_terminated "${web_name}" "${namespace}"
+    wait_pod_terminated "${name}" "${namespace}"
+    uninstall_secret_configmap
 }
