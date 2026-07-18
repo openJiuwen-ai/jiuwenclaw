@@ -537,7 +537,15 @@ class SkillToolkit:
             return {"success": False, "items": [], "detail": str(exc)}
 
     def get_tools(self) -> list[Tool]:
-        """Return skill-management tools for agent registration."""
+        """Return skill-management tools for agent registration.
+
+        Note: ``search_skill`` and ``install_skill`` (which search/download skills
+        from remote sources — SkillNet / ClawHub / TeamSkillsHub) are deliberately
+        NOT exposed. This environment disallows downloading skills from the network,
+        so agents cannot discover or install skills remotely; only locally
+        pre-installed skills are usable. ``uninstall_skill`` is retained so agents
+        can still remove locally installed skills.
+        """
 
         def make_tool(name: str, description: str, input_params: dict, func: Callable[..., Any]) -> Tool:
             # 统一用 LocalFunction 包装，保持与现有 toolkit 注册方式一致。
@@ -549,7 +557,10 @@ class SkillToolkit:
             )
             return LocalFunction(card=card, func=func)
 
-        return [
+        # Names blocked from exposure (network search/download of skills).
+        _blocked_remote_tool_names = {"search_skill", "install_skill"}
+
+        all_tools = [
             make_tool(
                 name="search_skill",
                 description=(
@@ -624,3 +635,4 @@ class SkillToolkit:
                 func=self.uninstall_skill,
             ),
         ]
+        return [t for t in all_tools if t.card.name not in _blocked_remote_tool_names]
