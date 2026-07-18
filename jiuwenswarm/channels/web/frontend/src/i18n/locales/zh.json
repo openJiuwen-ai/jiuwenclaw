@@ -781,6 +781,10 @@
       "proactiveMaxPerDay": "每日推荐上限",
       "proactiveMaxRounds": "每次检查对话轮数"
     },
+    "defaults": {
+      "teamLeaderDisplayName": "团队领导",
+      "teamLeaderPersona": "天才项目管理专家，擅长任务分解和团队协调"
+    },
     "keyHelp": {
       "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启",
       "skillRetrievalBuildRootCategories": "直接编辑包含 tree_root_categories 或 root_categories 的 YAML/JSON；页面会展示默认分层供参考。保存后会写入配置内容本身，而不是外部文件路径。"

@@ -781,6 +781,10 @@
       "proactiveMaxPerDay": "Daily recommendation limit",
       "proactiveMaxRounds": "Max rounds per check"
     },
+    "defaults": {
+      "teamLeaderDisplayName": "Team Leader",
+      "teamLeaderPersona": "Genius project management expert, skilled at task decomposition and team coordination"
+    },
     "keyHelp": {
       "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling",
       "skillRetrievalBuildRootCategories": "Edit YAML/JSON containing tree_root_categories or root_categories directly. The page shows the default taxonomy as a reference; saving writes the config content itself, not an external file path."

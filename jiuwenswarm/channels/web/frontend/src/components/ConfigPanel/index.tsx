@@ -2888,6 +2888,21 @@ function TeamItemSection({
     return labels[field] || field;
   };
 
+  // 内置默认 leader 的 display_name/persona 是种子文案，与当前 UI 语言无关；
+  // 未被用户改动时按当前语言展示对应译文，避免切换语言后仍显示另一语言的默认文案。
+  // 只影响展示，不改动 team.leader 里的实际值，因此不会把翻译结果回写进全局 config.yaml。
+  const LEADER_DEFAULT_TEXT_KEYS: Record<string, string> = {
+    display_name: "config.defaults.teamLeaderDisplayName",
+    persona: "config.defaults.teamLeaderPersona",
+  };
+
+  const getLeaderInputDisplayValue = (field: string, rawValue: string): string => {
+    const i18nKey = LEADER_DEFAULT_TEXT_KEYS[field];
+    if (!i18nKey) return rawValue;
+    const isUnmodifiedDefault = ["zh", "en"].some((lng) => rawValue === t(i18nKey, { lng }));
+    return isUnmodifiedDefault ? t(i18nKey) : rawValue;
+  };
+
   const getMemberFieldLabel = (field: string): string => {
     const labels: Record<string, string> = {
       member_name: t("config.keys.teamMemberName"),
@@ -3008,7 +3023,7 @@ function TeamItemSection({
                   <div className="flex-1">
                     <input
                       type="text"
-                      value={team.leader[field] ?? ""}
+                      value={getLeaderInputDisplayValue(field, team.leader[field] ?? "")}
                       onChange={(e) => updateLeader(field, e.target.value)}
                       maxLength={field === "persona" ? 2048 : 64}
                       className={`w-full rounded border bg-bg px-2 py-1 text-text text-xs ${field === "member_name" && memberNameError?.field === 'leader' ? "border-danger" : "border-border"}`}
