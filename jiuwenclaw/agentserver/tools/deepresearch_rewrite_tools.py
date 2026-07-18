@@ -20,6 +20,84 @@ from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
 
 logger = logging.getLogger(__name__)
 
+_PREPARE_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "report_path": {"type": "string"},
+        "action": {"type": "string", "enum": ["polish", "expand", "shorten"]},
+        "selection": {
+            "type": "object",
+            "properties": {
+                "protocol_version": {"type": "integer", "const": 2},
+                "start_byte": {"type": "integer", "minimum": 0},
+                "end_byte": {"type": "integer", "minimum": 0},
+                "selected_text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 12_000,
+                },
+                "source_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+            },
+            "required": [
+                "protocol_version",
+                "start_byte",
+                "end_byte",
+                "selected_text",
+                "source_sha256",
+            ],
+            "additionalProperties": False,
+        },
+        "instruction": {"type": "string", "maxLength": 2_000, "default": ""},
+    },
+    "required": ["report_path", "action", "selection"],
+    "additionalProperties": False,
+}
+
+_COMMIT_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "context_token": {"type": "string"},
+        "structured_result": {
+            "type": "object",
+            "properties": {
+                "units": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "unit_id": {"type": "string"},
+                            "slots": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "slot_id": {"type": "string"},
+                                        "text": {"type": "string"},
+                                    },
+                                    "required": ["slot_id", "text"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["unit_id", "slots"],
+                        "additionalProperties": False,
+                    },
+                },
+                "facts_added": {"type": "boolean", "const": False},
+            },
+            "required": ["units", "facts_added"],
+            "additionalProperties": False,
+        },
+    },
+    "required": ["context_token", "structured_result"],
+    "additionalProperties": False,
+}
+
 
 def _error(exc: RewriteError) -> str:
     return json.dumps(
@@ -35,6 +113,7 @@ def _error(exc: RewriteError) -> str:
         "selection 必须使用 Protocol v2，start_byte/end_byte 是绝对 UTF-8 byte 偏移；"
         "校验报告 revision、选区和引用白名单，返回一次性 context_token。"
     ),
+    input_params=_PREPARE_INPUT_SCHEMA,
 )
 async def deepresearch_prepare_rewrite(
     report_path: str,
@@ -94,6 +173,7 @@ async def _deliver_report(report_path: str, route: dict[str, object]) -> bool:
         "只能提交 deepresearch_prepare_rewrite 返回的 context_token 和结构化 units 结果，"
         "禁止直接写报告文件。"
     ),
+    input_params=_COMMIT_INPUT_SCHEMA,
 )
 async def deepresearch_commit_rewrite(
     context_token: str,
@@ -113,19 +193,23 @@ async def deepresearch_commit_rewrite(
             session_id=session_id,
             structured_result=structured_result,
         )
-        delivered = await _deliver_report(result["report_path"], route)
     except RewriteError as exc:
         logger.info("deepresearch commit rewrite rejected: code=%s", exc.code)
         return _error(exc)
+
+    try:
+        delivered = await _deliver_report(result["report_path"], route)
     except Exception:  # pylint: disable=broad-exception-caught
         logger.exception("deepresearch rewrite artifact delivery failed")
-        return json.dumps({
-            "status": "error",
-            "error_code": "WRITE_FAILED",
-            "error": "rewrite artifact delivery failed",
-        })
+        delivered = False
     return json.dumps(
-        {"status": "completed", "report_delivered": delivered, **result},
+        {
+            "status": "completed",
+            "report_delivered": delivered,
+            "delivery_status": "delivered" if delivered else "failed",
+            "delivery_error_code": None if delivered else "REPORT_DELIVERY_FAILED",
+            **result,
+        },
         ensure_ascii=False,
     )
 
