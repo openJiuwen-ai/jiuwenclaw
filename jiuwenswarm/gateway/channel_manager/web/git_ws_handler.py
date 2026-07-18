@@ -99,6 +99,8 @@ class GitDiffWebSocketHandler:
             await self._handle_diff_detail_watch(ws, req_id, params)
         elif method == "project.git.diff_unwatch":
             await self._handle_diff_unwatch(ws, req_id, params)
+        elif method == "project.git.discard_turn_changes":
+            await self._handle_discard_turn_changes(ws, req_id, params)
         else:
             await self._channel.send_response(
                 ws, req_id, ok=False,
@@ -107,17 +109,23 @@ class GitDiffWebSocketHandler:
             return
 
     @staticmethod
-    def _resolve_git_project(project_id: str):
+    def _resolve_git_project(project_id: str, *, cache_bust: bool = False):
         """校验并加载可用于 Git 操作的 code 项目。
 
         委托给共享 helper ``project_git.resolve_git_project``,
         与 ``app_web_handlers.py`` 的 Git RPC handler 共用同一校验逻辑。
 
+        Args:
+            project_id: 项目 ID
+            cache_bust: 是否绕过项目缓存。**写操作必须传 True**——项目可能刚被
+                隐藏/删除/修改 work_mode,使用旧缓存会导致对已失效项目执行写操作。
+                只读操作可保持 False 以复用缓存。
+
         Returns:
             ``(project, error_message, error_code)``: 成功时后两项为 None。
         """
         from jiuwenswarm.server.runtime.session.project_git import resolve_git_project
-        return resolve_git_project(project_id, cache_bust=False)
+        return resolve_git_project(project_id, cache_bust=cache_bust)
 
     async def _send_git_error_response(
         self, ws: Any, req_id: str, exc: Exception,
@@ -158,16 +166,12 @@ class GitDiffWebSocketHandler:
             params, "include_last_turn", default=True,
         )
 
-        watch = await self._registry.add_watch(
-            ws, project_id, session_id, scope="summary",
-            include_last_turn=include_last_turn,
-        )
-
-        from jiuwenswarm.server.runtime.session.git_diff_status import (
-            get_diff_status_service,
-        )
-        service = get_diff_status_service()
-        try:
+        async def _on_initial(watch: Any) -> dict[str, Any]:
+            """计算首次 summary 快照并发送响应;抛错由 registry 触发 remove_watch。"""
+            from jiuwenswarm.server.runtime.session.git_diff_status import (
+                get_diff_status_service,
+            )
+            service = get_diff_status_service()
             status = await asyncio.to_thread(
                 service.get_project_diff_status,
                 project=proj,
@@ -175,21 +179,22 @@ class GitDiffWebSocketHandler:
                 include_files=False,
                 include_hunks=False,
             )
-        except Exception as exc:  # noqa: BLE001
-            await self._registry.remove_watch(
-                watch.watch_id, scope="all", expected_ws=ws,
+            status_dict = status.to_dict(include_hunks=False)
+            snapshot = self._build_summary_snapshot(
+                watch.watch_id, status_dict, include_last_turn=include_last_turn,
             )
+            await self._channel.send_response(ws, req_id, ok=True, payload=snapshot)
+            return status_dict
+
+        try:
+            await self._registry.add_watch(
+                ws, project_id, session_id, scope="summary",
+                include_last_turn=include_last_turn,
+                on_initial=_on_initial,
+            )
+        except Exception as exc:  # noqa: BLE001
             await self._send_git_error_response(ws, req_id, exc)
             return
-
-        status_dict = status.to_dict(include_hunks=False)
-        # 用首次快照播种指纹，避免轮询首轮 "" → 非空 必然触发冗余 diff_changed
-        self._registry.seed_summary_fingerprint(watch.watch_id, status_dict)
-        snapshot = self._build_summary_snapshot(
-            watch.watch_id, status_dict, include_last_turn=include_last_turn,
-        )
-        await self._channel.send_response(ws, req_id, ok=True, payload=snapshot)
-        self._registry.mark_dirty(project_id, watch_id=watch.watch_id)
 
     @staticmethod
     def _parse_bool_param(
@@ -208,14 +213,19 @@ class GitDiffWebSocketHandler:
             return False
         return default
 
+    @staticmethod
     def _build_summary_snapshot(
-        self, watch_id: str, status_dict: dict[str, Any],
+        watch_id: str, status_dict: dict[str, Any],
         *, include_last_turn: bool = True,
     ) -> dict[str, Any]:
         """构造 diff_watch 首次响应 payload(设计文档 §4.2.1)。
 
         ``include_last_turn=False`` 时 ``last_turn`` 固定为 ``None``。
         """
+        from jiuwenswarm.server.runtime.session.git_diff_status import (
+            build_summary_entry,
+            build_turn_summary_entry,
+        )
         repo = status_dict.get("repo") or {}
         current = status_dict.get("current")
         last_turn = status_dict.get("last_turn") if include_last_turn else None
@@ -230,30 +240,10 @@ class GitDiffWebSocketHandler:
                     "head": repo.get("head"),
                     "transient": repo.get("transient", False),
                 },
-                "current": self._summary_entry(current) if current else None,
-                "last_turn": self._turn_summary_entry(last_turn) if last_turn else None,
+                "current": build_summary_entry(current),
+                "last_turn": build_turn_summary_entry(last_turn),
                 "revision": f"gitdiff:{int(time.time())}:init",
             },
-        }
-
-    @staticmethod
-    def _summary_entry(current: dict[str, Any]) -> dict[str, Any]:
-        """summary 事件/快照中的 current 条目(``files`` 固定 ``{}``)。"""
-        return {
-            "kind": current.get("kind", "working_tree"),
-            "is_dirty": current.get("is_dirty", False),
-            "stats": current.get("stats", {}),
-            "files": {},
-        }
-
-    @staticmethod
-    def _turn_summary_entry(last_turn: dict[str, Any]) -> dict[str, Any]:
-        """summary 事件/快照中的 last_turn 条目(``files`` 固定 ``{}``)。"""
-        return {
-            "kind": last_turn.get("kind", "conversation_turn"),
-            "turn_index": last_turn.get("turn_index", 0),
-            "stats": last_turn.get("stats", {}),
-            "files": {},
         }
 
     async def _handle_diff_files_watch(
@@ -287,25 +277,13 @@ class GitDiffWebSocketHandler:
             await self._channel.send_response(ws, req_id, ok=False, error=err, code=code)
             return
 
-        previous_files_state = await self._registry.snapshot_files_state(
-            watch_id, expected_ws=ws, expected_project_id=project_id,
-        )
-        watch = await self._registry.update_files(
-            watch_id, source, expected_ws=ws, expected_project_id=project_id,
-        )
-        if watch is None:
-            await self._channel.send_response(
-                ws, req_id, ok=False, error="watch not found", code="NOT_FOUND",
+        async def _on_snapshot(watch: Any) -> None:
+            """计算首次 files 快照并发送响应;抛错由 registry 触发回滚。"""
+            session_id = str(params.get("session_id") or "").strip() or watch.session_id
+            from jiuwenswarm.server.runtime.session.git_diff_status import (
+                get_diff_status_service,
             )
-            return
-
-        session_id = str(params.get("session_id") or "").strip() or watch.session_id
-
-        from jiuwenswarm.server.runtime.session.git_diff_status import (
-            get_diff_status_service,
-        )
-        service = get_diff_status_service()
-        try:
+            service = get_diff_status_service()
             status = await asyncio.to_thread(
                 service.get_project_diff_status,
                 project=proj,
@@ -313,30 +291,34 @@ class GitDiffWebSocketHandler:
                 include_files=True,
                 include_hunks=False,
             )
+            status_dict = status.to_dict(include_hunks=False)
+            files_dict = self._extract_files(status_dict, source) or {}
+            files_no_hunks = self._strip_hunks(files_dict)
+            payload = {
+                "watch_id": watch_id,
+                "files_scope": {"source": source},
+                "revision": f"gitdiff:{int(time.time())}:init",
+                "files": files_no_hunks,
+            }
+            await self._channel.send_response(ws, req_id, ok=True, payload=payload)
+            # seed files fingerprint + mark_dirty(Registry 内部完成)
+            self._registry.commit_initial_files(watch_id, status_dict, source)
+
+        try:
+            watch = await self._registry.update_files_with_restore(
+                watch_id, source,
+                expected_ws=ws,
+                expected_project_id=project_id,
+                on_snapshot=_on_snapshot,
+            )
         except Exception as exc:  # noqa: BLE001
-            if previous_files_state is not None:
-                await self._registry.restore_files_state(
-                    watch_id, previous_files_state, expected_ws=ws,
-                )
             await self._send_git_error_response(ws, req_id, exc)
             return
-
-        status_dict = status.to_dict(include_hunks=False)
-        files_dict = self._extract_files(status_dict, source) or {}
-
-        files_no_hunks = self._strip_hunks(files_dict)
-
-        payload = {
-            "watch_id": watch_id,
-            "files_scope": {"source": source},
-            "revision": f"gitdiff:{int(time.time())}:init",
-            "files": files_no_hunks,
-        }
-        await self._channel.send_response(ws, req_id, ok=True, payload=payload)
-        # 种子 files fingerprint,避免轮询首轮 "" → 非空 触发冗余 diff_files_changed;
-        # 之后 mark_dirty 唤醒轮询(也重建因结构性错误暂停的 poll task)
-        self._registry.seed_files_fingerprint(watch_id, status_dict, source)
-        self._registry.mark_dirty(project_id, watch_id=watch_id)
+        if watch is None:
+            await self._channel.send_response(
+                ws, req_id, ok=False, error="watch not found", code="NOT_FOUND",
+            )
+            return
 
     async def _handle_diff_detail_watch(
         self, ws: Any, req_id: str, params: dict[str, Any],
@@ -388,26 +370,13 @@ class GitDiffWebSocketHandler:
             await self._channel.send_response(ws, req_id, ok=False, error=err, code=code)
             return
 
-        previous_detail_state = await self._registry.snapshot_detail_state(
-            watch_id, expected_ws=ws, expected_project_id=project_id,
-        )
-        watch = await self._registry.update_detail(
-            watch_id, source, detail_files, expected_ws=ws,
-            expected_project_id=project_id,
-        )
-        if watch is None:
-            await self._channel.send_response(
-                ws, req_id, ok=False, error="watch not found", code="NOT_FOUND",
+        async def _on_snapshot(watch: Any) -> None:
+            """计算首次 detail 快照并发送响应;抛错由 registry 触发回滚。"""
+            session_id = str(params.get("session_id") or "").strip() or watch.session_id
+            from jiuwenswarm.server.runtime.session.git_diff_status import (
+                get_diff_status_service,
             )
-            return
-
-        session_id = str(params.get("session_id") or "").strip() or watch.session_id
-
-        from jiuwenswarm.server.runtime.session.git_diff_status import (
-            get_diff_status_service,
-        )
-        service = get_diff_status_service()
-        try:
+            service = get_diff_status_service()
             status = await asyncio.to_thread(
                 service.get_project_diff_status,
                 project=proj,
@@ -415,36 +384,42 @@ class GitDiffWebSocketHandler:
                 include_files=True,
                 include_hunks=True,
             )
+            status_dict = status.to_dict(include_hunks=True)
+            files_dict = self._extract_files(status_dict, source) or {}
+            detail_files_map: dict[str, Any] = {}
+            for path in detail_files:
+                entry = files_dict.get(path)
+                if isinstance(entry, dict):
+                    detail_files_map[path] = entry
+                else:
+                    detail_files_map[path] = None
+            payload = {
+                "watch_id": watch_id,
+                "detail_scope": {"source": source, "files": detail_files},
+                "revision": f"gitdiff:{int(time.time())}:init",
+                "files": detail_files_map,
+            }
+            await self._channel.send_response(ws, req_id, ok=True, payload=payload)
+            # seed detail fingerprint + mark_dirty(Registry 内部完成)
+            self._registry.commit_initial_detail(
+                watch_id, status_dict, source, detail_files,
+            )
+
+        try:
+            watch = await self._registry.update_detail_with_restore(
+                watch_id, source, detail_files,
+                expected_ws=ws,
+                expected_project_id=project_id,
+                on_snapshot=_on_snapshot,
+            )
         except Exception as exc:  # noqa: BLE001
-            if previous_detail_state is not None:
-                await self._registry.restore_detail_state(
-                    watch_id, previous_detail_state, expected_ws=ws,
-                )
             await self._send_git_error_response(ws, req_id, exc)
             return
-
-        status_dict = status.to_dict(include_hunks=True)
-        files_dict = self._extract_files(status_dict, source) or {}
-
-        detail_files_map: dict[str, Any] = {}
-        for path in detail_files:
-            entry = files_dict.get(path)
-            if isinstance(entry, dict):
-                detail_files_map[path] = entry
-            else:
-                detail_files_map[path] = None
-
-        payload = {
-            "watch_id": watch_id,
-            "detail_scope": {"source": source, "files": detail_files},
-            "revision": f"gitdiff:{int(time.time())}:init",
-            "files": detail_files_map,
-        }
-        await self._channel.send_response(ws, req_id, ok=True, payload=payload)
-        # 种子 detail fingerprint,避免轮询首轮 "" → 非空 触发冗余 diff_detail_changed;
-        # 之后 mark_dirty 唤醒轮询(也重建因结构性错误暂停的 poll task)
-        self._registry.seed_detail_fingerprint(watch_id, status_dict, source, detail_files)
-        self._registry.mark_dirty(project_id, watch_id=watch_id)
+        if watch is None:
+            await self._channel.send_response(
+                ws, req_id, ok=False, error="watch not found", code="NOT_FOUND",
+            )
+            return
 
     async def _handle_diff_unwatch(
         self, ws: Any, req_id: str, params: dict[str, Any],
@@ -477,18 +452,201 @@ class GitDiffWebSocketHandler:
             payload={"watch_id": watch_id, "cancelled": True, "scope": scope},
         )
 
+    async def _handle_discard_turn_changes(
+        self, ws: Any, req_id: str, params: dict[str, Any],
+    ) -> None:
+        """撤销本轮代码修改(设计文档 §4.2.5)。
+
+        将当前会话最后一轮 agent 通过工具调用产生的文件变更全部回滚到
+        该轮开始前的状态,并清理本轮的 file_ops 日志,使 git 监控的
+        current/last_turn diff 与实际工作区一致。
+
+        前置条件:
+          - project_id 指向 code 模式的 Git 项目
+          - session_id 非空
+          - 会话非忙碌(agent 未在执行)
+
+        后置效果:
+          - 本轮修改的文件被恢复到该轮开始前的内容(或删除 agent 新建的文件)
+          - **仅在所有文件恢复成功时**清理本轮 file_ops 日志;有失败项时
+            保留日志以便重试(详见下方"file_ops 截断条件")
+          - 触发 git watcher 重算,前端立即收到 diff_changed 事件
+
+        file_ops 截断条件(P1 修复):
+          ``restore_session_files`` 把单文件失败收集到 ``errors`` 不抛异常。
+          若不管 ``errors`` 一律截断 file_ops,失败文件将失去重试所需的日志。
+          故仅在 ``errors`` 为空时截断;有错误时返回 ``ok=False, partial=True``
+          并保留日志,调用方可重试。
+        """
+        project_id = str(params.get("project_id") or "").strip()
+        # 写操作:使用 cache_bust=True 避免对已隐藏/删除/变更 work_mode 的项目执行撤销
+        proj, err, code = self._resolve_git_project(project_id, cache_bust=True)
+        if proj is None:
+            await self._channel.send_response(ws, req_id, ok=False, error=err, code=code)
+            return
+
+        session_id = str(params.get("session_id") or "").strip()
+        if not session_id:
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error="session_id is required", code="BAD_REQUEST",
+            )
+            return
+
+        # 校验 session 与 project 的绑定关系:避免跨项目误撤销。
+        # 读取 session metadata 的 project_id,与请求传入的 project_id 比对。
+        # 用 get_session_metadata(enable_writeback=False):保留推断能力(存量会话
+        # 缺 project_id 时可从 project_dir 反查补全,避免误拒),但跳过异步写盘
+        # 避免读路径副作用。cache_bust=True 跳过缓存直接读盘,确保绑定校验基于
+        # 最新数据(跨进程同步场景下缓存可能 stale)。
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
+        try:
+            session_meta = await asyncio.to_thread(
+                get_session_metadata, session_id,
+                cache_bust=True, enable_writeback=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[GitWS] discard_turn_changes: failed to read session metadata "
+                "(session=%s): %s", session_id, exc,
+            )
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error=f"failed to read session metadata: {exc}",
+                code="INTERNAL_ERROR",
+            )
+            return
+
+        session_project_id = str(session_meta.get("project_id") or "").strip()
+        if not session_project_id:
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error="session has no project_id binding; cannot verify project ownership",
+                code="SESSION_NOT_BOUND",
+            )
+            return
+        if session_project_id != project_id:
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error=(
+                    f"session_id does not belong to project_id: "
+                    f"expected {project_id}, got {session_project_id}"
+                ),
+                code="PROJECT_SESSION_MISMATCH",
+            )
+            return
+
+        # 校验会话非忙碌:避免与正在执行的 agent 文件写入冲突
+        if self._channel.is_session_busy(session_id):
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error="session is busy; stop the current run before discarding changes",
+                code="SESSION_BUSY",
+            )
+            return
+
+        # 获取最后一轮 turn_index 和 timestamp
+        from jiuwenswarm.agents.harness.common.session_ops_service import (
+            get_last_turn_info,
+        )
+        last_turn = await asyncio.to_thread(
+            get_last_turn_info, session_id=session_id,
+        )
+        turn_index = last_turn["turn_index"]
+        cut_timestamp = last_turn["timestamp"]
+
+        if turn_index <= 0:
+            await self._channel.send_response(
+                ws, req_id, ok=False,
+                error="no turn to discard: session has no user messages",
+                code="NO_TURN_TO_DISCARD",
+            )
+            return
+
+        # 恢复本轮修改的文件到该轮开始前的状态
+        # 显式传入 proj.project_dir:Web/code 模式新会话的 channel_metadata 不含 cwd,
+        # 底层 _get_project_dir_from_metadata 已支持读顶层 project_dir 兜底,
+        # 但显式传入更可靠(避免依赖 metadata 读取顺序),也避免重复读盘。
+        from jiuwenswarm.agents.harness.common.session_ops_service import (
+            restore_session_files,
+        )
+        restore_result = await asyncio.to_thread(
+            restore_session_files,
+            session_id=session_id,
+            turn_index=turn_index,
+            project_dir=proj.project_dir,
+        )
+
+        # 清理本轮的 file_ops 日志,使 git 监控的 last_turn diff 与实际工作区一致。
+        # 注意 1:仅清理 session-specific file_ops;全局 file_ops 缺少 session 归属字段,
+        #   多 session 同文件场景下按路径清理会误伤其他 session 的修改,故不清理。
+        # 注意 2(P1 修复):仅在 ``restore_result.errors`` 为空时截断。
+        #   restore_session_files 把单文件失败收集到 errors 不抛异常,若一律截断
+        #   会让失败文件失去重试所需的日志。有错误时返回 partial 并保留日志。
+        # 注意 3(P1 修复):显式传入 proj.project_dir,与 restore_session_files 一致,
+        #   确保扫描到项目目录下的 session-specific file_ops。
+        restore_errors = restore_result.get("errors", []) or []
+        file_ops_truncated = False
+        if cut_timestamp > 0 and not restore_errors:
+            from jiuwenswarm.server.utils.diff_service import get_diff_service
+            diff_service = get_diff_service()
+            await asyncio.to_thread(
+                diff_service.truncate_file_ops_by_timestamp,
+                session_id, cut_timestamp,
+                project_dir=proj.project_dir,
+            )
+            file_ops_truncated = True
+
+        # 唤醒 git watcher 重算,前端立即收到 diff_changed 事件
+        try:
+            self._registry.mark_dirty(project_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[GitWS] mark_dirty failed after discard_turn_changes "
+                "(project=%s): %s", project_id, exc,
+            )
+
+        # 有文件恢复失败时返回 ok=False + partial=True,调用方可重试
+        # (file_ops 未截断,失败文件日志仍在,可再次撤销)
+        is_partial = bool(restore_errors)
+        await self._channel.send_response(
+            ws, req_id, ok=not is_partial,
+            payload={
+                "session_id": session_id,
+                "turn_index": turn_index,
+                "restored_files": restore_result.get("restored_files", []),
+                "deleted_files": restore_result.get("deleted_files", []),
+                "errors": restore_errors,
+                "file_ops_truncated": file_ops_truncated,
+                # P2: 全局 file_ops 始终不清理(缺 session_id 字段,误伤其他 session)。
+                # 显式返回 false 让调用方知晓:last_turn diff 可能残留历史全局记录,
+                # 工作区已恢复但 last_turn 与工作区可能不一致。
+                "global_file_ops_truncated": False,
+                "partial": is_partial,
+            },
+            error=(
+                f"partial failure: {len(restore_errors)} file(s) failed to restore; "
+                "file_ops not truncated, retryable"
+                if is_partial else None
+            ),
+            code="PARTIAL_RESTORE_FAILED" if is_partial else None,
+        )
+
     @staticmethod
     def _extract_files(
         status_dict: dict[str, Any], source: str,
     ) -> dict[str, Any] | None:
-        """从 status_dict 中提取指定 source 的 files 映射。"""
-        if source == "current":
-            current = status_dict.get("current")
-            return (current or {}).get("files") if current else None
-        if source == "last_turn":
-            last_turn = status_dict.get("last_turn")
-            return (last_turn or {}).get("files") if last_turn else None
-        return None
+        """从 status_dict 中提取指定 source 的 files 映射。
+
+        委托给 ``git_diff_status.extract_files_from_status`` 统一实现,
+        与 watcher 共用同一 schema 访问逻辑。
+        """
+        from jiuwenswarm.server.runtime.session.git_diff_status import (
+            extract_files_from_status,
+        )
+        return extract_files_from_status(status_dict, source)
 
     @staticmethod
     def _strip_hunks(files_dict: dict[str, Any]) -> dict[str, Any]:

@@ -543,3 +543,196 @@ class TestCrossModeCoexistence:
 
         assert resolve_cron_project_id(proj_dir, work_mode="work") == proj_work.project_id
         assert resolve_cron_project_id(proj_dir, work_mode="code") == proj_code.project_id
+
+
+# ===========================================================================
+# Project 惰性迁移:list_projects 读取时为缺/非法 work_mode 的老项目推断并写回磁盘
+# 替代原 migrate_legacy_projects_at_startup 启动迁移(Project 原无启动迁移,
+# 但 _load_cache 内的惰性迁移逻辑与 session/cron 对齐)
+# ===========================================================================
+class TestProjectLazyMigration:
+    """_load_cache 读取老项目时按需推断 work_mode 并写回磁盘。"""
+
+    @staticmethod
+    def test_legacy_project_without_work_mode_inferred_and_written_back(project_store_dir):
+        """缺 work_mode 的老项目,读取时推断为默认值 "work" 并写盘。"""
+        from jiuwenswarm.server.runtime.session.project_store import (
+            list_projects, invalidate_cache,
+        )
+
+        # 直接写磁盘:模拟老数据(缺 work_mode 字段)
+        projects_file = project_store_dir / "projects.json"
+        projects_file.write_text(
+            json.dumps({"projects": [
+                {
+                    "project_id": "p1",
+                    "name": "LegacyApp",
+                    "project_dir": "E:\\legacy",
+                    "created_at": 1000.0,
+                    "updated_at": 1000.0,
+                    # 缺 work_mode
+                }
+            ]}),
+            encoding="utf-8",
+        )
+        invalidate_cache()
+
+        projects = list_projects(cache_bust=True)
+        assert len(projects) == 1
+        assert projects[0].work_mode == "work"
+
+        # 磁盘写回 work_mode
+        disk = _read_projects(project_store_dir)
+        assert disk[0]["work_mode"] == "work"
+
+    @staticmethod
+    def test_legacy_project_with_invalid_work_mode_replaced(project_store_dir):
+        """非法 work_mode 值被推断替换为 "work"。"""
+        from jiuwenswarm.server.runtime.session.project_store import (
+            list_projects, invalidate_cache,
+        )
+
+        projects_file = project_store_dir / "projects.json"
+        projects_file.write_text(
+            json.dumps({"projects": [
+                {
+                    "project_id": "p1",
+                    "name": "BadMode",
+                    "project_dir": "E:\\bad",
+                    "created_at": 1000.0,
+                    "updated_at": 1000.0,
+                    "work_mode": "invalid_mode",  # 非法值
+                }
+            ]}),
+            encoding="utf-8",
+        )
+        invalidate_cache()
+
+        projects = list_projects(cache_bust=True)
+        assert projects[0].work_mode == "work"
+        # 磁盘写回合法值
+        assert _read_projects(project_store_dir)[0]["work_mode"] == "work"
+
+    @staticmethod
+    def test_valid_work_mode_not_overwritten(project_store_dir):
+        """已有合法 work_mode 的项目不被迁移覆盖。"""
+        from jiuwenswarm.server.runtime.session.project_store import (
+            list_projects, invalidate_cache,
+        )
+
+        projects_file = project_store_dir / "projects.json"
+        projects_file.write_text(
+            json.dumps({"projects": [
+                {
+                    "project_id": "p1",
+                    "name": "CodeApp",
+                    "project_dir": "E:\\code",
+                    "created_at": 1000.0,
+                    "updated_at": 1000.0,
+                    "work_mode": "code",  # 合法值
+                },
+                {
+                    "project_id": "p2",
+                    "name": "WorkApp",
+                    "project_dir": "E:\\work",
+                    "created_at": 1000.0,
+                    "updated_at": 1000.0,
+                    "work_mode": "work",  # 合法值
+                }
+            ]}),
+            encoding="utf-8",
+        )
+        invalidate_cache()
+
+        original_mtime = projects_file.stat().st_mtime
+        projects = list_projects(cache_bust=True)
+        by_id = {p.project_id: p for p in projects}
+
+        assert by_id["p1"].work_mode == "code"
+        assert by_id["p2"].work_mode == "work"
+
+        # 文件未被改写(所有 work_mode 都合法,无需写回)
+        assert projects_file.stat().st_mtime == original_mtime
+
+    @staticmethod
+    def test_mixed_legacy_and_valid_projects(project_store_dir):
+        """混合场景:老项目迁移、新项目不动,只写回有变更的部分。"""
+        from jiuwenswarm.server.runtime.session.project_store import (
+            list_projects, invalidate_cache,
+        )
+
+        projects_file = project_store_dir / "projects.json"
+        projects_file.write_text(
+            json.dumps({"projects": [
+                {
+                    "project_id": "p1",
+                    "name": "Legacy",
+                    "project_dir": "E:\\legacy",
+                    "created_at": 1000.0,
+                    "updated_at": 1000.0,
+                    # 缺 work_mode
+                },
+                {
+                    "project_id": "p2",
+                    "name": "CodeApp",
+                    "project_dir": "E:\\code",
+                    "created_at": 1000.0,
+                    "updated_at": 1000.0,
+                    "work_mode": "code",  # 合法
+                },
+                {
+                    "project_id": "p3",
+                    "name": "Invalid",
+                    "project_dir": "E:\\invalid",
+                    "created_at": 1000.0,
+                    "updated_at": 1000.0,
+                    "work_mode": "bad",  # 非法
+                }
+            ]}),
+            encoding="utf-8",
+        )
+        invalidate_cache()
+
+        projects = list_projects(cache_bust=True)
+        by_id = {p.project_id: p for p in projects}
+
+        assert by_id["p1"].work_mode == "work"  # 缺失 → 默认 work
+        assert by_id["p2"].work_mode == "code"  # 合法,不动
+        assert by_id["p3"].work_mode == "work"  # 非法 → 替换为 work
+
+        # 磁盘写回 p1 和 p3 的 work_mode
+        disk = {p["project_id"]: p for p in _read_projects(project_store_dir)}
+        assert disk["p1"]["work_mode"] == "work"
+        assert disk["p2"]["work_mode"] == "code"
+        assert disk["p3"]["work_mode"] == "work"
+
+    @staticmethod
+    def test_uppercase_work_mode_normalized_on_read(project_store_dir):
+        """大写 work_mode 值在读取时被 from_dict 规范化为小写。
+
+        注:大写值 strip().lower() 已是合法值,_load_cache 惰性迁移不触发写回
+        (语义已合法,仅大小写不规范,运行期 normalize 已覆盖)。
+        """
+        from jiuwenswarm.server.runtime.session.project_store import (
+            list_projects, invalidate_cache,
+        )
+
+        projects_file = project_store_dir / "projects.json"
+        projects_file.write_text(
+            json.dumps({"projects": [
+                {
+                    "project_id": "p1",
+                    "name": "UpperCase",
+                    "project_dir": "E:\\upper",
+                    "created_at": 1000.0,
+                    "updated_at": 1000.0,
+                    "work_mode": "CODE",  # 大写,strip().lower() 后合法
+                }
+            ]}),
+            encoding="utf-8",
+        )
+        invalidate_cache()
+
+        projects = list_projects(cache_bust=True)
+        # from_dict 已规范化为小写
+        assert projects[0].work_mode == "code"

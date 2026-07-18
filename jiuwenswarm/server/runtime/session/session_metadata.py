@@ -53,6 +53,196 @@ def _has_valid_work_mode(value: Any) -> bool:
     return isinstance(value, str) and value.strip().lower() in SUPPORTED_WORK_MODES
 
 
+# ── 惰性迁移:读取时推断缺失字段并回写磁盘 ──────────────────────────────────
+# 替代启动迁移 ``migrate_legacy_session_metadata_at_startup``:
+#   - 单条读取 ``get_session_metadata`` 与批量读取 ``get_all_sessions_metadata`` /
+#     ``collect_all_sessions_metadata`` 在读到老会话缺字段时按需推断并落盘。
+#   - 批量入口构建一次 project 映射复用,避免 N+1 扫描 project_store。
+#   - 仅写盘"确定性推断"结果;无法消歧的会话仍由运行期兜底返回稳定 schema,
+#     不写盘(避免错误推断被持久化)。
+
+
+def _build_project_lookup() -> tuple[
+    dict[str, list[tuple[str, str]]], dict[str, str]
+]:
+    """构建 project 查找映射供 work_mode / project_id 推断使用。
+
+    Returns:
+        ``(dir_to_projects, id_to_work_mode)``:
+        - ``dir_to_projects``: 规范化 ``project_dir`` →
+          ``[(project_id, work_mode), ...]``,仅含 project_dir 非空的可见项目。
+        - ``id_to_work_mode``: ``project_id`` → ``work_mode``,
+          含所有项目(含隐藏/无 project_dir),用于 metadata 已有 project_id 时直接命中。
+
+    任何异常降级为空映射,读取兜底仍能保证前端拿到稳定 schema。
+    """
+    try:
+        from jiuwenswarm.server.runtime.session.project_store import (
+            list_projects,
+            _normalize_path_for_match,
+        )
+        dir_to_projects: dict[str, list[tuple[str, str]]] = {}
+        id_to_work_mode: dict[str, str] = {}
+        for p in list_projects(include_hidden=True, cache_bust=True):
+            if p.project_id:
+                id_to_work_mode[p.project_id] = p.work_mode
+            if not p.project_dir or p.hidden:
+                continue
+            dir_to_projects.setdefault(
+                _normalize_path_for_match(p.project_dir), []
+            ).append((p.project_id, p.work_mode))
+        return dir_to_projects, id_to_work_mode
+    except Exception:
+        return {}, {}
+
+
+def _apply_metadata_defaults_with_inference(
+    session_id: str,
+    metadata: dict[str, Any],
+    session_dir: Path | None = None,
+    *,
+    dir_to_projects: dict[str, list[tuple[str, str]]] | None = None,
+    id_to_work_mode: dict[str, str] | None = None,
+    enable_writeback: bool = True,
+) -> dict[str, Any]:
+    """统一兜底 + 推断缺失字段,并在确定性推断时异步写盘。
+
+    三处读取入口(``get_session_metadata`` / ``get_all_sessions_metadata`` /
+    ``collect_all_sessions_metadata``)共用本函数,消除兜底不一致。
+
+    推断与写盘策略:
+      - 常量默认字段(``project_dir``/``model``/``cron_id``/``pinned`` 等):
+        ``setdefault`` 补默认值,不触发写盘(这些字段前端读到默认值即可,
+        无需持久化)。
+      - ``work_mode``: 缺失/非法时尝试双模式消歧推断(§5.3.4.1):
+        - 确定性推断成功(同路径唯一 Project / 同路径双模式按 channel_id 消歧 /
+          metadata 已有 project_id 命中真实 Project)→ 写盘持久化,避免后续重复推断。
+        - 无法消歧(无 project_dir / 无 Project 命中 / 双模式且 channel_id 为空)
+          → 按通道推断默认值兜底,不写盘。
+      - ``project_id``: 缺失且能按 work_mode 反查到唯一真实 Project → 回填并写盘。
+      - ``last_user_message_at``: 缺失时多级回退(``last_message_at`` →
+        ``created_at`` → 目录 mtime),写盘持久化(否则老会话排序错乱)。
+
+    Args:
+        session_id: 会话 ID。
+        metadata: 读取到的 metadata dict(可能缺字段)。原地修改并返回。
+        session_dir: 会话目录 Path,用于 ``last_user_message_at`` 回退到 mtime。
+        dir_to_projects: 批量入口预构建的 project_dir → projects 映射;
+            ``None`` 时本函数自行构建(单条读取场景)。
+        id_to_work_mode: 批量入口预构建的 project_id → work_mode 映射;
+            ``None`` 时与 ``dir_to_projects`` 一起自行构建。
+        enable_writeback: 是否允许写盘。批量入口在循环中调用时传 ``True``,
+            但写盘走异步队列,不会阻塞读路径。
+
+    Returns:
+        原地修改后的 ``metadata`` dict(保证所有字段齐全且 ``work_mode`` 合法)。
+    """
+    if not isinstance(metadata, dict) or not metadata:
+        return metadata
+
+    # 标题清理(原三处入口都有,统一到此处)
+    if metadata.get("title"):
+        sanitized = _sanitize_title(metadata["title"])
+        if sanitized != metadata["title"]:
+            metadata["title"] = sanitized
+
+    # 常量默认字段:不触发写盘
+    metadata.setdefault("project_dir", "")
+    metadata.setdefault("project_id", "")
+    metadata.setdefault("model", "")
+    metadata.setdefault("cron_id", "")
+    metadata.setdefault("pinned", False)
+    metadata.setdefault("pin_order", 0)
+    metadata.setdefault("status", "idle")
+
+    changed = False  # 是否有需要写盘的确定性推断
+
+    # last_user_message_at: 多级回退
+    # 优先用已有时间字段;不能用 ``or`` 短路——合法的 0.0 时间戳是 falsy。
+    if "last_user_message_at" not in metadata:
+        fallback = metadata.get("last_message_at")
+        if fallback is None:
+            fallback = metadata.get("created_at")
+        if fallback is None and session_dir is not None:
+            try:
+                fallback = session_dir.stat().st_mtime
+            except OSError:
+                fallback = None
+        try:
+            metadata["last_user_message_at"] = (
+                float(fallback) if fallback is not None else 0.0
+            )
+        except (TypeError, ValueError):
+            if session_dir is not None:
+                try:
+                    metadata["last_user_message_at"] = session_dir.stat().st_mtime
+                except OSError:
+                    metadata["last_user_message_at"] = 0.0
+            else:
+                metadata["last_user_message_at"] = 0.0
+        changed = True
+
+    # work_mode: 先按通道推断兜底(保证返回值稳定),再尝试确定性推断写盘
+    existing_wm = metadata.get("work_mode")
+    if _has_valid_work_mode(existing_wm):
+        metadata["work_mode"] = existing_wm.strip().lower()  # type: ignore[union-attr]
+    else:
+        # 兜底:按 channel_id 推断默认值,确保前端拿到稳定 schema
+        metadata["work_mode"] = default_work_mode_for_channel(metadata.get("channel_id"))
+        # 尝试确定性推断,成功则写盘持久化
+        if dir_to_projects is None or id_to_work_mode is None:
+            dir_to_projects, id_to_work_mode = _build_project_lookup()
+        resolved_wm = _resolve_legacy_work_mode(
+            metadata, dir_to_projects, id_to_work_mode
+        )
+        if resolved_wm is not None:
+            metadata["work_mode"] = resolved_wm
+            changed = True
+
+    # project_id: 缺失时尝试按 work_mode 反查唯一真实 Project
+    if not str(metadata.get("project_id") or "").strip():
+        if dir_to_projects is None or id_to_work_mode is None:
+            dir_to_projects, id_to_work_mode = _build_project_lookup()
+        pp = _normalize_path_for_match_safe(str(metadata.get("project_dir") or ""))
+        if pp and pp in dir_to_projects:
+            candidates = dir_to_projects[pp]
+            if len(candidates) == 1:
+                metadata["project_id"] = candidates[0][0]
+                changed = True
+            else:
+                # 同路径双模式:按已确定的 work_mode 选对应 project_id
+                known_wm = metadata["work_mode"]
+                for pid, pwm in candidates:
+                    if pwm == known_wm:
+                        metadata["project_id"] = pid
+                        changed = True
+                        break
+
+    # 确定性推断成功时异步写盘(不阻塞读路径)
+    if changed and enable_writeback:
+        try:
+            _enqueue_write(session_id, metadata, preserve_pin_fields=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("惰性迁移写回会话 %s 失败: %s", session_id, exc)
+
+    return metadata
+
+
+def _normalize_path_for_match_safe(path: str) -> str:
+    """规范化路径用于跨平台匹配(容忍尾部分隔符/大小写差异)。
+
+    与 :func:`project_store._normalize_path_for_match` 保持一致;
+    导入失败时退化为原始字符串(仅影响 project_id 反查准确性,不影响读路径)。
+    """
+    try:
+        from jiuwenswarm.server.runtime.session.project_store import (
+            _normalize_path_for_match,
+        )
+        return _normalize_path_for_match(path)
+    except Exception:
+        return str(path or "")
+
+
 def _sanitize_title(title: str) -> str:
     """清理标题中的系统注入 XML 标签。
 
@@ -618,35 +808,33 @@ def sync_session_request_metadata(
     return effective_project_dir
 
 
-def get_session_metadata(session_id: str, cache_bust: bool = False) -> dict[str, Any]:
+def get_session_metadata(
+    session_id: str,
+    cache_bust: bool = False,
+    *,
+    enable_writeback: bool = True,
+) -> dict[str, Any]:
     """获取会话元数据
 
     Args:
         session_id: 会话 ID
         cache_bust: 强制跳过缓存，直接从磁盘读取（用于跨进程同步场景）
+        enable_writeback: 是否允许推断后异步写盘持久化。默认 ``True`` 保持
+            原行为;只读校验场景(如 ``discard_turn_changes`` 的绑定校验)应传
+            ``False``,避免读路径触发写盘副作用,同时仍享受推断能力(存量会话
+            缺 ``project_id`` 时可从 ``project_dir`` 反查补全,避免误拒)。
     """
     metadata = _read_metadata(session_id, cache_bust)
     if isinstance(metadata, dict) and metadata:
-        # 清理已有会话中可能被误写入的系统注入标签标题（<system-reminder>、<file-content> 等）
-        if metadata.get("title"):
-            sanitized = _sanitize_title(metadata["title"])
-            if sanitized != metadata["title"]:
-                metadata["title"] = sanitized
-        # 兜底：存量会话补默认值，前端永远能拿到稳定 schema
-        metadata.setdefault("project_dir", "")
-        metadata.setdefault("project_id", "")
-        metadata.setdefault("model", "")
-        metadata.setdefault("cron_id", "")
-        metadata.setdefault("last_user_message_at", metadata.get("created_at", 0.0))
-        metadata.setdefault("pinned", False)
-        metadata.setdefault("pin_order", 0)
-        metadata.setdefault("status", "idle")
-        # work_mode：旧数据缺失时按 channel_id 推断默认值兜底
-        existing_wm = metadata.get("work_mode")
-        if not (isinstance(existing_wm, str) and existing_wm.strip()):
-            metadata["work_mode"] = default_work_mode_for_channel(metadata.get("channel_id"))
-        else:
-            metadata["work_mode"] = normalize_work_mode(existing_wm)
+        # 统一兜底 + 惰性迁移:缺失字段补默认值,可推断字段(work_mode/project_id/
+        # last_user_message_at)做确定性推断并(可选)异步写盘。无法消歧的会话仍
+        # 按通道推断默认值兜底返回,不写盘。
+        metadata = _apply_metadata_defaults_with_inference(
+            session_id,
+            metadata,
+            session_dir=get_agent_sessions_dir() / session_id,
+            enable_writeback=enable_writeback,
+        )
     return metadata
 
 
@@ -895,186 +1083,6 @@ def remove_team_mode_session_dirs_at_startup() -> None:
         logger.info("启动清理: 已删除 %d 个 team 模式会话目录", removed)
 
 
-def migrate_legacy_session_metadata_at_startup() -> None:
-    """AgentServer 启动时给老会话的 metadata.json 补全新字段并写回磁盘。
-
-    升级后新增了 project_dir / model / last_user_message_at / status / cron_id / work_mode
-    六个字段，老会话的 metadata.json 缺这些字段。本函数在启动时遍历所有会话目录，
-    按字段语义补默认值并落盘，保证磁盘上 schema 统一、前端永远拿到稳定结构。
-
-    各字段兜底值来源：
-      - project_id：优先按 project_dir 从 project_store 解析;无法匹配则 ""
-      - project_dir / model / status / cron_id：常量默认（""/""/"idle"/""），老会话本就没存过
-      - last_user_message_at：从已有时间字段推算 ——
-        last_message_at（agent 最后输出时间）→ created_at（创建时间）→ 目录 mtime
-        不能给常量 0.0，否则老会话排序/时间显示错乱
-      - work_mode：按 §5.3.4.1 同路径双模式消歧规则推断 ——
-        1. metadata 已有合法 work_mode → 直接保留
-        2. metadata 已有 project_id 命中真实可见 Project → 继承该 Project 的 work_mode
-        3. channel_id=="tui" → 优先匹配 work_mode="code" 的同路径 Project
-        4. channel_id=="web" 或其他 → 优先匹配 work_mode="work" 的同路径 Project
-        5. 同路径只有一个 Project → 直接使用
-        6. 无法消歧（无 Project 命中、或同路径双模式且 channel_id 无法消歧）→
-           保守跳过，交由运行期 get_session_metadata() 兜底（按 channel_id 推断）
-    """
-    sessions_dir = get_agent_sessions_dir()
-    if not sessions_dir.is_dir():
-        return
-
-    # 构建 project_dir → [(project_id, work_mode), ...] 映射，支持同路径双模式消歧。
-    # key 用 _normalize_path_for_match 规范化（normcase+normpath），与 project_store
-    # 的路径匹配口径一致，容忍尾部分隔符/大小写差异。
-    # 路径消歧候选池只含可见项目（§5.3.4.1 按"可见 Project"消歧）;
-    # id_to_work_mode 保留全部项目——metadata 已有 project_id 直接命中时,
-    # 即使项目已隐藏,继承其 work_mode 仍是最准确的归属。
-    try:
-        from jiuwenswarm.server.runtime.session.project_store import (
-            list_projects,
-            _normalize_path_for_match,
-        )
-        dir_to_projects: dict[str, list[tuple[str, str]]] = {}
-        id_to_work_mode: dict[str, str] = {}
-        for p in list_projects(include_hidden=True, cache_bust=True):
-            if p.project_id:
-                id_to_work_mode[p.project_id] = p.work_mode
-            if not p.project_dir or p.hidden:
-                continue
-            dir_to_projects.setdefault(
-                _normalize_path_for_match(p.project_dir), []
-            ).append((p.project_id, p.work_mode))
-    except Exception:
-        dir_to_projects = {}
-        id_to_work_mode = {}
-
-        def _normalize_path_for_match(path: str) -> str:  # type: ignore[misc]
-            return str(path or "")
-
-    migrated = 0
-    for session_dir in sessions_dir.iterdir():
-        if not session_dir.is_dir():
-            continue
-        if session_dir.name.startswith(_HEARTBEAT_SESSION_PREFIX):
-            continue
-        meta_path = session_dir / "metadata.json"
-        if not meta_path.is_file():
-            continue
-        try:
-            raw = json.loads(meta_path.read_text(encoding="utf-8") or "{}")
-        except (OSError, ValueError) as exc:
-            # OSError：并发删除/权限致 read_text 失败；ValueError：JSONDecodeError/UnicodeDecodeError
-            logger.warning("启动迁移跳过会话 %s: 读取 metadata.json 失败: %s", session_dir.name, exc)
-            continue
-        if not isinstance(raw, dict):
-            continue
-
-        changed = False
-        # project_dir / model：常量默认
-        if "project_dir" not in raw:
-            raw["project_dir"] = ""
-            changed = True
-        # project_id: 补默认值;若为空且有 project_dir,按路径解析到实际 project_id
-        # （此处只解析 project_id，work_mode 在下面单独处理以支持双模式消歧）
-        if not str(raw.get("project_id") or "").strip():
-            pp = _normalize_path_for_match(str(raw.get("project_dir") or ""))
-            if pp and pp in dir_to_projects:
-                candidates = dir_to_projects[pp]
-                if len(candidates) == 1:
-                    resolved = candidates[0][0]
-                else:
-                    # 同路径多模式：暂不在此处消歧（work_mode 分支会处理），
-                    # 先留空，由 work_mode 分支推断后回填
-                    resolved = ""
-            else:
-                resolved = ""
-            if raw.get("project_id") != resolved:
-                raw["project_id"] = resolved
-                changed = True
-        if "model" not in raw:
-            raw["model"] = ""
-            changed = True
-        if "status" not in raw:
-            raw["status"] = "idle"
-            changed = True
-        # cron_id：定时任务会话来源标记，老会话本就不是 cron 创建，补空字符串
-        if "cron_id" not in raw:
-            raw["cron_id"] = ""
-            changed = True
-        # last_user_message_at：从已有时间字段推算，保证语义合理
-        if "last_user_message_at" not in raw:
-            # 优先用已有时间字段；不能用 ``or`` 短路——合法的 0.0 时间戳是 falsy
-            # 会被跳过。显式 None 判定后回退到目录 mtime（OSError 时 0.0 兜底）。
-            fallback = raw.get("last_message_at")
-            if fallback is None:
-                fallback = raw.get("created_at")
-            if fallback is None:
-                fallback = session_dir.stat().st_mtime
-            try:
-                raw["last_user_message_at"] = float(fallback) if fallback is not None else 0.0
-            except (TypeError, ValueError):
-                raw["last_user_message_at"] = session_dir.stat().st_mtime
-            changed = True
-
-        # work_mode：按 §5.3.4.1 同路径双模式消歧规则推断
-        # 仅当磁盘缺 work_mode 或值为非法时才补全（不覆盖已有合法值）
-        existing_wm = raw.get("work_mode")
-        wm_already_valid = isinstance(existing_wm, str) and existing_wm.strip() in {"code", "work"}
-        if not wm_already_valid:
-            resolved_wm = _resolve_legacy_work_mode(raw, dir_to_projects, id_to_work_mode)
-            if resolved_wm is not None:
-                raw["work_mode"] = resolved_wm
-                changed = True
-                # 若 project_id 仍为空且同路径唯一 Project，回填 project_id
-                # （与 work_mode 保持归属一致）
-                if not str(raw.get("project_id") or "").strip():
-                    pp = _normalize_path_for_match(str(raw.get("project_dir") or ""))
-                    if pp and pp in dir_to_projects:
-                        candidates = dir_to_projects[pp]
-                        if len(candidates) == 1:
-                            raw["project_id"] = candidates[0][0]
-                        else:
-                            # 双模式：按已解析的 work_mode 选对应 project_id
-                            for pid, pwm in candidates:
-                                if pwm == resolved_wm:
-                                    raw["project_id"] = pid
-                                    break
-            # else: 无法消歧，保守跳过，交由运行期 get_session_metadata() 兜底
-        else:
-            # work_mode 已合法：若 project_id 仍为空且路径对应双模式项目，
-            # 按已有 work_mode 回填匹配的 project_id
-            if not str(raw.get("project_id") or "").strip():
-                pp = _normalize_path_for_match(str(raw.get("project_dir") or ""))
-                if pp and pp in dir_to_projects:
-                    candidates = dir_to_projects[pp]
-                    if len(candidates) == 1:
-                        raw["project_id"] = candidates[0][0]
-                        changed = True
-                    else:
-                        known_wm = existing_wm.strip()
-                        for pid, pwm in candidates:
-                            if pwm == known_wm:
-                                raw["project_id"] = pid
-                                changed = True
-                                break
-
-        if changed:
-            try:
-                with _FILE_LOCK:
-                    meta_path.write_text(
-                        json.dumps(raw, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
-                # 同步更新内存缓存，避免读到旧值
-                with _CACHE_LOCK:
-                    _METADATA_CACHE[session_dir.name] = raw.copy()
-                migrated += 1
-            except (OSError, ValueError, TypeError) as exc:
-                # OSError：写盘失败；ValueError/TypeError：json.dumps 序列化失败
-                logger.warning("启动迁移写回会话 %s 失败: %s", session_dir.name, exc)
-
-    if migrated:
-        logger.info("启动迁移: 已补全 %d 个老会话的 metadata 字段", migrated)
-
-
 def _resolve_legacy_work_mode(
     raw: dict[str, Any],
     dir_to_projects: dict[str, list[tuple[str, str]]],
@@ -1154,6 +1162,8 @@ def get_all_sessions_metadata(
         return [], 0
 
     sessions = []
+    # 批量入口构建一次 project 映射,所有会话共用,避免 N+1 扫描 project_store。
+    dir_to_projects, id_to_work_mode = _build_project_lookup()
     for session_dir in sessions_dir.iterdir():
         if not session_dir.is_dir():
             continue
@@ -1165,7 +1175,8 @@ def get_all_sessions_metadata(
 
         if not metadata:
             # 没有 metadata.json 的旧会话: 只构造最小信息,不读取 history.json
-            # (避免大量旧会话导致接口变慢,完整推断由启动迁移负责)
+            # (避免大量旧会话导致接口变慢);字段补全由 _apply_metadata_defaults_with_inference 负责。
+            # 这里不写盘(无 metadata.json 的会话通常是异常残留,写回可能掩盖上游问题)。
             metadata = {
                 "session_id": session_id,
                 "channel_id": "",
@@ -1180,22 +1191,28 @@ def get_all_sessions_metadata(
                 "cron_id": "",
                 "work_mode": DEFAULT_WEB_WORK_MODE,
             }
+            # 无 metadata.json 的会话不做推断写盘,仅补默认值
+            metadata = _apply_metadata_defaults_with_inference(
+                session_id,
+                metadata,
+                session_dir=session_dir,
+                dir_to_projects=dir_to_projects,
+                id_to_work_mode=id_to_work_mode,
+                enable_writeback=False,
+            )
+        else:
+            # 批量入口不写盘:避免首次 session.list 触发大量异步写入导致队列满退化为同步写。
+            # 缺失字段会在后续单条 get_session_metadata 读取时按需写回(真正的惰性迁移)。
+            metadata = _apply_metadata_defaults_with_inference(
+                session_id,
+                metadata,
+                session_dir=session_dir,
+                dir_to_projects=dir_to_projects,
+                id_to_work_mode=id_to_work_mode,
+                enable_writeback=False,
+            )
 
         sessions.append(metadata)
-
-    # 清理已有会话中可能被误写入的系统注入标签标题（<system-reminder>、<file-content> 等）
-    for s in sessions:
-        if s.get("title"):
-            sanitized = _sanitize_title(s["title"])
-            if sanitized != s["title"]:
-                s["title"] = sanitized
-        s.setdefault("cron_id", "")
-        # work_mode：旧数据兜底，按 channel_id 推断
-        existing_wm = s.get("work_mode")
-        if not (isinstance(existing_wm, str) and existing_wm.strip()):
-            s["work_mode"] = default_work_mode_for_channel(s.get("channel_id"))
-        else:
-            s["work_mode"] = normalize_work_mode(existing_wm)
 
     # 按最后消息时间倒序排序
     sessions.sort(key=lambda x: x.get("last_message_at", 0), reverse=True)
@@ -1216,6 +1233,8 @@ def collect_all_sessions_metadata() -> list[dict[str, Any]]:
     if not sessions_dir.is_dir():
         return []
     result: list[dict[str, Any]] = []
+    # 批量入口构建一次 project 映射,所有会话共用,避免 N+1 扫描 project_store。
+    dir_to_projects, id_to_work_mode = _build_project_lookup()
     for session_dir in sessions_dir.iterdir():
         if not session_dir.is_dir():
             continue
@@ -1224,7 +1243,8 @@ def collect_all_sessions_metadata() -> list[dict[str, Any]]:
             continue
         meta = _read_metadata(sid, cache_bust=True)
         if not meta:
-            # 旧会话无 metadata.json: 构造最小兜底,归入默认项目
+            # 旧会话无 metadata.json: 构造最小兜底,归入默认项目。
+            # 不做推断写盘(无 metadata.json 通常是异常残留)。
             try:
                 st = session_dir.stat()
             except OSError:
@@ -1243,27 +1263,24 @@ def collect_all_sessions_metadata() -> list[dict[str, Any]]:
                 "created_at": st.st_ctime,
                 "work_mode": DEFAULT_WEB_WORK_MODE,
             }
+            meta = _apply_metadata_defaults_with_inference(
+                sid,
+                meta,
+                session_dir=session_dir,
+                dir_to_projects=dir_to_projects,
+                id_to_work_mode=id_to_work_mode,
+                enable_writeback=False,
+            )
         else:
-            # 兜底默认值,保证新增字段齐全(存量会话无需迁移)
-            meta.setdefault("project_id", "")
-            meta.setdefault("project_dir", "")
-            meta.setdefault("cron_id", "")
-            meta.setdefault("pinned", False)
-            meta.setdefault("pin_order", 0)
-            meta.setdefault("last_user_message_at", meta.get("created_at", 0.0))
-            # work_mode：旧数据缺失时按 channel_id 推断默认值兜底
-            existing_wm = meta.get("work_mode")
-            if not (isinstance(existing_wm, str) and existing_wm.strip()):
-                meta["work_mode"] = default_work_mode_for_channel(meta.get("channel_id"))
-            else:
-                meta["work_mode"] = normalize_work_mode(existing_wm)
+            # 批量入口不写盘:避免首次 collect 触发大量异步写入导致队列满退化为同步写。
+            # 缺失字段会在后续单条 get_session_metadata 读取时按需写回(真正的惰性迁移)。
+            meta = _apply_metadata_defaults_with_inference(
+                sid,
+                meta,
+                session_dir=session_dir,
+                dir_to_projects=dir_to_projects,
+                id_to_work_mode=id_to_work_mode,
+                enable_writeback=False,
+            )
         result.append(meta)
-
-    # 对齐 get_all_sessions_metadata: 清理存量会话标题中残留的系统注入 XML 标签
-    # (如 <system-reminder>、<file-content>),避免通过项目接口返给前端
-    for s in result:
-        if s.get("title"):
-            sanitized = _sanitize_title(s["title"])
-            if sanitized != s["title"]:
-                s["title"] = sanitized
     return result

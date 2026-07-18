@@ -1792,17 +1792,19 @@ class TestSessionGetMetadataHandler:
 
 
 # ===========================================================================
-# migrate_legacy_session_metadata_at_startup
-# 覆盖 P2：stat() OSError 不得中断迁移；or 短路不得跳过合法 0.0 时间戳
+# 惰性迁移: 读取老会话时按需推断缺失字段并写回磁盘
+# 覆盖 P2：stat() OSError 不得中断读取；or 短路不得跳过合法 0.0 时间戳
 # ===========================================================================
-class TestMigrateLegacySessionMetadata:
-    """启动迁移：给老会话 metadata.json 补全 project_dir/model/status/last_user_message_at。"""
+class TestLazyMigrationOnRead:
+    """惰性迁移:读取老会话 metadata 时补全 project_dir/model/status/last_user_message_at,
+    可推断字段(work_mode/project_id)做确定性推断并异步写盘。"""
 
     @staticmethod
     def test_fills_missing_constant_fields(sessions_dir):
-        """缺 project_dir/model/status 的老会话被补常量默认值并写回。"""
+        """缺 project_dir/model/status 的老会话读取时补常量默认值。"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
-            migrate_legacy_session_metadata_at_startup,
+            get_session_metadata,
+            _METADATA_CACHE,
         )
 
         sdir = sessions_dir / "old_session"
@@ -1810,20 +1812,20 @@ class TestMigrateLegacySessionMetadata:
         (sdir / "metadata.json").write_text(
             json.dumps({"session_id": "old_session"}), encoding="utf-8"
         )
+        _METADATA_CACHE.pop("old_session", None)
 
-        migrate_legacy_session_metadata_at_startup()
-
-        meta = _read_json(sdir / "metadata.json")
-        assert meta["project_dir"] == ""
-        assert meta["model"] == ""
-        assert meta["status"] == "idle"
-        assert "last_user_message_at" in meta
+        data = get_session_metadata("old_session", cache_bust=True)
+        assert data["project_dir"] == ""
+        assert data["model"] == ""
+        assert data["status"] == "idle"
+        assert "last_user_message_at" in data
 
     @staticmethod
     def test_last_user_message_at_uses_last_message_at_when_present(sessions_dir):
         """有 last_message_at 时优先用它，不被 or 短路跳过 0.0。"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
-            migrate_legacy_session_metadata_at_startup,
+            get_session_metadata,
+            _METADATA_CACHE,
         )
 
         sdir = sessions_dir / "s_with_lma"
@@ -1832,15 +1834,20 @@ class TestMigrateLegacySessionMetadata:
             json.dumps({"session_id": "s_with_lma", "last_message_at": 123.0}),
             encoding="utf-8",
         )
+        _METADATA_CACHE.pop("s_with_lma", None)
 
-        migrate_legacy_session_metadata_at_startup()
+        data = get_session_metadata("s_with_lma", cache_bust=True)
+        _drain_queue()
+        assert data["last_user_message_at"] == 123.0
+        # 写盘后磁盘也有该字段
         assert _read_json(sdir / "metadata.json")["last_user_message_at"] == 123.0
 
     @staticmethod
     def test_zero_last_message_at_not_short_circuited(sessions_dir):
         """last_message_at=0.0（合法但 falsy）不得被 ``or`` 跳过回退到 stat mtime。"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
-            migrate_legacy_session_metadata_at_startup,
+            get_session_metadata,
+            _METADATA_CACHE,
         )
 
         sdir = sessions_dir / "s_zero"
@@ -1849,16 +1856,18 @@ class TestMigrateLegacySessionMetadata:
             json.dumps({"session_id": "s_zero", "last_message_at": 0.0}),
             encoding="utf-8",
         )
+        _METADATA_CACHE.pop("s_zero", None)
 
-        migrate_legacy_session_metadata_at_startup()
+        data = get_session_metadata("s_zero", cache_bust=True)
         # 0.0 是合法值，应被采用而非回退到目录 mtime
-        assert _read_json(sdir / "metadata.json")["last_user_message_at"] == 0.0
+        assert data["last_user_message_at"] == 0.0
 
     @staticmethod
     def test_falls_back_to_dir_mtime(sessions_dir):
         """无任何时间字段时回退到目录 mtime（OSError 时 0.0 兜底）。"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
-            migrate_legacy_session_metadata_at_startup,
+            get_session_metadata,
+            _METADATA_CACHE,
         )
 
         sdir = sessions_dir / "s_no_time"
@@ -1867,36 +1876,39 @@ class TestMigrateLegacySessionMetadata:
             json.dumps({"session_id": "s_no_time"}), encoding="utf-8"
         )
         expected_mtime = sdir.stat().st_mtime
+        _METADATA_CACHE.pop("s_no_time", None)
 
-        migrate_legacy_session_metadata_at_startup()
-        assert _read_json(sdir / "metadata.json")["last_user_message_at"] == expected_mtime
+        data = get_session_metadata("s_no_time", cache_bust=True)
+        _drain_queue()
+        assert data["last_user_message_at"] == expected_mtime
 
     @staticmethod
-    def test_corrupt_metadata_skipped(sessions_dir):
-        """metadata.json 非法 JSON 时跳过该会话，不影响其它会话迁移。"""
+    def test_corrupt_metadata_returns_empty_without_raising(sessions_dir):
+        """metadata.json 非法 JSON 时返回空 dict,不抛异常。
+
+        惰性迁移语义下无启动扫描,单条读取 corrupt 文件时 _read_metadata
+        返回 {},_apply_metadata_defaults_with_inference 对空 dict 短路返回。
+        故不会触发跨会话影响(无 "good 仍被迁移" 的交叉语义)。
+        """
         from jiuwenswarm.server.runtime.session.session_metadata import (
-            migrate_legacy_session_metadata_at_startup,
+            get_session_metadata,
+            _METADATA_CACHE,
         )
 
         bad = sessions_dir / "s_corrupt"
         bad.mkdir()
         (bad / "metadata.json").write_text("{not json", encoding="utf-8")
+        _METADATA_CACHE.pop("s_corrupt", None)
 
-        good = sessions_dir / "s_good"
-        good.mkdir()
-        (good / "metadata.json").write_text(
-            json.dumps({"session_id": "s_good"}), encoding="utf-8"
-        )
-
-        # 不抛异常，且 good 仍被迁移
-        migrate_legacy_session_metadata_at_startup()
-        assert _read_json(good / "metadata.json")["project_dir"] == ""
-        # bad 的文件原样保留（未被改写）
+        # 不抛异常,返回空 dict
+        data = get_session_metadata("s_corrupt", cache_bust=True)
+        assert data == {}
+        # bad 的文件原样保留(未被改写)
         assert (bad / "metadata.json").read_text(encoding="utf-8") == "{not json"
 
     @staticmethod
     def test_resolves_project_id_from_project_dir(sessions_dir, tmp_path, monkeypatch):
-        """有 project_dir 但无 project_id 的存量会话,迁移时按 path 解析到 project_id。"""
+        """有 project_dir 但无 project_id 的存量会话,读取时按 path 解析到 project_id 并写盘。"""
         # 准备 project_store: 创建一个有路径的项目
         root = tmp_path / "agent"
         root.mkdir()
@@ -1909,7 +1921,8 @@ class TestMigrateLegacySessionMetadata:
         proj = project_store.create_project("P", "E:\\legacy_app")
 
         from jiuwenswarm.server.runtime.session.session_metadata import (
-            migrate_legacy_session_metadata_at_startup,
+            get_session_metadata,
+            _METADATA_CACHE,
         )
 
         # 存量会话: 有 project_dir,无 project_id
@@ -1919,12 +1932,15 @@ class TestMigrateLegacySessionMetadata:
             json.dumps({"session_id": "s_legacy", "project_dir": "E:\\legacy_app"}),
             encoding="utf-8",
         )
+        _METADATA_CACHE.pop("s_legacy", None)
 
-        migrate_legacy_session_metadata_at_startup()
-        meta = _read_json(sdir / "metadata.json")
-        assert meta["project_id"] == proj.project_id
+        data = get_session_metadata("s_legacy", cache_bust=True)
+        _drain_queue()
+        assert data["project_id"] == proj.project_id
         # project_dir 保留不变
-        assert meta["project_dir"] == "E:\\legacy_app"
+        assert data["project_dir"] == "E:\\legacy_app"
+        # 写盘后磁盘也有 project_id
+        assert _read_json(sdir / "metadata.json")["project_id"] == proj.project_id
 
     @staticmethod
     def test_unresolvable_project_dir_leaves_empty_project_id(sessions_dir, tmp_path, monkeypatch):
@@ -1939,7 +1955,8 @@ class TestMigrateLegacySessionMetadata:
         project_store.invalidate_cache()
 
         from jiuwenswarm.server.runtime.session.session_metadata import (
-            migrate_legacy_session_metadata_at_startup,
+            get_session_metadata,
+            _METADATA_CACHE,
         )
 
         sdir = sessions_dir / "s_orphan"
@@ -1948,9 +1965,10 @@ class TestMigrateLegacySessionMetadata:
             json.dumps({"session_id": "s_orphan", "project_dir": "E:\\gone"}),
             encoding="utf-8",
         )
+        _METADATA_CACHE.pop("s_orphan", None)
 
-        migrate_legacy_session_metadata_at_startup()
-        assert _read_json(sdir / "metadata.json")["project_id"] == ""
+        data = get_session_metadata("s_orphan", cache_bust=True)
+        assert data["project_id"] == ""
 
 
 # ===========================================================================

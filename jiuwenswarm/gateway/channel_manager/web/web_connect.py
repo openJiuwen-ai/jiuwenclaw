@@ -100,6 +100,10 @@ class WebChannel(BaseWsChannel):
         self._disconnect_hooks: list[ConnectHook] = []
         # ws -> set[session_id]: 追踪每个连接上活跃的 session
         self._ws_sessions: dict[int, set[str]] = {}
+        # session_id -> is_processing: 由 chat.processing_status 事件维护,
+        # 供 /ws/git 写操作(如 discard_turn_changes)查询 agent 是否正在执行。
+        # 未跟踪的 session 默认返回 False(不忙碌)。
+        self._session_busy: dict[str, bool] = {}
         # Git diff 监控注册表(设计文档阶段10):由 app_gateway 在启动期注入,
         # handler 通过 ``getattr(channel, "git_watcher_registry", None)`` 防御性读取。
         self.git_watcher_registry: Any = None
@@ -790,15 +794,35 @@ class WebChannel(BaseWsChannel):
         }
         await self._broadcast_to(frame_data, all_clients)
 
+        # 维护 session busy 状态(供 /ws/git 写操作查询)
+        if event_name == "chat.processing_status" and isinstance(payload, dict):
+            sid = payload.get("session_id") or msg.session_id
+            if sid:
+                self._session_busy[sid] = bool(payload.get("is_processing", False))
+
         # interrupt_result 根据 intent 决定 is_processing 状态
         if event_name == "chat.interrupt_result":
             intent = payload.get("intent", "cancel") if isinstance(payload, dict) else "cancel"
             is_processing = intent in ("pause", "supplement", "resume")
+            # 同步更新 busy 映射
+            if msg.session_id:
+                self._session_busy[msg.session_id] = is_processing
             await self._broadcast_to({
                 "type": "event",
                 "event": "chat.processing_status",
                 "payload": {"session_id": msg.session_id, "is_processing": is_processing},
             }, all_clients)
+
+    def is_session_busy(self, session_id: str) -> bool:
+        """查询 session 是否正在执行(agent 处理中)。
+
+        基于 ``chat.processing_status`` 事件维护的映射。
+        未跟踪的 session 默认返回 False(不忙碌)。
+
+        供 /ws/git 写操作(如 ``project.git.discard_turn_changes``)在执行前
+        校验会话非忙碌,避免与正在进行的 agent 文件写入冲突。
+        """
+        return self._session_busy.get(session_id, False)
 
     def get_metadata(self) -> ChannelMetadata:
         """获取 Channel 元数据."""
@@ -917,6 +941,11 @@ class WebChannel(BaseWsChannel):
                 remote,
                 disconnected_sessions or "none",
             )
+            # 注意:此处不清理 _session_busy。ws 断开不等价于 agent 已停止——
+            # 用户关 tab / 刷新 / 网络断开期间,后端 run 仍可能在写文件。若按
+            # ws ownership 清掉 busy,新的 discard_turn_changes 会通过 busy 校验,
+            # 与仍在运行的 agent 文件写入并发,造成数据损坏。stale busy 的治理
+            # 应基于 TTL / 心跳 / agentserver run 状态源,而非 ws 连接状态。
             # 触发断连钩子,传入 session_ids(签名: (ws, session_ids))
             for hook in self._disconnect_hooks:
                 try:
