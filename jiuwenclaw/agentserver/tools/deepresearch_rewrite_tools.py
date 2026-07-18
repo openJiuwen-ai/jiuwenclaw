@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 
 from openjiuwen.core.foundation.tool import tool
 
@@ -106,6 +107,121 @@ def _error(exc: RewriteError) -> str:
     )
 
 
+def _validate_prepare_contract(
+    report_path: object,
+    action: object,
+    selection: object,
+    instruction: object,
+) -> None:
+    if not isinstance(report_path, str) or not isinstance(instruction, str):
+        raise RewriteError("BAD_REQUEST", "invalid rewrite request")
+    if (
+        len(instruction) > 2_000
+        or not isinstance(action, str)
+        or action not in {"polish", "expand", "shorten"}
+    ):
+        raise RewriteError("BAD_REQUEST", "invalid rewrite request")
+    if not isinstance(selection, dict):
+        raise RewriteError(
+            "SELECTION_PROTOCOL_UNSUPPORTED", "selection protocol version 2 is required"
+        )
+    if type(selection.get("protocol_version")) is not int or selection.get(
+        "protocol_version"
+    ) != 2:
+        raise RewriteError(
+            "SELECTION_PROTOCOL_UNSUPPORTED", "selection protocol version 2 is required"
+        )
+    if set(selection) != {
+        "protocol_version",
+        "start_byte",
+        "end_byte",
+        "selected_text",
+        "source_sha256",
+    }:
+        raise RewriteError("BAD_REQUEST", "invalid rewrite selection")
+    start = selection["start_byte"]
+    end = selection["end_byte"]
+    selected_text = selection["selected_text"]
+    source_sha256 = selection["source_sha256"]
+    if (
+        type(start) is not int
+        or type(end) is not int
+        or start < 0
+        or end <= start
+        or not isinstance(selected_text, str)
+        or not selected_text
+        or len(selected_text) > 12_000
+        or not isinstance(source_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", source_sha256) is None
+    ):
+        raise RewriteError("BAD_REQUEST", "invalid rewrite selection")
+
+
+def _validate_commit_contract(context_token: object, structured_result: object) -> None:
+    if not isinstance(context_token, str) or not isinstance(structured_result, dict):
+        raise RewriteError("MODEL_OUTPUT_INVALID", "invalid structured rewrite result")
+    if set(structured_result) != {"units", "facts_added"}:
+        raise RewriteError("MODEL_OUTPUT_INVALID", "invalid structured rewrite result")
+    if structured_result.get("facts_added") is not False:
+        raise RewriteError("MODEL_OUTPUT_INVALID", "invalid structured rewrite result")
+    units = structured_result.get("units")
+    if not isinstance(units, list) or not units:
+        raise RewriteError("MODEL_OUTPUT_INVALID", "invalid structured rewrite result")
+    for unit in units:
+        if not isinstance(unit, dict) or set(unit) != {"unit_id", "slots"}:
+            raise RewriteError("MODEL_OUTPUT_INVALID", "invalid structured rewrite result")
+        if not isinstance(unit.get("unit_id"), str):
+            raise RewriteError("MODEL_OUTPUT_INVALID", "invalid structured rewrite result")
+        slots = unit.get("slots")
+        if not isinstance(slots, list) or not slots:
+            raise RewriteError("MODEL_OUTPUT_INVALID", "invalid structured rewrite result")
+        for slot in slots:
+            if (
+                not isinstance(slot, dict)
+                or set(slot) != {"slot_id", "text"}
+                or not isinstance(slot.get("slot_id"), str)
+                or not isinstance(slot.get("text"), str)
+            ):
+                raise RewriteError(
+                    "MODEL_OUTPUT_INVALID", "invalid structured rewrite result"
+                )
+
+
+def _validate_prepare_invoke(inputs: object) -> None:
+    if not isinstance(inputs, dict):
+        raise RewriteError("BAD_REQUEST", "invalid rewrite request")
+    required = {"report_path", "action", "selection"}
+    allowed = required | {"instruction"}
+    if not required.issubset(inputs) or not set(inputs).issubset(allowed):
+        raise RewriteError("BAD_REQUEST", "invalid rewrite request")
+    _validate_prepare_contract(
+        inputs["report_path"],
+        inputs["action"],
+        inputs["selection"],
+        inputs.get("instruction", ""),
+    )
+
+
+def _validate_commit_invoke(inputs: object) -> None:
+    if not isinstance(inputs, dict) or set(inputs) != {"context_token", "structured_result"}:
+        raise RewriteError("MODEL_OUTPUT_INVALID", "invalid structured rewrite result")
+    _validate_commit_contract(inputs["context_token"], inputs["structured_result"])
+
+
+def _install_strict_invoke(local_tool, validator) -> None:
+    original_invoke = local_tool.invoke
+
+    async def strict_invoke(inputs, **kwargs):
+        try:
+            validator(inputs)
+        except RewriteError as exc:
+            logger.info("deepresearch tool input rejected: code=%s", exc.code)
+            return _error(exc)
+        return await original_invoke(inputs, **kwargs)
+
+    local_tool.invoke = strict_invoke
+
+
 @tool(
     name="deepresearch_prepare_rewrite",
     description=(
@@ -121,6 +237,11 @@ async def deepresearch_prepare_rewrite(
     selection: dict,
     instruction: str = "",
 ) -> str:
+    try:
+        _validate_prepare_contract(report_path, action, selection, instruction)
+    except RewriteError as exc:
+        logger.info("deepresearch prepare rewrite rejected: code=%s", exc.code)
+        return _error(exc)
     route = _get_route()
     output_dir = get_effective_request_output_dir()
     session_id = str(route.get("session_id") or "")
@@ -142,6 +263,15 @@ async def deepresearch_prepare_rewrite(
     except RewriteError as exc:
         logger.info("deepresearch prepare rewrite rejected: code=%s", exc.code)
         return _error(exc)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.error(
+            "deepresearch prepare rewrite failed: type=%s", type(exc).__name__
+        )
+        return json.dumps({
+            "status": "error",
+            "error_code": "INTERNAL_ERROR",
+            "error": "rewrite preparation failed",
+        })
     return json.dumps({"status": "prepared", **result}, ensure_ascii=False)
 
 
@@ -179,6 +309,11 @@ async def deepresearch_commit_rewrite(
     context_token: str,
     structured_result: dict,
 ) -> str:
+    try:
+        _validate_commit_contract(context_token, structured_result)
+    except RewriteError as exc:
+        logger.info("deepresearch commit rewrite rejected: code=%s", exc.code)
+        return _error(exc)
     route = _get_route()
     session_id = str(route.get("session_id") or "")
     if not session_id:
@@ -196,6 +331,13 @@ async def deepresearch_commit_rewrite(
     except RewriteError as exc:
         logger.info("deepresearch commit rewrite rejected: code=%s", exc.code)
         return _error(exc)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.error("deepresearch commit rewrite failed: type=%s", type(exc).__name__)
+        return json.dumps({
+            "status": "error",
+            "error_code": "WRITE_FAILED",
+            "error": "rewrite commit failed",
+        })
 
     try:
         delivered = await _deliver_report(result["report_path"], route)
@@ -213,5 +355,8 @@ async def deepresearch_commit_rewrite(
         ensure_ascii=False,
     )
 
+
+_install_strict_invoke(deepresearch_prepare_rewrite, _validate_prepare_invoke)
+_install_strict_invoke(deepresearch_commit_rewrite, _validate_commit_invoke)
 
 __all__ = ["deepresearch_prepare_rewrite", "deepresearch_commit_rewrite"]

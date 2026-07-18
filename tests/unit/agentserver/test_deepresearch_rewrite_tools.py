@@ -152,6 +152,76 @@ def test_rewrite_tool_schemas_expose_only_protocol_v2_contract():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "value", "error_code"),
+    [
+        ("action", "delete", "BAD_REQUEST"),
+        ("selection_extra", "sensitive extra", "BAD_REQUEST"),
+        ("protocol_version", 1, "SELECTION_PROTOCOL_UNSUPPORTED"),
+    ],
+)
+async def test_prepare_invoke_rejects_contract_violations_before_core(
+    change, value, error_code
+):
+    selection = _selection()
+    payload = {
+        "report_path": "/sensitive/report.md",
+        "action": "polish",
+        "selection": selection,
+    }
+    if change == "selection_extra":
+        selection["extra"] = value
+    elif change == "protocol_version":
+        selection["protocol_version"] = value
+    else:
+        payload[change] = value
+
+    with patch.object(
+        rt, "_get_route", return_value={"session_id": "S1"}
+    ), patch.object(
+        rt, "get_effective_request_output_dir", return_value="/workspace"
+    ), patch.object(
+        rt, "prepare_rewrite", side_effect=AssertionError("core called")
+    ) as core:
+        raw = await rt.deepresearch_prepare_rewrite.invoke(payload)
+
+    assert json.loads(raw)["error_code"] == error_code
+    assert "原句" not in raw
+    assert "/sensitive/report.md" not in raw
+    core.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["structured_extra", "facts_added"])
+async def test_commit_invoke_rejects_contract_violations_before_core(change):
+    structured_result = {
+        "units": [{
+            "unit_id": "unit_1",
+            "slots": [{"slot_id": "slot_1", "text": "sensitive output"}],
+        }],
+        "facts_added": False,
+    }
+    if change == "structured_extra":
+        structured_result["extra"] = "sensitive extra"
+    else:
+        structured_result["facts_added"] = True
+
+    with patch.object(
+        rt, "_get_route", return_value={"session_id": "S1"}
+    ), patch.object(
+        rt, "commit_rewrite", side_effect=AssertionError("core called")
+    ) as core:
+        raw = await rt.deepresearch_commit_rewrite.invoke({
+            "context_token": "sensitive-token",
+            "structured_result": structured_result,
+        })
+
+    assert json.loads(raw)["error_code"] == "MODEL_OUTPUT_INVALID"
+    assert "sensitive" not in raw
+    core.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_prepare_and_commit_tools_return_short_outcomes_and_deliver_file(tmp_path):
     report, _ = _document(tmp_path)
     selection = _selection()
@@ -188,6 +258,62 @@ async def test_prepare_and_commit_tools_return_short_outcomes_and_deliver_file(t
     assert Path(committed["report_path"]).is_file()
     push.send_push.assert_awaited_once()
     assert push.send_push.await_args.args[0]["payload"]["event_type"] == "chat.file"
+
+
+@pytest.mark.asyncio
+async def test_prepare_core_exception_returns_safe_internal_error(tmp_path, caplog):
+    report, _ = _document(tmp_path)
+    route = {"session_id": "S1"}
+    with patch.object(rt, "_get_route", return_value=route), patch.object(
+        rt, "get_effective_request_output_dir", return_value=str(tmp_path)
+    ), patch.object(
+        rt, "prepare_rewrite", side_effect=RuntimeError("secret /internal/path")
+    ), caplog.at_level(logging.ERROR, logger=rt.__name__):
+        raw = await rt.deepresearch_prepare_rewrite._func(
+            report_path=str(report), action="polish", selection=_selection()
+        )
+
+    assert json.loads(raw) == {
+        "status": "error",
+        "error_code": "INTERNAL_ERROR",
+        "error": "rewrite preparation failed",
+    }
+    assert "secret" not in raw
+    assert "/internal/path" not in raw
+    assert "secret" not in caplog.text
+    assert "/internal/path" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_commit_core_exception_returns_safe_write_error_before_delivery(caplog):
+    route = {"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}
+    delivery = AsyncMock()
+    with patch.object(rt, "_get_route", return_value=route), patch.object(
+        rt, "commit_rewrite", side_effect=OSError("secret /internal/path")
+    ), patch.object(rt, "_deliver_report", delivery), caplog.at_level(
+        logging.ERROR, logger=rt.__name__
+    ):
+        raw = await rt.deepresearch_commit_rewrite._func(
+            context_token="token",
+            structured_result={
+                "units": [{
+                    "unit_id": "unit_1",
+                    "slots": [{"slot_id": "slot_1", "text": "new"}],
+                }],
+                "facts_added": False,
+            },
+        )
+
+    assert json.loads(raw) == {
+        "status": "error",
+        "error_code": "WRITE_FAILED",
+        "error": "rewrite commit failed",
+    }
+    assert "secret" not in raw
+    assert "/internal/path" not in raw
+    assert "secret" not in caplog.text
+    assert "/internal/path" not in caplog.text
+    delivery.assert_not_awaited()
 
 
 @pytest.mark.asyncio
