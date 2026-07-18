@@ -2018,7 +2018,15 @@
     "helpTitle": "Usage Guide",
     "help0": "Extension folder must contain rail.py as the entry file",
     "help1": "Rail extension files must inherit from DeepAgentRail or AgentRail base class",
-    "help2": "Extension files are saved to ~/.jiuwenswarm/agent/workspace/extensions/ directory"
+    "help2": "Extension files are saved to ~/.jiuwenswarm/agent/workspace/extensions/ directory",
+    "errors": {
+      "missingFolderPath": "Missing folder_path parameter",
+      "folderNotFound": "Folder does not exist or is not a directory: {{path}}",
+      "invalidFolderName": "Folder name \"{{name}}\" must be a valid English identifier",
+      "alreadyExists": "Extension \"{{name}}\" already exists",
+      "missingRailFile": "Extension folder must contain a rail.py file",
+      "railValidationFailed": "rail.py validation failed"
+    }
   },
   "ownerScopes": {
     "title": "Avatar Permission",
@@ -2103,6 +2111,7 @@
       "renamePlaceholder": "Enter a new name",
       "deleteProject": "Delete project",
       "deleteProjectDescription": "Remove “{{projectName}}”? Unpinned conversations in this project will temporarily move to the default project.",
+      "defaultProjectName": "Default Project",
       "absolutePathError": "Enter an absolute path, for example /Users/name/work/project",
       "errors": {
         "pathExists": "This project path already exists. Choose another directory or start a new conversation from the existing project.",

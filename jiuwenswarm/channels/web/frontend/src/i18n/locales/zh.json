@@ -2019,7 +2019,15 @@
     "helpTitle": "使用说明",
     "help0": "扩展文件夹必须包含 rail.py 作为入口文件",
     "help1": "Rail 扩展文件必须继承 DeepAgentRail 或 AgentRail 基类",
-    "help2": "扩展文件会被保存到 ~/.jiuwenswarm/agent/workspace/extensions/ 目录"
+    "help2": "扩展文件会被保存到 ~/.jiuwenswarm/agent/workspace/extensions/ 目录",
+    "errors": {
+      "missingFolderPath": "缺少 folder_path 参数",
+      "folderNotFound": "文件夹不存在或不是目录：{{path}}",
+      "invalidFolderName": "文件夹名称 “{{name}}” 必须是有效的英文标识符",
+      "alreadyExists": "扩展 “{{name}}” 已存在",
+      "missingRailFile": "扩展文件夹必须包含 rail.py 文件",
+      "railValidationFailed": "rail.py 验证失败"
+    }
   },
   "ownerScopes": {
     "title": "分身权限配置",
@@ -2107,6 +2115,7 @@
       "renamePlaceholder": "输入新名称",
       "deleteProject": "删除项目",
       "deleteProjectDescription": "确定要移除“{{projectName}}”吗？项目下未置顶会话会临时归入默认项目。",
+      "defaultProjectName": "默认项目",
       "absolutePathError": "请输入绝对路径，例如 /Users/name/work/project",
       "errors": {
         "pathExists": "该项目路径已存在，请选择其他目录或直接从现有项目开始新对话",

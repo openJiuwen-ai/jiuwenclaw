@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import i18n from '../i18n';
 import { projectRegistryClient } from '../features/workspace/projectRegistryClient';
 import type { ProjectInfo, Session } from '../types';
 import { useChatStore } from './chatStore';
@@ -45,6 +46,12 @@ function findProject(projects: ProjectInfo[], projectId: string): ProjectInfo | 
 
 function isDefaultProject(project: ProjectInfo): boolean {
   return project.is_default || project.project_id === DEFAULT_PROJECT_ID;
+}
+
+// 默认项目节点由后端按固定中文文案实时生成、不入库也不可重命名，
+// 因此按当前 UI 语言在展示层替换即可，不存在覆盖用户自定义名称的风险。
+export function getProjectDisplayName(project: ProjectInfo): string {
+  return isDefaultProject(project) ? i18n.t('multiSession.project.defaultProjectName') : project.name;
 }
 
 function findDefaultProjectId(projects: ProjectInfo[]): string {
