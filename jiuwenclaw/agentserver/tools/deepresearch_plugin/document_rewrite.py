@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import unquote
 
 from markdown_it import MarkdownIt
 
@@ -27,6 +28,7 @@ from jiuwenclaw.agentserver.tools.deepresearch_plugin.markdown_rewrite_map impor
     build_rewrite_map,
     reconstruct_markdown,
     structure_signature,
+    visible_slot_byte_ranges,
 )
 
 SAFE_ID_RE = re.compile(r"^(?:doc|rev)_[A-Za-z0-9_-]{1,128}$")
@@ -750,6 +752,191 @@ def _topology_parts(signature: tuple[object, ...]) -> tuple[tuple[object, ...], 
     return blocks, protected
 
 
+def _heading_id(text: str) -> str:
+    normalized = re.sub(r"\s+", "-", text.strip().casefold())
+    normalized = "".join(
+        character
+        for character in normalized
+        if character.isalnum() or character in {"-", "_"}
+    )
+    return re.sub(r"-+", "-", normalized).strip("-")
+
+
+def _internal_link_anchors(
+    rewrite_map: MarkdownRewriteMap, heading_id: str
+) -> list[ProtectedAnchor]:
+    target = f"#{heading_id}"
+    return [
+        anchor
+        for unit in rewrite_map.units
+        for anchor in unit.protected
+        if anchor.kind == "link_destination"
+        and unquote(_link_destination_href(anchor) or "") == target
+    ]
+
+
+def _repair_internal_heading_anchor(
+    original_map: MarkdownRewriteMap,
+    child_markdown: str,
+    selected_unit_ids: set[str],
+) -> tuple[str, bool]:
+    child_map = build_rewrite_map(child_markdown)
+    selected_indexes = {
+        index
+        for index, unit in enumerate(original_map.units)
+        if unit.unit_id in selected_unit_ids
+    }
+    original_heading_ids = [
+        _heading_id(_full_unit_visible_text(unit))
+        for unit in original_map.units
+        if unit.unit_type == "heading"
+    ]
+    child_heading_ids = [
+        _heading_id(_full_unit_visible_text(unit))
+        for unit in child_map.units
+        if unit.unit_type == "heading"
+    ]
+    replacements: list[tuple[int, int, bytes]] = []
+    for index in selected_indexes:
+        original_unit = original_map.units[index]
+        child_unit = child_map.units[index]
+        if original_unit.unit_type != "heading" or child_unit.unit_type != "heading":
+            continue
+        old_id = _heading_id(_full_unit_visible_text(original_unit))
+        new_id = _heading_id(_full_unit_visible_text(child_unit))
+        if not old_id or not new_id or old_id == new_id:
+            continue
+        links = _internal_link_anchors(child_map, old_id)
+        if not links:
+            continue
+        if (
+            original_heading_ids.count(old_id) != 1
+            or child_heading_ids.count(new_id) != 1
+            or len(links) != 1
+        ):
+            raise RewriteError(
+                "FORMAT_CONFLICT", "same-document heading anchor is ambiguous"
+            )
+        anchor = links[0]
+        old_fragment = f"#{old_id}"
+        if anchor.source.count(old_fragment) != 1:
+            raise RewriteError(
+                "FORMAT_CONFLICT", "same-document heading link is ambiguous"
+            )
+        replacement = anchor.source.replace(old_fragment, f"#{new_id}", 1)
+        replacements.append(
+            (anchor.start_byte, anchor.end_byte, replacement.encode("utf-8"))
+        )
+    if not replacements:
+        return child_markdown, False
+    child_bytes = child_markdown.encode("utf-8")
+    for start, end, replacement in sorted(replacements, reverse=True):
+        child_bytes = child_bytes[:start] + replacement + child_bytes[end:]
+    return child_bytes.decode("utf-8"), True
+
+
+def _protected_topology_matches(
+    original_map: MarkdownRewriteMap,
+    child_map: MarkdownRewriteMap,
+    *,
+    allow_link_destination_change: bool,
+) -> bool:
+    original = structure_signature(original_map)
+    child = structure_signature(child_map)
+    if len(original) != len(child):
+        return False
+    for original_unit, child_unit in zip(original, child):
+        if original_unit[4] != child_unit[4]:
+            return False
+        original_anchors = original_unit[5]
+        child_anchors = child_unit[5]
+        if len(original_anchors) != len(child_anchors):
+            return False
+        for original_anchor, child_anchor in zip(original_anchors, child_anchors):
+            if original_anchor[0] != child_anchor[0]:
+                return False
+            if (
+                original_anchor != child_anchor
+                and not (
+                    allow_link_destination_change
+                    and original_anchor[0] == "link_destination"
+                )
+            ):
+                return False
+    return True
+
+
+def _current_highlight_ranges(
+    original_map: MarkdownRewriteMap,
+    child_map: MarkdownRewriteMap,
+    context: _RewriteContext,
+    slot_texts: dict[str, str],
+) -> list[dict[str, int]]:
+    selected_by_id = {unit.unit_id: unit for unit in context.selected_units}
+    ranges: list[tuple[int, int]] = []
+    for index, original_unit in enumerate(original_map.units):
+        selected_unit = selected_by_id.get(original_unit.unit_id)
+        if selected_unit is None:
+            continue
+        child_unit = child_map.units[index]
+        selected_slots = {slot.slot_id: slot for slot in selected_unit.slots}
+        flat_cursor = 0
+        highlight_spans: list[tuple[int, int]] = []
+        for original_slot in original_unit.slots:
+            selected_slot = selected_slots.get(original_slot.slot_id)
+            if selected_slot is None:
+                flat_cursor += len(original_slot.text)
+                continue
+            visible_start = original_slot.visible_boundary_to_byte.index(
+                selected_slot.start_byte
+            )
+            visible_end = original_slot.visible_boundary_to_byte.index(
+                selected_slot.end_byte
+            )
+            replacement = slot_texts[selected_slot.slot_id]
+            highlight_start = flat_cursor + visible_start
+            if replacement:
+                highlight_spans.append(
+                    (highlight_start, highlight_start + len(replacement))
+                )
+            flat_cursor += (
+                visible_start
+                + len(replacement)
+                + len(original_slot.text)
+                - visible_end
+            )
+        if flat_cursor != sum(len(slot.text) for slot in child_unit.slots):
+            raise RewriteError(
+                "STRUCTURE_CONFLICT", "rewritten slot highlight cannot be mapped"
+            )
+        child_cursor = 0
+        for child_slot in child_unit.slots:
+            child_end = child_cursor + len(child_slot.text)
+            for highlight_start, highlight_end in highlight_spans:
+                start = max(highlight_start, child_cursor)
+                end = min(highlight_end, child_end)
+                if start < end:
+                    ranges.extend(
+                        visible_slot_byte_ranges(
+                            child_map.source,
+                            child_slot,
+                            start - child_cursor,
+                            end - child_cursor,
+                        )
+                    )
+            child_cursor = child_end
+    ranges.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in ranges:
+        if merged and start < merged[-1][1]:
+            raise RewriteError("STRUCTURE_CONFLICT", "rewrite highlights overlap")
+        if merged and start == merged[-1][1]:
+            merged[-1] = (merged[-1][0], end)
+        else:
+            merged.append((start, end))
+    return [{"start_byte": start, "end_byte": end} for start, end in merged]
+
+
 def _validate_affected_citations(
     context: _RewriteContext,
     provenance: dict,
@@ -889,6 +1076,11 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
             )
         except RewriteMapError as exc:
             raise RewriteError("STRUCTURE_CONFLICT", str(exc)) from exc
+        child_markdown, anchor_repaired = _repair_internal_heading_anchor(
+            original_map,
+            child_markdown,
+            {unit.unit_id for unit in context.selected_units},
+        )
         child_map = build_rewrite_map(child_markdown)
         if tuple(region.kind for region in child_map.unsupported_regions) != tuple(
             region.kind for region in original_map.unsupported_regions
@@ -900,11 +1092,19 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
         child_blocks, child_protected = _topology_parts(structure_signature(child_map))
         if child_blocks != expected_blocks:
             raise RewriteError("STRUCTURE_CONFLICT", "rewrite changed Markdown block topology")
-        if child_protected != expected_protected and not _allows_empty_wrapper_deletion(
+        protected_matches = child_protected == expected_protected or (
+            anchor_repaired
+            and _protected_topology_matches(
+                original_map,
+                child_map,
+                allow_link_destination_change=True,
+            )
+        )
+        if not protected_matches and not _allows_empty_wrapper_deletion(
             original_map, context, slot_texts, selected_ranges
         ):
             raise RewriteError("FORMAT_CONFLICT", "rewrite changed protected inline topology")
-        source_ids = _validate_affected_citations(
+        citation_ids = _validate_affected_citations(
             context, provenance, original_map, child_map
         )
         result_bytes = "\n".join(slot_texts.values()).encode("utf-8")
@@ -916,15 +1116,25 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
         child_provenance = dict(provenance)
         history = list(provenance.get("rewrite_history") or [])
         history.append({
+            "rewrite_protocol_version": 2,
             "action": context.action,
             "parent_revision_id": context.parent_revision_id,
             "selection_sha256": _sha256(
                 current_bytes[context.selection_start_byte : context.selection_end_byte]
             ),
             "result_sha256": _sha256(result_bytes),
-            "source_ids": sorted(set(source_ids)),
+            "unit_types": [
+                unit.unit_type
+                for unit in original_map.units
+                if unit.unit_id in {item.unit_id for item in context.selected_units}
+            ],
+            "citation_ids": citation_ids,
         })
+        highlights = _current_highlight_ranges(
+            original_map, child_map, context, slot_texts
+        )
         child_provenance.update({
+            "rewrite_protocol_version": 2,
             "revision_id": revision_id,
             "parent_revision_id": context.parent_revision_id,
             "markdown_path": str(child_path),
@@ -932,6 +1142,11 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
             "created_at": datetime.now(timezone.utc).isoformat(),
             "operation": {"action": context.action},
             "rewrite_history": history,
+            "rewrite_highlights": {
+                "revision_id": revision_id,
+                "offset_unit": "utf8_byte",
+                "ranges": highlights,
+            },
         })
         _atomic_write(child_path, child_markdown.encode("utf-8"))
         provenance_path = child_path.with_suffix(".provenance.json")

@@ -841,7 +841,309 @@ def test_commit_preserves_multiple_citation_identity_order_count(tmp_path):
     child_provenance = json.loads(
         Path(result["provenance_path"]).read_text(encoding="utf-8")
     )
-    assert child_provenance["rewrite_history"][-1]["source_ids"] == ["3", "4"]
+    assert child_provenance["rewrite_history"][-1]["citation_ids"] == ["3", "4"]
+
+
+@pytest.mark.parametrize(
+    ("body", "raw", "visible", "unit_types"),
+    [
+        (
+            "first paragraph\n\nsecond paragraph\n",
+            "first paragraph\n\nsecond paragraph",
+            "first paragraph\nsecond paragraph",
+            ["paragraph", "paragraph"],
+        ),
+        (
+            "- first item\n- second item\n- third item\n",
+            "first item\n- second item\n- third item",
+            "first item\nsecond item\nthird item",
+            ["list_item", "list_item", "list_item"],
+        ),
+        (
+            "## Old heading\n\nparagraph body\n\n- list item\n",
+            "Old heading\n\nparagraph body\n\n- list item",
+            "Old heading\nparagraph body\nlist item",
+            ["heading", "paragraph", "list_item"],
+        ),
+    ],
+)
+def test_commit_rewrites_continuous_multi_units_without_changing_order(
+    tmp_path, body, raw, visible, unit_types
+):
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(tmp_path, report, raw, visible=visible)
+    replacements = {
+        slot["slot_id"]: f"rewritten {index}"
+        for index, unit in enumerate(prepared["units"])
+        for slot in unit["slots"]
+    }
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, replacements),
+    )
+
+    child_map = rewrite_module.build_rewrite_map(
+        Path(result["report_path"]).read_text(encoding="utf-8")
+    )
+    assert [unit.unit_type for unit in child_map.units] == unit_types
+    assert len(child_map.units) == len(prepared["units"])
+
+
+@pytest.mark.parametrize(
+    ("body", "raw", "visible"),
+    [
+        (
+            "first\n\n> unsupported gap\n\nthird\n",
+            "first\n\n> unsupported gap\n\nthird",
+            "first\nthird",
+        ),
+        (
+            "- outer\n  - nested\n- final\n",
+            "outer\n  - nested\n- final",
+            "outer\nnested\nfinal",
+        ),
+    ],
+)
+def test_prepare_rejects_noncontinuous_or_invalid_middle_multi_units(
+    tmp_path, body, raw, visible
+):
+    report, _ = _write_document(tmp_path, body)
+    with pytest.raises(RewriteError) as caught:
+        prepare_rewrite(
+            workspace_root=tmp_path,
+            report_path=report,
+            action="shorten",
+            selection=_selection(body, raw, visible),
+            session_id="S1",
+        )
+    assert caught.value.code == "UNSUPPORTED_SELECTION"
+
+
+def test_prepare_rejects_partially_covered_middle_multi_unit(tmp_path, monkeypatch):
+    body = "first\n\nmiddle\n\nlast\n"
+    report, _ = _write_document(tmp_path, body)
+    real_build = rewrite_module.build_rewrite_map
+
+    def build_with_partial_middle(markdown):
+        rewrite_map = real_build(markdown)
+        middle = rewrite_map.units[1]
+        slot = middle.slots[0]
+        partial_slot = replace(
+            slot,
+            start_byte=0,
+            visible_boundary_to_byte=(0, *slot.visible_boundary_to_byte[1:]),
+        )
+        return replace(
+            rewrite_map,
+            units=(
+                rewrite_map.units[0],
+                replace(middle, slots=(partial_slot,)),
+                rewrite_map.units[2],
+            ),
+        )
+
+    monkeypatch.setattr(rewrite_module, "build_rewrite_map", build_with_partial_middle)
+
+    with pytest.raises(RewriteError) as caught:
+        _prepare(
+            tmp_path,
+            report,
+            body[1:].rstrip("\n"),
+            visible="irst\nmiddle\nlast",
+        )
+
+    assert caught.value.code == "UNSUPPORTED_SELECTION"
+
+
+def test_commit_repairs_unique_same_document_heading_anchor(tmp_path):
+    body = "[跳转](#旧标题)\n\n## 旧标题\n"
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(tmp_path, report, "旧标题", occurrence=2)
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, {slot_id: "新标题"}),
+    )
+
+    assert Path(result["report_path"]).read_text(encoding="utf-8") == (
+        "[跳转](#新标题)\n\n## 新标题\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "[跳转](#旧标题)\n\n## 旧标题\n\n## 旧标题\n",
+        "[跳转](#旧标题)\n\n## 旧标题\n\n## 新标题\n",
+        "[甲](#旧标题) [乙](#旧标题)\n\n## 旧标题\n",
+    ],
+)
+def test_commit_rejects_ambiguous_heading_anchor_repair(tmp_path, body):
+    report, _ = _write_document(tmp_path, body)
+    heading_start = body.index("## 旧标题")
+    heading_occurrence = body[:heading_start].count("旧标题") + 1
+    prepared = _prepare(tmp_path, report, "旧标题", occurrence=heading_occurrence)
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared, {slot_id: "新标题"}),
+        )
+
+    assert caught.value.code == "FORMAT_CONFLICT"
+
+
+def test_commit_records_only_current_revision_visible_utf8_highlights(tmp_path):
+    body = (
+        "## **旧标题**\n\n"
+        "- [旧标签](https://ordinary.example/path) 正文 "
+        "[[1]](https://example.com/source) 结尾\n"
+    )
+    report, _ = _write_document(tmp_path, body)
+    raw_start = body.index("旧标题")
+    raw_end = body.index(" 结尾") + len(" 结尾")
+    raw = body[raw_start:raw_end]
+    prepared = _prepare(
+        tmp_path,
+        report,
+        raw,
+        visible="旧标题\n旧标签 正文 [1] 结尾",
+    )
+    replacements = {
+        slot["slot_id"]: {
+            "旧标题": "新标题",
+            "旧标签": "新标签",
+            " 正文 ": " 新正文 ",
+            " 结尾": " 新结尾",
+        }.get(slot["text"], slot["text"])
+        for unit in prepared["units"]
+        for slot in unit["slots"]
+    }
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, replacements),
+    )
+
+    child = Path(result["report_path"])
+    child_bytes = child.read_bytes()
+    expected_ranges = []
+    cursor = 0
+    for visible in ("新标题", "新标签", " 新正文 ", " 新结尾"):
+        start = child_bytes.index(visible.encode("utf-8"), cursor)
+        end = start + len(visible.encode("utf-8"))
+        expected_ranges.append({"start_byte": start, "end_byte": end})
+        cursor = end
+    child_provenance = json.loads(
+        Path(result["provenance_path"]).read_text(encoding="utf-8")
+    )
+    assert child_provenance["rewrite_protocol_version"] == 2
+    assert child_provenance["rewrite_highlights"] == {
+        "revision_id": child_provenance["revision_id"],
+        "offset_unit": "utf8_byte",
+        "ranges": expected_ranges,
+    }
+    assert all(
+        left["end_byte"] <= right["start_byte"]
+        for left, right in zip(expected_ranges, expected_ranges[1:])
+    )
+    history = child_provenance["rewrite_history"][-1]
+    assert set(history) == {
+        "rewrite_protocol_version",
+        "action",
+        "parent_revision_id",
+        "selection_sha256",
+        "result_sha256",
+        "unit_types",
+        "citation_ids",
+    }
+    assert "旧标题" not in json.dumps(history, ensure_ascii=False)
+    assert "新标题" not in json.dumps(history, ensure_ascii=False)
+
+
+def test_rewritten_child_can_be_rewritten_again_with_original_lineage(tmp_path):
+    body = "first claim [[1]](https://example.com/source) tail\n\nsecond paragraph\n"
+    report, provenance = _write_document(tmp_path, body)
+    provenance["inference_manifest"] = [{"path": "infer/1", "sha256": "a" * 64}]
+    provenance["chart_manifest"] = [{"path": "chart/1", "sha256": "b" * 64}]
+    report.with_suffix(".provenance.json").write_text(
+        json.dumps(provenance, ensure_ascii=False), encoding="utf-8"
+    )
+    ancestor_markdown = report.read_bytes()
+    ancestor_provenance = report.with_suffix(".provenance.json").read_bytes()
+
+    first_prepared = _prepare(
+        tmp_path,
+        report,
+        "first claim [[1]](https://example.com/source) tail",
+        visible="first claim [1] tail",
+    )
+    first_slot = first_prepared["units"][0]["slots"][0]["slot_id"]
+    first_result = commit_rewrite(
+        context_token=first_prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(
+            first_prepared, {first_slot: "rewritten claim "}
+        ),
+    )
+    first_child = Path(first_result["report_path"])
+    first_child_markdown = first_child.read_bytes()
+    first_child_sidecar = Path(first_result["provenance_path"])
+    first_child_provenance_bytes = first_child_sidecar.read_bytes()
+    first_child_provenance = json.loads(first_child_provenance_bytes)
+
+    second_prepared = _prepare(
+        tmp_path,
+        first_child,
+        "second paragraph",
+        action="polish",
+    )
+    second_slot = second_prepared["units"][0]["slots"][0]["slot_id"]
+    second_result = commit_rewrite(
+        context_token=second_prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(
+            second_prepared, {second_slot: "second generation"}
+        ),
+    )
+
+    second_provenance = json.loads(
+        Path(second_result["provenance_path"]).read_text(encoding="utf-8")
+    )
+    assert (
+        second_provenance["parent_revision_id"]
+        == first_child_provenance["revision_id"]
+    )
+    for key in (
+        "final_result_path",
+        "final_result_sha256",
+        "inference_manifest",
+        "chart_manifest",
+    ):
+        assert second_provenance[key] == provenance[key]
+    assert len(second_provenance["rewrite_history"]) == 2
+    assert (
+        second_provenance["rewrite_highlights"]["revision_id"]
+        == second_provenance["revision_id"]
+    )
+    assert (
+        second_provenance["rewrite_highlights"]
+        != first_child_provenance["rewrite_highlights"]
+    )
+    assert "[[1]](https://example.com/source)" in Path(
+        second_result["report_path"]
+    ).read_text(encoding="utf-8")
+    assert report.read_bytes() == ancestor_markdown
+    assert report.with_suffix(".provenance.json").read_bytes() == ancestor_provenance
+    assert first_child.read_bytes() == first_child_markdown
+    assert first_child_sidecar.read_bytes() == first_child_provenance_bytes
 
 
 def test_commit_rejects_citation_missing_from_final_result_whitelist(tmp_path):

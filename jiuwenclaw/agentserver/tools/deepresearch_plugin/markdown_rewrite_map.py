@@ -1072,3 +1072,32 @@ def reconstruct_markdown(
         return result.decode("utf-8")
     except UnicodeDecodeError:
         conflict("reconstructed markdown is not valid UTF-8")
+
+
+def visible_slot_byte_ranges(
+    source: str,
+    slot: RewriteSlot,
+    visible_start: int,
+    visible_end: int,
+) -> tuple[tuple[int, int], ...]:
+    """Return source byte ranges for visible slot characters, excluding escapes."""
+    if not 0 <= visible_start <= visible_end <= len(slot.text):
+        raise RewriteMapError(
+            "SELECTION_MAPPING_CONFLICT", "visible slot range is invalid"
+        )
+    source_bytes = source.encode("utf-8")
+    ranges: list[tuple[int, int]] = []
+    for index in range(visible_start, visible_end):
+        start = slot.visible_boundary_to_byte[index]
+        end = slot.visible_boundary_to_byte[index + 1]
+        raw = source_bytes[start:end]
+        if raw.startswith(b"\\") and len(raw) > 1:
+            start += 1
+            raw = raw[1:]
+        if raw in {b"\n", b"\r", b"\r\n"} or not raw:
+            continue
+        if ranges and ranges[-1][1] == start:
+            ranges[-1] = (ranges[-1][0], end)
+        else:
+            ranges.append((start, end))
+    return tuple(ranges)
