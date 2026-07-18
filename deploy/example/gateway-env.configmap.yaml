@@ -47,6 +47,7 @@ data:
   GATEWAY_PG_SCHEMA: <<GATEWAY_PG_SCHEMA>>
   GATEWAY_SQLITE_PATH: gateway.db
   HEARTBEAT_ENABLED: "FALSE"
+  JINA_READER_ENDPOINT: https://r.jinaai.cn
   JIUWENBOX_CODE_POD_PATH: /usr/local/lib/python3.11/site-packages/jiuwenbox
   JIUWENBOX_CONTAINER_NAME: jiuwenbox
   JIUWENBOX_ENABLED: "true"
