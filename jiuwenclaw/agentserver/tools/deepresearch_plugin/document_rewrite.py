@@ -180,10 +180,15 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
+def _read_bounded(path: Path, limit: int) -> bytes:
+    with path.open("rb") as stream:
+        return stream.read(limit + 1)
+
+
 def _load_provenance(report_path: Path) -> tuple[dict, str]:
     sidecar = report_path.with_suffix(".provenance.json")
     try:
-        payload = sidecar.read_bytes()
+        payload = _read_bounded(sidecar, PROVENANCE_MAX_BYTES)
     except OSError as exc:
         raise RewriteError("DOCUMENT_NOT_FOUND", "report provenance is unavailable") from exc
     if len(payload) > PROVENANCE_MAX_BYTES:
@@ -209,7 +214,7 @@ def _load_final_result_citations(report_path: Path, provenance: dict, root: Path
     if not _inside(snapshot_path, root):
         raise RewriteError("BAD_REQUEST", "report final result is outside the current workspace")
     try:
-        snapshot_bytes = snapshot_path.read_bytes()
+        snapshot_bytes = _read_bounded(snapshot_path, FINAL_RESULT_MAX_BYTES)
     except OSError as exc:
         raise RewriteError("DOCUMENT_NOT_FOUND", "report final result is unavailable") from exc
     if len(snapshot_bytes) > FINAL_RESULT_MAX_BYTES:

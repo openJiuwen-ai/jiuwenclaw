@@ -937,6 +937,51 @@ def test_prepare_rejects_oversized_citation_evidence_field(tmp_path, monkeypatch
     assert caught.value.code == "DOCUMENT_NOT_FOUND"
 
 
+@pytest.mark.parametrize("loader", ["provenance", "final_result"])
+def test_metadata_loaders_request_only_limit_plus_one_bytes(
+    tmp_path, monkeypatch, loader
+):
+    limit = 8
+    requested_sizes = []
+
+    class ReadProbe:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self, size=-1):
+            requested_sizes.append(size)
+            return b"x" * (limit + 1)
+
+    def open_probe(self, mode="r", *args, **kwargs):
+        assert mode == "rb"
+        return ReadProbe()
+
+    monkeypatch.setattr(Path, "open", open_probe)
+    report = tmp_path / "report.md"
+    if loader == "provenance":
+        monkeypatch.setattr(rewrite_module, "PROVENANCE_MAX_BYTES", limit)
+        invoke = lambda: rewrite_module._load_provenance(report)
+    else:
+        monkeypatch.setattr(rewrite_module, "FINAL_RESULT_MAX_BYTES", limit)
+        invoke = lambda: rewrite_module._load_final_result_citations(
+            report,
+            {
+                "final_result_path": "report.final-result.json",
+                "final_result_sha256": "0" * 64,
+            },
+            tmp_path,
+        )
+
+    with pytest.raises(RewriteError) as caught:
+        invoke()
+
+    assert caught.value.code == "DOCUMENT_NOT_FOUND"
+    assert requested_sizes == [limit + 1]
+
+
 def test_prepare_rejects_legacy_action_stale_hash_and_workspace_escape(tmp_path):
     report, provenance = _write_document(tmp_path, "原句。\n")
     with pytest.raises(RewriteError) as caught:
