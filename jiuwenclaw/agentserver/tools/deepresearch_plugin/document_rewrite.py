@@ -42,6 +42,10 @@ FORBIDDEN_OUTPUT_RE = re.compile(
 LIST_RE = re.compile(r"^\s*(?:[-+*]|\d+[.)])\s+")
 TOKEN_TTL_SECONDS = 10 * 60
 CONTEXT_CACHE_MAX = 1024
+PROVENANCE_MAX_BYTES = 4 * 1024 * 1024
+FINAL_RESULT_MAX_BYTES = 64 * 1024 * 1024
+CITATION_COUNT_MAX = 10_000
+CITATION_FIELD_MAX_BYTES = 1024 * 1024
 _INLINE_PARSER = MarkdownIt("commonmark")
 
 
@@ -65,16 +69,17 @@ class _RewriteContext:
     session_id: str
     workspace_root: Path
     report_path: Path
-    provenance: dict
+    provenance_sha256: str
+    document_id: str
+    parent_revision_id: str
+    final_result_path: str
+    final_result_sha256: str
     parent_hash: str
     selection_start_byte: int
     selection_end_byte: int
     selected_units: tuple["_SelectedUnitRange", ...]
     structure_signature: tuple[object, ...]
-    protected_anchors: tuple[ProtectedAnchor, ...]
     action: str
-    instruction: str
-    allowed_citations: dict[str, dict]
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,15 +180,21 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
-def _load_provenance(report_path: Path) -> dict:
+def _load_provenance(report_path: Path) -> tuple[dict, str]:
     sidecar = report_path.with_suffix(".provenance.json")
     try:
-        value = json.loads(sidecar.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = sidecar.read_bytes()
+    except OSError as exc:
+        raise RewriteError("DOCUMENT_NOT_FOUND", "report provenance is unavailable") from exc
+    if len(payload) > PROVENANCE_MAX_BYTES:
+        raise RewriteError("DOCUMENT_NOT_FOUND", "report provenance is too large")
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RewriteError("DOCUMENT_NOT_FOUND", "report provenance is unavailable") from exc
     if not isinstance(value, dict):
         raise RewriteError("DOCUMENT_NOT_FOUND", "report provenance is invalid")
-    return value
+    return value, _sha256(payload)
 
 
 def _load_final_result_citations(report_path: Path, provenance: dict, root: Path) -> list[dict]:
@@ -201,30 +212,75 @@ def _load_final_result_citations(report_path: Path, provenance: dict, root: Path
         snapshot_bytes = snapshot_path.read_bytes()
     except OSError as exc:
         raise RewriteError("DOCUMENT_NOT_FOUND", "report final result is unavailable") from exc
+    if len(snapshot_bytes) > FINAL_RESULT_MAX_BYTES:
+        raise RewriteError("DOCUMENT_NOT_FOUND", "report final result is too large")
     if _sha256(snapshot_bytes) != expected_hash:
         raise RewriteError("REVISION_CONFLICT", "the report final result changed")
     try:
         snapshot = json.loads(snapshot_bytes)
-    except json.JSONDecodeError as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RewriteError("DOCUMENT_NOT_FOUND", "report final result is invalid") from exc
     citation_messages = snapshot.get("citation_messages") if isinstance(snapshot, dict) else None
     citations = citation_messages.get("data") if isinstance(citation_messages, dict) else None
-    if not isinstance(citations, list) or any(not isinstance(item, dict) for item in citations):
+    if (
+        not isinstance(citations, list)
+        or len(citations) > CITATION_COUNT_MAX
+        or any(not isinstance(item, dict) for item in citations)
+    ):
         raise RewriteError("DOCUMENT_NOT_FOUND", "report citation data is invalid")
+    _citation_index(citations)
     return citations
 
 
 def _citation_index(citations: list[dict]) -> tuple[dict[str, dict], dict[str, dict]]:
+    def field_size(value: str) -> int:
+        try:
+            return len(value.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise RewriteError(
+                "DOCUMENT_NOT_FOUND", "report citation data is invalid"
+            ) from exc
+
     by_id: dict[str, dict] = {}
     by_key: dict[str, dict] = {}
     for item in citations:
-        source_id = str(item.get("id", ""))
-        url = str(item.get("url", ""))
-        reference_index = str(item.get("reference_index", ""))
-        if source_id:
-            by_id[source_id] = item
-        if url and reference_index:
-            by_key[f"{reference_index}\0{url}"] = item
+        raw_id = item.get("id")
+        raw_reference_index = item.get("reference_index")
+        url = item.get("url")
+        if (
+            isinstance(raw_id, bool)
+            or not isinstance(raw_id, (str, int))
+            or isinstance(raw_reference_index, bool)
+            or not isinstance(raw_reference_index, (str, int))
+            or not isinstance(url, str)
+        ):
+            raise RewriteError("DOCUMENT_NOT_FOUND", "report citation data is invalid")
+        source_id = str(raw_id).strip()
+        reference_index = str(raw_reference_index).strip()
+        url = url.strip()
+        if (
+            not source_id
+            or not reference_index
+            or not url
+            or re.fullmatch(r"https?://\S+", url, re.IGNORECASE) is None
+            or any(
+                field_size(value) > CITATION_FIELD_MAX_BYTES
+                for value in (source_id, reference_index, url)
+            )
+        ):
+            raise RewriteError("DOCUMENT_NOT_FOUND", "report citation data is invalid")
+        for field in ("title", "content", "chunk", "source"):
+            value = item.get(field)
+            if value is not None and (
+                not isinstance(value, str)
+                or field_size(value) > CITATION_FIELD_MAX_BYTES
+            ):
+                raise RewriteError("DOCUMENT_NOT_FOUND", "report citation data is invalid")
+        key = f"{reference_index}\0{url}"
+        if source_id in by_id or key in by_key:
+            raise RewriteError("DOCUMENT_NOT_FOUND", "report citation data is ambiguous")
+        by_id[source_id] = item
+        by_key[key] = item
     return by_id, by_key
 
 
@@ -490,7 +546,7 @@ def prepare_rewrite(
         markdown = report.read_text(encoding="utf-8")
     except OSError as exc:
         raise RewriteError("DOCUMENT_NOT_FOUND", "report is unavailable") from exc
-    provenance = _load_provenance(report)
+    provenance, provenance_sha256 = _load_provenance(report)
     document_id = provenance.get("document_id")
     revision_id = provenance.get("revision_id")
     content_sha256 = provenance.get("content_sha256")
@@ -570,16 +626,17 @@ def prepare_rewrite(
         session_id=session_id,
         workspace_root=root,
         report_path=report,
-        provenance=provenance,
+        provenance_sha256=provenance_sha256,
+        document_id=document_id,
+        parent_revision_id=revision_id,
+        final_result_path=str(provenance["final_result_path"]),
+        final_result_sha256=str(provenance["final_result_sha256"]),
         parent_hash=actual_hash,
         selection_start_byte=start,
         selection_end_byte=end,
         selected_units=selected_unit_ranges,
         structure_signature=structure_signature(rewrite_map),
-        protected_anchors=selected_anchors,
         action=action,
-        instruction=instruction,
-        allowed_citations=allowed,
     )
     _store_context(token, context)
     return {
@@ -665,9 +722,15 @@ def _validate_structured_units(
             ):
                 raise RewriteError("MODEL_OUTPUT_INVALID", "slot IDs must match prepared slots exactly")
             text = slot["text"]
+            try:
+                text_size = len(text.encode("utf-8"))
+            except UnicodeEncodeError as exc:
+                raise RewriteError(
+                    "MODEL_OUTPUT_INVALID", "slot text is not valid UTF-8"
+                ) from exc
             if FORBIDDEN_OUTPUT_RE.search(text):
                 raise RewriteError("MODEL_OUTPUT_INVALID", "slot text contains forbidden syntax")
-            total += len(text)
+            total += text_size
             if total > 24_000:
                 raise RewriteError("MODEL_OUTPUT_INVALID", "rewrite output is too large")
             normalized[expected_slot.slot_id] = text
@@ -684,11 +747,12 @@ def _topology_parts(signature: tuple[object, ...]) -> tuple[tuple[object, ...], 
 
 def _validate_affected_citations(
     context: _RewriteContext,
+    provenance: dict,
     original_map: MarkdownRewriteMap,
     child_map: MarkdownRewriteMap,
 ) -> list[str]:
     citations = _load_final_result_citations(
-        context.report_path, context.provenance, context.workspace_root
+        context.report_path, provenance, context.workspace_root
     )
     _, by_key = _citation_index(citations)
     selected_ids = {unit.unit_id for unit in context.selected_units}
@@ -779,10 +843,30 @@ def _atomic_write(path: Path, payload: bytes) -> None:
 def commit_rewrite(*, context_token: str, session_id: str, structured_result: object) -> dict:
     context = _take_context(context_token, session_id)
     slot_texts = _validate_structured_units(structured_result, context.selected_units)
-    document_id = str(context.provenance["document_id"])
+    document_id = context.document_id
     with _CONTEXT_LOCK:
         document_lock = _DOCUMENT_LOCKS.setdefault(document_id, threading.Lock())
     with document_lock:
+        try:
+            provenance, provenance_sha256 = _load_provenance(context.report_path)
+        except RewriteError as exc:
+            raise RewriteError("REVISION_CONFLICT", "the report provenance changed") from exc
+        provenance_identity = (
+            provenance.get("document_id"),
+            provenance.get("revision_id"),
+            provenance.get("content_sha256"),
+            provenance.get("final_result_path"),
+            provenance.get("final_result_sha256"),
+        )
+        expected_identity = (
+            context.document_id,
+            context.parent_revision_id,
+            context.parent_hash,
+            context.final_result_path,
+            context.final_result_sha256,
+        )
+        if provenance_sha256 != context.provenance_sha256 or provenance_identity != expected_identity:
+            raise RewriteError("REVISION_CONFLICT", "the report provenance changed")
         current_bytes = context.report_path.read_bytes()
         parent_hash = _sha256(current_bytes)
         if parent_hash != context.parent_hash:
@@ -815,18 +899,20 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
             original_map, context, slot_texts, selected_ranges
         ):
             raise RewriteError("FORMAT_CONFLICT", "rewrite changed protected inline topology")
-        source_ids = _validate_affected_citations(context, original_map, child_map)
+        source_ids = _validate_affected_citations(
+            context, provenance, original_map, child_map
+        )
         result_bytes = "\n".join(slot_texts.values()).encode("utf-8")
         revision_id = f"rev_{uuid.uuid4().hex}"
         child_path = context.report_path.with_name(
-            f"{context.report_path.stem}-rev-{revision_id[4:12]}.md"
+            f"{context.report_path.stem}-rev-{revision_id[4:]}.md"
         )
         child_hash = _sha256(child_markdown.encode("utf-8"))
-        child_provenance = dict(context.provenance)
-        history = list(context.provenance.get("rewrite_history") or [])
+        child_provenance = dict(provenance)
+        history = list(provenance.get("rewrite_history") or [])
         history.append({
             "action": context.action,
-            "parent_revision_id": context.provenance["revision_id"],
+            "parent_revision_id": context.parent_revision_id,
             "selection_sha256": _sha256(
                 current_bytes[context.selection_start_byte : context.selection_end_byte]
             ),
@@ -835,7 +921,7 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
         })
         child_provenance.update({
             "revision_id": revision_id,
-            "parent_revision_id": context.provenance["revision_id"],
+            "parent_revision_id": context.parent_revision_id,
             "markdown_path": str(child_path),
             "content_sha256": child_hash,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -851,7 +937,7 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
     return {
         "document_id": document_id,
         "revision_id": revision_id,
-        "parent_revision_id": context.provenance["revision_id"],
+        "parent_revision_id": context.parent_revision_id,
         "report_path": str(child_path),
         "provenance_path": str(provenance_path),
         "citation_integrity_status": "verified",

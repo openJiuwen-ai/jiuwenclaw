@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -540,6 +541,38 @@ def test_commit_rejects_unsafe_or_invalid_model_output(
     assert caught.value.code == "MODEL_OUTPUT_INVALID"
 
 
+def test_commit_rejects_lone_surrogate_as_invalid_model_output(tmp_path):
+    report, _ = _write_document(tmp_path, "original\n")
+    prepared = _prepare(tmp_path, report, "original")
+    payload = _structured_payload(prepared)
+    payload["units"][0]["slots"][0]["text"] = "bad\ud800text"
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=payload,
+        )
+
+    assert caught.value.code == "MODEL_OUTPUT_INVALID"
+
+
+def test_commit_counts_output_limit_in_utf8_bytes(tmp_path):
+    report, _ = _write_document(tmp_path, "original\n")
+    prepared = _prepare(tmp_path, report, "original")
+    payload = _structured_payload(prepared)
+    payload["units"][0]["slots"][0]["text"] = "中" * 8_001
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=payload,
+        )
+
+    assert caught.value.code == "MODEL_OUTPUT_INVALID"
+
+
 @pytest.mark.parametrize(
     ("body", "raw", "replacement", "expected_fragment"),
     [
@@ -727,6 +760,43 @@ def test_commit_revalidates_final_result_hash(tmp_path):
     assert caught.value.code == "REVISION_CONFLICT"
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "reserialize",
+        "revision_id",
+        "content_sha256",
+        "final_result_path",
+        "final_result_sha256",
+    ],
+)
+def test_commit_rejects_provenance_sidecar_toctou(tmp_path, mutation):
+    report, _ = _write_document(tmp_path, "original\n")
+    prepared = _prepare(tmp_path, report, "original")
+    sidecar = report.with_suffix(".provenance.json")
+    provenance = json.loads(sidecar.read_text(encoding="utf-8"))
+    if mutation == "reserialize":
+        provenance["created_at"] = "2026-07-18T00:00:00+00:00"
+    elif mutation == "revision_id":
+        provenance[mutation] = "rev_changed"
+    elif mutation == "content_sha256":
+        provenance[mutation] = "1" * 64
+    elif mutation == "final_result_path":
+        provenance[mutation] = "other.final-result.json"
+    else:
+        provenance[mutation] = "2" * 64
+    sidecar.write_text(json.dumps(provenance, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared),
+        )
+
+    assert caught.value.code == "REVISION_CONFLICT"
+
+
 def test_commit_preserves_multiple_citation_identity_order_count(tmp_path):
     body = (
         "left [[1]](https://example.com/source) middle "
@@ -792,6 +862,79 @@ def test_commit_rejects_citation_missing_from_final_result_whitelist(tmp_path):
         )
 
     assert caught.value.code == "FORMAT_CONFLICT"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_id",
+        "bool_id",
+        "missing_reference_index",
+        "bad_reference_index",
+        "missing_url",
+        "empty_url",
+        "duplicate_id",
+        "duplicate_key",
+    ],
+)
+def test_prepare_rejects_invalid_or_duplicate_citation_schema(tmp_path, mutation):
+    report, provenance = _write_document(tmp_path, "claim\n")
+    snapshot_path = report.with_name(provenance["final_result_path"])
+    citations = json.loads(snapshot_path.read_text(encoding="utf-8"))[
+        "citation_messages"
+    ]["data"]
+    first = dict(citations[0])
+    if mutation == "missing_id":
+        first.pop("id")
+    elif mutation == "bool_id":
+        first["id"] = True
+    elif mutation == "missing_reference_index":
+        first.pop("reference_index")
+    elif mutation == "bad_reference_index":
+        first["reference_index"] = []
+    elif mutation == "missing_url":
+        first.pop("url")
+    elif mutation == "empty_url":
+        first["url"] = ""
+    elif mutation == "duplicate_id":
+        citations.append(dict(first, reference_index=2, url="https://second.example"))
+    else:
+        citations.append(dict(first, id=4))
+    citations[0] = first
+    _set_snapshot_citations(report, provenance, citations)
+
+    with pytest.raises(RewriteError) as caught:
+        _prepare(tmp_path, report, "claim")
+
+    assert caught.value.code == "DOCUMENT_NOT_FOUND"
+
+
+def test_prepare_rejects_oversized_final_result_before_json_decode(
+    tmp_path, monkeypatch
+):
+    report, _ = _write_document(tmp_path, "claim\n")
+    monkeypatch.setattr(rewrite_module, "FINAL_RESULT_MAX_BYTES", 64, raising=False)
+
+    with pytest.raises(RewriteError) as caught:
+        _prepare(tmp_path, report, "claim")
+
+    assert caught.value.code == "DOCUMENT_NOT_FOUND"
+
+
+def test_prepare_rejects_oversized_citation_evidence_field(tmp_path, monkeypatch):
+    report, provenance = _write_document(tmp_path, "claim\n")
+    snapshot_path = report.with_name(provenance["final_result_path"])
+    citation = json.loads(snapshot_path.read_text(encoding="utf-8"))[
+        "citation_messages"
+    ]["data"][0]
+    citation["content"] = "x" * 65
+    _set_snapshot_citations(report, provenance, [citation])
+    monkeypatch.setattr(rewrite_module, "CITATION_FIELD_MAX_BYTES", 64, raising=False)
+
+    with pytest.raises(RewriteError) as caught:
+        _prepare(tmp_path, report, "claim")
+
+    assert caught.value.code == "DOCUMENT_NOT_FOUND"
 
 
 def test_prepare_rejects_legacy_action_stale_hash_and_workspace_escape(tmp_path):
@@ -956,3 +1099,45 @@ def test_context_store_is_bounded_and_evicts_earliest_expiry(
     with pytest.raises(RewriteError) as caught:
         rewrite_module._take_context(tokens[-1], "S1")
     assert caught.value.code == "CONTEXT_EXPIRED"
+
+
+def test_context_is_compact_under_large_citation_cache_saturation(
+    tmp_path, monkeypatch
+):
+    body = "claim [[1]](https://example.com/source) remains\n"
+    report, provenance = _write_document(tmp_path, body)
+    snapshot_path = report.with_name(provenance["final_result_path"])
+    citation = json.loads(snapshot_path.read_text(encoding="utf-8"))[
+        "citation_messages"
+    ]["data"][0]
+    citation["content"] = "x" * 100_000
+    _set_snapshot_citations(report, provenance, [citation])
+    monkeypatch.setattr(rewrite_module, "CONTEXT_CACHE_MAX", 3)
+    with rewrite_module._CONTEXT_LOCK:
+        rewrite_module._CONTEXTS.clear()
+
+    tokens = [_prepare(tmp_path, report, "claim")["context_token"] for _ in range(5)]
+
+    with rewrite_module._CONTEXT_LOCK:
+        assert set(rewrite_module._CONTEXTS) == set(tokens[-3:])
+        for context in rewrite_module._CONTEXTS.values():
+            assert not hasattr(context, "provenance")
+            assert not hasattr(context, "protected_anchors")
+            assert not hasattr(context, "instruction")
+            assert not hasattr(context, "allowed_citations")
+            assert isinstance(context.provenance_sha256, str)
+            assert context.document_id == "doc_test"
+            assert context.parent_revision_id == "rev_parent"
+
+
+def test_commit_child_path_uses_full_revision_uuid(tmp_path):
+    report, _ = _write_document(tmp_path, "original\n")
+    prepared = _prepare(tmp_path, report, "original")
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared),
+    )
+
+    assert re.search(r"-rev-[0-9a-f]{32}\.md$", result["report_path"])
