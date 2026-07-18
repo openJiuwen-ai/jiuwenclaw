@@ -194,6 +194,21 @@ def test_prepare_rejects_hash_or_visible_text_mismatch(tmp_path, field):
     assert caught.value.code == "SELECTION_MAPPING_CONFLICT"
 
 
+def test_prepare_rejects_uppercase_source_hash(tmp_path):
+    report, _ = _write_document(tmp_path, "text\n")
+    selection = _selection("text\n", "text")
+    selection["source_sha256"] = selection["source_sha256"].upper()
+    with pytest.raises(RewriteError) as caught:
+        prepare_rewrite(
+            workspace_root=tmp_path,
+            report_path=report,
+            action="polish",
+            selection=selection,
+            session_id="S1",
+        )
+    assert caught.value.code == "SELECTION_MAPPING_CONFLICT"
+
+
 def test_prepare_normalizes_visible_markdown_and_returns_partial_slots(tmp_path):
     body = "before **bold** [label](https://ordinary.example) soft\nbreak [[1]](https://example.com/source) hard  \nline `code` after\n"
     report, _ = _write_document(tmp_path, body)
@@ -226,6 +241,19 @@ def test_prepare_normalizes_multiple_citations_without_duplicate_evidence(tmp_pa
     )
     assert prepared["allowed_source_ids"] == ["3"]
     assert len(prepared["citation_evidence"]) == 1
+
+
+def test_prepare_rejects_selection_containing_only_a_protected_citation(tmp_path):
+    body = "left[[1]](https://example.com/source)right\n"
+    report, _ = _write_document(tmp_path, body)
+    with pytest.raises(RewriteError) as caught:
+        _prepare(
+            tmp_path,
+            report,
+            "[[1]](https://example.com/source)",
+            visible="[1]",
+        )
+    assert caught.value.code == "UNSUPPORTED_SELECTION"
 
 
 @pytest.mark.parametrize(
@@ -311,6 +339,35 @@ def test_prepare_and_commit_simple_unit_remain_compatible(tmp_path):
     assert child_provenance["parent_revision_id"] == provenance["revision_id"]
 
 
+@pytest.mark.parametrize(
+    ("body", "raw", "visible"),
+    [
+        ("before **bold** after\n", "bold** after", "bold after"),
+        ("first tail\n\nsecond head\n", "tail\n\nsecond", "tail\nsecond"),
+    ],
+)
+def test_legacy_commit_fails_closed_for_complex_v2_context(
+    tmp_path, body, raw, visible
+):
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(tmp_path, report, raw, visible=visible)
+    before_children = set(tmp_path.glob("report-rev-*.md"))
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result={
+                "segments": [{"text": "replacement", "source_ids": []}],
+                "facts_added": False,
+            },
+        )
+
+    assert caught.value.code == "MODEL_OUTPUT_INVALID"
+    assert report.read_text(encoding="utf-8") == body
+    assert set(tmp_path.glob("report-rev-*.md")) == before_children
+
+
 def test_prepare_rejects_legacy_action_stale_hash_and_workspace_escape(tmp_path):
     report, provenance = _write_document(tmp_path, "原句。\n")
     with pytest.raises(RewriteError) as caught:
@@ -349,6 +406,35 @@ def test_prepare_preserves_file_and_size_limits(tmp_path):
     long_report, _ = _write_document(tmp_path, long_body)
     with pytest.raises(RewriteError) as caught:
         _prepare(tmp_path, long_report, long_body.rstrip("\n"))
+    assert caught.value.code == "BAD_REQUEST"
+
+
+def test_request_limits_are_checked_before_persistent_document_access(
+    tmp_path, monkeypatch
+):
+    missing_report = tmp_path / "missing.md"
+    selection = {
+        "protocol_version": 2,
+        "start_byte": 0,
+        "end_byte": 1,
+        "selected_text": "x" * 12001,
+        "source_sha256": "0" * 64,
+    }
+    monkeypatch.setattr(
+        rewrite_module,
+        "_load_provenance",
+        lambda _path: pytest.fail("persistent provenance must not be read"),
+    )
+
+    with pytest.raises(RewriteError) as caught:
+        prepare_rewrite(
+            workspace_root=tmp_path,
+            report_path=missing_report,
+            action="polish",
+            selection=selection,
+            session_id="S1",
+        )
+
     assert caught.value.code == "BAD_REQUEST"
 
 

@@ -242,7 +242,7 @@ def _require_selection_protocol(selection: object) -> dict:
     return selection
 
 
-def _validate_selection(selection: object, markdown: str) -> tuple[int, int, str]:
+def _validate_selection_request(selection: object) -> tuple[int, int, str, str]:
     selection = _require_selection_protocol(selection)
     start = selection.get("start_byte")
     end = selection.get("end_byte")
@@ -252,8 +252,18 @@ def _validate_selection(selection: object, markdown: str) -> tuple[int, int, str
         _mapping_conflict("selection byte range is invalid")
     if not isinstance(selected_text, str):
         _mapping_conflict("selected text must be a string")
-    if not isinstance(source_hash, str) or re.fullmatch(r"[a-fA-F0-9]{64}", source_hash) is None:
+    if not selected_text or len(selected_text) > 12_000:
+        raise RewriteError("BAD_REQUEST", "selection size is invalid")
+    if (
+        not isinstance(source_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", source_hash) is None
+    ):
         _mapping_conflict("selection source hash is invalid")
+    return start, end, selected_text, source_hash
+
+
+def _validate_selection(selection: object, markdown: str) -> tuple[int, int, str]:
+    start, end, selected_text, source_hash = _validate_selection_request(selection)
     boundary_table = Utf8BoundaryTable(markdown)
     try:
         boundary_table.require_byte_boundary(start)
@@ -261,7 +271,7 @@ def _validate_selection(selection: object, markdown: str) -> tuple[int, int, str
     except ValueError as exc:
         _mapping_conflict(str(exc))
     source_bytes = markdown.encode("utf-8")
-    if end > len(source_bytes) or _sha256(source_bytes[start:end]) != source_hash.lower():
+    if end > len(source_bytes) or _sha256(source_bytes[start:end]) != source_hash:
         _mapping_conflict("selection source hash does not match the document")
     return start, end, selected_text
 
@@ -445,6 +455,7 @@ def prepare_rewrite(
         raise RewriteError("BAD_REQUEST", "unsupported rewrite action")
     if not isinstance(instruction, str) or len(instruction) > 2_000:
         raise RewriteError("BAD_REQUEST", "instruction size is invalid")
+    _validate_selection_request(selection)
 
     try:
         markdown = report.read_text(encoding="utf-8")
@@ -469,10 +480,16 @@ def prepare_rewrite(
     final_result_citations = _load_final_result_citations(report, provenance, root)
 
     start, end, selected_text = _validate_selection(selection, markdown)
-    if not selected_text or len(selected_text) > 12_000:
-        raise RewriteError("BAD_REQUEST", "selection size is invalid")
     rewrite_map = build_rewrite_map(markdown)
     covered = _selected_units(rewrite_map, start, end, provenance)
+    if not any(
+        _slot_slice(slot, start, end) is not None
+        for unit in covered
+        for slot in unit.slots
+    ):
+        raise RewriteError(
+            "UNSUPPORTED_SELECTION", "selection contains no editable text"
+        )
     normalized_visible = "\n".join(
         _unit_visible_text(unit, start, end) for unit in covered
     ).replace("\r\n", "\n").replace("\r", "\n")
@@ -557,6 +574,29 @@ def _take_context(token: str, session_id: str) -> _RewriteContext:
         return context
 
 
+def _require_legacy_commit_safe(context: _RewriteContext) -> None:
+    if len(context.selected_units) != 1:
+        raise RewriteError(
+            "MODEL_OUTPUT_INVALID", "structured multi-unit commit is not yet supported"
+        )
+    selected_unit = context.selected_units[0]
+    if len(selected_unit.slots) != 1:
+        raise RewriteError(
+            "MODEL_OUTPUT_INVALID", "structured multi-slot commit is not yet supported"
+        )
+    selected_slot = selected_unit.slots[0]
+    if (
+        selected_unit.start_byte != context.selection_start_byte
+        or selected_unit.end_byte != context.selection_end_byte
+        or selected_slot.start_byte != context.selection_start_byte
+        or selected_slot.end_byte != context.selection_end_byte
+        or context.protected_anchors
+    ):
+        raise RewriteError(
+            "MODEL_OUTPUT_INVALID", "protected or partial structured commit is not yet supported"
+        )
+
+
 def _validate_segments(structured_result: object, allowed: dict[str, dict]) -> list[dict]:
     if not isinstance(structured_result, dict) or structured_result.get("facts_added") is not False:
         raise RewriteError("MODEL_OUTPUT_INVALID", "facts_added must be false")
@@ -613,6 +653,7 @@ def _atomic_write(path: Path, payload: bytes) -> None:
 
 def commit_rewrite(*, context_token: str, session_id: str, structured_result: object) -> dict:
     context = _take_context(context_token, session_id)
+    _require_legacy_commit_safe(context)
     segments = _validate_segments(structured_result, context.allowed_citations)
     replacement = _render_segments(segments, context.allowed_citations)
     document_id = str(context.provenance["document_id"])
