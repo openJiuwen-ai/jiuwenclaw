@@ -101,8 +101,6 @@ TOOL_WHITELIST = frozenset({
     "audio_question_answering",
     "audio_metadata",
     "video_understanding",
-    "search_skill",
-    "install_skill",
     "uninstall_skill",
     "skill_index_build",
     "skill_branch_explore",
