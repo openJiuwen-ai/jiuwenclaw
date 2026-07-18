@@ -10,7 +10,9 @@ from jiuwenclaw.agentserver.tools.deepresearch_plugin import (
     markdown_rewrite_map as rewrite_map_module,
 )
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.markdown_rewrite_map import (
+    ProtectedAnchor,
     RewriteMapError,
+    RewriteSlot,
     Utf8BoundaryTable,
     sha256_byte_range,
 )
@@ -357,6 +359,235 @@ def test_build_rewrite_map_parses_sibling_after_unsupported_nested_list_item():
     assert markdown.encode("utf-8")[sibling.start_byte : sibling.end_byte].decode() == (
         "- sibling"
     )
+
+
+def test_inline_slots_exclude_link_destination_and_citation():
+    markdown = (
+        "市场正在**快速增长**，[官方报告](https://example.com/report \"title\")"
+        "已确认。[[1]](https://example.com/source)"
+    )
+
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+    unit = rewrite_map.units[0]
+
+    assert [(slot.text, slot.formats, slot.link_id) for slot in unit.slots] == [
+        ("市场正在", (), None),
+        ("快速增长", ("strong",), None),
+        ("，", (), None),
+        ("官方报告", ("link",), f"{unit.unit_id}:link:0"),
+        ("已确认。", (), None),
+    ]
+    assert [slot.slot_id for slot in unit.slots] == [
+        f"{unit.unit_id}:slot:{ordinal}:{slot.start_byte}:{slot.end_byte}"
+        for ordinal, slot in enumerate(unit.slots)
+    ]
+    assert [anchor.kind for anchor in unit.protected] == [
+        "syntax",
+        "syntax",
+        "syntax",
+        "link_destination",
+        "citation",
+    ]
+    protected_source = "".join(anchor.source for anchor in unit.protected)
+    assert "https://example.com/report" in protected_source
+    assert "[[1]](https://example.com/source)" in protected_source
+    assert all("http" not in slot.text for slot in unit.slots)
+
+
+def test_nested_inline_formats_have_balanced_protected_markers():
+    markdown = "**outer *inner ~~strike~~ tail* end**"
+
+    unit = rewrite_map_module.build_rewrite_map(markdown).units[0]
+
+    assert [(slot.text, slot.formats) for slot in unit.slots] == [
+        ("outer ", ("strong",)),
+        ("inner ", ("strong", "emphasis")),
+        ("strike", ("strong", "emphasis", "strikethrough")),
+        (" tail", ("strong", "emphasis")),
+        (" end", ("strong",)),
+    ]
+    assert [anchor.source for anchor in unit.protected] == [
+        "**", "*", "~~", "~~", "*", "**"
+    ]
+    assert all(anchor.kind == "syntax" for anchor in unit.protected)
+
+
+def test_multiple_citations_are_atomic_and_keep_identity_order_and_ranges():
+    markdown = "Claim [[12]](https://a.example) then [[3]](http://b.example)."
+
+    unit = rewrite_map_module.build_rewrite_map(markdown).units[0]
+    citations = [anchor for anchor in unit.protected if anchor.kind == "citation"]
+
+    assert [anchor.anchor_id for anchor in citations] == [
+        f"{unit.unit_id}:anchor:0:{len('Claim '.encode('utf-8'))}:31",
+        f"{unit.unit_id}:anchor:1:37:60",
+    ]
+    assert [anchor.source for anchor in citations] == [
+        "[[12]](https://a.example)",
+        "[[3]](http://b.example)",
+    ]
+    source_bytes = markdown.encode("utf-8")
+    assert [source_bytes[a.start_byte:a.end_byte].decode() for a in citations] == [
+        a.source for a in citations
+    ]
+
+
+@pytest.mark.parametrize(
+    "markdown,kind,source",
+    [
+        ("first\nsecond", "soft", " "),
+        ("first  \nsecond", "hard", "  \n"),
+        ("first\\\nsecond", "hard", "\\\n"),
+    ],
+)
+def test_soft_break_is_editable_space_and_hard_breaks_are_protected(
+    markdown, kind, source
+):
+    unit = rewrite_map_module.build_rewrite_map(markdown).units[0]
+
+    if kind == "soft":
+        whitespace = next(slot for slot in unit.slots if slot.text == " ")
+        assert whitespace.visible_boundary_to_byte == (5, 6)
+        assert unit.protected == ()
+    else:
+        hard_break = next(
+            anchor for anchor in unit.protected if anchor.kind == "hard_break"
+        )
+        assert hard_break.source == source
+        assert [slot.text for slot in unit.slots] == ["first", "second"]
+
+
+def test_atomic_inline_constructs_are_protected_but_mixed_unit_remains():
+    markdown = "before `code` ![alt](x.png) [#inference:claim](proof://1) after"
+
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+    unit = rewrite_map.units[0]
+
+    assert rewrite_map.unsupported_regions == ()
+    assert [slot.text for slot in unit.slots] == ["before ", " ", " ", " after"]
+    assert [(anchor.kind, anchor.source) for anchor in unit.protected] == [
+        ("inline_code", "`code`"),
+        ("image", "![alt](x.png)"),
+        ("inference", "[#inference:claim](proof://1)"),
+    ]
+
+
+def test_visible_boundary_map_handles_escape_emoji_cjk_and_combining_character():
+    markdown = r"escaped \* 😀中文 é"
+
+    slot = rewrite_map_module.build_rewrite_map(markdown).units[0].slots[0]
+
+    assert slot.text == "escaped * 😀中文 é"
+    raw_boundaries = Utf8BoundaryTable(markdown).codepoint_to_byte
+    # The rendered '*' consumes both the source backslash and '*'.
+    assert slot.visible_boundary_to_byte[8:10] == (
+        raw_boundaries[8], raw_boundaries[10]
+    )
+    assert slot.visible_boundary_to_byte[-5:] == raw_boundaries[-5:]
+
+
+def test_plain_ascii_punctuation_remains_editable_text():
+    markdown = "Growth: 10% faster! snake_case."
+
+    unit = rewrite_map_module.build_rewrite_map(markdown).units[0]
+
+    assert [slot.text for slot in unit.slots] == [markdown]
+    assert unit.protected == ()
+
+
+@pytest.mark.parametrize(
+    "markdown,break_source",
+    [
+        ("first\r\nsecond", None),
+        ("first  \r\nsecond", "  \r\n"),
+        ("first\\\r\nsecond", "\\\r\n"),
+    ],
+)
+def test_crlf_inline_breaks_keep_exact_source_ranges(markdown, break_source):
+    unit = rewrite_map_module.build_rewrite_map(markdown).units[0]
+
+    if break_source is None:
+        whitespace = next(slot for slot in unit.slots if slot.text == " ")
+        assert whitespace.visible_boundary_to_byte == (5, 7)
+    else:
+        hard_break = next(
+            anchor for anchor in unit.protected if anchor.kind == "hard_break"
+        )
+        assert hard_break.source == break_source
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "unterminated **strong",
+        "[label](<bad destination)",
+        "<https://example.com>",
+    ],
+)
+def test_ambiguous_inline_topology_fails_closed(markdown):
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+
+    assert rewrite_map.units == ()
+    assert [region.kind for region in rewrite_map.unsupported_regions] == [
+        "unsupported_inline"
+    ]
+
+
+def test_inline_map_types_are_frozen_and_slotted():
+    slot = RewriteSlot("slot", 0, 1, "x", (), None, (0, 1))
+    anchor = ProtectedAnchor("anchor", "syntax", 0, 1, "*")
+
+    for instance, attribute in [(slot, "text"), (anchor, "source")]:
+        with pytest.raises(FrozenInstanceError):
+            setattr(instance, attribute, getattr(instance, attribute))
+        assert not hasattr(instance, "__dict__")
+
+
+def test_structure_signature_ignores_editable_text_but_locks_inline_topology():
+    first = rewrite_map_module.build_rewrite_map(
+        "# **Alpha** [label](https://example.com) [[1]](https://source.example)"
+    )
+    second = rewrite_map_module.build_rewrite_map(
+        "# **Bravo** [other](https://example.com) [[1]](https://source.example)"
+    )
+    changed_destination = rewrite_map_module.build_rewrite_map(
+        "# **Bravo** [other](https://changed.example) [[1]](https://source.example)"
+    )
+
+    assert rewrite_map_module.structure_signature(first) == (
+        rewrite_map_module.structure_signature(second)
+    )
+    assert rewrite_map_module.structure_signature(first) != (
+        rewrite_map_module.structure_signature(changed_destination)
+    )
+
+    plain = rewrite_map_module.build_rewrite_map("Alpha text")
+    escaped_and_broken = rewrite_map_module.build_rewrite_map("Al\\*pha\ntext")
+    assert rewrite_map_module.structure_signature(plain) == (
+        rewrite_map_module.structure_signature(escaped_and_broken)
+    )
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "市场正在**快速增长**，"
+        "[官方报告](https://example.com/report \"title\")已确认。",
+        "first\nsecond",
+        "first  \nsecond",
+        r"escaped \* 😀中文 é",
+        "text ![alt](x.png) remains",
+    ],
+)
+def test_reconstruct_unchanged_slots_is_byte_identical(markdown):
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+    unchanged = {
+        slot.slot_id: slot.text
+        for unit in rewrite_map.units
+        for slot in unit.slots
+    }
+
+    assert rewrite_map_module.reconstruct_markdown(rewrite_map, unchanged) == markdown
 
 
 def test_build_rewrite_map_returns_empty_immutable_collections_for_empty_source():

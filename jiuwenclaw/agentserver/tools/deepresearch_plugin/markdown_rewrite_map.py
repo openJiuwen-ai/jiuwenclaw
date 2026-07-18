@@ -12,6 +12,39 @@ from markdown_it.token import Token
 
 
 UnitType = Literal["heading", "paragraph", "list_item"]
+ProtectedKind = Literal[
+    "syntax",
+    "link_destination",
+    "citation",
+    "hard_break",
+    "inline_code",
+    "image",
+    "inference",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class RewriteSlot:
+    """An editable rendered-text span with exact source byte boundaries."""
+
+    slot_id: str
+    start_byte: int
+    end_byte: int
+    text: str
+    formats: tuple[str, ...]
+    link_id: str | None = None
+    visible_boundary_to_byte: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectedAnchor:
+    """An immutable inline source span whose topology must be preserved."""
+
+    anchor_id: str
+    kind: ProtectedKind
+    start_byte: int
+    end_byte: int
+    source: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +219,383 @@ _UNSUPPORTED_BLOCK_KINDS = {
     "html_block": "html_block",
 }
 _LIST_MARKER = re.compile(r"^[ \t]*(?P<marker>[-+*]|\d+[.)])(?=[ \t])")
+_LIST_PREFIX = re.compile(r"^[ \t]*(?:[-+*]|\d+[.)])[ \t]+")
+_HEADING_PREFIX = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+")
+_HEADING_SUFFIX = re.compile(r"(?:[ \t]+#+)?[ \t]*")
+_CITATION = re.compile(r"\[\[(?P<number>\d+)\]\]\((?P<href>https?://[^\s)]+)\)")
+_ESCAPABLE = frozenset(r'!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~')
+
+
+class _InlineTopologyError(ValueError):
+    pass
+
+
+def _looks_like_unmatched_construct(raw: str, index: int) -> bool:
+    tail = raw[index:]
+    return tail.startswith(("**", "__", "~~", "[", "]", "<", "`", "!["))
+
+
+def _token_identity(token: Token) -> tuple[object, ...]:
+    return (
+        token.type,
+        token.nesting,
+        token.content,
+        token.markup,
+        tuple(sorted(token.attrs.items())),
+    )
+
+
+class _InlineScanner:
+    """Losslessly align one inline source span with markdown-it child tokens."""
+
+    def __init__(
+        self,
+        source: str,
+        raw: str,
+        raw_start: int,
+        unit_id: str,
+        children: list[Token],
+        parser: MarkdownIt,
+    ):
+        self.source = source
+        self.raw = raw
+        self.raw_start = raw_start
+        self.unit_id = unit_id
+        self.children = children
+        self.parser = parser
+        self.cursor = 0
+        self.slots: list[RewriteSlot] = []
+        self.protected: list[ProtectedAnchor] = []
+        self.link_count = 0
+        self.source_boundaries = Utf8BoundaryTable(source).codepoint_to_byte
+
+    def _byte(self, local_index: int) -> int:
+        return self.source_boundaries[self.raw_start + local_index]
+
+    def _add_slot(
+        self,
+        start: int,
+        end: int,
+        text: str,
+        boundaries: list[int],
+        formats: tuple[str, ...],
+        link_id: str | None,
+    ) -> None:
+        if not text:
+            return
+        start_byte, end_byte = self._byte(start), self._byte(end)
+        ordinal = len(self.slots)
+        self.slots.append(
+            RewriteSlot(
+                f"{self.unit_id}:slot:{ordinal}:{start_byte}:{end_byte}",
+                start_byte,
+                end_byte,
+                text,
+                formats,
+                link_id,
+                tuple(boundaries),
+            )
+        )
+
+    def _add_anchor(self, kind: ProtectedKind, start: int, end: int) -> None:
+        start_byte, end_byte = self._byte(start), self._byte(end)
+        ordinal = len(self.protected)
+        self.protected.append(
+            ProtectedAnchor(
+                f"{self.unit_id}:anchor:{ordinal}:{start_byte}:{end_byte}",
+                kind,
+                start_byte,
+                end_byte,
+                self.raw[start:end],
+            )
+        )
+
+    def _consume_text(
+        self,
+        rendered: str,
+        formats: tuple[str, ...],
+        link_id: str | None,
+    ) -> None:
+        if not rendered:
+            return
+        start = self.cursor
+        boundaries = [self._byte(start)]
+        for visible in rendered:
+            if (
+                self.cursor + 1 < len(self.raw)
+                and self.raw[self.cursor] == "\\"
+                and self.raw[self.cursor + 1] in _ESCAPABLE
+                and self.raw[self.cursor + 1] == visible
+            ):
+                self.cursor += 2
+            elif self.cursor < len(self.raw) and self.raw[self.cursor] == visible:
+                if _looks_like_unmatched_construct(self.raw, self.cursor):
+                    raise _InlineTopologyError("unmatched inline marker")
+                self.cursor += 1
+            else:
+                raise _InlineTopologyError("rendered text does not align with source")
+            boundaries.append(self._byte(self.cursor))
+        self._add_slot(
+            start,
+            self.cursor,
+            rendered,
+            boundaries,
+            formats,
+            link_id,
+        )
+
+    def _parsed_children(self, candidate: str) -> list[Token]:
+        parsed = self.parser.parseInline(candidate)
+        if len(parsed) != 1 or parsed[0].type != "inline":
+            return []
+        return parsed[0].children or []
+
+    def _find_atomic_end(self, start: int, expected: list[Token]) -> int:
+        expected_identity = [_token_identity(token) for token in expected]
+        for end in range(start + 1, len(self.raw) + 1):
+            candidate = self.raw[start:end]
+            actual = self._parsed_children(candidate)
+            if [_token_identity(token) for token in actual] == expected_identity:
+                return end
+        raise _InlineTopologyError("atomic inline source does not align")
+
+    def _matching_child_close(self, open_index: int) -> int:
+        depth = 0
+        for index in range(open_index, len(self.children)):
+            depth += self.children[index].nesting
+            if depth == 0:
+                return index
+        raise _InlineTopologyError("unbalanced inline child tokens")
+
+    def _scan_link(
+        self,
+        index: int,
+        formats: tuple[str, ...],
+    ) -> int:
+        close_index = self._matching_child_close(index)
+        expected = self.children[index : close_index + 1]
+        link_open = self.children[index]
+        href = link_open.attrGet("href") or ""
+        link_start = self.cursor
+
+        citation = _CITATION.match(self.raw, self.cursor)
+        if citation is not None:
+            expected_citation = (
+                close_index == index + 2
+                and self.children[index + 1].type == "text"
+                and self.children[index + 1].content == f"[{citation.group('number')}]"
+                and href == citation.group("href")
+            )
+            if not expected_citation:
+                raise _InlineTopologyError("citation disagrees with inline tokens")
+            self.cursor = citation.end()
+            self._add_anchor("citation", link_start, self.cursor)
+            return close_index + 1
+
+        if not self.raw.startswith("[", self.cursor):
+            raise _InlineTopologyError("only explicit inline links are supported")
+        link_end = self._find_atomic_end(link_start, expected)
+        label_text = "".join(
+            token.content
+            for token in self.children[index + 1 : close_index]
+            if token.type == "text"
+        )
+        if label_text.startswith("#inference:"):
+            self.cursor = link_end
+            self._add_anchor("inference", link_start, link_end)
+            return close_index + 1
+
+        link_id = f"{self.unit_id}:link:{self.link_count}"
+        self.link_count += 1
+        self.cursor += 1
+        self._add_anchor("syntax", link_start, self.cursor)
+        next_index = self._scan_range(
+            index + 1,
+            close_index,
+            formats + ("link",),
+            link_id,
+        )
+        if (
+            next_index != close_index
+            or self.cursor >= link_end
+            or self.raw[self.cursor] != "]"
+        ):
+            raise _InlineTopologyError("link label source does not align")
+        destination_start = self.cursor
+        self.cursor = link_end
+        self._add_anchor("link_destination", destination_start, link_end)
+        return close_index + 1
+
+    def _scan_range(
+        self,
+        index: int,
+        stop: int,
+        formats: tuple[str, ...],
+        link_id: str | None,
+    ) -> int:
+        format_types = {
+            "strong_open": "strong",
+            "em_open": "emphasis",
+            "s_open": "strikethrough",
+        }
+        while index < stop:
+            token = self.children[index]
+            if token.type == "text":
+                self._consume_text(token.content, formats, link_id)
+                index += 1
+                continue
+            if token.type in format_types:
+                close_index = self._matching_child_close(index)
+                marker = token.markup
+                if not marker or not self.raw.startswith(marker, self.cursor):
+                    raise _InlineTopologyError("format marker does not align")
+                marker_start = self.cursor
+                self.cursor += len(marker)
+                self._add_anchor("syntax", marker_start, self.cursor)
+                reached = self._scan_range(
+                    index + 1,
+                    close_index,
+                    formats + (format_types[token.type],),
+                    link_id,
+                )
+                close = self.children[close_index]
+                if reached != close_index or close.markup != marker:
+                    raise _InlineTopologyError("format topology is unbalanced")
+                if not self.raw.startswith(marker, self.cursor):
+                    raise _InlineTopologyError("closing format marker does not align")
+                marker_start = self.cursor
+                self.cursor += len(marker)
+                self._add_anchor("syntax", marker_start, self.cursor)
+                index = close_index + 1
+                continue
+            if token.type == "link_open":
+                index = self._scan_link(index, formats)
+                continue
+            if token.type == "softbreak":
+                start = self.cursor
+                while self.cursor < len(self.raw) and self.raw[self.cursor] in " \t":
+                    self.cursor += 1
+                if self.raw.startswith("\r\n", self.cursor):
+                    self.cursor += 2
+                elif self.cursor < len(self.raw) and self.raw[self.cursor] in "\r\n":
+                    self.cursor += 1
+                else:
+                    raise _InlineTopologyError("soft break does not align")
+                self._add_slot(
+                    start,
+                    self.cursor,
+                    " ",
+                    [self._byte(start), self._byte(self.cursor)],
+                    formats,
+                    link_id,
+                )
+                index += 1
+                continue
+            if token.type == "hardbreak":
+                start = self.cursor
+                if self.raw.startswith("\\\r\n", self.cursor):
+                    self.cursor += 3
+                elif self.raw.startswith("\\\n", self.cursor) or self.raw.startswith(
+                    "\\\r", self.cursor
+                ):
+                    self.cursor += 2
+                else:
+                    while self.cursor < len(self.raw) and self.raw[self.cursor] == " ":
+                        self.cursor += 1
+                    if self.cursor - start < 2:
+                        raise _InlineTopologyError("hard break marker is missing")
+                    if self.raw.startswith("\r\n", self.cursor):
+                        self.cursor += 2
+                    elif (
+                        self.cursor < len(self.raw)
+                        and self.raw[self.cursor] in "\r\n"
+                    ):
+                        self.cursor += 1
+                    else:
+                        raise _InlineTopologyError("hard break newline is missing")
+                self._add_anchor("hard_break", start, self.cursor)
+                index += 1
+                continue
+            if token.type in {"code_inline", "image"}:
+                end = self._find_atomic_end(self.cursor, [token])
+                start = self.cursor
+                self.cursor = end
+                self._add_anchor(
+                    "inline_code" if token.type == "code_inline" else "image",
+                    start,
+                    end,
+                )
+                index += 1
+                continue
+            raise _InlineTopologyError(f"unsupported inline token: {token.type}")
+        return index
+
+    def scan(self) -> tuple[tuple[RewriteSlot, ...], tuple[ProtectedAnchor, ...]]:
+        reached = self._scan_range(0, len(self.children), (), None)
+        if reached != len(self.children) or self.cursor != len(self.raw):
+            raise _InlineTopologyError("inline source was not consumed exactly")
+        return tuple(self.slots), tuple(self.protected)
+
+
+def _inline_source_span(
+    markdown: str,
+    unit_type: UnitType,
+    start_byte: int,
+    end_byte: int,
+    inline: Token,
+) -> tuple[str, int]:
+    table = Utf8BoundaryTable(markdown)
+    start = table.require_byte_boundary(start_byte)
+    end = table.require_byte_boundary(end_byte)
+    unit_source = markdown[start:end]
+    if unit_type == "paragraph":
+        prefix_end = 0
+    elif unit_type == "heading":
+        prefix = _HEADING_PREFIX.match(unit_source)
+        if prefix is None:
+            raise _InlineTopologyError("heading prefix does not align")
+        prefix_end = prefix.end()
+    else:
+        prefix = _LIST_PREFIX.match(unit_source)
+        if prefix is None:
+            raise _InlineTopologyError("list prefix does not align")
+        prefix_end = prefix.end()
+    if unit_type == "heading":
+        if not unit_source.startswith(inline.content, prefix_end):
+            raise _InlineTopologyError("inline content is not an exact source slice")
+        suffix = unit_source[prefix_end + len(inline.content) :]
+        if _HEADING_SUFFIX.fullmatch(suffix) is None:
+            raise _InlineTopologyError("heading suffix does not align")
+        raw = inline.content
+    else:
+        raw = unit_source[prefix_end:]
+        normalized = raw.replace("\r\n", "\n").replace("\r", "\n")
+        if normalized != inline.content:
+            raise _InlineTopologyError("inline content is not an exact source slice")
+    return raw, start + prefix_end
+
+
+def _scan_unit_inline(
+    markdown: str,
+    unit: RewriteUnit,
+    inline: Token,
+    parser: MarkdownIt,
+) -> tuple[tuple[RewriteSlot, ...], tuple[ProtectedAnchor, ...]]:
+    raw, raw_start = _inline_source_span(
+        markdown,
+        unit.unit_type,
+        unit.start_byte,
+        unit.end_byte,
+        inline,
+    )
+    return _InlineScanner(
+        markdown,
+        raw,
+        raw_start,
+        unit.unit_id,
+        inline.children or [],
+        parser,
+    ).scan()
 
 
 def _matching_close(tokens: list[Token], open_index: int) -> int | None:
@@ -229,8 +639,10 @@ def _list_item_kind(tokens: list[Token], open_index: int, close_index: int) -> s
 
 
 def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
-    """Classify supported Markdown blocks without deriving inline rewrite slots."""
-    parser = MarkdownIt("commonmark", {"html": True}).enable("table")
+    """Classify blocks and map supported inline text to exact source bytes."""
+    parser = MarkdownIt("commonmark", {"html": True}).enable(
+        ["table", "strikethrough"]
+    )
     tokens = parser.parse(markdown)
     source_lines = _SourceLines(markdown)
     units: list[RewriteUnit] = []
@@ -240,6 +652,7 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
     def add_unit(
         unit_type: UnitType,
         byte_range: tuple[int, int],
+        inline: Token,
         *,
         level: int | None = None,
         list_depth: int | None = None,
@@ -247,15 +660,33 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
     ) -> None:
         start_byte, end_byte = byte_range
         ordinal = len(units)
+        unit = RewriteUnit(
+            unit_id=f"{unit_type}_{ordinal}_{start_byte}_{end_byte}",
+            unit_type=unit_type,
+            start_byte=start_byte,
+            end_byte=end_byte,
+            level=level,
+            list_depth=list_depth,
+            list_marker=list_marker,
+        )
+        try:
+            slots, protected = _scan_unit_inline(markdown, unit, inline, parser)
+        except _InlineTopologyError:
+            unsupported.append(
+                UnsupportedRegion("unsupported_inline", start_byte, end_byte)
+            )
+            return
         units.append(
             RewriteUnit(
-                unit_id=f"{unit_type}_{ordinal}_{start_byte}_{end_byte}",
-                unit_type=unit_type,
-                start_byte=start_byte,
-                end_byte=end_byte,
-                level=level,
-                list_depth=list_depth,
-                list_marker=list_marker,
+                unit_id=unit.unit_id,
+                unit_type=unit.unit_type,
+                start_byte=unit.start_byte,
+                end_byte=unit.end_byte,
+                level=unit.level,
+                list_depth=unit.list_depth,
+                list_marker=unit.list_marker,
+                slots=slots,
+                protected=protected,
             )
         )
 
@@ -286,8 +717,18 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
                 continue
             depth = len(list_stack) - 1
             unsupported_kind = _list_item_kind(tokens, index, close_index)
+            inline = next(
+                (
+                    candidate
+                    for candidate in tokens[index + 1 : close_index]
+                    if candidate.type == "inline"
+                ),
+                None,
+            )
             if depth > 0:
                 unsupported_kind = "nested_list"
+            if inline is None:
+                unsupported_kind = "ambiguous_list_item"
             if unsupported_kind is not None:
                 add_unsupported(unsupported_kind, byte_range)
             else:
@@ -299,6 +740,7 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
                     add_unit(
                         "list_item",
                         byte_range,
+                        inline,
                         list_depth=depth,
                         list_marker=marker_match.group("marker"),
                     )
@@ -329,7 +771,9 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
             elif _is_image_only(inline):
                 add_unsupported("image_only", byte_range)
             else:
-                add_unit("heading", byte_range, level=int(token.tag[1:]))
+                add_unit(
+                    "heading", byte_range, inline, level=int(token.tag[1:])
+                )
             index = close_index + 1 if close_index is not None else index + 1
             continue
 
@@ -346,7 +790,7 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
             elif _is_image_only(inline):
                 add_unsupported("image_only", byte_range)
             else:
-                add_unit("paragraph", byte_range)
+                add_unit("paragraph", byte_range, inline)
             index = close_index + 1 if close_index is not None else index + 1
             continue
 
@@ -362,3 +806,50 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
         index += 1
 
     return MarkdownRewriteMap(markdown, tuple(units), tuple(unsupported))
+
+
+def structure_signature(rewrite_map: MarkdownRewriteMap) -> tuple[object, ...]:
+    """Return topology and protected identities, excluding editable text."""
+
+    units: list[object] = []
+    for unit in rewrite_map.units:
+        format_topology: list[tuple[str, ...]] = []
+        for slot in unit.slots:
+            if not format_topology or format_topology[-1] != slot.formats:
+                format_topology.append(slot.formats)
+        anchors = []
+        for anchor in unit.protected:
+            identity: str | None = None
+            if anchor.kind in {"link_destination", "citation"}:
+                identity = hashlib.sha256(anchor.source.encode("utf-8")).hexdigest()
+            anchors.append((anchor.kind, identity))
+        units.append(
+            (
+                unit.unit_type,
+                unit.level,
+                unit.list_depth,
+                unit.list_marker,
+                tuple(format_topology),
+                tuple(anchors),
+            )
+        )
+    return tuple(units)
+
+
+def reconstruct_markdown(
+    rewrite_map: MarkdownRewriteMap,
+    slot_texts: dict[str, str] | None = None,
+) -> str:
+    """Round-trip an unchanged map; arbitrary replacements are a later stage."""
+
+    expected = {
+        slot.slot_id: slot.text
+        for unit in rewrite_map.units
+        for slot in unit.slots
+    }
+    if slot_texts is not None and slot_texts != expected:
+        raise RewriteMapError(
+            "SELECTION_MAPPING_CONFLICT",
+            "inline reconstruction currently accepts unchanged slot text only",
+        )
+    return rewrite_map.source
