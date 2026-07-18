@@ -1110,6 +1110,7 @@ def test_commit_rejects_global_anchor_ambiguity_across_unsupported_regions(
 def test_commit_records_only_current_revision_visible_utf8_highlights(tmp_path):
     body = (
         "## **旧标题**\n\n"
+        "普通段落\n\n"
         "- [旧标签](https://ordinary.example/path) 正文 "
         "[[1]](https://example.com/source) 结尾\n"
     )
@@ -1121,11 +1122,12 @@ def test_commit_records_only_current_revision_visible_utf8_highlights(tmp_path):
         tmp_path,
         report,
         raw,
-        visible="旧标题\n旧标签 正文 [1] 结尾",
+        visible="旧标题\n普通段落\n旧标签 正文 [1] 结尾",
     )
     replacements = {
         slot["slot_id"]: {
             "旧标题": "新标题",
+            "普通段落": "新段落",
             "旧标签": "新标签",
             " 正文 ": " 新正文 ",
             " 结尾": " 新结尾",
@@ -1144,10 +1146,20 @@ def test_commit_records_only_current_revision_visible_utf8_highlights(tmp_path):
     child_bytes = child.read_bytes()
     expected_ranges = []
     cursor = 0
-    for visible in ("新标题", "新标签", " 新正文 ", " 新结尾"):
+    for visible, unit_type in (
+        ("新标题", "heading"),
+        ("新段落", "paragraph"),
+        ("新标签", "list_item"),
+        (" 新正文 ", "list_item"),
+        (" 新结尾", "list_item"),
+    ):
         start = child_bytes.index(visible.encode("utf-8"), cursor)
         end = start + len(visible.encode("utf-8"))
-        expected_ranges.append({"start_byte": start, "end_byte": end})
+        expected_ranges.append({
+            "start_byte": start,
+            "end_byte": end,
+            "unit_type": unit_type,
+        })
         cursor = end
     child_provenance = json.loads(
         Path(result["provenance_path"]).read_text(encoding="utf-8")
@@ -1174,6 +1186,30 @@ def test_commit_records_only_current_revision_visible_utf8_highlights(tmp_path):
     }
     assert "旧标题" not in json.dumps(history, ensure_ascii=False)
     assert "新标题" not in json.dumps(history, ensure_ascii=False)
+
+
+def test_commit_single_list_unit_highlight_records_its_actual_unit_type(tmp_path):
+    body = "- old item\n"
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(tmp_path, report, "old item")
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, {slot_id: "new item"}),
+    )
+
+    child = Path(result["report_path"])
+    start = child.read_bytes().index(b"new item")
+    child_provenance = json.loads(
+        Path(result["provenance_path"]).read_text(encoding="utf-8")
+    )
+    assert child_provenance["rewrite_highlights"]["ranges"] == [{
+        "start_byte": start,
+        "end_byte": start + len(b"new item"),
+        "unit_type": "list_item",
+    }]
 
 
 def test_commit_noop_rewrite_has_no_highlight_ranges(tmp_path):
@@ -1218,7 +1254,11 @@ def test_commit_highlights_changed_slot_but_not_noop_slot(tmp_path):
         Path(result["provenance_path"]).read_text(encoding="utf-8")
     )
     assert child_provenance["rewrite_highlights"]["ranges"] == [
-        {"start_byte": start, "end_byte": start + len(b"new text")}
+        {
+            "start_byte": start,
+            "end_byte": start + len(b"new text"),
+            "unit_type": "paragraph",
+        }
     ]
 
 
@@ -1291,6 +1331,14 @@ def test_rewritten_child_can_be_rewritten_again_with_original_lineage(tmp_path):
         second_provenance["rewrite_highlights"]
         != first_child_provenance["rewrite_highlights"]
     )
+    assert [
+        item["unit_type"]
+        for item in first_child_provenance["rewrite_highlights"]["ranges"]
+    ] == ["paragraph"]
+    assert [
+        item["unit_type"]
+        for item in second_provenance["rewrite_highlights"]["ranges"]
+    ] == ["paragraph"]
     assert "[[1]](https://example.com/source)" in Path(
         second_result["report_path"]
     ).read_text(encoding="utf-8")

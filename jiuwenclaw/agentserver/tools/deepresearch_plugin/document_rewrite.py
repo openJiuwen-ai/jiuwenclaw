@@ -895,9 +895,9 @@ def _current_highlight_ranges(
     child_map: MarkdownRewriteMap,
     context: _RewriteContext,
     slot_texts: dict[str, str],
-) -> list[dict[str, int]]:
+) -> list[dict[str, int | str]]:
     selected_by_id = {unit.unit_id: unit for unit in context.selected_units}
-    ranges: list[tuple[int, int]] = []
+    ranges: list[tuple[int, int, str]] = []
     for index, original_unit in enumerate(original_map.units):
         selected_unit = selected_by_id.get(original_unit.unit_id)
         if selected_unit is None:
@@ -942,7 +942,8 @@ def _current_highlight_ranges(
                 end = min(highlight_end, child_end)
                 if start < end:
                     ranges.extend(
-                        visible_slot_byte_ranges(
+                        (range_start, range_end, child_unit.unit_type)
+                        for range_start, range_end in visible_slot_byte_ranges(
                             child_map.source,
                             child_slot,
                             start - child_cursor,
@@ -951,15 +952,18 @@ def _current_highlight_ranges(
                     )
             child_cursor = child_end
     ranges.sort()
-    merged: list[tuple[int, int]] = []
-    for start, end in ranges:
+    merged: list[tuple[int, int, str]] = []
+    for start, end, unit_type in ranges:
         if merged and start < merged[-1][1]:
             raise RewriteError("STRUCTURE_CONFLICT", "rewrite highlights overlap")
-        if merged and start == merged[-1][1]:
-            merged[-1] = (merged[-1][0], end)
+        if merged and start == merged[-1][1] and unit_type == merged[-1][2]:
+            merged[-1] = (merged[-1][0], end, unit_type)
         else:
-            merged.append((start, end))
-    return [{"start_byte": start, "end_byte": end} for start, end in merged]
+            merged.append((start, end, unit_type))
+    return [
+        {"start_byte": start, "end_byte": end, "unit_type": unit_type}
+        for start, end, unit_type in merged
+    ]
 
 
 def _validate_affected_citations(
