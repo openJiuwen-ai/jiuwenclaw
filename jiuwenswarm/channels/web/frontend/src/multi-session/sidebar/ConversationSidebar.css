@@ -55,7 +55,7 @@
 }
 
 .conversation-sidebar__new:hover {
-  background: var(--color-action-secondary);
+  background: var(--color-sidebar-nav-active);
 }
 
 .conversation-sidebar__new:focus-visible {
