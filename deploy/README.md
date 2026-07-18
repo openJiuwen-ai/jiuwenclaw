@@ -727,15 +727,15 @@ WEB_NODE_PORT=
 
 ### 方案二：基于 Example 模板手动改造 YAML 部署（进阶方案，需具备 K8s 基础）
 
-本方案不依赖自动化部署脚本，完全基于项目内置 examples/ 目录原始 YAML 模板进行人工适配改造，适合需要深度自定义集群资源、脱离部署脚本独立交付的场景。操作人员需具备基础 Kubernetes 资源配置、YAML 语法、环境变量配置能力。
+本方案不依赖自动化部署脚本，完全基于项目内置 `examples` 目录原始 `YAML 模板`进行人工适配改造，适合需要深度自定义集群资源、脱离部署脚本独立交付的场景。操作人员需具备基础 Kubernetes 资源配置、YAML 语法、环境变量配置能力。
 
 **步骤 1：获取原生模板文件**
-拷贝部署工具根目录下的examples目录中的 所有 K8s 资源 YAML 模板至自定义工作目录，作为本次手动部署的基准文件。模板文件内置统一占位符 `<<变量名>>`，用于替换业务与集群参数。
+拷贝部署工具根目录下的examples目录中的 所有 K8s 资源`YAML 模板`至自定义工作目录，作为本次手动部署的基准文件。模板文件内置统一占位符 `<<变量名>>`，用于替换业务与集群参数。
 
-**步骤 2：依据配置说明书`.env.example`替换所有占位符，生产最终的 YAML 文件**
+**步骤 2：依据配置说明书`.env.example`替换所有占位符，生产最终的 `YAML 模板`**
 所有模板内的 `<<变量名>>`占位符，其含义、取值规范、默认规则、业务用途，均以部署工具根目录`.env.example`配置说明书为准。
 
-**替换规则：** 遍历所有 YAML 文件，将 `<<变量名>>`占位符，对照 `.env.example` 说明替换为当前客户环境的真实参数值。
+**替换规则：** 遍历所有 `YAML 模板`，将 `<<变量名>>`占位符，对照 `.env.example` 说明替换为当前客户环境的真实参数值。
 
 **替换示例：**
 模板 `gateway-env.configmap.yaml` 存在数据库占位符配置：
@@ -750,9 +750,21 @@ WEB_NODE_PORT=
 ```
 查询 `.env.example` 中 `DB_HOST`、`DB_PORT`、`DB_TYPE`、`DB_USER`变量使用规范、取值要求，替换为客户环境中的真实值。
 
+> 注意：`configmap-secret.yaml` 为 Kubernetes Secret 资源，data 字段规范要求填写明文经过 Base64 编码后的字符串，编码命令参考：`echo -n "明文内容" | base64 -w 0`
 
-**例外：飞书机器人专项配置**
-请在 `gateway-config.configmap.yaml` 配置文件中写入飞书渠道配置，支持单/多机器人同时部署，标准格式及填写规范如下：
+**步骤 3：存储挂载模式适配**
+当前模板默认采用 NFS 挂载模式（`CLAW_MOUNT_TYPE: nfs`）；若需切换为 PVC 持久卷挂载模式，请编辑 `gateway-env.configmap.yaml` 完成如下调整：
+- 删除原有 NFS 相关配置项：`CLAW_MOUNT_TYPE`、`CLAW_NFS_PATH`、`CLAW_NFS_SERVER`
+- 新增 PVC 模式配置参数：
+
+```
+CLAW_MOUNT_TYPE: pvc
+CLAW_PVC: <<外部 PVC 的名字，该PVC需存在，且与业务Pod处于同一Namespace>>
+NFS_SC_NAME: <<外部 PVC 绑定的StorageClass名称>>
+```
+
+**步骤 4：飞书机器人专项配置(可选)**
+如果需要飞书渠道与机器人交互，请在 `gateway-config.configmap.yaml` 配置文件中写入飞书渠道配置，支持单/多机器人同时部署，标准格式及填写规范如下：
 ```
 ....
 channels:
@@ -779,7 +791,7 @@ channels:
 ....
 ```
 
-**步骤 3：登录CCE 集群云管理平台，按如下文件顺序（资源依赖顺序）创建资源**
+**步骤 5：完成全部配置修改后，请登录CCE 集群云管理平台，按如下文件顺序（资源依赖顺序）创建资源**
 - configmap-secret.yaml
 - gateway-env.configmap.yaml
 - gateway-config.configmap.yaml
