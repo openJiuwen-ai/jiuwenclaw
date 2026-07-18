@@ -180,7 +180,11 @@ def _is_image_only(inline: Token) -> bool:
         "softbreak",
         "hardbreak",
     }
-    return has_image and all(child.type in non_text_topology for child in children)
+    return has_image and all(
+        child.type in non_text_topology
+        or (child.type == "text" and not child.content.strip())
+        for child in children
+    )
 
 
 def _list_item_kind(tokens: list[Token], open_index: int, close_index: int) -> str | None:

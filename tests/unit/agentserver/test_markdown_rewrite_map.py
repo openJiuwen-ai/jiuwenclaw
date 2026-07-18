@@ -229,11 +229,35 @@ def test_build_rewrite_map_uses_utf8_byte_offsets_after_unicode_prefix():
 
 def test_build_rewrite_map_keeps_paragraph_with_inline_image_for_later_slot_validation():
     rewrite_map = rewrite_map_module.build_rewrite_map(
-        "text ![alt](image.png) remains text\n"
+        "text ![a](a.png) ![b](b.png) remains text\n"
     )
 
     assert [unit.unit_type for unit in rewrite_map.units] == ["paragraph"]
     assert rewrite_map.unsupported_regions == ()
+
+
+def test_build_rewrite_map_rejects_multiple_images_separated_only_by_whitespace():
+    markdown = "![a](a.png) ![b](b.png)\n"
+
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+
+    assert rewrite_map.units == ()
+    assert [
+        (region.kind, region.start_byte, region.end_byte)
+        for region in rewrite_map.unsupported_regions
+    ] == [("image_only", 0, len(markdown.rstrip("\n").encode("utf-8")))]
+
+
+def test_build_rewrite_map_rejects_list_item_of_images_separated_only_by_whitespace():
+    markdown = "- ![a](a.png) ![b](b.png)\n"
+
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+
+    assert rewrite_map.units == ()
+    assert [
+        (region.kind, region.start_byte, region.end_byte)
+        for region in rewrite_map.unsupported_regions
+    ] == [("image_only", 0, len(markdown.rstrip("\n").encode("utf-8")))]
 
 
 @pytest.mark.parametrize(
