@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from jiuwenclaw.agentserver.tools.deepresearch_plugin import (
+    markdown_rewrite_map as rewrite_map_module,
+)
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.markdown_rewrite_map import (
     RewriteMapError,
     Utf8BoundaryTable,
@@ -147,6 +150,134 @@ def test_sha256_byte_range_rejects_invalid_ranges(start_byte, end_byte):
         sha256_byte_range("A😀中", start_byte, end_byte)
 
     assert caught.value.code == "SELECTION_MAPPING_CONFLICT"
+
+
+def test_rewrite_map_public_api_exists():
+    assert hasattr(rewrite_map_module, "RewriteUnit")
+    assert hasattr(rewrite_map_module, "UnsupportedRegion")
+    assert hasattr(rewrite_map_module, "MarkdownRewriteMap")
+    assert hasattr(rewrite_map_module, "build_rewrite_map")
+
+
+def test_build_rewrite_map_classifies_supported_blocks_and_preserves_raw_ranges():
+    markdown = (
+        "# First\n\n"
+        "## Second\n\n"
+        "paragraph line one\nparagraph line two\n\n"
+        "- alpha\n- beta\n\n"
+        "1. one\n2. two\n"
+    )
+
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+
+    assert rewrite_map.source == markdown
+    assert rewrite_map.unsupported_regions == ()
+    assert [unit.unit_type for unit in rewrite_map.units] == [
+        "heading",
+        "heading",
+        "paragraph",
+        "list_item",
+        "list_item",
+        "list_item",
+        "list_item",
+    ]
+    assert [unit.level for unit in rewrite_map.units] == [1, 2, None, None, None, None, None]
+    assert [unit.list_depth for unit in rewrite_map.units] == [
+        None,
+        None,
+        None,
+        0,
+        0,
+        0,
+        0,
+    ]
+    assert [unit.list_marker for unit in rewrite_map.units] == [
+        None,
+        None,
+        None,
+        "-",
+        "-",
+        "1.",
+        "2.",
+    ]
+    source_bytes = markdown.encode("utf-8")
+    assert [source_bytes[unit.start_byte : unit.end_byte].decode() for unit in rewrite_map.units] == [
+        "# First",
+        "## Second",
+        "paragraph line one\nparagraph line two",
+        "- alpha",
+        "- beta",
+        "1. one",
+        "2. two",
+    ]
+    assert [unit.unit_id for unit in rewrite_map.units] == [
+        f"{unit.unit_type}_{ordinal}_{unit.start_byte}_{unit.end_byte}"
+        for ordinal, unit in enumerate(rewrite_map.units)
+    ]
+
+
+def test_build_rewrite_map_uses_utf8_byte_offsets_after_unicode_prefix():
+    markdown = "前言\n\n# 标题\n"
+
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+
+    assert [(unit.start_byte, unit.end_byte) for unit in rewrite_map.units] == [
+        (0, len("前言".encode("utf-8"))),
+        (len("前言\n\n".encode("utf-8")), len("前言\n\n# 标题".encode("utf-8"))),
+    ]
+
+
+def test_build_rewrite_map_keeps_paragraph_with_inline_image_for_later_slot_validation():
+    rewrite_map = rewrite_map_module.build_rewrite_map(
+        "text ![alt](image.png) remains text\n"
+    )
+
+    assert [unit.unit_type for unit in rewrite_map.units] == ["paragraph"]
+    assert rewrite_map.unsupported_regions == ()
+
+
+@pytest.mark.parametrize(
+    ("kind", "markdown", "raw_region"),
+    [
+        ("blockquote", "> quoted", "> quoted"),
+        ("table", "| a | b |\n|---|---|\n| c | d |", "| a | b |\n|---|---|\n| c | d |"),
+        ("fenced_code", "```python\nx = 1\n```", "```python\nx = 1\n```"),
+        ("indented_code", "    x = 1", "    x = 1"),
+        ("html_block", "<div>content</div>", "<div>content</div>"),
+        ("image_only", "![alt](image.png)", "![alt](image.png)"),
+        ("nested_list", "- outer\n  - inner", "- outer\n  - inner"),
+        (
+            "compound_list_item",
+            "- first paragraph\n\n  second paragraph",
+            "- first paragraph\n\n  second paragraph",
+        ),
+    ],
+)
+def test_build_rewrite_map_marks_unsupported_blocks_without_paragraph_fallback(
+    kind, markdown, raw_region
+):
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown + "\n")
+
+    assert rewrite_map.units == ()
+    assert len(rewrite_map.unsupported_regions) == 1
+    region = rewrite_map.unsupported_regions[0]
+    assert region.kind == kind
+    assert markdown.encode("utf-8")[region.start_byte : region.end_byte].decode() == raw_region
+
+
+@pytest.mark.parametrize(
+    ("class_name", "args", "attribute"),
+    [
+        ("RewriteUnit", ("paragraph_0_0_4", "paragraph", 0, 4, None, None, None), "start_byte"),
+        ("UnsupportedRegion", ("blockquote", 0, 7), "kind"),
+        ("MarkdownRewriteMap", ("text", (), ()), "source"),
+    ],
+)
+def test_rewrite_map_types_are_frozen_and_slotted(class_name, args, attribute):
+    instance = getattr(rewrite_map_module, class_name)(*args)
+    with pytest.raises(FrozenInstanceError):
+        setattr(instance, attribute, getattr(instance, attribute))
+    assert not hasattr(instance, "__dict__")
 
 
 def test_protocol_v2_fixture_uses_real_utf8_ranges_and_hashes():
