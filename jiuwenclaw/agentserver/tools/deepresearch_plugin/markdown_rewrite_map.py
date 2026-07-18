@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Literal
+from urllib.parse import unquote
 
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
@@ -87,6 +89,32 @@ class MarkdownRewriteMap:
                 "source_sha256",
                 hashlib.sha256(self.source.encode("utf-8")).hexdigest(),
             )
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentHeading:
+    """A rendered heading discovered anywhere in the current Markdown."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentInternalLink:
+    """An exact same-document link destination in the current Markdown."""
+
+    target: str
+    start_byte: int
+    end_byte: int
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentAnchorIndex:
+    """Whole-document headings and internal links with fail-closed alignment."""
+
+    headings: tuple[DocumentHeading, ...]
+    links: tuple[DocumentInternalLink, ...]
+    ambiguous: bool = False
 
 
 class RewriteMapError(ValueError):
@@ -232,6 +260,10 @@ _LIST_PREFIX = re.compile(r"^[ \t]*(?:[-+*]|\d+[.)])[ \t]+")
 _HEADING_PREFIX = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+")
 _HEADING_SUFFIX = re.compile(r"(?:[ \t]+#+)?[ \t]*")
 _CITATION = re.compile(r"\[\[(?P<number>\d+)\]\]\((?P<href>https?://[^\s)]+)\)")
+_INTERNAL_LINK_SOURCE = re.compile(
+    r"(?<!!)\[[^\]\r\n]*\]\(\s*(?P<destination>#[^\s)>]+)"
+    r"(?:\s+(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|\([^\r\n)]*\)))?\s*\)"
+)
 _ESCAPABLE = frozenset(r'!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~')
 
 
@@ -834,6 +866,90 @@ def build_rewrite_map(markdown: str) -> MarkdownRewriteMap:
         index += 1
 
     return MarkdownRewriteMap(markdown, tuple(units), tuple(unsupported))
+
+
+def _heading_visible_text(inline: Token) -> tuple[str, bool]:
+    visible: list[str] = []
+    ambiguous = False
+    for child in inline.children or []:
+        if child.type in {"text", "code_inline"}:
+            visible.append(child.content)
+        elif child.type in {"softbreak", "hardbreak"}:
+            visible.append(" ")
+        elif child.type == "image":
+            visible.append(child.content)
+        elif child.type not in {
+            "link_open",
+            "link_close",
+            "strong_open",
+            "strong_close",
+            "em_open",
+            "em_close",
+            "s_open",
+            "s_close",
+        }:
+            ambiguous = True
+    return "".join(visible), ambiguous
+
+
+def build_document_anchor_index(markdown: str) -> DocumentAnchorIndex:
+    """Index headings and same-document links across supported and unsupported blocks."""
+    parser = MarkdownIt("commonmark", {"html": True}).enable(
+        ["table", "strikethrough"]
+    )
+    tokens = parser.parse(markdown)
+    source_lines = _SourceLines(markdown)
+    boundaries = Utf8BoundaryTable(markdown)
+    headings: list[DocumentHeading] = []
+    expected_links: list[str] = []
+    candidates: dict[tuple[int, int], DocumentInternalLink] = {}
+    ambiguous = False
+
+    for index, token in enumerate(tokens):
+        if token.type == "heading_open":
+            inline = tokens[index + 1] if index + 1 < len(tokens) else None
+            if inline is None or inline.type != "inline":
+                ambiguous = True
+            else:
+                text, heading_ambiguous = _heading_visible_text(inline)
+                headings.append(DocumentHeading(text))
+                ambiguous = ambiguous or heading_ambiguous
+        if token.type != "inline":
+            continue
+        internal_hrefs = [
+            unquote(child.attrGet("href") or "")[1:]
+            for child in token.children or []
+            if child.type == "link_open"
+            and unquote(child.attrGet("href") or "").startswith("#")
+        ]
+        if not internal_hrefs:
+            continue
+        expected_links.extend(internal_hrefs)
+        byte_range = source_lines.byte_range(token.map)
+        if byte_range is None:
+            ambiguous = True
+            continue
+        start_byte, end_byte = byte_range
+        start_codepoint = boundaries.require_byte_boundary(start_byte)
+        end_codepoint = boundaries.require_byte_boundary(end_byte)
+        raw = markdown[start_codepoint:end_codepoint]
+        for match in _INTERNAL_LINK_SOURCE.finditer(raw):
+            destination = match.group("destination")
+            destination_start = start_byte + len(
+                raw[: match.start("destination")].encode("utf-8")
+            )
+            destination_end = destination_start + len(destination.encode("utf-8"))
+            candidates[(destination_start, destination_end)] = DocumentInternalLink(
+                target=unquote(destination)[1:],
+                start_byte=destination_start,
+                end_byte=destination_end,
+                source=destination,
+            )
+
+    links = tuple(candidates[key] for key in sorted(candidates))
+    if Counter(link.target for link in links) != Counter(expected_links):
+        ambiguous = True
+    return DocumentAnchorIndex(tuple(headings), links, ambiguous)
 
 
 def structure_signature(rewrite_map: MarkdownRewriteMap) -> tuple[object, ...]:

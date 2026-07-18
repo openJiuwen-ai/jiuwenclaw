@@ -999,6 +999,63 @@ def test_commit_rejects_ambiguous_heading_anchor_repair(tmp_path, body):
     assert caught.value.code == "FORMAT_CONFLICT"
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "> [跳转](#旧标题)\n\n## 旧标题\n",
+        "| 导航 |\n| --- |\n| [跳转](#旧标题) |\n\n## 旧标题\n",
+    ],
+)
+def test_commit_repairs_unique_anchor_link_inside_unsupported_region(tmp_path, body):
+    report, _ = _write_document(tmp_path, body)
+    heading_start = body.index("## 旧标题")
+    occurrence = body[:heading_start].count("旧标题") + 1
+    prepared = _prepare(tmp_path, report, "旧标题", occurrence=occurrence)
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, {slot_id: "新标题"}),
+    )
+
+    child = Path(result["report_path"]).read_text(encoding="utf-8")
+    assert "[跳转](#新标题)" in child
+    assert "#旧标题" not in child
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "> ## 旧标题\n\n[跳转](#旧标题)\n\n## 旧标题\n",
+        "[跳转](#旧标题)\n\n## 旧标题\n\n新标题\n---\n",
+        "> [甲](#旧标题)\n\n[乙](#旧标题)\n\n## 旧标题\n",
+        (
+            "| 导航 |\n| --- |\n| [甲](#旧标题) |\n\n"
+            "[乙](#旧标题)\n\n## 旧标题\n"
+        ),
+        "[跳转][目标]\n\n[目标]: #旧标题\n\n## 旧标题\n",
+    ],
+)
+def test_commit_rejects_global_anchor_ambiguity_across_unsupported_regions(
+    tmp_path, body
+):
+    report, _ = _write_document(tmp_path, body)
+    heading_start = body.index("## 旧标题", body.find("\n\n## 旧标题"))
+    occurrence = body[:heading_start].count("旧标题") + 1
+    prepared = _prepare(tmp_path, report, "旧标题", occurrence=occurrence)
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared, {slot_id: "新标题"}),
+        )
+
+    assert caught.value.code == "FORMAT_CONFLICT"
+
+
 def test_commit_records_only_current_revision_visible_utf8_highlights(tmp_path):
     body = (
         "## **旧标题**\n\n"
@@ -1066,6 +1123,52 @@ def test_commit_records_only_current_revision_visible_utf8_highlights(tmp_path):
     }
     assert "旧标题" not in json.dumps(history, ensure_ascii=False)
     assert "新标题" not in json.dumps(history, ensure_ascii=False)
+
+
+def test_commit_noop_rewrite_has_no_highlight_ranges(tmp_path):
+    report, _ = _write_document(tmp_path, "unchanged text\n")
+    prepared = _prepare(tmp_path, report, "unchanged text")
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared),
+    )
+
+    child_provenance = json.loads(
+        Path(result["provenance_path"]).read_text(encoding="utf-8")
+    )
+    assert child_provenance["rewrite_highlights"]["ranges"] == []
+
+
+def test_commit_highlights_changed_slot_but_not_noop_slot(tmp_path):
+    body = "unchanged\n\nold text\n"
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(
+        tmp_path,
+        report,
+        body.rstrip("\n"),
+        visible="unchanged\nold text",
+    )
+    changed_slot = prepared["units"][1]["slots"][0]["slot_id"]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(
+            prepared, {changed_slot: "new text"}
+        ),
+    )
+
+    child = Path(result["report_path"])
+    child_bytes = child.read_bytes()
+    start = child_bytes.index(b"new text")
+    child_provenance = json.loads(
+        Path(result["provenance_path"]).read_text(encoding="utf-8")
+    )
+    assert child_provenance["rewrite_highlights"]["ranges"] == [
+        {"start_byte": start, "end_byte": start + len(b"new text")}
+    ]
 
 
 def test_rewritten_child_can_be_rewritten_again_with_original_lineage(tmp_path):

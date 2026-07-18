@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
-from urllib.parse import unquote
+from urllib.parse import quote
 
 from markdown_it import MarkdownIt
 
@@ -25,6 +25,7 @@ from jiuwenclaw.agentserver.tools.deepresearch_plugin.markdown_rewrite_map impor
     RewriteSlot,
     RewriteUnit,
     Utf8BoundaryTable,
+    build_document_anchor_index,
     build_rewrite_map,
     reconstruct_markdown,
     structure_signature,
@@ -762,19 +763,6 @@ def _heading_id(text: str) -> str:
     return re.sub(r"-+", "-", normalized).strip("-")
 
 
-def _internal_link_anchors(
-    rewrite_map: MarkdownRewriteMap, heading_id: str
-) -> list[ProtectedAnchor]:
-    target = f"#{heading_id}"
-    return [
-        anchor
-        for unit in rewrite_map.units
-        for anchor in unit.protected
-        if anchor.kind == "link_destination"
-        and unquote(_link_destination_href(anchor) or "") == target
-    ]
-
-
 def _repair_internal_heading_anchor(
     original_map: MarkdownRewriteMap,
     child_markdown: str,
@@ -786,17 +774,16 @@ def _repair_internal_heading_anchor(
         for index, unit in enumerate(original_map.units)
         if unit.unit_id in selected_unit_ids
     }
+    original_anchor_index = build_document_anchor_index(original_map.source)
+    child_anchor_index = build_document_anchor_index(child_markdown)
     original_heading_ids = [
-        _heading_id(_full_unit_visible_text(unit))
-        for unit in original_map.units
-        if unit.unit_type == "heading"
+        _heading_id(heading.text) for heading in original_anchor_index.headings
     ]
     child_heading_ids = [
-        _heading_id(_full_unit_visible_text(unit))
-        for unit in child_map.units
-        if unit.unit_type == "heading"
+        _heading_id(heading.text) for heading in child_anchor_index.headings
     ]
     replacements: list[tuple[int, int, bytes]] = []
+    repaired_pairs: list[tuple[str, str]] = []
     for index in selected_indexes:
         original_unit = original_map.units[index]
         child_unit = child_map.units[index]
@@ -806,33 +793,57 @@ def _repair_internal_heading_anchor(
         new_id = _heading_id(_full_unit_visible_text(child_unit))
         if not old_id or not new_id or old_id == new_id:
             continue
-        links = _internal_link_anchors(child_map, old_id)
-        if not links:
-            continue
         if (
-            original_heading_ids.count(old_id) != 1
+            original_anchor_index.ambiguous
+            or child_anchor_index.ambiguous
+            or original_heading_ids.count(old_id) != 1
             or child_heading_ids.count(new_id) != 1
-            or len(links) != 1
         ):
             raise RewriteError(
                 "FORMAT_CONFLICT", "same-document heading anchor is ambiguous"
             )
-        anchor = links[0]
-        old_fragment = f"#{old_id}"
-        if anchor.source.count(old_fragment) != 1:
+        links = [
+            link for link in child_anchor_index.links if link.target == old_id
+        ]
+        if not links:
+            continue
+        if (
+            len(links) != 1
+            or any(link.target == new_id for link in child_anchor_index.links)
+        ):
             raise RewriteError(
-                "FORMAT_CONFLICT", "same-document heading link is ambiguous"
+                "FORMAT_CONFLICT", "same-document heading anchor is ambiguous"
             )
-        replacement = anchor.source.replace(old_fragment, f"#{new_id}", 1)
-        replacements.append(
-            (anchor.start_byte, anchor.end_byte, replacement.encode("utf-8"))
+        link = links[0]
+        encoded = "%" in link.source
+        replacement = "#" + (
+            quote(new_id, safe="-._~") if encoded else new_id
         )
+        replacements.append(
+            (link.start_byte, link.end_byte, replacement.encode("utf-8"))
+        )
+        repaired_pairs.append((old_id, new_id))
     if not replacements:
         return child_markdown, False
     child_bytes = child_markdown.encode("utf-8")
     for start, end, replacement in sorted(replacements, reverse=True):
         child_bytes = child_bytes[:start] + replacement + child_bytes[end:]
-    return child_bytes.decode("utf-8"), True
+    repaired = child_bytes.decode("utf-8")
+    repaired_index = build_document_anchor_index(repaired)
+    repaired_heading_ids = [
+        _heading_id(heading.text) for heading in repaired_index.headings
+    ]
+    if (
+        repaired_index.ambiguous
+        or any(
+            any(link.target == old_id for link in repaired_index.links)
+            or sum(link.target == new_id for link in repaired_index.links) != 1
+            or repaired_heading_ids.count(new_id) != 1
+            for old_id, new_id in repaired_pairs
+        )
+    ):
+        raise RewriteError("FORMAT_CONFLICT", "repaired heading anchor is ambiguous")
+    return repaired, True
 
 
 def _protected_topology_matches(
@@ -895,7 +906,8 @@ def _current_highlight_ranges(
             )
             replacement = slot_texts[selected_slot.slot_id]
             highlight_start = flat_cursor + visible_start
-            if replacement:
+            original_visible = original_slot.text[visible_start:visible_end]
+            if replacement and replacement != original_visible:
                 highlight_spans.append(
                     (highlight_start, highlight_start + len(replacement))
                 )
