@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -281,6 +282,28 @@ def test_prepare_rejects_inference_manifest_ordinary_link_destination(tmp_path):
     assert caught.value.code == "INFERENCE_REWRITE_UNSUPPORTED"
 
 
+def test_inference_manifest_path_requires_exact_link_href_match(tmp_path):
+    body = "before [claim](infer/10) after\n"
+    report, provenance = _write_document(tmp_path, body)
+    provenance["inference_manifest"] = [{
+        "id": "1",
+        "path": "infer/1",
+        "sha256": "a" * 64,
+    }]
+    report.with_suffix(".provenance.json").write_text(
+        json.dumps(provenance), encoding="utf-8"
+    )
+
+    prepared = _prepare(
+        tmp_path,
+        report,
+        "before [claim](infer/10) after",
+        visible="before claim after",
+    )
+
+    assert prepared["units"][0]["slots"]
+
+
 @pytest.mark.parametrize(
     "raw",
     ["**", "https://ordinary.example", "`", "![alt]"],
@@ -322,6 +345,51 @@ def test_readonly_neighbors_do_not_expand_citation_allowlist(tmp_path):
     assert prepared["readonly_context"] == {"previous_unit": "previous [1]", "next_unit": "next safe"}
     assert prepared["allowed_source_ids"] == []
     assert prepared["citation_evidence"] == []
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "> quoted gap",
+        "| a | b |\n|---|---|\n| c | d |",
+        "```text\ncode gap\n```",
+    ],
+)
+def test_readonly_neighbors_do_not_cross_unsupported_gaps(tmp_path, unsupported):
+    body = (
+        f"previous\n\n{unsupported}\n\ntarget\n\n"
+        f"{unsupported}\n\nnext\n"
+    )
+    report, _ = _write_document(tmp_path, body)
+
+    prepared = _prepare(tmp_path, report, "target")
+
+    assert prepared["readonly_context"] == {
+        "previous_unit": None,
+        "next_unit": None,
+    }
+
+
+def test_prepare_multi_unit_mapping_never_uses_tuple_index(tmp_path, monkeypatch):
+    body = "\n\n".join(f"paragraph {index}" for index in range(200)) + "\n"
+    report, _ = _write_document(tmp_path, body)
+    real_build = rewrite_module.build_rewrite_map
+
+    class NoIndexTuple(tuple):
+        def index(self, *_args, **_kwargs):
+            pytest.fail("selection mapping must not use tuple.index")
+
+    def build_without_index(markdown):
+        rewrite_map = real_build(markdown)
+        return replace(rewrite_map, units=NoIndexTuple(rewrite_map.units))
+
+    monkeypatch.setattr(rewrite_module, "build_rewrite_map", build_without_index)
+    raw = body.rstrip("\n")
+    visible = "\n".join(f"paragraph {index}" for index in range(200))
+
+    prepared = _prepare(tmp_path, report, raw, visible=visible)
+
+    assert len(prepared["units"]) == 200
 
 
 def test_prepare_and_commit_simple_unit_remain_compatible(tmp_path):
@@ -489,4 +557,43 @@ def test_context_token_expires_after_ttl(tmp_path):
             context_token=prepared["context_token"], session_id="S1",
             structured_result={"segments": [{"text": "new", "source_ids": []}], "facts_added": False},
         )
+    assert caught.value.code == "CONTEXT_EXPIRED"
+
+
+def test_context_store_sweeps_expired_entries_in_one_prepare(tmp_path):
+    report, _ = _write_document(tmp_path, "text\n")
+    with rewrite_module._CONTEXT_LOCK:
+        rewrite_module._CONTEXTS.clear()
+    expired_tokens = [
+        _prepare(tmp_path, report, "text")["context_token"] for _ in range(4)
+    ]
+    with rewrite_module._CONTEXT_LOCK:
+        for token in expired_tokens:
+            rewrite_module._CONTEXTS[token].expires_at = 0
+
+    active = _prepare(tmp_path, report, "text")["context_token"]
+
+    with rewrite_module._CONTEXT_LOCK:
+        assert set(rewrite_module._CONTEXTS) == {active}
+
+
+def test_context_store_is_bounded_and_evicts_earliest_expiry(
+    tmp_path, monkeypatch
+):
+    report, _ = _write_document(tmp_path, "text\n")
+    monkeypatch.setattr(rewrite_module, "CONTEXT_CACHE_MAX", 3)
+    with rewrite_module._CONTEXT_LOCK:
+        rewrite_module._CONTEXTS.clear()
+
+    tokens = [_prepare(tmp_path, report, "text")["context_token"] for _ in range(5)]
+
+    with rewrite_module._CONTEXT_LOCK:
+        assert len(rewrite_module._CONTEXTS) == 3
+        assert set(rewrite_module._CONTEXTS) == set(tokens[-3:])
+    with pytest.raises(RewriteError) as caught:
+        rewrite_module._take_context(tokens[0], "S1")
+    assert caught.value.code == "CONTEXT_EXPIRED"
+    assert rewrite_module._take_context(tokens[-1], "S1").session_id == "S1"
+    with pytest.raises(RewriteError) as caught:
+        rewrite_module._take_context(tokens[-1], "S1")
     assert caught.value.code == "CONTEXT_EXPIRED"

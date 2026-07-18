@@ -32,6 +32,8 @@ CITATION_RE = re.compile(r"\[\[(?P<index>\d+)\]\]\((?P<url>https?://[^\s)]+)\)")
 FORBIDDEN_OUTPUT_RE = re.compile(r"https?://|\]\s*:\s*\S+|#inference:", re.IGNORECASE)
 LIST_RE = re.compile(r"^\s*(?:[-+*]|\d+[.)])\s+")
 TOKEN_TTL_SECONDS = 10 * 60
+CONTEXT_CACHE_MAX = 1024
+_INLINE_PARSER = MarkdownIt("commonmark")
 
 
 class RewriteError(ValueError):
@@ -79,6 +81,13 @@ class _SelectedUnitRange:
     start_byte: int
     end_byte: int
     slots: tuple[_SelectedSlotRange, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _CoveredSelection:
+    units: tuple[RewriteUnit, ...]
+    first_index: int
+    last_index: int
 
 
 _CONTEXTS: dict[str, _RewriteContext] = {}
@@ -210,17 +219,6 @@ def _citation_index(citations: list[dict]) -> tuple[dict[str, dict], dict[str, d
     return by_id, by_key
 
 
-def _block_contains_inference(block_text: str, provenance: dict) -> bool:
-    if "#inference:" in block_text:
-        return True
-    for item in provenance.get("inference_manifest") or []:
-        if isinstance(item, dict):
-            path = str(item.get("path") or "")
-            if path and path in block_text:
-                return True
-    return False
-
-
 def _mapping_conflict(message: str) -> None:
     raise RewriteError("SELECTION_MAPPING_CONFLICT", message)
 
@@ -297,7 +295,7 @@ def _anchor_visible_text(anchor: ProtectedAnchor) -> str:
     if anchor.kind == "hard_break":
         return "\n"
     if anchor.kind == "inline_code":
-        parsed = MarkdownIt("commonmark").parseInline(anchor.source)
+        parsed = _INLINE_PARSER.parseInline(anchor.source)
         children = parsed[0].children if parsed else None
         if children and len(children) == 1 and children[0].type == "code_inline":
             return children[0].content
@@ -375,15 +373,16 @@ def _selected_unit_range(
 
 def _selected_units(
     rewrite_map: MarkdownRewriteMap, start: int, end: int, provenance: dict
-) -> tuple[RewriteUnit, ...]:
+) -> _CoveredSelection:
     for region in rewrite_map.unsupported_regions:
         if _intersects(start, end, region.start_byte, region.end_byte):
             raise RewriteError("UNSUPPORTED_SELECTION", "selection crosses unsupported Markdown")
-    covered = tuple(
-        unit
-        for unit in rewrite_map.units
+    covered_pairs = tuple(
+        (index, unit)
+        for index, unit in enumerate(rewrite_map.units)
         if _intersects(start, end, unit.start_byte, unit.end_byte)
     )
+    covered = tuple(unit for _, unit in covered_pairs)
     if not covered:
         raise RewriteError("UNSUPPORTED_SELECTION", "selection does not cover editable Markdown")
 
@@ -404,7 +403,7 @@ def _selected_units(
     if any(
         anchor.kind == "link_destination"
         and _intersects(start, end, anchor.start_byte, anchor.end_byte)
-        and any(path in anchor.source for path in inference_paths)
+        and _link_destination_href(anchor) in inference_paths
         for anchor in protected
     ):
         raise RewriteError(
@@ -421,7 +420,7 @@ def _selected_units(
             "UNSUPPORTED_SELECTION", "selection endpoint is not an editable visible boundary"
         )
 
-    indexes = [rewrite_map.units.index(unit) for unit in covered]
+    indexes = [index for index, _ in covered_pairs]
     if indexes != list(range(indexes[0], indexes[-1] + 1)):
         raise RewriteError("UNSUPPORTED_SELECTION", "selected units are not continuous")
     for unit in covered[1:-1]:
@@ -434,7 +433,28 @@ def _selected_units(
     list_depths = {unit.list_depth for unit in covered if unit.unit_type == "list_item"}
     if len(list_depths) > 1:
         raise RewriteError("UNSUPPORTED_SELECTION", "selected list items have different depths")
-    return covered
+    return _CoveredSelection(covered, indexes[0], indexes[-1])
+
+
+def _link_destination_href(anchor: ProtectedAnchor) -> str | None:
+    if anchor.kind != "link_destination":
+        return None
+    parsed = _INLINE_PARSER.parseInline(f"[label{anchor.source}")
+    children = parsed[0].children if parsed else None
+    if not children:
+        return None
+    link_open = next((token for token in children if token.type == "link_open"), None)
+    href = link_open.attrGet("href") if link_open is not None else None
+    return href if isinstance(href, str) and href else None
+
+
+def _has_unsupported_gap(
+    rewrite_map: MarkdownRewriteMap, left_byte: int, right_byte: int
+) -> bool:
+    return any(
+        region.start_byte < right_byte and region.end_byte > left_byte
+        for region in rewrite_map.unsupported_regions
+    )
 
 
 def prepare_rewrite(
@@ -481,7 +501,8 @@ def prepare_rewrite(
 
     start, end, selected_text = _validate_selection(selection, markdown)
     rewrite_map = build_rewrite_map(markdown)
-    covered = _selected_units(rewrite_map, start, end, provenance)
+    covered_selection = _selected_units(rewrite_map, start, end, provenance)
+    covered = covered_selection.units
     if not any(
         _slot_slice(slot, start, end) is not None
         for unit in covered
@@ -513,14 +534,22 @@ def prepare_rewrite(
             if citation is not None:
                 allowed[str(citation.get("id"))] = citation
 
-    first_index = rewrite_map.units.index(covered[0])
-    last_index = rewrite_map.units.index(covered[-1])
+    first_index = covered_selection.first_index
+    last_index = covered_selection.last_index
     previous = rewrite_map.units[first_index - 1] if first_index else None
     next_unit = (
         rewrite_map.units[last_index + 1]
         if last_index + 1 < len(rewrite_map.units)
         else None
     )
+    if previous is not None and _has_unsupported_gap(
+        rewrite_map, previous.end_byte, covered[0].start_byte
+    ):
+        previous = None
+    if next_unit is not None and _has_unsupported_gap(
+        rewrite_map, covered[-1].end_byte, next_unit.start_byte
+    ):
+        next_unit = None
     unit_payloads = tuple(_selected_unit_payload(unit, start, end) for unit in covered)
     selected_unit_ranges = tuple(
         _selected_unit_range(unit, start, end) for unit in covered
@@ -543,8 +572,7 @@ def prepare_rewrite(
         instruction=instruction,
         allowed_citations=allowed,
     )
-    with _CONTEXT_LOCK:
-        _CONTEXTS[token] = context
+    _store_context(token, context)
     return {
         "context_token": token,
         "action_category": "synonym_rewrite",
@@ -563,12 +591,32 @@ def prepare_rewrite(
     }
 
 
+def _sweep_contexts_locked(now: float) -> None:
+    for token in [
+        token for token, context in _CONTEXTS.items() if context.expires_at <= now
+    ]:
+        _CONTEXTS.pop(token, None)
+
+
+def _store_context(token: str, context: _RewriteContext) -> None:
+    with _CONTEXT_LOCK:
+        _sweep_contexts_locked(time.monotonic())
+        if CONTEXT_CACHE_MAX < 1:
+            raise RewriteError("BAD_REQUEST", "rewrite context cache is unavailable")
+        if len(_CONTEXTS) >= CONTEXT_CACHE_MAX:
+            evicted = min(
+                _CONTEXTS,
+                key=lambda item: (_CONTEXTS[item].expires_at, item),
+            )
+            _CONTEXTS.pop(evicted, None)
+        _CONTEXTS[token] = context
+
+
 def _take_context(token: str, session_id: str) -> _RewriteContext:
     with _CONTEXT_LOCK:
+        _sweep_contexts_locked(time.monotonic())
         context = _CONTEXTS.get(token)
-        if context is None or context.expires_at < time.monotonic() or context.session_id != session_id:
-            if context is not None and context.expires_at < time.monotonic():
-                _CONTEXTS.pop(token, None)
+        if context is None or context.session_id != session_id:
             raise RewriteError("CONTEXT_EXPIRED", "rewrite context is missing or expired")
         _CONTEXTS.pop(token, None)
         return context
