@@ -576,6 +576,13 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 ("LOG_MASK_ENABLED", os.getenv("LOG_MASK_ENABLED")),
                 ("LOG_TO_FILE_ENABLED", os.getenv("LOG_TO_FILE_ENABLED")),
                 ("STREAMING_TOOL_WAIT_TIMEOUT_S", os.getenv("STREAMING_TOOL_WAIT_TIMEOUT_S")),
+                ("JINA_READER_ENDPOINT", os.getenv("JINA_READER_ENDPOINT")),
+                ("HTTP_PROXY", os.getenv("HTTP_PROXY")),
+                ("http_proxy", os.getenv("HTTP_PROXY")),
+                ("HTTPS_PROXY", os.getenv("HTTPS_PROXY")),
+                ("https_proxy", os.getenv("HTTPS_PROXY")),
+                ("NO_PROXY", os.getenv("NO_PROXY")),
+                ("no_proxy", os.getenv("NO_PROXY")),
             ):
                 if value is not None:
                     base[key] = value
