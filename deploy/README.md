@@ -41,7 +41,7 @@ kubectl get nodes
 |------|----------|----------|----------|----------|
 | yq | mikefarah/yq v4+ Go 版本 | 仅部署节点 |运行`yq --version`检查其版本是否符合要求|解析、修改 YAML 配置文件|
 | jq | 无强制版本限制 | 仅部署节点 |执行 `which jq` 命令，校验其是否已安装| 解析并筛选 JSON 数据，提取所需字段|
-| mount.nfs | 无强制版本限制 | 集群内所有节点  |执行 `which mount.nfs` 命令，校验其是否已安装|NFS客户端挂载工具，用于 Kubernetes 集群 Pod NFS 存储挂载|
+
 
 ### 1.3 下载部署工具
 
@@ -262,7 +262,23 @@ FEISHU_BOTS="
 
 #### 3.1.1 工具内置部署 NFS 服务（开发环境可用）
 
-本部署工具提供一键部署能力，可直接在集群内快速搭建 NFS 存储服务：
+本部署工具提供一键部署能力，可直接在集群内快速搭建 NFS 存储服务。部署之前，请在集群内所有节点执行以下命令逐一校验环境信息：
+```
+# 确认 NFS 服务端模块已加载
+# lsmod | grep nfsd
+nfsd                  647168  0
+auth_rpcgss           139264  1 nfsd
+nfs_acl                16384  2 nfsd,nfsv3
+lockd                 110592  3 nfsd,nfsv3,nfs
+grace                  16384  2 nfsd,lockd
+sunrpc                585728  10 nfsd,auth_rpcgss,lockd,nfsv3,nfs_acl,nfs
+
+# 确认 NFS 客户端挂载工具已安装
+# which mount.nfs
+/usr/sbin/mount.nfs
+```
+
+检查完成之后，请执行以下命令完成部署：
 ```
 ./deploy.sh up nfs          # 部署 NFS 存储模块（基础依赖，只需也只能一次）
 ```
@@ -525,14 +541,20 @@ JiuwenSwarm 企业级服务完整支持基于 Kubernetes 命名空间的多实�
 
 同一业务实例下的所有组件（Gateway、Web、CLAW-Manager）只有部署在同一个命名空间内才能服务调用和互通。而基础依赖组件（NFS、MySQL、Redis、MinIO、PostgreSQL）为所有业务实例的公共组件，无需随业务实例重复部署。
 
-**注意**： 业务组件请勿部署至 default 默认命名空间，
+**注意**：
+- 业务组件请勿部署至 default 默认命名空间。
+- 可参照对应章节分步单独部署各组件，也可执行以下命令一键部署所有业务组件（`Gateway`、`Manager`、`Web`）
+```
+./deploy.sh up -n <你的命名空间>
+```
+
 
 ### 4.1 部署 Gateway (必选部署)
 
 Gateway 是 JiuwenSwarm 的多渠道接入网关与消息调度核心，负责 AgentServer 生命周期管控、多平台渠道接入、消息双向路由转发、会话关系映射等关键能力。作为客户端与 AgentServer 之间的中转枢纽，该组件为系统强制部署项，缺失 Gateway 将导致整体业务系统无法正常运行。执行以下命令完成网关部署：
 
 ```
-./deploy.sh up              # 部署 Gateway 核心网关模块
+./deploy.sh up gateway -n <你的命名空间>             # 部署 Gateway 核心网关模块
 ```
 
 注意：默认以单机单实例模式运行；若需启用双实例主备高可用架构，请在启动前，修改配置文件 `.env.custom` 如下参数：
@@ -572,7 +594,7 @@ NFS_SC_NAME=""
 Manager 为平台管理模块，提供策略下发和配置、业务实例监控等管理能力，用于辅助运维人员完成系统管控。该组件为可选部署项，可根据实际运维需求选择性部署。执行以下命令完成管理模块部署：
 
 ```
-./deploy.sh up manager      # 部署 Manager 管理模块
+./deploy.sh up manager -n <你的命名空间>     # 部署 Manager 管理模块
 ```
 
 注意，这会启动 `jiuwenclaw-manager-server` 后端服务跟 `jiuwenclaw-manager-web` 前端组件，如果不需要 `jiuwenclaw-manager-web` 前端组件的，请在启动前，修改配置文件 `.env.custom` 如下参数：
@@ -586,7 +608,7 @@ IS_UP_MANAGER_WEB=false
 Web 为 JiuwenSwarm 企业版面向终端用户的对话可视化前端，用于用户直接和大模型机器人在线对话功能。该模块为可选组件，若业务仅通过飞书渠道与机器人交互、无需网页端对话入口，则可不部署。
 
 ```
-./deploy.sh up web          # 部署 Web 前端模块（可选部署）
+./deploy.sh up web -n <你的命名空间>          # 部署 Web 前端模块（可选部署）
 
 ```
 

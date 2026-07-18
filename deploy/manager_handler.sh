@@ -72,4 +72,5 @@ uninstall_manager() {
     fi
     exec_cmd kubectl delete -f ${manager_server_file} --ignore-not-found=true
     wait_pod_terminated "${manager_server_name}" "${namespace}"
+    uninstall_secret_configmap
 }
