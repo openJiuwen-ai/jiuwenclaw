@@ -49,6 +49,7 @@ PROVENANCE_MAX_BYTES = 4 * 1024 * 1024
 FINAL_RESULT_MAX_BYTES = 64 * 1024 * 1024
 CITATION_COUNT_MAX = 10_000
 CITATION_FIELD_MAX_BYTES = 1024 * 1024
+MAX_HIGHLIGHT_RANGES = 4096
 _INLINE_PARSER = MarkdownIt("commonmark")
 
 
@@ -960,6 +961,8 @@ def _current_highlight_ranges(
             merged[-1] = (merged[-1][0], end, unit_type)
         else:
             merged.append((start, end, unit_type))
+    if len(merged) > MAX_HIGHLIGHT_RANGES:
+        return []
     return [
         {"start_byte": start, "end_byte": end, "unit_type": unit_type}
         for start, end, unit_type in merged

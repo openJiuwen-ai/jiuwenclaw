@@ -1262,6 +1262,46 @@ def test_commit_highlights_changed_slot_but_not_noop_slot(tmp_path):
     ]
 
 
+@pytest.mark.parametrize(
+    ("unit_count", "expected_range_count"),
+    [(4096, 4096), (4097, 0)],
+)
+def test_commit_bounds_rewrite_highlight_ranges_without_truncation(
+    tmp_path, unit_count, expected_range_count
+):
+    body = "\n\n".join("a" for _ in range(unit_count)) + "\n"
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(
+        tmp_path,
+        report,
+        body.rstrip("\n"),
+        visible="\n".join("a" for _ in range(unit_count)),
+    )
+    replacements = {
+        slot["slot_id"]: "b"
+        for unit in prepared["units"]
+        for slot in unit["slots"]
+    }
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, replacements),
+    )
+
+    child_provenance = json.loads(
+        Path(result["provenance_path"]).read_text(encoding="utf-8")
+    )
+    ranges = child_provenance["rewrite_highlights"]["ranges"]
+    assert len(ranges) == expected_range_count
+    if ranges:
+        assert {item["unit_type"] for item in ranges} == {"paragraph"}
+        assert all(
+            left["end_byte"] <= right["start_byte"]
+            for left, right in zip(ranges, ranges[1:])
+        )
+
+
 def test_rewritten_child_can_be_rewritten_again_with_original_lineage(tmp_path):
     body = "first claim [[1]](https://example.com/source) tail\n\nsecond paragraph\n"
     report, provenance = _write_document(tmp_path, body)
