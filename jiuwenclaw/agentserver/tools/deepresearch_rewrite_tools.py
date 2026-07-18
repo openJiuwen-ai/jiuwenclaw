@@ -32,16 +32,14 @@ def _error(exc: RewriteError) -> str:
     name="deepresearch_prepare_rewrite",
     description=(
         "准备 DeepResearch Markdown 局部改写。必须在生成任何改写正文前调用；"
+        "selection 必须使用 Protocol v2，start_byte/end_byte 是绝对 UTF-8 byte 偏移；"
         "校验报告 revision、选区和引用白名单，返回一次性 context_token。"
     ),
 )
 async def deepresearch_prepare_rewrite(
     report_path: str,
     action: str,
-    block_id: str,
-    start: int,
-    end: int,
-    selected_text: str,
+    selection: dict,
     instruction: str = "",
 ) -> str:
     route = _get_route()
@@ -58,10 +56,7 @@ async def deepresearch_prepare_rewrite(
             workspace_root=output_dir,
             report_path=report_path,
             action=action,
-            block_id=block_id,
-            start=start,
-            end=end,
-            selected_text=selected_text,
+            selection=selection,
             instruction=instruction,
             session_id=session_id,
         )
@@ -96,7 +91,8 @@ async def _deliver_report(report_path: str, route: dict[str, object]) -> bool:
     name="deepresearch_commit_rewrite",
     description=(
         "提交 DeepResearch 局部改写结果并创建不可变 child revision。"
-        "只能使用 deepresearch_prepare_rewrite 返回的 context_token，禁止直接写报告文件。"
+        "只能提交 deepresearch_prepare_rewrite 返回的 context_token 和结构化 units 结果，"
+        "禁止直接写报告文件。"
     ),
 )
 async def deepresearch_commit_rewrite(

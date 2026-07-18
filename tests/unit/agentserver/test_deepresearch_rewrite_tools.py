@@ -1,5 +1,7 @@
 import hashlib
+import inspect
 import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -7,7 +9,6 @@ import pytest
 
 from jiuwenclaw.agentserver.tools import deepresearch_tools as dt
 from jiuwenclaw.agentserver.tools import deepresearch_rewrite_tools as rt
-from jiuwenclaw.agentserver.tools.deepresearch_plugin.document_rewrite import iter_rewrite_blocks
 
 
 def _document(root: Path):
@@ -43,27 +44,67 @@ def _document(root: Path):
         "rewrite_history": [],
     }
     report.with_suffix(".provenance.json").write_text(json.dumps(provenance), encoding="utf-8")
-    block = next(iter_rewrite_blocks(body))
-    return report, provenance, block
+    return report, provenance
+
+
+def _selection() -> dict:
+    selected = "原句。"
+    selected_bytes = selected.encode("utf-8")
+    return {
+        "protocol_version": 2,
+        "start_byte": 0,
+        "end_byte": len(selected_bytes),
+        "selected_text": selected,
+        "source_sha256": hashlib.sha256(selected_bytes).hexdigest(),
+    }
+
+
+def test_rewrite_tool_schemas_expose_only_protocol_v2_contract():
+    assert list(inspect.signature(rt.deepresearch_prepare_rewrite._func).parameters) == [
+        "report_path",
+        "action",
+        "selection",
+        "instruction",
+    ]
+    assert list(inspect.signature(rt.deepresearch_commit_rewrite._func).parameters) == [
+        "context_token",
+        "structured_result",
+    ]
+    prepare_card = rt.deepresearch_prepare_rewrite._card
+    assert list(prepare_card.input_params["properties"]) == [
+        "report_path",
+        "action",
+        "selection",
+        "instruction",
+    ]
+    assert "Protocol v2" in prepare_card.description
+    assert "UTF-8" in prepare_card.description
+    assert "byte" in prepare_card.description
+    commit_card = rt.deepresearch_commit_rewrite._card
+    assert list(commit_card.input_params["properties"]) == [
+        "context_token",
+        "structured_result",
+    ]
+    assert "units" in commit_card.description
 
 
 @pytest.mark.asyncio
 async def test_prepare_and_commit_tools_return_short_outcomes_and_deliver_file(tmp_path):
-    report, _, block = _document(tmp_path)
+    report, _ = _document(tmp_path)
+    selection = _selection()
     route = {"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}
     with patch.object(rt, "_get_route", return_value=route), patch.object(
         rt, "get_effective_request_output_dir", return_value=str(tmp_path)
     ):
         prepared_raw = await rt.deepresearch_prepare_rewrite._func(
             report_path=str(report),
-            action="shorten",
-            block_id=block.block_id,
-            start=0,
-            end=3,
-            selected_text="原句。",
+            action="polish",
+            selection=selection,
             instruction="",
         )
         prepared = json.loads(prepared_raw)
+        prepared_unit = prepared["units"][0]
+        prepared_slot = prepared_unit["slots"][0]
         push = AsyncMock()
         with patch(
             "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
@@ -72,7 +113,17 @@ async def test_prepare_and_commit_tools_return_short_outcomes_and_deliver_file(t
             committed_raw = await rt.deepresearch_commit_rewrite._func(
                 context_token=prepared["context_token"],
                 structured_result={
-                    "segments": [{"text": "新句。", "source_ids": []}],
+                    "units": [
+                        {
+                            "unit_id": prepared_unit["unit_id"],
+                            "slots": [
+                                {
+                                    "slot_id": prepared_slot["slot_id"],
+                                    "text": "新句。",
+                                }
+                            ],
+                        }
+                    ],
                     "facts_added": False,
                 },
             )
@@ -89,23 +140,38 @@ async def test_prepare_and_commit_tools_return_short_outcomes_and_deliver_file(t
 
 
 @pytest.mark.asyncio
-async def test_prepare_tool_returns_stable_error_code_without_leaking_selection(tmp_path):
-    report, _, block = _document(tmp_path)
-    report.write_text("已变化。\n", encoding="utf-8")
+async def test_prepare_passes_protocol_v2_selection_to_core_unchanged(tmp_path):
+    report, _ = _document(tmp_path)
+    selection = _selection()
+    prepared = {"context_token": "T1", "units": []}
     with patch.object(rt, "_get_route", return_value={"session_id": "S1"}), patch.object(
         rt, "get_effective_request_output_dir", return_value=str(tmp_path)
-    ):
+    ), patch.object(rt, "prepare_rewrite", return_value=prepared) as core_prepare:
         raw = await rt.deepresearch_prepare_rewrite._func(
             report_path=str(report),
-            action="shorten",
-            block_id=block.block_id,
-            start=0,
-            end=3,
-            selected_text="原句。",
+            action="polish",
+            selection=selection,
+        )
+
+    assert json.loads(raw) == {"status": "prepared", **prepared}
+    assert core_prepare.call_args.kwargs["selection"] is selection
+
+
+@pytest.mark.asyncio
+async def test_prepare_tool_returns_stable_error_without_leaking_selection(tmp_path, caplog):
+    report, _ = _document(tmp_path)
+    report.write_text("已变化。\n", encoding="utf-8")
+    selection = _selection()
+    with patch.object(rt, "_get_route", return_value={"session_id": "S1"}), patch.object(
+        rt, "get_effective_request_output_dir", return_value=str(tmp_path)
+    ), caplog.at_level(logging.INFO, logger=rt.__name__):
+        raw = await rt.deepresearch_prepare_rewrite._func(
+            report_path=str(report), action="polish", selection=selection
         )
     result = json.loads(raw)
     assert result == {"status": "error", "error_code": "REVISION_CONFLICT", "error": "the report revision changed"}
     assert "原句" not in raw
+    assert "原句" not in caplog.text
 
 
 def test_deepresearch_catalog_includes_stream_and_rewrite_tools(monkeypatch):
