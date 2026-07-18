@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from openjiuwen.core.runner.callback import get_callback_framework
+from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 from jiuwenclaw.agentserver.tools import deepresearch_tools as dt
 from jiuwenclaw.agentserver.tools import deepresearch_rewrite_tools as rt
@@ -71,6 +73,34 @@ def _structured_result(prepared: dict, text: str = "新句。") -> dict:
         ],
         "facts_added": False,
     }
+
+
+_INVOKE_LIFECYCLE_EVENTS = (
+    ToolCallEvents.TOOL_INVOKE_INPUT,
+    ToolCallEvents.TOOL_CALL_STARTED,
+    ToolCallEvents.TOOL_PARSE_STARTED,
+    ToolCallEvents.TOOL_PARSE_FINISHED,
+    ToolCallEvents.TOOL_CALL_FINISHED,
+    ToolCallEvents.TOOL_INVOKE_OUTPUT,
+)
+
+
+async def _invoke_with_event_probe(tool_instance, payload):
+    framework = get_callback_framework()
+    observed = []
+    callbacks = []
+    for event in _INVOKE_LIFECYCLE_EVENTS:
+        async def capture(*_args, _event=event, **_kwargs):
+            observed.append(_event)
+
+        framework.register_sync(event, capture, namespace="rewrite-tool-contract-test")
+        callbacks.append((event, capture))
+    try:
+        result = await tool_instance.invoke(payload)
+    finally:
+        for event, callback in callbacks:
+            await framework.unregister(event, callback)
+    return result, observed
 
 
 def test_rewrite_tool_schemas_expose_only_protocol_v2_contract():
@@ -149,6 +179,39 @@ def test_rewrite_tool_schemas_expose_only_protocol_v2_contract():
     slot_schema = unit_schema["properties"]["slots"]["items"]
     assert slot_schema["required"] == ["slot_id", "text"]
     assert slot_schema["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_prepare_invoke_keeps_full_lifecycle_for_valid_and_invalid_inputs():
+    valid_payload = {
+        "report_path": "/workspace/report.md",
+        "action": "polish",
+        "selection": _selection(),
+    }
+    invalid_payload = {
+        **valid_payload,
+        "selection": {**_selection(), "extra": "sensitive extra"},
+    }
+    with patch.object(
+        rt, "_get_route", return_value={"session_id": "S1"}
+    ), patch.object(
+        rt, "get_effective_request_output_dir", return_value="/workspace"
+    ), patch.object(
+        rt, "prepare_rewrite", return_value={"context_token": "T1", "units": []}
+    ) as core:
+        valid_raw, valid_events = await _invoke_with_event_probe(
+            rt.deepresearch_prepare_rewrite, valid_payload
+        )
+        invalid_raw, invalid_events = await _invoke_with_event_probe(
+            rt.deepresearch_prepare_rewrite, invalid_payload
+        )
+
+    assert json.loads(valid_raw)["status"] == "prepared"
+    assert json.loads(invalid_raw)["error_code"] == "BAD_REQUEST"
+    assert "sensitive" not in invalid_raw
+    assert core.call_count == 1
+    assert set(valid_events) == set(_INVOKE_LIFECYCLE_EVENTS)
+    assert invalid_events == valid_events
 
 
 @pytest.mark.asyncio

@@ -187,41 +187,6 @@ def _validate_commit_contract(context_token: object, structured_result: object) 
                 )
 
 
-def _validate_prepare_invoke(inputs: object) -> None:
-    if not isinstance(inputs, dict):
-        raise RewriteError("BAD_REQUEST", "invalid rewrite request")
-    required = {"report_path", "action", "selection"}
-    allowed = required | {"instruction"}
-    if not required.issubset(inputs) or not set(inputs).issubset(allowed):
-        raise RewriteError("BAD_REQUEST", "invalid rewrite request")
-    _validate_prepare_contract(
-        inputs["report_path"],
-        inputs["action"],
-        inputs["selection"],
-        inputs.get("instruction", ""),
-    )
-
-
-def _validate_commit_invoke(inputs: object) -> None:
-    if not isinstance(inputs, dict) or set(inputs) != {"context_token", "structured_result"}:
-        raise RewriteError("MODEL_OUTPUT_INVALID", "invalid structured rewrite result")
-    _validate_commit_contract(inputs["context_token"], inputs["structured_result"])
-
-
-def _install_strict_invoke(local_tool, validator) -> None:
-    original_invoke = local_tool.invoke
-
-    async def strict_invoke(inputs, **kwargs):
-        try:
-            validator(inputs)
-        except RewriteError as exc:
-            logger.info("deepresearch tool input rejected: code=%s", exc.code)
-            return _error(exc)
-        return await original_invoke(inputs, **kwargs)
-
-    local_tool.invoke = strict_invoke
-
-
 @tool(
     name="deepresearch_prepare_rewrite",
     description=(
@@ -355,8 +320,5 @@ async def deepresearch_commit_rewrite(
         ensure_ascii=False,
     )
 
-
-_install_strict_invoke(deepresearch_prepare_rewrite, _validate_prepare_invoke)
-_install_strict_invoke(deepresearch_commit_rewrite, _validate_commit_invoke)
 
 __all__ = ["deepresearch_prepare_rewrite", "deepresearch_commit_rewrite"]
