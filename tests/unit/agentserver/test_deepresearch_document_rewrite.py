@@ -60,6 +60,20 @@ def _write_document(root: Path, body: str) -> tuple[Path, dict]:
     return report, provenance
 
 
+def _set_snapshot_citations(report: Path, provenance: dict, citations: list[dict]) -> None:
+    snapshot_path = report.with_name(provenance["final_result_path"])
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["citation_messages"]["data"] = citations
+    snapshot_bytes = json.dumps(
+        snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    snapshot_path.write_bytes(snapshot_bytes)
+    provenance["final_result_sha256"] = hashlib.sha256(snapshot_bytes).hexdigest()
+    report.with_suffix(".provenance.json").write_text(
+        json.dumps(provenance, ensure_ascii=False), encoding="utf-8"
+    )
+
+
 def _selection(body: str, raw: str, visible: str | None = None, occurrence: int = 1) -> dict:
     cursor = -1
     for _ in range(occurrence):
@@ -489,6 +503,8 @@ def test_commit_rejects_non_exact_model_output_ids(tmp_path, mutation):
         (" \t\n", False),
         ("x" * 24_001, False),
         ("visit https://example.com", False),
+        ("clone ssh://git.example/repo", False),
+        ("run javascript:alert(1)", False),
         ("email mailto:user@example.com", False),
         ("[label](destination)", False),
         ("[label][reference]", False),
@@ -515,6 +531,62 @@ def test_commit_rejects_unsafe_or_invalid_model_output(
         )
 
     assert caught.value.code == "MODEL_OUTPUT_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("body", "raw", "replacement", "expected_fragment"),
+    [
+        ("plain text\n", "plain text", r"slash \ value", r"slash \\ value"),
+        ("plain text\n", "plain text", "entity &copy;", r"entity \&copy\;"),
+        (
+            "plain text\n",
+            "plain text",
+            "punctuation * _ # [ ]",
+            r"punctuation \* \_ \# \[ \]",
+        ),
+        ("plain text\n", "plain text", "**new**", r"\*\*new\*\*"),
+        (
+            "**bold** [label](https://ordinary.example)\n",
+            "label",
+            r"# \ &copy; *",
+            r"[\# \\ \&copy\; \*](https://ordinary.example)",
+        ),
+    ],
+)
+def test_commit_encodes_model_text_as_visible_markdown_literal(
+    tmp_path, body, raw, replacement, expected_fragment
+):
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(tmp_path, report, raw)
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, {slot_id: replacement}),
+    )
+
+    child = Path(result["report_path"]).read_text(encoding="utf-8")
+    assert expected_fragment in child
+    reparsed = rewrite_module.build_rewrite_map(child)
+    assert replacement in "".join(
+        slot.text for unit in reparsed.units for slot in unit.slots
+    )
+
+
+def test_commit_rejects_newline_that_would_change_softbreak_topology(tmp_path):
+    report, _ = _write_document(tmp_path, "original\n")
+    prepared = _prepare(tmp_path, report, "original")
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared, {slot_id: "a\nb"}),
+        )
+
+    assert caught.value.code == "FORMAT_CONFLICT"
 
 
 def test_commit_reconstructs_complex_units_and_preserves_protected_bytes(tmp_path):
@@ -605,9 +677,8 @@ def test_commit_deletes_an_empty_strong_wrapper(tmp_path):
 @pytest.mark.parametrize(
     ("replacement", "code"),
     [
-        ("new\n\n# heading", "STRUCTURE_CONFLICT"),
-        ("> protected\n\nnew", "STRUCTURE_CONFLICT"),
-        ("**new**", "FORMAT_CONFLICT"),
+        ("new\n\n# heading", "FORMAT_CONFLICT"),
+        ("> protected\n\nnew", "FORMAT_CONFLICT"),
     ],
 )
 def test_commit_rejects_reparsed_topology_conflicts(tmp_path, replacement, code):
@@ -645,6 +716,73 @@ def test_commit_revalidates_final_result_hash(tmp_path):
         )
 
     assert caught.value.code == "REVISION_CONFLICT"
+
+
+def test_commit_preserves_multiple_citation_identity_order_count(tmp_path):
+    body = (
+        "left [[1]](https://example.com/source) middle "
+        "[[2]](https://second.example/source) right\n"
+    )
+    report, provenance = _write_document(tmp_path, body)
+    second = {
+        "id": 4,
+        "reference_index": 2,
+        "url": "https://second.example/source",
+        "title": "Second",
+        "content": "second evidence",
+        "chunk": "second chunk",
+        "source": "web",
+    }
+    first = json.loads(
+        report.with_name(provenance["final_result_path"]).read_text(encoding="utf-8")
+    )["citation_messages"]["data"][0]
+    _set_snapshot_citations(report, provenance, [first, second])
+    prepared = _prepare(
+        tmp_path,
+        report,
+        body.rstrip("\n"),
+        visible="left [1] middle [2] right",
+    )
+    replacements = {
+        slot["slot_id"]: slot["text"].replace("left", "start").replace("right", "end")
+        for slot in prepared["units"][0]["slots"]
+    }
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, replacements),
+    )
+
+    child = Path(result["report_path"]).read_text(encoding="utf-8")
+    assert rewrite_module.CITATION_RE.findall(child) == [
+        ("1", "https://example.com/source"),
+        ("2", "https://second.example/source"),
+    ]
+    child_provenance = json.loads(
+        Path(result["provenance_path"]).read_text(encoding="utf-8")
+    )
+    assert child_provenance["rewrite_history"][-1]["source_ids"] == ["3", "4"]
+
+
+def test_commit_rejects_citation_missing_from_final_result_whitelist(tmp_path):
+    body = "claim [[2]](https://missing.example/source) remains\n"
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(
+        tmp_path,
+        report,
+        body.rstrip("\n"),
+        visible="claim [2] remains",
+    )
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared),
+        )
+
+    assert caught.value.code == "FORMAT_CONFLICT"
 
 
 def test_prepare_rejects_legacy_action_stale_hash_and_workspace_escape(tmp_path):

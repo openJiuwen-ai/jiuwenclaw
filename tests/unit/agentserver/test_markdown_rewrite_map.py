@@ -726,6 +726,27 @@ def test_reconstruct_replaces_selected_utf8_subranges_from_back_to_front():
     assert reconstructed == "prefix 替换 suffix"
 
 
+def test_reconstruct_encodes_replacement_as_final_visible_text():
+    markdown = "before plain after"
+    rewrite_map = rewrite_map_module.build_rewrite_map(markdown)
+    slot = rewrite_map.units[0].slots[0]
+    start = slot.visible_boundary_to_byte[7]
+    end = slot.visible_boundary_to_byte[12]
+    replacement = r"# \ &copy; * _ [ ]"
+
+    reconstructed = rewrite_map_module.reconstruct_markdown(
+        rewrite_map,
+        {slot.slot_id: replacement},
+        selected_ranges={slot.slot_id: (start, end)},
+    )
+
+    assert reconstructed == r"before \# \\ \&copy\; \* \_ \[ \] after"
+    reparsed = rewrite_map_module.build_rewrite_map(reconstructed)
+    assert "".join(current.text for current in reparsed.units[0].slots) == (
+        f"before {replacement} after"
+    )
+
+
 def test_build_rewrite_map_returns_empty_immutable_collections_for_empty_source():
     rewrite_map = rewrite_map_module.build_rewrite_map("")
 

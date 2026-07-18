@@ -239,6 +239,26 @@ class _InlineTopologyError(ValueError):
     pass
 
 
+def _encode_markdown_literal(text: str) -> str:
+    """Encode final visible inline text without introducing Markdown syntax."""
+    encoded: list[str] = []
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character == "\r":
+            if text[index + 1 : index + 2] == "\n":
+                index += 1
+            encoded.append("\\\n")
+        elif character == "\n":
+            encoded.append("\\\n")
+        elif character in _ESCAPABLE:
+            encoded.append("\\" + character)
+        else:
+            encoded.append(character)
+        index += 1
+    return "".join(encoded)
+
+
 def _looks_like_unmatched_construct(raw: str, index: int) -> bool:
     tail = raw[index:]
     return tail.startswith(("**", "__", "~~", "[", "]", "<", "`", "!["))
@@ -1002,7 +1022,13 @@ def reconstruct_markdown(
                 conflict("selected reconstruction range is reversed")
             original_visible = slot.text[visible_start:visible_end]
         if replacement != original_visible:
-            replacements.append((start_byte, end_byte, replacement.encode("utf-8")))
+            replacements.append(
+                (
+                    start_byte,
+                    end_byte,
+                    _encode_markdown_literal(replacement).encode("utf-8"),
+                )
+            )
         if (
             selected_ranges is not None
             and not replacement

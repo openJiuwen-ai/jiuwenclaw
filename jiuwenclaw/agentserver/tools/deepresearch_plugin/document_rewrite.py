@@ -32,7 +32,8 @@ from jiuwenclaw.agentserver.tools.deepresearch_plugin.markdown_rewrite_map impor
 SAFE_ID_RE = re.compile(r"^(?:doc|rev)_[A-Za-z0-9_-]{1,128}$")
 CITATION_RE = re.compile(r"\[\[(?P<index>\d+)\]\]\((?P<url>https?://[^\s)]+)\)")
 FORBIDDEN_OUTPUT_RE = re.compile(
-    r"(?:https?|ftp|file)://|(?:mailto|data):|!\[|\]\s*(?:\(|\[)|"
+    r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:(?://|[^\s])|"
+    r"!\[|\]\s*(?:\(|\[)|"
     r"^\s*\[[^\]\r\n]+\]\s*:\s*\S+|"
     r"<[A-Za-z!/][^>]*>|#inference:",
     re.IGNORECASE | re.MULTILINE,
