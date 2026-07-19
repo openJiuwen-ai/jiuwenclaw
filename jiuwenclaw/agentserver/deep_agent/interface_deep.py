@@ -1436,11 +1436,16 @@ class JiuWenClawDeepAdapter:
         model_name = self._resolve_model_name()
         if model_name in ("", "unknown"):
             model_name = (self._config_cache or {}).get("model_name", "gpt-4")
+            logger.warning(
+                "[JiuWenClawDeepAdapter] model name unresolved, falling back to '%s' "
+                "for changelog classification",
+                model_name,
+            )
         return ExperienceRebuildService(
             store=store,
             llm=self._model,
             model=model_name,
-            language="cn",
+            language=self._resolve_runtime_language(),
         )
 
     @staticmethod

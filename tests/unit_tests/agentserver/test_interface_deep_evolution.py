@@ -222,16 +222,29 @@ def _make_evolve_test_record():
     from openjiuwen.agent_evolving.checkpointing.types import EvolutionPatch, EvolutionRecord
     from openjiuwen.agent_evolving.signal.base import EvolutionTarget
 
-    return EvolutionRecord.make(
-        source="execution_failure",
-        context="tool failed",
-        change=EvolutionPatch(
-            section="Troubleshooting",
-            action="append",
-            content="Handle timeout by retrying",
-            target=EvolutionTarget.BODY,
-        ),
+    patch = EvolutionPatch(
+        section="Troubleshooting",
+        action="append",
+        content="Handle timeout by retrying",
+        target=EvolutionTarget.BODY,
     )
+    # enterprise-dev: make(EvolutionRecordSpec(...)); older: make(source=..., ...)
+    try:
+        from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecordSpec
+
+        return EvolutionRecord.make(
+            EvolutionRecordSpec(
+                source="execution_failure",
+                context="tool failed",
+                change=patch,
+            )
+        )
+    except (ImportError, TypeError):
+        return EvolutionRecord.make(
+            source="execution_failure",
+            context="tool failed",
+            change=patch,
+        )
 
 
 def _setup_evolve_command_rail(*, auto_save: bool):
@@ -345,6 +358,54 @@ async def test_evolve_rebuild_command_returns_followup(adapter, monkeypatch):
         "rebuild_context": {"records": [], "overflow_index": {}},
         "result_type": "followup",
     }
+
+
+def test_make_rebuild_service_passes_llm_params(adapter, monkeypatch):
+    """_make_rebuild_service must inject llm/model/language for changelog classification."""
+    captured: dict[str, Any] = {}
+
+    class _CapturingService:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(interface_deep_module, "ExperienceRebuildService", _CapturingService)
+    adapter._model = "fake_model"  # pylint: disable=protected-access
+    adapter._model_request_config = SimpleNamespace(model="test-model")  # pylint: disable=protected-access
+    monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "en")
+
+    adapter._make_rebuild_service(store=object())  # pylint: disable=protected-access
+
+    assert captured["llm"] == "fake_model"
+    assert captured["model"] == "test-model"
+    assert captured["language"] == "en"
+
+
+def test_make_rebuild_service_warns_on_model_fallback(adapter, monkeypatch):
+    """Unresolved model name should fall back with a warning for ops visibility."""
+    captured: dict[str, Any] = {}
+
+    class _CapturingService:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(interface_deep_module, "ExperienceRebuildService", _CapturingService)
+    adapter._model = "fake_model"  # pylint: disable=protected-access
+    adapter._model_request_config = None  # pylint: disable=protected-access
+    adapter._config_cache = {}  # pylint: disable=protected-access
+    monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "cn")
+
+    records, detach = _attach_capture_handler(interface_deep_module.logger)
+    try:
+        adapter._make_rebuild_service(store=object())  # pylint: disable=protected-access
+    finally:
+        detach()
+
+    assert captured["model"] == "gpt-4"
+    assert captured["language"] == "cn"
+    assert any(
+        "model name unresolved" in record.getMessage() and record.levelno == logging.WARNING
+        for record in records
+    )
 
 
 @pytest.mark.asyncio
