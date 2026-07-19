@@ -817,9 +817,24 @@ def test_toolkit_plan_returns_compact_beam_search():
         "round_index": 1,
         "graph": {
             "nodes": [
-                {"id": "skill-a", "label": "Skill A", "status": "final"},
-                {"id": "skill-b", "label": "Skill B", "status": "final"},
-                {"id": "skill-c", "label": "Skill C", "status": "rejected"},
+                {
+                    "id": "skill-a",
+                    "label": "Skill A",
+                    "status": "final",
+                    "seed": True,
+                },
+                {
+                    "id": "skill-b",
+                    "label": "Skill B",
+                    "status": "final",
+                    "seed": False,
+                },
+                {
+                    "id": "skill-c",
+                    "label": "Skill C",
+                    "status": "rejected",
+                    "seed": False,
+                },
             ],
             "edges": [
                 {"source": "skill-a", "target": "skill-b", "status": "final"},
@@ -983,19 +998,28 @@ def test_toolkit_get_tools_respects_symphony_enabled(monkeypatch):
         "fast",
         "beam",
     ]
+    mode_description = compose_tool.card.input_params["properties"]["mode"][
+        "description"
+    ]
+    assert "fast for simple tasks" in mode_description
+    assert "beam for complex multi-step tasks" in mode_description
+    assert "prerequisite skills" in mode_description
     assert "language" not in compose_tool.card.input_params["properties"]
     assert compose_tool.card.input_params["properties"]["candidate_skill_ids"] == {
         "type": "array",
         "items": {"type": "string"},
         "description": (
-            "Optional installed skill worker_id values returned by "
-            "skill_branch_explore. When provided, Symphony composes "
-            "from these candidate skills and their eligible neighbors."
+            "Optional identifiers or exact names of the installed Skills "
+            "you consider most relevant to the user's task. When relevant "
+            "Skills have already been identified, provide them here so "
+            "Symphony uses them and their eligible neighbors as seeds."
         ),
     }
     description = compose_tool.card.description
     assert "skill capabilities, skill chaining, skill ordering" in description
-    assert "skill_branch_explore" in description
+    assert "identify, inspect, or recommend installed Skills" in description
+    assert "skill_branch_explore" not in description
+    assert "worker_id" not in description
     assert "candidate_skill_ids" in description
     assert "search_skill to discover external skills" in description
     assert "install_skill" in description

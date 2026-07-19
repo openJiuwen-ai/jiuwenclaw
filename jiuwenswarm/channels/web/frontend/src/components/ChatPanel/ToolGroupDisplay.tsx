@@ -11,7 +11,7 @@ import { ToolExecution } from '../../types';
 import { formatToolArguments, formatToolResult } from '../../utils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { SkillTreePath } from './SkillTreePath';
-import { BeamSearchGraph } from './BeamSearchGraph';
+import { BeamSearchTree } from './BeamSearchTree';
 
 interface ToolGroupDisplayProps {
   executions: ToolExecution[];
@@ -522,7 +522,12 @@ export function ToolGroupDisplay({
             autoCollapse={collapseSkillTreeWhenContentStarts}
           />
         )}
-        {beamSearch && <BeamSearchGraph progress={beamSearch} />}
+        {beamSearch && (
+          <BeamSearchTree
+            progress={beamSearch}
+            autoCollapse={collapseSkillTreeWhenContentStarts}
+          />
+        )}
       </div>
     </div>
   );

@@ -91,16 +91,6 @@ def _artifacts(tmp_path, *, graph_skill_prefix: bool = False):
     )
 
 
-def _empty_artifacts(tmp_path):
-    return ScoreArtifacts(
-        score_dir=tmp_path,
-        manifest={},
-        skills=[],
-        graph={"edges": []},
-        lookup={},
-    )
-
-
 async def test_plan_from_score_fast_uses_one_shot_planner(monkeypatch, tmp_path):
     artifacts = _artifacts(tmp_path)
     llm = _FakeLLMClient(
@@ -214,7 +204,6 @@ async def test_plan_from_score_fast_accepts_prefixed_graph_skill_ids(
     ]
     assert result["recommended_plans"][0]["can_feed_edges"][0]["source_id"] == "skill-a"
     assert result["execution_graph"]["edges"][0]["source"] == "skill-a"
-    assert result["decision"]["partial_fallback_applied"] is False
 
 
 async def test_plan_from_score_fast_rejects_unknown_skill_once(monkeypatch, tmp_path):
@@ -241,10 +230,7 @@ async def test_plan_from_score_fast_rejects_unknown_skill_once(monkeypatch, tmp_
     assert result["execution_graph"]["nodes"] == []
 
 
-async def test_plan_from_score_fast_no_plan_without_retrieval_stays_no_plan(
-    monkeypatch,
-    tmp_path,
-):
+async def test_plan_from_score_fast_no_plan_calls_llm_once(monkeypatch, tmp_path):
     artifacts = _artifacts(tmp_path)
     llm = _FakeLLMClient(
         {
@@ -268,99 +254,6 @@ async def test_plan_from_score_fast_no_plan_without_retrieval_stays_no_plan(
     assert result["status"] == "no_plan"
     assert result["recommended_plans"] == []
     assert result["execution_graph"]["nodes"] == []
-    assert result["decision"]["partial_fallback_applied"] is False
-
-
-async def test_plan_from_score_fast_no_plan_uses_partial_candidate_fallback(
-    monkeypatch,
-    tmp_path,
-):
-    artifacts = _artifacts(tmp_path)
-    llm = _FakeLLMClient(
-        {
-            "title": "No useful plan",
-            "status": "no_plan",
-            "reason": "Candidates are partially useful.",
-            "steps": [],
-            "can_feed_edges": [],
-        }
-    )
-    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
-
-    result = await service.plan_from_score(
-        tmp_path,
-        "partially related user request",
-        llm_client=llm,
-        orchestration_config=SymphonyOrchestrationConfig(mode="fast"),
-        candidate_skill_ids=["skill-a", "skill-b"],
-    )
-
-    assert len(llm.calls) == 1
-    assert result["status"] == "needs_input"
-    assert result["recommended_plans"][0]["steps"][0]["skill_id"] == "skill-a"
-    assert result["recommended_plans"][0]["source"] == "one_shot_fast_partial_fallback"
-    assert result["decision"]["partial_fallback_applied"] is True
-    assert result["execution_graph"]["nodes"][0]["id"] == "skill-a"
-
-
-async def test_plan_from_score_fast_empty_steps_uses_first_retrieval_candidate(
-    monkeypatch,
-    tmp_path,
-):
-    artifacts = _artifacts(tmp_path)
-    llm = _FakeLLMClient(
-        {
-            "title": "Empty plan",
-            "status": "ready",
-            "reason": "Useful but incomplete.",
-            "steps": [],
-            "can_feed_edges": [],
-        }
-    )
-    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
-
-    result = await service.plan_from_score(
-        tmp_path,
-        "partial user request",
-        llm_client=llm,
-        orchestration_config=SymphonyOrchestrationConfig(mode="fast"),
-        candidate_skill_ids=["skill-b", "skill-a"],
-    )
-
-    assert result["status"] == "needs_input"
-    assert result["recommended_plans"][0]["steps"][0]["skill_id"] == "skill-b"
-    assert result["skill_retrieval"]["candidate_skill_ids"] == ["skill-b", "skill-a"]
-    assert result["decision"]["partial_fallback_applied"] is True
-
-
-async def test_plan_from_score_fast_no_candidates_still_returns_no_plan(
-    monkeypatch,
-    tmp_path,
-):
-    artifacts = _empty_artifacts(tmp_path)
-    llm = _FakeLLMClient(
-        {
-            "title": "No useful plan",
-            "status": "no_plan",
-            "reason": "No candidates.",
-            "steps": [],
-            "can_feed_edges": [],
-        }
-    )
-    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
-
-    result = await service.plan_from_score(
-        tmp_path,
-        "unrelated user request",
-        llm_client=llm,
-        orchestration_config=SymphonyOrchestrationConfig(mode="fast"),
-    )
-
-    assert len(llm.calls) == 1
-    assert result["status"] == "no_plan"
-    assert result["recommended_plans"] == []
-    assert result["execution_graph"]["nodes"] == []
-    assert result["decision"]["partial_fallback_applied"] is False
 
 
 async def test_plan_from_score_fast_accepts_low_confidence_edge_as_inferred(
@@ -581,6 +474,76 @@ async def test_plan_from_score_fast_without_candidates_uses_default_subgraph(
         "candidate_skill_ids": [],
         "candidate_count": 0,
         "fallback_reason": "candidate_skill_ids not provided",
+    }
+
+
+async def test_plan_from_score_resolves_unique_skill_names(
+    monkeypatch,
+    tmp_path,
+):
+    artifacts = _artifacts(tmp_path)
+    llm = _FakeLLMClient(
+        {
+            "title": "Named candidate plan",
+            "status": "ready",
+            "steps": [{"skill_id": "skill-b", "reason": "Named seed."}],
+            "can_feed_edges": [],
+        }
+    )
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    result = await service.plan_from_score(
+        tmp_path,
+        "use beta",
+        llm_client=llm,
+        orchestration_config=SymphonyOrchestrationConfig(mode="fast"),
+        candidate_skill_ids=["Beta Skill", "skill-a", "Beta Skill"],
+    )
+
+    assert result["skill_retrieval"]["candidate_skill_ids"] == [
+        "skill-b",
+        "skill-a",
+    ]
+
+
+async def test_plan_from_score_does_not_guess_ambiguous_skill_names(
+    monkeypatch,
+    tmp_path,
+):
+    artifacts = _artifacts(tmp_path)
+    artifacts.skills.append(
+        {
+            "id": "skill-beta-copy",
+            "name": "Beta Skill",
+            "description": "Another skill with the same display name.",
+            "inputs": [],
+            "outputs": [],
+        }
+    )
+    llm = _FakeLLMClient(
+        {
+            "title": "Fallback plan",
+            "status": "ready",
+            "steps": [{"skill_id": "skill-a", "reason": "Fallback."}],
+            "can_feed_edges": [],
+        }
+    )
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    result = await service.plan_from_score(
+        tmp_path,
+        "use beta",
+        llm_client=llm,
+        orchestration_config=SymphonyOrchestrationConfig(mode="fast"),
+        candidate_skill_ids=["Beta Skill"],
+    )
+
+    assert result["skill_retrieval"] == {
+        "source": "input",
+        "used": False,
+        "candidate_skill_ids": [],
+        "candidate_count": 0,
+        "fallback_reason": "candidate_skill_ids did not match current score",
     }
 
 

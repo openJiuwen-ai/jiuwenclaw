@@ -4,7 +4,10 @@ from unittest.mock import patch
 import pytest
 
 from openjiuwen.core.foundation.llm import Model
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    ToolCallInputs,
+)
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentManager,
@@ -101,6 +104,30 @@ class _FakeRuntimeInstance:
         self.ability_manager = _FakeAbilityManager()
 
 
+def _tool_call_ctx(
+    tool_name: str,
+    args: dict,
+    *,
+    extra: dict | None = None,
+    result: object | None = None,
+):
+    tool_call = SimpleNamespace(
+        id=f"{tool_name}-call",
+        name=tool_name,
+        arguments=dict(args),
+    )
+    return SimpleNamespace(
+        inputs=ToolCallInputs(
+            tool_call=tool_call,
+            tool_name=tool_name,
+            tool_args=dict(args),
+            tool_result={"success": True} if result is None else result,
+        ),
+        extra={} if extra is None else extra,
+        exception=None,
+    )
+
+
 def test_build_agent_identity_prompt_contains_identity_section_only():
     prompt = build_agent_identity_prompt(language="zh")
 
@@ -178,6 +205,114 @@ async def test_symphony_orchestration_prompt_rail_injects_when_tool_visible(
     prompt = builder.build()
     assert "## Symphony Orchestration" in prompt
     assert "`symphony_compose_score`" in prompt
+    assert "exact identifiers or names" in prompt
+    assert "Do not omit this field" in prompt
+    assert "skill_branch_explore" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_rail_backfills_viewed_skills():
+    rail = SymphonyOrchestrationPromptRail()
+    invocation_extra: dict = {}
+
+    for skill_name in (
+        "creating-financial-models",
+        "xlsx",
+        "creating-financial-models",
+    ):
+        await rail.after_tool_call(
+            _tool_call_ctx(
+                "skill_tool",
+                {"skill_name": skill_name},
+                extra=invocation_extra,
+            )
+        )
+
+    compose_ctx = _tool_call_ctx(
+        "symphony_compose_score",
+        {"query": "build a financial model"},
+        extra=invocation_extra,
+    )
+    await rail.before_tool_call(compose_ctx)
+
+    expected = ["creating-financial-models", "xlsx"]
+    assert compose_ctx.inputs.tool_args["candidate_skill_ids"] == expected
+    assert compose_ctx.inputs.tool_call.arguments["candidate_skill_ids"] == expected
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_rail_preserves_explicit_candidates():
+    rail = SymphonyOrchestrationPromptRail()
+    invocation_extra: dict = {}
+    await rail.after_tool_call(
+        _tool_call_ctx(
+            "skill_tool",
+            {"skill_name": "viewed-skill"},
+            extra=invocation_extra,
+        )
+    )
+    compose_ctx = _tool_call_ctx(
+        "symphony_compose_score",
+        {"query": "task", "candidate_skill_ids": ["explicit-skill"]},
+        extra=invocation_extra,
+    )
+
+    await rail.before_tool_call(compose_ctx)
+
+    assert compose_ctx.inputs.tool_args["candidate_skill_ids"] == [
+        "explicit-skill"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_rail_does_not_reuse_other_invocation():
+    rail = SymphonyOrchestrationPromptRail()
+    await rail.after_tool_call(
+        _tool_call_ctx(
+            "skill_tool",
+            {"skill_name": "previous-skill"},
+            extra={},
+        )
+    )
+    compose_ctx = _tool_call_ctx(
+        "symphony_compose_score",
+        {"query": "new task"},
+        extra={},
+    )
+
+    await rail.before_tool_call(compose_ctx)
+
+    assert "candidate_skill_ids" not in compose_ctx.inputs.tool_args
+
+
+@pytest.mark.asyncio
+async def test_symphony_orchestration_rail_ignores_disclosure_and_failed_views():
+    rail = SymphonyOrchestrationPromptRail()
+    invocation_extra: dict = {}
+    await rail.after_tool_call(
+        _tool_call_ctx(
+            "skill_branch_explore",
+            {"node_ids": ["FinanceBusiness"]},
+            extra=invocation_extra,
+        )
+    )
+    await rail.after_tool_call(
+        _tool_call_ctx(
+            "skill_tool",
+            {"skill_name": "failed-skill"},
+            extra=invocation_extra,
+            result={"success": False},
+        )
+    )
+    compose_ctx = _tool_call_ctx(
+        "symphony_compose_score",
+        {"query": "task"},
+        extra=invocation_extra,
+    )
+
+    await rail.before_tool_call(compose_ctx)
+
+    assert "candidate_skill_ids" not in compose_ctx.inputs.tool_args
 
 
 @pytest.mark.asyncio

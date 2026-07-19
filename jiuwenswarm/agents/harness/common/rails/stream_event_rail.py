@@ -86,6 +86,7 @@ def _copy_symphony_result_fields(
         "display_format",
         "mermaid",
         "summary",
+        "beam_search",
         "continue_after_display",
         "followup_action",
     ):

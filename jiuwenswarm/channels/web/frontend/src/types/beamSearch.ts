@@ -4,6 +4,7 @@ export interface BeamSearchNode {
   id: string;
   label: string;
   status: BeamNodeStatus;
+  seed?: boolean;
 }
 
 export interface BeamSearchEdge {

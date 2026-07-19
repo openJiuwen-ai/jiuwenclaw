@@ -180,6 +180,13 @@ async def test_stream_event_rail_force_finishes_symphony_compose_score_result():
         "mermaid": "flowchart LR\n  A --> B",
         "score_status": {"success": True, "exists": True, "stale": False},
         "score_build": {"rebuilt": False, "reason": "not_required"},
+        "beam_search": {
+            "round_index": 2,
+            "graph": {
+                "nodes": [{"id": "skill-a", "status": "final"}],
+                "edges": [],
+            },
+        },
     }
     ctx = _ctx(session, "symphony_compose_score", tool_result=result)
 
@@ -198,6 +205,7 @@ async def test_stream_event_rail_force_finishes_symphony_compose_score_result():
     assert tool_results[0]["raw_output"] == result
     assert tool_results[0]["score_status"] == result["score_status"]
     assert tool_results[0]["score_build"] == result["score_build"]
+    assert tool_results[0]["beam_search"] == result["beam_search"]
     assert tool_results[0]["direct_display"] is True
     direct_messages = [chunk for chunk in session.chunks if chunk.type == "chat.final"]
     assert direct_messages == []

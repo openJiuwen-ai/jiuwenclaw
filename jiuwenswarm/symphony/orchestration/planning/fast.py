@@ -41,9 +41,7 @@ Task:
 - Do not invent Skills, inputs, or outputs.
 - Prefer the shortest path that satisfies the user's intent.
 - If required information is missing, set status to "needs_input" and list it.
-- If candidate Skills are useful but insufficient for the complete task, return
-  the best partial plan with status "needs_input".
-- Use status "no_plan" only when none of the candidate Skills are useful.
+- If no useful plan exists from the candidates, set status to "no_plan".
 
 Schema:
 {
@@ -128,8 +126,6 @@ class FastOneShotPlanner:
         materialized = self._materialize_selection(
             selection,
             candidate_skill_ids=set(subgraph["skill_ids"]),
-            ordered_candidate_skill_ids=subgraph["skill_ids"],
-            allow_partial_fallback=bool(self.candidate_skill_ids),
             candidate_edges=subgraph["edge_by_key"],
         )
         if not materialized["valid"]:
@@ -146,9 +142,6 @@ class FastOneShotPlanner:
                 "strategy": "single_llm_selection",
                 "validated_count": 1 if plan.get("steps") else 0,
                 "candidate_count": len(subgraph["skills"]),
-                "partial_fallback_applied": (
-                    plan.get("source") == "one_shot_fast_partial_fallback"
-                ),
             },
             "validation": materialized,
             "status": plan.get("status", "no_plan") if plan else "no_plan",
@@ -425,8 +418,6 @@ class FastOneShotPlanner:
         selection: dict[str, Any],
         *,
         candidate_skill_ids: set[str],
-        ordered_candidate_skill_ids: Sequence[str],
-        allow_partial_fallback: bool,
         candidate_edges: dict[tuple[str, str], dict[str, Any]],
     ) -> dict[str, Any]:
         status = str(selection.get("status") or "ready").strip().lower()
@@ -435,17 +426,6 @@ class FastOneShotPlanner:
         raw_steps = selection.get("steps") or selection.get("skill_order") or []
         step_ids = self._normalize_step_ids(raw_steps)
         if status == "no_plan" or not step_ids:
-            if allow_partial_fallback:
-                fallback_plan = self._partial_fallback_plan(
-                    selection,
-                    ordered_candidate_skill_ids,
-                )
-                if fallback_plan is not None:
-                    return {
-                        "valid": True,
-                        "detail": "",
-                        "plan": fallback_plan,
-                    }
             return {
                 "valid": True,
                 "detail": "",
@@ -613,60 +593,6 @@ class FastOneShotPlanner:
                 ),
                 "source": "one_shot_fast",
             },
-        }
-
-    def _partial_fallback_plan(
-        self,
-        selection: dict[str, Any],
-        ordered_candidate_skill_ids: Sequence[str],
-    ) -> dict[str, Any] | None:
-        fallback_skill_id = next(
-            (
-                current_skill_id
-                for current_skill_id in ordered_candidate_skill_ids
-                if current_skill_id in self.artifacts.skill_by_id
-            ),
-            None,
-        )
-        if fallback_skill_id is None:
-            return None
-
-        skill = self.artifacts.skill_by_id[fallback_skill_id]
-        outputs = list(skill.get("outputs") or [])
-        produced_artifacts = [
-            {
-                "name": item.get("name"),
-                "type": item.get("type") or "unknown",
-                "source": "skill_output",
-            }
-            for item in outputs
-            if item.get("name")
-        ]
-        step = {
-            "step": 1,
-            "skill_id": fallback_skill_id,
-            "name": str(skill.get("name") or fallback_skill_id),
-            "inputs": list(skill.get("inputs") or []),
-            "outputs": outputs,
-            "missing_inputs": [],
-            "filled_inputs": [],
-            "reason": "Best available retrieved Skill for a partial plan.",
-        }
-        return {
-            "title": str(selection.get("title") or "Symphony partial plan").strip(),
-            "status": "needs_input",
-            "steps": [step],
-            "stages": [{"stage": 1, "skills": [step]}],
-            "produced_artifacts": produced_artifacts,
-            "missing_inputs": [],
-            "can_feed_edges": [],
-            "reason": str(
-                selection.get("reason")
-                or "Retrieved candidates are useful but insufficient."
-            ).strip(),
-            "plan_classification": "structurally_valid_but_incomplete",
-            "connectivity_trace": [],
-            "source": "one_shot_fast_partial_fallback",
         }
 
     @staticmethod

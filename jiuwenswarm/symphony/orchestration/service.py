@@ -53,7 +53,7 @@ async def plan_from_score(
 
     selected_candidate_skill_ids, skill_retrieval = _input_candidate_summary(
         candidate_skill_ids,
-        known_skill_ids=set(artifacts.skill_by_id),
+        skills=artifacts.skills,
     )
     if mode == "beam":
         result = await BidirectionalBeamPlanner(
@@ -86,14 +86,10 @@ async def plan_from_score(
 def _input_candidate_summary(
     values: Sequence[str] | None,
     *,
-    known_skill_ids: set[str],
+    skills: Sequence[dict[str, Any]],
 ) -> tuple[tuple[str, ...] | None, dict[str, Any]]:
     normalized = _normalize_candidate_skill_ids(values)
-    selected = tuple(
-        current_skill_id
-        for current_skill_id in normalized
-        if current_skill_id in known_skill_ids
-    )
+    selected = _resolve_candidate_skill_ids(normalized, skills)
     fallback_reason = ""
     if values is None:
         fallback_reason = "candidate_skill_ids not provided"
@@ -109,6 +105,37 @@ def _input_candidate_summary(
         "candidate_count": len(selected),
         "fallback_reason": fallback_reason,
     }
+
+
+def _resolve_candidate_skill_ids(
+    values: Sequence[str],
+    skills: Sequence[dict[str, Any]],
+) -> tuple[str, ...]:
+    known_skill_ids = {
+        str(skill.get("id") or "").strip()
+        for skill in skills
+        if str(skill.get("id") or "").strip()
+    }
+    skill_ids_by_name: dict[str, set[str]] = {}
+    for skill in skills:
+        current_skill_id = str(skill.get("id") or "").strip()
+        name = str(skill.get("name") or "").strip()
+        if current_skill_id and name:
+            skill_ids_by_name.setdefault(name, set()).add(current_skill_id)
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        current_skill_id = value if value in known_skill_ids else ""
+        if not current_skill_id:
+            matching_ids = skill_ids_by_name.get(value, set())
+            if len(matching_ids) == 1:
+                current_skill_id = next(iter(matching_ids))
+        if not current_skill_id or current_skill_id in seen:
+            continue
+        seen.add(current_skill_id)
+        selected.append(current_skill_id)
+    return tuple(selected)
 
 
 def _normalize_candidate_skill_ids(values: Sequence[str] | None) -> tuple[str, ...]:

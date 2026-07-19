@@ -4,15 +4,20 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    ToolCallInputs,
+)
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 _ConfigBaseProvider = (
     dict[str, Any] | Callable[[], dict[str, Any] | None] | None
 )
+_SHORTLIST_EXTRA_KEY = "symphony_candidate_skill_ids"
 
 
 def _render_symphony_orchestration_prompt(
@@ -37,13 +42,13 @@ When the user says to use skill(s) or 技能, or when you judge that skill
 capabilities, skill chaining, skill ordering, or a specialized toolchain could
 help complete the task, you MUST call `symphony_compose_score` with the original
 user task as `query` before answering.
-When installed-skill retrieval is available and can narrow the search space,
-use `skill_branch_peek` / `skill_branch_explore` to shortlist candidate skills
-first, then pass the selected `worker_id` values as
-`symphony_compose_score.candidate_skill_ids`. Do not inspect skill folders
-manually or choose the execution chain yourself; Symphony owns ordering and
-graph composition. After it returns, present its returned `content` directly to
-the user. If Symphony reports missing inputs, ask for those inputs.
+When you identify, inspect, or recommend installed Skills that are relevant to
+the task, you MUST pass their exact identifiers or names as
+`symphony_compose_score.candidate_skill_ids`. Do not omit this field after
+selecting candidate Skills. Do not choose the execution chain yourself;
+Symphony owns ordering and graph composition. After it returns, present its
+returned `content` directly to the user. If Symphony reports missing inputs,
+ask for those inputs.
 
 If Symphony reports no suitable candidates, a missing capability, or caveats
 that point to a skill gap, use `search_skill` to discover external skills. When
@@ -101,6 +106,91 @@ class SymphonyOrchestrationPromptRail(DeepAgentRail):
                 priority=self.SECTION_PRIORITY,
             )
         )
+
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        if not isinstance(ctx.inputs, ToolCallInputs):
+            return
+        if self._tool_name(ctx.inputs) != self.COMPOSE_TOOL_NAME:
+            return
+
+        args = self._tool_args(ctx.inputs)
+        if "candidate_skill_ids" in args:
+            return
+        shortlisted = self._shortlisted_skill_ids(ctx)
+        if not shortlisted:
+            return
+
+        args["candidate_skill_ids"] = shortlisted
+        ctx.inputs.tool_args = args
+        tool_call = ctx.inputs.tool_call
+        if tool_call is not None:
+            tool_call.arguments = args
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        if not isinstance(ctx.inputs, ToolCallInputs):
+            return
+        if not self._is_skill_tool(self._tool_name(ctx.inputs)):
+            return
+        if ctx.exception is not None or self._tool_result_failed(
+            ctx.inputs.tool_result
+        ):
+            return
+
+        args = self._tool_args(ctx.inputs)
+        skill_name = str(
+            args.get("skill_name") or args.get("skillName") or ""
+        ).strip()
+        if not skill_name:
+            return
+        shortlisted = self._shortlisted_skill_ids(ctx)
+        if skill_name not in shortlisted:
+            shortlisted.append(skill_name)
+        ctx.extra[_SHORTLIST_EXTRA_KEY] = shortlisted
+
+    @staticmethod
+    def _tool_name(inputs: ToolCallInputs) -> str:
+        return str(
+            inputs.tool_name
+            or getattr(inputs.tool_call, "name", "")
+            or ""
+        ).strip()
+
+    @staticmethod
+    def _is_skill_tool(name: str) -> bool:
+        compact = str(name or "").strip().lower().replace("-", "_")
+        return compact == "skill_tool" or compact.endswith(
+            (".skill_tool", "/skill_tool", ":skill_tool")
+        )
+
+    @staticmethod
+    def _tool_args(inputs: ToolCallInputs) -> dict[str, Any]:
+        if isinstance(inputs.tool_args, dict):
+            return dict(inputs.tool_args)
+        raw_args = getattr(inputs.tool_call, "arguments", None)
+        if isinstance(raw_args, dict):
+            return dict(raw_args)
+        if isinstance(raw_args, str):
+            try:
+                parsed = json.loads(raw_args)
+            except (TypeError, ValueError):
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    @staticmethod
+    def _tool_result_failed(result: Any) -> bool:
+        if not isinstance(result, dict):
+            return False
+        if result.get("success") is False:
+            return True
+        return str(result.get("status") or "").strip().lower() == "error"
+
+    @staticmethod
+    def _shortlisted_skill_ids(ctx: AgentCallbackContext) -> list[str]:
+        values = ctx.extra.get(_SHORTLIST_EXTRA_KEY)
+        if not isinstance(values, list):
+            return []
+        return [str(value).strip() for value in values if str(value).strip()]
 
     @classmethod
     def _has_compose_tool(cls, ctx: AgentCallbackContext) -> bool:

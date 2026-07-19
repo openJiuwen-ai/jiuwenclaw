@@ -408,7 +408,7 @@ class SymphonyToolkit:
     def _compact_beam_node(node: dict[str, Any]) -> dict[str, Any]:
         return _copy_compact_fields(
             node,
-            ("id", "label", "status"),
+            ("id", "label", "status", "seed"),
         )
 
     @staticmethod
@@ -628,9 +628,10 @@ class SymphonyToolkit:
                 (
                     "MUST call before answering when the user says to use skill(s) "
                     "or 技能, or when skill capabilities, skill chaining, skill ordering, "
-                    "or a specialized toolchain could help complete the task. Use skill_branch_peek "
-                    "and skill_branch_explore first when installed-skill retrieval can narrow "
-                    "the candidate skills, then pass returned worker_id values as candidate_skill_ids. "
+                    "or a specialized toolchain could help complete the task. When you identify, "
+                    "inspect, or recommend installed Skills that are relevant to the task, you MUST "
+                    "pass their exact identifiers or names as candidate_skill_ids. Do not omit "
+                    "candidate_skill_ids after selecting candidate Skills. "
                     "This is the Symphony composition entrypoint: it reads the score, refreshes stale "
                     "or missing scores, then composes the skill execution graph from the provided "
                     "candidates or a default score subgraph. If no suitable candidates or a missing "
@@ -652,18 +653,22 @@ class SymphonyToolkit:
                             "type": "string",
                             "enum": ["fast", "beam"],
                             "description": (
-                                "Optional planning mode. The current Symphony runtime "
-                                "supports fast by default and beam as an opt-in "
-                                "bidirectional search mode."
+                                "Optional planning mode. Use fast for simple tasks, "
+                                "short execution chains, or when candidate skills are "
+                                "already clear; fast is the default. Use beam for "
+                                "complex multi-step tasks, tasks with multiple possible "
+                                "skill paths, or when prerequisite skills need to be "
+                                "discovered through bidirectional search."
                             ),
                         },
                         "candidate_skill_ids": {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "Optional installed skill worker_id values returned by "
-                                "skill_branch_explore. When provided, Symphony composes "
-                                "from these candidate skills and their eligible neighbors."
+                                "Optional identifiers or exact names of the installed Skills "
+                                "you consider most relevant to the user's task. When relevant "
+                                "Skills have already been identified, provide them here so "
+                                "Symphony uses them and their eligible neighbors as seeds."
                             ),
                         },
                     },

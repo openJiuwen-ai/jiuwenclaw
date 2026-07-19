@@ -160,6 +160,7 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
     parseSkillTreePath(toolResultPayload.rawOutput);
   const beamSearch =
     parseBeamSearchProgress(toolResultPayload.beam_search_event) ??
+    parseBeamSearchProgress(toolResultPayload.beam_search) ??
     parseBeamSearchProgress(rawOutputRecord?.beam_search);
 
   return {

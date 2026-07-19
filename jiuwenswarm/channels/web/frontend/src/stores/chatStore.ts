@@ -35,6 +35,19 @@ function resolveExecutionStatus(result: ToolResult): ToolExecutionStatus {
   return result.success ? 'completed' : 'error';
 }
 
+export function mergeToolResultProgress(
+  existing: ToolResult | undefined,
+  incoming: ToolResult
+): ToolResult {
+  if (incoming.beamSearch || !existing?.beamSearch) {
+    return incoming;
+  }
+  return {
+    ...incoming,
+    beamSearch: existing.beamSearch,
+  };
+}
+
 /**
  * 子任务状态
  */
@@ -775,11 +788,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       }
 
+      const mergedToolResult = mergeToolResultProgress(
+        existingExecution.result,
+        toolResult
+      );
+
       if (existingExecution.result) {
         const duplicated =
-          existingExecution.result.result === toolResult.result &&
-          existingExecution.result.success === toolResult.success &&
-          (existingExecution.result.summary || '') === (toolResult.summary || '');
+          existingExecution.result.result === mergedToolResult.result &&
+          existingExecution.result.success === mergedToolResult.success &&
+          (existingExecution.result.summary || '') === (mergedToolResult.summary || '') &&
+          existingExecution.result.beamSearch === mergedToolResult.beamSearch;
         if (duplicated) {
           const nextDropped = runtime.toolMetrics.toolResultDedupDropped + 1;
           if (import.meta.env.DEV && (nextDropped === 1 || nextDropped % 10 === 0)) {
@@ -804,10 +823,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       const nextExecutions = new Map(runtime.toolExecutions);
-      const nextStatus = resolveExecutionStatus(toolResult);
+      const nextStatus = resolveExecutionStatus(mergedToolResult);
       nextExecutions.set(incomingToolCallId, {
         ...existingExecution,
-        result: toolResult,
+        result: mergedToolResult,
         status: nextStatus,
         updatedAt,
         resultArrivedAfterTimeout:
