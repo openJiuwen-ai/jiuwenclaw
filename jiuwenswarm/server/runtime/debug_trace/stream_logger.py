@@ -160,11 +160,16 @@ def _classify(ctype: str, payload: Any) -> str:
 class _Run:
     """A pending accumulation of token-streamed chunks (single source)."""
 
-    __slots__ = ("category", "buf")
+    __slots__ = ("category", "source", "buf", "llm_output_seen")
 
-    def __init__(self, category: str) -> None:
+    def __init__(self, category: str, source: str = "main") -> None:
         self.category = category
+        self.source = source
         self.buf: list[str] = []
+        # Per-run dedup flag: drop a trailing `answer` chunk that just repeats
+        # already-streamed llm_output. Kept per-_Run so main and subagent
+        # streams don't interfere.
+        self.llm_output_seen = False
 
 
 class DebugTraceLogger:
@@ -199,9 +204,11 @@ class DebugTraceLogger:
         self._start_monotonic: float | None = None
         self._chunk_count = 0
 
-        # Single-source accumulation (Phase 1: no subagent source metadata).
+        # Current accumulator. source is tracked per-_Run so the main run and
+        # any in-flight subagent stream coexist in one dump; begin_subagent /
+        # end_subagent bracket subagent sections, feed_subagent tags their
+        # chunks. See invoke_subagent_with_trace for the dispatch wiring.
         self._run: _Run | None = None
-        self._llm_output_seen = False
 
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -248,11 +255,55 @@ class DebugTraceLogger:
         except Exception as exc:
             self._safe_warn(f"start_run error: {exc!r}")
 
+    def captures_subagent_flow(self) -> bool:
+        """True if this run should capture subagent streams into the dump."""
+        return not self._disabled and self._settings.include_subagent_flow
+
     def feed(self, chunk: Any) -> None:
+        self._feed_safe(chunk, "main")
+
+    def feed_subagent(self, *, source: str, chunk: Any) -> None:
+        """Feed a chunk from an in-flight subagent stream.
+
+        Tags the chunk with *source* (e.g. ``subagent:builtin:explore_agent``)
+        so it appears in the dump under that source rather than ``main``.
+        No-op when disabled or when ``include_subagent_flow`` is off.
+        """
+        if self._disabled or not self._settings.include_subagent_flow:
+            return
+        self._feed_safe(chunk, source)
+
+    def begin_subagent(self, *, source: str, prompt: str = "") -> None:
         if self._disabled:
             return
         try:
-            self._feed(chunk)
+            self._flush_run()
+            self._write_raw("\n".join([
+                "========== subagent start ==========",
+                f"timestamp={_now_ts()}",
+                f"source={source}",
+                f"prompt={_truncate(prompt or '', self._settings.generic_payload_max_chars)}",
+            ]))
+        except Exception as exc:
+            self._safe_warn(f"begin_subagent error: {exc!r}")
+
+    def end_subagent(self, *, source: str, status: str = "ok") -> None:
+        if self._disabled:
+            return
+        try:
+            self._flush_run()
+            self._write_raw(
+                "========== subagent end ==========\n"
+                f"timestamp={_now_ts()}\nsource={source}\nstatus={status}"
+            )
+        except Exception as exc:
+            self._safe_warn(f"end_subagent error: {exc!r}")
+
+    def _feed_safe(self, chunk: Any, source: str) -> None:
+        if self._disabled:
+            return
+        try:
+            self._feed_chunk(chunk, source)
         except Exception as exc:  # never break the stream
             self._safe_warn(f"feed error: {exc!r}")
 
@@ -299,20 +350,21 @@ class DebugTraceLogger:
                 self._file = None
 
     # ── internals ────────────────────────────────────────────────────────
-    def _feed(self, chunk: Any) -> None:
+    def _feed_chunk(self, chunk: Any, source: str) -> None:
         self._chunk_count += 1
 
         ctype, payload = self._unpack(chunk)
         if ctype is None:
             # Dict / untyped chunk: record as 'other' for visibility.
             self._flush_run()
-            self._emit("other", "main", _truncate(_safe_str(chunk), self._settings.generic_payload_max_chars))
+            self._emit("other", source, _truncate(_safe_str(chunk), self._settings.generic_payload_max_chars))
             return
 
         category = _classify(ctype, payload)
 
+        run = self._run
         # `answer` duplicates already-streamed llm_output — drop if seen.
-        if ctype == _CHUNK_ANSWER and self._llm_output_seen:
+        if ctype == _CHUNK_ANSWER and run is not None and run.llm_output_seen:
             return
 
         if ctype in _ACCUMULATING_TYPES:
@@ -323,20 +375,24 @@ class DebugTraceLogger:
             content = _extract_content(payload)
             if not content:
                 return
-            if self._run is not None and self._run.category != category:
+            # Flush if the pending run is for a different category OR a different
+            # source (main vs a subagent) so streams never bleed into each other.
+            if run is not None and (run.category != category or run.source != source):
                 self._flush_run()
-            if self._run is None:
-                self._run = _Run(category)
-            self._run.buf.append(content)
+                run = self._run
+            if run is None:
+                run = _Run(category, source)
+                self._run = run
+            run.buf.append(content)
             if ctype == _CHUNK_LLM_OUTPUT:
-                self._llm_output_seen = True
+                run.llm_output_seen = True
             return
 
         # Discrete chunk: flush pending text, then emit a summary now.
         self._flush_run()
         summary = self._discrete_summary(ctype, category, payload)
         if summary:
-            self._emit(category, "main", summary)
+            self._emit(category, source, summary)
 
     @staticmethod
     def _unpack(chunk: Any) -> tuple[str | None, Any]:
@@ -433,7 +489,7 @@ class DebugTraceLogger:
             return
         text = "".join(run.buf)
         limit = self._settings.max_model_output_chars if run.category == "text" else None
-        self._emit(run.category, "main", _truncate(text, limit))
+        self._emit(run.category, run.source, _truncate(text, limit))
 
     def _emit(self, category: str, source: str, content: str) -> None:
         if not content:

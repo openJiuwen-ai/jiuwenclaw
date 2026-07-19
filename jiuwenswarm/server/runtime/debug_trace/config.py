@@ -31,6 +31,9 @@ class DebugTraceSettings:
     include_reasoning: bool = True
     include_tool_args: bool = True
     include_tool_result: bool = True
+    # When False, subagent streams fall back to plain invoke() (no subagent
+    # section in the dump). See invoke_subagent_with_trace.
+    include_subagent_flow: bool = True
     # Payload caps (chars).
     tool_args_max_chars: int = 2000
     tool_result_max_chars: int = 8000
@@ -110,6 +113,7 @@ def resolve_debug_trace_settings(*, mode: str, request_debug: bool) -> DebugTrac
         include_reasoning=bool(mode_cfg.get("include_reasoning", True)),
         include_tool_args=bool(mode_cfg.get("include_tool_args", True)),
         include_tool_result=bool(mode_cfg.get("include_tool_result", True)),
+        include_subagent_flow=bool(mode_cfg.get("include_subagent_flow", True)),
         tool_args_max_chars=_as_int(limits.get("tool_args_max_chars"), 2000),
         tool_result_max_chars=_as_int(limits.get("tool_result_max_chars"), 8000),
         generic_payload_max_chars=_as_int(limits.get("generic_payload_max_chars"), 4000),

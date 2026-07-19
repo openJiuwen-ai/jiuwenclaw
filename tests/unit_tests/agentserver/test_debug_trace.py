@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -441,4 +443,356 @@ class TestAgentObservabilityForce:
         ao.sync_agent_observability()  # enabled off + active + never forced -> teardown
         assert calls["shutdown"] == 1
         assert ao._force_ever_enabled is False
+
+
+# ── subagent capture (Phase 2: record subagent streams inline) ──────────────
+class TestSubagentCapture:
+    """begin/feed/end_subagent + source tagging + helper + patch."""
+
+    def _settings(self, **over: Any) -> Any:
+        base = resolve_debug_trace_settings(mode="code.normal", request_debug=True)
+        return dataclasses.replace(base, **over)
+
+    def test_config_include_subagent_flow_default_and_override(self, monkeypatch):
+        from jiuwenswarm.server.runtime.debug_trace import config as debug_config
+
+        monkeypatch.setattr(debug_config, "_load_debug_trace_config", lambda: {})
+        s = resolve_debug_trace_settings(mode="code.normal", request_debug=True)
+        assert s.include_subagent_flow is True  # default on
+        monkeypatch.setattr(
+            debug_config, "_load_debug_trace_config", lambda: {"code": {"include_subagent_flow": False}}
+        )
+        assert resolve_debug_trace_settings(mode="code.normal", request_debug=True).include_subagent_flow is False
+
+    def test_captures_subagent_flow_flag(self, tmp_path):
+        lg_on = DebugTraceLogger(
+            file_path=tmp_path / "a.txt", mode="code.normal", session_id="s",
+            request_id="r", settings=self._settings(include_subagent_flow=True),
+        )
+        lg_off = DebugTraceLogger(
+            file_path=tmp_path / "b.txt", mode="code.normal", session_id="s",
+            request_id="r", settings=self._settings(include_subagent_flow=False),
+        )
+        assert lg_on.captures_subagent_flow() is True
+        assert lg_off.captures_subagent_flow() is False
+        lg_on.flush()
+        lg_off.flush()
+
+    def test_begin_end_subagent_write_boundaries(self, tmp_path):
+        lg = _logger(tmp_path)
+        lg.start_run()
+        lg.begin_subagent(source="subagent:builtin:explore_agent", prompt="find foo")
+        lg.end_subagent(source="subagent:builtin:explore_agent", status="ok")
+        lg.end_run(status="ok")
+        out = _read(lg)
+        assert "subagent start" in out and "subagent end" in out
+        assert "source=subagent:builtin:explore_agent" in out
+        assert "prompt=find foo" in out
+        assert "status=ok" in out
+
+    def test_feed_subagent_tags_source_not_main(self, tmp_path):
+        lg = _logger(tmp_path)
+        lg.start_run()
+        lg.begin_subagent(source="subagent:custom:x")
+        lg.feed_subagent(
+            source="subagent:custom:x",
+            chunk=_chunk("llm_output", {"content": "sub text"}),
+        )
+        lg.end_subagent(source="subagent:custom:x")
+        lg.end_run(status="ok")
+        out = _read(lg)
+        assert "source=subagent:custom:x category=text" in out
+        assert "sub text" in out
+
+    def test_main_and_subagent_streams_do_not_bleed(self, tmp_path):
+        lg = _logger(tmp_path)
+        lg.start_run()
+        lg.feed(_chunk("llm_output", {"content": "main text"}))
+        lg.begin_subagent(source="subagent:custom:x")
+        lg.feed_subagent(
+            source="subagent:custom:x",
+            chunk=_chunk("llm_output", {"content": "sub text"}),
+        )
+        lg.end_subagent(source="subagent:custom:x")
+        lg.feed(_chunk("llm_output", {"content": "main text 2"}))
+        lg.end_run(status="ok")
+        out = _read(lg)
+        assert "source=main category=text" in out
+        assert "source=subagent:custom:x category=text" in out
+        assert "main text" in out and "sub text" in out and "main text 2" in out
+
+    def test_end_subagent_flushes_pending_accumulation(self, tmp_path):
+        lg = _logger(tmp_path)
+        lg.start_run()
+        lg.begin_subagent(source="subagent:custom:x")
+        lg.feed_subagent(
+            source="subagent:custom:x",
+            chunk=_chunk("llm_output", {"content": "buffered"}),
+        )
+        lg.end_subagent(source="subagent:custom:x")  # must flush the buffered text
+        lg.end_run(status="ok")
+        assert "buffered" in _read(lg)
+
+    def test_feed_subagent_noop_when_flag_off(self, tmp_path):
+        lg = DebugTraceLogger(
+            file_path=tmp_path / "off.txt", mode="code.normal", session_id="s",
+            request_id="r", settings=self._settings(include_subagent_flow=False),
+        )
+        lg.start_run()
+        lg.begin_subagent(source="subagent:custom:x")
+        lg.feed_subagent(
+            source="subagent:custom:x",
+            chunk=_chunk("llm_output", {"content": "secret"}),
+        )
+        lg.end_subagent(source="subagent:custom:x")
+        lg.end_run(status="ok")
+        out = _read(lg)
+        assert "secret" not in out  # feed_subagent was a no-op
+
+    def test_invoke_subagent_with_trace_no_debug_calls_invoke(self):
+        from jiuwenswarm.server.runtime.debug_trace import invoke_subagent_with_trace
+        from jiuwenswarm.server.runtime.debug_trace.context import _DEBUG_TRACE_LOGGER
+
+        assert _DEBUG_TRACE_LOGGER.get() is None  # clean baseline
+        calls = {"invoke": 0, "stream": 0}
+
+        class FakeSub:
+            async def invoke(self, inputs, session=None):
+                calls["invoke"] += 1
+                return {"output": "from-invoke", "result_type": "answer"}
+
+            async def stream(self, inputs, session=None):
+                calls["stream"] += 1
+                if False:  # pragma: no cover - never entered in no-debug path
+                    yield None
+
+        result = asyncio.run(invoke_subagent_with_trace(
+            FakeSub(), inputs={"query": "q"}, session=None,
+            source_label="subagent:builtin:explore_agent",
+        ))
+        assert calls == {"invoke": 1, "stream": 0}
+        assert result["output"] == "from-invoke"
+
+    def test_invoke_subagent_with_trace_debug_drives_stream(self, tmp_path):
+        from jiuwenswarm.server.runtime.debug_trace import (
+            invoke_subagent_with_trace,
+            reset_debug_trace_logger,
+            set_debug_trace_logger,
+        )
+
+        lg = _logger(tmp_path)
+        lg.start_run()
+        token = set_debug_trace_logger(lg)
+        try:
+
+            class FakeSub:
+                async def invoke(self, inputs, session=None):  # pragma: no cover
+                    return {"output": "should-not-happen"}
+
+                async def stream(self, inputs, session=None):
+                    yield _chunk("llm_output", {"content": "hello "})
+                    yield _chunk("llm_output", {"content": "world"})
+
+            result = asyncio.run(invoke_subagent_with_trace(
+                FakeSub(), inputs={"query": "do thing"}, session=None,
+                source_label="subagent:builtin:explore_agent",
+            ))
+        finally:
+            reset_debug_trace_logger(token)
+        assert result["output"] == "hello world"  # chunks reduced via SDK helper
+        lg.end_run(status="ok")
+        out = _read(lg)
+        assert "subagent start" in out and "subagent end" in out
+        assert "source=subagent:builtin:explore_agent" in out
+        assert "hello world" in out
+
+    def test_invoke_subagent_with_trace_uses_isolated_session(self, tmp_path):
+        # Fix D: the helper MUST pass session=None to subagent.stream() so the
+        # subagent drains an isolated session queue, not the parent session
+        # (which the parent run also drains — round-robin token split, see
+        # ReActAgent._inner_stream). Guards against regression.
+        from jiuwenswarm.server.runtime.debug_trace import (
+            invoke_subagent_with_trace,
+            reset_debug_trace_logger,
+            set_debug_trace_logger,
+        )
+
+        lg = _logger(tmp_path)
+        lg.start_run()
+        token = set_debug_trace_logger(lg)
+        try:
+            captured: dict[str, Any] = {}
+
+            class FakeSub:
+                async def invoke(self, inputs, session=None):  # pragma: no cover
+                    return {"output": "x"}
+
+                async def stream(self, inputs, session=None):
+                    captured["session"] = session
+                    yield _chunk("llm_output", {"content": "hi"})
+
+            asyncio.run(invoke_subagent_with_trace(
+                FakeSub(), inputs={"query": "q"}, session="PARENT_SESSION",
+                source_label="subagent:builtin:browser_agent",
+            ))
+        finally:
+            reset_debug_trace_logger(token)
+        assert captured.get("session") is None  # isolated, NOT parent_session
+        lg.end_run(status="ok")
+        lg.flush()
+
+    def test_invoke_subagent_with_trace_flag_off_falls_back_to_invoke(self, tmp_path):
+        from jiuwenswarm.server.runtime.debug_trace import (
+            invoke_subagent_with_trace,
+            reset_debug_trace_logger,
+            set_debug_trace_logger,
+        )
+
+        lg = DebugTraceLogger(
+            file_path=tmp_path / "off.txt", mode="code.normal", session_id="s",
+            request_id="r", settings=self._settings(include_subagent_flow=False),
+        )
+        lg.start_run()
+        token = set_debug_trace_logger(lg)
+        try:
+            calls = {"invoke": 0, "stream": 0}
+
+            class FakeSub:
+                async def invoke(self, inputs, session=None):
+                    calls["invoke"] += 1
+                    return {"output": "ok"}
+
+                async def stream(self, inputs, session=None):  # pragma: no cover
+                    yield None
+
+            result = asyncio.run(invoke_subagent_with_trace(
+                FakeSub(), inputs={"query": "q"}, session=None,
+                source_label="subagent:custom:x",
+            ))
+        finally:
+            reset_debug_trace_logger(token)
+        assert calls == {"invoke": 1, "stream": 0}
+        assert result["output"] == "ok"
+        lg.end_run(status="ok")
+        assert "subagent start" not in _read(lg)  # no capture section written
+
+    def test_background_task_inherits_contextvar(self, tmp_path):
+        # asyncio.create_task copies the current ContextVar snapshot, so a
+        # background subagent (AgentTool background=True) inherits the logger.
+        from jiuwenswarm.server.runtime.debug_trace import (
+            get_debug_trace_logger,
+            reset_debug_trace_logger,
+            set_debug_trace_logger,
+        )
+
+        lg = _logger(tmp_path)
+        token = set_debug_trace_logger(lg)
+        seen: dict[str, Any] = {}
+        try:
+
+            async def child():
+                seen["child_sees_logger"] = get_debug_trace_logger() is lg
+
+            async def main():
+                task = asyncio.create_task(child())
+                await task
+
+            asyncio.run(main())
+        finally:
+            reset_debug_trace_logger(token)
+            lg.flush()  # close the dump file handle (avoid ResourceWarning)
+        assert seen.get("child_sees_logger") is True
+
+    def test_task_tool_patch_idempotent(self):
+        from openjiuwen.harness.tools.subagent.task_tool import TaskTool
+
+        from jiuwenswarm.server.runtime.debug_trace.task_tool_patch import (
+            apply_task_tool_debug_patch,
+        )
+
+        apply_task_tool_debug_patch()
+        apply_task_tool_debug_patch()  # second call must be a no-op
+        assert getattr(TaskTool, "debug_trace_patch_applied", False) is True
+
+    def test_ensure_observability_rail_attaches_when_obs_up(self, monkeypatch):
+        # When observability is initialized, _ensure_observability_rail must
+        # add_rail() an ObservabilityRail onto the subagent (run-time attachment,
+        # since build-time is unreliable when obs isn't up yet).
+        import types
+
+        from jiuwenswarm.server.runtime.debug_trace import subagent_capture
+
+        sentinel = types.SimpleNamespace(name="OBS_RAIL")
+
+        class FakeObsRail:
+            pass
+
+        # Point the module-level symbols the helper imports at fakes.
+        import sys
+
+        fake_mod = types.ModuleType("fake_obs_rail")
+        fake_mod.ObservabilityRail = FakeObsRail
+        fake_mod.maybe_observability_rail = lambda: sentinel
+        monkeypatch.setitem(sys.modules, "openjiuwen.agent_teams.observability.rail", fake_mod)
+
+        added: list[Any] = []
+
+        class FakeSub:
+            def configured_rails(self):
+                return []  # none yet
+
+            def add_rail(self, rail):
+                added.append(rail)
+
+        subagent_capture._ensure_observability_rail(FakeSub())
+        assert added == [sentinel]
+
+    def test_ensure_observability_rail_skips_when_already_attached(self, monkeypatch):
+        import types, sys
+
+        from jiuwenswarm.server.runtime.debug_trace import subagent_capture
+
+        class FakeObsRail:
+            pass
+
+        sentinel = types.SimpleNamespace(name="OBS_RAIL")
+
+        fake_mod = types.ModuleType("fake_obs_rail")
+        fake_mod.ObservabilityRail = FakeObsRail
+        fake_mod.maybe_observability_rail = lambda: sentinel
+        monkeypatch.setitem(sys.modules, "openjiuwen.agent_teams.observability.rail", fake_mod)
+
+        added: list[Any] = []
+
+        class FakeSub:
+            def configured_rails(self):
+                return [FakeObsRail()]  # already has an ObservabilityRail
+
+            def add_rail(self, rail):
+                added.append(rail)
+
+        subagent_capture._ensure_observability_rail(FakeSub())
+        assert added == []  # idempotent: not re-added
+
+    def test_ensure_observability_rail_noop_when_obs_off(self, monkeypatch):
+        import types, sys
+
+        from jiuwenswarm.server.runtime.debug_trace import subagent_capture
+
+        fake_mod = types.ModuleType("fake_obs_rail")
+        fake_mod.ObservabilityRail = type("ObservabilityRail", (), {})
+        fake_mod.maybe_observability_rail = lambda: None  # obs not initialized
+        monkeypatch.setitem(sys.modules, "openjiuwen.agent_teams.observability.rail", fake_mod)
+
+        added: list[Any] = []
+
+        class FakeSub:
+            def configured_rails(self):
+                return []
+
+            def add_rail(self, rail):
+                added.append(rail)
+
+        subagent_capture._ensure_observability_rail(FakeSub())
+        assert added == []  # no-op when observability is off
 

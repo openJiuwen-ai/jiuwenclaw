@@ -6511,6 +6511,7 @@ class JiuWenSwarmDeepAdapter:
         image_files_token = None
         _run_span: Any = None
         _debug_logger = None
+        _debug_trace_token = None  # reset token for the ContextVar-bound logger
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -6596,6 +6597,9 @@ class JiuWenSwarmDeepAdapter:
                     pass
             # --- debug trace dump (request-level /debug OR config-level, best-effort) ---
             try:
+                from jiuwenswarm.server.runtime.debug_trace.context import (
+                    set_debug_trace_logger,
+                )
                 from jiuwenswarm.server.runtime.debug_trace.paths import debug_trace_file
                 from jiuwenswarm.server.runtime.debug_trace.stream_logger import (
                     DebugTraceLogger,
@@ -6613,6 +6617,11 @@ class JiuWenSwarmDeepAdapter:
                         otel_trace_id=_otel_trace_id,
                         otel_span_id=_otel_span_id,
                     )
+                    # Publish the logger so subagent dispatch sites (TaskTool in
+                    # the SDK, AgentTool in jiuwenswarm) can capture subagent
+                    # streams into this same dump. asyncio.create_task copies the
+                    # current ContextVar, so background subagents inherit it too.
+                    _debug_trace_token = set_debug_trace_logger(_debug_logger)
             except Exception as _dbg_exc:
                 logger.warning("[JiuWenSwarmDeepAdapter] debug trace init failed: %s", _dbg_exc)
                 _debug_logger = None
@@ -6850,6 +6859,11 @@ class JiuWenSwarmDeepAdapter:
             close_agent_run_span(_run_span)
             if _debug_logger is not None:
                 _debug_logger.flush()
+            if _debug_trace_token is not None:
+                from jiuwenswarm.server.runtime.debug_trace.context import (
+                    reset_debug_trace_logger,
+                )
+                reset_debug_trace_logger(_debug_trace_token)
             if image_files_token is not None:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                     reset_current_multimodal_image_files,
