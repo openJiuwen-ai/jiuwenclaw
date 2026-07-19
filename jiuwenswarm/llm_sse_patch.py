@@ -49,17 +49,24 @@ def _build_tool_calls(msg: dict) -> list | None:
     from openai.types.chat import ChatCompletionMessageFunctionToolCall
     from openai.types.chat.chat_completion_message_function_tool_call import Function
 
-    return [
-        ChatCompletionMessageFunctionToolCall(
-            id=tc["id"],
-            type="function",
-            function=Function(
-                name=tc["function"]["name"],
-                arguments=tc["function"]["arguments"],
-            ),
+    built = []
+    for tc in msg["tool_calls"]:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function") or {}
+        if not isinstance(fn, dict):
+            fn = {}
+        built.append(
+            ChatCompletionMessageFunctionToolCall(
+                id=tc.get("id", "") or "",
+                type="function",
+                function=Function(
+                    name=fn.get("name", "") or "",
+                    arguments=fn.get("arguments", "") or "",
+                ),
+            )
         )
-        for tc in msg["tool_calls"]
-    ]
+    return built or None
 
 
 def assemble_openai_response(response: str) -> Any:
