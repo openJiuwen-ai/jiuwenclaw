@@ -50,6 +50,7 @@ FINAL_RESULT_MAX_BYTES = 64 * 1024 * 1024
 CITATION_COUNT_MAX = 10_000
 CITATION_FIELD_MAX_BYTES = 1024 * 1024
 MAX_HIGHLIGHT_RANGES = 4096
+_BOUNDARY_PUNCTUATION = "，。！？；：,.!?;:"
 _INLINE_PARSER = MarkdownIt("commonmark")
 
 
@@ -1064,6 +1065,40 @@ def _atomic_write(path: Path, payload: bytes) -> None:
             pass
 
 
+def _normalize_unselected_right_punctuation(
+    current_bytes: bytes,
+    context: _RewriteContext,
+    slot_texts: dict[str, str],
+) -> dict[str, str]:
+    suffix = current_bytes[context.selection_end_byte :].decode("utf-8")
+    selection = current_bytes[
+        context.selection_start_byte : context.selection_end_byte
+    ].decode("utf-8")
+    selected_slots = [
+        slot
+        for unit in context.selected_units
+        for slot in unit.slots
+    ]
+    if (
+        not suffix
+        or suffix[0] not in _BOUNDARY_PUNCTUATION
+        or selection[-1:] in _BOUNDARY_PUNCTUATION
+        or not selected_slots
+    ):
+        return slot_texts
+    rightmost_slot = max(selected_slots, key=lambda slot: slot.end_byte)
+    replacement = slot_texts[rightmost_slot.slot_id]
+    if (
+        rightmost_slot.end_byte != context.selection_end_byte
+        or not replacement
+        or replacement[-1] not in _BOUNDARY_PUNCTUATION
+    ):
+        return slot_texts
+    normalized = dict(slot_texts)
+    normalized[rightmost_slot.slot_id] = replacement.rstrip(_BOUNDARY_PUNCTUATION)
+    return normalized
+
+
 def commit_rewrite(*, context_token: str, session_id: str, structured_result: object) -> dict:
     context = _take_context(context_token, session_id)
     slot_texts = _validate_structured_units(structured_result, context.selected_units)
@@ -1095,6 +1130,9 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
         parent_hash = _sha256(current_bytes)
         if parent_hash != context.parent_hash:
             raise RewriteError("REVISION_CONFLICT", "the parent report changed")
+        slot_texts = _normalize_unselected_right_punctuation(
+            current_bytes, context, slot_texts
+        )
         current_markdown = current_bytes.decode("utf-8")
         original_map = build_rewrite_map(current_markdown)
         selected_ranges = {

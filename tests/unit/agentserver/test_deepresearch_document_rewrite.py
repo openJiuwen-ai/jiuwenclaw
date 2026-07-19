@@ -446,6 +446,52 @@ def test_commit_accepts_exact_structured_unit_and_slot_output(tmp_path):
 
 
 @pytest.mark.parametrize(
+    ("body", "raw", "replacement", "expected"),
+    [
+        ("原句，后文\n", "原句", "新句。", "新句，后文\n"),
+        ("Original, tail\n", "Original", "Rewritten.", "Rewritten, tail\n"),
+        ("原句，后文\n", "原句", "新句", "新句，后文\n"),
+    ],
+)
+def test_commit_preserves_unselected_right_punctuation(
+    tmp_path, body, raw, replacement, expected
+):
+    report, provenance = _write_document(tmp_path, body)
+    prepared = _prepare(tmp_path, report, raw)
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, {slot_id: replacement}),
+    )
+
+    child = Path(result["report_path"])
+    child_bytes = child.read_bytes()
+    assert child_bytes.decode("utf-8") == expected
+    child_provenance = json.loads(
+        Path(result["provenance_path"]).read_text(encoding="utf-8")
+    )
+    assert child_provenance["parent_revision_id"] == provenance["revision_id"]
+    assert child_provenance["content_sha256"] == hashlib.sha256(child_bytes).hexdigest()
+
+
+def test_commit_keeps_candidate_punctuation_when_selection_contains_boundary(tmp_path):
+    body = "原句，后文\n"
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(tmp_path, report, "原句，")
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, {slot_id: "新句。"}),
+    )
+
+    assert Path(result["report_path"]).read_text(encoding="utf-8") == "新句。后文\n"
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         "missing_unit",
