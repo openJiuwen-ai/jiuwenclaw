@@ -67,5 +67,5 @@ uninstall_secret_configmap() {
         fi
     done
 
-    exec_cmd kubectl delete -f ${file}
+    exec_cmd kubectl delete -f ${file} --ignore-not-found=true
 }
