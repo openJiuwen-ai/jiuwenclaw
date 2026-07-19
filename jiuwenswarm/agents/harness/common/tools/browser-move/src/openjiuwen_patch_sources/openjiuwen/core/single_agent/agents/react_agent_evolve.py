@@ -377,7 +377,9 @@ class ReActAgentEvolve(BaseAgent):
                 # ENFORCEMENT: if verification is required but not done, force another turn
                 if self._config.require_verification and not self._verification_done:
                     logger.warning(
-                        "ReActAgentEvolve iteration %s: agent attempted to return answer without verification; forcing another turn",
+                        "ReActAgentEvolve iteration %s: \\"
+                        "agent attempted to return answer without verification; \\"
+                        "forcing another turn",
                         iteration + 1
                     )
                     # Evolution agent doesn't have direct system_messages list like react_agent,

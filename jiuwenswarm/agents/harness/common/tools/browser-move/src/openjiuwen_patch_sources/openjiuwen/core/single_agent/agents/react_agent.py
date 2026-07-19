@@ -447,6 +447,10 @@ class ReActAgent(BaseAgent):
             "Do not return a final answer without making at least one verification tool call."
         )
 
+    def enable_verification(self, enabled: bool = True) -> None:
+        """Require a verification tool call before returning a final answer."""
+        self._config.require_verification = enabled
+
     async def invoke(
             self,
             inputs: Any,
@@ -592,7 +596,9 @@ class ReActAgent(BaseAgent):
                 # ENFORCEMENT: if verification is required but not done, force another turn
                 if self._config.require_verification and not self._verification_done:
                     logger.warning(
-                        "ReActAgent iteration %s: agent attempted to return answer without verification; forcing another turn",
+                        "ReActAgent iteration %s: \\"
+                        "agent attempted to return answer without verification; \\"
+                        "forcing another turn",
                         iteration + 1
                     )
                     system_messages.append(self._force_verification_message())
