@@ -492,6 +492,61 @@ def test_commit_keeps_candidate_punctuation_when_selection_contains_boundary(tmp
 
 
 @pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("**原句**，后文\n", "**新句**，后文\n"),
+        (
+            "[原句](https://ordinary.example)，后文\n",
+            "[新句](https://ordinary.example)，后文\n",
+        ),
+    ],
+)
+def test_commit_preserves_unselected_right_punctuation_after_markdown_closing_syntax(
+    tmp_path, body, expected
+):
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(tmp_path, report, "原句")
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, {slot_id: "新句。"}),
+    )
+
+    assert Path(result["report_path"]).read_text(encoding="utf-8") == expected
+
+
+def test_commit_rejects_punctuation_only_boundary_replacement(tmp_path):
+    report, _ = _write_document(tmp_path, "原句，后文\n")
+    prepared = _prepare(tmp_path, report, "原句")
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    with pytest.raises(RewriteError) as caught:
+        commit_rewrite(
+            context_token=prepared["context_token"],
+            session_id="S1",
+            structured_result=_structured_payload(prepared, {slot_id: "."}),
+        )
+
+    assert caught.value.code == "MODEL_OUTPUT_INVALID"
+
+
+def test_commit_normalizes_boundary_punctuation_before_trailing_whitespace(tmp_path):
+    report, _ = _write_document(tmp_path, "原句，后文\n")
+    prepared = _prepare(tmp_path, report, "原句")
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, {slot_id: "新句。 "}),
+    )
+
+    assert Path(result["report_path"]).read_text(encoding="utf-8") == "新句，后文\n"
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         "missing_unit",

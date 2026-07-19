@@ -1065,37 +1065,75 @@ def _atomic_write(path: Path, payload: bytes) -> None:
             pass
 
 
+def _first_visible_character_after(
+    rewrite_map: MarkdownRewriteMap, byte_offset: int
+) -> str | None:
+    candidates: list[tuple[int, str]] = []
+    for unit in rewrite_map.units:
+        for slot in unit.slots:
+            visible_index = next(
+                (
+                    index
+                    for index in range(len(slot.text))
+                    if slot.visible_boundary_to_byte[index] >= byte_offset
+                ),
+                None,
+            )
+            if visible_index is None:
+                continue
+            ranges = visible_slot_byte_ranges(
+                rewrite_map.source, slot, visible_index, visible_index + 1
+            )
+            if ranges:
+                candidates.append((ranges[0][0], slot.text[visible_index]))
+        for anchor in unit.protected:
+            visible_text = _anchor_visible_text(anchor)
+            if anchor.start_byte >= byte_offset and visible_text:
+                candidates.append((anchor.start_byte, visible_text[0]))
+    return min(candidates)[1] if candidates else None
+
+
 def _normalize_unselected_right_punctuation(
-    current_bytes: bytes,
+    original_map: MarkdownRewriteMap,
     context: _RewriteContext,
     slot_texts: dict[str, str],
 ) -> dict[str, str]:
-    suffix = current_bytes[context.selection_end_byte :].decode("utf-8")
-    selection = current_bytes[
+    source_bytes = original_map.source.encode("utf-8")
+    selection = source_bytes[
         context.selection_start_byte : context.selection_end_byte
     ].decode("utf-8")
+    right_character = _first_visible_character_after(
+        original_map, context.selection_end_byte
+    )
     selected_slots = [
         slot
         for unit in context.selected_units
         for slot in unit.slots
     ]
     if (
-        not suffix
-        or suffix[0] not in _BOUNDARY_PUNCTUATION
+        right_character is None
+        or right_character not in _BOUNDARY_PUNCTUATION
         or selection[-1:] in _BOUNDARY_PUNCTUATION
         or not selected_slots
     ):
         return slot_texts
     rightmost_slot = max(selected_slots, key=lambda slot: slot.end_byte)
     replacement = slot_texts[rightmost_slot.slot_id]
+    replacement_core = replacement.rstrip()
     if (
         rightmost_slot.end_byte != context.selection_end_byte
-        or not replacement
-        or replacement[-1] not in _BOUNDARY_PUNCTUATION
+        or not replacement_core
+        or replacement_core[-1] not in _BOUNDARY_PUNCTUATION
     ):
         return slot_texts
+    replacement_core = replacement_core.rstrip(_BOUNDARY_PUNCTUATION)
+    if not replacement_core.strip():
+        raise RewriteError(
+            "MODEL_OUTPUT_INVALID",
+            "rewrite output must not become empty after punctuation normalization",
+        )
     normalized = dict(slot_texts)
-    normalized[rightmost_slot.slot_id] = replacement.rstrip(_BOUNDARY_PUNCTUATION)
+    normalized[rightmost_slot.slot_id] = replacement_core
     return normalized
 
 
@@ -1130,11 +1168,11 @@ def commit_rewrite(*, context_token: str, session_id: str, structured_result: ob
         parent_hash = _sha256(current_bytes)
         if parent_hash != context.parent_hash:
             raise RewriteError("REVISION_CONFLICT", "the parent report changed")
-        slot_texts = _normalize_unselected_right_punctuation(
-            current_bytes, context, slot_texts
-        )
         current_markdown = current_bytes.decode("utf-8")
         original_map = build_rewrite_map(current_markdown)
+        slot_texts = _normalize_unselected_right_punctuation(
+            original_map, context, slot_texts
+        )
         selected_ranges = {
             slot.slot_id: (slot.start_byte, slot.end_byte)
             for unit in context.selected_units
