@@ -1066,31 +1066,44 @@ def _atomic_write(path: Path, payload: bytes) -> None:
 
 
 def _first_visible_character_after(
-    rewrite_map: MarkdownRewriteMap, byte_offset: int
-) -> str | None:
+    rewrite_map: MarkdownRewriteMap, slot_id: str, byte_offset: int
+) -> tuple[int, str] | None:
+    unit = next(
+        (
+            unit
+            for unit in rewrite_map.units
+            if any(slot.slot_id == slot_id for slot in unit.slots)
+        ),
+        None,
+    )
+    if unit is None:
+        return None
     candidates: list[tuple[int, str]] = []
-    for unit in rewrite_map.units:
-        for slot in unit.slots:
-            visible_index = next(
-                (
-                    index
-                    for index in range(len(slot.text))
-                    if slot.visible_boundary_to_byte[index] >= byte_offset
-                ),
-                None,
-            )
-            if visible_index is None:
-                continue
-            ranges = visible_slot_byte_ranges(
-                rewrite_map.source, slot, visible_index, visible_index + 1
-            )
-            if ranges:
-                candidates.append((ranges[0][0], slot.text[visible_index]))
-        for anchor in unit.protected:
-            visible_text = _anchor_visible_text(anchor)
-            if anchor.start_byte >= byte_offset and visible_text:
-                candidates.append((anchor.start_byte, visible_text[0]))
-    return min(candidates)[1] if candidates else None
+    for slot in unit.slots:
+        visible_index = next(
+            (
+                index
+                for index in range(len(slot.text))
+                if slot.visible_boundary_to_byte[index] >= byte_offset
+            ),
+            None,
+        )
+        if visible_index is None:
+            continue
+        ranges = visible_slot_byte_ranges(
+            rewrite_map.source, slot, visible_index, visible_index + 1
+        )
+        if ranges:
+            candidates.append((ranges[0][0], slot.text[visible_index]))
+    for anchor in unit.protected:
+        visible_text = _anchor_visible_text(anchor)
+        if anchor.start_byte >= byte_offset and visible_text:
+            candidates.append((anchor.start_byte, visible_text[0]))
+    if not candidates:
+        return None
+    candidate = min(candidates)
+    gap = rewrite_map.source.encode("utf-8")[byte_offset : candidate[0]]
+    return None if b"\r" in gap or b"\n" in gap else candidate
 
 
 def _normalize_unselected_right_punctuation(
@@ -1102,27 +1115,25 @@ def _normalize_unselected_right_punctuation(
     selection = source_bytes[
         context.selection_start_byte : context.selection_end_byte
     ].decode("utf-8")
-    right_character = _first_visible_character_after(
-        original_map, context.selection_end_byte
-    )
     selected_slots = [
         slot
         for unit in context.selected_units
         for slot in unit.slots
     ]
-    if (
-        right_character is None
-        or right_character not in _BOUNDARY_PUNCTUATION
-        or selection[-1:] in _BOUNDARY_PUNCTUATION
-        or not selected_slots
-    ):
+    if not selected_slots or selection[-1:] in _BOUNDARY_PUNCTUATION:
         return slot_texts
     rightmost_slot = max(selected_slots, key=lambda slot: slot.end_byte)
+    if rightmost_slot.end_byte != context.selection_end_byte:
+        return slot_texts
+    right_visible = _first_visible_character_after(
+        original_map, rightmost_slot.slot_id, context.selection_end_byte
+    )
+    if right_visible is None or right_visible[1] not in _BOUNDARY_PUNCTUATION:
+        return slot_texts
     replacement = slot_texts[rightmost_slot.slot_id]
     replacement_core = replacement.rstrip()
     if (
-        rightmost_slot.end_byte != context.selection_end_byte
-        or not replacement_core
+        not replacement_core
         or replacement_core[-1] not in _BOUNDARY_PUNCTUATION
     ):
         return slot_texts

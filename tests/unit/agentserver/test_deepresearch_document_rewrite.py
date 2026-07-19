@@ -546,6 +546,21 @@ def test_commit_normalizes_boundary_punctuation_before_trailing_whitespace(tmp_p
     assert Path(result["report_path"]).read_text(encoding="utf-8") == "新句，后文\n"
 
 
+def test_commit_does_not_normalize_punctuation_across_paragraph_boundary(tmp_path):
+    body = "原句\n\n，后文\n"
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(tmp_path, report, "原句")
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, {slot_id: "新句。"}),
+    )
+
+    assert Path(result["report_path"]).read_text(encoding="utf-8") == "新句。\n\n，后文\n"
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
