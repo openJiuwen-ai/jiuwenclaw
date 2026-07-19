@@ -262,7 +262,7 @@ def _fetch_direct_sync(url: str, timeout_seconds: int) -> dict[str, Any] | None:
 def _fetch_via_jina_sync(url: str, timeout_seconds: int) -> dict[str, Any] | None:
     """Fetch via Jina Reader proxy."""
     try:
-        logger.debug(f"_JINA_READER_ENDPOINT={_JINA_READER_ENDPOINT}")
+        logger.info(f"JINA_READER_ENDPOINT={_JINA_READER_ENDPOINT}")
         reader_url = f"{_JINA_READER_ENDPOINT}/{url}"
         response = _http_get(
             reader_url, headers=_REQUEST_HEADERS, timeout=timeout_seconds
@@ -303,6 +303,11 @@ async def _fetch_webpage_async(
       - If direct failed (4xx/5xx or no content): wait for jina
       - If direct succeeded: wait for jina up to 3s, use jina if available, else direct
     """
+
+    # 环境变量优先，其次是传入的参数
+    timeout_seconds = int(os.getenv("FETCH_WEBPAGE_TIMEOUT", timeout_seconds))
+    overall_timeout = int(os.getenv("FETCH_WEBPAGE_TOTAL_TIMEOUT", overall_timeout))
+    logger.info(f"timeout_seconds={timeout_seconds}, overall_timeout={overall_timeout}")
 
     async def fetch_direct():
         return await asyncio.to_thread(_fetch_direct_sync, url, timeout_seconds)

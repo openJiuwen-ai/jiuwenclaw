@@ -2315,7 +2315,8 @@ class JiuWenClawDeepAdapter:
                 agent_id=agent_id,
                 language=self._resolve_runtime_language(),
         ):
-            Runner.resource_mgr.add_tool(tool)
+            if Runner.resource_mgr.get_tool(tool.card.id) is None:
+                Runner.resource_mgr.add_tool(tool)
             tool_cards.append(tool.card)
 
         # 付费搜索工具：有任意一个付费 key 就注册
