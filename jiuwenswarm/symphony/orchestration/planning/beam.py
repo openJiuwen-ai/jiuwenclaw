@@ -8,17 +8,15 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Protocol, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
 from jiuwenswarm.symphony.llm import LLMConfig, create_llm_client, llm_usage_context
 from jiuwenswarm.symphony.orchestration.artifacts import ScoreArtifacts
 from jiuwenswarm.symphony.orchestration.language import (
     default_beam_plan_title,
     planner_language_instruction,
-    resolve_orchestration_language,
 )
 from jiuwenswarm.symphony.orchestration.planning.models import (
-    GroundedQuery,
     OrchestrationPlan,
     SearchState,
 )
@@ -27,9 +25,15 @@ from jiuwenswarm.symphony.orchestration.planning.plan_builder import (
     build_outgoing_edges,
     state_to_plan,
 )
-from jiuwenswarm.symphony.orchestration.planning.utils import skill_id
+from jiuwenswarm.symphony.orchestration.planning.utils import (
+    eligible_can_feed_edges,
+    normalize_known_skill_ids,
+    skill_id,
+    skill_payload,
+)
 
 SEMANTIC_SCORE_THRESHOLD = 0.5
+SEED_BASELINE_SCORE = 0.5
 DEFAULT_MAX_CONCURRENT_JUDGES = 3
 BEAM_DEFAULT_MAX_SKILLS = 40
 BeamProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
@@ -65,11 +69,10 @@ class BeamState:
 
     skill_ids: tuple[str, ...]
     edge_indices: tuple[int, ...]
-    available: frozenset[tuple[str, str]]
     semantic_scores: tuple[float, ...]
     score_reasons: tuple[str, ...]
     seed_skill_ids: tuple[str, ...]
-    directions: frozenset[str]
+    last_direction: str
 
     @property
     def depth(self) -> int:
@@ -86,7 +89,6 @@ class BeamState:
     def to_search_state(self) -> SearchState:
         return SearchState(
             skill_ids=self.skill_ids,
-            available=self.available,
             edges=self.edge_indices,
             score_reasons=self.score_reasons,
         )
@@ -128,74 +130,47 @@ class BeamSearchGraph:
     def __init__(
         self,
         skill_by_id: dict[str, dict[str, Any]],
-        edges: list[dict[str, Any]],
     ) -> None:
         self.skill_by_id = skill_by_id
-        self.edges = edges
         self.nodes: dict[str, dict[str, Any]] = {}
         self.graph_edges: dict[str, dict[str, Any]] = {}
 
     def add_seed(self, current_skill_id: str) -> None:
-        self._ensure_node(current_skill_id, status="seed", direction="seed", seed=True)
+        self._ensure_node(current_skill_id, status="seed", seed=True)
 
-    def add_candidate(self, expansion: NeighborExpansion) -> dict[str, Any]:
+    def add_candidate(self, expansion: NeighborExpansion) -> None:
         self._ensure_node(
             expansion.current_skill_id,
             status="seed" if self._is_seed(expansion.current_skill_id) else "selected",
-            direction=expansion.direction,
         )
-        candidate = self._ensure_node(
+        self._ensure_node(
             expansion.candidate_skill_id,
             status="pending",
-            direction=expansion.direction,
         )
-        edge = self._ensure_edge(expansion, status="pending")
-        return {
-            "current_skill_id": expansion.current_skill_id,
-            "candidate_skill_id": expansion.candidate_skill_id,
-            "candidate_label": candidate["label"],
-            "direction": expansion.direction,
-            "status": "pending",
-            "edge": edge,
-        }
+        self._ensure_edge(expansion, status="pending")
 
     def apply_judgement(
         self,
         expansion: NeighborExpansion,
         judgement: SemanticJudgement,
-    ) -> dict[str, Any]:
+    ) -> None:
         status = (
-            "selected"
-            if judgement.score >= SEMANTIC_SCORE_THRESHOLD
-            else "rejected"
+            "selected" if judgement.score >= SEMANTIC_SCORE_THRESHOLD else "rejected"
         )
-        candidate = self._ensure_node(
+        self._ensure_node(
             expansion.candidate_skill_id,
             status=status,
-            direction=expansion.direction,
         )
-        edge = self._ensure_edge(expansion, status=status)
-        return {
-            "current_skill_id": expansion.current_skill_id,
-            "candidate_skill_id": expansion.candidate_skill_id,
-            "candidate_label": candidate["label"],
-            "direction": expansion.direction,
-            "status": status,
-            "edge": edge,
-        }
+        self._ensure_edge(expansion, status=status)
 
-    def mark_final_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
-        final_skill_ids: list[str] = []
+    def mark_final_plan(self, plan: dict[str, Any]) -> None:
         for step in plan.get("steps") or []:
             if not isinstance(step, dict):
                 continue
             current_skill_id = str(step.get("skill_id") or "").strip()
             if not current_skill_id:
                 continue
-            self._ensure_node(current_skill_id, status="final", direction="final")
-            final_skill_ids.append(current_skill_id)
-
-        final_edge_ids: list[str] = []
+            self._ensure_node(current_skill_id, status="final")
         for edge in plan.get("can_feed_edges") or []:
             if not isinstance(edge, dict):
                 continue
@@ -208,30 +183,19 @@ class BeamSearchGraph:
                 str(self.graph_edges[edge_id].get("status") or ""),
                 "final",
             )
-            final_edge_ids.append(edge_id)
-
-        return {
-            "final_skill_ids": list(dict.fromkeys(final_skill_ids)),
-            "final_edge_ids": list(dict.fromkeys(final_edge_ids)),
-        }
 
     def snapshot(self) -> dict[str, Any]:
         nodes = []
         for node in self.nodes.values():
-            directions = sorted(node.get("directions") or [])
             nodes.append(
                 {
                     "id": node["id"],
                     "label": node["label"],
                     "status": node["status"],
                     "seed": bool(node.get("seed")),
-                    "direction": _direction_label(directions),
                 }
             )
-        edges = [
-            _copy_public_graph_edge(edge)
-            for edge in self.graph_edges.values()
-        ]
+        edges = [_copy_public_graph_edge(edge) for edge in self.graph_edges.values()]
         return {"nodes": nodes, "edges": edges}
 
     def _ensure_node(
@@ -239,9 +203,8 @@ class BeamSearchGraph:
         current_skill_id: str,
         *,
         status: str,
-        direction: str,
         seed: bool = False,
-    ) -> dict[str, Any]:
+    ) -> None:
         node = self.nodes.get(current_skill_id)
         if node is None:
             node = {
@@ -249,14 +212,11 @@ class BeamSearchGraph:
                 "label": _skill_label(self.skill_by_id.get(current_skill_id, {})),
                 "status": status,
                 "seed": seed,
-                "directions": set(),
             }
             self.nodes[current_skill_id] = node
         else:
             node["status"] = _dominant_status(str(node.get("status") or ""), status)
             node["seed"] = bool(node.get("seed")) or seed
-        if direction:
-            node["directions"].add(direction)
         return node
 
     def _ensure_edge(
@@ -265,22 +225,16 @@ class BeamSearchGraph:
         *,
         status: str,
     ) -> dict[str, Any]:
-        edge = self.edges[expansion.edge_index]
         source_id = expansion.current_skill_id
         target_id = expansion.candidate_skill_id
         edge_id = f"{source_id}->{target_id}"
         graph_edge = self.graph_edges.get(edge_id)
-        confidence = edge.get("confidence")
         if graph_edge is None:
             graph_edge = {
                 "id": edge_id,
                 "source": source_id,
                 "target": target_id,
                 "status": status,
-                "confidence": confidence,
-                "direction": expansion.direction,
-                "can_feed_source_id": skill_id(edge.get("source")),
-                "can_feed_target_id": skill_id(edge.get("target")),
             }
             self.graph_edges[edge_id] = graph_edge
         else:
@@ -288,11 +242,6 @@ class BeamSearchGraph:
                 str(graph_edge.get("status") or ""),
                 status,
             )
-            graph_edge["confidence"] = _max_confidence(
-                graph_edge.get("confidence"),
-                confidence,
-            )
-        return _copy_public_graph_edge(graph_edge)
 
     def _existing_edge_id(self, source_id: str, target_id: str) -> str:
         forward_id = f"{source_id}->{target_id}"
@@ -306,106 +255,6 @@ class BeamSearchGraph:
     def _is_seed(self, current_skill_id: str) -> bool:
         node = self.nodes.get(current_skill_id)
         return bool(node and node.get("seed"))
-
-
-class SemanticJudgementCache:
-    """Cache judgements by the local semantic context visible to the LLM."""
-
-    def __init__(self) -> None:
-        self._items: dict[tuple[str, str, str, str], SemanticJudgement] = {}
-        self.hits = 0
-        self.misses = 0
-
-    def get(
-        self,
-        query_signature: str,
-        expansion: NeighborExpansion,
-    ) -> SemanticJudgement | None:
-        key = self.key_for(query_signature, expansion)
-        cached = self._items.get(key)
-        if cached is None:
-            self.misses += 1
-            return None
-        self.hits += 1
-        return cached
-
-    def set(
-        self,
-        query_signature: str,
-        expansion: NeighborExpansion,
-        judgement: SemanticJudgement,
-    ) -> None:
-        self._items[self.key_for(query_signature, expansion)] = judgement
-
-    @staticmethod
-    def key_for(
-        query_signature: str,
-        expansion: NeighborExpansion,
-    ) -> tuple[str, str, str, str]:
-        return (
-            query_signature,
-            expansion.direction,
-            expansion.current_skill_id,
-            expansion.candidate_skill_id,
-        )
-
-
-class BeamJudgeQueue:
-    """Run grouped LLM judgement tasks with a global concurrency limit."""
-
-    def __init__(
-        self,
-        *,
-        planner: BidirectionalBeamPlannerProtocol,
-        max_concurrent_judges: int = DEFAULT_MAX_CONCURRENT_JUDGES,
-    ) -> None:
-        self.planner = planner
-        self._semaphore = asyncio.Semaphore(max(1, int(max_concurrent_judges)))
-        self.llm_call_count = 0
-        self.failures: list[str] = []
-
-    async def judge_groups(
-        self,
-        query: str,
-        groups: list[list[NeighborExpansion]],
-    ) -> dict[str, SemanticJudgement]:
-        tasks = [
-            asyncio.create_task(self._judge_group(query, group))
-            for group in groups
-            if group
-        ]
-        if not tasks:
-            return {}
-
-        output: dict[str, SemanticJudgement] = {}
-        for result in await asyncio.gather(*tasks):
-            output.update(result)
-        return output
-
-    async def _judge_group(
-        self,
-        query: str,
-        group: list[NeighborExpansion],
-    ) -> dict[str, SemanticJudgement]:
-        async with self._semaphore:
-            self.llm_call_count += 1
-            try:
-                return await self.planner.judge_expansions(query, group)
-            except Exception as exc:
-                candidates = ", ".join(item.candidate_id for item in group[:5])
-                self.failures.append(
-                    f"beam judge failed for candidates [{candidates}]: {exc}"
-                )
-                return {}
-
-
-class BidirectionalBeamPlannerProtocol(Protocol):
-    async def judge_expansions(
-        self,
-        query: str,
-        expansions: list[NeighborExpansion],
-    ) -> dict[str, SemanticJudgement]:
-        ...
 
 
 class BidirectionalBeamPlanner:
@@ -433,23 +282,24 @@ class BidirectionalBeamPlanner:
         self.max_depth = max(1, int(max_depth))
         self.max_concurrent_judges = max(1, int(max_concurrent_judges))
         self.skill_by_id = artifacts.skill_by_id
-        self.candidate_skill_ids = self._normalize_candidate_skill_ids(
+        self.candidate_skill_ids = normalize_known_skill_ids(
             candidate_skill_ids,
             known_skill_ids=set(self.skill_by_id),
         )
         self.progress_callback = progress_callback
-        self.language = resolve_orchestration_language(language)
-        self._beam_event_sequence = 0
-        self._beam_events: list[dict[str, Any]] = []
+        self.language = language
         self.eligible_edges = self._sorted_eligible_edges()
-        self._beam_graph = BeamSearchGraph(self.skill_by_id, self.eligible_edges)
+        self._beam_graph = BeamSearchGraph(self.skill_by_id)
         self.outgoing_edges = build_outgoing_edges(self.eligible_edges)
         self.incoming_edges = build_incoming_edges(self.eligible_edges)
-        self.cache = SemanticJudgementCache()
+        self._judgement_cache: dict[tuple[str, str, str, str], SemanticJudgement] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._judge_semaphore = asyncio.Semaphore(self.max_concurrent_judges)
+        self._llm_call_count = 0
+        self._judge_failures: list[str] = []
 
     async def plan(self, query: str) -> dict[str, Any]:
-        client = self._client()
-        del client
         self._reset_beam_progress()
         query_signature = _query_signature(query)
         frontier = self._initial_states()
@@ -460,16 +310,9 @@ class BidirectionalBeamPlanner:
         await self._emit_beam_event(
             "started",
             round_index=0,
-            payload={
-                "seed_skill_ids": list(seed_skill_ids),
-                "graph": self._beam_graph.snapshot(),
-            },
+            graph=self._beam_graph.snapshot(),
         )
-        rounds: list[dict[str, Any]] = []
-        judge_queue = BeamJudgeQueue(
-            planner=self,
-            max_concurrent_judges=self.max_concurrent_judges,
-        )
+        round_index = 0
 
         for _round in range(max(0, self.max_depth - 1)):
             groups, cached = self._expansion_groups(query_signature, frontier)
@@ -478,91 +321,52 @@ class BidirectionalBeamPlanner:
                 await self._emit_beam_event(
                     "candidates_found",
                     round_index=_round + 1,
-                    payload={
-                        "expansions": found,
-                        "graph": self._beam_graph.snapshot(),
-                    },
+                    graph=self._beam_graph.snapshot(),
                 )
             if not groups and not cached:
                 break
-            fresh = await judge_queue.judge_groups(query, groups)
+            fresh = await self._judge_groups(query, groups)
             fresh = self._apply_judgement_aliases(fresh)
             for candidate_id, judgement in fresh.items():
                 expansion = self._expansion_by_id(candidate_id)
                 if expansion is not None:
-                    self.cache.set(query_signature, expansion, judgement)
+                    self._cache_set(query_signature, expansion, judgement)
             judgements = {**cached, **fresh}
             judged = self._record_candidates_judged(judgements)
             if judged:
                 await self._emit_beam_event(
                     "candidates_judged",
                     round_index=_round + 1,
-                    payload={
-                        "candidates": judged,
-                        "graph": self._beam_graph.snapshot(),
-                    },
+                    graph=self._beam_graph.snapshot(),
                 )
             next_states = self._apply_judgements(judgements)
             if not next_states:
-                rounds.append(
-                    self._round_summary(
-                        round_index=_round + 1,
-                        frontier=frontier,
-                        groups=groups,
-                        cached=cached,
-                        judgements=judgements,
-                        retained=[],
-                    )
-                )
                 await self._emit_beam_event(
                     "graph_merged",
                     round_index=_round + 1,
-                    payload={
-                        "retained_paths": [],
-                        "graph": self._beam_graph.snapshot(),
-                    },
+                    graph=self._beam_graph.snapshot(),
                 )
+                round_index = _round + 1
                 break
-            merged_states = self._merge_states(next_states)
-            retained = self._rank_and_trim(merged_states, limit=self.top_k)
-            rounds.append(
-                self._round_summary(
-                    round_index=_round + 1,
-                    frontier=frontier,
-                    groups=groups,
-                    cached=cached,
-                    judgements=judgements,
-                    retained=retained,
-                )
-            )
-            all_states = self._rank_and_trim(
-                merged_states,
-                limit=self.top_k,
-            )
+            retained = self._rank_and_trim(next_states, limit=self.top_k)
+            all_states = retained
             frontier = retained
+            round_index = _round + 1
             await self._emit_beam_event(
                 "graph_merged",
                 round_index=_round + 1,
-                payload={
-                    "retained_paths": [
-                        self._state_summary(state, rank=index)
-                        for index, state in enumerate(retained, start=1)
-                    ],
-                    "graph": self._beam_graph.snapshot(),
-                },
+                graph=self._beam_graph.snapshot(),
             )
 
-        plans = self._plans_from_states(all_states)[: self.top_k]
+        final_states = self._merge_converged_states(all_states)
+        plans = self._plans_from_states(final_states)[: self.top_k]
         recommended_plans = [self._plan_payload(plan, query=query) for plan in plans]
         final_plan = recommended_plans[0] if recommended_plans else {}
-        final_graph_payload = self._beam_graph.mark_final_plan(final_plan)
+        self._beam_graph.mark_final_plan(final_plan)
         await self._emit_beam_event(
             "completed",
-            round_index=len(rounds),
-            payload={
-                **final_graph_payload,
-                "graph": self._beam_graph.snapshot(),
-            },
+            round_index=round_index,
+            graph=self._beam_graph.snapshot(),
         )
         status = recommended_plans[0]["status"] if recommended_plans else "no_plan"
         reason = recommended_plans[0].get("reason", "") if recommended_plans else ""
@@ -576,7 +380,7 @@ class BidirectionalBeamPlanner:
             "language": self.language,
             "score_dir": str(self.artifacts.score_dir),
             "planning_mode": "bidirectional_beam",
-            "llm_call_count": judge_queue.llm_call_count,
+            "llm_call_count": self._llm_call_count,
             "candidate_skill_count": len(unique_skill_ids),
             "candidate_edge_count": len(self.eligible_edges),
             "plans": recommended_plans,
@@ -585,32 +389,20 @@ class BidirectionalBeamPlanner:
             "beam_search": {
                 "mode": "bidirectional_beam",
                 "language": self.language,
-                "round_index": len(rounds),
-                "top_k": self.top_k,
-                "max_depth": self.max_depth,
-                "min_edge_confidence": self.min_edge_confidence,
-                "semantic_score_threshold": SEMANTIC_SCORE_THRESHOLD,
-                "max_concurrent_judges": self.max_concurrent_judges,
-                "seed_skill_ids": list(seed_skill_ids),
+                "round_index": round_index,
                 "graph": self._beam_graph.snapshot(),
-                "rounds": rounds,
-                "events": self._beam_events,
-                "retained_paths": [
-                    self._state_summary(state, rank=index)
-                    for index, state in enumerate(all_states, start=1)
-                ],
             },
             "decision": {
                 "mode": "bidirectional_beam",
                 "strategy": "semantic_bidirectional_beam",
                 "validated_count": len(recommended_plans),
                 "candidate_count": len(unique_skill_ids),
-                "judge_cache_hits": self.cache.hits,
-                "judge_cache_misses": self.cache.misses,
+                "judge_cache_hits": self._cache_hits,
+                "judge_cache_misses": self._cache_misses,
             },
             "validation": {
                 "valid": True,
-                "details": judge_queue.failures[:10],
+                "details": self._judge_failures[:10],
             },
             "status": status,
             "reason": reason,
@@ -629,10 +421,9 @@ class BidirectionalBeamPlanner:
         payload = {
             "query": query,
             "direction": first.direction,
-            "current_skill": self._skill_payload(current_skill),
+            "current_skill": skill_payload(current_skill),
             "candidates": [
-                self._candidate_payload(expansion)
-                for expansion in expansions
+                self._candidate_payload(expansion) for expansion in expansions
             ],
         }
         with llm_usage_context("orchestration", "bidirectional_beam_judgement"):
@@ -672,7 +463,69 @@ class BidirectionalBeamPlanner:
             raise ValueError(
                 "beam Symphony planning requires llm_config or llm_client."
             )
-        return create_llm_client(self.llm_config)
+        self.llm_client = create_llm_client(self.llm_config)
+        return self.llm_client
+
+    async def _judge_groups(
+        self,
+        query: str,
+        groups: list[list[NeighborExpansion]],
+    ) -> dict[str, SemanticJudgement]:
+        tasks = [self._judge_group(query, group) for group in groups if group]
+        if not tasks:
+            return {}
+        output: dict[str, SemanticJudgement] = {}
+        for result in await asyncio.gather(*tasks):
+            output.update(result)
+        return output
+
+    async def _judge_group(
+        self,
+        query: str,
+        group: list[NeighborExpansion],
+    ) -> dict[str, SemanticJudgement]:
+        async with self._judge_semaphore:
+            self._llm_call_count += 1
+            try:
+                return await self.judge_expansions(query, group)
+            except Exception as exc:
+                candidates = ", ".join(item.candidate_id for item in group[:5])
+                self._judge_failures.append(
+                    f"beam judge failed for candidates [{candidates}]: {exc}"
+                )
+                return {}
+
+    @staticmethod
+    def _cache_key(
+        query_signature: str,
+        expansion: NeighborExpansion,
+    ) -> tuple[str, str, str, str]:
+        return (
+            query_signature,
+            expansion.direction,
+            expansion.current_skill_id,
+            expansion.candidate_skill_id,
+        )
+
+    def _cache_get(
+        self,
+        query_signature: str,
+        expansion: NeighborExpansion,
+    ) -> SemanticJudgement | None:
+        cached = self._judgement_cache.get(self._cache_key(query_signature, expansion))
+        if cached is None:
+            self._cache_misses += 1
+        else:
+            self._cache_hits += 1
+        return cached
+
+    def _cache_set(
+        self,
+        query_signature: str,
+        expansion: NeighborExpansion,
+        judgement: SemanticJudgement,
+    ) -> None:
+        self._judgement_cache[self._cache_key(query_signature, expansion)] = judgement
 
     def _initial_states(self) -> list[BeamState]:
         seeds = self.candidate_skill_ids or self._default_seed_skill_ids()
@@ -680,11 +533,10 @@ class BidirectionalBeamPlanner:
             BeamState(
                 skill_ids=(current_skill_id,),
                 edge_indices=(),
-                available=frozenset(),
-                semantic_scores=(1.0,),
+                semantic_scores=(),
                 score_reasons=(),
                 seed_skill_ids=tuple(seeds),
-                directions=frozenset({"seed"}),
+                last_direction="seed",
             )
             for current_skill_id in seeds
             if current_skill_id in self.skill_by_id
@@ -737,7 +589,7 @@ class BidirectionalBeamPlanner:
                 misses = []
                 for expansion in expansions:
                     current_expansions[expansion.candidate_id] = expansion
-                    judgement = self.cache.get(query_signature, expansion)
+                    judgement = self._cache_get(query_signature, expansion)
                     if judgement is None:
                         misses.append(expansion)
                     else:
@@ -745,7 +597,7 @@ class BidirectionalBeamPlanner:
                 if misses:
                     deduped_misses = []
                     for expansion in misses:
-                        key = self.cache.key_for(query_signature, expansion)
+                        key = self._cache_key(query_signature, expansion)
                         existing_candidate_id = pending_keys.get(key)
                         if existing_candidate_id is not None:
                             aliases[existing_candidate_id].append(
@@ -846,14 +698,13 @@ class BidirectionalBeamPlanner:
                 BeamState(
                     skill_ids=skill_ids,
                     edge_indices=edge_indices,
-                    available=state.available,
                     semantic_scores=(*state.semantic_scores, judgement.score),
                     score_reasons=_append_unique(
                         state.score_reasons,
                         judgement.reason,
                     ),
                     seed_skill_ids=state.seed_skill_ids,
-                    directions=state.directions | {expansion.direction},
+                    last_direction=expansion.direction,
                 )
             )
         return output
@@ -862,149 +713,53 @@ class BidirectionalBeamPlanner:
         return getattr(self, "_current_expansions", {}).get(candidate_id)
 
     def _reset_beam_progress(self) -> None:
-        self._beam_event_sequence = 0
-        self._beam_events = []
-        self._beam_graph = BeamSearchGraph(self.skill_by_id, self.eligible_edges)
+        self._beam_graph = BeamSearchGraph(self.skill_by_id)
 
     async def _emit_beam_event(
         self,
         event: str,
         *,
         round_index: int,
-        payload: dict[str, Any],
+        graph: dict[str, Any],
     ) -> None:
-        self._beam_event_sequence += 1
         item = {
-            "type": f"symphony.beam_search.{event}",
             "event": event,
             "language": self.language,
-            "sequence": self._beam_event_sequence,
-            "round": round_index,
-            "payload": payload,
+            "round_index": round_index,
+            "graph": graph,
         }
-        self._beam_events.append(_json_safe(item))
         if self.progress_callback is None:
             return
         try:
-            result = self.progress_callback(_json_safe(item))
+            result = self.progress_callback(item)
             if asyncio.iscoroutine(result):
                 await result
         except Exception as exc:
             logger.debug("beam progress callback failed: %s", exc)
 
-    def _record_candidates_found(self) -> list[dict[str, Any]]:
-        output = []
-        for expansion in _sorted_expansions(
+    def _record_candidates_found(self) -> bool:
+        expansions = _sorted_expansions(
             getattr(self, "_current_expansions", {}).values()
-        ):
-            output.append(self._beam_graph.add_candidate(expansion))
-        return output
+        )
+        for expansion in expansions:
+            self._beam_graph.add_candidate(expansion)
+        return bool(expansions)
 
     def _record_candidates_judged(
         self,
         judgements: dict[str, SemanticJudgement],
-    ) -> list[dict[str, Any]]:
-        output = []
+    ) -> bool:
+        found = False
         for candidate_id in sorted(judgements):
             expansion = self._expansion_by_id(candidate_id)
             if expansion is None:
                 continue
-            output.append(
-                self._beam_graph.apply_judgement(
-                    expansion,
-                    judgements[candidate_id],
-                )
+            self._beam_graph.apply_judgement(
+                expansion,
+                judgements[candidate_id],
             )
-        return output
-
-    def _round_summary(
-        self,
-        *,
-        round_index: int,
-        frontier: list[BeamState],
-        groups: list[list[NeighborExpansion]],
-        cached: dict[str, SemanticJudgement],
-        judgements: dict[str, SemanticJudgement],
-        retained: list[BeamState],
-    ) -> dict[str, Any]:
-        candidates = []
-        for candidate_id, judgement in judgements.items():
-            expansion = self._expansion_by_id(candidate_id)
-            if expansion is None:
-                continue
-            candidates.append(
-                self._candidate_status_summary(expansion, judgement)
-            )
-        candidates.sort(
-            key=lambda item: (
-                item["status"] != "selected",
-                item["direction"],
-                item["candidate_skill_id"],
-            )
-        )
-        retained_summaries = [
-            self._state_summary(state, rank=index)
-            for index, state in enumerate(retained, start=1)
-        ]
-        return {
-            "round": round_index,
-            "frontier_count": len(frontier),
-            "judge_request_count": len(groups),
-            "fresh_candidate_count": sum(len(group) for group in groups),
-            "cached_candidate_count": len(cached),
-            "judged_candidate_count": len(candidates),
-            "candidate_count": len(candidates),
-            "selected_count": sum(
-                1 for item in candidates if item["status"] == "selected"
-            ),
-            "rejected_count": sum(
-                1 for item in candidates if item["status"] == "rejected"
-            ),
-            "accepted_count": sum(
-                1 for item in candidates if item["status"] == "selected"
-            ),
-            "retained_count": len(retained_summaries),
-            "candidates": candidates,
-            "retained_paths": retained_summaries,
-        }
-
-    def _candidate_status_summary(
-        self,
-        expansion: NeighborExpansion,
-        judgement: SemanticJudgement,
-    ) -> dict[str, Any]:
-        edge = self.eligible_edges[expansion.edge_index]
-        status = (
-            "selected"
-            if judgement.score >= SEMANTIC_SCORE_THRESHOLD
-            else "rejected"
-        )
-        return {
-            "candidate_id": expansion.candidate_id,
-            "direction": expansion.direction,
-            "current_skill_id": expansion.current_skill_id,
-            "candidate_skill_id": expansion.candidate_skill_id,
-            "candidate_label": _skill_label(
-                self.skill_by_id.get(expansion.candidate_skill_id, {})
-            ),
-            "status": status,
-            "edge": {
-                "id": f"{expansion.current_skill_id}->{expansion.candidate_skill_id}",
-                "source": expansion.current_skill_id,
-                "target": expansion.candidate_skill_id,
-                "confidence": edge.get("confidence"),
-            },
-            "path": list(expansion.state.skill_ids),
-        }
-
-    def _state_summary(self, state: BeamState, *, rank: int) -> dict[str, Any]:
-        return {
-            "rank": rank,
-            "score": round(self._state_score(state), 4),
-            "skill_ids": list(state.skill_ids),
-            "edge_count": len(state.edge_indices),
-            "directions": sorted(state.directions),
-        }
+            found = True
+        return found
 
     def _plans_from_states(self, states: list[BeamState]) -> list[OrchestrationPlan]:
         state_plans = [
@@ -1012,11 +767,7 @@ class BidirectionalBeamPlanner:
                 state,
                 state_to_plan(
                     state=state.to_search_state(),
-                    grounded=GroundedQuery(
-                        query="",
-                        available_artifacts=[],
-                        seed_skill_ids=state.seed_skill_ids,
-                    ),
+                    seed_skill_ids=state.seed_skill_ids,
                     skill_by_id=self.skill_by_id,
                     can_feed_edges=self.eligible_edges,
                 ),
@@ -1026,7 +777,7 @@ class BidirectionalBeamPlanner:
         ]
         state_plans.sort(
             key=lambda item: (
-                -self._state_score(item[0]),
+                -self._state_score(item[0], plan=item[1]),
                 len(item[1].missing_inputs),
                 len(item[1].steps),
                 tuple(step.skill_id for step in item[1].steps),
@@ -1034,17 +785,20 @@ class BidirectionalBeamPlanner:
         )
         return [plan for _state, plan in state_plans]
 
-    def _merge_states(self, states: list[BeamState]) -> list[BeamState]:
+    def _merge_converged_states(self, states: list[BeamState]) -> list[BeamState]:
         deduped = self._dedupe_states(states)
         merged = list(deduped)
-        for groups in (
-            _group_states(deduped, lambda state: state.tail),
-            _group_states(deduped, lambda state: state.head),
+        directional_groups = (
             _group_states(
-                deduped,
-                lambda state: ",".join(sorted(state.skill_ids)),
+                [state for state in deduped if state.last_direction == "forward"],
+                lambda state: state.tail,
             ),
-        ):
+            _group_states(
+                [state for state in deduped if state.last_direction == "backward"],
+                lambda state: state.head,
+            ),
+        )
+        for groups in directional_groups:
             for group in groups:
                 if len(group) < 2:
                     continue
@@ -1057,11 +811,7 @@ class BidirectionalBeamPlanner:
         skill_ids = {current for state in states for current in state.skill_ids}
         edge_indices = tuple(
             sorted(
-                {
-                    edge_index
-                    for state in states
-                    for edge_index in state.edge_indices
-                }
+                {edge_index for state in states for edge_index in state.edge_indices}
             )
         )
         ordered = self._topological_order(skill_ids, edge_indices)
@@ -1069,9 +819,7 @@ class BidirectionalBeamPlanner:
             return None
         seed_skill_ids = tuple(
             dict.fromkeys(
-                current
-                for state in states
-                for current in state.seed_skill_ids
+                current for state in states for current in state.seed_skill_ids
             )
         )
         semantic_scores = tuple(
@@ -1079,25 +827,16 @@ class BidirectionalBeamPlanner:
         )
         reasons = tuple(
             dict.fromkeys(
-                reason
-                for state in states
-                for reason in state.score_reasons
-                if reason
+                reason for state in states for reason in state.score_reasons if reason
             )
-        )
-        directions = frozenset(
-            direction
-            for state in states
-            for direction in state.directions
         )
         return BeamState(
             skill_ids=tuple(ordered),
             edge_indices=edge_indices,
-            available=frozenset(),
-            semantic_scores=semantic_scores or (1.0,),
+            semantic_scores=semantic_scores,
             score_reasons=reasons[:8],
             seed_skill_ids=seed_skill_ids,
-            directions=directions,
+            last_direction=states[0].last_direction,
         )
 
     def _topological_order(
@@ -1139,9 +878,8 @@ class BidirectionalBeamPlanner:
         for state in states:
             key = (state.skill_ids, tuple(sorted(state.edge_indices)))
             existing = deduped.get(key)
-            if (
-                existing is None
-                or self._state_score(state) > self._state_score(existing)
+            if existing is None or self._state_score(state) > self._state_score(
+                existing
             ):
                 deduped[key] = state
         return list(deduped.values())
@@ -1152,49 +890,52 @@ class BidirectionalBeamPlanner:
         *,
         limit: int,
     ) -> list[BeamState]:
-        return sorted(
-            self._dedupe_states(states),
-            key=lambda state: (
-                -self._state_score(state),
-                self._state_missing_count(state),
-                len(state.skill_ids),
-                state.skill_ids,
-            ),
-        )[:limit]
+        ranked = []
+        for state in self._dedupe_states(states):
+            plan = self._state_plan(state)
+            ranked.append(
+                (state, self._state_score(state, plan=plan), len(plan.missing_inputs))
+            )
+        ranked.sort(
+            key=lambda item: (
+                -item[1],
+                item[2],
+                len(item[0].skill_ids),
+                item[0].skill_ids,
+                item[0].edge_indices,
+            )
+        )
+        return [state for state, _score, _missing in ranked[:limit]]
 
-    def _state_score(self, state: BeamState) -> float:
-        plan = self._state_plan(state)
+    def _state_score(
+        self,
+        state: BeamState,
+        *,
+        plan: OrchestrationPlan | None = None,
+    ) -> float:
+        plan = plan or self._state_plan(state)
         semantic_score = (
             sum(state.semantic_scores) / len(state.semantic_scores)
             if state.semantic_scores
-            else 0.0
+            else SEED_BASELINE_SCORE
         )
         edge_confidence = self._state_edge_confidence(state)
         input_coverage = self._input_coverage(plan)
-        seed_hit = 1.0 if set(state.skill_ids) & set(state.seed_skill_ids) else 0.0
         depth_penalty = max(0, len(state.skill_ids) - 1)
         return (
             0.45 * semantic_score
             + 0.25 * edge_confidence
             + 0.20 * input_coverage
-            + 0.10 * seed_hit
             - 0.03 * depth_penalty
         )
 
     def _state_plan(self, state: BeamState) -> OrchestrationPlan:
         return state_to_plan(
             state=state.to_search_state(),
-            grounded=GroundedQuery(
-                query="",
-                available_artifacts=[],
-                seed_skill_ids=state.seed_skill_ids,
-            ),
+            seed_skill_ids=state.seed_skill_ids,
             skill_by_id=self.skill_by_id,
             can_feed_edges=self.eligible_edges,
         )
-
-    def _state_missing_count(self, state: BeamState) -> int:
-        return len(self._state_plan(state).missing_inputs)
 
     def _state_edge_confidence(self, state: BeamState) -> float:
         if not state.edge_indices:
@@ -1209,9 +950,7 @@ class BidirectionalBeamPlanner:
     def _input_coverage(plan: OrchestrationPlan) -> float:
         required = 0
         for step in plan.steps:
-            required += sum(
-                1 for item in step.inputs if item.get("required", True)
-            )
+            required += sum(1 for item in step.inputs if item.get("required", True))
         if required <= 0:
             return 1.0
         missing = len(plan.missing_inputs)
@@ -1220,40 +959,14 @@ class BidirectionalBeamPlanner:
     def _candidate_payload(self, expansion: NeighborExpansion) -> dict[str, Any]:
         return {
             "candidate_id": expansion.candidate_id,
-            "skill": self._skill_payload(
-                self.skill_by_id[expansion.candidate_skill_id]
-            ),
-        }
-
-    @staticmethod
-    def _skill_payload(skill: dict[str, Any]) -> dict[str, Any]:
-        current_skill_id = str(skill.get("id") or "")
-        return {
-            "id": current_skill_id,
-            "name": str(skill.get("name") or current_skill_id),
-            "description": str(skill.get("description") or "")[:800],
+            "skill": skill_payload(self.skill_by_id[expansion.candidate_skill_id]),
         }
 
     def _sorted_eligible_edges(self) -> list[dict[str, Any]]:
-        filtered_edges = []
-        for edge in self.artifacts.graph.get("edges", []):
-            edge_confidence = float(edge.get("confidence") or 0.0)
-            source_id = skill_id(edge.get("source"))
-            target_id = skill_id(edge.get("target"))
-            if (
-                edge.get("type") == "can_feed"
-                and edge_confidence >= self.min_edge_confidence
-                and source_id in self.skill_by_id
-                and target_id in self.skill_by_id
-            ):
-                filtered_edges.append(edge)
-        return sorted(
-            filtered_edges,
-            key=lambda item: (
-                -float(item.get("confidence") or 0.0),
-                skill_id(item.get("source")),
-                skill_id(item.get("target")),
-            ),
+        return eligible_can_feed_edges(
+            self.artifacts.graph.get("edges", []),
+            known_skill_ids=set(self.skill_by_id),
+            min_confidence=self.min_edge_confidence,
         )
 
     def _plan_payload(self, plan: OrchestrationPlan, *, query: str) -> dict[str, Any]:
@@ -1269,35 +982,11 @@ class BidirectionalBeamPlanner:
                     if plan.status == "ready"
                     else "structurally_valid_but_incomplete"
                 ),
-                "connectivity_trace": (
-                    ["can_feed"] if plan.can_feed_edges else []
-                ),
+                "connectivity_trace": (["can_feed"] if plan.can_feed_edges else []),
                 "source": "bidirectional_beam",
             }
         )
         return payload
-
-    @staticmethod
-    def _normalize_candidate_skill_ids(
-        values: Sequence[str] | None,
-        *,
-        known_skill_ids: set[str],
-    ) -> tuple[str, ...] | None:
-        if values is None:
-            return None
-        output = []
-        seen = set()
-        for value in values:
-            current_skill_id = str(value or "").strip()
-            if (
-                not current_skill_id
-                or current_skill_id in seen
-                or current_skill_id not in known_skill_ids
-            ):
-                continue
-            seen.add(current_skill_id)
-            output.append(current_skill_id)
-        return tuple(output) if output else None
 
 
 def _query_signature(query: str) -> str:
@@ -1309,7 +998,7 @@ def _state_signature(state: BeamState) -> str:
     payload = {
         "skills": state.skill_ids,
         "edges": state.edge_indices,
-        "directions": sorted(state.directions),
+        "last_direction": state.last_direction,
     }
     return hashlib.sha1(
         json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
@@ -1356,50 +1045,17 @@ def _dominant_status(current: str, incoming: str) -> str:
     return incoming if incoming_priority >= current_priority else current
 
 
-def _direction_label(directions: list[str]) -> str:
-    filtered = [item for item in directions if item and item != "final"]
-    if not filtered:
-        return ""
-    if len(filtered) == 1:
-        return filtered[0]
-    if "seed" in filtered and len(filtered) == 2:
-        return next(item for item in filtered if item != "seed")
-    return "mixed"
-
-
 def _copy_public_graph_edge(edge: dict[str, Any]) -> dict[str, Any]:
-    output = {
-        "id": edge.get("id"),
+    return {
         "source": edge.get("source"),
         "target": edge.get("target"),
         "status": edge.get("status"),
-        "confidence": edge.get("confidence"),
     }
-    direction = edge.get("direction")
-    if direction not in (None, ""):
-        output["direction"] = direction
-    return output
-
-
-def _max_confidence(left: Any, right: Any) -> Any:
-    try:
-        left_value = float(left)
-    except (TypeError, ValueError):
-        return right
-    try:
-        right_value = float(right)
-    except (TypeError, ValueError):
-        return left
-    return max(left_value, right_value)
 
 
 def _skill_label(skill: dict[str, Any]) -> str:
     current_skill_id = str(skill.get("id") or "").strip()
     return str(skill.get("name") or current_skill_id).strip() or current_skill_id
-
-
-def _json_safe(payload: dict[str, Any]) -> dict[str, Any]:
-    return json.loads(json.dumps(payload, ensure_ascii=False, default=str))
 
 
 def _sorted_expansions(

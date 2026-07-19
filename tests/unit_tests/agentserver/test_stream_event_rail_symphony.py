@@ -151,8 +151,8 @@ async def test_stream_event_rail_emits_beam_progress_as_tool_update():
     callback = current_tool_progress()
     assert callback is not None
     await callback({
-        "type": "symphony.beam_search.started",
         "event": "started",
+        "language": "cn",
         "round_index": 0,
         "graph": {
             "nodes": [{"id": "seed", "label": "Seed", "status": "seed"}],
@@ -175,9 +175,7 @@ async def test_stream_event_rail_force_finishes_symphony_compose_score_result():
     result = {
         "success": True,
         "direct_display": True,
-        "display_format": "markdown",
         "content": "## Symphony plan\n\n```mermaid\nflowchart LR\n  A --> B\n```",
-        "mermaid": "flowchart LR\n  A --> B",
         "score_status": {"success": True, "exists": True, "stale": False},
         "score_build": {"rebuilt": False, "reason": "not_required"},
         "beam_search": {
@@ -205,7 +203,8 @@ async def test_stream_event_rail_force_finishes_symphony_compose_score_result():
     assert tool_results[0]["raw_output"] == result
     assert tool_results[0]["score_status"] == result["score_status"]
     assert tool_results[0]["score_build"] == result["score_build"]
-    assert tool_results[0]["beam_search"] == result["beam_search"]
+    assert "beam_search" not in tool_results[0]
+    assert tool_results[0]["raw_output"]["beam_search"] == result["beam_search"]
     assert tool_results[0]["direct_display"] is True
     direct_messages = [chunk for chunk in session.chunks if chunk.type == "chat.final"]
     assert direct_messages == []

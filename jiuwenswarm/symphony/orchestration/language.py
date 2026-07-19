@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from openjiuwen.harness.prompts import resolve_language
-
 DEFAULT_ORCHESTRATION_LANGUAGE = "cn"
 SUPPORTED_ORCHESTRATION_LANGUAGES = frozenset({"cn", "en"})
 
@@ -18,10 +16,7 @@ def resolve_orchestration_language(value: Any = None) -> str:
         raw = "cn"
     if raw not in SUPPORTED_ORCHESTRATION_LANGUAGES:
         return DEFAULT_ORCHESTRATION_LANGUAGE
-    resolved = resolve_language(raw)
-    if resolved not in SUPPORTED_ORCHESTRATION_LANGUAGES:
-        return DEFAULT_ORCHESTRATION_LANGUAGE
-    return resolved
+    return raw
 
 
 def planner_language_instruction(language: str) -> str:

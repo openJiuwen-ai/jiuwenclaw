@@ -12,10 +12,14 @@ from jiuwenswarm.symphony.orchestration.artifacts import ScoreArtifacts
 from jiuwenswarm.symphony.orchestration.language import (
     default_fast_no_plan_title,
     planner_language_instruction,
-    resolve_orchestration_language,
 )
 from jiuwenswarm.symphony.orchestration.planning.plan_builder import edge_plan_item
-from jiuwenswarm.symphony.orchestration.planning.utils import skill_id
+from jiuwenswarm.symphony.orchestration.planning.utils import (
+    eligible_can_feed_edges,
+    normalize_known_skill_ids,
+    skill_id,
+    skill_payload,
+)
 
 FAST_PLANNER_SYSTEM_PROMPT = """You are Symphony's fast Skill planner.
 Return strict JSON only.
@@ -80,8 +84,8 @@ class FastOneShotPlanner:
         self.llm_client = llm_client
         self.min_edge_confidence = min_edge_confidence
         self.max_depth = max(1, int(max_depth))
-        self.language = resolve_orchestration_language(language)
-        self.candidate_skill_ids = self._normalize_candidate_skill_ids(
+        self.language = language
+        self.candidate_skill_ids = normalize_known_skill_ids(
             candidate_skill_ids,
             known_skill_ids=set(artifacts.skill_by_id),
         )
@@ -324,18 +328,10 @@ class FastOneShotPlanner:
         return []
 
     def _sorted_eligible_edges(self) -> list[dict[str, Any]]:
-        filtered_edges = []
-        for edge in self.artifacts.graph.get("edges", []):
-            edge_confidence = float(edge.get("confidence") or 0.0)
-            if edge.get("type") == "can_feed" and edge_confidence >= self.min_edge_confidence:
-                filtered_edges.append(edge)
-        return sorted(
-            filtered_edges,
-            key=lambda item: (
-                -float(item.get("confidence") or 0.0),
-                str(item.get("source") or ""),
-                str(item.get("target") or ""),
-            ),
+        return eligible_can_feed_edges(
+            self.artifacts.graph.get("edges", []),
+            known_skill_ids=set(self.artifacts.skill_by_id),
+            min_confidence=self.min_edge_confidence,
         )
 
     def _subgraph_payload(
@@ -345,7 +341,7 @@ class FastOneShotPlanner:
     ) -> dict[str, Any]:
         skill_by_id = self.artifacts.skill_by_id
         skill_payloads = [
-            self._skill_payload(skill_by_id[current_skill_id])
+            skill_payload(skill_by_id[current_skill_id])
             for current_skill_id in selected
             if current_skill_id in skill_by_id
         ]
@@ -617,15 +613,6 @@ class FastOneShotPlanner:
         return payload
 
     @staticmethod
-    def _skill_payload(skill: dict[str, Any]) -> dict[str, Any]:
-        current_skill_id = str(skill.get("id") or "")
-        return {
-            "id": current_skill_id,
-            "name": str(skill.get("name") or current_skill_id),
-            "description": str(skill.get("description") or "")[:800],
-        }
-
-    @staticmethod
     def _edge_payload(edge: dict[str, Any]) -> dict[str, Any]:
         return {
             "source_id": skill_id(edge.get("source")),
@@ -735,25 +722,3 @@ class FastOneShotPlanner:
             ):
                 return str(item.get("reason") or "").strip()
         return ""
-
-    @staticmethod
-    def _normalize_candidate_skill_ids(
-        values: Sequence[str] | None,
-        *,
-        known_skill_ids: set[str],
-    ) -> tuple[str, ...] | None:
-        if values is None:
-            return None
-        output = []
-        seen = set()
-        for value in values:
-            current_skill_id = str(value or "").strip()
-            if (
-                not current_skill_id
-                or current_skill_id in seen
-                or current_skill_id not in known_skill_ids
-            ):
-                continue
-            seen.add(current_skill_id)
-            output.append(current_skill_id)
-        return tuple(output) if output else None

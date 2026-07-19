@@ -12,9 +12,6 @@ from jiuwenswarm.symphony.orchestration.artifacts import (
     load_score_artifacts,
 )
 from jiuwenswarm.symphony.orchestration.execution_graph import build_execution_graph
-from jiuwenswarm.symphony.orchestration.language import (
-    resolve_orchestration_language,
-)
 from jiuwenswarm.symphony.orchestration.planning.beam import BidirectionalBeamPlanner
 from jiuwenswarm.symphony.orchestration.planning.fast import FastOneShotPlanner
 from jiuwenswarm.symphony.orchestration.planning.utils import clamp
@@ -37,7 +34,6 @@ async def plan_from_score(
 ) -> dict[str, Any]:
     """Run online planning from an existing Symphony score."""
 
-    language = resolve_orchestration_language(language)
     if orchestration_config is not None:
         top_k = orchestration_config.top_k
         max_depth = orchestration_config.max_depth

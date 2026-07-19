@@ -101,7 +101,9 @@ class SymphonyExtension(BaseExtension):
         request: Any = None,
     ) -> dict[str, Any]:
         params = params or {}
-        return await self._build_score(params, request, force=_param_bool(params.get("force")))
+        return await self._build_score(
+            params, request, force=_param_bool(params.get("force"))
+        )
 
     async def pause_build(
         self,
@@ -135,7 +137,9 @@ class SymphonyExtension(BaseExtension):
         payload.update(_build_log_payload(score_dir))
         return payload
 
-    async def graph(self, params: dict[str, Any] | None = None, request: Any = None) -> dict[str, Any]:
+    async def graph(
+        self, params: dict[str, Any] | None = None, request: Any = None
+    ) -> dict[str, Any]:
         del params, request
         config = load_symphony_config()
         score_dir = config.paths.score_dir
@@ -170,7 +174,9 @@ class SymphonyExtension(BaseExtension):
 
         return await asyncio.to_thread(load)
 
-    async def plan(self, params: dict[str, Any] | None = None, request: Any = None) -> dict[str, Any]:
+    async def plan(
+        self, params: dict[str, Any] | None = None, request: Any = None
+    ) -> dict[str, Any]:
         params = params or {}
         query = str(params.get("query") or "").strip()
         if not query:
@@ -178,10 +184,9 @@ class SymphonyExtension(BaseExtension):
         candidate_skill_ids = _candidate_skill_ids_from_params(
             params.get("candidate_skill_ids")
         )
-        configured_language = params.get("language")
-        if configured_language is None:
-            configured_language = get_config().get("preferred_language", "zh")
-        language = resolve_orchestration_language(configured_language)
+        language = resolve_orchestration_language(
+            get_config().get("preferred_language", "zh")
+        )
         config = load_symphony_config()
         score_dir = config.paths.score_dir
         orchestration_config = config.orchestration
@@ -204,12 +209,29 @@ class SymphonyExtension(BaseExtension):
                 mode=requested_orchestration_config.mode,
             )
 
-        try:
-            load_score_artifacts(score_dir)
-        except FileNotFoundError as exc:
-            payload = _missing_artifacts_payload(score_dir, exc)
-            payload.update(_build_log_payload(score_dir))
-            return payload
+        status = await self.score_status(request=request)
+        if not status.get("success"):
+            return {
+                "success": False,
+                "detail": "symphony.score_status failed before planning",
+                "score_status": status,
+            }
+        if _score_needs_build(status):
+            score_build = await self.build_score(request=request)
+            score_build["rebuilt"] = True
+            if not score_build.get("success"):
+                return {
+                    "success": False,
+                    "detail": "symphony.build_score failed before planning",
+                    "score_status": status,
+                    "score_build": score_build,
+                }
+        else:
+            score_build = {
+                "success": True,
+                "rebuilt": False,
+                "reason": "not_required",
+            }
         progress_callback = _beam_progress_callback(request)
         payload = await plan_from_score(
             score_dir,
@@ -228,6 +250,8 @@ class SymphonyExtension(BaseExtension):
                 "query": query,
                 "mode": orchestration_config.mode,
                 "language": language,
+                "score_status": status,
+                "score_build": score_build,
                 **payload,
             }
         presentation = _build_presentation(payload, language=language)
@@ -238,11 +262,9 @@ class SymphonyExtension(BaseExtension):
             "mode": orchestration_config.mode,
             "language": language,
             "content": presentation["markdown"],
-            "markdown": presentation["markdown"],
-            "mermaid": presentation["mermaid"],
             "direct_display": True,
-            "display_format": "markdown",
-            "presentation": presentation,
+            "score_status": status,
+            "score_build": score_build,
             "result": payload,
         }
 
@@ -261,7 +283,11 @@ class SymphonyExtension(BaseExtension):
         current_task = asyncio.current_task()
         async with self._build_guard:
             active_task = self._active_build_task
-            if active_task is not None and active_task is not current_task and not active_task.done():
+            if (
+                active_task is not None
+                and active_task is not current_task
+                and not active_task.done()
+            ):
                 payload = {
                     "success": False,
                     "score_dir": str(score_dir),
@@ -329,7 +355,21 @@ async def register_extensions(registry):
     return [extension]
 
 
-def _missing_artifacts_payload(score_dir: Path, exc: FileNotFoundError) -> dict[str, Any]:
+def _score_needs_build(status: dict[str, Any]) -> bool:
+    if not bool(status.get("exists", False)) or bool(status.get("stale", False)):
+        return True
+    for key in ("added_count", "changed_count", "removed_count"):
+        try:
+            if int(status.get(key) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _missing_artifacts_payload(
+    score_dir: Path, exc: FileNotFoundError
+) -> dict[str, Any]:
     return {
         "success": False,
         "score_dir": str(score_dir),
@@ -350,30 +390,16 @@ def _param_bool(value: Any, default: bool = False) -> bool:
 
 def _beam_progress_callback(request: Any):
     async def callback(event: dict[str, Any]) -> None:
-        await _emit_beam_progress_event(request, _beam_display_event(event))
+        await _emit_beam_progress_event(request, event)
 
     return callback
-
-
-def _beam_display_event(event: dict[str, Any]) -> dict[str, Any]:
-    payload = event.get("payload")
-    if not isinstance(payload, dict):
-        return event
-    return {
-        "type": event.get("type") or "symphony.beam_search.update",
-        "event": event.get("event") or "",
-        "language": event.get("language") or "cn",
-        "sequence": event.get("sequence") or 0,
-        "round_index": event.get("round") or 0,
-        "graph": payload.get("graph") or {"nodes": [], "edges": []},
-    }
 
 
 async def _emit_beam_progress_event(request: Any, event: dict[str, Any]) -> None:
     if request is None:
         return
     payload = {
-        "event_type": event.get("type") or "symphony.beam_search.update",
+        "event_type": "symphony.beam_search.update",
         "beam_search_event": event,
     }
     metadata = getattr(request, "metadata", None)
@@ -483,7 +509,7 @@ def _read_build_log(score_dir: Path, *, limit: int = 80) -> list[dict[str, Any]]
     except OSError:
         return []
     entries: list[dict[str, Any]] = []
-    for line in lines[-max(1, limit):]:
+    for line in lines[-max(1, limit) :]:
         try:
             payload = json.loads(line)
         except json.JSONDecodeError:
@@ -548,12 +574,18 @@ def _latest_effective_build_log_entry(entries: list[dict[str, Any]]) -> dict[str
     if not entries:
         return {}
     for entry in reversed(entries):
-        if str(entry.get("stage") or "") in {"update.done", "update.failed", "update.paused"}:
+        if str(entry.get("stage") or "") in {
+            "update.done",
+            "update.failed",
+            "update.paused",
+        }:
             return entry
     return entries[-1]
 
 
-def _build_token_usage_payload(score_dir: Path, entries: list[dict[str, Any]]) -> dict[str, Any]:
+def _build_token_usage_payload(
+    score_dir: Path, entries: list[dict[str, Any]]
+) -> dict[str, Any]:
     status = _build_progress(entries).get("status")
     if status == "running":
         current = _current_token_usage_summary()
@@ -693,114 +725,6 @@ def _build_presentation(
     return {"markdown": "\n".join(lines), "mermaid": mermaid}
 
 
-def _beam_search_markdown(payload: Any) -> list[str]:
-    if not isinstance(payload, dict):
-        return []
-    graph = payload.get("graph")
-    rounds = payload.get("rounds")
-    lines = [
-        "## Beam search",
-        "",
-        "```mermaid",
-        _beam_graph_to_mermaid(graph),
-        "```",
-        "",
-        (
-            f"- Seeds: {_format_inline_list(payload.get('seed_skill_ids'))}"
-        ),
-        (
-            f"- TopK: `{payload.get('top_k')}`; "
-            f"max depth: `{payload.get('max_depth')}`"
-        ),
-    ]
-    if isinstance(rounds, list):
-        lines.append(f"- Rounds: `{len(rounds)}`")
-        round_lines = [
-            _beam_round_summary(item)
-            for item in rounds
-            if isinstance(item, dict)
-        ]
-        if round_lines:
-            lines.extend(["", "### Rounds", *round_lines])
-    return lines
-
-
-def _beam_round_summary(item: dict[str, Any]) -> str:
-    return (
-        f"- Round `{item.get('round')}`: "
-        f"`{item.get('candidate_count', item.get('judged_candidate_count', 0))}` "
-        f"candidates, `{item.get('selected_count', item.get('accepted_count', 0))}` "
-        f"selected, `{item.get('rejected_count', 0)}` rejected, "
-        f"`{item.get('retained_count', 0)}` retained"
-    )
-
-
-def _beam_graph_to_mermaid(graph: Any) -> str:
-    if not isinstance(graph, dict):
-        return "flowchart LR\n  none[\"No beam search graph\"]"
-    nodes = [node for node in graph.get("nodes") or [] if isinstance(node, dict)]
-    edges = [edge for edge in graph.get("edges") or [] if isinstance(edge, dict)]
-    if not nodes:
-        return "flowchart LR\n  none[\"No beam search graph\"]"
-
-    node_keys = {
-        str(node.get("id") or ""): f"B{index}"
-        for index, node in enumerate(nodes, start=1)
-        if str(node.get("id") or "").strip()
-    }
-    lines = ["flowchart LR"]
-    for node in nodes:
-        node_id = str(node.get("id") or "").strip()
-        if not node_id:
-            continue
-        label = str(node.get("label") or node_id)
-        lines.append(f'  {node_keys[node_id]}["{_mermaid_escape(label)}"]')
-    link_styles = []
-    link_index = 0
-    for edge in edges:
-        source = str(edge.get("source") or "").strip()
-        target = str(edge.get("target") or "").strip()
-        if source not in node_keys or target not in node_keys:
-            continue
-        lines.append(f"  {node_keys[source]} --> {node_keys[target]}")
-        edge_style = _beam_edge_style(str(edge.get("status") or ""))
-        if edge_style:
-            link_styles.append(f"  linkStyle {link_index} {edge_style}")
-        link_index += 1
-    lines.extend(
-        [
-            "  classDef seed fill:#e0f2fe,stroke:#0284c7,color:#0f172a",
-            "  classDef pending fill:#fef9c3,stroke:#ca8a04,color:#422006",
-            "  classDef selected fill:#dcfce7,stroke:#16a34a,color:#052e16",
-            "  classDef rejected fill:#f3f4f6,stroke:#9ca3af,color:#6b7280",
-            "  classDef final fill:#ede9fe,stroke:#7c3aed,color:#2e1065",
-        ]
-    )
-    for node in nodes:
-        node_id = str(node.get("id") or "").strip()
-        status = str(node.get("status") or "pending").strip()
-        if node_id in node_keys and status in {
-            "seed",
-            "pending",
-            "selected",
-            "rejected",
-            "final",
-        }:
-            lines.append(f"  class {node_keys[node_id]} {status}")
-    lines.extend(link_styles)
-    return "\n".join(lines)
-
-
-def _beam_edge_style(status: str) -> str:
-    if status == "rejected":
-        return "stroke:#9ca3af,stroke-width:1px,color:#6b7280"
-    if status == "selected":
-        return "stroke:#16a34a,stroke-width:2px"
-    if status == "final":
-        return "stroke:#7c3aed,stroke-width:3px"
-    return ""
-
-
 def _plan_to_mermaid(plan: dict[str, Any], graph: dict[str, Any]) -> str:
     steps = plan.get("steps") if isinstance(plan, dict) else []
     edges = graph.get("edges") if isinstance(graph, dict) else []
@@ -820,12 +744,16 @@ def _plan_to_mermaid(plan: dict[str, Any], graph: dict[str, Any]) -> str:
         if target and target not in node_ids:
             node_ids.append(target)
     if not node_ids:
-        return "flowchart LR\n  none[\"No Symphony plan\"]"
+        return 'flowchart LR\n  none["No Symphony plan"]'
 
-    node_keys = {node_id: f"N{index}" for index, node_id in enumerate(node_ids, start=1)}
+    node_keys = {
+        node_id: f"N{index}" for index, node_id in enumerate(node_ids, start=1)
+    }
     lines = ["flowchart LR"]
     for node_id in node_ids:
-        lines.append(f'  {node_keys[node_id]}["{_mermaid_escape(labels.get(node_id) or node_id)}"]')
+        lines.append(
+            f'  {node_keys[node_id]}["{_mermaid_escape(labels.get(node_id) or node_id)}"]'
+        )
     for edge in edges or []:
         source = str(edge.get("source") or "")
         target = str(edge.get("target") or "")
@@ -836,19 +764,3 @@ def _plan_to_mermaid(plan: dict[str, Any], graph: dict[str, Any]) -> str:
 
 def _mermaid_escape(value: str) -> str:
     return str(value or "").replace("\\", "\\\\").replace('"', '\\"')[:80]
-
-
-def _format_inline_list(values: Any) -> str:
-    if not isinstance(values, list) or not values:
-        return "`none`"
-    rendered = [
-        f"`{_compact_text(str(value), 80)}`"
-        for value in values[:8]
-        if str(value or "").strip()
-    ]
-    return ", ".join(rendered) if rendered else "`none`"
-
-
-def _compact_text(value: str, limit: int) -> str:
-    text = " ".join(str(value or "").split())
-    return text if len(text) <= limit else text[: limit - 3] + "..."

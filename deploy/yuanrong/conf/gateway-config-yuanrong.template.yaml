@@ -38,7 +38,10 @@ symphony:
     min_edge_confidence: 0.1
 
   orchestration:
+    # fast is the default one-shot path; beam enables bidirectional search.
     mode: fast
+    # Beam-only candidate count retained after each search round.
+    top_k: 3
     max_depth: 4
     min_edge_confidence: 0.3
 

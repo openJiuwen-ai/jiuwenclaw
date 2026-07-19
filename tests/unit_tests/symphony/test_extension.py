@@ -31,6 +31,12 @@ def _use_chinese_preferred_language(monkeypatch):
         lambda: {"preferred_language": "zh"},
     )
 
+    async def fresh_score(self, params=None, request=None):
+        del self, params, request
+        return {"success": True, "exists": True, "stale": False}
+
+    monkeypatch.setattr(SymphonyExtension, "score_status", fresh_score)
+
 
 class _Registry:
     def __init__(self):
@@ -53,7 +59,9 @@ def test_extension_registers_rpc_handlers():
 
 
 def test_symphony_skill_metadata():
-    skill_md = Path("jiuwenswarm/extensions/symphony/skills/symphony-assistant/SKILL.md")
+    skill_md = Path(
+        "jiuwenswarm/extensions/symphony/skills/symphony-assistant/SKILL.md"
+    )
     content = skill_md.read_text(encoding="utf-8")
 
     assert "name: symphony-assistant" in content
@@ -74,6 +82,48 @@ def test_extension_requires_query():
 
     assert result["success"] is False
     assert "query is required" in result["detail"]
+
+
+def test_plan_refreshes_stale_score_in_extension(monkeypatch, tmp_path):
+    extension = SymphonyExtension()
+    calls = []
+
+    async def stale_status(params=None, request=None):
+        del params, request
+        calls.append("status")
+        return {"success": True, "exists": True, "stale": True}
+
+    async def build_score(params=None, request=None):
+        del params, request
+        calls.append("build")
+        return {"success": True}
+
+    async def plan_from_score(*args, **kwargs):
+        del args, kwargs
+        calls.append("plan")
+        return {"status": "ready", "recommended_plans": []}
+
+    monkeypatch.setattr(extension, "score_status", stale_status)
+    monkeypatch.setattr(extension, "build_score", build_score)
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.plan_from_score",
+        plan_from_score,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.load_symphony_config",
+        lambda: symphony_config_from_dict(
+            {"paths": {"score_dir": str(tmp_path / "score")}}
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.symphony.extension.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+
+    result = asyncio.run(extension.plan({"query": "compose"}))
+
+    assert calls == ["status", "build", "plan"]
+    assert result["score_build"] == {"success": True, "rebuilt": True}
 
 
 def test_plan_uses_llm_plan_from_score(monkeypatch, tmp_path):
@@ -126,7 +176,7 @@ def test_plan_uses_llm_plan_from_score(monkeypatch, tmp_path):
     assert result["success"] is True
     assert result["mode"] == "fast"
     assert result["direct_display"] is True
-    assert result["display_format"] == "markdown"
+    assert "display_format" not in result
     assert seen["score_dir"] == configured_score_dir.resolve()
     assert seen["query"] == "do work"
     assert seen["llm_config"] is llm_config
@@ -134,7 +184,7 @@ def test_plan_uses_llm_plan_from_score(monkeypatch, tmp_path):
     assert seen["kwargs"]["language"] == "cn"
 
 
-def test_plan_uses_explicit_internal_language(monkeypatch, tmp_path):
+def test_plan_ignores_internal_language_parameter(monkeypatch, tmp_path):
     configured_score_dir = tmp_path / "configured"
     seen = {}
     monkeypatch.setattr(
@@ -170,9 +220,9 @@ def test_plan_uses_explicit_internal_language(monkeypatch, tmp_path):
         SymphonyExtension().plan({"query": "do work", "language": "en"})
     )
 
-    assert result["language"] == "en"
-    assert result["content"].startswith("## Symphony plan")
-    assert seen["language"] == "en"
+    assert result["language"] == "cn"
+    assert result["content"].startswith("## Symphony 编排计划")
+    assert seen["language"] == "cn"
 
 
 def test_plan_resolves_language_from_runtime_config(monkeypatch, tmp_path):
@@ -249,9 +299,7 @@ def test_plan_uses_requested_fast_mode(monkeypatch, tmp_path):
         fake_plan_from_score,
     )
 
-    result = asyncio.run(
-        SymphonyExtension().plan({"query": "do work", "mode": "fast"})
-    )
+    result = asyncio.run(SymphonyExtension().plan({"query": "do work", "mode": "fast"}))
 
     assert result["success"] is True
     assert result["mode"] == "fast"
@@ -411,9 +459,7 @@ def test_plan_uses_requested_beam_mode(monkeypatch, tmp_path):
         fake_plan_from_score,
     )
 
-    result = asyncio.run(
-        SymphonyExtension().plan({"query": "do work", "mode": "beam"})
-    )
+    result = asyncio.run(SymphonyExtension().plan({"query": "do work", "mode": "beam"}))
 
     assert result["success"] is True
     assert result["mode"] == "beam"
@@ -445,15 +491,10 @@ def test_plan_streams_beam_progress_events(monkeypatch, tmp_path):
         del score_dir, query, received_llm_config
         await kwargs["progress_callback"](
             {
-                "type": "symphony.beam_search.started",
                 "event": "started",
                 "language": "en",
-                "sequence": 1,
-                "round": 0,
-                "payload": {
-                    "seed_skill_ids": ["skill-1"],
-                    "graph": {"nodes": [], "edges": []},
-                },
+                "round_index": 0,
+                "graph": {"nodes": [], "edges": []},
             }
         )
         return {
@@ -480,10 +521,8 @@ def test_plan_streams_beam_progress_events(monkeypatch, tmp_path):
     assert result["success"] is True
     assert events == [
         {
-            "type": "symphony.beam_search.started",
             "event": "started",
             "language": "en",
-            "sequence": 1,
             "round_index": 0,
             "graph": {"nodes": [], "edges": []},
         }
@@ -546,9 +585,8 @@ def test_plan_presentation_uses_recommended_plan(monkeypatch, tmp_path):
                 ]
             },
             "beam_search": {
-                "seed_skill_ids": ["skill-1"],
-                "top_k": 2,
-                "max_depth": 3,
+                "language": "cn",
+                "round_index": 1,
                 "graph": {
                     "nodes": [
                         {
@@ -556,92 +594,33 @@ def test_plan_presentation_uses_recommended_plan(monkeypatch, tmp_path):
                             "label": "Skill 1",
                             "status": "final",
                             "seed": True,
-                            "direction": "seed",
                         },
                         {
                             "id": "skill-2",
                             "label": "Skill 2",
                             "status": "final",
                             "seed": False,
-                            "direction": "forward",
                         },
                         {
                             "id": "skill-3",
                             "label": "Skill 3",
                             "status": "rejected",
                             "seed": False,
-                            "direction": "forward",
                         },
                     ],
                     "edges": [
                         {
-                            "id": "skill-1->skill-2",
                             "source": "skill-1",
                             "target": "skill-2",
                             "status": "final",
-                            "confidence": 0.91,
                         },
                         {
-                            "id": "skill-1->skill-3",
                             "source": "skill-1",
                             "target": "skill-3",
                             "status": "rejected",
-                            "confidence": 0.72,
                         },
                     ],
                 },
-                "rounds": [
-                    {
-                        "round": 1,
-                        "frontier_count": 1,
-                        "judge_request_count": 1,
-                        "candidate_count": 2,
-                        "selected_count": 1,
-                        "rejected_count": 1,
-                        "candidates": [
-                            {
-                                "direction": "forward",
-                                "current_skill_id": "skill-1",
-                                "candidate_skill_id": "skill-2",
-                                "candidate_label": "Skill 2",
-                                "status": "selected",
-                                "edge": {
-                                    "id": "skill-1->skill-2",
-                                    "source": "skill-1",
-                                    "target": "skill-2",
-                                    "confidence": 0.91,
-                                },
-                            },
-                            {
-                                "direction": "forward",
-                                "current_skill_id": "skill-1",
-                                "candidate_skill_id": "skill-3",
-                                "candidate_label": "Skill 3",
-                                "status": "rejected",
-                                "edge": {
-                                    "id": "skill-1->skill-3",
-                                    "source": "skill-1",
-                                    "target": "skill-3",
-                                    "confidence": 0.72,
-                                },
-                            }
-                        ],
-                        "retained_paths": [
-                            {
-                                "rank": 1,
-                                "score": 0.88,
-                                "skill_ids": ["skill-1", "skill-2"],
-                            }
-                        ],
-                    }
-                ],
-                "retained_paths": [
-                    {
-                        "rank": 1,
-                        "score": 0.88,
-                        "skill_ids": ["skill-1", "skill-2"],
-                    }
-                ],
             },
         }
 
@@ -654,9 +633,9 @@ def test_plan_presentation_uses_recommended_plan(monkeypatch, tmp_path):
 
     assert result["success"] is True
     assert "## Recommended Plan" in result["content"]
-    assert result["markdown"] == result["content"]
+    assert "markdown" not in result
     assert result["direct_display"] is True
-    assert result["display_format"] == "markdown"
+    assert "display_format" not in result
     assert "Status:" not in result["content"]
     assert result["result"]["recommended_plans"][0]["status"] == "ready"
     assert "Best match." in result["content"]
@@ -680,19 +659,13 @@ def test_plan_presentation_uses_recommended_plan(monkeypatch, tmp_path):
         result["result"]["recommended_plans"][0]["can_feed_edges"][0]["confidence"]
         == 0.91
     )
-    assert 'N1["Skill 1"]' in result["mermaid"]
-    assert "N1 --> N2" in result["mermaid"]
-    assert "-->|" not in result["mermaid"]
-    assert "0.91" not in result["mermaid"]
+    assert 'N1["Skill 1"]' in result["content"]
+    assert "N1 --> N2" in result["content"]
 
 
 def test_plan_presentation_does_not_ask_to_execute_empty_plan():
     presentation = _build_presentation(
-        {
-            "recommended_plans": [
-                {"title": "Empty Plan", "status": "ready", "steps": []}
-            ]
-        }
+        {"recommended_plans": [{"title": "Empty Plan", "status": "ready", "steps": []}]}
     )
 
     assert "是否按照上述编排结果执行？" not in presentation["markdown"]
@@ -719,11 +692,7 @@ def test_plan_presentation_asks_to_execute_in_english():
 
 def test_plan_presentation_does_not_ask_to_execute_no_plan():
     presentation = _build_presentation(
-        {
-            "recommended_plans": [
-                {"title": "No Plan", "status": "no_plan", "steps": []}
-            ]
-        }
+        {"recommended_plans": [{"title": "No Plan", "status": "no_plan", "steps": []}]}
     )
 
     assert "是否按照上述编排结果执行？" not in presentation["markdown"]
@@ -766,7 +735,9 @@ def test_build_score_awaits_service_and_records_build_log(monkeypatch, tmp_path)
     async def fake_build_score(*args, **kwargs):
         seen["args"] = args
         seen["kwargs"] = kwargs
-        kwargs["build_log"]("fingerprint.extract.start", current=1, total=1, path="skill-1")
+        kwargs["build_log"](
+            "fingerprint.extract.start", current=1, total=1, path="skill-1"
+        )
         return _Result()
 
     monkeypatch.setattr(

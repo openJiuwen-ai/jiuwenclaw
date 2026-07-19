@@ -61,15 +61,7 @@ def _symphony_direct_display_content(result: Any) -> str:
         return ""
     if not bool(result.get("direct_display", False)):
         return ""
-    presentation = result.get("presentation")
-    presentation_markdown = (
-        presentation.get("markdown") if isinstance(presentation, dict) else None
-    )
-    rendered = (
-        result.get("content")
-        or result.get("markdown")
-        or presentation_markdown
-    )
+    rendered = result.get("content")
     return rendered.strip() if isinstance(rendered, str) else ""
 
 
@@ -83,10 +75,6 @@ def _copy_symphony_result_fields(
         "score_status",
         "score_build",
         "direct_display",
-        "display_format",
-        "mermaid",
-        "summary",
-        "beam_search",
         "continue_after_display",
         "followup_action",
     ):

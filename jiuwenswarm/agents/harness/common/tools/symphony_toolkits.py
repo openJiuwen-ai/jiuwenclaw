@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import logging
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -17,21 +15,12 @@ from jiuwenswarm.agents.harness.common.tool_progress_context import (
     current_tool_progress,
 )
 from jiuwenswarm.symphony.config import load_symphony_config
-from jiuwenswarm.symphony.orchestration.language import (
-    resolve_orchestration_language,
-)
-from jiuwenswarm.symphony.score_storage import (
-    CURRENT_POINTER_FILENAME,
-    resolve_score_artifact_dir,
-)
 
 logger = logging.getLogger(__name__)
 
+
 class SymphonyToolkit:
     """Expose Symphony extension RPC methods as model-callable tools."""
-
-    def __init__(self, language: str = "cn") -> None:
-        self.language = resolve_orchestration_language(language)
 
     @staticmethod
     def _resolve_timeout_s(default_s: float = 1800.0) -> float:
@@ -77,7 +66,11 @@ class SymphonyToolkit:
             logger.exception("Symphony RPC failed: %s", method)
             return {"success": False, "detail": f"{method}: {exc}"}
 
-        return payload if isinstance(payload, dict) else {"success": True, "result": payload}
+        return (
+            payload
+            if isinstance(payload, dict)
+            else {"success": True, "result": payload}
+        )
 
     @staticmethod
     def _disabled_payload(method: str) -> dict[str, Any]:
@@ -97,100 +90,6 @@ class SymphonyToolkit:
         if not self.is_enabled():
             return self._disabled_payload("symphony.build_score")
         return await self._call_rpc("symphony.build_score", {})
-
-    @staticmethod
-    def _score_needs_build(status: dict[str, Any]) -> bool:
-        if not bool(status.get("exists", False)):
-            return True
-        if bool(status.get("stale", False)):
-            return True
-        for key in ("added_count", "changed_count", "removed_count"):
-            try:
-                if int(status.get(key) or 0) > 0:
-                    return True
-            except (TypeError, ValueError):
-                continue
-        return False
-
-    @staticmethod
-    def _score_summary_markdown(
-        status: dict[str, Any],
-        update: dict[str, Any] | None,
-    ) -> str:
-        lines = ["## Symphony score", ""]
-        if status.get("success"):
-            state = "stale" if status.get("stale") else "fresh"
-            if not status.get("exists"):
-                state = "missing"
-            reason = str(status.get("reason") or "").strip()
-            lines.append(f"- Status: `{state}`")
-            if reason:
-                lines.append(f"- Detail: {reason}")
-            for key, label in (
-                ("added_count", "Added"),
-                ("changed_count", "Changed"),
-                ("removed_count", "Removed"),
-            ):
-                value = status.get(key)
-                if value not in (None, ""):
-                    lines.append(f"- {label}: `{value}`")
-        else:
-            detail = str(status.get("detail") or "score status failed").strip()
-            lines.append("- Status: `failed`")
-            lines.append(f"- Detail: {detail}")
-        if update is not None:
-            if update.get("rebuilt") is False:
-                lines.append("- Update: `not required`")
-                created_at = str(update.get("score_created_at") or "").strip()
-                if created_at:
-                    lines.append(f"- Score created: `{created_at}`")
-                return "\n".join(lines)
-
-            update_state = "succeeded" if update.get("success") else "failed"
-            lines.append(f"- Update: `{update_state}`")
-            detail = str(update.get("detail") or update.get("reason") or "").strip()
-            if detail:
-                lines.append(f"- Update detail: {detail}")
-            created_at = str(update.get("score_created_at") or "").strip()
-            if created_at:
-                lines.append(f"- Score created: `{created_at}`")
-            total_tokens = update.get("llm_total_tokens")
-            if total_tokens not in (None, ""):
-                lines.append(f"- Build tokens: `{total_tokens}`")
-        else:
-            lines.append("- Update: `not required`")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _attach_display_payload(
-        payload: dict[str, Any],
-        status: dict[str, Any],
-        update: dict[str, Any] | None,
-    ) -> None:
-        del status, update
-        presentation = payload.get("presentation")
-        presentation_markdown = (
-            presentation.get("markdown") if isinstance(presentation, dict) else None
-        )
-        presentation_mermaid = (
-            presentation.get("mermaid") if isinstance(presentation, dict) else None
-        )
-        rendered = (
-            payload.get("content")
-            or payload.get("markdown")
-            or presentation_markdown
-        )
-        mermaid = payload.get("mermaid") or presentation_mermaid
-        if isinstance(mermaid, str) and mermaid.strip():
-            payload.setdefault("mermaid", mermaid.strip())
-        if not isinstance(rendered, str):
-            rendered = ""
-        rendered = rendered.strip()
-        payload["content"] = rendered
-        payload["markdown"] = rendered
-        payload["summary"] = rendered
-        payload.setdefault("display_format", "markdown")
-        payload.setdefault("direct_display", True)
 
     @classmethod
     def _compact_plan_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
@@ -287,69 +186,6 @@ class SymphonyToolkit:
                 compact["llm_total_tokens"] = total_tokens
         return compact
 
-    @classmethod
-    def _score_build_summary(
-        cls,
-        status: dict[str, Any],
-        update: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        if isinstance(update, dict):
-            compact = cls._compact_score_build(update)
-            if update.get("success") is not False:
-                metadata = cls._score_metadata(status, update)
-                for key, value in metadata.items():
-                    compact.setdefault(key, value)
-            return compact
-
-        if not status.get("success"):
-            reason = "score_status_failed"
-        elif cls._score_needs_build(status):
-            reason = "not_run"
-        else:
-            reason = "not_required"
-        return {
-            "rebuilt": False,
-            "reason": reason,
-            **cls._score_metadata(status, None),
-        }
-
-    @staticmethod
-    def _score_metadata(
-        status: dict[str, Any],
-        update: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        score_dir = ""
-        if isinstance(update, dict):
-            score_dir = str(update.get("score_dir") or "").strip()
-        if not score_dir:
-            score_dir = str(status.get("score_dir") or "").strip()
-        if not score_dir:
-            return {}
-
-        root = Path(score_dir)
-        metadata: dict[str, Any] = {}
-        pointer_path = root / CURRENT_POINTER_FILENAME
-        if pointer_path.is_file():
-            try:
-                pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                pointer = {}
-            if isinstance(pointer, dict):
-                version = str(pointer.get("version") or "").strip()
-                if version:
-                    metadata["version"] = version
-
-        try:
-            manifest_path = resolve_score_artifact_dir(root) / "score_manifest.json"
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            manifest = {}
-        if isinstance(manifest, dict):
-            created_at = str(manifest.get("created_at") or "").strip()
-            if created_at:
-                metadata["score_created_at"] = created_at
-        return metadata
-
     @staticmethod
     def _llm_total_tokens(token_usage: Any) -> int:
         if not isinstance(token_usage, dict):
@@ -391,16 +227,12 @@ class SymphonyToolkit:
         nodes = graph.get("nodes")
         if isinstance(nodes, list):
             compact["nodes"] = [
-                cls._compact_beam_node(node)
-                for node in nodes
-                if isinstance(node, dict)
+                cls._compact_beam_node(node) for node in nodes if isinstance(node, dict)
             ]
         edges = graph.get("edges")
         if isinstance(edges, list):
             compact["edges"] = [
-                cls._compact_beam_edge(edge)
-                for edge in edges
-                if isinstance(edge, dict)
+                cls._compact_beam_edge(edge) for edge in edges if isinstance(edge, dict)
             ]
         return compact
 
@@ -488,16 +320,18 @@ class SymphonyToolkit:
     def _needs_external_skill_discovery(cls, payload: dict[str, Any]) -> bool:
         planning_payload = cls._planning_payload(payload)
         plan = cls._primary_plan(planning_payload)
-        status = str(
-            plan.get("status")
-            or planning_payload.get("status")
-            or payload.get("status")
-            or ""
-        ).strip().lower()
+        status = (
+            str(
+                plan.get("status")
+                or planning_payload.get("status")
+                or payload.get("status")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
         missing_inputs = (
-            plan.get("missing_inputs")
-            or planning_payload.get("missing_inputs")
-            or []
+            plan.get("missing_inputs") or planning_payload.get("missing_inputs") or []
         )
         if status == "needs_input" or missing_inputs:
             return False
@@ -509,9 +343,7 @@ class SymphonyToolkit:
         if not isinstance(execution_graph, dict):
             execution_graph = payload.get("execution_graph")
         graph_nodes = (
-            execution_graph.get("nodes")
-            if isinstance(execution_graph, dict)
-            else []
+            execution_graph.get("nodes") if isinstance(execution_graph, dict) else []
         )
         return not steps and not graph_nodes
 
@@ -540,31 +372,7 @@ class SymphonyToolkit:
     ) -> dict[str, Any]:
         if not self.is_enabled():
             return self._compact_plan_payload(self._disabled_payload("symphony.plan"))
-        status = await self.score_status()
-        if not status.get("success"):
-            detail = self._failure_detail(status, "symphony.score_status failed")
-            return self._compact_plan_payload({
-                "success": False,
-                "detail": f"symphony.score_status failed before planning: {detail}",
-                "score_status": status,
-            })
-        update: dict[str, Any] | None = None
-        if status.get("success") and self._score_needs_build(status):
-            update = await self.refresh_score()
-            if not update.get("success"):
-                detail = self._failure_detail(update, "symphony.build_score failed")
-                return self._compact_plan_payload({
-                    "success": False,
-                    "detail": f"symphony.build_score failed before planning: {detail}",
-                    "score_status": status,
-                    "score_build": self._score_build_summary(status, update),
-                })
-        score_build = self._score_build_summary(status, update)
-
-        params: dict[str, Any] = {
-            "query": str(query or "").strip(),
-            "language": self.language,
-        }
+        params: dict[str, Any] = {"query": str(query or "").strip()}
         mode_text = str(mode or "").strip()
         if mode_text:
             params["mode"] = mode_text
@@ -575,10 +383,7 @@ class SymphonyToolkit:
             params["candidate_skill_ids"] = normalized_candidate_skill_ids
         payload = await self._call_rpc("symphony.plan", params)
         if isinstance(payload, dict):
-            payload.setdefault("score_status", status)
-            payload["score_build"] = score_build
             self._attach_followup_control(payload)
-            self._attach_display_payload(payload, status, score_build)
             return self._compact_plan_payload(payload)
         return payload
 

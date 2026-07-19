@@ -61,35 +61,8 @@ async def test_beam_batches_outgoing_neighbors_and_filters_low_scores(tmp_path):
     assert result["planning_mode"] == "bidirectional_beam"
     assert result["llm_call_count"] == 1
     assert result["recommended_plans"][0]["title"] == "compose an alpha plan"
-    assert result["beam_search"]["seed_skill_ids"] == ["skill-a"]
     assert result["beam_search"]["round_index"] == 1
-    assert result["beam_search"]["events"][0]["event"] == "started"
-    assert result["beam_search"]["events"][0]["payload"]["graph"]["nodes"] == [
-        {
-            "id": "skill-a",
-            "label": "Skill A",
-            "status": "seed",
-            "seed": True,
-            "direction": "seed",
-        }
-    ]
-    assert result["beam_search"]["rounds"][0]["selected_count"] == 1
-    assert result["beam_search"]["rounds"][0]["rejected_count"] == 1
-    assert result["beam_search"]["rounds"][0]["retained_paths"][0]["skill_ids"] == [
-        "skill-a",
-        "skill-b",
-    ]
-    candidates = result["beam_search"]["rounds"][0]["candidates"]
-    assert [item["candidate_skill_id"] for item in candidates] == [
-        "skill-b",
-        "skill-c",
-    ]
-    assert {item["status"] for item in candidates} == {"selected", "rejected"}
-    assert all("score" not in item and "reason" not in item for item in candidates)
-    graph_nodes = {
-        item["id"]: item
-        for item in result["beam_search"]["graph"]["nodes"]
-    }
+    graph_nodes = {item["id"]: item for item in result["beam_search"]["graph"]["nodes"]}
     assert graph_nodes["skill-a"]["status"] == "final"
     assert graph_nodes["skill-a"]["seed"] is True
     assert graph_nodes["skill-b"]["status"] == "final"
@@ -107,8 +80,9 @@ async def test_beam_batches_outgoing_neighbors_and_filters_low_scores(tmp_path):
         "skill-c",
     ]
     assert all(set(item) == {"candidate_id", "skill"} for item in payload["candidates"])
-    assert "Write all user-visible natural-language fields in Simplified Chinese" in (
-        llm.calls[0]["system_prompt"]
+    assert (
+        "Write all user-visible natural-language fields in Simplified Chinese"
+        in (llm.calls[0]["system_prompt"])
     )
     assert _plan_signatures(result) == {("skill-a", "skill-b")}
 
@@ -170,9 +144,7 @@ async def test_beam_reuses_same_round_judgement_for_duplicate_skill_edge(tmp_pat
     }
     assert first_round_current_skills == {"skill-a", "skill-c"}
     final_payload = json.loads(llm.calls[-1]["user_content"])
-    assert [item["skill"]["id"] for item in final_payload["candidates"]] == [
-        "skill-d"
-    ]
+    assert [item["skill"]["id"] for item in final_payload["candidates"]] == ["skill-d"]
     assert result["decision"]["judge_cache_misses"] >= 3
     assert any("skill-d" in signature for signature in _plan_signatures(result))
 
@@ -256,13 +228,13 @@ async def test_beam_merges_converging_paths_into_dag_plan(tmp_path):
 
     assert ("skill-a", "skill-b", "skill-c") in _plan_signatures(result)
     merged = next(
-        plan for plan in result["recommended_plans"]
+        plan
+        for plan in result["recommended_plans"]
         if tuple(step["skill_id"] for step in plan["steps"])
         == ("skill-a", "skill-b", "skill-c")
     )
     assert {
-        (edge["source_id"], edge["target_id"])
-        for edge in merged["can_feed_edges"]
+        (edge["source_id"], edge["target_id"]) for edge in merged["can_feed_edges"]
     } == {("skill-a", "skill-c"), ("skill-b", "skill-c")}
     graph = result["beam_search"]["graph"]
     assert sorted(node["id"] for node in graph["nodes"]) == [
@@ -270,11 +242,35 @@ async def test_beam_merges_converging_paths_into_dag_plan(tmp_path):
         "skill-b",
         "skill-c",
     ]
-    assert {
-        (edge["source"], edge["target"])
-        for edge in graph["edges"]
-    } == {("skill-a", "skill-c"), ("skill-b", "skill-c")}
+    assert {(edge["source"], edge["target"]) for edge in graph["edges"]} == {
+        ("skill-a", "skill-c"),
+        ("skill-b", "skill-c"),
+    }
     assert {edge["status"] for edge in graph["edges"]} == {"final", "selected"}
+
+
+async def test_beam_keeps_diverging_paths_as_separate_plans(tmp_path):
+    artifacts = _artifacts(
+        tmp_path,
+        edges=[
+            _edge("skill-a", "skill-b", confidence=0.91),
+            _edge("skill-a", "skill-c", confidence=0.9),
+        ],
+    )
+    llm = _FakeBeamLLM({"skill-b": 0.9, "skill-c": 0.9})
+
+    result = await _planner(
+        artifacts,
+        llm,
+        top_k=3,
+        max_depth=2,
+        candidate_skill_ids=["skill-a"],
+    ).plan("choose one downstream path")
+
+    assert _plan_signatures(result) == {
+        ("skill-a", "skill-b"),
+        ("skill-a", "skill-c"),
+    }
 
 
 async def test_beam_progress_callback_receives_lightweight_graph_events(tmp_path):
@@ -307,13 +303,15 @@ async def test_beam_progress_callback_receives_lightweight_graph_events(tmp_path
         "graph_merged",
         "completed",
     ]
-    assert events == result["beam_search"]["events"]
     assert result["language"] == "cn"
     assert result["beam_search"]["language"] == "cn"
     assert all(event["language"] == "cn" for event in events)
-    judged = events[2]["payload"]["candidates"]
-    assert {item["status"] for item in judged} == {"selected", "rejected"}
-    assert all("score" not in item and "reason" not in item for item in judged)
+    assert all(
+        set(event) == {"event", "language", "round_index", "graph"} for event in events
+    )
+    judged_nodes = {node["id"]: node for node in events[2]["graph"]["nodes"]}
+    assert judged_nodes["skill-b"]["status"] == "selected"
+    assert judged_nodes["skill-c"]["status"] == "rejected"
 
 
 async def test_beam_judge_reason_uses_english_without_seed_copy(tmp_path):
@@ -337,8 +335,9 @@ async def test_beam_judge_reason_uses_english_without_seed_copy(tmp_path):
     assert "language" not in payload
     assert "language_instruction" not in payload
     assert "state" not in payload
-    assert "Write all user-visible natural-language fields in English" in (
-        prompt["system_prompt"]
+    assert (
+        "Write all user-visible natural-language fields in English"
+        in (prompt["system_prompt"])
     )
     assert result["reason"] == "skill-b is useful"
 
@@ -372,11 +371,7 @@ def _artifacts(
     edges: list[dict[str, object]],
 ) -> ScoreArtifacts:
     skill_ids = sorted(
-        {
-            endpoint
-            for edge in edges
-            for endpoint in (edge["source"], edge["target"])
-        }
+        {endpoint for edge in edges for endpoint in (edge["source"], edge["target"])}
     )
     return ScoreArtifacts(
         score_dir=tmp_path,

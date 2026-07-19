@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import clsx from 'clsx';
 import { ChevronDown, GitMerge } from 'lucide-react';
 import type { BeamSearchNode, BeamSearchProgress } from '../../types/beamSearch';
@@ -8,6 +8,7 @@ import {
   type BeamTreeNodeEntry,
 } from './beamSearchTreeModel';
 import './BeamSearchTree.css';
+import { useProcessTreeCollapse } from './useProcessTreeCollapse';
 
 const MAX_VISIBLE_REJECTED_CHILDREN = 4;
 
@@ -174,7 +175,7 @@ export function BeamSearchTree({
   progress,
   autoCollapse = false,
 }: BeamSearchTreeProps) {
-  const [collapsed, setCollapsed] = useState(autoCollapse);
+  const [collapsed, setCollapsed] = useProcessTreeCollapse(autoCollapse);
   const model = useMemo(() => buildBeamTree(progress), [progress]);
   const copy = COPY[progress.language];
   const selected = progress.graph.nodes.filter(
@@ -184,12 +185,6 @@ export function BeamSearchTree({
   const stage = progress.roundIndex > 0
     ? copy.round(progress.roundIndex)
     : copy.seedStage;
-
-  useEffect(() => {
-    if (autoCollapse) {
-      setCollapsed(true);
-    }
-  }, [autoCollapse]);
 
   return (
     <section className="beam-tree animate-rise" data-testid="beam-search-tree">

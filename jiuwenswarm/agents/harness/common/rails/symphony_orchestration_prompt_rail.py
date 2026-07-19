@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Callable
 
 from openjiuwen.core.single_agent.rail.base import (
@@ -157,10 +156,7 @@ class SymphonyOrchestrationPromptRail(DeepAgentRail):
 
     @staticmethod
     def _is_skill_tool(name: str) -> bool:
-        compact = str(name or "").strip().lower().replace("-", "_")
-        return compact == "skill_tool" or compact.endswith(
-            (".skill_tool", "/skill_tool", ":skill_tool")
-        )
+        return str(name or "").strip().lower() == "skill_tool"
 
     @staticmethod
     def _tool_args(inputs: ToolCallInputs) -> dict[str, Any]:
@@ -169,12 +165,6 @@ class SymphonyOrchestrationPromptRail(DeepAgentRail):
         raw_args = getattr(inputs.tool_call, "arguments", None)
         if isinstance(raw_args, dict):
             return dict(raw_args)
-        if isinstance(raw_args, str):
-            try:
-                parsed = json.loads(raw_args)
-            except (TypeError, ValueError):
-                return {}
-            return parsed if isinstance(parsed, dict) else {}
         return {}
 
     @staticmethod
