@@ -553,8 +553,12 @@ def prepare_rewrite(
     _validate_selection_request(selection)
 
     try:
-        markdown = report.read_text(encoding="utf-8")
+        report_bytes = report.read_bytes()
     except OSError as exc:
+        raise RewriteError("DOCUMENT_NOT_FOUND", "report is unavailable") from exc
+    try:
+        markdown = report_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise RewriteError("DOCUMENT_NOT_FOUND", "report is unavailable") from exc
     provenance, provenance_sha256 = _load_provenance(report)
     document_id = provenance.get("document_id")
@@ -569,7 +573,7 @@ def prepare_rewrite(
         or not re.fullmatch(r"[a-fA-F0-9]{64}", content_sha256)
     ):
         raise RewriteError("DOCUMENT_NOT_FOUND", "report provenance is invalid")
-    actual_hash = _sha256(markdown.encode("utf-8"))
+    actual_hash = _sha256(report_bytes)
     if actual_hash != content_sha256:
         raise RewriteError("REVISION_CONFLICT", "the report revision changed")
     final_result_citations = _load_final_result_citations(report, provenance, root)

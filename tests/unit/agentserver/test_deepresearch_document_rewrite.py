@@ -561,6 +561,24 @@ def test_commit_does_not_normalize_punctuation_across_paragraph_boundary(tmp_pat
     assert Path(result["report_path"]).read_text(encoding="utf-8") == "新句。\n\n，后文\n"
 
 
+def test_prepare_and_commit_preserve_crlf_punctuation_boundary(tmp_path):
+    body = "原句\r\n\r\n，后文\r\n"
+    report, _ = _write_document(tmp_path, body)
+    assert report.read_bytes() == body.encode("utf-8")
+    prepared = _prepare(tmp_path, report, "原句")
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, {slot_id: "新句。"}),
+    )
+
+    assert Path(result["report_path"]).read_bytes() == "新句。\r\n\r\n，后文\r\n".encode(
+        "utf-8"
+    )
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
