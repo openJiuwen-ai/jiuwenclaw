@@ -31,7 +31,7 @@ import pytest
 
 from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
-from openjiuwen.agent_teams.schema import deep_agent_spec as das
+from openjiuwen.harness.schema import deep_agent_spec as das
 from openjiuwen.agent_teams.harness.manifest import get_catalog, resolve_factory
 from openjiuwen.agent_teams.schema.blueprint import LeaderSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import (
@@ -1877,8 +1877,8 @@ def test_code_member_builds_declaratively_without_post_processing(
     assert "WorktreeRail" not in rail_types
     # The code system prompt is set declaratively on the spec.
     assert agent.deep_config.system_prompt
-    # CodingMemoryRail is published for the code_agent sub-agent to reuse.
-    assert ctx.extras.get(code_rails.CODING_MEMORY_EXTRAS_KEY) is not None
+    # CodingMemoryRail materializes through the derived build context.
+    assert "CodingMemoryRail" in rail_types
     coding_memory_dir = resolve_project_coding_memory_dir(
         agent_workspace_dir=str(tmp_path),
         project_dir=str(tmp_path),

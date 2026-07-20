@@ -16,7 +16,7 @@ import logging
 import pytest
 from pydantic import ValidationError
 
-from openjiuwen.agent_teams.schema import deep_agent_spec as das
+from openjiuwen.harness.schema import deep_agent_spec as das
 from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
 
 from jiuwenswarm.agents.swarm import register_swarm_providers, registry
