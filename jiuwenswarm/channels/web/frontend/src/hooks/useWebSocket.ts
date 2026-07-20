@@ -1632,6 +1632,28 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const cronMeta = payload.cron as Record<string, unknown> | undefined;
 
         // cron 广播处理：结果到达时刷新定时任务会话列表（在 sessionId 路由之前，确保无论如何都刷新）
+        // 达上限通知不绑定具体会话（后端 _send_notification_cb 不带 session_id），
+        // 必须在下方 session 守卫（if (!sessionId) return）之前拦截，否则会被该守卫
+        // 挡掉、用户看不到任何提示。走顶部 toast，不进会话历史。
+        if (typeof payload.source === 'string' && payload.source === 'proactive_notification') {
+          const notifContent = normalizeFinalContent(payload);
+          if (notifContent) {
+            useHarnessStore.getState().setProactiveNotification(notifContent);
+          }
+          return;
+        }
+
+        let sessionId = resolveEventSessionId(payload);
+        // cron 广播 session_id 为空（后端置空让消息进当前活跃会话流），fallback 到当前活跃 session
+        if (!sessionId && cronMeta) {
+          sessionId = useSessionStore.getState().currentSession?.session_id ?? null;
+          if (sessionId) {
+            ensureSessionRuntimes(sessionId);
+          }
+        }
+        if (!sessionId) return;
+
+        // cron 广播处理：结果到达时刷新触发会话列表
         if (cronMeta && typeof cronMeta === 'object') {
           const cronJobId = typeof cronMeta.job_id === 'string' ? cronMeta.job_id.trim() : '';
           const cronStatus = typeof cronMeta.status === 'string' ? cronMeta.status.trim() : '';
@@ -1696,13 +1718,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         const content = normalizeFinalContent(payload);
         finishContextCompressionTurn(sessionId);
-
-        if (typeof payload.source === 'string' && payload.source === 'proactive_notification') {
-          if (content) {
-            useHarnessStore.getState().setProactiveNotification(content);
-          }
-          return;
-        }
 
         // team 模式下，过滤成员输出，只保留外层 leader 回复。
         if (isHiddenTeamTeammateMessagePayload(currentMode ?? 'agent', payload)) {

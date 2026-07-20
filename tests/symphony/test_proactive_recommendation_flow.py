@@ -500,3 +500,76 @@ async def test_daily_limit_no_callback_no_crash():
             # 故意不调 set_send_notification_callback
             pushed = await engine.tick_now()
             assert pushed is False
+
+
+
+
+# ── 两种触发统一为"最活跃会话"：选法修复回归 ──────────────────────
+
+@pytest.mark.asyncio
+async def test_find_session_for_channel_no_history_required():
+    """推送目标选择不再要求 compressed_history 非空——刚发消息、assistant
+    还没回完的会话（历史空）仍可作为"最活跃会话"推送候选。
+
+    回归保护：推送本身只需 session_id，历史是 LLM 决策素材（render_for_llm/is_empty），
+    不该用历史空过滤推送候选。
+    """
+    from jiuwenswarm.agents.harness.common.recommendation.situation_report import (
+        SessionSummary, SituationReport,
+    )
+    # 两个会话：一个历史完整、一个历史空但 last_message_at 更新（刚发消息）
+    full = SessionSummary(
+        session_id="sess_old", channel_id="web", last_message_at=1000.0,
+        compressed_history="[User]: hi\n[Assistant]: hello",
+    )
+    fresh = SessionSummary(
+        session_id="sess_current", channel_id="web", last_message_at=2000.0,
+        compressed_history="",  # 刚发消息，assistant 没回完 → 历史空
+    )
+    report = SituationReport(sessions=[full, fresh])
+
+    # find_session_for_channel 应选 last_message_at 最新的 fresh（即便历史空）
+    chosen = report.find_session_for_channel("web")
+    assert chosen is not None
+    assert chosen.session_id == "sess_current"
+
+    # most_recent_active_session 同理
+    chosen2 = report.most_recent_active_session()
+    assert chosen2 is not None
+    assert chosen2.session_id == "sess_current"
+
+
+@pytest.mark.asyncio
+async def test_render_for_llm_still_skips_empty_history():
+    """LLM 决策素材职责不变：render_for_llm 仍只渲染 compressed_history 非空的
+    会话（历史空的不给 LLM 看决策素材），与推送目标选择解耦。"""
+    from jiuwenswarm.agents.harness.common.recommendation.situation_report import (
+        SessionSummary, SituationReport,
+    )
+    full = SessionSummary(
+        session_id="sess_old", channel_id="web", last_message_at=1000.0,
+        compressed_history="[User]: hi\n[Assistant]: hello",
+    )
+    fresh = SessionSummary(
+        session_id="sess_current", channel_id="web", last_message_at=2000.0,
+        compressed_history="",
+    )
+    report = SituationReport(sessions=[full, fresh])
+
+    rendered = report.render_for_llm()
+    # 只含历史完整的 sess_old，不含历史空的 sess_current
+    assert "sess_old" in rendered or "hi" in rendered
+    assert "sess_current" not in rendered
+
+
+def test_is_empty_still_true_when_all_history_empty():
+    """is_empty 守卫不变：所有会话 history 都空 → report 为空 → tick 跳过
+    （LLM 无决策素材，本就该跳过）。"""
+    from jiuwenswarm.agents.harness.common.recommendation.situation_report import (
+        SessionSummary, SituationReport,
+    )
+    report = SituationReport(sessions=[
+        SessionSummary(session_id="a", last_message_at=1000.0, compressed_history=""),
+        SessionSummary(session_id="b", last_message_at=2000.0, compressed_history=""),
+    ])
+    assert report.is_empty() is True
