@@ -414,11 +414,23 @@ function AppContent() {
     return session?.title?.trim() ?? '';
   }, [currentSession, sessions, sessionId]);
   const sessionProjectName = useMemo(() => {
-    const session = sessions.find((s) => s.session_id === sessionId);
+    const session = currentSession?.session_id === sessionId
+      ? currentSession
+      : sessions.find((s) => s.session_id === sessionId);
     if (!session?.project_dir) return '';
     const project = projects.find((item) => !item.is_default && item.project_dir === session.project_dir);
     return project?.name?.trim() ?? '';
-  }, [projects, sessions, sessionId]);
+  }, [currentSession, projects, sessions, sessionId]);
+  const sessionProject = useMemo(() => {
+    const session = currentSession?.session_id === sessionId
+      ? currentSession
+      : sessions.find((item) => item.session_id === sessionId);
+    if (!session) return null;
+    return projects.find((project) => (
+      (!project.is_default && project.project_id === session.project_id)
+      || Boolean(project.project_dir && project.project_dir === session.project_dir)
+    )) ?? null;
+  }, [currentSession, projects, sessions, sessionId]);
   const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent');
   const teamTaskEvents = useSessionStore((s) => s.runtimes[sessionId]?.teamTaskEvents ?? []);
   const teamTasks = useSessionStore((s) => s.runtimes[sessionId]?.teamTasks ?? []);
@@ -431,6 +443,11 @@ function AppContent() {
     }
     setTeamAreaExpanded(expanded);
   }, [mode, setTeamAreaActiveTab, setTeamAreaExpanded, teamAreaActiveTab]);
+
+  const handleOpenCodeReview = useCallback(() => {
+    setTeamAreaActiveTab('review');
+    setTeamAreaExpanded(true);
+  }, [setTeamAreaActiveTab, setTeamAreaExpanded]);
 
   const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -535,15 +552,16 @@ function AppContent() {
 
   const toolPanelHasContent = useMemo(() => {
     const hasMessages = messages.length > 0;
+    const hasCodeEnvironment = sessionProject?.work_mode === 'code' && sessionId !== NEW_CONVERSATION_ID;
     switch (mode) {
       case 'auto_harness':
         return Boolean(extensionReady?.runtimePath) || hasMessages;
       case 'team':
-        return isRestoringTeamHistory || teamTaskEvents.length > 0 || teamTasks.length > 0 || teamMembers.length > 0 || hasMessages;
+        return isRestoringTeamHistory || teamTaskEvents.length > 0 || teamTasks.length > 0 || teamMembers.length > 0 || hasMessages || hasCodeEnvironment;
       default:
-        return todos.length > 0 || hasMessages;
+        return todos.length > 0 || hasMessages || hasCodeEnvironment;
     }
-  }, [mode, todos.length, teamTaskEvents.length, teamTasks.length, teamMembers.length, extensionReady?.runtimePath, messages.length, isRestoringTeamHistory]);
+  }, [mode, todos.length, teamTaskEvents.length, teamTasks.length, teamMembers.length, extensionReady?.runtimePath, messages.length, isRestoringTeamHistory, sessionId, sessionProject?.work_mode]);
   // 单 agent 模式同样复用集群模式的展开布局（百分比宽度 + 可拖拽分割线），
   // 避免右侧面板与聊天面板平分空间导致宽度与集群模式不一致；auto_harness 走收起态分支。
   const isTeamAreaExpanded = mode !== 'auto_harness' && teamAreaExpanded && toolPanelHasContent;
@@ -1520,12 +1538,14 @@ function AppContent() {
       const workContext = {
         project_id: baseWorkContext.project_id || preservedProject?.project_id,
         project_dir: baseWorkContext.project_dir || preservedProject?.project_dir,
+        work_mode: useWorkspaceStore.getState().workMode,
       };
       try {
         const createParams: Record<string, unknown> = {
           session_id: newSid,
           mode: runtimeSettings.mode,
           title: createConversationTitle(content).slice(0, 100),
+          work_mode: workContext.work_mode,
         };
         if (runtimeSettings.selectedModelName) {
           createParams.model = runtimeSettings.selectedModelName;
@@ -1547,6 +1567,7 @@ function AppContent() {
           {
             project_id: workContext.project_id,
             project_dir: workContext.project_dir,
+            work_mode: workContext.work_mode,
           },
         );
         // 迁移 'new' 会话的已选技能到新会话
@@ -1954,10 +1975,12 @@ function AppContent() {
                       canExportShare={Boolean(sessionId && sessionId !== NEW_CONVERSATION_ID && (!isProcessing || isPaused))}
                       sessionTitle={sessionTitle}
                       sessionProjectName={sessionProjectName}
+                      sessionProject={sessionProject}
                       teamAreaExpanded={isTeamAreaExpanded}
                       autoFocusKey={composerFocusKey}
                       onNavigateToSkills={() => handleNavigate('skills')}
                       onToggleTeamArea={handleToggleDetailPanel}
+                      onOpenCodeReview={handleOpenCodeReview}
                       permissionsEnabled={serverConfig?.permissions_enabled !== 'false'}
                       onSavePermission={savePermissionSilent}
                       historyPager={chatHistoryPager}
@@ -1978,6 +2001,7 @@ function AppContent() {
                 {(toolPanelHasContent || isRestoringTeamHistory) && !showConversationNotFound && (
                   <ToolPanel
                     sessionId={sessionId}
+                    project={sessionProject}
                     isNewSessionPromotion={isNewSessionPromotion}
                     teamAreaExpanded={teamAreaExpanded}
                     teamAreaActiveTab={teamAreaActiveTab}

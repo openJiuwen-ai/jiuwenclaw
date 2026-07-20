@@ -37,7 +37,7 @@ function loadTeamPanelState(): TeamPanelState {
   return {
     ...DEFAULT_TEAM_PANEL_STATE,
     ...parsed,
-    activeTab: parsed.activeTab === 'planning' || parsed.activeTab === 'team' || parsed.activeTab === 'artifacts'
+    activeTab: parsed.activeTab === 'planning' || parsed.activeTab === 'team' || parsed.activeTab === 'artifacts' || parsed.activeTab === 'review'
       ? parsed.activeTab
       : DEFAULT_TEAM_PANEL_STATE.activeTab,
   };

@@ -2035,6 +2035,15 @@
   "security": {
     "contentRetracted": "内容已因安全原因撤回"
   },
+  "codeMode": {
+    "work": "工作",
+    "code": "Code",
+    "workDescription": "处理办公、协作和通用任务",
+    "codeDescription": "在项目目录中查看并修改代码",
+    "environment": "环境信息",
+    "changes": "变更",
+    "review": "审核"
+  },
   "multiSession": {
     "title": "工作",
     "conversations": "对话",

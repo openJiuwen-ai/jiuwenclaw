@@ -2031,6 +2031,15 @@
       "sendFileDesc": "Send files to user"
     }
   },
+  "codeMode": {
+    "work": "Work",
+    "code": "Code",
+    "workDescription": "Office, collaboration, and general tasks",
+    "codeDescription": "Inspect and modify code in a project directory",
+    "environment": "Environment",
+    "changes": "Changes",
+    "review": "Review"
+  },
   "multiSession": {
     "title": "Work",
     "conversations": "Conversations",

@@ -25,6 +25,7 @@ import { getInputProjectOptions, isDefaultInputProject } from './projectSelectio
 import sendIcon from '../../assets/send.svg';
 import sendActiveIcon from '../../assets/send_active.svg';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import { CodeBranchSelector } from '../../features/code-mode/CodeBranchSelector';
 
 /** 输入栏下拉所需的最小技能数据结构（与 SkillPanel 中的 SkillItem 保持一致） */
 type InputAreaSkillItem = {
@@ -90,7 +91,7 @@ function WorkIcon({ name, className }: { name: WorkIconName; className?: string 
 }
 
 function isDefaultProject(project: ProjectInfo): boolean {
-  return project.is_default || project.project_id === 'default';
+  return project.is_default || project.project_id === 'default' || project.project_id === 'default_code';
 }
 
 interface InputAreaProps {
@@ -285,6 +286,7 @@ export function InputArea({
   });
   const canPersistAttachments = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const {
+    workMode,
     projects,
     selectedProject,
     setSelectedProject,
@@ -339,7 +341,9 @@ export function InputArea({
   );
 
   const displayedProject = useMemo<ProjectInfo | null>(() => {
-    if (activeSession?.project_id && activeSession.project_id !== 'default') {
+    if (activeSession?.project_id
+      && activeSession.project_id !== 'default'
+      && activeSession.project_id !== 'default_code') {
       const matched = projects.find((project) => project.project_id === activeSession.project_id);
       if (matched && !isDefaultProject(matched)) return matched;
     }
@@ -355,6 +359,17 @@ export function InputArea({
         pin_order: 0,
         is_default: path === '',
         hidden: false,
+        work_mode: activeSession.work_mode ?? workMode,
+        git: {
+          enabled: false,
+          repo_root: '',
+          initialized_by_jiuwenswarm: false,
+          detected_at: 0,
+          status: 'disabled',
+          branch: '',
+          error: '',
+          is_dirty: false,
+        },
         session_count: 0,
         last_message_at: null,
         last_user_message_at: null,
@@ -362,7 +377,7 @@ export function InputArea({
       };
     }
     return selectedProject && !isDefaultInputProject(selectedProject) ? selectedProject : null;
-  }, [activeSession, projects, selectedProject, t]);
+  }, [activeSession, projects, selectedProject, t, workMode]);
 
   const {
     isListening,
@@ -1760,6 +1775,9 @@ export function InputArea({
               </div>
             ) : null}
           </div>
+          {workMode === 'code' ? (
+            <CodeBranchSelector project={displayedProject} disabled={isProcessing} compact />
+          ) : null}
           {projectDirError && !workDialogOpen ? (
             <div className="chat-work-select__error" role="alert">{projectDirError}</div>
           ) : null}
