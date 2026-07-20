@@ -885,12 +885,10 @@ async def _run(
     )
 
     if isinstance(heartbeat_cfg, dict):
-        cfg_enabled = heartbeat_cfg.get("enabled")
         cfg_every = heartbeat_cfg.get("every")
         cfg_target = heartbeat_cfg.get("target")
         cfg_active_hours = heartbeat_cfg.get("active_hours")
     else:
-        cfg_enabled = None
         cfg_every = None
         cfg_target = None
         cfg_active_hours = None
@@ -904,7 +902,8 @@ async def _run(
         str(cfg_target) if cfg_target is not None else "web"
     )
 
-    heartbeat_enabled = _get_bool_config("HEARTBEAT_ENABLED", cfg_enabled, default=True)
+    # Heartbeat is disabled by hardcode for vibeskill.
+    heartbeat_enabled = False
 
     heartbeat_config = HeartbeatConfig(
         enabled=heartbeat_enabled,
@@ -921,7 +920,7 @@ async def _run(
     if heartbeat_enabled:
         await heartbeat_service.start()
     else:
-        logger.info("[App] Heartbeat service disabled by config")
+        logger.info("[App] Heartbeat service is hard-disabled")
 
     initial_channels_conf: dict = channels_cfg if isinstance(channels_cfg, dict) else {}
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
