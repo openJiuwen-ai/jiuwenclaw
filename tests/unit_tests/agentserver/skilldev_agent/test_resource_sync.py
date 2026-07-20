@@ -17,6 +17,7 @@ from jiuwenclaw.agentserver.skilldev_agent.utils.resource_sync import (
     build_current_ref_file_hint_lines,
     build_current_ref_skill_hint_lines,
     build_current_tool_spec_hint_lines,
+    delete_uploaded_resources,
     load_resource_state,
     record_direct_imported_skills,
     resource_state_path,
@@ -458,3 +459,185 @@ def test_build_resource_hint_includes_skill_and_tool_sections(tmp_path: Path) ->
     assert "【本轮已移除参考 Skill 包】" in hint
     assert "【本轮新增可用工具】" in hint
     assert "【本轮已移除可用工具】" in hint
+
+
+def test_delete_plain_file_and_not_found(tmp_path: Path) -> None:
+    asyncio.run(
+        write_uploaded_resources(
+            tmp_path,
+            {"files": [{"filename": "spec.pdf", "base64Data": _b64("pdf")}]},
+        )
+    )
+    ref_dir = tmp_path / "resources" / "ref-files"
+    assert (ref_dir / "spec.pdf").is_file()
+
+    result = delete_uploaded_resources(
+        tmp_path,
+        [
+            {"type": "file", "filename": "spec.pdf"},
+            {"type": "file", "filename": "missing.txt"},
+        ],
+    )
+
+    assert result["ok"] is True
+    assert result["deleted"] == [{"type": "file", "filename": "spec.pdf"}]
+    assert result["notFound"] == [{"type": "file", "filename": "missing.txt"}]
+    assert result["errors"] == []
+    assert not (ref_dir / "spec.pdf").exists()
+    assert all(e.get("filename") != "spec.pdf" for e in _state(tmp_path).get("ref_files", []))
+
+
+def test_delete_zip_with_stem_extract_dir(tmp_path: Path) -> None:
+    asyncio.run(
+        write_uploaded_resources(
+            tmp_path,
+            {
+                "skill_packages": [
+                    {"filename": "ref.zip", "base64Data": _zip_b64({"readme.txt": "hi"})}
+                ]
+            },
+        )
+    )
+    ref_dir = tmp_path / "resources" / "ref-skills"
+    assert (ref_dir / "ref.zip").is_file()
+    assert (ref_dir / "ref").is_dir()
+    assert (ref_dir / "ref" / "readme.txt").is_file()
+
+    result = delete_uploaded_resources(
+        tmp_path,
+        [{"type": "skill", "filename": "ref.zip"}],
+    )
+
+    assert result["ok"] is True
+    assert result["deleted"] == [{"type": "skill", "filename": "ref.zip"}]
+    assert result["notFound"] == []
+    assert not (ref_dir / "ref.zip").exists()
+    assert not (ref_dir / "ref").exists()
+
+
+def test_delete_zip_flat_extracted_members(tmp_path: Path) -> None:
+    """URL-style extract (members at dest root) is cleaned via zip namelist."""
+    ref_dir = tmp_path / "resources" / "ref-files"
+    ref_dir.mkdir(parents=True)
+    zip_bytes = base64.b64decode(_zip_b64({"flat.txt": "flat-content", "subdir/a.txt": "a"}))
+    archive = ref_dir / "bundle.zip"
+    archive.write_bytes(zip_bytes)
+    (ref_dir / "flat.txt").write_text("flat-content", encoding="utf-8")
+    sub = ref_dir / "subdir"
+    sub.mkdir()
+    (sub / "a.txt").write_text("a", encoding="utf-8")
+    # Unrelated file must survive
+    (ref_dir / "keep.txt").write_text("keep", encoding="utf-8")
+    save_resource_state(
+        tmp_path,
+        {"ref_files": [{"filename": "bundle.zip", "url": "https://example.com/bundle.zip"}]},
+    )
+
+    result = delete_uploaded_resources(
+        tmp_path,
+        [{"type": "file", "filename": "bundle.zip"}],
+    )
+
+    assert result["ok"] is True
+    assert result["deleted"] == [{"type": "file", "filename": "bundle.zip"}]
+    assert not archive.exists()
+    assert not (ref_dir / "flat.txt").exists()
+    assert not (sub / "a.txt").exists()
+    assert (ref_dir / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_delete_tool_agent_cli_definitions(tmp_path: Path) -> None:
+    asyncio.run(
+        write_uploaded_resources(
+            tmp_path,
+            {
+                "tool_spec_files": [
+                    {"pluginId": "bundle.a", "toolName": "do_x", "description": "x"},
+                    {"pluginId": "bundle.b", "toolName": "do_y", "description": "y"},
+                ],
+                "agent_definitions": [
+                    {"agentId": "reviewer", "name": "Reviewer"},
+                    {"agentId": "writer", "name": "Writer"},
+                ],
+                "cli_definitions": [
+                    {"name": "my-cli", "command": "echo"},
+                    {"name": "other-cli", "command": "ls"},
+                ],
+            },
+        )
+    )
+    tools_dir = tmp_path / "resources" / "available-tools"
+    assert (tools_dir / "bundle.a__do_x.json").is_file()
+
+    result = delete_uploaded_resources(
+        tmp_path,
+        [
+            {"type": "toolDefinition", "pluginId": "bundle.a", "toolName": "do_x"},
+            {"type": "agentDefinition", "agentId": "reviewer"},
+            {"type": "cliDefinition", "name": "my-cli"},
+            {"type": "toolDefinition", "pluginId": "missing", "toolName": "nope"},
+        ],
+    )
+
+    assert result["ok"] is True
+    assert {"type": "toolDefinition", "pluginId": "bundle.a", "toolName": "do_x"} in result[
+        "deleted"
+    ]
+    assert {"type": "agentDefinition", "agentId": "reviewer"} in result["deleted"]
+    assert {"type": "cliDefinition", "name": "my-cli"} in result["deleted"]
+    assert result["notFound"] == [
+        {"type": "toolDefinition", "pluginId": "missing", "toolName": "nope"}
+    ]
+    assert not (tools_dir / "bundle.a__do_x.json").exists()
+    assert (tools_dir / "bundle.b__do_y.json").is_file()
+
+    agents = json.loads(
+        (tmp_path / "resources" / "agents" / "available_agents.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [a["agentId"] for a in agents] == ["writer"]
+
+    clis = json.loads(
+        (tmp_path / "resources" / "clis" / "available_clis.json").read_text(encoding="utf-8")
+    )
+    assert [c["name"] for c in clis] == ["other-cli"]
+
+    tool_specs = _state(tmp_path).get("tool_specs", [])
+    assert all(
+        not (e.get("pluginId") == "bundle.a" and e.get("toolName") == "do_x")
+        for e in tool_specs
+    )
+
+
+def test_delete_illegal_filename_is_error(tmp_path: Path) -> None:
+    result = delete_uploaded_resources(
+        tmp_path,
+        [{"type": "file", "filename": "../escape.txt"}],
+    )
+    assert result["ok"] is False
+    assert result["deleted"] == []
+    assert result["notFound"] == []
+    assert len(result["errors"]) == 1
+    assert result["errors"][0]["type"] == "file"
+    assert "illegal" in result["errors"][0]["error"]
+
+
+def test_delete_batch_mixed_ok_with_partial_not_found(tmp_path: Path) -> None:
+    asyncio.run(
+        write_uploaded_resources(
+            tmp_path,
+            {"files": [{"filename": "a.txt", "base64Data": _b64("a")}]},
+        )
+    )
+    result = delete_uploaded_resources(
+        tmp_path,
+        [
+            {"type": "file", "filename": "a.txt"},
+            {"type": "skill", "filename": "gone.zip"},
+        ],
+    )
+    assert result["ok"] is True
+    assert result["deleted"] == [{"type": "file", "filename": "a.txt"}]
+    assert result["notFound"] == [{"type": "skill", "filename": "gone.zip"}]
+    assert result["errors"] == []
