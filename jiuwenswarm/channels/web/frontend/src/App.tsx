@@ -2035,7 +2035,24 @@ function AppContent() {
                 sessionId={sessionId}
                 onCreateViaChat={(initialInputValue) => requestSessionNavigation('new', { initialInputValue })}
                 onSelectSession={(session) => {
-                  if (typeof session === 'string') { void handleRestoreSession(session); return; }
+                  if (typeof session === 'string') {
+                    // 立即执行返回的 session_id 可能还未在后端创建（agent 刚开始执行），
+                    // 构造最小 Session 占位对象，让 upsertSessionMetadata 直接加入会话列表，
+                    // 避免 loadSessionMetadata 立即失败导致"对话不存在或已删除"。
+                    // 后续 cron 广播到达时会刷新会话列表补全完整元数据。
+                    void handleRestoreSession(session, undefined, {
+                      session_id: session,
+                      title: '',
+                      project_id: '',
+                      project_dir: '',
+                      mode: 'agent',
+                      status: 'active',
+                      message_count: 0,
+                      created_at: new Date().toISOString(),
+                      updated_at: new Date().toISOString(),
+                    });
+                    return;
+                  }
                   requestSessionNavigation(session);
                 }}
               />

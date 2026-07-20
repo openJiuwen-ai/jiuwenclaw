@@ -73,6 +73,7 @@ export function HeartbeatPanel() {
   const [startInput, setStartInput] = useState('08:00');
   const [endInput, setEndInput] = useState('22:00');
   const [filePath, setFilePath] = useState<string>('');
+  const [enabledChannels, setEnabledChannels] = useState<Set<string>>(new Set(['web']));
 
   const loadConf = useCallback(async () => {
     setLoading(true);
@@ -112,6 +113,29 @@ export function HeartbeatPanel() {
     void loadConf();
     void loadFilePath();
   }, [loadConf, loadFilePath]);
+
+  // 拉取已启用频道列表，与频道面板保持一致：未启用的频道在心跳目标下拉中不可选
+  useEffect(() => {
+    void (async () => {
+      try {
+        const payload = await webRequest<{ channels?: unknown[] }>('channel.get');
+        const channels = Array.isArray(payload?.channels) ? payload.channels : [];
+        const enabled = new Set<string>(['web']);
+        for (const item of channels) {
+          if (!item || typeof item !== 'object') continue;
+          const cid = (item as { channel_id?: unknown }).channel_id;
+          if (typeof cid === 'string' && cid.trim()) {
+            enabled.add(cid.trim().toLowerCase());
+          }
+        }
+        setEnabledChannels(enabled);
+        // 当前选中的频道未启用时，自动回退到 web
+        setTargetInput((prev) => (prev !== 'web' && !enabled.has(prev) ? 'web' : prev));
+      } catch {
+        // 拉取失败时不阻塞面板使用，保持各选项可选
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     if (!success) {
@@ -353,9 +377,9 @@ export function HeartbeatPanel() {
                       className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
                     >
                       <option value="web">{t('heartbeat.channels.web')}</option>
-                      <option value="feishu">{t('heartbeat.channels.feishu')}</option>
-                      <option value="xiaoyi" disabled style={{ color: 'var(--color-option-disabled)'}}>{t('heartbeat.channels.xiaoyi')}</option>
-                      <option value="dingtalk" disabled style={{ color: 'var(--color-option-disabled)' }}>{t('heartbeat.channels.dingtalk')}</option>
+                      <option value="feishu" disabled={!enabledChannels.has('feishu')} style={!enabledChannels.has('feishu') ? { color: 'var(--color-option-disabled)' } : undefined}>{t('heartbeat.channels.feishu')}</option>
+                      <option value="xiaoyi" disabled={!enabledChannels.has('xiaoyi')} style={!enabledChannels.has('xiaoyi') ? { color: 'var(--color-option-disabled)' } : undefined}>{t('heartbeat.channels.xiaoyi')}</option>
+                      <option value="dingtalk" disabled={!enabledChannels.has('dingtalk')} style={!enabledChannels.has('dingtalk') ? { color: 'var(--color-option-disabled)' } : undefined}>{t('heartbeat.channels.dingtalk')}</option>
                     </select>
                   </label>
 

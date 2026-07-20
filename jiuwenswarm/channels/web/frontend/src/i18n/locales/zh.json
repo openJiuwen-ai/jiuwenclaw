@@ -2102,7 +2102,7 @@
       "noProjectMatches": "暂无匹配项目",
       "noProjects": "暂无项目",
       "noConversations": "暂无会话",
-      "noSessions": "暂无触发记录",
+      "noSessions": "暂无执行记录",
       "startConversation": "从{{projectName}}开始新对话",
       "pinProject": "置顶项目",
       "unpinProject": "取消置顶项目",

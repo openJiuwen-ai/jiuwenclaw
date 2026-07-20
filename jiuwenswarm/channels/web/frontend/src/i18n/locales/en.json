@@ -2098,7 +2098,7 @@
       "noProjectMatches": "No matching projects",
       "noProjects": "No projects",
       "noConversations": "No conversations",
-      "noSessions": "No trigger sessions",
+      "noSessions": "No execution sessions",
       "startConversation": "Start a new conversation from {{projectName}}",
       "pinProject": "Pin project",
       "unpinProject": "Unpin project",

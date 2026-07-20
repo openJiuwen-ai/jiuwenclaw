@@ -9,7 +9,7 @@ export function parseChatRoute(pathname: string): ChatRoute | null {
   const match = path.match(/^\/chat\/([^/]+)$/);
   if (!match) return null;
   const sessionId = decodeURIComponent(match[1]);
-  return /^sess_[A-Za-z0-9_.@-]+$/.test(sessionId)
+  return /^(sess_|cron_)[A-Za-z0-9_.@-]+$/.test(sessionId)
     ? { kind: 'chat-session', sessionId }
     : { kind: 'not-found', pathname: path };
 }
