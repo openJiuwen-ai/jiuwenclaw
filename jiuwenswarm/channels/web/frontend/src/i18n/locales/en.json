@@ -1044,7 +1044,8 @@
     },
     "search": {
       "placeholder": "Search",
-      "noResults": "No matching templates found. Try a different keyword."
+      "noResults": "No matching templates found. Try a different keyword.",
+      "noResultsJobs": "No matching tasks found. Try a different keyword."
     },
     "table": {
       "name": "Name",

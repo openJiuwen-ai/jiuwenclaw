@@ -1044,7 +1044,8 @@
     },
     "search": {
       "placeholder": "请输入搜索内容",
-      "noResults": "未找到相关模板，可换个关键词再试。"
+      "noResults": "未找到相关模板，可换个关键词再试。",
+      "noResultsJobs": "未找到相关任务，可换个关键词再试。"
     },
     "table": {
       "name": "名称",

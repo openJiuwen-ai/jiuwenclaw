@@ -593,7 +593,12 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
             </div>
           </div>
         )}
-        {activeTab === 'list' && !loading && jobs.length > 0 && (
+        {activeTab === 'list' && !loading && jobs.length > 0 && filteredJobs.length === 0 && (
+          <div className="flex min-h-[30vh] flex-col items-center justify-center gap-2 text-text-muted">
+            <p className="text-sm">{t('cron.search.noResultsJobs')}</p>
+          </div>
+        )}
+        {activeTab === 'list' && !loading && jobs.length > 0 && filteredJobs.length > 0 && (
           <div className="overflow-visible rounded-lg border border-border">
             <table className="w-full border-collapse text-sm">
               <thead>
