@@ -26,7 +26,7 @@ import {
 } from './features/tool-events/toolEventNormalizer';
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
-import { fetchSessions as fetchDbSessions, type HistorySession } from './services/api';
+import { fetchSessions as fetchDbSessions, fetchSessionDetail, type HistorySession } from './services/api';
 import { setToolResultDisplayMaxChars } from './utils/formatters';
 import { AgentMode, UserAnswer, ChatSendFile, ModelEntry } from './types';
 import {
@@ -281,6 +281,7 @@ function AppContent() {
   const historyRestoreSuppressedRef = useRef(false);
   /** 点击会话列表恢复时置 true，驱动 historyRestore effect 拉历史；新建/刷新页面不拉 */
   const restoreRequestedRef = useRef(false);
+  const restoreSeqRef = useRef(0);
   /** extSettings 路由字段变更后，待 WS 重连完成再 session.create */
   const pendingRoutingSessionResetRef = useRef(false);
 
@@ -569,6 +570,9 @@ function AppContent() {
 
   // 页面加载或切换会话时尝试恢复历史；用户开始实时对话后不再自动恢复
   useEffect(() => {
+    // 改用 DB 恢复（handleRestoreSession → /api/sessions/{id}），不再走 WS historyRestore
+    return;
+
     if (!isConnected || !sessionId || sessionId === 'new') return;
 
     // 仅处理以 sess_ 开头的会话 ID
@@ -807,11 +811,10 @@ function AppContent() {
   );
 
   const handleRestoreSession = useCallback(
-    (sid: string) => {
+    async (sid: string) => {
       if (!sid) return;
-      // 标记"要拉历史"，驱动下面的 historyRestore effect 从 AgentServer 恢复该会话
-      restoreRequestedRef.current = true;
-      disposeInFlightHistoryHandles();
+      restoreSeqRef.current += 1;
+      const seq = restoreSeqRef.current;
       clearMessages();
       clearTodos();
       setHistoryPagerMeta(null);
@@ -819,10 +822,27 @@ function AppContent() {
       setProcessing(false);
       setThinking(false);
       setPaused(false);
+      try {
+        const detail = await fetchSessionDetail(sid, extUserId || undefined);
+        if (seq !== restoreSeqRef.current) return; // 期间又点了别的会话，丢弃本次旧请求
+        if (detail && detail.messages) {
+          const chatStore = useChatStore.getState();
+          for (const m of detail.messages) {
+            chatStore.addMessage({
+              id: m.request_id || `hist-${sid}-${m.timestamp}`,
+              role: m.role,
+              content: m.content,
+              timestamp: new Date(m.timestamp * 1000).toISOString(),
+            });
+          }
+        }
+      } catch (e) {
+        console.error('handleRestoreSession failed', e);
+      }
       setSessionId(sid);
       storeSessionId(sid);
     },
-    [disposeInFlightHistoryHandles, clearMessages, clearTodos],
+    [extUserId, clearMessages, clearTodos],
   );
 
   const handleNewSession = useCallback(async () => {
