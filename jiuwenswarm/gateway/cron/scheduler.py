@@ -211,12 +211,9 @@ def _cron_next_push_dt(cron_expr: str, base_dt: datetime) -> datetime:
     # Lazy import so the rest of the system can still run without cron enabled.
     from croniter import croniter  # type: ignore
 
-    # Support Quartz 7-field format: second minute hour day month dow year
-    # croniter default is minute hour day month dow second year
-    field_count = len(cron_expr.strip().split())
-    second_at_beginning = field_count == 7
-
-    it = croniter(cron_expr, base_dt, second_at_beginning=second_at_beginning)
+    # 5-field standard cron: minute hour day month dow.
+    # croniter default ordering matches this (second_at_beginning=False).
+    it = croniter(cron_expr, base_dt)
     nxt = it.get_next(datetime)
     if not isinstance(nxt, datetime):
         raise RuntimeError("croniter returned invalid datetime")
@@ -1215,4 +1212,5 @@ class CronSchedulerService:
             )
             if not is_placeholder:
                 state.delivery_status = "failed"
+
 

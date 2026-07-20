@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
-from jiuwenswarm.gateway.cron.cron_expr import normalize_cron_expr, iso_to_seven_field_cron, is_one_shot_cron, validate_cron_expression
+from jiuwenswarm.gateway.cron.cron_expr import normalize_cron_expr, iso_to_five_field_cron, validate_cron_expression
 from jiuwenswarm.gateway.cron.models import (
     CRON_JOB_DEFAULT_MODE,
     CronRunState,
@@ -76,14 +76,9 @@ class CronController:
     def _validate_schedule(*, cron_expr: str, timezone: str) -> None:
         tz = ZoneInfo(timezone)
         base = datetime.now(tz=tz)
-        # One-shot tasks (kind='at' converted to 7-field Quartz with dow='?' and
-        # concrete year) may have a past target time. croniter.get_next() raises
-        # CroniterBadDateError for such cases. Skip the next-date check for
-        # one-shot tasks — the scheduler will mark them expired after reload.
-        # Syntax validation is still performed via validate_cron_expression below.
-        if is_one_shot_cron(cron_expr):
-            validate_cron_expression(cron_expr, timezone=timezone)
-            return
+        # All jobs use 5-field standard cron, which always has a future
+        # match (year is implicit '*'). One-shot semantics are achieved
+        # via delete_after_run=True, not via a fixed-year cron expression.
         _ = _cron_next_push_dt(cron_expr, base)
 
     _DESCRIPTION_TIME_KEYWORDS = ("每天", "每周", "每月", "上午", "下午", "早上", "晚上", "凌晨")
@@ -566,12 +561,14 @@ class CronController:
             timezone = str(schedule.get("tz") or "Asia/Shanghai").strip() or "Asia/Shanghai"
             params["timezone"] = timezone
             if schedule_kind == "at":
-                # One-shot task: convert ISO datetime to 7-field Quartz cron.
+                # One-shot task: convert ISO datetime to 5-field cron.
                 # Device sends {"kind": "at", "at": "2026-07-16T16:00:00+08:00", "expr": ""}.
+                # The year is dropped (5-field cron has no year); one-shot
+                # semantics rely on delete_after_run=True below.
                 at_iso = str(schedule.get("at") or "").strip()
                 if not at_iso:
                     raise ValueError("schedule.kind='at' requires non-empty 'at' field")
-                params["cron_expr"] = iso_to_seven_field_cron(at_iso, timezone=timezone)
+                params["cron_expr"] = iso_to_five_field_cron(at_iso, timezone=timezone)
                 # One-shot tasks should be auto-deleted after execution.
                 params["delete_after_run"] = True
             else:
@@ -640,13 +637,13 @@ class CronController:
             if timezone:
                 patch["timezone"] = timezone
             if schedule_kind == "at":
-                # One-shot task: convert ISO datetime to 7-field Quartz cron.
+                # One-shot task: convert ISO datetime to 5-field cron.
                 at_iso = str(schedule.get("at") or "").strip()
                 if not at_iso:
                     raise ValueError("schedule.kind='at' requires non-empty 'at' field")
                 # Use timezone from schedule if present, else fall back to existing job tz
                 tz_for_conversion = timezone or "Asia/Shanghai"
-                patch["cron_expr"] = iso_to_seven_field_cron(at_iso, timezone=tz_for_conversion)
+                patch["cron_expr"] = iso_to_five_field_cron(at_iso, timezone=tz_for_conversion)
                 # One-shot tasks should be auto-deleted after execution.
                 patch["delete_after_run"] = True
             elif schedule.get("expr"):
@@ -698,6 +695,7 @@ class CronController:
         mode: str | None = None,
         timeout_seconds: int | None = None,
         required_device_intents: list[str] | None = None,
+        delete_after_run: bool | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "name": name,
@@ -715,6 +713,8 @@ class CronController:
             params["timeout_seconds"] = timeout_seconds
         if required_device_intents is not None:
             params["required_device_intents"] = required_device_intents
+        if delete_after_run is not None:
+            params["delete_after_run"] = delete_after_run
         return await self.create_job(params)
 
     async def _update_job_tool(
@@ -791,19 +791,15 @@ class CronController:
                 name="cron_create_job",
                 description=(
                     "Create a scheduled cron job.\n"
-                    "cron_expr:\n"
-                    "- Recurring (5 fields): minute hour day month day-of-week.\n"
+                    "cron_expr is always 5-field standard cron: "
+                    "minute hour day month day-of-week.\n"
                     "  Example: daily 9:00 = '0 9 * * *', every Monday 9:00 = '0 9 * * 1'.\n"
-                    "- Relative time (e.g. \"in X minutes\"): take now in the given timezone, "
-                    "compute run_at = now + X minutes, then encode run_at as 7-field cron "
-                    "with a fixed year (minute hour day month day-of-week second year). "
-                    "Example: run_at (Mar 19, 2026 10:07:00 local) -> '0 7 10 19 3 * 2026'.\n"
-                    "- One-shot (runs only once): must use 7 fields with a fixed year: "
-                    "minute hour day month day-of-week second year. "
-                    "Example: 2026-03-28 17:00 (local) -> '0 17 28 3 * 0 2026'.\n"
-                    "Warning: if you use a 5-field expression with fixed day/month "
-                    "but year semantics implicitly '*', it will repeat every year; "
-                    "for a real one-shot, use the 7-field form with a fixed year.\n"
+                    "For a one-shot / relative-time task (e.g. \"in X minutes\"), "
+                    "compute run_at = now + X minutes in the given timezone, "
+                    "encode it as a 5-field cron (minute hour day month day-of-week), "
+                    "and set delete_after_run=true so the task fires once then stops.\n"
+                    "  Example: run_at = Mar 19, 2026 10:07 local -> '7 10 19 3 *' with "
+                    "delete_after_run=true.\n"
                     "description should contain task content only (no time/frequency). "
                     "timezone defaults to Asia/Shanghai."
                 ),
@@ -814,13 +810,12 @@ class CronController:
                         "cron_expr": {
                             "type": "string",
                             "description": (
-                                "Cron expression. "
-                                "Recurring jobs use 5 fields: minute hour dom month day-of-week. "
-                                "One-shot jobs must use 7 fields: minute hour dom month "
-                                "day-of-week second year (fixed year). "
-                                "For relative time, treat it as one-shot: compute run_at = now + X minutes, "
-                                "then encode it as a 7-field expression with a fixed year. "
-                                "Example: 2026-03-28 17:00 (local) -> '0 17 28 3 * 0 2026'."
+                                "Cron expression (5 fields): "
+                                "minute hour day month day-of-week. "
+                                "For one-shot tasks, encode the target time as a 5-field "
+                                "cron and set delete_after_run=true. "
+                                "Example: 2026-03-28 17:00 local -> '0 17 28 3 *' "
+                                "with delete_after_run=true."
                             ),
                         },
                         "timezone": {
@@ -868,6 +863,16 @@ class CronController:
                                 "Execution timeout in seconds (60-259200). "
                                 "Default 600 for normal modes and 1200 for team modes."
                             ),
+                        },
+                        "delete_after_run": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, the task fires once then is marked "
+                                "expired/disabled (one-shot semantics). Use this "
+                                "with a 5-field cron encoding a specific "
+                                "month/day/hour/minute for one-shot tasks."
+                            ),
+                            "default": False,
                         },
                         "required_device_intents": {
                             "type": "array",
@@ -968,4 +973,5 @@ class CronController:
                 func=self._preview_job_tool,
             ),
         ]
+
 
