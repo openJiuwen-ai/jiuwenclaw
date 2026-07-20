@@ -41,6 +41,14 @@ pnpm-debug.log*
 .env_personal
 !.env.example
 
+# Apple code signing & notarization secrets — NEVER commit (contains private keys!)
+*.p12
+*.cer
+*.mobileprovision
+AuthKey_*.p8
+DeveloperID_backup.p12
+developerID_application.cer
+
 # IDE / Editor
 .vscode/
 .idea/
