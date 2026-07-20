@@ -45,7 +45,7 @@ def build_external_memory_rail(
     provider = None
     try:
         if provider_name == "openjiuwen":
-            provider = _build_openjiuwen_provider(ext_cfg)
+            provider = _build_openjiuwen_provider(ext_cfg, config)
         elif provider_name == "mem0":
             provider = _build_mem0_provider(ext_cfg)
         elif provider_name == "openviking":
@@ -80,12 +80,12 @@ def build_external_memory_rail(
         return None
 
 
-def _build_openjiuwen_provider(ext_cfg: Dict[str, Any]):
+def _build_openjiuwen_provider(ext_cfg: Dict[str, Any], full_config: Optional[Dict[str, Any]] = None):
     from openjiuwen.core.memory.external.openjiuwen_memory_provider import (
         OpenJiuwenMemoryProvider,
     )
-    provider_config = build_openjiuwen_provider_config(ext_cfg)
-    return OpenJiuwenMemoryProvider(config=provider_config)
+    provider_config, scope_config = build_openjiuwen_provider_config(ext_cfg, full_config)
+    return OpenJiuwenMemoryProvider(config=provider_config, scope_config=scope_config)
 
 
 def _build_mem0_provider(ext_cfg: Dict[str, Any]):
