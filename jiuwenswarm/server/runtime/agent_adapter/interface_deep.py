@@ -5296,11 +5296,34 @@ class JiuWenSwarmDeepAdapter:
             AgentResponse 包含 interrupt_result 事件数据
         """
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
-            try:
-                return await session_adapter.process_interrupt(request)
-            finally:
-                await self._evict_idle_session_adapters()
+            intent_for_dispatch = request.params.get("intent", "cancel") if isinstance(request.params, dict) else "cancel"
+            if intent_for_dispatch in ("cancel", "supplement"):
+                # cancel/supplement：若该 session 尚无 session-scoped adapter（即没有 in-flight 流），
+                # 则不创建——创建会跑完整 agent 初始化（17 rail + ensure_initialized，
+                # 真实场景含 ProjectMemoryRail 扫描，耗时可达数十秒），把 cancel 处理本身卡住，
+                # 后续 esc 的 interrupt 全堵在队列里 → AgentServer 响应超时。
+                # 拿不到 cached adapter 即"无运行中任务"，直接 fallthrough 到主 adapter 的
+                # cancel 逻辑（下方 `not _session_is_active` 分支会跑 per-session teardown 并返回 success）。
+                cached = self._get_cached_session_adapter(request.session_id)
+                if cached is None:
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] interrupt(%s): no cached session adapter for "
+                        "session=%s, skip create (no in-flight stream) — fallthrough to shared teardown",
+                        intent_for_dispatch,
+                        request.session_id,
+                    )
+                else:
+                    try:
+                        return await cached.process_interrupt(request)
+                    finally:
+                        await self._evict_idle_session_adapters()
+            else:
+                # pause/resume：需要 session-scoped adapter 的 StreamEventRail，按原逻辑创建。
+                session_adapter = await self._get_or_create_session_adapter(request.session_id)
+                try:
+                    return await session_adapter.process_interrupt(request)
+                finally:
+                    await self._evict_idle_session_adapters()
 
         intent = request.params.get("intent", "cancel")
         new_input = request.params.get("new_input")

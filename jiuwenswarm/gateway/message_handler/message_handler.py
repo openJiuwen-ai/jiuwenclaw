@@ -3812,9 +3812,9 @@ class MessageHandler(ABC):
             # 标注本 rid 退出后是否还会触发 task.global_running 广播。
             # 若以下分支均不进入 _send_processing_status（其内部会广播），
             # 则前端保存锁可能卡在最后一次广播值，仅靠重连自愈。
+            # cancelled 也会补发 is_processing=false（见下方），故不再排除 cancelled。
             _will_broadcast = (
                 emit_processing_status
-                and not cancelled
                 and not has_processing_status_false
                 and not any(
                     sid == session_id
@@ -3834,9 +3834,14 @@ class MessageHandler(ABC):
                 "[MessageHandler] Stream 任务状态已清理: request_id=%s",
                 rid,
             )
-            # 该 session 流式任务正常结束后，通知前端处理完成
-            # 只有当 AgentServer 没有发送过 processing_status=false 时才发送
-            if emit_processing_status and not cancelled and not has_processing_status_false:
+            # 该 session 流式任务结束后，通知前端处理完成（is_processing=false）。
+            # 只有当 AgentServer 没有发送过 processing_status=false 时才补发。
+            # 注意：这里不再排除 cancelled 分支。stream 被 esc 取消（cancelled=True）时，
+            # AgentServer 的 interrupt_result 可能要等很久（如命中 agent 首次初始化的同步阻塞窗口，
+            # 事件循环读不出 cancel 消息），此时前端会一直转圈。主动补发一次 is_processing=false，
+            # 让 TUI 立刻停转圈，不等 AgentServer 回 interrupt_result。
+            # session_has_active_tasks 守卫仍保证：同 session 还有其它活跃流时不误发 false。
+            if emit_processing_status and not has_processing_status_false:
                 # 检查该 session_id 是否还有活跃任务
                 session_has_active_tasks = any(
                     sid == session_id
@@ -3849,7 +3854,8 @@ class MessageHandler(ABC):
                         is_processing=False, app_id=stream_app_id,
                     )
                     logger.info(
-                        "[MessageHandler] 该 session 流式任务已完成，已发送 is_processing=false: session_id=%s",
+                        "[MessageHandler] 该 session 流式任务已结束（cancelled=%s），已发送 is_processing=false: session_id=%s",
+                        cancelled,
                         session_id,
                     )
 
