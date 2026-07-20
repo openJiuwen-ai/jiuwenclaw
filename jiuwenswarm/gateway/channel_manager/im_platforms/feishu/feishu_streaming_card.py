@@ -202,11 +202,6 @@ class FeishuStreamingSession:
                 pass
             raise
 
-    def append(self, text: str) -> None:
-        if self.is_active and text:
-            self._text += text
-            self._schedule_flush()
-
     def replace(self, text: str) -> None:
         if self.is_active:
             self._text = text
@@ -241,6 +236,7 @@ class FeishuStreamingSession:
             snapshot = self._text
             await self._write_snapshot(snapshot)
             if self.is_active and snapshot != self._text:
+                self._flush_task = None
                 self._schedule_flush()
 
     async def _write_snapshot(self, text: str) -> None:

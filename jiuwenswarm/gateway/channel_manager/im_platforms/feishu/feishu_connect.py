@@ -1924,7 +1924,13 @@ class FeishuChannel(BaseChannel):
             try:
                 await session.start()
             except Exception:
-                logger.warning("创建飞书流式卡片失败", exc_info=True)
+                request_id, _, target_type = key.partition("\0")
+                logger.warning(
+                    "创建飞书流式卡片失败: request_id=%s target_type=%s",
+                    request_id,
+                    target_type.rsplit("\0", 1)[-1],
+                    exc_info=True,
+                )
                 return False
             self._cardkit_sessions[key] = session
             return True
@@ -1941,7 +1947,13 @@ class FeishuChannel(BaseChannel):
             await session.finalize(final_text)
             return True
         except CardKitError:
-            logger.warning("完成飞书流式卡片失败", exc_info=True)
+            request_id, _, target_type = key.partition("\0")
+            logger.warning(
+                "完成飞书流式卡片失败: request_id=%s target_type=%s",
+                request_id,
+                target_type.rsplit("\0", 1)[-1],
+                exc_info=True,
+            )
             return False
         finally:
             self._cardkit_sessions.pop(key, None)
