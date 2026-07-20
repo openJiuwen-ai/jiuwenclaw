@@ -678,24 +678,36 @@ class WebChannel(BaseWsChannel):
                 getattr(msg, "session_id", ""),
             )
 
-        # ── 旧路径：按 session_id 精确路由（不再全量广播）──
-        if not msg.session_id:
+        # ── 旧路径：优先按请求 metadata.ws_id 物理寻址，再按 session_id 精确路由 ──
+        # 普通 stream event（chat.delta/final/usage_summary 等）由 ChannelManager
+        # 调 channel.send(msg)，不会携带 RoutingTarget；但原始 Web 请求注入的
+        # metadata.ws_id 会经 _chunk_to_message 保留下来。先用它收窄到发起请求的
+        # 物理连接，避免同一个 session 桶里的陈旧 ws 一起收到迟到事件。
+        ws_set: set[Any] = set()
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        request_ws_id = str(metadata.get("ws_id") or "").strip()
+        if request_ws_id:
+            ws = self._ws_by_id.get(request_ws_id)
+            if ws is not None and not getattr(ws, "closed", False):
+                ws_set.add(ws)
+
+        if not ws_set and not msg.session_id:
             logger.warning(
                 "[WebChannel] msg has no session_id, cannot route -- "
                 "dropping msg id=%s to avoid cross-session broadcast",
                 getattr(msg, "id", ""),
             )
             return
-        ws_set: set[Any] = set()
-        for rk, ws_list in self._clients_by_key.items():
-            if rk.session_id == msg.session_id:
-                for w in ws_list:
-                    if not getattr(w, "closed", False):
-                        ws_set.add(w)
+        if not ws_set:
+            for rk, ws_list in self._clients_by_key.items():
+                if rk.session_id == msg.session_id:
+                    for w in ws_list:
+                        if not getattr(w, "closed", False):
+                            ws_set.add(w)
         if not ws_set:
             logger.debug(
-                "[WebChannel] session_id=%s has no connected ws, dropping msg id=%s",
-                msg.session_id, getattr(msg, "id", ""),
+                "[WebChannel] session_id=%s has no connected ws, dropping msg id=%s ws_id=%s",
+                msg.session_id, getattr(msg, "id", ""), request_ws_id,
             )
             return
         all_clients = ws_set

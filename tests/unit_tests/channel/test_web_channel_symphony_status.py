@@ -188,3 +188,67 @@ async def test_web_channel_routes_rpc_response_by_request_ws_id():
     finally:
         await channel.unregister_ws(client)
         await channel.unregister_ws(other_client)
+
+
+@pytest.mark.asyncio
+async def test_web_channel_routes_event_by_request_ws_id_before_session_bucket():
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    client = _FakeClient()
+    other_client = _FakeClient()
+    old_routing_key = RoutingKey(
+        channel_id="web",
+        app_id="default",
+        user_id="test_user",
+        session_id="sess-old",
+        agent_ref=None,
+    )
+    new_routing_key = RoutingKey(
+        channel_id="web",
+        app_id="default",
+        user_id="test_user",
+        session_id="sess-new",
+        agent_ref=None,
+    )
+    other_old_routing_key = RoutingKey(
+        channel_id="web",
+        app_id="default",
+        user_id="other_user",
+        session_id="sess-old",
+        agent_ref=None,
+    )
+
+    await channel.register_ws(client, old_routing_key)
+    await channel.register_ws(client, new_routing_key)
+    await channel.register_ws(other_client, other_old_routing_key)
+    try:
+        msg = Message(
+            id="req-usage",
+            type="event",
+            channel_id="web",
+            session_id="sess-old",
+            params={},
+            timestamp=0.0,
+            ok=True,
+            payload={
+                "event_type": "chat.usage_summary",
+                "session_id": "sess-old",
+                "usage": {"total_tokens": 7},
+            },
+            event_type=EventType.CHAT_USAGE_SUMMARY,
+            metadata={"ws_id": getattr(client, "_jiuwen_ws_id", "")},
+        )
+
+        await channel.send(msg)
+        for _ in range(20):
+            if client.frames:
+                break
+            await asyncio.sleep(0.005)
+
+        assert len(client.frames) == 1
+        assert client.frames[0]["type"] == "event"
+        assert client.frames[0]["event"] == "chat.usage_summary"
+        assert client.frames[0]["payload"]["session_id"] == "sess-old"
+        assert other_client.frames == []
+    finally:
+        await channel.unregister_ws(client)
+        await channel.unregister_ws(other_client)
