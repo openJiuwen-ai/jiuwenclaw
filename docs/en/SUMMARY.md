@@ -10,6 +10,7 @@
 - [Project & Session Management (Web)](Project-Session-Management.md)
 - [Configuration](Configuration.md)
 - [Distributed Team](DistributedTeam.md)
+- [Agent Team Human in the Team (HITT)](AgentTeamHumanInTheTeam.md)
 - [Multi-Instance](MultiInstance.md)
 - [Auto Harness Feature Overview](AutoHarness.md)
 - [User guide](README.md)
