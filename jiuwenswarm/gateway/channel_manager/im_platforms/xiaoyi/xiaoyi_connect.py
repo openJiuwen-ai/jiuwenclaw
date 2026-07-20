@@ -515,7 +515,10 @@ class XiaoyiChannel(BaseChannel):
 
         # 问卷降级保底：端侧无选项点选卡片能力，把 chat.ask_user_question 降级为纯文本，
         # 走 text part 管道（A2A artifact-update kind:"text"），保证端侧一定能渲染出问卷。
-        # is_final=False / last_chunk=False：走非终帧路径，不触发清流，保持流开启等待用户回答。
+        # last_chunk=True：问卷作为一次性整段输出，按协议流式输出必须以 lastChunk=True 结束，
+        #   且 last_chunk=True 才走 kind:"text" 正文管道（False 会走 reasoningText 思考管道）。
+        # is_final=False：不把 final 置 true，保持端云任务通道不断，等待用户回答后 agent 接续处理。
+        #   清流逻辑在 send() 末尾的 final 分支，本分支提前 return，不会触及，故不会清流。
         if msg.event_type == EventType.CHAT_ASK_USER_QUESTION:
             ask_payload = msg.payload if isinstance(msg.payload, dict) else {}
             ask_questions = ask_payload.get("questions", []) or []
@@ -536,7 +539,7 @@ class XiaoyiChannel(BaseChannel):
                             opt_label = str(opt)
                         if opt_label:
                             ask_lines.append(f"  • {opt_label}")
-                ask_lines.append("（直接回复你的选择或具体信息即可，我会据此继续为你制定方案）")
+                ask_lines.append("（直接回复你的选择或补充具体信息即可，我会据此继续处理）")
                 ask_text = "\n".join(ask_lines)
                 for url_key in list(self._ws_connections.keys()):
                     await self._send_text_response(
@@ -545,8 +548,8 @@ class XiaoyiChannel(BaseChannel):
                         ask_text,
                         url_key,
                         append=False,
-                        last_chunk=False,
-                        is_final=False,  # 不断流，等待用户回答后 agent 接续
+                        last_chunk=True,
+                        is_final=False,  # 不断通道，等待用户回答后 agent 接续处理
                     )
             return
 
