@@ -263,6 +263,17 @@ check_if_redis_up() {
     DEPLOY_VARS["REDIS_PORT"]="6379"
 }
 
+check_if_jina_up() {
+    local name="${DEPLOY_VARS["JINA_NAME"]}"
+    local rname="${name}-reader"
+    local cname="${name}-cache-proxy"
+
+    if check_k8s_resource_exists "deployment" "${rname}" && check_k8s_resource_exists "deployment" "${cname}"; then
+        DEPLOY_VARS["JINA_READER_ENDPOINT"]="http://${name}-cache-proxy-svc.default"
+        info "Use built-in Jina server"
+    fi
+}
+
 check_if_rabbitmq_up() {
     local name="${DEPLOY_VARS["RABBITMQ_NAME"]}"
     local user=${DEPLOY_VARS["RABBITMQ_USER"]}
@@ -366,7 +377,7 @@ check_minio_up_dependency(){
 }
 
 check_redis_up_dependency() {
-    info "Redis module has no extra prerequisites (deploys to default namespace)"
+    info "Redis module has no dependencies"
 }
 
 check_rabbitmq_up_dependency(){
@@ -403,6 +414,10 @@ check_log_up_dependency(){
     exec_cmd chmod 755 "${log_dir}"
 }
 
+check_jina_up_dependency() {
+    info "JINA module has no dependencies"
+}
+
 check_gateway_up_dependency(){
     local jiuwenclaw_path="${DEPLOY_VARS["NFS_POD_PATH"]}/jiuwenclaw"
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
@@ -423,6 +438,7 @@ check_gateway_up_dependency(){
 
     check_if_db_up
     check_if_redis_up
+    check_if_jina_up
 }
 
 check_web_up_dependency(){

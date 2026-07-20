@@ -13,7 +13,7 @@ parse_args() {
                 i=$((i+1))
                 ;;
             #nfs|rabbitmq|yr_claw|gateway|web|manager)
-            nfs|nfs-sc|rabbitmq|mysql|redis|postgresql|minio|log|gateway|web|manager)
+            nfs|nfs-sc|rabbitmq|mysql|redis|postgresql|minio|log|jina|gateway|web|manager)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;
@@ -80,6 +80,7 @@ Modules (Optional):
   redis     Redis module (deploys to default namespace, ignores -n parameter)
   minio     Minio module (deploys to default namespace, ignores -n parameter)
   log       Log module (deploys to default namespace, ignores -n parameter)
+  jina      Jina module (deploys to default namespace, ignores -n parameter)
   gateway   Gateway service module
   web       Web frontend module
   manager   CLAW Manager module
