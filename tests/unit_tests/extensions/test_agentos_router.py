@@ -235,11 +235,17 @@ def test_load_router_config_agent_key_fields() -> None:
             },
             "agentos": {
                 "agent_key_fields": ["user_id", "agent_type", "session_id"],
+                "registry": {
+                    "endpoint": "http://127.0.0.1:8000",
+                    "node": "192.168.0.12",
+                },
             },
         }
     }
     loaded = load_router_config(config)
     assert loaded.agent_key_fields == ("user_id", "agent_type", "session_id")
+    assert loaded.registry.endpoint == "http://127.0.0.1:8000"
+    assert loaded.registry.node == "192.168.0.12"
 
     default_loaded = load_router_config(
         {

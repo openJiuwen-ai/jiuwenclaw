@@ -68,6 +68,7 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
         registry=RegistryConfig(
             endpoint=str(registry.get("endpoint") or "").strip(),
             request_timeout_s=float(registry.get("request_timeout_s") or 10.0),
+            node=str(registry.get("node") or "").strip(),
         ),
         creating_timeout_seconds=float(
             agentos.get("creating_timeout_seconds") or 60.0

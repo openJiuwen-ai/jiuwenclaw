@@ -574,8 +574,11 @@ gateway:
       - user_id
       - agent_type
     registry:
+      # Agent OS 注册中心地址（空=本地 stub，不发 HTTP）。一体机默认 http://127.0.0.1:8000
       endpoint:
       request_timeout_s: 10
+      # 本机 nodeIP，供 POST /api/nodes/{node}/heartbeat
+      node:
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
