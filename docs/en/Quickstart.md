@@ -58,6 +58,38 @@ After successful startup, the terminal will display backend service status:
 
 When you see similar output, the service is ready. Open `http://localhost:5173` in your browser to use.
 
+### Automatic Port Conflict Resolution
+
+JiuWenSwarm uses a fixed set of default ports (`18092 / 19000 / 19001 / 5173`). If a port is already in use when starting (e.g. a previous run did not fully stop, or another app occupies it), the launcher **automatically scans upward for the next free port group** and uses it instead of failing:
+
+```
+[start_services] ⚠️  Original ports conflict. Falling back to alternative port group (index 1):
+[start_services] Using ports:
+  agent_server: 19092
+  web: 20000
+  gateway: 20001
+  frontend: 6173
+[start_services] TUI/CLI connect with:
+  jiuwenswarm-tui --url ws://127.0.0.1:20001/tui
+  jiuwenswarm chat   (auto-reads GATEWAY_PORT)
+```
+
+The chosen ports are **persisted**, so the next launch and the TUI/CLI read them automatically — no need to memorize. If no free group is found within the scan range, the command prints conflict-resolution hints and exits.
+
+To **force specific ports**, two options:
+
+1. **Stop the occupying process**: `jiuwenswarm-start --stop default` (or `lsof -i :19001` on Linux/macOS; on Windows `netstat -ano | findstr :19001` then `taskkill /PID <pid> /F`).
+2. **Override base ports via env vars** (Docker / container-friendly):
+
+   ```bash
+   # Override base ports (index-0 starting ports; named instances add index×1000)
+   export JIUWENSWARM_GATEWAY_PORT=29001
+   export JIUWENSWARM_AGENT_SERVER_PORT=28092
+   export JIUWENSWARM_FRONTEND_PORT=15173
+   export JIUWENSWARM_WEB_PORT=29000
+   jiuwenswarm-start
+   ```
+
 ### Terminal CLI
 
 You can also chat with JiuwenSwarm directly from the terminal:
