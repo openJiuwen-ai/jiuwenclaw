@@ -437,7 +437,7 @@ Standard 模式会额外调用 `ChannelManager.create_agent_session()`，再由 
 | `GET` | `/api/v1/session/{sessionID}/file` | 已实现 | 调用 `skilldev.file.list`，返回前端 `FileTreeNode[]` |
 | `GET` | `/api/v1/session/{sessionID}/file/content?path={path}` | 已实现 | 调用 `skilldev.file.read`，返回文本内容 |
 | `PUT` | `/api/v1/session/{sessionID}/file/content?path={path}` | 已实现 | 调用 `skilldev.file.write`，覆盖写入文本文件 |
-| `DELETE` | `/api/v1/session/{sessionID}/attachments` | Channel 已实现 | Channel 校验 body 后转发 `skilldev.resource.delete`（按资源身份删除此前 `message.send` 上传的附件）；AgentServer 落盘/解压清理实现待补齐。不改写历史消息 |
+| `DELETE` | `/api/v1/session/{sessionID}/attachments` | 已实现 | Channel 校验 body 后转发 `skilldev.resource.delete`；AgentServer 按资源身份清理 session workspace 内附件与 `resource_state.json`（含压缩包及解压目录）。不改写历史消息，不删除 OBS 原始上传源 |
 | `GET` | `/api/v1/session/{sessionID}/file/status` | 占位 | 当前返回空数组 |
 
 附件删除请求体示例：
