@@ -1175,7 +1175,8 @@ class MemoryIndexManager:
         try:
             cursor = self.db.execute(f"SELECT COUNT(*) as count FROM {EMBEDDING_CACHE_TABLE}")
             return cursor.fetchone()["count"]
-        except:
+        except Exception as e:
+            logger.warning(f"Failed to get cache entry count: {e}")
             return 0
 
     async def close(self) -> None:
