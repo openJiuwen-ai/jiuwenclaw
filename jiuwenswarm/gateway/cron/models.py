@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from jiuwenswarm.gateway.cron.cron_expr import denormalize_cron_expr, is_one_shot_cron, seven_field_cron_to_iso, validate_cron_expression
+from jiuwenswarm.gateway.cron.cron_expr import validate_cron_expression
 
 
 class CronTargetChannel(str, Enum):
@@ -442,27 +442,15 @@ class CronJob:
             if last_run_at_ms:
                 state["lastRunAtMs"] = last_run_at_ms
 
-        # schedule: detect one-shot tasks converted from "at" kind.
-        # One-shot cron is stored as 7-field Quartz with dow='?' and year=concrete.
-        # For such tasks, return {"kind": "at", "at": <ISO>, "expr": "", "tz": <tz>}
-        # to match the device's one-shot format.
-        if is_one_shot_cron(self.cron_expr):
-            try:
-                at_iso = seven_field_cron_to_iso(self.cron_expr, timezone=self.timezone)
-            except Exception :
-                at_iso = ""
-            schedule_obj: dict[str, Any] = {
-                "kind": "at",
-                "at": at_iso,
-                "expr": "",
-                "tz": self.timezone,
-            }
-        else:
-            schedule_obj = {
-                "kind": "cron",
-                "expr": denormalize_cron_expr(self.cron_expr),
-                "tz": self.timezone,
-            }
+        # schedule: always kind="cron" with 5-field expr.
+        # One-shot tasks are encoded as a 5-field cron with a matching
+        # month/day/hour/minute and rely on delete_after_run=True for
+        # one-shot semantics. The device protocol only defines kind="cron".
+        schedule_obj = {
+            "kind": "cron",
+            "expr": self.cron_expr,
+            "tz": self.timezone,
+        }
 
         result: dict[str, Any] = {
             "id": self.id,
@@ -625,4 +613,5 @@ class CronRunState:
         if self.job_name:
             entry["name"] = self.job_name
         return entry
+
 
