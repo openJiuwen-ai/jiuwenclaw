@@ -260,7 +260,7 @@ from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_I
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import (
     SkillManager,
-    _safe_path_name,
+    safe_path_name,
     enabled_skills_from_environ,
     resolve_string_or_list_config,
 )
@@ -5853,40 +5853,26 @@ class JiuWenClawDeepAdapter:
         archives = evolution_store.list_archives(skill_name)
         return [a for a in archives if self._is_body_archive_name(a)]
 
-    def _ensure_evolution_rail_for_rpc(self) -> str | None:
-        """Ensure evolution rail for control-plane RPC that still need LLM (scan/rebuild).
-
-        Archives/rollback RPCs must not call this — they use disk EvolutionStore only.
-        """
-        config = self._config_cache if self._config_cache else get_config().get("react", {})
-        if not isinstance(config, dict):
-            config = {}
-        if not self._config_cache:
-            self._config_cache = dict(config)
-        if not config.get("evolution", {}).get("enabled", False):
-            return "演进功能未启用。"
-        if self._skill_evolution_rail is None:
-            self._skill_evolution_rail = self._build_skill_evolution_rail(config)
-        if self._skill_evolution_rail is None:
-            return "演进功能初始化失败。"
-        return None
-
     async def _rollback_skill_via_store(
         self,
         store: EvolutionStore,
         skill_name: str,
         version: str | None = None,
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         """Rollback skill via EvolutionStore only (no EvolutionRail / LLM).
 
         ``version`` may be a body archive filename (``SKILL.v1.0.0.md``) or a bare
         SemVer string (``1.0.0``). When omitted, the newest body archive by mtime
         is used.
+
+        Returns ``(success, evo_restored)``. ``evo_restored`` is meaningful only
+        when ``success`` is True; False means body was rolled back but the paired
+        evolution log could not be restored.
         """
         archive = store.get_skill_archive_dir(skill_name)
         if archive is None:
             logger.warning("[JiuWenClaw] no archive dir for %s", skill_name)
-            return False
+            return False, True
 
         if version:
             body_name = store.normalize_body_archive_name(version)
@@ -5894,13 +5880,13 @@ class JiuWenClawDeepAdapter:
                 logger.warning(
                     "[JiuWenClaw] invalid archive version for %s: %s", skill_name, version,
                 )
-                return False
+                return False, True
             body_archive = store.get_skill_archive_file(skill_name, body_name)
             if body_archive is None:
                 logger.warning(
                     "[JiuWenClaw] invalid archive version for %s: %s", skill_name, version,
                 )
-                return False
+                return False, True
         else:
             body_files = sorted(
                 [
@@ -5912,7 +5898,7 @@ class JiuWenClawDeepAdapter:
             )
             if not body_files:
                 logger.warning("[JiuWenClaw] no archived body for %s", skill_name)
-                return False
+                return False, True
             body_archive = body_files[0]
 
         evo_archive = store.resolve_paired_evolution_archive(skill_name, body_archive.name)
@@ -5924,7 +5910,7 @@ class JiuWenClawDeepAdapter:
                 skill_name,
                 body_archive.name,
             )
-            return False
+            return False, True
 
         await store.archive_current_state(skill_name)
         await store.write_skill_content(skill_name, old_body)
@@ -5971,7 +5957,7 @@ class JiuWenClawDeepAdapter:
                 skill_name,
                 body_archive.name,
             )
-        return True
+        return True, evo_restored
 
     async def _do_evolve_rollback(
         self, skill_name: str, version: str | None,
@@ -5982,7 +5968,7 @@ class JiuWenClawDeepAdapter:
 
         Returns a structured dict:
         - ``{ok, rolled_back: False, name, versions}`` when *version* is omitted (list only)
-        - ``{ok, rolled_back: True, name, version}`` on successful rollback
+        - ``{ok, rolled_back: True, name, version[, warning]}`` on successful rollback
         - ``{ok: False, error}`` on failure
         """
         store = self._get_disk_evolution_store()
@@ -6025,34 +6011,48 @@ class JiuWenClawDeepAdapter:
             return {"ok": False, "error": f"版本 `{version}` 不存在。可用版本：{hint}"}
 
         try:
-            success = await asyncio.wait_for(
+            success, evo_ok = await asyncio.wait_for(
                 self._rollback_skill_via_store(store, skill_name, resolved),
                 timeout=30.0,
             )
         except asyncio.TimeoutError:
             logger.warning(
-                "[JiuWenClaw] evolve_rollback timed out for skill=%s version=%s",
+                "[JiuWenClaw] evolve_rollback timed out for skill=%s version=%s "
+                "(filesystem may be partially updated)",
                 skill_name,
                 resolved,
             )
-            return {"ok": False, "error": "回滚操作超时，请稍后重试。"}
+            return {
+                "ok": False,
+                "error": (
+                    "回滚操作超时，文件系统可能处于部分完成状态"
+                    "（body / evolution log / 归档可能不一致）。"
+                    f"请检查 Skill '{skill_name}' 的 archive 目录后再重试。"
+                ),
+            }
         except Exception as exc:
             logger.warning("[JiuWenClaw] evolve_rollback failed: %s", exc)
             return {"ok": False, "error": f"回滚失败：{exc}"}
 
         if success:
-            return {
+            result: dict[str, Any] = {
                 "ok": True,
                 "rolled_back": True,
                 "name": skill_name,
                 "version": resolved,
             }
+            if not evo_ok:
+                result["warning"] = (
+                    "Skill body 已回滚，但 evolution log 恢复失败，"
+                    "演进历史可能不一致。请检查该 Skill 的 archive 与 evolutions.json。"
+                )
+            return result
         return {"ok": False, "error": f"Skill '{skill_name}' 回滚失败，请检查归档版本是否有效。"}
 
     async def handle_skills_evolution_archives(self, params: dict) -> dict[str, Any]:
         """RPC: skills.evolution.archives — list rollback archive versions (disk-only)."""
         try:
-            skill_name = _safe_path_name(params.get("name"), "skill")
+            skill_name = safe_path_name(params.get("name"), "skill")
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -6072,7 +6072,7 @@ class JiuWenClawDeepAdapter:
     async def handle_skills_evolution_rollback(self, params: dict) -> dict[str, Any]:
         """RPC: skills.evolution.rollback — rollback skill via disk EvolutionStore."""
         try:
-            skill_name = _safe_path_name(params.get("name"), "skill")
+            skill_name = safe_path_name(params.get("name"), "skill")
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -6084,12 +6084,15 @@ class JiuWenClawDeepAdapter:
             raise ValueError(str(result.get("error") or "回滚失败"))
 
         if result.get("rolled_back"):
-            return {
+            payload = {
                 "success": True,
                 "name": result["name"],
                 "version": result["version"],
                 "rolled_back": True,
             }
+            if result.get("warning"):
+                payload["warning"] = result["warning"]
+            return payload
         return {
             "success": True,
             "name": result["name"],
@@ -6139,11 +6142,14 @@ class JiuWenClawDeepAdapter:
             return {"output": "\n".join(lines), "result_type": "answer"}
 
         resolved = result.get("version") or version
+        output = (
+            f"Skill '{skill_name}' 已成功回滚到 `{resolved}`。\n\n"
+            f"（当前状态已自动归档，可再次回滚恢复。）"
+        )
+        if result.get("warning"):
+            output += f"\n\n⚠️ {result['warning']}"
         return {
-            "output": (
-                f"Skill '{skill_name}' 已成功回滚到 `{resolved}`。\n\n"
-                f"（当前状态已自动归档，可再次回滚恢复。）"
-            ),
+            "output": output,
             "result_type": "answer",
         }
 

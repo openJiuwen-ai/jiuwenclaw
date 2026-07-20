@@ -97,7 +97,7 @@ def test_handle_skills_evolution_rollback_latest(monkeypatch):
     monkeypatch.setattr(
         adapter,
         "_rollback_skill_via_store",
-        AsyncMock(return_value=True),
+        AsyncMock(return_value=(True, True)),
     )
     monkeypatch.setattr(
         JiuWenClawDeepAdapter,
@@ -188,16 +188,75 @@ def test_rollback_skill_via_store_continues_when_evo_restore_fails(monkeypatch):
     store.render_evolution_markdown = AsyncMock()
     store.delete_archive_version = AsyncMock(return_value=True)
 
-    ok = asyncio.run(
+    ok, evo_ok = asyncio.run(
         adapter._rollback_skill_via_store(store, "daily-weather", "SKILL.v1.0.0.md")
     )
     assert ok is True
+    assert evo_ok is False
     store.write_skill_content.assert_awaited_once_with("daily-weather", "# archived body\n")
     store.restore_evolution_log_from_archive.assert_awaited_once()
     store.render_evolution_markdown.assert_awaited_once_with("daily-weather")
     store.delete_archive_version.assert_awaited_once_with(
         "daily-weather", "SKILL.v1.0.0.md"
     )
+
+
+@pytest.mark.unit
+def test_do_evolve_rollback_surfaces_evo_restore_warning(monkeypatch):
+    adapter = _make_adapter()
+    store = MagicMock()
+    store.skill_exists.return_value = True
+    store.list_archives.return_value = ["SKILL.v1.0.0.md"]
+    store.normalize_body_archive_name = lambda value: value
+    _mock_disk_store(adapter, monkeypatch, store)
+    monkeypatch.setattr(
+        adapter,
+        "_rollback_skill_via_store",
+        AsyncMock(return_value=(True, False)),
+    )
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_guard_bootstrap_skill",
+        staticmethod(lambda _name: None),
+    )
+
+    result = asyncio.run(adapter._do_evolve_rollback("daily-weather", "SKILL.v1.0.0.md"))
+    assert result["ok"] is True
+    assert result["rolled_back"] is True
+    assert "evolution log" in result["warning"]
+
+    rpc = asyncio.run(
+        adapter.handle_skills_evolution_rollback(
+            {"name": "daily-weather", "version": "SKILL.v1.0.0.md"}
+        )
+    )
+    assert rpc["rolled_back"] is True
+    assert "evolution log" in rpc["warning"]
+
+
+@pytest.mark.unit
+def test_do_evolve_rollback_timeout_mentions_archive_dir(monkeypatch):
+    adapter = _make_adapter()
+    store = MagicMock()
+    store.skill_exists.return_value = True
+    store.list_archives.return_value = ["SKILL.v1.0.0.md"]
+    store.normalize_body_archive_name = lambda value: value
+    _mock_disk_store(adapter, monkeypatch, store)
+
+    async def _slow(*_args, **_kwargs):
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(adapter, "_rollback_skill_via_store", _slow)
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_guard_bootstrap_skill",
+        staticmethod(lambda _name: None),
+    )
+
+    result = asyncio.run(adapter._do_evolve_rollback("daily-weather", "SKILL.v1.0.0.md"))
+    assert result["ok"] is False
+    assert "archive" in result["error"]
+    assert "部分完成" in result["error"]
 
 
 @pytest.mark.unit
@@ -337,4 +396,89 @@ def test_agent_manager_disk_only_evolution_skips_create_instance(monkeypatch):
     assert response.ok is True
     assert response.payload["versions"] == ["SKILL.v1.0.0.md"]
     ephemeral.process_message.assert_awaited_once_with(request)
+    manager.get_agent.assert_not_called()
+
+
+@pytest.mark.unit
+def test_facade_evolution_rail_rpc_handler_missing():
+    from jiuwenclaw.agentserver.interface import JiuWenClaw
+    from jiuwenclaw.schema.agent import AgentRequest
+    from jiuwenclaw.schema.message import ReqMethod
+
+    claw = object.__new__(JiuWenClaw)
+    claw._ensure_adapter = AsyncMock(return_value=SimpleNamespace())
+
+    request = AgentRequest(
+        request_id="req-missing",
+        channel_id="web",
+        req_method=ReqMethod.SKILLS_EVOLUTION_ROLLBACK,
+        params={"name": "docx-craft", "version": "latest"},
+    )
+    response = asyncio.run(claw._handle_skills_evolution_rail_request(request))
+    assert response.ok is False
+    assert "不支持" in response.payload["error"]
+
+
+@pytest.mark.unit
+def test_facade_evolution_rail_rpc_handler_raises():
+    from jiuwenclaw.agentserver.interface import JiuWenClaw
+    from jiuwenclaw.schema.agent import AgentRequest
+    from jiuwenclaw.schema.message import ReqMethod
+
+    claw = object.__new__(JiuWenClaw)
+    adapter = SimpleNamespace(
+        handle_skills_evolution_rollback=AsyncMock(side_effect=RuntimeError("boom")),
+    )
+    claw._ensure_adapter = AsyncMock(return_value=adapter)
+
+    request = AgentRequest(
+        request_id="req-err",
+        channel_id="web",
+        req_method=ReqMethod.SKILLS_EVOLUTION_ROLLBACK,
+        params={"name": "docx-craft", "version": "latest"},
+    )
+    response = asyncio.run(claw._handle_skills_evolution_rail_request(request))
+    assert response.ok is False
+    assert response.payload["error"] == "boom"
+
+
+@pytest.mark.unit
+def test_agent_manager_disk_only_evolution_reuses_existing_agent(monkeypatch):
+    from jiuwenclaw.agentserver.agent_manager import AgentManager
+    from jiuwenclaw.schema.agent import AgentRequest
+    from jiuwenclaw.schema.message import ReqMethod
+
+    manager = object.__new__(AgentManager)
+    manager.user_workspace_dir = None
+    manager.agent_id = "test-agent"
+    manager.service_id = "test-service"
+    manager._latest_env_overrides = {}
+    manager.get_agent = AsyncMock(side_effect=AssertionError("get_agent must not run"))
+
+    existing = SimpleNamespace(
+        process_message=AsyncMock(
+            return_value=SimpleNamespace(
+                ok=True,
+                payload={"name": "daily-weather", "versions": ["SKILL.v1.0.0.md"]},
+            )
+        )
+    )
+    manager.get_agent_nowait = MagicMock(return_value=existing)
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.interface.JiuWenClaw",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("ephemeral JiuWenClaw must not be created")
+        ),
+    )
+
+    request = AgentRequest(
+        request_id="req-reuse",
+        channel_id="web",
+        req_method=ReqMethod.SKILLS_EVOLUTION_ARCHIVES,
+        params={"name": "daily-weather"},
+    )
+    response = asyncio.run(manager.process_message(request))
+    assert response.ok is True
+    assert response.payload["versions"] == ["SKILL.v1.0.0.md"]
+    existing.process_message.assert_awaited_once_with(request)
     manager.get_agent.assert_not_called()
