@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,7 +95,12 @@ _STREAM_TRACE_ENV_KEY = "JIUWENSWARM_TEAM_STREAM_TRACE"
 # When set to "true", non-leader teammate frames are filtered out in team
 # streaming so the frontend only receives leader output.
 _HIDE_TEAMMATE_ENV_KEY = "JIUWENSWARM_TEAM_HIDE_TEAMMATE"
-_DEBUG_PREFIX = "/debug"
+# /debug 剥离原语与 Agent/Code 共享（debug_trace.directives），消除两份实现。
+# 别名保持 _DEBUG_PREFIX / _strip_directive 不变，_extract_query_directives 零改动。
+from jiuwenswarm.server.runtime.debug_trace.directives import (
+    DEBUG_PREFIX as _DEBUG_PREFIX,
+    strip_slash_directive as _strip_directive,
+)
 _FOLLOWUP_INTERACT_RETRY_TIMEOUT_SEC = 1.0
 _FOLLOWUP_INTERACT_RACE_WAIT_TIMEOUT_SEC = 3.0
 _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC = 0.05
@@ -312,20 +316,6 @@ def _build_team_event_chunk_meta(event: Any) -> tuple[dict | None, dict]:
     fan_out = _build_logical_targets(event)
     metadata = {"fan_out_targets": fan_out} if fan_out else {}
     return agent_ref, metadata
-
-
-def _strip_directive(query: str, prefix: str) -> tuple[str, bool]:
-    """Strip a leading slash directive from a query string.
-
-    Returns the cleaned query and whether the directive was present.
-    """
-    stripped = query.lstrip()
-    if not stripped.startswith(prefix):
-        return query, False
-    remainder = stripped[len(prefix):]
-    if remainder and not remainder[0].isspace():
-        return query, False
-    return remainder.lstrip(), True
 
 
 def _extract_query_directives(query: str) -> tuple[str, bool, bool]:
@@ -549,37 +539,24 @@ async def _team_session_has_runtime(team_manager: TeamManager, session_id: str) 
 
 async def query_team_human_members_for_join(
     session_id: str, team_name: str,
-) -> tuple[list[dict[str, Any]], str | None]:
-    """直查 team.db 取 human_agent 席位列表，同时校验 session_id ↔ team_name。
+) -> list[dict[str, Any]]:
+    """直查 team.db 取该 team 的全部成员（未 role 过滤，交调用方过滤）。
 
-    用 _build_session_scoped_team_name(team_name, session_id) 拼出完整
-    team_name 作为 DB key——key 拼不出来说明 session_id 与 team_name 不一致，
-    DB 自然查不到返回空。不依赖 monitor 是否存活。
-    team_name 为空返回 ([], None)。
+    纯查询：session_id↔team_name 一致性校验与对外文案均由 gateway 拼，
+    本函数只查不判。team_name 空、DB miss、DB 异常一律返回空 list。
+    session_id 仅用于日志排查，不参与查询。
     """
     if not team_name:
-        return [], None
-
-    # 拼 session-scoped team_name 作为 DB key
-    session_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "").strip()).strip("._-")
-    if session_suffix and not team_name.endswith(f"_{session_suffix}"):
-        full_team_name = f"{team_name}_{session_suffix}"
-    else:
-        full_team_name = team_name
+        return []
     try:
-        members_raw = await TeamMonitorHandler.get_member_list_from_db(full_team_name)
+        members = await TeamMonitorHandler.get_member_list_from_db(team_name)
     except Exception as exc:
         logger.warning(
             "[TeamHelpers] query_team_human_members_for_join db query failed: "
             "session=%s team=%s error=%s", session_id, team_name, exc,
         )
-        members_raw = None
-
-    members = [
-        m for m in (members_raw or [])
-        if isinstance(m, dict) and m.get("role") == "human_agent"
-    ]
-    return members, team_name
+        return []
+    return members or []
 
 
 async def ensure_monitor_handlers_for_active_runtime(
@@ -1167,7 +1144,7 @@ def ensure_team_evolution_watcher(
             source,
         )
         return
-    if not getattr(rail, "auto_scan", True) and not getattr(rail, "completion_followup_enabled", False):
+    if not rail.signal_trigger and not rail.review_trigger:
         logger.info(
             "[TeamHelpers] evolution monitor skipped because team evolution is disabled: "
             "channel_id=%s session_id=%s source=%s",
@@ -2019,19 +1996,18 @@ async def _consume_stream_with_query(
                 # is preserved.
                 if parsed.get("event_type") == "chat.final":
                     tm_ = get_team_manager(channel_id)
-                    if tm_.has_seen_team_events(session_id) and not tm_.is_workflow_completed(session_id):
-                        continue
-                    _broadcast_event(
-                        channel_id,
-                        session_id,
-                        {
-                            "event_type": "chat.processing_status",
-                            "session_id": session_id,
-                            "rid": round_id,
-                            "is_processing": False,
-                            "is_complete": True,
-                        },
-                    )
+                    if (not tm_.has_seen_team_events(session_id)) or tm_.is_workflow_completed(session_id):
+                        _broadcast_event(
+                            channel_id,
+                            session_id,
+                            {
+                                "event_type": "chat.processing_status",
+                                "session_id": session_id,
+                                "rid": round_id,
+                                "is_processing": False,
+                                "is_complete": True,
+                            },
+                        )
                 _broadcast_event(channel_id, session_id, parsed)
 
         # If stream ended without any chunks, broadcast an error event
@@ -2164,12 +2140,16 @@ async def _consume_monitor_events(
 #
 # member_id / task_id 均以 run_id 前缀做命名空间，避免与真实 teammate/task 冲突。
 
-_WF_PHASE_STATUS_TO_TASK_TYPE: dict[str, str] = {
-    "planned": "team.task.created",
-    "running": "team.task.claimed",
-    "completed": "team.task.completed",
-    "failed": "team.task.cancelled",
-    "stopped": "team.task.cancelled",
+# swarmflow phase status -> (web team.task event type, authoritative TeamTaskStatus).
+# The status is resolved here (server-side) so the web frontend consumes it
+# directly, consistent with TeamMonitorHandler's convergence. The event ``type``
+# only drives the activity-log label; ``status`` alone decides the board column.
+_WF_PHASE_STATUS_TO_TASK: dict[str, tuple[str, str]] = {
+    "planned": ("team.task.created", "pending"),
+    "running": ("team.task.claimed", "in_progress"),
+    "completed": ("team.task.completed", "completed"),
+    "failed": ("team.task.cancelled", "cancelled"),
+    "stopped": ("team.task.cancelled", "cancelled"),
 }
 
 
@@ -2213,8 +2193,9 @@ def _workflow_updated_to_team_events(
         task_id = f"{run_id}:{phase_id}"
         if seen_phase.get(task_id) != status:
             seen_phase[task_id] = status
-            task_type = _WF_PHASE_STATUS_TO_TASK_TYPE.get(status)
-            if task_type is not None:
+            mapping = _WF_PHASE_STATUS_TO_TASK.get(status)
+            if mapping is not None:
+                task_type, task_status = mapping
                 out.append(
                     _team_event_envelope(
                         "team.task",
@@ -2224,7 +2205,7 @@ def _workflow_updated_to_team_events(
                             "team_id": team_id,
                             "task_id": task_id,
                             "title": phase.get("name") or phase_id,
-                            "status": status,
+                            "status": task_status,
                         },
                     )
                 )
@@ -2326,7 +2307,6 @@ async def _consume_workflow_events(
                         _resolve_channel_id(channel_id), session_id, wf_status,
                     )
                     get_team_manager(channel_id).mark_workflow_completed(session_id)
-                    break
                 continue
             for team_ev in _workflow_updated_to_team_events(
                 event, session_id, seen_phase, seen_agent, spawned_members
@@ -2343,8 +2323,6 @@ async def _consume_workflow_events(
                     _resolve_channel_id(channel_id), session_id, wf_status,
                 )
                 get_team_manager(channel_id).mark_workflow_completed(session_id)
-                break
-
         logger.info(
             "[TeamHelpers] workflow event loop ended: channel_id=%s session_id=%s",
             _resolve_channel_id(channel_id),
@@ -2501,7 +2479,7 @@ async def _watch_team_evolution_and_push(
             fallback_sec=TEAM_EVOLUTION_EVENT_TIMEOUT_SEC,
         )
         while True:
-            if not getattr(rail, "auto_scan", True):
+            if not rail.signal_trigger and not rail.review_trigger:
                 if active_cycle_request_id is not None:
                     await push_evolution_status(
                         push_context,

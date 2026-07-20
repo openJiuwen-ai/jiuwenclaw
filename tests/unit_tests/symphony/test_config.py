@@ -61,7 +61,6 @@ def test_symphony_config_normalizes_values(monkeypatch, tmp_path):
             },
             "orchestration": {
                 "mode": "fast",
-                "top_k": 0,
                 "max_depth": "7",
                 "min_edge_confidence": -1,
             },
@@ -84,7 +83,6 @@ def test_symphony_config_normalizes_values(monkeypatch, tmp_path):
     assert cfg.build.require_consensus is False
     assert cfg.build.min_edge_confidence == 1.0
     assert cfg.orchestration.mode == "fast"
-    assert cfg.orchestration.top_k == 1
     assert cfg.orchestration.max_depth == 7
     assert cfg.orchestration.min_edge_confidence == 0.0
     assert cfg.enabled is True

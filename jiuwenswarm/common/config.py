@@ -173,7 +173,35 @@ def get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
     env_auto_scan = _get_bool_env(os.getenv("EVOLUTION_AUTO_SCAN"))
     if env_auto_scan is not None:
         return env_auto_scan
-    return _get_evolution_config(config).get("auto_scan", False)
+    return _get_evolution_config(config).get("auto_scan") is True
+
+
+def get_evolution_signal_trigger_enabled(
+    config: dict[str, Any] | None,
+    *,
+    fallback: bool = False,
+) -> bool:
+    env_signal_trigger = _get_bool_env(os.getenv("EVOLUTION_SIGNAL_TRIGGER"))
+    if env_signal_trigger is not None:
+        return env_signal_trigger
+    signal_trigger = _get_evolution_config(config).get("signal_trigger")
+    if isinstance(signal_trigger, bool):
+        return signal_trigger
+    return fallback
+
+
+def get_evolution_review_trigger_enabled(
+    config: dict[str, Any] | None,
+    *,
+    fallback: bool = False,
+) -> bool:
+    env_review_trigger = _get_bool_env(os.getenv("EVOLUTION_REVIEW_TRIGGER"))
+    if env_review_trigger is not None:
+        return env_review_trigger
+    review_trigger = _get_evolution_config(config).get("review_trigger")
+    if isinstance(review_trigger, bool):
+        return review_trigger
+    return fallback
 
 
 def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:

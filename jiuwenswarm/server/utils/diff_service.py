@@ -168,18 +168,29 @@ class DiffService:
 
     @staticmethod
     def _get_project_dir_from_metadata(session_id: str) -> str | None:
-        """从 session metadata.json 中读取项目目录."""
+        """从 session metadata.json 中读取项目目录.
+
+        读取顺序(任一命中即返回):
+          1. ``channel_metadata.cwd`` (TUI 等显式传 cwd 的通道)
+          2. ``delivery_context.route_metadata.cwd`` (路由元数据中的 cwd)
+          3. 顶层 ``project_dir`` (Web 等通道由 ``init_session_metadata`` 写入)
+
+        前两者是历史路径,保留以向后兼容;顶层 ``project_dir`` 是新 schema
+        (``init_session_metadata`` 创建会话时必写),覆盖 Web/code 模式等
+        ``channel_metadata`` 不含 ``cwd`` 的场景,避免 file_ops 漏读项目目录。
+        """
         metadata_file = get_agent_sessions_dir() / session_id / "metadata.json"
         if not metadata_file.exists():
             return None
         try:
             metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
-            # 从 channel_metadata.cwd 或 delivery_context.route_metadata.cwd 获取
+            # 1. channel_metadata.cwd
             channel_meta = metadata.get("channel_metadata", {})
             if isinstance(channel_meta, dict):
                 cwd = channel_meta.get("cwd")
                 if isinstance(cwd, str) and cwd.strip():
                     return cwd.strip()
+            # 2. delivery_context.route_metadata.cwd
             delivery_ctx = metadata.get("delivery_context", {})
             if isinstance(delivery_ctx, dict):
                 route_meta = delivery_ctx.get("route_metadata", {})
@@ -187,6 +198,10 @@ class DiffService:
                     cwd = route_meta.get("cwd")
                     if isinstance(cwd, str) and cwd.strip():
                         return cwd.strip()
+            # 3. 顶层 project_dir (新 schema,init_session_metadata 写入)
+            top_level = metadata.get("project_dir")
+            if isinstance(top_level, str) and top_level.strip():
+                return top_level.strip()
         except (json.JSONDecodeError, OSError) as e:
             logger.debug("Failed to read metadata file %s: %s", metadata_file, e)
         return None
@@ -1058,19 +1073,39 @@ class DiffService:
         return files_to_restore
 
 
-    def truncate_file_ops_by_timestamp(self, session_id: str, cutoff_ts: float) -> None:
-        """截断 session-specific file_ops 日志，移除 timestamp >= cutoff_ts 的条目.
+    def truncate_file_ops_by_timestamp(
+        self,
+        session_id: str,
+        cutoff_ts: float,
+        project_dir: str | None = None,
+    ) -> None:
+        """截断 file_ops 日志，移除 timestamp >= cutoff_ts 的条目.
 
-        在 rewind 操作后调用，确保 file_ops 日志与截断后的 history.json 一致。
-        仅处理 session-specific 文件（文件名包含 session_id），不动全局 file_ops。
+        在 rewind / discard_turn_changes 操作后调用，确保 file_ops 日志与
+        截断后的 history.json / 实际工作区一致。
+
+        清理范围:
+          - **session-specific file_ops**(文件名包含 session_id):
+            全部条目按 timestamp 过滤(因为这些条目只属于该 session)。
+          - **全局 file_ops**(文件名不含 session_id,如 ``file_ops_jiuwenswarm.json``):
+            **不清理**。全局 file_ops 缺少 session 归属字段,若按路径 + timestamp
+            清理会误伤其他 session 在同一文件上的后续修改(详见 P1 修复)。
+            撤销后 last_turn diff 可能残留历史全局记录,这是已知局限——
+            用户撤销本轮后一般不需要查看 last_turn,且 session-specific 日志
+            已足够支撑单 session 场景的精确恢复。
 
         Args:
             session_id: 会话 ID
             cutoff_ts: 截断阈值（Unix timestamp），>= 此时间的条目将被移除
+            project_dir: 项目目录路径。显式传入可避免底层从 metadata 推断,
+                覆盖 ``channel_metadata.cwd`` 缺失的场景(如 Web/code 模式新会话)。
+                为 ``None`` 时底层从 session metadata 推断(读取顺序见
+                ``_get_project_dir_from_metadata``)。
         """
 
         # 收集所有 session-specific file_ops 文件
         file_ops_paths: list[Path] = []
+
         for base_dir in (get_agent_workspace_dir(), get_user_workspace_dir()):
             hist_dir = base_dir / ".agent_history"
             if not hist_dir.is_dir():
@@ -1079,10 +1114,10 @@ class DiffService:
                 if self._is_valid_file_ops_file(f.name, session_id, require_session=True):
                     file_ops_paths.append(f)
 
-        # 也从项目目录扫描
-        project_dir = self._get_project_dir_from_metadata(session_id)
-        if project_dir:
-            project_hist_dir = Path(project_dir) / ".agent_history"
+        # 也从项目目录扫描(显式传入优先,否则从 metadata 推断)
+        resolved_project_dir = project_dir or self._get_project_dir_from_metadata(session_id)
+        if resolved_project_dir:
+            project_hist_dir = Path(resolved_project_dir) / ".agent_history"
             if project_hist_dir.is_dir():
                 for f in project_hist_dir.iterdir():
                     if self._is_valid_file_ops_file(f.name, session_id, require_session=True):

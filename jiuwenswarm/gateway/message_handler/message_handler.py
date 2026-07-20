@@ -1984,15 +1984,30 @@ class MessageHandler(ABC):
 
     # ---------- robot_messages ----------
 
-    def _iter_active_stream_modes(self) -> list[str]:
-        """所有活跃用户对话任务的 mode 快照（流式 + 非流式 chat）。
+    def _is_chat_stream(self, rid: str) -> bool:
+        """``rid`` 是否为计入运行态的对话流（``chat.send``）。
 
-        流式任务的 mode 存于 ``_stream_modes``，其 key 与
-        ``_stream_emits_processing_status`` 同 rid 配套、对每个流式任务都写
-        （与 emit 标志无关），故遍历它即覆盖全部流式任务；非流式 chat 的
-        mode 直接是 ``_active_chat_tasks`` 的 value。
+        计数口径与 ``_should_emit_processing_status_for_stream`` 对齐：只有
+        会发 processing_status 的流式任务（emit=True，即 chat.send）算“对话
+        任务在跑”。``history.get`` / ``chat.error`` 等只读/异常流登记在
+        ``_stream_modes`` 供取消取 mode 与 cron 回填 mode 用，但**不计入运行态**，
+        否则它们退出时会让保存锁计数悬空在最后一次广播值。emit 标志在启动时
+        先于 mode 写入、两者成对 pop（见 ``_pop_stream_tracking``），故
+        ``_stream_modes`` 中的 rid 必有对应标志项。
         """
-        return [*self._stream_modes.values(), *self._active_chat_tasks.values()]
+        return bool(self._stream_emits_processing_status.get(rid))
+
+    def _iter_active_stream_modes(self) -> list[str]:
+        """计入运行态的活跃对话任务 mode 快照（流式 chat + 非流式 chat）。
+
+        流式只取对话流（见 ``_is_chat_stream``），``_active_chat_tasks`` 天然
+        都是对话任务，二者合并即覆盖全部“需触发配置保存锁”的任务。
+        """
+        return [
+            mode
+            for rid, mode in self._stream_modes.items()
+            if self._is_chat_stream(rid)
+        ] + [*self._active_chat_tasks.values()]
 
     def has_active_streams(self) -> bool:
         """是否有非 team 模式的用户对话任务正在运行（配置保存锁用，只读）。
@@ -2010,15 +2025,14 @@ class MessageHandler(ABC):
         )
 
     def active_non_team_modes(self) -> list[tuple[str, str]]:
-        """非 team 活跃任务的 (request_id, mode) 明细（只读，调试/日志用）。
+        """非 team 活跃对话任务的 (request_id, mode) 明细（只读，调试/日志用）。
 
-        流式 rid 来自 ``_stream_modes``，非流式 chat rid 来自
-        ``_active_chat_tasks``；两者 key 集合互补，组合后覆盖全部活跃任务。
+        口径与 ``_iter_active_stream_modes`` 一致，再按 team 排除。
         供保存锁拒绝日志定位“是哪个 rid 让运行态误判为 true”。
         """
         result: list[tuple[str, str]] = []
         for rid, mode in self._stream_modes.items():
-            if not ChannelMode.is_team_mode(mode):
+            if self._is_chat_stream(rid) and not ChannelMode.is_team_mode(mode):
                 result.append((rid, mode))
         for rid, mode in self._active_chat_tasks.items():
             if not ChannelMode.is_team_mode(mode):
@@ -2048,10 +2062,16 @@ class MessageHandler(ABC):
                     "running": bool(count),
                     "count": count,
                 })
+                # chat_stream_rids 计入运行态的对话流数；stream_rids 为注册流总数
+                # （含 history.get 等 emit=False 非对话流），故前者 <= 后者。
+                chat_stream_rids = sum(
+                    1 for rid in self._stream_modes if self._is_chat_stream(rid)
+                )
                 logger.info(
                     "[task.global_running] broadcast: running=%s non_team_count=%d "
-                    "non_team_modes=%s team_modes=%s stream_rids=%d active_chat_rids=%d",
-                    bool(count), count, non_team_modes, team_modes,
+                    "non_team_modes=%s team_modes=%s chat_stream_rids=%d "
+                    "stream_rids=%d active_chat_rids=%d",
+                    bool(count), count, non_team_modes, team_modes, chat_stream_rids,
                     len(self._stream_modes), len(self._active_chat_tasks),
                 )
             else:
@@ -3607,9 +3627,10 @@ class MessageHandler(ABC):
                         # 能正确计到此任务；否则飞书等跨通道场景下全局运行态广播会漏计，
                         # 导致 web 前端保存按钮无法被禁用。
                         self._stream_emits_processing_status[stream_rid] = emit_processing_status
-                        # _stream_modes 同样须在 _send_processing_status 广播前写入，
-                        # 否则 has_active_streams() / _iter_active_stream_modes() 漏掉刚
-                        # 启动的任务，team 排除判断出错。
+                        # _stream_modes 同样须在 _send_processing_status 广播前写入：
+                        # 对话流（emit=True）经 _iter_active_stream_modes() 计入运行态，
+                        # 非对话流（emit=False，如 history.get）登记在此仅供退出清理与路由，
+                        # 不计入运行态计数。两者成对 pop，计数与清理口径一致。
                         self._stream_modes[stream_rid] = (
                             msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
                         )
@@ -3804,8 +3825,11 @@ class MessageHandler(ABC):
                     str((env.params or {}).get("request_id") or ""),
                 )
                 has_processing_status_false = True
-            # 清理状态
-            self._pop_stream_tracking(rid)
+            # 清理状态：pop tracking 后必须广播 task.global_running 最新快照。
+            # 若只裸 pop（不广播），非 chat.send 流（history.get / chat.error 等
+            # emit=False 路径）退出时会让 has_active_streams() 计数悬空，前端保存锁
+            # 卡在最后一次广播值（通常为 True），仅靠重连自愈。
+            await self._pop_stream_tracking_and_broadcast([rid])
             if session_id is not None and session_id not in self._stream_sessions.values():
                 # Fallback cleanup when stream exits unexpectedly without evolution end signal.
                 self._evolution_approval.clear_session_in_progress(session_id)

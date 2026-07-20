@@ -39,7 +39,6 @@ symphony:
 
   orchestration:
     mode: fast
-    top_k: 3
     max_depth: 4
     min_edge_confidence: 0.3
 
@@ -474,9 +473,9 @@ gateway:
   session_map_scope: <<GATEWAY_SESSION_MAP_SCOPE>>
 
   # AgentClient 配置 - Gateway 连接到 AgentServer 的方式
-  # type: websocket（默认，WebSocket 连接） | yuanrong（openYuanRong 函数调用）
+  # type: websocket（默认） | yuanrong（直接函数调用） | agentos_router（AgentOS 扩展）
   agent_client:
-    type: yuanrong # websocket | yuanrong
+    type: yuanrong # websocket | yuanrong | agentos_router
     # yuanrong 函数模式配置下面参数
     frontend_endpoint: http://<<MASTER_NODE_IP>>:<<FRONTEND_PORT>>
     function_version_urn: <<FUNCTION_ID>>

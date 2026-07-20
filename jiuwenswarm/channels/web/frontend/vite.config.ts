@@ -1,6 +1,7 @@
 import type { Plugin } from 'vite'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import svgr from 'vite-plugin-svgr'
 import { spawnSync } from 'child_process'
 import path from 'path'
 import fs from 'fs'
@@ -692,7 +693,7 @@ function devFileContentApi(): Plugin {
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [suppressWsProxySocketErrors(), devWsTrafficLogger(), devFileContentApi(), react()],
+  plugins: [suppressWsProxySocketErrors(), devWsTrafficLogger(), devFileContentApi(), react(), svgr()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

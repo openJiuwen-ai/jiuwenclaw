@@ -33,6 +33,7 @@ import yaml
 from dotenv import load_dotenv
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
+from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.runner import Runner
@@ -248,7 +249,9 @@ from jiuwenswarm.common.config import (
     get_config,
     get_default_models,
     get_evolution_auto_scan_enabled,
+    get_evolution_review_trigger_enabled,
     get_evolution_auto_save_enabled,
+    get_evolution_signal_trigger_enabled,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
     get_skill_create_enabled,
@@ -333,9 +336,14 @@ _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
 )
 
 
-def _set_skill_evolution_auto_scan(rail: Any, enabled: bool) -> None:
-    rail.auto_scan = enabled
-    rail.fuzzy_review = enabled
+def _set_skill_evolution_triggers(
+    rail: Any,
+    *,
+    signal_trigger: bool,
+    review_trigger: bool,
+) -> None:
+    rail.signal_trigger = signal_trigger
+    rail.review_trigger = review_trigger
 
 
 def _clean_heartbeat_content(content: str) -> str:
@@ -361,13 +369,17 @@ def init_permission_engine(*_args: Any, **_kwargs: Any) -> None:
 
 def _mcc_looks_usable(mcc: dict) -> bool:
     """检查 model_client_config 是否包含有效的 API 凭据。"""
-    api_key = str(mcc.get("api_key", "") or "").strip()
     api_base = str(mcc.get("api_base", "") or "").strip()
-    if not api_key or not api_base:
+    if not api_base or is_placeholder_api_base(api_base):
         return False
-    if is_placeholder_api_base(api_base):
-        return False
-    return True
+
+    provider = mcc.get("client_provider", "")
+    provider = getattr(provider, "value", provider)
+    if is_openai_account_provider(str(provider or "")):
+        return True
+
+    api_key = str(mcc.get("api_key", "") or "").strip()
+    return bool(api_key)
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -520,6 +532,8 @@ _MODE_DISPLAY_MAP: dict[str, dict[str, str]] = {
     "agent.plan": {"cn": "智能体模式", "en": "Agent Mode"},
     "agent.fast": {"cn": "智能体模式", "en": "Agent Mode"},
     "team": {"cn": "集群模式", "en": "Cluster Mode"},
+    "team.plan": {"cn": "集群计划模式", "en": "Cluster Plan Mode"},
+    "code.team": {"cn": "代码集群模式", "en": "Code Team Mode"},
 }
 
 
@@ -3273,6 +3287,11 @@ class JiuWenSwarmDeepAdapter:
         """Build SkillEvolutionRail."""
         try:
             evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+            evolution_signal_trigger = get_evolution_signal_trigger_enabled(config)
+            evolution_review_trigger = get_evolution_review_trigger_enabled(
+                config,
+                fallback=evolution_auto_scan,
+            )
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
             skill_evolution_rail = SkillEvolutionRail(
@@ -3280,8 +3299,8 @@ class JiuWenSwarmDeepAdapter:
                 llm=self._model,
                 model=model_name,
                 review_runtime=EvolutionReviewRuntime(),
-                auto_scan=evolution_auto_scan,
-                fuzzy_review=evolution_auto_scan,
+                signal_trigger=evolution_signal_trigger,
+                review_trigger=evolution_review_trigger,
                 auto_save=evolution_auto_save,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
             )
@@ -3299,6 +3318,11 @@ class JiuWenSwarmDeepAdapter:
 
         resolved_language = self._resolve_runtime_language()
         evolution_auto_scan = get_evolution_auto_scan_enabled(self._config_cache)
+        evolution_signal_trigger = get_evolution_signal_trigger_enabled(self._config_cache)
+        evolution_review_trigger = get_evolution_review_trigger_enabled(
+            self._config_cache,
+            fallback=evolution_auto_scan,
+        )
         evolution_auto_save = get_evolution_auto_save_enabled(self._config_cache)
         if (
             self._skill_evolution_rail is not None
@@ -3317,15 +3341,19 @@ class JiuWenSwarmDeepAdapter:
             llm=self._model,
             model=self._default_model_name
             or self._config_cache.get("model_name", "gpt-4"),
-            auto_scan=evolution_auto_scan,
-            fuzzy_review=evolution_auto_scan,
+            signal_trigger=evolution_signal_trigger,
+            review_trigger=evolution_review_trigger,
             auto_save=evolution_auto_save,
             disabled_skills=disabled_skills,
             language=resolved_language,
         )
         self._refresh_active_evolution_rail_refs()
         if self._skill_evolution_rail is not None:
-            _set_skill_evolution_auto_scan(self._skill_evolution_rail, evolution_auto_scan)
+            _set_skill_evolution_triggers(
+                self._skill_evolution_rail,
+                signal_trigger=evolution_signal_trigger,
+                review_trigger=evolution_review_trigger,
+            )
 
     async def _unconfigure_active_evolution_rails(self) -> None:
         """Remove cached single-agent evolution rails before rebuilding them."""
@@ -3864,6 +3892,19 @@ class JiuWenSwarmDeepAdapter:
                 )
         except Exception as e:
             logger.warning("[JiuWenSwarmDeepAdapter] Failed to load UserHookRail: %s", e)
+        # Observability rail: opens an agent-layer span (agent.<name>.task_iteration.<n>
+        # for task-loop runs, or agent.<name>.invoke for single-round) under the root
+        # run span per iteration/round. It is the only thing that creates the
+        # task_iteration / invoke spans that llm.call + tool.* nest under. It
+        # self-disables (before_* returns early when get_team_span() is None), so
+        # attaching it unconditionally is safe and also adapts to runtime
+        # enable/disable of agent_observability without rebuilding the agent.
+        try:
+            from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+            rails_list.append(ObservabilityRail())
+            logger.info("[JiuWenSwarmDeepAdapter] ObservabilityRail attached")
+        except Exception as e:
+            logger.warning("[JiuWenSwarmDeepAdapter] Failed to attach ObservabilityRail: %s", e)
         return rails_list
 
     @staticmethod
@@ -3872,10 +3913,10 @@ class JiuWenSwarmDeepAdapter:
     ) -> bool:
         """Resolve enable_task_loop considering evolution rail requirements.
 
-        SkillCreateRail and auto-scan SkillEvolutionRail follow-ups require
+        SkillCreateRail and review-trigger SkillEvolutionRail follow-ups require
         task-loop mode (enable_task_loop=True) because they use
         AFTER_TASK_ITERATION events and enqueue_follow_up().
-        When skill_create=True or auto_scan=True, we force enable_task_loop=True
+        When skill_create=True or review_trigger=True, we force enable_task_loop=True
         regardless of user config.
 
         Args:
@@ -3887,7 +3928,10 @@ class JiuWenSwarmDeepAdapter:
         """
         config_base = config_base or get_config()
         skill_create_enabled = get_skill_create_enabled(config_base)
-        evolution_auto_scan_enabled = get_evolution_auto_scan_enabled(config_base)
+        evolution_review_trigger_enabled = get_evolution_review_trigger_enabled(
+            config_base,
+            fallback=get_evolution_auto_scan_enabled(config_base),
+        )
         configured_value = config.get("enable_task_loop", True)
 
         if skill_create_enabled:
@@ -3898,10 +3942,10 @@ class JiuWenSwarmDeepAdapter:
                     configured_value,
                 )
             return True
-        if evolution_auto_scan_enabled:
+        if evolution_review_trigger_enabled:
             if not configured_value:
                 logger.warning(
-                    "[JiuWenSwarmDeepAdapter] evolution.auto_scan=True requires "
+                    "[JiuWenSwarmDeepAdapter] evolution.review_trigger=True requires "
                     "enable_task_loop=True; overriding user config (enable_task_loop=%s -> True)",
                     configured_value,
                 )
@@ -3982,9 +4026,14 @@ class JiuWenSwarmDeepAdapter:
         # Apply in-place updates to skill_evolution_rail (no re-init needed).
         if self._skill_evolution_rail is not None:
             self._skill_evolution_rail.update_llm(self._model, self._default_model_name)
-            _set_skill_evolution_auto_scan(
+            evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+            _set_skill_evolution_triggers(
                 self._skill_evolution_rail,
-                get_evolution_auto_scan_enabled(config),
+                signal_trigger=get_evolution_signal_trigger_enabled(config),
+                review_trigger=get_evolution_review_trigger_enabled(
+                    config,
+                    fallback=evolution_auto_scan,
+                ),
             )
 
         # Reuse existing SkillUseRail to preserve dynamically loaded skills
@@ -4647,6 +4696,7 @@ class JiuWenSwarmDeepAdapter:
         metadata: dict[str, Any] | None,
         request_id: str | None,
         mode: str | None,
+        project_dir: str | None = None,
     ) -> tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None], Token[str | None]]:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             set_shell_session_id,
@@ -4659,6 +4709,9 @@ class JiuWenSwarmDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+        # 注入 project_dir 供 cron tool 路由解析任务归属项目（设计文档 §5.1）
+        if isinstance(project_dir, str) and project_dir.strip():
+            normalized_metadata.setdefault("project_dir", project_dir.strip())
         return (
             _CRON_TOOL_CHANNEL_ID.set(normalized_channel),
             _CRON_TOOL_SESSION_ID.set(session_id),
@@ -5540,6 +5593,7 @@ class JiuWenSwarmDeepAdapter:
         return _mcc_looks_usable({
             "api_key": mcc_obj.api_key,
             "api_base": getattr(mcc_obj, "api_base", None),
+            "client_provider": getattr(mcc_obj, "client_provider", None),
         })
 
     def _has_valid_model_config(self, requested_model_name: str = "") -> bool:
@@ -6191,6 +6245,7 @@ class JiuWenSwarmDeepAdapter:
             metadata=request.metadata,
             request_id=request.request_id,
             mode=mode,
+            project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
@@ -6202,6 +6257,7 @@ class JiuWenSwarmDeepAdapter:
         if self._stream_event_rail is not None:
             self._stream_event_rail.reset_abort(session_id)
         image_files_token = None
+        _run_span: Any = None
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -6238,6 +6294,16 @@ class JiuWenSwarmDeepAdapter:
             image_files_token = set_current_multimodal_image_files(
                 inputs.pop("_multimodal_image_files", []) or []
             )
+            # Sync single-agent / coding-agent observability with current
+            # config before running, and open a root span so OtelCallbackHandler
+            # has a parent for LLM/tool spans (see streaming path for details).
+            from jiuwenswarm.agents.harness.agent_observability import (
+                close_agent_run_span,
+                open_agent_run_span,
+                sync_agent_observability,
+            )
+            sync_agent_observability()
+            _run_span = open_agent_run_span(session_id=session_id, mode=mode)
             result = await Runner.run_agent(agent=self._instance, inputs=inputs)
         except asyncio.CancelledError:
             logger.info(
@@ -6250,6 +6316,7 @@ class JiuWenSwarmDeepAdapter:
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
+            close_agent_run_span(_run_span)
             if image_files_token is not None:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                     reset_current_multimodal_image_files,
@@ -6460,6 +6527,7 @@ class JiuWenSwarmDeepAdapter:
             metadata=request.metadata,
             request_id=request.request_id,
             mode=mode,
+            project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
@@ -6470,6 +6538,8 @@ class JiuWenSwarmDeepAdapter:
         self._register_session_agent_task(session_id)
         stream_consumer_cancelled = False
         image_files_token = None
+        _run_span: Any = None
+        _debug_logger = None
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -6520,7 +6590,64 @@ class JiuWenSwarmDeepAdapter:
             image_files_token = set_current_multimodal_image_files(
                 inputs.pop("_multimodal_image_files", []) or []
             )
+            # Resolve debug-trace settings early: its otel_enabled drives the
+            # OTel force-enable below. Best-effort (config read never raises).
+            from jiuwenswarm.server.runtime.debug_trace.config import (
+                resolve_debug_trace_settings,
+            )
+            _dbg_settings = resolve_debug_trace_settings(
+                mode=mode, request_debug=bool(inputs.get("_request_debug"))
+            )
+            # Sync single-agent / coding-agent observability with current config
+            # before running. init_observability() wires the global
+            # OtelCallbackHandler so LLM/tool spans are emitted automatically.
+            # force=True (a /debug run with debug_trace.<mode>.otel_enabled) pulls
+            # up OTel even when agent_observability.enabled is false.
+            from jiuwenswarm.agents.harness.agent_observability import (
+                close_agent_run_span,
+                open_agent_run_span,
+                sync_agent_observability,
+            )
+            sync_agent_observability(force=_dbg_settings.otel_enabled)
+            # Open a root span so OtelCallbackHandler has a parent for LLM/tool
+            # spans. Closed in the finally below.
+            _run_span = open_agent_run_span(session_id=session_id, mode=mode)
+            # Capture OTel trace/span ids (empty when no span was opened, e.g.
+            # OTel not enabled) so the dump can be cross-referenced with a trace.
+            _otel_trace_id = ""
+            _otel_span_id = ""
+            if _run_span is not None:
+                try:
+                    _span_ctx = _run_span.get_span_context()
+                    _otel_trace_id = format(_span_ctx.trace_id, "032x")
+                    _otel_span_id = format(_span_ctx.span_id, "016x")
+                except Exception:
+                    pass
+            # --- debug trace dump (request-level /debug OR config-level, best-effort) ---
+            try:
+                from jiuwenswarm.server.runtime.debug_trace.paths import debug_trace_file
+                from jiuwenswarm.server.runtime.debug_trace.stream_logger import (
+                    DebugTraceLogger,
+                )
+                if _dbg_settings.enabled and _dbg_settings.dump_enabled:
+                    _debug_logger = DebugTraceLogger(
+                        file_path=debug_trace_file(mode, session_id),
+                        mode=mode,
+                        session_id=session_id,
+                        request_id=rid,
+                        settings=_dbg_settings,
+                    )
+                    _debug_logger.start_run(
+                        input_text=inputs.get("query"),
+                        otel_trace_id=_otel_trace_id,
+                        otel_span_id=_otel_span_id,
+                    )
+            except Exception as _dbg_exc:
+                logger.warning("[JiuWenSwarmDeepAdapter] debug trace init failed: %s", _dbg_exc)
+                _debug_logger = None
             async for chunk in Runner.run_agent_streaming(self._instance, inputs):
+                if _debug_logger is not None:
+                    _debug_logger.feed(chunk)
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                     parsed = self._parse_stream_chunk(chunk)
                     if parsed is not None:
@@ -6715,6 +6842,8 @@ class JiuWenSwarmDeepAdapter:
                 )
                 task.add_done_callback(self._on_evolution_watcher_done)
                 self._evolution_watcher_tasks.add(task)
+            if _debug_logger is not None:
+                _debug_logger.end_run(status="ok")
         except asyncio.CancelledError:
             stream_consumer_cancelled = True
             logger.info(
@@ -6729,9 +6858,13 @@ class JiuWenSwarmDeepAdapter:
                 self._resolve_interrupt_session_id(session_id),
                 "stream_cancel",
             )
+            if _debug_logger is not None:
+                _debug_logger.end_run(status="cancelled")
             raise
         except Exception as exc:
             logger.exception("[JiuWenSwarmDeepAdapter] 流式任务异常: %s", exc)
+            if _debug_logger is not None:
+                _debug_logger.end_run(status="error", error=exc)
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
@@ -6743,6 +6876,9 @@ class JiuWenSwarmDeepAdapter:
                 is_complete=False,
             )
         finally:
+            close_agent_run_span(_run_span)
+            if _debug_logger is not None:
+                _debug_logger.flush()
             if image_files_token is not None:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                     reset_current_multimodal_image_files,
@@ -8102,7 +8238,7 @@ class JiuWenSwarmDeepAdapter:
         try:
             if self._skill_evolution_rail is None:
                 return
-            if not getattr(self._skill_evolution_rail, "auto_scan", True):
+            if not self._skill_evolution_rail.signal_trigger:
                 return
 
             active = False
@@ -8115,7 +8251,7 @@ class JiuWenSwarmDeepAdapter:
             while True:
                 if self._skill_evolution_rail is None:
                     return
-                if not getattr(self._skill_evolution_rail, "auto_scan", True):
+                if not self._skill_evolution_rail.signal_trigger:
                     if active:
                         await _push_status("end", "hidden", "")
                     await _cleanup_evolution_rail()

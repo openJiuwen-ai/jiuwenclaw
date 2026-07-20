@@ -39,7 +39,6 @@ symphony:
 
   orchestration:
     mode: fast
-    top_k: 3
     max_depth: 4
     min_edge_confidence: 0.3
 
@@ -352,6 +351,74 @@ team_observability:
   traces_dir: ""                    # file exporter 输出目录，默认 ~/.jiuwenswarm/.trace
   file_retention_days: 7            # file exporter 文件保留天数
 
+# ============================================================
+# 单 Agent / Coding Agent 可观测性配置
+# ============================================================
+# 与 team_observability 对应，但作用于非 team 的运行路径
+#（Runner.run_agent / Runner.run_agent_streaming，即 agent.* 与 code.* 模式）。
+# 启用后会调用 init_observability() 注册全局 OtelCallbackHandler，
+# 自动为 LLM 调用与工具调用生成 span（不含 team/member/task 级 span，
+# 那是 team 模式专属）。
+#
+# 注意：OTel 一个进程只允许一个全局 TracerProvider。若本进程内 team 与
+# agent 可观测性同时开启，先初始化的一方生效，另一方复用同一个 provider
+#（其 exporter/endpoint 会被忽略）。代码层面用 ownership 标记保证
+# 关闭时不会误拆对方依赖的 provider。
+#
+# 前置条件（otlp 模式）：启动 OTel Collector + Langfuse。
+# ============================================================
+agent_observability:
+  enabled: false                    # 单 agent 可观测性总开关
+  exporter: file                    # otlp_grpc / otlp_http / file
+  endpoint: http://localhost:4317   # OTLP gRPC endpoint（file 模式不需要）
+  service_name: jiuwenswarm-agent   # 服务名称（OTel resource service.name）
+  sample_rate: 1.0                  # 采样率 (0.0-1.0)
+  redact_prompts: false             # 是否脱敏 prompt 内容
+  redact_completions: false         # 是否脱敏 completion 内容
+  attribute_value_max_length: 10240 # OTel attribute value 最大长度
+  langfuse_public_key: ""           # Langfuse OTLP 认证 public key（可选）
+  langfuse_secret_key: ""           # Langfuse OTLP 认证 secret key（可选）
+  traces_dir: ""                    # file exporter 输出目录，默认 ~/.jiuwenswarm/.trace
+  file_retention_days: 7            # file exporter 文件保留天数
+
+# ============================================================
+# Agent / Code 调试链路追踪（Debug Trace）配置
+# ============================================================
+# 控制非 team 模式（agent.* / code.*）的人类可读本地 dump。
+# 生效逻辑（resolve_debug_trace_settings）：
+#   debug_enabled = 请求带 /debug OR debug_trace.enabled OR debug_trace.<mode>.enabled
+#   dump_enabled  = debug_enabled AND debug_trace.<mode>.dump_enabled != false
+# dump 写入 ~/.jiuwenswarm/.agent/traces/ 或 .code/traces/（按模式）。
+# 与 agent_observability（OTel span）相互独立：本块只管本地文本 dump，
+# OTel 接入在后续阶段。
+# ============================================================
+debug_trace:
+  enabled: false                    # 全局开关（true=所有模式常开 dump）
+  agent:                            # agent 模式（agent.plan / agent.fast …）
+    enabled: false                  # 仅 agent 模式开关
+    dump_enabled: true              # debug 开启时是否写本地 dump
+    otel_enabled: false             # debug 时是否顺带 force-enable agent_observability（产 OTel span）
+    include_model_output: true      # 记录模型文本输出
+    include_reasoning: true         # 记录推理片段
+    include_tool_args: true         # 记录工具参数
+    include_tool_result: true       # 记录工具结果
+  code:                             # code 模式（code.normal / code.plan …）
+    enabled: false
+    dump_enabled: true
+    otel_enabled: false             # debug 时是否顺带 force-enable agent_observability（产 OTel span）
+    include_model_output: true
+    include_reasoning: true
+    include_tool_args: true
+    include_tool_result: true
+  limits:
+    tool_args_max_chars: 2000       # 工具参数截断阈值
+    tool_result_max_chars: 8000     # 工具结果截断阈值
+    generic_payload_max_chars: 4000 # 通用载荷/run input 截断阈值
+    max_model_output_chars:         # 空=不截模型输出；填数字则截断
+  redaction:
+    redact_prompts: false           # 脱敏 prompt/completion（密钥字段始终打码）
+    redact_completions: false
+
 react:
   agent_name: main_agent
   enable_task_loop: false
@@ -432,7 +499,9 @@ react:
   # Skills 在线自演进配置
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进
-    auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
+    auto_scan: false           # 兼容开关：单 Agent / leader 触发 review，teammate 触发 signal
+    signal_trigger:            # true / false = 显式覆盖规则触发；留空使用场景默认值
+    review_trigger:            # true / false = 显式覆盖软触发；留空时按场景回退 auto_scan
     auto_save: false           # true = 自演进审批无需用户点击自动通过（内部开关）
     skill_create: false        # true = 注册 SkillCreateRail（单 agent）及 TeamSkillCreateRail（leader）
     skill_base_dir: "agent/skills"  # Skill 根目录
@@ -486,14 +555,27 @@ gateway:
   session_map_scope: per_chat_bot
 
   # AgentClient 配置 - Gateway 连接到 AgentServer 的方式
-  # type: websocket（默认，WebSocket 连接） | yuanrong（openYuanRong 函数调用）
+  # type: websocket（默认） | yuanrong（直接函数调用） | agentos_router（AgentOS 扩展）
   agent_client:
-    type: websocket # websocket | yuanrong
+    type: websocket # websocket | yuanrong | agentos_router
     # yuanrong 函数模式配置下面参数
     frontend_endpoint:
     function_version_urn:
     concurrency: 1
     invoke_timeout_s: 60
+
+  # AgentOS Router Extension 配置；agent_client.type=agentos_router 时生效。
+  agentos:
+    creating_timeout_seconds: 60
+    # Agent 复用 key 字段，默认 user_id + agent_type。
+    # 可选字段：user_id、agent_type、session_id（必须包含前两项）。
+    # 示例：加入 session_id 后同一用户每个会话独立 Agent。
+    agent_key_fields:
+      - user_id
+      - agent_type
+    registry:
+      endpoint:
+      request_timeout_s: 10
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
@@ -1019,6 +1101,11 @@ modes:
       teammate_mode: build_mode
       spawn_mode: inprocess
       enable_swarmflow: false
+
+      # Enable the host-managed worktree capability used by team members and
+      # SwarmFlow agent calls with options.isolation="worktree".
+      worktree:
+        enabled: true
 
       # Team-specific permission control.
       enable_permissions: false

@@ -1,5 +1,7 @@
 /**
- * 会话状态管理
+ * 会话状态管理（多 session 版本）
+ *
+ * 全局字段保持不变，session 级字段按 session 隔离存储在 runtimes 中。
  */
 
 import { create } from 'zustand';
@@ -14,31 +16,11 @@ import {
   TeamMemberContextCompressionState,
 } from '../types';
 
-const STORAGE_KEY = 'jiuwenclaw_context_compression';
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
 
-function loadFromStorage() {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      return JSON.parse(stored);
-    }
-  } catch (error) {
-    console.error('Error loading context compression from storage:', error);
-  }
-  return null;
-}
-
-function saveToStorage(data: any) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch (error) {
-    console.error('Error saving context compression to storage:', error);
-  }
-}
-
 function loadModeFromStorage(): AgentMode {
+  if (typeof localStorage === 'undefined') return DEFAULT_MODE;
   try {
     const stored = localStorage.getItem(MODE_STORAGE_KEY);
     if (stored) {
@@ -51,6 +33,7 @@ function loadModeFromStorage(): AgentMode {
 }
 
 function saveModeToStorage(mode: AgentMode) {
+  if (typeof localStorage === 'undefined') return;
   try {
     localStorage.setItem(MODE_STORAGE_KEY, mode);
   } catch (error) {
@@ -164,8 +147,9 @@ export interface TeamTaskEvent {
 export type TeamTaskStatus =
   | 'pending'
   | 'blocked'
-  | 'claimed'
-  | 'plan_approved'
+  | 'planning'
+  | 'in_progress'
+  | 'in_review'
   | 'completed'
   | 'cancelled';
 
@@ -180,6 +164,10 @@ export interface TeamTask {
   skills?: string[];
   files?: string[];
 }
+
+// Upsert input: a task event may omit status (e.g. a content-only update).
+// The store then preserves the task's existing status instead of resetting it.
+export type TeamTaskUpsert = Omit<TeamTask, 'status'> & { status?: TeamTaskStatus };
 
 interface TeamMember {
   id: string;
@@ -230,21 +218,17 @@ export interface TeamMemberExecutionEvent {
   }>;
 }
 
-interface SessionState {
-  currentSession: Session | null;
-  sessions: Session[];
+/**
+ * 单个 session 的运行态。
+ * 原 B 类全局字段全部迁移到这里，按 session 隔离。
+ */
+export interface SessionRuntime {
   mode: AgentMode;
-  isConnected: boolean;
-  availableTools: string[];
-  connectionStats: ConnectionStats;
+  selectedModelName: string | null;
+  projectDirectory: string | null;
   contextCompressionRate: number;
   contextCompressionBefore: number | null;
   contextCompressionAfter: number | null;
-  memoryUsage: MemoryUsage;
-  heartbeatState: HeartbeatState;
-  heartbeatMessage: string | null;
-  heartbeatUpdatedAt: string | null;
-  heartbeatHistory: HeartbeatHistoryItem[];
   teamTaskEvents: TeamTaskEvent[];
   teamTasks: TeamTask[];
   teamMembers: TeamMember[];
@@ -253,64 +237,119 @@ interface SessionState {
   teamMemberExecutionEvents: TeamMemberExecutionEvent[];
   teamMemberContextCompression: Record<string, TeamMemberContextCompressionState>;
   teamHistoryMessages: Message[];
+  /** 当前会话输入栏已选中的技能名（用于随消息发送） */
+  selectedSkills: string[];
+}
+
+function createEmptyRuntime(): SessionRuntime {
+  return {
+    mode: loadModeFromStorage(),
+    selectedModelName: (() => {
+      if (typeof localStorage === 'undefined') return null;
+      try { return localStorage.getItem(MODEL_STORAGE_KEY); } catch { return null; }
+    })(),
+    projectDirectory: null,
+    contextCompressionRate: 0,
+    contextCompressionBefore: null,
+    contextCompressionAfter: null,
+    teamTaskEvents: [],
+    teamTasks: [],
+    teamMembers: [],
+    teamLeaderMemberIds: [],
+    teamHumanShareCommands: [],
+    teamMemberExecutionEvents: [],
+    teamMemberContextCompression: {},
+    teamHistoryMessages: [],
+    selectedSkills: [],
+  };
+}
+
+interface SessionState {
+  // A 类全局字段
+  currentSession: Session | null;
+  sessions: Session[];
+  isConnected: boolean;
+  availableTools: string[];
+  connectionStats: ConnectionStats;
+  memoryUsage: MemoryUsage;
+  heartbeatState: HeartbeatState;
+  heartbeatMessage: string | null;
+  heartbeatUpdatedAt: string | null;
+  heartbeatHistory: HeartbeatHistoryItem[];
   availableModels: ModelEntry[];
-  selectedModelName: string | null;
   /** 过滤 is_default=true 的模型，供聊天窗口 ModelSelector 使用 */
   chatAvailableModels: ModelEntry[];
 
-  // Actions
+  // B 类 session 级字段
+  runtimes: Record<string, SessionRuntime>;
+
+  // Runtime 管理方法
+  ensureRuntime: (sessionId: string) => SessionRuntime;
+  getRuntime: (sessionId: string | null) => SessionRuntime | undefined;
+  removeRuntime: (sessionId: string) => void;
+
+  // A 类 actions（不加 sessionId）
   setCurrentSession: (session: Session | null) => void;
   setSessions: (sessions: Session[]) => void;
   addSession: (session: Session) => void;
   updateSession: (sessionId: string, updates: Partial<Session>) => void;
   removeSession: (sessionId: string) => void;
-  setMode: (mode: AgentMode) => void;
   setConnected: (connected: boolean) => void;
   setAvailableTools: (tools: string[]) => void;
   setConnectionStats: (stats: Partial<ConnectionStats>) => void;
-  setContextCompressionRate: (rate: number) => void;
-  setContextCompressionStats: (stats: Partial<ContextCompressionStats> | null) => void;
+  setContextCompressionStats: (sessionId: string, stats: Partial<ContextCompressionStats> | null) => void;
   setMemoryUsage: (memoryUsage: Partial<MemoryUsage> | null) => void;
   setHeartbeatStatus: (
     status: HeartbeatState,
     message?: string | null,
     updatedAt?: string | null
   ) => void;
-  setTeamTaskEvents: (events: TeamTaskEvent[]) => void;
-  addTeamTaskEvent: (event: TeamTaskEvent) => void;
-  setTeamTasks: (tasks: TeamTask[]) => void;
-  upsertTeamTask: (task: TeamTask) => void;
-  updateTeamTask: (taskId: string, patch: Partial<TeamTask>) => void;
-  setTeamMembers: (members: TeamMember[]) => void;
-  setTeamLeaderMemberIds: (memberIds: string[]) => void;
-  addTeamLeaderMemberId: (memberId: string) => void;
-  addTeamMember: (member: TeamMember) => void;
-  updateTeamMemberStatus: (memberId: string, newStatus: string, timestamp?: number) => void;
-  setTeamHumanShareCommands: (commands: HumanShareCommand[]) => void;
-  upsertTeamHumanShareCommand: (command: HumanShareCommand) => void;
+  setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
+  setSelectedModelName: (sessionId: string, name: string) => void;
+
+  // B 类 actions（加 sessionId）
+  setMode: (sessionId: string, mode: AgentMode) => void;
+  setProjectDirectory: (sessionId: string, directory: string | null) => void;
+  setTeamTaskEvents: (sessionId: string, events: TeamTaskEvent[]) => void;
+  addTeamTaskEvent: (sessionId: string, event: TeamTaskEvent) => void;
+  setTeamTasks: (sessionId: string, tasks: TeamTask[]) => void;
+  upsertTeamTask: (sessionId: string, task: TeamTaskUpsert) => void;
+  updateTeamTask: (sessionId: string, taskId: string, patch: Partial<TeamTask>) => void;
+  setTeamMembers: (sessionId: string, members: TeamMember[]) => void;
+  setTeamLeaderMemberIds: (sessionId: string, memberIds: string[]) => void;
+  addTeamLeaderMemberId: (sessionId: string, memberId: string) => void;
+  /** 输入栏已选技能：追加（去重） */
+  addSelectedSkill: (sessionId: string, skill: string) => void;
+  /** 输入栏已选技能：移除指定项 */
+  removeSelectedSkill: (sessionId: string, skill: string) => void;
+  /** 输入栏已选技能：清空 */
+  clearSelectedSkills: (sessionId: string) => void;
+  addTeamMember: (sessionId: string, member: TeamMember) => void;
+  updateTeamMemberStatus: (sessionId: string, memberId: string, newStatus: string, timestamp?: number) => void;
+  setTeamHumanShareCommands: (sessionId: string, commands: HumanShareCommand[]) => void;
+  upsertTeamHumanShareCommand: (sessionId: string, command: HumanShareCommand) => void;
   updateTeamHumanShareStatus: (
+    sessionId: string,
     memberName: string,
     status: HumanShareStatus,
     patch?: Partial<HumanShareCommand>
   ) => void;
-  setTeamMemberExecutionEvents: (events: TeamMemberExecutionEvent[]) => void;
-  addTeamMemberExecutionEvent: (event: TeamMemberExecutionEvent) => void;
+  setTeamMemberExecutionEvents: (sessionId: string, events: TeamMemberExecutionEvent[]) => void;
+  addTeamMemberExecutionEvent: (sessionId: string, event: TeamMemberExecutionEvent) => void;
   setTeamMemberContextCompressionStatus: (
+    sessionId: string,
     memberId: string,
     runtime?: ContextCompressionRuntime,
     summary?: ContextCompressionSummary
   ) => void;
-  clearTeamMemberContextCompressionStatus: (memberId: string) => void;
-  clearAllTeamMemberContextCompressionStatus: () => void;
-  setTeamHistoryMessages: (messages: Message[]) => void;
-  setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
-  setSelectedModelName: (name: string) => void;
+  clearTeamMemberContextCompressionStatus: (sessionId: string, memberId: string) => void;
+  clearAllTeamMemberContextCompressionStatus: (sessionId: string) => void;
+  setTeamHistoryMessages: (sessionId: string, messages: Message[]) => void;
 }
 
-export const useSessionStore = create<SessionState>((set) => ({
+export const useSessionStore = create<SessionState>((set, get) => ({
   currentSession: null,
   sessions: [],
-  mode: loadModeFromStorage(),
   isConnected: false,
   availableTools: [],
   connectionStats: {
@@ -318,9 +357,6 @@ export const useSessionStore = create<SessionState>((set) => ({
     inflight: 0,
     lastError: null,
   },
-  contextCompressionRate: loadFromStorage()?.rate || 0,
-  contextCompressionBefore: loadFromStorage()?.beforeCompressed || null,
-  contextCompressionAfter: loadFromStorage()?.afterCompressed || null,
   memoryUsage: {
     rssMb: null,
     usedPercent: null,
@@ -329,30 +365,52 @@ export const useSessionStore = create<SessionState>((set) => ({
   heartbeatMessage: null,
   heartbeatUpdatedAt: null,
   heartbeatHistory: [],
-  teamTaskEvents: [],
-  teamTasks: [],
-  teamMembers: [],
-  teamLeaderMemberIds: [],
-  teamHumanShareCommands: [],
-  teamMemberExecutionEvents: [],
-  teamMemberContextCompression: {},
-  teamHistoryMessages: [],
   availableModels: [],
   chatAvailableModels: [],
-  selectedModelName: (() => {
-    try { return localStorage.getItem(MODEL_STORAGE_KEY); } catch { return null; }
-  })(),
+  runtimes: {},
+
+  ensureRuntime: (sessionId) => {
+    const existing = get().runtimes[sessionId];
+    if (existing) return existing;
+    const runtime = createEmptyRuntime();
+    set((state) => ({
+      runtimes: { ...state.runtimes, [sessionId]: runtime },
+    }));
+    return runtime;
+  },
+
+  getRuntime: (sessionId) => {
+    if (!sessionId) return undefined;
+    return get().runtimes[sessionId];
+  },
+
+  removeRuntime: (sessionId) => {
+    set((state) => {
+      const next = { ...state.runtimes };
+      delete next[sessionId];
+      return { runtimes: next };
+    });
+  },
 
   setCurrentSession: (session) => {
     const normalizedSession = session ? normalizeSession(session) : null;
-    set((state) => ({
-      currentSession: normalizedSession,
-      mode: normalizedSession?.mode || state.mode,
-      teamHistoryMessages:
-        normalizedSession && normalizedSession.session_id === state.currentSession?.session_id
-          ? state.teamHistoryMessages
-          : [],
-    }));
+    set((state) => {
+      if (!normalizedSession) {
+        return { currentSession: null };
+      }
+      const sessionId = normalizedSession.session_id;
+      const existingRuntime = state.runtimes[sessionId];
+      const baseRuntime = existingRuntime || createEmptyRuntime();
+      const nextRuntime: SessionRuntime = {
+        ...baseRuntime,
+        mode: normalizedSession.mode || baseRuntime.mode,
+        teamHistoryMessages: baseRuntime.teamHistoryMessages,
+      };
+      return {
+        currentSession: normalizedSession,
+        runtimes: { ...state.runtimes, [sessionId]: nextRuntime },
+      };
+    });
   },
 
   setSessions: (sessions) => {
@@ -391,10 +449,32 @@ export const useSessionStore = create<SessionState>((set) => ({
     }));
   },
 
-  setMode: (mode) => {
+  setMode: (sessionId, mode) => {
     const normalizedMode = normalizeAgentMode(mode);
     saveModeToStorage(normalizedMode);
-    set({ mode: normalizedMode });
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, mode: normalizedMode },
+        },
+      };
+    });
+  },
+
+  setProjectDirectory: (sessionId, directory) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, projectDirectory: directory },
+        },
+      };
+    });
   },
 
   setConnected: (connected) => {
@@ -414,19 +494,15 @@ export const useSessionStore = create<SessionState>((set) => ({
     }));
   },
 
-  setContextCompressionRate: (rate) => {
-    const normalizedRate = Number.isFinite(rate) ? Math.min(Math.max(rate, 0), 100) : 0;
-    set({ contextCompressionRate: Number(normalizedRate.toFixed(1)) });
-  },
-
-  setContextCompressionStats: (stats) => {
+  setContextCompressionStats: (sessionId, stats) => {
     if (!stats) {
-      set({
-        contextCompressionRate: 0,
-        contextCompressionBefore: null,
-        contextCompressionAfter: null,
+      set((state) => {
+        const runtime = state.runtimes[sessionId];
+        if (!runtime) return state;
+        return { runtimes: { ...state.runtimes, [sessionId]: {
+          ...runtime, contextCompressionRate: 0, contextCompressionBefore: null, contextCompressionAfter: null,
+        } } };
       });
-      saveToStorage(null);
       return;
     }
 
@@ -443,19 +519,16 @@ export const useSessionStore = create<SessionState>((set) => ({
         ? Math.max(Math.round(stats.afterCompressed), 0)
         : null;
 
-    const contextCompressionData = {
-      rate: normalizedRate,
-      beforeCompressed: normalizedBefore,
-      afterCompressed: normalizedAfter
-    };
-
-    set({
-      contextCompressionRate: normalizedRate,
-      contextCompressionBefore: normalizedBefore,
-      contextCompressionAfter: normalizedAfter,
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return { runtimes: { ...state.runtimes, [sessionId]: {
+        ...runtime,
+        contextCompressionRate: normalizedRate,
+        contextCompressionBefore: normalizedBefore,
+        contextCompressionAfter: normalizedAfter,
+      } } };
     });
-
-    saveToStorage(contextCompressionData);
   },
 
   setMemoryUsage: (memoryUsage) => {
@@ -505,59 +578,113 @@ export const useSessionStore = create<SessionState>((set) => ({
       };
     });
   },
-  setTeamTaskEvents: (events) => {
-    set({ teamTaskEvents: events });
-  },
-  addTeamTaskEvent: (event) => {
+
+  setTeamTaskEvents: (sessionId, events) => {
     set((state) => {
-      const existingIndex = state.teamTaskEvents.findIndex(
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamTaskEvents: events },
+        },
+      };
+    });
+  },
+
+  addTeamTaskEvent: (sessionId, event) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existingIndex = runtime.teamTaskEvents.findIndex(
         (e) => e.task_id === event.task_id
       );
       if (existingIndex >= 0) {
-        const updatedEvents = [...state.teamTaskEvents];
+        const updatedEvents = [...runtime.teamTaskEvents];
         updatedEvents[existingIndex] = {
           ...updatedEvents[existingIndex],
           ...event,
         };
-        return { teamTaskEvents: updatedEvents };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamTaskEvents: updatedEvents },
+          },
+        };
       }
-      return { teamTaskEvents: [event, ...state.teamTaskEvents] };
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamTaskEvents: [event, ...runtime.teamTaskEvents] },
+        },
+      };
     });
   },
-  setTeamTasks: (tasks) => {
-    set({ teamTasks: tasks });
-  },
-  upsertTeamTask: (task) => {
+
+  setTeamTasks: (sessionId, tasks) => {
     set((state) => {
-      const existingIndex = state.teamTasks.findIndex(
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamTasks: tasks },
+        },
+      };
+    });
+  },
+
+  upsertTeamTask: (sessionId, task) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existingIndex = runtime.teamTasks.findIndex(
         (item) => item.task_id === task.task_id
       );
       if (existingIndex >= 0) {
-        const updatedTasks = [...state.teamTasks];
+        const existing = runtime.teamTasks[existingIndex];
+        const updatedTasks = [...runtime.teamTasks];
         updatedTasks[existingIndex] = {
-          ...updatedTasks[existingIndex],
+          ...existing,
           ...task,
-          title: task.title ?? updatedTasks[existingIndex].title,
-          content: task.content ?? updatedTasks[existingIndex].content,
-          assignee: task.assignee ?? updatedTasks[existingIndex].assignee,
-          team_id: task.team_id ?? updatedTasks[existingIndex].team_id,
-          skills: task.skills ?? updatedTasks[existingIndex].skills,
-          files: task.files ?? updatedTasks[existingIndex].files,
+          // An event without an explicit status (e.g. a content-only update)
+          // must not reset the task; keep the existing status.
+          status: task.status ?? existing.status,
+          title: task.title ?? existing.title,
+          content: task.content ?? existing.content,
+          assignee: task.assignee ?? existing.assignee,
+          team_id: task.team_id ?? existing.team_id,
+          skills: task.skills ?? existing.skills,
+          files: task.files ?? existing.files,
         };
-        return { teamTasks: updatedTasks };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamTasks: updatedTasks },
+          },
+        };
       }
-      return { teamTasks: [task, ...state.teamTasks] };
+      return {
+       runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamTasks: [{ ...task, status: task.status ?? 'pending' }, ...runtime.teamTasks],
+      },
+        },
+      };
     });
   },
-  updateTeamTask: (taskId, patch) => {
+
+  updateTeamTask: (sessionId, taskId, patch) => {
     set((state) => {
-      const existingIndex = state.teamTasks.findIndex(
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existingIndex = runtime.teamTasks.findIndex(
         (task) => task.task_id === taskId
       );
       if (existingIndex < 0) {
         return state;
       }
-      const updatedTasks = [...state.teamTasks];
+      const updatedTasks = [...runtime.teamTasks];
       updatedTasks[existingIndex] = {
         ...updatedTasks[existingIndex],
         ...patch,
@@ -568,44 +695,124 @@ export const useSessionStore = create<SessionState>((set) => ({
         skills: patch.skills ?? updatedTasks[existingIndex].skills,
         files: patch.files ?? updatedTasks[existingIndex].files,
       };
-      return { teamTasks: updatedTasks };
-    });
-  },
-  setTeamMembers: (members) => {
-    set((state) => {
-      const memberIds = new Set(members.map((member) => member.member_id));
-      const nextCompression = Object.fromEntries(
-        Object.entries(state.teamMemberContextCompression).filter(([memberId]) => memberIds.has(memberId))
-      );
       return {
-        teamMembers: members,
-        teamMemberContextCompression: nextCompression,
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamTasks: updatedTasks },
+        },
       };
     });
   },
-  setTeamLeaderMemberIds: (memberIds) => {
+
+  setTeamMembers: (sessionId, members) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const memberIds = new Set(members.map((member) => member.member_id));
+      const nextCompression = Object.fromEntries(
+        Object.entries(runtime.teamMemberContextCompression).filter(([memberId]) => memberIds.has(memberId))
+      );
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            teamMembers: members,
+            teamMemberContextCompression: nextCompression,
+          },
+        },
+      };
+    });
+  },
+
+  setTeamLeaderMemberIds: (sessionId, memberIds) => {
     const normalized = Array.from(
       new Set(memberIds.map((memberId) => memberId.trim()).filter(Boolean))
     );
-    set({ teamLeaderMemberIds: normalized });
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamLeaderMemberIds: normalized },
+        },
+      };
+    });
   },
-  addTeamLeaderMemberId: (memberId) => {
+
+  addTeamLeaderMemberId: (sessionId, memberId) => {
     const normalized = memberId.trim();
     if (!normalized) return;
     set((state) => {
-      if (state.teamLeaderMemberIds.includes(normalized)) {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.teamLeaderMemberIds.includes(normalized)) {
         return state;
       }
-      return { teamLeaderMemberIds: [...state.teamLeaderMemberIds, normalized] };
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamLeaderMemberIds: [...runtime.teamLeaderMemberIds, normalized] },
+        },
+      };
     });
   },
-  addTeamMember: (member) => {
+
+  addSelectedSkill: (sessionId, skill) => {
+    const normalized = skill.trim();
+    if (!normalized) return;
     set((state) => {
-      const existingIndex = state.teamMembers.findIndex(
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      if (runtime.selectedSkills.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, selectedSkills: [...runtime.selectedSkills, normalized] },
+        },
+      };
+    });
+  },
+
+  removeSelectedSkill: (sessionId, skill) => {
+    const normalized = skill.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (!runtime.selectedSkills.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, selectedSkills: runtime.selectedSkills.filter((s) => s !== normalized) },
+        },
+      };
+    });
+  },
+
+  clearSelectedSkills: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.selectedSkills.length === 0) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, selectedSkills: [] },
+        },
+      };
+    });
+  },
+
+  addTeamMember: (sessionId, member) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existingIndex = runtime.teamMembers.findIndex(
         (m) => m.member_id === member.member_id
       );
       if (existingIndex >= 0) {
-        const updatedMembers = [...state.teamMembers];
+        const updatedMembers = [...runtime.teamMembers];
         const existingMember = updatedMembers[existingIndex];
         updatedMembers[existingIndex] = {
           ...existingMember,
@@ -615,38 +822,69 @@ export const useSessionStore = create<SessionState>((set) => ({
               ? member.status
               : existingMember.status,
         };
-        return { teamMembers: updatedMembers };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamMembers: updatedMembers },
+          },
+        };
       }
-      return { teamMembers: [member, ...state.teamMembers] };
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamMembers: [member, ...runtime.teamMembers] },
+        },
+      };
     });
   },
-  updateTeamMemberStatus: (memberId, newStatus, timestamp) => {
+
+  updateTeamMemberStatus: (sessionId, memberId, newStatus, timestamp) => {
     set((state) => {
-      const existingIndex = state.teamMembers.findIndex(
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existingIndex = runtime.teamMembers.findIndex(
         (m) => m.member_id === memberId
       );
       if (existingIndex >= 0) {
-        const updatedMembers = [...state.teamMembers];
+        const updatedMembers = [...runtime.teamMembers];
         updatedMembers[existingIndex] = {
           ...updatedMembers[existingIndex],
           status: newStatus,
           timestamp: timestamp || Date.now(),
         };
-        return { teamMembers: updatedMembers };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamMembers: updatedMembers },
+          },
+        };
       }
       return state;
     });
   },
-  setTeamHumanShareCommands: (commands) => {
-    set({ teamHumanShareCommands: commands });
-  },
-  upsertTeamHumanShareCommand: (command) => {
+
+  setTeamHumanShareCommands: (sessionId, commands) => {
     set((state) => {
-      const existingIndex = state.teamHumanShareCommands.findIndex(
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamHumanShareCommands: commands },
+        },
+      };
+    });
+  },
+
+  upsertTeamHumanShareCommand: (sessionId, command) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existingIndex = runtime.teamHumanShareCommands.findIndex(
         (item) => item.memberName === command.memberName && item.sessionId === command.sessionId
       );
       if (existingIndex >= 0) {
-        const updated = [...state.teamHumanShareCommands];
+        const updated = [...runtime.teamHumanShareCommands];
         const existing = updated[existingIndex];
         updated[existingIndex] = {
           ...existing,
@@ -661,96 +899,182 @@ export const useSessionStore = create<SessionState>((set) => ({
               ? existing.status
               : command.status,
         };
-        return { teamHumanShareCommands: updated };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamHumanShareCommands: updated },
+          },
+        };
       }
-      return { teamHumanShareCommands: [...state.teamHumanShareCommands, command] };
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            teamHumanShareCommands: [...runtime.teamHumanShareCommands, command],
+          },
+        },
+      };
     });
   },
-  updateTeamHumanShareStatus: (memberName, status, patch = {}) => {
+
+  updateTeamHumanShareStatus: (sessionId, memberName, status, patch = {}) => {
     const normalizedMemberName = memberName.trim();
     if (!normalizedMemberName) return;
-    set((state) => ({
-      teamHumanShareCommands: state.teamHumanShareCommands.map((command) =>
-        command.memberName === normalizedMemberName
-          ? {
-              ...command,
-              ...patch,
-              status,
-              updatedAt: Date.now(),
-            }
-          : command
-      ),
-    }));
-  },
-  setTeamMemberExecutionEvents: (events) => {
-    set({ teamMemberExecutionEvents: dedupeTeamMemberExecutionEvents(events).slice(0, 300) });
-  },
-  addTeamMemberExecutionEvent: (event) => {
     set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            teamHumanShareCommands: runtime.teamHumanShareCommands.map((command) =>
+              command.memberName === normalizedMemberName
+                ? {
+                    ...command,
+                    ...patch,
+                    status,
+                    updatedAt: Date.now(),
+                  }
+                : command
+            ),
+          },
+        },
+      };
+    });
+  },
+
+  setTeamMemberExecutionEvents: (sessionId, events) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamMemberExecutionEvents: dedupeTeamMemberExecutionEvents(events).slice(0, 300) },
+        },
+      };
+    });
+  },
+
+  addTeamMemberExecutionEvent: (sessionId, event) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
       const eventPatch = Object.fromEntries(
         Object.entries(event).filter(([, value]) => value !== undefined)
       ) as TeamMemberExecutionEvent;
-      const duplicateIndex = state.teamMemberExecutionEvents.findIndex(
+      const duplicateIndex = runtime.teamMemberExecutionEvents.findIndex(
         (item) => isDuplicateFinalExecutionEvent(item, eventPatch)
       );
       if (duplicateIndex >= 0) {
-        const updatedEvents = [...state.teamMemberExecutionEvents];
+        const updatedEvents = [...runtime.teamMemberExecutionEvents];
         updatedEvents[duplicateIndex] = {
           ...updatedEvents[duplicateIndex],
           ...eventPatch,
           id: updatedEvents[duplicateIndex].id,
           timestamp: Math.min(updatedEvents[duplicateIndex].timestamp || eventPatch.timestamp, eventPatch.timestamp),
         };
-        return { teamMemberExecutionEvents: updatedEvents };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamMemberExecutionEvents: updatedEvents },
+          },
+        };
       }
-      const existingIndex = state.teamMemberExecutionEvents.findIndex(
+      const existingIndex = runtime.teamMemberExecutionEvents.findIndex(
         (item) => item.id === event.id
       );
       if (existingIndex >= 0) {
-        const updatedEvents = [...state.teamMemberExecutionEvents];
+        const updatedEvents = [...runtime.teamMemberExecutionEvents];
         updatedEvents[existingIndex] = {
           ...updatedEvents[existingIndex],
           ...eventPatch,
         };
-        return { teamMemberExecutionEvents: updatedEvents };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamMemberExecutionEvents: updatedEvents },
+          },
+        };
       }
       return {
-        teamMemberExecutionEvents: [eventPatch, ...state.teamMemberExecutionEvents].slice(0, 300),
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamMemberExecutionEvents: [eventPatch, ...runtime.teamMemberExecutionEvents].slice(0, 300) },
+        },
       };
     });
   },
-  setTeamMemberContextCompressionStatus: (memberId, runtime, summary) => {
+
+  setTeamMemberContextCompressionStatus: (sessionId, memberId, runtimeState, summary) => {
     const normalizedMemberId = memberId.trim();
     if (!normalizedMemberId) return;
     set((state) => {
-      const next = { ...state.teamMemberContextCompression };
-      if (!runtime && !summary) {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const next = { ...runtime.teamMemberContextCompression };
+      if (!runtimeState && !summary) {
         delete next[normalizedMemberId];
       } else {
         const existing = next[normalizedMemberId];
-        next[normalizedMemberId] = { runtime, summary: summary ?? existing?.summary };
+        next[normalizedMemberId] = { runtime: runtimeState, summary: summary ?? existing?.summary };
       }
-      return { teamMemberContextCompression: next };
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamMemberContextCompression: next },
+        },
+      };
     });
   },
-  clearTeamMemberContextCompressionStatus: (memberId) => {
+
+  clearTeamMemberContextCompressionStatus: (sessionId, memberId) => {
     const normalizedMemberId = memberId.trim();
     if (!normalizedMemberId) return;
     set((state) => {
-      if (!state.teamMemberContextCompression[normalizedMemberId]) {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime?.teamMemberContextCompression[normalizedMemberId]) {
         return state;
       }
-      const next = { ...state.teamMemberContextCompression };
+      const next = { ...runtime.teamMemberContextCompression };
       delete next[normalizedMemberId];
-      return { teamMemberContextCompression: next };
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamMemberContextCompression: next },
+        },
+      };
     });
   },
-  clearAllTeamMemberContextCompressionStatus: () => {
-    set({ teamMemberContextCompression: {} });
+
+  clearAllTeamMemberContextCompressionStatus: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamMemberContextCompression: {} },
+        },
+      };
+    });
   },
-  setTeamHistoryMessages: (messages) => {
-    set({ teamHistoryMessages: messages });
+
+  setTeamHistoryMessages: (sessionId, messages) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamHistoryMessages: messages },
+        },
+      };
+    });
   },
+
   setAvailableModels: (models, activeModel) => {
     set(() => {
       const chatModels = models.filter((m) => m.is_default !== false);
@@ -762,11 +1086,16 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (selected) {
         try { localStorage.setItem(MODEL_STORAGE_KEY, selected); } catch { /* noop */ }
       }
-      return { availableModels: models, chatAvailableModels: chatModels, selectedModelName: selected };
+      return { availableModels: models, chatAvailableModels: chatModels };
     });
   },
-  setSelectedModelName: (name) => {
+
+  setSelectedModelName: (sessionId, name) => {
     try { localStorage.setItem(MODEL_STORAGE_KEY, name); } catch { /* noop */ }
-    set({ selectedModelName: name });
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return { runtimes: { ...state.runtimes, [sessionId]: { ...runtime, selectedModelName: name } } };
+    });
   },
 }));

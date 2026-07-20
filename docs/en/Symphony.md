@@ -295,11 +295,10 @@ Runtime parameters for Skill Orchestration. The current template is:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `mode` | `fast` | Orchestration mode. The current runtime tools use the fast orchestration path and prioritize an executable skill chain |
-| `top_k` | `3` | Maximum number of candidate routes retained per orchestration round. Larger values cover more alternatives but can make output less focused |
 | `max_depth` | `4` | Maximum skill-chain search depth, limiting how many skills can be chained in one task |
 | `min_edge_confidence` | `0.3` | Minimum confidence threshold for skill-score edges. Edges below this value are not preferred for orchestration |
 
-These settings tune how candidate skills are connected into a route. If routes are too short or often miss intermediate steps, consider increasing `max_depth`. If routes are too broad or unstable, consider lowering `top_k` or increasing `min_edge_confidence`.
+These settings tune how candidate skills are connected into a route. If routes are too short or often miss intermediate steps, consider increasing `max_depth`. If routes often use low-confidence connections, consider increasing `min_edge_confidence`.
 
 #### `symphony.skill_retrieval.enabled`
 
@@ -409,7 +408,6 @@ symphony:
 
   orchestration:
     mode: fast
-    top_k: 3
     max_depth: 4
     min_edge_confidence: 0.3
 

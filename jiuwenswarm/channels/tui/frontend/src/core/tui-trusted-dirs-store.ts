@@ -8,7 +8,7 @@ import { loadTuiConfig, saveTuiConfig } from "./tui-config-store.js";
  * Trusted directories storage — project-scoped.
  *
  * Each project (identified by its cwd) maintains its own trusted dirs list.
- * Stored in ~/.jiuwenswarm-tui/config.json as `trustedDirs: {projectPath: [dir1, dir2]}`.
+ * Stored in ~/.jiuwenswarm-tui/config.json as `trustedDirs: {projectDir: [dir1, dir2]}`.
  */
 let _trustedDirsByProject: Record<string, string[]> | null = null;
 

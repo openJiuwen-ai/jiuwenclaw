@@ -16,12 +16,38 @@ from openjiuwen.agent_teams.monitor import TeamMonitor
 from openjiuwen.agent_teams.monitor.models import MonitorEvent, MonitorEventType
 
 from jiuwenswarm.agents.harness.team.event_types import (
-    get_team_event_type,
-    get_event_category,
+    TeamEventCategory,
+    resolve_team_event,
 )
 from jiuwenswarm.agents.harness.team.handlers.base_monitor_handler import BaseMonitorHandler
 
 logger = logging.getLogger(__name__)
+
+# Single server-side convergence point for task status. Each monitor event
+# advances the task to a fixed status; the frontend consumes ``status``
+# directly and never re-derives it from the event type. Events that carry
+# their own status in the payload (created / plan_request / plan_response /
+# updated) override the table default via ``event.status or ...``. TASK_UPDATED
+# is intentionally absent: its status is purely payload-driven, so a missing
+# status must leave the task unchanged rather than reset it.
+#
+# Adding a new task event is now a one-line entry here plus the SDK mapping in
+# ``event_types.py`` — no frontend change required.
+_TASK_EVENT_STATUS: dict[MonitorEventType, str] = {
+    MonitorEventType.TASK_CREATED: "pending",
+    MonitorEventType.TASK_CLAIMED: "in_progress",
+    MonitorEventType.TASK_STARTED: "in_progress",
+    MonitorEventType.TASK_PLAN_REQUEST: "planning",
+    MonitorEventType.TASK_PLAN_RESPONSE: "in_progress",
+    MonitorEventType.TASK_COMPLETED: "completed",
+    MonitorEventType.TASK_CANCELLED: "cancelled",
+    MonitorEventType.TASK_UNBLOCKED: "pending",
+    MonitorEventType.TASK_RELEASED: "pending",
+    MonitorEventType.TASK_REVOKED: "pending",
+    MonitorEventType.TASK_SUBMITTED_FOR_REVIEW: "in_review",
+    MonitorEventType.TASK_VERIFIED: "completed",
+    MonitorEventType.TASK_REVISION_REQUESTED: "in_progress",
+}
 
 
 class TeamMonitorHandler(BaseMonitorHandler):
@@ -108,31 +134,24 @@ class TeamMonitorHandler(BaseMonitorHandler):
         return base
 
     @staticmethod
-    def _handle_task_created(base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
-        base.update({
-            "task_id": event.task_id,
-            "status": event.status,
-        })
-        return base
+    def _handle_task(base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
+        """Converge every task event into the frontend-ready task shape.
 
-    @staticmethod
-    def _handle_task_claimed(base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
-        base["task_id"] = event.task_id
-        return base
+        The authoritative task status is resolved once here (server-side) so the
+        frontend reads ``status`` directly and never re-derives it from the event
+        type. The assignee already rides in ``member_id`` set by the caller.
 
-    @staticmethod
-    def _handle_task_completed(base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
-        base["task_id"] = event.task_id
-        return base
+        Args:
+            base: Pre-filled event dict (type / team_id / member_id).
+            event: Source monitor event.
 
-    @staticmethod
-    def _handle_task_cancelled(base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
+        Returns:
+            The event dict with ``task_id`` and, when known, the resolved ``status``.
+        """
         base["task_id"] = event.task_id
-        return base
-
-    @staticmethod
-    def _handle_task_unblocked(base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
-        base["task_id"] = event.task_id
+        resolved = event.status or _TASK_EVENT_STATUS.get(event.event_type)
+        if resolved:
+            base["status"] = resolved
         return base
 
     async def _handle_message(self, base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
@@ -195,43 +214,41 @@ class TeamMonitorHandler(BaseMonitorHandler):
             return content
 
     async def _convert_event_to_dict(self, event: MonitorEvent) -> dict[str, Any] | None:
-        team_event_type = get_team_event_type(event.event_type)
-        if team_event_type is None:
+        resolved = resolve_team_event(event.event_type)
+        if resolved is None:
             return None
-
-        event_category = get_event_category(team_event_type)
+        type_str, event_category = resolved
 
         event_data: dict[str, Any] = {
-            "type": team_event_type.value,
+            "type": type_str,
             "team_id": event.team_name,
         }
 
         if event.member_name:
             event_data["member_id"] = event.member_name
 
-        event_handlers = {
-            MonitorEventType.MEMBER_SPAWNED: self._handle_member_spawned,
-            MonitorEventType.MEMBER_STATUS_CHANGED: self._handle_member_status_changed,
-            MonitorEventType.MEMBER_EXECUTION_CHANGED: self._handle_member_execution_changed,
-            MonitorEventType.MEMBER_RESTARTED: self._handle_member_restarted,
-            MonitorEventType.MEMBER_SHUTDOWN: self._handle_member_shutdown,
-            MonitorEventType.TASK_CREATED: self._handle_task_created,
-            MonitorEventType.TASK_CLAIMED: self._handle_task_claimed,
-            MonitorEventType.TASK_COMPLETED: self._handle_task_completed,
-            MonitorEventType.TASK_CANCELLED: self._handle_task_cancelled,
-            MonitorEventType.TASK_UNBLOCKED: self._handle_task_unblocked,
-            MonitorEventType.MESSAGE: self._handle_message,
-            MonitorEventType.BROADCAST: self._handle_broadcast,
-        }
-
-        handler = event_handlers.get(event.event_type)
-        if handler is None:
-            return None
-
-        if asyncio.iscoroutinefunction(handler):
-            event_data = await handler(event_data, event)
+        # Task events all converge through a single handler that resolves the
+        # authoritative status server-side. Member / message events keep their
+        # dedicated handlers because they carry distinct fields.
+        if event_category == TeamEventCategory.TASK:
+            event_data = self._handle_task(event_data, event)
         else:
-            event_data = handler(event_data, event)
+            non_task_handlers = {
+                MonitorEventType.MEMBER_SPAWNED: self._handle_member_spawned,
+                MonitorEventType.MEMBER_STATUS_CHANGED: self._handle_member_status_changed,
+                MonitorEventType.MEMBER_EXECUTION_CHANGED: self._handle_member_execution_changed,
+                MonitorEventType.MEMBER_RESTARTED: self._handle_member_restarted,
+                MonitorEventType.MEMBER_SHUTDOWN: self._handle_member_shutdown,
+                MonitorEventType.MESSAGE: self._handle_message,
+                MonitorEventType.BROADCAST: self._handle_broadcast,
+            }
+            handler = non_task_handlers.get(event.event_type)
+            if handler is None:
+                return None
+            if asyncio.iscoroutinefunction(handler):
+                event_data = await handler(event_data, event)
+            else:
+                event_data = handler(event_data, event)
 
         return {
             "event_type": event_category.value,

@@ -46,6 +46,7 @@ class TestResolveMode:
         assert resolve_mode("code.plan") == "code.plan"
         assert resolve_mode("code.team") == "code.team"
         assert resolve_mode("team") == "team"
+        assert resolve_mode("team.plan") == "team.plan"
 
     @staticmethod
     def test_alias_resolution():

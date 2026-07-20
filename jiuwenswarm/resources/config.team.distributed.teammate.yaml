@@ -263,7 +263,9 @@ react:
   # Skills 在线自演进配置
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进
-    auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
+    auto_scan: false           # 兼容开关：teammate 触发 signal
+    signal_trigger:            # true / false = 显式覆盖规则触发；留空时回退 auto_scan
+    review_trigger:            # teammate 不启用软触发；保留字段以对齐通用配置
     skill_create: false        # true = 注册 SkillCreateRail（单 agent）及 TeamSkillCreateRail（leader）
     auto_save: false           # true = 自演进审批无需用户点击自动通过（内部开关）
     skill_base_dir: "agent/skills"  # Skill 根目录

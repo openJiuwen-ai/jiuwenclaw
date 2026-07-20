@@ -14,15 +14,14 @@ import {
 import { CommandKind } from "../dist/core/commands/types.js";
 
 const planQuestion = "**Plan Approval**\n\nThe agent has completed a plan.";
-const cnPlanQuestion = "**计划审批**\n\nAgent 已完成计划制定，等待你审批。";
-const toolQuestion = "**Tool `bash` requires your approval**";
+const planApprovalKind = "plan_approval";
 
-assert.equal(isPlanApprovalRequest("confirm_interrupt", planQuestion), true);
-assert.equal(isPlanApprovalRequest("confirm_interrupt", cnPlanQuestion), true);
-assert.equal(isPlanApprovalRequest("confirm_interrupt", toolQuestion), false);
+assert.equal(isPlanApprovalRequest("confirm_interrupt", planApprovalKind), true);
+assert.equal(isPlanApprovalRequest("confirm_interrupt", "permission"), false);
+assert.equal(isPlanApprovalRequest("permission_interrupt", planApprovalKind), false);
 
-assert.equal(getPendingQuestionTitle("confirm_interrupt", planQuestion, "", 0, 1), "Exit Plan and Execute:");
-assert.equal(getPendingQuestionTitle("confirm_interrupt", toolQuestion, "", 0, 1), "Confirm action");
+assert.equal(getPendingQuestionTitle("confirm_interrupt", "", 0, 1, planApprovalKind), "Exit Plan and Execute:");
+assert.equal(getPendingQuestionTitle("confirm_interrupt", "", 0, 1), "Confirm action");
 
 assert.equal(formatQuestionOptionLabelForDisplay("本次允许", false), "Allow once");
 assert.equal(formatQuestionOptionLabelForDisplay("拒绝", false), "Reject");
@@ -39,12 +38,12 @@ assert.equal(
   "[ use \x1b[7m \x1b[0mpytest ]",
 );
 
-assert.equal(shouldCollectPlanRejectFeedback("confirm_interrupt", planQuestion, "拒绝"), true);
-assert.equal(shouldCollectPlanRejectFeedback("confirm_interrupt", planQuestion, "Reject"), true);
-assert.equal(shouldCollectPlanRejectFeedback("confirm_interrupt", planQuestion, "本次允许"), false);
-assert.equal(shouldCollectPlanRejectFeedback("confirm_interrupt", toolQuestion, "拒绝"), false);
-assert.equal(shouldAppendPlanRejectFeedback("confirm_interrupt", planQuestion, "拒绝"), true);
-assert.equal(shouldAppendPlanRejectFeedback("confirm_interrupt", planQuestion, "本次允许"), false);
+assert.equal(shouldCollectPlanRejectFeedback("confirm_interrupt", "拒绝", planApprovalKind), true);
+assert.equal(shouldCollectPlanRejectFeedback("confirm_interrupt", "Reject", planApprovalKind), true);
+assert.equal(shouldCollectPlanRejectFeedback("confirm_interrupt", "本次允许", planApprovalKind), false);
+assert.equal(shouldCollectPlanRejectFeedback("confirm_interrupt", "拒绝", "permission"), false);
+assert.equal(shouldAppendPlanRejectFeedback("confirm_interrupt", "拒绝", planApprovalKind), true);
+assert.equal(shouldAppendPlanRejectFeedback("confirm_interrupt", "本次允许", planApprovalKind), false);
 
 assert.deepEqual(
   buildPlanApprovalQuestionItems([

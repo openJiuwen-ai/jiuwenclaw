@@ -39,8 +39,6 @@ class ResourceDegradationManager:
 
         proc = subprocess.Popen(
             ["/usr/bin/stress-ng", f"--cpu={cores}", f"--timeout={duration}s"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
         )
         self._processes.append(proc)
         time.sleep(2)
@@ -53,8 +51,6 @@ class ResourceDegradationManager:
 
         proc = subprocess.Popen(
             ["/usr/bin/stress-ng", f"--vm-bytes={vm_bytes}", "--vm=4", f"--timeout={duration}s"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
         )
         self._processes.append(proc)
         time.sleep(2)
@@ -90,16 +86,10 @@ class ResourceDegradationManager:
         count = size[:-1]
         proc = subprocess.Popen(
             [
-                "/usr/bin/timeout",
-                f"{duration}s",
-                "/bin/dd",
-                "if=/dev/urandom",
-                f"of={path}/stress_file",
-                "bs=1G",
-                f"count={count}",
+                "/usr/bin/timeout", f"{duration}s",
+                "/bin/dd", "if=/dev/urandom",
+                f"of={path}/stress_file", "bs=1G", f"count={count}",
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
         )
         self._processes.append(proc)
         time.sleep(2)
@@ -117,13 +107,14 @@ class ResourceDegradationManager:
             try:
                 proc.terminate()
                 proc.wait(timeout=5)
-            except Exception as exc:
-                logger.debug("Failed to terminate process: %s", exc)
+            except subprocess.TimeoutExpired:
                 try:
                     proc.kill()
                     proc.wait(timeout=5)
                 except Exception as kill_exc:
                     logger.warning("Failed to kill process: %s", kill_exc)
+            except Exception as exc:
+                logger.debug("Failed to terminate process: %s", exc)
         self._processes.clear()
 
 
@@ -138,13 +129,7 @@ class ChaosInjector:
         resp = self._client.post(
             f"/api/v1/sandboxes/{sandbox_id}/exec",
             json={
-                "command": [
-                    "sh",
-                    "-c",
-                    "pid=$(pgrep -f 'sandbox-daemon\\.py' | head -1); "
-                    "if [ -z \"$pid\" ]; then pid=$(pgrep -f 'sandbox-daemon' | head -1); fi; "
-                    "if [ -z \"$pid\" ]; then exit 1; fi; echo \"$pid\"",
-                ],
+                "command": ["pgrep", "-f", "sandbox-daemon"],
                 "timeout_seconds": 10,
             },
         )
@@ -153,11 +138,12 @@ class ChaosInjector:
                 f"Failed to discover daemon PID: {resp.status_code} {resp.text}"
             )
         raw = (resp.json().get("stdout") or "").strip()
-        if not raw.isdigit():
+        pids = raw.splitlines()
+        if not pids or not pids[0].isdigit():
             raise RuntimeError(
                 f"Could not find sandbox daemon PID in sandbox {sandbox_id}: {raw!r}"
             )
-        return raw
+        return pids[0]
 
     def kill_sandbox_daemon(self, sandbox_id: str):
         """Kill the sandbox daemon process."""
