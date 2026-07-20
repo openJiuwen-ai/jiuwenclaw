@@ -528,3 +528,60 @@ def file_map_to_dict_no_hunks(
             continue
         result[path] = file_entry_to_dict_no_hunks(entry)
     return result
+
+
+# ── 事件 payload 构造 helper(供 handler 与 registry 共用,避免重复实现) ──
+
+def extract_files_from_status(
+    status_dict: dict[str, Any],
+    source: str,
+) -> dict[str, Any] | None:
+    """从 ``ProjectGitDiffStatus.to_dict()`` 中提取指定 source 的 files 映射。
+
+    Args:
+        status_dict: 已序列化的 diff status dict
+        source: ``"current"`` 或 ``"last_turn"``
+
+    Returns:
+        files 映射;对应分支不存在时返回 ``None``
+    """
+    if source == "current":
+        current = status_dict.get("current")
+        return (current or {}).get("files") if current else None
+    if source == "last_turn":
+        last_turn = status_dict.get("last_turn")
+        return (last_turn or {}).get("files") if last_turn else None
+    return None
+
+
+def build_summary_entry(current: dict[str, Any] | None) -> dict[str, Any] | None:
+    """构造 summary 事件/快照中的 current 条目(``files`` 固定 ``{}``)。
+
+    summary 层只关心统计信息,文件列表由 files 层负责。
+
+    Returns:
+        构造的 summary 条目;``current`` 为空时返回 ``None``。
+    """
+    if not current:
+        return None
+    return {
+        "kind": current.get("kind", "working_tree"),
+        "is_dirty": current.get("is_dirty", False),
+        "stats": current.get("stats", {}),
+        "files": {},
+    }
+
+
+def build_turn_summary_entry(last_turn: dict[str, Any] | None) -> dict[str, Any] | None:
+    """构造 summary 事件/快照中的 last_turn 条目(``files`` 固定 ``{}``)。
+
+    与 ``build_summary_entry`` 对称,仅用于 last_turn 分支。
+    """
+    if not last_turn:
+        return None
+    return {
+        "kind": last_turn.get("kind", "conversation_turn"),
+        "turn_index": last_turn.get("turn_index", 0),
+        "stats": last_turn.get("stats", {}),
+        "files": {},
+    }

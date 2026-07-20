@@ -681,6 +681,21 @@
       "saveGeneric": "Save failed, please try again later",
       "wechatNumericInvalid": "{{field}} must be a valid number between {{min}} and {{max}}",
       "wechatBackoffOrder": "backoff_max_sec must not be less than backoff_base_sec"
+    },
+    "feishuApps": {
+      "defaultAppName": "Default Lark App",
+      "legacyDefaultAppName": "Default App",
+      "unnamedAppName": "Unnamed Lark App",
+      "appNameTemplate": "Lark App {{index}}",
+      "appNamePlaceholder": "App name",
+      "collapseConfig": "Collapse app configuration",
+      "expandConfig": "Expand app configuration",
+      "defaultBadge": "Default",
+      "setDefault": "Set as default",
+      "setDefaultAria": "Set as default app",
+      "appIdNotConfigured": "app_id not configured",
+      "deleteApp": "Delete app",
+      "addApp": "Add app"
     }
   },
   "config": {
@@ -780,6 +795,10 @@
       "proactiveTickInterval": "Check interval (minutes)",
       "proactiveMaxPerDay": "Daily recommendation limit",
       "proactiveMaxRounds": "Max rounds per check"
+    },
+    "defaults": {
+      "teamLeaderDisplayName": "Team Leader",
+      "teamLeaderPersona": "Genius project management expert, skilled at task decomposition and team coordination"
     },
     "keyHelp": {
       "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling",
@@ -1024,7 +1043,8 @@
       "history": "Run History"
     },
     "search": {
-      "placeholder": "Search"
+      "placeholder": "Search",
+      "noResults": "No matching templates found. Try a different keyword."
     },
     "table": {
       "name": "Name",
@@ -1998,7 +2018,15 @@
     "helpTitle": "Usage Guide",
     "help0": "Extension folder must contain rail.py as the entry file",
     "help1": "Rail extension files must inherit from DeepAgentRail or AgentRail base class",
-    "help2": "Extension files are saved to ~/.jiuwenswarm/agent/workspace/extensions/ directory"
+    "help2": "Extension files are saved to ~/.jiuwenswarm/agent/workspace/extensions/ directory",
+    "errors": {
+      "missingFolderPath": "Missing folder_path parameter",
+      "folderNotFound": "Folder does not exist or is not a directory: {{path}}",
+      "invalidFolderName": "Folder name \"{{name}}\" must be a valid English identifier",
+      "alreadyExists": "Extension \"{{name}}\" already exists",
+      "missingRailFile": "Extension folder must contain a rail.py file",
+      "railValidationFailed": "rail.py validation failed"
+    }
   },
   "ownerScopes": {
     "title": "Avatar Permission",
@@ -2091,7 +2119,8 @@
       "rename": "Rename",
       "renamePlaceholder": "Enter a new name",
       "deleteProject": "Delete project",
-      "deleteProjectDescription": "Remove “{{projectName}}”? Unpinned conversations in this project will temporarily move to the default project.",
+      "deleteProjectDescription": "Remove “<name>{{projectName}}</name>”? Unpinned conversations in this project will temporarily move to the default project.",
+      "defaultProjectName": "Default Project",
       "absolutePathError": "Enter an absolute path, for example /Users/name/work/project",
       "errors": {
         "pathExists": "This project path already exists. Choose another directory or start a new conversation from the existing project.",
@@ -2101,7 +2130,7 @@
       "confirm": "Confirm"
     },
     "runtime": { "processing": "Processing" },
-    "deleteDialog": { "title": "Delete", "description": "Delete “{{title}}”? This action cannot be undone." },
+    "deleteDialog": { "title": "Delete", "description": "Delete “<name>{{title}}</name>”? This action cannot be undone." },
     "notFound": { "title": "Conversation not found or deleted", "newConversation": "New conversation" },
     "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
   },

@@ -681,6 +681,21 @@
       "saveGeneric": "保存失败，请稍后重试",
       "wechatNumericInvalid": "{{field}} 需为 {{min}}–{{max}} 之间的有效数值",
       "wechatBackoffOrder": "backoff_max_sec 不得小于 backoff_base_sec"
+    },
+    "feishuApps": {
+      "defaultAppName": "飞书默认应用",
+      "legacyDefaultAppName": "默认应用",
+      "unnamedAppName": "未命名飞书应用",
+      "appNameTemplate": "飞书应用 {{index}}",
+      "appNamePlaceholder": "应用名称",
+      "collapseConfig": "收起应用配置",
+      "expandConfig": "展开应用配置",
+      "defaultBadge": "默认",
+      "setDefault": "设为默认",
+      "setDefaultAria": "设为默认应用",
+      "appIdNotConfigured": "未配置 app_id",
+      "deleteApp": "删除应用",
+      "addApp": "添加应用"
     }
   },
   "config": {
@@ -780,6 +795,10 @@
       "proactiveTickInterval": "检查间隔（分钟）",
       "proactiveMaxPerDay": "每日推荐上限",
       "proactiveMaxRounds": "每次检查对话轮数"
+    },
+    "defaults": {
+      "teamLeaderDisplayName": "团队领导",
+      "teamLeaderPersona": "天才项目管理专家，擅长任务分解和团队协调"
     },
     "keyHelp": {
       "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启",
@@ -1024,7 +1043,8 @@
       "history": "执行历史"
     },
     "search": {
-      "placeholder": "请输入搜索内容"
+      "placeholder": "请输入搜索内容",
+      "noResults": "未找到相关模板，可换个关键词再试。"
     },
     "table": {
       "name": "名称",
@@ -1999,7 +2019,15 @@
     "helpTitle": "使用说明",
     "help0": "扩展文件夹必须包含 rail.py 作为入口文件",
     "help1": "Rail 扩展文件必须继承 DeepAgentRail 或 AgentRail 基类",
-    "help2": "扩展文件会被保存到 ~/.jiuwenswarm/agent/workspace/extensions/ 目录"
+    "help2": "扩展文件会被保存到 ~/.jiuwenswarm/agent/workspace/extensions/ 目录",
+    "errors": {
+      "missingFolderPath": "缺少 folder_path 参数",
+      "folderNotFound": "文件夹不存在或不是目录：{{path}}",
+      "invalidFolderName": "文件夹名称 “{{name}}” 必须是有效的英文标识符",
+      "alreadyExists": "扩展 “{{name}}” 已存在",
+      "missingRailFile": "扩展文件夹必须包含 rail.py 文件",
+      "railValidationFailed": "rail.py 验证失败"
+    }
   },
   "ownerScopes": {
     "title": "分身权限配置",
@@ -2095,7 +2123,8 @@
       "rename": "重命名",
       "renamePlaceholder": "输入新名称",
       "deleteProject": "删除项目",
-      "deleteProjectDescription": "确定要移除“{{projectName}}”吗？项目下未置顶会话会临时归入默认项目。",
+      "deleteProjectDescription": "确定要移除“<name>{{projectName}}</name>”吗？项目下未置顶会话会临时归入默认项目。",
+      "defaultProjectName": "默认项目",
       "absolutePathError": "请输入绝对路径，例如 /Users/name/work/project",
       "errors": {
         "pathExists": "该项目路径已存在，请选择其他目录或直接从现有项目开始新对话",
@@ -2105,7 +2134,7 @@
       "confirm": "确定"
     },
     "runtime": { "processing": "处理中" },
-    "deleteDialog": { "title": "删除", "description": "确定删除“{{title}}”吗？此操作不可撤销。" },
+    "deleteDialog": { "title": "删除", "description": "确定删除“<name>{{title}}</name>”吗？此操作不可撤销。" },
     "notFound": { "title": "对话不存在或已删除", "newConversation": "新建对话" },
     "errors": { "delete": "删除对话失败", "create": "创建对话失败", "send": "发送消息失败" }
   },

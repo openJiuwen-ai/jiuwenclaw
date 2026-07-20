@@ -37,7 +37,7 @@ export default function SimpleSelect({ value, onChange, options, placeholder = '
         <ChevronDown size={14} className={`text-text-muted transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && !disabled && (
-        <div className="absolute left-0 top-[calc(100%+4px)] z-30 w-full rounded-lg border border-border bg-card p-1.5 shadow-lg">
+        <div className="absolute left-0 top-[calc(100%+4px)] z-30 max-h-60 w-full overflow-y-auto rounded-lg border border-border bg-card p-1.5 shadow-lg">
           {options.map((opt) => {
             const active = opt.value === value;
             return (

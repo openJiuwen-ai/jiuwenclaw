@@ -31,7 +31,7 @@ import pytest
 
 from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKILL_USE
-from openjiuwen.agent_teams.schema import deep_agent_spec as das
+from openjiuwen.harness.schema import deep_agent_spec as das
 from openjiuwen.agent_teams.harness.manifest import get_catalog, resolve_factory
 from openjiuwen.agent_teams.schema.blueprint import LeaderSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import (
@@ -200,7 +200,7 @@ def _assert_evolution_approval_stack(
     assert isinstance(interrupt_rail, _FakeEvolutionInterruptRail)
     assert "review_runtime" in rail.kwargs
     assert rail.kwargs["review_runtime"] is not None
-    assert rail.kwargs["fuzzy_review"] is False
+    assert "fuzzy_review" not in rail.kwargs
     assert interrupt_rail.kwargs == {
         "review_runtime": rail.kwargs["review_runtime"],
         "submission_service": rail.approval_submission_service,
@@ -1147,7 +1147,11 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     )
 
     built = evolution_rails.build_team_skill_evolution_rail(
-        {"evolution_model_config": {}, "auto_scan": True, "auto_save": auto_save},
+        {
+            "evolution_model_config": {},
+            "review_trigger": True,
+            "auto_save": auto_save,
+        },
         ctx,
     )
 
@@ -1158,9 +1162,9 @@ def test_team_skill_evolution_provider_passes_review_runtime(
         language="cn",
     )
     rail = built[1]
-    assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is auto_save
-    assert rail.kwargs["completion_followup_enabled"] is True
+    assert rail.kwargs["review_trigger"] is True
 
 
 def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
@@ -1247,7 +1251,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
     )
 
     built = evolution_rails.build_member_skill_evolution_rail(
-        {"evolution_model_config": {}, "auto_scan": False},
+        {"evolution_model_config": {}, "signal_trigger": False},
         ctx,
     )
 
@@ -1258,7 +1262,7 @@ def test_member_skill_evolution_provider_passes_review_runtime(
         language="en",
     )
     assert rail.kwargs["language"] == "en"
-    assert rail.kwargs["auto_scan"] is False
+    assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is True
     assert rail.bound_sink == (registry_obj, "t", "teammate")
 
@@ -1873,8 +1877,8 @@ def test_code_member_builds_declaratively_without_post_processing(
     assert "WorktreeRail" not in rail_types
     # The code system prompt is set declaratively on the spec.
     assert agent.deep_config.system_prompt
-    # CodingMemoryRail is published for the code_agent sub-agent to reuse.
-    assert ctx.extras.get(code_rails.CODING_MEMORY_EXTRAS_KEY) is not None
+    # CodingMemoryRail materializes through the derived build context.
+    assert "CodingMemoryRail" in rail_types
     coding_memory_dir = resolve_project_coding_memory_dir(
         agent_workspace_dir=str(tmp_path),
         project_dir=str(tmp_path),

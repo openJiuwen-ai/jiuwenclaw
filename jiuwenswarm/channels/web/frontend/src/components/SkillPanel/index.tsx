@@ -775,7 +775,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
   }, [filteredSkills, activeTab, installedSkillMap]);
 
   const builtinSkills = useMemo(() => {
-    let filtered = skills.filter((skill) => skill.is_builtin === true);
+    let filtered = skills.filter((skill) => skill.is_builtin === true || skill.is_builtin_source === true);
     if (search.trim()) {
       const searchLower = search.toLowerCase();
       filtered = filtered.filter(

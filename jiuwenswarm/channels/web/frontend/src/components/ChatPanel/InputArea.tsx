@@ -1741,30 +1741,32 @@ export function InputArea({
                         placeholder={t('multiSession.project.searchProject')}
                       />
                     </label>
-                    {inputProjectOptions.map((project) => {
-                      const active = selectedProject?.project_id === project.project_id;
-                      return (
-                        <button
-                          type="button"
-                          key={project.project_id}
-                          className={clsx('chat-work-select__option', active && 'is-active')}
-                          onClick={() => {
-                            setSelectedProject(project);
-                            setWorkMenuOpen(null);
-                          }}
-                          role="menuitemradio"
-                          aria-checked={active}
-                          title={project.project_dir}
-                        >
-                          <WorkIcon name="folder" />
-                          <span>{project.name}</span>
-                          {active ? <WorkIcon name="check" className="chat-work-select__check" /> : null}
-                        </button>
-                      );
-                    })}
-                    {inputProjectOptions.length === 0 ? (
-                      <div className="chat-work-select__empty">{t('multiSession.project.noProjectMatches')}</div>
-                    ) : null}
+                    <div className="chat-work-select__options">
+                      {inputProjectOptions.map((project) => {
+                        const active = selectedProject?.project_id === project.project_id;
+                        return (
+                          <button
+                            type="button"
+                            key={project.project_id}
+                            className={clsx('chat-work-select__option', active && 'is-active')}
+                            onClick={() => {
+                              setSelectedProject(project);
+                              setWorkMenuOpen(null);
+                            }}
+                            role="menuitemradio"
+                            aria-checked={active}
+                            title={project.project_dir}
+                          >
+                            <WorkIcon name="folder" />
+                            <span>{project.name}</span>
+                            {active ? <WorkIcon name="check" className="chat-work-select__check" /> : null}
+                          </button>
+                        );
+                      })}
+                      {inputProjectOptions.length === 0 ? (
+                        <div className="chat-work-select__empty">{t('multiSession.project.noProjectMatches')}</div>
+                      ) : null}
+                    </div>
                     <ProjectAddSubmenu
                       onCreate={(mode) => {
                         void openProjectCreateDialog(mode);

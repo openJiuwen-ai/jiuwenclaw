@@ -526,6 +526,32 @@ class GatewayServer:
             return False
         return self._session_to_client.get(session_key) is ws
 
+    def get_active_session_ids(
+        self,
+        channel_id: str,
+        exclude_ws: Any = None,
+    ) -> set[str]:
+        """返回在指定 channel 下、仍处于活跃连接绑定的 session_id 集合。
+
+        用于 session.list 标记 active_in_window，供前端在 /resume 前拦截冲突会话。
+        排除 exclude_ws（通常是发起 session.list 请求的连接本身），并跳过已关闭的 ws，
+        与实时防线（forward 阶段 SESSION_IN_USE 检查）口径保持一致。
+        """
+        active: set[str] = set()
+        for key, client_ws in self._session_to_client.items():
+            if not isinstance(key, tuple) or len(key) < 2:
+                continue
+            if key[0] != channel_id:
+                continue
+            if client_ws is exclude_ws:
+                continue
+            if bool(getattr(client_ws, "closed", False)):
+                continue
+            session_id = key[1]
+            if isinstance(session_id, str) and session_id:
+                active.add(session_id)
+        return active
+
     @staticmethod
     def _extract_routing_session_id(msg, *, include_top_level: bool = True) -> str | None:
         """Best-effort session id from message fields for outbound event routing."""
@@ -2292,15 +2318,8 @@ async def _run(
     await channel_manager.set_config(initial_channels_conf)
 
     await channel_manager.start_dispatch()
-    # 启动迁移：给老 cron_jobs.json 中的 job 补全 work_mode 字段
-    # 必须在 cron_scheduler.start() 之前执行——scheduler.start() 会 reload() 从磁盘读入
-    # jobs 到内存，若迁移在后，老 job 会以 from_dict() 兜底的 work_mode="work" 进入
-    # 内存和事件队列，磁盘迁移成 code 后内存不一致，启动后马上到期的 job 可能按错误快照执行。
-    # 同时也必须在 sync_proactive_tick_job 之前，避免 proactive job 的 work_mode 未初始化
-    try:
-        await cron_store.migrate_legacy_jobs_at_startup()
-    except Exception as e:  # noqa: BLE001  # 兜底：cron 迁移失败不阻断 Gateway 启动
-        logger.warning("[App] cron legacy jobs migration failed (non-fatal): %s", e)
+    # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
+    # list_jobs() 读取时按需推断并写回磁盘(见 CronJobStore.list_jobs),无需启动全量扫描。
     await cron_scheduler.start()
     # 主动推荐：按 config 自动注册/删除 proactive.tick 定时 job
     try:

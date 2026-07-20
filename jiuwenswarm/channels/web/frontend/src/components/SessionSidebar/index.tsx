@@ -195,6 +195,10 @@ export function SessionSidebar({
   const visibleMainNavItems = mainNavItems.filter((item) => !hiddenNavItems.includes(item.key));
   const visibleMoreNavItems = moreNavItems.filter((item) => !hiddenNavItems.includes(item.key));
   const isMoreActive = visibleMoreNavItems.some((item) => item.key === activeNav);
+  // 定时任务（cron）是"工作"区内与会话同级的视图，没有独立的导航图标，
+  // 因此进入定时任务时"工作"导航项也应保持选中态
+  const isNavItemActive = (item: NavItem) =>
+    activeNav === item.key || (item.key === 'chat' && activeNav === 'cron');
 
   useLayoutEffect(() => {
     onMorePanelOpenChange?.(isMoreActive);
@@ -222,7 +226,7 @@ export function SessionSidebar({
       {visibleMainNavItems.map((item) => (
         <button
           key={item.key}
-          className={`icon-rail-nav-item${activeNav === item.key ? ' icon-rail-nav-item--active' : ''}`}
+          className={`icon-rail-nav-item${isNavItemActive(item) ? ' icon-rail-nav-item--active' : ''}`}
           onClick={() => handleNavClick(item.key)}
         >
           <span className="icon-rail-nav-item__icon">{item.icon}</span>

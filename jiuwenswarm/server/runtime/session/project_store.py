@@ -255,6 +255,28 @@ def _load_cache(cache_bust: bool = False) -> list[dict[str, Any]]:
     path = _projects_file()
     with _file_lock(path):
         raw = _read_disk_locked(path)
+        # 惰性迁移:为缺 work_mode 的老项目推断并写回磁盘。
+        # from_dict 已能在读取时兜底,但持久化可避免后续每次读都重复推断,
+        # 也保证磁盘 schema 统一(运维/跨进程/直接读文件场景看到的 schema 完整)。
+        # git 字段缺省为 {} 由 from_dict 处理,无需写回(纯常量默认,非推断)。
+        changed = False
+        for p in raw:
+            existing_wm = p.get("work_mode")
+            if (
+                isinstance(existing_wm, str)
+                and existing_wm.strip().lower() in {"code", "work"}
+            ):
+                continue
+            # infer_legacy_project_work_mode 总是返回合法值(缺失/非法时回退 "work")
+            p["work_mode"] = infer_legacy_project_work_mode(p)
+            changed = True
+        if changed:
+            try:
+                _write_disk_locked(path, raw)
+            except (OSError, ValueError, TypeError) as exc:
+                logger.warning(
+                    "Project 惰性迁移写回 projects.json 失败: %s", exc
+                )
     with _CACHE_LOCK:
         _CACHE = [dict(p) for p in raw]
     return [dict(p) for p in raw]

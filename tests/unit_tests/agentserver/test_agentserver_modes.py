@@ -1330,6 +1330,8 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
 
     class FakeAbilityManager:
         @staticmethod
@@ -1415,8 +1417,8 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
         for rail in registered
         if _is_regular_skill_evolution_rail(rail)
     )
-    assert skill_evolution_rail.auto_scan is False
-    assert skill_evolution_rail.fuzzy_review is False
+    assert skill_evolution_rail.signal_trigger is False
+    assert skill_evolution_rail.review_trigger is False
 
 
 def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkeypatch, tmp_path):

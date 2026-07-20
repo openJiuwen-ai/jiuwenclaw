@@ -236,7 +236,7 @@ class CronJob:
     enabled: bool
     cron_expr: str
     timezone: str
-    wake_offset_seconds: int = 300
+    wake_offset_seconds: int = 0
     description: str = ""
     # For one-shot schedules where croniter has no "next" after the run.
     expired: bool = False
@@ -315,7 +315,7 @@ class CronJob:
         enabled = bool(data.get("enabled", False))
         expired = bool(data.get("expired", False))
 
-        wake_offset_seconds_raw = data.get("wake_offset_seconds", 300)
+        wake_offset_seconds_raw = data.get("wake_offset_seconds", 0)
         try:
             wake_offset_seconds = int(wake_offset_seconds_raw)
         except Exception as exc:  # noqa: BLE001
