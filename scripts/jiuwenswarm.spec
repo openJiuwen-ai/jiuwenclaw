@@ -67,7 +67,11 @@ def collect_resources_data_files(source_dir, target_dir):
         if any(root_abs == excluded or root_abs.startswith(excluded + os.sep) for excluded in excluded_dirs):
             continue
 
-        rel_dir = os.path.dirname(os.path.relpath(root, source_dir))
+        # 这里 root 本身就是目录，dirname 会砍掉最后一级，导致
+        # skills/<name>/SKILL.md 被错误放到 skills/SKILL.md，无子目录的技能整个消失。
+        rel_dir = os.path.relpath(root, source_dir)
+        if rel_dir == ".":
+            rel_dir = ""
         dest_dir = os.path.normpath(os.path.join(target_dir, rel_dir))
         for filename in files:
             data_files.append((os.path.join(root, filename), dest_dir))
