@@ -513,6 +513,43 @@ class XiaoyiChannel(BaseChannel):
             )
             return
 
+        # 问卷降级保底：端侧无选项点选卡片能力，把 chat.ask_user_question 降级为纯文本，
+        # 走 text part 管道（A2A artifact-update kind:"text"），保证端侧一定能渲染出问卷。
+        # is_final=False / last_chunk=False：走非终帧路径，不触发清流，保持流开启等待用户回答。
+        if msg.event_type == EventType.CHAT_ASK_USER_QUESTION:
+            ask_payload = msg.payload if isinstance(msg.payload, dict) else {}
+            ask_questions = ask_payload.get("questions", []) or []
+            if ask_questions:
+                ask_lines = ["为了帮你更好地完成任务，请回答以下几个问题：", ""]
+                for q in ask_questions:
+                    q_header = q.get("header", "") or q.get("question", "") or "问题"
+                    q_text = q.get("question", "")
+                    if q_header and q_header != q_text:
+                        ask_lines.append(f"【{q_header}】{q_text}")
+                    else:
+                        ask_lines.append(q_text)
+                    q_opts = q.get("options", []) or []
+                    for opt in q_opts:
+                        if isinstance(opt, dict):
+                            opt_label = opt.get("label", "") or opt.get("description", "")
+                        else:
+                            opt_label = str(opt)
+                        if opt_label:
+                            ask_lines.append(f"  • {opt_label}")
+                ask_lines.append("（直接回复你的选择或具体信息即可，我会据此继续为你制定方案）")
+                ask_text = "\n".join(ask_lines)
+                for url_key in list(self._ws_connections.keys()):
+                    await self._send_text_response(
+                        session_id,
+                        task_id,
+                        ask_text,
+                        url_key,
+                        append=False,
+                        last_chunk=False,
+                        is_final=False,  # 不断流，等待用户回答后 agent 接续
+                    )
+            return
+
         content = ""
         cron_job_name = ""
         if isinstance(msg.payload, dict):
