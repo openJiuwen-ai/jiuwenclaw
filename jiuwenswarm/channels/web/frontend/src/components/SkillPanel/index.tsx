@@ -27,6 +27,11 @@ const GRAPH_READING_MIN_VISIBLE_MS = 500;
 /** 在线技能源存储 key */
 const ONLINE_SOURCE_STORAGE_KEY = "jiuwen:online_source";
 
+// SkillPanel 可见性开关 — 设为 true 显示，false 隐藏。
+const SKILL_PANEL_FLAGS = {
+  showImportLocal: false, // "导入本地技能" 按钮
+};
+
 /** 获取保存的在线源 */
 function getSavedOnlineSource(): "skillnet" | "clawhub" {
   try {
@@ -1590,21 +1595,23 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
               </svg>
               {activeTab === "graph" && graphReading ? "正在读取技能总谱" : t('common.refresh')}
             </button>
-            <button
-              onClick={handleImportLocal}
-              className={`flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm  ${
-                actionTarget === "import_local"
-                  ? "text-text-muted cursor-not-allowed"
-                  : "text-text-muted hover:text-text hover:bg-secondary/50"
-              }`}
-              disabled={actionTarget === "import_local"}
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v9m0 0l-3-3m3 3l3-3" />
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5 15v4a2 2 0 002 2h10a2 2 0 002-2v-4" />
-              </svg>
-              {t('skills.actions.importLocal')}
-            </button>
+            {SKILL_PANEL_FLAGS.showImportLocal && (
+              <button
+                onClick={handleImportLocal}
+                className={`flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm  ${
+                  actionTarget === "import_local"
+                    ? "text-text-muted cursor-not-allowed"
+                    : "text-text-muted hover:text-text hover:bg-secondary/50"
+                }`}
+                disabled={actionTarget === "import_local"}
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v9m0 0l-3-3m3 3l3-3" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 15v4a2 2 0 002 2h10a2 2 0 002-2v-4" />
+                </svg>
+                {t('skills.actions.importLocal')}
+              </button>
+            )}
           </div>
         </div>
 
