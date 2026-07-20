@@ -476,6 +476,42 @@ def test_commit_preserves_unselected_right_punctuation(
     assert child_provenance["content_sha256"] == hashlib.sha256(child_bytes).hexdigest()
 
 
+def test_commit_uses_normalized_punctuation_replacement_for_metadata(tmp_path):
+    report, _ = _write_document(tmp_path, "原句，后文\n")
+    prepared = _prepare(tmp_path, report, "原句")
+    slot_id = prepared["units"][0]["slots"][0]["slot_id"]
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(prepared, {slot_id: "新句。"}),
+    )
+
+    child = Path(result["report_path"])
+    child_bytes = child.read_bytes()
+    assert child_bytes == "新句，后文\n".encode("utf-8")
+    child_provenance = json.loads(
+        Path(result["provenance_path"]).read_text(encoding="utf-8")
+    )
+    history = child_provenance["rewrite_history"][-1]
+    normalized_bytes = "新句".encode("utf-8")
+    assert history["result_sha256"] == hashlib.sha256(normalized_bytes).hexdigest()
+    assert history["result_sha256"] != hashlib.sha256(
+        "新句。".encode("utf-8")
+    ).hexdigest()
+    assert child_provenance["rewrite_highlights"] == {
+        "revision_id": child_provenance["revision_id"],
+        "offset_unit": "utf8_byte",
+        "ranges": [
+            {
+                "start_byte": 0,
+                "end_byte": len(normalized_bytes),
+                "unit_type": "paragraph",
+            }
+        ],
+    }
+
+
 def test_commit_keeps_candidate_punctuation_when_selection_contains_boundary(tmp_path):
     body = "原句，后文\n"
     report, _ = _write_document(tmp_path, body)
