@@ -212,6 +212,13 @@ class ManagedBrowserDriver:
             "--no-first-run",
             "--no-default-browser-check",
             "about:blank",
+            "--headless",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--disable-features=IsolateOrigins, site-per-process",
         ]
         args.extend(self.profile.extra_args)
         return args

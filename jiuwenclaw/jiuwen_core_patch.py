@@ -5,6 +5,7 @@ import asyncio
 import logging
 from typing import Any, Optional, AsyncIterator, Callable
 from contextvars import ContextVar
+from typing import FrozenSet
 from dataclasses import dataclass
 
 from pydantic import Field
@@ -26,6 +27,9 @@ llm_logger = logging.getLogger("jiuwenclaw.agentserver")
 # Session context for retry notifications.
 # Set by react_agent._call_llm_stream before calling llm.stream/invoke.
 _retry_session: ContextVar[Optional[Any]] = ContextVar("retry_session", default=None)
+_stream_tool_header_seen: ContextVar[FrozenSet[int]] = ContextVar(
+    "stream_tool_header_seen", default=frozenset()
+)
 
 _ORIGINAL_BUILD_REQUEST_PARAMS = None
 
@@ -348,11 +352,11 @@ class RetryMixin:
                 return  # 流式成功完成
             except Exception as e:
                 last_error = e
-                # if not self._is_retryable_error(e, cfg):
-                #     reason = self._classify_error(e, cfg)
-                #     details = self._extract_error_details(e)
-                #     llm_logger.info(f"LLM stream 不可重试 [{reason}] [{details}], details: {e}")
-                #     raise
+                if not self._is_retryable_error(e, cfg):
+                    reason = self._classify_error(e, cfg)
+                    details = self._extract_error_details(e)
+                    llm_logger.info(f"LLM stream 不可重试 [{reason}] [{details}], details: {e}")
+                    raise
                 llm_logger.info(f"LLM stream 开始重试, details: {e}")
                 reason = self._classify_error(e, cfg)
                 details = self._extract_error_details(e)
@@ -546,20 +550,34 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         # Parse tool_calls delta
         tool_calls = []
         if hasattr(delta, 'tool_calls') and delta.tool_calls:
+            seen_tool_header_indexes = set(_stream_tool_header_seen.get())
             for tc_delta in delta.tool_calls:
                 if hasattr(tc_delta, 'function') and tc_delta.function:
                     index = getattr(tc_delta, 'index', None)
+                    normalized_index = index if index is not None else 0
                     function_name = getattr(tc_delta.function, 'name', None) or ""
                     function_arguments = getattr(tc_delta.function, 'arguments', None) or ""
+                    tool_call_id = getattr(tc_delta, 'id', '') or ""
+                    has_header = bool(tool_call_id or function_name)
+
+                    # Some providers may expose malformed ``delta.tool_calls`` entries
+                    # while actually streaming plain text. Do not start a tool-call
+                    # sequence from an arguments-only fragment unless a valid tool
+                    # header was already seen for the same tool-call index.
+                    if not has_header and normalized_index not in seen_tool_header_indexes:
+                        continue
+                    if has_header:
+                        seen_tool_header_indexes.add(normalized_index)
 
                     tool_call = ToolCall(
-                        id=getattr(tc_delta, 'id', '') or "",
+                        id=tool_call_id,
                         type="function",
                         name=function_name,
                         arguments=function_arguments,
-                        index=index if index is not None else 0,
+                        index=normalized_index,
                     )
                     tool_calls.append(tool_call)
+            _stream_tool_header_seen.set(frozenset(seen_tool_header_indexes))
 
         # Huawei MaaS workaround: merge tool_calls with same index
         # MaaS sometimes returns multiple tool_calls deltas with identical index,
@@ -701,51 +719,55 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             str(messages)
         )
         chunk_counter = 0
-        segment_parts = []  # 分段打印缓冲区
-        segment_counter = 0  # 已打印段数
-        segment_accum_len = 0  # 累积字符数
-        min_segment_size = self._MIN_SEGMENT_SIZE
+        token = _stream_tool_header_seen.set(frozenset())
+        try:
+            segment_parts = []  # 分段打印缓冲区
+            segment_counter = 0  # 已打印段数
+            segment_accum_len = 0  # 累积字符数
+            min_segment_size = self._MIN_SEGMENT_SIZE
 
-        async for chunk in self._stream_with_retry(
-                _orig_stream,
-                self,
-                messages,
-                tools=tools,
-                temperature=temperature,
-                top_p=top_p,
-                model=model,
-                max_tokens=max_tokens,
-                stop=stop,
-                output_parser=output_parser,
-                timeout=timeout,
-                **kwargs,
-        ):
-            chunk_counter += 1
-            if chunk_counter % 10 == 1:
-                llm_logger.debug(
-                    "[session=%s] [LLM] Output chunk #%d: %s...",
-                    session_id,
-                    chunk_counter,
-                    str(chunk)[:200]
-                )
-            _content = getattr(chunk, "content")
-            if _content:
-                segment_parts.append(_content)
-                segment_accum_len += len(_content)
-
-                if segment_accum_len >= min_segment_size:
-                    segment_counter += 1
-                    full_segment = "".join(segment_parts)
-                    llm_logger.info(
-                        "[session=%s] [LLM] Output segment #%d (live, len=%d): %s",
+            async for chunk in self._stream_with_retry(
+                    _orig_stream,
+                    self,
+                    messages,
+                    tools=tools,
+                    temperature=temperature,
+                    top_p=top_p,
+                    model=model,
+                    max_tokens=max_tokens,
+                    stop=stop,
+                    output_parser=output_parser,
+                    timeout=timeout,
+                    **kwargs,
+            ):
+                chunk_counter += 1
+                if chunk_counter % 10 == 1:
+                    llm_logger.debug(
+                        "[session=%s] [LLM] Output chunk #%d: %s...",
                         session_id,
-                        segment_counter,
-                        len(full_segment),
-                        full_segment,
+                        chunk_counter,
+                        str(chunk)[:200]
                     )
-                    segment_parts = []
-                    segment_accum_len = 0
-            yield chunk
+                _content = getattr(chunk, "content")
+                if _content:
+                    segment_parts.append(_content)
+                    segment_accum_len += len(_content)
+
+                    if segment_accum_len >= min_segment_size:
+                        segment_counter += 1
+                        full_segment = "".join(segment_parts)
+                        llm_logger.info(
+                            "[session=%s] [LLM] Output segment #%d (live, len=%d): %s",
+                            session_id,
+                            segment_counter,
+                            len(full_segment),
+                            full_segment,
+                        )
+                        segment_parts = []
+                        segment_accum_len = 0
+                yield chunk
+        finally:
+            _stream_tool_header_seen.reset(token)
 
         # 处理最后剩余的缓冲区内容
         if segment_parts:

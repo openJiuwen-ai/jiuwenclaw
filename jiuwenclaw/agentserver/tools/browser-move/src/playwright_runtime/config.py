@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -85,9 +86,67 @@ def resolve_playwright_mcp_cwd() -> str:
     return str(Path(REPO_ROOT).expanduser().resolve())
 
 
+def _resolve_playwright_mcp_cli_path() -> str:
+    explicit = (os.getenv("PLAYWRIGHT_MCP_CLI_PATH") or "").strip()
+    if explicit:
+        candidate = Path(explicit).expanduser()
+        if candidate.exists():
+            return str(candidate.resolve())
+        return ""
+
+    cwd = Path(resolve_playwright_mcp_cwd())
+    candidates = [
+        cwd / "node_modules" / "@playwright" / "mcp" / "cli.js",
+    ]
+
+    appdata = (os.getenv("APPDATA") or "").strip()
+    if appdata:
+        candidates.append(
+            Path(appdata) / "npm" / "node_modules" / "@playwright" / "mcp" / "cli.js"
+        )
+
+    npm_prefix = (
+        os.getenv("NPM_CONFIG_PREFIX")
+        or os.getenv("npm_config_prefix")
+        or ""
+    ).strip()
+    if npm_prefix:
+        prefix_path = Path(npm_prefix).expanduser()
+        candidates.extend(
+            [
+                prefix_path / "node_modules" / "@playwright" / "mcp" / "cli.js",
+                prefix_path / "@playwright" / "mcp" / "cli.js",
+            ]
+        )
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate.resolve())
+    return ""
+
+
+def _default_playwright_mcp_launcher() -> Tuple[str, List[str]]:
+    local_cli = _resolve_playwright_mcp_cli_path()
+    if local_cli:
+        node_bin = shutil.which("node")
+        if node_bin:
+            return node_bin, [local_cli]
+
+    # Avoid forcing a registry lookup for "latest" on every start. When the
+    # package already exists in npm cache or local install, plain package
+    # resolution is more stable in restricted network environments.
+    return "npx", ["-y", "@playwright/mcp"]
+
+
 def build_playwright_mcp_config() -> McpServerConfig:
-    command = os.getenv("PLAYWRIGHT_MCP_COMMAND", "npx").strip() or "npx"
-    args = parse_args(os.getenv("PLAYWRIGHT_MCP_ARGS", "-y @playwright/mcp@latest"))
+    command = (os.getenv("PLAYWRIGHT_MCP_COMMAND") or "").strip()
+    args_env = (os.getenv("PLAYWRIGHT_MCP_ARGS") or "").strip()
+    if command:
+        args = parse_args(args_env)
+    else:
+        command, args = _default_playwright_mcp_launcher()
+        if args_env:
+            args = parse_args(args_env)
     cwd = resolve_playwright_mcp_cwd()
     driver_mode = (os.getenv("BROWSER_DRIVER") or "").strip().lower()
     extension_mode = driver_mode == "extension" or _is_truthy_env(os.getenv("PLAYWRIGHT_MCP_EXTENSION") or "")
@@ -103,6 +162,13 @@ def build_playwright_mcp_config() -> McpServerConfig:
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",
+        "NPM_CONFIG_REGISTRY",
+        "NPM_CONFIG_PROXY",
+        "NPM_CONFIG_HTTPS_PROXY",
+        "NPM_CONFIG_FETCH_TIMEOUT",
+        "NPM_CONFIG_FETCH_RETRIES",
+        "NODE_EXTRA_CA_CERTS",
+        "PLAYWRIGHT_MCP_CLI_PATH",
     ):
         value = os.getenv(key)
         if value:

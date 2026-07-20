@@ -2,10 +2,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
 from contextlib import AsyncExitStack
-from typing import Any, List, Optional, Dict
+from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.tool import McpToolCard
+from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 
@@ -13,16 +13,43 @@ from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 class StdioClient(McpClient):
     """Stdio transport based MCP client"""
 
-    def __init__(self, server_path: str, name: str, params: Dict = None):
-        super().__init__(server_path)
-        self._name = name
+    __client_name__ = "stdio"
+    __client_type__ = "mcp"
+
+    def __init__(
+        self,
+        config: McpServerConfig | str,
+        name: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ):
+        resolved_config = self._normalize_config(config, name=name, params=params)
+        super().__init__(resolved_config)
+        self._name = resolved_config.server_name
         self._client = None
         self._session = None
         self._read = None
         self._write = None
-        self._params = params if params else {}
+        self._params = resolved_config.params if resolved_config.params else {}
         self._exit_stack = AsyncExitStack()
         self._is_disconnected: bool = False
+
+    @staticmethod
+    def _normalize_config(
+        config: McpServerConfig | str,
+        *,
+        name: Optional[str],
+        params: Optional[Dict[str, Any]],
+    ) -> McpServerConfig:
+        if isinstance(config, McpServerConfig):
+            return config
+        resolved_name = (name or "").strip() or "stdio"
+        return McpServerConfig(
+            server_id=resolved_name,
+            server_name=resolved_name,
+            server_path=config,
+            client_type="stdio",
+            params=params or {},
+        )
 
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
         """Establish Stdio connection to the tool server"""

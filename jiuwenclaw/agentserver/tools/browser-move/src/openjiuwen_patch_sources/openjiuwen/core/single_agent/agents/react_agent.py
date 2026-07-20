@@ -34,7 +34,7 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
-from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent
+from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
@@ -302,6 +302,13 @@ class ReActAgent(BaseAgent):
         """Create default configuration"""
         return ReActAgentConfig()
 
+    @staticmethod
+    def _summarize_tool_result(tool_result: Any, max_len: int = 600) -> str:
+        text = str(tool_result)
+        if len(text) <= max_len:
+            return text
+        return f"{text[:max_len]}...(truncated {len(text) - max_len} chars)"
+
     def configure(self, config: ReActAgentConfig) -> 'BaseAgent':
         """Set configuration
 
@@ -466,18 +473,20 @@ class ReActAgent(BaseAgent):
                 f"ReAct iteration {iteration + 1}/{self._config.max_iterations}"
             )
 
-            # Get context window with system messages and tools
-            context_window = await context.get_context_window(
-                system_messages=system_messages,
-                tools=tools if tools else None,
-            )
-
             # Hook: before model call
             await self._execute_callbacks(
                 AgentCallbackEvent.BEFORE_MODEL_CALL,
                 inputs=inputs,
                 iteration=iteration + 1,
-                messages=context_window.get_messages()
+                messages=context.get_messages()
+            )
+
+            # Build context window after callbacks so any context repair or
+            # prompt mutation performed in before_model_call takes effect
+            # for the current LLM request instead of the next iteration.
+            context_window = await context.get_context_window(
+                system_messages=system_messages,
+                tools=tools if tools else None,
             )
 
             # Call LLM with messages and tools from context window
@@ -527,7 +536,10 @@ class ReActAgent(BaseAgent):
 
                 # Process results and add tool messages to context
                 for idx, (tool_result, tool_msg) in enumerate(results):
-                    logger.info(f"Tool result: {tool_result}")
+                    logger.info(
+                        "Tool result: "
+                        f"{self._summarize_tool_result(tool_result)}"
+                    )
                     await context.add_messages(tool_msg)
 
                     # Hook: after tool call
