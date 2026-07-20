@@ -8,8 +8,6 @@ interface SourceManagerModalProps {
   open: boolean;
   sessionId: string;
   onClose: () => void;
-  onSourceChange?: (source: SourceType) => void;
-  currentSource?: SourceType;
   onNavigateToConfig?: () => void;
 }
 
@@ -17,12 +15,10 @@ export function SourceManagerModal({
   open,
   sessionId,
   onClose,
-  onSourceChange,
-  currentSource = "skillnet",
   onNavigateToConfig,
 }: SourceManagerModalProps) {
   const { t } = useTranslation();
-  const [selectedSource, setSelectedSource] = useState<SourceType>(currentSource);
+  const [selectedSource, setSelectedSource] = useState<SourceType>("skillnet");
   const [clawhubToken, setClawhubToken] = useState("");
   const [tokenLoading, setTokenLoading] = useState(false);
   const [tokenSaving, setTokenSaving] = useState(false);
@@ -57,9 +53,8 @@ export function SourceManagerModal({
 
   useEffect(() => {
     if (!open) return;
-    setSelectedSource(currentSource);
     void fetchClawhubToken();
-  }, [open, currentSource, fetchClawhubToken]);
+  }, [open, fetchClawhubToken]);
 
   useEffect(() => {
     if (!open) return;
@@ -73,13 +68,6 @@ export function SourceManagerModal({
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [open, onClose]);
-
-  const handleSourceSelect = useCallback((source: SourceType) => {
-    setSelectedSource(source);
-    if (onSourceChange) {
-      onSourceChange(source);
-    }
-  }, [onSourceChange]);
 
   const handleSaveToken = useCallback(async () => {
     const token = clawhubToken.trim();
@@ -136,7 +124,7 @@ export function SourceManagerModal({
             <div className="flex gap-3">
               <button
                 type="button"
-                onClick={() => handleSourceSelect("skillnet")}
+                onClick={() => setSelectedSource("skillnet")}
                 className={`flex-1 py-3 px-4 rounded-lg border  ${
                   selectedSource === "skillnet"
                     ? "border-text bg-[var(--color-source-selected-surface)] text-text"
@@ -150,7 +138,7 @@ export function SourceManagerModal({
               </button>
               <button
                 type="button"
-                onClick={() => handleSourceSelect("clawhub")}
+                onClick={() => setSelectedSource("clawhub")}
                 className={`flex-1 py-3 px-4 rounded-lg border  ${
                   selectedSource === "clawhub"
                     ? "border-text bg-[var(--color-source-selected-surface)] text-text"
