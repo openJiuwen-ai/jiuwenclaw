@@ -12,8 +12,11 @@ from openjiuwen.core.context_engine.qa_artifact.store import QAArtifactStore
 from openjiuwen.core.context_engine.qa_artifact.assembly_state import clear_assembly_qa_artifact_state
 from openjiuwen.core.context_engine.qa_artifact.window import make_processor_ctx
 from openjiuwen.core.context_engine.qa_block.messages import (
+    extract_qa_native_messages,
     is_other_qa_message,
+    message_qa_id,
 )
+from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.context_engine.qa_block.catalog import (
     build_catalog_section,
     build_catalog_text,
@@ -38,6 +41,7 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeI
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
+    post_agent_execute_for_session,
     resolve_actual_session,
     resolve_context_engine,
     session_id_from_session,
@@ -99,8 +103,15 @@ def _should_keep_current_qa_on_interrupt_resume(
     """Permission/HITL resume 后继续沿用未冻结的进行中 QA，避免错误新开轮次。
 
     ``before_model_call`` 看不到 InteractiveInput，因此用 before_invoke 写入的
-    session 标记识别 resume 轮。空上下文 + 无 assembly commit 的 stale 指针
-    仍放行给后续清理/组装逻辑。
+    session 标记识别 resume 轮。
+
+    Keep 条件（满足其一即可）：
+    1. 本轮已 assembly commit 到该 QA；
+    2. context 上已有该 QA 的 native 工作内容；
+    3. 下一轮 user query 为空（权限/HITL resume 的预期形态）——避免误 allocate 空 QA。
+
+    若 resume 轮却带着非空 query、且无 commit/无 native work，视为 stale 指针，
+    放行给后续清理/组装逻辑。
     """
     if not _is_interrupt_resume_turn(session):
         return False
@@ -113,6 +124,15 @@ def _should_keep_current_qa_on_interrupt_resume(
     if _get_assembly_committed_qa_id(session) == active_qa_id:
         return True
     if _context_has_active_qa_work(ctx, active_qa_id):
+        return True
+    messages: list = []
+    context = ctx.context
+    if context is not None:
+        getter = getattr(context, "get_messages", None)
+        if callable(getter):
+            messages = getter() or []
+    # Empty query is expected on permission/HITL resume; keep unfrozen QA.
+    if not extract_next_user_query(messages).strip():
         return True
     return False
 
@@ -213,11 +233,67 @@ def _pop_pending_orphan_salvage(session: Any) -> str | None:
     return str(qa_id)
 
 
-def _is_task_continuation(ctx: AgentCallbackContext, next_query: str) -> bool:
+def _tail_unassigned_user_messages(messages: list) -> list:
+    """Trailing UserMessage copies without qa_id/source_qa_id (current-round input)."""
+    preserved: list = []
+    for message in reversed(messages):
+        if not isinstance(message, UserMessage):
+            break
+        if message_qa_id(message):
+            break
+        copy = message.model_copy(deep=True) if hasattr(message, "model_copy") else message
+        preserved.insert(0, copy)
+    return preserved
+
+
+def _strip_tail_unassigned_user_messages(messages: list) -> list:
+    preserved = _tail_unassigned_user_messages(messages)
+    if not preserved:
+        return list(messages)
+    return list(messages[: len(messages) - len(preserved)])
+
+
+def _orphan_needs_no_salvage(
+    ctx: AgentCallbackContext,
+    qa_id: str,
+    entry: QABlockEntry | None,
+    registry: QABlockRegistry,
+) -> bool:
+    """True when stale orphan pointer has nothing worth freezing (repair-only clear).
+
+    ``before_invoke`` often runs before ``ctx.context`` is ready. When the buffer
+    cannot be inspected, keep deferred salvage (do not clear blindly).
+    """
+    if _is_resume_invoke(ctx):
+        return False
+
+    context = ctx.context
+    if context is None:
+        return False
+    getter = getattr(context, "get_messages", None)
+    if not callable(getter):
+        return False
+
+    messages = getter() or []
+    if not messages:
+        return True
+    preserved_count = len(_tail_unassigned_user_messages(messages))
+    candidate = messages[: len(messages) - preserved_count] if preserved_count else messages
+    orphan_native = extract_qa_native_messages(candidate, registry)
+    return not orphan_native
+
+
+def _is_task_continuation(
+    ctx: AgentCallbackContext,
+    next_query: str,
+    session: Any | None = None,
+) -> bool:
     resume_input = ctx.extra.get(RESUME_USER_INPUT_KEY)
     if isinstance(resume_input, InteractiveInput):
         return True
     if not next_query.strip() and _is_resume_invoke(ctx):
+        return True
+    if session is not None and _is_interrupt_resume_turn(session) and not next_query.strip():
         return True
     return False
 
@@ -297,6 +373,25 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
             return
 
         if entry is None or not entry.freeze_committed_at:
+            if _orphan_needs_no_salvage(ctx, qa_id, entry, registry):
+                _clear_current_qa_pointer(session, registry, qa_id)
+                try:
+                    await post_agent_execute_for_session(session)
+                except Exception as exc:
+                    logger.warning(
+                        "[QABlockAssemblyRail] orphan pointer checkpoint flush failed "
+                        "session_id=%s qa_id=%s: %s",
+                        session_id,
+                        qa_id,
+                        exc,
+                    )
+                logger.info(
+                    "[QABlockAssemblyRail] repaired empty/stale orphan pointer without salvage "
+                    "session_id=%s qa_id=%s",
+                    session_id,
+                    qa_id,
+                )
+                return
             _set_pending_orphan_salvage(session, qa_id)
             logger.info(
                 "[QABlockAssemblyRail] deferred orphan salvage session_id=%s qa_id=%s",
@@ -314,12 +409,31 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
         freeze_rail = self._freeze_rail
         if freeze_rail is None:
             return False
+
+        context = ctx.context
+        original_messages: list | None = None
+        preserved_users: list = []
+        if context is not None:
+            getter = getattr(context, "get_messages", None)
+            if callable(getter):
+                messages = list(getter() or [])
+                original_messages = messages
+                preserved_users = _tail_unassigned_user_messages(messages)
+                if preserved_users:
+                    context.set_messages(
+                        _strip_tail_unassigned_user_messages(messages),
+                        with_history=True,
+                    )
+
         try:
+            # persist_context=False: avoid checkpointing the stripped buffer before
+            # current-round user messages are restored (crash-window / Problem A).
             await freeze_rail.freeze_current_qa_sync(
                 session_id,
                 agent=ctx.agent,
                 session=session,
                 status="interrupted",
+                persist_context=False,
             )
         except Exception as exc:
             logger.warning(
@@ -329,11 +443,46 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
                 exc,
                 exc_info=True,
             )
+            if context is not None and original_messages is not None:
+                context.set_messages(original_messages, with_history=True)
             return False
 
         registry = load_registry(session, force_reload=True)
         entry = registry.blocks.get(qa_id)
-        if _is_frozen_entry(entry):
+        frozen = _is_frozen_entry(entry)
+
+        if context is not None and preserved_users:
+            if frozen:
+                # Successful freeze strips the active buffer; restore only this round's user.
+                context.set_messages(preserved_users, with_history=True)
+            elif original_messages is not None:
+                # Freeze returned None without strip; put the full pre-strip buffer back.
+                context.set_messages(original_messages, with_history=True)
+            logger.info(
+                "[QABlockAssemblyRail] orphan salvage preserved current-round user "
+                "session_id=%s qa_id=%s count=%s frozen=%s",
+                session_id,
+                qa_id,
+                len(preserved_users),
+                frozen,
+            )
+
+        # Persist only after restore so checkpoint never sees a stripped-without-user snapshot.
+        context_engine = resolve_context_engine(ctx.agent)
+        if context_engine is not None:
+            try:
+                await context_engine.save_contexts(session)
+                await post_agent_execute_for_session(session)
+            except Exception as exc:
+                logger.warning(
+                    "[QABlockAssemblyRail] orphan salvage checkpoint flush failed "
+                    "session_id=%s qa_id=%s: %s",
+                    session_id,
+                    qa_id,
+                    exc,
+                )
+
+        if frozen:
             if registry.current_qa_id == qa_id:
                 _clear_current_qa_pointer(session, registry, qa_id)
             logger.info(
@@ -517,7 +666,7 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
             next_query = extract_next_user_query(context.get_messages())
             model = resolve_selector_model(agent)
             selector = QABlockSelector(self._config)
-            is_continuation = _is_task_continuation(ctx, next_query)
+            is_continuation = _is_task_continuation(ctx, next_query, session)
             try:
                 selected_qa_ids = await selector.select(
                     next_query,
@@ -554,6 +703,16 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
         else:
             ctx.extra[_PRELOADED_QA_IDS_KEY] = []
             await layer.hydrate_history_into_window(context)
+
+        if _is_interrupt_resume_turn(session) and not extract_next_user_query(
+            context.get_messages()
+        ).strip():
+            logger.info(
+                "[QABlockAssemblyRail] skip QA allocate on interrupt resume with empty query "
+                "session_id=%s",
+                session_id,
+            )
+            return
 
         qa_id, _ = allocate_qa_id(registry)
         registry.current_qa_id = qa_id
