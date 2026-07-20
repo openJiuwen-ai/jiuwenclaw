@@ -5296,7 +5296,10 @@ class JiuWenSwarmDeepAdapter:
             AgentResponse 包含 interrupt_result 事件数据
         """
         if not self._is_session_scoped_adapter:
-            intent_for_dispatch = request.params.get("intent", "cancel") if isinstance(request.params, dict) else "cancel"
+            if isinstance(request.params, dict):
+                intent_for_dispatch = request.params.get("intent", "cancel")
+            else:
+                intent_for_dispatch = "cancel"
             if intent_for_dispatch in ("cancel", "supplement"):
                 # cancel/supplement：若该 session 尚无 session-scoped adapter（即没有 in-flight 流），
                 # 则不创建——创建会跑完整 agent 初始化（17 rail + ensure_initialized，
