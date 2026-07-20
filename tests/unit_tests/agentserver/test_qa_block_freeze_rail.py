@@ -12,7 +12,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from openjiuwen.core.context_engine.qa_block.freezer import FreezeCommitResult
-from openjiuwen.core.context_engine.qa_block.schema import QABlockEntry
+from openjiuwen.core.context_engine.qa_block.schema import QABlockEntry, QABlockRegistry
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
@@ -193,6 +193,55 @@ class TestQABlockFreezeRailInteractiveResume(unittest.IsolatedAsyncioTestCase):
             await self.rail.after_invoke(ctx)
 
         self.freeze_mock.assert_not_awaited()
+
+    async def test_failed_freeze_clears_empty_current_qa_id(self) -> None:
+        ctx, context_engine, session = _make_interactive_freeze_ctx()
+        registry = QABlockRegistry(session_id="session-1", current_qa_id="qa_stale", next_qa_index=2)
+        self.freeze_mock.return_value = None
+
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "clear_assembly_committed_qa_id"), patch.object(
+            _module, "QABlockStore", return_value=MagicMock()
+        ), patch.object(_module, "load_registry", return_value=registry), patch.object(
+            _module, "save_registry"
+        ) as mock_save, patch.object(
+            _module, "post_agent_execute_for_session", new_callable=AsyncMock
+        ) as mock_flush:
+            await self.rail.after_invoke(ctx)
+
+        self.freeze_mock.assert_awaited_once()
+        self.assertIsNone(registry.current_qa_id)
+        mock_save.assert_called_once()
+        mock_flush.assert_awaited_once()
+        context_engine.save_contexts.assert_awaited()
+
+    async def test_failed_freeze_skips_save_contexts_when_persist_context_false(self) -> None:
+        context_engine = MagicMock()
+        context_engine.get_context.return_value = MagicMock(context_id=lambda: "ctx-1")
+        context_engine.get_history_qa_buffer.return_value = []
+        context_engine.save_contexts = AsyncMock()
+        session = SimpleNamespace(get_session_id=lambda: "session-1", get_state=lambda *_a, **_k: None)
+        registry = QABlockRegistry(session_id="session-1", current_qa_id="qa_stale", next_qa_index=2)
+        self.freeze_mock.return_value = None
+        agent = SimpleNamespace()
+
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "clear_assembly_committed_qa_id"), patch.object(
+            _module, "QABlockStore", return_value=MagicMock()
+        ), patch.object(_module, "load_registry", return_value=registry), patch.object(
+            _module, "save_registry"
+        ), patch.object(_module, "post_agent_execute_for_session", new_callable=AsyncMock):
+            await self.rail.freeze_current_qa_sync(
+                "session-1",
+                agent=agent,
+                session=session,
+                persist_context=False,
+            )
+
+        self.assertIsNone(registry.current_qa_id)
+        context_engine.save_contexts.assert_not_awaited()
 
 
 if __name__ == "__main__":
