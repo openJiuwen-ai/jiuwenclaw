@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from openjiuwen.core.foundation.llm.model import Model
-from openjiuwen.core.foundation.tool import Tool
+from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.schema.config import SubAgentConfig
@@ -18,7 +18,7 @@ from openjiuwen.harness.tools.filesystem import (
     ReadFileTool,
     WriteFileTool,
 )
-
+from openjiuwen.harness.workspace.workspace import Workspace
 
 DESCRIPTION_CN = (
     "评分器：对比执行结果与预期断言，生成 grading.json。"
@@ -142,6 +142,20 @@ expectation 是通过还是失败。提供清晰的证据支持每个判定。
 **不确定时**：举证责任在 expectation 一方——不确定则判 FAIL。
 
 **无部分得分**：每条 expectation 只有通过或失败，没有部分通过。
+
+# 完成标准（强制）
+
+评分完成后，你的**最后一轮回复必须是非空文本总结**，不得以空消息结束，也不得只调用工具后直接停止。
+
+硬性要求：
+1. **必须生成最终文本回复**：在写入 grading.json 完成后，再用一段自然语言总结结束，不要再发起工具调用。
+2. **禁止空收尾**：最后一轮必须直接写出可被读取的总结正文；不要只在内心思考/推理里完成总结却不对外输出文字。
+3. **总结至少包含**：
+   - 通过/失败数量与通过率
+   - grading.json 的保存路径（grading_output_path）
+   - 如有明显评测问题，一句简要说明
+4. 总结写在最终回复正文中即可，简短清晰，例如：
+   `评分完成：通过 N/M（通过率 X%）。结果已写入 <grading_output_path>。`
 """
 
 SYSTEM_PROMPT_EN = """\
@@ -265,30 +279,46 @@ write `{"suggestions": [], "overall": "No suggestions, evals look solid."}` when
 **When uncertain**: Burden of proof is on the expectation — FAIL if unsure.
 
 **No partial credit**: Each expectation is pass or fail, not partial.
+
+# Completion (mandatory)
+
+After grading, your **final reply must be a non-empty text summary**. Do not end with an empty message, and do not stop right after tool calls without a final text response.
+
+Hard requirements:
+1. **Must produce a final text reply**: After writing grading.json, end with a natural-language summary and do not make further tool calls.
+2. **No empty ending**: The final turn must include a readable summary in the reply text itself; do not keep the summary only in internal reasoning/thinking without writing it out.
+3. **Summary must include at least**:
+   - Pass/fail counts and pass rate
+   - Path where grading.json was saved (grading_output_path)
+   - One brief note if there are clear eval issues
+4. Put the summary in the final reply body, short and clear, e.g.:
+   `Grading complete: N/M passed (X% pass rate). Results written to <grading_output_path>.`
 """
 
 
 def build_grader_config(
-    model: Model,
-    *,
-    language: str = "cn",
-    sys_operation: Optional[SysOperation] = None,
+        model: Model,
+        *,
+        language: str = "cn",
+        sys_operation: Optional[SysOperation] = None,
+        agent_id: Optional[str] = None,
+        workspace: Optional[Workspace] = None,
 ) -> SubAgentConfig:
     """Build SubAgentConfig for the grader subagent.
 
-    workspace is intentionally left as None so that create_subagent derives
-    it dynamically from the parent's current workspace at invocation time.
+    workspace 显式传入父 agent 的 workspace，使 create_subagent 同时复用父的
+    sys_operation，避免传入 sys_operation=None 导致 create_deep_agent 新建孤儿 sysop。
     """
     is_cn = language in ("cn", "zh")
 
-    tools: List[Tool] = []
+    tools: List[Tool | ToolCard] = []
     if sys_operation is not None:
         tools = [
-            ReadFileTool(sys_operation, language=language),
-            WriteFileTool(sys_operation, language=language),
-            GlobTool(sys_operation, language=language),
-            GrepTool(sys_operation, language=language),
-            ListDirTool(sys_operation, language=language),
+            ReadFileTool(sys_operation, language=language, agent_id=agent_id),
+            WriteFileTool(sys_operation, language=language, agent_id=agent_id),
+            GlobTool(sys_operation, language=language, agent_id=agent_id),
+            GrepTool(sys_operation, language=language, agent_id=agent_id),
+            ListDirTool(sys_operation, language=language, agent_id=agent_id),
         ]
 
     return SubAgentConfig(
@@ -298,6 +328,8 @@ def build_grader_config(
         ),
         system_prompt=SYSTEM_PROMPT_CN if is_cn else SYSTEM_PROMPT_EN,
         tools=tools,
+        sys_operation=sys_operation,
+        workspace=workspace,
         model=model,
         max_iterations=30,
         language=language,

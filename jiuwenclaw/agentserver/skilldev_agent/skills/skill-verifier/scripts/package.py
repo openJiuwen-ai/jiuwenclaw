@@ -168,6 +168,33 @@ def copy_dependency_references(skill_path: Path) -> bool:
 
     return True
 
+def clean_empty_dirs(skill_path: Path) -> None:
+    """Remove empty optional directories (scripts/, assets/, references/) from skill folder."""
+    optional_dirs = ["scripts", "assets", "references"]
+    for dir_name in optional_dirs:
+        dir_path = skill_path / dir_name
+        if dir_path.exists() and dir_path.is_dir():
+            _remove_empty_recursive(dir_path, skill_path)
+
+
+def _remove_empty_recursive(directory: Path, skill_path: Path) -> None:
+    """Recursively remove empty directories from bottom up."""
+    try:
+        for child in directory.iterdir():
+            if not child.is_symlink() and child.is_dir():
+                _remove_empty_recursive(child, skill_path)
+    except OSError:
+        return  # skip if we can't even list the directory
+
+    try:
+        if not any(directory.iterdir()):
+            directory.rmdir()
+            logger.info(
+                "Removed empty directory: %s",
+                directory.relative_to(skill_path)
+            )
+    except OSError:
+        pass  # non-critical cleanup, skip on failure
 
 def package_skill(skill_root: Path, output_dir: Path) -> Path | None:
     """Package a skill directory into a zip under *output_dir*."""
@@ -181,6 +208,12 @@ def package_skill(skill_root: Path, output_dir: Path) -> Path | None:
     if not copy_dependency_references(skill_root):
         logger.error("Please fix dependency reference errors before packaging.")
         return None
+
+    logger.info("Cleaning empty optional directories...")
+    try:
+        clean_empty_dirs(skill_root)
+    except OSError:
+        logger.warning("Failed to clean empty directories, continuing...")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     for existing in output_dir.iterdir():

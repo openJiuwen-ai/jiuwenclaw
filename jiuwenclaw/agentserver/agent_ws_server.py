@@ -131,7 +131,7 @@ class AgentWebSocketServer:
         # OA 模式相关
         self._oa_ws_uri: str | None = os.getenv("AGENTSERVER_TO_OA_WS_URL", "").strip() or None
         self._oa_mode: bool = sandbox_routing_enabled()
-        self._oa_connect_retry_interval: float = float(os.getenv("AGENTSERVER_TO_OA_RETRY_INTERVAL", "1.0"))  # 默认1秒快速重连
+        self._oa_connect_retry_interval: float = float(os.getenv("AGENTSERVER_TO_OA_RETRY_INTERVAL", "0.5"))  # 默认0.5秒快速重连
         self._oa_connect_max_retries: int = int(os.getenv("AGENTSERVER_TO_OA_MAX_RETRIES", "0"))  # 0 表示无限重试
         self._oa_receiver_task: asyncio.Task | None = None
         self._oa_running: bool = False
@@ -509,41 +509,43 @@ class AgentWebSocketServer:
         1. 快速重连：默认3秒间隔，尽快恢复服务
         2. 保障模型服务：连接断开不立即停止模型推理，只影响消息收发
         3. 状态恢复：重连后恢复消息处理能力
+        4. 指数退避：初始快速重试，逐步增加超时至上限（快速预热）
         """
         import websockets
-        from websockets.legacy.client import connect as legacy_connect
+        connect_fn = websockets.connect
 
         retry_count = 0
-        timeout = os.getenv("AGENTSERVER_TO_OA_CONNECT_TIMEOUT", 2.0)
+        _initial_timeout: float = float(os.getenv("AGENTSERVER_TO_OA_INITIAL_TIMEOUT", "0.5"))  # 初始超时（默认0.5s）
+        _max_timeout: float = float(os.getenv("AGENTSERVER_TO_OA_MAX_TIMEOUT", "2.0"))  # 最大超时
+        _backoff_factor: float = float(os.getenv("AGENTSERVER_TO_OA_BACKOFF_FACTOR", "1.5"))  # 退避因子（默认1.5）
+
+        def _calculate_timeout(count: int) -> float:
+            """指数退避计算超时时间：initial * factor^count，不超过 max"""
+            _timeout = _initial_timeout * (_backoff_factor ** count)
+            return min(_timeout, _max_timeout)
+
         while self._oa_running:
             ws = None
+            # 计算本次连接超时（指数退避）
+            timeout = _calculate_timeout(retry_count)
+
             try:
                 logger.info(
-                    "[AgentWebSocketServer] 正在连接 OpenAbility: %s (重试次数: %d)",
-                    self._oa_ws_uri, retry_count
+                    "[AgentWebSocketServer] 正在连接 OpenAbility: %s (重试: %d, 超时: %.3fs)",
+                    self._oa_ws_uri, retry_count, timeout
                 )
                 # 获取鉴权 headers
                 auth_headers = get_oa_auth_headers()
 
-                # 建立 WebSocket 连接
-                try:
-                    connect_fn = legacy_connect
-                except ImportError:
-                    connect_fn = websockets.connect
-
-                # 使用较短的连接超时，快速失败
-                ws = await asyncio.wait_for(
-                    connect_fn(
-                        self._oa_ws_uri,
-                        ping_interval=self._ping_interval,
-                        ping_timeout=self._ping_timeout,
-                        extra_headers=auth_headers,
-                        open_timeout=timeout,
-                        close_timeout=timeout
-                    ),
-                    timeout=timeout
+                # 建立连接：open_timeout 控制握手阶段超时
+                ws = await connect_fn(
+                    self._oa_ws_uri,
+                    ping_interval=self._ping_interval,
+                    ping_timeout=self._ping_timeout,
+                    open_timeout=timeout,
+                    close_timeout=timeout,
+                    additional_headers=auth_headers
                 )
-                retry_count = 0  # 重置重试计数
 
                 logger.info("[AgentWebSocketServer] WebSocket 连接已建立，等待 OpenAbility 建连确认...")
                 # 发送 INIT 消息，携带 apiKey 和 sandboxId
@@ -551,7 +553,7 @@ class AgentWebSocketServer:
                 await ws.send(json.dumps(init_msg, ensure_ascii=False))
                 logger.info("[AgentWebSocketServer] 已发送 INIT 消息到 OpenAbility")
                 # 等待 OA 返回第一条建连成功消息
-                if not await oa_wait_connection_ack(ws, timeout=timeout):
+                if not await oa_wait_connection_ack(ws, timeout=_max_timeout):
                     await ws.close()
                     raise RuntimeError("OpenAbility 建连确认失败")
                 logger.info("[AgentWebSocketServer] OpenAbility 连接已确认，开始业务处理")
@@ -566,7 +568,7 @@ class AgentWebSocketServer:
             except websockets.exceptions.ConnectionClosed as e:
                 logger.warning("[AgentWebSocketServer] OA 连接关闭: %s", e)
             except asyncio.TimeoutError:
-                logger.error("[AgentWebSocketServer] OA 连接超时")
+                logger.error("[AgentWebSocketServer] OA 连接超时 (timeout=%.3fs)", timeout)
             except Exception as e:
                 logger.exception("[AgentWebSocketServer] OA 连接异常: %s", e)
             finally:
@@ -588,7 +590,9 @@ class AgentWebSocketServer:
 
             delay = self._oa_connect_retry_interval
 
-            logger.info("[AgentWebSocketServer] %.1f秒后尝试重连 OpenAbility...", delay)
+            logger.info(
+                "[AgentWebSocketServer] %.1f秒后尝试重连 OpenAbility...", delay
+            )
             await asyncio.sleep(delay)
 
         # 循环结束，统一清理资源

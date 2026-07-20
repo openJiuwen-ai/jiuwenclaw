@@ -40,7 +40,7 @@ async def upload_env_to_agentserver(
     """
     env_file = prepare_agentserver_env_file()
     if env_file is None:
-        logger.warning("[EnvSync] No env vars to sync, skipping upload")
+        logger.warning("[sandbox_id=%s] [EnvSync] No env vars to sync, skipping upload", sandbox_id)
         return False
 
     try:
@@ -49,10 +49,10 @@ async def upload_env_to_agentserver(
             remote_path=target_path,
             sandbox_id=sandbox_id,
         )
-        logger.info("[EnvSync] Uploaded env file to %s", target_path)
+        logger.info("[sandbox_id=%s] [EnvSync] Uploaded env file to %s", sandbox_id, target_path)
         return True
     except Exception as e:
-        logger.error("[EnvSync] Failed to upload env file: %s", e)
+        logger.error("[sandbox_id=%s] [EnvSync] Failed to upload env file: %s", sandbox_id, e)
         return False
     finally:
         # 清理临时文件
@@ -61,7 +61,8 @@ async def upload_env_to_agentserver(
                 env_file.unlink(missing_ok=True)
             except OSError:
                 logger.exception(
-                    "[EnvSync] Failed to remove temporary sandbox init env data file: %s", env_file
+                    "[sandbox_id=%s] [EnvSync] Failed to remove temporary sandbox "
+                    "init env data file: %s", sandbox_id, env_file
                 )
 
 

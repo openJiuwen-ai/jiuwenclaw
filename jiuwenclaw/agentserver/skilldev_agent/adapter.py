@@ -135,6 +135,10 @@ class SkillDevDeepAdapter:
             recorder.record_chunk(task_id=task_id, chunk=chunk)
         return chunk
 
+    @property
+    def agent_id(self) -> str:
+        return f"skilldev_agent_{self._task_id or 'default'}"
+
     def _cleanup_stale_instances(self) -> None:
         """Remove TaskTool registrations for instances no longer in use.
 
@@ -231,6 +235,65 @@ class SkillDevDeepAdapter:
             bool(str(os.getenv("BROWSER_MANAGED_BINARY") or "").strip()),
         )
 
+    def cleanup_task_resources(self, task_id: str | None = None) -> None:
+        """清理指定 task 在 Runner.resource_mgr 中注册的工具和 sysop.
+
+        在 task 的 chat 流结束或中断时调用，确保按 task 隔离的资源及时释放，
+        避免 Runner.resource_mgr 随 task 数量单调累积。
+        """
+        task_id = task_id or self._task_id
+        if not task_id:
+            return
+        from openjiuwen.core.runner.runner import Runner
+
+        sysop_id = parent_agent_id = f"skilldev_agent_{task_id}"
+
+        # 父 agent 工具
+        parent_tool_names = [
+            "GlobTool", "ListDirTool", "BashTool", "CodeTool", "GrepTool",
+            "ReadFileTool", "WriteFileTool", "EditFileTool",
+            "SkillTool", "SkillCompleteTool", "TodoCreateTool",
+            "TodoListTool", "TodoModifyTool", "TodoCreateTool",
+            "read_file", "write_file", "edit_file",
+            "file_glob", "file_grep", "file_listdir",
+            "shell", "code_execute",
+            "web_search", "web_fetch",
+        ]
+        for name in parent_tool_names:
+            tool_id = f"{name}_{parent_agent_id}"
+            try:
+                Runner.resource_mgr.remove_tool(tool_id)
+            except Exception:
+                pass
+
+        # 子 agent 工具（skill_executor / grader）
+        for suffix in ("executor", "grader"):
+            sub_agent_id = f"{parent_agent_id}-{suffix}"
+            for name in parent_tool_names:
+                tool_id = f"{name}_{sub_agent_id}"
+                try:
+                    Runner.resource_mgr.remove_tool(tool_id)
+                except Exception:
+                    pass
+
+        # task_tool
+        try:
+            Runner.resource_mgr.remove_tool(f"task_tool_{parent_agent_id}")
+        except Exception:
+            pass
+
+        # sysop
+        try:
+            Runner.resource_mgr.remove_sys_operation(sysop_id)
+        except Exception:
+            pass
+
+    async def cleanup(self) -> None:
+        """清理 SkillDev adapter 持有的资源（供 JiuWenClaw.cleanup 调用）."""
+        self.cleanup_task_resources()
+        self._stale_instance_ids.clear()
+        logger.info("[SkillDevDeepAdapter] cleanup done")
+
     async def update_workspace(self, workspace_dir: str | Path) -> None:
         """Switch to a task-scoped workspace and rebuild the agent if needed."""
         resolved = str(Path(workspace_dir))
@@ -256,10 +319,11 @@ class SkillDevDeepAdapter:
         self._model = self._create_model(config_base)
         self._skills_dir = react_config.get("skilldev_skills_dir", str(BUILTIN_SKILLS_DIR))
         sys_operation = self._create_or_update_sys_operation()
+        agent_id = self.agent_id
         tools = build_skilldev_tools(
             sys_operation=sys_operation,
             language=react_config.get("language", "cn"),
-            agent_id=f"skilldev-agent-{self._task_id or 'default'}",
+            agent_id=agent_id,
         )
 
         tool_cards = self._register_tools(tools)
@@ -282,13 +346,17 @@ class SkillDevDeepAdapter:
             self._model,
             language=react_config.get("language", "cn"),
             sys_operation=sys_operation,
-            agent_id=f"skilldev-agent-{self._task_id or 'default'}",
+            agent_id=agent_id,
+            workspace_dir=self._workspace_dir,
         )
+        # 预注册子 agent 工具
+        for sub in subagents:
+            sub.tools = self._register_tools(sub.tools)
         self._instance = create_deep_agent(
             model=self._model,
             card=AgentCard(
                 name="skilldev-agent",
-                id=f"skilldev-agent-{self._task_id or 'default'}",
+                id=agent_id,
                 description="专用 Skill 生成 Agent",
             ),
             system_prompt=SKILLDEV_AGENT_SYSTEM_PROMPT.format(
@@ -361,7 +429,15 @@ class SkillDevDeepAdapter:
         inputs: dict[str, Any],
         *,
         interactive_ask: bool = True,
+        emit_terminal: bool = True,
     ) -> AsyncIterator[AgentResponseChunk]:
+        """Run the inner Agent stream.
+
+        ``skilldev.chat`` performs additional review/package finalization after the
+        Agent stops.  Its caller therefore sets ``emit_terminal=False`` so the
+        first ``is_complete`` marker is not emitted until that outer finalization
+        has finished.  Direct callers retain the historical standalone behavior.
+        """
         if self._instance is None:
             await self.create_instance(self._last_config)
 
@@ -518,12 +594,13 @@ class SkillDevDeepAdapter:
             logger.exception("[session=%s] [SkillDevDeepAdapter] stream task failed: %s", session_id, exc)
             yield _make_chunk({"event_type": "skilldev.error", "error": str(exc)})
 
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=cid,
-            payload=None,
-            is_complete=True,
-        )
+        if emit_terminal:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload=None,
+                is_complete=True,
+            )
 
     # ------------------------------------------------------------------
     # skilldev.chat entry point (workspace init + resource write + stream)
@@ -557,6 +634,7 @@ class SkillDevDeepAdapter:
         raw_session_id = str(request.session_id or task_id)
         conversation_id = self._make_todo_session_id(raw_session_id)
         persist_error: str | None = None
+        terminal_emitted = False
         try:
             if recorder is not None:
                 recorder.begin_round(
@@ -566,7 +644,16 @@ class SkillDevDeepAdapter:
                     is_first=is_first_task_input(task_workspace),
                 )
             async for chunk in self._iter_chat_locked(request, params, task_id, task_workspace):
+                terminal_emitted = terminal_emitted or chunk.is_complete
                 yield self._track_chunk(recorder, task_id, chunk)
+            if not terminal_emitted:
+                terminal_chunk = AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload=None,
+                    is_complete=True,
+                )
+                yield self._track_chunk(recorder, task_id, terminal_chunk)
         except Exception as exc:
             persist_error = str(exc)
             raise
@@ -714,7 +801,11 @@ class SkillDevDeepAdapter:
             "conversation_id": self._make_todo_session_id(raw_session_id),
             "query": combined_query,
         }
-        async for chunk in self.process_message_stream_impl(request, inputs):
+        async for chunk in self.process_message_stream_impl(
+            request,
+            inputs,
+            emit_terminal=False,
+        ):
             yield chunk
 
         async for chunk in self._finalize_skilldev_run(
@@ -924,6 +1015,7 @@ class SkillDevDeepAdapter:
             request,
             inputs,
             interactive_ask=True,
+            emit_terminal=False,
         ):
             yield chunk
 
@@ -1120,7 +1212,7 @@ class SkillDevDeepAdapter:
                 is_complete=False,
             )
             return
-        
+
         # Check output/ for packaged skill artifacts (.skill/.zip).
         skill_files = collect_output_packages(task_workspace / "output")
         if skill_files:
@@ -1332,6 +1424,8 @@ class SkillDevDeepAdapter:
             if self._instance is not None:
                 await self._instance.abort()
             self._cancel_ask_user_for_request(request)
+            self.cleanup_task_resources()
+            self._instance = None
             message = "任务已切换"
         else:
             if self._stream_event_rail is not None:
@@ -1339,6 +1433,8 @@ class SkillDevDeepAdapter:
             if self._instance is not None:
                 await self._instance.abort()
             self._cancel_ask_user_for_request(request)
+            self.cleanup_task_resources()
+            self._instance = None
             if request.session_id:
                 updated_todos = await self._cancel_pending_todos(
                     self._make_todo_session_id(str(request.session_id))
@@ -1431,7 +1527,7 @@ class SkillDevDeepAdapter:
         return f"todo_{raw_id}"
 
     def _create_or_update_sys_operation(self) -> SysOperation:
-        sysop_id = f"skilldev_agent_{self._agent_id or 'default'}_{self._task_id or 'default'}"
+        sysop_id = self.agent_id
         sys_operation = Runner.resource_mgr.get_sys_operation(sysop_id)
         if sys_operation is not None:
             return sys_operation

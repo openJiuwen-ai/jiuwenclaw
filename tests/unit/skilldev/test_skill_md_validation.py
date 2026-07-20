@@ -51,6 +51,38 @@ def test_skill_md_allows_dangerous_command_in_skill_md():
     assert err is None
 
 
+def test_skill_md_allows_utf8_bom_frontmatter():
+    content = "\ufeff" + "\n".join(
+        [
+            "---",
+            "name: joke-teller",
+            "description: ok",
+            "---",
+            "",
+            "body",
+            "",
+        ]
+    )
+    err = validate_skill_md_content(content)
+    assert err is None
+
+
+def test_skill_md_allows_crlf_frontmatter():
+    content = "\r\n".join(
+        [
+            "---",
+            "name: joke-teller",
+            "description: ok",
+            "---",
+            "",
+            "body",
+            "",
+        ]
+    )
+    err = validate_skill_md_content(content)
+    assert err is None
+
+
 def test_skill_md_rejects_short_password_assignment():
     content = "\n".join(
         [

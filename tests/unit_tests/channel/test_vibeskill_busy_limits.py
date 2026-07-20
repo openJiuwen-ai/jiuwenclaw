@@ -73,6 +73,30 @@ def channel_factory(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
+async def test_message_send_rejects_empty_parts_with_task_error(channel_factory) -> None:
+    channel, router = channel_factory()
+    session = await channel._store.get_or_create(session_id="sid-current", mode="SkillCreate")
+    await channel._store.set_metadata(session.session_id, {"user_id": "user-a"})
+    ws = FakeWebSocket()
+    payload = _message_send(session.session_id)
+    payload["parts"] = []
+
+    handled = await channel._handle_message_send(ws, payload)
+
+    assert handled is True
+    assert router.delivered == []
+    assert await channel._store.get_state(session.session_id) is VibeSkillSessionState.IDLE
+    task_errors = _events(ws, "task.error")
+    assert task_errors
+    assert task_errors[-1]["properties"]["error"] == "parts must not be empty"
+    statuses = _events(ws, "session.status")
+    assert statuses[-1]["properties"]["status"]["type"] == "idle"
+    res = _events(ws, "res")
+    assert res[-1]["ok"] is False
+    assert res[-1]["error"] == "parts must not be empty"
+
+
+@pytest.mark.asyncio
 async def test_message_send_without_limits_delivers_to_message_handler(channel_factory) -> None:
     channel, router = channel_factory()
     session = await channel._store.get_or_create(session_id="sid-current", mode="SkillCreate")

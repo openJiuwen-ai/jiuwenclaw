@@ -186,9 +186,73 @@ def _http_interface_name(path: str, method: str) -> str:
         return "FileRead"
     if tail == ["file", "content"] and meth_u == "PUT":
         return "FileWrite"
+    if tail == ["attachments"] and meth_u == "DELETE":
+        return "AttachmentDelete"
     if tail == ["export"] and meth_u == "POST":
         return "SkillExport"
     return ""
+
+
+_ATTACHMENT_DELETE_TYPES = frozenset(
+    {"file", "skill", "toolDefinition", "agentDefinition", "cliDefinition"}
+)
+
+
+def validate_attachment_delete_items(
+    items: Any,
+) -> tuple[str | None, list[dict[str, Any]] | None]:
+    """Validate DELETE /attachments request body ``items``.
+
+    Returns ``(None, normalized_items)`` on success, or ``(error, None)`` on failure.
+    """
+    if not isinstance(items, list) or not items:
+        return "items must be a non-empty array", None
+
+    normalized: list[dict[str, Any]] = []
+    for idx, raw in enumerate(items):
+        if not isinstance(raw, dict):
+            return f"items[{idx}] must be an object", None
+        item_type = str(raw.get("type") or "").strip()
+        if item_type not in _ATTACHMENT_DELETE_TYPES:
+            return (
+                f"items[{idx}].type must be one of "
+                f"{', '.join(sorted(_ATTACHMENT_DELETE_TYPES))}",
+                None,
+            )
+        item: dict[str, Any] = {"type": item_type}
+        if item_type in {"file", "skill"}:
+            filename = str(raw.get("filename") or raw.get("name") or "").strip()
+            if not filename:
+                return f"items[{idx}] requires filename", None
+            if (
+                "/" in filename
+                or "\\" in filename
+                or filename in {".", ".."}
+                or ".." in filename
+            ):
+                return f"items[{idx}].filename is illegal", None
+            item["filename"] = filename
+        elif item_type == "toolDefinition":
+            plugin_id = str(
+                raw.get("pluginId") or raw.get("bundleName") or raw.get("plugin_id") or ""
+            ).strip()
+            tool_name = str(raw.get("toolName") or raw.get("name") or "").strip()
+            if not plugin_id or not tool_name:
+                return f"items[{idx}] requires pluginId/bundleName and toolName", None
+            item["pluginId"] = plugin_id
+            item["toolName"] = tool_name
+        elif item_type == "agentDefinition":
+            agent_id = str(raw.get("agentId") or raw.get("agent_id") or "").strip()
+            if not agent_id:
+                return f"items[{idx}] requires agentId", None
+            item["agentId"] = agent_id
+        else:  # cliDefinition
+            name = str(raw.get("name") or "").strip()
+            if not name:
+                return f"items[{idx}] requires name", None
+            item["name"] = name
+        normalized.append(item)
+    return None, normalized
 
 
 def _http_response_log_context(path: str, method: str) -> tuple[str, str]:
@@ -377,6 +441,23 @@ class VibeSkillConfig:
         http_p = self.resolved_http_port()
         ws_p = self.resolved_ws_port()
         return http_p == ws_p
+
+
+class _TimelineReplayStore:
+    """No-op persistence boundary for history-only event conversion."""
+
+    async def append_file_ready_obs_url(self, session_id: str, url: str) -> None:
+        return None
+
+    async def set_state(
+        self,
+        session_id: str,
+        state: VibeSkillSessionState,
+    ) -> None:
+        return None
+
+    async def set_exportable(self, session_id: str, exportable: bool) -> None:
+        return None
 
 
 class VibeSkillChannel(BaseChannel):
@@ -1517,6 +1598,31 @@ class VibeSkillChannel(BaseChannel):
         if not isinstance(parts, list):
             await self._send_ws_res_error(
                 ws, data, "parts must be an array", source="message.send.invalid_parts_type"
+            )
+            return True
+
+        if not parts:
+            external_sid = (
+                session_id
+                or await self._resolve_external_session_id(session.session_id)
+                or session.session_id
+            )
+            error_text = "parts must not be empty"
+            for response in self._build_error_responses(
+                session.session_id,
+                external_sid,
+                error_text,
+            ):
+                await self._send_ws_json(
+                    ws,
+                    response,
+                    source="message.send.empty_parts",
+                )
+            await self._send_ws_res_error(
+                ws,
+                data,
+                error_text,
+                source="message.send.empty_parts_ack",
             )
             return True
 
@@ -3744,12 +3850,14 @@ class VibeSkillChannel(BaseChannel):
         """
         messages: list[dict[str, Any]] = []
         pending_confirms: list[dict[str, Any]] = []
-        replay_ctx_backup = self._message_ctx
-        replay_pending_backup = self._pending_confirms
-        replay_detached_backup = self._detached_tool_parts
-        self._message_ctx = {}
-        self._pending_confirms = {}
-        self._detached_tool_parts = {}
+        # HTTP history replay may overlap a live WebSocket stream. Bind the
+        # existing event handlers to an isolated channel view so replay never
+        # swaps or mutates the live channel's aggregation/persistence state.
+        replay_channel = copy.copy(self)
+        replay_channel._message_ctx = {}
+        replay_channel._pending_confirms = {}
+        replay_channel._detached_tool_parts = {}
+        replay_channel._store = _TimelineReplayStore()
 
         # 需要 replay 的事件类型（使用流式处理器处理）
         replayable_event_keys = (
@@ -3765,7 +3873,7 @@ class VibeSkillChannel(BaseChannel):
             "skilldev.error",
             "skilldev.completed",
         )
-        all_handlers = self._get_skilldev_event_handlers()
+        all_handlers = replay_channel._get_skilldev_event_handlers()
         replayable_handlers = {
             key: handler
             for key, handler in all_handlers.items()
@@ -3790,7 +3898,7 @@ class VibeSkillChannel(BaseChannel):
                 role = "user" if source == "user" else "assistant"
 
                 if event_type in round_boundary_user_events:
-                    self._clear_message_context_for_session(session_id)
+                    replay_channel._clear_message_context_for_session(session_id)
 
                 # skilldev.agent_completed：Agent 单轮结束（Agent 模式专有）。
                 # 仅用于划分回合，不向客户端补发 session.status / 关 WS 等副作用。
@@ -4056,9 +4164,9 @@ class VibeSkillChannel(BaseChannel):
 
             return self._merge_message_update_events(messages)
         finally:
-            self._message_ctx = replay_ctx_backup
-            self._pending_confirms = replay_pending_backup
-            self._detached_tool_parts = replay_detached_backup
+            replay_channel._message_ctx.clear()
+            replay_channel._pending_confirms.clear()
+            replay_channel._detached_tool_parts.clear()
 
     async def http_handler(
         self,
@@ -4119,6 +4227,13 @@ class VibeSkillChannel(BaseChannel):
         if request_path.startswith("/api/v1/session/") and request_path.endswith("/summarize") and method == "POST":
             session_id = request_path.replace("/api/v1/session/", "").replace("/summarize", "")
             return await self._handle_http_session_summarize(session_id)
+        if (
+            request_path.startswith("/api/v1/session/")
+            and request_path.endswith("/attachments")
+            and method == "DELETE"
+        ):
+            session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/attachments", "")
+            return await self._handle_http_attachments_delete(session_id, body)
         if request_path.startswith("/api/v1/session/") and method == "DELETE":
             session_id = request_path.split("/api/v1/session/", 1)[-1]
             return await self._handle_http_session_delete(session_id)
@@ -4540,6 +4655,69 @@ class VibeSkillChannel(BaseChannel):
             source="http.session.delete",
         )
         return self._json_response(200, result)
+
+    async def _handle_http_attachments_delete(
+        self, session_id: str, body: bytes
+    ) -> tuple[int, dict, bytes]:
+        """DELETE /api/v1/session/{id}/attachments — skilldev.resource.delete."""
+        sid = str(session_id or "").strip().strip("/")
+        if not sid:
+            return self._json_response(400, {"error": "sessionID cannot be empty"})
+        session_obj = await self._store.resolve_session(sid)
+        if session_obj is None:
+            return self._json_response(404, {"error": "session_not_found"})
+
+        try:
+            payload = json.loads(body.decode("utf-8") or "{}")
+        except Exception:
+            return self._json_response(400, {"error": "invalid JSON body"})
+        if not isinstance(payload, dict):
+            return self._json_response(400, {"error": "body must be a JSON object"})
+
+        err, items = validate_attachment_delete_items(payload.get("items"))
+        if err or items is None:
+            return self._json_response(400, {"error": err or "invalid items"})
+
+        request_id = f"vibeskill-att-del-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+        delete_params: dict[str, Any] = {
+            "task_id": session_obj.session_id,
+            "session_id": session_obj.session_id,
+            "items": items,
+        }
+        self._apply_tenant_service_id(delete_params, session_obj.session_id)
+        env = e2a_from_agent_fields(
+            request_id=request_id,
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=session_obj.session_id,
+            req_method=ReqMethod.SKILLDEV_RESOURCE_DELETE,
+            params=delete_params,
+            is_stream=False,
+            timestamp=time.time(),
+            user_id=self._session_user_id(session_obj.session_id),
+        )
+        logger.info(
+            "[VibeSkillChannel] skilldev.resource.delete sent, session_id=%s items=%d",
+            session_obj.session_id,
+            len(items),
+        )
+        resp = await self._send_agent_request(env)
+        if not resp.ok:
+            pl = dict(resp.payload) if isinstance(resp.payload, dict) else {}
+            return self._json_response(502, {"error": str(pl.get("error") or "request failed")})
+        result = dict(resp.payload) if isinstance(resp.payload, dict) else {}
+        if result.get("event_type") == "skilldev.error":
+            return self._json_response(400, {"error": str(result.get("error") or "skilldev.error")})
+        return self._json_response(
+            200,
+            {
+                "ok": bool(result.get("ok", True)),
+                "deleted": result.get("deleted") if isinstance(result.get("deleted"), list) else [],
+                "notFound": (
+                    result.get("notFound") if isinstance(result.get("notFound"), list) else []
+                ),
+                "errors": result.get("errors") if isinstance(result.get("errors"), list) else [],
+            },
+        )
 
     async def _handle_http_file_list(self, session_id: str, headers: dict) -> tuple[int, dict, bytes]:
         """GET /api/v1/.../file — 列目录（skilldev.file.list → FileTreeNode[] 嵌套树）。"""

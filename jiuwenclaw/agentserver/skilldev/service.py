@@ -95,10 +95,11 @@ _METHOD_DISPATCH = {
     ReqMethod.SKILLDEV_FILE_WRITE: "_handle_file_write",
     ReqMethod.SKILLDEV_BATCH_UPLOAD: "_handle_batch_upload",
     ReqMethod.SKILLDEV_BATCH_DOWNLOAD: "_handle_batch_download",
+    ReqMethod.SKILLDEV_RESOURCE_DELETE: "_handle_resource_delete",
 }
 
 # 依次尝试的文本编码顺序。不包含 latin-1，以确保真正的二进制文件能被正确检测出来。
-_TEXT_ENCODINGS = ("utf-8", "gbk", "gb2312", "big5", "shift_jis", "euc-kr")
+_TEXT_ENCODINGS = ("utf-8-sig", "gbk", "gb2312", "big5", "shift_jis", "euc-kr")
 
 
 def _read_text_with_fallback(path: Path) -> tuple[str, str] | None:
@@ -647,6 +648,36 @@ class SkillDevService:
             request_id=request_id,
             channel_id=channel_id,
             payload={"ok": True, "message": msg},
+            is_complete=True,
+        )
+
+    # ------------------------------------------------------------------
+    # skilldev.resource.delete — 按身份删除 message.send 上传的附件
+    # ------------------------------------------------------------------
+
+    def _handle_resource_delete(
+            self, params: dict, request_id: str, channel_id: str, session_id: str
+    ) -> AgentResponseChunk:
+        from jiuwenclaw.agentserver.skilldev_agent.utils.resource_sync import (
+            delete_uploaded_resources,
+        )
+
+        task_id = params.get("task_id")
+        if not task_id:
+            return self._error_chunk(request_id, channel_id, "缺少 task_id 参数")
+
+        items = params.get("items")
+        if not isinstance(items, list) or not items:
+            return self._error_chunk(
+                request_id, channel_id, "items must be a non-empty array"
+            )
+
+        workspace = self._deps.workspace_provider.get_local_path(task_id)
+        result = delete_uploaded_resources(workspace, items)
+        return AgentResponseChunk(
+            request_id=request_id,
+            channel_id=channel_id,
+            payload=result,
             is_complete=True,
         )
 

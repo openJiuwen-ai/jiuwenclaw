@@ -7,6 +7,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import shutil
+import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +23,11 @@ STATE_DIRECT_IMPORTED = "direct_imported_skills"
 STATE_REF_FILES = "ref_files"
 STATE_REF_SKILLS = "ref_skills"
 STATE_TOOL_SPECS = "tool_specs"
+
+_ARCHIVE_SUFFIXES = frozenset({".zip", ".skill"})
+_DELETE_ITEM_TYPES = frozenset(
+    {"file", "skill", "toolDefinition", "agentDefinition", "cliDefinition"}
+)
 
 
 def resource_state_path(task_workspace: str | Path) -> Path:
@@ -69,6 +77,305 @@ def record_direct_imported_skills(task_workspace: str | Path, packages: list[dic
     }
     state[STATE_DIRECT_IMPORTED] = sorted(existing | package_names)
     save_resource_state(task_workspace, state)
+
+
+def delete_uploaded_resources(
+    task_workspace: str | Path,
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Delete previously uploaded resources by identity.
+
+    Returns ``{ok, deleted, notFound, errors}`` matching the Channel contract.
+    ``notFound`` does not make ``ok`` false; only entries in ``errors`` do.
+    """
+    task_workspace = Path(task_workspace)
+    deleted: list[dict[str, Any]] = []
+    not_found: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    state = load_resource_state(task_workspace)
+    state_dirty = False
+
+    for raw in items:
+        if not isinstance(raw, dict):
+            errors.append({"type": "unknown", "error": "item must be an object"})
+            continue
+        item_type = str(raw.get("type") or "").strip()
+        identity = _delete_item_identity(raw, item_type)
+        try:
+            result = _delete_one_resource(task_workspace, identity, state)
+        except Exception as exc:
+            logger.warning("[resource_sync] delete failed for %s: %s", identity, exc)
+            errors.append({**identity, "error": str(exc)})
+            continue
+        if result == "deleted":
+            deleted.append(identity)
+            state_dirty = True
+        elif result == "notFound":
+            not_found.append(identity)
+        else:
+            errors.append({**identity, "error": result})
+
+    if state_dirty:
+        save_resource_state(task_workspace, state)
+
+    return {
+        "ok": len(errors) == 0,
+        "deleted": deleted,
+        "notFound": not_found,
+        "errors": errors,
+    }
+
+
+def _delete_item_identity(raw: dict[str, Any], item_type: str) -> dict[str, Any]:
+    """Normalize identity fields echoed back in delete responses."""
+    if item_type not in _DELETE_ITEM_TYPES:
+        return {"type": item_type or "unknown"}
+    item: dict[str, Any] = {"type": item_type}
+    if item_type in {"file", "skill"}:
+        filename = str(raw.get("filename") or raw.get("name") or "").strip()
+        if filename:
+            item["filename"] = filename
+    elif item_type == "toolDefinition":
+        plugin_id = str(
+            raw.get("pluginId") or raw.get("bundleName") or raw.get("plugin_id") or ""
+        ).strip()
+        tool_name = str(raw.get("toolName") or raw.get("name") or "").strip()
+        if plugin_id:
+            item["pluginId"] = plugin_id
+        if tool_name:
+            item["toolName"] = tool_name
+    elif item_type == "agentDefinition":
+        agent_id = str(raw.get("agentId") or raw.get("agent_id") or "").strip()
+        if agent_id:
+            item["agentId"] = agent_id
+    else:  # cliDefinition
+        name = str(raw.get("name") or "").strip()
+        if name:
+            item["name"] = name
+    return item
+
+
+def _delete_one_resource(
+    task_workspace: Path,
+    identity: dict[str, Any],
+    state: dict[str, Any],
+) -> str:
+    """Delete one resource. Returns ``deleted``, ``notFound``, or an error message."""
+    item_type = str(identity.get("type") or "")
+    if item_type not in _DELETE_ITEM_TYPES:
+        return f"unsupported type: {item_type or 'unknown'}"
+
+    if item_type in {"file", "skill"}:
+        filename = str(identity.get("filename") or "").strip()
+        if not filename:
+            return "requires filename"
+        if (
+            "/" in filename
+            or "\\" in filename
+            or filename in {".", ".."}
+            or ".." in filename
+        ):
+            return "filename is illegal"
+        dest_dir = task_workspace / "resources" / (
+            "ref-files" if item_type == "file" else "ref-skills"
+        )
+        state_key = STATE_REF_FILES if item_type == "file" else STATE_REF_SKILLS
+        return _delete_file_or_skill(dest_dir, filename, state, state_key)
+
+    if item_type == "toolDefinition":
+        plugin_id = str(identity.get("pluginId") or "").strip()
+        tool_name = str(identity.get("toolName") or "").strip()
+        if not plugin_id or not tool_name:
+            return "requires pluginId and toolName"
+        return _delete_tool_definition(task_workspace, plugin_id, tool_name, state)
+
+    if item_type == "agentDefinition":
+        agent_id = str(identity.get("agentId") or "").strip()
+        if not agent_id:
+            return "requires agentId"
+        path = task_workspace / "resources" / "agents" / "available_agents.json"
+        return _delete_json_array_entry(
+            path,
+            match_key=lambda entry: str(
+                entry.get("agentId") or entry.get("agent_id") or ""
+            ).strip()
+            == agent_id,
+        )
+
+    # cliDefinition
+    name = str(identity.get("name") or "").strip()
+    if not name:
+        return "requires name"
+    path = task_workspace / "resources" / "clis" / "available_clis.json"
+    return _delete_json_array_entry(
+        path,
+        match_key=lambda entry: str(entry.get("name") or "").strip() == name,
+    )
+
+
+def _delete_file_or_skill(
+    dest_dir: Path,
+    filename: str,
+    state: dict[str, Any],
+    state_key: str,
+) -> str:
+    archive_path = _safe_child_path(dest_dir, filename)
+    if archive_path is None:
+        return "filename is illegal"
+
+    suffix = Path(filename).suffix.lower()
+    removed_anything = False
+
+    if suffix in _ARCHIVE_SUFFIXES:
+        stem_dir = _safe_child_path(dest_dir, Path(filename).stem)
+        if stem_dir is not None and stem_dir.is_dir():
+            shutil.rmtree(stem_dir)
+            removed_anything = True
+
+        if archive_path.is_file():
+            _delete_zip_members_from_dest(archive_path, dest_dir)
+            archive_path.unlink(missing_ok=True)
+            removed_anything = True
+    else:
+        if archive_path.is_file():
+            archive_path.unlink()
+            removed_anything = True
+        elif archive_path.is_dir():
+            shutil.rmtree(archive_path)
+            removed_anything = True
+
+    entries = _state_entries(state.get(state_key, []))
+    remaining = [e for e in entries if e.get("filename") != filename]
+    if len(remaining) != len(entries):
+        state[state_key] = _sorted_entries(remaining)
+        removed_anything = True
+
+    return "deleted" if removed_anything else "notFound"
+
+
+def _delete_zip_members_from_dest(archive_path: Path, dest_dir: Path) -> None:
+    """Remove members extracted into ``dest_dir`` (URL flat-extract layout)."""
+    dest_resolved = dest_dir.resolve()
+    try:
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            member_names = zf.namelist()
+    except Exception as exc:
+        logger.warning(
+            "[resource_sync] failed to list zip members %s: %s", archive_path, exc
+        )
+        return
+
+    # Delete deepest paths first so files go before their parent dirs.
+    for name in sorted(member_names, key=lambda n: n.count("/"), reverse=True):
+        if not name or name.startswith("__MACOSX/") or "/__MACOSX/" in name:
+            continue
+        rel = name.rstrip("/")
+        if not rel:
+            continue
+        target = dest_dir / rel
+        try:
+            target.resolve().relative_to(dest_resolved)
+        except ValueError:
+            continue
+        if target.is_file():
+            target.unlink(missing_ok=True)
+        elif target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+
+        # Best-effort cleanup of emptied parent directories (do not remove dest_dir).
+        parent = target.parent
+        while parent != dest_dir:
+            try:
+                parent.resolve().relative_to(dest_resolved)
+            except ValueError:
+                break
+            if not parent.is_dir():
+                break
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+
+def _delete_tool_definition(
+    task_workspace: Path,
+    plugin_id: str,
+    tool_name: str,
+    state: dict[str, Any],
+) -> str:
+    from jiuwenclaw.agentserver.skilldev_agent.meta_tools.external_tool_registry import (
+        tool_spec_filename,
+    )
+
+    filename = tool_spec_filename(plugin_id, tool_name)
+    dest_dir = task_workspace / "resources" / "available-tools"
+    json_file = _safe_child_path(dest_dir, filename)
+    removed_anything = False
+
+    if json_file is not None and json_file.is_file():
+        json_file.unlink()
+        removed_anything = True
+
+    entries = _tool_state_entries(state.get(STATE_TOOL_SPECS, []))
+    remaining = [
+        e
+        for e in entries
+        if not (
+            e.get("filename") == filename
+            or (
+                e.get("pluginId") == plugin_id
+                and e.get("toolName") == tool_name
+            )
+        )
+    ]
+    if len(remaining) != len(entries):
+        state[STATE_TOOL_SPECS] = sorted(
+            remaining,
+            key=lambda item: (item.get("pluginId", ""), item.get("toolName", "")),
+        )
+        removed_anything = True
+
+    return "deleted" if removed_anything else "notFound"
+
+
+def _delete_json_array_entry(
+    path: Path,
+    *,
+    match_key: Callable[[dict[str, Any]], bool],
+) -> str:
+    if not path.is_file():
+        return "notFound"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"failed to read {path.name}: {exc}") from exc
+
+    if isinstance(data, dict):
+        # Single-object file: treat as one-element array.
+        entries = [data]
+    elif isinstance(data, list):
+        entries = data
+    else:
+        return "notFound"
+
+    remaining: list[Any] = []
+    matched = False
+    for entry in entries:
+        if isinstance(entry, dict) and match_key(entry):
+            matched = True
+            continue
+        remaining.append(entry)
+
+    if not matched:
+        return "notFound"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(remaining, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return "deleted"
 
 
 async def write_uploaded_resources(

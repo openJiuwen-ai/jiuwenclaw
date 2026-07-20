@@ -75,6 +75,80 @@ def test_dangerous_command_rm_rf_in_skill_md_is_allowed(tmp_path: Path):
     assert ok, msg
 
 
+def test_utf8_bom_skill_md_is_allowed(tmp_path: Path):
+    mod = _load_validate_module()
+    skill_dir = tmp_path / "my-skill"
+    _write_skill(skill_dir)
+    skill_md = skill_dir / "SKILL.md"
+    content = skill_md.read_text(encoding="utf-8")
+    skill_md.write_bytes(b"\xef\xbb\xbf" + content.encode("utf-8"))
+
+    ok, msg = mod.validate_skill(skill_dir)
+    assert ok, msg
+
+
+def test_crlf_skill_md_frontmatter_is_allowed(tmp_path: Path):
+    mod = _load_validate_module()
+    skill_dir = tmp_path / "my-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "\r\n".join(
+            [
+                "---",
+                f"name: {skill_dir.name}",
+                "description: test skill",
+                "---",
+                "",
+                "body",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+        newline="",
+    )
+
+    ok, msg = mod.validate_skill(skill_dir)
+    assert ok, msg
+
+
+def test_utf8_bom_script_is_scanned(tmp_path: Path):
+    mod = _load_validate_module()
+    skill_dir = tmp_path / "my-skill"
+    _write_skill(skill_dir)
+    scripts = skill_dir / "scripts"
+    scripts.mkdir()
+    (scripts / "run.sh").write_bytes(b"\xef\xbb\xbf" + b"rm -rf ~\n")
+
+    ok, msg = mod.validate_skill(skill_dir)
+    assert not ok
+    assert "prohibited command pattern" in msg
+
+
+def test_non_utf8_script_reports_clear_error(tmp_path: Path):
+    mod = _load_validate_module()
+    skill_dir = tmp_path / "my-skill"
+    _write_skill(skill_dir)
+    scripts = skill_dir / "scripts"
+    scripts.mkdir()
+    (scripts / "run.py").write_bytes("print('hi')  # \xe4".encode("latin-1"))
+
+    ok, msg = mod.validate_skill(skill_dir)
+    assert not ok
+    assert "Non-UTF-8 text file detected" in msg
+
+
+def test_binary_script_file_is_skipped(tmp_path: Path):
+    mod = _load_validate_module()
+    skill_dir = tmp_path / "my-skill"
+    _write_skill(skill_dir)
+    scripts = skill_dir / "scripts"
+    scripts.mkdir()
+    (scripts / "payload.bin").write_bytes(b"\x00\xff\xfe")
+
+    ok, msg = mod.validate_skill(skill_dir)
+    assert ok, msg
+
+
 def test_short_password_assignment_in_skill_md_is_blocked(tmp_path: Path):
     mod = _load_validate_module()
     skill_dir = tmp_path / "my-skill"
