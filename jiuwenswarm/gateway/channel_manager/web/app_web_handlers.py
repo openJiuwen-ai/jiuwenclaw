@@ -20,7 +20,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from dotenv import load_dotenv
-import psutil
+try:
+    import psutil as _psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _psutil = None  # type: ignore[assignment]
+    _HAS_PSUTIL = False
 from openjiuwen.core.common.logging import LogManager
 from openjiuwen.core.foundation.llm import Model, ProviderType
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
@@ -401,6 +406,31 @@ def _values_match(parsed_val: Any, resolved_val: Any) -> bool:
     return str(parsed_val if parsed_val is not None else "") == str(
         resolved_val if resolved_val is not None else ""
     )
+
+
+def _read_proc_meminfo() -> tuple[float, float, float]:
+    """Fallback for platforms without psutil: read /proc/meminfo.
+
+    Returns (rss_mb, total_mb, available_mb).  Returns (0, 0, 0) on failure.
+    """
+    try:
+        info: dict[str, int] = {}
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    info[parts[0].rstrip(":")] = int(parts[1])  # kB
+        total_mb = info.get("MemTotal", 0) / 1024
+        available_mb = info.get("MemAvailable", info.get("MemFree", 0)) / 1024
+        # RSS from /proc/self/status
+        with open("/proc/self/status", "r") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss_mb = int(line.split()[1]) / 1024  # kB → MB
+                    return rss_mb, total_mb, available_mb
+        return 0.0, total_mb, available_mb
+    except OSError:
+        return 0.0, 0.0, 0.0
 
 
 def _serialize_reasoning_level(value: Any) -> Any:
@@ -3885,14 +3915,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
 
     async def _memory_compute(ws, req_id, params, session_id):
+        if _HAS_PSUTIL:
+            process = _psutil.Process()  # type: ignore[union-attribute]
+            rss_mb = process.memory_info().rss / (1024 * 1024)
 
-        process = psutil.Process()
-        rss_bytes = process.memory_info().rss  # 物理内存
-        rss_mb = rss_bytes / (1024 * 1024)
-
-        mem = psutil.virtual_memory()
-        total_mb = mem.total / (1024 * 1024)
-        available_mb = mem.available / (1024 * 1024)
+            mem = _psutil.virtual_memory()  # type: ignore[union-attribute]
+            total_mb = mem.total / (1024 * 1024)
+            available_mb = mem.available / (1024 * 1024)
+        else:
+            rss_mb, total_mb, available_mb = _read_proc_meminfo()
 
         await channel.send_response(ws, req_id, ok=True,
                                     payload={"rss_mb": rss_mb, "total_mb": total_mb,
