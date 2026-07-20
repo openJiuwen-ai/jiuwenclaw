@@ -526,6 +526,32 @@ class GatewayServer:
             return False
         return self._session_to_client.get(session_key) is ws
 
+    def get_active_session_ids(
+        self,
+        channel_id: str,
+        exclude_ws: Any = None,
+    ) -> set[str]:
+        """返回在指定 channel 下、仍处于活跃连接绑定的 session_id 集合。
+
+        用于 session.list 标记 active_in_window，供前端在 /resume 前拦截冲突会话。
+        排除 exclude_ws（通常是发起 session.list 请求的连接本身），并跳过已关闭的 ws，
+        与实时防线（forward 阶段 SESSION_IN_USE 检查）口径保持一致。
+        """
+        active: set[str] = set()
+        for key, client_ws in self._session_to_client.items():
+            if not isinstance(key, tuple) or len(key) < 2:
+                continue
+            if key[0] != channel_id:
+                continue
+            if client_ws is exclude_ws:
+                continue
+            if bool(getattr(client_ws, "closed", False)):
+                continue
+            session_id = key[1]
+            if isinstance(session_id, str) and session_id:
+                active.add(session_id)
+        return active
+
     @staticmethod
     def _extract_routing_session_id(msg, *, include_top_level: bool = True) -> str | None:
         """Best-effort session id from message fields for outbound event routing."""
