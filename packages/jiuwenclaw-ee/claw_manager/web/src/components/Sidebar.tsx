@@ -61,6 +61,20 @@ export function Sidebar() {
       ),
     },
     {
+      key: 'embedding-templates',
+      pathPrefix: '/embedding-templates',
+      href: '/embedding-templates',
+      label: t('nav.embeddingTemplates'),
+      icon: (
+        <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+          <circle cx="6" cy="12" r="2" />
+          <circle cx="18" cy="6" r="2" />
+          <circle cx="18" cy="18" r="2" />
+          <path strokeLinecap="round" strokeLinejoin="round" d="M8 11l8-4M8 13l8 4" />
+        </svg>
+      ),
+    },
+    {
       key: 'extension-templates',
       pathPrefix: '/extension-config-templates',
       href: '/extension-config-templates',

@@ -1,4 +1,4 @@
-"""模板 API 请求/响应模型：model_template、extension_config_template、skill_whitelist_template、service_config_template。"""
+"""模板 API 请求/响应模型。"""
 
 from __future__ import annotations
 
@@ -107,6 +107,75 @@ class ModelTemplateListQuery(BaseModel):
             "排序字段：template_name、description、model_provider、model_id、"
             "model_type、api_base、updated_at"
         ),
+    )
+    sort_order: str | None = Field(default=None, description="排序方向：asc、desc")
+
+
+class EmbeddingTemplateCreateBody(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    template_name: str = Field(..., min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    embed_tags: list[str] | None = None
+    api_base: str = Field(..., min_length=1, max_length=512)
+    api_key: str = Field(..., min_length=1)
+    model_id: str = Field(..., min_length=1, max_length=128)
+    model_provider: str = Field(..., min_length=1, max_length=64)
+    parameters: dict[str, Any] | None = None
+    client_config: dict[str, Any] | None = Field(
+        default_factory=lambda: {
+            "timeout": 60,
+            "retry_count": 3,
+            "verify_ssl": True,
+        }
+    )
+    enabled: bool = True
+    data: dict[str, Any] | None = None
+
+
+class EmbeddingTemplateUpdateBody(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    template_name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    embed_tags: list[str] | None = None
+    api_base: str | None = Field(default=None, min_length=1, max_length=512)
+    api_key: str | None = Field(default=None, min_length=1)
+    model_id: str | None = Field(default=None, min_length=1, max_length=128)
+    model_provider: str | None = Field(default=None, min_length=1, max_length=64)
+    parameters: dict[str, Any] | None = None
+    client_config: dict[str, Any] | None = None
+    enabled: bool | None = None
+    data: dict[str, Any] | None = None
+
+
+class EmbeddingTemplateOut(BaseModel):
+    id: int
+    template_id: str
+    template_name: str
+    description: str | None
+    embed_tags: list[str] | None
+    api_base: str
+    api_key: str
+    model_id: str
+    model_provider: str
+    parameters: dict[str, Any] | None
+    client_config: dict[str, Any] | None
+    enabled: bool
+    data: dict[str, Any] | None
+    created_at: str | None
+    updated_at: str | None
+
+
+class EmbeddingTemplateListQuery(BaseModel):
+    page: int = Field(1, ge=1)
+    page_size: int = Field(20, ge=1, le=200)
+    enabled: bool | None = None
+    model_provider: str | None = Field(default=None, max_length=64)
+    search: str | None = Field(default=None, max_length=256)
+    sort_by: str | None = Field(
+        default=None,
+        description="排序字段：template_name、description、model_provider、model_id、api_base、updated_at",
     )
     sort_order: str | None = Field(default=None, description="排序方向：asc、desc")
 

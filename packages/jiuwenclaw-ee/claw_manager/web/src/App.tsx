@@ -12,6 +12,7 @@ import { ModelTemplatesPage } from './pages/templates/ModelTemplatesPage';
 import { ExtensionTemplatesPage } from './pages/templates/ExtensionTemplatesPage';
 import { SkillWhitelistTemplatesPage } from './pages/templates/SkillWhitelistTemplatesPage';
 import { ServiceConfigTemplatesPage } from './pages/templates/ServiceConfigTemplatesPage';
+import { EmbeddingTemplatesPage } from './pages/templates/EmbeddingTemplatesPage';
 import { matchRoute, RouterProvider, useRouter } from './router';
 
 interface ErrorBoundaryState {
@@ -61,6 +62,9 @@ function RouteView() {
   }
   if (path === '/model-templates') {
     return <ModelTemplatesPage />;
+  }
+  if (path === '/embedding-templates') {
+    return <EmbeddingTemplatesPage />;
   }
   if (path === '/extension-config-templates') {
     return <ExtensionTemplatesPage />;

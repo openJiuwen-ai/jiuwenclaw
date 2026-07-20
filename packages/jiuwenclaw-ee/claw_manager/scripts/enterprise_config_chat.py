@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""配置完成后，经 Gateway WebChannel 发送一条用户聊天请求（验证 AgentServer 侧企业策略 / 模型 / Skill / 扩展配置）。
+"""配置完成后，经 Gateway WebChannel 发送一条用户聊天请求（验证 AgentServer 侧企业策略 / 模型 / Embedding / Skill / 扩展配置）。
 
 依赖：主仓库已安装 ``websockets``（``uv sync`` 或 ``pip install websockets``）。
 
 典型用法（先完成 provision-local + ``enterprise_config_demo_data_config.py``，记下 provision 返回的 web 端口）::
 
-    # alice → default/vision 均为 M3 VIP-加强对话；Skill W1；扩展 E3（覆盖服务 E1+E2）
+    # alice → default/vision=M3，embedding=B3；Skill W1；扩展 E3
     uv run python packages/jiuwenclaw-ee/claw_manager/scripts/enterprise_config_chat.py \\
         --group-id g_demo_sales --bot-id bot_main --user-id alice \\
         --content "用一句话说明当前使用的模型" --web-port 19234
 
-    # bob → default=M5，vision=M2；Skill W1+W2；扩展 E1+E2（继承服务级）
+    # bob → default=M5，vision=M2，embedding=B2；Skill W1+W2；扩展 E1+E2
     uv run python .../enterprise_config_chat.py \\
         --group-id g_demo_sales --bot-id bot_main --user-id bob --web-port 19234
 
-    # g_unknown → 四模型槽位均为 M1；Skill W3；扩展 E4
+    # g_unknown → 四模型槽位均为 M1，embedding=B1；Skill W3；扩展 E4
     uv run python .../enterprise_config_chat.py \\
         --group-id g_unknown --bot-id bot_main --user-id bob --web-port 19234
 
@@ -91,9 +91,10 @@ _DEMO_ENTERPRISE_EXPECTATIONS: dict[tuple[str, str], dict[str, Any]] = {
             "video_model": "M1 全局兜底-经济型 (gpt-4o-mini)",
             "audio_model": "M1 全局兜底-经济型 (gpt-4o-mini)",
         },
+        "embedding_model": "B3 VIP 向量模型 (text-embedding-3-large, dimensions=3072)",
         "skill_whitelist": "W1 销售组-天气 Skill",
         "extension_config": "E3 Agent Server 错误恢复（覆盖服务 E1+E2）",
-        "note": "2.6.1 覆盖 2.5.1 的 default/vision；video/audio 由 2.7 回填 M1 全局兜底-经济型",
+        "note": "2.7.1 覆盖 2.6.1 的 default/vision/embedding；video/audio 由 2.8 回填 M1",
     },
     ("g_demo_sales", "bob"): {
         "model_slots": {
@@ -102,9 +103,10 @@ _DEMO_ENTERPRISE_EXPECTATIONS: dict[tuple[str, str], dict[str, Any]] = {
             "video_model": "M1 全局兜底-经济型 (gpt-4o-mini)",
             "audio_model": "M1 全局兜底-经济型 (gpt-4o-mini)",
         },
-        "skill_whitelist": "W1 销售组-天气 Skill + W2 销售组-CRM Skill（继承 2.5.1）",
-        "extension_config": "E1 Gateway 请求前鉴权 + E2 Gateway 请求后日志（继承 2.5.1）",
-        "note": "default=M5（2.6.2+2.8.2）；vision=M2（继承 2.5.1）；video/audio=M1 全局兜底-经济型（2.7 回填）",
+        "embedding_model": "B2 销售组向量模型 (text-embedding-3-large, dimensions=1536)",
+        "skill_whitelist": "W1 销售组-天气 Skill + W2 销售组-CRM Skill（继承 2.6.1）",
+        "extension_config": "E1 Gateway 请求前鉴权 + E2 Gateway 请求后日志（继承 2.6.1）",
+        "note": "default=M5（2.7.2+2.9.2）；vision/embedding 继承 2.6.1；video/audio 由 2.8 回填 M1",
     },
     ("g_unknown", "bob"): {
         "model_slots": {
@@ -113,9 +115,10 @@ _DEMO_ENTERPRISE_EXPECTATIONS: dict[tuple[str, str], dict[str, Any]] = {
             "video_model": "M1 全局兜底-经济型 (gpt-4o-mini)",
             "audio_model": "M1 全局兜底-经济型 (gpt-4o-mini)",
         },
+        "embedding_model": "B1 全局兜底向量模型 (text-embedding-3-small)",
         "skill_whitelist": "W3 全局兜底 Skill",
         "extension_config": "E4 Gateway 定时清理",
-        "note": "未命中服务策略，四槽位均走 2.7 全局兜底（M1 全局兜底-经济型）",
+        "note": "未命中服务策略，四个模型槽位与 embedding 均走 2.8 全局兜底",
     },
 }
 
@@ -129,6 +132,7 @@ def _log_demo_expectation(group_id: str, user_id: str) -> None:
     slots = hint.get("model_slots") or {}
     slot_parts = [f"{k}={slots.get(k, '未配置')}" for k in _MODEL_SLOT_KEYS]
     logger.info("[expect] 演示 seed 预期模型槽位: %s", "; ".join(slot_parts))
+    logger.info("[expect] embedding_model=%s", hint["embedding_model"])
     if hint.get("note"):
         logger.info("[expect] 说明: %s", hint["note"])
     logger.info(
@@ -189,7 +193,9 @@ def _browser_origin_header(ws_url: str) -> dict[str, str]:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="经 Gateway /ws 发送 chat.send（企业路由参数在 params 内）")
+    p = argparse.ArgumentParser(
+        description="经 Gateway /ws 发送 chat.send（企业路由参数在 params 内）"
+    )
     p.add_argument("--host", default="127.0.0.1", help="Gateway 主机，默认 127.0.0.1")
     p.add_argument("--ws-path", default="/ws", help="WebSocket 路径，默认 /ws")
     p.add_argument("--session-id", default="", help="会话 ID；留空则由 Gateway 自动生成")
@@ -214,7 +220,9 @@ def _parse_args() -> argparse.Namespace:
         help="打印 chat.delta 流式片段（默认只打印 final）",
     )
     src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--web-port", type=int, help="Gateway WebChannel 端口（provision 返回的 ports.web）")
+    src.add_argument(
+        "--web-port", type=int, help="Gateway WebChannel 端口（provision 返回的 ports.web）"
+    )
     src.add_argument(
         "--provision-json",
         type=Path,

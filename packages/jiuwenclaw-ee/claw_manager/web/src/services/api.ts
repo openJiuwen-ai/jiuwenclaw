@@ -13,6 +13,9 @@ import type {
   ConfigEffectiveServicePolicyCreateBody,
   ConfigEffectiveServicePolicyUpdateBody,
   CreateInstanceBody,
+  EmbeddingTemplate,
+  EmbeddingTemplateCreateBody,
+  EmbeddingTemplateUpdateBody,
   ExtensionConfigTemplate,
   ExtensionConfigTemplateCreateBody,
   ExtensionConfigTemplateUpdateBody,
@@ -212,6 +215,38 @@ export const ModelTemplateApi = {
     http<{ deleted: boolean; template_id: string }>(`/v1/model-templates/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     }),
+};
+
+export const EmbeddingTemplateApi = {
+  list: (params?: {
+    page?: number;
+    page_size?: number;
+    enabled?: boolean;
+    model_provider?: string;
+    search?: string;
+    sort_by?:
+      | 'template_name'
+      | 'description'
+      | 'model_provider'
+      | 'model_id'
+      | 'api_base'
+      | 'updated_at';
+    sort_order?: 'asc' | 'desc';
+  }) => http<PageResult<EmbeddingTemplate>>('/v1/embedding-templates', { query: params }),
+  get: (id: string) =>
+    http<EmbeddingTemplate>(`/v1/embedding-templates/${encodeURIComponent(id)}`),
+  create: (body: EmbeddingTemplateCreateBody) =>
+    http<EmbeddingTemplate>('/v1/embedding-templates', { method: 'POST', body }),
+  update: (id: string, body: EmbeddingTemplateUpdateBody) =>
+    http<EmbeddingTemplate>(`/v1/embedding-templates/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body,
+    }),
+  remove: (id: string) =>
+    http<{ deleted: boolean; template_id: string }>(
+      `/v1/embedding-templates/${encodeURIComponent(id)}`,
+      { method: 'DELETE' }
+    ),
 };
 
 export const ExtensionTemplateApi = {

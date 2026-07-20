@@ -50,7 +50,6 @@ from jiuwenclaw_manager.models.application_config_models import (
     LOGGING_CONFIG_TABLE_DEF,
     PERMISSIONS_CONFIG_TABLE_DEF,
     _CHANNEL_CONFIG_TABLE_DEF,
-    _EMBED_CONFIG_TABLE_DEF,
     _TASK_MEMORY_CONFIG_TABLE_DEF,
 )
 
@@ -69,7 +68,6 @@ _MANAGER_INSTANCE_TABLES = (
     _CHANNEL_CONFIG_TABLE_DEF.table_name,
     LOG_MASKING_RULE_TABLE_DEF.table_name,
     LOGGING_CONFIG_TABLE_DEF.table_name,
-    _EMBED_CONFIG_TABLE_DEF.table_name,
     _TASK_MEMORY_CONFIG_TABLE_DEF.table_name,
     PERMISSIONS_CONFIG_TABLE_DEF.table_name,
 )

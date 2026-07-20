@@ -114,8 +114,15 @@ from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
 )
 from jiuwenclaw.agentserver.permissions.core import init_permission_engine
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
-from jiuwenclaw.agentserver.memory.config import (clear_config_cache, get_memory_mode, is_memory_enabled,
-                                                  is_proactive_memory, clear_embed_config_db_cache)
+from jiuwenclaw.agentserver.memory.config import (
+    clear_config_cache,
+    clear_embed_config_db_cache,
+    get_embed_config,
+    get_memory_mode,
+    is_memory_enabled,
+    is_proactive_memory,
+    set_embed_config_db_cache,
+)
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.permissions.config_loader import (
     reset_permissions_session_scope,
@@ -1847,8 +1854,7 @@ class JiuWenClawDeepAdapter:
 
     def _build_memory_rail(self, mode: str) -> MemoryRail | None:
         try:
-            from jiuwenclaw.agentserver.memory.config import get_embed_config
-            config = get_config()
+            config = self._startup_config_base
             embed_config = get_embed_config()
             has_api_key = embed_config.get("api_key") if isinstance(embed_config, dict) else None
             has_base_url = embed_config.get("base_url") if isinstance(embed_config, dict) else None
@@ -1877,8 +1883,7 @@ class JiuWenClawDeepAdapter:
             CodingMemoryRail 实例，失败返回 None
         """
         try:
-            from jiuwenclaw.agentserver.memory.config import get_embed_config
-            config = get_config()
+            config = self._startup_config_base
             embed_config = get_embed_config()
 
             # 检查 embedding 配置
@@ -2567,6 +2572,7 @@ class JiuWenClawDeepAdapter:
     ) -> dict[str, Any]:
         """若已加载 ``_enterprise_config``，将其模型槽位覆盖到 config 快照上。"""
         if self._enterprise_config is None:
+            clear_embed_config_db_cache()
             return config_base
         from jiuwenclaw.agentserver.enterprise_config.apply_models import (
             apply_enterprise_models_to_config,
@@ -2574,6 +2580,9 @@ class JiuWenClawDeepAdapter:
 
         merged, applied = apply_enterprise_models_to_config(
             config_base, self._enterprise_config
+        )
+        set_embed_config_db_cache(
+            getattr(self._enterprise_config, "embedding", None)
         )
         if applied:
             self._model_config_source = "enterprise_policy"
@@ -2872,6 +2881,7 @@ class JiuWenClawDeepAdapter:
 
         config_base = self._merge_enterprise_models_into_config(config_base)
         self._refresh_multimodal_configs(config_base)
+        self._startup_config_base = config_base
 
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
@@ -5317,7 +5327,7 @@ class JiuWenClawDeepAdapter:
         return None
 
     async def _handle_memory_rail_by_config(self, mode: str):
-        config = get_config()
+        config = self._startup_config_base
         if get_memory_mode(config) == "local":
             # 引擎门禁：memory.engine 未放行内置时，等同于禁用
             builtin_on = is_builtin_memory_allowed(config) and is_memory_enabled(mode, config)

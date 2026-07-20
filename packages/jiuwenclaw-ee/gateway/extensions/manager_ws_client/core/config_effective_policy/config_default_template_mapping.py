@@ -36,6 +36,7 @@ _ALLOWED_TEMPLATE_TYPES = frozenset({
     "video_model",
     "audio_model",
     "vision_model",
+    "embedding_model",
     "skill_whitelist",
     "extension_config",
     "service_config",

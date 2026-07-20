@@ -44,6 +44,40 @@ export interface ModelTemplateCreateBody {
 
 export type ModelTemplateUpdateBody = Partial<ModelTemplateCreateBody>;
 
+export interface EmbeddingTemplate {
+  id: number;
+  template_id: string;
+  template_name: string;
+  description?: string | null;
+  embed_tags?: string[] | null;
+  api_base: string;
+  api_key: string;
+  model_id: string;
+  model_provider: string;
+  parameters?: Record<string, unknown> | null;
+  client_config?: Record<string, unknown> | null;
+  enabled: boolean;
+  data?: Record<string, unknown> | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface EmbeddingTemplateCreateBody {
+  template_name: string;
+  description?: string;
+  embed_tags?: string[];
+  api_base: string;
+  api_key: string;
+  model_id: string;
+  model_provider: string;
+  parameters?: Record<string, unknown>;
+  client_config?: Record<string, unknown>;
+  enabled?: boolean;
+  data?: Record<string, unknown>;
+}
+
+export type EmbeddingTemplateUpdateBody = Partial<EmbeddingTemplateCreateBody>;
+
 export interface ExtensionConfigTemplate {
   id: number;
   template_id: string;

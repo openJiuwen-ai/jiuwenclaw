@@ -23,6 +23,10 @@ from jiuwenclaw.agentserver.enterprise_config.loader import (
     load_effective_enterprise_config,
     schemas,
 )
+from jiuwenclaw.agentserver.enterprise_config.apply_models import (
+    apply_enterprise_models_to_config,
+)
+from jiuwenclaw.agentserver.memory import config as memory_config
 from jiuwenclaw.schema.agent import AgentRequest
 
 _utils = _load_manager_ws_utils()
@@ -31,6 +35,8 @@ GatewayDb = _gateway_db_mod.GatewayDb
 expressions = import_manager_ws_client_module("core.enterprise_config.expressions")
 routing_id = import_manager_ws_client_module("core.enterprise_config.routing_id")
 loader = import_manager_ws_client_module("core.enterprise_config.loader")
+embedding_template = import_manager_ws_client_module("core.template.embedding_template")
+table_init = import_manager_ws_client_module("models.table_init")
 resolve_policy_field = loader.resolve_policy_field
 routing_context_from_request = loader.routing_context_from_request
 
@@ -449,6 +455,190 @@ def test_fill_missing_template_ref_slots() -> None:
         "audio_model": ["m1"],
         "skill_whitelist": ["w3"],
     }
+
+
+def test_embedding_slot_is_loaded_separately_from_model_slots() -> None:
+    assert TemplateRefSlot.EMBEDDING_MODEL.value == "embedding_model"
+    assert (
+        schemas.SLOT_ENTITY_TABLE[TemplateRefSlot.EMBEDDING_MODEL]
+        == "embedding_template"
+    )
+    assert TemplateRefSlot.EMBEDDING_MODEL in DEFAULT_AGENT_LOAD_SLOTS
+    assert TemplateRefSlot.EMBEDDING_MODEL not in schemas.MODEL_SLOT_KEYS
+
+
+def test_enterprise_embedding_maps_to_embed_config_section() -> None:
+    enterprise = schemas.EffectiveEnterpriseConfig(
+        routing=schemas.RoutingContext(group_id="g", bot_id="b", user_id="u"),
+        embedding=[
+            {
+                "api_key": "policy-key",
+                "api_base": "https://embedding.example.com/v1",
+                "model_id": "text-embedding-3-large",
+            }
+        ],
+    )
+
+    merged, applied = apply_enterprise_models_to_config(
+        {
+            "embed": {
+                "embed_api_key": "local-key",
+                "embed_base_url": "https://local.example.com/v1",
+                "embed_model": "local-model",
+            }
+        },
+        enterprise,
+    )
+
+    assert applied is True
+    assert merged["embed"] == {
+        "embed_api_key": "policy-key",
+        "embed_base_url": "https://embedding.example.com/v1",
+        "embed_model": "text-embedding-3-large",
+    }
+
+
+def test_get_embed_config_prefers_db_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        memory_config,
+        "_load_config",
+        lambda: {
+            "embed": {
+                "embed_api_key": "local-key",
+                "embed_base_url": "https://local.example.com/v1",
+                "embed_model": "local-model",
+            }
+        },
+    )
+    memory_config.clear_embed_config_db_cache()
+    assert memory_config.get_embed_config()["api_key"] == "local-key"
+
+    memory_config.set_embed_config_db_cache(
+        {
+            "api_key": "policy-key",
+            "api_base": "https://policy.example.com/v1",
+            "model_id": "policy-model",
+        }
+    )
+    assert memory_config.get_embed_config() == {
+        "api_key": "policy-key",
+        "base_url": "https://policy.example.com/v1",
+        "model": "policy-model",
+    }
+
+    memory_config.clear_embed_config_db_cache()
+    assert memory_config.get_embed_config()["api_key"] == "local-key"
+
+
+@pytest.mark.asyncio
+async def test_embedding_template_create_sync_uses_instance_scoped_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[tuple[str, dict[str, Any]]] = []
+
+    class _Handler:
+        async def get(self, _table: str, _filters: dict[str, Any]) -> None:
+            return None
+
+        async def create(self, table: str, row: dict[str, Any]) -> None:
+            created.append((table, row))
+
+    async def _ensure_db_handler() -> _Handler:
+        return _Handler()
+
+    monkeypatch.setenv("JIUWENCLAW_ID", "embedding-sync-demo")
+    monkeypatch.setattr(
+        embedding_template, "ensure_db_handler", _ensure_db_handler
+    )
+    result = await embedding_template.apply_embedding_template(
+        {
+            "op": "create",
+            "template": {
+                "template_id": "embedding-template-1",
+                "template_name": "Memory embedding",
+                "api_base": "https://embedding.example.com/v1",
+                "api_key": "secret",
+                "model_id": "text-embedding-3-large",
+                "model_provider": "openai",
+                "client_config": {"timeout": 60, "verify_ssl": True},
+            },
+        }
+    )
+
+    assert result == {"template_id": "embedding-template-1"}
+    assert created[0][0] == "embedding_template"
+    assert created[0][1]["jiuwenclaw_id"] == "embedding-sync-demo"
+    assert created[0][1]["template_name"] == "Memory embedding"
+    assert any(
+        table.table_name == "embedding_template"
+        for table in table_init.ALL_TABLE_DEFINITIONS
+    )
+
+
+@pytest.mark.asyncio
+async def test_load_effective_config_loads_embedding_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jid = "embedding-demo"
+    db = _bind_gateway_db(monkeypatch, jid)
+    embedding_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+
+    async def _list_records(
+        table: str,
+        *,
+        filters: dict | None = None,
+        order_by: str = "",
+    ) -> list[dict]:
+        scoped = db.apply_instance_scope(table, dict(filters or {}))
+        if table == "config_effective_service_policy":
+            return []
+        if (
+            table == "config_effective_global_policy"
+            and scoped.get("jiuwenclaw_id") == jid
+        ):
+            return [
+                {
+                    "id": 8,
+                    "jiuwenclaw_id": jid,
+                    "template_ref": {"embedding_model": [embedding_id]},
+                }
+            ]
+        return []
+
+    async def _fetch_template_by_slot(slot: str, template_id: str) -> dict | None:
+        assert slot == TemplateRefSlot.EMBEDDING_MODEL
+        assert template_id == embedding_id
+        return {
+            "template_id": template_id,
+            "api_base": "https://embedding.example.com/v1",
+            "api_key": "secret",
+            "model_id": "text-embedding-3-large",
+        }
+
+    _patch_gateway_queries(
+        monkeypatch,
+        db,
+        list_records=_list_records,
+        fetch_template_by_slot=_fetch_template_by_slot,
+    )
+    loaded = await load_effective_enterprise_config(
+        AgentRequest(request_id="req-embedding"),
+        DEFAULT_AGENT_LOAD_SLOTS,
+    )
+
+    assert loaded is not None
+    assert loaded.embedding == [
+        {
+            "template_id": embedding_id,
+            "api_base": "https://embedding.example.com/v1",
+            "api_key": "secret",
+            "model_id": "text-embedding-3-large",
+        }
+    ]
+    assert "embedding_model" not in loaded.models
+    assert loaded.as_dict()["embedding"] == loaded.embedding
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,8 @@ from .config import (
     is_memory_enabled,
     get_memory_mode,
     get_embed_config,
+    clear_embed_config_db_cache,
+    set_embed_config_db_cache,
     DEFAULT_WORKSPACE_DIR,
 )
 from .embeddings import EmbeddingProvider, create_embedding_provider
@@ -66,6 +68,8 @@ __all__ = [
     "is_memory_enabled",
     "get_memory_mode",
     "get_embed_config",
+    "clear_embed_config_db_cache",
+    "set_embed_config_db_cache",
     "DEFAULT_WORKSPACE_DIR",
     "estimate_tokens",
     "get_external_memory_config",

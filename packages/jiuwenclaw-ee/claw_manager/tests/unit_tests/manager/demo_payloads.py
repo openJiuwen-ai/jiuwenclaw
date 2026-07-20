@@ -102,6 +102,31 @@ def model_templates() -> list[tuple[str, dict[str, Any]]]:
     ]
 
 
+def embedding_templates() -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (
+            "EM1",
+            {
+                "template_name": "记忆向量-OpenAI",
+                "description": "用于记忆语义检索",
+                "embed_tags": ["memory", "task_memory"],
+                "api_base": "https://api.openai.com/v1",
+                "api_key": "sk-demo-embedding",
+                "model_id": "text-embedding-3-large",
+                "model_provider": "openai",
+                "parameters": {"encoding_format": "float", "dimensions": 1024},
+                "client_config": {
+                    "timeout": 60,
+                    "retry_count": 3,
+                    "verify_ssl": True,
+                },
+                "enabled": True,
+                "data": {},
+            },
+        ),
+    ]
+
+
 def extension_config_templates() -> list[tuple[str, dict[str, Any]]]:
     return [
         (

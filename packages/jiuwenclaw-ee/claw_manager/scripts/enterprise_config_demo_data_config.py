@@ -7,16 +7,17 @@
 
 若升级 Manager 后首次双写失败，请删除 ``claw_manager.db`` 后重启 Manager 再执行。
 
-执行顺序（与文档 §2.1–§2.8 一致，跳过步骤 1 provision）：
+执行顺序（与文档 §2.1–§2.9 一致，跳过步骤 1 provision）：
 
 1. §2.1 五条 ``model_template``（M1–M5；2.1.1–2.1.5）
-2. §2.2 四条 ``extension-config-templates``（E1–E4；2.2.1–2.2.4）
-3. §2.3 三条 ``skill-whitelist-templates``（W1–W3；2.3.1–2.3.3）
-4. §2.4 两条 ``service-config-templates``（S1–S2；2.4.1–2.4.2）
-5. §2.5 两条 ``config-effective/service-policies``（2.5.1–2.5.2）
-6. §2.6 两条 ``config-effective/agent-policies``（2.6.1–2.6.2；依赖 2.5.1 的 ``policy_id`` UUID）
-7. §2.7 ``config-effective/global-policies``（2.7；可多条，运行时取 enabled 且 priority 最高者）
-8. §2.8 两条 ``config-default-template-mappings``（2.8.1–2.8.2）
+2. §2.2 三条 ``embedding-template``（B1–B3；全局、销售组、VIP）
+3. §2.3 四条 ``extension-config-templates``（E1–E4）
+4. §2.4 三条 ``skill-whitelist-templates``（W1–W3）
+5. §2.5 两条 ``service-config-templates``（S1–S2）
+6. §2.6 两条 ``config-effective/service-policies``
+7. §2.7 两条 ``config-effective/agent-policies``（依赖 2.6.1 的 ``policy_id`` UUID）
+8. §2.8 ``config-effective/global-policies``（可多条，运行时取 enabled 且 priority 最高者）
+9. §2.9 两条 ``config-default-template-mappings``
 
 典型用法（PowerShell，项目根目录）::
 
@@ -118,12 +119,15 @@ class ManagerClient:
         return self._base
 
     def _url(self, path: str) -> str:
-        if path.startswith((
-            "/model-templates",
-            "/extension-config-templates",
-            "/skill-whitelist-templates",
-            "/service-config-templates",
-        )):
+        if path.startswith(
+            (
+                "/model-templates",
+                "/embedding-templates",
+                "/extension-config-templates",
+                "/skill-whitelist-templates",
+                "/service-config-templates",
+            )
+        ):
             return f"{self._base}/api/v1{path}"
         return f"{self._base}/api/v1/instances/{self._jid}{path}"
 
@@ -277,6 +281,66 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
     ]
 
 
+def _embedding_templates() -> list[tuple[str, dict[str, Any]]]:
+    base = {
+        "api_base": "https://api.openai.com/v1",
+        "model_provider": "openai",
+        "parameters": {"encoding_format": "float"},
+        "client_config": {
+            "timeout": 60,
+            "retry_count": 3,
+            "verify_ssl": True,
+        },
+        "enabled": True,
+    }
+    return [
+        (
+            "B1 全局兜底向量模型",
+            {
+                **base,
+                "template_name": "全局兜底向量模型",
+                "description": "未命中服务策略时使用",
+                "embed_tags": ["memory", "global"],
+                "api_key": "sk-demo-embed-global",
+                "model_id": "text-embedding-3-small",
+                "data": {"demo": "b1"},
+            },
+        ),
+        (
+            "B2 销售组向量模型",
+            {
+                **base,
+                "template_name": "销售组向量模型",
+                "description": "销售组记忆检索使用",
+                "embed_tags": ["memory", "sales"],
+                "api_key": "sk-demo-embed-sales",
+                "model_id": "text-embedding-3-large",
+                "parameters": {
+                    "encoding_format": "float",
+                    "dimensions": 1536,
+                },
+                "data": {"demo": "b2"},
+            },
+        ),
+        (
+            "B3 VIP 向量模型",
+            {
+                **base,
+                "template_name": "VIP 向量模型",
+                "description": "VIP 用户主动记忆使用",
+                "embed_tags": ["memory", "vip"],
+                "api_key": "sk-demo-embed-vip",
+                "model_id": "text-embedding-3-large",
+                "parameters": {
+                    "encoding_format": "float",
+                    "dimensions": 3072,
+                },
+                "data": {"demo": "b3"},
+            },
+        ),
+    ]
+
+
 def _extension_config_templates() -> list[tuple[str, dict[str, Any]]]:
     return [
         (
@@ -424,12 +488,13 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result: dict[str, Any] = {
         "jiuwenclaw_id": client.jiuwenclaw_id,
         "model_templates": {},
+        "embedding_templates": {},
         "extension_config_templates": {},
         "skill_whitelist_templates": {},
         "service_config_templates": {},
     }
 
-    logger.info("[1/8] 创建 model_template（M1–M5）")
+    logger.info("[1/9] 创建 model_template（M1–M5）")
     template_ids: list[str] = []
     for label, body in _model_templates():
         row = client.post("/model-templates", body)
@@ -442,7 +507,19 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     m1, m2, m3, m4, m5 = template_ids
     group_map_default_model = f"${{group::g_demo_sales}} or {m1}"
 
-    logger.info("[2/8] 创建 extension-config-templates（E1–E4）")
+    logger.info("[2/9] 创建 embedding-templates（B1–B3）")
+    embedding_ids: list[str] = []
+    for label, body in _embedding_templates():
+        row = client.post("/embedding-templates", body)
+        tid = _require_template_id(row, "/embedding-templates")
+        embedding_ids.append(tid)
+        key = f"b{len(embedding_ids)}"
+        result["embedding_templates"][key] = tid
+        logger.info("  [%s] %s -> template_id=%s", key, label, tid)
+
+    b1, b2, b3 = embedding_ids
+
+    logger.info("[3/9] 创建 extension-config-templates（E1–E4）")
     extension_ids: list[str] = []
     for label, body in _extension_config_templates():
         row = client.post("/extension-config-templates", body)
@@ -460,7 +537,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         "e4": e4,
     }
 
-    logger.info("[3/8] 创建 skill-whitelist-templates（W1–W3）")
+    logger.info("[4/9] 创建 skill-whitelist-templates（W1–W3）")
     whitelist_ids: list[str] = []
     for label, body in _skill_whitelist_templates():
         row = client.post("/skill-whitelist-templates", body)
@@ -477,7 +554,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         "w3": w3,
     }
 
-    logger.info("[4/8] 创建 service-config-templates（S1–S2）")
+    logger.info("[5/9] 创建 service-config-templates（S1–S2）")
     service_config_ids: list[str] = []
     for label, body in _service_config_templates():
         row = client.post("/service-config-templates", body)
@@ -493,7 +570,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         "s2": s2,
     }
 
-    logger.info("[5/8] 创建 service-policies")
+    logger.info("[6/9] 创建 service-policies")
     sales = client.post(
         "/config-effective/service-policies/",
         {
@@ -505,13 +582,12 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "template_ref": {
                 "default_model": [m2],
                 "vision_model": [m2],
+                "embedding_model": [b2],
                 "skill_whitelist": [w1, w2],
                 "extension_config": [e1, e2],
             },
             "enabled": True,
-            "data": {
-                "note": "服务策略匹配仅看 match_expr；service_id 仅为业务标识"
-            },
+            "data": {"note": "服务策略匹配仅看 match_expr；service_id 仅为业务标识"},
         },
     )
     sales_id = _require_id(sales, "service-policies/sales")
@@ -519,10 +595,11 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["service_policy_sales_id"] = sales_id
     result["service_policy_sales_policy_id"] = sales_policy_id
     logger.info(
-        "  [2.5.1] 销售通道 priority=100 -> id=%s policy_id=%s (default_model=%s, skills=%s,%s, ext=%s,%s)",
+        "  [2.6.1] 销售通道 priority=100 -> id=%s policy_id=%s (default_model=%s, embedding=%s, skills=%s,%s, ext=%s,%s)",
         sales_id,
         sales_policy_id,
         m2,
+        b2,
         w1,
         w2,
         e1,
@@ -546,18 +623,18 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["service_policy_fallback_id"] = fallback_id
     result["service_policy_fallback_policy_id"] = fallback_policy_id
     logger.info(
-        "  [2.5.2] 低优先级兜底 -> id=%s policy_id=%s (default_model=%s)",
+        "  [2.6.2] 低优先级兜底 -> id=%s policy_id=%s (default_model=%s)",
         fallback_id,
         fallback_policy_id,
         m1,
     )
 
-    logger.info("[6/8] 创建 agent-policies")
+    logger.info("[7/9] 创建 agent-policies")
     vip = client.post(
         "/config-effective/agent-policies/",
         {
             "policy_name": "VIP alice",
-            "policy_desc": "alice 覆盖为 M3",
+            "policy_desc": "alice 覆盖为 M3 与 B3",
             "agent_id": "${user_id}",
             "service_policy_id": sales_policy_id,
             "priority": 100,
@@ -565,6 +642,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "template_ref": {
                 "default_model": [m3],
                 "vision_model": [m3],
+                "embedding_model": [b3],
                 "skill_whitelist": [w1],
                 "extension_config": [e3],
             },
@@ -583,10 +661,11 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["agent_policy_vip_id"] = vip_id
     result["agent_policy_vip_policy_id"] = vip_policy_id
     logger.info(
-        "  [2.6.1] VIP alice -> id=%s policy_id=%s (default_model=%s, skill=%s, ext=%s)",
+        "  [2.7.1] VIP alice -> id=%s policy_id=%s (default_model=%s, embedding=%s, skill=%s, ext=%s)",
         vip_id,
         vip_policy_id,
         m3,
+        b3,
         w1,
         e3,
     )
@@ -601,9 +680,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "match_expr": "",
             "template_ref": {"default_model": [group_map_default_model]},
             "enabled": True,
-            "data": {
-                "remark": "固定 agent_id；匹配仅看 match_expr；group:: 查 2.8.2"
-            },
+            "data": {"remark": "固定 agent_id；匹配仅看 match_expr；group:: 查 2.9.2"},
         },
     )
     mapping_id = _require_id(mapping_rule, "agent-policies/mapping")
@@ -611,13 +688,13 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["agent_policy_mapping_id"] = mapping_id
     result["agent_policy_mapping_policy_id"] = mapping_policy_id
     logger.info(
-        "  [2.6.2] 组映射表达式 -> id=%s policy_id=%s (default_model=%s)",
+        "  [2.7.2] 组映射表达式 -> id=%s policy_id=%s (default_model=%s)",
         mapping_id,
         mapping_policy_id,
         group_map_default_model,
     )
 
-    logger.info("[7/8] 创建 global-policies")
+    logger.info("[8/9] 创建 global-policies")
     global_row = client.post(
         "/config-effective/global-policies/",
         {
@@ -629,6 +706,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
                 "video_model": [m1],
                 "audio_model": [m1],
                 "vision_model": [m1],
+                "embedding_model": [b1],
                 "skill_whitelist": [w3],
                 "extension_config": [e4],
             },
@@ -641,15 +719,16 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["global_policy_id"] = global_id
     result["global_policy_uuid"] = global_policy_uuid
     logger.info(
-        "  [2.7] 全局兜底 -> id=%s policy_id=%s (四槽位=%s, skill=%s, ext=%s)",
+        "  [2.8] 全局兜底 -> id=%s policy_id=%s (四模型槽位=%s, embedding=%s, skill=%s, ext=%s)",
         global_id,
         global_policy_uuid,
         m1,
+        b1,
         w3,
         e4,
     )
 
-    logger.info("[8/8] 创建 config-default-template-mappings")
+    logger.info("[9/9] 创建 config-default-template-mappings")
     carol_map = client.post(
         "/config-default-template-mappings/",
         {
@@ -668,7 +747,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["mapping_carol_id"] = carol_map_id
     result["mapping_carol_policy_id"] = carol_map_policy_id
     logger.info(
-        "  [2.8.1] user carol -> template_id=%s (id=%s policy_id=%s)",
+        "  [2.9.1] user carol -> template_id=%s (id=%s policy_id=%s)",
         m4,
         carol_map_id,
         carol_map_policy_id,
@@ -684,7 +763,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "template_id": m5,
             "template_type": "default_model",
             "enabled": True,
-            "data": {"remark": "组级 default_model 映射，供 2.6.2 ${group::g_demo_sales} 解析"},
+            "data": {"remark": "组级 default_model 映射，供 2.7.2 ${group::g_demo_sales} 解析"},
         },
     )
     group_map_id = _require_id(group_map, "mapping/group")
@@ -692,13 +771,22 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["mapping_group_id"] = group_map_id
     result["mapping_group_policy_id"] = group_map_policy_id
     logger.info(
-        "  [2.8.2] group g_demo_sales -> template_id=%s (id=%s policy_id=%s)",
+        "  [2.9.2] group g_demo_sales -> template_id=%s (id=%s policy_id=%s)",
         m5,
         group_map_id,
         group_map_policy_id,
     )
 
-    result["template_id_literals"] = {"m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5}
+    result["template_id_literals"] = {
+        "m1": m1,
+        "m2": m2,
+        "m3": m3,
+        "m4": m4,
+        "m5": m5,
+        "b1": b1,
+        "b2": b2,
+        "b3": b3,
+    }
     return result
 
 
@@ -732,9 +820,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     _configure_cli_logging()
     if _httpx_import_error is not None:
-        logger.error(
-            "缺少 httpx，请在 claw_manager 目录执行: uv sync\n或: pip install httpx"
-        )
+        logger.error("缺少 httpx，请在 claw_manager 目录执行: uv sync\n或: pip install httpx")
         sys.exit(1)
 
     args = _parse_args()
@@ -761,19 +847,20 @@ def main() -> None:
     logger.info("")
     logger.info("[done] 演示配置已写入。预期解析（各模型槽位可不同）：")
     logger.info("  alice + g_demo_sales::bot_main")
-    logger.info("    default/vision -> M3 VIP-加强对话 (2.6.1)")
-    logger.info("    video/audio -> M1 全局兜底-经济型 (2.7 回填)")
-    logger.info(
-        "    skills=[W1 销售组-天气 Skill]; ext=E3 Agent Server 错误恢复（覆盖服务 E1+E2）"
-    )
+    logger.info("    default/vision -> M3 VIP-加强对话 (2.7.1)")
+    logger.info("    video/audio -> M1 全局兜底-经济型 (2.8 回填)")
+    logger.info("    embedding -> B3 VIP 向量模型 (2.7.1)")
+    logger.info("    skills=[W1 销售组-天气 Skill]; ext=E3 Agent Server 错误恢复（覆盖服务 E1+E2）")
     logger.info("  bob   + g_demo_sales::bot_main")
-    logger.info("    default -> M5 销售组映射专用 (2.6.2 + 2.8.2)")
-    logger.info("    vision -> M2 销售组-标准型 (继承 2.5.1)")
-    logger.info("    video/audio -> M1 全局兜底-经济型 (2.7 回填)")
-    logger.info("    skills=[W1 销售组-天气 Skill, W2 销售组-CRM Skill] 继承 2.5.1")
-    logger.info("    ext=E1 Gateway 请求前鉴权 + E2 Gateway 请求后日志（继承 2.5.1）")
+    logger.info("    default -> M5 销售组映射专用 (2.7.2 + 2.9.2)")
+    logger.info("    vision -> M2 销售组-标准型 (继承 2.6.1)")
+    logger.info("    video/audio -> M1 全局兜底-经济型 (2.8 回填)")
+    logger.info("    embedding -> B2 销售组向量模型 (继承 2.6.1)")
+    logger.info("    skills=[W1 销售组-天气 Skill, W2 销售组-CRM Skill] 继承 2.6.1")
+    logger.info("    ext=E1 Gateway 请求前鉴权 + E2 Gateway 请求后日志（继承 2.6.1）")
     logger.info("  g_unknown::bot_main")
     logger.info("    default/vision/video/audio -> M1 全局兜底-经济型 (全局兜底)")
+    logger.info("    embedding -> B1 全局兜底向量模型 (全局兜底)")
     logger.info("    skill=W3 全局兜底 Skill; ext=E4 Gateway 定时清理")
     logger.info("")
     logger.info("Gateway Runtime service_config 验证（§3.2）：")
