@@ -80,6 +80,26 @@ def test_has_sensitive():
     assert has_sensitive("unknown_section", body) is False
 
 
+@pytest.mark.parametrize("container", ["template", "templates", "updates"])
+def test_embedding_template_sensitive_fields(container):
+    values = {
+        "api_key": "sk-embedding",
+        "parameters": {"dimensions": 1024},
+        "client_config": {"timeout": 60},
+    }
+    body = {"op": "sync" if container == "templates" else "update"}
+    body[container] = [values] if container == "templates" else values
+
+    encrypted, fields = encrypt_sensitive_fields(
+        "embedding_templates", body, new_dek()
+    )
+    target = encrypted[container][0] if container == "templates" else encrypted[container]
+    assert len(fields) == 1
+    assert is_encrypted(target["api_key"])
+    assert target["parameters"] == values["parameters"]
+    assert target["client_config"] == values["client_config"]
+
+
 def test_unregistered_section_passthrough():
     body = {"op": "create", "mapping": {"scope_type": "user", "scope_id": "u1"}}
     enc_body, fields = encrypt_sensitive_fields(

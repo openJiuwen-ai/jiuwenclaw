@@ -137,15 +137,6 @@ async def _run(host: str, port: int) -> None:
 
     if os.getenv("AGENT_RUNTIME", "").strip():
         try:
-            from jiuwenclaw.agentserver.memory.config import reload_embed_config_from_gateway_db
-
-            await reload_embed_config_from_gateway_db()
-            logger.info("[AgentServer] embed_config loaded from Gateway DB (if any)")
-        except Exception:  # noqa: BLE001
-            logger.warning("[AgentServer] embed_config cold load skipped", exc_info=True)
-
-    if os.getenv("AGENT_RUNTIME", "").strip():
-        try:
             from jiuwenclaw.agentserver.memory.config import reload_task_memory_config_from_gateway_db
 
             await reload_task_memory_config_from_gateway_db()

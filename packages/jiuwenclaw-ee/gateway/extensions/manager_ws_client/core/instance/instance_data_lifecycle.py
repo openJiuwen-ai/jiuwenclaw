@@ -19,6 +19,7 @@ _LIST_ALL_CAP = 10_000
 # 按 jiuwenclaw_id 隔离的业务表（删除实例时整实例 purge）。
 INSTANCE_PURGE_TABLES: tuple[str, ...] = (
     "model_template",
+    "embedding_template",
     "extension_config_template",
     "skill_whitelist_template",
     "service_config_template",
@@ -29,7 +30,6 @@ INSTANCE_PURGE_TABLES: tuple[str, ...] = (
     "log_masking_rule",
     "channel_config",
     "logging_config",
-    "embed_config",
     "task_memory_config",
     "permissions_config",
 )

@@ -176,6 +176,8 @@ def _apply_slot_entities(
 ) -> None:
     if slot in {s.value for s in MODEL_SLOT_KEYS}:
         result.models[slot] = entities
+    elif slot == TemplateRefSlot.EMBEDDING_MODEL:
+        result.embedding = entities
     elif slot == TemplateRefSlot.SKILL_WHITELIST:
         result.skill_whitelist = entities
     elif slot == TemplateRefSlot.EXTENSION_CONFIG:
@@ -190,6 +192,8 @@ def _any_requested_slot_loaded(
 ) -> bool:
     for slot in load_slots:
         if slot in {s.value for s in MODEL_SLOT_KEYS} and result.models.get(slot):
+            return True
+        if slot == TemplateRefSlot.EMBEDDING_MODEL and result.embedding:
             return True
         if slot == TemplateRefSlot.SKILL_WHITELIST and result.skill_whitelist:
             return True
@@ -243,8 +247,8 @@ async def load_effective_enterprise_config(
     """按 Service → Agent → Global 三级匹配加载企业配置。
 
     ``slots`` 指定要解析并加载的 ``template_ref`` 槽位，例如模型槽位、
-    ``TemplateRefSlot.SKILL_WHITELIST``、``TemplateRefSlot.EXTENSION_CONFIG``、
-    ``TemplateRefSlot.SERVICE_CONFIG`` 等。
+    ``TemplateRefSlot.EMBEDDING_MODEL``、``TemplateRefSlot.SKILL_WHITELIST``、
+    ``TemplateRefSlot.EXTENSION_CONFIG``、``TemplateRefSlot.SERVICE_CONFIG`` 等。
     """
     ctx = routing_context_from_request(request)
     if not slots:

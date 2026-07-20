@@ -50,6 +50,7 @@
     "instances": "Instance Management",
     "config": "Global Config",
     "modelTemplates": "Model Templates",
+    "embeddingTemplates": "Embedding Templates",
     "extensionTemplates": "Extension Templates",
     "skillWhitelistTemplates": "Skill Whitelist Templates",
     "serviceConfigTemplates": "Service Config Templates",
@@ -249,6 +250,27 @@
     "retryCountMin": "Retry count cannot be negative",
     "deleteConfirm": "Delete this model template? It may be referenced by instance policies."
   },
+  "embeddingTemplate": {
+    "title": "Embedding Templates",
+    "subtitle": "Maintain reusable embedding model configurations",
+    "new": "New Embedding Template",
+    "edit": "Edit Embedding Template",
+    "templateName": "Template Name",
+    "templateDescription": "Template Description",
+    "embedTags": "Embedding Tags",
+    "embedTagsHint": "Comma-separated, e.g. memory,task_memory",
+    "apiBase": "API Base",
+    "apiKey": "API Key",
+    "modelId": "Model ID",
+    "modelProvider": "Provider",
+    "parameters": "Request Parameters",
+    "clientConfig": "Client Config",
+    "data": "Extra Data",
+    "updatedAt": "UPDATED AT",
+    "searchPlaceholder": "Search template ID, name, description, provider, model ID, or API base",
+    "fieldRequired": "Please fill in {{field}}",
+    "deleteConfirm": "Delete this embedding template? It may be referenced by instance policies."
+  },
   "extensionTemplate": {
     "title": "Extension Templates",
     "subtitle": "Maintain extension config templates callable on Agent, with support for custom hook functions",
@@ -409,6 +431,7 @@
         "video_model": "Video model (video_model)",
         "audio_model": "Audio model (audio_model)",
         "vision_model": "Vision model (vision_model)",
+        "embedding_model": "Embedding model (embedding_model)",
         "skill_whitelist": "Skill whitelist (skill_whitelist)",
         "extension_config": "Extension config (extension_config)",
         "service_config": "Service config (service_config)"

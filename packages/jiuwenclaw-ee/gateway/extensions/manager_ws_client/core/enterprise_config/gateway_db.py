@@ -25,6 +25,7 @@ _INSTANCE_SCOPED_TABLES = frozenset({
     "config_default_template_mapping",
     "log_masking_rule",
     "model_template",
+    "embedding_template",
     "extension_config_template",
     "skill_whitelist_template",
     "service_config_template",
