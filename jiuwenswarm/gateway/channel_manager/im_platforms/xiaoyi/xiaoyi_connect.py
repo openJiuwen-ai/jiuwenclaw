@@ -1063,17 +1063,6 @@ class XiaoyiChannel(BaseChannel):
         if file_attachments:
             logger.info(f"XiaoYi: Processed {len(file_attachments)} file(s): {', '.join(file_attachments)}")
 
-        # ==================== INTERCEPT TEAM MODE COMMANDS ====================
-        # xiaoyi channel 不支持 team 模式，拦截并直接返回提示
-        text_stripped = text.strip()
-        if text_stripped in ("/mode team", "/mode code.team"):
-            logger.info(f"XiaoYi: Intercepted team mode command: {text_stripped}")
-            response_text = "小艺：暂不支持team 模式。请使用web或者飞书频道试用"
-            for url_key in list(self._ws_connections.keys()):
-                await self._send_text_response(session_id, task_id, response_text, url_key, is_final=True)
-            return
-        # =================================================================
-
         # ==================== DOWNLOAD AND SAVE MEDIA FILES ====================
         media_payload: dict[str, Any] = {}
         if media_files:
