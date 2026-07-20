@@ -1454,7 +1454,9 @@ function AppContent() {
   const enterNewConversation = useCallback((targetMode: AgentMode = mode, options: NewConversationOptions = {}) => {
     const currentSessionId = sessionIdRef.current;
     const currentRuntime = useSessionStore.getState().getRuntime(currentSessionId);
-    const selectedModelName = currentRuntime?.selectedModelName ?? null;
+    // 新建会话固定使用配置的默认模型，不继承当前会话手动切换过的模型；
+    // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
+    const selectedModelName = useSessionStore.getState().defaultModelName ?? currentRuntime?.selectedModelName ?? null;
     const selectedProject = options.project ?? useWorkspaceStore.getState().selectedProject;
     const projectDir = selectedProject?.project_dir ?? currentRuntime?.projectDirectory ?? null;
     disposeInFlightHistoryHandles(
