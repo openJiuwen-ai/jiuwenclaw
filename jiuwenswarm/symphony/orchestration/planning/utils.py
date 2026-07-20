@@ -34,13 +34,13 @@ def eligible_can_feed_edges(
     for edge in edges:
         source_id = skill_id(edge.get("source"))
         target_id = skill_id(edge.get("target"))
-        if (
-            edge.get("type") == "can_feed"
-            and float(edge.get("confidence") or 0.0) >= min_confidence
-            and source_id in known_skill_ids
-            and target_id in known_skill_ids
-        ):
-            eligible.append(edge)
+        if edge.get("type") != "can_feed":
+            continue
+        if float(edge.get("confidence") or 0.0) < min_confidence:
+            continue
+        if source_id not in known_skill_ids or target_id not in known_skill_ids:
+            continue
+        eligible.append(edge)
     return sorted(
         eligible,
         key=lambda item: (

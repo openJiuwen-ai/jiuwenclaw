@@ -69,7 +69,8 @@ def test_plan_calls_compose_rpc_once_without_language():
         "success": True,
         "content": "## Plan",
         "direct_display": True,
-        "continue_after_display": False,
+        "continue_after_display": True,
+        "followup_action": "external_skill_discovery",
     }
 
 

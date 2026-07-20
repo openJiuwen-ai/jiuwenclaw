@@ -91,7 +91,7 @@ Schema:
 }
 """
 
-BEAM_FINAL_RERANK_SYSTEM_PROMPT = """You are Symphony's final task orchestration reranker.
+BEAM_FINAL_RERANK_SYSTEM_PROMPT = """You are a final task orchestration reranker.
 Return strict JSON only.
 
 You receive the user's query, candidate plans produced by bidirectional beam
@@ -360,6 +360,9 @@ class BidirectionalBeamPlanner:
         self._llm_call_count = 0
         self._final_rerank_call_count = 0
         self._judge_failures: list[str] = []
+        self.required_output_types: frozenset[str] = frozenset()
+        self._current_expansions: dict[str, NeighborExpansion] = {}
+        self._current_expansion_aliases: dict[str, list[str]] = {}
 
     async def plan(self, query: str) -> dict[str, Any]:
         self._reset_beam_progress()
@@ -656,19 +659,25 @@ class BidirectionalBeamPlanner:
         self,
         candidate_skill_ids: set[str],
     ) -> list[dict[str, Any]]:
-        return [
-            {
-                "source_id": skill_id(edge.get("source")),
-                "target_id": skill_id(edge.get("target")),
-                "confidence": edge.get("confidence"),
-            }
-            for edge in self.eligible_edges
-            if skill_id(edge.get("source")) in candidate_skill_ids
-            and skill_id(edge.get("target")) in candidate_skill_ids
-        ]
+        output = []
+        for edge in self.eligible_edges:
+            source_id = skill_id(edge.get("source"))
+            target_id = skill_id(edge.get("target"))
+            if source_id not in candidate_skill_ids:
+                continue
+            if target_id not in candidate_skill_ids:
+                continue
+            output.append(
+                {
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "confidence": edge.get("confidence"),
+                }
+            )
+        return output
 
+    @staticmethod
     def _compact_plan_for_rerank(
-        self,
         plan: dict[str, Any],
         *,
         plan_index: int,
@@ -706,12 +715,13 @@ class BidirectionalBeamPlanner:
             }
 
         allowed_skill_ids = _candidate_plan_skill_ids(recommended_plans)
-        step_ids = [
-            current_skill_id
-            for current_skill_id in _normalize_rerank_step_ids(raw_steps)
-            if current_skill_id in allowed_skill_ids
-            and current_skill_id in self.skill_by_id
-        ]
+        step_ids = []
+        for current_skill_id in _normalize_rerank_step_ids(raw_steps):
+            if current_skill_id not in allowed_skill_ids:
+                continue
+            if current_skill_id not in self.skill_by_id:
+                continue
+            step_ids.append(current_skill_id)
         if not step_ids:
             return {
                 "valid": True,
@@ -732,14 +742,16 @@ class BidirectionalBeamPlanner:
         order = {
             current_skill_id: index for index, current_skill_id in enumerate(step_ids)
         }
-        selected_edges = [
-            edge
-            for edge in selected_edges
-            if edge[0] in step_set
-            and edge[1] in step_set
-            and edge in eligible_edge_keys
-            and order[edge[0]] < order[edge[1]]
-        ]
+        filtered_edges = []
+        for edge in selected_edges:
+            if edge[0] not in step_set or edge[1] not in step_set:
+                continue
+            if edge not in eligible_edge_keys:
+                continue
+            if order[edge[0]] >= order[edge[1]]:
+                continue
+            filtered_edges.append(edge)
+        selected_edges = filtered_edges
 
         return {
             "valid": True,
@@ -811,12 +823,12 @@ class BidirectionalBeamPlanner:
                     "reason": step_reasons.get(current_skill_id, ""),
                 }
             )
-        missing_inputs = _dedupe_dict_items(
-            item
-            for step in steps
-            for item in step.get("missing_inputs") or []
-            if isinstance(item, dict)
-        )
+        raw_missing_inputs = []
+        for step in steps:
+            for item in step.get("missing_inputs") or []:
+                if isinstance(item, dict):
+                    raw_missing_inputs.append(item)
+        missing_inputs = _dedupe_dict_items(raw_missing_inputs)
         edge_by_key = {
             (skill_id(edge.get("source")), skill_id(edge.get("target"))): edge
             for edge in self.eligible_edges
@@ -1004,11 +1016,7 @@ class BidirectionalBeamPlanner:
         judgements: dict[str, SemanticJudgement],
     ) -> dict[str, SemanticJudgement]:
         output = dict(judgements)
-        for source_id, alias_ids in getattr(
-            self,
-            "_current_expansion_aliases",
-            {},
-        ).items():
+        for source_id, alias_ids in self._current_expansion_aliases.items():
             judgement = judgements.get(source_id)
             if judgement is None:
                 continue
@@ -1097,7 +1105,7 @@ class BidirectionalBeamPlanner:
         return output
 
     def _expansion_by_id(self, candidate_id: str) -> NeighborExpansion | None:
-        return getattr(self, "_current_expansions", {}).get(candidate_id)
+        return self._current_expansions.get(candidate_id)
 
     def _reset_beam_progress(self) -> None:
         self._beam_graph = BeamSearchGraph(self.skill_by_id)
@@ -1125,9 +1133,7 @@ class BidirectionalBeamPlanner:
             logger.debug("beam progress callback failed: %s", exc)
 
     def _record_candidates_found(self) -> bool:
-        expansions = _sorted_expansions(
-            getattr(self, "_current_expansions", {}).values()
-        )
+        expansions = _sorted_expansions(self._current_expansions.values())
         for expansion in expansions:
             self._beam_graph.add_candidate(expansion)
         return bool(expansions)
@@ -1212,11 +1218,12 @@ class BidirectionalBeamPlanner:
         semantic_scores = tuple(
             score for state in states for score in state.semantic_scores
         )
-        reasons = tuple(
-            dict.fromkeys(
-                reason for state in states for reason in state.score_reasons if reason
-            )
-        )
+        unique_reasons = []
+        for state in states:
+            for reason in state.score_reasons:
+                if reason and reason not in unique_reasons:
+                    unique_reasons.append(reason)
+        reasons = tuple(unique_reasons)
         return BeamState(
             skill_ids=tuple(ordered),
             edge_indices=edge_indices,
@@ -1432,7 +1439,9 @@ def _normalize_rerank_edges(raw_edges: Any) -> dict[str, Any]:
         source_id = skill_id(item.get("source_id") or item.get("source")).strip()
         target_id = skill_id(item.get("target_id") or item.get("target")).strip()
         edge = (source_id, target_id)
-        if not source_id or not target_id or source_id == target_id or edge in seen:
+        if not source_id or not target_id:
+            continue
+        if source_id == target_id or edge in seen:
             continue
         seen.add(edge)
         edges.append(edge)

@@ -509,7 +509,7 @@ def _read_build_log(score_dir: Path, *, limit: int = 80) -> list[dict[str, Any]]
     except OSError:
         return []
     entries: list[dict[str, Any]] = []
-    for line in lines[-max(1, limit) :]:
+    for line in lines[-max(1, limit):]:
         try:
             payload = json.loads(line)
         except json.JSONDecodeError:
