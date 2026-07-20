@@ -98,7 +98,7 @@ JiuwenSwarm provides two automation mechanisms: **Scheduled Tasks (Cron)** and *
 | **Cron Expression** | Cron expression | `0 9 * * *` (every day at 9am) |
 | **Status** | Task status | Enable/Disable |
 | **Description** | Task content description | Generate today's work reminder |
-| **Wake Offset Seconds** | Wake-up advance seconds | `300` (5 minutes advance) |
+| **Wake Offset Seconds** | Wake-up advance seconds | `0` (default, no advance wake-up) |
 | **Delivery Channel** | Result delivery channel | `web`, `feishu`, `wechat`, `wecom`, `whatsapp`, `telegram`, etc. |
 | **Project Directory** | Project working directory (absolute path) for task归属 | `/home/user/my-project`; defaults to current session's project |
 
@@ -278,7 +278,7 @@ Scheduled task execution results are:
 
 ### Q4: What does wake_offset_seconds do?
 
-`wake_offset_seconds` defines how early to wake up the Agent. For example:
+`wake_offset_seconds` defines how early to wake up the Agent (default `0`, i.e. no advance wake-up). For example, when set to `300` (5 minutes):
 - Task scheduled for 9:00 AM
 - `wake_offset_seconds: 300` (5 minutes)
 - Agent starts preparing at 8:55 AM to ensure execution at 9:00 AM sharp
