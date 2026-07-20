@@ -6,9 +6,11 @@ import asyncio
 import hashlib
 import json
 import logging
+import mimetypes
+import re
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Any, Awaitable, Callable, Iterable, Sequence
 
 from jiuwenswarm.symphony.llm import LLMConfig, create_llm_client, llm_usage_context
 from jiuwenswarm.symphony.orchestration.artifacts import ScoreArtifacts
@@ -23,6 +25,7 @@ from jiuwenswarm.symphony.orchestration.planning.models import (
 from jiuwenswarm.symphony.orchestration.planning.plan_builder import (
     build_incoming_edges,
     build_outgoing_edges,
+    edge_plan_item,
     state_to_plan,
 )
 from jiuwenswarm.symphony.orchestration.planning.utils import (
@@ -38,6 +41,32 @@ DEFAULT_MAX_CONCURRENT_JUDGES = 3
 BEAM_DEFAULT_MAX_SKILLS = 40
 BeamProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 logger = logging.getLogger(__name__)
+_EXPLICIT_FILE_EXTENSION_RE = re.compile(
+    r"(?<![A-Za-z0-9])[\w.-]+\.([A-Za-z0-9]{1,12})\b"
+)
+_MIME_TO_OUTPUT_TYPE = {
+    "application/json": "json",
+    "application/msword": "docx",
+    "application/pdf": "pdf",
+    "application/vnd.ms-excel": "xlsx",
+    "application/vnd.ms-powerpoint": "pptx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": (
+        "pptx"
+    ),
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "text/csv": "csv",
+    "text/html": "html",
+}
+for _extension, _mime_type in {
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}.items():
+    mimetypes.add_type(_mime_type, _extension)
 
 BEAM_JUDGE_SYSTEM_PROMPT = """You are Symphony's bidirectional beam expansion judge.
 Return strict JSON only.
@@ -58,6 +87,38 @@ Schema:
 {
   "judgements": [
     {"candidate_id": "candidate-id", "score": 0.0, "reason": "short reason"}
+  ]
+}
+"""
+
+BEAM_FINAL_RERANK_SYSTEM_PROMPT = """You are Symphony's final task orchestration reranker.
+Return strict JSON only.
+
+You receive the user's query, candidate plans produced by bidirectional beam
+search, a candidate Skill pool, and the existing can_feed edges available among
+those Skills.
+
+Task:
+- Select the best plan for completing the user's task.
+- Candidate plans are references, not hard constraints. You may combine Skills
+  from different plans or remove duplicate-function Skills.
+- Use only Skill IDs from candidate_skill_pool.
+- Use only edges from candidate_can_feed_edges. Skills without a dependency edge
+  may remain parallel steps in the same plan.
+- Preserve distinct Skills needed for multi-stage or multi-deliverable tasks.
+- Prefer the shortest plan that covers the user's intent.
+- Do not invent Skills, inputs, outputs, dependencies, or artifacts.
+- Keep each reason <= 50 Chinese characters or <= 12 English words.
+
+Schema:
+{
+  "selected_plan_index": 1,
+  "reason": "short reason",
+  "steps": [
+    {"skill_id": "skill-a", "reason": "short reason"}
+  ],
+  "can_feed_edges": [
+    {"source_id": "skill-a", "target_id": "skill-b"}
   ]
 }
 """
@@ -297,10 +358,13 @@ class BidirectionalBeamPlanner:
         self._cache_misses = 0
         self._judge_semaphore = asyncio.Semaphore(self.max_concurrent_judges)
         self._llm_call_count = 0
+        self._final_rerank_call_count = 0
         self._judge_failures: list[str] = []
 
     async def plan(self, query: str) -> dict[str, Any]:
         self._reset_beam_progress()
+        self._final_rerank_call_count = 0
+        self.required_output_types = _required_output_types_from_query(query)
         query_signature = _query_signature(query)
         frontier = self._initial_states()
         all_states = list(frontier)
@@ -361,6 +425,12 @@ class BidirectionalBeamPlanner:
         final_states = self._merge_converged_states(all_states)
         plans = self._plans_from_states(final_states)[: self.top_k]
         recommended_plans = [self._plan_payload(plan, query=query) for plan in plans]
+        final_rerank = await self._final_rerank_plans(
+            query=query,
+            recommended_plans=recommended_plans,
+            seed_skill_ids=seed_skill_ids,
+        )
+        recommended_plans = final_rerank["recommended_plans"]
         final_plan = recommended_plans[0] if recommended_plans else {}
         self._beam_graph.mark_final_plan(final_plan)
         await self._emit_beam_event(
@@ -380,7 +450,7 @@ class BidirectionalBeamPlanner:
             "language": self.language,
             "score_dir": str(self.artifacts.score_dir),
             "planning_mode": "bidirectional_beam",
-            "llm_call_count": self._llm_call_count,
+            "llm_call_count": self._llm_call_count + self._final_rerank_call_count,
             "candidate_skill_count": len(unique_skill_ids),
             "candidate_edge_count": len(self.eligible_edges),
             "plans": recommended_plans,
@@ -397,8 +467,15 @@ class BidirectionalBeamPlanner:
                 "strategy": "semantic_bidirectional_beam",
                 "validated_count": len(recommended_plans),
                 "candidate_count": len(unique_skill_ids),
+                "judge_llm_call_count": self._llm_call_count,
                 "judge_cache_hits": self._cache_hits,
                 "judge_cache_misses": self._cache_misses,
+                "final_rerank": {
+                    "applied": final_rerank["applied"],
+                    "llm_call_count": self._final_rerank_call_count,
+                    "cross_plan_skill_merge": final_rerank["cross_plan_skill_merge"],
+                    "error": final_rerank["error"],
+                },
             },
             "validation": {
                 "valid": True,
@@ -455,6 +532,316 @@ class BidirectionalBeamPlanner:
                 reason=str(item.get("reason") or "").strip(),
             )
         return judgements
+
+    async def _final_rerank_plans(
+        self,
+        *,
+        query: str,
+        recommended_plans: list[dict[str, Any]],
+        seed_skill_ids: tuple[str, ...],
+    ) -> dict[str, Any]:
+        base = {
+            "applied": False,
+            "error": "",
+            "cross_plan_skill_merge": False,
+            "recommended_plans": recommended_plans[: self.top_k],
+        }
+        if not recommended_plans:
+            return base
+
+        payload = self._final_rerank_payload(
+            query=query,
+            recommended_plans=recommended_plans,
+            seed_skill_ids=seed_skill_ids,
+        )
+        self._final_rerank_call_count += 1
+        try:
+            with llm_usage_context("orchestration", "beam_final_rerank"):
+                raw = await self._client().complete_json_async(
+                    system_prompt=(
+                        f"{BEAM_FINAL_RERANK_SYSTEM_PROMPT}\n"
+                        f"{planner_language_instruction(self.language)}"
+                    ),
+                    user_content=json.dumps(payload, ensure_ascii=False),
+                    error_context="Symphony beam final rerank",
+                    request_overrides={
+                        "extra_body": {"thinking": {"type": "disabled"}}
+                    },
+                )
+            selection = json.loads(raw)
+        except Exception as exc:
+            return {**base, "error": f"{type(exc).__name__}: {exc}"}
+        if not isinstance(selection, dict):
+            return {**base, "error": "Final rerank returned non-object JSON."}
+
+        materialized = self._materialize_final_rerank(
+            selection,
+            query=query,
+            recommended_plans=recommended_plans,
+        )
+        if not materialized["valid"]:
+            return {**base, "error": materialized["detail"]}
+
+        primary_plan = materialized["plan"]
+        output = [primary_plan]
+        seen = {_dict_plan_signature(primary_plan)}
+        for plan in recommended_plans:
+            signature = _dict_plan_signature(plan)
+            if signature in seen:
+                continue
+            output.append(plan)
+            seen.add(signature)
+            if len(output) >= self.top_k:
+                break
+        return {
+            **base,
+            "applied": True,
+            "cross_plan_skill_merge": materialized["cross_plan_skill_merge"],
+            "recommended_plans": output,
+        }
+
+    def _final_rerank_payload(
+        self,
+        *,
+        query: str,
+        recommended_plans: list[dict[str, Any]],
+        seed_skill_ids: tuple[str, ...],
+    ) -> dict[str, Any]:
+        candidate_skill_ids = _candidate_plan_skill_ids(recommended_plans)
+        return {
+            "query": query,
+            "required_output_types": sorted(self.required_output_types),
+            "candidate_skill_pool": self._candidate_skill_pool_for_rerank(
+                candidate_skill_ids,
+                seed_skill_ids=seed_skill_ids,
+            ),
+            "candidate_can_feed_edges": self._candidate_edges_for_rerank(
+                candidate_skill_ids
+            ),
+            "candidate_plans": [
+                self._compact_plan_for_rerank(plan, plan_index=index)
+                for index, plan in enumerate(recommended_plans, start=1)
+            ],
+        }
+
+    def _candidate_skill_pool_for_rerank(
+        self,
+        candidate_skill_ids: set[str],
+        *,
+        seed_skill_ids: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        seed_skill_id_set = set(seed_skill_ids)
+        output = []
+        for current_skill_id in sorted(candidate_skill_ids):
+            skill = self.skill_by_id.get(current_skill_id)
+            if not skill:
+                continue
+            output.append(
+                {
+                    **skill_payload(skill),
+                    "is_seed": current_skill_id in seed_skill_id_set,
+                    "outputs": [
+                        {
+                            "name": str(item.get("name") or ""),
+                            "type": str(item.get("type") or "unknown"),
+                        }
+                        for item in skill.get("outputs") or []
+                        if isinstance(item, dict) and item.get("name")
+                    ],
+                }
+            )
+        return output
+
+    def _candidate_edges_for_rerank(
+        self,
+        candidate_skill_ids: set[str],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "source_id": skill_id(edge.get("source")),
+                "target_id": skill_id(edge.get("target")),
+                "confidence": edge.get("confidence"),
+            }
+            for edge in self.eligible_edges
+            if skill_id(edge.get("source")) in candidate_skill_ids
+            and skill_id(edge.get("target")) in candidate_skill_ids
+        ]
+
+    def _compact_plan_for_rerank(
+        self,
+        plan: dict[str, Any],
+        *,
+        plan_index: int,
+    ) -> dict[str, Any]:
+        return {
+            "plan_index": plan_index,
+            "skills": list(_dict_plan_signature(plan)),
+            "missing_input_count": len(plan.get("missing_inputs") or []),
+            "status": plan.get("status"),
+        }
+
+    def _materialize_final_rerank(
+        self,
+        selection: dict[str, Any],
+        *,
+        query: str,
+        recommended_plans: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        selected_index = _positive_int(selection.get("selected_plan_index")) or 1
+        selected_index = min(selected_index, len(recommended_plans))
+
+        selected_plan = recommended_plans[selected_index - 1]
+        raw_steps = selection.get("steps")
+        if raw_steps is None:
+            return {
+                "valid": True,
+                "detail": "",
+                "cross_plan_skill_merge": False,
+                "plan": {
+                    **selected_plan,
+                    "reason": _short_text(str(selection.get("reason") or ""))
+                    or selected_plan.get("reason", ""),
+                    "source": "bidirectional_beam_final_rerank",
+                },
+            }
+
+        allowed_skill_ids = _candidate_plan_skill_ids(recommended_plans)
+        step_ids = [
+            current_skill_id
+            for current_skill_id in _normalize_rerank_step_ids(raw_steps)
+            if current_skill_id in allowed_skill_ids
+            and current_skill_id in self.skill_by_id
+        ]
+        if not step_ids:
+            return {
+                "valid": True,
+                "detail": "",
+                "cross_plan_skill_merge": False,
+                "plan": selected_plan,
+            }
+
+        edge_result = _normalize_rerank_edges(selection.get("can_feed_edges"))
+        selected_edges = edge_result["edges"]
+        if selection.get("can_feed_edges") is None:
+            selected_edges = self._default_rerank_edges(step_ids)
+        step_set = set(step_ids)
+        eligible_edge_keys = {
+            (skill_id(edge.get("source")), skill_id(edge.get("target")))
+            for edge in self.eligible_edges
+        }
+        order = {
+            current_skill_id: index for index, current_skill_id in enumerate(step_ids)
+        }
+        selected_edges = [
+            edge
+            for edge in selected_edges
+            if edge[0] in step_set
+            and edge[1] in step_set
+            and edge in eligible_edge_keys
+            and order[edge[0]] < order[edge[1]]
+        ]
+
+        return {
+            "valid": True,
+            "detail": "",
+            "cross_plan_skill_merge": not set(step_ids)
+            <= set(_dict_plan_signature(selected_plan)),
+            "plan": self._final_rerank_plan_payload(
+                selection,
+                query=query,
+                step_ids=step_ids,
+                selected_edges=selected_edges,
+                recommended_plans=recommended_plans,
+            ),
+        }
+
+    def _default_rerank_edges(
+        self,
+        step_ids: list[str],
+    ) -> list[tuple[str, str]]:
+        order = {
+            current_skill_id: index for index, current_skill_id in enumerate(step_ids)
+        }
+        output = []
+        for item in self.eligible_edges:
+            edge = (skill_id(item.get("source")), skill_id(item.get("target")))
+            if (
+                edge[0] in order
+                and edge[1] in order
+                and order[edge[0]] < order[edge[1]]
+            ):
+                output.append(edge)
+        return output
+
+    def _final_rerank_plan_payload(
+        self,
+        selection: dict[str, Any],
+        *,
+        query: str,
+        step_ids: list[str],
+        selected_edges: list[tuple[str, str]],
+        recommended_plans: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        source_steps = _plan_steps_by_skill(recommended_plans)
+        step_reasons = _step_reasons_by_skill(selection.get("steps"))
+        steps = []
+        produced_artifacts = []
+        for index, current_skill_id in enumerate(step_ids, start=1):
+            skill = self.skill_by_id[current_skill_id]
+            source_step = source_steps.get(current_skill_id, {})
+            outputs = list(skill.get("outputs") or [])
+            produced_artifacts.extend(
+                {
+                    "name": item.get("name"),
+                    "type": item.get("type") or "unknown",
+                    "source": "skill_output",
+                }
+                for item in outputs
+                if isinstance(item, dict) and item.get("name")
+            )
+            steps.append(
+                {
+                    "step": index,
+                    "skill_id": current_skill_id,
+                    "name": str(skill.get("name") or current_skill_id),
+                    "inputs": list(skill.get("inputs") or []),
+                    "outputs": outputs,
+                    "missing_inputs": list(source_step.get("missing_inputs") or []),
+                    "filled_inputs": list(source_step.get("filled_inputs") or []),
+                    "reason": step_reasons.get(current_skill_id, ""),
+                }
+            )
+        missing_inputs = _dedupe_dict_items(
+            item
+            for step in steps
+            for item in step.get("missing_inputs") or []
+            if isinstance(item, dict)
+        )
+        edge_by_key = {
+            (skill_id(edge.get("source")), skill_id(edge.get("target"))): edge
+            for edge in self.eligible_edges
+        }
+        edge_items = [edge_plan_item(edge_by_key[edge]) for edge in selected_edges]
+        status = "needs_input" if missing_inputs else "ready"
+        reason = _short_text(str(selection.get("reason") or ""))
+        return {
+            "title": _query_plan_title(query, language=self.language),
+            "status": status,
+            "steps": steps,
+            "stages": _rerank_plan_stages(steps, edge_items),
+            "produced_artifacts": _dedupe_dict_items(produced_artifacts),
+            "missing_inputs": missing_inputs,
+            "can_feed_edges": edge_items,
+            "reason": reason,
+            "reasons": [reason] if reason else [],
+            "plan_classification": (
+                "executable"
+                if status == "ready"
+                else "structurally_valid_but_incomplete"
+            ),
+            "connectivity_trace": ["can_feed"] if edge_items else [],
+            "source": "bidirectional_beam_final_rerank",
+        }
 
     def _client(self) -> Any:
         if self.llm_client is not None:
@@ -1003,6 +1390,152 @@ def _state_signature(state: BeamState) -> str:
     return hashlib.sha1(
         json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()[:10]
+
+
+def _dict_plan_signature(plan: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        str(step.get("skill_id") or "").strip()
+        for step in plan.get("steps") or []
+        if isinstance(step, dict) and str(step.get("skill_id") or "").strip()
+    )
+
+
+def _candidate_plan_skill_ids(plans: list[dict[str, Any]]) -> set[str]:
+    return {
+        current_skill_id
+        for plan in plans
+        for current_skill_id in _dict_plan_signature(plan)
+    }
+
+
+def _normalize_rerank_step_ids(raw_steps: Any) -> list[str]:
+    if not isinstance(raw_steps, list):
+        return []
+    output = []
+    for item in raw_steps:
+        current_skill_id = skill_id(
+            item.get("skill_id") if isinstance(item, dict) else item
+        ).strip()
+        if current_skill_id and current_skill_id not in output:
+            output.append(current_skill_id)
+    return output
+
+
+def _normalize_rerank_edges(raw_edges: Any) -> dict[str, Any]:
+    edges: list[tuple[str, str]] = []
+    if not isinstance(raw_edges, list):
+        return {"edges": edges}
+    seen = set()
+    for item in raw_edges:
+        if not isinstance(item, dict):
+            continue
+        source_id = skill_id(item.get("source_id") or item.get("source")).strip()
+        target_id = skill_id(item.get("target_id") or item.get("target")).strip()
+        edge = (source_id, target_id)
+        if not source_id or not target_id or source_id == target_id or edge in seen:
+            continue
+        seen.add(edge)
+        edges.append(edge)
+    return {"edges": edges}
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _short_text(value: str, *, max_chars: int = 80) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip()
+
+
+def _plan_steps_by_skill(
+    plans: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    output = {}
+    for plan in plans:
+        for step in plan.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            current_skill_id = str(step.get("skill_id") or "").strip()
+            if current_skill_id:
+                output.setdefault(current_skill_id, step)
+    return output
+
+
+def _step_reasons_by_skill(raw_steps: Any) -> dict[str, str]:
+    if not isinstance(raw_steps, list):
+        return {}
+    output = {}
+    for item in raw_steps:
+        if not isinstance(item, dict):
+            continue
+        current_skill_id = skill_id(item.get("skill_id")).strip()
+        if current_skill_id:
+            output[current_skill_id] = _short_text(str(item.get("reason") or ""))
+    return output
+
+
+def _dedupe_dict_items(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    seen = set()
+    for item in items:
+        key = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(item)
+    return output
+
+
+def _rerank_plan_stages(
+    steps: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    step_by_id = {str(step.get("skill_id") or ""): step for step in steps}
+    incoming = {current_skill_id: set() for current_skill_id in step_by_id}
+    for edge in edges:
+        source_id = str(edge.get("source_id") or "")
+        target_id = str(edge.get("target_id") or "")
+        if source_id in step_by_id and target_id in incoming:
+            incoming[target_id].add(source_id)
+    remaining = list(step_by_id)
+    completed = set()
+    stages = []
+    while remaining:
+        ready = [
+            current_skill_id
+            for current_skill_id in remaining
+            if incoming[current_skill_id] <= completed
+        ]
+        if not ready:
+            ready = [remaining[0]]
+        stages.append(
+            {
+                "stage": len(stages) + 1,
+                "skills": [step_by_id[current_skill_id] for current_skill_id in ready],
+            }
+        )
+        completed.update(ready)
+        remaining = [item for item in remaining if item not in completed]
+    return stages
+
+
+def _required_output_types_from_query(query: str) -> frozenset[str]:
+    output_types = set()
+    for match in _EXPLICIT_FILE_EXTENSION_RE.finditer(str(query or "")):
+        normalized = str(match.group(1) or "").strip().lower().lstrip(".")
+        mime_type, _encoding = mimetypes.guess_type(f"file.{normalized}")
+        if mime_type in _MIME_TO_OUTPUT_TYPE:
+            output_types.add(_MIME_TO_OUTPUT_TYPE[mime_type])
+        elif mime_type and mime_type.startswith("image/"):
+            output_types.add("image")
+    return frozenset(output_types)
 
 
 def _clamp_score(value: Any) -> float:
