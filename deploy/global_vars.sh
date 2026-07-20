@@ -35,6 +35,9 @@ declare -A CONFIG=(
     ["LOG_TEMPLATE_FILE"]="${TEMPLATE_DIR}/log.template.yaml"
     ["LOG_FILE"]="${CONFIG_DIR}/log.yaml"
 
+    ["JINA_TEMPLATE_FILE"]="${TEMPLATE_DIR}/jina.template.yaml"
+    ["JINA_FILE"]="${CONFIG_DIR}/jina.yaml"
+
     ["SECRET_CM_TEMPLATE_FILE"]="${TEMPLATE_DIR}/configmap-secret.template.yaml"
     ["SECRET_CM_FILE"]="${CONFIG_DIR}/configmap-secret.yaml"
 
@@ -74,7 +77,7 @@ declare -A ARGS=(
 
 
 # ==== All available modules ====
-declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "LOG" "GATEWAY" "WEB" "MANAGER")
+declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "LOG" "JINA" "GATEWAY" "WEB" "MANAGER")
 
 declare -ga MODULES=()
 
@@ -124,7 +127,12 @@ declare -A DEPLOY_VARS=(
     ["IS_UP_MANAGER_WEB"]="true"
     ["IS_MOUNT_WEB_CODE"]="false"
     ["JIUWENBOX_CODE_POD_PATH"]="/usr/local/lib/python3.11/site-packages/jiuwenbox"
-    ["JIUWENCLAW_ID"]=""
+    ["JINA_NAME"]="jina"
+    ["JINA_CACHE_IMAGE"]="nginx:alpine"
+    ["JINA_READER_IMAGE"]="ghcr.1ms.run/jina-ai/reader:latest"
+    ["JINA_READER_ENDPOINT"]="https://r.jinaai.cn"
+    ["JINA_READER_NUM"]="2"
+    ["FLUENT_BIT_IMAGE"]="fluent/fluent-bit:3.0.0"
     ["MANAGER_DB_NAME"]="manager"
     ["MANAGER_PG_SCHEMA"]="public"
     ["MANAGER_REST_PORT"]="8765"

@@ -287,7 +287,7 @@ def _fetch_via_jina_sync(url: str, timeout_seconds: int) -> dict[str, Any] | Non
         logger.warning(
             "Jina proxy webpage fetch failed: %s: %s",
             type(exc).__name__,
-            str(exc)[:200],
+            str(exc),
         )
         return None
 

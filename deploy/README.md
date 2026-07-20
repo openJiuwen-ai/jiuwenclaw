@@ -88,6 +88,7 @@ JiuwenClaw_deployTool_0.0.74k_arm64/
 ├── update_docker_registry.py             # 镜像仓库地址批量更新工具
 ├── web_handler.sh                        # Web 前端模块部署、运维脚本
 ├── log_handler.sh                        # 日志管理模块部署、运维脚本
+├── jina_handler.sh                       # 网页内容提取服务模块部署、运维脚本
 ├── configmap_secret_handler.sh           # 处理存放密码的ConfigMap的脚本
 └── templates/                            # 所有 Kubernetes 资源模板配置目录
     ├── gateway-config-jiuwen.template.yaml # 网关业务配置模板
@@ -103,6 +104,7 @@ JiuwenClaw_deployTool_0.0.74k_arm64/
     ├── postgresql.template.yaml            # PostgreSQL 数据库 Kubernetes 资源模板
     ├── redis.template.yaml                 # Redis 缓存 Kubernetes 资源模板
     ├── log.template.yaml                   # 日志模块 Kubernetes 资源模板
+    ├── jina.template.yaml                  # 网页内容提取服务模块 Kubernetes 资源模板
     ├── configmap-secret.template.yaml      # 专门存放密码的ConfigMap 资源模板
     └── web.template.yaml                   # Web 前端 Kubernetes 部署资源模板
 ```
@@ -158,7 +160,7 @@ FEISHU_BOTS="
 - **down**：停止并卸载指定的业务模块
 - **restart**：重启指定的业务模块
 
-**基础用法**（当未指定模块参数时，部署工具默认操作 gateway 单模块）：
+**基础用法**（当未指定模块参数时，部署工具默认操作所有业务模块）：
 ```
 ./deploy.sh up       # 部署 Gateway、Web、Manager 模块
 ./deploy.sh down     # 卸载 Manager、Web、Gateway 模块
@@ -175,6 +177,7 @@ FEISHU_BOTS="
 - **postgresql**：PostgreSQL 存储服务模块
 - **minio**：Minio 存储服务模块
 - **log**：日志管理模块
+- **jina**：网页内容提取服务模块
 - **gateway**：Gateway 模块
 - **web**：Web 前端页面服务模块
 - **manager**：CLAW-Manager 管理模块
@@ -188,6 +191,7 @@ FEISHU_BOTS="
 ./deploy.sh [操作命令] postgresql   # 仅操作 PostgreSQL 模块
 ./deploy.sh [操作命令] minio        # 仅操作 MinIO 模块
 ./deploy.sh [操作命令] log          # 仅操作日志管理模块
+./deploy.sh [操作命令] jina         # 仅操作网页内容提取服务模块
 ./deploy.sh [操作命令] gateway      # 仅操作 Gateway 模块
 ./deploy.sh [操作命令] web          # 仅操作 Web 模块
 ./deploy.sh [操作命令] manager      # 仅操作 Manager 模块
@@ -195,8 +199,8 @@ FEISHU_BOTS="
 
 **重要约束：**
 
-- **NFS / MySQL / Redis / PostgreSQL：** 以上基础依赖模块全局仅支持单次部署，固定运行于 default 命名空间，部署命令自动忽略自定义命名空间参数。
-- **Web / Gateway / CLAW-Manager：** 业务服务模块需保持命名空间一致（为了环境隔离与日志运维，禁止使用default命令空间），否则服务间网络互通异常、功能不可用。
+- **NFS / MySQL / PostgreSQL / Redis / Log / Jina：** 以上基础依赖模块全局仅支持单次部署，固定运行于 default 命名空间，部署命令自动忽略自定义命名空间参数。
+- **Web / Gateway / Manager：** 业务服务模块需保持命名空间一致（为了环境隔离与日志运维，禁止使用default命令空间），否则服务间网络互通异常、功能不可用。
 
 **使用示例：**
 
@@ -208,35 +212,39 @@ FEISHU_BOTS="
 ./deploy.sh up minio      # 启动 MinIO 存储模块（只需一次）
 ./deploy.sh up redis      # 启动 Redis 存储模块（只需一次）
 ./deploy.sh up log        # 启动日志管理服务模块（只需一次）
-./deploy.sh up            # 启动 Gateway 服务模块
-./deploy.sh up manager    # 启动 Manager 管理模块
+./deploy.sh up jina       # 启动网页内容提取服务模块（只需一次）
+./deploy.sh up gateway    # 启动 Gateway 服务模块
 ./deploy.sh up web        # 启动 Web 前端模块
+./deploy.sh up manager    # 启动 Manager 管理模块
+
 
 ./deploy.sh down manager    # 卸载 Manager 管理模块（按需卸载）
 ./deploy.sh down web        # 卸载 Web 前端模块（按需卸载）
-./deploy.sh down            # 卸载 Gateway 服务模块（按需卸载）
-./deploy.sh down            # 卸载日志管理服务模块（非必要不卸载）
-./deploy.sh down mysql      # 卸载 MySQL 存储模块（非必要不卸载）
+./deploy.sh down gateway    # 卸载 Gateway 服务模块（按需卸载）
+./deploy.sh down jina       # 卸载网页内容提取服务模块（非必要不卸载）
+./deploy.sh down log        # 卸载日志管理服务模块（非必要不卸载）
 ./deploy.sh down redis      # 卸载 Redis 存储模块（非必要不卸载）
+./deploy.sh down minio      # 卸载 MinIO 存储模块（非必要不卸载
 ./deploy.sh down postgresql # 卸载 PostgreSQL 存储模块（非必要不卸载）
-./deploy.sh down minio      # 卸载 MinIO 存储模块（非必要不卸载）
-./deploy.sh down nfs        # 卸载 NFS 存储模块（非必要不卸载）
+./deploy.sh down mysql      # 卸载 MySQL 存储模块（非必要不卸载）
 ./deploy.sh down nfs-sc     # 卸载 NFS 存储供给模块（非必要不卸载）
+./deploy.sh down nfs        # 卸载 NFS 存储模块（非必要不卸载）
 
-./deploy.sh restart             # 重启 Gateway 服务模块（按需重启）
-./deploy.sh restart web         # 重启 Web 前端模块（按需重启）
-./deploy.sh restart manager     # 重启 Manager 管理模块（按需重启）
-./deploy.sh restart log         # 重启日志管理模块（非必要不重启）
+./deploy.sh restart nfs-sc      # 重启 NFS 存储供给模块（非必要不重启）
+./deploy.sh restart nfs         # 重启 NFS 存储模块（非必要不重启）
 ./deploy.sh restart mysql       # 重启 MySQL 存储模块（非必要不重启）
-./deploy.sh restart redis       # 重启 Redis 存储模块（非必要不重启）
 ./deploy.sh restart postgresql  # 重启 PostgreSQL 存储模块（非必要不重启）
 ./deploy.sh restart minio       # 重启 MinIO 存储模块（非必要不重启）
-./deploy.sh restart nfs         # 重启 NFS 存储模块（非必要不重启）
-./deploy.sh restart nfs-sc      # 重启 NFS 存储供给模块（非必要不重启）
+./deploy.sh restart redis       # 重启 Redis 存储模块（非必要不重启）
+./deploy.sh restart log         # 重启日志管理模块（非必要不重启）
+./deploy.sh restart jina        # 重启网页内容提取服务模块（非必要不重启）
+./deploy.sh restart gateway     # 重启 Gateway 服务模块（按需重启）
+./deploy.sh restart web         # 重启 Web 前端模块（按需重启）
+./deploy.sh restart manager     # 重启 Manager 管理模块（按需重启）
 ```
 
 **重要说明：**
-每当升级新版本服务时，对于**NFS、NFS-SC、MySQL、PostgreSQL、Redis、MinIO、Log** 等全局基础依赖组件应尽量保持不变，无需重复部署。仅需对业务服务**Gateway、Web、CLAW-Manager**进行版本替换：在旧版本部署目录中，依次卸载 业务模块；随后切换至新版本部署工具目录，启动对应新版业务模块。
+每当升级新版本服务时，对于**NFS、NFS-SC、MySQL、PostgreSQL、Redis、MinIO、Log、Jina** 等全局基础依赖组件应尽量保持不变，无需重复部署。仅需对业务服务**Gateway、Web、CLAW-Manager**进行版本替换：在旧版本部署目录中，依次卸载 业务模块；随后切换至新版本部署工具目录，启动对应新版业务模块。
 
 ### 2.3 配置参数（选填）
 
@@ -532,8 +540,45 @@ LOG_TO_FILE_ENABLED=false
     └── jiuwenclaw-web-545f77c477-drfcf
         └── web-2026-07-14.log
 ```
+### 3.5 部署 Jina 网页内容提取服务（可选部署）
+
+#### 3.5.1 三种方案介绍
+业务侧的 `fetch_webpage` 工具依赖网页内容提取服务，将目标网页转换为 Markdown 输出供模型消费。客户可根据自身网络环境与抓取场景，从以下三种方案中选择：
+
+- **本部署工具内置部署的 Jina 服务**：本部署工具内置部署，基于开源镜像在自有集群内运行，无 API Key 限制、无官方调用限流、数据内网流转，无数据出境的风险，适合大批量内部抓取场景。通过如下命令一键部署：
+```
+./deploy.sh up jina          # 部署网页内容提取服务模块（可选部署，也只能部署一次）
+```
+部署完成后，当集群检测到 `jina-reader`、`jina-cache-proxy` 部署资源时，`fetch_webpage` 会自动路由至该内置服务，无需额外配置。
+
+- **r.jinaai.cn（官方国内加速）**：大陆网络直连无需代理，需自备 API Key，匿名调用受官方严格限流管控。集群内未部署内置 Jina 服务，且未手动修改 `JINA_READER_ENDPOINT` 配置时，系统默认自动使用该地址。
+
+- **r.jina.ai（官方海外原版）**：适合有跨境代理的国内客户或海外客户使用，需自备 API Key，匿名调用受官方严格限流管控。不会自动启用，如需切换至此服务，必须手动修改全局环境变量 `JINA_READER_ENDPOINT`，将值指定为 `https://r.jina.ai`。
 
 
+#### 3.5.1 三种方案对比
+
+为方便客户选型，下表对三种网页内容提取方案做一个详细的横向对比：
+
+| 维度 | 本部署工具内置部署的Jina 服务 | r.jinaai.cn（官方国内加速） | r.jina.ai（官方海外原版） |
+|---|---|---|---|
+| 是否需要 API Key | 否，开源镜像自部署 | 是，匿名调用严格限流 | 是，匿名调用严格限流 |
+| 调用频次限制 | 无，按自有算力伸缩 | 有官方限流 | 有官方限流 |
+| 国内网络延迟 | 内网 ms 级，最快 | 200ms–1s，大陆直连 | 1–5s 甚至超时，跨境抖动 |
+| 抓取成功率 | 中等。开源 reader 对 JS 重渲染、Cloudflare 反爬处理一般 | 高。官方有 IP 池反封禁、高阶反爬能力 | 高，同左 |
+|ReaderLM 语义提纯模型（官方闭源）|无，仅靠 DOM 规则清洗，广告、侧边栏、推荐内容过滤效果弱，输出 Markdown 冗余内容更多|支持，内置 ReaderLM 大模型提纯，输出文本干净，自动剔除广告、导航栏、弹窗，无需二次清洗|同左 |
+| 功能完整度 | 仅网页转 Markdown 主功能 |阉割加速版（Reader、搜索、Grounding 等支持） | 完整，海外 beta 功能最先上线，部分高级头部参数、图像摘要、深度渲染仅原版完整支持  |
+| 缓存策略 | 自带 nginx 分层缓存，命中后毫秒返回 | 由官方控制，不暴露缓存层 | 同左 |
+| 数据隐私 | 抓取内容不离开自有集群，敏感 URL 安全，数据不出镜 | URL/内容会进官方日志，数据出境 | 同左 |
+| 故障可控性 | 完全自管，Pod/日志/缓存可观测 | 依赖 SaaS，故障只能等 | 同左 |
+| 被目标站点封禁风险 | 较高，单一出口 IP 易被站点封禁 | 低，官方 IP 轮换 | 低 |
+| 成本 | 自有算力 + 维护成本 | 按流量付费，免费额度不够用 | 同左 |
+
+#### 3.5.3 选型建议
+
+- **国内客户 + 高频国内网页抓取**（天气、12306、知乎、微博等）：首选**自建 Jina**，零限流 + 内网缓存提速最明显。
+- **国内客户 + 高频遇到 Cloudflare / JS 渲染重站点抓取失败**：用 **r.jinaai.cn** （建议配 token）。
+- **海外客户**：用 **r.jina.ai**（建议配 token）。
 
 ## 4 部署JiuwenSwarm企业级服务
 
