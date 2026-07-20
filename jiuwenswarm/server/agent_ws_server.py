@@ -113,6 +113,76 @@ from jiuwenswarm.common.schema.message import ReqMethod
 
 logger = logging.getLogger(__name__)
 
+
+def _get_friendly_error_hint(error_message: str) -> str:
+    """
+    Return a friendly hint based on the error message (bilingual zh/en).
+
+    Provides user-friendly suggestions for common API errors to help users
+    quickly locate and resolve problems.
+
+    Returns:
+        Friendly hint string (Chinese + English), or empty string if no match.
+    """
+    error_lower = error_message.lower()
+
+    if "chat/completions" in error_lower and ("endpoint" in error_lower or "method" in error_lower):
+        return (
+            "💡 提示：检测到 API 端点错误。如果您正在使用本地 LLM 服务（如 LM Studio、Ollama），"
+            "请检查 api_base 配置是否正确。本地服务通常需要包含 '/v1' 后缀，例如：\n"
+            "  - 当前可能: http://localhost:1234\n"
+            "  - 建议改为: http://localhost:1234/v1\n\n"
+            "💡 Hint: API endpoint error detected. If you are using a local LLM service "
+            "(e.g. LM Studio, Ollama), check the api_base config. Local services usually "
+            "require a '/v1' suffix, e.g.:\n"
+            "  - Current: http://localhost:1234\n"
+            "  - Suggested: http://localhost:1234/v1"
+        )
+
+    if "connection refused" in error_lower or "connection reset" in error_lower:
+        return (
+            "💡 提示：无法连接到模型服务。请检查：\n"
+            "  1. 模型服务（如 LM Studio、Ollama）是否已启动\n"
+            "  2. api_base 配置的地址和端口是否正确\n"
+            "  3. 防火墙是否允许访问该端口\n\n"
+            "💡 Hint: Cannot connect to the model service. Please check:\n"
+            "  1. Whether the model service (e.g. LM Studio, Ollama) is running\n"
+            "  2. Whether the api_base address and port are correct\n"
+            "  3. Whether the firewall allows access to the port"
+        )
+
+    if "timeout" in error_lower:
+        return (
+            "💡 提示：请求超时。请检查：\n"
+            "  1. 模型服务是否正在运行且响应正常\n"
+            "  2. 网络连接是否稳定\n"
+            "  3. 考虑增加超时时间配置\n\n"
+            "💡 Hint: Request timed out. Please check:\n"
+            "  1. Whether the model service is running and responding normally\n"
+            "  2. Whether the network connection is stable\n"
+            "  3. Consider increasing the timeout configuration"
+        )
+
+    if "api key" in error_lower or "invalid key" in error_lower:
+        return (
+            "💡 提示：API Key 无效或未配置。请检查 api_key 配置是否正确。\n"
+            "对于本地 LLM 服务（如 LM Studio），api_key 可以设置为任意非空字符串。\n\n"
+            "💡 Hint: API Key is invalid or not configured. Please check the api_key config.\n"
+            "For local LLM services (e.g. LM Studio), api_key can be set to any non-empty string."
+        )
+
+    if "model" in error_lower and ("not found" in error_lower or "invalid" in error_lower):
+        return (
+            "💡 提示：模型名称无效或未找到。请检查 model_name 配置是否与服务端可用的模型一致。\n"
+            "对于 LM Studio，请使用模型卡片上显示的完整模型名称。\n\n"
+            "💡 Hint: Model name is invalid or not found. Please check that model_name matches "
+            "an available model on the server.\n"
+            "For LM Studio, use the full model name shown on the model card."
+        )
+
+    return ""
+
+
 # 后台权限重载任务引用集合,防止 fire-and-forget 任务被 GC 提前回收。
 # task 完成后自动从集合移除(Python 官方推荐模式)。
 _background_permission_reload_tasks: set[asyncio.Task] = set()
@@ -1787,11 +1857,15 @@ class AgentWebSocketServer:
                 request.request_id,
                 e,
             )
+            error_message = str(e)
+            friendly_hint = _get_friendly_error_hint(error_message)
+            if friendly_hint:
+                error_message = f"{error_message}\n\n{friendly_hint}"
             error_resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(e)},
+                payload={"error": error_message},
             )
             wire = encode_agent_response_for_wire(
                 error_resp, response_id=request.request_id
@@ -2295,8 +2369,23 @@ class AgentWebSocketServer:
         resp = None
         try:
             resp = await agent.process_message(request)
+        except Exception as e:
+            logger.exception(
+                "[AgentWebSocketServer] 非流式处理请求失败: request_id=%s: %s",
+                request.request_id,
+                e,
+            )
+            error_message = str(e)
+            friendly_hint = _get_friendly_error_hint(error_message)
+            if friendly_hint:
+                error_message = f"{error_message}\n\n{friendly_hint}"
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": error_message},
+            )
         finally:
-            # Push plan.mode_exited if exit_plan_mode restored mode during processing
             await self._check_post_process_plan_exit(request, agent)
 
         # V2: 非流式响应回带请求侧 agent_ref，供 gateway 3 元组路由（设计 §6.3）。
@@ -2429,6 +2518,37 @@ class AgentWebSocketServer:
                     return
                 # 清除 event，让心跳任务重新开始计时
                 heartbeat_event.clear()
+        except Exception as e:
+            logger.exception(
+                "[AgentWebSocketServer] 流式处理请求失败: request_id=%s: %s",
+                request.request_id,
+                e,
+            )
+            error_message = str(e)
+            friendly_hint = _get_friendly_error_hint(error_message)
+            if friendly_hint:
+                error_message = f"{error_message}\n\n{friendly_hint}"
+            error_chunk = AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=channel_id,
+                payload={"event_type": "chat.error", "error": error_message},
+                is_complete=False,
+            )
+            if error_chunk.agent_ref is None:
+                error_chunk.agent_ref = request.agent_ref
+            wire = encode_agent_chunk_for_wire(
+                error_chunk,
+                response_id=request.request_id,
+                sequence=chunk_count,
+            )
+            try:
+                async with send_lock:
+                    await send_wire_payload(ws, wire)
+            except WebSocketConnectionClosed:
+                logger.info(
+                    "[AgentWebSocketServer] 流式错误响应未发送，WebSocket 已关闭: request_id=%s",
+                    request.request_id,
+                )
         finally:
             # 停止心跳任务
             if heartbeat_task is not None:
