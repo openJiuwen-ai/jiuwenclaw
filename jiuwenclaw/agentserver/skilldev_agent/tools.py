@@ -117,7 +117,10 @@ class WebFetchTool(JiuwenHarnessFetchWebpageTool):
                 id=f"web_fetch_{agent_id}" if agent_id else f"web_fetch_{uuid.uuid4().hex}",
                 name="WebFetch",
                 description=(
-                    "XiaoYi wants to fetch content from this URL."
+                    "XiaoYi wants to fetch content from this URL. Prefer this for static HTML pages. "
+                    "If the target page is a SPA, JS-rendered page, login-dependent page, or WebFetch only "
+                    "returns a shell page without the main content, prefer browser runtime tools such as "
+                    "browser_run_task instead."
                 ),
                 input_params=get_tool_input_params("fetch_webpage"),
             ),

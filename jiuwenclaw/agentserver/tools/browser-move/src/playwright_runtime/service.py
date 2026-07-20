@@ -15,7 +15,7 @@ import shlex
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Dict, List, Optional, Tuple
 from urllib.request import urlopen
 
 from openjiuwen.core.common.logging import logger
@@ -24,9 +24,9 @@ from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVSto
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
-from openjiuwen.core.single_agent.middleware.base import (
+from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
-    AgentMiddleware,
+    AgentRail,
     AnyAgentCallback,
 )
 from playwright_runtime import REPO_ROOT
@@ -101,6 +101,20 @@ def extract_json_object(text: Any) -> Dict[str, Any]:
     return {}
 
 
+def _schedule_agent_registration(coro: Awaitable[Any], description: str) -> None:
+    """Run async agent registration from sync compatibility call sites."""
+
+    task = asyncio.create_task(coro)
+
+    def _log_task_result(done_task: asyncio.Task[Any]) -> None:
+        try:
+            done_task.result()
+        except Exception as exc:  # pragma: no cover - defensive logging path
+            logger.error(f"BrowserService: {description} failed: {exc}")
+
+    task.add_done_callback(_log_task_result)
+
+
 class BrowserService:
     """Backend browser service with sticky logical sessions."""
 
@@ -127,7 +141,7 @@ class BrowserService:
         self._locks: Dict[str, asyncio.Lock] = {}
         self._sessions: set[str] = set()
         self._inflight_tasks: Dict[str, set[asyncio.Task[Any]]] = {}
-        self._pending_middlewares: List[AgentMiddleware] = []
+        self._pending_middlewares: List[AgentRail] = []
         self._pending_callbacks: List[Tuple[AgentCallbackEvent, AnyAgentCallback, int]] = []
         self._screenshot_subdir = "screenshots"
         self._mcp_cwd = self._resolve_mcp_cwd()
@@ -279,6 +293,11 @@ class BrowserService:
         parts: List[str] = []
         for attr in ("reason", "message", "msg", "code"):
             value = getattr(error_value, attr, None)
+            if callable(value):
+                try:
+                    value = value()
+                except Exception:
+                    value = None
             if value:
                 parts.append(str(value))
         for attr in ("args",):
@@ -710,11 +729,14 @@ class BrowserService:
         wildcard = await self._cancel_store.get(self._cancel_key(sid, "*"))
         return wildcard is not None
 
-    def add_browser_middleware(self, middleware: AgentMiddleware) -> None:
+    def add_browser_middleware(self, middleware: AgentRail) -> None:
         if self._browser_agent is None:
             self._pending_middlewares.append(middleware)
             return
-        self._browser_agent.register_middleware(middleware)
+        _schedule_agent_registration(
+            self._browser_agent.register_rail(middleware),
+            f"register browser rail {middleware.__class__.__name__}",
+        )
 
     def add_browser_callback(
         self,
@@ -725,7 +747,10 @@ class BrowserService:
         if self._browser_agent is None:
             self._pending_callbacks.append((event, callback, priority))
             return
-        self._browser_agent.register_callback(event, callback, priority=priority)
+        _schedule_agent_registration(
+            self._browser_agent.register_callback(event, callback, priority=priority),
+            f"register browser callback {event}",
+        )
 
     def session_new(self, session_id: Optional[str] = None) -> str:
         sid = (session_id or "").strip() or f"browser-{uuid.uuid4().hex}"
@@ -769,12 +794,18 @@ class BrowserService:
             max_steps=self.guardrails.max_steps,
             screenshot_subdir=self._screenshot_subdir,
         )
-        self._browser_agent.register_middleware(BrowserCancellationMiddleware(self.is_cancelled))
+        await self._browser_agent.register_rail(
+            BrowserCancellationMiddleware(self.is_cancelled)
+        )
         for middleware in self._pending_middlewares:
-            self._browser_agent.register_middleware(middleware)
+            await self._browser_agent.register_rail(middleware)
         self._pending_middlewares.clear()
         for event, callback, priority in self._pending_callbacks:
-            self._browser_agent.register_callback(event, callback, priority=priority)
+            await self._browser_agent.register_callback(
+                event,
+                callback,
+                priority=priority,
+            )
         self._pending_callbacks.clear()
         self.started = True
         logger.info(

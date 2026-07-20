@@ -59,6 +59,7 @@ SYSTEM_PROMPT_CN = """\
 2. **Skill 遵循**：如果提供了 skill_path，先读取 SKILL.md，然后按照其指令执行任务。如果没有提供 skill_path，则用你的通用能力完成任务。
 3. **路径规范**：所有文件读写使用 task_description 中给出的绝对路径。
 4. **错误处理**：遇到错误时尝试修复并重试，记录错误次数。
+5. **网页内容选择策略**：若当前可用工具中存在浏览器 runtime 工具（例如 `browser_run_task`），则静态 HTML 页面优先用 `WebFetch`；但对 SPA、JavaScript 动态渲染、需等待页面加载或依赖浏览器会话/cookie 的页面，优先用浏览器 runtime。若 `WebFetch` 只拿到壳页、导航页脚或缺少主体内容，立即切换到浏览器 runtime，不要反复重试 `WebFetch`。
 
 # 输出要求
 
@@ -135,6 +136,7 @@ Your task_description will specify:
 2. **Skill adherence**: If skill_path is provided, read SKILL.md first, then follow its instructions. If not provided, use general capabilities.
 3. **Paths**: Use the absolute paths provided in task_description for all file operations.
 4. **Error handling**: On errors, attempt to fix and retry; count errors.
+5. **Web content strategy**: If browser runtime tools are available (for example `browser_run_task`), use `WebFetch` for static HTML pages, but prefer browser runtime for SPA pages, JavaScript-rendered content, pages that require waiting for client-side rendering, or pages that depend on browser session/cookies. If `WebFetch` only returns a shell page or misses the main body content, switch to browser runtime immediately instead of retrying `WebFetch`.
 
 # Output Requirements
 

@@ -5,7 +5,7 @@ from contextlib import AsyncExitStack
 from typing import Any, List, Optional
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.tool import McpToolCard
+from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 
@@ -13,15 +13,35 @@ from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 class PlaywrightClient(McpClient):
     """Playwright browser session based MCP client"""
 
-    def __init__(self, server_path: str, name: str):
-        super().__init__(server_path)
-        self._name = name
+    __client_name__ = "playwright"
+    __client_type__ = "mcp"
+
+    def __init__(self, config: McpServerConfig | str, name: str = ""):
+        resolved_config = self._normalize_config(config, name=name)
+        super().__init__(resolved_config)
+        self._name = resolved_config.server_name
         self._client = None
         self._session = None
         self._read = None
         self._write = None
         self._exit_stack = AsyncExitStack()
         self._is_disconnected: bool = False
+
+    @staticmethod
+    def _normalize_config(
+        config: McpServerConfig | str,
+        *,
+        name: str,
+    ) -> McpServerConfig:
+        if isinstance(config, McpServerConfig):
+            return config
+        resolved_name = (name or "").strip() or "playwright"
+        return McpServerConfig(
+            server_id=resolved_name,
+            server_name=resolved_name,
+            server_path=config,
+            client_type="playwright",
+        )
 
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
         """Establish connection to Playwright MCP server"""

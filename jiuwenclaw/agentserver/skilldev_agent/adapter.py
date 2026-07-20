@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import secrets
 import sys
 import uuid
@@ -32,6 +33,9 @@ from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     ask_user_question_request_scope,
 )
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawStreamEventRail
+from jiuwenclaw.agentserver.tools.browser_tools import (
+    register_browser_runtime_mcp_server,
+)
 from jiuwenclaw.agentserver.stream_utils import tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.skilldev_agent.utils.resource_sync import (
     STATE_TOOL_SPECS,
@@ -45,7 +49,7 @@ from jiuwenclaw.agentserver.skilldev_agent.utils.resource_sync import (
 )
 from jiuwenclaw.agentserver.tools.subagent_executor import init_subagent_executor
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import set_effective_request_workspace_dir
-from jiuwenclaw.config import get_config, get_default_models
+from jiuwenclaw.config import get_config, get_default_models, resolve_env_vars
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import get_agent_workspace_dir
 
@@ -149,6 +153,84 @@ class SkillDevDeepAdapter:
                 pass
             self._stale_instance_ids.discard(card_id)
 
+    @staticmethod
+    def _browser_runtime_requested() -> bool:
+        value = (os.getenv("BROWSER_RUNTIME_MCP_ENABLED") or "").strip().lower()
+        if not value:
+            return False
+        return value in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _resolve_managed_browser_binary_from_config(config_base: dict[str, Any] | None) -> str:
+        """Resolve managed-browser binary from saved browser config."""
+        if not isinstance(config_base, dict):
+            return ""
+        config = resolve_env_vars(config_base)
+        browser_cfg = config.get("browser", {}) if isinstance(config, dict) else {}
+        if not isinstance(browser_cfg, dict):
+            return ""
+        chrome_path = browser_cfg.get("chrome_path", "")
+        if isinstance(chrome_path, str):
+            return chrome_path.strip()
+        if not isinstance(chrome_path, dict):
+            return ""
+        platform_map = {
+            "win32": "windows",
+            "cygwin": "windows",
+            "darwin": "macos",
+            "linux": "linux",
+            "linux2": "linux",
+        }
+        os_key = platform_map.get(os.sys.platform, "default")
+        for key in (os_key, "default"):
+            value = chrome_path.get(key, "")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _prepare_browser_runtime_env(self, config_base: dict[str, Any] | None) -> None:
+        """Set browser runtime defaults before MCP registration."""
+        if not self._browser_runtime_requested():
+            logger.info(
+                "[session=%s] [SkillDevDeepAdapter] browser runtime disabled: "
+                "BROWSER_RUNTIME_MCP_ENABLED is not set",
+                self._task_id,
+            )
+            return
+
+        if not str(os.getenv("BROWSER_DRIVER") or "").strip():
+            os.environ["BROWSER_DRIVER"] = "managed"
+            logger.info(
+                "[session=%s] [SkillDevDeepAdapter] browser runtime enabled without BROWSER_DRIVER; "
+                "defaulting to managed mode",
+                self._task_id,
+            )
+
+        if not str(os.getenv("BROWSER_MANAGED_BINARY") or "").strip():
+            chrome_path = self._resolve_managed_browser_binary_from_config(config_base)
+            if chrome_path:
+                os.environ["BROWSER_MANAGED_BINARY"] = chrome_path
+                logger.info(
+                    "[session=%s] [SkillDevDeepAdapter] using browser.chrome_path for managed browser: %s",
+                    self._task_id,
+                    chrome_path,
+                )
+            else:
+                logger.info(
+                    "[session=%s] [SkillDevDeepAdapter] browser runtime enabled but browser.chrome_path "
+                    "is not configured; managed browser startup may fail",
+                    self._task_id,
+                )
+
+        logger.info(
+            "[session=%s] [SkillDevDeepAdapter] browser runtime requested: client_type=%s driver=%s "
+            "managed_binary_configured=%s",
+            self._task_id,
+            (os.getenv("BROWSER_RUNTIME_MCP_CLIENT_TYPE") or "streamable-http").strip(),
+            (os.getenv("BROWSER_DRIVER") or "").strip() or "managed",
+            bool(str(os.getenv("BROWSER_MANAGED_BINARY") or "").strip()),
+        )
+
     async def update_workspace(self, workspace_dir: str | Path) -> None:
         """Switch to a task-scoped workspace and rebuild the agent if needed."""
         resolved = str(Path(workspace_dir))
@@ -229,6 +311,30 @@ class SkillDevDeepAdapter:
             language=react_config.get("language", "cn"),
             completion_timeout=react_config.get("completion_timeout", 3600.0),
         )
+        if self._instance is not None:
+            self._prepare_browser_runtime_env(config_base)
+            try:
+                registered = await register_browser_runtime_mcp_server(
+                    self._instance,
+                    tag=f"skilldev.{self._task_id or 'default'}",
+                )
+                if registered:
+                    logger.info(
+                        "[session=%s] [SkillDevDeepAdapter] browser runtime MCP registered successfully",
+                        self._task_id,
+                    )
+                else:
+                    logger.info(
+                        "[session=%s] [SkillDevDeepAdapter] browser runtime MCP registration skipped "
+                        "(feature disabled or config unavailable)",
+                        self._task_id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[session=%s] [SkillDevDeepAdapter] browser runtime MCP registration failed: %s",
+                    self._task_id,
+                    exc,
+                )
         self._init_subagent_tools()
         logger.info("[session=%s] [SkillDevDeepAdapter] initialized workspace=%s", self._task_id, self._workspace_dir)
 

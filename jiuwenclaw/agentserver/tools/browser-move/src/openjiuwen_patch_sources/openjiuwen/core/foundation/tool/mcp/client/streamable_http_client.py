@@ -2,12 +2,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
 from contextlib import AsyncExitStack
-from typing import Any, List, Optional, Dict, AsyncGenerator
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.tool import McpToolCard
+from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 
@@ -15,15 +15,24 @@ from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 class StreamableHttpClient(McpClient):
     """Streamable HTTP transport based MCP client."""
 
+    __client_name__ = ["streamable-http", "streamable_http"]
+    __client_type__ = "mcp"
+
     def __init__(
         self,
-        server_path: str,
-        name: str,
+        config: McpServerConfig | str,
+        name: Optional[str] = None,
         auth_headers: Optional[Dict[str, str]] = None,
         auth_query_params: Optional[Dict[str, str]] = None,
     ):
-        super().__init__(server_path)
-        self._name = name
+        resolved_config = self._normalize_config(
+            config,
+            name=name,
+            auth_headers=auth_headers,
+            auth_query_params=auth_query_params,
+        )
+        super().__init__(resolved_config)
+        self._name = resolved_config.server_name
         self._client = None
         self._session = None
         self._read = None
@@ -32,14 +41,34 @@ class StreamableHttpClient(McpClient):
         self._exit_stack = AsyncExitStack()
         self._is_disconnected: bool = False
         self._reconnect_lock = asyncio.Lock()
-        if auth_headers is not None or auth_query_params is not None:
+        if resolved_config.auth_headers or resolved_config.auth_query_params:
             self._auth_provider = AuthHeaderAndQueryProvider(
-                auth_headers=auth_headers or {},
-                auth_query_params=auth_query_params or {},
+                auth_headers=resolved_config.auth_headers,
+                auth_query_params=resolved_config.auth_query_params,
             )
             logger.info("Using custom header and query authorization for Streamable HTTP client")
         else:
             self._auth_provider = None
+
+    @staticmethod
+    def _normalize_config(
+        config: McpServerConfig | str,
+        *,
+        name: Optional[str],
+        auth_headers: Optional[Dict[str, str]],
+        auth_query_params: Optional[Dict[str, str]],
+    ) -> McpServerConfig:
+        if isinstance(config, McpServerConfig):
+            return config
+        resolved_name = (name or "").strip() or "streamable-http"
+        return McpServerConfig(
+            server_id=resolved_name,
+            server_name=resolved_name,
+            server_path=config,
+            client_type="streamable-http",
+            auth_headers=auth_headers or {},
+            auth_query_params=auth_query_params or {},
+        )
 
     @staticmethod
     def _is_retryable_transport_error(error: Exception) -> bool:

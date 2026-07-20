@@ -105,6 +105,10 @@ jiuwenclaw = [
     "resources/**/*",
     "resources/*",
     "resources/.env.template",
+    # Browser runtime sidecar sources loaded by file path at runtime.
+    "agentserver/tools/browser-move/api_desc_response.json",
+    "agentserver/tools/browser-move/src/**/*.py",
+    "agentserver/tools/browser-move/src/*.py",
 ]
 "jiuwenclaw.agentserver.skilldev_agent" = [
     "skills/**/*",

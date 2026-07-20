@@ -8,14 +8,14 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable, Optional
 
-from openjiuwen.core.single_agent.middleware.base import AgentCallbackContext, AgentMiddleware
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail
 
 
 class BrowserRunCancelled(RuntimeError):
     """Raised when a browser run is canceled by external signal."""
 
 
-class BrowserCancellationMiddleware(AgentMiddleware):
+class BrowserCancellationMiddleware(AgentRail):
     """Abort browser agent execution when cancellation flag is set."""
 
     priority = 1

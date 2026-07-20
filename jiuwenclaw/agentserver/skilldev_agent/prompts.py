@@ -147,6 +147,14 @@ _DEFAULT_PROMPT = """
 
 注意区分：`WebSearch` 是唯一允许写入目标 Skill 的环境工具，当目标 Skill 需要运行时搜索能力时可声明使用。`WebFetch` 及其他本节工具严禁写入目标 Skill。
 
+当当前可用工具中存在浏览器 runtime MCP 工具（例如 `browser_run_task`、`browser_custom_action`、`browser_runtime_health`）时，网页内容获取按以下策略执行：
+
+- **静态页优先 `WebFetch`**：文档站、博客、普通文章页、直接返回正文的 HTML 页面，优先用 `WebFetch`。
+- **动态页优先浏览器 runtime**：单页应用（SPA）、依赖 JavaScript 渲染、正文通过 XHR/fetch 回填、需要浏览器会话/登录态/cookie、或需要实际点击/等待页面加载的网页，优先用浏览器 runtime，不要先执着于 `WebFetch`。
+- **识别动态页信号**：`WebFetch` 拿到的原始 HTML 只有壳结构（如 `div#app`、大量前端 chunk 脚本、导航页脚很多但正文很少）、正文明显缺失、标题存在但主体内容缺失、或页面内容要在浏览器打开后才出现。
+- **失败切换**：如果 `WebFetch` 只拿到页面壳、摘要不足以回答问题、或你怀疑页面内容是运行时加载，立即切换为浏览器 runtime，不要反复重试 `WebFetch`。
+- **浏览器任务表达**：使用 `browser_run_task` 时，给出完整且目标明确的任务描述，例如“打开该 URL，等待页面稳定后提取正文、标题、时间、主要图片和相关链接；若内容由接口回填，基于最终渲染结果总结”。
+
 ## 6.6 文件产物交付
 
 本小节仅适用于交付**非 Skill 包的文件产物**。当本轮任务最终需把这样一个文件交付用户时，调用 `upload_file`（入参为工作区文件路径）交付。
