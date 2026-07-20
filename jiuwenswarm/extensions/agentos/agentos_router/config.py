@@ -19,6 +19,8 @@ class RouterConfig:
     concurrency: int
     invoke_timeout_s: float
     registry: RegistryConfig
+    agent_namespace: str = "default"
+    agent_timeout_s: float = 300.0
     creating_timeout_seconds: float = 60.0
     agent_key_fields: tuple[str, ...] = DEFAULT_AGENT_KEY_FIELDS
 
@@ -65,6 +67,8 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
         function_version_urn=function_version_urn,
         concurrency=int(agent_client.get("concurrency") or 1),
         invoke_timeout_s=float(agent_client.get("invoke_timeout_s") or 60.0),
+        agent_namespace=str(agent_client.get("agent_namespace") or "default").strip() or "default",
+        agent_timeout_s=float(agent_client.get("agent_timeout_s") or 300.0),
         registry=RegistryConfig(
             endpoint=str(registry.get("endpoint") or "").strip(),
             request_timeout_s=float(registry.get("request_timeout_s") or 10.0),

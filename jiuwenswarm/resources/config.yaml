@@ -563,6 +563,10 @@ gateway:
     function_version_urn:
     concurrency: 1
     invoke_timeout_s: 60
+    # POST/DELETE /api/agent 超时（秒）；create 含镜像拉取/容器启动，建议明显大于 invoke_timeout_s
+    agent_timeout_s: 300
+    # create 请求的 namespace，默认 default
+    agent_namespace: default
 
   # AgentOS Router Extension 配置；agent_client.type=agentos_router 时生效。
   agentos:

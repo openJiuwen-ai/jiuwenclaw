@@ -25,6 +25,8 @@ from jiuwenswarm.extensions.yuanrong_frontend_client import SandboxInfo
 class FakeYuanRongClient:
     def __init__(self) -> None:
         self.server_ready = True
+        self.function_version_urn = "urn:test:function:1"
+        self.agent_namespace = "default"
         self.send_calls = 0
         self.create_calls = 0
         self.delete_calls: list[str] = []
@@ -41,32 +43,27 @@ class FakeYuanRongClient:
     async def create_sandbox(
         self,
         *,
-        user_id: str,
-        agent_type: str,
-        agent_id: str | None = None,
-        image_name: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        namespace: str,
+        name: str,
+        urn: str,
+        workspace: str | None = None,
+        env_vars: dict[str, str] | None = None,
+        mounts: list[dict[str, Any]] | None = None,
     ) -> SandboxInfo:
         self.create_calls += 1
         return SandboxInfo(
             sandbox_id=f"sbx-{self.create_calls}",
-            user_id=user_id,
-            agent_type=agent_type,
             metadata={
-                **dict(metadata or {}),
-                "agent_id": agent_id,
-                "image_name": image_name,
+                "namespace": namespace,
+                "name": name,
+                "urn": urn,
+                "workspace": workspace,
+                "env_vars": dict(env_vars or {}),
+                "mounts": list(mounts or []),
             },
         )
 
-    async def delete_sandbox(
-        self,
-        sandbox_id: str,
-        *,
-        user_id: str | None = None,
-        agent_type: str | None = None,
-    ) -> None:
-        del user_id, agent_type
+    async def delete_sandbox(self, sandbox_id: str) -> None:
         self.delete_calls.append(sandbox_id)
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
