@@ -15,6 +15,13 @@
     "modify": "修改",
     "delete": "删除"
   },
+  "a2ui": {
+    "generating": "A2UI 界面生成中...",
+    "unavailable": "界面内容暂时无法显示，请稍后重试或重新生成结果。",
+    "unavailableTitle": "界面内容暂时无法显示",
+    "retry": "请稍后重试或重新生成结果",
+    "unsupportedProtocol": "不支持的 A2UI 协议版本：{{version}}"
+  },
   "nav": {
     "chat": "对话",
     "work": "工作",

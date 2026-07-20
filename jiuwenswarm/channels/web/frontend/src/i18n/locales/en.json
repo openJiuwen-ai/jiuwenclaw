@@ -15,6 +15,13 @@
     "modify": "Modify",
     "delete": "Delete"
   },
+  "a2ui": {
+    "generating": "Generating A2UI interface...",
+    "unavailable": "The interface cannot be displayed right now. Please try again or regenerate the result.",
+    "unavailableTitle": "The interface cannot be displayed right now",
+    "retry": "Please try again later or regenerate the result",
+    "unsupportedProtocol": "Unsupported A2UI protocol version: {{version}}"
+  },
   "nav": {
     "chat": "Chat",
     "work": "Work",
