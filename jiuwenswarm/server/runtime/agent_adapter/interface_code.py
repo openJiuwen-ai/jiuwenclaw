@@ -698,7 +698,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """构建 CodeAgentModeRail。
 
         与 Claude Code 对齐：
-        - ``plan_mode_system_note``: 静态注入 system prompt（KV-cache 友好），
+        - ``plan_mode_attachment_note``: 通过 prompt attachment 注入 plan 提示，
+          不修改 system prompt，保持 KV-cache 稳定，
           告知 LLM 必须先调 ``enter_plan_mode``。
         - ``enter_plan_instructions``: 追加到 ``enter_plan_mode`` 的 tool_result，
           包含完整的 5-phase 工作流说明（指令在对话中，不在 system prompt）。
@@ -712,7 +713,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
             return CodeAgentModeRail(
                 allowed_tools=_CODE_PLAN_ALLOWED_TOOLS,
-                plan_mode_system_note=_PLAN_MODE_SYSTEM_NOTE,
+                plan_mode_attachment_note=_PLAN_MODE_SYSTEM_NOTE,
                 enter_plan_instructions=_ENTER_PLAN_MODE_INSTRUCTIONS_EN,
                 exit_plan_notification=_EXIT_PLAN_MODE_NOTIFICATION,
             )
