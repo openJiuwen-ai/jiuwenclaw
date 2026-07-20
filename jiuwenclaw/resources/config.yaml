@@ -748,20 +748,41 @@ heartbeat:
     start: 08:00
     end: 22:00
 
-# 执行护栏：工具循环检测、无输出超时监控与主动中断
-execution_guard:
-  # 断路器：检测工具重复/交替/无进展循环，critical 级会强制结束当次回答
-  circuit_breaker:
-    # 总开关。默认开启；显式 enabled: false 时关闭
-    enabled: true
-    # 相同工具+参数重复达到该次数时告警（仅日志，不中断）
-    warning_threshold: 5
-    # Ping-Pong 两工具交替且无进展达到该次数时中断
-    critical_threshold: 10
-    # 工具连续无进展（结果不变）达到该次数时兜底中断
-    global_breaker_threshold: 10
-    # 未知/错误工具连续调用达到该次数时停止重试并中断
-    unknown_tool_threshold: 10
+# Agent RAS 整体配置
+agent_ras:
+  # 总开关。默认开启；显式 enabled: false 时不注册 AgentRASRail
+  enabled: true
+  detectors:
+    # 工具循环检测
+    repeat_tool:
+      enabled: true
+      # circuit_breaker_recovery: 相同工具+参数重复达到该次数时告警（LOW）
+      warning_threshold: 5
+      # ping-pong 交替轮次达到该次数时告警（LOW，不要求 no_progress）
+      critical_threshold: 10
+      # 全局兜底：连续相同调用且无进展达到该次数时 CRITICAL 断路
+      global_breaker_threshold: 10
+      # 未知/错误工具连续失败达到该次数时 CRITICAL（WARNING 为阈值一半）
+      unknown_tool_threshold: 10
+    # LLM 文本/思考死循环检测（门槛单位：字符）
+    llm_thinking_loop:
+      enabled: true
+      # 默认启用 L3 语义 Judge；显式 false 才关闭（关闭后仅 L1/L2 字面检测）
+      semantic_content_enabled: true
+      # 累计字符达到该门槛后才开始 L1/L2/L3 检测
+      detection_start_chars: 30000
+      # L1/L2 近窗大小 = 扫描间隔 = 最小可检长度（FIFO 截断最旧内容）
+      window_max_chars: 2000
+      # suffix_cycle / similar_clauses 重复次数阈值
+      loop_repeat_threshold: 5
+      # 分句相似度阈值（0~1，越高越严格）
+      similar_clause_sim_threshold: 0.95
+      # 启动后，自上次 L3 eval 起新增字符达到该门槛才触发语义检测
+      semantic_eval_chars: 10000
+  # 恢复侧通用配置
+  recovery:
+    # LOW 警告时是否向用户推送可见 notice（steering 始终按 policy 执行）
+    notify_user_on_warning: true
 
 channels:
   feishu:

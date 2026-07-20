@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -69,7 +70,13 @@ from openjiuwen.harness import (
     DeepAgentConfig,
     VisionModelConfig,
 )
+try:
+    from openjiuwen.harness.agent_ras import AgentRASConfig
+except ImportError:
+    # Older openjiuwen builds may lack Agent RAS; degrade passthrough below.
+    AgentRASConfig = None
 from openjiuwen.harness.factory import create_deep_agent
+from pydantic import ValidationError
 from openjiuwen.harness.subagents.code_agent import create_code_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.sections.memory import build_memory_section
@@ -197,10 +204,6 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
 from jiuwenclaw.agentserver.deep_agent.rails.context_engineering_rail_ext import (
     normalize_identify_override,
     normalize_soul_override,
-)
-from jiuwenclaw.agentserver.deep_agent.rails.execution_guard import (
-    CircuitBreakerConfig,
-    CircuitBreakerRail,
 )
 from jiuwenclaw.agentserver.utils import extract_uploaded_files
 from jiuwenclaw.agentserver.deep_agent.rails.disabled_tools_rail import DisabledToolsRail
@@ -986,7 +989,6 @@ def _resolve_qa_artifact_config(
 
 def react_config_for_subagent(react_config: dict[str, Any] | None) -> dict[str, Any]:
     """Disable QA block / qa_artifact for spawn/fork subagents (plan scope: main session only)."""
-    import copy
 
     def _set_disabled(section: dict[str, Any], key: str) -> None:
         raw = section.get(key)
@@ -1021,6 +1023,62 @@ def _resolve_qa_block_config(config: dict[str, Any]) -> QABlockConfig | None:
             return None
         return QABlockConfig.model_validate(raw)
     return QABlockConfig()
+
+
+# Once-per-process flag: avoid spamming when agent_ras module is missing.
+_AGENT_RAS_UNAVAILABLE_WARNED = False
+
+
+def _agent_ras_kwargs_from_config(config_base: dict[str, Any] | None) -> dict[str, Any]:
+    """Pass through optional YAML ``agent_ras`` overrides to create_deep_agent.
+
+    Missing section means core defaults (Agent RAS enabled). Explicit
+    ``enabled: false`` disables it. Invalid keys / types fail here with a
+    clear error (same ``AgentRASConfig`` schema as agent-core) instead of
+    surfacing deep inside ``create_deep_agent``.
+
+    When ``openjiuwen.harness.agent_ras`` is unavailable, skip passthrough
+    with a warning so the adapter still starts on older openjiuwen builds.
+    """
+    global _AGENT_RAS_UNAVAILABLE_WARNED
+    base = config_base or {}
+    raw = base.get("agent_ras")
+    if AgentRASConfig is None:
+        if raw is not None:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] openjiuwen.harness.agent_ras "
+                "unavailable; ignoring YAML agent_ras and disabling "
+                "Agent RAS config passthrough"
+            )
+        elif not _AGENT_RAS_UNAVAILABLE_WARNED:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] openjiuwen.harness.agent_ras "
+                "unavailable; Agent RAS config passthrough disabled"
+            )
+            _AGENT_RAS_UNAVAILABLE_WARNED = True
+        return {}
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning(
+            "[JiuWenClawDeepAdapter] ignoring invalid agent_ras section: "
+            "expected dict, got %s",
+            type(raw).__name__,
+        )
+        return {}
+    payload = copy.deepcopy(raw)
+    payload.setdefault("enabled", True)
+    try:
+        validated = AgentRASConfig.model_validate(payload)
+    except ValidationError as exc:
+        logger.error(
+            "[JiuWenClawDeepAdapter] invalid agent_ras config: %s",
+            exc,
+        )
+        raise ValueError(
+            f"invalid agent_ras config: {exc}"
+        ) from exc
+    return {"agent_ras": validated.model_dump(mode="python")}
 
 
 def _build_context_engineering_rail(config: dict[str, Any],
@@ -1823,6 +1881,16 @@ class JiuWenClawDeepAdapter:
         for tool_id in list(self._qualified_runtime_tool_ids):
             remove_tool_from_resource_mgr(tool_id)
         self._qualified_runtime_tool_ids.clear()
+
+    @staticmethod
+    def _cleanup_circuit_breaker_session(session_id: str | None = None) -> None:
+        """No-op: CircuitBreakerRail removed; Agent RAS owns session lifecycle.
+
+        Kept during rolling upgrade so leftover call sites / ops hooks do not
+        AttributeError. Safe to delete after one release cycle.
+        """
+        _ = session_id
+        return
 
     def _register_runtime_tools(
             self,
@@ -2782,31 +2850,6 @@ class JiuWenClawDeepAdapter:
             heartbeat_rail = None
         return heartbeat_rail
 
-    def _build_circuit_breaker_rail(self) -> CircuitBreakerRail | None:
-        try:
-            guard_cfg = (get_config() or {}).get("execution_guard") or {}
-            cb_cfg = guard_cfg.get("circuit_breaker") or {}
-            if cb_cfg.get("enabled", True) is False:
-                logger.info("[JiuWenClawDeepAdapter] CircuitBreakerRail disabled by config")
-                return None
-            defaults = CircuitBreakerConfig()
-            config = CircuitBreakerConfig(
-                warning_threshold=cb_cfg.get("warning_threshold", defaults.warning_threshold),
-                critical_threshold=cb_cfg.get("critical_threshold", defaults.critical_threshold),
-                global_breaker_threshold=cb_cfg.get(
-                    "global_breaker_threshold", defaults.global_breaker_threshold
-                ),
-                unknown_tool_threshold=cb_cfg.get(
-                    "unknown_tool_threshold", defaults.unknown_tool_threshold
-                ),
-            )
-            rail = CircuitBreakerRail(config, language=self._resolve_runtime_language())
-            logger.info("[JiuWenClawDeepAdapter] CircuitBreakerRail create success")
-            return rail
-        except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] CircuitBreakerRail create failed: %s", exc)
-            return None
-
     @staticmethod
     def _build_avatar_rail() -> Any | None:
         """Build AvatarPromptRail for digital avatar mode."""
@@ -3043,7 +3086,6 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail),
             _RailBuildInfo("_context_overflow_recovery_rail", self._build_context_overflow_recovery_rail),
-            _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail, {"config": config_base}),
             _RailBuildInfo("_security_rail", self._build_security_rail),
@@ -3572,6 +3614,9 @@ class JiuWenClawDeepAdapter:
             language=self._resolve_runtime_language(),
         )
 
+        # agent_ras applies to both code and claw paths (create_code_agent
+        # forwards **config_kwargs into create_deep_agent).
+        common_kwargs.update(_agent_ras_kwargs_from_config(ctx.config_base))
         if ctx.mode == "code":
             self._instance = create_code_agent(**common_kwargs)
         else:
@@ -3772,29 +3817,14 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] Failed to initialize skill_turbo tool: %s", exc)
 
-    def _cleanup_circuit_breaker_session(self, session_id: str | None) -> None:
-        circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
-        if circuit_breaker_rail is None:
-            return
-        sid = str(session_id or "").strip() or "default"
-        try:
-            circuit_breaker_rail.cleanup_session(sid)
-        except Exception as exc:
-            logger.warning(
-                "[JiuWenClawDeepAdapter] circuit_breaker cleanup_session(%s) failed: %s",
-                sid,
-                exc,
-            )
-
     async def cleanup(self) -> None:
         """Abort active subagents and release the local executor."""
         await self._abort_active_subagents("adapter_cleanup")
         self._fork_agent_executor = None
         if self._stream_event_rail is not None:
             self._stream_event_rail.set_fork_agent_executor(None)
-        circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
-        if circuit_breaker_rail is not None:
-            circuit_breaker_rail.cleanup_all()
+        # Transitional no-op (was circuit_breaker_rail.cleanup_all()).
+        self._cleanup_circuit_breaker_session(None)
         # Release the provider so the lambda registered in __init__ stops
         # capturing `self` and the adapter can be garbage-collected.
         set_skill_credential_provider(None)
@@ -4654,9 +4684,6 @@ class JiuWenClawDeepAdapter:
 
         if self._runtime_prompt_rail:
             self._runtime_prompt_rail.set_language(resolved_language)
-        circuit_breaker_rail = getattr(self, "_circuit_breaker_rail", None)
-        if circuit_breaker_rail is not None:
-            circuit_breaker_rail.set_language(resolved_language)
         if self._runtime_prompt_rail:
             resolved_channel = (
                 str(params.channel_id or self._resolve_prompt_channel(params.session_id) or "web").strip() or "web"
