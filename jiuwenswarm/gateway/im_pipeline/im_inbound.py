@@ -19,6 +19,48 @@ from jiuwenswarm.gateway.routing.interaction_context import PendingInteraction
 from jiuwenswarm.common.schema.message import Message, ReqMethod
 from jiuwenswarm.gateway.message_handler.command_parser.slash_command import CONTROL_MESSAGE_TEXTS
 from jiuwenswarm.common.utils import get_deepagent_user_md_path, logger
+
+
+def _validate_and_fix_api_base(api_base: str) -> tuple[str, str]:
+    """
+    Validate and fix API base URL for OpenAI-compatible services.
+    
+    Many local LLM servers (like LM Studio) expect the API base to include '/v1' suffix.
+    If the api_base doesn't contain '/v1' and doesn't end with '/chat/completions',
+    it may cause 'Unexpected endpoint' errors.
+    
+    Returns:
+        Tuple of (fixed_api_base, warning_message)
+    """
+    if not api_base:
+        return api_base, ""
+    
+    b = api_base.rstrip("/")
+    
+    if b.endswith("/v1"):
+        return api_base, ""
+    
+    if "/v1/" in b:
+        return api_base, ""
+    
+    if b.endswith("/chat/completions"):
+        return api_base, ""
+    
+    local_host_patterns = ["localhost", "127.0.0.1"]
+    is_local = any(pattern in b for pattern in local_host_patterns)
+    
+    if is_local:
+        fixed_base = f"{b}/v1"
+        warning = (
+            f"检测到 api_base 可能配置不正确: 当前值 '{api_base}'. "
+            f"对于本地 LLM 服务（如 LM Studio、Ollama），API 地址通常需要包含 '/v1' 后缀。 "
+            f"已自动修正为 '{fixed_base}'。如果仍然无法正常工作，请在配置文件中手动设置 api_base 为 '{fixed_base}'。"
+        )
+        return fixed_base, warning
+    
+    return api_base, ""
+
+
 SYSTEM_PROMPT_TEMPLATE = """
 你是{principal_name}的数字分身，活跃在即时通讯群聊中。当群里有其他用户发送与{principal_name}相关的消息时，你的任务是改写这条消息，使其更清晰、更完整，以便后续帮助{principal_name}生成恰当的回复。
 
@@ -396,6 +438,11 @@ class IMConversationProcessor:
             api_base = (mcc.get("api_base") or os.getenv("API_BASE") or "").strip()
             if api_base.endswith("/chat/completions"):
                 api_base = api_base.rsplit("/chat/completions", 1)[0]
+            
+            api_base, api_base_warning = _validate_and_fix_api_base(api_base)
+            if api_base_warning:
+                logger.warning("[IMConversationProcessor] %s", api_base_warning)
+            
             client_provider = mcc.get("client_provider") or os.getenv("MODEL_PROVIDER", "OpenAI")
             custom_headers = _parse_custom_headers(mcc.get("custom_headers") or os.getenv("CUSTOM_HEADERS"))
             reasoning_mcc = {
