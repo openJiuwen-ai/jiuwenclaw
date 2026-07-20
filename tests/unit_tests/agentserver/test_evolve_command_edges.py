@@ -113,6 +113,8 @@ async def test_evolve_slash_allows_team_without_lazy_registering(monkeypatch):
 @pytest.mark.parametrize("auto_save", [False, True])
 @pytest.mark.anyio
 async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch, auto_save):
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+
     class _FakeSkillEvolutionRail:
         pass
 

@@ -852,6 +852,7 @@ def test_resolve_enable_task_loop_preserves_false_when_only_evolution_enabled(mo
 
 def test_resolve_enable_task_loop_preserves_false_without_enforcers(monkeypatch):
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
     monkeypatch.delenv("SKILL_CREATE", raising=False)
     assert (
         JiuWenSwarmDeepAdapter._resolve_enable_task_loop(
