@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Dict, Sequence
 
 from indexing.catalog.records import CatalogRecord
 from indexing.io.items_jsonl import is_passthrough_item_uri
+from shared.tags import normalize_tags
 
 
 def write_manifest(
@@ -21,6 +23,15 @@ def write_manifest(
         "count": len(records),
         "item_paths": [_serialize_item_path(path) for path in item_paths],
         "worker_ids": [record.worker_id for record in records],
+        "tag_counts": dict(
+            sorted(
+                Counter(
+                    tag
+                    for record in records
+                    for tag in normalize_tags(record.tags, record.metadata.get("tags"))
+                ).items()
+            )
+        ),
     }
     if item_type:
         manifest["item_type"] = str(item_type)
