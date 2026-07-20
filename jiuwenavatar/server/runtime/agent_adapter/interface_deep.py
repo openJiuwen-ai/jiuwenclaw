@@ -561,6 +561,11 @@ class JiuWenClawDeepAdapter:
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
         self._persona_avatar_chat_rail: Any = None
+        self._committer_review_trace_rail: Any = None
+        self._committer_review_trace_rail_registered: bool = False
+        self._committer_review_trace_avatar_id: str = ""
+        self._committer_review_trace_registered_agent: Any = None
+        self._committer_review_trace_lock = asyncio.Lock()
         self._tool_cards = None
         self._evolution_watcher_tasks: set[asyncio.Task] = set()
         self._sys_operation = None
@@ -2934,6 +2939,11 @@ class JiuWenClawDeepAdapter:
             auto_create_workspace=False
         )
 
+        # A previous DeepAgent instance may still own the dynamically registered
+        # Committer review-trace Rail. Detach it before replacing the instance so
+        # the registration flag cannot become stale across agent recreation.
+        await self._detach_committer_review_trace_rail(clear_rail=True)
+
         self._instance = create_deep_agent(
             **common_kwargs,
             context_engine_config=_deep_agent_context_engine_config(config),
@@ -3478,6 +3488,98 @@ class JiuWenClawDeepAdapter:
         params = request.params if isinstance(request.params, dict) else {}
         return str(params.get("avatar_id") or "").strip()
 
+    async def _detach_committer_review_trace_rail(self, *, clear_rail: bool = False) -> None:
+        """Unregister the Rail from the agent that actually owns it."""
+
+        async with self._committer_review_trace_lock:
+            await self._detach_committer_review_trace_rail_locked(clear_rail=clear_rail)
+
+    async def _detach_committer_review_trace_rail_locked(self, *, clear_rail: bool) -> None:
+        rail = self._committer_review_trace_rail
+        registered_agent = self._committer_review_trace_registered_agent
+        if registered_agent is None and self._committer_review_trace_rail_registered:
+            registered_agent = self._instance
+
+        if rail is not None and registered_agent is not None:
+            try:
+                await registered_agent.unregister_rail(rail)
+            except Exception as exc:
+                logger.debug(
+                    "[JiuWenClawDeepAdapter] Committer review-trace Rail unregister ignored: %s",
+                    exc,
+                )
+
+        self._committer_review_trace_rail_registered = False
+        self._committer_review_trace_registered_agent = None
+        if clear_rail:
+            self._committer_review_trace_rail = None
+            self._committer_review_trace_avatar_id = ""
+
+    async def _sync_committer_review_trace_rail(self, ctx: Any | None) -> None:
+        """Register PR review-trace collection only for Committer avatar chats."""
+
+        async with self._committer_review_trace_lock:
+            if self._instance is None:
+                return
+
+            # If the DeepAgent was replaced outside create_instance(), recover
+            # from the stale ownership state before deciding whether to reuse the
+            # existing avatar-specific Rail.
+            if (
+                self._committer_review_trace_rail_registered
+                and self._committer_review_trace_registered_agent is not self._instance
+            ):
+                await self._detach_committer_review_trace_rail_locked(clear_rail=False)
+
+            persona_id = str(getattr(ctx, "persona_id", "") or "") if ctx else ""
+            should_enable = bool(ctx)
+            if should_enable:
+                try:
+                    from jiuwenavatar.server.runtime.review_trace import (
+                        build_committer_review_trace_rail,
+                        committer_review_trace_base_dir,
+                        should_collect_committer_review_trace,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] Committer review-trace integration unavailable: %s",
+                        exc,
+                    )
+                    should_enable = False
+                else:
+                    should_enable = should_collect_committer_review_trace(persona_id)
+
+            if not should_enable:
+                await self._detach_committer_review_trace_rail_locked(clear_rail=False)
+                return
+
+            avatar_id = str(getattr(ctx, "avatar_id", "") or "")
+            if (
+                self._committer_review_trace_rail is None
+                or self._committer_review_trace_avatar_id != avatar_id
+            ):
+                await self._detach_committer_review_trace_rail_locked(clear_rail=True)
+                self._committer_review_trace_rail = build_committer_review_trace_rail(
+                    avatar_id=avatar_id
+                )
+                self._committer_review_trace_avatar_id = avatar_id
+
+            if not self._committer_review_trace_rail_registered:
+                try:
+                    await self._instance.register_rail(self._committer_review_trace_rail)
+                    self._committer_review_trace_rail_registered = True
+                    self._committer_review_trace_registered_agent = self._instance
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] Committer review-trace Rail registered: avatar=%s dir=%s",
+                        avatar_id,
+                        committer_review_trace_base_dir(avatar_id=avatar_id),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] Committer review-trace Rail register failed: %s",
+                        exc,
+                    )
+
     async def _set_subagent_delegation_enabled(self, enabled: bool) -> None:
         """Enable/disable task_tool subagent delegation for the current request."""
         if self._instance is None:
@@ -3508,6 +3610,8 @@ class JiuWenClawDeepAdapter:
 
         if self._persona_avatar_chat_rail is not None:
             self._persona_avatar_chat_rail.set_context(ctx)
+
+        await self._sync_committer_review_trace_rail(ctx)
 
         if ctx and self._skill_manager is not None:
             installed, missing = await ensure_avatar_skills_installed(
@@ -3777,6 +3881,7 @@ class JiuWenClawDeepAdapter:
 
     async def cleanup(self) -> None:
         """Release adapter-owned external runtime resources."""
+        await self._detach_committer_review_trace_rail(clear_rail=True)
         await self._close_a2x_client()
 
     def _collect_registered_ability_names(self) -> set[str]:
