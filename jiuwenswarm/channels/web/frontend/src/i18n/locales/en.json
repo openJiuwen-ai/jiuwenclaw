@@ -537,8 +537,8 @@
   "sourceManager": {
     "closeAria": "Close source manager dialog",
     "title": "Source Manager",
-    "subtitle": "Select online search source and configure",
-    "selectSource": "Select Online Search Source",
+    "subtitle": "Configure online sources",
+    "selectSource": "Configure online sources",
     "skillnetDesc": "Open source skill library",
     "clawhubDesc": "Enterprise skill library",
     "skillnetInfo": "SkillNet Online Search",
@@ -1351,7 +1351,16 @@
       "searchPlaceholder": "Enter keywords to search SwarmSkills"
     },
     "onlineSearch": {
-      "title": "Skills Online Search"
+      "title": "Skills Online Search",
+      "searchPlaceholder": "Search multiple online skill sources",
+      "searchHint": "Enter keywords to aggregate results from available online sources.",
+      "searchFailed": "Online skill search failed. Please try again later.",
+      "partialFailure": "Some online sources are unavailable. Results from available sources are shown.",
+      "clawhubSkipped": "SkillNet was searched. Configure a ClawHub token to include ClawHub results.",
+      "noResults": "No matching online skills found.",
+      "installFailed": "Failed to install the skill.",
+      "installed": "Installed skill {{name}}",
+      "sourceRank": "Source rank {{rank}}"
     },
     "actions": {
       "install": "Install",
