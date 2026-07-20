@@ -1029,14 +1029,30 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if env_updates:
             _persist_env_updates(env_updates)
 
-        # 当 models / embed / yaml 配置改动时，通知 AgentServer 清缓存并热重载
+        # 当 models / embed / yaml 配置改动时，后台通知 AgentServer 清缓存并热重载。
+        # 必须在 send_response 之前 fire-and-forget：reload 在 AgentServer 端要重建
+        # 全部 agent + session adapter（单次可达 25~44s），若同步 await 会阻塞当前
+        # WebSocket 消息循环（同连接 `async for raw in ws` 串行），导致后续 config.get
+        # 等本地帧排队等满 reload 超时（25s），前端 30s 超时报 request timeout: config.get。
+        # 写盘（上面 setter + _persist_env_updates）已同步完成，config.get 直接读
+        # config.yaml 即可立即验证；reload 仅用于 AgentServer 内存热更新，本就尽力而为，
+        # 故丢后台不阻塞回包。与 _command_model._model_switch_background 对齐。
         if yaml_updated or _yaml_sections_updated:
             real_client = (
                 agent_client.get("value")
                 if isinstance(agent_client, dict)
                 else agent_client
             )
-            await _clear_agent_config_cache(real_client)
+
+            async def _config_set_reload_background() -> None:
+                try:
+                    await _clear_agent_config_cache(real_client)
+                except Exception as _e_reload:  # noqa: BLE001
+                    logger.warning(
+                        "[cli config.set] AGENT_RELOAD_CONFIG failed: %s", _e_reload
+                    )
+
+            asyncio.create_task(_config_set_reload_background())
 
         updated_param_keys = [
             k for k, e in _CLI_CONFIG_SET_ENV_MAP.items() if e in env_updates
