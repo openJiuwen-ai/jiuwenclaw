@@ -1047,7 +1047,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             async def _config_set_reload_background() -> None:
                 try:
                     await _clear_agent_config_cache(real_client)
-                except Exception as _e_reload:  # noqa: BLE001
+                except Exception as _e_reload:
                     logger.warning(
                         "[cli config.set] AGENT_RELOAD_CONFIG failed: %s", _e_reload
                     )
