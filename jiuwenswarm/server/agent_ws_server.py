@@ -104,6 +104,57 @@ from jiuwenswarm.common.schema.message import ReqMethod
 
 logger = logging.getLogger(__name__)
 
+
+def _get_friendly_error_hint(error_message: str) -> str:
+    """
+    根据错误信息返回友好的提示信息。
+    
+    针对常见的 API 错误提供用户友好的建议，帮助用户快速定位和解决问题。
+    
+    Returns:
+        友好提示字符串，如果没有匹配的错误类型则返回空字符串
+    """
+    error_lower = error_message.lower()
+    
+    if "chat/completions" in error_lower and ("endpoint" in error_lower or "method" in error_lower):
+        return (
+            "💡 提示：检测到 API 端点错误。如果您正在使用本地 LLM 服务（如 LM Studio、Ollama），"
+            "请检查 api_base 配置是否正确。本地服务通常需要包含 '/v1' 后缀，例如：\n"
+            "  - 当前可能: http://localhost:1234\n"
+            "  - 建议改为: http://localhost:1234/v1"
+        )
+    
+    if "connection refused" in error_lower or "connection reset" in error_lower:
+        return (
+            "💡 提示：无法连接到模型服务。请检查：\n"
+            "  1. 模型服务（如 LM Studio、Ollama）是否已启动\n"
+            "  2. api_base 配置的地址和端口是否正确\n"
+            "  3. 防火墙是否允许访问该端口"
+        )
+    
+    if "timeout" in error_lower:
+        return (
+            "💡 提示：请求超时。请检查：\n"
+            "  1. 模型服务是否正在运行且响应正常\n"
+            "  2. 网络连接是否稳定\n"
+            "  3. 考虑增加超时时间配置"
+        )
+    
+    if "api key" in error_lower or "invalid key" in error_lower:
+        return (
+            "💡 提示：API Key 无效或未配置。请检查 api_key 配置是否正确。\n"
+            "对于本地 LLM 服务（如 LM Studio），api_key 可以设置为任意非空字符串。"
+        )
+    
+    if "model" in error_lower and ("not found" in error_lower or "invalid" in error_lower):
+        return (
+            "💡 提示：模型名称无效或未找到。请检查 model_name 配置是否与服务端可用的模型一致。\n"
+            "对于 LM Studio，请使用模型卡片上显示的完整模型名称。"
+        )
+    
+    return ""
+
+
 # Serialize plan-mode restore per session to avoid checkpoint races.
 _session_mode_sync_locks: dict[str, asyncio.Lock] = {}
 
@@ -1609,11 +1660,15 @@ class AgentWebSocketServer:
                 request.request_id,
                 e,
             )
+            error_message = str(e)
+            friendly_hint = _get_friendly_error_hint(error_message)
+            if friendly_hint:
+                error_message = f"{error_message}\n\n{friendly_hint}"
             error_resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": str(e)},
+                payload={"error": error_message},
             )
             wire = encode_agent_response_for_wire(
                 error_resp, response_id=request.request_id
