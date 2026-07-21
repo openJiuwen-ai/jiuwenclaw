@@ -17,6 +17,7 @@ import os
 import platform
 import re
 import subprocess
+import threading
 import time
 from collections import Counter
 from contextvars import ContextVar, Token
@@ -329,8 +330,58 @@ def get_runtime_tool_session_id() -> str | None:
 
 logger = logging.getLogger(__name__)
 
-_PERSISTENT_CHECKPOINTER_LOCK = asyncio.Lock()
+_PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
+_PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
+_PERSISTENT_CHECKPOINTER_LOCK_INIT = threading.Lock()
 _PERSISTENT_CHECKPOINTER_READY = False
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
+async def _get_persistent_checkpointer_lock() -> asyncio.Lock:
+    """Lazy-init or rebind the process-wide checkpointer lock to the running loop.
+
+    ``asyncio.Lock`` binds to the loop of its first ``acquire()``; any later
+    acquire from a different loop raises ``RuntimeError("... is bound to a
+    different event loop")``. The first call may have happened on a transient
+    loop (test harness, ephemeral worker) that is gone by the time AgentServer's
+    main loop needs the lock. To stay correct under that drift we:
+
+    1. Lazily construct the Lock inside the caller's running loop (guarded by a
+       ``threading.Lock`` so concurrent first-acquires from different threads
+       cannot create two Locks).
+    2. Before returning, verify the Lock is still bound to the current loop. If
+       it is bound to a dead/foreign loop, drop and rebuild it so the caller can
+       re-acquire safely. This rebinding is also done under the threading guard.
+
+    After ``_PERSISTENT_CHECKPOINTER_READY`` flips True no one acquires the lock,
+    so rebinding is a no-op for the steady state.
+    """
+    global _PERSISTENT_CHECKPOINTER_LOCK, _PERSISTENT_CHECKPOINTER_LOCK_LOOP
+    current = _running_loop()
+    if current is None:
+        raise RuntimeError(
+            "_get_persistent_checkpointer_lock must be called from a running event loop"
+        )
+    with _PERSISTENT_CHECKPOINTER_LOCK_INIT:
+        bound = _PERSISTENT_CHECKPOINTER_LOCK_LOOP
+        if _PERSISTENT_CHECKPOINTER_LOCK is None or bound is None or bound is not current:
+            if bound is not None and bound is not current and not bound.is_closed():
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] _PERSISTENT_CHECKPOINTER_LOCK rebound: "
+                    "old_loop=%r new_loop=%r (lock repr=%r)",
+                    bound,
+                    current,
+                    _PERSISTENT_CHECKPOINTER_LOCK,
+                )
+            _PERSISTENT_CHECKPOINTER_LOCK = asyncio.Lock()
+            _PERSISTENT_CHECKPOINTER_LOCK_LOOP = current
+    return _PERSISTENT_CHECKPOINTER_LOCK
 
 _ACP_BLOCKED_DEFAULT_TOOL_NAMES = frozenset(
     {
@@ -513,7 +564,21 @@ async def ensure_persistent_checkpointer() -> None:
     if _PERSISTENT_CHECKPOINTER_READY:
         return
 
-    async with _PERSISTENT_CHECKPOINTER_LOCK:
+    lock = await _get_persistent_checkpointer_lock()
+    acquired = False
+    try:
+        try:
+            await lock.acquire()
+        except RuntimeError as acquire_exc:
+            logger.exception(
+                "[JiuWenSwarmDeepAdapter] _PERSISTENT_CHECKPOINTER_LOCK acquire failed: %s "
+                "(lock repr=%r, running_loop=%r)",
+                acquire_exc,
+                lock,
+                asyncio.get_event_loop(),
+            )
+            raise
+        acquired = True
         if _PERSISTENT_CHECKPOINTER_READY:
             return
 
@@ -538,6 +603,9 @@ async def ensure_persistent_checkpointer() -> None:
                 exc,
             )
             raise RuntimeError("persistent checkpointer initialization failed") from exc
+    finally:
+        if acquired:
+            lock.release()
 
 
 _MODE_DISPLAY_MAP: dict[str, dict[str, str]] = {
