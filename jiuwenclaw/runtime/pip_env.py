@@ -276,8 +276,15 @@ def _quote_for_shell(path: Path) -> str:
 
 
 def _segment_already_uses_runtime_pip(segment: str) -> bool:
-    runtime_py_str = str(get_runtime_python().resolve())
-    if runtime_py_str.lower() not in segment.lower():
+    runtime_py = get_runtime_python()
+    # Match BOTH the literal venv path (e.g. .../isolation_venv/bin/python,
+    # a symlink) and its resolve() target (the base python). The agent emits
+    # the literal venv path; checking only .resolve() missed it, so this guard
+    # failed to detect "segment already uses runtime pip" and
+    # _PYTHON_PIP_INSTALL_RE re-substituted on every retry, doubling the venv
+    # prefix (x2 -> x3 -> x5 ...) until the 10x circuit-breaker aborted the task.
+    candidates = {str(runtime_py).lower(), str(runtime_py.resolve()).lower()}
+    if not any(c in segment.lower() for c in candidates):
         return False
     return bool(re.search(r"(?i)-m\s+pip\s+install\b", segment))
 
