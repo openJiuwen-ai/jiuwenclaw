@@ -15,7 +15,6 @@ from openjiuwen.core.context_engine.qa_block.messages import extract_qa_native_m
 from openjiuwen.core.context_engine.qa_block.registry import load_registry, save_registry
 from openjiuwen.core.context_engine.qa_block.selector import resolve_summarizer_model
 from openjiuwen.core.context_engine.qa_block.store import QABlockStore
-from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -28,8 +27,6 @@ from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
 from jiuwenclaw.agentserver.deep_agent.rails.qa_block_assembly_rail import (
     clear_assembly_committed_qa_id,
 )
-
-from jiuwenclaw.agentserver.deep_agent.rails.utils import is_ask_user_question_interrupt
 
 logger = logging.getLogger(__name__)
 
@@ -49,16 +46,14 @@ def infer_qa_status(ctx: AgentCallbackContext) -> Literal["completed", "interrup
     return "completed"
 
 
-def _is_ask_user_question_interrupt(ctx: AgentCallbackContext) -> bool:
-    """检测中断是否为工具权限确认弹窗(ask_user_question/popup)。
+def _clear_session_interruption_key(session: Any) -> None:
+    """Clear leftover HITL interrupt marker after a settled freeze.
 
-    与用户主动取消(CancelledError)不同：
-    - 工具权限弹窗：result_type="interrupt" + 包含 interrupt_ids
-    - 用户主动取消：不设置 result，直接抛 CancelledError
-
-    这类中断应跳过QA卸载，沿用当前上下文。
+    Skip-freeze paths must NOT call this — secondary ASK keep relies on the key.
     """
-    return is_ask_user_question_interrupt(ctx)
+    updater = getattr(session, "update_state", None)
+    if callable(updater):
+        updater({INTERRUPTION_KEY: None})
 
 
 class JiuClawQABlockFreezeRail(DeepAgentRail):
@@ -320,25 +315,38 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             logger.info("[QABlockFreezeRail] freeze skipped: context not in pool session_id=%s", session_id)
             return
 
-        # 弹窗交互(ask_user_question)中断时不卸载QA，沿用当前上下文
-        if _is_ask_user_question_interrupt(ctx):
-            logger.info("[QABlockFreezeRail] skip freeze for ask_user_question interrupt session_id=%s", session_id)
-            return
-
-        # 弹窗确认恢复：仅当仍处于中断时跳过 freeze。
-        # stream 外层 result 常为 None，不能再据此 skip，否则成功收尾会留下孤儿 QA。
-        # invoke 看 result_type=interrupt；stream 以 session INTERRUPTION_KEY 为准。
-        if isinstance(ctx.inputs, InvokeInputs) and isinstance(ctx.inputs.query, InteractiveInput):
+        # 弹窗/权限 HITL 中断期间不卸载 QA，沿用当前上下文（同轮 keep）。
+        # 覆盖：首次普通 query ASK、InteractiveInput 续跑中再次中断。
+        # 成功收尾：result 明确非 interrupt 时不因残留 INTERRUPTION_KEY 误 skip（stale key）；
+        # 且 freeze 成功后清 key。二次 ASK（result=interrupt 或 result 未决 + key）仍 skip，不清 key。
+        # stream 外层 result 常为 None，故未决时仍看 session INTERRUPTION_KEY。
+        if isinstance(ctx.inputs, InvokeInputs):
             result = getattr(ctx.inputs, "result", None)
-            still_interrupted = (
-                (isinstance(result, dict) and result.get("result_type") == "interrupt")
-                or bool(session.get_state(INTERRUPTION_KEY))
+            result_is_interrupt = (
+                isinstance(result, dict) and result.get("result_type") == "interrupt"
+            )
+            result_settled = (
+                isinstance(result, dict)
+                and bool(result.get("result_type"))
+                and result.get("result_type") != "interrupt"
+            )
+            has_interrupt_key = bool(session.get_state(INTERRUPTION_KEY))
+            still_interrupted = result_is_interrupt or (
+                has_interrupt_key and not result_settled
             )
             if still_interrupted:
-                logger.info(
-                    "[QABlockFreezeRail] skip freeze for popup confirmation resume session_id=%s",
-                    session_id,
-                )
+                if isinstance(result, dict) and "interrupt_ids" in result:
+                    logger.info(
+                        "[QABlockFreezeRail] skip freeze for ask_user_question interrupt "
+                        "session_id=%s",
+                        session_id,
+                    )
+                else:
+                    logger.info(
+                        "[QABlockFreezeRail] skip freeze while session interrupted "
+                        "session_id=%s",
+                        session_id,
+                    )
                 return
 
         workspace_root = ""
@@ -372,12 +380,15 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
                 session_id=session_id,
                 context=context,
             )
+            # Turn is settled enough to attempt freeze; drop stale interrupt marker.
+            _clear_session_interruption_key(session)
             return
 
         clear_assembly_committed_qa_id(session)
         ctx.extra[_FREEZE_DONE_KEY] = entry.qa_id
         await context_engine.save_contexts(session)
         await self._persist_freeze_checkpoint(session, session_id=session_id)
+        _clear_session_interruption_key(session)
         logger.info(
             "[QABlockFreezeRail] freeze committed session_id=%s qa_id=%s status=%s persist=%s",
             session_id,
