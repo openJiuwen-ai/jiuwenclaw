@@ -108,7 +108,52 @@ def merged_file_guard_config(permissions: dict[str, Any]) -> dict[str, Any]:
     ted = fg.get("trusted_exec_directory")
     if not isinstance(ted, list):
         fg["trusted_exec_directory"] = []
+    _inject_system_default_trust(fg)
     return fg
+
+
+def _inject_system_default_trust(fg: dict[str, Any]) -> None:
+    """将系统基础设施路径注入 file_guard 默认信任配置。
+
+    ``isolation_venv/Scripts``（或 ``isolation_venv/bin``）是系统自己管理的
+    隔离虚拟环境，不是用户数据，不应被当作"外部路径"弹窗。
+    如果用户已显式配置了信任路径，本注入视为兜底，不覆盖用户配置。
+    """
+    try:
+        from jiuwenclaw.runtime import get_runtime_venv_dir
+
+        venv_dir = get_runtime_venv_dir()
+        scripts_dir = _posix_str(venv_dir / ("Scripts" if os.name == "nt" else "bin"))
+        if not scripts_dir:
+            return
+
+        ted = fg.get("trusted_exec_directory")
+        if not isinstance(ted, list):
+            ted = []
+            fg["trusted_exec_directory"] = ted
+
+        # 仅当该路径尚未被显式配置时注入。用精确 posix 路径比较（与
+        # _trusted_matches 一致），避免 substring matching 把超集路径
+        # （如 Scripts-backup）误判为已配置而跳过注入。
+        already_trusted = False
+        for raw in ted:
+            if not isinstance(raw, str):
+                continue
+            try:
+                prefix = _posix_str(Path(_expand_path_str(raw.strip())))
+            except (OSError, RuntimeError):
+                continue
+            if scripts_dir == prefix or scripts_dir.startswith(prefix + "/"):
+                already_trusted = True
+                break
+        if not already_trusted:
+            ted.append(scripts_dir)
+            logger.info(
+                "[file_guard] system_default_trust added path=%s",
+                scripts_dir,
+            )
+    except Exception:
+        logger.debug("[file_guard] system_default_trust skip", exc_info=True)
 
 
 def _expand_path_str(s: str) -> str:
