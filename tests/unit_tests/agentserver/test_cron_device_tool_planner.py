@@ -59,7 +59,7 @@ async def test_planner_returns_real_device_tool_calls_without_execution() -> Non
 @pytest.mark.asyncio
 async def test_planner_returns_multiple_ordered_tools() -> None:
     model = _FakeModel(
-        [_tool_response("search_contact", "send_message", "send_message")]
+        [_tool_response("search_contact", "send_sms", "send_sms")]
     )
     planner = CronDeviceToolPlanner(model_factory=lambda: model)
 
@@ -69,7 +69,7 @@ async def test_planner_returns_multiple_ordered_tools() -> None:
         privilege_intents={"SearchContactLocal", "SendShortMessage"},
     )
 
-    assert plan.tool_names == ("search_contact", "send_message")
+    assert plan.tool_names == ("search_contact", "send_sms")
     assert plan.allowed_intents == (
         "SearchContactLocal",
         "SendShortMessage",
@@ -145,6 +145,17 @@ def test_route_registry_maps_privileged_and_non_privileged_tools() -> None:
     assert plan.privilege_intents == ("CreateNote",)
 
 
+def test_route_registry_migrates_legacy_sms_tool_name() -> None:
+    plan = map_device_tool_names(
+        ["send_message"],
+        privilege_intents={"SendShortMessage"},
+    )
+
+    assert plan.tool_names == ("send_sms",)
+    assert plan.allowed_intents == ("SendShortMessage",)
+    assert plan.privilege_intents == ("SendShortMessage",)
+
+
 def test_route_registry_covers_all_current_device_tools() -> None:
     assert set(DEVICE_TOOL_ROUTE_BY_NAME) == {
         "get_user_location",
@@ -159,7 +170,7 @@ def test_route_registry_covers_all_current_device_tools() -> None:
         "search_file",
         "upload_file",
         "call_phone",
-        "send_message",
+        "send_sms",
         "search_message",
         "create_alarm",
         "search_alarms",

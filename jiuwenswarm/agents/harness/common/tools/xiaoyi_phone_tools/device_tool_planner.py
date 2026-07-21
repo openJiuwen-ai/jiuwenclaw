@@ -25,7 +25,7 @@ from .calendar_tools import create_calendar_event, search_calendar_event
 from .contact_tools import search_contact
 from .file_tools import search_file, upload_file
 from .location_tool import get_user_location
-from .message_tools import search_message, send_message
+from .message_tools import search_message, send_sms
 from .note_tools import create_note, modify_note, search_notes
 from .phone_tools import call_phone
 from .photo_tools import search_photo_gallery, upload_photo
@@ -75,7 +75,7 @@ DEVICE_TOOL_ROUTE_SPECS: tuple[DeviceToolRouteSpec, ...] = (
     DeviceToolRouteSpec(search_file, "SearchFile"),
     DeviceToolRouteSpec(upload_file, "FileUploadForClaw"),
     DeviceToolRouteSpec(call_phone, "StartCall"),
-    DeviceToolRouteSpec(send_message, "SendShortMessage"),
+    DeviceToolRouteSpec(send_sms, "SendShortMessage"),
     DeviceToolRouteSpec(search_message, "SearchMessage"),
     DeviceToolRouteSpec(create_alarm, "CreateAlarm"),
     DeviceToolRouteSpec(search_alarms, "SearchAlarm"),
@@ -112,6 +112,10 @@ class DeviceToolRouteRegistry:
         checked_intents: list[str] = []
         for raw_name in tool_names:
             tool_name = str(raw_name or "").strip()
+            if tool_name == "send_message":
+                # Legacy Xiaoyi cron plans used the team-colliding SMS name.
+                # Migrate it only inside the Xiaoyi device-tool registry.
+                tool_name = "send_sms"
             if not tool_name or tool_name in normalized_tools:
                 continue
             spec = self.by_name.get(tool_name)

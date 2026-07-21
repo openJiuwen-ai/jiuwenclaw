@@ -3,7 +3,7 @@
 """Message tools - 短信/消息工具.
 
 包含：
-- send_message: 发送短信
+- send_sms: 发送短信
 - search_message: 搜索短信
 """
 
@@ -58,14 +58,14 @@ def _log_outputs_summary(intent: str, outputs: Dict[str, Any]) -> None:
 
 
 @tool(
-    name="send_message",
+    name="send_sms",
     description=(
         "通过手机发送短信。需要提供接收方手机号码和短信内容。"
         "手机号码会自动添加+86前缀（如果没有的话）。"
         "注意:操作超时时间为60秒,请勿重复调用此工具,如果超时或失败,最多重试一次。"
     ),
 )
-async def send_message(phone_number: str, content: str) -> Dict[str, Any]:
+async def send_sms(phone_number: str, content: str) -> Dict[str, Any]:
     """发送短信.
 
     Args:
@@ -161,6 +161,10 @@ async def send_message(phone_number: str, content: str) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"[SEND_MESSAGE_TOOL] Failed to send message: {e}")
         raise RuntimeError(f"发送短信失败: {str(e)}") from e
+
+
+# Python import compatibility only. The exposed LLM tool name is ``send_sms``.
+send_message = send_sms
 
 
 @tool(

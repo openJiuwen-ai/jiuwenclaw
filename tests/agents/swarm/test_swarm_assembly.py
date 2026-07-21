@@ -964,9 +964,10 @@ def test_xiaoyi_phone_tools_gated_by_config() -> None:
 
     enabled_tools = tools._build_xiaoyi_phone_tools(enabled)
     assert len(enabled_tools) == 27
-    assert "check_plugin_privilege" not in {
-        tool.card.name for tool in enabled_tools
-    }
+    enabled_names = {tool.card.name for tool in enabled_tools}
+    assert "check_plugin_privilege" not in enabled_names
+    assert "send_sms" in enabled_names
+    assert "send_message" not in enabled_names
     assert tools._build_xiaoyi_phone_tools(disabled) == []
 
 
