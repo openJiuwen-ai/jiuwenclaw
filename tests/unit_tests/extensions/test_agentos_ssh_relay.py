@@ -427,3 +427,365 @@ async def test_ssh_relay_agent_creation_failure_releases_session() -> None:
         assert "create failed" in stub_relay.failed[0][1]
     finally:
         await client.shutdown()
+
+
+# ---------- bidirectional disconnect ----------
+
+
+class _FakeStream:
+    """Minimal async stream used by disconnect tests."""
+
+    def __init__(
+        self,
+        chunks: list[bytes] | None = None,
+        *,
+        raise_on_read: BaseException | None = None,
+        block_read: bool = False,
+    ) -> None:
+        self._chunks = list(chunks or [])
+        self._raise_on_read = raise_on_read
+        self._block_read = block_read
+        self.writes: list[bytes] = []
+        self.eof_written = False
+        self._read_event = asyncio.Event()
+
+    async def read(self, _n: int) -> bytes:
+        if self._raise_on_read is not None:
+            raise self._raise_on_read
+        if self._block_read:
+            await self._read_event.wait()
+            return b""
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
+
+    def write(self, data: bytes) -> None:
+        self.writes.append(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def write_eof(self) -> None:
+        self.eof_written = True
+
+    def unblock(self) -> None:
+        self._read_event.set()
+
+
+class _FakeProcess:
+    def __init__(self, stdin: _FakeStream, stdout: _FakeStream, stderr: _FakeStream) -> None:
+        self.stdin = stdin
+        self.stdout = stdout
+        self.stderr = stderr
+        self.exit_codes: list[int] = []
+
+    def get_terminal_type(self) -> str:
+        return "xterm"
+
+    def get_terminal_size(self) -> tuple[int, int]:
+        return (80, 24)
+
+    def exit(self, code: int) -> None:
+        self.exit_codes.append(code)
+
+
+class _FakeBackend:
+    def __init__(
+        self,
+        stdout: _FakeStream,
+        stderr: _FakeStream,
+        stdin: _FakeStream | None = None,
+        *,
+        exit_status: int | None = 0,
+    ) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.stdin = stdin or _FakeStream()
+        self.exit_status = exit_status
+        self.closed = False
+        self.wait_closed_called = False
+
+    def close(self) -> None:
+        self.closed = True
+        self.stdout.unblock()
+        self.stderr.unblock()
+        self.stdin.unblock()
+
+    async def wait_closed(self) -> None:
+        self.wait_closed_called = True
+
+
+class _FakeConn:
+    def __init__(self, backend: _FakeBackend) -> None:
+        self._backend = backend
+        self.create_calls = 0
+
+    async def create_process(self, *args: Any, **kwargs: Any) -> _FakeBackend:
+        del args, kwargs
+        self.create_calls += 1
+        return self._backend
+
+
+def _install_fake_asyncssh(modules: dict[str, Any]) -> type[BaseException]:
+    from types import ModuleType
+
+    fake_asyncssh = ModuleType("asyncssh")
+
+    class ConnectionLost(Exception):
+        pass
+
+    class TerminalSizeChanged(Exception):
+        pass
+
+    class BreakReceived(Exception):
+        pass
+
+    fake_asyncssh.ConnectionLost = ConnectionLost  # type: ignore[attr-defined]
+    fake_asyncssh.TerminalSizeChanged = TerminalSizeChanged  # type: ignore[attr-defined]
+    fake_asyncssh.BreakReceived = BreakReceived  # type: ignore[attr-defined]
+    modules["asyncssh"] = fake_asyncssh
+    return ConnectionLost
+
+
+@pytest.mark.asyncio
+async def test_southbound_eof_closes_northbound_and_cancels_pumps() -> None:
+    """Southbound stdout EOF must exit the northbound process and stop other pumps."""
+    import sys
+    from unittest.mock import patch
+
+    modules: dict[str, Any] = dict(sys.modules)
+    _install_fake_asyncssh(modules)
+
+    north_stdin = _FakeStream(block_read=True)
+    north_stdout = _FakeStream()
+    north_stderr = _FakeStream()
+    process = _FakeProcess(north_stdin, north_stdout, north_stderr)
+
+    backend_stdout = _FakeStream(chunks=[b"bye"])  # one chunk then EOF
+    backend_stderr = _FakeStream(block_read=True)
+    backend = _FakeBackend(backend_stdout, backend_stderr, exit_status=7)
+    conn = _FakeConn(backend)
+
+    session = _relay_session("ssh_s2n")
+    session.process = process
+
+    relay = YuanrongSshRelay(
+        YuanrongSshSettings(),
+        frontend_endpoint="http://127.0.0.1:31220",
+    )
+    with patch.dict(sys.modules, modules):
+        code = await asyncio.wait_for(
+            relay._relay_over_connection(session, conn),
+            timeout=5,
+        )
+
+    assert code == 7
+    assert backend.closed is True
+    assert process.exit_codes == [7]
+    assert north_stdout.writes == [b"bye"]
+
+
+@pytest.mark.asyncio
+async def test_northbound_disconnect_closes_southbound() -> None:
+    """Northbound ConnectionLost must close the southbound backend."""
+    import sys
+    from unittest.mock import patch
+
+    modules: dict[str, Any] = dict(sys.modules)
+    ConnectionLost = _install_fake_asyncssh(modules)
+
+    north_stdin = _FakeStream(raise_on_read=ConnectionLost())
+    process = _FakeProcess(north_stdin, _FakeStream(), _FakeStream())
+
+    backend_stdout = _FakeStream(block_read=True)
+    backend_stderr = _FakeStream(block_read=True)
+    backend = _FakeBackend(backend_stdout, backend_stderr, exit_status=None)
+    conn = _FakeConn(backend)
+
+    session = _relay_session("ssh_n2s")
+    session.process = process
+
+    relay = YuanrongSshRelay(
+        YuanrongSshSettings(),
+        frontend_endpoint="http://127.0.0.1:31220",
+    )
+    with patch.dict(sys.modules, modules):
+        code = await asyncio.wait_for(
+            relay._relay_over_connection(session, conn),
+            timeout=5,
+        )
+
+    assert code == 0
+    assert backend.closed is True
+    assert process.exit_codes == [0]
+
+
+@pytest.mark.asyncio
+async def test_relay_run_cancelled_releases_session_done() -> None:
+    """Cancelling the relay task must still set session.done for the northbound waiter."""
+    session = _relay_session("ssh_cancel")
+    session.process = _FakeProcess(_FakeStream(), _FakeStream(), _FakeStream())
+    relay = YuanrongSshRelay(
+        YuanrongSshSettings(),
+        frontend_endpoint="http://127.0.0.1:31220",
+    )
+
+    async def _hang(
+        _session: Any, _instance_id: str, *, user_id: str = ""
+    ) -> int:
+        del user_id
+        await asyncio.Event().wait()
+        return 0
+
+    relay._relay = _hang  # type: ignore[method-assign]
+    task = asyncio.create_task(relay.run(session, "inst-1"))
+    await asyncio.sleep(0)
+    assert not session.done.is_set()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert session.done.is_set()
+    assert session.exit_code == 130
+
+
+@pytest.mark.asyncio
+async def test_router_disconnect_cancels_background_ssh_relay() -> None:
+    """Router disconnect must cancel in-flight SSH relay background tasks."""
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class HangingRelay(StubSshRelay):
+        async def run(
+            self,
+            session: Any,
+            instance_id: str,
+            *,
+            user_id: str = "",
+        ) -> int:
+            del instance_id, user_id
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                session.exit_code = 130
+                session.done.set()
+                raise
+            return 0
+
+    session = _relay_session("ssh_drain")
+    client = AgentOSRouterClient(
+        FakeYuanRongClient(),
+        FakeRegistryClient(),
+        AgentManager(),
+        ssh_relay=HangingRelay(),
+    )
+    try:
+        await client.send_request(_ssh_envelope(session, agent_type="opencode"))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        assert session.relay_task is not None
+        assert not session.relay_task.done()
+        await client.disconnect()
+        await asyncio.wait_for(cancelled.wait(), timeout=5)
+        assert session.done.is_set()
+    finally:
+        await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_wait_relay_done_timeout_cancels_southbound_task() -> None:
+    """Northbound relay timeout must cancel the southbound relay_task."""
+    from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import (
+        SshChannel,
+        SshChannelConfig,
+    )
+
+    cancelled = asyncio.Event()
+
+    async def _hanging_relay() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            session.exit_code = 130
+            session.done.set()
+            raise
+
+    session = _relay_session("ssh_timeout")
+    session.relay_task = asyncio.create_task(_hanging_relay())
+
+    channel = SshChannel(
+        SshChannelConfig(enabled=False, relay_timeout_sec=0.05),
+        router=None,  # type: ignore[arg-type]
+    )
+    await channel._register_session(
+        session_id="ssh_timeout",
+        process=object(),
+        username="alice",
+        client_addr="127.0.0.1:1",
+    )
+    channel._sessions["ssh_timeout"].relay = session
+    try:
+        code = await channel._wait_relay_done("ssh_timeout")
+        assert code == 124
+        await asyncio.wait_for(cancelled.wait(), timeout=5)
+        assert session.done.is_set()
+    finally:
+        await channel._unregister_session("ssh_timeout")
+        if session.relay_task and not session.relay_task.done():
+            session.relay_task.cancel()
+            try:
+                await session.relay_task
+            except asyncio.CancelledError:
+                pass
+
+
+@pytest.mark.asyncio
+async def test_unregister_session_cancels_southbound_task() -> None:
+    """Northbound session teardown must cancel a still-running southbound
+    relay, even when the pumps never notice the dead client (stdin blocked)."""
+    from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import (
+        SshChannel,
+        SshChannelConfig,
+    )
+
+    cancelled = asyncio.Event()
+
+    async def _hanging_relay() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            session.exit_code = 130
+            session.done.set()
+            raise
+
+    session = _relay_session("ssh_unreg")
+    session.relay_task = asyncio.create_task(_hanging_relay())
+    # Let the relay task start; cancelling a never-started task would skip
+    # its CancelledError handler.
+    await asyncio.sleep(0)
+
+    channel = SshChannel(
+        SshChannelConfig(enabled=False),
+        router=None,  # type: ignore[arg-type]
+    )
+    await channel._register_session(
+        session_id="ssh_unreg",
+        process=object(),
+        username="alice",
+        client_addr="127.0.0.1:1",
+    )
+    channel._sessions["ssh_unreg"].relay = session
+    try:
+        await channel._unregister_session("ssh_unreg")
+        await asyncio.wait_for(cancelled.wait(), timeout=5)
+        assert session.done.is_set()
+        assert "ssh_unreg" not in channel._sessions
+    finally:
+        if session.relay_task and not session.relay_task.done():
+            session.relay_task.cancel()
+            try:
+                await session.relay_task
+            except asyncio.CancelledError:
+                pass
