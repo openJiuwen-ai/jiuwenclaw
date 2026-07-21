@@ -659,16 +659,18 @@ class MessageHandler(ABC):
 
         - str: 兼容历史行为，封装为 {"content": text, "is_complete": True}
         - dict: 透传给 channel（仅确保 is_complete=True）
+
+        小艺 channel 按 payload.is_complete 判定任务结束（True → WS final=true，
+        关闭「处理中」接收周期）。CLI 控制指令等 notice 均为终态回包，必须默认 True；
+        若确需多帧未完结，调用方显式传入 is_complete=False。
         """
         from jiuwenswarm.common.schema.message import Message, EventType
 
-        # 小艺 channel 按 payload.is_complete 判定任务结束（收到 True 即关闭接收周期）。
-        _default_complete = False if channel_id == "xiaoyi" else True
         if isinstance(text_or_payload, dict):
             payload = dict(text_or_payload)
-            payload.setdefault("is_complete", _default_complete)
+            payload.setdefault("is_complete", True)
         else:
-            payload = {"content": text_or_payload, "is_complete": _default_complete}
+            payload = {"content": text_or_payload, "is_complete": True}
 
         _app_id = user_infos.get("app_id") or user_infos.get("bot_id", "")
         msg = Message(
