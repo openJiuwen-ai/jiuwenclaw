@@ -5,14 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
-try:
-    from PIL import Image, ImageDraw, ImageFont
-except ImportError:
-    print("ERROR: Pillow required. Install with: pip install pillow", file=sys.stderr)
-    sys.exit(2)
+from PIL import Image, ImageDraw, ImageFont
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 # Common CJK-capable fonts on macOS / Linux / Windows (first existing wins).
 _FONT_CANDIDATES = [
@@ -107,23 +107,24 @@ def overlay(base_path: Path, layout_path: Path, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     rgb = img.convert("RGB")
     rgb.save(out_path, format="PNG")
-    print(f"OK wrote {out_path}")
+    logger.info("OK wrote %s", out_path)
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="Overlay text on poster base image")
     parser.add_argument("--base", required=True, type=Path)
     parser.add_argument("--layout", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     if not args.base.is_file():
-        print(f"ERROR: base not found: {args.base}", file=sys.stderr)
-        sys.exit(1)
+        logger.error("base not found: %s", args.base)
+        return 1
     if not args.layout.is_file():
-        print(f"ERROR: layout not found: {args.layout}", file=sys.stderr)
-        sys.exit(1)
+        logger.error("layout not found: %s", args.layout)
+        return 1
     overlay(args.base, args.layout, args.out)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
