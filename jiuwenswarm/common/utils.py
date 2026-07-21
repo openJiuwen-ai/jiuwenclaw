@@ -28,6 +28,7 @@ Runtime layout:
 """
 
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -1681,12 +1682,13 @@ _DATA_IMAGE_PATTERN = re.compile(
 # - api_key: sk-xxx
 # - authorization = Bearer ...
 # 分组说明：
-# 1) 敏感键名；2) 分隔符及两侧空白（: 或 =）；3/4) 可选引号（当前替换逻辑未直接使用）
+# 1) 敏感键名；2) 分隔符及两侧空白（: 或 =）；3) 可选起始引号；
+# 4) 值本体（用于脱敏后附指纹）；5) 可选结束引号。
 _KV_SENSITIVE_PATTERN = re.compile(
     r"(?i)(?<![A-Za-z0-9])"
     r"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|"
     r"refresh[_-]?token|authorization|user[_-]?id|userid)"
-    r"(?![A-Za-z0-9])(\s*[:=]\s*)([\"']?)[^,\s\"'\]\}]+([\"']?)"
+    r"(?![A-Za-z0-9])(\s*[:=]\s*)([\"']?)([^,\s\"'\]\}]+)([\"']?)"
 )
 # 匹配“键名包含敏感关键词”且“值被引号包裹”的场景，覆盖:
 # - 'CAT_CAFE_CALLBACK_TOKEN': 'xxxx'
@@ -1704,7 +1706,8 @@ _NAMED_SENSITIVE_KV_PATTERN = re.compile(
     r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)([\"'])(.*?)(\2)"
 )
 # 匹配 Authorization Bearer 令牌，保留 "Bearer " 前缀，仅掩码后面的令牌值。
-_BEARER_SENSITIVE_PATTERN = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9\-._~+/]+=*")
+# 分组：1) "Bearer " 前缀；2) 令牌值本体（用于算指纹）。
+_BEARER_SENSITIVE_PATTERN = re.compile(r"(?i)\b(Bearer\s+)([A-Za-z0-9\-._~+/]+=*)")
 _SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
     # 匹配 JWT（header.payload.signature 三段式，常见以 eyJ 开头）。
     re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
@@ -1721,6 +1724,33 @@ _SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
     # 匹配中国身份证号（18 位，最后一位可为 X/x）。
     re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"),
 ]
+# PII / 非凭证类 pattern：掩码但不附指纹（关联意义不大，且避免引入额外可逆性顾虑）。
+_SENSITIVE_PII_PATTERNS: tuple[re.Pattern[str], ...] = tuple(_SENSITIVE_PATTERNS[-3:])
+# 凭证类 prefix pattern：掩码并附指纹（同 key 指纹一致可关联、不可逆）。
+_SENSITIVE_CREDENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = tuple(_SENSITIVE_PATTERNS[:4])
+
+
+def _fingerprint(value: str) -> str:
+    """返回 value 的 SHA256 前 4 字节（8 位 hex）指纹，用于脱敏后的关联。
+
+    不可逆：拿到 ``fp:7f3a2c19`` 无法还原原值。同一 key 每次指纹一致，
+    可在日志中把同一账号/会话的多次请求串起来排查；key 轮换后指纹自然变化。
+    """
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:8]
+
+
+def _masked_with_fp(value: Any) -> str:
+    """脱敏并附指纹：``******(fp:xxxxxxxx)``。value 为空或失败时退化为纯掩码。"""
+    try:
+        v = str(value) if value is not None else ""
+    except Exception:
+        return _SENSITIVE_MASK
+    fp = _fingerprint(v)
+    if not fp:
+        return _SENSITIVE_MASK
+    return f"{_SENSITIVE_MASK}(fp:{fp})"
 
 
 def _sanitize_log_text(text: str) -> str:
@@ -1729,10 +1759,23 @@ def _sanitize_log_text(text: str) -> str:
 
     masked = text
     masked = _DATA_IMAGE_PATTERN.sub("data:image/*;base64,******", masked)
-    masked = _KV_SENSITIVE_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}", masked)
-    masked = _NAMED_SENSITIVE_KV_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}" r"\2", masked)
-    masked = _BEARER_SENSITIVE_PATTERN.sub(r"\1" f"{_SENSITIVE_MASK}", masked)
-    for pattern in _SENSITIVE_PATTERNS:
+    # _KV_SENSITIVE_PATTERN: 组1=键名, 组2=分隔符, 组4=值（组3/5 为可选引号）。
+    masked = _KV_SENSITIVE_PATTERN.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}{_masked_with_fp(m.group(4))}", masked
+    )
+    # _NAMED_SENSITIVE_KV_PATTERN: 组1=键+分隔符, 组2=起始引号, 组3=值, 组4=结束引号。
+    masked = _NAMED_SENSITIVE_KV_PATTERN.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}{_masked_with_fp(m.group(3))}{m.group(4)}", masked
+    )
+    # _BEARER_SENSITIVE_PATTERN: 组1=Bearer 前缀, 组2=令牌值。
+    masked = _BEARER_SENSITIVE_PATTERN.sub(
+        lambda m: f"{m.group(1)}{_masked_with_fp(m.group(2))}", masked
+    )
+    # 凭证类 prefix key（JWT/sk-/ghp_/glpat-）：掩码并附指纹。
+    for pattern in _SENSITIVE_CREDENTIAL_PATTERNS:
+        masked = pattern.sub(lambda m, _p=pattern: _masked_with_fp(m.group(0)), masked)
+    # PII（邮箱/手机/身份证）：纯掩码，不附指纹。
+    for pattern in _SENSITIVE_PII_PATTERNS:
         masked = pattern.sub(_SENSITIVE_MASK, masked)
     return masked
 
