@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import type { ProjectInfo } from '../../types';
 import { CodeBranchSelector } from './CodeBranchSelector';
 import { gitClient } from './gitClient';
-import type { GitDiffStats } from './types';
+import type { GitDiffStats, ProjectGitDiffStatus } from './types';
 
 interface CodeEnvironmentPanelProps {
   project: ProjectInfo;
@@ -21,12 +21,11 @@ const EMPTY_STATS: GitDiffStats = {
 
 const DIFF_STATS_POLL_MS = 3000;
 
-function hasDiffStats(stats: GitDiffStats | null | undefined): stats is GitDiffStats {
-  return !!stats && (
-    stats.files_changed > 0
-    || stats.lines_added > 0
-    || stats.lines_removed > 0
-  );
+function getEnvironmentStats(status: ProjectGitDiffStatus): GitDiffStats {
+  if (!status.repo.is_git) {
+    return status.last_turn?.stats ?? EMPTY_STATS;
+  }
+  return status.current?.stats ?? EMPTY_STATS;
 }
 
 export function CodeEnvironmentPanel({ project, sessionId, isProcessing, onReview }: CodeEnvironmentPanelProps) {
@@ -44,8 +43,7 @@ export function CodeEnvironmentPanel({ project, sessionId, isProcessing, onRevie
     }
     try {
       const status = await gitClient.diffStatus(project.project_id, sessionId);
-      const currentStats = status.current?.stats;
-      setStats(hasDiffStats(currentStats) ? currentStats : status.last_turn?.stats ?? EMPTY_STATS);
+      setStats(getEnvironmentStats(status));
     } catch (error) {
       console.warn('[code-mode] Failed to load environment diff stats', error);
       setStats(EMPTY_STATS);
