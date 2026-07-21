@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -52,6 +53,10 @@ _proxy_manager: ProxyManager | None = None
 # flag to surface a clean 503 instead of lazily constructing one on
 # the first sandbox-API call.
 _proxy_only_mode: bool = False
+# Windows 出站代理 asyncio task (仅 win32). 沙箱所有出网流量经此代理做
+# 域名/IP 白名单过滤 (docs/window沙箱.md 6.6). None = 非 win32 或未启动.
+_win_proxy_task: asyncio.Task | None = None
+_win_proxy_stop: asyncio.Event | None = None
 
 # Every sandbox API call that talks to the in-sandbox daemon (exec, write_file,
 # read_file, list_dir) is dispatched via ``loop.run_in_executor(None, ...)``
@@ -243,6 +248,7 @@ def _chmod_uds_socket_if_any() -> None:
 @asynccontextmanager
 async def lifespan(_application: FastAPI):
     global _sandbox_manager, _proxy_manager, _proxy_only_mode
+    global _win_proxy_task, _win_proxy_stop
     # Both of these have to run after uvicorn has spun up its event loop -
     # ``set_default_executor`` requires a running loop, and raising NOFILE is
     # only effective within the live process. They are also independent of
@@ -268,6 +274,34 @@ async def lifespan(_application: FastAPI):
             "sandbox subsystem startup",
         )
     else:
+        # Windows 平台: 先做一次性环境准备 (用户创建 + WFP filter + 读 ACL
+        # 预装), 并启动出站代理 asyncio task. 仅 win32 走此分支, Linux 完全
+        # 不动 (docs/window沙箱.md 6.9 lifespan 改动).
+        if sys.platform == "win32":
+            from jiuwenbox.supervisor import win_proxy, win_setup
+            try:
+                win_setup.ensure_windows_setup()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "ensure_windows_setup 失败; Windows 沙箱可能不可用",
+                )
+            # 启动出站代理 (egress 规则取根 policy 的 windows.network.egress).
+            try:
+                root_policy = policy_reader.load_policy()
+                egress = root_policy.windows.network.egress
+                ingress = root_policy.windows.network.ingress
+                _win_proxy_stop = asyncio.Event()
+                _win_proxy_task, _win_proxy_stop = await win_proxy.serve_windows_proxy(
+                    egress=egress,
+                    ingress=ingress,
+                    port_range_start=root_policy.windows.proxy.port_range_start,
+                    port_range_end=root_policy.windows.proxy.port_range_end,
+                    stop_event=_win_proxy_stop,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Windows 出站代理启动失败; 沙箱网络隔离将不可用",
+                )
         # Become the subreaper for our descendant tree *before* any sandbox
         # spawns bwrap. PR_SET_CHILD_SUBREAPER only affects *future*
         # children, so doing it here (after the loop is up but before
@@ -321,6 +355,18 @@ async def lifespan(_application: FastAPI):
             logger.info("MCP session manager stopped")
         except Exception:
             logger.exception("MCP session manager shutdown failed")
+
+        # Windows 出站代理: 通知 stop event + 等待 task 退出 (仅 win32).
+        if _win_proxy_task is not None:
+            try:
+                if _win_proxy_stop is not None:
+                    _win_proxy_stop.set()
+                await asyncio.wait_for(_win_proxy_task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                logger.debug("Windows proxy task shutdown", exc_info=True)
+            finally:
+                _win_proxy_task = None
+                _win_proxy_stop = None
 
         # Stop proxies first so any in-flight clients are torn down before we
         # wipe sandbox descriptors. All steps below are best-effort: a failure
@@ -487,10 +533,22 @@ def create_app() -> FastAPI:
             sandboxes = await _sandbox_manager.list_sandboxes()
             active = sum(1 for s in sandboxes if s.phase.value == "ready")
 
+        # Windows 沙箱可用性: 仅 win32 且 setup 已完成 (注册表 installed 标记).
+        windows_supported = False
+        if sys.platform == "win32":
+            try:
+                from jiuwenbox.supervisor import win_constants as _wconst
+                from jiuwenbox.supervisor import win_setup
+                installed = win_setup._reg_get_str(_wconst.REG_VALUE_INSTALLED)  # noqa: SLF001
+                windows_supported = installed == "1"
+            except Exception:  # noqa: BLE001
+                windows_supported = False
+
         return HealthResponse(
             version=__version__,
             landlock_supported=detect_landlock_abi() > 0,
             sandboxes_active=active,
+            windows_supported=windows_supported,
         )
 
     from jiuwenbox.server.routes.mcp import mcp_server

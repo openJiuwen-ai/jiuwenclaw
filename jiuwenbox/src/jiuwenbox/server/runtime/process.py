@@ -34,6 +34,13 @@ from typing import Any
 
 import yaml
 
+# Windows 平台下的 ctypes / wintypes 仅在 win32 分支使用. 顶层 import
+# 不触发任何 win32 API 调用 (ctypes / wintypes 在 Linux 也可 import, 是
+# 纯 Python 定义). 真正的 dll 加载延迟到 win_*.py 模块函数体内.
+if sys.platform == "win32":
+    import ctypes  # noqa: F401
+    from ctypes import wintypes  # noqa: F401
+
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import NetworkMode, SecurityPolicy
 from jiuwenbox.models.sandbox import (
@@ -139,6 +146,24 @@ SANDBOX_DAEMON_SOURCE = _SUPERVISOR_DIR / "sandbox_daemon.py"
 _LANDLOCK_LAUNCHER_BYTES = LANDLOCK_LAUNCHER_SOURCE.read_bytes()
 _SANDBOX_DAEMON_BYTES = SANDBOX_DAEMON_SOURCE.read_bytes()
 PYTHON_EXECUTABLE = "python3"
+
+
+def _osfhandle_to_fd(kernel32, handle: int) -> int:
+    """把 Windows HANDLE 包装成 C 文件描述符 (供 os.fdopen 使用).
+
+    仅在 win32 调用. 通过 msvcrt.open_osfhandle 把内核句柄转成 fd, 再由
+    Python 文件对象接管读写. fd 在关闭文件对象时被 Python 回收, 但底层
+    HANDLE 不会被自动关, 由调用方管理 handle 生命周期.
+    """
+    if sys.platform != "win32":
+        raise RuntimeError("_osfhandle_to_fd 仅在 Windows 平台可用")
+    import msvcrt  # type: ignore[import-not-found]
+    import os as _os
+    # O_RDONLY | O_BINARY for read handles; for write handles caller passes
+    # appropriate flags. 这里简化: 根据 handle 用途由调用方决定, 默认读写都行
+    # (匿名管道是单向的, 错误方向会 EBADF).
+    flags = _os.O_BINARY
+    return msvcrt.open_osfhandle(handle, flags)
 
 # Per-sandbox control socket: box-server ``bind()``s a Unix socket on its
 # own host filesystem inside a per-sandbox control directory, then passes
@@ -586,6 +611,14 @@ class ProcessRuntime(RuntimeAdapter):
             os.cpu_count(),
             len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
         )
+        # Windows 沙箱 per-sandbox state. 仅在 win32 分支写入; Linux 路径
+        # 完全不动这些字典 (文档 6.9: 在 ProcessRuntime 层新增 Windows 分支).
+        # runner pipe 句柄 + Job handle + ACL workspace + runner pid/handle.
+        self._win_runners: dict[str, dict] = {}
+        self._win_job_handles: dict[str, int] = {}
+        self._win_acl_paths: dict[str, str] = {}
+        self._win_policies: dict[str, SecurityPolicy] = {}
+        self._win_exec_sem: asyncio.Semaphore | None = None
 
     @staticmethod
     def _load_policy(policy_path: Path) -> SecurityPolicy:
@@ -1693,6 +1726,8 @@ class ProcessRuntime(RuntimeAdapter):
         policy_path: Path,
         env: dict[str, str] | None = None,
     ) -> int:
+        if sys.platform == "win32":
+            return await self._create_windows(sandbox_id, policy_path, env)
         existing = self._processes.get(sandbox_id)
         if existing is not None:
             if existing.poll() is None:
@@ -2013,6 +2048,8 @@ class ProcessRuntime(RuntimeAdapter):
         self._teardown_cgroup(sandbox_id)
 
     async def stop(self, sandbox_id: str, timeout: float = 10.0) -> None:
+        if sys.platform == "win32":
+            return await self._stop_windows(sandbox_id, timeout)
         await self._stop_background_processes(sandbox_id)
         proc = self._processes.get(sandbox_id)
         if proc is None:
@@ -2090,6 +2127,8 @@ class ProcessRuntime(RuntimeAdapter):
             )
 
     async def is_running(self, sandbox_id: str) -> bool:
+        if sys.platform == "win32":
+            return await self._is_running_windows(sandbox_id)
         proc = self._processes.get(sandbox_id)
         if proc is None:
             return False
@@ -2511,6 +2550,10 @@ class ProcessRuntime(RuntimeAdapter):
         mkdir_parents: bool = True,
         mode: int | None = None,
     ) -> RuntimeFileOpResult:
+        if sys.platform == "win32":
+            return await self._write_file_windows(
+                sandbox_id, sandbox_path, content, mkdir_parents, mode,
+            )
         socket_path = self._control_socket_host_path(sandbox_id)
         if socket_path is None or not self._daemon_ipc_available(sandbox_id):
             return self._file_op_unavailable(sandbox_id)
@@ -2552,6 +2595,8 @@ class ProcessRuntime(RuntimeAdapter):
         sandbox_id: str,
         sandbox_path: str,
     ) -> RuntimeFileOpResult:
+        if sys.platform == "win32":
+            return await self._read_file_windows(sandbox_id, sandbox_path)
         socket_path = self._control_socket_host_path(sandbox_id)
         if socket_path is None or not self._daemon_ipc_available(sandbox_id):
             return self._file_op_unavailable(sandbox_id)
@@ -2590,6 +2635,12 @@ class ProcessRuntime(RuntimeAdapter):
         include_files: bool = True,
         include_dirs: bool = True,
     ) -> RuntimeFileOpResult:
+        if sys.platform == "win32":
+            return await self._list_dir_windows(
+                sandbox_id, sandbox_path,
+                recursive=recursive, max_depth=max_depth,
+                include_files=include_files, include_dirs=include_dirs,
+            )
         socket_path = self._control_socket_host_path(sandbox_id)
         if socket_path is None or not self._daemon_ipc_available(sandbox_id):
             return self._file_op_unavailable(sandbox_id)
@@ -2684,6 +2735,372 @@ class ProcessRuntime(RuntimeAdapter):
             self._exec_semaphore = sem
         return sem
 
+    # ------------------------------------------------------------------
+    # Windows 沙箱实现 (docs/window沙箱.md 6.9).
+    #
+    # 这些方法仅在 ``sys.platform == "win32"`` 时被入口分支调用. Linux 路径
+    # 完全不走这里. 委托 supervisor/win_*.py 模块完成 ACL / 两跳启动 /
+    # Job / runner-pipe IPC. 对外仍返回 ExecResult / RuntimeFileOpResult,
+    # 上层 SandboxManager 与 API 路由无需感知平台差异.
+    # ------------------------------------------------------------------
+    def _ensure_win_exec_semaphore(self) -> asyncio.Semaphore:
+        sem = self._win_exec_sem
+        if sem is None:
+            sem = asyncio.Semaphore(self._exec_concurrency_limit)
+            self._win_exec_sem = sem
+        return sem
+
+    @staticmethod
+    def _win_workspace_for(policy: SecurityPolicy, sandbox_id: str) -> str:
+        """从 policy.windows 解析沙箱 workspace 路径."""
+        allow_write = policy.windows.filesystem.allow_write
+        if allow_write:
+            return str(Path(os.path.expandvars(allow_write[0])))
+        # 兜底: ~/.jiuwenbox/workspace/<sandbox_id>
+        return str(SANDBOX_WORKSPACE / sandbox_id)
+
+    async def _create_windows(
+        self,
+        sandbox_id: str,
+        policy_path: Path,
+        env: dict[str, str] | None = None,
+    ) -> int:
+        from jiuwenbox.supervisor import (
+            win_acl, win_exec, win_job, win_setup, win_constants as const,
+        )
+
+        await win_setup.ensure_windows_setup()
+        policy = self._load_policy(policy_path)
+        self._win_policies[sandbox_id] = policy
+        workspace = self._win_workspace_for(policy, sandbox_id)
+        self._win_acl_paths[sandbox_id] = workspace
+
+        # 1. 施加文件 ACL.
+        win_acl.apply_sandbox_acl(
+            workspace,
+            policy.windows.filesystem.allow_write,
+            policy.windows.filesystem.deny_write,
+        )
+
+        # 2. 两跳启动 runner.
+        user = const.SANDBOX_USER_NAME
+        password = win_setup.get_sandbox_user_password()
+        if not password:
+            raise RuntimeError(
+                "无法读取 jbx-sandbox 用户密码; 请先以管理员身份运行 "
+                "'python -m jiuwenbox.supervisor.win_setup --install'"
+            )
+        proxy_start = policy.windows.proxy.port_range_start
+        proxy_end = policy.windows.proxy.port_range_end
+        runner_pid, stdin_w, stdout_r, proc_handle = win_exec.two_hop_spawn(
+            sandbox_id,
+            sandbox_user=user,
+            sandbox_password=password,
+            workspace=workspace,
+            proxy_port_start=proxy_start,
+            proxy_port_end=proxy_end,
+            env=env,
+        )
+        self._win_runners[sandbox_id] = {
+            "pid": runner_pid,
+            "stdin_handle": stdin_w,
+            "stdout_handle": stdout_r,
+            "process_handle": proc_handle,
+            "workspace": workspace,
+        }
+
+        # 3. Job Object (可选).
+        resource = policy.windows.resource
+        if not resource.is_empty():
+            try:
+                job = win_job.create_job(
+                    resource.memory_max, resource.cpu_rate, resource.max_processes,
+                )
+                win_job.assign_process_by_pid(job, runner_pid)
+                self._win_job_handles[sandbox_id] = job
+            except Exception:  # noqa: BLE001 - Job 失败不阻断沙箱创建
+                logger.warning(
+                    "Windows Job Object 创建失败 (sandbox=%s); 沙箱将不受资源限制",
+                    sandbox_id, exc_info=True,
+                )
+
+        logger.info("Windows 沙箱已创建: %s runner_pid=%d", sandbox_id, runner_pid)
+        return runner_pid
+
+    async def _stop_windows(self, sandbox_id: str, timeout: float = 10.0) -> None:
+        from jiuwenbox.supervisor import win_acl, win_exec, win_job
+
+        # 关 Job -> 内核强杀所有成员 (含 runner 及其子进程).
+        job = self._win_job_handles.pop(sandbox_id, None)
+        if job is not None:
+            win_job.teardown(job)
+
+        runner = self._win_runners.get(sandbox_id)
+        if runner is not None:
+            # 先发 shutdown, 再 TerminateProcess 兜底.
+            await self._send_runner_shutdown(sandbox_id)
+            try:
+                win_exec._stop_runner(runner["pid"], runner["process_handle"])
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "停止 runner 失败 sandbox=%s", sandbox_id, exc_info=True,
+                )
+            self._win_runners.pop(sandbox_id, None)
+
+        # 撤销文件 ACL.
+        workspace = self._win_acl_paths.pop(sandbox_id, None)
+        if workspace:
+            try:
+                win_acl.revoke_sandbox_acl(workspace)
+            except Exception:  # noqa: BLE001
+                logger.debug("撤销 ACL 失败 sandbox=%s", sandbox_id, exc_info=True)
+
+    async def _is_running_windows(self, sandbox_id: str) -> bool:
+        runner = self._win_runners.get(sandbox_id)
+        if runner is None:
+            return False
+        # WaitForSingleObject(0) 非阻塞探测: WAIT_TIMEOUT(0x102) 仍在运行,
+        # WAIT_OBJECT_0(0) 已终止.
+        from jiuwenbox.supervisor import win_exec
+        try:
+            kernel32 = win_exec._get_kernel32()
+            WAIT_TIMEOUT = 0x102
+            result = kernel32.WaitForSingleObject(
+                wintypes.HANDLE(runner["process_handle"]), 0,
+            )
+            return result == WAIT_TIMEOUT
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _exec_windows(
+        self,
+        sandbox_id: str,
+        request: RuntimeExecRequest,
+    ) -> ExecResult:
+        """通过 runner pipe 发 exec 请求帧, 读回响应帧."""
+        runner = self._win_runners.get(sandbox_id)
+        if runner is None:
+            return ExecResult(
+                exit_code=1,
+                stderr=f"sandbox {sandbox_id!r} runner 不可用; 沙箱未运行或已停止",
+            )
+        payload: dict[str, Any] = {
+            "command": list(request.command),
+            "stdin_size": len(request.stdin_data or b""),
+        }
+        if request.env:
+            payload["env"] = dict(request.env)
+        if request.workdir:
+            payload["workdir"] = request.workdir
+        if request.timeout is not None:
+            payload["timeout"] = request.timeout
+        response = await self._win_runner_roundtrip(
+            sandbox_id, runner, REQUEST_TYPE_EXEC, payload, request.stdin_data,
+        )
+        if response is None:
+            return ExecResult(
+                exit_code=1,
+                stderr=f"sandbox {sandbox_id!r} runner IPC 失败",
+            )
+        return ExecResult(
+            exit_code=int(response.get("exit_code", 1)),
+            stdout=str(response.get("stdout", "")),
+            stderr=str(response.get("stderr", "")),
+        )
+
+    async def _exec_background_windows(
+        self,
+        sandbox_id: str,
+        request: RuntimeBackgroundExecRequest,
+    ) -> BackgroundExecResult:
+        # Windows 后台 exec 复用前台 exec 路径, 以 runner 起 child (runner 内部
+        # 不等待 child 退出). 这里简化: 直接走 _exec_windows 并标记 started.
+        # 完整后台语义 (日志文件/独立 job) 留待 Windows 实跑环境验证后补全.
+        logger.warning(
+            "Windows exec_background 降级为同步 exec (sandbox=%s)", sandbox_id,
+        )
+        result = await self._exec_windows(
+            sandbox_id,
+            RuntimeExecRequest(
+                command=request.command,
+                workdir=request.workdir,
+                env=request.env,
+                stdin_data=request.stdin_data,
+            ),
+        )
+        return BackgroundExecResult(
+            started=True,
+            job_id=request.job_id,
+            command=list(request.command),
+            running=False,
+            exit_code=result.exit_code,
+            capture_output=request.capture_output,
+        )
+
+    async def _write_file_windows(
+        self,
+        sandbox_id: str,
+        sandbox_path: str,
+        content: bytes,
+        mkdir_parents: bool,
+        mode: int | None,
+    ) -> RuntimeFileOpResult:
+        runner = self._win_runners.get(sandbox_id)
+        if runner is None:
+            return self._file_op_unavailable(sandbox_id)
+        payload: dict[str, Any] = {
+            "path": sandbox_path,
+            "content_size": len(content),
+            "mkdir_parents": mkdir_parents,
+        }
+        if mode is not None:
+            payload["mode"] = mode
+        response = await self._win_runner_roundtrip(
+            sandbox_id, runner, REQUEST_TYPE_WRITE_FILE, payload, content,
+        )
+        if response is None:
+            return self._file_op_unavailable(sandbox_id)
+        return self._file_op_result_from_response(response)
+
+    async def _read_file_windows(
+        self, sandbox_id: str, sandbox_path: str,
+    ) -> RuntimeFileOpResult:
+        runner = self._win_runners.get(sandbox_id)
+        if runner is None:
+            return self._file_op_unavailable(sandbox_id)
+        response, content = await self._win_runner_roundtrip_with_body(
+            sandbox_id, runner, REQUEST_TYPE_READ_FILE, {"path": sandbox_path},
+        )
+        if response is None:
+            return self._file_op_unavailable(sandbox_id)
+        if response.get("ok"):
+            return RuntimeFileOpResult(ok=True, content=content or b"")
+        return self._file_op_result_from_response(response)
+
+    async def _list_dir_windows(
+        self, sandbox_id: str, sandbox_path: str, *,
+        recursive: bool = False, max_depth: int | None = None,
+        include_files: bool = True, include_dirs: bool = True,
+    ) -> RuntimeFileOpResult:
+        runner = self._win_runners.get(sandbox_id)
+        if runner is None:
+            return self._file_op_unavailable(sandbox_id)
+        payload: dict[str, Any] = {
+            "path": sandbox_path,
+            "recursive": recursive,
+            "include_files": include_files,
+            "include_dirs": include_dirs,
+        }
+        if max_depth is not None:
+            payload["max_depth"] = max_depth
+        response = await self._win_runner_roundtrip(
+            sandbox_id, runner, REQUEST_TYPE_LIST_DIR, payload, None,
+        )
+        if response is None:
+            return self._file_op_unavailable(sandbox_id)
+        if response.get("ok"):
+            items = response.get("items")
+            if not isinstance(items, list):
+                items = []
+            return RuntimeFileOpResult(ok=True, items=items)
+        return self._file_op_result_from_response(response)
+
+    async def _win_runner_roundtrip(
+        self,
+        sandbox_id: str,
+        runner: dict,
+        request_type: str,
+        payload: dict[str, Any],
+        body_bytes: bytes | None,
+    ) -> dict[str, Any] | None:
+        """发送请求帧 + (可选) body 帧, 读回单个响应帧 (JSON)."""
+        import json
+        from jiuwenbox.supervisor import win_exec
+        try:
+            kernel32 = win_exec._get_kernel32()
+            stdin_fd = _osfhandle_to_fd(kernel32, runner["stdin_handle"])
+            stdout_fd = _osfhandle_to_fd(kernel32, runner["stdout_handle"])
+            with os.fdopen(stdin_fd, "wb") as wf, \
+                 os.fdopen(stdout_fd, "rb") as rf:
+                header_blob = encode_request(request_type=request_type, payload=payload)
+                send_frame(wf, header_blob)
+                if body_bytes:
+                    send_frame(wf, body_bytes)
+                try:
+                    wf.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+                blob = recv_frame(rf, DAEMON_MAX_RESPONSE_BYTES)
+            return json.loads(blob.decode("utf-8"))
+        except (OSError, ConnectionError, ValueError) as exc:
+            logger.warning(
+                "Windows runner IPC 失败 (sandbox=%s): %s", sandbox_id, exc,
+            )
+            return None
+
+    async def _win_runner_roundtrip_with_body(
+        self,
+        sandbox_id: str,
+        runner: dict,
+        request_type: str,
+        payload: dict[str, Any],
+    ) -> "tuple[dict[str, Any] | None, bytes]":
+        """发送请求帧, 读回响应帧 + (若 ok) body 帧 (read_file)."""
+        import json
+        from jiuwenbox.supervisor import win_exec
+        try:
+            kernel32 = win_exec._get_kernel32()
+            stdin_fd = _osfhandle_to_fd(kernel32, runner["stdin_handle"])
+            stdout_fd = _osfhandle_to_fd(kernel32, runner["stdout_handle"])
+            with os.fdopen(stdin_fd, "wb") as wf, \
+                 os.fdopen(stdout_fd, "rb") as rf:
+                header_blob = encode_request(request_type=request_type, payload=payload)
+                send_frame(wf, header_blob)
+                try:
+                    wf.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+                blob = recv_frame(rf, DAEMON_MAX_RESPONSE_BYTES)
+            response = json.loads(blob.decode("utf-8"))
+            content = b""
+            if response.get("ok"):
+                size = int(response.get("content_size") or 0)
+                if size > 0:
+                    content = recv_frame(rf, MAX_FILE_BYTES)
+            return response, content
+        except (OSError, ConnectionError, ValueError) as exc:
+            logger.warning(
+                "Windows runner IPC 失败 (sandbox=%s): %s", sandbox_id, exc,
+            )
+            return None, b""
+
+    async def _send_runner_shutdown(self, sandbox_id: str) -> None:
+        runner = self._win_runners.get(sandbox_id)
+        if runner is None:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(
+                    None,
+                    self._send_runner_shutdown_blocking,
+                    sandbox_id, runner,
+                ),
+                timeout=DAEMON_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+        except (asyncio.TimeoutError, OSError) as exc:
+            logger.debug("Windows runner shutdown 失败 %s: %s", sandbox_id, exc)
+
+    @staticmethod
+    def _send_runner_shutdown_blocking(sandbox_id: str, runner: dict) -> None:
+        from jiuwenbox.supervisor import win_exec
+        try:
+            kernel32 = win_exec._get_kernel32()
+            stdin_fd = _osfhandle_to_fd(kernel32, runner["stdin_handle"])
+            with os.fdopen(stdin_fd, "wb") as wf:
+                send_frame(wf, encode_request(request_type=REQUEST_TYPE_SHUTDOWN))
+        except Exception:  # noqa: BLE001
+            logger.debug("runner shutdown 发送异常 %s", sandbox_id, exc_info=True)
+
     async def exec(
         self,
         sandbox_id: str,
@@ -2712,6 +3129,10 @@ class ProcessRuntime(RuntimeAdapter):
             sandbox_id,
             _summarize_command(list(request.command)),
         )
+        if sys.platform == "win32":
+            semaphore = self._ensure_exec_semaphore()
+            async with semaphore:
+                return await self._exec_windows(sandbox_id, request)
         semaphore = self._ensure_exec_semaphore()
         async with semaphore:
             return await self._exec_via_daemon(sandbox_id, request)
@@ -2721,6 +3142,8 @@ class ProcessRuntime(RuntimeAdapter):
         sandbox_id: str,
         request: RuntimeBackgroundExecRequest,
     ) -> BackgroundExecResult:
+        if sys.platform == "win32":
+            return await self._exec_background_windows(sandbox_id, request)
         prepared = self._prepare_exec_invocation(
             sandbox_id,
             RuntimeExecRequest(
@@ -2891,6 +3314,10 @@ class ProcessRuntime(RuntimeAdapter):
 
     async def cleanup(self, sandbox_id: str) -> None:
         await self.stop(sandbox_id)
+        if sys.platform == "win32":
+            self._win_runners.pop(sandbox_id, None)
+            self._win_policies.pop(sandbox_id, None)
+            return
         self._processes.pop(sandbox_id, None)
         policy_path = self._policy_paths.pop(sandbox_id, None)
         network_mode = self._network_modes.pop(sandbox_id, None)

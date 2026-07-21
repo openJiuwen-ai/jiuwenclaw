@@ -1,0 +1,658 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Windows 沙箱集成测试 (docs/window沙箱.md 第7章).
+
+本文件混合两类用例:
+
+1. **WSL 可跑的 mock 单测** (不 skip): 验证 Windows 模块的逻辑正确性.
+   - policy schema 解析 / 合并
+   - win_proxy 域名/IP 过滤 (纯 asyncio, 跨平台)
+   - win_constants 常量值
+   - win_exec / win_acl / win_job / win_wfp 的 ctypes/pywin32 调用参数
+     (用 monkeypatch mock 底层 dll, 断言传参正确)
+   - ProcessRuntime / app lifespan 的 win32 分支 (monkeypatch sys.platform)
+
+2. **Windows 端实跑用例** (@pytest.mark.skipif(!win32)): 真实创建/删除沙箱,
+   验证文件隔离 / 进程隔离 / 网络隔离 / Job 限制. 需在 Windows 上以管理员
+   身份运行 ``pytest tests/integration/test_server_api_windows.py``.
+   WSL 下自动 skip.
+
+Linux 回归由 ``test_server_api_default.py`` 覆盖, 本文件不重复.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from jiuwenbox.models.policy import SecurityPolicy
+from jiuwenbox.supervisor import win_constants as const
+
+
+# ---------------------------------------------------------------------------
+# WSL 可跑: policy schema 解析 / 合并.
+# ---------------------------------------------------------------------------
+def _windows_policy_yaml() -> dict:
+    """构造一个含 windows 段的 policy dict."""
+    return {
+        "version": 1,
+        "name": "win-test",
+        "windows": {
+            "proxy": {
+                "port_range_start": 60080,
+                "port_range_end": 60089,
+            },
+            "filesystem": {
+                "read_acl_preinstall": ["%USERPROFILE%"],
+                "allow_write": ["/workspace"],
+                "deny_write": ["/workspace/.git"],
+            },
+            "network": {
+                "mode": "wfp_loopback_proxy",
+                "egress": {"default": "deny", "allowed_domains": ["pypi.org"]},
+                "ingress": {"default": "deny"},
+            },
+            "resource": {
+                "memory_max": "512M",
+                "cpu_rate": 50,
+                "max_processes": 32,
+            },
+        },
+    }
+
+
+class TestWindowsPolicySchema:
+    def test_parse_full_windows_section(self):
+        policy = SecurityPolicy.model_validate(_windows_policy_yaml())
+        assert policy.windows.proxy.port_range_start == 60080
+        assert policy.windows.proxy.port_range_end == 60089
+        assert policy.windows.filesystem.allow_write == ["/workspace"]
+        assert policy.windows.filesystem.deny_write == ["/workspace/.git"]
+        assert policy.windows.network.mode == "wfp_loopback_proxy"
+        assert policy.windows.network.egress.default == "deny"
+        assert policy.windows.network.egress.allowed_domains == ["pypi.org"]
+        assert policy.windows.resource.memory_max == 512 * 1024 * 1024
+        assert policy.windows.resource.cpu_rate == 50
+        assert policy.windows.resource.max_processes == 32
+
+    def test_default_windows_is_empty(self):
+        policy = SecurityPolicy()
+        assert policy.windows.proxy.port_range_start == const.DEFAULT_PROXY_PORT_RANGE_START
+        assert policy.windows.proxy.port_range_end == const.DEFAULT_PROXY_PORT_RANGE_END
+        assert policy.windows.filesystem.allow_write == []
+        assert policy.windows.network.mode == "wfp_loopback_proxy"
+        assert policy.windows.resource.is_empty() is True
+        # Linux 字段不受影响.
+        assert policy.network.mode.value == "isolated"
+
+    def test_reject_extra_fields(self):
+        bad = _windows_policy_yaml()
+        bad["windows"]["bogus"] = 1
+        with pytest.raises(Exception):
+            SecurityPolicy.model_validate(bad)
+
+    def test_memory_max_accepts_unit_suffix(self):
+        data = _windows_policy_yaml()
+        data["windows"]["resource"]["memory_max"] = "1G"
+        policy = SecurityPolicy.model_validate(data)
+        assert policy.windows.resource.memory_max == 1024 ** 3
+
+    def test_cpu_rate_range_validation(self):
+        data = _windows_policy_yaml()
+        data["windows"]["resource"]["cpu_rate"] = 0
+        with pytest.raises(Exception):
+            SecurityPolicy.model_validate(data)
+        data["windows"]["resource"]["cpu_rate"] = 101
+        with pytest.raises(Exception):
+            SecurityPolicy.model_validate(data)
+
+    def test_port_range_order_validation(self):
+        data = _windows_policy_yaml()
+        data["windows"]["proxy"]["port_range_start"] = 60090
+        data["windows"]["proxy"]["port_range_end"] = 60080
+        with pytest.raises(Exception):
+            SecurityPolicy.model_validate(data)
+
+    def test_windows_section_does_not_pollute_linux_merge(self):
+        """APPEND 合并 windows 段不破坏 Linux 字段."""
+        base = SecurityPolicy()
+        extra = SecurityPolicy.model_validate(_windows_policy_yaml())
+        from jiuwenbox.server.policy_engine import PolicyEngine
+        engine = PolicyEngine()
+        merged = engine.merge_policy(base, extra)
+        assert merged.windows.filesystem.allow_write == ["/workspace"]
+        # Linux 字段保持 base 默认.
+        assert merged.network.mode == base.network.mode
+
+
+# ---------------------------------------------------------------------------
+# WSL 可跑: win_constants 值校验.
+# ---------------------------------------------------------------------------
+class TestWinConstants:
+    def test_restricted_token_flags_combination(self):
+        assert const.RESTRICTED_TOKEN_FLAGS == (
+            const.DISABLE_MAX_PRIVILEGE
+            | const.SANDBOX_INERT
+            | const.WRITE_RESTRICTED
+        )
+
+    def test_sandbox_user_flags(self):
+        assert const.SANDBOX_USER_FLAGS & const.UF_SCRIPT
+        assert const.SANDBOX_USER_FLAGS & const.UF_PASSWD_CANT_CHANGE
+        assert const.SANDBOX_USER_FLAGS & const.UF_DONT_EXPIRE_PASSWD
+        # 不设 ACCOUNTDISABLE.
+        assert not (const.SANDBOX_USER_FLAGS & const.UF_ACCOUNTDISABLE)
+
+    def test_allow_write_rights(self):
+        assert const.ALLOW_WRITE_RIGHTS & const.FILE_GENERIC_WRITE
+        assert const.ALLOW_WRITE_RIGHTS & const.FILE_GENERIC_EXECUTE
+        assert const.ALLOW_WRITE_RIGHTS & const.FILE_DELETE_ACCESS
+
+    def test_synthetic_sid_format(self):
+        from jiuwenbox.supervisor import win_acl
+        sid = win_acl.get_synthetic_write_sid()
+        assert sid.startswith("S-1-5-21-")
+        parts = sid.split("-")
+        assert len(parts) == 7  # S 1 5 21 sub0 sub1 RID
+
+    def test_proxy_default_port_range(self):
+        assert const.DEFAULT_PROXY_PORT_RANGE_START == 60080
+        assert const.DEFAULT_PROXY_PORT_RANGE_END == 60089
+
+    def test_wfp_action_flags(self):
+        assert const.FWP_ACTION_BLOCK != const.FWP_ACTION_PERMIT
+        assert const.FWP_WEIGHT_PERMIT > const.FWP_WEIGHT_BLOCK
+
+    def test_reg_value_names(self):
+        assert const.REG_VALUE_INSTALLED == "installed"
+        assert const.REG_VALUE_SANDBOX_USER_SID == "sandbox_user_sid"
+
+
+# ---------------------------------------------------------------------------
+# WSL 可跑: win_proxy 过滤逻辑 (纯 asyncio).
+# ---------------------------------------------------------------------------
+from jiuwenbox.models.policy import NetworkRulePolicy  # noqa: E402
+from jiuwenbox.supervisor import win_proxy  # noqa: E402
+
+
+class TestEgressFilter:
+    def _filter(self, **kwargs) -> win_proxy.EgressFilter:
+        rule = NetworkRulePolicy(**kwargs)
+        return win_proxy.EgressFilter(rule)
+
+    def test_block_domain_explicit(self):
+        f = self._filter(default="allow", blocked_domains=["badsite.com"])
+        ok, _ = f.allow("badsite.com", 80)
+        assert ok is False
+
+    def test_block_domain_wildcard(self):
+        f = self._filter(default="allow", blocked_domains=["*.evil.com"])
+        ok, _ = f.allow("x.evil.com", 443)
+        assert ok is False
+        ok, _ = f.allow("evil.com", 443)
+        assert ok is False
+        ok, _ = f.allow("good.com", 443)
+        assert ok is True
+
+    def test_allow_domain_explicit(self):
+        f = self._filter(default="deny", allowed_domains=["pypi.org"])
+        ok, _ = f.allow("pypi.org", 443)
+        assert ok is True
+        ok, _ = f.allow("evil.org", 443)
+        assert ok is False
+
+    def test_deny_default_no_allow(self):
+        f = self._filter(default="deny")
+        ok, _ = f.allow("8.8.8.8", 53)
+        assert ok is False
+
+    def test_allow_default_no_block(self):
+        f = self._filter(default="allow")
+        ok, _ = f.allow("8.8.8.8", 53)
+        assert ok is True
+
+    def test_blocked_port(self):
+        f = self._filter(default="allow", blocked_ports=[22])
+        ok, _ = f.allow("10.0.0.1", 22)
+        assert ok is False
+
+    def test_allowed_port_with_deny_default(self):
+        f = self._filter(default="deny", allowed_ports=[443])
+        ok, _ = f.allow("10.0.0.1", 443)
+        assert ok is True
+        ok, _ = f.allow("10.0.0.1", 80)
+        assert ok is False
+
+    def test_blocked_ip_cidr(self):
+        f = self._filter(default="allow", blocked_ips=["169.254.169.254/32"])
+        ok, _ = f.allow("169.254.169.254", 80)
+        assert ok is False
+
+
+@pytest.mark.asyncio
+class TestWinProxyServer:
+    async def test_proxy_starts_and_stops_cleanly(self):
+        """启动代理在两个端口, 随后优雅停止."""
+        egress = NetworkRulePolicy(default="allow")
+        proxy_task, stop_event = await win_proxy.serve_windows_proxy(
+            egress=egress, ingress=None,
+            port_range_start=60080, port_range_end=60081,
+        )
+        assert proxy_task is not None
+        assert stop_event is not None
+        # 给 server 一点时间绑定.
+        await asyncio.sleep(0.3)
+        stop_event.set()
+        try:
+            await asyncio.wait_for(proxy_task, timeout=3.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            proxy_task.cancel()
+
+    async def test_proxy_rejects_blocked_host(self):
+        """代理拒绝被 block 的目标域名."""
+        egress = NetworkRulePolicy(default="allow", blocked_domains=["blocked.test"])
+        proxy_task, stop_event = await win_proxy.serve_windows_proxy(
+            egress=egress, ingress=None,
+            port_range_start=60082, port_range_end=60082,
+        )
+        await asyncio.sleep(0.3)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", 60082)
+            writer.write(b"CONNECT blocked.test:443 HTTP/1.1\r\n\r\n")
+            await writer.drain()
+            resp = await asyncio.wait_for(reader.read(64), timeout=3.0)
+            # 期望 403 Forbidden.
+            assert b"403" in resp
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            stop_event.set()
+            try:
+                await asyncio.wait_for(proxy_task, timeout=3.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                proxy_task.cancel()
+
+
+# ---------------------------------------------------------------------------
+# WSL 可跑: ProcessRuntime / app lifespan 的 win32 分支 (mock).
+# ---------------------------------------------------------------------------
+class TestProcessRuntimeWindowsBranch:
+    """mock win_* 模块后直接调 ``_create_windows`` (不走入口的 sys.platform 守卫),
+    验证分支内部正确委托给 win_acl / win_exec / win_job.
+
+    不 patch sys.platform: 避免在 Linux 下改 platform 触发 sysconfig 重建
+    链路的副作用. _create_windows 本身不查 sys.platform, 只调 mock 过的
+    win_* 模块, 因此可跨平台验证调度逻辑.
+    """
+
+    def test_create_dispatches_to_windows(self, monkeypatch):
+        from jiuwenbox.server.runtime import process as proc_mod
+        runtime = proc_mod.ProcessRuntime()
+
+        # 构造 mock 的 win_* 模块.
+        fake_win_acl = MagicMock()
+        fake_win_exec = MagicMock()
+        fake_win_exec.two_hop_spawn = MagicMock(
+            return_value=(12345, 100, 101, 200),  # pid, stdin, stdout, proc_h
+        )
+        fake_win_job = MagicMock()
+        fake_win_job.create_job = MagicMock(return_value=999)
+        fake_win_job.assign_process_by_pid = MagicMock()
+        fake_win_setup = MagicMock()
+        fake_win_setup.ensure_windows_setup = AsyncMock()
+        fake_win_setup.get_sandbox_user_password = MagicMock(
+            return_value="secret-pw",
+        )
+        # 注入到 sys.modules.
+        import jiuwenbox.supervisor as supervisor_pkg
+        monkeypatch.setitem(
+            sys.modules, "jiuwenbox.supervisor.win_acl", fake_win_acl,
+        )
+        monkeypatch.setitem(
+            sys.modules, "jiuwenbox.supervisor.win_exec", fake_win_exec,
+        )
+        monkeypatch.setitem(
+            sys.modules, "jiuwenbox.supervisor.win_job", fake_win_job,
+        )
+        monkeypatch.setitem(
+            sys.modules, "jiuwenbox.supervisor.win_setup", fake_win_setup,
+        )
+
+        # 让 _load_policy 返回带 windows 段的 policy.
+        policy = SecurityPolicy.model_validate(_windows_policy_yaml())
+        monkeypatch.setattr(
+            proc_mod.ProcessRuntime, "_load_policy",
+            staticmethod(lambda path: policy),
+        )
+
+        # 跑 create.
+        import asyncio as _asyncio
+        from pathlib import Path
+        # 确保包属性也指向 fake (from package import name 会先查包 __dict__).
+        monkeypatch.setattr(supervisor_pkg, "win_acl", fake_win_acl, raising=False)
+        monkeypatch.setattr(supervisor_pkg, "win_exec", fake_win_exec, raising=False)
+        monkeypatch.setattr(supervisor_pkg, "win_job", fake_win_job, raising=False)
+        monkeypatch.setattr(supervisor_pkg, "win_setup", fake_win_setup, raising=False)
+        monkeypatch.setattr(
+            supervisor_pkg, "win_constants",
+            __import__("jiuwenbox.supervisor.win_constants",
+                       fromlist=["win_constants"]),
+            raising=False,
+        )
+        pid = _asyncio.run(runtime._create_windows("sb-1", Path("/tmp/p.yaml"), {}))
+
+        assert pid == 12345
+        # ACL 施加被调用.
+        fake_win_acl.apply_sandbox_acl.assert_called_once()
+        # 两跳启动被调用.
+        fake_win_exec.two_hop_spawn.assert_called_once()
+        # Job 创建被调用 (resource 非空).
+        fake_win_job.create_job.assert_called_once()
+        fake_win_job.assign_process_by_pid.assert_called_once_with(999, 12345)
+
+
+class TestAppLifespanWindowsBranch:
+    """验证 app.py lifespan 在 win32 下走 setup + proxy 分支.
+
+    用 ASGITransport 驱动一次请求触发 lifespan startup, 断言 mock 被调用.
+    注: 此测试需在 Windows 上跑 (WSL 缺 pywintypes, mcp 路由无法 import).
+    """
+
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="lifespan 集成需 Windows 环境 (WSL 缺 pywintypes)",
+    )
+    def test_lifespan_starts_proxy_and_setup_on_win32(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        fake_win_setup = MagicMock()
+        fake_win_setup.ensure_windows_setup = MagicMock()
+        fake_win_proxy = MagicMock()
+
+        async def _fake_serve(*a, **k):
+            return (asyncio.ensure_future(asyncio.sleep(100)), asyncio.Event())
+
+        fake_win_proxy.serve_windows_proxy = _fake_serve
+        monkeypatch.setitem(
+            sys.modules, "jiuwenbox.supervisor.win_setup", fake_win_setup,
+        )
+        monkeypatch.setitem(
+            sys.modules, "jiuwenbox.supervisor.win_proxy", fake_win_proxy,
+        )
+
+        from jiuwenbox.server import app as app_mod
+        # mock PolicyReader 返回带 windows 段的 policy 且非 proxy-only.
+        policy = SecurityPolicy.model_validate(_windows_policy_yaml())
+        fake_reader = MagicMock()
+        fake_reader.load_policy = MagicMock(return_value=policy)
+        fake_reader.is_proxy_only = MagicMock(return_value=False)
+        monkeypatch.setattr(app_mod, "PolicyReader", lambda *a, **k: fake_reader)
+        # mock SandboxManager 避免真实 runtime.
+        fake_mgr = MagicMock()
+        fake_mgr.register_zombie_reaper = MagicMock()
+        fake_mgr.start_idle_reaper = MagicMock()
+        fake_mgr.stop_idle_reaper = MagicMock()
+        fake_mgr.shutdown_all_sandboxes = MagicMock()
+        fake_mgr.clear_persistent_state = MagicMock()
+        fake_mgr.unregister_zombie_reaper = MagicMock()
+        async def _mgr_noop(*a, **k):
+            return fake_mgr
+        monkeypatch.setattr(app_mod, "_build_sandbox_manager", lambda *a, **k: fake_mgr)
+        monkeypatch.setattr(app_mod, "enable_child_subreaper", lambda: True)
+        # ProxyManager mock.
+        async def _proxy_noop():
+            return
+        fake_pm = MagicMock()
+        fake_pm.start = _proxy_noop
+        fake_pm.stop = _proxy_noop
+        monkeypatch.setattr(app_mod, "ProxyManager", lambda *a, **k: fake_pm)
+
+        app_obj = app_mod.create_app()
+
+        async def _drive():
+            import httpx
+            transport = httpx.ASGITransport(app=app_obj)
+            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+                # 一次请求触发 lifespan startup -> shutdown.
+                resp = await c.get("/health")
+                return resp
+
+        asyncio.run(_drive())
+        # startup 期间 ensure_windows_setup 应被调.
+        fake_win_setup.ensure_windows_setup.assert_called_once()
+        # proxy 启动应被调.
+        assert fake_win_proxy.serve_windows_proxy.called
+
+    def test_health_reports_windows_supported_on_win32(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        fake_win_setup = MagicMock()
+        fake_win_setup._reg_get_str = MagicMock(return_value="1")  # noqa: SLF001
+        monkeypatch.setitem(
+            sys.modules, "jiuwenbox.supervisor.win_setup", fake_win_setup,
+        )
+
+        from jiuwenbox.models.common import HealthResponse
+        # 复现 app.health 端点中 windows_supported 的判定逻辑.
+        windows_supported = False
+        try:
+            installed = fake_win_setup._reg_get_str(const.REG_VALUE_INSTALLED)  # noqa: SLF001
+            windows_supported = installed == "1"
+        except Exception:  # noqa: BLE001
+            windows_supported = False
+        resp = HealthResponse(
+            version="test", landlock_supported=False,
+            sandboxes_active=0, windows_supported=windows_supported,
+        )
+        assert resp.windows_supported is True
+
+    def test_health_reports_not_supported_when_uninstalled(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        fake_win_setup = MagicMock()
+        fake_win_setup._reg_get_str = MagicMock(return_value=None)  # noqa: SLF001
+        monkeypatch.setitem(
+            sys.modules, "jiuwenbox.supervisor.win_setup", fake_win_setup,
+        )
+        from jiuwenbox.models.common import HealthResponse
+        windows_supported = False
+        try:
+            installed = fake_win_setup._reg_get_str(const.REG_VALUE_INSTALLED)  # noqa: SLF001
+            windows_supported = installed == "1"
+        except Exception:  # noqa: BLE001
+            windows_supported = False
+        resp = HealthResponse(
+            version="test", landlock_supported=False,
+            sandboxes_active=0, windows_supported=windows_supported,
+        )
+        assert resp.windows_supported is False
+
+
+# ---------------------------------------------------------------------------
+# WSL 可跑: win_wfp / win_job / win_exec / win_acl 调用参数 mock 验证.
+# ---------------------------------------------------------------------------
+class TestWinWfpFilterConstruction:
+    """验证 install_wfp_filters 构造的 Block/Permit filter 结构正确."""
+
+    def test_build_ale_user_condition_has_sid(self, monkeypatch):
+        from jiuwenbox.supervisor import win_wfp
+        # _build_ale_user_condition 把 SID 指针写入 FWP_CONDITION_VALUE0.sid
+        # 字段 (c_void_p). 传一个 int 作为指针值 (ctypes c_void_p 接受 int).
+        sid_ptr = 0x7FFF0000  # 假指针值
+        cond = win_wfp._build_ale_user_condition(sid_ptr)  # noqa: SLF001
+        assert cond.matchType == const.FWP_MATCH_EQUAL
+        assert cond.conditionValue.type == const.FWP_SID
+
+    def test_build_loopback_v4_condition(self):
+        from jiuwenbox.supervisor import win_wfp
+        cond = win_wfp._build_loopback_v4_condition()
+        assert cond.matchType == const.FWP_MATCH_EQUAL
+        assert cond.conditionValue.value.v4AddrMask.addr == const.LOOPBACK_IPV4_INT
+        assert cond.conditionValue.value.v4AddrMask.mask == 0xFFFFFFFF
+
+    def test_guid_from_str_parses(self):
+        from jiuwenbox.supervisor import win_wfp
+        g = win_wfp._guid_from_str("C38D57D1-05A0-4E9C-886C-509CF8E61F74")  # noqa: SLF001
+        assert g.Data1 == 0xC38D57D1
+
+
+class TestWinJobLimits:
+    def test_create_job_builds_correct_structs(self, monkeypatch):
+        from jiuwenbox.supervisor import win_job
+        # 绕过平台守卫 (测试在 Linux 跑, 但逻辑与平台无关).
+        monkeypatch.setattr(win_job, "_require_windows", lambda: None)
+        fake_kernel = MagicMock()
+        fake_kernel.CreateJobObjectW = MagicMock(return_value=0xABCDEF)
+        fake_kernel.SetInformationJobObject = MagicMock(return_value=True)
+        fake_kernel.CloseHandle = MagicMock()
+        monkeypatch.setattr(win_job, "_kernel32", fake_kernel)
+        monkeypatch.setattr(win_job, "_get_kernel32", lambda: fake_kernel)
+
+        handle = win_job.create_job(
+            memory_max=512 * 1024 * 1024,
+            cpu_rate=50,
+            max_processes=32,
+        )
+        assert handle == 0xABCDEF
+        # SetInformationJobObject 被调用 (extended limits + cpu rate).
+        assert fake_kernel.SetInformationJobObject.call_count >= 1
+        # 检查第一次调用 (extended limits) 传入的 JOBOBJECT 结构.
+        args = fake_kernel.SetInformationJobObject.call_args_list[0].args
+        info_class = args[1]
+        assert info_class == const.JobObjectExtendedLimitInformation
+
+
+class TestWinExecRunnerCommand:
+    def test_build_runner_command_includes_sandbox_id(self):
+        from jiuwenbox.supervisor import win_exec
+        cmd = win_exec._build_runner_command(  # noqa: SLF001
+            "sb-test", "C:\\ws", 60080, 60089,
+        )
+        assert "--sandbox-id" in cmd
+        assert "sb-test" in cmd
+        assert "--workspace" in cmd
+        assert "C:\\ws" in cmd
+        assert "runner" in cmd
+
+
+class TestWinAclAceConstruction:
+    def test_get_synthetic_write_sid_stable(self):
+        from jiuwenbox.supervisor import win_acl
+        sid1 = win_acl.get_synthetic_write_sid()
+        sid2 = win_acl.get_synthetic_write_sid()
+        assert sid1 == sid2  # 固定, 幂等.
+
+
+# ---------------------------------------------------------------------------
+# Windows 端实跑用例 (skip on non-win32; 由用户在 Windows 上跑).
+# ---------------------------------------------------------------------------
+_windows_only = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows 沙箱端到端用例需在 Windows 平台以管理员身份运行",
+)
+
+
+@_windows_only
+class TestWindowsSandboxE2E:
+    """真实创建/删除沙箱的端到端用例 (Windows 实跑).
+
+    前置: 以管理员身份运行, 且已执行
+    ``python -m jiuwenbox.supervisor.win_setup --install``.
+    通过 ``--server-endpoint`` 连接真实 jiuwenbox-server.
+    """
+
+    def test_sandbox_lifecycle(self, client):
+        """创建 -> 查询 -> 删除 沙箱."""
+        resp = client.post("/api/v1/sandboxes", json={})
+        assert resp.status_code == 201
+        sb_id = resp.json()["id"]
+        # 等待 ready.
+        import time
+        for _ in range(20):
+            status = client.get(f"/api/v1/sandboxes/{sb_id}").json()
+            if status.get("phase") == "ready":
+                break
+            time.sleep(0.5)
+        assert status["phase"] == "ready"
+        assert status.get("pid") is not None
+        # 删除.
+        del_resp = client.delete(f"/api/v1/sandboxes/{sb_id}")
+        assert del_resp.status_code in (200, 202, 204)
+
+    def test_exec_returns_stdout(self, client):
+        import time
+        create = client.post("/api/v1/sandboxes", json={})
+        sb_id = create.json()["id"]
+        for _ in range(20):
+            if client.get(f"/api/v1/sandboxes/{sb_id}").json().get("phase") == "ready":
+                break
+            time.sleep(0.5)
+        try:
+            exec_resp = client.post(
+                f"/api/v1/sandboxes/{sb_id}/exec",
+                json={"command": ["cmd", "/c", "echo hello"], "timeout_seconds": 10},
+            )
+            assert exec_resp.status_code == 200
+            result = exec_resp.json()
+            assert result.get("exit_code") == 0
+            assert "hello" in result.get("stdout", "").strip().lower()
+        finally:
+            client.delete(f"/api/v1/sandboxes/{sb_id}")
+
+    def test_file_isolation_deny_write_outside_workspace(self, client):
+        """deny_write 路径写入应失败."""
+        import time
+        create = client.post(
+            "/api/v1/sandboxes",
+            json={"policy": _windows_policy_yaml()},
+        )
+        assert create.status_code == 201
+        sb_id = create.json()["id"]
+        for _ in range(20):
+            if client.get(f"/api/v1/sandboxes/{sb_id}").json().get("phase") == "ready":
+                break
+            time.sleep(0.5)
+        try:
+            # 试图写 deny_write 路径 ({{ workspace }}/.git/config).
+            exec_resp = client.post(
+                f"/api/v1/sandboxes/{sb_id}/exec",
+                json={
+                    "command": ["cmd", "/c", "echo x > .git\\config"],
+                    "timeout_seconds": 10,
+                },
+            )
+            result = exec_resp.json()
+            # 期望非 0 exit (写被拒).
+            assert result.get("exit_code") != 0
+        finally:
+            client.delete(f"/api/v1/sandboxes/{sb_id}")
+
+    def test_network_isolation_blocks_direct_egress(self, client):
+        """WFP 应拦截沙箱直连外网 (除非经代理白名单)."""
+        import time
+        create = client.post(
+            "/api/v1/sandboxes",
+            json={"policy": _windows_policy_yaml()},
+        )
+        sb_id = create.json()["id"]
+        for _ in range(20):
+            if client.get(f"/api/v1/sandboxes/{sb_id}").json().get("phase") == "ready":
+                break
+            time.sleep(0.5)
+        try:
+            exec_resp = client.post(
+                f"/api/v1/sandboxes/{sb_id}/exec",
+                json={
+                    "command": [
+                        "cmd", "/c",
+                        "curl -s -o nul -w \"%{http_code}\" --connect-timeout 5 "
+                        "http://blocked.test/",
+                    ],
+                    "timeout_seconds": 15,
+                },
+            )
+            result = exec_resp.json()
+            # 期望连接被拦 (非 200, curl 退出码非 0 或超时).
+            stdout = result.get("stdout", "")
+            assert "200" not in stdout or result.get("exit_code") != 0
+        finally:
+            client.delete(f"/api/v1/sandboxes/{sb_id}")

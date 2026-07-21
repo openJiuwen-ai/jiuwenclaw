@@ -1,0 +1,132 @@
+# Windows 沙箱示例 policy (docs/window沙箱.md 6.10).
+#
+# 与 Linux default-policy.yaml 并列: Linux 字段保留 (Windows 下忽略),
+# 新增 ``windows`` 顶层字段仅在 sys.platform == "win32" 时读取.
+# 用 ``JIUWENBOX_POLICY_PATH=<本文件>`` 指定加载.
+version: 1
+
+name: "windows-default"
+
+# Windows 沙箱下不使用 bubblewrap/landlock/seccomp, 但 environment 仍平台
+# 无关地注入到子进程.
+environment: {}
+
+# Linux 字段在 Windows 下忽略 (保留以兼容策略合并逻辑).
+filesystem_policy:
+  directories:
+    - path: "/home"
+      permissions: "0777"
+    - path: "/tmp"
+      permissions: "1777"
+  read_only: []
+  read_write: []
+  bind_mounts: []
+  device: []
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+namespace:
+  user: true
+  pid: true
+  ipc: true
+  cgroup: true
+  uts: true
+capabilities:
+  add: []
+  drop: []
+landlock:
+  compatibility: disabled
+syscall:
+  x86_64:
+    blocked: []
+  arm64:
+    blocked: []
+network:
+  mode: host
+  uplink:
+    nat: true
+    interface: ""
+  egress:
+    default: allow
+    allowed_domains: []
+    blocked_domains: []
+    allowed_ips: []
+    blocked_ips: []
+    allowed_ports: []
+    blocked_ports: []
+  ingress:
+    default: allow
+    allowed_domains: []
+    blocked_domains: []
+    allowed_ips: []
+    blocked_ips: []
+    allowed_ports: []
+    blocked_ports: []
+cgroup: {}
+timeout: {}
+
+# ---------------------------------------------------------------------------
+# Windows 专用配置 (docs/window沙箱.md 6.10)
+# ---------------------------------------------------------------------------
+windows:
+  # 出站代理端口范围: WFP Permit filter 仅放行指向 127.0.0.1:<port_range>
+  # 的流量, 沙箱出网必须经此代理做域名/IP 白名单过滤.
+  proxy:
+    port_range_start: 60080
+    port_range_end: 60089
+
+  filesystem:
+    # 一次性预装读 ACL 的路径 (安装阶段, jbx-sandbox 用户默认读不了这些目录).
+    read_acl_preinstall:
+      - "%USERPROFILE%"
+      - "%SystemRoot%"
+      - "%ProgramFiles%"
+      - "%ProgramData%"
+    # 沙箱可写路径 (合成 SID 授 Allow Write+Execute+Delete). 第一个路径作为
+    # 沙箱 workspace 根.
+    allow_write:
+      - "{{ workspace }}"
+    # 在 allow 范围内精细化封锁 (Deny Write).
+    deny_write:
+      - "{{ workspace }}/.git"
+      - "{{ workspace }}/.env"
+
+  network:
+    # wfp_loopback_proxy: WFP Block 所有出站 + Permit loopback:port_range.
+    # disabled: 不安装 WFP filter, 沙箱可直接访问外网 (第一阶段降级).
+    mode: wfp_loopback_proxy
+    egress:
+      default: deny
+      # 域名白名单 (沙箱可访问的外部域名, 解析后比对 IP).
+      allowed_domains:
+        - "pypi.org"
+        - "files.pythonhosted.org"
+      blocked_domains:
+        - "ip.me"
+      allowed_ips:
+        - "127.0.0.1/32"
+        - "::1/128"
+      blocked_ips:
+        - "169.254.169.254/32"
+      allowed_ports:
+        - 443
+        - 80
+      blocked_ports:
+        - 22
+    ingress:
+      default: deny
+      allowed_domains:
+        - "localhost"
+      blocked_domains: []
+      allowed_ips:
+        - "127.0.0.1/32"
+        - "::1/128"
+      blocked_ips: []
+      allowed_ports: []
+      blocked_ports: []
+
+  resource:
+    # Job Object 限制 (对齐 Linux cgroup). 全部留空 = 不限制.
+    memory_max: 512M
+    cpu_rate: 50            # 百分比 (1-100), 对应 Job CpuRate.
+    max_processes: 32
