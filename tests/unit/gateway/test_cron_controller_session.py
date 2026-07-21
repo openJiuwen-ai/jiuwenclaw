@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -10,12 +10,19 @@ from jiuwenclaw.gateway.cron.store import FileCronJobStore
 
 
 @pytest.fixture
-def cron_controller(tmp_path: Path) -> CronController:
+def cron_controller(tmp_path: Path):
     CronController.reset_instance()
     store = FileCronJobStore(path=tmp_path / "cron_jobs.json")
     scheduler = MagicMock()
     scheduler.reload = AsyncMock(return_value=None)
-    return CronController.get_instance(store=store, scheduler=scheduler)
+    with patch(
+        "jiuwenclaw.gateway.cron.controller.enterprise_cron_enabled",
+        return_value=False,
+    ), patch(
+        "jiuwenclaw.gateway.cron.controller.is_enterprise_edition",
+        return_value=False,
+    ):
+        yield CronController.get_instance(store=store, scheduler=scheduler)
 
 
 @pytest.mark.asyncio

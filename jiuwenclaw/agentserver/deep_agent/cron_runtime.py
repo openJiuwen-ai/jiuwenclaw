@@ -35,11 +35,17 @@ class _CronToolsCronBackend(CronToolBackend):
             else None
         )
         chat_type = str(metadata.get("chat_type") or "").strip() or None
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        group_id, bot_id, user_id = extract_routing_triple(metadata, context)
         return CronToolRoute(
             request_id=request_id,
             channel_id=channel_id,
             session_id=session_id,
             chat_type=chat_type,
+            group_id=group_id,
+            bot_id=bot_id,
+            user_id=user_id,
         )
 
     async def list_jobs(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:

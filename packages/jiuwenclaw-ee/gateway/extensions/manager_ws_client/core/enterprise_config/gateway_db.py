@@ -29,6 +29,7 @@ _INSTANCE_SCOPED_TABLES = frozenset({
     "skill_whitelist_template",
     "service_config_template",
     "installed_skill",
+    "cron_job",
 })
 
 _DEFAULT_RELATIVE_ROOT = Path(__file__).resolve().parents[2]
