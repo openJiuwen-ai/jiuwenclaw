@@ -318,11 +318,9 @@ def _convert_current_diff(
     """转换 ``DiffService.get_git_diff()`` 返回 → DiffSummary。
 
     ``is_dirty`` 语义与 ``GitRepoStatus.is_dirty`` 对齐:既包含已跟踪文件的
-    改动(``stats.files_changed > 0``),也包含 untracked 文件(``files`` 中
-    ``is_untracked=True`` 的条目)。``DiffService.get_git_diff`` 会把 untracked
-    文件加入 ``files`` 但不计入 ``stats.files_changed``,仅按 stats 判定会导致
-    "工作区只有 untracked 文件时 DiffSummary.is_dirty=False" 与
-    ``GitRepoStatus.is_dirty=True`` 矛盾。
+    改动(``stats.files_changed > 0``),也包含 untracked 文件。新版
+    ``DiffService.get_git_diff`` 会将 untracked 文件计入 stats；这里仍保留
+    ``files`` 中 ``is_untracked=True`` 的检查，兼容旧快照或边界场景。
 
     ``include_files=False`` 时 ``files`` 为空,无法通过 ``has_untracked``
     检测 untracked 文件,此时使用 ``repo_is_dirty``(来自 ``GitRepoStatus.is_dirty``)
@@ -340,9 +338,9 @@ def _convert_current_diff(
         include_files=include_files,
         include_hunks=include_hunks,
     )
-    # stats.files_changed 不含 untracked,需单独检查 files 中是否存在 untracked 条目。
+    # 新版 stats.files_changed 已包含 untracked；has_untracked 保留为旧快照/边界兜底。
     # include_files=False 时 files 为空,使用 repo_is_dirty 兜底:
-    # summary 首次订阅正是 include_files=False,仅靠 stats 会漏掉 untracked-only 场景。
+    # summary 首次订阅正是 include_files=False,repo_is_dirty 与 git status 口径对齐。
     has_untracked = any(f.is_untracked for f in files.values()) if include_files else False
     return DiffSummary(
         is_dirty=stats.files_changed > 0 or has_untracked or repo_is_dirty,

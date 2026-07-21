@@ -1294,7 +1294,20 @@ class DiffService:
     def _get_untracked_files(
         self, project_dir: str, max_files: int = MAX_FILES
     ) -> dict[str, dict[str, Any]]:
-        """获取未跟踪文件列表，仅记录文件名和状态."""
+        """获取未跟踪文件列表，并读取内容计算行数与 hunk.
+
+        与 tracked 文件走 ``git diff HEAD`` 不同，untracked 文件不在 git
+        索引中、无 old_content 可 diff。尤其 unborn HEAD（仓库无任何
+        commit）场景下 ``git diff HEAD`` 会失败，工作区改动几乎都是
+        untracked；若此处仍把 ``linesAdded`` 写死为 0，会导致
+        ``get_git_diff`` 返回的 ``stats.linesAdded`` 恒为 0，前端"变更"
+        栏目看不到行数变化。此处将整文件视为新增 hunk，给出与 tracked
+        文件一致的 stats 口径。
+
+        二进制文件（前 8KB 出现 NUL 字节）不计行数；大文件按
+        ``MAX_LINES_PER_FILE`` 截断并标记 ``isTruncated``，与
+        ``_compute_hunks`` 的截断口径一致。
+        """
         # core.quotepath=false 让 git 对非 ASCII 字节直接输出原始 UTF-8 文件名
         # （而非八进制转义串），否则中文路径无法对应磁盘真实路径。但 ASCII 控制字符
         # （如 TAB）无论该设置如何都会被加引号并 C 转义（如 "dir\tfile.txt"），
@@ -1316,7 +1329,7 @@ class DiffService:
             rel_path = DiffService._unquote_git_path(rel_path)
             abs_path = str(Path(project_dir) / rel_path)
 
-            files[abs_path] = {
+            entry: dict[str, Any] = {
                 "filePath": abs_path,
                 "hunks": [],
                 "isNewFile": True,
@@ -1329,10 +1342,60 @@ class DiffService:
                 "lastEditTime": None,
             }
 
+            # 符号链接不解引用：避免未跟踪 symlink 指向工作区外敏感/超大文件，
+            # 通过 diff API 暴露内容。symlink 不计行数，hunks 留空。
+            if Path(abs_path).is_symlink():
+                files[abs_path] = entry
+                continue
+
+            # 二进制探测：前 8KB 出现 NUL 字节视为二进制，不计行数
+            try:
+                with open(abs_path, "rb") as f:
+                    head = f.read(8192)
+            except OSError:
+                files[abs_path] = entry
+                continue
+            if b"\x00" in head:
+                entry["isBinary"] = True
+                files[abs_path] = entry
+                continue
+
+            # 流式逐行读取：完整行数计入 stats（与 tracked 文件 git numstat
+            # 口径一致），但 hunk lines 只保留前 MAX_LINES_PER_FILE 行用于展示，
+            # 避免大文件爆内存。
+            hunk_lines: list[str] = []
+            total_lines = 0
+            try:
+                with open(abs_path, "r", encoding="utf-8", errors="replace", newline="") as f:
+                    for line in f:
+                        total_lines += 1
+                        if total_lines <= MAX_LINES_PER_FILE:
+                            hunk_lines.append(line.rstrip("\r\n"))
+            except OSError:
+                files[abs_path] = entry
+                continue
+
+            truncated = total_lines > MAX_LINES_PER_FILE
+            entry["hunks"] = [{
+                "oldStart": 0,
+                "oldLines": 0,
+                "newStart": 1,
+                "newLines": len(hunk_lines),
+                "lines": [f"+{line}" for line in hunk_lines],
+            }]
+            entry["isTruncated"] = truncated
+            entry["linesAdded"] = total_lines
+            files[abs_path] = entry
+
         return files
 
     def get_git_diff(self, project_dir: str | None) -> dict[str, Any] | None:
-        """获取工作区相对于 HEAD 的 git diff（仅已跟踪文件的修改）.
+        """获取工作区相对于 HEAD 的 git diff，含未跟踪文件行数.
+
+        已跟踪文件走 ``git diff HEAD``；untracked 文件（含 unborn HEAD
+        仓库无 commit 场景）由 ``_get_untracked_files`` 读取内容计算行数
+        与 hunk，并累加进 stats，避免工作区仅有新增文件时 lines_added
+        恒为 0。
 
         Args:
             project_dir: 项目目录路径.
@@ -1427,6 +1490,10 @@ class DiffService:
             entry["status"] = "added"
             files[file_path] = entry
         total_files_changed += len(untracked_files)
+        # untracked 文件无 git diff 可统计，_get_untracked_files 已按文件内容
+        # 计算行数；此处补回 stats，避免 unborn HEAD 等场景下 lines_added 恒为 0。
+        total_added += sum(int(f.get("linesAdded", 0) or 0) for f in untracked_files.values())
+        total_removed += sum(int(f.get("linesRemoved", 0) or 0) for f in untracked_files.values())
 
         if not files:
             return None

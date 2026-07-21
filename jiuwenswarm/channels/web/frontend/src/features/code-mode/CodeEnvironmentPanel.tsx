@@ -19,30 +19,58 @@ const EMPTY_STATS: GitDiffStats = {
   lines_removed: 0,
 };
 
+const DIFF_STATS_POLL_MS = 3000;
+
+function hasDiffStats(stats: GitDiffStats | null | undefined): stats is GitDiffStats {
+  return !!stats && (
+    stats.files_changed > 0
+    || stats.lines_added > 0
+    || stats.lines_removed > 0
+  );
+}
+
 export function CodeEnvironmentPanel({ project, sessionId, isProcessing, onReview }: CodeEnvironmentPanelProps) {
   const { t } = useTranslation();
   const [stats, setStats] = useState<GitDiffStats>(EMPTY_STATS);
   const [loading, setLoading] = useState(false);
   const previousProcessingRef = useRef(isProcessing);
+  const loadingRef = useRef(false);
 
-  const loadStats = useCallback(async () => {
-    setLoading(true);
+  const loadStats = useCallback(async (options: { silent?: boolean } = {}) => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    if (!options.silent) {
+      setLoading(true);
+    }
     try {
       const status = await gitClient.diffStatus(project.project_id, sessionId);
-      setStats(status.current?.stats ?? EMPTY_STATS);
+      const currentStats = status.current?.stats;
+      setStats(hasDiffStats(currentStats) ? currentStats : status.last_turn?.stats ?? EMPTY_STATS);
     } catch (error) {
       console.warn('[code-mode] Failed to load environment diff stats', error);
       setStats(EMPTY_STATS);
     } finally {
-      setLoading(false);
+      loadingRef.current = false;
+      if (!options.silent) {
+        setLoading(false);
+      }
     }
   }, [project.project_id, sessionId]);
+
+  useEffect(() => {
+    void loadStats();
+    const timer = window.setInterval(() => {
+      void loadStats({ silent: true });
+    }, DIFF_STATS_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [loadStats]);
 
   useEffect(() => {
     const completed = previousProcessingRef.current && !isProcessing;
     previousProcessingRef.current = isProcessing;
     if (isProcessing) return;
-    const timer = window.setTimeout(() => void loadStats(), completed ? 350 : 0);
+    if (!completed) return;
+    const timer = window.setTimeout(() => void loadStats(), 350);
     return () => window.clearTimeout(timer);
   }, [isProcessing, loadStats]);
 

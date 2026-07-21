@@ -39,9 +39,12 @@ def test_git_diff_from_subdir_includes_untracked_files(tmp_path):
     assert untracked_info["status"] == "added"
     assert untracked_info["isNewFile"] is True
     assert untracked_info["isUntracked"] is True
-    assert untracked_info["hunks"] == []
+    assert len(untracked_info["hunks"]) == 1
+    assert untracked_info["hunks"][0]["lines"] == ["+line one", "+line two"]
+    assert untracked_info["linesAdded"] == 2
+    assert untracked_info["isTruncated"] is False
     assert diff["stats"]["filesChanged"] == 2
-    assert diff["stats"]["linesAdded"] == 1
+    assert diff["stats"]["linesAdded"] == 3
     assert diff["stats"]["linesRemoved"] == 1
 
 
