@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import logging
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, List
 from zoneinfo import ZoneInfo
 
@@ -22,6 +24,13 @@ from jiuwenswarm.gateway.cron.models import (
 )
 from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService, _cron_next_push_dt
 from jiuwenswarm.gateway.cron.store import CronJobStore
+
+logger = logging.getLogger(__name__)
+
+# cron session_id 格式: cron_{ts_hex}_{job_id}
+# 例如 cron_18f3a2b1c00_myjob  → job_id="myjob", ts_hex="18f3a2b1c00"
+_CRON_SESSION_PREFIX = "cron_"
+_CRON_SESSION_RE = re.compile(r"^cron_([0-9a-fA-F]+)_(.+)$")
 
 
 def _strip_onetime_marker(name: str) -> str:
@@ -467,6 +476,128 @@ class CronController:
             "nextOffset": None,
         }
 
+    def _load_cron_session_history(
+        self,
+        *,
+        jobs_map: dict[str, CronJob],
+        next_run_cache: dict[str, int],
+    ) -> list[dict[str, Any]]:
+        """Scan the agent sessions directory for ``cron_*`` sessions and build
+        historical execution entries.
+
+        Each cron run creates an isolated session ``cron_{ts_hex}_{job_id}``
+        under ``~/.jiuwenswarm/agent/sessions/``. This method scans those
+        directories, reads ``metadata.json`` (created_at, last_message_at,
+        mode, title) and the history file (last assistant message as summary),
+        and returns A2A ``queryTimeList`` entries.
+
+        Only sessions matching ``cron_{hex}_{job_id}`` are included; other
+        session types are ignored.
+
+        Args:
+            jobs_map: ``job_id → CronJob`` map (for timezone / one-shot lookup).
+                Built by the async caller before invoking this method.
+            next_run_cache: ``job_id → next_run_ms`` cache (mutated in-place
+                for newly seen job_ids).
+
+        Returns a list of entry dicts (``queryTimeList`` format, status "ok").
+        """
+        try:
+            from jiuwenswarm.common.utils import get_agent_sessions_dir
+            from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata
+            from jiuwenswarm.server.runtime.session.session_history import load_history_records
+        except Exception as exc:
+            logger.warning("[Cron] _load_cron_session_history import failed: %s", exc)
+            return []
+
+        sessions_dir = get_agent_sessions_dir()
+        if not sessions_dir.exists() or not sessions_dir.is_dir():
+            return []
+
+        entries: list[dict[str, Any]] = []
+        for session_dir in sessions_dir.iterdir():
+            if not session_dir.is_dir():
+                continue
+            session_id = session_dir.name
+            if not session_id.startswith(_CRON_SESSION_PREFIX):
+                continue
+            m = _CRON_SESSION_RE.match(session_id)
+            if not m:
+                continue
+            ts_hex = m.group(1)
+            job_id = m.group(2)
+
+            # Parse timestamp from ts_hex (milliseconds epoch, hex-encoded).
+            try:
+                run_ts_ms = int(ts_hex, 16)
+            except ValueError:
+                run_ts_ms = 0
+
+            # Read metadata.json for created_at / last_message_at / mode.
+            meta = _read_metadata(session_id, cache_bust=True)
+            created_at = meta.get("created_at") or 0
+            last_message_at = meta.get("last_message_at") or 0
+            title = str(meta.get("title") or "")
+
+            # Determine run status from history records.
+            # - If history has a final assistant message → "ok" (succeeded)
+            # - If history exists but no assistant output → "skipped"
+            # - If no history file → "skipped"
+            status = "skipped"
+            summary = ""
+            try:
+                records = load_history_records(session_id)
+            except Exception:
+                records = []
+            if records:
+                status = "ok"
+                # Find the last assistant message as summary.
+                for rec in reversed(records):
+                    if rec.get("role") == "assistant":
+                        content = rec.get("content")
+                        if isinstance(content, str) and content.strip():
+                            summary = content.strip()
+                            break
+                        # Some records store content as list of blocks
+                        if isinstance(content, list):
+                            for block in reversed(content):
+                                if isinstance(block, dict):
+                                    text = block.get("text") or block.get("content")
+                                    if isinstance(text, str) and text.strip():
+                                        summary = text.strip()
+                                        break
+                            if summary:
+                                break
+
+            # Use created_at (run start) as runAtMs; last_message_at as ts.
+            run_at_ms = int(float(created_at) * 1000) if created_at else run_ts_ms
+            ts_ms = int(float(last_message_at) * 1000) if last_message_at else run_at_ms
+            duration_ms = max(0, ts_ms - run_at_ms) if run_at_ms and ts_ms else 0
+
+            # Compute next run for this job (cached).
+            if job_id not in next_run_cache:
+                next_run_cache[job_id] = self._compute_next_run_ms(job_id, job=jobs_map.get(job_id))
+
+            entry: dict[str, Any] = {
+                "ts": ts_ms,
+                "jobId": job_id,
+                "action": "finished",
+                "status": status,
+                "runAtMs": run_at_ms,
+                "durationMs": duration_ms,
+                "nextRunAtMs": next_run_cache[job_id],
+                "deliveryStatus": "unknown",
+                "sessionId": session_id,
+                "sessionKey": f"agent:main:cron:{job_id}:run:{session_id}",
+            }
+            if summary:
+                entry["summary"] = summary
+            if title:
+                entry["name"] = title
+            entries.append(entry)
+
+        return entries
+
     async def query_time_list(self) -> list[dict[str, list[dict[str, Any]]]]:
         """Return run history grouped by date (A2A ``queryTimeList``).
 
@@ -475,12 +606,16 @@ class CronController:
         objects: ``[{"2026-06-01": [entry, ...]}, {"2026-06-02": [entry, ...]}]``.
         Each entry has action="finished", status=ok|error|skipped, etc.
 
-        Data source: ``scheduler._runs`` dict (in-memory run history).
+        Data sources (merged, deduplicated by session_id):
+          1. ``scheduler._runs`` dict — in-memory runs (current process only,
+             lost on restart). Has accurate status for in-flight runs.
+          2. ``~/.jiuwenswarm/agent/sessions/cron_*`` directories — persisted
+             session files from all past runs (survives restarts). Scanned via
+             ``_load_cron_session_history``.
+
         Future scheduled events (from ``_events`` heap) are NOT included —
         they are not "finished" executions.
         """
-        from datetime import datetime, timezone
-
         all_entries: list[dict[str, Any]] = []
 
         # Build job_id → CronJob map so we can check delete_after_run for
@@ -492,20 +627,50 @@ class CronController:
         # Cache next run times per job_id to avoid repeated heap scans.
         next_run_cache: dict[str, int] = {}
 
-        # Collect historical runs from scheduler._runs.
-        # Include all statuses: succeeded, failed, running, pending.
-        # - succeeded/failed: completed runs → status "ok"/"error"
-        # - running: in-flight run → status "running"
-        # - pending: wake triggered but agent not started yet → status "skipped"
+        # ── Source 1: in-memory runs (scheduler._runs) ─────────────────────
+        # These have accurate status (running/succeeded/failed) and delivery
+        # tracking. Collect session_ids for dedup against file history.
+        in_memory_session_ids: set[str] = set()
         runs = getattr(self._scheduler, "_runs", None)
         if runs:
             for state in runs.values():
                 jid = state.job_id
                 if jid not in next_run_cache:
                     next_run_cache[jid] = self._compute_next_run_ms(jid, job=jobs_map.get(jid))
-                all_entries.append(
-                    state.to_a2a_run_entry(next_run_at_ms=next_run_cache[jid])
-                )
+                entry = state.to_a2a_run_entry(next_run_at_ms=next_run_cache[jid])
+                all_entries.append(entry)
+                # Track session_id for dedup. CronRunState doesn't store
+                # session_id directly, but run_id format is "{job_id}:{ts}",
+                # and the session_id is "cron_{ts_hex}_{job_id}". We dedup
+                # by (job_id, run_ts) instead.
+                in_memory_session_ids.add(f"{jid}:{int(state.started_at or 0)}")
+
+        # ── Source 2: persisted cron session files ─────────────────────────
+        # Scan sessions dir for cron_* sessions. Dedup against in-memory runs
+        # by (job_id, run_ts) to avoid double-counting runs that are still
+        # in _runs (e.g. currently running).
+        file_entries = self._load_cron_session_history(
+            jobs_map=jobs_map,
+            next_run_cache=next_run_cache,
+        )
+        for fe in file_entries:
+            # Dedup key: job_id + runAtMs (start timestamp in ms).
+            # In-memory run may have slightly different started_at (UTC float)
+            # vs metadata created_at (UTC float from agentserver). Allow ±2s
+            # tolerance to catch the same run across both sources.
+            fe_jid = fe.get("jobId") or ""
+            fe_run_ms = int(fe.get("runAtMs") or 0)
+            is_dup = False
+            for im_key in in_memory_session_ids:
+                im_jid, im_ts_s = im_key.split(":", 1)
+                if im_jid != fe_jid:
+                    continue
+                im_run_ms = int(im_ts_s) * 1000
+                if abs(im_run_ms - fe_run_ms) <= 2000:
+                    is_dup = True
+                    break
+            if not is_dup:
+                all_entries.append(fe)
 
         # Group by date (YYYY-MM-DD) based on ts
         by_date: dict[str, list[dict[str, Any]]] = {}
