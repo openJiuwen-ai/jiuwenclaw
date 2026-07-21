@@ -188,22 +188,46 @@ def calculate_instance_ports(index: int) -> Dict[str, int]:
 
 
 def is_port_available(host: str, port: int) -> bool:
-    """Check if a port is available on the given host.
+    """Check if a port is available for binding on the given host.
+
+    Probes by attempting to ``bind()``+``listen()`` (without SO_REUSEADDR) and
+    immediately closing. This mirrors how the real services (AgentServer /
+    Gateway / Web / Frontend) actually acquire their ports, so it correctly
+    detects:
+
+    - A live service listening on the port (bind fails -> occupied).
+    - A *stuck/zombie* listener that is in LISTENING state but no longer
+      accept()ing connections (connect()-based probes falsely report these as
+      free because the connect times out, but bind() still fails).
+
+    Earlier connect()-based probes mis-detected stuck listeners as available,
+    which made the fallback logic pick an index whose ports were actually
+    held by a dead-but-listening socket, causing the real service to crash
+    with ``OSError [Errno 10048]`` on its own bind.
 
     Args:
         host: Host address to check
         port: Port number to check
 
     Returns:
-        True if port is available, False if occupied
+        True if the port can be bound (available), False if occupied.
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.5)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Intentionally NOT setting SO_REUSEADDR: on Windows it permits multiple
+    # sockets to bind the same port, which would mask an occupied port and
+    # reproduce the very 10048 crash we are trying to avoid. The real services
+    # do not set it either.
+    try:
+        sock.bind((host, port))
+        sock.listen(1)
+        return True  # Port is available (we could bind it)
+    except OSError:
+        return False  # Port is occupied
+    finally:
         try:
-            sock.connect((host, port))
-            return False  # Port is occupied
+            sock.close()
         except OSError:
-            return True  # Port is available
+            pass
 
 
 def check_port_conflicts(

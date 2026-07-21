@@ -202,6 +202,39 @@ class TestPortAvailability:
         conflicts = check_port_conflicts(ports, "127.0.0.1", existing)
         assert 19092 in conflicts
 
+    @staticmethod
+    def test_is_port_available_detects_live_listener(tmp_path):
+        """A port held by a real bind()+listen() is reported as occupied.
+
+        Regression guard: the old connect()-based probe timed out against a
+        stuck/zombie listener (LISTENING but not accept()ing) and falsely
+        reported it as free, which made the fallback pick an index whose
+        ports were actually held and the real service crashed with
+        OSError [Errno 10048] on bind. The bind()-based probe detects this.
+        """
+        import socket as _socket
+        # Pick an ephemeral port the OS hands us, then hold it.
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.listen(1)
+        try:
+            assert is_port_available("127.0.0.1", port) is False
+        finally:
+            s.close()
+
+    @staticmethod
+    def test_is_port_available_true_when_free(tmp_path):
+        """A genuinely free ephemeral port is reported as available."""
+        import socket as _socket
+        # Grab an ephemeral port, release it, then probe — it should be free.
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        # Small race window, but in practice the port is free immediately.
+        assert is_port_available("127.0.0.1", port) is True
+
 
 class TestInstanceConfig:
     """Test InstanceConfig dataclass."""
