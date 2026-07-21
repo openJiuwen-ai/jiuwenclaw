@@ -13,17 +13,22 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import platform
 import re
+import secrets
 import subprocess
 import time
-from collections import Counter
+from collections import Counter, deque
+from functools import partial
+from importlib.metadata import PackageNotFoundError, version as package_version
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, List, Optional, Tuple
+from weakref import WeakKeyDictionary
 
 if TYPE_CHECKING:
     from openjiuwen.harness.schema.config import SubAgentConfig
@@ -40,6 +45,11 @@ from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    AgentCallbackEvent,
+    AgentRail,
+)
 from openjiuwen.core.sys_operation import (
     SysOperation,
     SysOperationCard,
@@ -80,6 +90,27 @@ from openjiuwen.harness.tools import (
     WebPaidSearchTool,
     create_audio_tools,
     create_vision_tools,
+)
+from jiuwenswarm.integrations.ai4research_subscription.consumer_policy import (
+    CODEX_CALL_PERMIT_KWARG,
+    CodexConsumer,
+    classify_agent_request,
+    is_codex_model,
+    issue_codex_call_permit,
+    provider_name,
+    require_codex_consumer,
+    require_codex_model_consumer,
+)
+from jiuwenswarm.common.model_route import (
+    ActualModelRouteReceipt,
+    ModelRouteCandidate,
+    actual_model_route_metadata,
+    build_model_route_index,
+    parse_expected_model_route,
+)
+from jiuwenswarm.integrations.ai4research_subscription.errors import (
+    CodexProviderError,
+    provider_error_payload,
 )
 
 try:
@@ -190,6 +221,9 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
     handle_evolution_slash_command,
 )
 from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload
+from jiuwenswarm.server.runtime.agent_adapter.stream_lifecycle import (
+    close_owned_async_iterator,
+)
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_image_gen_model_config_from_yaml,
@@ -313,6 +347,150 @@ def get_runtime_tool_session_id() -> str | None:
 
 logger = logging.getLogger(__name__)
 
+_PINNED_OPENJIUWEN_VERSION = "0.1.16"
+_CODEX_MODEL_CALL_ARM_PRIORITY = float("-inf")
+_CODEX_MODEL_CALL_REVOKE_PRIORITY = float("inf")
+CODEX_CANCEL_DEADLINE_METADATA_KEY = "_jiuwen_internal_codex_cancel_deadline_monotonic"
+
+
+@dataclass(eq=False)
+class _CodexModelCallArm:
+    """One-use authorization for one exact OpenJiuwen model-call task."""
+
+    task: asyncio.Task[Any]
+    scope: object
+    active: bool = True
+
+
+@dataclass(frozen=True)
+class _CodexTurnIdentity:
+    session_id: str
+    request_id: str
+    generation: int
+
+
+@dataclass(frozen=True)
+class _CodexTurnCompletion:
+    clean: bool
+    code: str | None = None
+    message: str | None = None
+
+
+class _CodexTurnOwner:
+    """Exact request-local owner for the active Codex model-call task."""
+
+    def __init__(
+        self,
+        identity: _CodexTurnIdentity,
+        on_complete: Callable[["_CodexTurnOwner"], None],
+    ) -> None:
+        self.identity = identity
+        self._on_complete = on_complete
+        self._completion: asyncio.Future[_CodexTurnCompletion] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._model_call_task: asyncio.Task[Any] | None = None
+        self._cancel_requested = False
+        self._failure: BaseException | None = None
+        self._turn_cleanup_finished = False
+        self._turn_cleanup_error: BaseException | None = None
+        self._registered = False
+        self.consumer_value: str | None = None
+
+    @property
+    def completion(self) -> asyncio.Future[_CodexTurnCompletion]:
+        return self._completion
+
+    @property
+    def registered(self) -> bool:
+        return self._registered
+
+    @property
+    def provider_failure(self) -> CodexProviderError | None:
+        """The typed provider error recorded for this turn's model call, if any.
+
+        OpenJiuwen converts model-call exceptions into stream error chunks, so
+        the wire layer cannot see the original typed error; it re-reads it here
+        to keep code/provider/consumer route receipts on ``chat.error`` events.
+        """
+        failure = self._failure
+        return failure if isinstance(failure, CodexProviderError) else None
+
+    def mark_registered(self) -> None:
+        self._registered = True
+
+    def bind_model_call(self) -> asyncio.Task[Any]:
+        task = asyncio.current_task()
+        if task is None:
+            raise CodexProviderError(
+                "provider_failed",
+                "Codex model execution has no owning task.",
+            )
+        active = self._model_call_task
+        if active is not None and active is not task and not active.done():
+            raise CodexProviderError(
+                "provider_busy",
+                "This Codex turn already has an active model call.",
+            )
+        self._model_call_task = task
+        if self._cancel_requested:
+            raise asyncio.CancelledError()
+        return task
+
+    def release_model_call(
+        self,
+        task: asyncio.Task[Any],
+        error: BaseException | None,
+    ) -> None:
+        if self._model_call_task is task:
+            self._model_call_task = None
+        if error is not None and not isinstance(error, asyncio.CancelledError):
+            self._failure = error
+        self._complete_if_ready()
+
+    def request_cancel(self) -> asyncio.Future[_CodexTurnCompletion]:
+        self._cancel_requested = True
+        task = self._model_call_task
+        current = asyncio.current_task()
+        if task is not None and task is not current and not task.done():
+            if task.cancelling() == 0:
+                task.cancel()
+        return self._completion
+
+    def finish(self, cleanup_error: BaseException | None = None) -> None:
+        self._turn_cleanup_finished = True
+        if cleanup_error is not None:
+            self._turn_cleanup_error = cleanup_error
+        self._complete_if_ready()
+
+    def _complete_if_ready(self) -> None:
+        if self._completion.done():
+            return
+        # OpenJiuwen may close the outer Runner stream while a decorated model
+        # async-generator task is still awaiting the provider process finalizer.
+        # Publishing completion at that point would let AgentServer send a
+        # successful interrupt terminal before process/turn cleanup is durable.
+        if not self._turn_cleanup_finished or self._model_call_task is not None:
+            return
+        failure = self._turn_cleanup_error or self._failure
+        if failure is None or isinstance(failure, asyncio.CancelledError):
+            result = _CodexTurnCompletion(clean=True)
+        elif isinstance(failure, CodexProviderError):
+            result = _CodexTurnCompletion(
+                clean=False,
+                code=failure.code,
+                message=failure.safe_message,
+            )
+        else:
+            result = _CodexTurnCompletion(
+                clean=False,
+                code="cancel_cleanup_failed",
+                message="Codex cancellation cleanup failed.",
+            )
+        self._completion.set_result(result)
+        self._on_complete(self)
+
+
 _PERSISTENT_CHECKPOINTER_LOCK = asyncio.Lock()
 _PERSISTENT_CHECKPOINTER_READY = False
 
@@ -332,6 +510,267 @@ _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
         "skill_branch_peek",
     }
 )
+
+
+class _CallBoundCodexModel:
+    """Request-local Model proxy that authorizes only its exact Codex client calls.
+
+    OpenJiuwen's ``Model.invoke`` and ``Model.stream`` forward arbitrary keyword
+    arguments through their callback-decorated client methods. Supplying a fresh
+    one-use permit here preserves those callbacks without authorizing the Runner
+    or any other model consumer around it.
+    """
+
+    def __init__(
+        self,
+        delegate: Model,
+        consumer: CodexConsumer,
+        owner: _CodexTurnOwner | None = None,
+    ) -> None:
+        if consumer is not CodexConsumer.DIRECT_AGENT_FAST:
+            raise CodexProviderError(
+                "unsupported_consumer",
+                "Codex subscription is not enabled for this consumer in v1.",
+            )
+        client = getattr(delegate, "_client", None)
+        if client is None:
+            raise CodexProviderError(
+                "invalid_config",
+                "The selected Codex model client is unavailable.",
+            )
+        self._delegate = delegate
+        self._client = client
+        self._consumer = consumer
+        self._turn_owner = owner or _CodexTurnOwner(
+            _CodexTurnIdentity(session_id="default", request_id="", generation=0),
+            lambda _owner: None,
+        )
+        # Recorded for wire-error route receipts; the owner outlives the model
+        # call and is the only turn-scoped object the stream converter can see.
+        self._turn_owner.consumer_value = consumer.value
+        self._call_scope = object()
+        arm_capability = secrets.token_bytes(32)
+        self._arm_capability_digest = hashlib.sha256(arm_capability).digest()
+        self._active_arm: _CodexModelCallArm | None = None
+        self._active = True
+        self.model_config = delegate.model_config
+        self.model_client_config = delegate.model_client_config
+        _CODEX_MODEL_CALL_ARM_CAPABILITIES[self] = arm_capability
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+    def deactivate(self) -> None:
+        self._active = False
+        _CODEX_MODEL_CALL_ARM_CAPABILITIES.pop(self, None)
+        self.revoke_unconsumed_arm()
+
+    def _arm_current_task_once(self, capability: bytes) -> bool:
+        """Arm the current producer task only with the bridge-owned capability."""
+
+        if not self._active:
+            return False
+        if not isinstance(capability, bytes):
+            raise CodexProviderError(
+                "invalid_call_permit",
+                "The Codex model-call arm capability is invalid.",
+            )
+        if not secrets.compare_digest(
+            hashlib.sha256(capability).digest(),
+            self._arm_capability_digest,
+        ):
+            raise CodexProviderError(
+                "invalid_call_permit",
+                "The Codex model-call arm capability is invalid.",
+            )
+        task = asyncio.current_task()
+        if task is None:
+            return False
+        self.revoke_unconsumed_arm()
+        self._active_arm = _CodexModelCallArm(task=task, scope=self._call_scope)
+        return True
+
+    def revoke_unconsumed_arm(self) -> None:
+        arm = self._active_arm
+        self._active_arm = None
+        if arm is not None:
+            arm.active = False
+
+    def _authorized_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        arm = self._active_arm
+        if (
+            not self._active
+            or arm is None
+            or not arm.active
+            or arm.scope is not self._call_scope
+            or arm.task is not asyncio.current_task()
+        ):
+            raise CodexProviderError(
+                "missing_call_permit",
+                "Codex subscription requires a call-bound consumer authorization.",
+            )
+        arm.active = False
+        self._active_arm = None
+        if CODEX_CALL_PERMIT_KWARG in kwargs:
+            raise CodexProviderError(
+                "invalid_call_permit",
+                "The Codex call permit is managed by the request-local model wrapper.",
+            )
+        authorized = dict(kwargs)
+        authorized[CODEX_CALL_PERMIT_KWARG] = issue_codex_call_permit(
+            self._client,
+            self._consumer,
+        )
+        return authorized
+
+    async def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        task = self._turn_owner.bind_model_call()
+        error: BaseException | None = None
+        try:
+            return await self._delegate.invoke(*args, **self._authorized_kwargs(kwargs))
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            self._turn_owner.release_model_call(task, error)
+
+    async def stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        task = self._turn_owner.bind_model_call()
+        error: BaseException | None = None
+        stream = self._delegate.stream(*args, **self._authorized_kwargs(kwargs))
+        try:
+            async for chunk in stream:
+                yield chunk
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            try:
+                await close_owned_async_iterator(stream)
+            except BaseException as exc:
+                error = exc
+                raise
+            finally:
+                self._turn_owner.release_model_call(task, error)
+
+
+_CODEX_MODEL_CALL_ARM_CAPABILITIES: WeakKeyDictionary[
+    _CallBoundCodexModel,
+    bytes,
+] = WeakKeyDictionary()
+
+
+class _CodexModelCallArmRail(AgentRail):
+    """Arm one exact producer task after all finite-priority BEFORE callbacks."""
+
+    priority = _CODEX_MODEL_CALL_ARM_PRIORITY
+
+    def __init__(
+        self,
+        model: _CallBoundCodexModel,
+        agent: DeepAgent | None = None,
+    ) -> None:
+        self._model = model
+        self._agent = agent
+        capability = _CODEX_MODEL_CALL_ARM_CAPABILITIES.pop(model, None)
+        if capability is None:
+            raise CodexProviderError(
+                "invalid_call_permit",
+                "The Codex model-call arm capability is unavailable.",
+            )
+        self._capability = capability
+
+    async def before_model_call(self, _ctx: AgentCallbackContext) -> None:
+        if self._agent is not None:
+            _validate_codex_model_call_arm_position(self._agent, self)
+        self._model._arm_current_task_once(self._capability)
+
+    def uninit(self, _agent: Any) -> None:
+        self._model.revoke_unconsumed_arm()
+
+
+class _CodexModelCallRevokeRail(AgentRail):
+    """Revoke unused arms before all finite-priority terminal callbacks."""
+
+    priority = _CODEX_MODEL_CALL_REVOKE_PRIORITY
+
+    def __init__(self, model: _CallBoundCodexModel) -> None:
+        self._model = model
+
+    async def after_model_call(self, _ctx: AgentCallbackContext) -> None:
+        self._model.revoke_unconsumed_arm()
+
+    async def on_model_exception(self, _ctx: AgentCallbackContext) -> None:
+        self._model.revoke_unconsumed_arm()
+
+    def uninit(self, _agent: Any) -> None:
+        self._model.revoke_unconsumed_arm()
+
+
+def _validate_codex_model_call_rail_contract(agent: DeepAgent) -> None:
+    """Fail closed unless the pinned callback ordering contract is uncontested."""
+
+    try:
+        installed_version = package_version("openjiuwen")
+    except PackageNotFoundError as exc:
+        raise CodexProviderError(
+            "invalid_config",
+            "The pinned OpenJiuwen runtime is unavailable.",
+        ) from exc
+    if installed_version != _PINNED_OPENJIUWEN_VERSION:
+        raise CodexProviderError(
+            "invalid_config",
+            "The Codex subscription bridge requires its pinned OpenJiuwen runtime.",
+        )
+
+    react_agent = agent.react_agent
+    if react_agent is None:
+        raise CodexProviderError(
+            "invalid_config",
+            "The OpenJiuwen ReAct agent is unavailable.",
+        )
+    namespace = react_agent.agent_callback_manager.event_namespace
+    callback_prefix = f"{namespace}_"
+    for event_name, callback_infos in Runner.callback_framework.callbacks.items():
+        if not event_name.startswith(callback_prefix):
+            continue
+        if any(not math.isfinite(float(info.priority)) for info in callback_infos):
+            raise CodexProviderError(
+                "invalid_config",
+                "The OpenJiuwen callback priority boundary is already reserved.",
+            )
+
+
+def _validate_codex_model_call_arm_position(
+    agent: DeepAgent,
+    arm_rail: _CodexModelCallArmRail,
+) -> None:
+    """Recheck the live BEFORE callback tail immediately before arming."""
+
+    react_agent = agent.react_agent
+    if react_agent is None:
+        raise CodexProviderError(
+            "invalid_config",
+            "The OpenJiuwen ReAct agent is unavailable.",
+        )
+    namespace = react_agent.agent_callback_manager.event_namespace
+    event_name = f"{namespace}_{AgentCallbackEvent.BEFORE_MODEL_CALL}"
+    callback_infos = Runner.callback_framework.callbacks.get(event_name, ())
+    expected_callback = arm_rail.before_model_call
+    matching_indexes = [
+        index
+        for index, info in enumerate(callback_infos)
+        if info.callback == expected_callback
+    ]
+    if matching_indexes != [len(callback_infos) - 1] or any(
+        not math.isfinite(float(info.priority))
+        for index, info in enumerate(callback_infos)
+        if index not in matching_indexes
+    ):
+        raise CodexProviderError(
+            "invalid_config",
+            "The OpenJiuwen model-call callback boundary changed during the turn.",
+        )
 
 
 def _set_skill_evolution_auto_scan(rail: Any, enabled: bool) -> None:
@@ -360,8 +799,158 @@ def init_permission_engine(*_args: Any, **_kwargs: Any) -> None:
     return None
 
 
+class _ModelTurnPermit:
+    __slots__ = ("_exclusive", "_gate", "_released")
+
+    def __init__(self, gate: "_ModelTurnGate", *, exclusive: bool) -> None:
+        self._gate = gate
+        self._exclusive = exclusive
+        self._released = False
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._gate._release(self)
+
+
+class _ModelTurnGate:
+    """Writer-preferring per-adapter gate with model-keyed reader cohorts."""
+
+    def __init__(self) -> None:
+        self._active_readers = 0
+        self._active_reader_key: int | None = None
+        self._writer_active = False
+        self._waiting_readers: deque[asyncio.Future[_ModelTurnPermit]] = deque()
+        self._waiting_reader_keys: dict[asyncio.Future[_ModelTurnPermit], int] = {}
+        self._waiting_writers: deque[asyncio.Future[_ModelTurnPermit]] = deque()
+
+    def locked(self) -> bool:
+        return self._writer_active or self._active_readers > 0
+
+    async def acquire(
+        self,
+        *,
+        exclusive: bool = True,
+        shared_key: int | None = None,
+    ) -> _ModelTurnPermit:
+        self._discard_completed(self._waiting_writers)
+        self._discard_completed_readers()
+        if exclusive:
+            if not self._writer_active and self._active_readers == 0:
+                self._writer_active = True
+                return _ModelTurnPermit(self, exclusive=True)
+            waiters = self._waiting_writers
+        else:
+            if shared_key is None:
+                raise ValueError("Shared model turns require a model identity key")
+            can_start_cohort = self._active_readers == 0 and not self._waiting_readers
+            can_join_cohort = (
+                self._active_readers > 0
+                and self._active_reader_key == shared_key
+                and not self._waiting_readers
+            )
+            if (
+                not self._writer_active
+                and not self._waiting_writers
+                and (can_start_cohort or can_join_cohort)
+            ):
+                self._active_reader_key = shared_key
+                self._active_readers += 1
+                return _ModelTurnPermit(self, exclusive=False)
+            waiters = self._waiting_readers
+
+        waiter = asyncio.get_running_loop().create_future()
+        waiters.append(waiter)
+        if not exclusive:
+            self._waiting_reader_keys[waiter] = shared_key
+        try:
+            return await asyncio.shield(waiter)
+        except asyncio.CancelledError:
+            if waiter.done():
+                waiter.result().release()
+            else:
+                try:
+                    waiters.remove(waiter)
+                except ValueError:
+                    pass
+                self._waiting_reader_keys.pop(waiter, None)
+                self._wake_waiters()
+            raise
+
+    def _release(self, permit: _ModelTurnPermit) -> None:
+        if permit._exclusive:
+            if not self._writer_active:
+                raise RuntimeError("Model turn writer permit is not active")
+            self._writer_active = False
+        else:
+            if self._active_readers <= 0:
+                raise RuntimeError("Model turn reader permit is not active")
+            self._active_readers -= 1
+            if self._active_readers == 0:
+                self._active_reader_key = None
+        self._wake_waiters()
+
+    @staticmethod
+    def _discard_completed(
+        waiters: deque[asyncio.Future[_ModelTurnPermit]],
+    ) -> None:
+        while waiters and waiters[0].done():
+            waiters.popleft()
+
+    def _discard_completed_readers(self) -> None:
+        while self._waiting_readers and self._waiting_readers[0].done():
+            waiter = self._waiting_readers.popleft()
+            self._waiting_reader_keys.pop(waiter, None)
+
+    def _wake_waiters(self) -> None:
+        if self._writer_active or self._active_readers:
+            return
+        self._discard_completed(self._waiting_writers)
+        if self._waiting_writers:
+            waiter = self._waiting_writers.popleft()
+            self._writer_active = True
+            waiter.set_result(_ModelTurnPermit(self, exclusive=True))
+            return
+
+        self._discard_completed_readers()
+        if not self._waiting_readers:
+            return
+        cohort_key = self._waiting_reader_keys[self._waiting_readers[0]]
+        self._active_reader_key = cohort_key
+        while self._waiting_readers:
+            self._discard_completed_readers()
+            if not self._waiting_readers:
+                break
+            if self._waiting_reader_keys[self._waiting_readers[0]] != cohort_key:
+                break
+            waiter = self._waiting_readers.popleft()
+            self._waiting_reader_keys.pop(waiter, None)
+            self._active_readers += 1
+            waiter.set_result(_ModelTurnPermit(self, exclusive=False))
+
+
+@dataclass(frozen=True)
+class _ModelTurnState:
+    permit: _ModelTurnPermit
+    processor_state: tuple[Any, Any, list[Any] | None, list[Any] | None]
+    call_rails: tuple[AgentRail, ...] = ()
+
+
 def _mcc_looks_usable(mcc: dict) -> bool:
-    """检查 model_client_config 是否包含有效的 API 凭据。"""
+    """Check whether a model client has the fields required by its provider."""
+    from jiuwenswarm.integrations.ai4research_subscription.provider_capabilities import (
+        get_model_provider_capabilities,
+        model_client_config_looks_usable,
+    )
+
+    if not model_client_config_looks_usable(mcc):
+        return False
+    capabilities = get_model_provider_capabilities(
+        mcc.get("client_provider", mcc.get("model_provider", ""))
+    )
+    if not capabilities.requires_api_base:
+        return True
     api_key = str(mcc.get("api_key", "") or "").strip()
     api_base = str(mcc.get("api_base", "") or "").strip()
     if not api_key or not api_base:
@@ -627,6 +1216,17 @@ class JiuWenSwarmDeepAdapter:
         self._active_session_ids: Counter[str] = Counter()
         # In-flight asyncio tasks per session (stream/non-stream agent runs).
         self._session_agent_tasks: dict[str, set[asyncio.Task[Any]]] = {}
+        # Exact Codex request owners remain registered until their model runner,
+        # async-iterator chain, and turn cleanup have all completed.
+        self._codex_turn_owners: dict[str, _CodexTurnOwner] = {}
+        self._codex_turn_generations: Counter[str] = Counter()
+        # API turns selecting the same cached model share this per-adapter gate;
+        # different model cohorts cannot mutate the React agent concurrently.
+        # Codex direct turns take the exclusive side, with writer preference.
+        self._model_turn_lock = _ModelTurnGate()
+        # Failed request-rail unregistrations are retried under the exclusive
+        # turn gate before another Codex request can be armed.
+        self._codex_call_rail_cleanup_pending: tuple[AgentRail, ...] = ()
         self._task_planning_rail: TaskPlanningRail | None = None
         self._context_assemble_rail: ContextAssembleRail | None = None
         self._context_assemble_mode: str | None = None
@@ -699,6 +1299,7 @@ class JiuWenSwarmDeepAdapter:
         self._is_proactive_memory: bool | None = None
         self._model_cache: dict[str, Model] = {}
         self._model_name_to_keys: dict[str, list[str]] = {}
+        self._model_canonical_key_by_object_id: dict[int, str] = {}
         # Cache system prompt to avoid re-building on every btw/recap call.
         # The system prompt is derived from project context (CLAUDE.md, skills, etc.)
         # which doesn't change within a session, so caching is safe.
@@ -1134,22 +1735,24 @@ class JiuWenSwarmDeepAdapter:
         #   → but _cancel_scheduler_running_tasks() was AFTER abort() → deadlock.
         self._cancel_scheduler_running_tasks()
         try:
+            abort_task = asyncio.create_task(
+                self._instance.abort(),
+                name=f"deep-agent-abort:{reason}",
+            )
+            cancellation: asyncio.CancelledError | None = None
+            current = asyncio.current_task()
+            while not abort_task.done():
+                try:
+                    await asyncio.shield(abort_task)
+                except asyncio.CancelledError as exc:
+                    cancellation = cancellation or exc
+                    if current is not None:
+                        while current.cancelling():
+                            current.uncancel()
             try:
-                # asyncio.shield protects abort() from re-injected CancelledError
-                # when called from a CancelledError handler — a second task.cancel()
-                # would otherwise interrupt abort() mid-execution, leaving the
-                # DeepAgent in a partially-aborted state.  shield() ensures abort()
-                # runs to completion even if the outer task is re-cancelled.
-                await asyncio.shield(self._instance.abort())
+                await abort_task
                 logger.info(
                     "[JiuWenSwarmDeepAdapter] interrupt(%s): 已终止 DeepAgent 任务循环",
-                    reason,
-                )
-            except asyncio.CancelledError:
-                # shield() absorbed the re-cancellation; abort() completed.
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] interrupt(%s): instance.abort 在 shield 下完成"
-                    "（外层 task 被二次 cancel）",
                     reason,
                 )
             except Exception as exc:
@@ -1158,6 +1761,8 @@ class JiuWenSwarmDeepAdapter:
                     reason,
                     exc,
                 )
+            if cancellation is not None:
+                raise cancellation
         finally:
             # Safety net: cancel again in case new scheduler tasks were spawned
             # between the first cancel and abort().
@@ -1182,20 +1787,34 @@ class JiuWenSwarmDeepAdapter:
         if not bucket:
             self._session_agent_tasks.pop(sid, None)
 
-    async def _cancel_session_agent_tasks(self, session_id: str) -> int:
+    async def _cancel_session_agent_tasks(
+        self,
+        session_id: str,
+        *,
+        deadline: float | None = None,
+    ) -> int:
         sid = self._resolve_interrupt_session_id(session_id)
         tasks_dict = getattr(self, "_session_agent_tasks", None)
         if not tasks_dict:
             return 0
-        tasks = list(tasks_dict.pop(sid, set()))
+        # Do not pop ownership before join.  Each task removes only itself from
+        # its own finally after its child iterator and model turn are closed.
+        tasks = list(tasks_dict.get(sid, set()))
         cancelled = 0
+        current = asyncio.current_task()
+        wait_tasks: list[asyncio.Task[Any]] = []
         for task in tasks:
-            if task is not None and not task.done():
-                task.cancel()
-                cancelled += 1
-        if cancelled:
+            if task is None or task is current:
+                continue
+            if not task.done():
+                wait_tasks.append(task)
+                if task.cancelling() == 0:
+                    task.cancel()
+                    cancelled += 1
+        if wait_tasks:
             logger.info(
-                "[JiuWenSwarmDeepAdapter] interrupt: cancelled %d agent asyncio task(s) session=%s",
+                "[JiuWenSwarmDeepAdapter] interrupt: requested cancellation for %d "
+                "agent asyncio task(s) session=%s",
                 cancelled,
                 sid,
             )
@@ -1203,7 +1822,41 @@ class JiuWenSwarmDeepAdapter:
             # task.cancel() 只调度 CancelledError，不保证任务已停止。
             # 如果不等待，后续 interrupt 处理（rail.abort, instance.abort）
             # 可能与任务清理并发执行，且调用方可能在任务仍在运行时返回"成功"。
-            await asyncio.gather(*[t for t in tasks if t is not None], return_exceptions=True)
+            cancellation: asyncio.CancelledError | None = None
+            pending: set[asyncio.Task[Any]] = set(wait_tasks)
+            while pending:
+                try:
+                    timeout = None
+                    if deadline is not None:
+                        timeout = deadline - time.monotonic()
+                        if timeout <= 0:
+                            raise CodexProviderError(
+                                "cancel_cleanup_timeout",
+                                "Codex cancellation cleanup exceeded its deadline.",
+                            )
+                    done, pending = await asyncio.wait(pending, timeout=timeout)
+                    if done:
+                        await asyncio.gather(*done, return_exceptions=True)
+                    if pending and deadline is not None:
+                        raise CodexProviderError(
+                            "cancel_cleanup_timeout",
+                            "Codex cancellation cleanup exceeded its deadline.",
+                        )
+                except asyncio.CancelledError as exc:
+                    cancellation = cancellation or exc
+                    if current is not None:
+                        while current.cancelling():
+                            current.uncancel()
+            await asyncio.gather(*wait_tasks, return_exceptions=True)
+            if cancellation is not None:
+                raise cancellation
+        bucket = tasks_dict.get(sid)
+        if bucket is not None:
+            for task in tasks:
+                if task.done():
+                    bucket.discard(task)
+            if not bucket:
+                tasks_dict.pop(sid, None)
         return cancelled
 
     def _clear_a2x_runtime_state(self) -> None:
@@ -2440,39 +3093,29 @@ class JiuWenSwarmDeepAdapter:
     def _register_model_cache_entry(
         self,
         entry: dict[str, Any],
-        name_counter: dict[str, int],
-    ) -> None:
+        candidate: ModelRouteCandidate,
+    ) -> bool:
         """Register one model entry into the request-selectable model cache."""
         mcc = entry.get("model_client_config") or {}
-        if not mcc.get("model_name"):
-            return
-        model_name = mcc["model_name"]
-        idx = name_counter.get(model_name, 0)
-        name_counter[model_name] = idx + 1
-        cache_key = f"{model_name}#{idx}"
         try:
             model = self._build_model_from_entry(
                 mcc,
                 entry.get("model_config_obj") or {},
             )
-            self._model_cache[cache_key] = model
         except Exception as exc:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] 跳过无效模型条目 %s: %s",
-                model_name, exc,
+                candidate.model_name, exc,
             )
-            return
-        if model_name not in self._model_name_to_keys:
-            self._model_name_to_keys[model_name] = []
-        self._model_name_to_keys[model_name].append(cache_key)
-
-        # 同时用纯 model_name 作为 key 指向 is_default=true 的条目
-        if entry.get("is_default") is True:
-            self._model_cache[model_name] = self._model_cache[cache_key]
-
-        alias = entry.get("alias") or ""
-        if alias and alias != model_name and alias not in self._model_cache:
-            self._model_cache[alias] = self._model_cache[cache_key]
+            return False
+        self._model_cache[candidate.canonical_model_key] = model
+        self._model_canonical_key_by_object_id[id(model)] = (
+            candidate.canonical_model_key
+        )
+        self._model_name_to_keys.setdefault(candidate.model_name, []).append(
+            candidate.canonical_model_key
+        )
+        return True
 
     def _build_model_cache_from_defaults(self, config: dict) -> None:
         """从 models.defaults 列表构建模型缓存。
@@ -2481,10 +3124,26 @@ class JiuWenSwarmDeepAdapter:
         同时记录 _model_name_to_keys 映射以便按 model_name 查找。
         """
         self._model_name_to_keys.clear()
-        name_counter: dict[str, int] = {}
+        self._model_canonical_key_by_object_id.clear()
+        entries = get_default_models(config)
+        route_index = build_model_route_index(entries)
+        available_keys: set[str] = set()
+        for candidate in route_index.candidates:
+            entry = entries[candidate.entry_index]
+            if isinstance(entry, dict) and self._register_model_cache_entry(
+                entry,
+                candidate,
+            ):
+                available_keys.add(candidate.canonical_model_key)
 
-        for entry in get_default_models(config):
-            self._register_model_cache_entry(entry, name_counter)
+        actual_index = build_model_route_index(
+            entries,
+            available_canonical_keys=available_keys,
+        )
+        for selectable_key, candidate in actual_index.routes_by_key.items():
+            self._model_cache[selectable_key] = self._model_cache[
+                candidate.canonical_model_key
+            ]
 
     def _build_model_cache_legacy(self, config: dict) -> None:
         """回退到旧格式（models.default / react 段）构建单条目缓存。"""
@@ -2506,7 +3165,9 @@ class JiuWenSwarmDeepAdapter:
             or {}
         )
         try:
-            self._model_cache[model_name] = self._build_model_from_entry(mcc, mco)
+            model = self._build_model_from_entry(mcc, mco)
+            self._model_cache[model_name] = model
+            self._model_canonical_key_by_object_id[id(model)] = model_name
         except Exception as exc:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] 跳过无效模型条目(legacy) %s: %s",
@@ -2534,6 +3195,7 @@ class JiuWenSwarmDeepAdapter:
 
         self._model_cache.clear()
         self._model_name_to_keys.clear()
+        self._model_canonical_key_by_object_id.clear()
         self._inject_attribution_to_config(config)
         self._build_model_cache_from_defaults(config)
         if not self._model_cache:
@@ -2607,10 +3269,445 @@ class JiuWenSwarmDeepAdapter:
         - {model_name}#{index}：查找指定索引的条目
         """
         requested = (request.params.get("model_name") or "").strip()
+        if request.subscription_continuation_bound:
+            expected = parse_expected_model_route(request.metadata)
+            requested_mode = str(
+                (request.params or {}).get("mode") or ""
+            ).strip()
+            model = (
+                self._model_cache.get(expected.canonical_model_key)
+                if expected is not None
+                else None
+            )
+            actual_provider = provider_name(
+                getattr(
+                    getattr(model, "model_client_config", None),
+                    "client_provider",
+                    None,
+                )
+            )
+            if (
+                expected is None
+                or requested != expected.canonical_model_key
+                or requested_mode != expected.mode
+                or model is None
+                or actual_provider != expected.provider
+            ):
+                raise CodexProviderError(
+                    "route_unavailable",
+                    "The model route used by this pending request is no longer available.",
+                )
+            return model
         model = self._resolve_model_by_name(requested)
         if model is None:
             raise RuntimeError("No model configured for request")
         return model
+
+    def _canonical_model_key_for_model(self, model: Model) -> str:
+        canonical = self._model_canonical_key_by_object_id.get(id(model), "")
+        if canonical:
+            return canonical
+        matching_keys = [
+            key for key, cached_model in self._model_cache.items()
+            if cached_model is model
+        ]
+        return next(
+            (key for key in matching_keys if "#" in key),
+            matching_keys[0] if matching_keys else "",
+        )
+
+    def _stamp_actual_model_route(
+        self,
+        request: AgentRequest,
+        model: Model,
+    ) -> ActualModelRouteReceipt:
+        canonical_key = self._canonical_model_key_for_model(model)
+        provider = provider_name(
+            getattr(getattr(model, "model_client_config", None), "client_provider", None)
+        )
+        mode = str((request.params or {}).get("mode") or "").strip()
+        if not canonical_key or not provider or not mode:
+            raise RuntimeError("Resolved model route is missing canonical identity")
+        receipt = ActualModelRouteReceipt(
+            canonical_model_key=canonical_key,
+            provider=provider,
+            source_request_id=request.request_id,
+            mode=mode,
+        )
+        request.metadata = {
+            **(request.metadata or {}),
+            **actual_model_route_metadata(receipt),
+        }
+        return receipt
+
+    def request_uses_codex(self, request: AgentRequest) -> bool:
+        """Return whether this request resolves to the native Codex provider."""
+
+        return is_codex_model(self._resolve_model_for_request(request))
+
+    def preflight_subscription_request(self, request: AgentRequest) -> CodexConsumer | None:
+        """Apply provider admission before Jiuwen records or dispatches a chat turn."""
+
+        model = self._resolve_model_for_request(request)
+        return self._preflight_codex_request(request, model)
+
+    @staticmethod
+    def _preflight_codex_request(request: AgentRequest, model: Model) -> CodexConsumer | None:
+        if not is_codex_model(model):
+            return None
+        consumer = classify_agent_request(request)
+        require_codex_consumer(consumer)
+        params = request.params if isinstance(request.params, dict) else {}
+        from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+            extract_multimodal_image_files,
+            is_image_content_block,
+        )
+
+        has_multimodal_input = bool(extract_multimodal_image_files(params))
+        attachments = params.get("attachments")
+        if not has_multimodal_input and isinstance(attachments, list):
+            has_multimodal_input = any(
+                isinstance(item, dict)
+                and (
+                    str(item.get("type") or "").strip().lower()
+                    in {"image", "image_url", "input_image"}
+                    or str(item.get("mime_type") or item.get("mimeType") or "")
+                    .strip()
+                    .lower()
+                    .startswith("image/")
+                )
+                for item in attachments
+            )
+        if not has_multimodal_input:
+            has_multimodal_input = any(
+                is_image_content_block(part)
+                for key in ("query", "content")
+                for part in (
+                    params.get(key) if isinstance(params.get(key), list) else []
+                )
+            )
+        if has_multimodal_input:
+            raise CodexProviderError(
+                "unsupported_modality",
+                "Codex subscription supports text-only requests in v1.",
+            )
+        if not isinstance(request.params, dict) or any(
+            key in params and not isinstance(params[key], str)
+            for key in ("query", "content")
+        ):
+            raise CodexProviderError(
+                "invalid_request",
+                "Codex subscription query and content fields must be strings in v1.",
+            )
+        return consumer
+
+    def _suspend_codex_context_processors(
+        self,
+        session_id: str,
+        *,
+        enabled: bool,
+    ) -> tuple[Any, Any, list[Any] | None, list[Any] | None]:
+        """Prevent hidden compression/summarization model calls for one Codex turn."""
+
+        if not enabled:
+            return None, None, None, None
+        react_agent = getattr(self._instance, "react_agent", None)
+        config = getattr(react_agent, "_config", None)
+        context_engine = getattr(react_agent, "context_engine", None)
+        config_processors = None
+        context_processors = None
+        context = None
+        try:
+            if config is not None:
+                config_processors = list(getattr(config, "context_processors", None) or [])
+                config.context_processors = []
+            if context_engine is not None:
+                context = context_engine.get_context(session_id=session_id)
+                if context is not None:
+                    context_processors = list(getattr(context, "_processors", None) or [])
+                    context._processors = []
+        except BaseException:
+            self._restore_codex_context_processors(
+                (config, context, config_processors, context_processors)
+            )
+            raise
+        return config, context, config_processors, context_processors
+
+    @staticmethod
+    def _restore_codex_context_processors(
+        state: tuple[Any, Any, list[Any] | None, list[Any] | None],
+    ) -> None:
+        config, context, config_processors, context_processors = state
+        if config is not None and config_processors is not None:
+            config.context_processors = config_processors
+        if context is not None and context_processors is not None:
+            context._processors = context_processors
+
+    async def _begin_model_turn(
+        self,
+        session_id: str,
+        resolved_model: Model | None,
+        *,
+        suspend_context_processors: bool,
+        request: AgentRequest | None = None,
+    ) -> _ModelTurnState:
+        """Acquire the turn guard, select its model, and optionally suspend processors."""
+
+        permit = await self._model_turn_lock.acquire(
+            exclusive=suspend_context_processors,
+            shared_key=None if suspend_context_processors else id(resolved_model),
+        )
+        processor_state = None
+        call_rails: tuple[AgentRail, ...] = ()
+        try:
+            await self._recover_codex_model_call_rail_cleanup()
+            if request is not None and resolved_model is not None:
+                current_model = self._resolve_model_for_request(request)
+                expected_model = (
+                    resolved_model._delegate
+                    if isinstance(resolved_model, _CallBoundCodexModel)
+                    else resolved_model
+                )
+                if current_model is not expected_model:
+                    raise CodexProviderError(
+                        "route_unavailable",
+                        "The selected model route changed while this request was queued.",
+                    )
+                current_consumer = self._preflight_codex_request(request, current_model)
+                if isinstance(resolved_model, _CallBoundCodexModel):
+                    if current_consumer is not CodexConsumer.DIRECT_AGENT_FAST:
+                        raise CodexProviderError(
+                            "route_unavailable",
+                            "The selected Codex consumer changed while this request was queued.",
+                        )
+                elif current_consumer is not None:
+                    raise CodexProviderError(
+                        "route_unavailable",
+                        "The selected provider changed while this request was queued.",
+                    )
+            if resolved_model is not None:
+                self._apply_model_to_react_agent(resolved_model)
+            processor_state = self._suspend_codex_context_processors(
+                session_id,
+                enabled=suspend_context_processors,
+            )
+            if isinstance(resolved_model, _CallBoundCodexModel):
+                _validate_codex_model_call_rail_contract(self._instance)
+                call_rails = (
+                    _CodexModelCallRevokeRail(resolved_model),
+                    _CodexModelCallArmRail(
+                        resolved_model,
+                        self._instance
+                        if isinstance(self._instance, DeepAgent)
+                        else None,
+                    ),
+                )
+                for call_rail in call_rails:
+                    await self._instance.register_rail(call_rail)
+                self._register_codex_turn_owner(resolved_model._turn_owner)
+            return _ModelTurnState(
+                permit=permit,
+                processor_state=processor_state,
+                call_rails=call_rails,
+            )
+        except BaseException as start_error:
+            cleanup_error: BaseException | None = None
+            if isinstance(resolved_model, _CallBoundCodexModel):
+                resolved_model.deactivate()
+            try:
+                if call_rails and not await self._unregister_codex_model_call_rails(
+                    call_rails
+                ):
+                    cleanup_error = CodexProviderError(
+                        "cancel_cleanup_failed",
+                        "Codex request callback cleanup failed.",
+                    )
+            except BaseException as exc:
+                cleanup_error = exc
+            finally:
+                try:
+                    if processor_state is not None:
+                        self._restore_codex_context_processors(processor_state)
+                except BaseException as exc:
+                    cleanup_error = cleanup_error or exc
+                finally:
+                    permit.release()
+                    if isinstance(resolved_model, _CallBoundCodexModel):
+                        resolved_model._turn_owner.finish(
+                            cleanup_error or start_error
+                        )
+            if cleanup_error is not None:
+                raise cleanup_error from start_error
+            raise
+
+    async def _unregister_codex_model_call_rails(
+        self,
+        rails: tuple[AgentRail, ...],
+    ) -> bool:
+        """Remove request rails without allowing cleanup to reopen a turn."""
+
+        failed: list[AgentRail] = []
+        for rail in reversed(rails):
+            for attempt in range(2):
+                try:
+                    await self._instance.unregister_rail(rail)
+                    break
+                except BaseException:
+                    if attempt == 0:
+                        continue
+                    failed.append(rail)
+                    logger.exception(
+                        "[JiuWenSwarmDeepAdapter] Codex model-call rail cleanup "
+                        "failed twice; adapter is fail-closed until recovery"
+                    )
+        self._codex_call_rail_cleanup_pending = tuple(reversed(failed))
+        return not failed
+
+    async def _recover_codex_model_call_rail_cleanup(self) -> None:
+        """Retry stale inert rail cleanup before admitting another turn."""
+
+        pending = getattr(self, "_codex_call_rail_cleanup_pending", ())
+        if not pending:
+            return
+        self._codex_call_rail_cleanup_pending = ()
+        if not await self._unregister_codex_model_call_rails(pending):
+            raise CodexProviderError(
+                "invalid_config",
+                "Codex request callback cleanup has not recovered.",
+            )
+
+    async def _finish_model_turn(
+        self,
+        state: _ModelTurnState | None,
+        turn_model: Model | _CallBoundCodexModel,
+    ) -> None:
+        """Fail closed, remove the request rail, then release the turn gate."""
+
+        cleanup_error: BaseException | None = None
+        if isinstance(turn_model, _CallBoundCodexModel):
+            turn_model.deactivate()
+        try:
+            if state is not None and state.call_rails:
+                if not await self._unregister_codex_model_call_rails(state.call_rails):
+                    cleanup_error = CodexProviderError(
+                        "cancel_cleanup_failed",
+                        "Codex request callback cleanup failed.",
+                    )
+        except BaseException as exc:
+            cleanup_error = exc
+            raise
+        finally:
+            try:
+                self._end_model_turn(state)
+            except BaseException as exc:
+                cleanup_error = cleanup_error or exc
+                raise
+            finally:
+                if isinstance(turn_model, _CallBoundCodexModel):
+                    turn_model._turn_owner.finish(cleanup_error)
+
+    async def _finish_model_turn_resilient(
+        self,
+        state: _ModelTurnState | None,
+        turn_model: Model | _CallBoundCodexModel,
+    ) -> None:
+        """Finish rails and release the turn gate despite repeated task cancellation."""
+
+        cleanup_task = asyncio.create_task(
+            self._finish_model_turn(state, turn_model),
+            name="codex-model-turn-cleanup",
+        )
+        current = asyncio.current_task()
+        cancellation: asyncio.CancelledError | None = None
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+                if current is not None:
+                    while current.cancelling():
+                        current.uncancel()
+        await cleanup_task
+        if cancellation is not None:
+            raise cancellation
+
+    def _end_model_turn(
+        self,
+        state: _ModelTurnState | None,
+    ) -> None:
+        """Restore processor state and release the turn guard on every exit."""
+
+        if state is None:
+            return
+        try:
+            self._restore_codex_context_processors(state.processor_state)
+        finally:
+            state.permit.release()
+
+    @staticmethod
+    def _model_for_request_turn(
+        model: Model,
+        consumer: CodexConsumer | None,
+    ) -> Model | _CallBoundCodexModel:
+        """Compatibility factory for tests and non-owned local call scopes."""
+
+        if consumer is CodexConsumer.DIRECT_AGENT_FAST:
+            return _CallBoundCodexModel(model, consumer)
+        return model
+
+    def _owned_model_for_request_turn(
+        self,
+        model: Model,
+        consumer: CodexConsumer | None,
+        *,
+        session_id: str,
+        request_id: str,
+    ) -> Model | _CallBoundCodexModel:
+        """Return an exact-call-authorized proxy only for an admitted Codex turn."""
+
+        if consumer is CodexConsumer.DIRECT_AGENT_FAST:
+            sid = self._resolve_interrupt_session_id(session_id)
+            generations = getattr(self, "_codex_turn_generations", None)
+            if generations is None:
+                generations = Counter()
+                self._codex_turn_generations = generations
+            generations[sid] += 1
+            owner = _CodexTurnOwner(
+                _CodexTurnIdentity(
+                    session_id=sid,
+                    request_id=str(request_id or ""),
+                    generation=generations[sid],
+                ),
+                self._remove_codex_turn_owner,
+            )
+            return _CallBoundCodexModel(model, consumer, owner)
+        return model
+
+    def _register_codex_turn_owner(self, owner: _CodexTurnOwner) -> None:
+        sid = owner.identity.session_id
+        owners = getattr(self, "_codex_turn_owners", None)
+        if owners is None:
+            owners = {}
+            self._codex_turn_owners = owners
+        existing = owners.get(sid)
+        if existing is not None and existing is not owner and not existing.completion.done():
+            raise CodexProviderError(
+                "provider_busy",
+                "The previous Codex turn for this session is still cleaning up.",
+            )
+        owners[sid] = owner
+        owner.mark_registered()
+
+    def _remove_codex_turn_owner(self, owner: _CodexTurnOwner) -> None:
+        sid = owner.identity.session_id
+        owners = getattr(self, "_codex_turn_owners", None)
+        if owners is not None and owners.get(sid) is owner:
+            owners.pop(sid, None)
+
+    def _snapshot_codex_turn_owner(self, session_id: str) -> _CodexTurnOwner | None:
+        return getattr(self, "_codex_turn_owners", {}).get(
+            self._resolve_interrupt_session_id(session_id)
+        )
 
     @staticmethod
     def _prepare_multimodal_image_inputs(
@@ -2774,17 +3871,16 @@ class JiuWenSwarmDeepAdapter:
         return self._vision_model_config is None
 
     def _apply_model_to_react_agent(self, model: Model) -> None:
-        """将指定模型应用到 react_agent 实例（替换 _llm 和 _config 字段）。
+        """将指定模型应用到 react_agent 实例。
 
-        react_agent._railed_model_call 使用 self._config.model_name 作为 model= 参数，
-        因此需要同时替换 _llm 和 _config 中的模型相关字段。
+        使用 OpenJiuwen 暴露的 ``DeepAgent.react_agent``、``set_llm`` 和
+        ``ReActAgent.config`` 公共接口，避免依赖其私有字段布局。
         """
-        react_agent = getattr(self._instance, "_react_agent", None)
+        react_agent = self._instance.react_agent
         if react_agent is None:
             return
-        if callable(getattr(react_agent, "set_llm", None)):
-            react_agent.set_llm(model)
-        config = getattr(react_agent, "_config", None)
+        react_agent.set_llm(model)
+        config = react_agent.config
         if config is not None:
             config.model_name = model.model_config.model_name
             config.model_client_config = model.model_client_config
@@ -4409,6 +5505,24 @@ class JiuWenSwarmDeepAdapter:
         env_overrides: dict[str, Any] | None = None,
         target_session_id: str | None = None,
     ) -> None:
+        """Serialize DeepAgent reconfiguration against all active model turns."""
+
+        permit = await self._model_turn_lock.acquire(exclusive=True)
+        try:
+            await self._reload_agent_config_under_model_gate(
+                config_base,
+                env_overrides,
+                target_session_id,
+            )
+        finally:
+            permit.release()
+
+    async def _reload_agent_config_under_model_gate(
+        self,
+        config_base: dict[str, Any] | None = None,
+        env_overrides: dict[str, Any] | None = None,
+        target_session_id: str | None = None,
+    ) -> None:
         """从 config.yaml 重新加载配置，通过 DeepAgent.configure() 热更新当前实例（不新建 DeepAgent）。
 
         DeepAgent.configure() 现在自动处理 rail 生命周期：保留旧已注册 rails 的注销上下文，
@@ -5269,11 +6383,15 @@ class JiuWenSwarmDeepAdapter:
         *,
         intent: str,
         reset_for_new_task: bool = False,
+        deadline: float | None = None,
     ) -> list[dict[str, Any]]:
         """Per-session teardown: rail abort, shell kill, cancelled tool collection."""
         sid = self._resolve_interrupt_session_id(session_id)
         cancelled_tool_results: list[dict[str, Any]] = []
-        cancelled_tasks = await self._cancel_session_agent_tasks(sid)
+        cancelled_tasks = await self._cancel_session_agent_tasks(
+            sid,
+            deadline=deadline,
+        )
         if self._stream_event_rail is not None:
             self._stream_event_rail.abort(session_id or sid)
             self._stream_event_rail.collect_cancelled_tool_updates(session_id or sid)
@@ -5367,6 +6485,23 @@ class JiuWenSwarmDeepAdapter:
         # an empty-string or None request.session_id doesn't bypass the guard.
         _normalized_sid = self._resolve_interrupt_session_id(request.session_id)
         _session_is_active = self._is_session_active(_normalized_sid)
+        codex_owner = (
+            self._snapshot_codex_turn_owner(_normalized_sid)
+            if intent in ("cancel", "supplement")
+            else None
+        )
+        codex_completion = (
+            codex_owner.request_cancel() if codex_owner is not None else None
+        )
+        cancel_deadline: float | None = None
+        if codex_owner is not None:
+            raw_deadline = (request.metadata or {}).get(
+                CODEX_CANCEL_DEADLINE_METADATA_KEY
+            )
+            if isinstance(raw_deadline, (int, float)) and math.isfinite(raw_deadline):
+                cancel_deadline = float(raw_deadline)
+            else:
+                cancel_deadline = time.monotonic() + 15.0
         if not _session_is_active and intent in ("pause", "resume"):
             logger.info(
                 "[JiuWenSwarmDeepAdapter] interrupt(%s): session=%s not active on this adapter, "
@@ -5388,6 +6523,7 @@ class JiuWenSwarmDeepAdapter:
         success = True
         updated_todos = None
         cancelled_tool_results = []
+        cancel_failure: CodexProviderError | None = None
 
         if intent == "pause":
             # 暂停：通过 StreamEventRail 在下一个 model_call/tool_call checkpoint 阻塞
@@ -5411,11 +6547,21 @@ class JiuWenSwarmDeepAdapter:
 
         elif intent == "supplement":
             # supplement: 停止当前执行，但保留 todo（新任务会根据 todo 待办继续执行）
-            cancelled_tool_results = await self._stop_session_interrupt_work(
-                request.session_id,
-                intent="supplement",
-            )
-            if _session_is_active:
+            try:
+                cancelled_tool_results = await self._stop_session_interrupt_work(
+                    request.session_id,
+                    intent="supplement",
+                    deadline=cancel_deadline,
+                )
+            except CodexProviderError as exc:
+                if codex_owner is None:
+                    raise
+                cancel_failure = exc
+            if (
+                _session_is_active
+                and cancel_failure is None
+                and codex_owner is None
+            ):
                 # Global abort is safe only when this session has work in flight.
                 # When inactive, another session may have just started — aborting
                 # the shared DeepAgent would kill it as collateral damage.
@@ -5433,12 +6579,22 @@ class JiuWenSwarmDeepAdapter:
             # DeepAgent 的 _run_task_loop_stream 后台 Task 不会停止
             # （stream_task.cancel() 只取消了 chunk 转发 Task，不影响 _stream_process）。
             # SessionManager.cancel_session_task 仅管理非流式队列 Task，对流式后台 Task 无效。
-            cancelled_tool_results = await self._stop_session_interrupt_work(
-                request.session_id,
-                intent="cancel",
-                reset_for_new_task=True,
-            )
-            if _session_is_active:
+            try:
+                cancelled_tool_results = await self._stop_session_interrupt_work(
+                    request.session_id,
+                    intent="cancel",
+                    reset_for_new_task=True,
+                    deadline=cancel_deadline,
+                )
+            except CodexProviderError as exc:
+                if codex_owner is None:
+                    raise
+                cancel_failure = exc
+            if (
+                _session_is_active
+                and cancel_failure is None
+                and codex_owner is None
+            ):
                 # Global abort is safe only when this session has work in flight.
                 # When inactive, another session may have just started — aborting
                 # the shared DeepAgent would kill it as collateral damage.
@@ -5478,12 +6634,38 @@ class JiuWenSwarmDeepAdapter:
             else:
                 message = "任务已取消"
 
+        if codex_completion is not None:
+            try:
+                remaining = (cancel_deadline or time.monotonic()) - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                async with asyncio.timeout(remaining):
+                    completion = await asyncio.shield(codex_completion)
+            except TimeoutError as exc:
+                cancel_failure = CodexProviderError(
+                    "cancel_cleanup_timeout",
+                    "Codex cancellation cleanup exceeded its deadline.",
+                )
+                cancel_failure.__cause__ = exc
+            else:
+                if not completion.clean:
+                    cancel_failure = CodexProviderError(
+                        completion.code or "cancel_cleanup_failed",
+                        completion.message or "Codex cancellation cleanup failed.",
+                    )
+
+        if cancel_failure is not None:
+            success = False
+            message = cancel_failure.safe_message
+
         payload = {
             "event_type": "chat.interrupt_result",
             "intent": intent,
             "success": success,
             "message": message,
         }
+        if cancel_failure is not None:
+            payload["code"] = cancel_failure.code
 
         if new_input:
             payload["new_input"] = new_input
@@ -5605,6 +6787,8 @@ class JiuWenSwarmDeepAdapter:
         return _mcc_looks_usable({
             "api_key": mcc_obj.api_key,
             "api_base": getattr(mcc_obj, "api_base", None),
+            "client_provider": getattr(mcc_obj, "client_provider", None),
+            "model_name": getattr(getattr(model, "model_config", None), "model_name", None),
         })
 
     def _has_valid_model_config(self, requested_model_name: str = "") -> bool:
@@ -6249,6 +7433,15 @@ class JiuWenSwarmDeepAdapter:
                     metadata=request.metadata,
                 )
 
+        resolved_model = self._resolve_model_for_request(request)
+        codex_consumer = self._preflight_codex_request(request, resolved_model)
+        turn_model = self._owned_model_for_request_turn(
+            resolved_model,
+            codex_consumer,
+            session_id=session_id,
+            request_id=request.request_id,
+        )
+
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
             session_id=request.session_id,
@@ -6258,15 +7451,22 @@ class JiuWenSwarmDeepAdapter:
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
-        # 按请求选择模型
-        resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         if self._stream_event_rail is not None:
             self._stream_event_rail.reset_abort(session_id)
         image_files_token = None
+        processor_state = None
         try:
+            processor_state = await self._begin_model_turn(
+                session_id,
+                turn_model,
+                suspend_context_processors=(
+                    codex_consumer is CodexConsumer.DIRECT_AGENT_FAST
+                ),
+                request=request,
+            )
+            self._stamp_actual_model_route(request, resolved_model)
             await self._update_runtime_config(
                 self._RuntimeConfig(
                     session_id=session_id,
@@ -6314,17 +7514,20 @@ class JiuWenSwarmDeepAdapter:
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
-            if image_files_token is not None:
-                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
-                    reset_current_multimodal_image_files,
-                )
+            try:
+                await self._finish_model_turn(processor_state, turn_model)
+            finally:
+                if image_files_token is not None:
+                    from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                        reset_current_multimodal_image_files,
+                    )
 
-                reset_current_multimodal_image_files(image_files_token)
-            self._unregister_session_agent_task(session_id)
-            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
-            cleanup_permission_context(token_perm)
-            self._reset_runtime_cron_context(cron_context_tokens)
-            self._unmark_session_active(session_id)
+                    reset_current_multimodal_image_files(image_files_token)
+                self._unregister_session_agent_task(session_id)
+                TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+                cleanup_permission_context(token_perm)
+                self._reset_runtime_cron_context(cron_context_tokens)
+                self._unmark_session_active(session_id)
 
         content = result if isinstance(result, (str, dict)) else str(result)
 
@@ -6350,12 +7553,16 @@ class JiuWenSwarmDeepAdapter:
         """
         if not self._is_session_scoped_adapter:
             session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            session_stream = session_adapter.process_message_stream_impl(request, inputs)
             try:
-                async for chunk in session_adapter.process_message_stream_impl(request, inputs):
+                async for chunk in session_stream:
                     yield chunk
                 return
             finally:
-                await self._evict_idle_session_adapters()
+                try:
+                    await close_owned_async_iterator(session_stream)
+                finally:
+                    await self._evict_idle_session_adapters()
 
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
@@ -6375,82 +7582,115 @@ class JiuWenSwarmDeepAdapter:
         cid = request.channel_id
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
+        resolved_model = self._resolve_model_for_request(request)
+        codex_consumer = self._preflight_codex_request(request, resolved_model)
+        actual_route_receipt = None
+        turn_model = self._owned_model_for_request_turn(
+            resolved_model,
+            codex_consumer,
+            session_id=session_id,
+            request_id=request.request_id,
+        )
 
         # Team 模式处理
         if mode in ("team", "team.plan", "code.team"):
             from jiuwenswarm.server.runtime.agent_adapter.team_helpers import process_team_message_stream
 
-            resolved_model = self._resolve_model_for_request(request)
-            self._apply_model_to_react_agent(resolved_model)
-            resolved_language = self._resolve_runtime_language()
-            resolved_channel = str(cid or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
-            if self._runtime_prompt_rail:
-                self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
-                self._runtime_prompt_rail.set_mode(mode)
-                self._runtime_prompt_rail.set_session_id(session_id)
-            self._write_runtime_state(
-                mode=mode,
-                language=resolved_language,
-                channel=resolved_channel,
-                session_id=session_id,
-                project_dir=inputs.get("project_dir")
-                or inputs.get("cwd")
-                or self._project_dir
-                or self._workspace_dir,
+            team_state = await self._begin_model_turn(
+                session_id,
+                turn_model,
+                suspend_context_processors=False,
+                request=request,
             )
+            try:
+                self._stamp_actual_model_route(request, resolved_model)
+                resolved_language = self._resolve_runtime_language()
+                resolved_channel = str(
+                    cid or self._resolve_prompt_channel(session_id) or "web"
+                ).strip() or "web"
+                if self._runtime_prompt_rail:
+                    self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
+                    self._runtime_prompt_rail.set_mode(mode)
+                    self._runtime_prompt_rail.set_session_id(session_id)
+                self._write_runtime_state(
+                    mode=mode,
+                    language=resolved_language,
+                    channel=resolved_channel,
+                    session_id=session_id,
+                    project_dir=inputs.get("project_dir")
+                    or inputs.get("cwd")
+                    or self._project_dir
+                    or self._workspace_dir,
+                )
 
-            async for chunk in process_team_message_stream(request, inputs, self._instance):
-                yield chunk
-            return
+                team_stream = process_team_message_stream(
+                    request,
+                    inputs,
+                    self._instance,
+                )
+                try:
+                    async for chunk in team_stream:
+                        yield chunk
+                finally:
+                    await close_owned_async_iterator(team_stream)
+                return
+            finally:
+                await self._finish_model_turn(team_state, turn_model)
 
         # Auto-Harness 模式处理
         if mode == "auto_harness":
-            if self._auto_harness_service is None:
-                self._auto_harness_service = AutoHarnessService(
-                    self._stream_event_rail,
-                    agent=self._instance,
-                )
-
-            await self._update_runtime_config(
-                self._RuntimeConfig(
-                    session_id=session_id,
-                    mode=mode,
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    request_metadata=request.metadata,
-                    trusted_dirs=inputs.get("trusted_dirs"),
-                    cwd=inputs.get("cwd"),
-                    project_dir=inputs.get("project_dir"),
-                )
+            auto_state = await self._begin_model_turn(
+                session_id,
+                turn_model,
+                suspend_context_processors=False,
+                request=request,
             )
+            try:
+                self._stamp_actual_model_route(request, resolved_model)
+                if self._auto_harness_service is None:
+                    self._auto_harness_service = AutoHarnessService(
+                        self._stream_event_rail,
+                        agent=self._instance,
+                    )
 
-            activate_response = request.params.get("activate_response")
-            if isinstance(activate_response, dict):
-                async for chunk in self._auto_harness_service.resume_activate(
-                    session_id, rid, cid, activate_response
-                ):
-                    yield chunk
-                return
+                await self._update_runtime_config(
+                    self._RuntimeConfig(
+                        session_id=session_id,
+                        mode=mode,
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        request_metadata=request.metadata,
+                        trusted_dirs=inputs.get("trusted_dirs"),
+                        cwd=inputs.get("cwd"),
+                        project_dir=inputs.get("project_dir"),
+                    )
+                )
 
-            resolved_model = self._resolve_model_for_request(request)
-            if self._auto_harness_service.is_activate_only_request(request, query):
-                async for chunk in self._auto_harness_service.run_activate_only(
-                    request, session_id, rid, query, model=resolved_model
-                ):
-                    yield chunk
+                activate_response = request.params.get("activate_response")
+                if isinstance(activate_response, dict):
+                    auto_stream = self._auto_harness_service.resume_activate(
+                        session_id, rid, cid, activate_response
+                    )
+                elif self._auto_harness_service.is_activate_only_request(request, query):
+                    auto_stream = self._auto_harness_service.run_activate_only(
+                        request, session_id, rid, query, model=resolved_model
+                    )
+                elif self._auto_harness_service.is_implement_only_request(request, query):
+                    auto_stream = self._auto_harness_service.run_implement_only(
+                        request, session_id, rid, query, model=resolved_model
+                    )
+                else:
+                    auto_stream = self._auto_harness_service.run(
+                        request, session_id, rid, query=query, model=resolved_model
+                    )
+                try:
+                    async for chunk in auto_stream:
+                        yield chunk
+                finally:
+                    await close_owned_async_iterator(auto_stream)
                 return
-            if self._auto_harness_service.is_implement_only_request(request, query):
-                async for chunk in self._auto_harness_service.run_implement_only(
-                    request, session_id, rid, query, model=resolved_model
-                ):
-                    yield chunk
-                return
-
-            async for chunk in self._auto_harness_service.run(
-                request, session_id, rid, query=query, model=resolved_model
-            ):
-                yield chunk
-            return
+            finally:
+                await self._finish_model_turn(auto_state, turn_model)
 
         # 拦截斜杠命令
         slash_result = await self._handle_slash_command(query, session_id, mode)
@@ -6461,6 +7701,10 @@ class JiuWenSwarmDeepAdapter:
                 inputs["query"] = followup_prompt
                 inputs["_invoke_turn_id"] = request.request_id
             else:
+                # No model turn follows this local command. Drop any request-local
+                # Codex arm capability that was prepared during route admission.
+                if isinstance(turn_model, _CallBoundCodexModel):
+                    turn_model.deactivate()
                 approval_chunks = slash_result.get("approval_chunks", [])
                 if approval_chunks:
                     for chunk in approval_chunks:
@@ -6527,14 +7771,25 @@ class JiuWenSwarmDeepAdapter:
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
-        # 按请求选择模型
-        resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)
         self._register_session_agent_task(session_id)
         stream_consumer_cancelled = False
         image_files_token = None
+        processor_state = None
+        runner_stream = None
         try:
+            processor_state = await self._begin_model_turn(
+                session_id,
+                turn_model,
+                suspend_context_processors=(
+                    codex_consumer is CodexConsumer.DIRECT_AGENT_FAST
+                ),
+                request=request,
+            )
+            actual_route_receipt = self._stamp_actual_model_route(
+                request,
+                resolved_model,
+            )
             await self._update_runtime_config(
                 self._RuntimeConfig(
                     session_id=session_id,
@@ -6584,9 +7839,10 @@ class JiuWenSwarmDeepAdapter:
             image_files_token = set_current_multimodal_image_files(
                 inputs.pop("_multimodal_image_files", []) or []
             )
-            async for chunk in Runner.run_agent_streaming(self._instance, inputs):
+            runner_stream = Runner.run_agent_streaming(self._instance, inputs)
+            async for chunk in runner_stream:
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
-                    parsed = self._parse_stream_chunk(chunk)
+                    parsed = self._with_codex_error_receipts(self._parse_stream_chunk(chunk))
                     if parsed is not None:
                         if should_skip_duplicate_ask_user(parsed):
                             continue
@@ -6708,7 +7964,9 @@ class JiuWenSwarmDeepAdapter:
                         )
                         accumulated_reasoning = ""
                     if has_streamed_content:
-                        parsed = self._parse_stream_chunk(chunk, _has_streamed_content=True)
+                        parsed = self._with_codex_error_receipts(
+                            self._parse_stream_chunk(chunk, _has_streamed_content=True)
+                        )
                         if parsed is not None:
                             if should_skip_duplicate_ask_user(parsed):
                                 continue
@@ -6719,7 +7977,7 @@ class JiuWenSwarmDeepAdapter:
                                 is_complete=False,
                             )
                         continue
-                    parsed = self._parse_stream_chunk(chunk)
+                    parsed = self._with_codex_error_receipts(self._parse_stream_chunk(chunk))
                     if parsed is not None:
                         if should_skip_duplicate_ask_user(parsed):
                             continue
@@ -6747,7 +8005,7 @@ class JiuWenSwarmDeepAdapter:
                         is_complete=False,
                     )
                     accumulated_reasoning = ""
-                parsed = self._parse_stream_chunk(chunk)
+                parsed = self._with_codex_error_receipts(self._parse_stream_chunk(chunk))
                 if parsed is not None:
                     if should_skip_duplicate_ask_user(parsed):
                         continue
@@ -6775,14 +8033,20 @@ class JiuWenSwarmDeepAdapter:
 
             if self._skill_evolution_rail is not None:
                 task = asyncio.create_task(
-                    self._watch_evolution_and_push(rid, cid, session_id)
+                    self._watch_evolution_and_push(
+                        rid,
+                        cid,
+                        session_id,
+                        actual_route_receipt=actual_route_receipt,
+                    )
                 )
                 task.add_done_callback(self._on_evolution_watcher_done)
                 self._evolution_watcher_tasks.add(task)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
             stream_consumer_cancelled = True
             logger.info(
-                "[JiuWenSwarmDeepAdapter] 流式任务被取消: request_id=%s session_id=%s",
+                "[JiuWenSwarmDeepAdapter] 流式任务被取消或关闭: "
+                "request_id=%s session_id=%s",
                 rid,
                 session_id,
             )
@@ -6796,36 +8060,50 @@ class JiuWenSwarmDeepAdapter:
             raise
         except Exception as exc:
             logger.exception("[JiuWenSwarmDeepAdapter] 流式任务异常: %s", exc)
+            error_payload = (
+                provider_error_payload(
+                    exc,
+                    consumer=codex_consumer.value if codex_consumer is not None else None,
+                )
+                if isinstance(exc, CodexProviderError)
+                else {"error": str(exc), "error_type": type(exc).__name__}
+            )
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
                 payload={
                     "event_type": "chat.error",
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
+                    **error_payload,
                 },
                 is_complete=False,
             )
         finally:
-            if image_files_token is not None:
-                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
-                    reset_current_multimodal_image_files,
-                )
+            try:
+                if runner_stream is not None:
+                    await close_owned_async_iterator(runner_stream)
+            finally:
+                try:
+                    await self._finish_model_turn_resilient(processor_state, turn_model)
+                finally:
+                    if image_files_token is not None:
+                        from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                            reset_current_multimodal_image_files,
+                        )
 
-                reset_current_multimodal_image_files(image_files_token)
-            self._unregister_session_agent_task(session_id)
-            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
-            cleanup_permission_context(token_perm)
-            if not stream_consumer_cancelled:
-                self._reset_runtime_cron_context(cron_context_tokens)
-            # Always clean up rail state — process_interrupt's
-            # _stop_session_interrupt_work sets abort flags but does NOT
-            # call cleanup_session(), so skipping cleanup here would leak
-            # _abort_requested / _pause_events entries on long-lived adapters.
-            self._unmark_session_active(
-                session_id,
-                cleanup_rail=True,
-            )
+                        reset_current_multimodal_image_files(image_files_token)
+                    self._unregister_session_agent_task(session_id)
+                    TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+                    cleanup_permission_context(token_perm)
+                    if not stream_consumer_cancelled:
+                        self._reset_runtime_cron_context(cron_context_tokens)
+                    # Always clean up rail state — process_interrupt's
+                    # _stop_session_interrupt_work sets abort flags but does NOT
+                    # call cleanup_session(), so skipping cleanup here would leak
+                    # _abort_requested / _pause_events entries on long-lived adapters.
+                    self._unmark_session_active(
+                        session_id,
+                        cleanup_rail=True,
+                    )
 
         summary = {
             "input_tokens": usage_accumulator["input_tokens"],
@@ -6901,6 +8179,24 @@ class JiuWenSwarmDeepAdapter:
             payload=None,
             is_complete=True,
         )
+
+    def _with_codex_error_receipts(self, parsed: dict | None) -> dict | None:
+        """Restore typed code/provider/consumer receipts on Codex chat.error events.
+
+        OpenJiuwen surfaces model-call failures as stream chunks, so the original
+        CodexProviderError never reaches this adapter's exception handler; the
+        request-local turn owner keeps the typed error for the wire payload.
+        """
+        if not isinstance(parsed, dict) or parsed.get("event_type") != "chat.error":
+            return parsed
+        for owner in self._codex_turn_owners.values():
+            failure = owner.provider_failure
+            if failure is not None:
+                return {
+                    "event_type": "chat.error",
+                    **provider_error_payload(failure, consumer=owner.consumer_value),
+                }
+        return parsed
 
     @staticmethod
     def _parse_stream_chunk(
@@ -7398,6 +8694,8 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None or self._instance.react_agent is None:
             raise ValueError("Agent instance not available")
 
+        require_codex_model_consumer(self._model, CodexConsumer.CONTEXT_COMPACTION)
+
         context_engine = self._instance.react_agent.context_engine
         react_agent = self._instance.react_agent
 
@@ -7584,6 +8882,8 @@ class JiuWenSwarmDeepAdapter:
                     return await session_adapter.generate_recap(session_id=session_id)
                 finally:
                     await self._evict_idle_session_adapters()
+
+        require_codex_model_consumer(self._model, CodexConsumer.CONTEXT_COMPACTION)
 
         from jiuwenswarm.server.runtime.agent_adapter.recap_prompts import (
             RECENT_MESSAGE_WINDOW,
@@ -7800,6 +9100,7 @@ class JiuWenSwarmDeepAdapter:
         if self._model is None:
             logger.error("[oneshot] no model instance available")
             return None
+        require_codex_model_consumer(self._model, CodexConsumer.CONTEXT_COMPACTION)
 
         recap_messages: list[Any] = []
 
@@ -7930,6 +9231,7 @@ class JiuWenSwarmDeepAdapter:
         if self._model is None:
             logger.warning("[JiuWenSwarmDeepAdapter] repair skipped: no model instance available")
             return None
+        require_codex_model_consumer(self._model, CodexConsumer.CONTEXT_COMPACTION)
         from openjiuwen.core.foundation.llm.schema.message import UserMessage
 
         result = await self._model.invoke(
@@ -7970,6 +9272,7 @@ class JiuWenSwarmDeepAdapter:
         from jiuwenswarm.agents.harness.common.session_ops_service import (
             get_agent_sessions_dir,
         )
+        require_codex_model_consumer(self._model, CodexConsumer.CONTEXT_COMPACTION)
         from jiuwenswarm.server.runtime.session.session_history import _read_history
         from jiuwenswarm.server.runtime.agent_adapter.compact_partial_prompts import (
             NO_TOOLS_PREAMBLE,
@@ -8123,7 +9426,14 @@ class JiuWenSwarmDeepAdapter:
 
         return total_tokens
 
-    async def _watch_evolution_and_push(self, rid: str, cid: str, session_id: str) -> None:
+    async def _watch_evolution_and_push(
+        self,
+        rid: str,
+        cid: str,
+        session_id: str,
+        *,
+        actual_route_receipt: ActualModelRouteReceipt | None = None,
+    ) -> None:
         """Poll passive evolution events and push progress, approval, and terminal status."""
         from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
 
@@ -8132,12 +9442,21 @@ class JiuWenSwarmDeepAdapter:
             channel_id=cid,
             session_id=session_id,
         )
+        build_correlated_push_message = partial(
+            build_server_push_message,
+            source_request_id=rid,
+            actual_model_route_receipt=(
+                actual_route_receipt.to_dict()
+                if actual_route_receipt is not None
+                else None
+            ),
+        )
 
         async def _push_status(status: str, stage: str, message: str = "") -> None:
             await push_evolution_status(
                 push_context,
                 build_evolution_status_update(rid, status, stage, message),
-                build_server_push_message,
+                build_correlated_push_message,
                 include_payload_request_id=False,
             )
 
@@ -8146,7 +9465,7 @@ class JiuWenSwarmDeepAdapter:
                 push_context,
                 rid,
                 evt,
-                build_server_push_message,
+                build_correlated_push_message,
             )
 
         async def _cleanup_evolution_rail() -> None:
@@ -8228,7 +9547,7 @@ class JiuWenSwarmDeepAdapter:
                     rid,
                     events,
                     parse_stream_chunk=self._parse_stream_chunk,
-                    build_push_message=build_server_push_message,
+                    build_push_message=build_correlated_push_message,
                 )
 
                 progress_statuses_to_push = visible_progress_statuses
@@ -8357,6 +9676,7 @@ class JiuWenSwarmDeepAdapter:
         if self._dreaming_started:
             return
         try:
+            require_codex_model_consumer(self._model, CodexConsumer.MEMORY)
             from jiuwenswarm.agents.harness.common.memory.dreaming import start_dreaming
             from jiuwenswarm.common.utils import get_agent_sessions_dir
             sessions_dir = str(get_agent_sessions_dir() or "")

@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -634,11 +633,22 @@ class TestDeliveryContext:
             request_id="push-1",
             payload={"event_type": "chat.ask_user_question"},
             fallback_channel_id="web",
+            source_request_id="req-origin",
+            actual_model_route_receipt={
+                "canonical_model_key": "codex-cli#0",
+                "provider": "AI4ResearchCodex",
+                "source_request_id": "req-origin",
+                "mode": "agent.fast",
+            },
         )
 
         assert push["channel_id"] == "telegram"
         assert push["session_id"] == "sess_push"
         assert push["metadata"]["telegram_chat_id"] == "chat-1"
+        assert push["source_request_id"] == "req-origin"
+        assert push["actual_model_route_receipt"]["canonical_model_key"] == (
+            "codex-cli#0"
+        )
 
 
 # ===========================================================================

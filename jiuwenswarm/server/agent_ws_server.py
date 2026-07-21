@@ -12,6 +12,7 @@ import math
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
@@ -56,6 +57,9 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
+from jiuwenswarm.server.runtime.agent_adapter.stream_lifecycle import (
+    close_owned_async_iterator,
+)
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
@@ -105,6 +109,23 @@ from jiuwenswarm.common.security.ws_origin import (
     get_header_value,
     is_origin_check_enabled,
     is_allowed_browser_origin,
+    is_loopback_websocket_peer,
+)
+from jiuwenswarm.integrations.ai4research_subscription.constants import (
+    CODEX_MODEL_ALIAS,
+    CODEX_PROVIDER_NAME,
+)
+from jiuwenswarm.integrations.ai4research_subscription.consumer_policy import (
+    CODEX_CALL_PERMIT_KWARG,
+    CodexConsumer,
+    codex_subscription_enabled,
+    issue_codex_call_permit,
+    require_codex_enabled,
+    require_default_codex_consumer,
+)
+from jiuwenswarm.integrations.ai4research_subscription.errors import (
+    CodexProviderError,
+    provider_error_payload,
 )
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_MODE_EXITED_EVENT_TYPE,
@@ -112,6 +133,21 @@ from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
 from jiuwenswarm.common.schema.message import ReqMethod
 
 logger = logging.getLogger(__name__)
+
+_CODEX_CANCEL_DEADLINE_METADATA_KEY = (
+    "_jiuwen_internal_codex_cancel_deadline_monotonic"
+)
+_CANCEL_CLEANUP_TIMEOUT_SECONDS = 15.0
+
+_CODEX_CONTROL_METHODS = frozenset(
+    {
+        ReqMethod.CODEX_AUTH_STATUS,
+        ReqMethod.CODEX_AUTH_START,
+        ReqMethod.CODEX_AUTH_CANCEL,
+        ReqMethod.CODEX_AUTH_LOGOUT,
+        ReqMethod.CODEX_VALIDATE_MODEL,
+    }
+)
 
 # 后台权限重载任务引用集合,防止 fire-and-forget 任务被 GC 提前回收。
 # task 完成后自动从集合移除(Python 官方推荐模式)。
@@ -937,6 +973,11 @@ class AgentWebSocketServer:
         self._agent_manager = AgentManager()
         # session_id → 正在运行的流式 asyncio.Task，用于 interrupt 时精确取消
         self._session_stream_tasks: dict[str, asyncio.Task] = {}
+        # Adapter-side interrupt work can outlive the response deadline while
+        # it finishes provider/process cleanup.  Keep an explicit strong owner
+        # until that work settles; the deadline path must report failure without
+        # delivering a second cancellation into the cleanup task.
+        self._cancel_cleanup_tasks: set[asyncio.Task[Any]] = set()
         # Scheduler service instance (for scheduled auto_harness tasks)
         self._scheduler_service: Optional[AutoHarnessService] = None
         # Model cache for scheduled task execution (same approach as interface_deep)
@@ -1256,6 +1297,14 @@ class AgentWebSocketServer:
             await self._jiuwenbox_runner.stop()
         except Exception as exc:  # noqa: BLE001
             logger.warning("[AgentWebSocketServer] jiuwenbox_runner.stop failed: %s", exc)
+        try:
+            from jiuwenswarm.integrations.ai4research_subscription.auth_controller import (
+                get_codex_auth_controller,
+            )
+
+            await get_codex_auth_controller().shutdown()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentWebSocketServer] Codex auth shutdown failed: %s", type(exc).__name__)
         logger.info("[AgentWebSocketServer] 已停止")
 
     # ---------- 连接处理 ----------
@@ -1362,26 +1411,46 @@ class AgentWebSocketServer:
                 )
             return
 
+        parse_err: Exception | None = None
+        used_legacy_fallback = False
+        env: E2AEnvelope | None = None
         try:
             env = E2AEnvelope.from_dict(data)
-        except Exception as parse_err:
-            logger.warning(
-                "[AgentWebSocketServer] E2A from_dict 失败，按旧载荷解析: %s",
-                parse_err,
-            )
+        except Exception as error:
+            parse_err = error
             request = _payload_to_request(data)
         else:
             jw = (env.channel_context or {}).get(E2A_INTERNAL_CONTEXT_KEY)
             if isinstance(jw, dict) and jw.get(E2A_FALLBACK_FAILED_KEY):
                 legacy = jw.get(E2A_LEGACY_AGENT_REQUEST_KEY)
-                logger.warning(
-                    "[E2A][fallback] using legacy_agent_request request_id=%s",
-                    env.request_id,
-                )
                 if not isinstance(legacy, dict):
                     raise ValueError("legacy_agent_request missing or not a dict")
+                used_legacy_fallback = True
                 request = _payload_to_request(legacy)
             else:
+                request = e2a_to_agent_request(env)
+
+        try:
+            if (
+                request.req_method in _CODEX_CONTROL_METHODS
+                and not is_loopback_websocket_peer(ws)
+            ):
+                raise CodexProviderError(
+                    "local_provider_required",
+                    "Codex subscription controls require a local Jiuwen Gateway and AgentServer.",
+                )
+
+            if parse_err is not None:
+                logger.warning(
+                    "[AgentWebSocketServer] E2A from_dict 失败，按旧载荷解析: %s",
+                    parse_err,
+                )
+            elif used_legacy_fallback:
+                logger.warning(
+                    "[E2A][fallback] using legacy_agent_request request_id=%s",
+                    env.request_id if env is not None else None,
+                )
+            elif env is not None:
                 logger.info(
                     "[E2A][in] request_id=%s channel=%s method=%s is_stream=%s",
                     env.request_id,
@@ -1389,16 +1458,14 @@ class AgentWebSocketServer:
                     env.method,
                     env.is_stream,
                 )
-                request = e2a_to_agent_request(env)
 
-        logger.info(
-            "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
-            request.request_id,
-            request.channel_id,
-            request.is_stream,
-        )
+            logger.info(
+                "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
+                request.request_id,
+                request.channel_id,
+                request.is_stream,
+            )
 
-        try:
             if request.channel_id == "acp" and request.req_method != ReqMethod.INITIALIZE:
                 metadata = dict(request.metadata or {})
                 ws_caps = self._get_ws_acp_client_capabilities(ws)
@@ -1412,6 +1479,12 @@ class AgentWebSocketServer:
 
             if request.req_method == ReqMethod.SESSION_LIST:
                 await self._handle_session_list(ws, request, send_lock)
+                return
+            if request.req_method in _CODEX_CONTROL_METHODS:
+                if request.req_method == ReqMethod.CODEX_VALIDATE_MODEL:
+                    await self._handle_codex_validate_model(ws, request, send_lock)
+                else:
+                    await self._handle_codex_auth(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.SESSION_RENAME:
                 await self._handle_session_rename(ws, request, send_lock)
@@ -1617,6 +1690,11 @@ class AgentWebSocketServer:
                 sid = request.session_id or "default"
                 intent = request.params.get("intent", "cancel") if isinstance(request.params, dict) else "cancel"
                 cleanup_after_cancel = self._is_client_disconnect_cancel_request(request)
+                cancel_deadline = time.monotonic() + _CANCEL_CLEANUP_TIMEOUT_SECONDS
+                request.metadata = {
+                    **(request.metadata or {}),
+                    _CODEX_CANCEL_DEADLINE_METADATA_KEY: cancel_deadline,
+                }
 
                 # 只有 cancel/supplement 才取消流式任务
                 # pause/resume 不取消，因为任务仍在运行（pause 在 checkpoint 阻塞，resume 解除阻塞）
@@ -1638,23 +1716,11 @@ class AgentWebSocketServer:
                         request,
                         send_lock,
                         allow_create=not cleanup_after_cancel,
+                        stream_task=stream_task,
+                        deadline=cancel_deadline,
+                        send_terminal=not cleanup_after_cancel,
                     )
                 finally:
-                    # 等待被取消的 stream task 完成清理（finally 块中的 heartbeat 取消、
-                    # _session_stream_tasks 清理、plan mode exit 检查等），避免僵尸调用。
-                    if stream_task is not None and not stream_task.done():
-                        try:
-                            await stream_task
-                        except asyncio.CancelledError:
-                            pass
-                        except Exception as exc:
-                            logger.warning(
-                                "[AgentWebSocketServer] cancel: stream task cleanup failed: "
-                                "session_id=%s intent=%s error=%s",
-                                sid,
-                                intent,
-                                exc,
-                            )
                     if cleanup_after_cancel and intent in ("cancel", "supplement"):
                         await self._cleanup_client_disconnect_session_runtime(request)
                 return
@@ -1683,6 +1749,23 @@ class AgentWebSocketServer:
                     describe_ws_exception(e),
                 ),
             )
+        except CodexProviderError as exc:
+            logger.warning(
+                "[AgentWebSocketServer] Codex request denied: request_id=%s code=%s",
+                request.request_id,
+                exc.code,
+            )
+            error_resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload=provider_error_payload(exc),
+            )
+            wire = encode_agent_response_for_wire(
+                error_resp, response_id=request.request_id
+            )
+            async with send_lock:
+                await send_wire_payload(ws, wire)
         except Exception as e:
             logger.exception(
                 "[AgentWebSocketServer] 处理请求失败: request_id=%s: %s",
@@ -1785,6 +1868,9 @@ class AgentWebSocketServer:
         send_lock: asyncio.Lock,
         *,
         allow_create: bool = True,
+        stream_task: asyncio.Task[Any] | None = None,
+        deadline: float | None = None,
+        send_terminal: bool = True,
     ) -> None:
         """处理 CHAT_CANCEL 中断请求：复用已有 agent 实例，避免创建新实例。
 
@@ -1793,6 +1879,11 @@ class AgentWebSocketServer:
         因此 cancel 请求必须直接定位已有 agent 来处理。
         """
         channel_id = request.channel_id or "default"
+        effective_deadline = (
+            deadline
+            if deadline is not None
+            else time.monotonic() + _CANCEL_CLEANUP_TIMEOUT_SECONDS
+        )
 
         # 1. 尝试按 params 中的 mode 查找已有 agent
         project_dir = resolve_request_project_dir(request)
@@ -1814,6 +1905,7 @@ class AgentWebSocketServer:
             agent = self._agent_manager.get_agent_nowait(channel_id, project_dir=project_dir)
 
         resp: AgentResponse | None = None
+        cleanup_failure: tuple[str, str] | None = None
 
         if agent is None and not allow_create:
             logger.info(
@@ -1852,11 +1944,109 @@ class AgentWebSocketServer:
             raise ValueError("Failed to get agent for cancel request")
 
         if resp is None:
-            resp = await agent.process_message(request)
+            cancel_task = asyncio.create_task(
+                agent.process_message(request),
+                name=f"agent-cancel-cleanup:{request.session_id or 'default'}",
+            )
+            cleanup_tasks = getattr(self, "_cancel_cleanup_tasks", None)
+            if cleanup_tasks is None:
+                cleanup_tasks = set()
+                self._cancel_cleanup_tasks = cleanup_tasks
+            cleanup_tasks.add(cancel_task)
 
-        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await send_wire_payload(ws, wire)
+            def _release_cancel_cleanup_task(task: asyncio.Task[Any]) -> None:
+                cleanup_tasks.discard(task)
+                if task.cancelled():
+                    return
+                try:
+                    task.exception()
+                except (asyncio.CancelledError, Exception):
+                    # Completion is observed here solely to avoid an orphaned
+                    # task warning after the response deadline has elapsed.
+                    pass
+
+            cancel_task.add_done_callback(_release_cancel_cleanup_task)
+            remaining = effective_deadline - time.monotonic()
+            if remaining <= 0:
+                cleanup_failure = (
+                    "cancel_cleanup_timeout",
+                    "Codex cancellation cleanup exceeded its deadline.",
+                )
+            else:
+                done, _pending = await asyncio.wait({cancel_task}, timeout=remaining)
+                if cancel_task in done:
+                    resp = cancel_task.result()
+                else:
+                    cleanup_failure = (
+                        "cancel_cleanup_timeout",
+                        "Codex cancellation cleanup exceeded its deadline.",
+                    )
+
+            if resp is None:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={
+                        "event_type": "chat.interrupt_result",
+                        "intent": (
+                            request.params.get("intent", "cancel")
+                            if isinstance(request.params, dict)
+                            else "cancel"
+                        ),
+                        "success": False,
+                    },
+                    metadata=request.metadata,
+                )
+
+        if stream_task is not None and stream_task is not asyncio.current_task():
+            try:
+                if not stream_task.done():
+                    remaining = effective_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    async with asyncio.timeout(remaining):
+                        await asyncio.shield(stream_task)
+                else:
+                    await stream_task
+            except asyncio.CancelledError:
+                pass
+            except TimeoutError:
+                cleanup_failure = cleanup_failure or (
+                    "cancel_cleanup_timeout",
+                    "Codex cancellation cleanup exceeded its deadline.",
+                )
+            except Exception:
+                logger.exception(
+                    "[AgentWebSocketServer] cancel: stream task cleanup failed: "
+                    "session_id=%s",
+                    request.session_id,
+                )
+                cleanup_failure = cleanup_failure or (
+                    "cancel_cleanup_failed",
+                    "Codex cancellation cleanup failed.",
+                )
+
+        payload = resp.payload if isinstance(resp.payload, dict) else {}
+        if cleanup_failure is not None:
+            code, message = cleanup_failure
+            resp.payload = {
+                **payload,
+                "event_type": "chat.interrupt_result",
+                "intent": (
+                    request.params.get("intent", "cancel")
+                    if isinstance(request.params, dict)
+                    else "cancel"
+                ),
+                "success": False,
+                "code": code,
+                "message": message,
+            }
+
+        if send_terminal:
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            async with send_lock:
+                await send_wire_payload(ws, wire)
 
     @staticmethod
     def _resolve_code_language() -> str:
@@ -2261,8 +2451,9 @@ class AgentWebSocketServer:
         # 启动心跳任务
         heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
+        stream = agent.process_message_stream(request)
         try:
-            async for chunk in agent.process_message_stream(request):
+            async for chunk in stream:
                 chunk_count += 1
                 # 通知心跳任务有真实 chunk 发送，重置心跳计时
                 heartbeat_event.set()
@@ -2306,21 +2497,24 @@ class AgentWebSocketServer:
                 # 清除 event，让心跳任务重新开始计时
                 heartbeat_event.clear()
         finally:
-            # 停止心跳任务
-            if heartbeat_task is not None:
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    pass
-                except WebSocketConnectionClosed:
-                    pass
-            # 清除 session 流式任务追踪（仅清除自身，避免误删后续新任务）
-            if self._session_stream_tasks.get(session_id) is current_task:
-                self._session_stream_tasks.pop(session_id, None)
+            try:
+                await close_owned_async_iterator(stream)
+            finally:
+                # 停止心跳任务
+                if heartbeat_task is not None:
+                    heartbeat_task.cancel()
+                    try:
+                        await heartbeat_task
+                    except asyncio.CancelledError:
+                        pass
+                    except WebSocketConnectionClosed:
+                        pass
+                # 清除 session 流式任务追踪（仅清除自身，避免误删后续新任务）
+                if self._session_stream_tasks.get(session_id) is current_task:
+                    self._session_stream_tasks.pop(session_id, None)
 
-            # Push plan.mode_exited if exit_plan_mode restored mode during processing
-            await self._check_post_process_plan_exit(request, agent)
+                # Push plan.mode_exited if exit_plan_mode restored mode during processing
+                await self._check_post_process_plan_exit(request, agent)
 
         logger.info(
             "[AgentWebSocketServer] 流式响应已发送: request_id=%s 共 %s 个 chunk",
@@ -2975,6 +3169,164 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
+    async def _handle_codex_auth(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Handle the instance-scoped Codex authentication control plane."""
+        from jiuwenswarm.integrations.ai4research_subscription.auth_controller import (
+            get_codex_auth_controller,
+        )
+        from jiuwenswarm.integrations.ai4research_subscription.errors import CodexProviderError
+
+        params = request.params if isinstance(request.params, dict) else {}
+        try:
+            if request.req_method == ReqMethod.CODEX_AUTH_STATUS and not codex_subscription_enabled():
+                payload = {
+                    "provider": CODEX_PROVIDER_NAME,
+                    "enabled": False,
+                    "connected": False,
+                    "state": "disabled",
+                }
+            elif request.req_method == ReqMethod.CODEX_AUTH_STATUS:
+                controller = get_codex_auth_controller()
+                payload = await controller.status()
+            elif request.req_method == ReqMethod.CODEX_AUTH_START:
+                controller = get_codex_auth_controller()
+                payload = await controller.start_device_login()
+            elif request.req_method == ReqMethod.CODEX_AUTH_CANCEL:
+                controller = get_codex_auth_controller()
+                payload = await controller.cancel(str(params.get("operation_id") or ""))
+            elif request.req_method == ReqMethod.CODEX_AUTH_LOGOUT:
+                controller = get_codex_auth_controller()
+                payload = await controller.logout()
+            else:
+                raise CodexProviderError("invalid_request", "Unsupported Codex authentication operation.")
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=payload,
+                metadata=request.metadata,
+            )
+        except CodexProviderError as exc:
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": exc.safe_message, "code": exc.code},
+                metadata=request.metadata,
+            )
+        except Exception:
+            logger.exception("[AgentWS] Codex auth operation failed")
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "Codex authentication failed.", "code": "auth_failed"},
+                metadata=request.metadata,
+            )
+        wire = encode_agent_response_for_wire(response, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_codex_validate_model(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Run one credentialless Codex model probe inside AgentServer."""
+        from openjiuwen.core.foundation.llm import Model
+        from openjiuwen.core.foundation.llm.schema.config import (
+            ModelClientConfig,
+            ModelRequestConfig,
+        )
+
+        params = request.params if isinstance(request.params, dict) else None
+        try:
+            if params is None or set(params) != {"model_provider", "model"}:
+                raise CodexProviderError(
+                    "invalid_request",
+                    "Codex model validation accepts only model_provider and model.",
+                )
+            if (
+                params.get("model_provider") != CODEX_PROVIDER_NAME
+                or params.get("model") != CODEX_MODEL_ALIAS
+            ):
+                raise CodexProviderError(
+                    "invalid_request",
+                    "The Codex subscription provider or model alias is invalid.",
+                )
+
+            require_codex_enabled()
+            model_request_config = ModelRequestConfig(
+                model_name=CODEX_MODEL_ALIAS,
+                temperature=0,
+            )
+            model_client_config = ModelClientConfig(
+                client_id="config-validate",
+                client_provider=CODEX_PROVIDER_NAME,
+                api_key="",
+                api_base="",
+                timeout=25.0,
+                max_retries=0,
+                verify_ssl=False,
+            )
+            llm = Model(
+                model_config=model_request_config,
+                model_client_config=model_client_config,
+            )
+            call_permit = issue_codex_call_permit(
+                llm._client,
+                CodexConsumer.CONFIG_VALIDATION,
+            )
+            result = await llm.invoke(
+                [{"role": "user", "content": "Hi"}],
+                max_tokens=1,
+                temperature=0,
+                **{CODEX_CALL_PERMIT_KWARG: call_permit},
+            )
+            content = getattr(result, "content", None)
+            if not isinstance(content, str) or not content.strip():
+                raise CodexProviderError(
+                    "invalid_output",
+                    "Codex returned an empty model-validation response.",
+                )
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "validated": True,
+                    "model_provider": CODEX_PROVIDER_NAME,
+                    "model": CODEX_MODEL_ALIAS,
+                    "response": content.strip(),
+                },
+                metadata=request.metadata,
+            )
+        except CodexProviderError as exc:
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": exc.safe_message, "code": exc.code},
+                metadata=request.metadata,
+            )
+        except Exception:
+            logger.exception("[AgentWS] Codex model validation failed")
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "error": "Codex could not validate the model configuration.",
+                    "code": "provider_failed",
+                },
+                metadata=request.metadata,
+            )
+
+        wire = encode_agent_response_for_wire(response, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
     async def _handle_permissions_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """处理 permissions.* E2A 请求（与 Web ``register_method`` 同名 method）。"""
         from jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc import \
@@ -3036,6 +3388,19 @@ class AgentWebSocketServer:
         This is called by Gateway's CronScheduler to trigger a recommendation tick.
         Respects cooldown and daily limits.
         """
+        try:
+            require_default_codex_consumer(CodexConsumer.PROACTIVE)
+        except CodexProviderError as exc:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload=provider_error_payload(exc, consumer=CodexConsumer.PROACTIVE.value),
+            )
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            async with send_lock:
+                await send_wire_payload(ws, wire)
+            return
         if self._proactive_engine is None:
             resp = AgentResponse(
                 request_id=request.request_id,

@@ -394,6 +394,8 @@ def build_server_push_message(
     request_id: str,
     payload: dict[str, Any],
     fallback_channel_id: str | None = None,
+    source_request_id: str | None = None,
+    actual_model_route_receipt: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """基于 session delivery context 构造 evolution watcher 的 server_push 消息。"""
     delivery_context = get_session_delivery_context(session_id) or {}
@@ -408,6 +410,13 @@ def build_server_push_message(
         "session_id": session_id,
         "payload": dict(payload),
     }
+    normalized_source_request_id = str(source_request_id or "").strip()
+    if normalized_source_request_id:
+        message["source_request_id"] = normalized_source_request_id
+    if isinstance(actual_model_route_receipt, dict) and actual_model_route_receipt:
+        message["actual_model_route_receipt"] = copy.deepcopy(
+            actual_model_route_receipt
+        )
     if isinstance(route_metadata, dict) and route_metadata:
         message["metadata"] = copy.deepcopy(route_metadata)
     return message
