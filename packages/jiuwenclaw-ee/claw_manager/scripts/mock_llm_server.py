@@ -6,6 +6,14 @@
 行为与 ``tests/system_tests/enterprise/mock_llm_server.py`` 一致，并增加压测场景常用选项
 （``--host``、请求统计、毫秒时间戳日志）。
 
+``--profile loadtest`` 时按用户输入关键词自动路由多场景 Mock 流程：
+
+- **travel**（默认）：小说《旅行的意义》多工具 Agent 流程
+- **scheduled_task**：用户消息含「定时任务」等关键词
+- **cron_delivery**：定时任务到点触发，返回一句喝水提醒
+- **skill**：用户消息含「skill」「技能」等关键词
+- **file**：用户消息含「文件」关键词
+
 典型用法（项目根目录）::
 
     # E2E 快速流式（与 system test 相同参数）
@@ -38,7 +46,9 @@ import signal
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +61,522 @@ LOADTEST_STREAM_CHUNK_CHARS = 256
 LOADTEST_CHAT_EXCERPT_CHARS = 6_000
 LOADTEST_WRITE_MAX_CHARS = 32_000
 
-_LOADTEST_NOVEL_MARKERS = ("旅行的意义", "人生的意义", "十万字", "txt", "小说")
+_LOADTEST_NOVEL_MARKERS = ("旅行的意义", "人生的意义", "十万字", "txt")
+# 单独「小说」太宽，会误匹配 Agent 回写的 intro 文案；用下方 echo 检测兜底
+_TRAVEL_ASSISTANT_ECHO_MARKERS = (
+    "我看到你希望我专注于",
+    "让我重新规划，专注于创作",
+    "而不是立即尝试完成整部",
+)
+_TRAVEL_COMPLETION_ECHO_MARKERS = (
+    "完成！我已经为你创作了小说",
+    "开篇章节约6000字",
+    "如需继续创作后续章节",
+)
+_SKILL_ECHO_MARKERS = (
+    "全部完成！✅",
+    "任务完成总结",
+    "北京3日游攻略已生成",
+    "有什么需要调整或补充的，随时告诉我",
+)
+_FILE_ECHO_MARKERS = (
+    "已经把扩写好的作文发给你了",
+    "纯汉字约 5400 字",
+    "字数核对：纯汉字",
+)
+_CRON_ECHO_MARKERS = (
+    "喝水提醒已创建",
+    "到点后会通过 web 频道向你推送提醒",
+    "执行完成后自动删除",
+)
+# skill 场景除关键字外，常见用户表述
+_SKILL_INTENT_EXTRA = ("skillnet", "openclaw.tours", "旅游攻略技能", "北京3日游", "旅游攻略")
 _NOVEL_FILENAME = "旅行的意义_开篇完整版.txt"
+
+
+# ---------------------------------------------------------------------------
+# 多场景路由：根据用户输入关键词选择 Mock 对话流程（loadtest profile）
+# ---------------------------------------------------------------------------
+class MockScenario:
+    """Mock LLM 联调场景标识。"""
+
+    TRAVEL = "travel"
+    SCHEDULED_TASK = "scheduled_task"
+    CRON_DELIVERY = "cron_delivery"
+    SKILL = "skill"
+    FILE = "file"
+
+
+# loadtest 联调脚本的固定场景顺序（travel 完成后用户发 skill 时，Agent 可能尚未把新消息注入 LLM）
+_LOADTEST_SCENARIO_SEQUENCE = (
+    MockScenario.TRAVEL,
+    MockScenario.SKILL,
+    MockScenario.FILE,
+    MockScenario.SCHEDULED_TASK,
+)
+
+
+# 优先级：cron_delivery > scheduled_task > skill > file > travel(默认)
+_SCHEDULED_TASK_KEYWORDS = ("定时任务", "定时提醒")
+_SKILL_KEYWORDS = ("skill", "技能")
+# 不要用单独的「文件」——用户包装 prompt / 系统提示里几乎总会出现，会把小说场景串到扩写
+_FILE_KEYWORDS = ("童趣的春天", "扩写", "作文")
+
+# ---------------------------------------------------------------------------
+# 定时任务场景常量
+# ---------------------------------------------------------------------------
+_CRON_INTRO = ""
+_CRON_JOB_ARGS = {
+    "name": "喝水提醒",
+    "delay_seconds": 60,
+    "delete_after_run": True,
+    "timezone": "Asia/Shanghai",
+    "description": "🥤 喝水时间到啦！记得喝杯水，保持水分摄入～",
+    "targets": "web",
+    "enabled": True,
+}
+_CRON_DONE_MESSAGE = (
+    "✅ 喝水提醒已创建！\n\n"
+    "⏰ 执行时间：1 分钟后\n\n"
+    "📝 提醒内容：🥤 喝水时间到啦！记得喝杯水，保持水分摄入～\n\n"
+    "📡 投递频道：web\n\n"
+    "🔔 一次性任务，到点后会通过 web 频道向你推送提醒，执行完成后自动删除\n\n"
+    "如果之后想取消，跟我说一声就行～"
+)
+_CRON_WAKE_MARKERS = ("喝水时间到啦",)
+_CRON_DELIVERY_MESSAGE = "🥤 喝水时间到啦！记得喝杯水，保持水分摄入～"
+_CRON_CONTEXT_PATH_RE = re.compile(r"/context/cron_[a-z0-9_]+_context")
+# ---------------------------------------------------------------------------
+# 技能加载场景常量（openclaw-tour-planner / 北京3日游）
+# ---------------------------------------------------------------------------
+_SKILL_GITHUB_URL = "https://github.com/Asif2BD/openclaw.tours/tree/main"
+_SKILL_NAME = "openclaw-tour-planner"
+_SKILL_INSTALL_ARGS_SHORT = {
+    "identifier": "Asif2BD/openclaw.tours",
+    "source": "skillnet",
+}
+_SKILL_INSTALL_ARGS_FULL = {
+    "identifier": _SKILL_GITHUB_URL,
+    "source": "skillnet",
+}
+_SKILL_STEP_TASKS = [
+    "地理编码 — 通过 Nominatim API 获取北京坐标信息",
+    "天气预报 — 获取北京未来3天天气",
+    "旅游指南 — 收集 Wikivoyage 旅行指南",
+    "行程规划 — 构建北京3日游逐日行程",
+    "生成攻略文档 — 输出完整 Markdown 攻略",
+]
+# 运行时 todo_create 仍接受「分号分隔字符串」（旧格式）；对象数组会导致创建结果为空。
+# 场景切换后 session 内仍有 travel 等待办，skill 需 force=true 才能覆盖创建新任务列表。
+_SKILL_TODO_TASKS = (
+    "安装旅游规划技能;"
+    "收集北京旅游信息;"
+    "生成北京3日游攻略;"
+    "交付攻略文档"
+)
+_SKILL_TODO_CONTENTS = (
+    "安装旅游规划技能",
+    "收集北京旅游信息",
+    "生成北京3日游攻略",
+    "交付攻略文档",
+)
+_SKILL_INTRO = (
+    "我来帮你完成这个任务。首先，我需要通过 skillnet 安装这个旅游攻略技能，"
+    "然后为你制作北京3日游攻略。\n\n让我先尝试安装这个技能：\n"
+)
+_SKILL_INSTALL_RETRY_INTRO = "让我用完整的 GitHub URL 再试一次：\n"
+_SKILL_AFTER_LOAD_INTRO = (
+    "SKILL.md 已加载完毕！这是一个旅游规划技能，使用免费 API"
+    "（Nominatim 地理编码、天气预报、Wikivoyage 旅行指南）来生成行程。\n\n"
+    "现在我先创建 skill_step 路线图，然后开始为你制作北京3日游攻略。\n"
+)
+_SKILL_AFTER_PLAN_INTRO = (
+    "现在开始执行！我将并行获取北京的地理坐标、天气预报和旅游指南信息。\n\n"
+    "[当前步骤: 地理编码 — 通过 Nominatim API 获取北京坐标信息]\n"
+)
+_SKILL_AFTER_SEARCH_INTRO = (
+    "我已经收集到了足够的北京旅游信息。现在让我标记前三个步骤完成，并开始构建行程。\n"
+)
+_SKILL_BEFORE_WRITE_INTRO = (
+    "[当前步骤: 行程规划 — 构建北京3日游逐日行程]\n\n"
+    "现在我来构建完整的北京3日游攻略文档：\n"
+)
+_SKILL_AFTER_WRITE_INTRO = (
+    "攻略文档已成功生成！现在完成行程生成和预算估算步骤，并发送文件给你：\n"
+)
+_SKILL_BEFORE_SEND_INTRO = "步骤已标记完成，现在把攻略文件发给你：\n"
+_SKILL_BEFORE_COMPLETE_INTRO = "文件已发送！现在释放技能上下文：\n"
+_BEIJING_GUIDE_FILENAME = "北京3日游旅游攻略.md"
+_BEIJING_GUIDE_PATH = Path(__file__).resolve().parent / _BEIJING_GUIDE_FILENAME
+_BEIJING_GUIDE_CONTENT = """# 🏯 北京3日游旅游攻略
+
+> 由 OpenClaw Tour Planner 技能生成 | 数据来源：Nominatim · Open-Meteo · Wikivoyage · 北京旅游网
+
+---
+
+## 📋 行程概览
+
+| 项目 | 详情 |
+|------|------|
+| **目的地** | 北京（39.90°N, 116.41°E，海拔47m，GMT+8） |
+| **游玩天数** | 3天 |
+| **推荐季节** | 4月-10月（旺季），当前为7月盛夏 |
+| **预算（单人）** | 约 ¥1,300 - ¥2,200（不含往返大交通） |
+| **行程主题** | 皇城经典 → 长城雄关 → 皇家园林与胡同文化 |
+
+---
+
+## 🌤️ 近期天气预报（2026年7月）
+
+> 数据来源：Open-Meteo 免费天气API
+
+| 日期 | 最高温 | 最低温 | 降水量 | 天气状况 | 风速 |
+|------|--------|--------|--------|----------|------|
+| 7月20日（周一） | 31.9°C | 22.5°C | 11.1mm | ⛈ 雷暴 | 11.9 km/h |
+| 7月21日（周二） | 30.5°C | 21.2°C | 0.5mm | 🌧 小雨 | 11.6 km/h |
+| 7月22日（周三） | 29.5°C | 24.7°C | 6.3mm | ⛈ 雷暴 | 11.3 km/h |
+| 7月23日（周四） | 28.5°C | 21.8°C | 18.1mm | ⛈ 雷暴 | 9.1 km/h |
+| **7月24日（周五）** | **29.7°C** | **22.8°C** | **0.0mm** | **☁ 阴天** | **6.0 km/h** |
+| 7月25日（周六） | 32.9°C | 24.3°C | 0.6mm | 🌧 小雨 | 6.1 km/h |
+| 7月26日（周日） | 33.3°C | 26.2°C | 1.8mm | ⛈ 雷暴 | 6.5 km/h |
+
+### ☀️ 天气建议
+- **最佳出行日**：7月24日（周五），阴天无降水，气温适宜
+- 北京7月盛夏高温多雨，**务必携带雨具和防晒用品**
+- 建议早出晚归，避开正午高温时段（11:00-14:00）
+- 雷暴天气时避免在长城等高处停留
+
+---
+
+## 📅 Day 1：中轴线皇城经典游
+
+> 穿越六百年紫禁城，漫步中轴线上的皇城根下
+
+### 🌅 上午：天安门广场 → 故宫博物院
+
+| 时间 | 活动 | 备注 |
+|------|------|------|
+| 08:00 | 天安门广场观升旗/游览 | 广场免费开放，建议早起避开人流 |
+| 09:00 | 故宫博物院（紫禁城）入馆 | ⚠️ **需提前在官网预约购票** |
+| 09:00-12:00 | 游览故宫：午门→三大殿→后三宫→御花园 | 推荐游览3小时 |
+
+**故宫实用信息：**
+- 🕐 开放时间（旺季4-10月）：8:30-17:00，16:00停止入馆
+- 🎫 门票：旺季60元/人（珍宝馆10元、钟表馆10元另购）
+- 📞 咨询电话：400-950-1925
+- 🔍 紫禁城南北长961m，东西宽753m，城墙高10m，护城河宽52m
+- 💡 提示：故宫实行实名制预约，每日限流，务必提前1-7天预约
+
+### 🌞 下午：景山公园 → 北海公园
+
+| 时间 | 活动 | 备注 |
+|------|------|------|
+| 12:30 | 午餐：故宫东华门附近餐厅 | 可品尝老北京炸酱面 |
+| 14:00 | 景山公园 | 登万春亭俯瞰故宫全景，门票2元 |
+| 15:30 | 北海公园 | 皇家御苑，白塔、九龙壁、泛舟太液池 |
+| 17:00 | 公园闭园前结束游览 | 北海门票10元 |
+
+### 🌃 晚上：王府井大街
+
+| 时间 | 活动 | 备注 |
+|------|------|------|
+| 18:00 | 晚餐：王府井小吃街 / 全聚德王府井店 | 北京烤鸭必尝！ |
+| 19:30 | 王府井步行街逛街购物 | 北京最繁华商业街之一 |
+| 21:00 | 返回酒店休息 | 建议住二环内，方便出行 |
+
+---
+
+## 📅 Day 2：长城雄关 + 奥运风采
+
+> 登万里长城做好汉，赏鸟巢水立方夜景
+
+### 🌅 上午：八达岭长城
+
+| 时间 | 活动 | 备注 |
+|------|------|------|
+| 07:00 | 从市区出发前往八达岭 | 建议早出发，避开高温和人流高峰 |
+| 08:30 | 抵达八达岭长城，开始登城 | 旺季开放，推荐游览3小时 |
+| 08:30-11:30 | 攀登长城（南段1176m / 北段2565m） | 北段更壮观，南段人少 |
+
+**八达岭长城实用信息：**
+- 📍 地址：北京市延庆区军都山关沟古道北口
+- 🕐 开放时间（旺季4-10月）：6:30-16:30（夏季可能延长）
+- 🎫 门票：旺季40元/人（缆车另购：单程100元，往返140元）
+- 📞 购票咨询：010-69121474（9:00-16:30）
+- 🏆 国家5A级景区，1987年列入世界文化遗产
+- 🚗 停车场可容纳1500辆机动车，高峰时有免费摆渡车
+
+**交通方式（三选一）：**
+1. **S2线市郊铁路**：黄土店站→八达岭站，约1小时，可刷公交卡
+2. **877路公交**：德胜门→八达岭，约1.5小时，票价12元
+3. **自驾/打车**：京藏高速（G6），约1小时
+
+### 🌞 下午：奥林匹克公园
+
+| 时间 | 活动 | 备注 |
+|------|------|------|
+| 12:30 | 午餐：八达岭景区或返程途中 | |
+| 14:30 | 返回市区，前往奥林匹克公园 | |
+| 15:30 | 鸟巢（国家体育场）外景参观 | 可购票入内参观 |
+| 16:30 | 水立方（国家游泳中心）外景 | 蓝色立方体建筑，夜景灯光绝美 |
+
+### 🌃 晚上：什刹海 / 后海
+
+| 时间 | 活动 | 备注 |
+|------|------|------|
+| 18:00 | 晚餐：什刹海周边餐厅 | 涮羊肉推荐东来顺什刹海店 |
+| 19:30 | 后海酒吧街漫步 | 霓虹倒映湖面，体验胡同夜生活 |
+| 20:30 | 什刹海胡同夜游 | 感受老北京的烟火气 |
+| 22:00 | 返回酒店 | |
+
+---
+
+## 📅 Day 3：皇家园林 + 胡同文化
+
+> 颐和园中赏湖光山色，南锣鼓巷品胡同烟火
+
+### 🌅 上午：颐和园
+
+| 时间 | 活动 | 备注 |
+|------|------|------|
+| 08:30 | 抵达颐和园（东宫门/北宫门入） | 建议从北宫门入，逆时针游览 |
+| 09:00-12:00 | 游览颐和园 | 中国现存最大皇家园林，世界文化遗产 |
+
+**颐和园游览路线推荐：**
+- 北宫门→苏州街→万寿山→佛香阁→长廊→排云殿→昆明湖→十七孔桥→铜牛→东宫门出
+- 🎫 门票：旺季30元/人（联票含佛香阁60元）
+- 🕐 开放时间：6:30-18:00（旺季）
+- 💡 园内可乘游船游昆明湖（另收费）
+
+### 🌞 下午：天坛公园 → 南锣鼓巷
+
+| 时间 | 活动 | 备注 |
+|------|------|------|
+| 12:30 | 午餐：天坛附近餐厅 | |
+| 14:00 | 天坛公园 | 明清皇帝祭天祈谷之处，世界文化遗产 |
+| 14:00-16:00 | 游览天坛：祈年殿→回音壁→圜丘 | 🎫 联票34元/人 |
+| 16:30 | 前往南锣鼓巷 | 地铁6号线直达 |
+| 17:00 | 南锣鼓巷胡同文化体验 | 700年历史胡同，文艺小店+特色小吃 |
+
+**南锣鼓巷亮点：**
+- 北京最古老的街区之一，元大都时期已成巷
+- 两侧16条胡同整齐排列，呈"鱼骨状"格局
+- 文艺店铺、手作工坊、特色咖啡馆云集
+- 可品尝文宇奶酪店、炸酱面、糖葫芦等北京小吃
+
+### 🌃 晚上：告别晚餐
+
+| 时间 | 活动 | 备注 |
+|------|------|------|
+| 18:30 | 告别晚餐：全聚德/大董烤鸭 | 北京烤鸭是必吃的告别仪式 |
+| 20:00 | 簋街夜宵（可选） | 北京最有名的夜宵美食街 |
+| 21:00 | 返程准备 / 返回酒店 | |
+
+---
+
+## 💰 预算估算（中档标准，单人）
+
+| 费用类别 | 明细 | 预估金额 |
+|----------|------|----------|
+| **住宿** | 经济型/中档酒店 × 2晚 | ¥600 - ¥1,000 |
+| **餐饮** | 早餐+午餐+晚餐 × 3天 | ¥300 - ¥600 |
+| **交通** | 地铁/公交日常 + 长城往返 | ¥100 - ¥200 |
+| **门票** | 故宫60+长城40+颐和园30+天坛34+景山2+北海10 | ¥176 |
+| **其他** | 纪念品/零食/应急 | ¥100 - ¥225 |
+| **合计** | | **¥1,276 - ¥2,201** |
+
+### 💡 省钱小贴士
+- 办理北京公交一卡通，地铁公交通用，有折扣
+- 故宫、长城等热门景点提前在官网预约，可避免黄牛加价
+- 颐和园、天坛等公园可选择不买联票，只购基础门票
+- 餐饮选择胡同里的老字号小店，性价比高且地道
+
+---
+
+## 🎒 打包清单
+
+### 必备物品
+- [ ] 身份证（景点实名制预约必备）
+- [ ] 手机 + 充电宝（导航、电子票、拍照）
+- [ ] 雨伞/雨衣（7月雷暴频繁）
+- [ ] 防晒霜 SPF50+（盛夏紫外线强）
+- [ ] 太阳帽/遮阳伞
+- [ ] 舒适运动鞋（长城爬坡需要）
+- [ ] 充足饮用水（随身携带，及时补水）
+
+### 建议携带
+- [ ] 薄外套（室内空调冷/早晚温差）
+- [ ] 驱蚊液（公园水边蚊虫多）
+- [ ] 小零食（长城游览时间较长）
+- [ ] 相机（故宫、长城出片绝佳）
+- [ ] 旅行装洗漱用品
+- [ ] 常用药品（创可贴、肠胃药、藿香正气水防中暑）
+
+---
+
+## 📱 实用信息
+
+### 🚇 交通出行
+- 北京地铁覆盖主要景点，推荐办公交一卡通
+- 故宫：地铁1号线天安门东/西站
+- 八达岭：S2线市郊铁路或877路公交
+- 颐和园：地铁4号线北宫门站
+- 天坛：地铁5号线天坛东门站
+- 南锣鼓巷：地铁6号线南锣鼓巷站
+
+### 🎫 门票预约提醒
+| 景点 | 预约方式 | 提前预约时间 |
+|------|----------|-------------|
+| 故宫博物院 | 故宫官网 dpm.org.cn | 提前1-7天 |
+| 八达岭长城 | 八达岭官网 badaling.cn | 提前1-7天 |
+| 颐和园 | 颐和园官方公众号/官网 | 提前1-7天 |
+| 天坛公园 | 天坛官方公众号/官网 | 建议提前1-3天 |
+
+### 🍜 北京必吃美食
+| 美食 | 推荐餐厅 | 参考价格 |
+|------|----------|----------|
+| 北京烤鸭 | 全聚德、大董、便宜坊 | ¥150-300/人 |
+| 涮羊肉 | 东来顺、聚宝源 | ¥100-200/人 |
+| 炸酱面 | 海碗居、方砖厂69号 | ¥30-50/碗 |
+| 卤煮火烧 | 小肠陈、门框胡同百年卤煮 | ¥25-40/碗 |
+| 豆汁焦圈 | 护国寺小吃、锦芳小吃 | ¥10-20/份 |
+| 驴打滚/艾窝窝 | 稻香村、护国寺小吃 | ¥10-25/份 |
+
+---
+
+## ⚠️ 注意事项
+
+1. **防暑防雨**：7月北京高温多雨，雷暴天气频繁，务必携带雨具，及时补水
+2. **提前预约**：故宫等热门景点实行实名制限流，务必提前预约，现场不售票
+3. **避开高峰**：周末和节假日人流大，建议工作日出行；长城建议早出发
+4. **文明游览**：故宫、长城等均为世界文化遗产，请勿触摸文物、勿乱刻乱画
+5. **交通规划**：北京城区面积大，景点间距离较远，合理规划路线可节省大量时间
+6. **支付方式**：几乎全场景支持微信/支付宝，建议下载并绑定
+
+---
+
+## 🗺️ 行程路线图
+
+```
+Day 1: 天安门广场 → 故宫 → 景山 → 北海 → 王府井
+        （中轴线一带，步行+地铁，全天集中在二环内）
+
+Day 2: 八达岭长城（北郊延庆） → 奥林匹克公园（北城） → 什刹海（二环内）
+        （向北出发，返程沿途游览，晚间回市区）
+
+Day 3: 颐和园（西北郊） → 天坛（南城） → 南锣鼓巷（二环内）
+        （由西北向东南，最后在胡同收尾）
+```
+
+---
+
+> 📌 本攻略由 **OpenClaw Tour Planner** 技能自动生成
+> 数据来源：Nominatim（地理编码）、Open-Meteo（天气）、Wikivoyage（旅行指南）、北京旅游网（景点信息）
+> 生成时间：2026年7月20日 | 技能版本：v1.0.2 | License: MIT
+
+祝你旅途愉快！🎉
+"""
+
+
+def _load_beijing_guide_content() -> str:
+    """优先读同目录攻略文件；缺失时回退到内嵌全文。"""
+    try:
+        return _BEIJING_GUIDE_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return _BEIJING_GUIDE_CONTENT
+
+
+_SKILL_DONE_MESSAGE = (
+    "全部完成！✅ 以下是任务总结：\n\n"
+    "## ✅ 任务完成总结\n\n"
+    "### 第一步：技能安装\n"
+    f"通过 skillnet 成功安装了 **{_SKILL_NAME}** 旅游规划技能"
+    f"（来源：{_SKILL_GITHUB_URL}）\n\n"
+    "### 第二步：北京3日游攻略已生成\n"
+    f"📄 **攻略文件**：`{_BEIJING_GUIDE_FILENAME}`\n\n"
+    "#### 📅 三日行程速览\n\n"
+    "| 日期 | 主题 | 核心景点 |\n"
+    "|------|------|----------|\n"
+    "| Day 1 | 中轴线经典之旅 | 天安门广场 → 故宫 → 景山公园 → 北海公园 → 王府井 |\n"
+    "| Day 2 | 长城壮游 + 奥运地标 | 八达岭长城 → 鸟巢/水立方 |\n"
+    "| Day 3 | 皇家园林与胡同文化 | 颐和园 → 天坛 → 南锣鼓巷 → 什刹海 |\n\n"
+    "#### 💰 预算参考\n\n"
+    "- **经济型**：¥1,500-2,200/人\n"
+    "- **中等消费**：¥2,500-3,500/人\n\n"
+    "#### 📖 攻略亮点\n\n"
+    "- 🌤️ 7月北京天气与穿衣指南（防暑防雨必备）\n"
+    "- 🍜 北京必吃美食清单（烤鸭、炸酱面、铜锅涮肉等8道）\n"
+    "- 🎫 各景点门票价格及开放时间\n"
+    "- 📱 景点预约提醒（故宫需提前7天预约！）\n"
+    "- 🚇 交通出行方案（地铁/公交/S2线/网约车）\n"
+    "- ⚠️ 8条实用注意事项\n\n"
+    "💡 **提醒**：故宫等热门景点需提前在官方微信公众号预约，切勿到现场才买票。"
+    "7月北京炎热多雨，务必做好防晒和防雨准备！\n\n"
+    "有什么需要调整或补充的，随时告诉我！😊"
+)
+# ---------------------------------------------------------------------------
+# 文件扩写场景常量（童趣的春天）
+# ---------------------------------------------------------------------------
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_SPRING_ESSAY_SOURCE = "童趣的春天.md"
+_SPRING_ESSAY_OUTPUT = "童趣的春天_扩写版.md"
+_SPRING_ESSAY_TARGET_CHARS = 6000
+_SPRING_ESSAY_SOURCE_PATH = _SCRIPT_DIR / _SPRING_ESSAY_SOURCE
+_HTTP_URL_RE = re.compile(r"https?://[^\s\"'\\<>]+")
+_FILE_DONE_MESSAGE = (
+    "已经把扩写好的作文发给你了 ✅\n\n"
+    "这次扩写保留了原文的五个场景（清晨桃树、午后田野、放风筝、春夜蛙鸣、结尾怀念），"
+    "并在此基础上做了这些丰富：\n\n"
+    "细节加深：蜜蜂采花粉、花瓣雨、编花环的手法、捉蝴蝶的过程、"
+    "做风筝扎骨架糊纸、青团现采现蒸的香气\n\n"
+    "新增场景：清明青团、春雨踩水坑、雨后田埂踩脚印、捉蜗牛数蚯蚓，让\"童趣\"更立体\n\n"
+    "情感升华：结尾加入\"只要春风还在吹，记忆就会一年年醒来\"的呼应，照应开头\n\n"
+    "字数核对：纯汉字约 5400 字，全文约 6200 字（含中文标点与空白；"
+    "学校作文一般按汉字+标点计），达到约 6000 字要求。"
+    "如果你希望纯汉字也稳过 6000，或想调整某个场景的篇幅、增删某段，告诉我即可。"
+)
+_SPRING_EXPANSION_SECTIONS = (
+    (
+        "桃花开得最盛的那几天，风一吹，粉色的花瓣便簌簌落下，像一场温柔的花瓣雨。"
+        "我们仰着头在树下转圈，任花瓣落在头发和肩膀上，笑声惊起了花间的蜜蜂。"
+        "它们忙着采花粉，翅膀在阳光下闪着金色的光，我们踮起脚，学着大人的样子"
+        "轻轻把花瓣拢进掌心，再撒向空中，看它们打着旋儿飘远。"
+    ),
+    (
+        "编花环是午后田野里的必修课。先选几朵颜色最艳的野花，再把细长的草茎一根根理顺，"
+        "从中间对折、交叉、缠绕，动作要轻，别把花瓣揉皱。花环戴在头上，我们便觉得自己"
+        "成了春天里的小公主和小王子。捉蝴蝶更是热闹，有人负责惊飞，有人负责用网兜兜住，"
+        "白色的、黄色的、带斑点的蝴蝶在花丛里翩翩起舞，像极了会飞的花朵。"
+    ),
+    (
+        "做风筝的日子，爸爸会找来旧报纸和竹条，先扎出骨架，再一层层糊上纸。"
+        "我在风筝上画上太阳、云朵和小鸟，等浆糊干透，春风正好，我们便跑到空旷的草地上。"
+        "线轴在手中转动，风筝一点点升高，最后变成天空中的一个小点，心也随着风筝飞向了远方。"
+    ),
+    (
+        "清明前后，奶奶会在灶台前蒸青团。艾草是清早从田埂边现采的，糯米团子裹进豆沙馅，"
+        "锅盖一掀，清香便漫满整个院子。我们围在灶台边等，烫着嘴也要先咬上一口，"
+        "软糯里带着草木的气息，那是春天最实在的味道。"
+    ),
+    (
+        "春雨过后，村口的土路积起浅浅的水坑。我们脱掉鞋袜，光着脚踩进去，"
+        "水花溅到裤脚上也不管，只听见啪嗒啪嗒的声响，像春天在和我们打招呼。"
+        "雨后的田埂松软湿润，我们故意踩出一串歪歪扭扭的脚印，再蹲下来数泥土里探头的蜗牛和蚯蚓，"
+        "比谁找到的多，笑声惊飞了停在电线杆上的麻雀。"
+    ),
+    (
+        "春夜的蛙鸣一声接一声，像是大地的呼吸。我们躺在院子里，看星星一颗一颗亮起来，"
+        "听大人们讲春天里万物苏醒的故事。那些关于花、关于风、关于远行的传说，"
+        "在夜色里变得格外动人，也把好奇悄悄种进了心里。"
+    ),
+    (
+        "如今虽已长大，每到春天，那些记忆仍会如春风般拂过心头。"
+        "那些简单而纯粹的快乐，那些对世界的好奇与探索，都深深地刻在了心里。"
+        "春天不仅是一个季节，更是童年最美好的开始。"
+        "只要春风还在吹，记忆就会一年年醒来——在桃树下，在田野里，在风筝线上，"
+        "在每一口青团的清香里，在我们轻轻踩过的每一个水坑中。"
+    ),
+)
 _FORBIDDEN_WRITE_PATH = "/__mock_loadtest_forbidden__/novel.txt"
 # 不在 config builtin allow 规则内（echo/ls/pwd 等），可稳定触发 bash ASK
 _PERMISSION_PROBE_BASH = "python3 -c \"print('mock_loadtest_permission_probe')\""
@@ -74,6 +598,13 @@ _TODO_TASKS = (
     "故事背景设定;"
     "故事冲突与悬念设置;"
     "整理并发送开篇文件"
+)
+_TODO_CONTENTS = (
+    "《旅行的意义》开篇",
+    "人物详细介绍",
+    "故事背景设定",
+    "故事冲突与悬念设置",
+    "整理并发送开篇文件",
 )
 _TRAVEL_SCENE_BLOCKS = (
     (
@@ -312,19 +843,439 @@ def _message_text(message: dict[str, Any]) -> str:
     return ""
 
 
-def _payload_contains_novel_markers(payload: dict[str, Any]) -> bool:
-    messages = payload.get("messages")
-    if isinstance(messages, list):
-        for message in messages:
-            if isinstance(message, dict):
-                text = _message_text(message)
-                if any(marker in text for marker in _LOADTEST_NOVEL_MARKERS):
-                    return True
+def _latest_user_message_index(messages: list[Any]) -> int | None:
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
+        if isinstance(message, dict) and message.get("role") == "user":
+            return idx
+    return None
+
+
+def _normalize_user_intent_text(text: str) -> str:
+    """归一化 user 文本，便于识别 Agent 每轮回写的同一条用户请求。"""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    for prefix in ("你收到一条消息：\n", "You receive a new message:\n"):
+        if cleaned.startswith(prefix):
+            parsed = _parse_user_prompt_payload(cleaned)
+            if isinstance(parsed, dict):
+                content = parsed.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+    # build_user_prompt 包装：尽量抽出 content 字段再比较
+    brace = cleaned.find("{")
+    if brace >= 0:
+        blob = cleaned[brace:]
+        try:
+            parsed = json.loads(blob)
+        except json.JSONDecodeError:
+            end = blob.rfind("}")
+            parsed = None
+            while end > 0:
+                try:
+                    parsed = json.loads(blob[: end + 1])
+                    break
+                except json.JSONDecodeError:
+                    end = blob.rfind("}", 0, end)
+        if isinstance(parsed, dict):
+            content = parsed.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    return cleaned
+
+
+def _user_message_intent(message: dict[str, Any]) -> str:
+    return _normalize_user_intent_text(_message_text(message)) or _message_text(message).strip()
+
+
+def _is_user_reappend(messages: list[Any], idx: int) -> bool:
+    """判断 messages[idx] 是否为更早一条同 intent user 的 re-append（Agent 每轮回写）。"""
+    if idx < 0 or idx >= len(messages):
+        return False
+    message = messages[idx]
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    intent = _user_message_intent(message)
+    if not intent:
+        return False
+    for i in range(idx - 1, -1, -1):
+        earlier = messages[i]
+        if not isinstance(earlier, dict) or earlier.get("role") != "user":
+            continue
+        if _is_skill_rail_injection(_message_text(earlier)):
+            continue
+        earlier_intent = _user_message_intent(earlier)
+        if not earlier_intent:
+            continue
+        if earlier_intent == intent:
+            return True
+    return False
+
+
+def _is_skill_rail_injection(text: str) -> bool:
+    """SkillCompliance / SkillUse / 进度提醒等注入，不应作为新用户回合起点。"""
+    markers = (
+        "[ACTIVE SKILL BODY]",
+        "[Skill ",
+        "[skill_step",
+        "当前 session 已加载 SKILL.md",
+        "This session has loaded SKILL.md",
+        "skill_step(action=\"create\"",
+        "skill_step(action='create'",
+        "立即调用 `skill_complete",
+        "Call `skill_complete",
+        "Progress reminder",
+        "进度提醒",
+        "Current todo list",
+        "当前待办",
+        "task_id:",
+        "Next step: Immediately execute",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _latest_real_user_message_index(messages: list[Any]) -> int | None:
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        text = _message_text(message)
+        if _is_skill_rail_injection(text):
+            continue
+        return idx
+    return None
+
+
+def _latest_user_text(messages: list[Any]) -> str:
+    idx = _latest_real_user_message_index(messages)
+    if idx is None:
+        return ""
+    message = messages[idx]
+    if not isinstance(message, dict):
+        return ""
+    return _message_text(message).strip()
+
+
+def _text_matches_keywords(text: str, keywords: tuple[str, ...], *, case_insensitive: bool = False) -> bool:
+    haystack = text.lower() if case_insensitive else text
+    for keyword in keywords:
+        needle = keyword.lower() if case_insensitive else keyword
+        if needle in haystack:
+            return True
+    return False
+
+
+def _is_travel_assistant_echo_user(text: str) -> bool:
+    """Agent 把 assistant intro 回写为 user 时的噪声，不能作为 travel 锚点。"""
+    return any(marker in text for marker in _TRAVEL_ASSISTANT_ECHO_MARKERS)
+
+
+def _is_travel_completion_echo_user(text: str) -> bool:
+    """Agent 把小说收尾 assistant 文案回写为 user 时的噪声。"""
+    return any(marker in text for marker in _TRAVEL_COMPLETION_ECHO_MARKERS)
+
+
+def _is_travel_noise_user(text: str) -> bool:
+    return _is_travel_assistant_echo_user(text) or _is_travel_completion_echo_user(text)
+
+
+def _is_travel_todo_echo_user(text: str) -> bool:
+    """todo_modify 完成后 Agent 可能把 travel 任务名回写为 user，不能当作新场景意图。"""
+    cleaned = _normalize_user_intent_text(text) or text.strip()
+    return cleaned in _TODO_CONTENTS
+
+
+def _is_skill_echo_user(text: str) -> bool:
+    return any(marker in text for marker in _SKILL_ECHO_MARKERS)
+
+
+def _is_file_echo_user(text: str) -> bool:
+    return any(marker in text for marker in _FILE_ECHO_MARKERS)
+
+
+def _is_cron_echo_user(text: str) -> bool:
+    return any(marker in text for marker in _CRON_ECHO_MARKERS)
+
+
+def _is_cron_wake_message(payload: dict[str, Any]) -> bool:
+    """定时任务到点唤醒：user 消息含喝水提醒正文。"""
+    for message in reversed(_agent_messages(payload)):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        text = _message_text(message)
+        if any(marker in text for marker in _CRON_WAKE_MARKERS):
+            return True
+    return False
+
+
+def _is_cron_delivery_request(payload: dict[str, Any]) -> bool:
+    """严格判定 cron 子会话到点投递（需 payload 含 cron context 路径）。"""
+    if not _is_cron_wake_message(payload):
+        return False
     try:
         blob = json.dumps(payload, ensure_ascii=False)
     except TypeError:
         blob = str(payload)
-    return any(marker in blob for marker in _LOADTEST_NOVEL_MARKERS)
+    return bool(_CRON_CONTEXT_PATH_RE.search(blob))
+
+
+def _is_assistant_echo_user(text: str) -> bool:
+    """各场景 assistant 收尾/总结/intro 回写为 user 时的噪声，不参与路由与锚点。"""
+    return (
+        _is_travel_noise_user(text)
+        or _is_skill_echo_user(text)
+        or _is_file_echo_user(text)
+        or _is_cron_echo_user(text)
+    )
+
+
+def _is_routing_noise_user(messages: list[Any], idx: int) -> bool:
+    """场景路由时忽略的 user：rail 注入、re-append、assistant 回写噪声。"""
+    if idx < 0 or idx >= len(messages):
+        return True
+    message = messages[idx]
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return True
+    text = _message_text(message)
+    if _is_skill_rail_injection(text):
+        return True
+    if _is_user_reappend(messages, idx):
+        return True
+    if _is_assistant_echo_user(text):
+        return True
+    if _is_travel_todo_echo_user(text):
+        return True
+    return False
+
+
+def _intent_matches_scenario(intent: str, scenario: str, *, messages: list[Any] | None = None) -> bool:
+    if _is_assistant_echo_user(intent):
+        return False
+    if scenario == MockScenario.CRON_DELIVERY:
+        return any(marker in intent for marker in _CRON_WAKE_MARKERS)
+    if scenario == MockScenario.SCHEDULED_TASK:
+        return _text_matches_keywords(intent, _SCHEDULED_TASK_KEYWORDS)
+    if scenario == MockScenario.SKILL:
+        if _text_matches_keywords(intent, _SKILL_KEYWORDS, case_insensitive=True):
+            return True
+        haystack = intent.lower()
+        return any(kw.lower() in haystack for kw in _SKILL_INTENT_EXTRA)
+    if scenario == MockScenario.FILE:
+        if _text_matches_keywords(intent, _FILE_KEYWORDS):
+            return True
+        if messages is not None:
+            idx = _find_user_message_index_by_intent(messages, intent)
+            if idx is not None:
+                return bool(_extract_uploaded_files(messages[: idx + 1]))
+        return False
+    if scenario == MockScenario.TRAVEL:
+        return _text_matches_keywords(intent, _LOADTEST_NOVEL_MARKERS)
+    return False
+
+
+def _find_user_message_index_by_intent(messages: list[Any], intent: str) -> int | None:
+    target = intent.strip()
+    if not target:
+        return None
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        text = _message_text(message)
+        if _is_skill_rail_injection(text):
+            continue
+        normalized = _normalize_user_intent_text(text) or text.strip()
+        if normalized == target or text.strip() == target:
+            return idx
+    return None
+
+
+def _collect_routable_user_intents(
+    messages: list[Any], since_index: int = 0
+) -> list[str]:
+    """从 messages[since_index:] 按从新到旧收集不重复 user 意图（跳过 routing 噪声）。"""
+    intents: list[str] = []
+    seen: set[str] = set()
+    for idx in range(len(messages) - 1, since_index - 1, -1):
+        if _is_routing_noise_user(messages, idx):
+            continue
+        intent = _user_message_intent(messages[idx])
+        if not intent or intent in seen:
+            continue
+        seen.add(intent)
+        intents.append(intent)
+    return intents
+
+
+def _collect_user_intents_since(messages: list[Any], since_index: int) -> list[str]:
+    return _collect_routable_user_intents(messages, since_index)
+
+
+_SCENARIO_PRIORITY = (
+    MockScenario.CRON_DELIVERY,
+    MockScenario.SCHEDULED_TASK,
+    MockScenario.SKILL,
+    MockScenario.FILE,
+    MockScenario.TRAVEL,
+)
+
+
+def _route_intents_to_scenario(
+    intents: list[str], messages: list[Any]
+) -> str:
+    """按场景优先级匹配一组 user 意图（skill 优先于 travel）。"""
+    for scenario in _SCENARIO_PRIORITY:
+        for intent in intents:
+            if _intent_matches_scenario(intent, scenario, messages=messages):
+                return scenario
+    return MockScenario.TRAVEL
+
+
+def _detect_loadtest_scenario(payload: dict[str, Any]) -> str:
+    """收集全部有效 user 意图后按优先级路由（避免末尾 travel re-append 覆盖 skill）。"""
+    if _is_cron_wake_message(payload):
+        return MockScenario.CRON_DELIVERY
+    messages = _agent_messages(payload)
+    intents = _collect_routable_user_intents(messages)
+    if not intents:
+        return MockScenario.TRAVEL
+    return _route_intents_to_scenario(intents, messages)
+
+
+def _next_loadtest_scenario_in_sequence(completed: str) -> str | None:
+    try:
+        idx = _LOADTEST_SCENARIO_SEQUENCE.index(completed)
+    except ValueError:
+        return None
+    if idx + 1 >= len(_LOADTEST_SCENARIO_SEQUENCE):
+        return None
+    return _LOADTEST_SCENARIO_SEQUENCE[idx + 1]
+
+
+def _prior_scenarios_in_sequence(completed: str) -> frozenset[str]:
+    """已完成场景及其在 loadtest 顺序中的前序场景（不应再被 re-route 命中）。"""
+    try:
+        idx = _LOADTEST_SCENARIO_SEQUENCE.index(completed)
+    except ValueError:
+        return frozenset({completed})
+    return frozenset(_LOADTEST_SCENARIO_SEQUENCE[: idx + 1])
+
+
+def _intent_matches_prior_scenarios(
+    intent: str, completed: str, *, messages: list[Any] | None = None
+) -> bool:
+    for scenario in _prior_scenarios_in_sequence(completed):
+        if _intent_matches_scenario(intent, scenario, messages=messages):
+            return True
+    return False
+
+
+def _has_post_done_message_activity(
+    payload: dict[str, Any], state: "_LoadtestSessionState"
+) -> bool:
+    """done 后 messages 变长/变短，说明 Agent 开始了新一轮 LLM 回合（新 user 可能尚未写入 messages）。"""
+    msg_len = len(_agent_messages(payload))
+    at_done = state.msg_len_at_done
+    return msg_len != at_done
+
+
+def _scan_new_scenario_after_done(
+    payload: dict[str, Any],
+    state: "_LoadtestSessionState",
+    *,
+    since: int,
+) -> str | None:
+    """从 since 起找最新的、不属于已完成场景的 user 意图。"""
+    messages = _agent_messages(payload)
+    completed = state.scenario
+    for idx in range(len(messages) - 1, since - 1, -1):
+        if _is_routing_noise_user(messages, idx):
+            continue
+        intent = _user_message_intent(messages[idx])
+        if not intent:
+            continue
+        if _intent_matches_prior_scenarios(intent, completed, messages=messages):
+            continue
+        for scenario in _SCENARIO_PRIORITY:
+            if scenario in _prior_scenarios_in_sequence(completed):
+                continue
+            if _intent_matches_scenario(intent, scenario, messages=messages):
+                return scenario
+    return None
+
+
+def _scan_payload_for_scenario_after_done(
+    payload: dict[str, Any], state: "_LoadtestSessionState"
+) -> str | None:
+    """从 done 后的 user 消息原文嗅探下一场景（新 user / 附件可能尚未被 intent 解析）。
+
+    注意：不对整包 payload 做 cron 关键词匹配——tools/system 里常有 cron_create_job 等字样。
+    """
+    prior = _prior_scenarios_in_sequence(state.scenario)
+    messages = _agent_messages(payload)
+    since = state.msg_len_at_done
+    if since > len(messages):
+        since = 0
+
+    user_blobs: list[str] = []
+    for idx in range(since, len(messages)):
+        message = messages[idx]
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        user_blobs.append(_message_text(message))
+
+    if not user_blobs:
+        return None
+
+    combined = "\n".join(user_blobs)
+
+    for scenario in _SCENARIO_PRIORITY:
+        if scenario in prior:
+            continue
+        if scenario == MockScenario.SKILL:
+            if _text_matches_keywords(combined, _SKILL_KEYWORDS, case_insensitive=True):
+                return scenario
+            haystack = combined.lower()
+            if any(kw.lower() in haystack for kw in _SKILL_INTENT_EXTRA):
+                return scenario
+        elif scenario == MockScenario.FILE:
+            if "童趣的春天" in combined:
+                return scenario
+            if "files_updated_by_user" in combined and "扩写" in combined:
+                return scenario
+        # SCHEDULED_TASK 仅通过显式 user 意图匹配，不做 payload 嗅探
+    return None
+
+
+def _detect_loadtest_scenario_after_done(
+    payload: dict[str, Any], state: "_LoadtestSessionState"
+) -> str | None:
+    """任务已完成后检测下一场景。
+
+    1. 扫描 done 之后的新 user 意图（跳过已完成及前序场景 intent）
+    2. dedup 导致 messages 变短时 since 回退为 0，但仍跳过前序场景 intent
+    3. done 后 user 消息嗅探（附件 / skill 文本可能尚未被 intent 解析）
+    4. 仍无匹配但 messages 已变化 → 按 loadtest 固定顺序切到下一场景
+       （Agent 收到 chat.send 后，首轮 LLM 可能只有上一场景收尾 echo）
+    """
+    messages = _agent_messages(payload)
+    since = state.msg_len_at_done
+    if since > len(messages):
+        since = 0
+
+    found = _scan_new_scenario_after_done(payload, state, since=since)
+    if found is not None:
+        return found
+
+    found = _scan_payload_for_scenario_after_done(payload, state)
+    if found is not None:
+        return found
+
+    if _has_post_done_message_activity(payload, state):
+        return _next_loadtest_scenario_in_sequence(state.scenario)
+
+    return None
 
 
 def _payload_tool_names(payload: dict[str, Any]) -> set[str]:
@@ -363,6 +1314,152 @@ def _is_session_memory_request(payload: dict[str, Any]) -> bool:
     if "Use the edit_file" in blob and "<current_notes_content>" in blob:
         return True
     return any(marker in blob for marker in _SESSION_MEMORY_USER_MARKERS[2:])
+
+
+_SESSION_KEY_RE = re.compile(r"sess_[a-z0-9_]+")
+
+_SCENARIO_FINAL_STAGE: dict[str, int] = {
+    MockScenario.TRAVEL: 11,
+    MockScenario.SCHEDULED_TASK: 1,
+    MockScenario.SKILL: 17,
+    MockScenario.FILE: 4,
+}
+
+
+@dataclass
+class _LoadtestSessionState:
+    scenario: str
+    stage: int = 0
+    done: bool = False
+    msg_len_at_done: int = 0
+
+
+_loadtest_states: dict[str, _LoadtestSessionState] = {}
+
+
+def _reroute_since_index(state: _LoadtestSessionState, messages: list[Any]) -> int:
+    """done 后扫描新意图的起始下标；dedup 导致 messages 变短时回退到 0。"""
+    since = state.msg_len_at_done
+    if since > len(messages):
+        return 0
+    return since
+
+
+def _agent_messages(payload: dict[str, Any]) -> list[Any]:
+    messages = payload.get("messages")
+    return messages if isinstance(messages, list) else []
+
+
+def _extract_loadtest_session_key(payload: dict[str, Any]) -> str | None:
+    """优先从完整 payload 提取 sess_*，避免早期请求只有 intent 哈希、后期才有路径导致状态丢失。"""
+    try:
+        blob = json.dumps(payload, ensure_ascii=False)
+    except TypeError:
+        blob = str(payload)
+    match = _SESSION_KEY_RE.search(blob)
+    if match:
+        return match.group(0)
+    for message in reversed(_agent_messages(payload)):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        text = _user_message_intent(message)
+        if text and not _is_assistant_echo_user(text):
+            return f"intent:{abs(hash(text))}"
+    return None
+
+
+def _is_main_agent_loadtest_request(payload: dict[str, Any]) -> bool:
+    """排除 Session Memory 子 Agent、以及消息过短的并行探测请求。"""
+    if _is_session_memory_request(payload):
+        return False
+    if _is_cron_wake_message(payload):
+        return True
+    messages = _agent_messages(payload)
+    tools = payload.get("tools")
+    if isinstance(tools, list) and len(tools) <= 1:
+        return False
+    key = _extract_loadtest_session_key(payload)
+    if not key:
+        return False
+    state = _loadtest_states.get(key)
+    if state is not None and state.done:
+        return True
+    if state is None:
+        return len(messages) >= 2
+    return len(messages) >= 3
+
+
+def _prepare_loadtest_state(
+    payload: dict[str, Any], scenario: str
+) -> tuple[str | None, int, str]:
+    """主 Agent 请求：按 session 返回 (key, stage, effective_scenario)。
+
+    - 无状态 → 新建 stage=0
+    - done=False → 继续当前任务
+    - done=True 且无新 user 意图 → 保持收尾 stage（Agent 同轮尾请求）
+    - done=True 且有新 user 意图 → 按优先级重新路由，stage=0
+    """
+    if not _is_main_agent_loadtest_request(payload):
+        return None, 0, scenario
+    key = _extract_loadtest_session_key(payload)
+    if not key:
+        return None, 0, scenario
+
+    state = _loadtest_states.get(key)
+
+    if state is not None and not state.done:
+        return key, state.stage, state.scenario
+
+    if state is not None and state.done:
+        next_scenario = _detect_loadtest_scenario_after_done(payload, state)
+        msg_count = len(_agent_messages(payload))
+        if next_scenario is None:
+            logger.info(
+                "loadtest keep done scenario=%s stage=%d msg_len=%d at_done=%d",
+                state.scenario,
+                state.stage,
+                msg_count,
+                state.msg_len_at_done,
+            )
+            return key, state.stage, state.scenario
+        route_reason = "sequence"
+        messages = _agent_messages(payload)
+        since = _reroute_since_index(state, messages)
+        if _scan_new_scenario_after_done(payload, state, since=since) == next_scenario:
+            route_reason = "intent"
+        elif _scan_payload_for_scenario_after_done(payload, state) == next_scenario:
+            route_reason = "payload"
+        new_intents = _collect_user_intents_since(messages, since)
+        logger.info(
+            "loadtest re-route after done (%s): %s -> %s msg_len=%d at_done=%d new_intents=%r",
+            route_reason,
+            state.scenario,
+            next_scenario,
+            msg_count,
+            state.msg_len_at_done,
+            [i[:80] for i in new_intents],
+        )
+        scenario = next_scenario
+
+    _loadtest_states[key] = _LoadtestSessionState(scenario=scenario, stage=0)
+    return key, 0, scenario
+
+
+def _advance_loadtest_state(
+    key: str | None, scenario: str, stage_used: int, payload: dict[str, Any]
+) -> None:
+    if not key:
+        return
+    state = _loadtest_states.get(key)
+    if state is None or state.scenario != scenario:
+        return
+    final = _SCENARIO_FINAL_STAGE.get(scenario, 11)
+    if stage_used >= final:
+        state.stage = final
+        state.done = True
+        state.msg_len_at_done = len(_agent_messages(payload))
+    else:
+        state.stage = stage_used + 1
 
 
 def _parse_session_memory_notes_path(messages: list[Any]) -> str | None:
@@ -464,109 +1561,18 @@ def _plan_session_memory_response(payload: dict[str, Any]) -> _AgentPlan:
 
 
 def _should_use_novel_scenario(profile: str, payload: dict[str, Any]) -> bool:
-    """loadtest 压测 profile 默认走小说多轮场景（不依赖 user 消息格式）。"""
+    """loadtest 仅处理主 Agent 多工具链与 Session Memory；其余走通用 mock。"""
     if profile != "loadtest":
         return False
     if _is_session_memory_request(payload):
         return True
-    messages = payload.get("messages")
-    if isinstance(messages, list):
-        if any(isinstance(m, dict) and m.get("role") == "tool" for m in messages):
-            return True
-    if _payload_contains_novel_markers(payload):
+    if _is_cron_wake_message(payload):
         return True
-    tools = payload.get("tools")
-    if isinstance(tools, list) and tools:
-        return True
-    return True
+    return _is_main_agent_loadtest_request(payload)
 
 
-def _tool_call_id_to_name(messages: list[Any]) -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    for message in messages:
-        if not isinstance(message, dict) or message.get("role") != "assistant":
-            continue
-        tool_calls = message.get("tool_calls")
-        if not isinstance(tool_calls, list):
-            continue
-        for call in tool_calls:
-            if not isinstance(call, dict):
-                continue
-            call_id = call.get("id")
-            fn = call.get("function")
-            if not isinstance(call_id, str) or not isinstance(fn, dict):
-                continue
-            name = fn.get("name")
-            if isinstance(name, str) and name:
-                mapping[call_id] = name
-    return mapping
-
-
-def _completed_tool_names(messages: list[Any]) -> list[str]:
-    """按历史顺序解析已完成工具名（优先 tool.name，否则用 tool_call_id 映射）。"""
-    id_to_name = _tool_call_id_to_name(messages)
-    names: list[str] = []
-    for message in messages:
-        if not isinstance(message, dict) or message.get("role") != "tool":
-            continue
-        name = message.get("name")
-        if not isinstance(name, str) or not name:
-            call_id = message.get("tool_call_id")
-            name = id_to_name.get(call_id, "") if isinstance(call_id, str) else ""
-        if name:
-            names.append(name)
-    return names
-
-
-def _assistants_after_last_tool(messages: list[Any]) -> int:
-    last_tool_idx = -1
-    for idx, message in enumerate(messages):
-        if isinstance(message, dict) and message.get("role") == "tool":
-            last_tool_idx = idx
-    if last_tool_idx < 0:
-        return 0
-    return sum(
-        1
-        for message in messages[last_tool_idx + 1:]
-        if isinstance(message, dict) and message.get("role") == "assistant"
-    )
-
-
-def _agent_flow_stage(messages: list[Any]) -> int:
-    """按已完成工具名驱动多工具 Agent 场景（避免多余 tool 消息导致跳段）。
-
-    0 todo_create → 1 聊天区长文 → 2 bash(权限 ASK) → 3 write_file
-    → 4 read_file → 5 todo_modify(权限 ASK) → 6 todo_modify
-    → 7 send_file_to_user → 8 收尾
-
-    一旦出现 send_file_to_user 的 tool result，强制进入 stage 8。
-    """
-    names = _completed_tool_names(messages)
-    if not names:
-        return 0
-    if "send_file_to_user" in names:
-        return 8
-
-    has_todo_create = "todo_create" in names
-    has_bash = "bash" in names
-    has_write = "write_file" in names
-    has_read = "read_file" in names
-    todo_modify_count = sum(1 for name in names if name == "todo_modify")
-
-    if not has_todo_create:
-        return 0
-    if not has_bash:
-        # todo_create 刚结束：先出长文；其后的 LLM 轮再调 bash
-        return 1 if _assistants_after_last_tool(messages) == 0 else 2
-    if not has_write:
-        return 3
-    if not has_read:
-        return 4
-    if todo_modify_count == 0:
-        return 5
-    if todo_modify_count == 1:
-        return 6
-    return 7
+# travel: stage 0 todo_create → 1 stream → 2 bash → … → 11 收尾
+_TRAVEL_FINAL_STAGE = 11
 
 
 def _build_travel_opening_text(target_chars: int) -> str:
@@ -595,7 +1601,8 @@ def _build_travel_novel_file_text(target_chars: int) -> str:
     return text
 
 
-_TODO_ID_RE = re.compile(r"task_id:\s*(\S+)\s*,\s*content:\s*(.+)", re.MULTILINE)
+# content 截到行尾；先把 tool 结果里的字面 \\n 还原成换行，避免 JSON 转义导致整段被吞掉
+_TODO_ID_RE = re.compile(r"task_id:\s*(\S+)\s*,\s*content:\s*([^\n]+)")
 _FILE_PATH_KV_RE = re.compile(r"""['"]file_path['"]\s*:\s*['"]([^'"]+)['"]""")
 _ABS_PATH_RE = re.compile(r"([A-Za-z]:\\[^\s\"']+|/[^\s\"']+" + re.escape(_NOVEL_FILENAME) + r")")
 
@@ -613,35 +1620,124 @@ def _tool_message_text(message: dict[str, Any]) -> str:
     return str(content or "")
 
 
+def _looks_like_tool_result_json(text: str) -> bool:
+    """粗判 tool 返回是否为可再展开的 JSON 文本。"""
+    if not text.startswith("{"):
+        return False
+    markers = ("task_id:", "Successfully", "message")
+    return any(marker in text for marker in markers)
+
+
+def _unwrap_tool_result_text(blob: str) -> str:
+    """把 tool 返回的 JSON（如 {"message": "..."}）展开成可读文本，并还原转义换行。"""
+    text = blob.strip()
+    if _looks_like_tool_result_json(text):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            for key in ("message", "result", "content", "output"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    text = value
+                    break
+            else:
+                text = json.dumps(parsed, ensure_ascii=False)
+        elif isinstance(parsed, str):
+            text = parsed
+    # JSON dump 后再当普通字符串传来时，换行仍是字面 \\n
+    if text.count("\n") < 2 and "\\n" in text:
+        text = text.replace("\\n", "\n")
+    return text
+
+
 def _is_absolute_path(path: str) -> bool:
     if path.startswith("/"):
         return True
     return len(path) > 2 and path[1] == ":" and path[0].isalpha()
 
 
-def _parse_abs_path_from_tool_blob(blob: str) -> str | None:
-    if _NOVEL_FILENAME not in blob:
+def _parse_file_path_from_tool_blob(blob: str, filename: str) -> str | None:
+    if filename not in blob:
         return None
     for match in _FILE_PATH_KV_RE.finditer(blob):
         path = match.group(1).strip()
-        if _NOVEL_FILENAME in path and _is_absolute_path(path):
+        if filename in path:
             return path
-    abs_match = _ABS_PATH_RE.search(blob)
+    pattern = re.compile(r"([A-Za-z]:\\[^\s\"']+|/[^\s\"']+" + re.escape(filename) + r")")
+    abs_match = pattern.search(blob)
     if abs_match:
         return abs_match.group(1)
     return None
 
 
-def _parse_todo_items(messages: list[Any]) -> list[tuple[str, str]]:
+def _parse_abs_path_from_tool_blob(blob: str) -> str | None:
+    return _parse_file_path_from_tool_blob(blob, _NOVEL_FILENAME)
+
+
+def _last_todo_create_tool_call_id(messages: list[Any]) -> str | None:
+    """返回 messages 里最近一次 todo_create 的 tool_call id。"""
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for call in reversed(tool_calls):
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function")
+            if not isinstance(fn, dict) or fn.get("name") != "todo_create":
+                continue
+            call_id = call.get("id")
+            if isinstance(call_id, str) and call_id:
+                return call_id
+    return None
+
+
+def _parse_todo_items_from_tool_content(content: str) -> list[tuple[str, str]]:
+    text = _unwrap_tool_result_text(content)
     items: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    if "task_id:" not in text:
+        return items
+    for match in _TODO_ID_RE.finditer(text):
+        todo_id = match.group(1).rstrip(",").strip()
+        todo_content = match.group(2).strip().rstrip('"').rstrip("'")
+        if not todo_id or todo_id in seen:
+            continue
+        seen.add(todo_id)
+        items.append((todo_id, todo_content))
+    return items
+
+
+def _parse_todo_items(messages: list[Any]) -> list[tuple[str, str]]:
+    """从 tool 消息解析 todo；优先使用最近一次 todo_create 的结果（场景切换后避免 travel id）。"""
+    create_call_id = _last_todo_create_tool_call_id(messages)
+    if create_call_id:
+        for message in reversed(messages):
+            if not isinstance(message, dict) or message.get("role") != "tool":
+                continue
+            if message.get("tool_call_id") != create_call_id:
+                continue
+            items = _parse_todo_items_from_tool_content(_tool_message_text(message))
+            if items:
+                return items
+            break
+
+    items: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for message in messages:
         if not isinstance(message, dict) or message.get("role") != "tool":
             continue
-        content = message.get("content")
-        if not isinstance(content, str):
-            continue
-        for match in _TODO_ID_RE.finditer(content):
-            items.append((match.group(1), match.group(2).strip()))
+        for todo_id, todo_content in _parse_todo_items_from_tool_content(
+            _tool_message_text(message)
+        ):
+            if todo_id in seen:
+                continue
+            seen.add(todo_id)
+            items.append((todo_id, todo_content))
     return items
 
 
@@ -696,30 +1792,265 @@ def _resolve_novel_file_path(messages: list[Any]) -> str:
     return _NOVEL_FILENAME
 
 
-def _todo_modify_complete_args(messages: list[Any], task_index: int) -> dict[str, Any]:
+def _shell_single_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _coerce_upload_file_entries(raw: Any) -> list[dict[str, str]]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+
+    entries: list[Any] = []
+    if isinstance(raw, list):
+        entries = raw
+    elif isinstance(raw, dict):
+        if any(raw.get(k) for k in ("url", "uri", "path", "name", "filename")):
+            entries = [raw]
+        else:
+            for key, value in raw.items():
+                if isinstance(value, dict):
+                    item = dict(value)
+                    item.setdefault("name", str(key))
+                    entries.append(item)
+                elif isinstance(value, str) and value.strip():
+                    text = value.strip()
+                    if text.startswith("http://") or text.startswith("https://"):
+                        entries.append({"name": str(key), "url": text, "path": ""})
+                    else:
+                        entries.append({"name": str(key), "url": "", "path": text})
+    else:
+        return []
+
+    result: list[dict[str, str]] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("filename") or "").strip()
+        url = str(item.get("url") or item.get("uri") or "").strip()
+        path = str(item.get("path") or "").strip()
+        if not name:
+            if path:
+                name = Path(path).name
+            elif url:
+                name = Path(url.split("?", 1)[0]).name
+        if not name and not url and not path:
+            continue
+        if not name:
+            name = _SPRING_ESSAY_SOURCE
+        result.append({"name": name, "url": url, "path": path})
+    return result
+
+
+def _parse_user_prompt_payload(text: str) -> dict[str, Any] | None:
+    """解析 build_user_prompt 包装后的 JSON（可能前缀中文说明）。"""
+    brace = text.find("{")
+    if brace < 0:
+        return None
+    blob = text[brace:]
+    try:
+        parsed = json.loads(blob)
+    except json.JSONDecodeError:
+        # 容错：从后往前截断到最后一个 }
+        end = blob.rfind("}")
+        while end > 0:
+            try:
+                parsed = json.loads(blob[: end + 1])
+                break
+            except json.JSONDecodeError:
+                end = blob.rfind("}", 0, end)
+        else:
+            return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _files_from_user_message_text(text: str) -> list[dict[str, str]]:
+    """从单条 user 消息文本解析附件元数据。"""
+    if not text:
+        return []
+
+    payload = _parse_user_prompt_payload(text)
+    if isinstance(payload, dict):
+        for key in ("files_updated_by_user", "files"):
+            files = _coerce_upload_file_entries(payload.get(key))
+            if files:
+                return files
+
+    urls = _HTTP_URL_RE.findall(text)
+    if urls:
+        preferred = [
+            u for u in urls
+            if _SPRING_ESSAY_SOURCE in u or "sandbox_path" in u or u.lower().endswith(".md")
+        ]
+        chosen = preferred[0] if preferred else urls[0]
+        name = Path(chosen.split("?", 1)[0]).name or _SPRING_ESSAY_SOURCE
+        if "%" in name:
+            name = unquote(name)
+        return [{"name": name, "url": chosen, "path": ""}]
+
+    return []
+
+
+def _extract_uploaded_files(messages: list[Any]) -> list[dict[str, str]]:
+    """从 user 消息提取上传附件（扫描全部 user，不仅最新一条 re-append）。"""
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        text = _message_text(message)
+        if _is_skill_rail_injection(text):
+            continue
+        files = _files_from_user_message_text(text)
+        if files:
+            return files
+    return []
+
+
+def _pick_upload_file(messages: list[Any]) -> dict[str, str]:
+    files = _extract_uploaded_files(messages)
+    for item in files:
+        if _SPRING_ESSAY_SOURCE in item.get("name", "") or _SPRING_ESSAY_SOURCE in item.get("path", ""):
+            return item
+    if files:
+        return files[0]
+    return {"name": _SPRING_ESSAY_SOURCE, "url": "", "path": ""}
+
+
+def _build_heredoc_write_bash(filename: str, content: str) -> str:
+    """在工作区写入 Mock 原文（无 url/path 时兜底，确保 read_file 有文件可读）。
+
+    heredoc 结束行后不能接 &&（bash -c 会报 syntax error），改用换行分隔命令。
+    """
+    delimiter = "MOCK_ESSAY_EOF"
+    while delimiter in content:
+        delimiter += "_"
+    return (
+        f"cat > {_shell_single_quote(filename)} << '{delimiter}'\n"
+        f"{content}\n"
+        f"{delimiter}\n"
+        f"ls -la {_shell_single_quote(filename)} "
+        f"&& wc -c {_shell_single_quote(filename)}"
+    )
+
+
+def _build_file_download_bash(upload: dict[str, str]) -> str:
+    """企业版附件需先 curl 下载到工作区，再 read_file。"""
+    name = upload.get("name") or _SPRING_ESSAY_SOURCE
+    url = upload.get("url") or ""
+    path = upload.get("path") or ""
+    if url:
+        return (
+            f"curl -fsSL -o {_shell_single_quote(name)} {_shell_single_quote(url)} "
+            f"&& ls -la {_shell_single_quote(name)} "
+            f"&& wc -c {_shell_single_quote(name)}"
+        )
+    if path and _is_absolute_path(path):
+        return (
+            f"cp {_shell_single_quote(path)} {_shell_single_quote(name)} "
+            f"&& ls -la {_shell_single_quote(name)} "
+            f"&& wc -c {_shell_single_quote(name)}"
+        )
+    # 兜底：写入 Mock 原文到当前工作区（避免 find 找不到文件导致 read_file 404）
+    return _build_heredoc_write_bash(name, _load_spring_essay_source())
+
+
+def _resolve_spring_local_read_path(messages: list[Any], upload: dict[str, str]) -> str:
+    """read_file 使用的本地路径：优先绝对 path，否则用下载/写入后的文件名。"""
+    path = upload.get("path") or ""
+    if path and _is_absolute_path(path):
+        return path
+    resolved = _resolve_spring_source_path(messages)
+    if _is_absolute_path(resolved):
+        return resolved
+    name = upload.get("name") or _SPRING_ESSAY_SOURCE
+    return name
+
+
+def _load_spring_essay_source() -> str:
+    try:
+        return _SPRING_ESSAY_SOURCE_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return (
+            "# 童趣的春天\n\n"
+            "春天，是童年记忆中最温柔的序曲。每当春风拂过脸颊，"
+            "我便仿佛又回到了那个充满好奇与惊喜的童年时光。"
+        )
+
+
+def _build_spring_essay_expanded(*, target_chars: int = _SPRING_ESSAY_TARGET_CHARS) -> str:
+    source = _load_spring_essay_source()
+    body = source.split("---", 1)[0].strip()
+    parts = [body]
+    section_idx = 0
+    while len("".join(parts)) < target_chars:
+        parts.append(_SPRING_EXPANSION_SECTIONS[section_idx % len(_SPRING_EXPANSION_SECTIONS)])
+        section_idx += 1
+    text = "\n\n".join(parts)
+    footer = (
+        f"\n\n---\n**字数统计**：约{target_chars}字\n"
+        f"**主题**：童趣的春天（扩写版）\n"
+        "**说明**：Mock Agent 自动扩写生成"
+    )
+    return text + footer
+
+
+def _resolve_spring_source_path(messages: list[Any]) -> str:
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        text = _tool_message_text(message) if message.get("role") == "tool" else _message_text(message)
+        path = _parse_file_path_from_tool_blob(text, _SPRING_ESSAY_SOURCE)
+        if path:
+            return path
+    for args in reversed(_assistant_tool_call_args(messages, "read_file")):
+        path = args.get("file_path") or args.get("path")
+        if isinstance(path, str) and path and _SPRING_ESSAY_SOURCE in path:
+            return path
+    return _SPRING_ESSAY_SOURCE
+
+
+def _resolve_spring_output_path(messages: list[Any]) -> str:
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        path = _parse_file_path_from_tool_blob(_tool_message_text(message), _SPRING_ESSAY_OUTPUT)
+        if path:
+            return path
+    for args in reversed(_assistant_tool_call_args(messages, "write_file")):
+        path = args.get("file_path") or args.get("path")
+        if isinstance(path, str) and path and _SPRING_ESSAY_OUTPUT in path:
+            return path
+    return _SPRING_ESSAY_OUTPUT
+
+
+def _todo_modify_complete_args(
+    messages: list[Any],
+    task_index: int,
+    *,
+    fallback_contents: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    """只更新 status=completed，不改写 content，避免错误解析污染任务文案。"""
     todos = _parse_todo_items(messages)
-    if task_index >= len(todos):
-        task_index = max(0, len(todos) - 1)
-    if not todos:
-        return {
-            "action": "update",
-            "todos": [
-                {
-                    "id": "mock-todo-1",
-                    "content": "《旅行的意义》开篇",
-                    "activeForm": "完成《旅行的意义》开篇",
-                    "status": "completed",
-                }
-            ],
-        }
-    todo_id, content = todos[task_index]
+    todo_id: str | None = None
+    if fallback_contents and 0 <= task_index < len(fallback_contents):
+        want = fallback_contents[task_index]
+        for tid, content in todos:
+            if content == want or content.startswith(want) or want in content:
+                todo_id = tid
+                break
+    if todo_id is None and 0 <= task_index < len(todos):
+        todo_id = todos[task_index][0]
+    elif todo_id is None and todos:
+        todo_id = todos[min(task_index, len(todos) - 1)][0]
+    if not todo_id:
+        todo_id = "mock-todo-1"
     return {
         "action": "update",
         "todos": [
             {
                 "id": todo_id,
-                "content": content,
-                "activeForm": f"完成{content}",
                 "status": "completed",
             }
         ],
@@ -734,16 +2065,15 @@ class _AgentPlan:
     tool_args: dict[str, Any] | None = None
 
 
-def _plan_agent_flow_response(
+def _plan_travel_flow_response(
     payload: dict[str, Any],
     *,
+    stage: int,
     novel_chars: int,
     excerpt_chars: int,
 ) -> _AgentPlan:
-    messages = payload.get("messages")
-    if not isinstance(messages, list):
-        messages = []
-    stage = _agent_flow_stage(messages)
+    """小说《旅行的意义》场景：todo → stream → bash → write → read → todo×5 → send → 收尾。"""
+    messages = _agent_messages(payload)
     opening = _build_travel_opening_text(min(excerpt_chars, novel_chars))
     file_body = _build_travel_novel_file_text(min(novel_chars, LOADTEST_WRITE_MAX_CHARS))
 
@@ -783,16 +2113,38 @@ def _plan_agent_flow_response(
             kind="intro_and_tool_call",
             text=_INTRO_PERMISSION_TODO_MODIFY,
             tool_name="todo_modify",
-            tool_args=_todo_modify_complete_args(messages, 0),
+            tool_args=_todo_modify_complete_args(
+                messages, 0, fallback_contents=_TODO_CONTENTS
+            ),
         )
     if stage == 6:
         return _AgentPlan(
             kind="intro_and_tool_call",
             text="权限已确认。现在继续更新任务状态并完善人物介绍：\n" + _CHARACTER_INTRO,
             tool_name="todo_modify",
-            tool_args=_todo_modify_complete_args(messages, 1),
+            tool_args=_todo_modify_complete_args(
+                messages, 1, fallback_contents=_TODO_CONTENTS
+            ),
         )
     if stage == 7:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="人物介绍已完善，标记「故事背景设定」完成：\n",
+            tool_name="todo_modify",
+            tool_args=_todo_modify_complete_args(
+                messages, 2, fallback_contents=_TODO_CONTENTS
+            ),
+        )
+    if stage == 8:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="背景设定已就绪，标记「故事冲突与悬念设置」完成：\n",
+            tool_name="todo_modify",
+            tool_args=_todo_modify_complete_args(
+                messages, 3, fallback_contents=_TODO_CONTENTS
+            ),
+        )
+    if stage == 9:
         path = _resolve_novel_file_path(messages)
         return _AgentPlan(
             kind="intro_and_tool_call",
@@ -800,22 +2152,302 @@ def _plan_agent_flow_response(
             tool_name="send_file_to_user",
             tool_args={"abs_file_path_list": [path]},
         )
+    if stage == 10:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="文件已发送，标记「整理并发送开篇文件」完成：\n",
+            tool_name="todo_modify",
+            tool_args=_todo_modify_complete_args(
+                messages, 4, fallback_contents=_TODO_CONTENTS
+            ),
+        )
     return _AgentPlan(kind="stream_text", text=_NOVEL_FINAL_MESSAGE)
 
 
-def _plan_novel_response(
+def _resolve_beijing_guide_path(messages: list[Any]) -> str:
+    """从 write_file / tool 结果解析攻略绝对路径，供 send_file_to_user 使用。"""
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        path = _parse_file_path_from_tool_blob(_tool_message_text(message), _BEIJING_GUIDE_FILENAME)
+        if path:
+            return path
+    for args in reversed(_assistant_tool_call_args(messages, "write_file")):
+        path = args.get("file_path") or args.get("path")
+        if isinstance(path, str) and path and _BEIJING_GUIDE_FILENAME in path:
+            return path
+    return _BEIJING_GUIDE_FILENAME
+
+
+def _plan_scheduled_task_flow_response(
+    payload: dict[str, Any],
+    *,
+    stage: int,
+    novel_chars: int,
+    excerpt_chars: int,
+) -> _AgentPlan:
+    """定时任务场景：调用 cron_create_job 创建一次性延迟任务 → 返回确认消息。"""
+    _ = payload, novel_chars, excerpt_chars
+    if stage == 0:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text=_CRON_INTRO,
+            tool_name="cron_create_job",
+            tool_args=_CRON_JOB_ARGS,
+        )
+    return _AgentPlan(kind="stream_text", text=_CRON_DONE_MESSAGE)
+
+
+def _plan_cron_delivery_response(
+    payload: dict[str, Any],
+    *,
+    stage: int,
+    novel_chars: int,
+    excerpt_chars: int,
+) -> _AgentPlan:
+    """定时任务到点：仅返回一句喝水提醒，不触发 travel / 通用 mock。"""
+    _ = payload, stage, novel_chars, excerpt_chars
+    return _AgentPlan(kind="stream_text", text=_CRON_DELIVERY_MESSAGE)
+
+
+def _plan_skill_flow_response(
+    payload: dict[str, Any],
+    *,
+    stage: int,
+    novel_chars: int,
+    excerpt_chars: int,
+) -> _AgentPlan:
+    """技能场景：install_skill → skill_tool → skill_step → 搜索 → write_file → skill_complete。"""
+    _ = novel_chars, excerpt_chars
+    messages = _agent_messages(payload)
+
+    if stage == 0:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text=_SKILL_INTRO,
+            tool_name="install_skill",
+            tool_args=_SKILL_INSTALL_ARGS_SHORT,
+        )
+    if stage == 1:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text=_SKILL_INSTALL_RETRY_INTRO,
+            tool_name="install_skill",
+            tool_args=_SKILL_INSTALL_ARGS_FULL,
+        )
+    if stage == 2:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="技能安装成功！现在让我加载这个技能的 SKILL.md 来了解如何使用它：\n",
+            tool_name="skill_tool",
+            tool_args={"skill_name": _SKILL_NAME, "relative_file_path": "SKILL.md"},
+        )
+    if stage == 3:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text=_SKILL_AFTER_LOAD_INTRO,
+            tool_name="skill_step",
+            tool_args={"action": "create", "tasks": _SKILL_STEP_TASKS},
+        )
+    if stage == 4:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="接下来为北京3日游攻略创建新的任务清单：\n",
+            tool_name="todo_create",
+            tool_args={"tasks": _SKILL_TODO_TASKS, "force": True},
+        )
+    if stage == 5:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text=_SKILL_AFTER_PLAN_INTRO,
+            tool_name="free_search",
+            tool_args={"query": "北京3日游攻略 故宫 颐和园 长城 2026"},
+        )
+    if stage == 6:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="让我抓取详细内容来获取景点信息：\n",
+            tool_name="fetch_webpage",
+            tool_args={"url": "https://www.zhihu.com/question/beijing-travel-guide"},
+        )
+    if stage == 7:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="很好！已获取故宫和颐和园的详细信息。让我继续搜索天气、美食和交通信息：\n",
+            tool_name="free_search",
+            tool_args={"query": "北京7月天气预报 旅游穿衣 美食推荐"},
+        )
+    if stage == 8:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text=_SKILL_AFTER_SEARCH_INTRO,
+            tool_name="skill_step",
+            tool_args={
+                "action": "complete_batch",
+                "indices": [1, 2, 3],
+                "results": ["北京坐标已确认", "天气预报已获取", "景点信息已收集"],
+            },
+        )
+    if stage == 9:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="信息收集完成。先把「安装旅游规划技能」标记为完成：\n",
+            tool_name="todo_modify",
+            tool_args=_todo_modify_complete_args(messages, 0, fallback_contents=_SKILL_TODO_CONTENTS),
+        )
+    if stage == 10:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="继续更新任务状态，标记「收集北京旅游信息」已完成：\n",
+            tool_name="todo_modify",
+            tool_args=_todo_modify_complete_args(messages, 1, fallback_contents=_SKILL_TODO_CONTENTS),
+        )
+    if stage == 11:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text=_SKILL_BEFORE_WRITE_INTRO,
+            tool_name="write_file",
+            tool_args={
+                "file_path": _BEIJING_GUIDE_FILENAME,
+                "content": _load_beijing_guide_content(),
+            },
+        )
+    if stage == 12:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text=_SKILL_AFTER_WRITE_INTRO,
+            tool_name="skill_step",
+            tool_args={
+                "action": "complete_batch",
+                "indices": [4, 5],
+                "results": ["3日行程已规划", "攻略文档已生成"],
+            },
+        )
+    if stage == 13:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="攻略文档已写好，标记「生成北京3日游攻略」完成：\n",
+            tool_name="todo_modify",
+            tool_args=_todo_modify_complete_args(messages, 2, fallback_contents=_SKILL_TODO_CONTENTS),
+        )
+    if stage == 14:
+        guide_path = _resolve_beijing_guide_path(messages)
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text=_SKILL_BEFORE_SEND_INTRO,
+            tool_name="send_file_to_user",
+            tool_args={"abs_file_path_list": [guide_path]},
+        )
+    if stage == 15:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="文件已发送，标记「交付攻略文档」完成：\n",
+            tool_name="todo_modify",
+            tool_args=_todo_modify_complete_args(messages, 3, fallback_contents=_SKILL_TODO_CONTENTS),
+        )
+    if stage == 16:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text=_SKILL_BEFORE_COMPLETE_INTRO,
+            tool_name="skill_complete",
+            tool_args={"skill_name": _SKILL_NAME},
+        )
+    return _AgentPlan(kind="stream_text", text=_SKILL_DONE_MESSAGE)
+
+
+def _plan_file_flow_response(
+    payload: dict[str, Any],
+    *,
+    stage: int,
+    novel_chars: int,
+    excerpt_chars: int,
+) -> _AgentPlan:
+    """文件扩写场景：bash(下载/确认) → read_file → write_file → send_file_to_user → 确认消息。"""
+    _ = novel_chars, excerpt_chars
+    messages = _agent_messages(payload)
+    upload = _pick_upload_file(messages)
+    source_path = _resolve_spring_local_read_path(messages, upload)
+    output_path = _resolve_spring_output_path(messages)
+    if output_path == _SPRING_ESSAY_OUTPUT:
+        # 与源文件同目录写出扩写版，便于 send_file_to_user
+        src_parent = Path(source_path).parent if _is_absolute_path(source_path) else None
+        if src_parent is not None and str(src_parent) not in {".", ""}:
+            output_path = str(src_parent / _SPRING_ESSAY_OUTPUT)
+    expanded_body = _build_spring_essay_expanded(target_chars=_SPRING_ESSAY_TARGET_CHARS)
+
+    if stage == 0:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="我先把上传的作文下载到工作区并确认文件：\n",
+            tool_name="bash",
+            tool_args={"command": _build_file_download_bash(upload)},
+        )
+    if stage == 1:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="接下来读取原文内容：\n",
+            tool_name="read_file",
+            tool_args={"file_path": source_path},
+        )
+    if stage == 2:
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="正在把作文扩写到约 6000 字并写入文件：\n",
+            tool_name="write_file",
+            tool_args={"file_path": output_path, "content": expanded_body},
+        )
+    if stage == 3:
+        send_path = _resolve_spring_output_path(messages)
+        if send_path == _SPRING_ESSAY_OUTPUT and output_path != _SPRING_ESSAY_OUTPUT:
+            send_path = output_path
+        return _AgentPlan(
+            kind="intro_and_tool_call",
+            text="扩写完成，现在把文件发回给你：\n",
+            tool_name="send_file_to_user",
+            tool_args={"abs_file_path_list": [send_path]},
+        )
+    return _AgentPlan(kind="stream_text", text=_FILE_DONE_MESSAGE)
+
+
+_SCENARIO_PLANNERS: dict[str, Any] = {
+    MockScenario.TRAVEL: _plan_travel_flow_response,
+    MockScenario.SCHEDULED_TASK: _plan_scheduled_task_flow_response,
+    MockScenario.CRON_DELIVERY: _plan_cron_delivery_response,
+    MockScenario.SKILL: _plan_skill_flow_response,
+    MockScenario.FILE: _plan_file_flow_response,
+}
+
+
+def _plan_loadtest_response(
     payload: dict[str, Any],
     *,
     novel_chars: int,
     excerpt_chars: int,
-) -> _AgentPlan:
+) -> tuple[_AgentPlan, str, int]:
+    """按场景分发 Mock 响应计划，返回 (plan, scenario, stage)。"""
     if _is_session_memory_request(payload):
-        return _plan_session_memory_response(payload)
-    return _plan_agent_flow_response(
+        return _plan_session_memory_response(payload), MockScenario.TRAVEL, 0
+
+    if _is_cron_wake_message(payload):
+        plan = _plan_cron_delivery_response(
+            payload,
+            stage=0,
+            novel_chars=novel_chars,
+            excerpt_chars=excerpt_chars,
+        )
+        return plan, MockScenario.CRON_DELIVERY, 0
+
+    routed_scenario = _detect_loadtest_scenario(payload)
+    key, stage, scenario = _prepare_loadtest_state(payload, routed_scenario)
+    planner = _SCENARIO_PLANNERS.get(scenario, _plan_travel_flow_response)
+    plan = planner(
         payload,
+        stage=stage,
         novel_chars=novel_chars,
         excerpt_chars=excerpt_chars,
     )
+    _advance_loadtest_state(key, scenario, stage, payload)
+    return plan, scenario, stage
 
 
 def _mock_usage(*, completion_chars: int, prompt_tokens: int = 10) -> dict[str, int]:
@@ -1189,9 +2821,9 @@ async def _handle_request(
 
         if method == "POST" and path.rstrip("/") == "/v1/chat/completions":
             model = str(payload.get("model") or "mock-model")
-            use_novel = _should_use_novel_scenario(profile, payload)
-            if use_novel:
-                plan = _plan_novel_response(
+            use_loadtest = _should_use_novel_scenario(profile, payload)
+            if use_loadtest:
+                plan, scenario, stage = _plan_loadtest_response(
                     payload,
                     novel_chars=novel_chars,
                     excerpt_chars=excerpt_chars,
@@ -1205,9 +2837,10 @@ async def _handle_request(
                     )
                 else:
                     logger.info(
-                        "Agent loadtest scenario kind=%s stage=%d novel_chars=%d excerpt_chars=%d",
+                        "Agent loadtest scenario=%s kind=%s stage=%d novel_chars=%d excerpt_chars=%d",
+                        scenario,
                         plan.kind,
-                        _agent_flow_stage(payload.get("messages") or []),
+                        stage,
                         novel_chars,
                         excerpt_chars,
                     )
@@ -1383,10 +3016,9 @@ async def main(
     )
     if profile == "loadtest":
         logger.info(
-            "loadtest profile active: agent-flow scenario "
-            "(todo_create -> stream opening -> bash(permission ASK) -> write_file -> "
-            "read_file -> todo_modify(permission ASK) -> todo_modify -> "
-            "send_file_to_user -> finalize); session-memory requests return edit_file only"
+            "loadtest profile active: per-session stage + done flag; "
+            "re-route after task done: intent/payload/sequence "
+            "(priority: cron_delivery>scheduled_task>skill>file>travel; skip prior completed scenarios)"
         )
     logger.info("Health: http://%s:%d/health", addr[0], addr[1])
 

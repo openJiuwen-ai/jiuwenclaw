@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import time
 from pathlib import Path
 
 
@@ -164,10 +165,160 @@ def test_loadtest_terminal_ready_requires_file_only():
     )
 
 
+def test_cron_creation_text_does_not_mark_step_done():
+    mod = _load_module()
+    creation = (
+        "✅ 喝水提醒已创建！\n\n⏰ 执行时间：1 分钟后\n\n"
+        "📝 提醒内容：🥤 喝水时间到啦！记得喝杯水，保持水分摄入～"
+    )
+    assert mod._is_cron_creation_text(creation)
+    assert not mod._is_cron_delivery_text(creation)
+    assert not mod._content_marks_step_done(
+        expect_file=False,
+        expect_delayed_text=True,
+        content=creation,
+    )
+
+
+def test_cron_delivery_text_marks_step_done():
+    mod = _load_module()
+    delivery = "🥤 喝水时间到啦！记得喝杯水，保持水分摄入～"
+    assert mod._is_cron_delivery_text(delivery)
+    assert mod._content_marks_step_done(
+        expect_file=False,
+        expect_delayed_text=True,
+        content=delivery,
+    )
+
+
+def test_event_session_id_prefers_payload():
+    mod = _load_module()
+    assert (
+        mod._event_session_id(
+            {"session_id": "sess_a"},
+            {"session_id": "sess_b"},
+        )
+        == "sess_b"
+    )
+    assert mod._event_session_id({"session_id": "sess_a"}, {}) == "sess_a"
+    assert mod._event_session_id({}, {}) == ""
+
+
+def test_premature_idle_not_after_cron_creation_subflow():
+    mod = _load_module()
+    assert not mod._should_fail_on_premature_idle(
+        expect_file=False,
+        expect_delayed_text=True,
+        accepted=True,
+        hitl_paused=False,
+        hitl_suppress_next_idle=False,
+        hitl_await_agent_resume=False,
+        saw_deliverable_file=False,
+        saw_step_text=False,
+        payload={"is_processing": False},
+    )
+
+
+def test_premature_idle_still_fails_for_non_delayed_text_step():
+    mod = _load_module()
+    assert mod._should_fail_on_premature_idle(
+        expect_file=False,
+        expect_delayed_text=False,
+        accepted=True,
+        hitl_paused=False,
+        hitl_suppress_next_idle=False,
+        hitl_await_agent_resume=False,
+        saw_deliverable_file=False,
+        saw_step_text=False,
+        payload={"is_processing": False},
+    )
+
+
+def test_build_loadtest_cron_step_waits_for_delivery():
+    mod = _load_module()
+    steps = mod._build_default_loadtest_steps(mod._DEFAULT_SPRING_ESSAY)
+    cron = steps[-1]
+    assert cron.name == "cron"
+    assert "1分钟后" in cron.content
+    assert cron.expect_delayed_text is True
+    assert cron.expect_file is False
+
+
+def test_build_loadtest_file_step_downloads_deliverable():
+    mod = _load_module()
+    steps = mod._build_default_loadtest_steps(mod._DEFAULT_SPRING_ESSAY)
+    file_step = next(s for s in steps if s.name == "file")
+    assert file_step.download_deliverable is True
+
+
+def test_make_run_download_dir_appends_timestamp():
+    mod = _load_module()
+    when = time.strptime("2026-07-21 21:15:25", "%Y-%m-%d %H:%M:%S")
+    path = mod._make_run_download_dir(when=when)
+    assert path.name == "download_20260721_211525"
+    assert path.parent == mod._SCRIPT_DIR
+
+
+def test_indexed_download_filename_appends_request_index():
+    mod = _load_module()
+    assert mod._indexed_download_filename("童趣的春天_扩写版.md", 0) == "童趣的春天_扩写版_00.md"
+    assert mod._indexed_download_filename("report.txt", 12) == "report_12.txt"
+
+
+def test_absolute_download_url_resolves_relative_path():
+    mod = _load_module()
+    assert (
+        mod._absolute_download_url("ws://10.0.0.1:30105/ws", "/file-api/download?token=abc")
+        == "http://10.0.0.1:30105/file-api/download?token=abc"
+    )
+    assert (
+        mod._absolute_download_url("ws://10.0.0.1:30105/ws", "https://cdn.example/a.md")
+        == "https://cdn.example/a.md"
+    )
+
+
+def test_extract_downloadable_files_requires_download_url():
+    mod = _load_module()
+    assert mod._extract_downloadable_files({"files": [{"name": "a.md", "path": "/tmp/a.md"}]}) == []
+    assert mod._extract_downloadable_files(
+        {"files": [{"name": "a.md", "download_url": "/file-api/download?token=t"}]}
+    ) == [{"name": "a.md", "download_url": "/file-api/download?token=t"}]
+
+
 def test_hitl_resume_clear_includes_chat_file():
     mod = _load_module()
     assert "chat.delta" in mod._HITL_RESUME_CLEAR_EVENTS
     assert "chat.file" in mod._HITL_RESUME_CLEAR_EVENTS
+    assert "chat.tool_result" in mod._HITL_RESUME_CLEAR_EVENTS
+
+
+def test_usage_summary_blocked_during_hitl_resume_wait_without_file():
+    mod = _load_module()
+    assert not mod._should_complete_invoke(
+        accepted=True,
+        saw_agent_output=True,
+        hitl_paused=False,
+        hitl_await_agent_resume=True,
+        saw_deliverable_file=False,
+        saw_post_deliverable_text=True,
+        event="chat.usage_summary",
+        payload={},
+    )
+
+
+def test_usage_summary_completes_during_hitl_resume_wait_after_file():
+    """skill_complete 放行后可能直接 usage_summary，无中间 delta。"""
+    mod = _load_module()
+    assert mod._should_complete_invoke(
+        accepted=True,
+        saw_agent_output=True,
+        hitl_paused=False,
+        hitl_await_agent_resume=True,
+        saw_deliverable_file=True,
+        saw_post_deliverable_text=False,
+        event="chat.usage_summary",
+        payload={},
+    )
 
 
 def test_usage_summary_blocked_before_deliverable_milestone():
@@ -238,20 +389,6 @@ def test_processing_idle_completes_after_file_without_stage8_text():
         saw_deliverable_file=True,
         saw_post_deliverable_text=False,
         payload={"is_processing": False},
-    )
-
-
-def test_usage_summary_blocked_during_hitl_resume_wait():
-    mod = _load_module()
-    assert not mod._should_complete_invoke(
-        accepted=True,
-        saw_agent_output=True,
-        hitl_paused=False,
-        hitl_await_agent_resume=True,
-        saw_deliverable_file=True,
-        saw_post_deliverable_text=True,
-        event="chat.usage_summary",
-        payload={},
     )
 
 
