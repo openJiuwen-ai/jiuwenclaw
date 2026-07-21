@@ -329,42 +329,154 @@ def _terminate_processes(processes: dict[str, subprocess.Popen[bytes]]) -> None:
             proc.kill()
 
 
-def _wait_for_services_ready(ports: dict[str, int], processes: dict[str, subprocess.Popen[bytes]]) -> None:
-    """Wait for services to be ready and log startup info."""
+def _resolve_runtime_ports() -> dict[str, int]:
+    """Resolve default-instance ports from env overrides with BASE_PORTS fallback."""
+    env_map = {
+        "agent_server": "AGENT_SERVER_PORT",
+        "web": "WEB_PORT",
+        "gateway": "GATEWAY_PORT",
+        "frontend": "FRONTEND_PORT",
+    }
+    ports = {pt: compute_auto_port(pt, 0) for pt in PORT_TYPES}
+    for port_type, env_name in env_map.items():
+        raw = os.environ.get(env_name)
+        if not raw:
+            continue
+        try:
+            ports[port_type] = int(raw)
+        except ValueError:
+            logging.info(
+                "[start_services] ignore invalid %s=%r, keep port %s",
+                env_name,
+                raw,
+                ports.get(port_type),
+            )
+    return ports
+
+
+def _print_port_banner(
+    targets: list[tuple[str, int, str]],
+    ready: dict[str, bool],
+) -> None:
+    """Print a user-facing port / access-URL summary for issue #1059."""
+    all_ready = all(ready[label] for label, _, _ in targets)
+    title = (
+        "服务已启动，端口信息如下："
+        if all_ready
+        else "服务启动中，端口信息如下："
+    )
+    label_width = max(len(label) for label, _, _ in targets)
+    logging.info("")
+    logging.info("=" * 64)
+    logging.info(f"  {title}")
+    for label, _port, url in targets:
+        mark = "✓" if ready[label] else "…"
+        logging.info(f"  {mark} {label:<{label_width}}  {url}")
+    logging.info("=" * 64)
+    logging.info("")
+
+
+def _wait_for_services_ready(
+    ports: dict[str, int],
+    processes: dict[str, subprocess.Popen[bytes]],
+    *,
+    overall_timeout: float | None = None,
+) -> None:
+    """Wait for services to be ready and log a complete access / port summary.
+
+    Prints the access-URL banner as soon as Web UI is ready (or at the end if
+    there is no Web UI target). Continues probing remaining ports afterward.
+    Aborts early if a launched subprocess has already exited.
+    """
     import socket
 
-    def _check_port(port: int, timeout: float = 3.0) -> bool:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    sock.settimeout(0.5)
-                    sock.connect(("127.0.0.1", port))
-                    return True
-            except OSError:
-                time.sleep(0.3)
+    def _proc_alive(name: str) -> bool:
+        proc = processes.get(name)
+        return proc is not None and proc.poll() is None
+
+    def _any_required_dead() -> bool:
+        for name in ("app", "web", "web-dev"):
+            proc = processes.get(name)
+            if proc is not None and proc.poll() is not None:
+                return True
         return False
 
-    # Service definitions: (proc_name, port_key, name, url_prefix)
-    services = [
-        ("app", "agent_server", "AgentServer WebSocket", "ws://"),
-        ("app", "gateway", "Gateway HTTP", "http://"),
-        ("app", "web", "WebChannel WebSocket", "ws://"),
-        ("web", "frontend", "Frontend HTTP", "http://"),
-    ]
+    def _port_open(port: int) -> bool:
+        """Return True if port accepts TCP on IPv4 or IPv6 localhost."""
+        # Vite on Windows often binds ::1 only; backend services bind 127.0.0.1.
+        for host, family in (("127.0.0.1", socket.AF_INET), ("::1", socket.AF_INET6)):
+            try:
+                with socket.socket(family, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(0.4)
+                    sock.connect((host, port))
+                    return True
+            except OSError:
+                continue
+        return False
 
-    for proc_name, port_key, svc_name, url_prefix in services:
-        proc = processes.get(proc_name)
-        if proc is None or proc.poll() is not None:
-            continue
+    # (label, port, access_url) — only entries for processes actually launched.
+    targets: list[tuple[str, int, str]] = []
 
-        port = ports.get(port_key, 0)
-        path_suffix = "/ws" if port_key == "web" else ""
+    if _proc_alive("app"):
+        agent_port = ports.get("agent_server", 0)
+        gateway_port = ports.get("gateway", 0)
+        web_port = ports.get("web", 0)
+        if agent_port:
+            targets.append(("AgentServer WebSocket", agent_port, f"ws://localhost:{agent_port}"))
+        if gateway_port:
+            targets.append(("Gateway HTTP", gateway_port, f"http://localhost:{gateway_port}"))
+        if web_port:
+            targets.append(("WebChannel WebSocket", web_port, f"ws://localhost:{web_port}/ws"))
 
-        if _check_port(port):
-            logging.info(f"[start_services] ✓ {svc_name} ready at {url_prefix}127.0.0.1:{port}{path_suffix}")
-        else:
-            logging.info(f"[start_services] ⏳ {svc_name} starting... (port {port})")
+    frontend_alive = _proc_alive("web") or _proc_alive("web-dev")
+    frontend_port = ports.get("frontend", 0)
+    if frontend_alive and frontend_port:
+        # Web UI first in the user-facing banner.
+        targets.insert(0, ("Web UI", frontend_port, f"http://localhost:{frontend_port}"))
+
+    if not targets:
+        return
+
+    if overall_timeout is None:
+        overall_timeout = 45.0 if "web-dev" in processes else 30.0
+    deadline = time.time() + overall_timeout
+    ready: dict[str, bool] = {label: False for label, _, _ in targets}
+    banner_printed = False
+    banner_was_partial = False
+
+    while time.time() < deadline and not all(ready.values()):
+        if _any_required_dead():
+            logging.info(
+                "[start_services] a required process exited during startup wait; "
+                "stop waiting for remaining ports"
+            )
+            break
+
+        for label, port, _url in targets:
+            if ready[label]:
+                continue
+            if _port_open(port):
+                ready[label] = True
+                logging.info(f"[start_services] ✓ {label} ready (port {port})")
+
+        # CR-001: surface Web UI URL as soon as frontend is reachable.
+        if not banner_printed and ready.get("Web UI"):
+            _print_port_banner(targets, ready)
+            banner_printed = True
+            banner_was_partial = not all(ready.values())
+
+        if not all(ready.values()):
+            time.sleep(0.3)
+
+    for label, port, _url in targets:
+        if not ready[label]:
+            logging.info(f"[start_services] ⏳ {label} starting... (port {port})")
+
+    if not banner_printed:
+        _print_port_banner(targets, ready)
+    elif banner_was_partial:
+        # Refresh so early "…" rows can become "✓" after backends catch up.
+        _print_port_banner(targets, ready)
 
 
 def _run_processes(commands: list[tuple[str, list[str], Path]]) -> int:
@@ -380,6 +492,8 @@ def _run_processes(commands: list[tuple[str, list[str], Path]]) -> int:
     try:
         for name, cmd, cwd in commands:
             processes[name] = _start_process(name, cmd, cwd)
+
+        _wait_for_services_ready(_resolve_runtime_ports(), processes)
 
         while True:
             for name, proc in processes.items():
