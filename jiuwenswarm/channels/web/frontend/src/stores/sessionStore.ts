@@ -279,6 +279,8 @@ interface SessionState {
   availableModels: ModelEntry[];
   /** 过滤 is_default=true 的模型，供聊天窗口 ModelSelector 使用 */
   chatAvailableModels: ModelEntry[];
+  /** 后端配置的默认模型（alias 优先），供新建会话取用，不受任何会话手动切换模型影响 */
+  defaultModelName: string | null;
 
   // B 类 session 级字段
   runtimes: Record<string, SessionRuntime>;
@@ -367,6 +369,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   heartbeatHistory: [],
   availableModels: [],
   chatAvailableModels: [],
+  defaultModelName: null,
   runtimes: {},
 
   ensureRuntime: (sessionId) => {
@@ -1086,12 +1089,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (selected) {
         try { localStorage.setItem(MODEL_STORAGE_KEY, selected); } catch { /* noop */ }
       }
-      return { availableModels: models, chatAvailableModels: chatModels };
+      return { availableModels: models, chatAvailableModels: chatModels, defaultModelName: selected };
     });
   },
 
   setSelectedModelName: (sessionId, name) => {
-    try { localStorage.setItem(MODEL_STORAGE_KEY, name); } catch { /* noop */ }
+    // 注意：这里只更新当次会话的内存态，不再写 MODEL_STORAGE_KEY——
+    // 该 key 专门保存后端配置的默认模型（见 setAvailableModels），
+    // 用户手动切模型不应污染"默认模型"这个标记，否则新建会话会继承到"最后用过的模型"。
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;

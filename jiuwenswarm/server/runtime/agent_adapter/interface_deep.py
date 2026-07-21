@@ -82,6 +82,18 @@ from openjiuwen.harness.tools import (
     create_audio_tools,
     create_vision_tools,
 )
+from openjiuwen.harness.goal.schema import GoalOperationError, GoalStatus
+from openjiuwen.harness.schema.interaction import (
+    InteractionEventType,
+    InputDispatchMode,
+    SendInputRequest,
+)
+
+GOAL_UPDATED_EVENT_TYPE = InteractionEventType.GOAL_UPDATED.value
+_ERROR_EVENT = getattr(InteractionEventType, "EXECUTION_ERROR", None)
+if _ERROR_EVENT is None:
+    _ERROR_EVENT = getattr(InteractionEventType, "RUNTIME_ERROR")
+ERROR_EVENT_TYPE = _ERROR_EVENT.value
 
 try:
     from openjiuwen.harness.tools import is_paid_search_enabled
@@ -249,7 +261,9 @@ from jiuwenswarm.common.config import (
     get_config,
     get_default_models,
     get_evolution_auto_scan_enabled,
+    get_evolution_review_trigger_enabled,
     get_evolution_auto_save_enabled,
+    get_evolution_signal_trigger_enabled,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
     get_skill_create_enabled,
@@ -271,6 +285,7 @@ from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACK
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.gateway.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.utils import (
     get_agent_skills_dir,
     get_agent_workspace_dir,
@@ -334,9 +349,14 @@ _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
 )
 
 
-def _set_skill_evolution_auto_scan(rail: Any, enabled: bool) -> None:
-    rail.auto_scan = enabled
-    rail.fuzzy_review = enabled
+def _set_skill_evolution_triggers(
+    rail: Any,
+    *,
+    signal_trigger: bool,
+    review_trigger: bool,
+) -> None:
+    rail.signal_trigger = signal_trigger
+    rail.review_trigger = review_trigger
 
 
 def _clean_heartbeat_content(content: str) -> str:
@@ -965,6 +985,9 @@ class JiuWenSwarmDeepAdapter:
                 mode=self._session_instance_mode,
                 sub_mode=self._session_instance_sub_mode,
             )
+
+            await adapter.start_interaction(session_id=sid)
+
             self._session_adapters[sid] = adapter
             # A brand-new session adapter is created from ``_session_instance_config``
             # (which may predate the latest global reload). If a global reload left a
@@ -3280,6 +3303,11 @@ class JiuWenSwarmDeepAdapter:
         """Build SkillEvolutionRail."""
         try:
             evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+            evolution_signal_trigger = get_evolution_signal_trigger_enabled(config)
+            evolution_review_trigger = get_evolution_review_trigger_enabled(
+                config,
+                fallback=evolution_auto_scan,
+            )
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
             skill_evolution_rail = SkillEvolutionRail(
@@ -3287,8 +3315,8 @@ class JiuWenSwarmDeepAdapter:
                 llm=self._model,
                 model=model_name,
                 review_runtime=EvolutionReviewRuntime(),
-                auto_scan=evolution_auto_scan,
-                fuzzy_review=evolution_auto_scan,
+                signal_trigger=evolution_signal_trigger,
+                review_trigger=evolution_review_trigger,
                 auto_save=evolution_auto_save,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
             )
@@ -3306,6 +3334,11 @@ class JiuWenSwarmDeepAdapter:
 
         resolved_language = self._resolve_runtime_language()
         evolution_auto_scan = get_evolution_auto_scan_enabled(self._config_cache)
+        evolution_signal_trigger = get_evolution_signal_trigger_enabled(self._config_cache)
+        evolution_review_trigger = get_evolution_review_trigger_enabled(
+            self._config_cache,
+            fallback=evolution_auto_scan,
+        )
         evolution_auto_save = get_evolution_auto_save_enabled(self._config_cache)
         if (
             self._skill_evolution_rail is not None
@@ -3324,15 +3357,19 @@ class JiuWenSwarmDeepAdapter:
             llm=self._model,
             model=self._default_model_name
             or self._config_cache.get("model_name", "gpt-4"),
-            auto_scan=evolution_auto_scan,
-            fuzzy_review=evolution_auto_scan,
+            signal_trigger=evolution_signal_trigger,
+            review_trigger=evolution_review_trigger,
             auto_save=evolution_auto_save,
             disabled_skills=disabled_skills,
             language=resolved_language,
         )
         self._refresh_active_evolution_rail_refs()
         if self._skill_evolution_rail is not None:
-            _set_skill_evolution_auto_scan(self._skill_evolution_rail, evolution_auto_scan)
+            _set_skill_evolution_triggers(
+                self._skill_evolution_rail,
+                signal_trigger=evolution_signal_trigger,
+                review_trigger=evolution_review_trigger,
+            )
 
     async def _unconfigure_active_evolution_rails(self) -> None:
         """Remove cached single-agent evolution rails before rebuilding them."""
@@ -3892,10 +3929,10 @@ class JiuWenSwarmDeepAdapter:
     ) -> bool:
         """Resolve enable_task_loop considering evolution rail requirements.
 
-        SkillCreateRail and auto-scan SkillEvolutionRail follow-ups require
+        SkillCreateRail and review-trigger SkillEvolutionRail follow-ups require
         task-loop mode (enable_task_loop=True) because they use
         AFTER_TASK_ITERATION events and enqueue_follow_up().
-        When skill_create=True or auto_scan=True, we force enable_task_loop=True
+        When skill_create=True or review_trigger=True, we force enable_task_loop=True
         regardless of user config.
 
         Args:
@@ -3907,7 +3944,10 @@ class JiuWenSwarmDeepAdapter:
         """
         config_base = config_base or get_config()
         skill_create_enabled = get_skill_create_enabled(config_base)
-        evolution_auto_scan_enabled = get_evolution_auto_scan_enabled(config_base)
+        evolution_review_trigger_enabled = get_evolution_review_trigger_enabled(
+            config_base,
+            fallback=get_evolution_auto_scan_enabled(config_base),
+        )
         configured_value = config.get("enable_task_loop", True)
 
         if skill_create_enabled:
@@ -3918,10 +3958,10 @@ class JiuWenSwarmDeepAdapter:
                     configured_value,
                 )
             return True
-        if evolution_auto_scan_enabled:
+        if evolution_review_trigger_enabled:
             if not configured_value:
                 logger.warning(
-                    "[JiuWenSwarmDeepAdapter] evolution.auto_scan=True requires "
+                    "[JiuWenSwarmDeepAdapter] evolution.review_trigger=True requires "
                     "enable_task_loop=True; overriding user config (enable_task_loop=%s -> True)",
                     configured_value,
                 )
@@ -4002,9 +4042,14 @@ class JiuWenSwarmDeepAdapter:
         # Apply in-place updates to skill_evolution_rail (no re-init needed).
         if self._skill_evolution_rail is not None:
             self._skill_evolution_rail.update_llm(self._model, self._default_model_name)
-            _set_skill_evolution_auto_scan(
+            evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+            _set_skill_evolution_triggers(
                 self._skill_evolution_rail,
-                get_evolution_auto_scan_enabled(config),
+                signal_trigger=get_evolution_signal_trigger_enabled(config),
+                review_trigger=get_evolution_review_trigger_enabled(
+                    config,
+                    fallback=evolution_auto_scan,
+                ),
             )
 
         # Reuse existing SkillUseRail to preserve dynamically loaded skills
@@ -5176,11 +5221,47 @@ class JiuWenSwarmDeepAdapter:
             return False
         return has_runtime_capability
 
+    async def start_interaction(self, session_id: str) -> None:
+        """Bind a product Session and start this adapter's DeepAgent interaction loop.
+
+        Public entry for the facade/session-pool path. No-op when
+        ``create_instance`` has not produced an underlying agent yet. Failures
+        are logged and swallowed — same contract as the former inline start.
+        """
+        if self._instance is None:
+            return
+        try:
+            from openjiuwen.core.session.agent import create_agent_session
+
+            session = create_agent_session(
+                session_id=session_id,
+                card=getattr(self._instance, "card", None),
+            )
+            await session.pre_run(inputs={})
+            await self._instance.start(session=session)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] start completed: session_id=%s",
+                session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] start failed: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+
+    async def stop_interaction(self) -> None:
+        """Stop this adapter's DeepAgent interaction loop if it was started."""
+        if self._instance is None:
+            return
+        await self._instance.stop()
+
     async def cleanup(self) -> None:
         """Release adapter-owned external runtime resources."""
         if not self._is_session_scoped_adapter:
             for adapter in list(self._session_adapters.values()):
                 try:
+                    await adapter.stop_interaction()
                     await adapter.cleanup()
                 except Exception as exc:
                     logger.warning(
@@ -5192,6 +5273,14 @@ class JiuWenSwarmDeepAdapter:
             self._session_adapter_last_used.clear()
             self._session_adapter_versions.clear()
             self._session_adapter_reload_failures.clear()
+        else:
+            try:
+                await self.stop_interaction()
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] stop failed during cleanup: %s",
+                    exc,
+                )
         # 取消未到期的延时重索引 task，避免 adapter cleanup 后仍有孤儿 task
         # 去触发 manager.sync（此时 rail/manager 可能已失效）。
         if self._memory_reindex_task is not None and not self._memory_reindex_task.done():
@@ -5270,9 +5359,167 @@ class JiuWenSwarmDeepAdapter:
             )
         return cancelled_tool_results
 
+    def _has_active_goal_round(self) -> bool:
+        """Whether DeepAgent is currently executing a goal round.
+
+        A goal round is a session-level persistent objective that must survive
+        stray stream cancellations (``stream_cancel``) and ``chat.interrupt``.
+        It is controlled exclusively via ``/goal pause | clear``, never by a
+        generic abort — otherwise a new chat.send (which the frontend precedes
+        with chat.interrupt cancel) would tear down the goal producer.
+        """
+        if self._instance is None:
+            return False
+        if not self._instance_interaction_started():
+            return False
+        active = self._instance.active_round
+        return active is not None and getattr(active, "run_kind", None) == "goal"
+
+    def _instance_interaction_started(self) -> bool:
+        """Prefer the public ``interaction_started`` flag; fall back for older SDKs."""
+        if self._instance is None:
+            return False
+        started = getattr(self._instance, "interaction_started", None)
+        if isinstance(started, bool):
+            return started
+        return bool(getattr(self._instance, "_interaction_started", False))
+
+    def _has_active_goal_interaction(self) -> bool:
+        """Whether the shared DeepAgent still owns an active goal interaction."""
+        if self._has_active_goal_round():
+            return True
+        if self._instance is None:
+            return False
+        manager = getattr(self._instance, "goal_manager", None)
+        if manager is None:
+            return False
+        try:
+            peek = getattr(manager, "peek", None)
+            record = peek() if callable(peek) else manager.get_store().load()
+        except Exception:
+            logger.debug("[Goal] failed to inspect active goal status", exc_info=True)
+            return False
+        status = getattr(record, "status", None)
+        status_value = getattr(status, "value", status)
+        return status_value == "active"
+
+    def _adapt_goal_intermediate_final(self, parsed: dict | None) -> dict | None:
+        if not isinstance(parsed, dict):
+            return parsed
+        if parsed.get("event_type") != "chat.final":
+            return parsed
+        if not self._has_active_goal_interaction():
+            return parsed
+        adapted = dict(parsed)
+        adapted["event_type"] = "chat.delta"
+        adapted["goal_intermediate"] = True
+        return adapted
+
+    @staticmethod
+    def _resolve_input_dispatch_mode(params: Any) -> InputDispatchMode | None:
+        """Map host ``input_mode`` / ``runtime_mode`` onto OpenJiuwen dispatch mode.
+
+        Missing or unknown values keep pre-Goal Gateway replace semantics
+        (``None`` → OpenJiuwen default FOLLOW_UP boundary when idle).
+        """
+        if not isinstance(params, dict):
+            return None
+        input_mode = str(
+            params.get("input_mode") or params.get("runtime_mode") or ""
+        ).strip().lower()
+        if input_mode == "follow_up":
+            return InputDispatchMode.FOLLOW_UP
+        if input_mode == "steer":
+            return InputDispatchMode.STEER
+        return None
+
+    @staticmethod
+    def _wants_attach_goal(params: Any) -> bool:
+        return isinstance(params, dict) and params.get("attach_goal") is True
+
+    @staticmethod
+    def _should_parse_tui_goal_slash(
+        *,
+        pending_goal_op: dict[str, Any] | None,
+        attach_goal_request: bool,
+        channel_id: Any,
+        query: Any,
+    ) -> bool:
+        """Whether to parse chat text ``/goal ...`` (TUI only, when no structured op)."""
+        if pending_goal_op is not None or attach_goal_request:
+            return False
+        if str(channel_id or "").strip().lower() != "tui":
+            return False
+        return isinstance(query, str)
+
+    @staticmethod
+    def _parse_goal_slash_intent(query: str) -> dict[str, Any] | None:
+        """Parse ``/goal ...`` into an action dict without touching GoalManager."""
+        text = query.strip()
+        if not text.startswith("/goal"):
+            return None
+        args = text[5:].strip()
+        if not args:
+            return {"action": "get"}
+        lower = args.lower()
+        if lower in {"pause", "resume", "clear"}:
+            return {"action": lower}
+        if lower.startswith("set "):
+            return {"action": "set", "objective": args[4:].strip()}
+        if lower == "set":
+            return {"action": "set", "objective": ""}
+        return {"action": "set", "objective": args}
+
+    def _is_ack_only_dispatch(self, params: Any) -> bool:
+        """Steer / follow_up prefer an existing reader when one is present."""
+        mode = self._resolve_input_dispatch_mode(params)
+        return mode in (InputDispatchMode.STEER, InputDispatchMode.FOLLOW_UP)
+
+    @staticmethod
+    def _structured_goal_op_from_request(
+        request: AgentRequest,
+    ) -> dict[str, Any] | None:
+        """Map streaming ``command.goal`` set/resume onto the attach→control path.
+
+        Plain chat text like ``/goal set ...`` is never parsed here — only an
+        explicit ``command.goal`` method (Web/TUI structured API).
+        """
+        if request.req_method != ReqMethod.COMMAND_GOAL:
+            return None
+        raw = request.params if isinstance(request.params, dict) else {}
+        action = str(raw.get("action", "get") or "get").strip().lower()
+        if action not in {"set", "resume"}:
+            return None
+        op: dict[str, Any] = {"action": action}
+        if action == "set":
+            objective = raw.get("objective")
+            op["objective"] = objective if isinstance(objective, str) else ""
+            op["overwrite_confirmed"] = bool(raw.get("overwrite_confirmed", False))
+            for key in ("token_budget", "max_attempts"):
+                value = raw.get(key)
+                if value is None or isinstance(value, bool):
+                    continue
+                if isinstance(value, int):
+                    op[key] = value
+                elif isinstance(value, str) and value.strip().lstrip("-").isdigit():
+                    op[key] = int(value.strip())
+        return op
+
     async def _abort_shared_agent_if_safe(self, normalized_sid: str, intent: str) -> None:
         """Global DeepAgent/scheduler abort when safe for unrelated sessions."""
         if self._instance is None:
+            return
+        # Never abort while a goal round is in flight.  The goal supervisor owns
+        # its lifecycle; aborting the shared DeepAgent here (e.g. from a
+        # stream_cancel triggered by the frontend's cancel-before-send) would
+        # kill the goal producer and freeze the backend for the goal session.
+        if self._has_active_goal_round():
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] interrupt(%s): active goal round -> "
+                "skip instance.abort (goal controlled via /goal pause|clear): session=%s",
+                intent,
+                normalized_sid,
+            )
             return
         other_count = self._other_active_sessions(normalized_sid)
         if other_count > 0:
@@ -5309,14 +5556,56 @@ class JiuWenSwarmDeepAdapter:
             AgentResponse 包含 interrupt_result 事件数据
         """
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
-            try:
-                return await session_adapter.process_interrupt(request)
-            finally:
-                await self._evict_idle_session_adapters()
+            if isinstance(request.params, dict):
+                intent_for_dispatch = request.params.get("intent", "cancel")
+            else:
+                intent_for_dispatch = "cancel"
+            if intent_for_dispatch in ("cancel", "supplement"):
+                # cancel/supplement：若该 session 尚无 session-scoped adapter（即没有 in-flight 流），
+                # 则不创建——创建会跑完整 agent 初始化（17 rail + ensure_initialized，
+                # 真实场景含 ProjectMemoryRail 扫描，耗时可达数十秒），把 cancel 处理本身卡住，
+                # 后续 esc 的 interrupt 全堵在队列里 → AgentServer 响应超时。
+                # 拿不到 cached adapter 即"无运行中任务"，直接 fallthrough 到主 adapter 的
+                # cancel 逻辑（下方 `not _session_is_active` 分支会跑 per-session teardown 并返回 success）。
+                cached = self._get_cached_session_adapter(request.session_id)
+                if cached is None:
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] interrupt(%s): no cached session adapter for "
+                        "session=%s, skip create (no in-flight stream) — fallthrough to shared teardown",
+                        intent_for_dispatch,
+                        request.session_id,
+                    )
+                else:
+                    try:
+                        return await cached.process_interrupt(request)
+                    finally:
+                        await self._evict_idle_session_adapters()
+            else:
+                # pause/resume：需要 session-scoped adapter 的 StreamEventRail，按原逻辑创建。
+                session_adapter = await self._get_or_create_session_adapter(request.session_id)
+                try:
+                    return await session_adapter.process_interrupt(request)
+                finally:
+                    await self._evict_idle_session_adapters()
 
         intent = request.params.get("intent", "cancel")
         new_input = request.params.get("new_input")
+
+        # Interaction-managed sessions: route cancel/supplement through
+        # DeepAgent.cancel_round instead of the global DeepAgent abort + raw
+        # asyncio-task cancellation path.  The global path kills the shared
+        # stream producer out-of-band, which leaves the interaction supervisor's
+        # session stream consumer hanging forever and stops the
+        # backend from responding to any further messages.  The owning output
+        # stream closes with abort_active_round=True for stream requests (primary
+        # path).  cancel_round below is the idempotent unary fallback: it aborts
+        # the current user OR goal attempt but never clears GoalRecord.
+        if (
+            self._instance is not None
+            and self._instance_interaction_started()
+            and intent in ("cancel", "supplement")
+        ):
+            return await self._process_interaction_interrupt(request, intent, new_input)
 
         # Session guard: only execute interrupt operations if the target session
         # is currently active on this adapter. Without this guard, a shared adapter
@@ -5328,7 +5617,8 @@ class JiuWenSwarmDeepAdapter:
         _session_is_active = self._is_session_active(_normalized_sid)
         if not _session_is_active and intent in ("pause", "resume"):
             logger.info(
-                "[JiuWenSwarmDeepAdapter] interrupt(%s): session=%s not active on this adapter, "
+                "[JiuWenSwarmDeepAdapter] interrupt(%s):",
+                "session=%s not active on this adapter, ",
                 "skipping pause/resume (active_sessions=%s)",
                 intent,
                 request.session_id,
@@ -5473,6 +5763,66 @@ class JiuWenSwarmDeepAdapter:
                         },
                     },
                     mode=request.params.get("mode", "unknown") if isinstance(request.params, dict) else "unknown",
+                )
+
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
+    async def _process_interaction_interrupt(
+        self,
+        request: "AgentRequest",
+        intent: str,
+        new_input: Any,
+    ) -> "AgentResponse":
+        """Handle cancel/supplement for an interaction-managed session.
+
+        Closing the owning interaction output stream is the primary shutdown
+        path for streaming hosts.  This unary handler is the idempotent
+        fallback: ``cancel_round`` aborts the current user or goal attempt
+        without clearing GoalRecord.
+        """
+        cancelled = False
+        try:
+            cancelled = await self._instance.cancel_round(
+                reason="user_cancel",
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] interrupt(%s): interaction round cancel "
+                "cancelled=%s session=%s",
+                intent,
+                cancelled,
+                request.session_id,
+            )
+        except Exception:
+            logger.exception(
+                "[JiuWenSwarmDeepAdapter] interrupt(%s): interaction cancel failed",
+                intent,
+            )
+        message = "任务已切换" if intent == "supplement" else "任务已取消"
+
+        payload: dict[str, Any] = {
+            "event_type": "chat.interrupt_result",
+            "intent": intent,
+            "success": True,
+            "message": message,
+        }
+        if new_input:
+            payload["new_input"] = new_input
+
+        # Best-effort todo cancellation for user cancel (does not touch runtime).
+        if cancelled and intent == "cancel" and request.session_id:
+            try:
+                updated_todos = await self._cancel_pending_todos(request.session_id)
+                if updated_todos is not None:
+                    payload["todos"] = updated_todos
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] 标记 todo cancelled 失败: %s", exc,
                 )
 
         return AgentResponse(
@@ -6053,11 +6403,13 @@ class JiuWenSwarmDeepAdapter:
                 self._skill_create_rail = self._build_skill_create_rail(self._config_cache)
         return None
 
+
     async def _handle_slash_command(
         self,
         query: Any,
         session_id: str = "default",
         mode: str = "agent",
+        channel_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Intercept slash commands before agent invocation.
 
@@ -6067,6 +6419,17 @@ class JiuWenSwarmDeepAdapter:
         """
         if not isinstance(query, str):
             return None
+
+        # Goal slash text is a TUI convenience only. Web (and other channels)
+        # must use structured ``command.goal`` / ``attach_goal``; a plain
+        # chat message like "/goal set ..." stays ordinary user text.
+        if str(channel_id or "").strip().lower() == "tui":
+            goal_result = await self._handle_goal_slash_command(
+                query,
+                session_id,
+            )
+            if goal_result is not None:
+                return goal_result
 
         stripped = query.strip()
 
@@ -6088,6 +6451,206 @@ class JiuWenSwarmDeepAdapter:
             )
 
         return None
+
+    # Goal capability adapter -------------------------------------------------
+
+    @staticmethod
+    def _goal_record_payload(record: Any | None) -> dict[str, Any] | None:
+        if record is None:
+            return None
+        to_dict = getattr(record, "to_dict", None)
+        return to_dict() if callable(to_dict) else None
+
+    @staticmethod
+    def _format_goal_control_message(action: str, goal: dict[str, Any] | None) -> str:
+        if action == "get":
+            return "No goal in this session." if goal is None else f"Goal: {goal.get('objective', '')}"
+        if action == "pause":
+            return "Goal paused." if goal is not None else "No goal in this session."
+        if action == "clear":
+            return "Goal cleared." if goal is None else "Goal was not cleared."
+        if action == "resume":
+            return "Goal resumed." if goal is not None else "No goal in this session."
+        return "Goal set." if goal is not None else "Goal was not set."
+
+    @staticmethod
+    def _interaction_goal_updated_payload(payload: Any) -> dict[str, Any]:
+        """Normalize goal updates to the public Web/TUI payload shape."""
+        if not isinstance(payload, dict):
+            return {"event_type": GOAL_UPDATED_EVENT_TYPE, "goal": None}
+        if "goal" in payload:
+            return {
+                "event_type": GOAL_UPDATED_EVENT_TYPE,
+                "goal": payload.get("goal"),
+            }
+        return {
+            "event_type": GOAL_UPDATED_EVENT_TYPE,
+            "goal": payload or None,
+        }
+
+    def _get_goal_manager(self) -> Any:
+        if self._instance is None:
+            return None
+        return getattr(self._instance, "goal_manager", None)
+
+    async def dispatch_goal_control(
+        self,
+        *,
+        action: str,
+        objective: str | None = None,
+        overwrite_confirmed: bool = False,
+        token_budget: int | None = None,
+        max_attempts: int | None = None,
+        session_id: str = "default",
+    ) -> dict[str, Any] | None:
+        """Public Goal control entry used by the facade/session-pool adapter."""
+        return await self._dispatch_goal_control(
+            action=action,
+            objective=objective,
+            overwrite_confirmed=overwrite_confirmed,
+            token_budget=token_budget,
+            max_attempts=max_attempts,
+            session_id=session_id,
+        )
+
+    async def _dispatch_goal_control(
+        self,
+        *,
+        action: str,
+        objective: str | None = None,
+        overwrite_confirmed: bool = False,
+        token_budget: int | None = None,
+        max_attempts: int | None = None,
+        session_id: str = "default",
+    ) -> dict[str, Any] | None:
+        """Map JiuwenSwarm protocol fields to the independent Goal methods."""
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(session_id)
+            try:
+                return await session_adapter.dispatch_goal_control(
+                    action=action,
+                    objective=objective,
+                    overwrite_confirmed=overwrite_confirmed,
+                    token_budget=token_budget,
+                    max_attempts=max_attempts,
+                    session_id=session_id,
+                )
+            finally:
+                await self._evict_idle_session_adapters()
+        if self._instance is None:
+            return None
+
+        normalized_action = action.strip().lower()
+        goal_manager = self._get_goal_manager()
+        if goal_manager is None:
+            return {
+                "result_type": "goal_error",
+                "action": normalized_action,
+                "error_code": "goal_manager_not_started",
+                "error": "goal manager is not started",
+            }
+        try:
+            if normalized_action == "get":
+                goal = await goal_manager.get()
+            elif normalized_action == "set":
+                goal = await goal_manager.set(
+                    objective or "",
+                    overwrite_confirmed=overwrite_confirmed,
+                    token_budget=token_budget,
+                    max_attempts=max_attempts,
+                )
+            elif normalized_action == "pause":
+                goal = await goal_manager.pause()
+            elif normalized_action == "resume":
+                goal = await goal_manager.resume()
+            elif normalized_action == "clear":
+                removed = await goal_manager.clear()
+                return {
+                    "result_type": "goal_control",
+                    "action": normalized_action,
+                    "goal": None,
+                    "cleared_goal": self._goal_record_payload(removed),
+                    "output": self._format_goal_control_message(normalized_action, None),
+                }
+            else:
+                return {
+                    "result_type": "goal_error",
+                    "action": normalized_action,
+                    "error_code": "invalid_action",
+                    "error": f"unsupported goal action: {action}",
+                }
+        except GoalOperationError as exc:
+            if exc.code == "already_exists":
+                return {
+                    "result_type": "goal_confirm_required",
+                    "action": normalized_action,
+                    "error_code": exc.code,
+                    "error": str(exc),
+                    "existing_goal": self._goal_record_payload(exc.goal),
+                    "requested_objective": objective,
+                }
+            return {
+                "result_type": "goal_error",
+                "action": normalized_action,
+                "error_code": exc.code,
+                "error": str(exc),
+                "goal": self._goal_record_payload(exc.goal),
+            }
+
+        goal_payload = self._goal_record_payload(goal)
+        active = goal is not None and goal.status is GoalStatus.ACTIVE
+        return {
+            "result_type": "goal_stream"
+            if normalized_action in {"set", "resume"} and active
+            else "goal_control",
+            "action": normalized_action,
+            "goal": goal_payload,
+            "output": self._format_goal_control_message(normalized_action, goal_payload),
+        }
+
+    async def handle_goal_command_structured(
+        self,
+        params: dict[str, Any] | None,
+        session_id: str = "default",
+    ) -> dict[str, Any] | None:
+        """Structured ``command.goal`` endpoint."""
+        raw = params if isinstance(params, dict) else {}
+        objective = raw.get("objective")
+        return await self._dispatch_goal_control(
+            action=str(raw.get("action", "get")),
+            objective=objective if isinstance(objective, str) else None,
+            overwrite_confirmed=bool(raw.get("overwrite_confirmed", False)),
+            token_budget=raw.get("token_budget"),
+            max_attempts=raw.get("max_attempts"),
+            session_id=session_id,
+        )
+
+    async def _handle_goal_slash_command(
+        self,
+        query: str,
+        session_id: str = "default",
+    ) -> dict[str, Any] | None:
+        """Translate only product syntax; the SDK receives capability calls."""
+        text = query.strip()
+        if not text.startswith("/goal"):
+            return None
+        args = text[5:].strip()
+        if not args:
+            return await self._dispatch_goal_control(action="get", session_id=session_id)
+        lower = args.lower()
+        if lower in {"pause", "resume", "clear"}:
+            return await self._dispatch_goal_control(action=lower, session_id=session_id)
+        if lower.startswith("set "):
+            objective = args[4:].strip()
+        elif lower == "set":
+            objective = ""
+        else:
+            # ``get`` and ``stop`` are not user command words.  They remain
+            # valid goal text in the documented ``/goal <objective>`` form.
+            objective = args
+        return await self._dispatch_goal_control(
+            action="set", objective=objective, session_id=session_id
+        )
 
     async def _cancel_pending_todos(self, session_id: str) -> list[dict] | None:
         """将未完成的 todo 项标记为 cancelled.
@@ -6183,8 +6746,63 @@ class JiuWenSwarmDeepAdapter:
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent")
 
-        slash_result = await self._handle_slash_command(query, session_id, mode)
+        slash_result = await self._handle_slash_command(
+            query,
+            session_id,
+            mode,
+            channel_id=request.channel_id,
+        )
         if slash_result is not None:
+            result_type = slash_result.get("result_type")
+            if result_type == "goal_stream":
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={
+                        "event_type": "goal.snapshot",
+                        "action": slash_result.get("action"),
+                        "goal": slash_result.get("goal"),
+                        "message": "Goal is ready to run through a streaming request.",
+                    },
+                    metadata=request.metadata,
+                )
+            elif result_type == "goal_control":
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={
+                        "event_type": "goal.snapshot",
+                        "action": slash_result.get("action"),
+                        "goal": slash_result.get("goal"),
+                        "cleared_goal": slash_result.get("cleared_goal"),
+                    },
+                    metadata=request.metadata,
+                )
+            elif result_type == "goal_confirm_required":
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={
+                        "event_type": "goal.confirm_required",
+                        "existing_goal": slash_result.get("existing_goal"),
+                        "requested_objective": slash_result.get("requested_objective"),
+                    },
+                    metadata=request.metadata,
+                )
+            elif result_type == "goal_error":
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={
+                        "event_type": ERROR_EVENT_TYPE,
+                        "code": slash_result.get("error_code", "goal_error"),
+                        "message": slash_result.get("error", "goal operation failed"),
+                        "goal": slash_result.get("goal"),
+                    },
+                    metadata=request.metadata,
+                )
             followup_prompt = self._extract_followup_prompt(slash_result)
             if followup_prompt is not None:
                 inputs = dict(inputs)
@@ -6220,7 +6838,6 @@ class JiuWenSwarmDeepAdapter:
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
-        # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)
@@ -6229,6 +6846,9 @@ class JiuWenSwarmDeepAdapter:
             self._stream_event_rail.reset_abort(session_id)
         image_files_token = None
         _run_span: Any = None
+        collected_content: list[str] = []
+        interaction_stream = None
+        interaction_stream_abort = True
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -6275,7 +6895,67 @@ class JiuWenSwarmDeepAdapter:
             )
             sync_agent_observability()
             _run_span = open_agent_run_span(session_id=session_id, mode=mode)
-            result = await Runner.run_agent(agent=self._instance, inputs=inputs)
+            attach_goal = self._wants_attach_goal(request.params)
+            dispatch_mode = self._resolve_input_dispatch_mode(request.params)
+            if attach_goal:
+                gm = self._get_goal_manager()
+                peek = getattr(gm, "peek", None) if gm is not None else None
+                record = peek() if callable(peek) else None
+                status = getattr(getattr(record, "status", None), "value", getattr(record, "status", None))
+                if status != "active":
+                    return AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=True,
+                        payload={"event_type": "runtime.accepted", "request_id": request.request_id},
+                        metadata=request.metadata,
+                    )
+                interaction_stream = await self._instance.attach_output()
+            elif self._is_ack_only_dispatch(request.params):
+                # Steal the reader if idle; otherwise inject into the existing stream.
+                interaction_stream = await self._instance.attach_output()
+                await self._instance.send_input(
+                    SendInputRequest(
+                        request_id=request.request_id,
+                        inputs=inputs,
+                        mode=dispatch_mode,
+                    )
+                )
+            else:
+                interaction_stream = await self._instance.attach_output()
+                if interaction_stream is not None:
+                    await self._instance.send_input(
+                        SendInputRequest(
+                            request_id=request.request_id,
+                            inputs=inputs,
+                            mode=dispatch_mode,
+                        )
+                    )
+            if interaction_stream is None:
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={"event_type": "runtime.accepted", "request_id": request.request_id},
+                    metadata=request.metadata,
+                )
+            async for chunk in interaction_stream:
+                if hasattr(chunk, "type") and hasattr(chunk, "payload"):
+                    if chunk.type in ("llm_output", "answer"):
+                        text = (
+                            chunk.payload.get("content", "")
+                            if isinstance(chunk.payload, dict)
+                            else str(chunk.payload)
+                        )
+                        if text:
+                            collected_content.append(text)
+                else:
+                    parsed = self._parse_stream_chunk(chunk)
+                    if parsed is not None:
+                        text = parsed.get("content", "")
+                        if text:
+                            collected_content.append(text)
+            interaction_stream_abort = False
         except asyncio.CancelledError:
             logger.info(
                 "[JiuWenSwarmDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s",
@@ -6294,13 +6974,20 @@ class JiuWenSwarmDeepAdapter:
                 )
 
                 reset_current_multimodal_image_files(image_files_token)
+            if interaction_stream is not None:
+                try:
+                    await interaction_stream.close(
+                        abort_active_round=interaction_stream_abort,
+                    )
+                except Exception:
+                    logger.debug("[Goal] interaction stream close failed", exc_info=True)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
             self._unmark_session_active(session_id)
 
-        content = result if isinstance(result, (str, dict)) else str(result)
+        content = "".join(collected_content) if collected_content else ""
 
         return AgentResponse(
             request_id=request.request_id,
@@ -6426,9 +7113,78 @@ class JiuWenSwarmDeepAdapter:
                 yield chunk
             return
 
-        # 拦截斜杠命令
-        slash_result = await self._handle_slash_command(query, session_id, mode)
+        # 拦截斜杠命令 / 结构化 command.goal
+        goal_stream_request = False
+        goal_snapshot: dict[str, Any] | None = None
+        goal_action: str | None = None
+        pending_goal_op: dict[str, Any] | None = None
+        attach_goal_request = self._wants_attach_goal(request.params)
+        # Structured command.goal set/resume (Web/TUI): same attach→set→read path.
+        # Plain chat text "/goal ..." is NOT parsed here for Web — only TUI slash.
+        pending_goal_op = self._structured_goal_op_from_request(request)
+        if self._should_parse_tui_goal_slash(
+            pending_goal_op=pending_goal_op,
+            attach_goal_request=attach_goal_request,
+            channel_id=request.channel_id,
+            query=query,
+        ):
+            intent = self._parse_goal_slash_intent(query)
+            if intent is not None and intent.get("action") in {"set", "resume"}:
+                # Defer set/resume until after attach_output (attach → set).
+                pending_goal_op = intent
+        slash_result = None
+        if pending_goal_op is None and not attach_goal_request:
+            slash_result = await self._handle_slash_command(
+                query,
+                session_id,
+                mode,
+                channel_id=request.channel_id,
+            )
         if slash_result is not None:
+            result_type = slash_result.get("result_type")
+            if result_type == "goal_stream":
+                # Legacy path: control already applied; attach will ensure work.
+                goal_stream_request = True
+                goal_snapshot = slash_result.get("goal")
+                goal_action = slash_result.get("action")
+            elif result_type == "goal_control":
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": "goal.snapshot",
+                        "action": slash_result.get("action"),
+                        "goal": slash_result.get("goal"),
+                        "cleared_goal": slash_result.get("cleared_goal"),
+                    },
+                    is_complete=True,
+                )
+                return
+            elif result_type == "goal_confirm_required":
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": "goal.confirm_required",
+                        "existing_goal": slash_result.get("existing_goal"),
+                        "requested_objective": slash_result.get("requested_objective"),
+                    },
+                    is_complete=True,
+                )
+                return
+            elif result_type == "goal_error":
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": ERROR_EVENT_TYPE,
+                        "code": slash_result.get("error_code", "goal_error"),
+                        "message": slash_result.get("error", "goal operation failed"),
+                        "goal": slash_result.get("goal"),
+                    },
+                    is_complete=True,
+                )
+                return
             followup_prompt = self._extract_followup_prompt(slash_result)
             if followup_prompt is not None:
                 inputs = dict(inputs)
@@ -6512,6 +7268,8 @@ class JiuWenSwarmDeepAdapter:
         _run_span: Any = None
         _debug_logger = None
         _debug_trace_token = None  # reset token for the ContextVar-bound logger
+        interaction_stream = None
+        interaction_stream_abort = True
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -6571,21 +7329,14 @@ class JiuWenSwarmDeepAdapter:
                 mode=mode, request_debug=bool(inputs.get("_request_debug"))
             )
             # Sync single-agent / coding-agent observability with current config
-            # before running. init_observability() wires the global
-            # OtelCallbackHandler so LLM/tool spans are emitted automatically.
-            # force=True (a /debug run with debug_trace.<mode>.otel_enabled) pulls
-            # up OTel even when agent_observability.enabled is false.
+            # before running.
             from jiuwenswarm.agents.harness.agent_observability import (
                 close_agent_run_span,
                 open_agent_run_span,
                 sync_agent_observability,
             )
             sync_agent_observability(force=_dbg_settings.otel_enabled)
-            # Open a root span so OtelCallbackHandler has a parent for LLM/tool
-            # spans. Closed in the finally below.
             _run_span = open_agent_run_span(session_id=session_id, mode=mode)
-            # Capture OTel trace/span ids (empty when no span was opened, e.g.
-            # OTel not enabled) so the dump can be cross-referenced with a trace.
             _otel_trace_id = ""
             _otel_span_id = ""
             if _run_span is not None:
@@ -6595,7 +7346,6 @@ class JiuWenSwarmDeepAdapter:
                     _otel_span_id = format(_span_ctx.span_id, "016x")
                 except Exception:
                     pass
-            # --- debug trace dump (request-level /debug OR config-level, best-effort) ---
             try:
                 from jiuwenswarm.server.runtime.debug_trace.context import (
                     set_debug_trace_logger,
@@ -6625,11 +7375,152 @@ class JiuWenSwarmDeepAdapter:
             except Exception as _dbg_exc:
                 logger.warning("[JiuWenSwarmDeepAdapter] debug trace init failed: %s", _dbg_exc)
                 _debug_logger = None
-            async for chunk in Runner.run_agent_streaming(self._instance, inputs):
+
+            async def _yield_runtime_accepted() -> AsyncIterator[AgentResponseChunk]:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={"event_type": "runtime.accepted", "request_id": rid},
+                    is_complete=False,
+                )
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload=None,
+                    is_complete=True,
+                )
+
+            if pending_goal_op is not None:
+                interaction_stream = await self._instance.attach_output()
+                control = await self._dispatch_goal_control(
+                    action=str(pending_goal_op.get("action") or "get"),
+                    objective=pending_goal_op.get("objective")
+                    if isinstance(pending_goal_op.get("objective"), str)
+                    else None,
+                    overwrite_confirmed=bool(pending_goal_op.get("overwrite_confirmed", False)),
+                    token_budget=pending_goal_op.get("token_budget"),
+                    max_attempts=pending_goal_op.get("max_attempts"),
+                    session_id=session_id,
+                )
+                result_type = (control or {}).get("result_type")
+                if result_type == "goal_confirm_required":
+                    if interaction_stream is not None:
+                        await interaction_stream.close(abort_active_round=False)
+                        interaction_stream = None
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload={
+                            "event_type": "goal.confirm_required",
+                            "existing_goal": control.get("existing_goal"),
+                            "requested_objective": control.get("requested_objective"),
+                        },
+                        is_complete=True,
+                    )
+                    interaction_stream_abort = False
+                    return
+                if result_type == "goal_error":
+                    if interaction_stream is not None:
+                        await interaction_stream.close(abort_active_round=False)
+                        interaction_stream = None
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload={
+                            "event_type": ERROR_EVENT_TYPE,
+                            "code": control.get("error_code", "goal_error"),
+                            "message": control.get("error", "goal operation failed"),
+                            "goal": control.get("goal"),
+                        },
+                        is_complete=True,
+                    )
+                    interaction_stream_abort = False
+                    return
+                goal_snapshot = (control or {}).get("goal")
+                goal_action = (control or {}).get("action")
+                if goal_snapshot is not None:
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload={
+                            "event_type": "goal.snapshot",
+                            "action": goal_action,
+                            "goal": goal_snapshot,
+                        },
+                        is_complete=False,
+                    )
+                # Only keep the lease when set/resume left an ACTIVE goal to run.
+                if result_type != "goal_stream" or interaction_stream is None:
+                    if interaction_stream is not None:
+                        await interaction_stream.close(abort_active_round=False)
+                        interaction_stream = None
+                    async for chunk in _yield_runtime_accepted():
+                        yield chunk
+                    interaction_stream_abort = False
+                    return
+            elif goal_stream_request or attach_goal_request:
+                if goal_snapshot is not None:
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload={
+                            "event_type": "goal.snapshot",
+                            "action": goal_action,
+                            "goal": goal_snapshot,
+                        },
+                        is_complete=False,
+                    )
+                if attach_goal_request:
+                    gm = self._get_goal_manager()
+                    peek = getattr(gm, "peek", None) if gm is not None else None
+                    record = peek() if callable(peek) else None
+                    status = getattr(getattr(record, "status", None), "value", getattr(record, "status", None))
+                    if status != "active":
+                        async for chunk in _yield_runtime_accepted():
+                            yield chunk
+                        interaction_stream_abort = False
+                        return
+                interaction_stream = await self._instance.attach_output()
+                if interaction_stream is None:
+                    async for chunk in _yield_runtime_accepted():
+                        yield chunk
+                    interaction_stream_abort = False
+                    return
+            elif self._is_ack_only_dispatch(request.params):
+                # Idle → become the reader; busy → inject and accept.
+                interaction_stream = await self._instance.attach_output()
+                await self._instance.send_input(
+                    SendInputRequest(
+                        request_id=rid,
+                        inputs=inputs,
+                        mode=self._resolve_input_dispatch_mode(request.params),
+                    )
+                )
+                if interaction_stream is None:
+                    async for chunk in _yield_runtime_accepted():
+                        yield chunk
+                    interaction_stream_abort = False
+                    return
+            else:
+                interaction_stream = await self._instance.attach_output()
+                if interaction_stream is None:
+                    async for chunk in _yield_runtime_accepted():
+                        yield chunk
+                    interaction_stream_abort = False
+                    return
+                await self._instance.send_input(
+                    SendInputRequest(
+                        request_id=rid,
+                        inputs=inputs,
+                        mode=self._resolve_input_dispatch_mode(request.params),
+                    )
+                )
+            async for chunk in interaction_stream:
                 if _debug_logger is not None:
                     _debug_logger.feed(chunk)
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                     parsed = self._parse_stream_chunk(chunk)
+                    parsed = self._adapt_goal_intermediate_final(parsed)
                     if parsed is not None:
                         if should_skip_duplicate_ask_user(parsed):
                             continue
@@ -6752,6 +7643,7 @@ class JiuWenSwarmDeepAdapter:
                         accumulated_reasoning = ""
                     if has_streamed_content:
                         parsed = self._parse_stream_chunk(chunk, _has_streamed_content=True)
+                        parsed = self._adapt_goal_intermediate_final(parsed)
                         if parsed is not None:
                             if should_skip_duplicate_ask_user(parsed):
                                 continue
@@ -6763,6 +7655,7 @@ class JiuWenSwarmDeepAdapter:
                             )
                         continue
                     parsed = self._parse_stream_chunk(chunk)
+                    parsed = self._adapt_goal_intermediate_final(parsed)
                     if parsed is not None:
                         if should_skip_duplicate_ask_user(parsed):
                             continue
@@ -6791,6 +7684,7 @@ class JiuWenSwarmDeepAdapter:
                     )
                     accumulated_reasoning = ""
                 parsed = self._parse_stream_chunk(chunk)
+                parsed = self._adapt_goal_intermediate_final(parsed)
                 if parsed is not None:
                     if should_skip_duplicate_ask_user(parsed):
                         continue
@@ -6802,10 +7696,15 @@ class JiuWenSwarmDeepAdapter:
                     )
 
             if accumulated_text:
+                final_event_type = (
+                    "chat.delta"
+                    if self._has_active_goal_interaction()
+                    else "chat.final"
+                )
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
-                    payload={"event_type": "chat.final", "content": accumulated_text},
+                    payload={"event_type": final_event_type, "content": accumulated_text},
                     is_complete=False,
                 )
             if accumulated_reasoning:
@@ -6824,6 +7723,7 @@ class JiuWenSwarmDeepAdapter:
                 self._evolution_watcher_tasks.add(task)
             if _debug_logger is not None:
                 _debug_logger.end_run(status="ok")
+            interaction_stream_abort = False
         except asyncio.CancelledError:
             stream_consumer_cancelled = True
             logger.info(
@@ -6831,13 +7731,9 @@ class JiuWenSwarmDeepAdapter:
                 rid,
                 session_id,
             )
-            # Use _abort_shared_agent_if_safe to guard against cross-session
-            # collateral damage — instance.abort() is global on the shared
-            # DeepAgent and must not fire when other sessions are active.
-            await self._abort_shared_agent_if_safe(
-                self._resolve_interrupt_session_id(session_id),
-                "stream_cancel",
-            )
+            # InteractionOutputStream.close() in ``finally`` owns the targeted
+            # round abort. Do not issue a second adapter-level abort here:
+            # it can race with a newly attached output consumer.
             if _debug_logger is not None:
                 _debug_logger.end_run(status="cancelled")
             raise
@@ -6870,6 +7766,13 @@ class JiuWenSwarmDeepAdapter:
                 )
 
                 reset_current_multimodal_image_files(image_files_token)
+            if interaction_stream is not None:
+                try:
+                    await interaction_stream.close(
+                        abort_active_round=interaction_stream_abort,
+                    )
+                except Exception:
+                    logger.debug("[Goal] interaction stream close failed", exc_info=True)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
@@ -6980,6 +7883,18 @@ class JiuWenSwarmDeepAdapter:
             if hasattr(chunk, "type") and hasattr(chunk, "payload"):
                 chunk_type = chunk.type
                 payload = chunk.payload
+
+                if chunk_type == GOAL_UPDATED_EVENT_TYPE:
+                    return JiuWenSwarmDeepAdapter._interaction_goal_updated_payload(payload)
+
+                if chunk_type == ERROR_EVENT_TYPE:
+                    err_payload = payload if isinstance(payload, dict) else {}
+                    return {
+                        "event_type": ERROR_EVENT_TYPE,
+                        "code": err_payload.get("code", "execution_error"),
+                        "message": err_payload.get("message", "execution error"),
+                        "goal": err_payload.get("goal"),
+                    }
 
                 if chunk_type == "controller_output" and payload is not None:
                     inner_t = getattr(payload, "type", None)
@@ -7299,6 +8214,22 @@ class JiuWenSwarmDeepAdapter:
             if isinstance(chunk, dict):
                 if "traceId" in chunk or "invokeId" in chunk:
                     return None
+                # Interaction loop lifecycle events emitted by DeepAgent
+                # (goal.updated snapshot etc.) forwarded to the TUI goal status bar.
+                interaction_evt = chunk.get("type")
+                if interaction_evt == GOAL_UPDATED_EVENT_TYPE:
+                    return JiuWenSwarmDeepAdapter._interaction_goal_updated_payload(
+                        chunk.get("payload")
+                    )
+                if interaction_evt == ERROR_EVENT_TYPE:
+                    err_payload = chunk.get("payload")
+                    err_payload = err_payload if isinstance(err_payload, dict) else {}
+                    return {
+                        "event_type": ERROR_EVENT_TYPE,
+                        "code": err_payload.get("code", "execution_error"),
+                        "message": err_payload.get("message", "execution error"),
+                        "goal": err_payload.get("goal"),
+                    }
                 if chunk.get("result_type") == "error":
                     return {
                         "event_type": "chat.error",
@@ -8223,7 +9154,7 @@ class JiuWenSwarmDeepAdapter:
         try:
             if self._skill_evolution_rail is None:
                 return
-            if not getattr(self._skill_evolution_rail, "auto_scan", True):
+            if not self._skill_evolution_rail.signal_trigger:
                 return
 
             active = False
@@ -8236,7 +9167,7 @@ class JiuWenSwarmDeepAdapter:
             while True:
                 if self._skill_evolution_rail is None:
                     return
-                if not getattr(self._skill_evolution_rail, "auto_scan", True):
+                if not self._skill_evolution_rail.signal_trigger:
                     if active:
                         await _push_status("end", "hidden", "")
                     await _cleanup_evolution_rail()

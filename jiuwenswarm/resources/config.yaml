@@ -421,7 +421,7 @@ debug_trace:
 
 react:
   agent_name: main_agent
-  enable_task_loop: false
+  enable_task_loop: true
   max_iterations: 100
   model_name: ${MODEL_NAME:-deepseek-chat}
   skill_mode: all
@@ -499,7 +499,9 @@ react:
   # Skills 在线自演进配置
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进
-    auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
+    auto_scan: false           # 兼容开关：单 Agent / leader 触发 review，teammate 触发 signal
+    signal_trigger:            # true / false = 显式覆盖规则触发；留空使用场景默认值
+    review_trigger:            # true / false = 显式覆盖软触发；留空时按场景回退 auto_scan
     auto_save: false           # true = 自演进审批无需用户点击自动通过（内部开关）
     skill_create: false        # true = 注册 SkillCreateRail（单 agent）及 TeamSkillCreateRail（leader）
     skill_base_dir: "agent/skills"  # Skill 根目录
@@ -553,14 +555,27 @@ gateway:
   session_map_scope: per_chat_bot
 
   # AgentClient 配置 - Gateway 连接到 AgentServer 的方式
-  # type: websocket（默认，WebSocket 连接） | yuanrong（openYuanRong 函数调用）
+  # type: websocket（默认） | yuanrong（直接函数调用） | agentos_router（AgentOS 扩展）
   agent_client:
-    type: websocket # websocket | yuanrong
+    type: websocket # websocket | yuanrong | agentos_router
     # yuanrong 函数模式配置下面参数
     frontend_endpoint:
     function_version_urn:
     concurrency: 1
     invoke_timeout_s: 60
+
+  # AgentOS Router Extension 配置；agent_client.type=agentos_router 时生效。
+  agentos:
+    creating_timeout_seconds: 60
+    # Agent 复用 key 字段，默认 user_id + agent_type。
+    # 可选字段：user_id、agent_type、session_id（必须包含前两项）。
+    # 示例：加入 session_id 后同一用户每个会话独立 Agent。
+    agent_key_fields:
+      - user_id
+      - agent_type
+    registry:
+      endpoint:
+      request_timeout_s: 10
 
 heartbeat:
   # 心跳间隔（秒），默认 3600

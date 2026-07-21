@@ -1188,6 +1188,9 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
             at: new Date().toISOString(),
           });
           delegate.setLastError(message);
+          // 失败也视为本次 interrupt 请求已结束，清本地标志 + 解除 esc 去抖窗口，
+          // 否则去抖窗口内后续 esc 会被一直抑制，无法重新发起取消。
+          delegate.clearInterruptRequested();
         }
       } else if (intent === "pause") {
         delegate.setStreamingState(StreamingState.Paused);

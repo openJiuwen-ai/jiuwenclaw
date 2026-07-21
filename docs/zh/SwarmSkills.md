@@ -1,24 +1,24 @@
-# Team Skills 团队技能
+# Swarm Skills 团队技能
 
-JiuwenClaw 的 **Team Skills（团队技能）** 是一种面向多 Agent 协作的标准化能力包。它不是单个 Agent 的能力补丁，而是把一次优秀的团队协作流程沉淀为可复用、可复制、可进化的团队协作 SOP，让复杂任务不再每次都从零开始临时编排。
+jiuwenSwarm 的 **Swarm Skills（团队技能）** 是一种面向多 Agent 协作的标准化能力包。它不是单个 Agent 的能力补丁，而是把一次优秀的团队协作流程沉淀为可复用、可复制、可进化的团队协作 SOP，让复杂任务不再每次都从零开始临时编排。
 
 ---
 
 ## 1. 概念科普
 
-### 1.1 Team Skills 的定位
+### 1.1 Swarm Skills 的定位
 
-Team Skills 是 JiuwenClaw 技能体系中的**多 Agent 协作层**。如果说 Agent Skill 解决的是"一个 Agent 怎么做事"，那么 Team Skills 解决的就是"一个 Agent 团队怎么配合做事"。
+Swarm Skills 是 jiuwenSwarm 技能体系中的**多 Agent 协作层**。如果说 Agent Skill 解决的是"一个 Agent 怎么做事"，那么 Swarm Skills 解决的就是"一个 Agent 团队怎么配合做事"。
 
-在传统的 AI Agent 使用中，面对复杂任务时，用户往往需要手动编排多个 Agent 的协作方式——谁来做什么、谁先谁后、出了问题怎么办。这种方式每次都要从零开始，协作质量不稳定，流程难以复用。Team Skills 的出现，正是为了解决这个痛点：
+在传统的 AI Agent 使用中，面对复杂任务时，用户往往需要手动编排多个 Agent 的协作方式——谁来做什么、谁先谁后、出了问题怎么办。这种方式每次都要从零开始，协作质量不稳定，流程难以复用。Swarm Skills 的出现，正是为了解决这个痛点：
 
 - **一次沉淀，反复使用**：将经过验证的团队协作流程封装为标准化的能力包，下次遇到同类任务直接调用，无需重新编排。
 - **流程可进化**：协作流程不是一成不变的，可以根据实际使用反馈持续优化和迭代。
 - **质量可预期**：预定义的角色分工、协作顺序和异常处理策略，让每次协作的输出质量更加稳定。
 
-### 1.2 Team Skills 与 Agent Skills 的区别
+### 1.2 Swarm Skills 与 Agent Skills 的区别
 
-| 维度 | Agent Skill | Team Skill |
+| 维度 | Agent Skill | Swarm Skill |
 |------|-------------|------------|
 | **定位** | 单个 Agent 的能力扩展 | 多 Agent 团队的协作模式封装 |
 | **关注点** | 一个 Agent 怎么做事 | 一个 Agent 团队怎么配合做事 |
@@ -27,21 +27,21 @@ Team Skills 是 JiuwenClaw 技能体系中的**多 Agent 协作层**。如果说
 | **协作方式** | 无协作，Agent 独立执行 | 预定义角色分工、协作流程和异常处理 |
 | **复用性** | 能力可复用 | 协作流程可复用 |
 
-简单类比：Agent Skill 像是给一个人增加一项专业技能（如"会做数据分析"），而 Team Skill 像是给一个团队制定一套协作 SOP（如"研究团队如何从调研到撰写到审核完成一份报告"）。
+简单类比：Agent Skill 像是给一个人增加一项专业技能（如"会做数据分析"），而 Swarm Skill 像是给一个团队制定一套协作 SOP（如"研究团队如何从调研到撰写到审核完成一份报告"）。
 
-### 1.3 Team Skills 的通用性
+### 1.3 Swarm Skills 的通用性
 
-Team Skills 不只局限于 JiuwenClaw 平台。它的核心设计理念——角色分工、协作流程、边界约束——是一种通用的团队协作能力封装方式，可以适配到支持相关协作标准的其他 AI Agent 框架中。这意味着：
+Swarm Skills 不只局限于 jiuwenSwarm 平台。它的核心设计理念——角色分工、协作流程、边界约束——是一种通用的团队协作能力封装方式，可以适配到支持相关协作标准的其他 AI Agent 框架中。这意味着：
 
-- 在 JiuwenClaw 中创建的 Team Skill，理论上可以迁移到其他支持类似协作标准的平台使用。
-- Team Skills 的标准化结构（5 文件规范）为跨框架互操作提供了基础。
-- 社区贡献的 Team Skill 可以在不同平台间共享，共建团队技能生态。
+- 在 jiuwenSwarm 中创建的 Swarm Skill，理论上可以迁移到其他支持类似协作标准的平台使用。
+- Swarm Skills 的标准化结构（5 文件规范）为跨框架互操作提供了基础。
+- 社区贡献的 Swarm Skill 可以在不同平台间共享，共建团队技能生态。
 
 ---
 
 ## 2. 组成结构
 
-一个 Team Skill 本质上是一个**结构化的目录**，而非单一的说明文件。这种设计使得团队协作的各个要素——角色、流程、边界、依赖——能够被清晰地组织和维护。
+一个 Swarm Skill 本质上是一个**结构化的目录**，而非单一的说明文件。这种设计使得团队协作的各个要素——角色、流程、边界、依赖——能够被清晰地组织和维护。
 
 ### 2.1 目录结构概览
 
@@ -75,15 +75,17 @@ team-skill-name/
 
 ### 2.3 核心文件详解
 
+> 本节以**医疗会诊团队场景**为例，讲解 Swarm Skill 的各个文件。该技能的主要功能是通过协调者组织多学科医疗专家（内科、外科、影像科）对复杂病例进行并行评估，并整合各专家意见，输出结构化诊疗建议。
+
 #### SKILL.md — 团队入口
 
-`SKILL.md` 是 Team Skill 的入口文件，采用 YAML frontmatter 声明元信息：
+`SKILL.md` 是 Swarm Skill 的入口文件，采用 YAML frontmatter 声明元信息：
 
-```markdown
+````markdown
 ---
 name: medical-consultation-team
 version: 1.0.0
-author: jiuwenclaw-team
+author: jiuwenSwarm-team
 description: |
   多学科医疗专家会诊团队技能，通过协调者组织多专科专家并行评估并整合意见。
   Use when 需要多学科专家共同评估复杂病例并输出结构化诊疗建议。
@@ -139,12 +141,12 @@ roles:
 | [bind.md](bind.md) | 资源限制、行为约束、失败处理和降级模式 | 遇到限制、处理失败或需要降级规则时 |
 | [roles/*.md](roles/) | 每个角色的身份、成功标准、输出格式、Inline Persona | 分派每个队友前 — 提取 Inline Persona |
 | [dependencies.yaml](dependencies.yaml) | 外部技能和工具依赖 | **启动时** — 验证依赖，报告缺失项，用户决定是否继续 |
-```
+````
 
 **关键字段说明**：
 
 - **`name`**：技能的唯一标识符，必须与目录名一致（kebab-case，约定以 `-team` 结尾）。
-- **`kind`**：必须为 `team-skill`（注意：不是 `type`），用于区分 Team Skill 和普通 Agent Skill。
+- **`kind`**：必须为 `team-skill`（注意：不是 `type`），用于区分 Swarm Skill 和普通 Agent Skill。
 - **`roles`**：角色列表，**至少 2 个角色**，每个角色必须包含 `id`（角色标识）、`purpose`（一句话职责描述，≤150 字符）、`skills`（依赖的技能列表）和 `tools`（依赖的工具列表）。
 - **`description`**：技能描述，遵循简洁原则（≤4 行、≤500 字符），采用 WHAT / WHEN / NOT 三行结构。
 
@@ -160,7 +162,7 @@ roles:
 
 示例：
 
-```markdown
+````markdown
 ---
 role_name: coordinator
 description: 会诊协调者，负责组织专家、汇总意见
@@ -217,19 +219,19 @@ description: 会诊协调者，负责组织专家、汇总意见
 6. 输出结构化的诊疗建议报告
 
 你不直接给出医学诊断意见，而是确保各专家意见被充分表达和整合。
-```
+````
 
 #### workflow.md — 协作流程
 
 定义角色之间的交互顺序和任务流转，包含 3 个必需章节：
 
-1. **`## Overview`**：流程概览，必须包含 mermaid 流程图，这是 Team Skill 与单 Agent Skill 的核心表达差异。
+1. **`## Overview`**：流程概览，必须包含 mermaid 流程图，这是 Swarm Skill 与单 Agent Skill 的核心表达差异。
 2. **`## Detailed Steps`**：详细步骤，每步包含执行者、输入、输出、串行/并行标记和质量门控。
 3. **`## Acceptance Criteria`**：验收标准，判断一次协作是否成功的标准。
 
 示例：
 
-```markdown
+````markdown
 # 会诊协作流程
 
 ## Overview
@@ -286,7 +288,7 @@ graph TD
 - 所有受邀专家均提交了意见（或缺失意见已标注）
 - 意见分歧已被识别和处理
 - 最终报告是结构化的、包含综合诊疗建议
-```
+````
 
 #### bind.md — 边界与异常处理
 
@@ -373,44 +375,44 @@ tools:
 
 ## 3. 使用指导
 
-### 3.1 如何开始使用 Team Skills
+### 3.1 如何开始使用 Swarm Skills
 
-用户通常通过以下步骤开始使用 Team Skills：
+用户通常通过以下步骤开始使用 Swarm Skills：
 
-**步骤一：从 Team Skills Hub 获取现成技能**
+**步骤一：从 Swarm Skills Hub 获取现成技能**
 
-1. 打开 JiuwenClaw 的「技能」面板
-2. 点击「Team Skills Hub 在线搜索」
+1. 打开 jiuwenSwarm 的「技能」面板
+2. 点击「Swarm Skills Hub 在线搜索」
 3. 输入关键词搜索所需的团队技能（如"医疗会诊"、"研究报告"等）
 4. 点击「安装」将技能添加到工作区
 
 也可以通过命令行搜索和安装：
 
 ```
-# 搜索 Team Skills
-/teamskills search "医疗会诊"
+# 搜索 Swarm Skills
+/swarmskills search "医疗会诊"
 
-# 查看 Team Skill 详情
-/teamskills info <asset_id> --version 1.0.0
+# 查看 Swarm Skill 详情
+/swarmskills info <asset_id> --version 1.0.0
 
-# 安装 Team Skill
-/teamskills install <asset_id> --version 1.0.0
+# 安装 Swarm Skill
+/swarmskills install <asset_id> --version 1.0.0
 ```
 
-> **提示**：`<asset_id>` 是 Team Skills Hub 上的技能唯一标识（如 `sk-123`），搜索结果中会显示。
+> **提示**：`<asset_id>` 是 Swarm Skills Hub 上的技能唯一标识（如 `sk-123`），搜索结果中会显示。
 
-**步骤二：在 JiuwenClaw 中使用**
+**步骤二：在 jiuwenSwarm 中使用**
 
-安装完成后，Team Skill 会自动出现在可用技能列表中：
+安装完成后，Swarm Skill 会自动出现在可用技能列表中：
 
 1. 在对话中描述你的任务目标
-2. 系统会识别并调用相应的 Team Skill
+2. 系统会识别并调用相应的 Swarm Skill
 3. 团队协作流程按既定方式自动运行
 4. 获得结构化的输出结果
 
-### 3.2 什么场景更适合使用 Team Skills
+### 3.2 什么场景更适合使用 Swarm Skills
 
-Team Skills 特别适合以下场景：
+Swarm Skills 特别适合以下场景：
 
 | 场景特征 | 说明 | 示例 |
 |----------|------|------|
@@ -419,29 +421,29 @@ Team Skills 特别适合以下场景：
 | 希望复用成熟流程 | 不想每次都重新设计协作方式 | 定期执行的代码审查、安全审计 |
 | 输出需要结构化 | 需要标准化的报告、方案或建议 | 诊疗建议报告、研究报告、审计报告 |
 
-**对比：何时使用单 Agent Skill vs Team Skill**
+**对比：何时使用单 Agent Skill vs Swarm Skill**
 
 | 情况 | 推荐选择 | 原因 |
 |------|----------|------|
-| 单一任务，一个 Agent 可完成 | 单 Agent Skill | 无需多角色协作，Team Skill 会增加不必要的开销 |
+| 单一任务，一个 Agent 可完成 | 单 Agent Skill | 无需多角色协作，Swarm Skill 会增加不必要的开销 |
 | 需要多步推理，但无需角色分工 | 单 Agent Skill + 工作流 | 流程可以由单个 Agent 按步骤执行 |
-| 需要多个专业角色协作 | **Team Skill** | 不同角色的专业视角不可替代 |
-| 任务流程固定、需要复用 | **Team Skill** | 预定义流程可反复使用，质量更稳定 |
-| 需要对抗性检查（如代码审查） | **Team Skill** | 单 Agent 角色扮演多个视角容易产生收敛偏差 |
+| 需要多个专业角色协作 | **Swarm Skill** | 不同角色的专业视角不可替代 |
+| 任务流程固定、需要复用 | **Swarm Skill** | 预定义流程可反复使用，质量更稳定 |
+| 需要对抗性检查（如代码审查） | **Swarm Skill** | 单 Agent 角色扮演多个视角容易产生收敛偏差 |
 
 ### 3.3 使用重点
 
-Team Skills 的核心价值在于：**选择合适的 Team Skill，让团队协作流程按既定方式自动运行**，而不是手动编排每个 Agent。
+Swarm Skills 的核心价值在于：**选择合适的 Swarm Skill，让团队协作流程按既定方式自动运行**，而不是手动编排每个 Agent。
 
 使用时的三个重点：
 
-1. **选择合适的 Team Skill**：根据任务特点选择匹配的团队技能。如果现有技能不完全匹配，可以基于 `teamskill-creator` 修改已有技能或创建新技能。
+1. **选择合适的 Swarm Skill**：根据任务特点选择匹配的团队技能。如果现有技能不完全匹配，可以基于 `swarmskill-creator` 修改已有技能或创建新技能。
 2. **提供清晰的输入**：按照技能要求提供完整的任务信息。输入越清晰，协作输出质量越高。
 3. **理解输出结构**：了解技能的输出格式，便于后续处理和使用。
 
-Team Skills 相比临时组队的三大优势：
+Swarm Skills 相比临时组队的三大优势：
 
-| 优势点 | 临时组队 | Team Skill |
+| 优势点 | 临时组队 | Swarm Skill |
 |--------|----------|------------|
 | 分工规则 | 每次需重新分配，可能遗漏或混乱 | 预定义，稳定可靠 |
 | 协作顺序 | 可能遗漏关键步骤 | workflow.md 明确规定 |
@@ -449,12 +451,12 @@ Team Skills 相比临时组队的三大优势：
 
 ### 3.4 跨框架复用潜力
 
-Team Skills 采用标准化的结构定义（5 文件规范），具备跨框架复用潜力：
+Swarm Skills 采用标准化的结构定义（5 文件规范），具备跨框架复用潜力：
 
 - 协作标准基于通用的角色-流程-边界模型，不依赖特定框架的实现细节
 - 可适配到支持相关协作标准的其他 AI Agent 平台
 - 便于在不同框架间迁移和共享团队协作经验
-- Team Skills Hub 作为社区共享平台，促进跨框架的技能生态共建
+- Swarm Skills Hub 作为社区共享平台，促进跨框架的技能生态共建
 
 ---
 
@@ -462,7 +464,7 @@ Team Skills 采用标准化的结构定义（5 文件规范），具备跨框架
 
 ### 4.1 案例：多学科医疗专家会诊
 
-本案例展示 Team Skills 在医疗会诊场景中的实际应用价值。
+本案例展示 Swarm Skills 在医疗会诊场景中的实际应用价值。
 
 #### 适用场景
 
@@ -495,6 +497,8 @@ Team Skills 采用标准化的结构定义（5 文件规范），具备跨框架
 
 **阶段二：专家评估（并行）**
 
+![专家评估](../assets/images/jiuwenswarm专家评估.png)
+
 ```
 [internist] 评估内科方面：
 - ST段抬高提示心肌损伤可能
@@ -522,6 +526,8 @@ Team Skills 采用标准化的结构定义（5 文件规范），具备跨框架
 ```
 
 **阶段四：输出结果**
+
+![医疗会诊报告概览](../assets/images/jiuwenswarm医疗就诊案例.png)
 
 ```markdown
 # 会诊报告 #2024-001
@@ -556,19 +562,23 @@ Team Skills 采用标准化的结构定义（5 文件规范），具备跨框架
 参与专家：内科张医生、外科李医生、影像科王医生
 ```
 
-#### Team Skills 的优势体现
+以下截图展示了医疗会诊 Swarm Skill 在 JiuwenSwarm 中的实际执行结果，包括已完成的任务列表和生成的会诊报告文件：
 
-| 优势点 | 临时组队 | Team Skill |
+![医疗会诊执行结果](../assets/images/jiuwenswarm医疗报告生成.png)
+
+#### Swarm Skills 的优势体现
+
+| 优势点 | 临时组队 | Swarm Skill |
 |--------|----------|------------|
 | 分工规则 | 每次需重新分配谁看什么 | 预定义角色（内科/外科/影像科），稳定可靠 |
 | 协作顺序 | 可能遗漏步骤（如忘记整合分歧） | workflow.md 明确规定：分析→评估→整合→输出 |
 | 异常处理 | 专家超时怎么办？临时决定 | bind.md 统一策略：跳过并标注缺失 |
 | 输出格式 | 每次格式不同 | 结构化、标准化报告 |
-| 复用性 | 下次会诊又要从零开始 | 同一 Team Skill 可反复使用 |
+| 复用性 | 下次会诊又要从零开始 | 同一 Swarm Skill 可反复使用 |
 
 ### 4.2 案例：研究与 PPT 撰写团队
 
-本案例展示 Team Skills 在内容生产场景中的应用。
+本案例展示 Swarm Skills 在内容生产场景中的应用。
 
 #### 适用场景
 
@@ -620,35 +630,37 @@ Team Skills 采用标准化的结构定义（5 文件规范），具备跨框架
 
 ## 5. 创建指导
 
-### 5.1 使用 teamskill-creator 创建新的 Team Skill
+### 5.1 使用 swarmskill-creator 创建新的 Swarm Skill
 
-JiuwenClaw 提供了 `teamskill-creator` 技能，帮助用户创建、转换或修改 Team Skill。它内置了标准化的模板、决策树和自动化验证器，确保创建的 Team Skill 符合规范。
+jiuwenSwarm 提供了 `swarmskill-creator` 技能，帮助用户创建、转换或修改 Swarm Skill。它内置了标准化的模板、决策树和自动化验证器，确保创建的 Swarm Skill 符合规范。
+
+![swarmskill-creator](../en/swarmskill.png)
 
 **获取与安装**：
 
-`teamskill-creator` 是 JiuwenClaw 的内置技能，无需额外安装。如果您的环境中没有该技能，可以通过以下方式获取：
+`swarmskill-creator` 是 jiuwenSwarm 的内置技能，无需额外安装。如果您的环境中没有该技能，可以通过以下方式获取：
 
 ```bash
 # 从技能中心搜索并安装
-/skills search teamskill-creator
-/skills install teamskill-creator
+/skills search swarmskill-creator
+/skills install swarmskill-creator
 ```
 
 **三种模式**：
 
 | 模式 | 适用场景 | 输出 |
 |------|----------|------|
-| **CREATE** | 从零创建新的团队技能 | 新的 `<teamskill-name>/` 目录，包含完整的 5 文件集 |
-| **CONVERT** | 将现有单 Agent Skill 转换为 Team Skill | 转换后的 `<teamskill-name>/` 目录 + 差异报告 |
-| **MODIFY** | 修改已有 Team Skill（增删角色、调整流程等） | 更新后的文件 |
+| **CREATE** | 从零创建新的团队技能 | 新的 `<swarmskill-name>/` 目录，包含完整的 5 文件集 |
+| **CONVERT** | 将现有单 Agent Skill 转换为 Swarm Skill | 转换后的 `<swarmskill-name>/` 目录 + 差异报告 |
+| **MODIFY** | 修改已有 Swarm Skill（增删角色、调整流程等） | 更新后的文件 |
 
 #### 创建流程示例
 
 以下以创建「研究与报告撰写团队」为例，展示完整的创建过程：
 
-**步骤一：判断是否需要 Team Skill**
+**步骤一：判断是否需要 Swarm Skill**
 
-首先确认：这个任务是否真的需要多角色协作？Team Skill 仅在以下情况才值得创建：
+首先确认：这个任务是否真的需要多角色协作？Swarm Skill 仅在以下情况才值得创建：
 
 1. **对抗性盲区**：单 Agent 角色扮演多个视角会产生收敛偏差（如代码审查、安全审计）
 2. **并行分解收益**：多个独立子任务可以并行执行，且整合非平凡（如多角度研究）
@@ -688,7 +700,7 @@ research-report-team/
 
 编写 `workflow.md`，包含 mermaid 流程图、详细步骤和验收标准：
 
-```markdown
+````markdown
 ## Overview
 
 ```mermaid
@@ -702,7 +714,7 @@ graph TD
     RV -->|通过| OUT[输出最终报告]
     RV -->|需修改| W
 ```
-```
+````
 
 **步骤五：编写边界与异常处理**
 
@@ -740,14 +752,14 @@ graph TD
 
 **步骤七：验证**
 
-运行自动化验证器，确保 Team Skill 符合规范：
+运行自动化验证器，确保 Swarm Skill 符合规范：
 
 ```bash
 # 方式一：使用 TUI 内置命令（推荐）
-/teamskills validate path/to/research-report-team/ --type teamskills
+/swarmskills validate path/to/research-report-team/ --type swarmskills
 
 # 方式二：使用独立验证脚本
-python scripts/validate_teamskill.py path/to/research-report-team/
+python scripts/validate_swarmskill.py path/to/research-report-team/
 ```
 
 验证器检查：
@@ -763,9 +775,9 @@ python scripts/validate_teamskill.py path/to/research-report-team/
 
 **退出码 0 = 合规**。非零退出码会打印具体的失败检查项。
 
-### 5.2 修改已有 Team Skill
+### 5.2 修改已有 Swarm Skill
 
-使用 `teamskill-creator` 的 MODIFY 模式可以修改已有的 Team Skill：
+使用 `swarmskill-creator` 的 MODIFY 模式可以修改已有的 Swarm Skill：
 
 | 修改类型 | 需要重新执行的步骤 | 需要更新的文件 |
 |----------|-------------------|---------------|
@@ -777,52 +789,52 @@ python scripts/validate_teamskill.py path/to/research-report-team/
 
 **重要**：无论修改大小，步骤 7（验证）都必须执行。
 
-### 5.3 将单 Agent Skill 转换为 Team Skill
+### 5.3 将单 Agent Skill 转换为 Swarm Skill
 
-使用 `teamskill-creator` 的 CONVERT 模式可以将现有的单 Agent Skill 转换为 Team Skill：
+使用 `swarmskill-creator` 的 CONVERT 模式可以将现有的单 Agent Skill 转换为 Swarm Skill：
 
 1. **读取源 SKILL.md**，识别自然角色边界：
    - 找到嵌入的多角色设定（如"扮演 Persona 1 / Persona 2 / Persona 3"）
    - 找到顺序阶段和质量门控（如"先做 X，再验证 Y，再产出 Z"）
    - 找到按类别分支的检查清单（如"[ ] 安全 [ ] 性能 [ ] 可读性"）
-2. **明确转换价值**：单 Agent 形式下丢失了什么？这成为 Team Skill 的"为什么"
+2. **明确转换价值**：单 Agent 形式下丢失了什么？这成为 Swarm Skill 的"为什么"
 3. **继续从步骤 2 开始**，按 CREATE 流程完成
 
-### 5.4 上传到 Team Skills Hub
+### 5.4 上传到 Swarm Skills Hub
 
-创建完成后，可以将 Team Skill 分享到社区，共建团队技能生态：
+创建完成后，可以将 Swarm Skill 分享到社区，共建团队技能生态：
 
 **步骤一：验证完整性**
 
 ```bash
 # 方式一：使用 TUI 内置命令（推荐）
-/teamskills validate path/to/<teamskill-name>/ --type teamskills
+/swarmskills validate path/to/<swarmskill-name>/ --type swarmskills
 
 # 方式二：使用独立验证脚本
-python scripts/validate_teamskill.py path/to/<teamskill-name>/
+python scripts/validate_swarmskill.py path/to/<swarmskill-name>/
 ```
 
 确保退出码为 0（合规）。
 
 **步骤二：上传发布**
 
-在 JiuwenClaw 的「技能」面板中：
-1. 点击「Team Skills Hub」
-2. 选择要发布的 Team Skill
+在 jiuwenSwarm 的「技能」面板中：
+1. 点击「Swarm Skills Hub」
+2. 选择要发布的 Swarm Skill
 3. 点击「上传」
-4. 首次使用需要认证（输入 Team Skills Hub Token）
+4. 首次使用需要认证（输入 Swarm Skills Hub Token）
 
 也可以通过命令行发布：
 
 ```
-# 发布到 Team Skills Hub（需要鉴权）
-/teamskills publish path/to/<teamskill-name> --version 1.0.0 --token <TOKEN>
+# 发布到 Swarm Skills Hub（需要鉴权）
+/swarmskills publish path/to/<swarmskill-name> --version 1.0.0 --token <TOKEN>
 
 # 如需覆盖已有版本，添加 --force
-/teamskills publish path/to/<teamskill-name> --version 1.0.1 --token <TOKEN> --force
+/swarmskills publish path/to/<swarmskill-name> --version 1.0.1 --token <TOKEN> --force
 ```
 
-> **鉴权说明**：发布和删除操作需要提供 `--token`（用户 Token）或 `--system-token`（系统 Token），且只能选择一种。Token 可通过 `/teamskills config --token <TOKEN>` 预配置，避免每次手动输入。
+> **鉴权说明**：发布和删除操作需要提供 `--token`（用户 Token）或 `--system-token`（系统 Token），且只能选择一种。Token 可通过 `/swarmskills config --token <TOKEN>` 预配置，避免每次手动输入。
 
 **步骤三：维护更新**
 
@@ -851,45 +863,45 @@ python scripts/validate_teamskill.py path/to/<teamskill-name>/
 
 | 操作 | 命令/方式 |
 |------|----------|
-| 搜索 Team Skills | `/teamskills search <关键词>` |
-| 查看 Team Skill 详情 | `/teamskills info <asset_id> --version <x.y.z>` |
-| 安装 Team Skill | `/teamskills install <asset_id> --version <x.y.z>` |
-| 查看已安装技能 | `/teamskills list` |
-| 卸载 Team Skill | `/teamskills uninstall <name>` |
-| 创建 Team Skill 脚手架 | `/teamskills init <name> --type teamskills` |
-| 验证 Team Skill | `/teamskills validate <path> --type teamskills` |
-| 打包 Team Skill | `/teamskills pack <path> --output <dir>` |
-| 配置 Hub URL 和 Token | `/teamskills config --market-url <url> --token <TOKEN>` |
-| 发布到 Team Skills Hub | `/teamskills publish <path> --version <x.y.z> --token <TOKEN>` |
-| 删除 Hub 上的技能 | `/teamskills delete <skill_id> --version <x.y.z> --token <TOKEN>` |
-| 使用 teamskill-creator 创建 | 使用 `teamskill-creator` 技能的 CREATE 模式 |
-| 使用 teamskill-creator 修改 | 使用 `teamskill-creator` 技能的 MODIFY 模式 |
-| 使用 teamskill-creator 转换 | 使用 `teamskill-creator` 技能的 CONVERT 模式 |
+| 搜索 Swarm Skills | `/swarmskills search <关键词>` |
+| 查看 Swarm Skill 详情 | `/swarmskills info <asset_id> --version <x.y.z>` |
+| 安装 Swarm Skill | `/swarmskills install <asset_id> --version <x.y.z>` |
+| 查看已安装技能 | `/swarmskills list` |
+| 卸载 Swarm Skill | `/swarmskills uninstall <name>` |
+| 创建 Swarm Skill 脚手架 | `/swarmskills init <name> --type swarmskills` |
+| 验证 Swarm Skill | `/swarmskills validate <path> --type swarmskills` |
+| 打包 Swarm Skill | `/swarmskills pack <path> --output <dir>` |
+| 配置 Hub URL 和 Token | `/swarmskills config --market-url <url> --token <TOKEN>` |
+| 发布到 Swarm Skills Hub | `/swarmskills publish <path> --version <x.y.z> --token <TOKEN>` |
+| 删除 Hub 上的技能 | `/swarmskills delete <skill_id> --version <x.y.z> --token <TOKEN>` |
+| 使用 swarmskill-creator 创建 | 使用 `swarmskill-creator` 技能的 CREATE 模式 |
+| 使用 swarmskill-creator 修改 | 使用 `swarmskill-creator` 技能的 MODIFY 模式 |
+| 使用 swarmskill-creator 转换 | 使用 `swarmskill-creator` 技能的 CONVERT 模式 |
 
 ### 常见问题
 
-**Q: Team Skill 和普通 Skill 有什么区别？**
+**Q: Swarm Skill 和普通 Skill 有什么区别？**
 
-A: 普通 Skill 是单一 Agent 的能力扩展（"一个 Agent 怎么做事"），而 Team Skill 封装了多 Agent 协作的完整模式（"一个 Agent 团队怎么配合做事"），包括角色分工、协作流程和异常处理策略。
+A: 普通 Skill 是单一 Agent 的能力扩展（"一个 Agent 怎么做事"），而 Swarm Skill 封装了多 Agent 协作的完整模式（"一个 Agent 团队怎么配合做事"），包括角色分工、协作流程和异常处理策略。
 
-**Q: 如何判断是否需要使用 Team Skill？**
+**Q: 如何判断是否需要使用 Swarm Skill？**
 
-A: 如果任务存在以下情况，适合使用 Team Skill：(1) 单 Agent 角色扮演多视角会产生收敛偏差；(2) 多个独立子任务可以并行执行；(3) 顺序阶段有质量门控需要专业化处理。如果以上都不适用，建议使用单 Agent Skill。
+A: 如果任务存在以下情况，适合使用 Swarm Skill：(1) 单 Agent 角色扮演多视角会产生收敛偏差；(2) 多个独立子任务可以并行执行；(3) 顺序阶段有质量门控需要专业化处理。如果以上都不适用，建议使用单 Agent Skill。
 
-**Q: 可以修改已安装的 Team Skill 吗？**
+**Q: 可以修改已安装的 Swarm Skill 吗？**
 
-A: 可以。使用 `teamskill-creator` 的 MODIFY 模式修改本地副本，修改后需重新运行验证器确认合规。
+A: 可以。使用 `swarmskill-creator` 的 MODIFY 模式修改本地副本，修改后需重新运行验证器确认合规。
 
-**Q: Team Skill 的 5 文件结构都是必需的吗？**
+**Q: Swarm Skill 的 5 文件结构都是必需的吗？**
 
 A: 是的。SKILL.md、roles/、workflow.md、bind.md、dependencies.yaml 都是必需文件。验证器会检查所有 5 个文件是否齐全。`examples/`、`templates/`、`assets/` 等扩展目录是可选的。
 
-**Q: Team Skills Hub 的默认地址是什么？**
+**Q: Swarm Skills Hub 的默认地址是什么？**
 
-A: 默认地址为 `https://teamskills.openjiuwen.com`，可通过环境变量 `TEAM_SKILLS_HUB_BASE_URL` 覆盖。
+A: 默认地址为 `https://swarmskills.openjiuwen.com`，可通过环境变量 `TEAM_SKILLS_HUB_BASE_URL` 覆盖。
 
 ---
 
 *文档版本：v2.0*
-*适用对象：JiuwenClaw 用户、技能开发者*
-*最后更新：2026-05-08*
+*适用对象：jiuwenSwarm 用户、技能开发者*
+*最后更新：2026-07-13*

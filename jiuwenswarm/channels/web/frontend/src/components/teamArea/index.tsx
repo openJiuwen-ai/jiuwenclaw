@@ -4,7 +4,8 @@
 
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FileText, Minimize2 } from 'lucide-react';
+import { FileCheck2, FileText, Minimize2 } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
 import type { Message } from '../../types';
 import { ArtifactsPanel, useSessionArtifactsCount } from '../ArtifactsPanel';
@@ -97,6 +98,7 @@ function ExpandedTeamArea({
   onDetailTabChange,
   onMemberSelect,
   onCollapse,
+  reviewPanel,
 }: {
   members: TeamMember[];
   historyMessages?: Message[];
@@ -107,10 +109,12 @@ function ExpandedTeamArea({
   onDetailTabChange: (tab: TeamDetailTab) => void;
   onMemberSelect?: (memberId: string) => void;
   onCollapse?: () => void;
+  reviewPanel?: ReactNode;
 }) {
   const { t } = useTranslation();
   const { completedTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
   const artifactsCount = useSessionArtifactsCount();
+  const resolvedTab = activeTab === 'review' && !reviewPanel ? 'planning' : activeTab;
 
   const selectedMember = useMemo(() => {
     if (!externalSelectedMemberId) return null;
@@ -139,7 +143,8 @@ function ExpandedTeamArea({
       count: artifactsCount,
       icon: <FileText size={16} />,
     },
-  ] as const;
+    ...(reviewPanel ? [{ key: 'review' as const, label: t('codeMode.review'), icon: <FileCheck2 size={16} /> }] : []),
+  ];
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-card">
@@ -149,7 +154,7 @@ function ExpandedTeamArea({
             <button
               key={tab.key}
               className={`h-9 rounded-lg px-4 text-sm  flex items-center gap-2 ${
-                activeTab === tab.key
+                resolvedTab === tab.key
                   ? 'bg-secondary font-medium text-text'
                   : 'text-text-muted hover:bg-secondary/50 hover:text-text'
               }`}
@@ -171,7 +176,7 @@ function ExpandedTeamArea({
       </div>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {activeTab === 'planning' ? (
+        {resolvedTab === 'planning' ? (
           <TaskPlanningPanel
             variant="expanded"
             tasks={teamTasks}
@@ -179,10 +184,12 @@ function ExpandedTeamArea({
             totalTasks={totalTasks}
             completedTasks={completedTasks}
           />
-        ) : activeTab === 'artifacts' ? (
+        ) : resolvedTab === 'artifacts' ? (
           <div className="flex min-w-0 flex-1 overflow-hidden">
             <ArtifactsPanel />
           </div>
+        ) : resolvedTab === 'review' && reviewPanel ? (
+          <div className="flex min-w-0 flex-1 overflow-hidden">{reviewPanel}</div>
         ) : (
           <TeamMembersPanel
             variant="expanded"
@@ -201,7 +208,7 @@ function ExpandedTeamArea({
 }
 
 export function TeamArea(props: TeamAreaProps) {
-  const { members, historyMessages = [] } = props;
+  const { members, historyMessages = [], reviewPanel } = props;
 
   if (props.expanded) {
     return (
@@ -215,6 +222,7 @@ export function TeamArea(props: TeamAreaProps) {
         onDetailTabChange={props.onDetailTabChange}
         onMemberSelect={props.onMemberSelect}
         onCollapse={props.onCollapse}
+        reviewPanel={reviewPanel}
       />
     );
   }

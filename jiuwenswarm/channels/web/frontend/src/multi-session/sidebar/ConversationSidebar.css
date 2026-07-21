@@ -24,6 +24,99 @@
   line-height: 68px;
 }
 
+.conversation-sidebar__mode {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  height: 68px;
+  align-items: center;
+  padding: 0 10px;
+  box-sizing: border-box;
+}
+
+.conversation-sidebar__mode-trigger {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.conversation-sidebar__mode-trigger:hover:not(:disabled),
+.conversation-sidebar__mode-trigger[aria-expanded='true'] {
+  background: var(--color-sidebar-action-hover);
+}
+
+.conversation-sidebar__mode-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.conversation-sidebar__mode-trigger svg {
+  transition: transform 0.16s ease;
+}
+
+.conversation-sidebar__mode-trigger svg.is-open {
+  transform: rotate(180deg);
+}
+
+.conversation-sidebar__mode-menu {
+  position: absolute;
+  z-index: 100;
+  top: 54px;
+  left: 10px;
+  width: 224px;
+  padding: 8px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 12px;
+  background: var(--color-surface-popover);
+  box-shadow: var(--effect-shadow-lg);
+}
+
+.conversation-sidebar__mode-menu > button {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 16px;
+  align-items: start;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.conversation-sidebar__mode-menu > button:hover,
+.conversation-sidebar__mode-menu > button.is-active {
+  background: var(--color-surface-hover);
+}
+
+.conversation-sidebar__mode-menu > button > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.conversation-sidebar__mode-menu strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.conversation-sidebar__mode-menu small {
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .conversation-sidebar__operations {
   display: flex;
   flex-direction: column;
@@ -55,7 +148,7 @@
 }
 
 .conversation-sidebar__new:hover {
-  background: var(--color-action-secondary);
+  background: var(--color-sidebar-nav-active);
 }
 
 .conversation-sidebar__new:focus-visible {

@@ -334,6 +334,7 @@ def test_first_batch_registry_ids() -> None:
     expected = {
         "new_session", "mode", "switch", "skills", "resume",
         "workspace_dir", "branch", "rewind", "recap", "agents", "review", "security-review",
+        "goal",
     }
     assert ids == expected
 

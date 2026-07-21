@@ -11,6 +11,7 @@ import { cronExprToSchedule, isOnceScheduleExpired } from './scheduleConvert';
 import { TIMEZONE_OPTIONS } from './constants';
 import type { CronTaskUI, CronTemplateUI } from '../../types/cron';
 import type { ProjectInfo } from '../../features/workspace/projectTypes';
+import { getProjectDisplayName } from '../../stores/workspaceStore';
 
 // "生效周期"依赖后端 effective_from/effective_until（见 backend-requests.md 需求3），目前后端还
 // 没有这个概念，选了也不下发。之前的方案是保留字段但标注"即将上线"，用户后来觉得不如先整个隐藏，
@@ -93,7 +94,7 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
   const [form, setForm] = useState<CronTaskFormValue>(initial ?? emptyForm());
 
   const title = mode === 'edit' ? t('cron.drawer.titleEdit') : mode === 'template' ? t('cron.drawer.titleTemplate') : t('cron.drawer.titleCreate');
-  const projectOptions = projects.map((p) => ({ value: p.project_dir, label: p.name }));
+  const projectOptions = projects.map((p) => ({ value: p.project_dir, label: getProjectDisplayName(p) }));
   const timezoneOptions = TIMEZONE_OPTIONS.map((tz) => ({ value: tz, label: tz }));
   // 必填项缺失时，收集清单用来在"确定"按钮旁给出具体提示（而不是只让按钮变灰、不说原因）
   const missingFieldLabels: string[] = [];

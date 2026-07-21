@@ -1631,17 +1631,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
         const cronMeta = payload.cron as Record<string, unknown> | undefined;
 
-        let sessionId = resolveEventSessionId(payload);
-        // cron 广播 session_id 为空（后端置空让消息进当前活跃会话流），fallback 到当前活跃 session
-        if (!sessionId && cronMeta) {
-          sessionId = useSessionStore.getState().currentSession?.session_id ?? null;
-          if (sessionId) {
-            ensureSessionRuntimes(sessionId);
-          }
-        }
-        if (!sessionId) return;
-
-        // cron 广播处理：结果到达时刷新触发会话列表
+        // cron 广播处理：结果到达时刷新定时任务会话列表（在 sessionId 路由之前，确保无论如何都刷新）
         if (cronMeta && typeof cronMeta === 'object') {
           const cronJobId = typeof cronMeta.job_id === 'string' ? cronMeta.job_id.trim() : '';
           const cronStatus = typeof cronMeta.status === 'string' ? cronMeta.status.trim() : '';
@@ -1651,6 +1641,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             void useCronStore.getState().loadCronSessions(cronProjectId, cronJobId);
           }
         }
+
+        let sessionId = resolveEventSessionId(payload);
+        // cron 广播 session_id 为空（后端对 web 通道置空），
+        // 优先使用 cronMeta.exec_session_id 路由到定时任务专属会话，
+        // 不再 fallback 到当前活跃会话，避免广播消息污染创建者会话。
+        if (!sessionId && cronMeta) {
+          const execSessionId =
+            typeof cronMeta.exec_session_id === 'string'
+              ? (cronMeta.exec_session_id as string).trim()
+              : '';
+          if (execSessionId) {
+            sessionId = execSessionId;
+            ensureSessionRuntimes(sessionId);
+          }
+        }
+        if (!sessionId) return;
 
         const memberAction = pickString(payload.member_action);
         const actionMemberName = pickString(payload.member_name);
@@ -1779,6 +1785,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().updateMessage(sessionId, streamId, {
             ...(content ? { content } : {}),
             isStreaming: false,
+            timestamp: normalizeEventTimestampIso(payload.timestamp),
             ...(isProactiveRecommendation ? { isProactiveRecommendation, ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}) } : {}),
           });
           useChatStore.getState().stopStreaming(sessionId);

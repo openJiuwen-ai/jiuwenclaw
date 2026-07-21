@@ -115,3 +115,33 @@ async def test_send_request_omits_session_context_without_user_id(client: Yuanro
         await client.send_request(envelope)
 
     assert "X-session-context" not in {k.lower() for k in captured}
+
+
+@pytest.mark.asyncio
+async def test_create_and_delete_sandbox_placeholders(client: YuanrongFrontendAgentClientProbe):
+    await client.connect("http://127.0.0.1:8080")
+
+    sandbox = await client.create_sandbox(
+        user_id="alice",
+        agent_type="swarm",
+        agent_id="agent-1",
+        image_name="jiuwenswarm:latest",
+    )
+
+    assert sandbox.sandbox_id.startswith("sbx_")
+    assert sandbox.user_id == "alice"
+    assert sandbox.agent_type == "swarm"
+    assert sandbox.status == "ready"
+    assert sandbox.metadata["provisioning"] == "yuanrong_create_sandbox_stub"
+
+    await client.delete_sandbox(
+        sandbox.sandbox_id,
+        user_id="alice",
+        agent_type="3rd",
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_sandbox_requires_connection(client: YuanrongFrontendAgentClientProbe):
+    with pytest.raises(RuntimeError, match="client not connected"):
+        await client.create_sandbox(user_id="alice", agent_type="swarm")

@@ -14,6 +14,7 @@ export interface Session {
   title: string;
   project_id: string;
   project_dir: string;
+  work_mode?: import('../features/workspace/projectTypes').WorkMode;
   pinned?: boolean;
   pin_order?: number;
   renamed_at?: string | null;

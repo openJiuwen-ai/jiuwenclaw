@@ -467,7 +467,7 @@
 | `timezone` | 否 | IANA 时区，默认 `Asia/Shanghai` |
 | `mode` | 否 | 执行模式，默认 `agent.fast`。可选：`agent`、`agent.fast`、`agent.plan`、`plan`、`team`、`team.plan`、`code.team`。`team` 系列走多 Agent 流式执行，详见 [定时任务 — Team 模式](定时任务.md#6-team-模式与-swarmflow多智能体定时任务) |
 | `timeout_seconds` | 否 | 单次执行超时（秒），范围 60～259200。未设置时普通模式默认 600，Team 模式默认 1200 |
-| `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 300 |
+| `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 0 |
 | `delete_after_run` | 否 | 执行一次后自动删除，默认 false |
 
 - `add` 示例：

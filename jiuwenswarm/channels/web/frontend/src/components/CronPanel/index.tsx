@@ -593,7 +593,12 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
             </div>
           </div>
         )}
-        {activeTab === 'list' && !loading && jobs.length > 0 && (
+        {activeTab === 'list' && !loading && jobs.length > 0 && filteredJobs.length === 0 && (
+          <div className="flex min-h-[30vh] flex-col items-center justify-center gap-2 text-text-muted">
+            <p className="text-sm">{t('cron.search.noResultsJobs')}</p>
+          </div>
+        )}
+        {activeTab === 'list' && !loading && jobs.length > 0 && filteredJobs.length > 0 && (
           <div className="overflow-visible rounded-lg border border-border">
             <table className="w-full border-collapse text-sm">
               <thead>
@@ -808,21 +813,27 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
 
         {/* tab: 任务模板 */}
         {activeTab === 'template' && (
-          <div className="grid grid-cols-3 gap-4">
-            {filteredTemplates.map((tpl) => (
-              <button
-                key={tpl.id}
-                onClick={() => openTemplateDrawer(tpl)}
-                className="rounded-lg border border-border bg-card p-4 text-left transition-colors hover:border-accent"
-              >
-                <div className="mb-2 flex items-center gap-2">
-                  <TemplateIcon icon={tpl.icon} />
-                  <span className="text-sm font-bold text-text-strong">{t(tpl.titleKey)}</span>
-                </div>
-                <p className="text-xs leading-relaxed text-text-muted">{t(tpl.descriptionKey)}</p>
-              </button>
-            ))}
-          </div>
+          filteredTemplates.length > 0 ? (
+            <div className="grid grid-cols-3 gap-4">
+              {filteredTemplates.map((tpl) => (
+                <button
+                  key={tpl.id}
+                  onClick={() => openTemplateDrawer(tpl)}
+                  className="rounded-lg border border-border bg-card p-4 text-left transition-colors hover:border-accent"
+                >
+                  <div className="mb-2 flex items-center gap-2">
+                    <TemplateIcon icon={tpl.icon} />
+                    <span className="text-sm font-bold text-text-strong">{t(tpl.titleKey)}</span>
+                  </div>
+                  <p className="text-xs leading-relaxed text-text-muted">{t(tpl.descriptionKey)}</p>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="flex min-h-[30vh] flex-col items-center justify-center gap-2 text-text-muted">
+              <p className="text-sm">{t('cron.search.noResults')}</p>
+            </div>
+          )
         )}
 
         {/* tab: 执行历史（等 backend-requests.md #1 交付后接入真实数据，见 plan.md §5） */}

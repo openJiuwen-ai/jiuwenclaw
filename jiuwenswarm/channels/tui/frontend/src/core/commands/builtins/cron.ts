@@ -454,7 +454,7 @@ async function _handleShow(ctx: CommandContext, parts: string[]): Promise<void> 
           { label: "targets", value: job.targets },
           { label: "mode", value: job.mode || cronMeta.default_mode },
           { label: "timeout_seconds", value: formatTimeoutLabel(job, cronMeta) },
-          { label: "wake_offset_seconds", value: String(job.wake_offset_seconds ?? 300) },
+          { label: "wake_offset_seconds", value: String(job.wake_offset_seconds ?? 0) },
           { label: "delete_after_run", value: String(isOneShot) },
         ],
       }),
@@ -577,7 +577,7 @@ async function _handleAdd(ctx: CommandContext, raw: string): Promise<void> {
       targets: kvPairs.targets,
       timezone: kvPairs.timezone,
       mode: kvPairs.mode,
-      wake_offset_seconds: parseInt(kvPairs.wake_offset_seconds || "300", 10),
+      wake_offset_seconds: parseInt(kvPairs.wake_offset_seconds || "0", 10),
       delete_after_run: kvPairs.delete_after_run === "true",
       ...(kvPairs.timeout_seconds
         ? { timeout_seconds: parseInt(kvPairs.timeout_seconds, 10) }

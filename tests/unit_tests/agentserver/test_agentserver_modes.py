@@ -1020,7 +1020,10 @@ def test_process_message_stream_treats_plain_team_query_as_first_request_after_r
 
     chunks = asyncio.run(collect_chunks())
 
-    assert FakeSessionManager.submit_task_calls == ["team-session"]
+    # Ordinary chat (including team first request) is scheduled by the facade
+    # task itself; DeepAgent interaction owns session concurrency, so
+    # SessionManager.submit_task is no longer used on this path.
+    assert FakeSessionManager.submit_task_calls == []
     assert fake_adapter.seen_inputs["query"] == "你好"
     assert chunks[0].payload == {"event_type": "chat.done"}
     assert chunks[-1].is_complete is True
@@ -1330,6 +1333,8 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
 
     class FakeAbilityManager:
         @staticmethod
@@ -1415,8 +1420,8 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
         for rail in registered
         if _is_regular_skill_evolution_rail(rail)
     )
-    assert skill_evolution_rail.auto_scan is False
-    assert skill_evolution_rail.fuzzy_review is False
+    assert skill_evolution_rail.signal_trigger is False
+    assert skill_evolution_rail.review_trigger is False
 
 
 def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkeypatch, tmp_path):

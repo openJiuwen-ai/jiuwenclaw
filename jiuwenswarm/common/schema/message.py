@@ -63,6 +63,7 @@ class ReqMethod(Enum):
     MEMORY_COMPUTE = "memory.compute"
 
     PROACTIVE_TICK = "proactive.tick"  # Trigger proactive recommendation tick (from Cron)
+    COMMAND_GOAL = "command.goal"
 
     FILES_LIST = "files.list"
     FILES_GET = "files.get"
@@ -227,6 +228,10 @@ class EventType(Enum):
     CHAT_ASK_USER_QUESTION = "chat.ask_user_question"
     PLAN_APPROVAL_REQUIRED = "plan.approval_required"
     CHAT_SESSION_RESULT = "chat.session_result"
+    GOAL_SNAPSHOT = "goal.snapshot"
+    GOAL_UPDATED = "goal.updated"
+    RUNTIME_ACCEPTED = "runtime.accepted"
+    EXECUTION_ERROR = "execution.error"
     TEAM_MEMBER = "team.member"
     TEAM_TASK = "team.task"
     TEAM_MESSAGE = "team.message"

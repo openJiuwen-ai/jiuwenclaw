@@ -48,6 +48,38 @@ _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
 
 _HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
 
+_WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
+    {
+        "connection.ack",
+        "todo.updated",
+        "chat.tool_call",
+        "chat.tool_result",
+        "chat.processing_status",
+        "chat.interrupt_result",
+        "chat.evolution_status",
+        "chat.error",
+        "heartbeat.relay",
+        "context.usage",
+        "context.compression_state",
+        "chat.ask_user_question",
+        "chat.subtask_update",
+        "chat.symphony_status",
+        "chat.notice",
+        "history.message",
+        "chat.session_result",
+        "chat.usage_metadata",
+        "chat.usage_summary",
+        "chat.file",
+        "chat.retract",
+        "security.alert",
+        "goal.snapshot",
+        "goal.updated",
+        "runtime.accepted",
+        "execution.error",
+        "proactive_recommendation",
+    }
+)
+
 # ── 类型别名 ──────────────────────────────────────────────
 # 方法处理器签名: (ws, req_id, params, session_id) -> None
 MethodHandler = Callable[..., Awaitable[None]]
@@ -505,6 +537,61 @@ class WebChannel(BaseWsChannel):
         )
         return forbidden_origin_response(args)
 
+    @staticmethod
+    def _should_preserve_full_payload(event_name: str) -> bool:
+        return (
+            event_name in _WEB_FULL_PAYLOAD_EVENT_TYPES
+            or event_name.startswith("team.")
+            or event_name.startswith("harness.")
+        )
+
+    @classmethod
+    def _build_event_payload(cls, msg: Message, event_name: str) -> dict[str, Any]:
+        """Build the Web event payload without dropping structured control fields."""
+        if isinstance(msg.payload, dict):
+            if cls._should_preserve_full_payload(event_name):
+                payload = {**msg.payload}
+                if "session_id" not in payload and msg.session_id:
+                    payload["session_id"] = msg.session_id
+                if event_name.startswith("chat.") and "request_id" not in payload and msg.id:
+                    payload["request_id"] = msg.id
+                return payload
+
+            content = str(msg.payload.get("content", "") or "")
+            if not content and not getattr(msg, "ok", True) and msg.payload.get("error"):
+                content = str(msg.payload.get("error", ""))
+            payload = {
+                "session_id": msg.session_id,
+                "content": content,
+            }
+            for _key in ("role", "member_name", "member_action", "source_channel", "user_id", "display_name"):
+                _val = msg.payload.get(_key)
+                if _val is not None:
+                    payload[_key] = _val
+            if event_name == "chat.final":
+                cron_extra = msg.payload.get("cron")
+                if isinstance(cron_extra, dict):
+                    payload["cron"] = cron_extra
+                source = msg.payload.get("source")
+                if source:
+                    payload["source"] = source
+                ptype = msg.payload.get("proactive_type")
+                if ptype:
+                    payload["proactive_type"] = ptype
+                if source == "proactive_recommendation":
+                    logger.info(
+                        "[WebChannel] proactive push frame: source=%s proactive_type=%s "
+                        "content_len=%d payload_keys=%s",
+                        source, ptype, len(str(payload.get("content", ""))), list(payload.keys()),
+                    )
+            return payload
+
+        content = str((msg.params or {}).get("content", "") or "")
+        return {
+            "session_id": msg.session_id,
+            "content": content,
+        }
+
     async def send(
         self,
         msg: Message,
@@ -678,24 +765,36 @@ class WebChannel(BaseWsChannel):
                 getattr(msg, "session_id", ""),
             )
 
-        # ── 旧路径：按 session_id 精确路由（不再全量广播）──
-        if not msg.session_id:
+        # ── 旧路径：优先按请求 metadata.ws_id 物理寻址，再按 session_id 精确路由 ──
+        # 普通 stream event（chat.delta/final/usage_summary 等）由 ChannelManager
+        # 调 channel.send(msg)，不会携带 RoutingTarget；但原始 Web 请求注入的
+        # metadata.ws_id 会经 _chunk_to_message 保留下来。先用它收窄到发起请求的
+        # 物理连接，避免同一个 session 桶里的陈旧 ws 一起收到迟到事件。
+        ws_set: set[Any] = set()
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        request_ws_id = str(metadata.get("ws_id") or "").strip()
+        if request_ws_id:
+            ws = self._ws_by_id.get(request_ws_id)
+            if ws is not None and not getattr(ws, "closed", False):
+                ws_set.add(ws)
+
+        if not ws_set and not msg.session_id:
             logger.warning(
                 "[WebChannel] msg has no session_id, cannot route -- "
                 "dropping msg id=%s to avoid cross-session broadcast",
                 getattr(msg, "id", ""),
             )
             return
-        ws_set: set[Any] = set()
-        for rk, ws_list in self._clients_by_key.items():
-            if rk.session_id == msg.session_id:
-                for w in ws_list:
-                    if not getattr(w, "closed", False):
-                        ws_set.add(w)
+        if not ws_set:
+            for rk, ws_list in self._clients_by_key.items():
+                if rk.session_id == msg.session_id:
+                    for w in ws_list:
+                        if not getattr(w, "closed", False):
+                            ws_set.add(w)
         if not ws_set:
             logger.debug(
-                "[WebChannel] session_id=%s has no connected ws, dropping msg id=%s",
-                msg.session_id, getattr(msg, "id", ""),
+                "[WebChannel] session_id=%s has no connected ws, dropping msg id=%s ws_id=%s",
+                msg.session_id, getattr(msg, "id", ""), request_ws_id,
             )
             return
         all_clients = ws_set
@@ -709,71 +808,7 @@ class WebChannel(BaseWsChannel):
             if isinstance(payload_event_type, str) and payload_event_type.strip():
                 event_name = payload_event_type.strip()
 
-        # 根据事件类型构造 payload
-        payload: dict[str, Any] = {}
-
-        if isinstance(msg.payload, dict):
-            # 对于需要传递完整结构化数据的事件类型
-            if event_name in ("connection.ack", "todo.updated", "chat.tool_call", "chat.tool_result",
-                              "chat.processing_status", "chat.interrupt_result", "chat.evolution_status",
-                              "chat.error", "heartbeat.relay",
-                              "context.usage", "context.compression_state",
-                              "chat.ask_user_question", "chat.subtask_update",
-                              "chat.symphony_status", "chat.notice",
-                              "history.message",
-                              "chat.session_result", "chat.usage_metadata",
-                              "chat.usage_summary", "chat.file",
-                              "chat.retract", "security.alert",
-                              "proactive_recommendation") \
-                                or event_name.startswith("team.") \
-                                or event_name.startswith("harness."):
-                # 传递完整 payload，保留所有字段
-                payload = {**msg.payload}
-                # 确保包含 session_id
-                if "session_id" not in payload and msg.session_id:
-                    payload["session_id"] = msg.session_id
-                if event_name.startswith("chat.") and "request_id" not in payload and msg.id:
-                    payload["request_id"] = msg.id
-            else:
-                # 对于纯文本消息（chat.delta, chat.final, chat.error 等），提取 content
-                content = str(msg.payload.get("content", "") or "")
-                if not content and not getattr(msg, "ok", True) and msg.payload.get("error"):
-                    content = str(msg.payload.get("error", ""))
-                payload = {
-                    "session_id": msg.session_id,
-                    "content": content,
-                }
-                # teammate 消息：保留 role 和 member_name 供前端区分成员
-                for _key in ("role", "member_name", "member_action", "source_channel", "user_id", "display_name"):
-                    _val = msg.payload.get(_key)
-                    if _val is not None:
-                        payload[_key] = _val
-                # 定时任务推送：附带 cron 元数据，供前端识别并替换占位消息（避免误写入流式气泡）
-                if event_name == "chat.final":
-                    cron_extra = msg.payload.get("cron")
-                    if isinstance(cron_extra, dict):
-                        payload["cron"] = cron_extra
-                    # 保留 source 字段，供前端识别消息来源（如主动推荐）
-                    source = msg.payload.get("source")
-                    if source:
-                        payload["source"] = source
-                    # 保留 proactive_type，供前端选对卡片样式（技能推荐/任务提醒/探索发现）
-                    ptype = msg.payload.get("proactive_type")
-                    if ptype:
-                        payload["proactive_type"] = ptype
-                    if source == "proactive_recommendation":
-                        logger.info(
-                            "[WebChannel] proactive push frame: source=%s proactive_type=%s "
-                            "content_len=%d payload_keys=%s",
-                            source, ptype, len(str(payload.get("content", ""))), list(payload.keys()),
-                        )
-        else:
-            # payload 不是 dict，尝试从 params 提取
-            content = str((msg.params or {}).get("content", "") or "")
-            payload = {
-                "session_id": msg.session_id,
-                "content": content,
-            }
+        payload = self._build_event_payload(msg, event_name)
 
         # ── V2: 诊断日志 ──
         if routing_target is not None:

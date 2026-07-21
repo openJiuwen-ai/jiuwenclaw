@@ -16,7 +16,7 @@ import logging
 import pytest
 from pydantic import ValidationError
 
-from openjiuwen.agent_teams.schema import deep_agent_spec as das
+from openjiuwen.harness.schema import deep_agent_spec as das
 from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
 
 from jiuwenswarm.agents.swarm import register_swarm_providers, registry
@@ -200,7 +200,7 @@ def test_attribute_fields_are_params_env_fields_are_context() -> None:
         },
         registry.TEAM_SKILL_EVOLUTION: {
             "evolution_model_config": "params",
-            "auto_scan": "params",
+            "review_trigger": "params",
             "team_skills_dir": "context",
             "trajectory_registry": "context",
         },
@@ -244,6 +244,54 @@ def test_config_specs_bakes_attribute_params() -> None:
         by_type[registry.TEAM_SKILL_EVOLUTION]["evolution_model_config"]["model_name"]
         == "gpt-4o"
     )
+
+
+def test_config_specs_maps_auto_scan_by_swarm_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Leader reviews softly while teammates use deterministic signals."""
+    from jiuwenswarm.agents.swarm.config_specs import build_member_capability_specs
+
+    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    config = {"evolution": {"auto_scan": True}}
+    leader_rails, _ = build_member_capability_specs(config, "team", "leader")
+    member_rails, _ = build_member_capability_specs(config, "team", "teammate")
+    leader_params = {spec.type: spec.params for spec in leader_rails}
+    member_params = {spec.type: spec.params for spec in member_rails}
+
+    assert leader_params[registry.TEAM_SKILL_EVOLUTION]["review_trigger"] is True
+    assert "signal_trigger" not in leader_params[registry.TEAM_SKILL_EVOLUTION]
+    assert member_params[registry.MEMBER_SKILL_EVOLUTION]["signal_trigger"] is True
+    assert "review_trigger" not in member_params[registry.MEMBER_SKILL_EVOLUTION]
+
+
+def test_config_specs_keeps_supported_explicit_swarm_trigger_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the trigger supported by each swarm role is configurable."""
+    from jiuwenswarm.agents.swarm.config_specs import build_member_capability_specs
+
+    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    config = {
+        "evolution": {
+            "auto_scan": True,
+            "signal_trigger": False,
+            "review_trigger": False,
+        }
+    }
+    leader_rails, _ = build_member_capability_specs(config, "team", "leader")
+    member_rails, _ = build_member_capability_specs(config, "team", "teammate")
+    leader_params = {spec.type: spec.params for spec in leader_rails}
+    member_params = {spec.type: spec.params for spec in member_rails}
+
+    assert leader_params[registry.TEAM_SKILL_EVOLUTION]["review_trigger"] is False
+    assert "signal_trigger" not in leader_params[registry.TEAM_SKILL_EVOLUTION]
+    assert member_params[registry.MEMBER_SKILL_EVOLUTION]["signal_trigger"] is False
+    assert "review_trigger" not in member_params[registry.MEMBER_SKILL_EVOLUTION]
 
 
 def test_descriptor_json_round_trip() -> None:

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronRight, Plus, Trash2 } from 'lucide-react';
+import i18n from '../../i18n';
 import { webRequest } from '../../services/webClient';
 import { AvatarPermEditor } from './AvatarPermEditor';
 import { WechatQrModal } from './WechatQrModal';
@@ -420,7 +421,7 @@ function sortFeishuApps(apps: FeishuAppConfig[]): FeishuAppConfig[] {
   return [...apps].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
 }
 
-function normalizeFeishuAppConfig(input: unknown, fallbackName = '未命名飞书应用', isDefault = false): FeishuAppConfig {
+function normalizeFeishuAppConfig(input: unknown, fallbackName = i18n.t('channels.feishuApps.unnamedAppName'), isDefault = false): FeishuAppConfig {
   const base = normalizeFeishuConfig(input);
   const data = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
   return {
@@ -434,11 +435,17 @@ function normalizeFeishuAppsConfig(input: unknown): FeishuAppConfig[] {
   if (input && typeof input === 'object') {
     const data = input as Record<string, unknown>;
     if (Array.isArray(data.apps)) {
-      const apps = data.apps.map((item, idx) => normalizeFeishuAppConfig(item, `飞书应用 ${idx + 1}`, idx === 0));
-      return sortFeishuApps(apps.length > 0 ? apps : [normalizeFeishuAppConfig(DEFAULT_FEISHU_CONF, '默认飞书应用', true)]);
+      const apps = data.apps.map((item, idx) =>
+        normalizeFeishuAppConfig(item, i18n.t('channels.feishuApps.appNameTemplate', { index: idx + 1 }), idx === 0),
+      );
+      return sortFeishuApps(
+        apps.length > 0
+          ? apps
+          : [normalizeFeishuAppConfig(DEFAULT_FEISHU_CONF, i18n.t('channels.feishuApps.defaultAppName'), true)],
+      );
     }
   }
-  return sortFeishuApps([normalizeFeishuAppConfig(input, '默认飞书应用', true)]);
+  return sortFeishuApps([normalizeFeishuAppConfig(input, i18n.t('channels.feishuApps.defaultAppName'), true)]);
 }
 
 function draftFromFeishuAppConfig(conf: FeishuAppConfig): FeishuAppDraft {
@@ -454,7 +461,7 @@ function buildFeishuAppConfig(draft: FeishuAppDraft): FeishuAppConfig {
   return {
     ...DEFAULT_FEISHU_CONF,
     ...(payload as FeishuConfig),
-    name: draft.name.trim() || '未命名飞书应用',
+    name: draft.name.trim() || i18n.t('channels.feishuApps.unnamedAppName'),
     is_default: draft.is_default,
   };
 }
@@ -1296,7 +1303,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
         {
           ...draftFromFeishuAppConfig({
             ...DEFAULT_FEISHU_CONF,
-            name: `飞书应用 ${prev.length + 1}`,
+            name: t('channels.feishuApps.appNameTemplate', { index: prev.length + 1 }),
             is_default: false,
           }),
         },
@@ -1328,7 +1335,9 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     setSuccess(null);
   };
 
-  const draft = feishuDraftApps[0] ?? draftFromFeishuAppConfig({ ...DEFAULT_FEISHU_CONF, name: '默认飞书应用', is_default: true });
+  const draft =
+    feishuDraftApps[0] ??
+    draftFromFeishuAppConfig({ ...DEFAULT_FEISHU_CONF, name: t('channels.feishuApps.defaultAppName'), is_default: true });
 
   const handleFieldChange = <K extends keyof FeishuDraft>(key: K, value: FeishuDraft[K]) => {
     handleFeishuAppFieldChange(0, key, value);
@@ -1788,11 +1797,30 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     );
   };
 
+  // 旧版单飞书应用配置迁移到 apps 数组时，后端会给缺失的 name 填入固定中文种子文案
+  // （见 app_web_handlers.py 的 _FEISHU_APP_DEFAULTS/_normalize_single_feishu_to_app），
+  // 与当前 UI 语言无关。这里仅做展示层替换：未被用户改过时按当前语言显示对应译文，
+  // 不改动 app.name 的实际值，因此不会把翻译结果回写进 config.yaml。
+  // legacyDefaultAppName 只用于识别后端旧迁移逻辑写入的原始种子文案（"默认应用"），
+  // 命中后统一按 defaultAppName（"飞书默认应用"）展示，避免出现两种"默认应用"文案。
+  const FEISHU_APP_NAME_SEED_KEYS: { detectKey: string; displayKey: string }[] = [
+    { detectKey: 'channels.feishuApps.defaultAppName', displayKey: 'channels.feishuApps.defaultAppName' },
+    { detectKey: 'channels.feishuApps.legacyDefaultAppName', displayKey: 'channels.feishuApps.defaultAppName' },
+    { detectKey: 'channels.feishuApps.unnamedAppName', displayKey: 'channels.feishuApps.unnamedAppName' },
+  ];
+
+  const getFeishuAppNameDisplayValue = (rawName: string): string => {
+    const matched = FEISHU_APP_NAME_SEED_KEYS.find((entry) =>
+      ['zh', 'en'].some((lng) => rawName === t(entry.detectKey, { lng })),
+    );
+    return matched ? t(matched.displayKey) : rawName;
+  };
+
   const renderFeishuAppsEditor = () => (
     <div className="space-y-3">
       {feishuDraftApps.map((app, index) => {
         const expanded = expandedFeishuAppIndex === index;
-        const identifier = app.app_id.trim() || '未配置 app_id';
+        const identifier = app.app_id.trim() || t('channels.feishuApps.appIdNotConfigured');
         return (
           <div key={`feishu-app-${index}`} className="rounded-xl border border-border bg-card overflow-hidden">
             <div className="flex items-center gap-3 px-4 py-3">
@@ -1800,21 +1828,21 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 type="button"
                 onClick={() => setExpandedFeishuAppIndex(expanded ? -1 : index)}
                 className="inline-flex h-7 w-7 items-center justify-center rounded-md text-text-muted hover:bg-secondary hover:text-text"
-                aria-label={expanded ? '收起应用配置' : '展开应用配置'}
-                title={expanded ? '收起应用配置' : '展开应用配置'}
+                aria-label={expanded ? t('channels.feishuApps.collapseConfig') : t('channels.feishuApps.expandConfig')}
+                title={expanded ? t('channels.feishuApps.collapseConfig') : t('channels.feishuApps.expandConfig')}
               >
                 <ChevronRight className={`h-4 w-4  ${expanded ? 'rotate-90' : ''}`} />
               </button>
               <input
                 type="text"
-                value={app.name}
+                value={getFeishuAppNameDisplayValue(app.name)}
                 onChange={(e) => handleFeishuAppFieldChange(index, 'name', e.target.value)}
                 className="min-w-[160px] flex-1 rounded-md border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-accent"
-                placeholder="应用名称"
+                placeholder={t('channels.feishuApps.appNamePlaceholder')}
               />
               {app.is_default ? (
                 <span className="rounded-full border border-accent bg-accent-subtle px-2.5 py-1 text-xs text-accent">
-                  默认
+                  {t('channels.feishuApps.defaultBadge')}
                 </span>
               ) : null}
               {!app.is_default ? (
@@ -1822,10 +1850,10 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                   type="button"
                   onClick={() => handleSetDefaultFeishuApp(index)}
                   className="rounded-full border border-accent/50 bg-accent-subtle px-2.5 py-1 text-xs font-medium text-accent hover:border-accent hover:bg-accent/15"
-                  aria-label="设为默认应用"
-                  title="设为默认应用"
+                  aria-label={t('channels.feishuApps.setDefaultAria')}
+                  title={t('channels.feishuApps.setDefaultAria')}
                 >
-                  设为默认
+                  {t('channels.feishuApps.setDefault')}
                 </button>
               ) : null}
               <span className="mono max-w-[220px] truncate rounded-md border border-border bg-secondary px-2.5 py-1 text-xs text-text-muted">
@@ -1843,8 +1871,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                 onClick={() => handleDeleteFeishuApp(index)}
                 disabled={feishuDraftApps.length <= 1}
                 className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border text-text-muted hover:bg-danger-subtle hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
-                aria-label="删除应用"
-                title="删除应用"
+                aria-label={t('channels.feishuApps.deleteApp')}
+                title={t('channels.feishuApps.deleteApp')}
               >
                 <Trash2 className="h-4 w-4" />
               </button>
@@ -1869,7 +1897,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
         className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border px-4 py-3 text-sm text-text-muted hover:border-accent hover:bg-accent-subtle hover:text-accent"
       >
         <Plus className="h-4 w-4" />
-        添加应用
+        {t('channels.feishuApps.addApp')}
       </button>
     </div>
   );
