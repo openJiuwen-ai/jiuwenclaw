@@ -990,14 +990,14 @@ class GitDiffWatcherRegistry:
                     files_fp = _files_fingerprint(files_dict)
                     if files_fp != watch.last_files_fingerprint:
                         watch.last_files_fingerprint = files_fp
-                        await self._push_files_changed(watch, files_dict, files_fp)
+                        await self._push_files_changed(watch, status_dict, files_dict, files_fp)
 
                 if watch.detail_source and watch.detail_files:
                     files_dict = self._extract_files(status_dict, watch.detail_source)
                     detail_fp = _detail_fingerprint(files_dict, watch.detail_files)
                     if detail_fp != watch.last_detail_fingerprint:
                         watch.last_detail_fingerprint = detail_fp
-                        await self._push_detail_changed(watch, files_dict, detail_fp)
+                        await self._push_detail_changed(watch, status_dict, files_dict, detail_fp)
 
     @staticmethod
     def _extract_files(
@@ -1086,6 +1086,7 @@ class GitDiffWatcherRegistry:
     async def _push_files_changed(
         self,
         watch: GitDiffWatch,
+        status_dict: dict[str, Any],
         files_dict: dict[str, Any] | None,
         fingerprint: str,
     ) -> None:
@@ -1105,6 +1106,8 @@ class GitDiffWatcherRegistry:
             "revision": _build_revision("gitdiff", fingerprint),
             "files": files_no_hunks,
         }
+        if watch.files_source == "last_turn":
+            payload.update(self._last_turn_event_metadata(status_dict))
         try:
             await self._channel.send_event(
                 watch.ws, "project.git.diff_files_changed", payload,
@@ -1120,6 +1123,7 @@ class GitDiffWatcherRegistry:
     async def _push_detail_changed(
         self,
         watch: GitDiffWatch,
+        status_dict: dict[str, Any],
         files_dict: dict[str, Any] | None,
         fingerprint: str,
     ) -> None:
@@ -1143,6 +1147,8 @@ class GitDiffWatcherRegistry:
             "revision": _build_revision("gitdiff", fingerprint),
             "files": detail_files,
         }
+        if watch.detail_source == "last_turn":
+            payload.update(self._last_turn_event_metadata(status_dict))
         try:
             await self._channel.send_event(
                 watch.ws, "project.git.diff_detail_changed", payload,
@@ -1154,6 +1160,21 @@ class GitDiffWatcherRegistry:
                 watch.watch_id, exc,
             )
             await self._on_push_failure(watch)
+
+    @staticmethod
+    def _last_turn_event_metadata(status_dict: dict[str, Any]) -> dict[str, Any]:
+        """提取 last_turn 的稳定绑定元数据。"""
+        last_turn = status_dict.get("last_turn")
+        if not isinstance(last_turn, dict):
+            return {}
+        return {
+            "change_set_id": last_turn.get("change_set_id", ""),
+            "turn_index": last_turn.get("turn_index", 0),
+            "assistant_message_id": last_turn.get("assistant_message_id", ""),
+            "user_message_id": last_turn.get("user_message_id", ""),
+            "request_id": last_turn.get("request_id", ""),
+            "status": last_turn.get("status", "completed"),
+        }
 
     async def _on_push_failure(self, watch: GitDiffWatch) -> None:
         """推送失败计数;连续失败达到阈值后回收 watcher。

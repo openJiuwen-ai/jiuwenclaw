@@ -1051,7 +1051,8 @@
     },
     "search": {
       "placeholder": "请输入搜索内容",
-      "noResults": "未找到相关模板，可换个关键词再试。"
+      "noResults": "未找到相关模板，可换个关键词再试。",
+      "noResultsJobs": "未找到相关任务，可换个关键词再试。"
     },
     "table": {
       "name": "名称",
@@ -2070,6 +2071,15 @@
   "security": {
     "contentRetracted": "内容已因安全原因撤回"
   },
+  "codeMode": {
+    "work": "工作",
+    "code": "Code",
+    "workDescription": "处理办公、协作和通用任务",
+    "codeDescription": "在项目目录中查看并修改代码",
+    "environment": "环境信息",
+    "changes": "变更",
+    "review": "审核"
+  },
   "multiSession": {
     "title": "工作",
     "conversations": "对话",
@@ -2109,7 +2119,7 @@
       "noProjectMatches": "暂无匹配项目",
       "noProjects": "暂无项目",
       "noConversations": "暂无会话",
-      "noSessions": "暂无触发记录",
+      "noSessions": "暂无执行记录",
       "startConversation": "从{{projectName}}开始新对话",
       "pinProject": "置顶项目",
       "unpinProject": "取消置顶项目",

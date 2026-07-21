@@ -10,7 +10,7 @@ import { ArrowRight, CheckCircle2, ClipboardList, Copy, Info, LoaderCircle, Shar
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useHarnessStore, useSessionStore, useTodoStore } from '../../stores';
-import { AgentMode, MediaItem, Message, UserAnswer } from '../../types';
+import { AgentMode, MediaItem, Message, UserAnswer, type ProjectInfo } from '../../types';
 import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
@@ -34,6 +34,7 @@ import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import welcomeBanner from '../../assets/home-banner.svg';
 import './ChatPanel.css';
+import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
@@ -61,6 +62,7 @@ interface ChatPanelProps {
   canExportShare?: boolean;
   sessionTitle?: string;
   sessionProjectName?: string;
+  sessionProject?: ProjectInfo | null;
   /** 自会话管理恢复历史后出现；支持分页加载更早消息 */
   historyPager?: ChatHistoryPagerProps | null;
   /** 历史会话首屏恢复中：保持聊天布局，避免短暂退回欢迎态 */
@@ -72,6 +74,8 @@ interface ChatPanelProps {
   onNavigateToSkills?: () => void;
   /** 切换右侧紧缩面板展开状态 */
   onToggleTeamArea?: (expanded: boolean) => void;
+  /** 打开右侧面板并切换到代码审核 Tab */
+  onOpenCodeReview?: () => void;
   permissionsEnabled: boolean;
   onSavePermission: (updates: Record<string, string>) => Promise<void>;
 }
@@ -656,12 +660,14 @@ export function ChatPanel({
   canExportShare = false,
   sessionTitle,
   sessionProjectName,
+  sessionProject = null,
   historyPager = null,
   isHistoryRestoring = false,
   teamAreaExpanded = false,
   autoFocusKey = null,
   onNavigateToSkills,
   onToggleTeamArea,
+  onOpenCodeReview,
   permissionsEnabled,
   onSavePermission,
 }: ChatPanelProps) {
@@ -1045,6 +1051,14 @@ export function ChatPanel({
               {hasTimelineContent ? (
                 <>
                   <MessageList messages={messages} />
+                  {activeSessionId && activeSessionId !== 'new' ? (
+                    <CodeChangesCard
+                      project={sessionProject}
+                      sessionId={activeSessionId}
+                      isProcessing={isProcessing}
+                      onReview={() => onOpenCodeReview?.()}
+                    />
+                  ) : null}
                   {shouldShowHumanShare && (
                     <HumanShareCard
                       commands={teamHumanShareCommands}

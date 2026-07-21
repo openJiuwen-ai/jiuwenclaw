@@ -22,8 +22,9 @@ from jiuwenswarm.symphony.fingerprint.models import (
     ParameterSpec,
     RawSkillManifest,
     FingerprintExtractionResult,
+    Fingerprint,
+    FingerprintType,
     SkillFolder,
-    SkillFingerprint,
     SkillSchemaExtractor,
 )
 
@@ -84,8 +85,9 @@ __all__ = [
     "ParameterSpec",
     "RawSkillManifest",
     "FingerprintExtractionResult",
+    "Fingerprint",
+    "FingerprintType",
     "SkillFolder",
-    "SkillFingerprint",
     "SkillSchemaExtractor",
     # Stage: scan
     "SkillFolderScanner",

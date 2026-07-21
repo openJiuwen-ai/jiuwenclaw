@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from jiuwenswarm.symphony.fingerprint.models import SkillFingerprint
+from jiuwenswarm.symphony.fingerprint.models import Fingerprint
 from jiuwenswarm.symphony.graph.models import LLMMatch, RelationCandidate, SkillRegistry
 
 
@@ -29,7 +29,7 @@ class CachedOntologyMatcher:
         matcher: Any,
         cache_path: str | Path,
         *,
-        fingerprints: Iterable[SkillFingerprint],
+        fingerprints: Iterable[Fingerprint],
     ) -> None:
         self.matcher = matcher
         self.cache = RelationMatchCache(
@@ -125,12 +125,12 @@ class RelationMatchCache:
         path: str | Path,
         *,
         matcher_signature: dict[str, Any],
-        fingerprints: Iterable[SkillFingerprint],
+        fingerprints: Iterable[Fingerprint],
     ) -> None:
         self.path = Path(path).resolve()
         self.matcher_signature = matcher_signature
         self.fingerprint_hashes = {
-            item.id: _stable_sha256(item.to_dict())
+            item.id: _stable_sha256(item.graph_identity_dict())
             for item in fingerprints
         }
         self._records = self._load()

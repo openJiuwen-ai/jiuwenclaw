@@ -713,6 +713,59 @@ class TestInteractiveLoop:
         assert renderer.streamed_text == "Hello world"
 
     @pytest.mark.asyncio
+    async def test_team_control_final_envelopes_do_not_hide_answer(self):
+        messages = [
+            {
+                "type": "event",
+                "event": "chat.processing_status",
+                "payload": {"is_processing": True},
+            },
+            {
+                "type": "event",
+                "event": "chat.final",
+                "payload": {"event_type": "team.runtime_ready"},
+            },
+            {
+                "type": "event",
+                "event": "chat.final",
+                "payload": {"event_type": "chat.llm_usage"},
+            },
+            {
+                "type": "event",
+                "event": "chat.delta",
+                "payload": {"content": "当前是集群模式"},
+            },
+            {
+                "type": "event",
+                "event": "chat.final",
+                "payload": {
+                    "event_type": "chat.final",
+                    "content": "当前是集群模式。",
+                },
+            },
+            {
+                "type": "event",
+                "event": "chat.processing_status",
+                "payload": {"is_processing": False},
+            },
+        ]
+
+        from jiuwenswarm.cli.chat import _run_interactive_loop
+
+        client = await self._make_connected_client(messages)
+        renderer = HumanRenderer()
+        request = {
+            "type": "req", "id": "r1", "method": "chat.send",
+            "is_stream": True,
+            "params": {"session_id": "s1", "content": "hi", "query": "hi",
+                       "mode": "team", "cwd": "/tmp", "project_dir": "/tmp",
+                       "trusted_dirs": ["/tmp"]},
+        }
+        code = await _run_interactive_loop(client, renderer, request)
+        assert code == 0
+        assert renderer.streamed_text == "当前是集群模式。"
+
+    @pytest.mark.asyncio
     async def test_chat_error_returns_1(self):
         messages = [
             {"type": "event", "event": "chat.error", "payload": {"error": "something broke"}},
@@ -754,6 +807,7 @@ class TestInteractiveLoop:
         }
         code = await _run_interactive_loop(client, renderer, request)
         assert code == 0
+        assert renderer.streamed_text == "ok"
 
     @pytest.mark.asyncio
     @staticmethod

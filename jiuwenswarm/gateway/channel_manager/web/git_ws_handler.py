@@ -589,9 +589,15 @@ class GitDiffWebSocketHandler:
         #   确保扫描到项目目录下的 session-specific file_ops。
         restore_errors = restore_result.get("errors", []) or []
         file_ops_truncated = False
+        discarded_change_set_id: str | None = None
         if cut_timestamp > 0 and not restore_errors:
             from jiuwenswarm.server.utils.diff_service import get_diff_service
             diff_service = get_diff_service()
+            discarded_change_set_id = await asyncio.to_thread(
+                diff_service.mark_turn_discarded,
+                session_id, turn_index,
+                project_dir=proj.project_dir,
+            )
             await asyncio.to_thread(
                 diff_service.truncate_file_ops_by_timestamp,
                 session_id, cut_timestamp,
@@ -616,6 +622,7 @@ class GitDiffWebSocketHandler:
             payload={
                 "session_id": session_id,
                 "turn_index": turn_index,
+                "change_set_id": discarded_change_set_id,
                 "restored_files": restore_result.get("restored_files", []),
                 "deleted_files": restore_result.get("deleted_files", []),
                 "errors": restore_errors,

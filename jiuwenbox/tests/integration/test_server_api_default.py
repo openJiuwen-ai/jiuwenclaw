@@ -3767,6 +3767,36 @@ class TestBackgroundJobs:
         )
         assert get_resp.status_code == 404, get_resp.text
 
+    @staticmethod
+    def test_bg_exec_visible_via_exec_ps(client):
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        sandbox_id = create_resp.json()["id"]
+        job_id = f"ps-{uuid.uuid4().hex[:4]}"
+
+        started = _exec_background(
+            client,
+            sandbox_id,
+            ["sleep", "3600"],
+            job_id=job_id,
+        )
+        assert started["started"] is True
+
+        ps_resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/exec",
+            json={
+                "command": ["ps", "-eo", "pid,args"],
+                "timeout_seconds": 10,
+            },
+        )
+        assert ps_resp.status_code == 200, ps_resp.text
+        assert ps_resp.json()["exit_code"] == 0
+        assert "sleep" in ps_resp.json()["stdout"]
+
+        client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/background/{job_id}/kill",
+            json={},
+        )
+
 
 class TestSandboxListing:
     @staticmethod

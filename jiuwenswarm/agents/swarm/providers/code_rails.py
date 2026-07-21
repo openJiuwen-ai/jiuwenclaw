@@ -145,6 +145,10 @@ def build_code_runtime_prompt(params: dict[str, Any], ctx: SwarmBuildContext) ->
     try:
         inp = CodeRuntimePromptInput.resolve(params, ctx)
         rail = RuntimePromptRail(language=inp.language, channel=inp.channel)
+        # Code-team members need the same per-request runtime binding as the
+        # regular team profile; otherwise mode falls back to "unknown".
+        rail.set_mode(ctx.mode)
+        rail.set_session_id(ctx.session_id)
         rail.set_runtime_paths(cwd=inp.project_dir, project_dir=inp.project_dir)
         return rail
     except Exception as exc:

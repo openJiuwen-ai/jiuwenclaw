@@ -353,17 +353,18 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
     if (!confirmState || confirmBusy) return;
     setConfirmBusy(true);
     try {
-      const result = await webRequest<{ accepted: boolean; run_id: string; session_id: string }>('cron.job.run_now', { id: confirmState.job.id });
+      // 不带 target_session_id：两种触发（自然到点 / 立即执行）统一走后端"最活跃会话"
+      // 选取。后端返回的 session_id 是调度占位 id（cron_*），不可用于跳转，故不再
+      // onSelectSession——避免跳到不存在的会话弹出"对话不存在或已删除"。推荐内容
+      // 异步经 chat.final（source=proactive_recommendation）推到最活跃会话气泡。
+      await webRequest<{ accepted: boolean; run_id: string }>('cron.job.run_now', {
+        id: confirmState.job.id,
+      });
       setSuccess(t('cron.success.runNow'));
       // 刷新左侧栏该定时任务下展开的 session 列表（project.get_cron_sessions）
       const { id: cronId, projectId } = confirmState.job;
       if (cronId && projectId) {
         void loadCronSessions(projectId, cronId);
-      }
-      // 后端首次执行（job 还没有 last_session_id）时 session_id 会是空串，此时不跳转，
-      // 用户仍可通过"触发的会话"列表在会话就绪后手动打开
-      if (result.session_id) {
-        onSelectSession(result.session_id);
       }
     } catch (runNowError) {
       const message = runNowError instanceof Error ? runNowError.message : t('cron.errors.runNowFailed');
@@ -593,7 +594,12 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
             </div>
           </div>
         )}
-        {activeTab === 'list' && !loading && jobs.length > 0 && (
+        {activeTab === 'list' && !loading && jobs.length > 0 && filteredJobs.length === 0 && (
+          <div className="flex min-h-[30vh] flex-col items-center justify-center gap-2 text-text-muted">
+            <p className="text-sm">{t('cron.search.noResultsJobs')}</p>
+          </div>
+        )}
+        {activeTab === 'list' && !loading && jobs.length > 0 && filteredJobs.length > 0 && (
           <div className="overflow-visible rounded-lg border border-border">
             <table className="w-full border-collapse text-sm">
               <thead>

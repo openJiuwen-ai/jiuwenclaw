@@ -30,6 +30,8 @@ class AgentOSRouter(AgentServerClientExtension):
             function_version_urn=config.function_version_urn,
             concurrency=config.concurrency,
             invoke_timeout_s=config.invoke_timeout_s,
+            agent_timeout_s=config.agent_timeout_s,
+            agent_namespace=config.agent_namespace,
         )
         self._registry_client = RegistryClient(config.registry)
         self._agent_manager = AgentManager(

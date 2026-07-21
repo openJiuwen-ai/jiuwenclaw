@@ -421,7 +421,7 @@ debug_trace:
 
 react:
   agent_name: main_agent
-  enable_task_loop: false
+  enable_task_loop: true
   max_iterations: 100
   model_name: ${MODEL_NAME:-deepseek-chat}
   skill_mode: all
@@ -563,6 +563,10 @@ gateway:
     function_version_urn:
     concurrency: 1
     invoke_timeout_s: 60
+    # POST/DELETE /api/agent 超时（秒）；create 含镜像拉取/容器启动，建议明显大于 invoke_timeout_s
+    agent_timeout_s: 300
+    # create 请求的 namespace，默认 default
+    agent_namespace: default
 
   # AgentOS Router Extension 配置；agent_client.type=agentos_router 时生效。
   agentos:
@@ -574,8 +578,11 @@ gateway:
       - user_id
       - agent_type
     registry:
+      # Agent OS 注册中心地址（空=本地 stub，不发 HTTP）。一体机默认 http://127.0.0.1:8000
       endpoint:
       request_timeout_s: 10
+      # 本机 nodeIP，供 POST /api/nodes/{node}/heartbeat
+      node:
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
@@ -1003,35 +1010,6 @@ hooks:
   #       - type: command
   #         command: "echo 'agent stopping'"
 
-
-team:
-  # 默认：单机 local + inprocess。双机 pyzmq 示例见 tmp/team-leader.yaml、tmp/team-teammate.yaml（与 .tmp/leader_home、.tmp/teammate_home 内 config 同步）。
-  runtime:
-    mode: local
-    role: leader
-
-  team_name: jiuwen_team
-  lifecycle: persistent
-  teammate_mode: build_mode
-  spawn_mode: inprocess
-
-  leader:
-    member_name: team_leader
-    display_name: 团队领导
-    persona: "天才项目管理专家，擅长任务分解和团队协调"
-
-  agents:
-    leader: $agent_leader
-    teammate: $agent_teammate
-
-  workspace:
-    enabled: true
-
-  transport:
-    type: inprocess
-
-  storage:
-    type: sqlite
 
 mcp:
   servers: []

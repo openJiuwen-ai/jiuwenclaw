@@ -2807,21 +2807,26 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
     assert [event["event_type"] for event in broadcasted] == [
         "chat.processing_status",
         "team.runtime_ready",
+        'chat.final',
+        'chat.processing_status',
+        'chat.final',
+        'chat.processing_status',
+        'chat.final',
+        'chat.processing_status',
         "chat.processing_status",
-        'chat.final',
-        'chat.processing_status',
-        'chat.final',
-        'chat.processing_status',
-        'chat.final',
-        'chat.processing_status',
         'team.completed',
     ]
     # Round-start processing_status
     assert broadcasted[0]["is_processing"] is True
     assert broadcasted[0]["is_complete"] is False
     # Round-end processing_status (from team.completed)
-    assert broadcasted[2]["is_processing"] is False
-    assert broadcasted[2]["is_complete"] is True
+    assert broadcasted[-2]["is_processing"] is False
+    assert broadcasted[-2]["is_complete"] is True
+    for index, event in enumerate(broadcasted):
+        if event.get("event_type") == "chat.final":
+            next_event = broadcasted[index + 1]
+            assert next_event["event_type"] == "chat.processing_status"
+            assert next_event["is_processing"] is False
 
 
 @pytest.mark.anyio

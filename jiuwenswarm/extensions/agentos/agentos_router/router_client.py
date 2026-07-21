@@ -128,20 +128,26 @@ class AgentOSRouterClient(AgentServerClient):
             )
 
         image_info = await self._registry.get_image_info(agent_info.agent_type)
+        urn = str(
+            image_info.image_uri
+            or image_info.metadata.get("urn")
+            or self._yuanrong.function_version_urn
+        ).strip()
+        if not urn:
+            raise ValueError(
+                f"function urn is required to create sandbox for agent_type={agent_info.agent_type}"
+            )
         sandbox = await self._yuanrong.create_sandbox(
-            user_id=agent_info.user_id,
-            agent_type=agent_info.agent_type,
-            agent_id=agent_info.agent_id,
-            image_name=image_info.image_name,
-            metadata={
-                "session_id": agent_info.metadata.get("session_id"),
-                "image_info": dict(image_info.metadata),
-            },
+            namespace=self._yuanrong.agent_namespace,
+            name=f"{agent_info.user_id}+{agent_info.agent_type}",
+            urn=urn,
         )
-        agent_info.sandbox_id = sandbox.sandbox_id
+        instance_id = sandbox.sandbox_id
+        agent_info.sandbox_id = instance_id
         agent_info.metadata.update(
             {
-                "image": image_info.image_name,
+                "instance_id": instance_id,
+                "urn": urn,
                 "image_info": dict(image_info.metadata),
                 "sandbox": dict(sandbox.metadata),
             }
@@ -179,11 +185,7 @@ class AgentOSRouterClient(AgentServerClient):
                 "session_id"
             )
         if agent_info.sandbox_id:
-            await self._yuanrong.delete_sandbox(
-                agent_info.sandbox_id,
-                user_id=agent_info.user_id,
-                agent_type=agent_info.agent_type,
-            )
+            await self._yuanrong.delete_sandbox(agent_info.sandbox_id)
         await self._agent_manager.delete_agent(
             agent_info.user_id,
             agent_info.agent_type,

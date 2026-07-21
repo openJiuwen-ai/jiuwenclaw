@@ -1051,7 +1051,8 @@
     },
     "search": {
       "placeholder": "Search",
-      "noResults": "No matching templates found. Try a different keyword."
+      "noResults": "No matching templates found. Try a different keyword.",
+      "noResultsJobs": "No matching tasks found. Try a different keyword."
     },
     "table": {
       "name": "Name",
@@ -2066,6 +2067,15 @@
       "sendFileDesc": "Send files to user"
     }
   },
+  "codeMode": {
+    "work": "Work",
+    "code": "Code",
+    "workDescription": "Office, collaboration, and general tasks",
+    "codeDescription": "Inspect and modify code in a project directory",
+    "environment": "Environment",
+    "changes": "Changes",
+    "review": "Review"
+  },
   "multiSession": {
     "title": "Work",
     "conversations": "Conversations",
@@ -2105,7 +2115,7 @@
       "noProjectMatches": "No matching projects",
       "noProjects": "No projects",
       "noConversations": "No conversations",
-      "noSessions": "No trigger sessions",
+      "noSessions": "No execution sessions",
       "startConversation": "Start a new conversation from {{projectName}}",
       "pinProject": "Pin project",
       "unpinProject": "Unpin project",

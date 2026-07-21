@@ -801,6 +801,34 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self._write_json(200, {"files": files})
             return
 
+        if path == "/file-api/raw-file":
+            file_arg = query.get("path", "")
+            if not file_arg:
+                self._write_json(400, {"error": "missing_file_path"})
+                return
+            full_path = (self.project_root / file_arg).resolve()
+            if not self._is_path_under_allowed_root(full_path):
+                self._write_json(403, {"error": "forbidden_path"})
+                return
+            if not full_path.is_file():
+                self._write_json(404, {"error": "file_not_found"})
+                return
+
+            mime_type, _ = mimetypes.guess_type(full_path.name)
+            self.send_response(200)
+            self.send_header("Content-Type", mime_type or "application/octet-stream")
+            self.send_header("Content-Length", str(full_path.stat().st_size))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command != "HEAD":
+                with full_path.open("rb") as file_obj:
+                    while True:
+                        chunk = file_obj.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            return
+
         if path == "/file-api/file-content":
             file_arg = query.get("path", "")
             encoding_arg = query.get("encoding", "utf-8")

@@ -3,9 +3,22 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Union
+from typing import (
+    Any,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Protocol,
+    TypeAlias,
+    Union,
+    cast,
+)
+
+
+FingerprintType: TypeAlias = Literal["agent", "skill"]
 
 
 @dataclass(frozen=True)
@@ -28,7 +41,7 @@ class ExtractionDiagnostic:
     message: str
     skill_id: Optional[str] = None
     path: Optional[str] = None
-    details: Dict[str, Any] = field(default_factory=dict)
+    details: Dict[str, Any] = dataclass_field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -50,7 +63,7 @@ class RawSkillManifest:
     frontmatter: Dict[str, Any]
     body: str
     body_sha256: str
-    diagnostics: List[ExtractionDiagnostic] = field(default_factory=list)
+    diagnostics: List[ExtractionDiagnostic] = dataclass_field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -94,25 +107,63 @@ class ExtractedSkillSchema:
     """LLM-extracted candidate schema before deterministic normalization."""
 
     description: str = ""
-    inputs: List[Union[ParameterSpec, Dict[str, Any]]] = field(default_factory=list)
-    outputs: List[Union[ArtifactSpec, Dict[str, Any]]] = field(default_factory=list)
+    inputs: List[Union[ParameterSpec, Dict[str, Any]]] = dataclass_field(
+        default_factory=list
+    )
+    outputs: List[Union[ArtifactSpec, Dict[str, Any]]] = dataclass_field(
+        default_factory=list
+    )
     confidence: Optional[float] = None
-    warnings: List[str] = field(default_factory=list)
+    warnings: List[str] = dataclass_field(default_factory=list)
 
 
 @dataclass(frozen=True)
-class SkillFingerprint:
-    """Normalized Skill fingerprint v1."""
+class Fingerprint:
+    """Normalized static description of an Agent or Skill."""
 
+    type: FingerprintType
     id: str
     name: str
     description: str
     version: str
-    inputs: List[ParameterSpec]
-    outputs: List[ArtifactSpec]
+    inputs: List[ParameterSpec] = dataclass_field(default_factory=list)
+    outputs: List[ArtifactSpec] = dataclass_field(default_factory=list)
+    static_data: Dict[str, Any] = dataclass_field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.type not in {"agent", "skill"}:
+            raise ValueError("Fingerprint type must be 'agent' or 'skill'.")
+        for name, value in (
+            ("id", self.id),
+            ("name", self.name),
+            ("version", self.version),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Fingerprint {name} must be a non-empty string.")
+        if any(not isinstance(item, ParameterSpec) for item in self.inputs):
+            raise ValueError("Fingerprint inputs must contain ParameterSpec objects.")
+        if any(not isinstance(item, ArtifactSpec) for item in self.outputs):
+            raise ValueError("Fingerprint outputs must contain ArtifactSpec objects.")
+        if not isinstance(self.static_data, dict):
+            raise ValueError("Fingerprint static_data must be a dictionary.")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "type": self.type,
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "version": self.version,
+            "inputs": [item.to_dict() for item in self.inputs],
+            "outputs": [item.to_dict() for item in self.outputs],
+            "static_data": self.static_data,
+        }
+
+    def graph_identity_dict(self) -> Dict[str, Any]:
+        """Return fields that define graph identity and matching behavior."""
+
+        return {
+            "type": self.type,
             "id": self.id,
             "name": self.name,
             "description": self.description,
@@ -122,12 +173,32 @@ class SkillFingerprint:
         }
 
     @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> "SkillFingerprint":
+    def from_dict(cls, payload: Dict[str, Any]) -> "Fingerprint":
+        if not isinstance(payload, dict):
+            raise ValueError("Fingerprint payload must be a dictionary.")
+        raw_type = str(payload.get("type") or "")
+        if raw_type not in {"agent", "skill"}:
+            raise ValueError("Fingerprint type must be 'agent' or 'skill'.")
+        raw_inputs = payload.get("inputs", [])
+        raw_outputs = payload.get("outputs", [])
+        raw_static_data = payload.get("static_data", {})
+        if not isinstance(raw_inputs, list):
+            raise ValueError("Fingerprint inputs must be a list.")
+        if any(not isinstance(item, dict) for item in raw_inputs):
+            raise ValueError("Fingerprint inputs must contain dictionaries.")
+        if not isinstance(raw_outputs, list):
+            raise ValueError("Fingerprint outputs must be a list.")
+        if any(not isinstance(item, dict) for item in raw_outputs):
+            raise ValueError("Fingerprint outputs must contain dictionaries.")
+        if not isinstance(raw_static_data, dict):
+            raise ValueError("Fingerprint static_data must be a dictionary.")
+        fingerprint_type = cast(FingerprintType, raw_type)
         return cls(
-            id=str(payload.get("id") or ""),
-            name=str(payload.get("name") or ""),
+            type=fingerprint_type,
+            id=payload.get("id", ""),
+            name=payload.get("name", ""),
             description=str(payload.get("description") or ""),
-            version=str(payload.get("version") or "1.0.0"),
+            version=payload.get("version", "1.0.0"),
             inputs=[
                 ParameterSpec(
                     name=str(item.get("name") or "input"),
@@ -136,7 +207,7 @@ class SkillFingerprint:
                     description=str(item.get("description") or ""),
                     default=item.get("default"),
                 )
-                for item in payload.get("inputs", [])
+                for item in raw_inputs
             ],
             outputs=[
                 ArtifactSpec(
@@ -144,8 +215,9 @@ class SkillFingerprint:
                     type=str(item.get("type") or "unknown"),
                     description=str(item.get("description") or ""),
                 )
-                for item in payload.get("outputs", [])
+                for item in raw_outputs
             ],
+            static_data=dict(raw_static_data),
         )
 
 
@@ -154,7 +226,7 @@ class NormalizationConfig:
     """Configuration and vocabularies used by the deterministic normalizer.
 
     This object owns the normalizer defaults, vocabulary versions, and optional
-    alias maps. `SkillFingerprint` keeps only normalized `name` and `type`
+    alias maps. `Fingerprint` keeps only normalized `name` and `type`
     values; the evidence for each choice is stored in `NormalizationDecision`.
 
     `name` and `type` have different roles:
@@ -218,7 +290,7 @@ class NormalizationDecision:
     vocab: str
     vocab_version: str
     confidence: float
-    details: Dict[str, Any] = field(default_factory=dict)
+    details: Dict[str, Any] = dataclass_field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -239,22 +311,26 @@ class NormalizationDecision:
 
 @dataclass(frozen=True)
 class NormalizationResult:
-    fingerprint: SkillFingerprint
+    fingerprint: Fingerprint
     diagnostics: List[ExtractionDiagnostic]
-    decisions: List[NormalizationDecision] = field(default_factory=list)
+    decisions: List[NormalizationDecision] = dataclass_field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class FingerprintExtractionResult:
-    fingerprints: List[SkillFingerprint]
+    fingerprints: List[Fingerprint]
     diagnostics: List[ExtractionDiagnostic]
-    normalization_decisions: List[NormalizationDecision] = field(default_factory=list)
-    io_name_vocab: Dict[str, Any] = field(default_factory=dict)
-    llm_token_usage: Dict[str, Any] = field(default_factory=dict)
-    folders: List[SkillFolder] = field(default_factory=list)
-    current_hashes: Dict[str, str] = field(default_factory=dict)
-    removed_paths: set[str] = field(default_factory=set)
-    fingerprints_by_path: Dict[str, SkillFingerprint] = field(default_factory=dict)
+    normalization_decisions: List[NormalizationDecision] = dataclass_field(
+        default_factory=list
+    )
+    io_name_vocab: Dict[str, Any] = dataclass_field(default_factory=dict)
+    llm_token_usage: Dict[str, Any] = dataclass_field(default_factory=dict)
+    folders: List[SkillFolder] = dataclass_field(default_factory=list)
+    current_hashes: Dict[str, str] = dataclass_field(default_factory=dict)
+    removed_paths: set[str] = dataclass_field(default_factory=set)
+    fingerprints_by_path: Dict[str, Fingerprint] = dataclass_field(
+        default_factory=dict
+    )
     reused_count: int = 0
     extracted_count: int = 0
 

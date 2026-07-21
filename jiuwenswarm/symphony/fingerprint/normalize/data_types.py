@@ -10,7 +10,7 @@ from jiuwenswarm.symphony.fingerprint.models import (
     NormalizationConfig,
     NormalizationDecision,
     RawSkillManifest,
-    SkillFingerprint,
+    Fingerprint,
 )
 from jiuwenswarm.symphony.fingerprint.normalize.data_type_vocab import (
     DataTypeInference,
@@ -260,7 +260,7 @@ class DataTypeNormalizer:
 
     def validate(
         self,
-        fingerprint: SkillFingerprint,
+        fingerprint: Fingerprint,
         manifest: RawSkillManifest,
         diagnostics: List[ExtractionDiagnostic],
     ) -> None:

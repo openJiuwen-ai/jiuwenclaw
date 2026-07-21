@@ -1996,7 +1996,15 @@ async def _consume_stream_with_query(
                 # is preserved.
                 if parsed.get("event_type") == "chat.final":
                     tm_ = get_team_manager(channel_id)
-                    if (not tm_.has_seen_team_events(session_id)) or tm_.is_workflow_completed(session_id):
+                    should_finish_round = (
+                        (not tm_.has_seen_team_events(session_id))
+                        or tm_.is_workflow_completed(session_id)
+                    )
+                    # Deliver the final content before announcing that the
+                    # round is complete. Clients may stop consuming the stream
+                    # as soon as processing_status(False) arrives.
+                    _broadcast_event(channel_id, session_id, parsed)
+                    if should_finish_round:
                         _broadcast_event(
                             channel_id,
                             session_id,
@@ -2008,6 +2016,7 @@ async def _consume_stream_with_query(
                                 "is_complete": True,
                             },
                         )
+                    continue
                 _broadcast_event(channel_id, session_id, parsed)
 
         # If stream ended without any chunks, broadcast an error event
