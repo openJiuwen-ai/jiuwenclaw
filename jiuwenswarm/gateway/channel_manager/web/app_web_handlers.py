@@ -21,7 +21,7 @@ from typing import Any
 from dotenv import load_dotenv
 import psutil
 from openjiuwen.core.common.logging import LogManager
-from openjiuwen.core.foundation.llm import Model, ProviderType
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 
 from jiuwenswarm.common.config import (
@@ -69,6 +69,16 @@ from jiuwenswarm.gateway.media_attachments import normalize_chat_media_attachmen
 from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     coerce_root_categories_value,
     root_categories_to_text,
+)
+from jiuwenswarm.integrations.ai4research_subscription.provider_capabilities import (
+    available_model_provider_names,
+    get_model_provider_capabilities,
+    missing_model_fields,
+    validate_provider_model_name,
+)
+from jiuwenswarm.integrations.ai4research_subscription.constants import (
+    CODEX_MODEL_ALIAS,
+    CODEX_PROVIDER_NAME,
 )
 
 for _jiuwen_log in LogManager.get_all_loggers().values():
@@ -1316,17 +1326,26 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     def _apply_config_payload(params: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
         """Apply config.set-style payload to .env/config.yaml without triggering reload."""
+        if str(params.get("model_provider") or "").strip() == CODEX_PROVIDER_NAME:
+            params = dict(params)
+            params.setdefault("model", CODEX_MODEL_ALIAS)
+            params["api_base"] = ""
+            params["api_key"] = ""
         params = _encrypt_config_params(params)
         env_updates: dict[str, str] = {}
         yaml_updated: list[str] = []
-        available_model_providers = [provider.value for provider in ProviderType]
+        available_model_providers = available_model_provider_names()
+        api_model_providers = [name for name in available_model_providers if name != CODEX_PROVIDER_NAME]
 
         for param_key, env_key in _CONFIG_SET_ENV_MAP.items():
             if param_key not in params:
                 continue
             val = params[param_key]
-            if param_key.endswith("_provider") and val and val not in available_model_providers:
-                raise _ConfigBadRequest(f"Model provider must in: {available_model_providers} ")
+            allowed_providers = (
+                available_model_providers if param_key == "model_provider" else api_model_providers
+            )
+            if param_key.endswith("_provider") and val and val not in allowed_providers:
+                raise _ConfigBadRequest(f"Model provider must in: {allowed_providers} ")
             if val is None:
                 env_updates[env_key] = ""
             else:
@@ -1456,7 +1475,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(raw_models, list) or not raw_models:
             raise _ConfigBadRequest("models must be a non-empty list")
 
-        available_model_providers = [p.value for p in ProviderType]
+        available_model_providers = available_model_provider_names()
         parsed: list[dict] = []
         aliases_seen: dict[str, int] = {}
         for idx, item in enumerate(raw_models):
@@ -1474,15 +1493,30 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 except (TypeError, ValueError):
                     origin_index = None
             api_key = str(item.get("api_key") or "").strip()
-            # New entries must carry a non-empty api_key. Existing entries may legitimately
-            # be empty when the source is ``${API_KEY:-}`` and the env var is unset; in that
-            # case origin_index lets replace_all preserve the original placeholder.
-            if not api_key and origin_index is None:
-                raise _ConfigBadRequest(f"models[{idx}].api_key is required")
             api_base = str(item.get("api_base") or "").strip()
             model_provider = str(item.get("model_provider") or "").strip()
+            capabilities = get_model_provider_capabilities(model_provider)
+            # New API-provider entries must carry a non-empty api_key. Existing entries may legitimately
+            # be empty when the source is ``${API_KEY:-}`` and the env var is unset; in that
+            # case origin_index lets replace_all preserve the original placeholder.
+            if capabilities.requires_api_key and not api_key and origin_index is None:
+                raise _ConfigBadRequest(f"models[{idx}].api_key is required")
             if model_provider and model_provider not in available_model_providers:
                 raise _ConfigBadRequest(f"models[{idx}].model_provider must be one of: {available_model_providers}")
+            missing = missing_model_fields(
+                model_name=model_name,
+                model_provider=model_provider,
+                api_base=api_base,
+                api_key=api_key,
+            )
+            if missing:
+                raise _ConfigBadRequest(f"models[{idx}] required fields missing: {', '.join(missing)}")
+            if not validate_provider_model_name(model_provider, model_name):
+                raise _ConfigBadRequest(f"models[{idx}].model_name is invalid for {model_provider}")
+            if not capabilities.requires_api_base and api_base:
+                raise _ConfigBadRequest(f"models[{idx}].api_base must be empty for {model_provider}")
+            if not capabilities.requires_api_key and api_key:
+                raise _ConfigBadRequest(f"models[{idx}].api_key must be empty for {model_provider}")
             try:
                 temperature = float(item.get("temperature", 0.95))
             except (ValueError, TypeError):
@@ -1594,14 +1628,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         api_key = str(params.get("api_key") or "").strip()
         model = str(params.get("model") or "").strip()
         model_provider = str(params.get("model_provider") or "").strip()
-        if not all([api_base, api_key, model, model_provider]):
+        missing = missing_model_fields(
+            model_name=model,
+            model_provider=model_provider,
+            api_base=api_base,
+            api_key=api_key,
+        )
+        if missing:
             await channel.send_response(
                 ws, req_id, ok=False,
-                error="api_base, api_key, model, and model_provider are required",
+                error=f"Required fields missing: {', '.join(missing)}",
                 code="BAD_REQUEST",
             )
             return
-        available_model_providers = [provider.value for provider in ProviderType]
+        available_model_providers = available_model_provider_names()
         if model_provider not in available_model_providers:
             await channel.send_response(
                 ws, req_id, ok=False,
@@ -1609,9 +1649,125 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 code="BAD_REQUEST",
             )
             return
+        if not validate_provider_model_name(model_provider, model):
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=f"model is invalid for {model_provider}",
+                code="BAD_REQUEST",
+            )
+            return
+        capabilities = get_model_provider_capabilities(model_provider)
+        if (not capabilities.requires_api_base and api_base) or (
+            not capabilities.requires_api_key and api_key
+        ):
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=f"api_base and api_key must be empty for {model_provider}",
+                code="BAD_REQUEST",
+            )
+            return
         if api_base.endswith("/chat/completions"):
             api_base = api_base.rsplit("/chat/completions", 1)[0]
         api_base = api_base.rstrip("/")
+
+        if model_provider == CODEX_PROVIDER_NAME:
+            from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+            from jiuwenswarm.common.schema.message import ReqMethod
+            from jiuwenswarm.common.security.ws_origin import (
+                is_sensitive_browser_request_allowed,
+            )
+            from jiuwenswarm.gateway.routing.agent_request_timeout import (
+                AGENT_SERVER_TIMEOUT_CODE,
+                AGENT_SERVER_TIMEOUT_ERROR,
+                AgentRequestTimeoutError,
+                send_agent_request_with_timeout,
+            )
+
+            if not is_sensitive_browser_request_allowed(ws):
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="Codex model validation requires a trusted local browser origin.",
+                    code="FORBIDDEN_ORIGIN",
+                )
+                return
+            ac = _resolve(agent_client)
+            if ac is None or not getattr(ac, "server_ready", False):
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="AgentServer is not available for Codex model validation.",
+                    code="AGENT_UNAVAILABLE",
+                )
+                return
+            env = e2a_from_agent_fields(
+                request_id=str(req_id) if req_id else "",
+                channel_id="web",
+                session_id=session_id,
+                req_method=ReqMethod.CODEX_VALIDATE_MODEL,
+                params={
+                    "model_provider": CODEX_PROVIDER_NAME,
+                    "model": CODEX_MODEL_ALIAS,
+                },
+            )
+            try:
+                response = await send_agent_request_with_timeout(
+                    ac,
+                    env,
+                    label=ReqMethod.CODEX_VALIDATE_MODEL.value,
+                    timeout_seconds=35.0,
+                )
+            except AgentRequestTimeoutError:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=AGENT_SERVER_TIMEOUT_ERROR,
+                    code=AGENT_SERVER_TIMEOUT_CODE,
+                )
+                return
+            except Exception:
+                logger.exception("[config.validate_model] Codex AgentServer forwarding failed")
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="Codex model validation service is unavailable.",
+                    code="AGENT_UNAVAILABLE",
+                )
+                return
+            payload = response.payload if isinstance(response.payload, dict) else {}
+            if not response.ok:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=str(payload.get("error") or "Codex model validation failed."),
+                    code=str(payload.get("code") or "LLM_ERROR"),
+                )
+                return
+            if (
+                payload.get("validated") is not True
+                or payload.get("model_provider") != CODEX_PROVIDER_NAME
+                or payload.get("model") != CODEX_MODEL_ALIAS
+            ):
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="Codex model validation returned an invalid response.",
+                    code="LLM_ERROR",
+                )
+                return
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={"ok": True, "model_provider": model_provider},
+            )
+            return
 
         verify_ssl = bool(params.get("verify_ssl", False))
 
@@ -3237,6 +3393,96 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     channel.register_method("permissions.owner_scopes.get", _permissions_owner_scopes_get)
     channel.register_method("permissions.owner_scopes.set", _permissions_owner_scopes_set)
+
+    from jiuwenswarm.common.schema.message import ReqMethod as _CodexReqMethod
+
+    async def _forward_codex_auth_to_agent(
+        ws, req_id, params, session_id, *, req_method, user_id=None,
+    ):
+        """Forward the credential-owning Codex auth operation to AgentServer."""
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.security.ws_origin import is_sensitive_browser_request_allowed
+
+        if not is_sensitive_browser_request_allowed(ws):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="Codex authentication requires a trusted local browser origin.",
+                code="FORBIDDEN_ORIGIN",
+            )
+            return
+
+        ac = _resolve(agent_client)
+        if ac is None or not getattr(ac, "server_ready", False):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="AgentServer is not available for Codex authentication.",
+                code="AGENT_UNAVAILABLE",
+            )
+            return
+        env = e2a_from_agent_fields(
+            request_id=str(req_id) if req_id else "",
+            channel_id="web",
+            session_id=session_id,
+            req_method=req_method,
+            params=dict(params) if isinstance(params, dict) else {},
+            user_id=user_id,
+        )
+        try:
+            response = await ac.send_request(env)
+        except Exception:
+            logger.exception("[provider.codex.auth] AgentServer forwarding failed")
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="Codex authentication service is unavailable.",
+                code="AGENT_UNAVAILABLE",
+            )
+            return
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        if not response.ok:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(payload.get("error") or "Codex authentication failed."),
+                code=str(payload.get("code") or "AUTH_FAILED"),
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _codex_auth_status(ws, req_id, params, session_id, user_id=None):
+        await _forward_codex_auth_to_agent(
+            ws, req_id, params, session_id,
+            req_method=_CodexReqMethod.CODEX_AUTH_STATUS, user_id=user_id,
+        )
+
+    async def _codex_auth_start(ws, req_id, params, session_id, user_id=None):
+        await _forward_codex_auth_to_agent(
+            ws, req_id, params, session_id,
+            req_method=_CodexReqMethod.CODEX_AUTH_START, user_id=user_id,
+        )
+
+    async def _codex_auth_cancel(ws, req_id, params, session_id, user_id=None):
+        await _forward_codex_auth_to_agent(
+            ws, req_id, params, session_id,
+            req_method=_CodexReqMethod.CODEX_AUTH_CANCEL, user_id=user_id,
+        )
+
+    async def _codex_auth_logout(ws, req_id, params, session_id, user_id=None):
+        await _forward_codex_auth_to_agent(
+            ws, req_id, params, session_id,
+            req_method=_CodexReqMethod.CODEX_AUTH_LOGOUT, user_id=user_id,
+        )
+
+    channel.register_method("provider.codex.auth.status", _codex_auth_status)
+    channel.register_method("provider.codex.auth.start", _codex_auth_start)
+    channel.register_method("provider.codex.auth.cancel", _codex_auth_cancel)
+    channel.register_method("provider.codex.auth.logout", _codex_auth_logout)
 
     async def _forward_permissions_to_agent(
         ws, req_id, params, session_id, *, req_method, user_id=None,

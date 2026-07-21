@@ -9,6 +9,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from jiuwenswarm.common.e2a.constants import (
+    E2A_WIRE_INTERNAL_METADATA_KEYS,
     E2A_RESPONSE_KIND_ACP_OUTPUT_REQUEST,
     E2A_RESPONSE_KIND_CRON,
     E2A_RESPONSE_KIND_PLAN_APPROVAL_REQUIRED,
@@ -39,6 +40,8 @@ logger = logging.getLogger(__name__)
 E2A_INTERNAL_CONTEXT_KEY = "_jiuwenswarm"
 E2A_FALLBACK_FAILED_KEY = "normalize_failed"
 E2A_LEGACY_AGENT_REQUEST_KEY = "legacy_agent_request"
+E2A_BOUND_SUBSCRIPTION_CONTINUATION_KEY = "bound_subscription_continuation"
+E2A_BOUND_SUBSCRIPTION_ROUTE_KEY = "bound_subscription_route"
 MAX_LEGACY_AGENT_REQUEST_JSON_BYTES = 512_000
 
 
@@ -128,6 +131,12 @@ def message_to_e2a(msg: "Message") -> E2AEnvelope:
         d["method"] = msg.req_method.value
     # 合并 metadata 和独立字段（enable_memory, group_digital_avatar 等）
     metadata: dict[str, Any] = dict(msg.metadata or {})
+    # ``_jiuwenswarm`` is reserved for Gateway-owned transport state.  Strip a
+    # channel-supplied namesake before constructing the envelope; trusted
+    # fields are stamped explicitly by the Gateway after admission.
+    metadata.pop(E2A_INTERNAL_CONTEXT_KEY, None)
+    for internal_key in E2A_WIRE_INTERNAL_METADATA_KEYS:
+        metadata.pop(internal_key, None)
 
     # enable_memory 逻辑：只有当 enable_memory=False 且 group_digital_avatar=True 且 is_group_chat=True 时才禁用记忆
     # is_group_chat 通过 metadata 中的 avatar_mode 判断

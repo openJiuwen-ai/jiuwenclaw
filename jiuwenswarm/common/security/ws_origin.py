@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from http import HTTPStatus
 from typing import Any
@@ -12,6 +13,7 @@ from urllib.parse import urlsplit
 _ENABLE_ORIGIN_CHECK_ENV = "JIUWENSWARM_ENABLE_ORIGIN_CHECK"
 _ALLOWED_ORIGIN_HOSTS_ENV = "JIUWENSWARM_WS_ALLOWED_ORIGIN_HOSTS"
 _FORBIDDEN_BODY = b"Forbidden: Origin not allowed\n"
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def is_origin_check_enabled() -> bool:
@@ -39,6 +41,86 @@ def is_allowed_browser_origin(origin: str | None) -> bool:
         return False
 
     return (parsed.hostname or "").lower() in allowed_hosts
+
+
+def is_sensitive_browser_origin_allowed(origin: str | None, host: str | None) -> bool:
+    """Fail-closed Origin boundary for browser RPCs that mutate credentials.
+
+    The owner-operated v1 accepts an explicit configured hostname, an exact
+    same-origin authority, or a loopback-to-loopback browser connection.  A
+    missing Origin is intentionally rejected here even when the general
+    WebSocket origin check is disabled; non-browser clients use their own
+    channels and never need this exception.
+    """
+    if origin is None or host is None:
+        return False
+    try:
+        parsed_origin = urlsplit(origin)
+        parsed_host = urlsplit(f"//{host}")
+        origin_port = parsed_origin.port
+        host_port = parsed_host.port
+    except ValueError:
+        return False
+
+    origin_hostname = (parsed_origin.hostname or "").lower()
+    host_hostname = (parsed_host.hostname or "").lower()
+    if (
+        parsed_origin.scheme not in {"http", "https"}
+        or not origin_hostname
+        or not host_hostname
+        or parsed_origin.username is not None
+        or parsed_origin.password is not None
+        or parsed_origin.path not in {"", "/"}
+        or parsed_origin.query
+        or parsed_origin.fragment
+    ):
+        return False
+
+    if origin_hostname in get_allowed_origin_hosts():
+        return True
+    if origin_hostname in _LOOPBACK_HOSTS and host_hostname in _LOOPBACK_HOSTS:
+        return True
+
+    default_port = 443 if parsed_origin.scheme == "https" else 80
+    return (
+        origin_hostname == host_hostname
+        and (origin_port or default_port) == (host_port or default_port)
+    )
+
+
+def is_sensitive_browser_request_allowed(ws: Any) -> bool:
+    """Validate the Origin/Host pair attached to a WebSocket connection."""
+    headers = (
+        getattr(getattr(ws, "request", None), "headers", None)
+        or getattr(ws, "request_headers", None)
+    )
+    return is_sensitive_browser_origin_allowed(
+        get_header_value(headers, "Origin"),
+        get_header_value(headers, "Host"),
+    )
+
+
+def is_loopback_websocket_peer(ws: Any) -> bool:
+    """Return whether the server-observed WebSocket peer is local loopback.
+
+    This intentionally ignores client-controlled forwarding and Origin headers.
+    Missing, hostname-only, Unix-socket, and malformed peer values fail closed.
+    """
+
+    remote = getattr(ws, "remote_address", None)
+    if not isinstance(remote, (tuple, list)) or not remote:
+        return False
+    host = remote[0]
+    if not isinstance(host, str) or not host:
+        return False
+    try:
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return False
+    if address.is_loopback:
+        return True
+    mapped = getattr(address, "ipv4_mapped", None)
+    return bool(mapped is not None and mapped.is_loopback)
 
 
 def extract_handshake_request(args: tuple[Any, ...]) -> tuple[str, Any]:
