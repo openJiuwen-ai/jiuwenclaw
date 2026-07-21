@@ -1742,6 +1742,10 @@ class JiuWenSwarm:
             adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
             return await adapter.handle_user_answer(request)
 
+        if request.req_method == ReqMethod.CHAT_SWARMFLOW_REPLY:
+            adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+            return await adapter.handle_swarmflow_reply(request)
+
         # Non-stream goal command (GET, PAUSE, CLEAR)
         if request.req_method == ReqMethod.COMMAND_GOAL:
             try:

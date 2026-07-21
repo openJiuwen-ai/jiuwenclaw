@@ -66,6 +66,32 @@ export interface UserAnswer {
   custom_input?: string;
 }
 
+/**
+ * A pending swarmflow human-session turn awaiting the person's reply.
+ * Not the leader HITL channel (PendingQuestion) — this is a workflow human
+ * node (human_session / human) paused on a real person's input.
+ *
+ * Composite map key is `${workflow_run_id}:${correlation_id}` so concurrent
+ * runs with the same correlation id don't clobber each other's pending entry.
+ */
+export interface PendingHumanPrompt {
+  workflow_run_id: string;
+  workflow_id: string;
+  workflow_name: string;
+  agent_id: string;
+  correlation_id: string;
+  prompt: string;
+  label: string;
+  /** True when reply/detail chrome should show a turn label (session nodes only). */
+  is_session: boolean;
+  /** Turn index parsed from correlation_id ({phase}:{label}:{turn}); 0 for one-shot. */
+  turn: number;
+  /** Set when the reply has been submitted (entry stays dimmed in the list). */
+  replied?: boolean;
+  /** Short reply summary shown after the entry is replied. */
+  answer?: string;
+}
+
 // Harness extension ready info
 export interface HarnessExtensionReady {
   extensionName: string;
@@ -111,6 +137,7 @@ export interface AppEventDelegate {
   appendTeamTaskEvent(event: TeamTaskEvent): void;
   appendTeamMessageEvent(event: TeamMessageEvent): void;
   applyWorkflowUpdate(workflow: WorkflowRun): void;
+  setPendingHumanPrompts(prompts: Map<string, PendingHumanPrompt> | null): void;
   setEvolutionStatus(status: "idle" | "running"): void;
   setContextCompression(stats: ContextCompressionStats | null): void;
   setContextWindowLimit(n: number | null): void;

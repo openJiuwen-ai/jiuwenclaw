@@ -41,6 +41,7 @@ import { createStatusCommand } from "./builtins/status.js";
 import { createStatusLineCommand } from "./builtins/statusline.js";
 import { createSkillsCommand } from "./builtins/skills.js";
 import { createSwarmFlowsCommand } from "./builtins/swarmflows.js";
+import { createSwarmflowCommand } from "./builtins/swarmflow.js";
 import { createTeamSkillsCommand } from "./builtins/teamskills.js";
 import { createAgentsCommand } from "./builtins/agents.js";
 import { createAutoHarnessCommand } from "./builtins/auto-harness.js";
@@ -90,6 +91,7 @@ export function createBuiltinCommands(): SlashCommand[] {
     createStatusCommand(),
     createStatusLineCommand(),
     createSwarmFlowsCommand(),
+    createSwarmflowCommand(),
     createTeamSkillsCommand(),
     createAutoHarnessCommand(),
     createThemeCommand(),

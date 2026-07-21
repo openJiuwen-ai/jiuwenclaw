@@ -3304,6 +3304,15 @@ class MessageHandler(ABC):
                             )
                     continue
 
+                if msg.req_method == ReqMethod.CHAT_SWARMFLOW_REPLY:
+                    # Forward a swarmflow human reply to the agent adapter
+                    # (non-stream). Unlike CHAT_ANSWER, no evolution-approval
+                    # machinery; unlike CHAT_SEND, no cancel-existing-stream.
+                    agent_msg = await self._prepare_agent_dispatch_message(msg)
+                    env = self.message_to_e2a(agent_msg)
+                    await self._process_non_stream_request(msg, env)
+                    continue
+
                 if msg.req_method == ReqMethod.CHAT_CANCEL:
                     logger.info(
                         "[MessageHandler] 收到中断请求: id=%s channel_id=%s",

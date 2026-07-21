@@ -36,6 +36,8 @@ export interface ScreenLayoutOptions {
   btwOverlayIndex?: number;
   /** btw 历史总数 */
   btwOverlayTotal?: number;
+  /** 替换 transcript 区域的 overlay 内容（如 chat 内 H 打开的 pending 面板） */
+  overlayTranscriptLines?: string[];
 }
 
 function formatSubtaskStatus(status: string): string {
@@ -319,15 +321,17 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
   // "Working" animation always stays at the screen bottom for visual prominence.
   const effectiveStatusLines = statusLines;
 
-  const transcriptLines = buildTranscriptLines(
-    snapshot,
-    options.width,
-    options.showFullThinking,
-    options.showToolDetails,
-    options.animationPhase,
-    options.pendingInput,
-    options.pendingInputBaseline,
-  );
+  const transcriptLines =
+    options.overlayTranscriptLines ??
+    buildTranscriptLines(
+      snapshot,
+      options.width,
+      options.showFullThinking,
+      options.showToolDetails,
+      options.animationPhase,
+      options.pendingInput,
+      options.pendingInputBaseline,
+    );
   const todoLines = renderTodoList(snapshot.todos, options.width, options.todosCollapsed, options.animationPhase);
   const hasTeamActivity =
     isTeamMode(snapshot.mode) ||

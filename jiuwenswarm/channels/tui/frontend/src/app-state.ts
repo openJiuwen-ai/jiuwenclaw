@@ -62,7 +62,22 @@ import {
   getCurrentCwd,
 } from "./core/tui-trusted-dirs-store.js";
 import { loadTuiConfig } from "./core/tui-config-store.js";
-import { applyWorkflowUpdate, normalizeWorkflowRun, type WorkflowRun } from "./core/workflows.js";
+import {
+  applyWorkflowUpdate,
+  collectWaitingForHuman,
+  countWaitingForHuman,
+  findWorkflowAgent,
+  isHumanPromptTruncated,
+  mergeHumanPromptText,
+  mergeWorkflowRun,
+  normalizeWorkflowRun,
+  isSessionNode,
+  phaseLocalTurnNumber,
+  sessionTurnLabelNumber,
+  shouldShowTurnInDetailOrReply,
+  type WorkflowRun,
+} from "./core/workflows.js";
+import type { PendingHumanPrompt } from "./core/event-handlers.js";
 import { execFile, spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
@@ -123,6 +138,7 @@ export interface AppSnapshot {
   teamTaskEvents: TeamTaskEvent[];
   teamMessageEvents: TeamMessageEvent[];
   workflowRuns: WorkflowRun[];
+  pendingHumanPrompts: Map<string, PendingHumanPrompt>;
   evolutionStatus: "idle" | "running";
   contextCompression: ContextCompressionStats | null;
   contextWindowLimit: number | null;
@@ -319,6 +335,7 @@ export class CliPiAppState {
   private teamTaskEvents: TeamTaskEvent[] = [];
   private teamMessageEvents: TeamMessageEvent[] = [];
   private workflowRuns: WorkflowRun[] = [];
+  private pendingHumanPrompts: Map<string, PendingHumanPrompt> = new Map();
   private evolutionStatus: "idle" | "running" = "idle";
   private contextCompression: ContextCompressionStats | null = null;
   private contextWindowLimit: number | null = null;
@@ -456,6 +473,9 @@ export class CliPiAppState {
     },
     applyWorkflowUpdate: (workflow) => {
       this.applyWorkflowUpdate(workflow);
+    },
+    setPendingHumanPrompts: (prompts) => {
+      this.setPendingHumanPrompts(prompts);
     },
     setEvolutionStatus: (status) => {
       this.evolutionStatus = status;
@@ -986,6 +1006,7 @@ export class CliPiAppState {
           })),
         })),
       })),
+      pendingHumanPrompts: new Map(this.pendingHumanPrompts),
       evolutionStatus: this.evolutionStatus,
       contextCompression: this.contextCompression ? { ...this.contextCompression } : null,
       contextWindowLimit: this.contextWindowLimit,
@@ -1278,40 +1299,190 @@ export class CliPiAppState {
       type?: string;
       workflows?: unknown[];
       session_id?: string;
+      total?: number;
+      truncated?: boolean;
     }>(
       "command.workflows",
       {
         action: "list",
         session_id: sessionId,
       },
-      10000,
+      // Align with get / get_human_prompt. 10s was too tight when the Gateway
+      // outbound writer is busy with workflow.updated / chat stream frames
+      // (list itself finishes in ms on AgentServer).
+      30000,
     );
     this.applyWorkflowSnapshotPayload(payload);
+  };
+
+  readonly loadWorkflowDetail = async (
+    workflowId: string,
+    sessionId = this.sessionId,
+  ): Promise<void> => {
+    const payload = await this.request<{
+      type?: string;
+      workflow?: unknown;
+      truncated?: boolean;
+    }>(
+      "command.workflows",
+      {
+        action: "get",
+        workflow_id: workflowId,
+        session_id: sessionId,
+      },
+      30000,
+    );
+    if (
+      payload.type === "workflow_run_detail" &&
+      payload.workflow &&
+      typeof payload.workflow === "object" &&
+      !Array.isArray(payload.workflow) &&
+      "id" in payload.workflow
+    ) {
+      const workflow = payload.workflow as WorkflowRun;
+      if (payload.truncated === true) {
+        workflow.truncated = true;
+      }
+      this.applyWorkflowUpdate(workflow);
+    }
+  };
+
+  readonly loadHumanPrompt = async (
+    workflowId: string,
+    agentId: string,
+    sessionId = this.sessionId,
+  ): Promise<string> => {
+    const payload = await this.request<{
+      type?: string;
+      human_prompt?: unknown;
+      agent_id?: unknown;
+      error?: unknown;
+    }>(
+      "command.workflows",
+      {
+        action: "get_human_prompt",
+        workflow_id: workflowId,
+        agent_id: agentId,
+        session_id: sessionId,
+      },
+      30000,
+    );
+    if (payload.error) {
+      throw new Error(String(payload.error));
+    }
+    const prompt = typeof payload.human_prompt === "string" ? payload.human_prompt.trim() : "";
+    if (!prompt) return "";
+
+    const existing = this.workflowRuns.find((item) => item.id === workflowId);
+    if (!existing) return prompt;
+
+    const updatedPhases = (existing.phases ?? []).map((phase) => ({
+      ...phase,
+      agents: (phase.agents ?? []).map((agent) =>
+        agent.id === agentId
+          ? { ...agent, human_prompt: mergeHumanPromptText(agent.human_prompt, prompt) }
+          : agent,
+      ),
+    }));
+    this.applyWorkflowUpdate({ ...existing, phases: updatedPhases });
+    return prompt;
+  };
+
+  readonly ensureHumanPromptLoaded = async (
+    workflowId: string,
+    agentId: string,
+  ): Promise<void> => {
+    const lookup = findWorkflowAgent(this.workflowRuns, workflowId, agentId);
+    const current = lookup?.agent.human_prompt?.trim() ?? "";
+    if (current && !isHumanPromptTruncated(current)) return;
+    try {
+      await this.loadHumanPrompt(workflowId, agentId);
+    } catch {
+      // Best-effort — pending list still shows whatever partial text we have.
+    }
   };
 
   readonly applyWorkflowSnapshotPayload = (payload: {
     type?: unknown;
     workflows?: unknown;
+    total?: unknown;
+    truncated?: unknown;
     [key: string]: unknown;
   }): void => {
     const workflows = Array.isArray(payload.workflows) ? payload.workflows : [];
     if (payload.type !== "workflow_run_snapshot" && workflows.length === 0) {
       return;
     }
-    this.setWorkflowRuns(
-      workflows.filter((item): item is WorkflowRun =>
-        Boolean(item && typeof item === "object" && !Array.isArray(item) && "id" in item),
-      ),
+    const incoming = workflows.filter((item): item is WorkflowRun =>
+      Boolean(item && typeof item === "object" && !Array.isArray(item) && "id" in item),
     );
+    const merged = incoming.map((workflow) => {
+      const existing = this.workflowRuns.find((item) => item.id === workflow.id);
+      return normalizeWorkflowRun(mergeWorkflowRun(existing, workflow));
+    });
+    const incomingIds = new Set(incoming.map((workflow) => workflow.id));
+    const preserved = this.workflowRuns.filter((workflow) => !incomingIds.has(workflow.id));
+    this.setWorkflowRuns([...merged, ...preserved]);
   };
 
   readonly setWorkflowRuns = (workflows: WorkflowRun[]): void => {
     this.workflowRuns = workflows.map((workflow) => normalizeWorkflowRun(workflow));
+    this.recomputePendingHumanPrompts();
     this.emitChange();
   };
 
   readonly applyWorkflowUpdate = (workflow: WorkflowRun): void => {
     this.workflowRuns = applyWorkflowUpdate(this.workflowRuns, workflow);
+    this.recomputePendingHumanPrompts();
+    this.emitChange();
+  };
+
+  /** Recompute the pending-human-prompt map from the full workflow snapshot. */
+  private recomputePendingHumanPrompts(): void {
+    // Preserve reply summaries from the previous map for entries that are no
+    // longer waiting (replied -> running) so the list can dim them briefly.
+    const next = new Map<string, PendingHumanPrompt>();
+    for (const wf of this.workflowRuns) {
+      const waiting = collectWaitingForHuman(wf);
+      for (const { phase, agent } of waiting) {
+        const key = `${wf.id}:${agent.correlation_id ?? agent.id}`;
+        const turn = phaseLocalTurnNumber(agent, phase.agents ?? []) ?? 0;
+        const prev = this.pendingHumanPrompts.get(key);
+        next.set(key, {
+          workflow_run_id: wf.id,
+          workflow_id: wf.id,
+          workflow_name: wf.name,
+          agent_id: agent.id,
+          correlation_id: agent.correlation_id ?? "",
+          prompt: mergeHumanPromptText(prev?.prompt, agent.human_prompt ?? ""),
+          label: agent.name,
+          is_session: isSessionNode(agent),
+          turn,
+          // Carry forward a prior reply summary if this entry was replied then
+          // somehow re-listed (defensive — normally a replied turn won't wait again).
+          replied: prev?.replied,
+          answer: prev?.answer,
+        });
+      }
+      // Dim entries that were waiting and are now replied (status moved off
+      // waiting_for_human but human_reply was just set).
+      for (const phase of wf.phases ?? []) {
+        for (const agent of phase.agents ?? []) {
+          if (agent.status !== "waiting_for_human" && agent.human_reply) {
+            const key = `${wf.id}:${agent.correlation_id ?? agent.id}`;
+            const prev = this.pendingHumanPrompts.get(key);
+            if (prev && !prev.replied) {
+              next.set(key, { ...prev, replied: true, answer: agent.human_reply });
+            }
+          }
+        }
+      }
+    }
+    this.pendingHumanPrompts = next;
+  }
+
+  readonly setPendingHumanPrompts = (prompts: Map<string, PendingHumanPrompt> | null): void => {
+    this.pendingHumanPrompts = prompts ?? new Map();
     this.emitChange();
   };
 
@@ -1321,6 +1492,7 @@ export class CliPiAppState {
     this.usageByModel.clear();
     this.resetCurrentUsageTokens();
     this.workflowRuns = [];
+    this.pendingHumanPrompts = new Map();
     this.btwOverlay = null;
     this.btwHistory = [];
     this.btwOverlayIndex = -1;

@@ -33,6 +33,7 @@ from jiuwenswarm.common.config import (
     update_permissions_enabled_in_config,
     get_model_names,
     update_preferred_language_in_config,
+    update_swarmflow_enabled_in_config,
     update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
@@ -212,6 +213,7 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "chat.interrupt",
         "chat.resume",
         "chat.user_answer",
+        "chat.swarmflow_reply",
         "history.get",
         "browser.start",
         "skills.marketplace.list",
@@ -470,6 +472,7 @@ _CLI_CONFIG_YAML_SETTERS: dict[str, Any] = {
     "permissions_enabled": update_permissions_enabled_in_config,
     "memory_forbidden_enabled": update_memory_forbidden_enabled_in_config,
     "preferred_language": update_preferred_language_in_config,
+    "enable_swarmflow": update_swarmflow_enabled_in_config,
     # Auto-Harness config items (stored in ~/.jiuwenswarm/auto-harness/config.yaml)
     # 用户名同时设置 git.user_name, fork_owner, gitcode.username（三者合一）
     "auto_harness_git_user_name": _update_auto_harness_git_user_name,
@@ -731,6 +734,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload["auto_recap_enabled"] = (
                 "true" if auto_recap_cfg.get("enabled", True) else "false"
             )
+            # swarmflow toggle lives at modes.team.jiuwen_team.enable_swarmflow
+            _team_cfg = (raw.get("modes") or {}).get("team") or {}
+            _jiuwen_team_cfg = _team_cfg.get("jiuwen_team") or {}
+            _swarmflow_enabled = bool(_jiuwen_team_cfg.get("enable_swarmflow", False))
+            payload["enable_swarmflow"] = "true" if _swarmflow_enabled else "false"
 
             # Resolve model-related fields from config.yaml.
             # When models.defaults list is in use, it is the canonical source
@@ -2109,6 +2117,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload["request_id"] = request_id
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
+    async def _chat_swarmflow_reply(ws, req_id, params, session_id):
+        # Empty-ack shell — standard 3-layer routing forwards the reply to the
+        # agent adapter, which builds HumanAgentMessage and calls team_manager.
+        await channel.send_response(
+            ws, req_id, ok=True, payload={"accepted": True, "session_id": session_id}
+        )
+
     async def _history_get(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
         if isinstance(params, dict):
@@ -2818,6 +2833,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "chat.interrupt", _chat_interrupt)
     channel.register_local_handler(path, "tui.disconnect", _tui_disconnect_request)
     channel.register_local_handler(path, "chat.user_answer", _chat_user_answer)
+    channel.register_local_handler(path, "chat.swarmflow_reply", _chat_swarmflow_reply)
     channel.register_local_handler(path, "history.get", _history_get)
     channel.register_local_handler(path, "command.model", _command_model)
 

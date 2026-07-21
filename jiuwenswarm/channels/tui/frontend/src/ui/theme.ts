@@ -53,6 +53,7 @@ type ThemeDefinition = {
   textUser: string;
   textAssistant: string;
   textThinking: string;
+  textHumanInput: string;
   textSystem: string;
   textInfo: string;
   textTool: string;
@@ -85,6 +86,7 @@ const THEME_DEFINITIONS: Record<"light" | "dark", ThemeDefinition> = {
     textUser: "#2563eb",
     textAssistant: "#d0d0d0",
     textThinking: "#966c1e",
+    textHumanInput: "#0d9488",
     textSystem: "#666666",
     textInfo: "#5769f7",
     textTool: "#5769f7",
@@ -93,7 +95,7 @@ const THEME_DEFINITIONS: Record<"light" | "dark", ThemeDefinition> = {
     statusWarning: "#966c1e",
     statusInfo: "#5769f7",
     borderPanel: "#999999",
-    borderQuestion: "#966c1e",
+    borderQuestion: "#0d9488",
     surfaceUserBg: "#f0f0f0",
     surfaceUserFg: "#000000",
     markdownHeading: "#d77757",
@@ -115,6 +117,7 @@ const THEME_DEFINITIONS: Record<"light" | "dark", ThemeDefinition> = {
     textUser: "#7ab4e8",
     textAssistant: "#ffffff",
     textThinking: "#ffc107",
+    textHumanInput: "#2dd4bf",
     textSystem: "#999999",
     textInfo: "#b1b9f9",
     textTool: "#b1b9f9",
@@ -123,7 +126,7 @@ const THEME_DEFINITIONS: Record<"light" | "dark", ThemeDefinition> = {
     statusWarning: "#ffc107",
     statusInfo: "#b1b9f9",
     borderPanel: "#888888",
-    borderQuestion: "#ffc107",
+    borderQuestion: "#2dd4bf",
     surfaceUserBg: "#373737",
     surfaceUserFg: "#ffffff",
     markdownHeading: "#d77757",
@@ -233,6 +236,7 @@ export const palette = {
     user: (value: string) => chalk.hex(getThemeDefinition().textUser)(value),
     assistant: (value: string) => chalk.hex(getThemeDefinition().textAssistant)(value),
     thinking: (value: string) => chalk.hex(getThemeDefinition().textThinking)(value),
+    humanInput: (value: string) => chalk.hex(getThemeDefinition().textHumanInput)(value),
     system: (value: string) => chalk.hex(getThemeDefinition().textSystem)(value),
     info: (value: string) => chalk.hex(getThemeDefinition().textInfo)(value),
     tool: (value: string) => chalk.hex(getThemeDefinition().textTool)(value),

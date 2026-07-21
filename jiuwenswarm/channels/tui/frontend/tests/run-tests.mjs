@@ -11,6 +11,15 @@ import {
   shouldAppendPlanRejectFeedback,
   shouldCollectPlanRejectFeedback,
 } from "../dist/ui/app-screen.js";
+import { planSwarmflowToggle } from "../dist/core/commands/builtins/swarmflow.js";
+import {
+  canOpenSessionHistory,
+  groupWorkflowAgentsByName,
+  isSessionNode,
+  shouldShowSessionTree,
+  shouldShowTurnInDetailOrReply,
+  sessionTurnLabelNumber,
+} from "../dist/core/workflows.js";
 import { CommandKind } from "../dist/core/commands/types.js";
 
 const planQuestion = "**Plan Approval**\n\nThe agent has completed a plan.";
@@ -153,5 +162,110 @@ assert.equal(pendingQuestionExitCount, 0);
 // render depending on the list handler, but it must not interrupt or exit.
 assert.ok(pendingQuestionInterruptCount === 2 && pendingQuestionExitCount === 0);
 console.log("ctrl+d render requests:", pendingQuestionRenderCount - renderCountBeforeCtrlD);
+
+const agent = (name, node_type, correlation_id, id = `${name}-${node_type ?? "plain"}-${correlation_id ?? "none"}`) => ({
+  id,
+  name,
+  status: "completed",
+  node_type,
+  correlation_id,
+});
+
+assert.equal(isSessionNode({ node_type: "agent_session" }), true);
+assert.equal(isSessionNode({ node_type: "human_session" }), true);
+assert.equal(isSessionNode({ node_type: "agent" }), false);
+assert.equal(isSessionNode({ node_type: "human" }), false);
+assert.equal(canOpenSessionHistory({ node_type: "agent_session" }), true);
+assert.equal(canOpenSessionHistory({ node_type: "human_session" }), true);
+assert.equal(canOpenSessionHistory({ node_type: "human", correlation_id: "p:h:0" }), false);
+assert.equal(canOpenSessionHistory({ node_type: "agent" }), false);
+assert.equal(canOpenSessionHistory({}), false);
+
+const grouped = groupWorkflowAgentsByName([
+  agent("coder", "agent", undefined),
+  agent("coder", "agent", undefined),
+  agent("review", "agent_session", "p:review:0"),
+  agent("review", "agent_session", "p:review:1"),
+  agent("host", "human", "p:host:0"),
+]);
+assert.equal(grouped.oneShots.length, 3);
+assert.equal(grouped.sessions.length, 1);
+assert.equal(grouped.sessions[0]?.label, "review");
+assert.equal(grouped.sessions[0]?.members.length, 2);
+
+// one-shot human() carries a real correlation_id but is NOT a session node.
+assert.equal(isSessionNode(agent("host", "human", "p:host:0")), false);
+assert.equal(isSessionNode(agent("review", "agent_session", "p:review:0")), true);
+assert.equal(shouldShowTurnInDetailOrReply(agent("host", "human", "p:host:0")), false);
+assert.equal(shouldShowTurnInDetailOrReply(agent("review", "agent_session", "p:review:0")), true);
+assert.equal(
+  shouldShowSessionTree(agent("review", "agent_session", "p:review:0"), [
+    agent("review", "agent_session", "p:review:0"),
+  ]),
+  true,
+);
+const multiTurnPhase = [
+  agent("review", "agent_session", "p:review:0"),
+  agent("review", "agent_session", "p:review:1"),
+];
+assert.equal(shouldShowSessionTree(agent("review", "agent_session", "p:review:0"), multiTurnPhase), true);
+assert.equal(sessionTurnLabelNumber(agent("host", "human", "p:host:0"), []), null);
+assert.equal(sessionTurnLabelNumber(agent("review", "agent_session", "p:review:0"), [
+  agent("review", "agent_session", "p:review:0"),
+]), 0);
+assert.equal(sessionTurnLabelNumber(agent("review", "agent_session", "p:review:1"), multiTurnPhase), 1);
+
+// Single-turn session still forms a tree (parent + turn 0) — distinct from human()/agent().
+const singleSessionGrouped = groupWorkflowAgentsByName([
+  agent("solo", "human_session", "p:solo:0"),
+  agent("plain", "human", "p:plain:0"),
+]);
+assert.equal(singleSessionGrouped.sessions.length, 1);
+assert.equal(singleSessionGrouped.sessions[0]?.label, "solo");
+assert.equal(singleSessionGrouped.sessions[0]?.members.length, 1);
+assert.equal(singleSessionGrouped.oneShots.length, 1);
+assert.equal(singleSessionGrouped.oneShots[0]?.name, "plain");
+assert.equal(
+  sessionTurnLabelNumber(agent("solo", "human_session", "p:solo:0"), [
+    agent("solo", "human_session", "p:solo:0"),
+  ]),
+  0,
+);
+assert.equal(
+  sessionTurnLabelNumber(agent("plain", "human", "p:plain:0"), [
+    agent("plain", "human", "p:plain:0"),
+  ]),
+  null,
+);
+
+assert.deepEqual(
+  planSwarmflowToggle({ target: "on", currentEnabled: true, mode: "team" }),
+  {
+    writeConfig: false,
+    switchToTeam: false,
+    message: "SwarmFlow is already on in team mode. No changes were made.",
+  },
+);
+assert.deepEqual(
+  planSwarmflowToggle({ target: "on", currentEnabled: true, mode: "code.normal" }),
+  {
+    writeConfig: false,
+    switchToTeam: true,
+    message:
+      "SwarmFlow is already on. Switched to team mode — the next workflow run uses the enabled setting.",
+  },
+);
+assert.deepEqual(
+  planSwarmflowToggle({ target: "off", currentEnabled: false, mode: "team" }),
+  {
+    writeConfig: false,
+    switchToTeam: false,
+    message: "SwarmFlow is already off. Mode remains team. No changes were made.",
+  },
+);
+assert.equal(
+  planSwarmflowToggle({ target: "on", currentEnabled: false, mode: "team" }).writeConfig,
+  true,
+);
 
 console.log("frontend tests passed");

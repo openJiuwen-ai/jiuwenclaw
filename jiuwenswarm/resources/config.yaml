@@ -1083,6 +1083,17 @@ modes:
       spawn_mode: inprocess
       enable_swarmflow: false
 
+      # SwarmFlow per-Leader concurrency caps (three-layer governor).
+      # Only effective when enable_swarmflow is true.
+      #   max_workflows:    L1 — max concurrent workflow runs under one leader (>=1).
+      #   agents_per_run:   L2 — per-run agent admission cap (optional; None uses
+      #                          the engine's default agents-per-run resolution).
+      #   max_agents_total: L3 — global agent admission across all runs (>=1).
+      swarmflow_concurrency:
+        max_workflows: 16
+        agents_per_run: null
+        max_agents_total: 64
+
       # Enable the host-managed worktree capability used by team members and
       # SwarmFlow agent calls with options.isolation="worktree".
       worktree:

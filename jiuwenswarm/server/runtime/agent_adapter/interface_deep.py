@@ -6045,6 +6045,89 @@ class JiuWenSwarmDeepAdapter:
             metadata=request.metadata,
         )
 
+    async def handle_swarmflow_reply(self, request: AgentRequest) -> AgentResponse:
+        """Handle chat.swarmflow_reply — deliver a person's reply to a human turn.
+
+        Builds a HumanAgentMessage addressed to ``swarmflow:<run_id>:<corr>``
+        (run-scoped; falls back to ``swarmflow:<corr>`` when no run_id) and
+        delivers it via ``TeamManager.interact`` — the agent-core thin route
+        resolves the pending human-session future on the run's reply topic.
+        """
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            try:
+                return await session_adapter.handle_swarmflow_reply(request)
+            finally:
+                await self._evict_idle_session_adapters()
+
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = params.get("session_id") or request.session_id or ""
+        run_id = params.get("run_id")
+        corr = params.get("correlation_id") or ""
+        answer = params.get("answer") or ""
+        logger.info(
+            "[WF_DBG] chat.swarmflow_reply req channel_id=%s session_id=%s request_id=%s "
+            "run_id=%s correlation_id=%s answer_len=%d",
+            request.channel_id,
+            session_id,
+            request.request_id,
+            run_id,
+            corr,
+            len(answer) if isinstance(answer, str) else 0,
+        )
+        if not session_id or not corr or answer == "":
+            logger.warning(
+                "[WF_DBG] chat.swarmflow_reply res ok=False session_id=%s correlation_id=%s error=missing_params",
+                session_id,
+                corr,
+            )
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"ok": False, "error": "missing session_id/correlation_id/answer"},
+                metadata=request.metadata,
+            )
+
+        from jiuwenswarm.agents.harness.team import get_team_manager
+        from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
+        from openjiuwen.agent_teams.interaction.payload import HumanAgentMessage
+
+        from openjiuwen.agent_teams.schema.events import format_swarmflow_human_reply_target
+
+        target = format_swarmflow_human_reply_target(corr, run_id)
+        msg = HumanAgentMessage(
+            sender=USER_PSEUDO_MEMBER_NAME,
+            target=target,
+            body=answer,
+        )
+        try:
+            team_manager = get_team_manager(request.channel_id)
+            ok, reason = await team_manager.interact(session_id, msg)
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] swarmflow reply delivery failed: "
+                "session_id=%s corr=%s error=%s",
+                session_id, corr, exc,
+            )
+            ok, reason = False, "exception"
+
+        logger.log(
+            logging.WARNING if not ok else logging.INFO,
+            "[WF_DBG] chat.swarmflow_reply res ok=%s session_id=%s correlation_id=%s error=%s",
+            ok,
+            session_id,
+            corr,
+            None if ok else (reason or "failed"),
+        )
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=bool(ok),
+            payload={"ok": True} if ok else {"ok": False, "error": reason or "failed"},
+            metadata=request.metadata,
+        )
+
     @staticmethod
     def _is_interrupt_skill_evolution_approval_params(request_id: str, params: Any) -> bool:
         if not isinstance(params, dict):

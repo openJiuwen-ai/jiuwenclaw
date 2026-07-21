@@ -420,3 +420,35 @@ class TestWorkflowMonitorHandlerRunIdRegistry:
         assert len(runs) == 1
         assert run_id in runs
         assert runs[run_id].id == run_id
+
+
+# ---------------------------------------------------------------------------
+# New-field passthrough (agent_id / node_type / correlation_id / answer)
+# ---------------------------------------------------------------------------
+
+class TestExtractProgressPassthrough:
+    """_extract_progress passes the new fields through the dict payload path.
+
+    Agent-core EventMessage / WorkflowProgressTeamEvent shapes vary by package
+    version; those paths are not pinned here.
+    """
+
+    @staticmethod
+    def test_dict_payload_passes_new_fields() -> None:
+        """dict path: WorkflowProgress(**payload) covers the new fields."""
+        handler = WorkflowMonitorHandler(monitor=_FakeTeamMonitor(), session_id="s")
+        payload = {
+            "kind": "agent_started",
+            "phase": "review",
+            "label": "host",
+            "agent_id": "main/call:1",
+            "node_type": "human_session",
+            "correlation_id": "review:host:0",
+            "answer": "yes, approved",
+        }
+        progress = handler._extract_progress(SimpleNamespace(payload=payload))
+        assert progress is not None
+        assert progress.agent_id == "main/call:1"
+        assert progress.node_type == "human_session"
+        assert progress.correlation_id == "review:host:0"
+        assert progress.answer == "yes, approved"
