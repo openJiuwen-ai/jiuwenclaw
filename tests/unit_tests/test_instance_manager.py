@@ -1122,10 +1122,18 @@ class TestStartServicesFallback:
         cfg_env.write_text("API_KEY=sk-keep\nMODEL_NAME=m-keep\n", encoding="utf-8")
         monkeypatch.setattr("jiuwenswarm.start_services.get_env_file", lambda: cfg_env)
 
+        # Isolate from other instances configured on the host machine
+        # (e.g. a leftover 'alice'/'bob' in instances.yaml would otherwise
+        # pollute collect_all_ports and shift the fallback index).
+        monkeypatch.setattr(
+            "jiuwenswarm.instance_manager.collect_all_ports",
+            lambda exclude_name=None: [],
+        )
+
         cmd = start_services.InstanceCommand("default")
         assert cmd.validate_and_load() is None
 
-        # Force the index-0 group to be occupied
+        # Force ONLY the index-0 group to be occupied; every higher index free.
         occupied = set(calculate_instance_ports(0).values())
         real = is_port_available
 
@@ -1158,6 +1166,10 @@ class TestStartServicesFallback:
         cfg_env = tmp_path / "config" / ".env"
         cfg_env.parent.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr("jiuwenswarm.start_services.get_env_file", lambda: cfg_env)
+        monkeypatch.setattr(
+            "jiuwenswarm.instance_manager.collect_all_ports",
+            lambda exclude_name=None: [],
+        )
 
         cmd = start_services.InstanceCommand("default")
         assert cmd.validate_and_load() is None
@@ -1172,3 +1184,61 @@ class TestStartServicesFallback:
         )
         rc = start_services._resolve_ports_with_fallback(cmd, scan_range=3)
         assert rc == 1
+
+    @staticmethod
+    def test_persistence_failure_aborts_launch(tmp_path, monkeypatch):
+        """P2: if port persistence fails, fallback returns 1 (not None).
+
+        Without this, a default instance whose .env write fails would return
+        success and the launcher would spawn subprocesses that read the OLD
+        (still-conflicting) ports from .env and crash on bind. The caller
+        must be told persistence failed so it aborts instead.
+        """
+        from unittest.mock import patch as _patch
+        from jiuwenswarm import start_services
+
+        cfg_env = tmp_path / "config" / ".env"
+        cfg_env.parent.mkdir(parents=True, exist_ok=True)
+        # Pre-create the file so the post-check read works even though the
+        # write is mocked to fail. Pre-existing content must be preserved
+        # (no fallback ports written into it).
+        cfg_env.write_text("API_KEY=sk-keep\n", encoding="utf-8")
+        monkeypatch.setattr("jiuwenswarm.start_services.get_env_file", lambda: cfg_env)
+        monkeypatch.setattr(
+            "jiuwenswarm.instance_manager.collect_all_ports",
+            lambda exclude_name=None: [],
+        )
+
+        cmd = start_services.InstanceCommand("default")
+        assert cmd.validate_and_load() is None
+
+        # Only index-0 occupied so a fallback group IS found — but then make
+        # the .env write raise so the persistence path fails.
+        occupied = set(calculate_instance_ports(0).values())
+        real = is_port_available
+
+        def fake_probe(host, port):
+            return port not in occupied and real(host, port)
+
+        monkeypatch.setattr(
+            "jiuwenswarm.instance_manager.config.is_port_available", fake_probe
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.start_services.is_port_available", fake_probe
+        )
+
+        def boom(*args, **kwargs):
+            raise OSError("simulated .env write failure")
+
+        with _patch(
+            "jiuwenswarm.instance_manager.config._upsert_env_ports",
+            side_effect=boom,
+        ):
+            rc = start_services._resolve_ports_with_fallback(cmd)
+
+        # Must surface the failure (return 1), not silently succeed.
+        assert rc == 1
+        # Persistence failed, so the .env must NOT contain fallback ports;
+        # only the pre-existing content remains.
+        assert "GATEWAY_PORT=20001" not in cfg_env.read_text()
+        assert "API_KEY=sk-keep" in cfg_env.read_text()

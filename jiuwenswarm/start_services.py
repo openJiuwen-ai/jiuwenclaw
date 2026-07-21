@@ -279,10 +279,18 @@ def _resolve_ports_with_fallback(cmd: InstanceCommand, scan_range: int = 10) -> 
             f"[start_services] ERROR: No available port group within scan_range={scan_range} "
             f"(scanned indices {base_index}..{base_index + scan_range - 1})."
         )
+        # Tailor the stop command and the port-inspection command to the
+        # actual instance name and host platform so the hint is actionable.
+        import platform as _platform
+        stop_hint = f"jiuwenswarm-start --stop {cmd.name}"
+        if _platform.system().lower() == "windows":
+            port_hint = "netstat -ano | findstr :<port>   (then taskkill /PID <pid> /F)"
+        else:
+            port_hint = "lsof -i :<port>   (or: ss -ltnp | grep <port>)"
         logging.info(
-            "[start_services] Suggestions: stop the occupying process "
-            "('jiuwenswarm-start --stop default' or 'netstat -ano | findstr :<port>'), "
-            "increase scan range, or set JIUWENSWARM_<TYPE>_PORT env vars to move the base."
+            f"[start_services] Suggestions: stop the occupying instance ({stop_hint}), "
+            f"find the holder ({port_hint}), increase scan_range, "
+            f"or set JIUWENSWARM_<TYPE>_PORT env vars to move the base."
         )
         return 1
 
@@ -302,15 +310,32 @@ def _resolve_ports_with_fallback(cmd: InstanceCommand, scan_range: int = 10) -> 
     )
 
     # Persist so subprocesses + next launch + TUI/CLI all see the new ports.
+    # Failure to persist is FATAL for the launch: subprocesses read the ports
+    # from .env (default instance via app.py's load_dotenv) or from the
+    # bootstrap .env (named instance via --dotenv). If we write neither, the
+    # spawned subprocesses still see the OLD conflicting ports and crash with
+    # OSError [Errno 10048] on bind. So we must surface this to the caller as a
+    # hard failure (return 1) rather than silently proceeding.
+    persist_where = (
+        f"{get_env_file()}" if cmd.is_default
+        else f"instances.yaml + {cmd.config.get_bootstrap_env_path()}"
+    )
     try:
         if cmd.is_default:
             _upsert_env_ports(get_env_file(), alt_ports)
         else:
             update_instances_yaml(cmd.name, cmd.config.workspace, alt_ports)
             create_bootstrap_env(cmd.config)
-    except Exception as exc:  # pragma: no cover - defensive logging
-        logging.info(f"[start_services] WARNING: Failed to persist fallback ports: {exc}")
-        logging.info("[start_services] Subprocesses will still use the resolved ports this session.")
+    except Exception as exc:
+        logging.info(
+            f"[start_services] ERROR: Failed to persist fallback ports to {persist_where}: {exc}"
+        )
+        logging.info(
+            "[start_services] Aborting: subprocesses would read the old (conflicting) "
+            "ports and crash on bind. Free up the port file location, fix permissions, "
+            "then retry."
+        )
+        return 1
 
     logging.info(_format_url_hint(alt_ports))
     return None
