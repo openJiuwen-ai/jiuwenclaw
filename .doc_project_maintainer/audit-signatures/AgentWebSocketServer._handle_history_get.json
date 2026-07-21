@@ -1,22 +1,19 @@
 {
   "calls": [
     {
-      "tool_name": "multi_agent_v1.spawn_agent",
+      "tool_name": "collaboration.followup_task",
       "raw_input": {
-        "agent_id": "019f407b-f6a5-70a0-acf4-f35984db7eaa",
-        "agent_type": "explorer",
+        "target": "/root/reaudit_ws_key",
         "symbol_id": "AgentWebSocketServer._handle_history_get",
-        "assignment": "Audit exactly one symbol: AgentWebSocketServer._handle_history_get in jiuwenswarm/server/agent_ws_server.py."
+        "assignment": "Re-audit exactly one expired symbol against current source."
       }
     },
     {
-      "tool_name": "multi_agent_v1.wait_agent",
+      "tool_name": "collaboration.wait_agent",
       "raw_input": {
-        "agent_id": "019f407b-f6a5-70a0-acf4-f35984db7eaa",
-        "nickname": "Volta",
+        "target": "/root/reaudit_ws_key",
         "symbol_id": "AgentWebSocketServer._handle_history_get",
-        "completed": true,
-        "finding_count": 3
+        "completed": true
       }
     }
   ]

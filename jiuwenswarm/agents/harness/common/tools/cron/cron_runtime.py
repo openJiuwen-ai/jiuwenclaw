@@ -40,12 +40,14 @@ class _CronToolsCronBackend(CronToolBackend):
             else None
         )
         chat_type = str(metadata.get("chat_type") or "").strip() or None
+        project_dir = str(metadata.get("project_dir") or "").strip()
         app_id = str(metadata.get("app_id") or "").strip()
         return CronToolRoute(
             request_id=request_id,
             channel_id=channel_id,
             session_id=session_id,
             chat_type=chat_type,
+            project_dir=project_dir,
             app_id=app_id,
         )
 

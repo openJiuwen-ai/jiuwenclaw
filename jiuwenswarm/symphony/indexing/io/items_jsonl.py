@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from shared.storage import is_s3_uri, read_s3_text
+from shared.tags import normalize_tags
 
 LOGGER = logging.getLogger("index_builder")
 
@@ -113,6 +114,7 @@ def parse_jsonl_scanned_items(jsonl_content: str) -> tuple[dict[str, dict], list
                 "stars": stars,
                 "is_official": bool(content_extend.get("isOfficial", content_extend.get("is_official", False))),
                 "author": str(content_extend.get("author") or ""),
+                "tags": list(normalize_tags(content_extend.get("tags"))),
                 "content_extend_param": dict(content_extend),
             }
             if source_path not in seen_paths:

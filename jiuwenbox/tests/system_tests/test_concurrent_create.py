@@ -19,13 +19,14 @@ class TestConcurrentCreate:
 
     @staticmethod
     def _normalize_endpoint(endpoint: str) -> str:
-        return endpoint if "://" in endpoint else f"http://{endpoint}"
+        return endpoint if "://" in endpoint else f"https://{endpoint}"
 
     @staticmethod
     def _create_sandbox(endpoint: str, tracker) -> str:
         with httpx.Client(
             base_url=TestConcurrentCreate._normalize_endpoint(endpoint),
             timeout=TestConfig.DEFAULT_TIMEOUT,
+            verify=True,
         ) as http:
             resp = http.post("/api/v1/sandboxes", json={})
             assert resp.status_code == 201, f"Failed to create sandbox: {resp.text}"

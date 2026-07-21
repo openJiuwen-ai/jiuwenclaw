@@ -2,7 +2,7 @@
 id: gateway-and-channels
 name: Gateway And Channels
 confidence: inferred
-last_updated: 2026-07-07
+last_updated: 2026-07-13
 read_when: "Working on Gateway routing, channel adapters, frontend/TUI command forwarding, or AgentServer client behavior."
 ---
 
@@ -23,6 +23,14 @@ Accepts user/channel/front-end input, normalizes it into E2A or legacy-compatibl
 - `docs/en/E2A-protocol.md` describes Gateway -> AgentServer E2A field contracts.
 - Tests outside the AgentServer directory cover AgentServer client queueing, reconnect/close behavior, stream tail grace, and timeout policy.
 
+## Related Flows
+
+- `gateway-agentserver-e2a-chat` and `agentserver-server-push`
+- `agentserver-command-mcp` and `agentserver-sandbox-runtime`
+- `agentserver-plan-mode-exit`
+- `agentserver-schedule-auto-harness`
+- `agentserver-history-stream`
+
 ## Pending
 
-Document Gateway message handler and channel-specific session/identity mapping after the AgentServer slice.
+Document the remaining Gateway message handlers and channel-specific identity/ownership rules; the new flow docs trace only the AgentServer-facing paths needed for the scoped delivery.

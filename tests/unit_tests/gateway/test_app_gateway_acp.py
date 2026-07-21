@@ -1696,7 +1696,7 @@ async def test_gateway_server_handle_raw_message_forwards_request():
     assert msg.session_id == "sess-3"
     assert msg.req_method == ReqMethod.CHAT_SEND
     assert msg.params.get("content") == "hello"
-    assert msg.mode.value == "agent.fast"
+    assert msg.mode.value == "agent"
     assert ws.sent_frames == []
 
 

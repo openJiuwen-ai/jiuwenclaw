@@ -20,6 +20,8 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.workspace.workspace import Workspace
 
+from jiuwenswarm.server.runtime.debug_trace import invoke_subagent_with_trace
+
 if TYPE_CHECKING:
     from openjiuwen.core.session.agent import Session
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -313,9 +315,11 @@ class AgentTool(Tool):
             )
         else:
             try:
-                result = await subagent.invoke(
-                    {"query": prompt, "conversation_id": sub_session_id},
+                result = await invoke_subagent_with_trace(
+                    subagent,
+                    inputs={"query": prompt, "conversation_id": sub_session_id},
                     session=parent_session,
+                    source_label=f"subagent:custom:{subagent_type}",
                 )
                 output = result.get("output", "")
                 return ToolOutput(
@@ -334,9 +338,11 @@ class AgentTool(Tool):
         subagent_type: str, parent_session: Session,
     ) -> None:
         try:
-            await subagent.invoke(
-                {"query": prompt, "conversation_id": sub_session_id},
+            await invoke_subagent_with_trace(
+                subagent,
+                inputs={"query": prompt, "conversation_id": sub_session_id},
                 session=parent_session,
+                source_label=f"subagent:custom:{subagent_type}",
             )
         except Exception as exc:
             logger.error(

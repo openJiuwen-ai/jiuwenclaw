@@ -258,14 +258,14 @@ export function TeamPanel() {
             <button
               type="button"
               onClick={() => toggleExpanded(item.path)}
-              className="w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-text-muted hover:bg-secondary/40 hover:text-text transition-colors"
+              className="w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-text-muted hover:bg-secondary/40 hover:text-text "
               style={{ paddingLeft: `${depth * 16 + 12}px` }}
               title={item.path}
             >
               <span className="w-4 h-4 flex items-center justify-center text-text-muted/80">
                 {hasChildren ? (
                   <svg
-                    className={`w-3 h-3 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+                    className={`w-3 h-3  ${isExpanded ? 'rotate-90' : ''}`}
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
@@ -295,9 +295,9 @@ export function TeamPanel() {
           onClick={() => {
             if (selectable) setSelectedFile(item);
           }}
-          className={`w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-sm transition-colors ${
+          className={`w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-sm  ${
             selected
-              ? 'border border-[var(--border-accent)] bg-accent-subtle text-text'
+              ? 'border border-[var(--color-border-accent)] bg-accent-subtle text-text'
               : selectable
                 ? 'border border-transparent text-text-muted hover:bg-secondary/40 hover:text-text'
                 : 'border border-transparent text-text-muted/70 cursor-default'
@@ -367,9 +367,9 @@ export function TeamPanel() {
                 teams.map((team) => (
                   <div
                     key={team.name}
-                    className={`w-full min-w-0 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+                    className={`w-full min-w-0 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm  ${
                       selectedTeamName === team.name
-                        ? 'border-[var(--border-accent)] bg-accent-subtle text-text'
+                        ? 'border-[var(--color-border-accent)] bg-accent-subtle text-text'
                         : 'border-transparent hover:bg-secondary/40 text-text-muted hover:text-text'
                     }`}
                   >
@@ -423,12 +423,12 @@ export function TeamPanel() {
                       <button
                         type="button"
                         onClick={() => toggleExpanded(selectedRoot)}
-                        className="w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-text-muted hover:bg-secondary/40 hover:text-text transition-colors"
+                        className="w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-text-muted hover:bg-secondary/40 hover:text-text "
                         title={selectedRoot}
                       >
                         <span className="w-4 h-4 flex items-center justify-center text-text-muted/80">
                           <svg
-                            className={`w-3 h-3 transition-transform ${expandedPaths.has(selectedRoot) ? 'rotate-90' : ''}`}
+                            className={`w-3 h-3  ${expandedPaths.has(selectedRoot) ? 'rotate-90' : ''}`}
                             viewBox="0 0 24 24"
                             fill="none"
                             stroke="currentColor"

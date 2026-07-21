@@ -99,6 +99,7 @@ class AgentManager:
         agent_topology: Any,
         target_channel_id: str | None,
         target_session_id: str | None,
+        reload_scopes: list[str] | None = None,
     ) -> str:
         payload = {
             "config": config,
@@ -106,6 +107,7 @@ class AgentManager:
             "agent_topology": agent_topology,
             "target_channel_id": str(target_channel_id or "").strip() or None,
             "target_session_id": str(target_session_id or "").strip() or None,
+            "reload_scopes": reload_scopes if reload_scopes is not None else [],
         }
         return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=repr)
 
@@ -375,7 +377,7 @@ class AgentManager:
         channel_id: str | None = None,
         skip_instance: Any | None = None,
     ) -> None:
-        """Broadcast package change to agent.fast and agent.plan instances only.
+        """Broadcast package change to single-agent (agent mode) instances only.
 
         This ensures deactivation affects all relevant agent instances, not just the current one.
         Does NOT affect team mode agents.
@@ -387,6 +389,7 @@ class AgentManager:
             channel_id: Optional channel ID to limit broadcast scope.
             skip_instance: Optional agent instance to skip (already processed by caller).
         """
+        # plan / fast 已合并为单一 agent；agent.fast / agent.plan 作为历史 token 仍兼容匹配。
         target_modes = {"agent", "agent.fast", "agent.plan"}
 
         for channel_key, channel_agents in self.agents.items():
@@ -463,11 +466,18 @@ class AgentManager:
         *,
         target_channel_id: str | None = None,
         target_session_id: str | None = None,
+        reload_scopes: set[str] | None = None,
     ) -> None:
         """reload agent config.
 
         使用 ``self._reload_lock`` 串行化, 避免高频触发(如批量 MCP 增删)时多个
         reload 并发叠加, 同时重建大量 agent 实例导致内存暴涨被 OOM kill.
+
+        ``reload_scopes`` 含 ``"model"`` 时, 模型配置属于所有 channel 共享的
+        全局配置段, 此时忽略 ``target_channel_id`` 的窄化, fan-out 到全部
+        channel——否则 web 保存模型后只有 web 通道被热更新, IM 长连接通道
+        (xiaoyi 等)的 session adapter 会继续用旧错误模型, 直到用户手动
+        /new_session 才恢复.
         """
         async with self._reload_lock:
             self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
@@ -480,6 +490,17 @@ class AgentManager:
 
             target_channel = str(target_channel_id or "").strip() or None
             target_session = str(target_session_id or "").strip() or None
+            # model 是全局共享配置: 变更时必须广播到所有 channel, 否则非触发
+            # 通道(如 IM 长连接 xiaoyi)的 agent 不会收到热更新, 旧模型残留。
+            scope_set = set(reload_scopes) if reload_scopes else set()
+            model_scope = "model" in scope_set
+            effective_target_channel = None if model_scope else target_channel
+            if target_channel and model_scope:
+                logger.info(
+                    "[AgentManager] model config changed via channel=%s; fan-out reload "
+                    "to all channels (model is global)",
+                    target_channel,
+                )
             effective_config = config
             if effective_config is None:
                 try:
@@ -489,21 +510,22 @@ class AgentManager:
             fingerprint = self._reload_fingerprint(
                 effective_config,
                 self._latest_env_overrides,
-                agent_topology=self._reload_agent_topology(target_channel),
-                target_channel_id=target_channel,
+                agent_topology=self._reload_agent_topology(effective_target_channel),
+                target_channel_id=effective_target_channel,
                 target_session_id=target_session,
+                reload_scopes=sorted(scope_set) if scope_set else None,
             )
             if fingerprint == self._last_reload_fingerprint:
                 logger.info(
                     "[AgentManager] reload agent config skipped: unchanged scope/config/env "
                     "(channel=%s session=%s)",
-                    target_channel or "*",
+                    effective_target_channel or "*",
                     target_session or "*",
                 )
                 return
             channel_items = (
-                [(target_channel, self.agents.get(target_channel, {}))]
-                if target_channel
+                [(effective_target_channel, self.agents.get(effective_target_channel, {}))]
+                if effective_target_channel
                 else list(self.agents.items())
             )
             reload_completed = True
@@ -632,7 +654,7 @@ class AgentManager:
         try:
             channel_id = getattr(request, "channel_id", "")
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
-            mode_full = params.get("mode", "agent.plan")
+            mode_full = params.get("mode", "agent")
             mode = str(mode_full).split(".")[0] if mode_full else "agent"
             workspace_dir = params.get("workspace_dir")
 
@@ -661,7 +683,7 @@ class AgentManager:
         try:
             channel_id = getattr(request, "channel_id", "")
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
-            mode_full = params.get("mode", "agent.plan")
+            mode_full = params.get("mode", "agent")
             mode = str(mode_full).split(".")[0] if mode_full else "agent"
             workspace_dir = params.get("workspace_dir")
 

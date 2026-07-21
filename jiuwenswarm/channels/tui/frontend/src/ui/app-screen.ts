@@ -231,8 +231,8 @@ const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlo
 const REASONING_LEVEL_OPTIONS = ["", "off", "low", "medium", "high"];
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
-const MAX_API_BASE_LENGTH = 100;
-const MAX_API_KEY_LENGTH = 500;
+const MAX_API_BASE_LENGTH = 512;
+const MAX_API_KEY_LENGTH = 2048;
 
 type ToolSelectorState = {
   list: CheckboxList;
@@ -1312,8 +1312,6 @@ export class AppScreen implements Component, Focusable {
   private questionPreviewMap: Map<string, string> | null = null;
   private questionOptionRows: QuestionOptionRowHit[] = [];
   private otherInputMode = false;
-  private ctrlCPendingForQuestion = false;
-  private ctrlCPendingForQuestionTimer: ReturnType<typeof setTimeout> | null = null;
   private resumeSessionList: ResumeSessionListState | null = null;
   private modelList: ModelListState | null = null;
   private toolSelector: ToolSelectorState | null = null;
@@ -1564,21 +1562,12 @@ export class AppScreen implements Component, Focusable {
       this.transientNoticeTimer = null;
     }
     this.clearEscClearPending();
-    this.clearCtrlCPendingForQuestion();
     if (this.animationTimer) {
       clearInterval(this.animationTimer);
       this.animationTimer = null;
     }
     this.tui.terminal.write(DISABLE_MOUSE_TRACKING);
     this.unsubscribe();
-  }
-
-  private clearCtrlCPendingForQuestion(): void {
-    this.ctrlCPendingForQuestion = false;
-    if (this.ctrlCPendingForQuestionTimer) {
-      clearTimeout(this.ctrlCPendingForQuestionTimer);
-      this.ctrlCPendingForQuestionTimer = null;
-    }
   }
 
   /** 清除 ESC 双击清空输入框的待触发状态及其提示定时器。 */
@@ -2261,42 +2250,14 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    // Ctrl+C during pending question: first press shows hint, second press within 1s cancels
-    if (pendingQuestion && matchesKey(data, "ctrl+c")) {
-      if (this.ctrlCPendingForQuestion) {
-        this.clearCtrlCPendingForQuestion();
-        this.transientNotice = null;
-        this.interruptTask();
-        return;
-      }
-      this.ctrlCPendingForQuestion = true;
-      this.transientNotice = "Press Ctrl+C again to exit";
-      this.ctrlCPendingForQuestionTimer = setTimeout(() => {
-        this.ctrlCPendingForQuestion = false;
-        this.ctrlCPendingForQuestionTimer = null;
-        this.transientNotice = null;
-        this.tui.requestRender();
-      }, 3000);
-      this.tui.requestRender();
-      return;
-    }
-
-    // Ctrl+D during pending question: same double-press mechanism as Ctrl+C
-    if (pendingQuestion && matchesKey(data, "ctrl+d")) {
-      if (this.ctrlCPendingForQuestion) {
-        this.clearCtrlCPendingForQuestion();
-        this.transientNotice = null;
-        this.interruptTask();
-        return;
-      }
-      this.ctrlCPendingForQuestion = true;
-      this.transientNotice = "Press Ctrl+D again to cancel";
-      this.ctrlCPendingForQuestionTimer = setTimeout(() => {
-        this.ctrlCPendingForQuestion = false;
-        this.ctrlCPendingForQuestionTimer = null;
-        this.transientNotice = null;
-        this.tui.requestRender();
-      }, 3000);
+    // 审批框（pendingQuestion）激活时：Ctrl+C 或 Esc 按一次即中断任务并关闭审批框，
+    // 不再需要双击，也不再退出 TUI 进程；Ctrl+D 不再响应。
+    if (
+      pendingQuestion &&
+      (matchesKey(data, "ctrl+c") || matchesKey(data, "escape"))
+    ) {
+      this.transientNotice = null;
+      this.interruptTask();
       this.tui.requestRender();
       return;
     }
@@ -3189,7 +3150,7 @@ export class AppScreen implements Component, Focusable {
             openInExternalEditor(this.tui, filePath);
           },
           openFolder: (folderPath: string) => {
-            openFolderInExplorer(folderPath);
+            return openFolderInExplorer(folderPath);
           },
           enterFileViewer: (content, title, source) => {
             this.enterFileViewer(content, title, source);
@@ -3289,7 +3250,6 @@ export class AppScreen implements Component, Focusable {
         this.editor.setText(this.draftBeforeQuestion);
       }
       this.draftBeforeQuestion = "";
-      this.clearCtrlCPendingForQuestion();
     }
     this.syncEditorSubmitState(snapshot);
     this.syncTeamPanelSelection(snapshot);
@@ -3950,11 +3910,8 @@ export class AppScreen implements Component, Focusable {
     const toggleHint = `${projectHint} · ${branchHint}`;
     const scopeSuffix = branchOn ? ` · branch:${this.resumeSessionList.currentBranch}` : "";
     const searchBox = this.resumeSessionList.searchQuery
-      ? padToWidth(palette.text.primary(`Search: ${this.resumeSessionList.searchQuery}${END_CURSOR}`), width)
-      : padToWidth(
-          palette.text.dim(`Type to search · ↑/↓ to choose · Enter to resume · Space to preview · Ctrl+R to rename · ${toggleHint} · Esc to cancel`),
-          width,
-        );
+      ? padToWidth(palette.text.primary(`🔍: ${this.resumeSessionList.searchQuery}${END_CURSOR}`), width)
+      : padToWidth(palette.text.dim(`🔍: Type to search · Esc to cancel`), width);
     const st = this.resumeSessionList;
     const visibleCount = computeResumeItems(st.sessions, {
       query: st.searchQuery,
@@ -7163,9 +7120,6 @@ export class AppScreen implements Component, Focusable {
           width,
         ),
       );
-    }
-    if (this.ctrlCPendingForQuestion) {
-      lines.push(padToWidth(palette.status.warning("Press Ctrl+C again to exit"), width));
     }
     return lines;
   }

@@ -95,7 +95,12 @@ _STREAM_TRACE_ENV_KEY = "JIUWENSWARM_TEAM_STREAM_TRACE"
 # When set to "true", non-leader teammate frames are filtered out in team
 # streaming so the frontend only receives leader output.
 _HIDE_TEAMMATE_ENV_KEY = "JIUWENSWARM_TEAM_HIDE_TEAMMATE"
-_DEBUG_PREFIX = "/debug"
+# /debug 剥离原语与 Agent/Code 共享（debug_trace.directives），消除两份实现。
+# 别名保持 _DEBUG_PREFIX / _strip_directive 不变，_extract_query_directives 零改动。
+from jiuwenswarm.server.runtime.debug_trace.directives import (
+    DEBUG_PREFIX as _DEBUG_PREFIX,
+    strip_slash_directive as _strip_directive,
+)
 _FOLLOWUP_INTERACT_RETRY_TIMEOUT_SEC = 1.0
 _FOLLOWUP_INTERACT_RACE_WAIT_TIMEOUT_SEC = 3.0
 _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC = 0.05
@@ -311,20 +316,6 @@ def _build_team_event_chunk_meta(event: Any) -> tuple[dict | None, dict]:
     fan_out = _build_logical_targets(event)
     metadata = {"fan_out_targets": fan_out} if fan_out else {}
     return agent_ref, metadata
-
-
-def _strip_directive(query: str, prefix: str) -> tuple[str, bool]:
-    """Strip a leading slash directive from a query string.
-
-    Returns the cleaned query and whether the directive was present.
-    """
-    stripped = query.lstrip()
-    if not stripped.startswith(prefix):
-        return query, False
-    remainder = stripped[len(prefix):]
-    if remainder and not remainder[0].isspace():
-        return query, False
-    return remainder.lstrip(), True
 
 
 def _extract_query_directives(query: str) -> tuple[str, bool, bool]:
@@ -544,6 +535,28 @@ async def _team_session_has_runtime(team_manager: TeamManager, session_id: str) 
         or team_manager.is_runtime_pending(session_id)
         or bool(team_manager.has_stream_task(session_id))
     )
+
+
+async def query_team_human_members_for_join(
+    session_id: str, team_name: str,
+) -> list[dict[str, Any]]:
+    """直查 team.db 取该 team 的全部成员（未 role 过滤，交调用方过滤）。
+
+    纯查询：session_id↔team_name 一致性校验与对外文案均由 gateway 拼，
+    本函数只查不判。team_name 空、DB miss、DB 异常一律返回空 list。
+    session_id 仅用于日志排查，不参与查询。
+    """
+    if not team_name:
+        return []
+    try:
+        members = await TeamMonitorHandler.get_member_list_from_db(team_name)
+    except Exception as exc:
+        logger.warning(
+            "[TeamHelpers] query_team_human_members_for_join db query failed: "
+            "session=%s team=%s error=%s", session_id, team_name, exc,
+        )
+        return []
+    return members or []
 
 
 async def ensure_monitor_handlers_for_active_runtime(
@@ -866,11 +879,20 @@ def _try_finish_cron_team_stream(
         )
 
 
+_TEAM_BUILDING_EVENT_TYPES = frozenset({
+    "team.member", "team.task", "workflow.updated",
+})
+
+
 def _broadcast_event(
     channel_id: str | None, session_id: str, event: dict[str, Any]
 ) -> None:
     """Broadcast an event to all request queues waiting on the same session."""
-    get_team_manager(channel_id).broadcast_event(session_id, event)
+    tm = get_team_manager(channel_id)
+    tm.broadcast_event(session_id, event)
+    # Track team-building events so chat.final can be gated correctly.
+    if (not tm.has_seen_team_events(session_id)) and event.get("event_type") in _TEAM_BUILDING_EVENT_TYPES:
+        tm.mark_seen_team_events(session_id)
     _try_finish_cron_team_stream(channel_id, session_id, event)
 
 
@@ -1122,7 +1144,7 @@ def ensure_team_evolution_watcher(
             source,
         )
         return
-    if not getattr(rail, "auto_scan", True) and not getattr(rail, "completion_followup_enabled", False):
+    if not rail.signal_trigger and not rail.review_trigger:
         logger.info(
             "[TeamHelpers] evolution monitor skipped because team evolution is disabled: "
             "channel_id=%s session_id=%s source=%s",
@@ -1519,8 +1541,18 @@ async def process_team_message_stream(
                         else:
                             reason = reason or "gate_closed"
                     if not success and not is_first_request:
+                        final_reason = reason or ""
+                        # gate_closed 是 shutdown race（leader stream 正在收尾），静默结束流
+                        if final_reason == "gate_closed":
+                            yield AgentResponseChunk(
+                                request_id=rid,
+                                channel_id=channel_id,
+                                payload=None,
+                                is_complete=True,
+                            )
+                            return
                         error_msg = _INTERACT_REASON_ERROR_MAP.get(
-                            reason or "",
+                            final_reason,
                             "Failed to send message, please try again later",
                         )
                         yield AgentResponseChunk(
@@ -1770,6 +1802,11 @@ async def _consume_stream_with_query(
     hide_dm: bool = bool(_envs.get("hide_dm", False))
     received_chunks = 0
     emitted_ask_user_request_ids: set[str] = set()
+    # Reset the team-events flag at the start of a new round so chat.final
+    # can correctly determine whether the team is active.
+    tm_ = get_team_manager(channel_id)
+    tm_.reset_seen_team_events(session_id)
+    tm_.reset_workflow_completed(session_id)
     try:
         logger.info(
             "[TeamHelpers] stream started: channel_id=%s session_id=%s round_id=%s",
@@ -1947,6 +1984,39 @@ async def _consume_stream_with_query(
                             },
                         )
                     continue
+                # chat.final: if team events (team.member / team.task /
+                # workflow.updated) have already been broadcast (tracked
+                # via TeamManager.seen_team_events), the team is still
+                # running — suppress chat.final so the frontend does not
+                # prematurely set isProcessing=false.  Exception: once the
+                # workflow has completed (workflow_completed=True), chat.final
+                # is no longer suppressed and serves as the normal
+                # end-of-round signal.  In non-swarmflow mode,
+                # workflow_completed stays False so the original behavior
+                # is preserved.
+                if parsed.get("event_type") == "chat.final":
+                    tm_ = get_team_manager(channel_id)
+                    should_finish_round = (
+                        (not tm_.has_seen_team_events(session_id))
+                        or tm_.is_workflow_completed(session_id)
+                    )
+                    # Deliver the final content before announcing that the
+                    # round is complete. Clients may stop consuming the stream
+                    # as soon as processing_status(False) arrives.
+                    _broadcast_event(channel_id, session_id, parsed)
+                    if should_finish_round:
+                        _broadcast_event(
+                            channel_id,
+                            session_id,
+                            {
+                                "event_type": "chat.processing_status",
+                                "session_id": session_id,
+                                "rid": round_id,
+                                "is_processing": False,
+                                "is_complete": True,
+                            },
+                        )
+                    continue
                 _broadcast_event(channel_id, session_id, parsed)
 
         # If stream ended without any chunks, broadcast an error event
@@ -1997,6 +2067,12 @@ async def _consume_stream_with_query(
             },
         )
     finally:
+        # Flush & close the stream trace logger if one was opened.
+        if lg is not None:
+            try:
+                lg.flush()
+            except Exception as e:
+                logger.warning(f"TeamStreamLogger flush failed, error is {e}")
         # Broadcast team.completed so cron round watchers (both the agent
         # adapter's _wait_for_cron_team_round_events and the cron scheduler's
         # own round_state) can finalise even when the team stream ended
@@ -2073,12 +2149,16 @@ async def _consume_monitor_events(
 #
 # member_id / task_id 均以 run_id 前缀做命名空间，避免与真实 teammate/task 冲突。
 
-_WF_PHASE_STATUS_TO_TASK_TYPE: dict[str, str] = {
-    "planned": "team.task.created",
-    "running": "team.task.claimed",
-    "completed": "team.task.completed",
-    "failed": "team.task.cancelled",
-    "stopped": "team.task.cancelled",
+# swarmflow phase status -> (web team.task event type, authoritative TeamTaskStatus).
+# The status is resolved here (server-side) so the web frontend consumes it
+# directly, consistent with TeamMonitorHandler's convergence. The event ``type``
+# only drives the activity-log label; ``status`` alone decides the board column.
+_WF_PHASE_STATUS_TO_TASK: dict[str, tuple[str, str]] = {
+    "planned": ("team.task.created", "pending"),
+    "running": ("team.task.claimed", "in_progress"),
+    "completed": ("team.task.completed", "completed"),
+    "failed": ("team.task.cancelled", "cancelled"),
+    "stopped": ("team.task.cancelled", "cancelled"),
 }
 
 
@@ -2122,8 +2202,9 @@ def _workflow_updated_to_team_events(
         task_id = f"{run_id}:{phase_id}"
         if seen_phase.get(task_id) != status:
             seen_phase[task_id] = status
-            task_type = _WF_PHASE_STATUS_TO_TASK_TYPE.get(status)
-            if task_type is not None:
+            mapping = _WF_PHASE_STATUS_TO_TASK.get(status)
+            if mapping is not None:
+                task_type, task_status = mapping
                 out.append(
                     _team_event_envelope(
                         "team.task",
@@ -2133,7 +2214,7 @@ def _workflow_updated_to_team_events(
                             "team_id": team_id,
                             "task_id": task_id,
                             "title": phase.get("name") or phase_id,
-                            "status": status,
+                            "status": task_status,
                         },
                     )
                 )
@@ -2227,13 +2308,30 @@ async def _consume_workflow_events(
             )
             if is_tui:
                 _broadcast_event(channel_id, session_id, event)
+                # Check terminal status for TUI path too
+                wf_status = (wf.get("status") or "").strip()
+                if wf_status in ("completed", "failed", "stopped"):
+                    logger.info(
+                        "[TeamHelpers] workflow terminal: channel_id=%s session_id=%s wf_status=%s",
+                        _resolve_channel_id(channel_id), session_id, wf_status,
+                    )
+                    get_team_manager(channel_id).mark_workflow_completed(session_id)
                 continue
             for team_ev in _workflow_updated_to_team_events(
                 event, session_id, seen_phase, seen_agent, spawned_members
             ):
                 _persist_team_history_event(channel_id, session_id, team_ev)
                 _broadcast_event(channel_id, session_id, team_ev)
-
+            # When the workflow reaches a terminal status, mark
+            # workflow_completed and broadcast chat.processing_status
+            # so the frontend transitions out of the processing state.
+            wf_status = (wf.get("status") or "").strip()
+            if wf_status in ("completed", "failed", "stopped"):
+                logger.info(
+                    "[TeamHelpers] workflow terminal: channel_id=%s session_id=%s wf_status=%s",
+                    _resolve_channel_id(channel_id), session_id, wf_status,
+                )
+                get_team_manager(channel_id).mark_workflow_completed(session_id)
         logger.info(
             "[TeamHelpers] workflow event loop ended: channel_id=%s session_id=%s",
             _resolve_channel_id(channel_id),
@@ -2390,7 +2488,7 @@ async def _watch_team_evolution_and_push(
             fallback_sec=TEAM_EVOLUTION_EVENT_TIMEOUT_SEC,
         )
         while True:
-            if not getattr(rail, "auto_scan", True):
+            if not rail.signal_trigger and not rail.review_trigger:
                 if active_cycle_request_id is not None:
                     await push_evolution_status(
                         push_context,

@@ -12,6 +12,22 @@ import { useChatStore, useSessionStore } from '../../stores';
 import { isTeamMemberCollaborationMessage } from './teamEventUtils';
 import { isA2UIClientEventContent } from '../../features/a2ui/a2uiContent';
 
+const legacyMessageKeyCache = new WeakMap<Message, string>();
+let legacyMessageKeyCounter = 0;
+
+function getMessageRenderKey(message: Message): string {
+  if (message.renderKey) {
+    return message.renderKey;
+  }
+  let key = legacyMessageKeyCache.get(message);
+  if (!key) {
+    legacyMessageKeyCounter += 1;
+    key = `legacy-message-${legacyMessageKeyCounter}`;
+    legacyMessageKeyCache.set(message, key);
+  }
+  return key;
+}
+
 interface MessageListProps {
   messages: Message[];
 }
@@ -96,7 +112,7 @@ function buildTimelineItems(
     })
     .map((message, index) => ({
       type: 'message',
-      key: `message-${message.id}-${index}`,
+      key: getMessageRenderKey(message),
       timestampMs: toTimestampMs(message.timestamp),
       sourceIndex: index,
       message,
@@ -360,8 +376,10 @@ export function ChatTimelineList({
 }
 
 export function MessageList({ messages }: MessageListProps) {
-  const { toolExecutions, toolExecutionOrder } = useChatStore();
-  const { mode } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const toolExecutions = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutions ?? new Map());
+  const toolExecutionOrder = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutionOrder ?? []);
+  const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
   const executions = useMemo(
     () => toolExecutionOrder
       .map((toolCallId) => toolExecutions.get(toolCallId))

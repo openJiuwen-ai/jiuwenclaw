@@ -179,6 +179,7 @@ code_symbols:
       audited_at: null
       audited_commit: null
       audited_source_hash: null
+      audited_symbol_hash: null
       confidence: "inferred"
       expired_reason: null
     issues: []

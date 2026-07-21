@@ -2,7 +2,7 @@
 id: agentserver-runtime
 name: AgentServer Runtime
 confidence: confirmed
-last_updated: 2026-07-07
+last_updated: 2026-07-15
 read_when: "Working on AgentServer startup, Gateway WebSocket handling, sessions, commands, server push, ACP, scheduler, sandbox, or runtime services."
 ---
 
@@ -30,6 +30,11 @@ Hosts the standalone AgentServer process and the WebSocket RPC surface used by G
 - `gateway-agentserver-e2a-chat`: Gateway request -> AgentServer dispatch -> agent response.
 - `agentserver-session-lifecycle`: session metadata/history/checkpointer/runtime state.
 - `agentserver-server-push`: agent-originated downstream push events.
+- `agentserver-command-mcp`: persisted MCP configuration, discovery, agent reload, and runtime reconciliation.
+- `agentserver-sandbox-runtime`: JiuwenBox lifecycle, persisted policy, agent recreation/hot patching, and Landlock status.
+- `agentserver-plan-mode-exit`: approval, checkpoint restoration, stale re-entry protection, and client notification.
+- `agentserver-schedule-auto-harness`: scheduler startup, durable tasks, autonomous execution identity, and logs.
+- `agentserver-history-stream`: persisted history paging, sanitization, streamed events, and frontend reconstruction.
 
 ## Related Code Symbols
 
@@ -52,4 +57,5 @@ Hosts the standalone AgentServer process and the WebSocket RPC surface used by G
 
 - No full live WebSocket integration evidence found yet for real `websockets.serve`, origin rejection, concurrent inbound frames, ack timing, heartbeat, and disconnect cleanup together.
 - `send_push` tracks one current Gateway WebSocket; multiple Gateway connections need explicit ownership rules.
-- Broad runtime mutation handlers need per-symbol audit: MCP config, sandbox config/process, model env mutation, agent reload, scheduler actions.
+- Broad runtime mutation handlers remain risky even where their `AgentWebSocketServer` entrypoints are now audited; downstream manager, adapter, scheduler, filesystem, and frontend methods still need their own symbol audits.
+- The 2026-07-15 scan at `10afedf2` found 0 expired audits among all 128 existing `AgentWebSocketServer` method reviews. The frozen runtime queue still contains 823 methods, including 695 unaudited methods in other server classes; 6 newly observed unaudited methods were not added in this expiration-only update. Current integrity verification trusts 59 method records and flags 69 non-source-expired cards whose entry-document hashes changed.

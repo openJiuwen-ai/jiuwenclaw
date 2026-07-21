@@ -15,7 +15,9 @@ interface UserQuestionModalProps {
 
 export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
   const { t } = useTranslation();
-  const { pendingQuestion, setPendingQuestion } = useChatStore();
+  const pendingQuestion = useChatStore((s) => s.runtimes[s.activeSessionId ?? '']?.pendingQuestion ?? null);
+  const setPendingQuestion = useChatStore((s) => s.setPendingQuestion);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
   const [answers, setAnswers] = useState<Map<number, UserAnswer>>(new Map());
 
   // 处理选项选择
@@ -92,9 +94,9 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
 
   // 取消/关闭
   const handleCancel = useCallback(() => {
-    setPendingQuestion(null);
+    if (activeSessionId) setPendingQuestion(activeSessionId, null);
     setAnswers(new Map());
-  }, [setPendingQuestion]);
+  }, [activeSessionId, setPendingQuestion]);
 
   if (!pendingQuestion) {
     return null;
@@ -112,26 +114,26 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
       <div
         className="relative w-full max-w-lg max-h-[80vh] overflow-hidden rounded-xl animate-rise"
         style={{
-          backgroundColor: 'var(--card)',
-          boxShadow: 'var(--shadow-xl)',
+          backgroundColor: 'var(--color-surface-card)',
+          boxShadow: 'var(--effect-shadow-xl)',
         }}
       >
         {/* 标题栏 */}
         <div
           className="px-6 py-4 flex items-center gap-4"
           style={{
-            backgroundColor: 'var(--panel-strong)',
-            borderBottom: '1px solid var(--border)',
+            backgroundColor: 'var(--color-surface-panel-strong)',
+            borderBottom: '1px solid var(--color-border-default)',
           }}
         >
           <div
             className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
             style={{
-              background: 'linear-gradient(135deg, var(--accent), var(--accent-2))',
+              background: 'linear-gradient(135deg, var(--color-action-primary), var(--color-brand-secondary))',
             }}
           >
             <svg
-              className="w-5 h-5 text-white"
+              className="w-5 h-5 text-text-inverse"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -147,13 +149,13 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
           <div>
             <h2
               className="text-lg font-semibold"
-              style={{ color: 'var(--text-strong)' }}
+              style={{ color: 'var(--color-text-strong)' }}
             >
               {t('userQuestion.title')}
             </h2>
             <p
               className="text-sm"
-              style={{ color: 'var(--muted)' }}
+              style={{ color: 'var(--color-text-secondary)' }}
             >
               {t('userQuestion.subtitle')}
             </p>
@@ -165,7 +167,7 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
           className="px-6 py-5 overflow-y-auto"
           style={{
             maxHeight: '50vh',
-            backgroundColor: 'var(--card)',
+            backgroundColor: 'var(--color-surface-card)',
           }}
         >
           {pendingQuestion.questions.map((question, qIndex) => (
@@ -184,33 +186,33 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
         <div
           className="px-6 py-4 flex justify-end gap-3"
           style={{
-            backgroundColor: 'var(--panel-strong)',
-            borderTop: '1px solid var(--border)',
+            backgroundColor: 'var(--color-surface-panel-strong)',
+            borderTop: '1px solid var(--color-border-default)',
           }}
         >
           <button
             onClick={handleCancel}
-            className="px-4 py-2 text-sm font-medium rounded-lg transition-colors"
+            className="px-4 py-2 text-sm font-medium rounded-lg "
             style={{
-              color: 'var(--muted)',
+              color: 'var(--color-text-secondary)',
               backgroundColor: 'transparent',
             }}
             onMouseOver={(e) => {
-              e.currentTarget.style.backgroundColor = 'var(--bg-hover)';
-              e.currentTarget.style.color = 'var(--text)';
+              e.currentTarget.style.backgroundColor = 'var(--color-surface-hover)';
+              e.currentTarget.style.color = 'var(--color-text-primary)';
             }}
             onMouseOut={(e) => {
               e.currentTarget.style.backgroundColor = 'transparent';
-              e.currentTarget.style.color = 'var(--muted)';
+              e.currentTarget.style.color = 'var(--color-text-secondary)';
             }}
           >
             {t('common.cancel')}
           </button>
           <button
             onClick={handleSubmit}
-            className="px-5 py-2 text-sm font-medium text-white rounded-lg transition-opacity hover:opacity-90"
+            className="px-5 py-2 text-sm font-medium text-text-inverse rounded-lg  hover:opacity-90"
             style={{
-              background: 'linear-gradient(135deg, var(--accent), var(--accent-2))',
+              background: 'linear-gradient(135deg, var(--color-action-primary), var(--color-brand-secondary))',
             }}
           >
             {t('userQuestion.submit')}
@@ -252,22 +254,22 @@ function QuestionItem({
         <span
           className="inline-block px-2 py-0.5 text-xs font-medium rounded mb-2"
           style={{
-            color: 'var(--accent)',
-            backgroundColor: 'var(--accent-subtle)',
+            color: 'var(--color-action-primary)',
+            backgroundColor: 'var(--color-action-primary-subtle)',
           }}
         >
           {question.header}
         </span>
         <p
           className="font-medium"
-          style={{ color: 'var(--text-strong)' }}
+          style={{ color: 'var(--color-text-strong)' }}
         >
           {question.question}
         </p>
         {question.multi_select && (
           <p
             className="text-xs mt-1"
-            style={{ color: 'var(--muted)' }}
+            style={{ color: 'var(--color-text-secondary)' }}
           >
             {t('userQuestion.multiSelect')}
           </p>
@@ -288,30 +290,30 @@ function QuestionItem({
                   question.multi_select || false
                 )
               }
-              className="w-full text-left px-4 py-3 rounded-lg transition-all"
+              className="w-full text-left px-4 py-3 rounded-lg "
               style={{
                 backgroundColor: isSelected
-                  ? 'var(--accent-subtle)'
-                  : 'var(--bg-elevated)',
+                  ? 'var(--color-action-primary-subtle)'
+                  : 'var(--color-surface-elevated)',
                 border: `1px solid ${
-                  isSelected ? 'var(--accent)' : 'var(--border)'
+                  isSelected ? 'var(--color-action-primary)' : 'var(--color-border-default)'
                 }`,
-                color: isSelected ? 'var(--text-strong)' : 'var(--text)',
+                color: isSelected ? 'var(--color-text-strong)' : 'var(--color-text-primary)',
               }}
             >
               <div className="flex items-center gap-3">
                 <div
-                  className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 transition-colors"
+                  className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 "
                   style={{
                     border: `2px solid ${
-                      isSelected ? 'var(--accent)' : 'var(--border-strong)'
+                      isSelected ? 'var(--color-action-primary)' : 'var(--color-border-strong)'
                     }`,
-                    backgroundColor: isSelected ? 'var(--accent)' : 'transparent',
+                    backgroundColor: isSelected ? 'var(--color-action-primary)' : 'transparent',
                   }}
                 >
                   {isSelected && (
                     <svg
-                      className="w-3 h-3 text-white"
+                      className="w-3 h-3 text-text-inverse"
                       fill="currentColor"
                       viewBox="0 0 20 20"
                     >
@@ -328,7 +330,7 @@ function QuestionItem({
                   {option.description && (
                     <div
                       className="text-sm mt-0.5"
-                      style={{ color: 'var(--muted)' }}
+                      style={{ color: 'var(--color-text-secondary)' }}
                     >
                       {option.description}
                     </div>
@@ -342,30 +344,30 @@ function QuestionItem({
         {/* 自定义输入选项 */}
         <button
           onClick={() => setShowCustomInput(!showCustomInput)}
-          className="w-full text-left px-4 py-3 rounded-lg transition-all"
+          className="w-full text-left px-4 py-3 rounded-lg "
           style={{
             backgroundColor: showCustomInput
-              ? 'var(--accent-subtle)'
-              : 'var(--bg-elevated)',
+              ? 'var(--color-action-primary-subtle)'
+              : 'var(--color-surface-elevated)',
             border: `1px solid ${
-              showCustomInput ? 'var(--accent)' : 'var(--border)'
+              showCustomInput ? 'var(--color-action-primary)' : 'var(--color-border-default)'
             }`,
-            color: showCustomInput ? 'var(--text-strong)' : 'var(--text)',
+            color: showCustomInput ? 'var(--color-text-strong)' : 'var(--color-text-primary)',
           }}
         >
           <div className="flex items-center gap-3">
             <div
-              className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 transition-colors"
+              className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 "
               style={{
                 border: `2px solid ${
-                  showCustomInput ? 'var(--accent)' : 'var(--border-strong)'
+                  showCustomInput ? 'var(--color-action-primary)' : 'var(--color-border-strong)'
                 }`,
-                backgroundColor: showCustomInput ? 'var(--accent)' : 'transparent',
+                backgroundColor: showCustomInput ? 'var(--color-action-primary)' : 'transparent',
               }}
             >
               {showCustomInput && (
                 <svg
-                  className="w-3 h-3 text-white"
+                  className="w-3 h-3 text-text-inverse"
                   fill="currentColor"
                   viewBox="0 0 20 20"
                 >
@@ -390,15 +392,15 @@ function QuestionItem({
               placeholder={t('userQuestion.customPlaceholder')}
               className="w-full px-3 py-2 text-sm rounded-lg resize-none focus:outline-none"
               style={{
-                backgroundColor: 'var(--bg-elevated)',
-                border: '1px solid var(--border)',
-                color: 'var(--text)',
+                backgroundColor: 'var(--color-surface-elevated)',
+                border: '1px solid var(--color-border-default)',
+                color: 'var(--color-text-primary)',
               }}
               onFocus={(e) => {
-                e.currentTarget.style.borderColor = 'var(--accent)';
+                e.currentTarget.style.borderColor = 'var(--color-action-primary)';
               }}
               onBlur={(e) => {
-                e.currentTarget.style.borderColor = 'var(--border)';
+                e.currentTarget.style.borderColor = 'var(--color-border-default)';
               }}
               rows={3}
             />

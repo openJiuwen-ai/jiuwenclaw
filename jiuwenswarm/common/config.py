@@ -171,7 +171,35 @@ def get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
     env_auto_scan = _get_bool_env(os.getenv("EVOLUTION_AUTO_SCAN"))
     if env_auto_scan is not None:
         return env_auto_scan
-    return _get_evolution_config(config).get("auto_scan", False)
+    return _get_evolution_config(config).get("auto_scan") is True
+
+
+def get_evolution_signal_trigger_enabled(
+    config: dict[str, Any] | None,
+    *,
+    fallback: bool = False,
+) -> bool:
+    env_signal_trigger = _get_bool_env(os.getenv("EVOLUTION_SIGNAL_TRIGGER"))
+    if env_signal_trigger is not None:
+        return env_signal_trigger
+    signal_trigger = _get_evolution_config(config).get("signal_trigger")
+    if isinstance(signal_trigger, bool):
+        return signal_trigger
+    return fallback
+
+
+def get_evolution_review_trigger_enabled(
+    config: dict[str, Any] | None,
+    *,
+    fallback: bool = False,
+) -> bool:
+    env_review_trigger = _get_bool_env(os.getenv("EVOLUTION_REVIEW_TRIGGER"))
+    if env_review_trigger is not None:
+        return env_review_trigger
+    review_trigger = _get_evolution_config(config).get("review_trigger")
+    if isinstance(review_trigger, bool):
+        return review_trigger
+    return fallback
 
 
 def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
@@ -1534,6 +1562,38 @@ def _deep_merge(
     return result
 
 
+
+_LEGACY_AGENT_SUBMODE_KEYS: tuple[str, ...] = ("plan", "fast", "agent.plan", "agent.fast")
+
+
+def _migrate_legacy_agent_submode_memory(user_data: dict[str, Any]) -> None:
+    modes = user_data.get("modes")
+    if not isinstance(modes, dict):
+        return
+    agent_node = modes.get("agent")
+    if not isinstance(agent_node, dict):
+        return
+
+    legacy_enabled_values: list[bool] = []
+    for key in _LEGACY_AGENT_SUBMODE_KEYS:
+        sub_node = agent_node.get(key)
+        if isinstance(sub_node, dict):
+            sub_memory = sub_node.get("memory")
+            if isinstance(sub_memory, dict) and "enabled" in sub_memory:
+                legacy_enabled_values.append(bool(sub_memory["enabled"]))
+
+    if not legacy_enabled_values:
+        return
+
+    flat_memory = agent_node.get("memory")
+    if not isinstance(flat_memory, dict):
+        flat_memory = {}
+        agent_node["memory"] = flat_memory
+
+    if "enabled" not in flat_memory:
+        flat_memory["enabled"] = all(legacy_enabled_values)
+
+
 def migrate_config_from_template(
     template_path: Path,
     user_config_path: Path,
@@ -1571,6 +1631,10 @@ def migrate_config_from_template(
 
     if user_data is None:
         user_data = {}
+
+    # 结构性迁移：plan/fast 子模式 memory 配置 -> 合并后的 modes.agent.memory
+    # 必须在 _deep_merge 之前执行，否则旧子节点会被静默丢弃而非迁移。
+    _migrate_legacy_agent_submode_memory(user_data)
 
     # Deep merge: template provides defaults, user values preserved
     merged_data = _deep_merge(template_data, user_data)

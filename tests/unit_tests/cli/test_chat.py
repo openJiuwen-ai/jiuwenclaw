@@ -42,22 +42,25 @@ class TestResolveMode:
     @staticmethod
     def test_canonical_values_pass_through():
         assert resolve_mode("code.normal") == "code.normal"
-        assert resolve_mode("agent.plan") == "agent.plan"
-        assert resolve_mode("agent.fast") == "agent.fast"
+        assert resolve_mode("agent") == "agent"
         assert resolve_mode("code.plan") == "code.plan"
         assert resolve_mode("code.team") == "code.team"
         assert resolve_mode("team") == "team"
+        assert resolve_mode("team.plan") == "team.plan"
 
     @staticmethod
     def test_alias_resolution():
-        assert resolve_mode("agent") == "agent.plan"
+        assert resolve_mode("plan") == "agent"
+        assert resolve_mode("fast") == "agent"
+        assert resolve_mode("agent.plan") == "agent"
+        assert resolve_mode("agent.fast") == "agent"
         assert resolve_mode("code") == "code.normal"
 
     @staticmethod
     def test_case_insensitive():
-        assert resolve_mode("AGENT") == "agent.plan"
+        assert resolve_mode("AGENT") == "agent"
         assert resolve_mode("Code.Normal") == "code.normal"
-        assert resolve_mode("  agent.fast  ") == "agent.fast"
+        assert resolve_mode("  agent.fast  ") == "agent"
 
     @staticmethod
     def test_invalid_mode_raises():
@@ -256,7 +259,7 @@ class TestValidateArgs:
         args = argparse.Namespace(mode="agent", json=False, jsonl=False,
                                   show_reasoning=False, show_tools=False, timeout=None)
         assert _validate_args(args) is None
-        assert args.mode == "agent.plan"
+        assert args.mode == "agent"
 
 
 class TestParser:
@@ -710,6 +713,59 @@ class TestInteractiveLoop:
         assert renderer.streamed_text == "Hello world"
 
     @pytest.mark.asyncio
+    async def test_team_control_final_envelopes_do_not_hide_answer(self):
+        messages = [
+            {
+                "type": "event",
+                "event": "chat.processing_status",
+                "payload": {"is_processing": True},
+            },
+            {
+                "type": "event",
+                "event": "chat.final",
+                "payload": {"event_type": "team.runtime_ready"},
+            },
+            {
+                "type": "event",
+                "event": "chat.final",
+                "payload": {"event_type": "chat.llm_usage"},
+            },
+            {
+                "type": "event",
+                "event": "chat.delta",
+                "payload": {"content": "当前是集群模式"},
+            },
+            {
+                "type": "event",
+                "event": "chat.final",
+                "payload": {
+                    "event_type": "chat.final",
+                    "content": "当前是集群模式。",
+                },
+            },
+            {
+                "type": "event",
+                "event": "chat.processing_status",
+                "payload": {"is_processing": False},
+            },
+        ]
+
+        from jiuwenswarm.cli.chat import _run_interactive_loop
+
+        client = await self._make_connected_client(messages)
+        renderer = HumanRenderer()
+        request = {
+            "type": "req", "id": "r1", "method": "chat.send",
+            "is_stream": True,
+            "params": {"session_id": "s1", "content": "hi", "query": "hi",
+                       "mode": "team", "cwd": "/tmp", "project_dir": "/tmp",
+                       "trusted_dirs": ["/tmp"]},
+        }
+        code = await _run_interactive_loop(client, renderer, request)
+        assert code == 0
+        assert renderer.streamed_text == "当前是集群模式。"
+
+    @pytest.mark.asyncio
     async def test_chat_error_returns_1(self):
         messages = [
             {"type": "event", "event": "chat.error", "payload": {"error": "something broke"}},
@@ -751,6 +807,7 @@ class TestInteractiveLoop:
         }
         code = await _run_interactive_loop(client, renderer, request)
         assert code == 0
+        assert renderer.streamed_text == "ok"
 
     @pytest.mark.asyncio
     @staticmethod

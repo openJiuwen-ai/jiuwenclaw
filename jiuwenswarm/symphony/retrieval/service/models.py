@@ -113,6 +113,9 @@ class RequestConfig:
     # Requested result count. None means using RetrieverConfig.top_k.
     top_k: int | None = None
 
+    # Candidate tags required before tree traversal. Empty means no filtering.
+    tags: tuple[str, ...] = ()
+
 
 @dataclass(frozen=True)
 class _RuntimeRetrieverConfig:

@@ -58,7 +58,11 @@ def collect_resources_data_files(source_dir, target_dir):
         if any(root_abs == excluded or root_abs.startswith(excluded + os.sep) for excluded in excluded_dirs):
             continue
 
-        rel_dir = os.path.dirname(os.path.relpath(root, source_dir))
+        # 这里 root 本身就是目录，dirname 会砍掉最后一级，导致
+        # skills/<name>/SKILL.md 被错误放到 skills/SKILL.md，无子目录的技能整个消失。
+        rel_dir = os.path.relpath(root, source_dir)
+        if rel_dir == ".":
+            rel_dir = ""
         dest_dir = os.path.normpath(os.path.join(target_dir, rel_dir))
         for filename in files:
             data_files.append((os.path.join(root, filename), dest_dir))
@@ -130,6 +134,11 @@ datas += copy_metadata("mcp", recursive=True)
 datas += copy_metadata("openjiuwen", recursive=True)
 datas += collect_data_files("openjiuwen", include_py_files=False)
 datas += collect_data_files(
+    "a2ui",
+    include_py_files=False,
+    includes=["assets/0.8/*.json"],
+)
+datas += collect_data_files(
     "jiuwenswarm.extensions",
     include_py_files=True,
     includes=EXTENSION_DATA_FILE_PATTERNS,
@@ -160,9 +169,6 @@ hiddenimports = webview_hiddenimports + [
     "ruamel.yaml.reader",
     "ruamel.yaml.representer",
     "ruamel.yaml.nodes",
-    "chromadb",
-    "chromadb.config",
-    "chromadb.telemetry",
     "openjiuwen",
     "psutil",
     "aiosqlite",
@@ -254,6 +260,30 @@ if _sp_dir:
         _mypyc_binaries.append((_pyd, "."))
 _bundled_binaries = _bundled_binaries + _mypyc_binaries
 
+# Bundle chromadb fully. chromadb 1.x is config-driven: it stores fully-qualified
+# class names as strings (chromadb.config.Settings.chroma_api_impl defaults to
+# "chromadb.api.rust.RustBindingsAPI", chroma_product_telemetry_impl to
+# "chromadb.telemetry.product.posthog.Posthog") and resolves them at runtime via
+# importlib.import_module(). PyInstaller's static analysis cannot follow these
+# string references, so manually listing "chromadb"/"chromadb.config"/
+# "chromadb.telemetry" misses the api.rust and telemetry.product.posthog
+# submodules — OpenJiuwenMemoryProvider then crashes on vector-store init with
+# ModuleNotFoundError and falls back to no-Provider. collect_all grabs every
+# submodule + data file (log_config.yml, migrations/, etc.) in one shot.
+_chroma_datas, _chroma_binaries, _chroma_hidden = collect_all("chromadb")
+datas += _chroma_datas
+hiddenimports += _chroma_hidden
+_bundled_binaries = _bundled_binaries + _chroma_binaries
+
+# chromadb.api.rust does `import chromadb_rust_bindings` — a C extension shipping
+# a .pyd under a top-level package of the same name. collect_all("chromadb")
+# won't touch a separate top-level package, so collect it explicitly or the rust
+# API path raises ModuleNotFoundError on the .pyd at runtime.
+_rust_datas, _rust_binaries, _rust_hidden = collect_all("chromadb_rust_bindings")
+datas += _rust_datas
+hiddenimports += _rust_hidden
+_bundled_binaries = _bundled_binaries + _rust_binaries
+
 a = Analysis(
     [entry_script],
     pathex=[project_root, symphony_root],
@@ -313,8 +343,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "JiuwenSwarm",
             "CFBundleDisplayName": "JiuwenSwarm",
-            "CFBundleShortVersionString": "0.2.3.beta1",
-            "CFBundleVersion": "0.2.3.beta1",
+            "CFBundleShortVersionString": "0.2.3",
+            "CFBundleVersion": "0.2.3",
             "NSHighResolutionCapable": "True",
         },
     )

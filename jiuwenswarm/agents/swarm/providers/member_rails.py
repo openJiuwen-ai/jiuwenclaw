@@ -166,6 +166,11 @@ def _build_runtime_prompt_rail(
     """
     inp = RuntimePromptInput.resolve(params, context)
     rail = RuntimePromptRail(language=inp.language, channel=inp.channel)
+    # Team members use their own RuntimePromptRail instance. Bind it to the
+    # originating request so runtime state is read from the active session
+    # instead of the process-wide ``default`` state file.
+    rail.set_mode(context.mode)
+    rail.set_session_id(context.session_id)
     # Seed cwd/project_dir so the TUI branch injects the "current project
     # directory" policy and the model answers with the project dir instead of
     # calling `pwd` (which would surface the per-member workspace path).

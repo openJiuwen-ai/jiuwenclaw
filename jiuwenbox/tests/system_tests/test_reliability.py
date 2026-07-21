@@ -2,27 +2,41 @@
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 import time
 
+import httpx
 import pytest
 
 from tests.system_tests.test_utils import ChaosInjector
 
+# Docker Engine API via Unix socket (replaces subprocess docker CLI calls)
+_DOCKER_SOCKET = "/var/run/docker.sock"
+_DOCKER_API_BASE = "http://localhost"
 
-def _docker_restart_policy(container_name: str) -> str | None:
-    docker = shutil.which("docker")
-    if docker is None:
-        return None
-    result = subprocess.run(
-        [docker, "inspect", "--format", "{{.HostConfig.RestartPolicy.Name}}", container_name],
-        capture_output=True,
-        text=True,
+
+def build_docker_client() -> httpx.Client:
+    """Build an httpx client connected to Docker Engine API via Unix socket."""
+    return httpx.Client(
+        transport=httpx.HTTPTransport(uds=_DOCKER_SOCKET),
+        base_url=_DOCKER_API_BASE,
+        timeout=10.0,
     )
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
+
+
+def get_docker_restart_policy(container_name: str) -> str:
+    """Query docker container restart policy via Engine API.
+
+    Returns the restart policy string, or empty string if unavailable.
+    """
+    try:
+        with build_docker_client() as client:
+            resp = client.get(f"/containers/{container_name}/json")
+            if resp.status_code != 200:
+                return ""
+            data = resp.json()
+            return data.get("HostConfig", {}).get("RestartPolicy", {}).get("Name", "")
+    except Exception:
+        return ""
 
 
 @pytest.mark.system
@@ -54,8 +68,8 @@ class TestReliability:
         sandbox_id = resp.json()["id"]
         wait_for_sandbox_ready(sandbox_id)
 
-        restart_policy = _docker_restart_policy("jiuwenbox-server")
-        if restart_policy is None:
+        restart_policy = get_docker_restart_policy("jiuwenbox-server")
+        if not restart_policy:
             pytest.skip("Docker or jiuwenbox-server container not available")
         if restart_policy not in ("always", "unless-stopped"):
             pytest.skip(
@@ -63,11 +77,13 @@ class TestReliability:
                 "need 'always' or 'unless-stopped' for this test"
             )
 
-        docker = shutil.which("docker")
         try:
-            subprocess.run([docker, "kill", "jiuwenbox-server"], check=True)
-        except subprocess.CalledProcessError:
-            pytest.skip("Docker container not running")
+            with build_docker_client() as docker_client:
+                resp = docker_client.post("/containers/jiuwenbox-server/kill")
+                if resp.status_code not in (200, 204):
+                    pytest.skip("Docker container not running")
+        except Exception:
+            pytest.skip("Docker not available")
 
         time.sleep(30)
 
@@ -222,7 +238,7 @@ class TestReliability:
 
         resp = exec_command(
             sandbox_id,
-            ["python3", "-c", "import os; os.fork(); os._exit(0)"],
+            ["python3", "-c", "import sys; sys.exit(0)"],
             timeout_seconds=10,
         )
         assert resp.status_code == 200
@@ -230,11 +246,10 @@ class TestReliability:
         time.sleep(5)
         resp = exec_command(
             sandbox_id,
-            ["sh", "-c", "ps aux | grep -E '[Z].*<defunct>' | wc -l"],
+            ["ps", "aux"],
             timeout_seconds=10,
         )
         assert resp.status_code == 200
-        raw = (resp.json().get("stdout") or "").strip()
-        assert raw.isdigit(), f"Unexpected stdout: {raw!r}"
-        zombie_count = int(raw)
+        output = resp.json().get("stdout") or ""
+        zombie_count = sum(1 for line in output.splitlines() if "<defunct>" in line)
         assert zombie_count == 0

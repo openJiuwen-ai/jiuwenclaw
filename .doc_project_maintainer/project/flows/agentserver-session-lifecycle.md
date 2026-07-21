@@ -3,7 +3,7 @@ id: agentserver-session-lifecycle
 name: AgentServer Session Lifecycle
 status: partial
 confidence: confirmed
-last_updated: 2026-07-07
+last_updated: 2026-07-13
 user_visible_surface: "Session create, switch, list, fork, rewind, delete, history, and team session operations."
 source_of_truth:
   - "agent session directories"
@@ -27,11 +27,11 @@ entrypoints:
 
 ## Outcome
 
-User and team sessions can be created, switched, listed, renamed, deleted, forked, rewound, compacted, and paged through history from Gateway requests.
+User and team session operations are exposed for create, switch, list, rename, delete, fork, rewind, compact, and history. Static analysis confirms the RPC paths but also shows that `session.create` does not itself reserve or persist a unique session and that caller-provided IDs reach later filesystem-backed operations.
 
 ## Causal Path
 
-`_handle_message` routes session and history `ReqMethod` values to local handlers before generic chat handling. Session create calls `AgentManager.create_session` and, for team mode, prepares team session switching. Fork copies filesystem session state, in-memory context, and DeepAgent state. History handlers read persisted history records, filter restorable records, enforce page/byte limits, and encode sanitized records. Delete and team delete handlers cross both session metadata and active runtime state.
+`_handle_message` routes session and history `ReqMethod` values to local handlers before generic chat handling. Session create chooses or accepts an ID and may prepare team switching, but does not durably reserve the ID. Fork copies filesystem session state, history/context, and DeepAgent state through multiple non-atomic steps. History handlers read persisted records, filter restorable records, enforce per-record/page limits, and encode sanitized records. Delete and team delete handlers cross metadata, filesystem, and active runtime state.
 
 ## State Classification
 
@@ -41,16 +41,16 @@ User and team sessions can be created, switched, listed, renamed, deleted, forke
 
 ## Replay, Restore, Or Reconstruction
 
-History paging reverses persisted restorable records so latest records appear first. Rewind and rewind-restore paths depend on session operations and active adapter state; full flow detail is pending.
+History paging rereads the full persisted history, filters restorable records, reverses them so latest records appear first, and slices a page. Fork and rewind reconstruct several stores independently; no transaction or recovery journal spans filesystem copies, history, checkpointer state, and active runtime state.
 
 ## Contract
 
-Handlers take `AgentRequest.params` fields such as `session_id`, `source_session_id`, `target_session_id`, `title`, page parameters, and mode hints. Responses are `AgentResponse` payloads encoded as E2A wire.
+Handlers take `AgentRequest.params` fields such as `session_id`, `source_session_id`, `target_session_id`, `title`, page parameters, and mode hints. Responses are `AgentResponse` payloads encoded as E2A wire. A strict normalized `sess_*` identifier and resolved-path containment contract was not found at the AgentWebSocketServer boundary.
 
 ## Verification
 
-Tests cover ACP/session creation and switching, session/team delete, history payload limits, session operations, and agentserver modes. Direct full rewind/restore flow coverage still needs review.
+Tests cover ACP/session creation and switching, session/team delete, history payload limits, session operations, and AgentServer modes. The session-create success test is mock-heavy; direct hostile-ID containment, duplicate reservation, partial fork failure, wrong Agent variant, send failure, and full rewind/restore coverage remain missing.
 
 ## Known Gaps
 
-Detailed documentation for `_handle_session_rewind_full`, `_handle_session_rewind_context`, `_handle_team_delete`, and `_handle_session_delete` is pending.
+Caller-controlled absolute or `..` session IDs can reach path composition in history/session helpers without a confirmed containment check. Create may report success without durable creation or uniqueness; fork can leave partial state while later failure is normalized ambiguously. Detailed downstream audits for rewind, metadata stores, history storage, checkpointer state, and team teardown remain pending.

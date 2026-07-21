@@ -12,11 +12,33 @@ app_agentserver 只需调 init_proactive_engine(server, config)。
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# 后台主 agent 推送任务的 inflight 集合，防止同 session 重复并发触发 stream。
+# fire-and-forget 后 cron 可能在一个后台 tick 还没跑完时又来下一次，靠这个
+# 标志跳过，避免同 session 并发 process_message_stream（不支持并发）。
+_proactive_push_inflight: set[str] = set()
+
+
+@dataclass
+class ProactiveTriggerRequest:
+    """一次主动推荐触发请求的具名参数封装（G.FNM.03：多相关参数具名化）。
+
+    把 session_id / channel_id / query / decision / on_delivered 这一组"本次推荐请求"
+    相关参数封装到一起，让 trigger_main_agent 的签名从 6 参降到 2 参（server + request）。
+    server 作为运行时依赖不入此结构。
+    """
+    session_id: str
+    query: str
+    decision: Any
+    channel_id: str | None = None
+    on_delivered: Any = None
 
 
 def build_proactive_agent():
@@ -54,14 +76,32 @@ def build_proactive_agent():
         return None
 
 
-async def trigger_main_agent(server, session_id: str, channel_id: str | None,
-                             query: str, decision: Any) -> bool:
+async def trigger_main_agent(server, request: ProactiveTriggerRequest) -> bool:
     """Drive the main agent to run one round with the directive-style query.
 
     避让：目标 session 正在跑 stream 时跳过（同 session 不支持并发 stream）。
     触发后主 agent 自己生成话术 → 进 context engine → stream 推前端。
-    Returns True on triggered, False on busy/missing adapter/failure.
+
+    fire-and-forget：主 agent 跑一轮被丢到后台 task，本函数立即返回 True
+    （表示"已触发"，让调用方 cron 秒回不超时）。``request.on_delivered`` 回调在后台
+    task **真正跑完**（主 agent 输出流尽、未抛异常）后才被调用——用于让
+    调用方在"推荐确实送达"时再做计数/状态持久化，避免后台失败却已计数。
+    后台 task 失败时不会调 on_delivered，调用方据此知道本次未真正送达。
+
+    Args:
+        server: 运行时依赖（不入 ProactiveTriggerRequest）。
+        request: 本次触发请求的具名参数（session_id/channel_id/query/decision/on_delivered）。
+
+    Returns:
+        True if the main agent was triggered (后台异步跑), False on busy/missing
+        adapter/failure/duplicate-inflight.
     """
+    session_id = request.session_id
+    channel_id = request.channel_id
+    query = request.query
+    decision = request.decision
+    on_delivered = request.on_delivered
+
     try:
         from jiuwenswarm.common.schema.agent import AgentRequest
     except ImportError as exc:
@@ -97,7 +137,7 @@ async def trigger_main_agent(server, session_id: str, channel_id: str | None,
         except Exception as exc:
             logger.debug("[ProactiveEngine] is_deep_agent_executing_for_session check failed: %s", exc)
 
-    request = AgentRequest(
+    agent_request = AgentRequest(
         request_id=f"proactive_{decision.type}_{int(time.time() * 1000)}",
         channel_id=cid,
         session_id=session_id,
@@ -107,42 +147,73 @@ async def trigger_main_agent(server, session_id: str, channel_id: str | None,
         # proactive_type/target 给 assistant 写 history 时透传用（待通用流程支持）。
         params={
             "query": query,
-            "mode": "agent.plan",
+            "mode": "agent",
             "source": "proactive_recommendation",
             "proactive_type": decision.type,
             "proactive_target": decision.target,
         },
         is_stream=True,
     )
-    try:
-        async for chunk in agent.process_message_stream(request):
-            # chunk 经 server.send_push 推 Gateway。send_push 内部已用
-            # _current_send_lock 串行化 ws 发送，且 build_server_push_wire 走
-            # chunk 分支（无 response_kind）正确编码——这里只需带齐 chunk 的
-            # request_id / payload / is_complete，Gateway 才能按 request_id 路由。
-            #
-            # 注入 source/proactive_type：主 agent 的 chunk 是普通对话格式，
-            # 不带主动推荐标记。前端靠 payload.source==='proactive_recommendation'
-            # 识别卡片、payload.proactive_type 选颜色，缺这俩会退化成普通白色气泡。
-            # decision.type 在手上，给每个 chunk 的 payload 补上。
-            try:
-                chunk_payload = dict(getattr(chunk, "payload", None) or {})
-                chunk_payload.setdefault("source", "proactive_recommendation")
-                chunk_payload.setdefault("proactive_type", decision.type)
-                chunk_payload.setdefault("proactive_target", decision.target)
-                await server.send_push({
-                    "request_id": getattr(chunk, "request_id", "") or request.request_id,
-                    "channel_id": cid,
-                    "session_id": session_id,
-                    "payload": chunk_payload,
-                    "is_complete": bool(getattr(chunk, "is_complete", False)),
-                })
-            except Exception as exc:
-                logger.debug("[ProactiveEngine] send_push chunk failed: %s", exc)
-        return True
-    except Exception as exc:
-        logger.warning("[ProactiveEngine] trigger: process_message_stream failed: %s", exc, exc_info=True)
+
+    # fire-and-forget：主 agent 跑一轮 + 流式推前端这一段可能很慢（LLM + 工具调用 +
+    # post_run 持久化），如果串行 await 会把调用方（_handle_proactive_tick → cron）一起拖到
+    # 600 秒超时。这里把它丢后台 task，立即返回 True（表示"已触发"），让 cron 秒回。
+    # 推荐内容本来就走 server.send_push 独立流式推前端，不依赖 cron 的请求-响应通道。
+    inflight_key = f"{cid}:{session_id}"
+    if inflight_key in _proactive_push_inflight:
+        logger.info("[ProactiveEngine] trigger: previous push still running for %s, skipping",
+                    inflight_key)
         return False
+    _proactive_push_inflight.add(inflight_key)
+
+    async def _push_chunks() -> None:
+        """后台消费主 agent 的流式输出并推 Gateway。"""
+        delivered = False
+        try:
+            async for chunk in agent.process_message_stream(agent_request):
+                # chunk 经 server.send_push 推 Gateway。send_push 内部已用
+                # _current_send_lock 串行化 ws 发送，且 build_server_push_wire 走
+                # chunk 分支（无 response_kind）正确编码——这里只需带齐 chunk 的
+                # request_id / payload / is_complete，Gateway 才能按 request_id 路由。
+                #
+                # 注入 source/proactive_type：主 agent 的 chunk 是普通对话格式，
+                # 不带主动推荐标记。前端靠 payload.source==='proactive_recommendation'
+                # 识别卡片、payload.proactive_type 选颜色，缺这俩会退化成普通白色气泡。
+                # decision.type 在手上，给每个 chunk 的 payload 补上。
+                try:
+                    chunk_payload = dict(getattr(chunk, "payload", None) or {})
+                    chunk_payload.setdefault("source", "proactive_recommendation")
+                    chunk_payload.setdefault("proactive_type", decision.type)
+                    chunk_payload.setdefault("proactive_target", decision.target)
+                    await server.send_push({
+                        "request_id": getattr(chunk, "request_id", "") or agent_request.request_id,
+                        "channel_id": cid,
+                        "session_id": session_id,
+                        "payload": chunk_payload,
+                        "is_complete": bool(getattr(chunk, "is_complete", False)),
+                    })
+                except Exception as exc:
+                    logger.debug("[ProactiveEngine] send_push chunk failed: %s", exc)
+            # 循环正常跑完（未抛异常）= 主 agent 输出流尽，推荐确实送达。
+            delivered = True
+        except Exception as exc:
+            logger.warning("[ProactiveEngine] trigger: process_message_stream failed: %s",
+                           exc, exc_info=True)
+        finally:
+            _proactive_push_inflight.discard(inflight_key)
+            # 只在真正送达时回调，让调用方据此做计数/状态持久化（名实相符）。
+            # 后台失败（delivered=False）不回调，调用方下次 tick 仍可重试。
+            if delivered and on_delivered is not None:
+                try:
+                    on_delivered()
+                except Exception as exc:
+                    logger.warning("[ProactiveEngine] on_delivered callback failed: %s",
+                                   exc, exc_info=True)
+
+    asyncio.create_task(_push_chunks())
+    logger.info("[ProactiveEngine] trigger: fired background push for %s (fire-and-forget)",
+                inflight_key)
+    return True
 
 
 async def init_proactive_engine(server, config: dict[str, Any] | None = None) -> None:
@@ -192,8 +263,17 @@ async def init_proactive_engine(server, config: dict[str, Any] | None = None) ->
 
         # 触发主 agent 回调：tick 决策后，把决策包成指令式 query 触发主 agent
         # 跑一轮，主 agent 自己生成话术 → 进 context engine → stream 推前端。
-        async def _trigger_cb(session_id, channel_id, query, decision):
-            return await trigger_main_agent(server, session_id, channel_id, query, decision)
+        # _trigger_cb 是 _trigger_main_agent 的调用契约（位置参数），这里组装成
+        # ProactiveTriggerRequest 再交给 trigger_main_agent。
+        async def _trigger_cb(session_id, channel_id, query, decision, on_delivered=None):
+            req = ProactiveTriggerRequest(
+                session_id=session_id,
+                channel_id=channel_id,
+                query=query,
+                decision=decision,
+                on_delivered=on_delivered,
+            )
+            return await trigger_main_agent(server, req)
 
         proactive_engine.set_trigger_main_agent_callback(_trigger_cb)
         server.set_proactive_engine(proactive_engine)

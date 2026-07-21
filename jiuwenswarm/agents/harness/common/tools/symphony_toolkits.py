@@ -438,9 +438,14 @@ class SymphonyToolkit:
             compact["source_id"] = source
         if target not in (None, ""):
             compact["target_id"] = target
-        confidence = edge.get("confidence")
-        if confidence not in (None, ""):
-            compact["confidence"] = confidence
+        if "confidence" in edge:
+            compact["confidence"] = edge.get("confidence")
+        method = edge.get("method")
+        if method not in (None, ""):
+            compact["method"] = method
+        reason = edge.get("reason")
+        if reason not in (None, ""):
+            compact["reason"] = reason
         return compact
 
     @staticmethod

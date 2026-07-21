@@ -616,6 +616,27 @@ def test_toolkit_plan_returns_compact_plan_and_skill_retrieval():
     assert "resolved_payload" not in skill_retrieval["candidate_records"][0]
 
 
+def test_toolkit_compacts_inferred_edge_provenance():
+    edge = SymphonyToolkit._compact_can_feed_edge(
+        {
+            "source_id": "skill-a",
+            "target_id": "skill-b",
+            "confidence": None,
+            "method": "fast_llm_inferred",
+            "reason": "LLM connected retrieved candidates.",
+            "port_mappings": [],
+        }
+    )
+
+    assert edge == {
+        "source_id": "skill-a",
+        "target_id": "skill-b",
+        "confidence": None,
+        "method": "fast_llm_inferred",
+        "reason": "LLM connected retrieved candidates.",
+    }
+
+
 def test_toolkit_no_plan_continues_for_skill_discovery():
     registry = ExtensionRegistry.create_instance(
         callback_framework=_CallbackFramework(),

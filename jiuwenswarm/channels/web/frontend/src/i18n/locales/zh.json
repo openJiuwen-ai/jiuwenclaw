@@ -17,6 +17,7 @@
   },
   "nav": {
     "chat": "对话",
+    "work": "工作",
     "agent": "智能体",
     "teams": "团队",
     "sessions": "会话",
@@ -27,6 +28,7 @@
     "extensions": "Harness",
     "rails": "Rails",
     "harnesspkg": "Harness Package",
+    "more": "更多",
     "settings": "设置",
     "config": "配置信息",
     "browser": "浏览器服务",
@@ -35,7 +37,7 @@
   },
   "team": {
     "members": "团队成员",
-    "membersTab": "Team成员",
+    "membersTab": "团队",
     "statusTab": "状态",
     "filesTab": "文件",
     "taskEventLog": "任务事件日志",
@@ -149,7 +151,6 @@
       "tab": "任务规划",
       "progressTitle": "任务进度",
       "token": "Token",
-      "elapsedTime": "已用时 {{value}}",
       "taskList": "任务列表",
       "taskListAria": "{{task}} 任务列表",
       "resources": "任务资源",
@@ -162,6 +163,9 @@
         "structure": "结构视图",
         "board": "任务板视图"
       },
+      "metrics": {
+        "progress": "进度"
+      },
       "columns": {
         "waiting": "等待中",
         "running": "进行中",
@@ -170,6 +174,17 @@
         "failed": "任务失败"
       }
     }
+  },
+  "artifacts": {
+    "title": "所有产物",
+    "tab": "产物",
+    "count": "{{count}} 个产物",
+    "empty": "暂无产物",
+    "download": "下载",
+    "selectArtifact": "请选择一个产物预览",
+    "previewUnsupported": "仅支持 Markdown 文件预览",
+    "previewMissingPath": "当前产物没有可读取的本地路径",
+    "previewFailed": "Markdown 预览加载失败"
   },
   "teams": {
     "title": "团队管理",
@@ -220,13 +235,13 @@
     "placeholderVoice": "正在听取语音...",
     "welcomeLogoAlt": "JiuwenSwarm 标志",
     "welcomeHeading": "你好，我是JiuwenSwarm，很高兴认识你！",
-    "welcomeSubtext": "我可以帮你回答问题，解决疑惑，还可以帮你完成一些任务。",
     "welcomeSuggestions": {
       "journey": "让我们开启一段新的旅程吧！",
       "skills": "能告诉我你有哪些技能吗？"
     },
     "newSession": "新建会话",
     "sessionCreated": "已新建会话",
+    "modeAgentSingle": "Agent模式",
     "modePlan": "规划模式",
     "modeAgent": "性能模式",
     "modeAgentTeam": "集群模式",
@@ -234,19 +249,40 @@
     "modeAutoHarnessDesc": "自动分析并优化目标仓库",
     "recording": "正在录音...（松开按钮自动发送）",
     "waitingTasks": "等待任务",
+    "messageQueue": "消息队列",
     "waitingTasksCount": "等待任务 ({{count}})",
     "removeTask": "移除任务",
     "addImage": "添加图片",
     "addImageDisabled": "处理中或录音中不可添加图片",
     "removeImage": "移除图片",
+    "sendTask": "发送消息，但不打断模型运行",
+    "editTask": "编辑",
+    "dragTask": "拖动排序",
+    "queueModeEnabled": "开启队列模式",
+    "paused": "已暂停",
+    "resume": "继续执行",
+    "queuePausedConfirm": "你即将发送一条消息，要清除正在排队的{{count}}条消息吗？\n\n点击「确定」清空队列并发送；点击「取消」保持队列（消息将加入队列）。",
     "holdToSpeak": "按住说话",
     "send": "发送 (Enter)",
     "stop": "停止",
     "modelSelector": {
-      "tooltip": "切换对话使用的模型"
+      "tooltip": "切换对话使用的模型",
+      "configured": "已配置模型",
+      "addModel": "添加自定义模型",
+      "placeholder": "选择模型"
     },
+    "modeSwitchDisabledProcessing": "当前对话运行中，请新建对话后选择模式",
+    "configLockedHistory": "会话已有消息，请新建会话后更改配置",
     "modeSwitchTitle": "切换模式",
     "modeSwitchConfirm": "当前会话有历史消息，切换模式将新建会话。是否继续？",
+    "skills": "技能",
+    "skillsToggle": "查看已安装技能",
+    "noInstalledSkills": "暂无已安装技能",
+    "skillsSearchPlaceholder": "搜索技能名称或描述",
+    "skillsManage": "技能管理",
+    "skillsAdd": "添加到输入栏",
+    "skillsRemove": "移除",
+    "recentTasks": "最近任务",
     "teamPause": "暂停",
     "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
     "teamBroadcastTarget": "@所有人",
@@ -254,10 +290,28 @@
     "historyPager": {
       "loadedOfTotal": "历史已加载 {{loaded}} / {{total}} 页",
       "loadingMore": "加载中…",
-      "allLoaded": "已显示全部历史",
-      "wheelToLoadMore": "向上滚动加载更多",
-      "clickToLoadMore": "点击加载更多",
-      "clickOrScrollToLoadMore": "点击或向上滚动加载更多"
+      "clickOrScrollToLoadMore": "点击或向上滚动加载更多",
+      "allLoaded": "历史已全部加载"
+    },
+    "config": {
+      "mode": {
+        "cluster": "集群模式",
+        "clusterDesc": "深度推理，复杂需求，长任务处理",
+        "singleAgent": "单Agent模式"
+      },
+      "permission": {
+        "default": "默认权限",
+        "defaultDesc": "编辑外部文件和使用互联网时始终询问",
+        "fullAccess": "完全访问权限",
+        "fullAccessDesc": "可不受限制地访问互联网和您电脑上的任何文件",
+        "fullAccessWarning": {
+          "title": "告警",
+          "body1": "在完全访问模式下，Jiuwen无需你的批准即可编辑你电脑上的任何文件，并执行可联网的命令。",
+          "body2": "启用完全访问权限前请谨慎评估。此操作将显著增加数据丢失、泄露或异常行为的风险。",
+          "cancel": "取消",
+          "confirm": "仍然继续"
+        }
+      }
     }
   },
   "autoHarness": {
@@ -404,18 +458,15 @@
       "loadSessions": "会话列表加载失败",
       "loadFiles": "会话文件列表加载失败",
       "deleteSession": "删除会话失败：{{sessionId}}",
-      "switchSession": "切换团队会话失败",
       "restoreFailed": "恢复会话失败：{{sessionId}}"
     }
   },
   "sessionSidebar": {
     "newSession": "新会话",
-    "advancedConfig": "高级配置",
-    "expandSidebar": "展开侧边栏",
-    "collapseSidebar": "收起侧边栏",
     "connectionStatus": "连接状态",
+    "version": "版本",
     "language": "语言",
-    "appearance": "外观"
+    "moreSettings": "更多设置"
   },
   "heartbeat": {
     "title": "心跳管理",
@@ -630,6 +681,21 @@
       "saveGeneric": "保存失败，请稍后重试",
       "wechatNumericInvalid": "{{field}} 需为 {{min}}–{{max}} 之间的有效数值",
       "wechatBackoffOrder": "backoff_max_sec 不得小于 backoff_base_sec"
+    },
+    "feishuApps": {
+      "defaultAppName": "飞书默认应用",
+      "legacyDefaultAppName": "默认应用",
+      "unnamedAppName": "未命名飞书应用",
+      "appNameTemplate": "飞书应用 {{index}}",
+      "appNamePlaceholder": "应用名称",
+      "collapseConfig": "收起应用配置",
+      "expandConfig": "展开应用配置",
+      "defaultBadge": "默认",
+      "setDefault": "设为默认",
+      "setDefaultAria": "设为默认应用",
+      "appIdNotConfigured": "未配置 app_id",
+      "deleteApp": "删除应用",
+      "addApp": "添加应用"
     }
   },
   "config": {
@@ -730,6 +796,10 @@
       "proactiveMaxPerDay": "每日推荐上限",
       "proactiveMaxRounds": "每次检查对话轮数"
     },
+    "defaults": {
+      "teamLeaderDisplayName": "团队领导",
+      "teamLeaderPersona": "天才项目管理专家，擅长任务分解和团队协调"
+    },
     "keyHelp": {
       "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启",
       "skillRetrievalBuildRootCategories": "直接编辑包含 tree_root_categories 或 root_categories 的 YAML/JSON；页面会展示默认分层供参考。保存后会写入配置内容本身，而不是外部文件路径。"
@@ -743,7 +813,50 @@
       "success": "配置有效",
       "notWorking": "配置不可用",
       "needConnection": "请先连接服务器后再测试。",
-      "needFields": "请先填写 api_base、api_key、model、model_provider。"
+      "needFields": "请先填写 api_base、model、model_provider；非 OAuth Provider 还需要 api_key。"
+    },
+    "openaiAccount": {
+      "title": "OpenAI 账号 OAuth",
+      "description": "使用 OpenAI 账号 token，无需 API Key。",
+      "connected": "已连接",
+      "notConnected": "未连接",
+      "refreshNeeded": "需刷新",
+      "connect": "连接 OpenAI 账号",
+      "connecting": "获取授权码...",
+      "waitingAuth": "等待授权",
+      "logout": "登出",
+      "refresh": "刷新状态",
+      "refreshCoolingDown": "请稍后再刷新状态",
+      "authCodeLabel": "授权码",
+      "openAuthPage": "打开授权页面",
+      "copyCode": "复制授权码",
+      "copied": "已复制",
+      "copyFailed": "复制授权码失败，请手动复制。",
+      "waiting": "等待授权完成...",
+      "loginTimeHint": "请在 5 分钟内完成 OpenAI 授权。",
+      "loginExpired": "授权码已过期，请重新连接。",
+      "needConnection": "请先连接服务器后再登录。",
+      "apiKeyNotNeeded": "OAuth 登录后自动使用 token，无需 API Key。",
+      "statusAuthPath": "认证文件：{{path}}",
+      "statusFailed": "获取 OpenAI 账号状态失败",
+      "loginFailed": "OpenAI 账号登录失败",
+      "logoutFailed": "OpenAI 账号登出失败",
+      "modelSelectLabel": "OpenAI 模型",
+      "modelSelectPlaceholder": "请选择模型",
+      "refreshModels": "刷新模型",
+      "loadingModels": "正在刷新模型列表...",
+      "modelsLoaded": "已加载 {{count}} 个模型",
+      "modelsLoadFailed": "刷新 OpenAI 模型列表失败",
+      "noModelsAvailable": "未返回可用 OpenAI 模型，请在授权完成后刷新。",
+      "configuredModelUnavailable": "当前配置的模型“{{model}}”不在 OpenAI 账号模型列表中。",
+      "modelNameUseDropdown": "请使用下方 OpenAI 模型下拉框选择",
+      "apiBaseManaged": "OAuth Provider 自动维护，无需手动修改",
+      "autoSaving": "登录完成，正在自动保存配置...",
+      "autoSaved": "配置已自动保存",
+      "autoSaveDeferred": "登录已完成，仍有其他模型改动待保存，请点击“保存”统一提交。",
+      "newModelSaveDeferred": "登录已完成，请先确认添加该模型，再保存配置。",
+      "autoSaveBusy": "配置正在保存，请稍后再试。",
+      "autoSaveFailed": "登录成功，但自动保存配置失败：{{error}}"
     },
     "modelList": {
       "addModel": "添加模型",
@@ -760,10 +873,11 @@
       "apiKeyPlaceholder": "本地模型无需 API Key 可随意填写，如 sk-1234",
       "apiBaseRequired": "API Base URL 为必填项，请填写后再保存",
       "apiBaseUrlInvalid": "API Base URL 必须以 http:// 或 https:// 开头",
+      "modelNameRequired": "模型名称为必填项，请先选择模型后再保存",
       "modelNameTooLong": "模型名称过长，请控制在 100 字符以内",
       "aliasTooLong": "别名过长，请控制在 100 字符以内",
-      "apiBaseTooLong": "API Base URL 过长，请控制在 256 字符以内",
-      "apiKeyTooLong": "API Key 过长，请控制在 500 字符以内",
+      "apiBaseTooLong": "API Base URL 过长，请控制在 512 字符以内",
+      "apiKeyTooLong": "API Key 过长，请控制在 2048 字符以内",
       "reasoningDefault": "使用默认值",
       "alias": "别名",
       "aliasPlaceholder": "选填，默认为空"
@@ -881,6 +995,11 @@
       "requiredModelFields": "模型配置为必填：{{fields}}。请完整填写后再保存并重启。",
       "saveFailed": "保存失败，请稍后重试",
       "processingDisabled": "任务执行中，请等待任务完成后再保存配置。",
+      "taskRunning": "有任务正在运行，请等待任务完成后再保存配置。",
+      "configChangedTitle": "配置已被其他窗口更新",
+      "configChangedDesc": "是否丢弃本地草稿并加载最新配置？取消则保留当前草稿继续编辑。",
+      "configChangedConfirm": "加载最新配置",
+      "configChangedCancel": "保留草稿",
       "proactiveIntEmpty": "{{field}} 不能为空，需为 {{lo}}-{{hi}} 的正整数",
       "proactiveIntNotInteger": "{{field}} 必须是正整数（{{lo}}-{{hi}}），当前值无效：{{value}}",
       "proactiveIntOutOfRange": "{{field}} 需为 {{lo}}-{{hi}} 的正整数，当前：{{value}}"
@@ -895,7 +1014,7 @@
     "update": "更新",
     "delete": "删除",
     "runNow": "立即执行",
-    "previewAction": "预览",
+    "previewAction": "未来执行计划",
     "enable": "启动",
     "disable": "停用",
     "loading": "正在加载任务列表...",
@@ -904,10 +1023,193 @@
     "autoManaged": "自动维护",
     "autoManagedHint": "此任务由主动推荐开关自动创建/删除；开关在设置→主动推荐。仅 Cron 表达式与时区可在此面板编辑，其余字段（名称/状态/描述/偏移/频道）不可改；删除请到设置关闭开关。",
     "autoManagedToggleDisabled": "自动维护任务的开关由设置→主动推荐控制，不可在此切换。",
+    "pageTitle": "定时任务",
+    "pageSubtitle": "配置和管理自动化任务，Jiuwen 将按计划执行。",
+    "actions": {
+      "confirm": "确定"
+    },
+    "createMenu": {
+      "trigger": "创建",
+      "manual": "手动创建",
+      "viaChat": "通过聊天创建",
+      "viaChatPrompt": "我们一起来设置一个定时任务吧。首先，说明定时任务在 JiuwenSwarm 中的工作方式。然后询问我需要安排什么，以及应该在什么时候运行。"
+    },
+    "stats": {
+      "total": "任务总数（{{count}}）"
+    },
+    "tabs": {
+      "list": "任务列表",
+      "template": "任务模板",
+      "history": "执行历史"
+    },
+    "search": {
+      "placeholder": "请输入搜索内容",
+      "noResults": "未找到相关模板，可换个关键词再试。",
+      "noResultsJobs": "未找到相关任务，可换个关键词再试。"
+    },
+    "table": {
+      "name": "名称",
+      "project": "项目",
+      "schedule": "计划于",
+      "status": "运行状态",
+      "timezone": "时区",
+      "channel": "推送频道",
+      "actions": "操作",
+      "noProject": "–",
+      "runNow": "立即执行",
+      "stop": "停止",
+      "start": "启动",
+      "edit": "编辑",
+      "more": "更多",
+      "history": "运行历史",
+      "triggeredSessions": "执行记录",
+      "noTriggeredSessions": "暂无触发记录"
+    },
+    "empty": {
+      "createButton": "创建定时任务",
+      "templateSectionTitle": "任务模板",
+      "templateMore": "更多"
+    },
+    "history": {
+      "comingSoon": "该功能即将上线"
+    },
+    "confirm": {
+      "deleteTitle": "删除",
+      "deleteMessage": "确定要删除自动化任务\"{{name}}\"吗？",
+      "stopTitle": "停止",
+      "stopMessage": "确定要停止自动化任务\"{{name}}\"吗？",
+      "runNowTitle": "立即执行",
+      "runNowMessage": "确定要立即执行任务\"{{name}}\"吗？"
+    },
+    "drawer": {
+      "titleCreate": "创建定时任务",
+      "titleEdit": "编辑",
+      "titleTemplate": "从模板创建",
+      "switchToManual": "手动创建",
+      "switchToTemplate": "从模板创建",
+      "fieldName": "任务名称",
+      "fieldProject": "项目（可选）",
+      "fieldModel": "模型",
+      "fieldDescription": "描述",
+      "fieldChannel": "推送频道",
+      "fieldTimezone": "时区",
+      "fieldEffectiveDate": "生效周期（可选）",
+      "effectiveDateComingSoon": "该功能即将上线，当前选择暂不影响任务生效",
+      "fieldEnabled": "启用",
+      "placeholderInput": "请输入",
+      "placeholderSelect": "请选择",
+      "placeholderEffectiveDate": "请选择生效日期",
+      "missingFieldsHint": "还需要填写：{{fields}}",
+      "scheduleAlreadyExpiredHint": "所选的执行时间已经过去，请重新选择"
+    },
+    "schedule": {
+      "title": "执行计划",
+      "help": "选择任务的执行频率",
+      "modePeriod": "周期",
+      "modeInterval": "按间隔",
+      "modeOnce": "单次",
+      "modeCronExpr": "Cron表达式",
+      "cronExprPlaceholder": "请输入 Cron 表达式，如 0 0 9 * * ? *",
+      "cronExprHelp": "7段式(Quartz)：秒 分 时 日 月 周 年",
+      "daily": "每天",
+      "weekly": "每周",
+      "monthly": "每月",
+      "yearly": "每年",
+      "selectTime": "请选择时间",
+      "selectMonth": "请选择月份",
+      "selectDay": "请选择日期",
+      "every": "每",
+      "everyHoursPlaceholder": "小时数",
+      "everyMinutesPlaceholder": "分钟数",
+      "hoursUnit": "小时",
+      "minutesUnit": "分钟",
+      "intervalUnit": {
+        "hours": "小时",
+        "minutes": "分钟"
+      },
+      "dayOption": "{{day}}日",
+      "monthOption": "{{month}}月",
+      "lastDayOfMonth": "月末最后一天",
+      "listSeparator": "、",
+      "weekday": {
+        "mon": "一",
+        "tue": "二",
+        "wed": "三",
+        "thu": "四",
+        "fri": "五",
+        "sat": "六",
+        "sun": "日"
+      },
+      "summary": {
+        "daily": "每天 {{time}}",
+        "weekly": "每周{{days}} {{time}}",
+        "monthly": "每月{{day}} {{time}}",
+        "monthlyWeekday": "每月{{weekOfMonth}} 周{{days}} {{time}}",
+        "yearly": "每年{{month}}月{{day}}日 {{time}}",
+        "interval": "每{{n}}小时",
+        "intervalWithWeekdays": "每{{n}}小时 周{{days}}",
+        "intervalMinutes": "每{{n}}分钟",
+        "intervalMinutesWithWeekdays": "每{{n}}分钟 周{{days}}",
+        "once": "{{date}} {{time}}",
+        "lastDay": "月末"
+      },
+      "monthlySubMode": {
+        "date": "按日期",
+        "week": "按星期"
+      },
+      "weekOfMonth": {
+        "1": "第一周",
+        "2": "第二周",
+        "3": "第三周",
+        "4": "第四周",
+        "last": "最后一周"
+      }
+    },
+    "modelPicker": {
+      "configured": "已配置",
+      "empty": "暂无可用模型，请先在配置面板添加模型"
+    },
+    "timePicker": {
+      "hour": "时",
+      "minute": "分"
+    },
+    "datePicker": {
+      "prevYear": "上一年",
+      "prevMonth": "上一月",
+      "nextMonth": "下一月",
+      "nextYear": "下一年",
+      "yearMonthHeader": "{{year}}年 {{month}}月",
+      "monthItem": "{{month}}月",
+      "weekday": {
+        "sun": "日",
+        "mon": "一",
+        "tue": "二",
+        "wed": "三",
+        "thu": "四",
+        "fri": "五",
+        "sat": "六"
+      }
+    },
+    "template": {
+      "trend": {
+        "title": "每日行业资讯",
+        "description": "每天早上8点，给我推送当天【你所在行业，例如：人工客服/金融/新能源】点最新行业资讯动态，整理成结构化文档发出。"
+      },
+      "newspaper": {
+        "title": "市场舆情追踪",
+        "description": "每天中午12点，帮我搜索并汇总竞争对手【某公司或某某产品】过去24小时在全网点最新动态和舆情报道"
+      },
+      "briefcase": {
+        "title": "工作周报",
+        "description": "每周五下午6点，帮我根据本周聊天、文档、表格，生成我的周报，任务进度，下周事项工作安排，并且以文档形式发出。"
+      }
+    },
     "status": {
       "enabled": "启用",
       "disabled": "禁用",
-      "expired": "过期"
+      "expired": "过期",
+      "running": "运行中",
+      "paused": "已暂停"
     },
     "columns": {
       "name": "任务名称",
@@ -957,6 +1259,7 @@
       "previewFailed": "预览触发时间失败",
       "runNowFailed": "立即执行失败",
       "expiredCannotRunNow": "任务过期，无法执行",
+      "disabledCannotRunNow": "任务已停止，无法执行",
       "expiredCannotEnable": "任务过期，无法启动",
       "loadDetailFailed": "获取任务详情失败",
       "nameRequired": "任务名称不能为空",
@@ -968,7 +1271,7 @@
       "cronHourStep": "小时步长需能被24整除",
       "cronDay": "日字段错误（取值 1-31，支持 * ? - ,）",
       "cronMonth": "月字段错误（取值 1-12，支持 * - ,）",
-      "cronWeek": "周字段错误（取值 1-7，支持 * ? - ,，1=SUN）",
+      "cronWeek": "周字段错误（取值 0-6，支持 * ? - ,，0=周日、1=周一...6=周六）",
       "cronYear": "年份字段错误（取值 1970-2099 或 *）",
       "timezoneRequired": "时区不能为空",
       "targetRequired": "推送频道不能为空",
@@ -1473,9 +1776,16 @@
   },
   "chatUi": {
     "copyMessage": "复制消息",
+    "copied": "已复制",
     "stopReading": "停止朗读",
     "readMessage": "朗读消息",
     "fileExpired": "已过期",
+    "agentProcessing": "Agent 处理中",
+    "thinking": "正在思考...",
+    "processing": "正在处理...",
+    "paused": "已暂停",
+    "waitingTasks": "等待任务",
+    "messageQueue": "消息队列",
     "parallelProgress": "并行任务执行中 ({{completedCount}}/{{total}} 完成)",
     "subtask": {
       "starting": "启动中...",
@@ -1554,7 +1864,7 @@
     "groupChat": "群聊记录",
     "noGroupChat": "暂无群聊记录",
     "everyone": "所有人",
-    "generatedBy": "由 openJiuwen AI 生成",
+    "aiNotice": "内容由AI生成，仅供参考",
     "website": "官网地址：{{url}}",
     "repository": "代码仓：{{url}}"
   },
@@ -1625,6 +1935,7 @@
     "installNow": "安装并重启",
     "pipUpgrade": "升级",
     "pipRestart": "立即重启",
+    "restoreDefaults": "恢复默认更新源",
     "currentVersion": "当前版本",
     "latestVersion": "最新版本",
     "state": "更新状态",
@@ -1657,11 +1968,11 @@
       "downloadFailed": "下载更新失败",
       "upgradeFailed": "安装更新失败",
       "saveConfigFailed": "保存更新配置失败",
+      "resetSourceFailed": "恢复默认更新源失败",
       "installUnavailable": "当前环境无法直接触发安装，请确认在桌面应用内运行。",
       "installFailed": "启动更新安装失败"
     },
     "fields": {
-      "enabled": "启用更新",
       "releaseApiType": "更新源",
       "releaseApiUrl": "更新地址"
     }
@@ -1673,9 +1984,6 @@
     "errorTitle": "应用加载出错",
     "unknownError": "未知错误",
     "reload": "刷新页面",
-    "themeSystem": "跟随系统",
-    "themeDark": "深色模式",
-    "themeLight": "浅色模式",
     "configError": "无法通过 WebSocket 获取后端配置，已使用默认配置",
     "configErrorHint": "请先启动 E2E 后端（如",
     "configErrorDefault": "，默认监听 19000）。若后端不在本机或端口不同，可在",
@@ -1712,7 +2020,15 @@
     "helpTitle": "使用说明",
     "help0": "扩展文件夹必须包含 rail.py 作为入口文件",
     "help1": "Rail 扩展文件必须继承 DeepAgentRail 或 AgentRail 基类",
-    "help2": "扩展文件会被保存到 ~/.jiuwenswarm/agent/workspace/extensions/ 目录"
+    "help2": "扩展文件会被保存到 ~/.jiuwenswarm/agent/workspace/extensions/ 目录",
+    "errors": {
+      "missingFolderPath": "缺少 folder_path 参数",
+      "folderNotFound": "文件夹不存在或不是目录：{{path}}",
+      "invalidFolderName": "文件夹名称 “{{name}}” 必须是有效的英文标识符",
+      "alreadyExists": "扩展 “{{name}}” 已存在",
+      "missingRailFile": "扩展文件夹必须包含 rail.py 文件",
+      "railValidationFailed": "rail.py 验证失败"
+    }
   },
   "ownerScopes": {
     "title": "分身权限配置",
@@ -1747,5 +2063,114 @@
   },
   "security": {
     "contentRetracted": "内容已因安全原因撤回"
+  },
+  "codeMode": {
+    "work": "工作",
+    "code": "Code",
+    "workDescription": "处理办公、协作和通用任务",
+    "codeDescription": "在项目目录中查看并修改代码",
+    "environment": "环境信息",
+    "changes": "变更",
+    "review": "审核"
+  },
+  "multiSession": {
+    "title": "工作",
+    "conversations": "对话",
+    "newConversation": "新建任务",
+    "empty": "暂无对话",
+    "untitled": "未命名对话",
+    "showMore": "展开更多",
+    "collapse": "折叠显示",
+    "waitingReply": "等待确认",
+    "completedUnread": "后台任务已完成",
+    "moreActions": "更多操作",
+    "cronJobs": "定时任务",
+    "delete": "删除",
+    "deleteRunningDisabled": "运行中或等待回复的对话不能删除",
+    "status": {
+      "waiting": "等待确认",
+      "processing": "进行中",
+      "unread": "已完成未读",
+      "error": "任务异常",
+      "read": "已完成已读"
+    },
+    "project": {
+      "projects": "项目",
+      "newConversation": "新建对话",
+      "pinned": "置顶",
+      "newProject": "新建项目",
+      "createBlank": "新建空白项目",
+      "selectExisting": "选择现有目录",
+      "addNewProject": "添加新项目",
+      "namePlaceholder": "请输入简短易识别的项目名称",
+      "chooseProjectDirectory": "选择项目目录",
+      "directoryPickerUnsupported": "当前环境无法打开系统目录选择器，请手动填写项目名和路径",
+      "directoryPickerFailed": "目录选择失败，请重试",
+      "lockedProjectTitle": "已有会话的项目归属不可在输入框改写",
+      "clearProject": "不使用项目",
+      "searchProject": "搜索项目",
+      "noProjectMatches": "暂无匹配项目",
+      "noProjects": "暂无项目",
+      "noConversations": "暂无会话",
+      "noSessions": "暂无执行记录",
+      "startConversation": "从{{projectName}}开始新对话",
+      "pinProject": "置顶项目",
+      "unpinProject": "取消置顶项目",
+      "pinConversation": "置顶对话",
+      "unpinConversation": "取消置顶",
+      "pin": "置顶",
+      "unpin": "取消置顶",
+      "pinFailed": "置顶操作失败",
+      "rename": "重命名",
+      "renamePlaceholder": "输入新名称",
+      "deleteProject": "删除项目",
+      "deleteProjectDescription": "确定要移除“<name>{{projectName}}</name>”吗？项目下未置顶会话会临时归入默认项目。",
+      "defaultProjectName": "默认项目",
+      "absolutePathError": "请输入绝对路径，例如 /Users/name/work/project",
+      "errors": {
+        "pathExists": "该项目路径已存在，请选择其他目录或直接从现有项目开始新对话",
+        "nameExists": "该项目名已存在，请换个名称"
+      },
+      "cancel": "取消",
+      "confirm": "确定"
+    },
+    "runtime": { "processing": "处理中" },
+    "deleteDialog": { "title": "删除", "description": "确定删除“<name>{{title}}</name>”吗？此操作不可撤销。" },
+    "notFound": { "title": "对话不存在或已删除", "newConversation": "新建对话" },
+    "errors": { "delete": "删除对话失败", "create": "创建对话失败", "send": "发送消息失败" }
+  },
+  "mermaid": {
+    "image": "图片",
+    "code": "代码",
+    "copyCode": "复制代码",
+    "zoomIn": "放大",
+    "zoomOut": "缩小",
+    "fitView": "适应视图"
+  },
+  "authPrompt": {
+    "title": "操作授权",
+    "titleConfirm": "操作确认",
+    "allowOnce": "授权单次",
+    "allowAlways": "总是允许",
+    "skip": "跳过",
+    "tip": {
+      "allowOnce": "仅本次授权执行",
+      "allowAlways": "记住该规则，以后自动放行",
+      "skip": "拒绝执行此操作"
+    }
+  },
+  "interactionPrompt": {
+    "title": "请回答问题",
+    "prev": "上一题",
+    "next": "下一题",
+    "cancel": "取消",
+    "skip": "跳过",
+    "nextStep": "下一步",
+    "confirm": "确定",
+    "customOption": "自定义",
+    "customPlaceholder": "没有合适的选项？输入您的答案..."
+  },
+  "qaSummary": {
+    "title": "问题澄清"
   }
 }

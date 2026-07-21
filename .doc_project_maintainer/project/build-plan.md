@@ -1,5 +1,5 @@
 ---
-last_updated: 2026-07-08
+last_updated: 2026-07-15
 sync_status: partial
 coverage_status: partial
 flow_coverage_status: partial
@@ -10,92 +10,72 @@ code_symbol_coverage_status: partial
 
 ## Current State
 
-- Artifact status: initialized with AgentServer-first documentation.
-- Trusted coverage: root project map, AgentServer runtime module, three AgentServer flows, selected AgentServer code symbol cards, and 63 trusted AgentWebSocketServer method audits.
-- Known incomplete areas: most modules outside AgentServer, most directories, most source symbol entry docs, trusted health audits.
-- Every stable source file inventoried: yes, by `inventory_symbols.py`.
-- Every top-level class documented with `Actual Role` and health: no.
-- Every top-level function documented with `Actual Role` and health: no.
-- Every class method documented with `Actual Role` and health: no.
-- Every required symbol audited or out of scope: no.
-- Inventory command: `inventory_symbols.py --verify-docs`; compact/full ledgers are under `project/` and `ledger-archive/`.
+- Artifact status: AgentServer-first delivery rebuilt with normalized Python AST symbol hashes.
+- Latest expiration check: the 2026-07-15 normalized-AST scan at `10afedf2` found 0 expired audits among the 128 existing `AgentWebSocketServer` method reviews. No method card or audit signature required refresh, and no previously unaudited symbol was promoted.
+- Flow delivery: eight AgentServer flows are documented, including MCP, sandbox, plan exit, scheduled Auto-Harness, and history streaming.
+- Project status remains partial: most modules, directories, source symbol entry docs, cross-layer flows, and default-health audits are still pending.
+- Actionable repository queues remain 298 coverage slices and 167 default-health audit slices.
+- Every stable source file inventoried: yes, by the 2026-07-15 UTC `inventory_symbols.py --verify-docs` scan; its full output was used as comparison evidence rather than replacing the frozen authoritative ledger.
+- Every required symbol documented or out of scope: no.
+- Every requested-scope audit symbol closure eligible or out of scope: no; 0 AgentWebSocketServer method audits are source-expired, while 69 records currently have entry-document hash mismatches and broader repository audits remain pending.
+- Inventory extractor summary: 1,023 `python_ast`, 252 `heuristic`; heuristic files require review.
 - Coverage map recommended mode: multi-agent.
-- Git head inventoried: `af779aa6742969e46005a2a94f49d42d7a3b443a`.
-- Dirty worktree state: artifact files are untracked after this build.
+- Git head for the latest AgentWebSocketServer expiration scan: `10afedf222bcd6db98b24347a28f75e4613b3c87`. The authoritative repository inventory and method queue were intentionally not widened during this scoped update.
 
 ## Inventory Summary
 
-- Source files: 1236.
-- Required repository symbols: 14746.
-- Documented source files: 1.
-- Documented required symbols: 66.
-- Pending required symbols: 14680.
-- Default health audit symbols: 8737.
-- Repository coverage only symbols: 6009.
-- Pending files: 985.
-- Pending review files: 250.
-- Recorded source directories: 275.
-- Excluded directories: 1.
-- Skipped non-source directories: 95.
-- Suggested repository slices: 282.
-- Suggested default health audit slices: 164.
-- Audit statuses: 14683 unaudited, 63 trusted agent audited, 0 human audited, 0 out of scope.
-- Default health audit statuses: 8674 unaudited, 63 trusted agent audited.
-- Open symbol issue records in current docs: 160.
-- Full generated ledgers are archived under `ledger-archive/*.full.json.gz`; `project/*.json` holds compact summaries to satisfy artifact size budgets.
-- AgentServer method audit queue: 785 default-health methods under `jiuwenswarm/server/`, 63 documented method cards, 63 trusted agent audits, 722 unaudited methods.
+- Source files: 1,275; documented file docs: 1; missing file docs: 1,273; pending review files: 252.
+- Required repository symbols: 15,584; documented: 131; missing entry docs: 15,453.
+- Default-health symbols: 9,040; repository-coverage-only symbols: 6,544.
+- Repository audit statuses: 15,456 unaudited, 128 agent audited, 0 expired, 0 human audited, 0 out of scope.
+- Default-health audit statuses: 8,912 unaudited, 128 agent audited, 0 expired.
+- Audit integrity: 59 trusted, 0 provisional, 0 suspicious, 69 invalid because entry-document hashes differ from their signed state; 128 unique signature batches and 59 closure-eligible records. This does not change the source-expiration result: all 128 existing method hashes remain current.
+- Open symbol issue records: 492.
+- Full authoritative ledgers and the integrity report are compressed under `ledger-archive/*.full.json.gz`; `project/*.json` contains navigable summaries.
+- AgentServer method queue: the frozen queue remains 823 methods under `jiuwenswarm/server/`; 128 documented and `agent_audited`, 59 currently closure eligible, 695 unaudited, and 0 source-expired. The fresh scan observed 829 server methods, including 6 additional unaudited methods that were not added to this scoped delivery.
 
 ## Completed Slices
 
-- 2026-07-07: `agentserver-entrypoint` - documented `app_agentserver.py`, process startup, extension loading, server start/stop, proactive adapter, teammate bootstrap, and CLI args.
-- 2026-07-07: `agentserver-dispatch-core` - documented `AgentWebSocketServer` file-level behavior plus selected dispatch, unary, stream, cancel, session, and push methods.
-- 2026-07-07: `agentserver-flows` - documented Gateway E2A chat, session lifecycle, and server push flows.
-- 2026-07-08: `agentserver-audit-batches-001..011` - 63 trusted AgentWebSocketServer method audits from lifecycle/dispatch/session/history commands through diff/simplify/model and MCP prelude helpers.
+- 2026-07-07: AgentServer entrypoint, dispatch core, and initial chat/session/push flows.
+- 2026-07-13: normalized-AST migration, 52 legacy-expiration re-audits, all 128 method cards, and five additional flows.
+- 2026-07-14: `agentserver-rebase-expiration-reaudit` - re-reviewed exactly the 64 existing AgentWebSocketServer methods expired by the rebase at `39feee89`; all 64 are trusted, with no new unaudited symbol added or promoted.
+- 2026-07-15: `agentserver-expiration-scan` - scanned `10afedf2`; all 128 existing AgentWebSocketServer method audits remain source-current, 0 expired, and 6 newly observed unaudited server methods were left outside the frozen queue.
 
-## Pending Slices
+## Completed AgentServer Flow Slices
 
-- `jiuwenswarm/server/runtime/agent_adapter`: inspect interface, code, deep, evolution, sysop, and team helper adapters.
-- `jiuwenswarm/gateway/message_handler`: document channel message queues and Gateway-to-AgentServer forwarding.
-- `jiuwenswarm/agents/harness/team`: document distributed team lifecycle and remote member bootstrap.
-- `jiuwenswarm/server/runtime/skill`: document skill manager and skilldev flows.
-- `jiuwenswarm/channels/web` and `jiuwenswarm/channels/tui`: document UI state and E2A-facing commands.
-- `jiuwenbox`: document sandbox service boundary and policy runtime.
+- `gateway-agentserver-e2a-chat`, `agentserver-session-lifecycle`, `agentserver-server-push`, `agentserver-command-mcp`, `agentserver-sandbox-runtime`, `agentserver-plan-mode-exit`, `agentserver-schedule-auto-harness`, `agentserver-history-stream`.
 
-## Pending Flow Slices
+## Pending Code And Audit Slices
 
-- `agentserver-command-mcp`: config mutation, tool discovery, reload behavior, and error codes.
-- `agentserver-sandbox-runtime`: jiuwenbox process startup, policy mutation, Landlock status, and runtime patching.
-- `agentserver-plan-mode-exit`: plan mode state restore, exit event push, and race prevention.
-- `agentserver-schedule-auto-harness`: lazy scheduler startup and task execution.
-- `agentserver-history-stream`: history pagination, sanitization, size limits, and frontend reconstruction.
+- `jiuwenswarm/server/agent_ws_server.py`: 158 required symbols; all 128 methods and the class are documented, while 29 top-level functions still need entry docs and audits.
+- Other `jiuwenswarm/server` classes: 695 frozen-queue methods remain unaudited; 6 newly observed unaudited methods were intentionally not added in this expiration-only update.
+- `jiuwenswarm/server/runtime/agent_adapter`: interface, code, deep, evolution, sysop, and team helpers.
+- `jiuwenswarm/server/runtime/skill`: skill manager and skilldev flows.
+- `jiuwenswarm/gateway/message_handler`: channel queues and Gateway-to-AgentServer forwarding.
+- `jiuwenswarm/agents/harness/team`: distributed team lifecycle and remote member bootstrap.
+- `jiuwenswarm/channels/web`, `jiuwenswarm/channels/tui`, and `jiuwenbox`: UI state, command consumers, and sandbox service boundaries.
+- `tests/unit_tests/agentserver`: repository-coverage-only test symbols remain largely undocumented.
 
-## Pending Code Symbol Slices
+## Highest-Risk Findings To Carry Forward
 
-- `jiuwenswarm/server/agent_ws_server.py`: 152 symbols total; file, class, and 63 method cards exist; 88 function and method entry docs remain pending.
-- `jiuwenswarm/server/runtime/agent_adapter/interface_deep.py`: 215 symbols pending.
-- `jiuwenswarm/server/runtime/skill/skill_manager.py`: 152 symbols pending.
-- `tests/unit_tests/agentserver`: many test-source symbols pending as repository coverage only.
-
-## Pending Symbol Audit Slices
-
-- Default health audit remains partial. Current active target is the 785-method `jiuwenswarm/server/` AgentServer runtime queue.
-- Completed trusted batches: AgentWebSocketServer lifecycle, dispatch, push, singleton/proactive/ACP capability, hooks, code-mode/plan-mode sync, session list, session/team delete, rewind helpers/handlers, permissions config, history.get, proactive/team/workflow/history stream/add-dir, chrome/compact/context/recap/BTW/diff/simplify/model/MCP prelude handlers and helpers.
-- Remaining AgentServer method audit queue: 722 methods are still unaudited and need per-symbol review.
-- Next trusted audit candidates: `_normalize_mcp_payload`, `_normalize_mcp_add_payload`, `_normalize_mcp_update_payload`, `_handle_command_mcp`, `_handle_command_sandbox`, `_handle_sandbox_enable`, then sandbox/schedule/adapter/skill methods.
+- Session IDs reach filesystem-backed helpers without confirmed containment; scheduled work lacks durable channel/project/Agent identity.
+- MCP, agent, extension, harness-package, and sandbox mutations lack transactional rollback; extension import also accepts executable host folders.
+- ACP responses use process-wide correlation without confirmed connection/session ownership; server push and global managers also have under-specified ownership.
+- Model caching collapses same-name providers and lacks a config fingerprint, allowing partial or stale initialization.
 
 ## Coverage Closure Audit
 
-- Audit source: `git ls-files` plus `git status --short`, via `inventory_symbols.py`.
-- Tracked path audit: partial.
-- Unmapped stable tracked paths: many stable directories remain intentionally pending.
-- Untracked path disposition: `.doc_project_maintainer/` is artifact output.
-- Flow trace disposition: three flows documented, five AgentServer flow slices pending, wider project flows pending.
-- Code symbol disposition: inventory complete, entry docs incomplete.
-- Symbol audit disposition: 63 default-health symbols are closure-eligible trusted agent audits; 8674 default-health symbols remain pending, including 722 AgentServer runtime methods.
-- Criteria to mark `current`: no suggested repository slices, no pending review files, every required symbol has an entry doc with `Actual Role` and health, every requested-scope audit symbol is closure eligible, and all required flows are documented or out of scope.
+- Audit source: `git ls-files` plus `git status --short`, via the 2026-07-15 UTC inventory at `10afedf2`.
+- Tracked path audit: partial; 298 suggested repository slices remain.
+- Untracked path disposition: `.doc_project_maintainer/.work/` is temporary generation state and must not ship; no candidate source files were found.
+- Flow trace disposition: eight AgentServer flows documented; wider project flows remain pending.
+- Code symbol disposition: inventory complete, entry docs incomplete, and 252 heuristic files need review.
+- Symbol audit disposition: the latest 128-method AgentWebSocketServer expiration check has 0 source-expired records. Current verification trusts 59 and flags 69 as integrity-invalid only because their entry-document hashes changed. The fresh repository scan observed 8,963 unaudited default-health symbols, but the frozen authoritative ledger was not widened in this scoped update.
+- Criteria to mark the entire artifact `current`: no pending repository/flow/code-symbol slices, no unresolved heuristic review, every required entry doc has `Actual Role` and health, and every requested-scope audit is closure eligible or explicitly out of scope.
 
 ## Suggested Subagent Queue
 
-- `jiuwenswarm-129`: `jiuwenswarm/server/agent_ws_server.py`, 152 symbols, runtime source, default health audit.
-- `jiuwenswarm-130`: `app_agentserver.py`, gateway push, hooks, and a2ui startup files, 47 symbols.
-- `tests-023..tests-046`: `tests/unit_tests/agentserver` behavior evidence, repository coverage only.
+- `agentserver-other-methods`: 695 unaudited methods from the frozen `audit-queues/server-method-audit-queue.json`, plus 6 newly observed methods to consider only if the audit scope is explicitly widened; one agent assignment per symbol.
+- `agentserver-top-level-functions`: 29 missing `agent_ws_server.py` function entry docs and audits.
+- `agentserver-downstream-risks`: AgentManager reload, session path containment, scheduler identity, extension lifecycle, and harness package consistency.
+- `tests-agentserver`: test evidence inventory, repository coverage only.
