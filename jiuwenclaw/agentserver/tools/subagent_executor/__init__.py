@@ -22,10 +22,11 @@ from .context_vars import (
     _get_llm_trace_session_id_var,
 )
 
-# Rails
+# Rails (ThinkingInjectRail re-exported from .rails for package API)
 from .rails import (
     ForkMessageInjectionRail,
     SubagentContextRail,
+    ThinkingInjectRail,
 )
 
 # Session proxy
@@ -59,6 +60,7 @@ __all__ = [
     # Rails
     "ForkMessageInjectionRail",
     "SubagentContextRail",
+    "ThinkingInjectRail",
     # Session proxy
     "SubagentSessionProxy",
     # Executor
