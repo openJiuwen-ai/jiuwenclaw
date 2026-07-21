@@ -60,6 +60,7 @@ dependencies = [
     "openjiuwen_deepsearch @ git+https://gitcode.com/openJiuwen/deepsearch.git@enterprise_dev",
     "latex2mathml>=3.81.0",
     "markdown",
+    "markdown-it-py>=4.0.0,<5.0.0",
     "jieba3k>=0.35.1",
     "beautifulsoup4>=4.14.3",
     "python-docx>=1.2.0",

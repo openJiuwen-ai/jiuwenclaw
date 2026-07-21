@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import importlib.util
 import json
 import logging
 import os
 import sys
+import tempfile
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from openjiuwen.core.foundation.tool import tool
@@ -77,6 +81,7 @@ def _write_report_markdown(final_result: dict, file_name: str, conversation_id: 
     )
     from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import (
         build_report_bundle,
+        serialize_final_result_snapshot,
     )
     from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
         get_effective_request_output_dir,
@@ -92,7 +97,32 @@ def _write_report_markdown(final_result: dict, file_name: str, conversation_id: 
     report_path = Path(output_dir).expanduser().resolve() / f"{safe_stem}.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     bundle = build_report_bundle(final_result, report_path.with_suffix(""))
-    report_path.write_text(bundle.markdown_text, encoding="utf-8")
+    markdown_bytes = bundle.markdown_text.encode("utf-8")
+    snapshot_path = report_path.with_suffix(".final-result.json")
+    snapshot_bytes = serialize_final_result_snapshot(bundle.final_result_snapshot)
+    provenance = {
+        "schema_version": 2,
+        "document_id": f"doc_{uuid.uuid4().hex}",
+        "revision_id": f"rev_{uuid.uuid4().hex}",
+        "parent_revision_id": None,
+        "conversation_id": conversation_id,
+        "markdown_path": str(report_path),
+        "content_sha256": hashlib.sha256(markdown_bytes).hexdigest(),
+        "final_result_path": snapshot_path.name,
+        "final_result_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "operation": {"action": "deepresearch_generate"},
+        "citations": bundle.citations,
+        "inference_manifest": bundle.inference_manifest,
+        "chart_manifest": bundle.chart_manifest,
+        "rewrite_history": [],
+    }
+    _atomic_write_bytes(snapshot_path, snapshot_bytes)
+    _atomic_write_bytes(
+        report_path.with_suffix(".provenance.json"),
+        json.dumps(provenance, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+    _atomic_write_bytes(report_path, markdown_bytes)
     return str(report_path)
 
 
@@ -110,29 +140,11 @@ def _write_report_artifacts_stream(
         absolute file path of the generated artifact.  ``"md"`` is always
         present; ``"html"`` is included only when conversion succeeds.
     """
-    from jiuwenclaw.agentserver.tools.deepresearch_plugin.conversion_utils import (
-        make_safe_filename_component,
+    # Reuse the rewrite-aware Markdown writer so the hidden final-result and
+    # provenance sidecars are created before any visible artifact is delivered.
+    report_path_md = Path(
+        _write_report_markdown(final_result, file_name, conversation_id)
     )
-    from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import (
-        build_report_bundle,
-    )
-    from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
-        get_effective_request_output_dir,
-    )
-
-    output_dir = get_effective_request_output_dir()
-    if not output_dir:
-        raise RuntimeError("current request output_dir is unavailable")
-
-    requested_stem = Path(file_name).stem if file_name else ""
-    fallback_stem = f"deepresearch_{conversation_id or 'report'}"
-    safe_stem = make_safe_filename_component(requested_stem, default=fallback_stem)
-    report_path_md = Path(output_dir).expanduser().resolve() / f"{safe_stem}.md"
-    report_path_md.parent.mkdir(parents=True, exist_ok=True)
-
-    # --- Markdown (always) ---
-    bundle = build_report_bundle(final_result, report_path_md.with_suffix(""))
-    report_path_md.write_text(bundle.markdown_text, encoding="utf-8")
     artifacts: dict[str, str] = {"md": str(report_path_md)}
 
     # --- HTML (best-effort) ---
@@ -153,6 +165,22 @@ def _write_report_artifacts_stream(
         artifacts["html"] = str(report_path_html)
 
     return artifacts
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    """Atomically replace one file without exposing a partially written artifact."""
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, path)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
 
 
 def _deepresearch_dependency_available() -> bool:
@@ -851,8 +879,15 @@ def get_deepresearch_tools() -> list:
             _DEEPRESEARCH_DEPENDENCY,
         )
         return []
+    from jiuwenclaw.agentserver.tools.deepresearch_rewrite_tools import (  # pylint: disable=import-outside-toplevel
+        deepresearch_commit_rewrite,
+        deepresearch_prepare_rewrite,
+    )
+
     return [
         deepresearch_stream,
+        deepresearch_prepare_rewrite,
+        deepresearch_commit_rewrite,
     ]
 
 

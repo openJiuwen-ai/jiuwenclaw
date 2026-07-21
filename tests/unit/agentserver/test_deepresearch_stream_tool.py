@@ -6,6 +6,7 @@
 """
 import asyncio
 import base64
+import hashlib
 import json
 
 import os
@@ -259,7 +260,27 @@ def test_write_report_markdown_builds_inference_bundle_and_strips_internal_marke
             "id": "7",
             "html_base64": base64.b64encode(b"<html>trace</html>").decode("ascii"),
         }],
-        "chart_messages": [],
+        "chart_messages": [{
+            "chart_id": "chart-1",
+            "chart_title": "趋势图",
+            "base64": base64.b64encode(b"png-bytes").decode("ascii"),
+        }],
+        "request_metadata": {"trace_id": "trace-1"},
+        "citation_messages": {
+            "code": 0,
+            "msg": "success",
+            "data": [{
+                "id": 3,
+                "reference_index": 1,
+                "url": "https://example.com/source",
+                "title": "Source",
+                "content": "evidence",
+                "chunk": "evidence chunk",
+                "source": "web",
+                "publish_time": "2026-07-15",
+                "score": 0.9,
+            }],
+        },
     }
     with patch(
         "jiuwenclaw.agentserver.tools.subagent_executor.context_vars.get_effective_request_output_dir",
@@ -273,6 +294,76 @@ def test_write_report_markdown_builds_inference_bundle_and_strips_internal_marke
     assert "[观点](研究报告_infer/inference_7.html)" in report
     assert "[[1]](https://example.com/source)" in report
     assert (tmp_path / "研究报告_infer" / "inference_7.html").read_bytes() == b"<html>trace</html>"
+    provenance = json.loads((tmp_path / "研究报告.provenance.json").read_text(encoding="utf-8"))
+    snapshot_path = tmp_path / "研究报告.final-result.json"
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert snapshot["response_content"] == final_result["response_content"]
+    assert snapshot["citation_messages"] == final_result["citation_messages"]
+    assert snapshot["request_metadata"] == {"trace_id": "trace-1"}
+    assert "html_base64" not in snapshot["infer_messages"][0]
+    assert snapshot["infer_messages"][0]["artifact_path"] == "研究报告_infer/inference_7.html"
+    assert "base64" not in snapshot["chart_messages"][0]
+    assert snapshot["chart_messages"][0]["artifact_path"] == "研究报告_charts/chart-1.png"
+    assert provenance["schema_version"] == 2
+    assert provenance["document_id"].startswith("doc_")
+    assert provenance["revision_id"].startswith("rev_")
+    assert provenance["parent_revision_id"] is None
+    assert provenance["conversation_id"] == "C1"
+    assert provenance["content_sha256"] == hashlib.sha256(report.encode("utf-8")).hexdigest()
+    assert provenance["final_result_path"] == snapshot_path.name
+    assert provenance["final_result_sha256"] == hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
+    assert provenance["citations"] == final_result["citation_messages"]["data"]
+    assert provenance["inference_manifest"][0]["id"] == "7"
+    assert "html_base64" not in json.dumps(provenance)
+
+
+def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
+    final_result = {
+        "response_content": "# 报告\n\n正文",
+        "infer_messages": [],
+        "chart_messages": [],
+    }
+
+    def _convert(_markdown_path, html_path):
+        with open(html_path, "w", encoding="utf-8") as stream:
+            stream.write("<html>report</html>")
+
+    with patch(
+        "jiuwenclaw.agentserver.tools.subagent_executor.context_vars.get_effective_request_output_dir",
+        return_value=str(tmp_path),
+    ), patch(
+        "jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline.convert_md_to_html",
+        side_effect=_convert,
+    ):
+        artifacts = dt._write_report_artifacts_stream(final_result, "研究报告.md", "C1")
+
+    assert artifacts == {
+        "md": str(tmp_path / "研究报告.md"),
+        "html": str(tmp_path / "研究报告.html"),
+    }
+    assert (tmp_path / "研究报告.final-result.json").is_file()
+    assert (tmp_path / "研究报告.provenance.json").is_file()
+
+
+def test_write_report_artifacts_keeps_rewrite_sidecars_when_html_fails(tmp_path):
+    final_result = {
+        "response_content": "# 报告\n\n正文",
+        "infer_messages": [],
+        "chart_messages": [],
+    }
+
+    with patch(
+        "jiuwenclaw.agentserver.tools.subagent_executor.context_vars.get_effective_request_output_dir",
+        return_value=str(tmp_path),
+    ), patch(
+        "jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline.convert_md_to_html",
+        side_effect=RuntimeError("converter unavailable"),
+    ):
+        artifacts = dt._write_report_artifacts_stream(final_result, "研究报告.md", "C1")
+
+    assert artifacts == {"md": str(tmp_path / "研究报告.md")}
+    assert (tmp_path / "研究报告.final-result.json").is_file()
+    assert (tmp_path / "研究报告.provenance.json").is_file()
 
 
 @pytest.mark.asyncio
@@ -974,11 +1065,17 @@ def test_deepresearch_python_uses_current_jiuwenclaw_interpreter():
     assert dt._resolve_jiuwenclaw_python() == sys.executable
 
 
-def test_get_deepresearch_tools_exposes_only_stream(monkeypatch):
+def test_get_deepresearch_tools_exposes_stream_and_rewrite_tools(monkeypatch):
     monkeypatch.setattr(dt, "enable_deepresearch", lambda: True)
     monkeypatch.setattr(dt, "_deepresearch_dependency_available", lambda: True)
 
-    assert dt.get_deepresearch_tools() == [dt.deepresearch_stream]
+    from jiuwenclaw.agentserver.tools import deepresearch_rewrite_tools as rt
+
+    assert dt.get_deepresearch_tools() == [
+        dt.deepresearch_stream,
+        rt.deepresearch_prepare_rewrite,
+        rt.deepresearch_commit_rewrite,
+    ]
 
 
 def test_resolve_skill_root_env_uses_platform_path_separator(tmp_path, monkeypatch):
