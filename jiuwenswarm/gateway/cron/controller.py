@@ -9,6 +9,7 @@ from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 from jiuwenswarm.gateway.cron.cron_expr import normalize_cron_expr, iso_to_five_field_cron, validate_cron_expression
 from jiuwenswarm.gateway.cron.models import (
     CRON_JOB_DEFAULT_MODE,
+    CronJob,
     CronRunState,
     CronTargetChannel,
     cron_job_metadata,
@@ -21,6 +22,16 @@ from jiuwenswarm.gateway.cron.models import (
 )
 from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService, _cron_next_push_dt
 from jiuwenswarm.gateway.cron.store import CronJobStore
+
+
+def _strip_onetime_marker(name: str) -> str:
+    if not name:
+        return name
+    idx = name.find("|")
+    if idx < 0:
+        return name
+    cleaned = name[:idx].strip()
+    return cleaned if cleaned else name
 
 
 class CronController:
@@ -274,12 +285,20 @@ class CronController:
 
     # ── A2A CronQuery protocol methods ────────────────────────────────
 
-    def _compute_next_run_ms(self, job_id: str) -> int:
+    def _compute_next_run_ms(self, job_id: str, *, job: CronJob | None = None) -> int:
         """Compute next scheduled run time (ms) for a job from scheduler events.
 
         Scans ``scheduler._events`` heap for the earliest ``wake`` event
         matching ``job_id``. Returns 0 if not found or scheduler unavailable.
+
+        For one-shot tasks (``delete_after_run=True``), always returns 0 —
+        one-shot tasks have no recurring next run; they fire once then expire.
+        If ``job`` is provided, its ``delete_after_run`` flag is checked
+        directly; otherwise the flag cannot be determined synchronously.
         """
+        # One-shot tasks have no next run — they fire once then auto-expire.
+        if job is not None and job.delete_after_run:
+            return 0
         events = getattr(self._scheduler, "_events", None)
         if not events:
             return 0
@@ -429,7 +448,7 @@ class CronController:
         limit = max(1, min(int(limit), 100))
         entries: list[dict[str, Any]] = []
         # Compute next run time for this job once (shared across all entries)
-        next_run_ms = self._compute_next_run_ms(job_id)
+        next_run_ms = self._compute_next_run_ms(job_id, job=job)
         runs = getattr(self._scheduler, "_runs", None)
         if runs:
             for state in runs.values():
@@ -464,6 +483,12 @@ class CronController:
 
         all_entries: list[dict[str, Any]] = []
 
+        # Build job_id → CronJob map so we can check delete_after_run for
+        # one-shot tasks (their next run is 0).
+        jobs_map: dict[str, CronJob] = {
+            j.id: j for j in await self._store.list_jobs()
+        }
+
         # Cache next run times per job_id to avoid repeated heap scans.
         next_run_cache: dict[str, int] = {}
 
@@ -477,7 +502,7 @@ class CronController:
             for state in runs.values():
                 jid = state.job_id
                 if jid not in next_run_cache:
-                    next_run_cache[jid] = self._compute_next_run_ms(jid)
+                    next_run_cache[jid] = self._compute_next_run_ms(jid, job=jobs_map.get(jid))
                 all_entries.append(
                     state.to_a2a_run_entry(next_run_at_ms=next_run_cache[jid])
                 )
@@ -512,14 +537,14 @@ class CronController:
             jobs = [j for j in jobs if j.enabled]
         a2a_jobs = [
             j.to_a2a_job(
-                next_run_at_ms=self._compute_next_run_ms(j.id),
+                next_run_at_ms=self._compute_next_run_ms(j.id, job=j),
                 last_run_at_ms=self._compute_last_run_ms(j.id),
                 job_run_stats=self._compute_job_run_stats(j.id),
             )
             for j in jobs
         ]
         total = len(a2a_jobs)
-        return {
+        ans = {
             "jobs": a2a_jobs,
             "total": total,
             "offset": 0,
@@ -528,6 +553,7 @@ class CronController:
             "nextOffset": None,
             "deliveryPreviews": {},
         }
+        return ans
 
     async def create_job_a2a(self, job_params: dict[str, Any], session_id: str | None = None) -> dict[str, Any]:
         """Create job from A2A ``add`` action params and return A2A ans format.
@@ -537,7 +563,7 @@ class CronController:
         """
         # Extract A2A nested fields and map to internal flat params
         params: dict[str, Any] = {}
-        params["name"] = str(job_params.get("name") or "").strip()
+        params["name"] = _strip_onetime_marker(str(job_params.get("name") or "").strip())
         params["enabled"] = bool(job_params.get("enabled", True))
         if job_params.get("deleteAfterRun") is not None:
             params["delete_after_run"] = bool(job_params.get("deleteAfterRun"))
@@ -607,7 +633,7 @@ class CronController:
         if created:
             return created.to_a2a_job(
                 include_description=True,
-                next_run_at_ms=self._compute_next_run_ms(created.id),
+                next_run_at_ms=self._compute_next_run_ms(created.id, job=created),
                 last_run_at_ms=self._compute_last_run_ms(created.id),
             )
         # Fallback: construct minimal A2A shape from to_dict result
@@ -620,7 +646,7 @@ class CronController:
         if "enabled" in patch_params:
             patch["enabled"] = bool(patch_params["enabled"])
         if "name" in patch_params:
-            patch["name"] = str(patch_params["name"]).strip()
+            patch["name"] = _strip_onetime_marker(str(patch_params["name"]).strip())
         if "wakeOffsetSeconds" in patch_params:
             try:
                 patch["wake_offset_seconds"] = int(patch_params["wakeOffsetSeconds"])
@@ -661,7 +687,7 @@ class CronController:
         if stored:
             return stored.to_a2a_job(
                 include_description=True,
-                next_run_at_ms=self._compute_next_run_ms(stored.id),
+                next_run_at_ms=self._compute_next_run_ms(stored.id, job=stored),
                 last_run_at_ms=self._compute_last_run_ms(stored.id),
             )
         return job
@@ -973,5 +999,4 @@ class CronController:
                 func=self._preview_job_tool,
             ),
         ]
-
 
