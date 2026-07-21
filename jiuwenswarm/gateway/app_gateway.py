@@ -1402,6 +1402,7 @@ async def _run(
     from jiuwenswarm.gateway.channel_manager.im_platforms.discord.discord_connect import DiscordChannel, \
         DiscordChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
+    from jiuwenswarm.gateway.channel_manager.protocol.ssh.ssh_connect import SshChannel, SshChannelConfig
     from jiuwenswarm.common.config import get_config
     from jiuwenswarm.common.cleanup import start_background_cleanup
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
@@ -1447,7 +1448,7 @@ async def _run(
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
 
-    # 从扩展注册表获取 AgentServerClient
+    # 从扩展注册表获取 AgentServerClient（WebSocket 或 Yuanrong 等扩展实现）
     agent_server_ext = extension_registry.get_agent_server_client_extension()
     if agent_server_ext is not None:
         logger.info("[App] using extension AgentServerClient: %s", agent_server_ext.metadata.name)
@@ -1830,6 +1831,8 @@ async def _run(
     wecom_task = None
     wechat_channel = None
     wechat_task = None
+    ssh_channel = None
+    ssh_task = None
 
     _last_channels_conf: dict = {}
 
@@ -1902,6 +1905,7 @@ async def _run(
         nonlocal whatsapp_channel, whatsapp_task
         nonlocal wecom_channel, wecom_task
         nonlocal wechat_channel, wechat_task
+        nonlocal ssh_channel, ssh_task
         nonlocal _last_channels_conf
         nonlocal feishu_enterprise_channels, feishu_enterprise_tasks
 
@@ -1927,6 +1931,7 @@ async def _run(
             "discord",
             "wecom",
             "wechat",
+            "ssh",
         ]:
             if _should_restart_channel(channel_name, _last_channels_conf, conf) or channel_name in restart_pending:
                 if channel_name in restart_pending and not _should_restart_channel(
@@ -2338,6 +2343,45 @@ async def _run(
             else:
                 logger.info("[App] channels.wechat missing or invalid, WechatChannel disabled")
 
+        if "ssh" in changed_channels:
+            ssh_conf = conf.get("ssh") if isinstance(conf, dict) else None
+            await _stop_channel(ssh_channel, ssh_task, "ssh")
+            ssh_channel, ssh_task = None, None
+
+            if isinstance(ssh_conf, dict):
+                # 南向经 agent client（如 agentos_router -> yuanrong）动态解析。
+                enabled, reason = _is_channel_enabled(ssh_conf, ["listen_port"])
+                if not enabled:
+                    logger.info("[App] channels.ssh.%s, SshChannel disabled", reason)
+                else:
+                    ssh_config = SshChannelConfig.from_dict({**ssh_conf, "enabled": True})
+                    ssh_channel = SshChannel(ssh_config, _DummyBus())
+                    channel_manager.register_channel(ssh_channel)
+                    ssh_task = asyncio.create_task(ssh_channel.start(), name="ssh")
+
+                    def _on_ssh_task_done(task: asyncio.Task) -> None:
+                        try:
+                            task.result()
+                        except asyncio.CancelledError:
+                            return
+                        except Exception as exc:  # noqa: BLE001
+                            logger.error(
+                                "[App] SSH channel failed to start: %s. "
+                                "If SSH is enabled, install optional dependency with "
+                                "`uv sync --extra ssh` or `pip install \"jiuwenswarm[ssh]\"`.",
+                                exc,
+                            )
+
+                    ssh_task.add_done_callback(_on_ssh_task_done)
+                    logger.info(
+                        "[App] SshChannel registered from config.yaml.channels.ssh "
+                        "(listen %s:%s -> MessageHandler; southbound via agent client)",
+                        ssh_config.listen_host,
+                        ssh_config.listen_port,
+                    )
+            else:
+                logger.info("[App] channels.ssh missing or invalid, SshChannel disabled")
+
     channel_manager.set_config_callback(_apply_channel_config)
     await channel_manager.set_config(initial_channels_conf)
 
@@ -2488,6 +2532,13 @@ async def _run(
             except asyncio.CancelledError:
                 pass
             await wechat_channel.stop()
+        if ssh_channel is not None and ssh_task is not None:
+            ssh_task.cancel()
+            try:
+                await ssh_task
+            except asyncio.CancelledError:
+                pass
+            await ssh_channel.stop()
 
         await cron_scheduler.stop()
         await channel_manager.stop_dispatch()
