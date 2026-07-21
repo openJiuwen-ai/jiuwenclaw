@@ -1720,25 +1720,6 @@ overflow: hidden;
   overflow: visible;
 }
 
-.chat-work-select__clear-label {
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 8px);
-  transform: translateX(-50%);
-  width: 92px;
-  height: 40px;
-  border-radius: 8px;
-  background: var(--color-surface-popover);
-  color: var(--color-text-primary);
-  font-size: 12px;
-  line-height: 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: var(--effect-chat-tooltip-shadow);
-  pointer-events: none;
-}
-
 .chat-work-select__clear {
   display: inline-flex;
   width: 16px;

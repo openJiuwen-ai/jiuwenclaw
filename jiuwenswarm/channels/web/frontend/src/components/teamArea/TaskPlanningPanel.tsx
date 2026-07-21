@@ -284,13 +284,13 @@ function ExpandedTaskList({
     <>
       <div className="mt-2 flex min-h-7 flex-wrap items-baseline gap-x-8 gap-y-2">
         <div className="flex shrink-0 items-baseline gap-2">
-          <span className="text-base leading-6 text-text-muted">{t('team.planning.metrics.progress')}</span>
-          <span className="text-lg font-semibold leading-7 text-text-strong">{progressPercent}%</span>
+          <span className="text-sm leading-5 text-text-muted">{t('team.planning.metrics.progress')}</span>
+          <span className="text-base font-semibold leading-6 text-text">{progressPercent}%</span>
         </div>
         {BOARD_COLUMNS.map((column) => (
           <div key={column.key} className="flex shrink-0 items-baseline gap-2">
-            <span className="text-base leading-6 text-text-muted">{t(column.labelKey)}</span>
-            <span className="text-lg font-semibold leading-7 text-text-strong">{groupedTasks[column.key].length}</span>
+            <span className="text-sm leading-5 text-text-muted">{t(column.labelKey)}</span>
+            <span className="text-base font-semibold leading-6 text-text">{groupedTasks[column.key].length}</span>
           </div>
         ))}
       </div>
@@ -313,7 +313,7 @@ function ExpandedTaskList({
               <span className="mr-4 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-secondary text-xs font-medium leading-4 text-muted">
                 {String(seq).padStart(2, '0')}
               </span>
-              <span className="min-w-0 flex-1 truncate text-base leading-6 text-text" title={title}>{title}</span>
+              <span className="min-w-0 flex-1 truncate text-sm font-normal leading-5 text-text" title={title}>{title}</span>
               <img
                 src={compactStatusIcons[columnKey]}
                 className={`ml-4 h-4 w-4 shrink-0 ${columnKey === 'running' ? 'animate-spin' : ''}`}

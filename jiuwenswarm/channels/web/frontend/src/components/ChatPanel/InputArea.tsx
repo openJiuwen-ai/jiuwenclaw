@@ -1880,7 +1880,6 @@ export function InputArea({
             </button>
             {displayedProject && !isWorkContextLocked ? (
               <span className="chat-work-select__clear-wrap" aria-hidden="false">
-                <span className="chat-work-select__clear-label">{t('multiSession.project.clearProject')}</span>
                 <button
                   type="button"
                   className="chat-work-select__clear"
