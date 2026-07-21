@@ -50,8 +50,18 @@ import { createUsageCommand } from "./builtins/usage.js";
 import { createReviewCommand } from "./builtins/review.js";
 import { createDebugCommand } from "./builtins/debug.js";
 import { createSecurityReviewCommand } from "./builtins/security-review.js";
+import { createSwitchCommand } from "./builtins/switch.js";
 
-export function createBuiltinCommands(): SlashCommand[] {
+export interface BuiltinCommandsOptions {
+  /**
+   * 是否激活 /switch 命令。
+   * 仅一体机场景（launcher 注入 AGENTOS_TUI_SUPERVISED=1）时为 true，
+   * 此时命令可见且可执行；否则不注册，命令在 help、补全、执行中均不可见。
+   */
+  switchEnabled?: boolean;
+}
+
+export function createBuiltinCommands(options: BuiltinCommandsOptions = {}): SlashCommand[] {
   const commands: SlashCommand[] = [
     createAgentsCommand(),
     createHelpCommand(() => commands),
@@ -98,6 +108,8 @@ export function createBuiltinCommands(): SlashCommand[] {
     createReviewCommand(),
     createDebugCommand(),
     createSecurityReviewCommand(),
+    // /switch 仅在一体机场景（托管模式）激活；否则不注册，命令完全不可见。
+    ...(options.switchEnabled ? [createSwitchCommand()] : []),
     createMemoryCommand(),
     createPluginCommand(),
     createReloadPluginsCommand(),

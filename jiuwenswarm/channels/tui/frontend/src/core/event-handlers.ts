@@ -167,6 +167,16 @@ export interface AppEventDelegate {
   getHarnessActivateInteraction(): HarnessActivateInteraction | null;
   /** Auto-activate extension (send activate_response with action="accept") */
   autoActivateExtension(interactionId: string): void;
+  /**
+   * 由 event-handlers 在收到 chat.interrupt_result 时调用；
+   * 通知所有订阅器（等待型取消按 requestId + sessionId 关联）。
+   */
+  notifyInterruptResult(
+    requestId: string,
+    sessionId: string,
+    success: boolean,
+    message?: string,
+  ): void;
 }
 
 function _handleAgentModeToolResult(
@@ -1153,14 +1163,24 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
 
     case "chat.interrupt_result": {
       const intent = typeof payload.intent === "string" ? payload.intent : "cancel";
+      const requestId = typeof payload.request_id === "string" ? payload.request_id : "";
+      const eventSessionId =
+        typeof payload.session_id === "string" ? payload.session_id : activeSessionId;
       if (intent === "cancel") {
+        // 先通知等待型 waiter，让其 resolve/reject。
+        // 服务端可能不回显 TUI 的 requestId（使用自己的 interrupt_xxx 格式），
+        // 因此即使 requestId 为空也要通知，由 waiter 按 sessionId 关联。
+        // 迟到事件（waiter 已清除）由 listener 自行过滤。
+        const success = payload.success !== false;
+        const message =
+          typeof payload.message === "string" ? payload.message : undefined;
+        delegate.notifyInterruptResult(requestId, eventSessionId, success, message);
         const suppressed = delegate.getSuppressInterruptResult();
         if (suppressed) {
           delegate.clearSuppressInterruptResult();
           return true;
         }
-        const success = payload.success !== false;
-        const message = formatInterruptResultMessage(delegate.getPreferredLanguage(), intent, success, payload.message);
+        const uiMessage = formatInterruptResultMessage(delegate.getPreferredLanguage(), intent, success, payload.message);
         if (success) {
           delegate.setStreamingState(StreamingState.Interrupted);
           delegate.getActiveSubtasks().clear();
@@ -1171,7 +1191,7 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
             kind: "info",
             id: createId("info"),
             sessionId: activeSessionId,
-            content: message,
+            content: uiMessage,
             icon: "i",
             at: new Date().toISOString(),
           });
@@ -1184,10 +1204,10 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
             kind: "error",
             id: createId("error"),
             sessionId: activeSessionId,
-            content: message,
+            content: uiMessage,
             at: new Date().toISOString(),
           });
-          delegate.setLastError(message);
+          delegate.setLastError(uiMessage);
           // 失败也视为本次 interrupt 请求已结束，清本地标志 + 解除 esc 去抖窗口，
           // 否则去抖窗口内后续 esc 会被一直抑制，无法重新发起取消。
           delegate.clearInterruptRequested();

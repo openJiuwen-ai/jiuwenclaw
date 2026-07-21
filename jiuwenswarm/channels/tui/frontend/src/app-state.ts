@@ -1,5 +1,11 @@
 import { addError, addInfo } from "./core/commands/helpers.js";
 import type { CommandContext, PreferredLanguage } from "./core/commands/types.js";
+import type {
+  HandoffPort,
+  TaskLifecyclePort,
+  UiLifecyclePort,
+} from "./core/supervision/protocol.js";
+import type { ReauthenticationPort } from "./core/supervision/protocol.js";
 import {
   computeTimeoutAt,
   isIgnorableHistoryRestoreError,
@@ -415,6 +421,24 @@ export class CliPiAppState {
   private harnessActivateInteraction: HarnessActivateInteraction | null = null;
   private deferTranscriptFrames = false;
   private deferredTranscriptFrames: EventFrame[] = [];
+
+  // ── /switch 公共契约端口（可选；由 index.ts 注入） ──
+  /** HandoffPort；未注入时 /switch 通过 CommandContext 回退到 NOT_SUPERVISED。 */
+  private handoffPort: HandoffPort | null = null;
+  /** TaskLifecyclePort；未注入时回退到 hasServerTask()/cancel()。 */
+  private taskLifecycle: TaskLifecyclePort | null = null;
+  /** ReauthenticationPort；由 ws-client 在权威认证过期时调用。 */
+  private reauthPort: ReauthenticationPort | null = null;
+  /** UiLifecyclePort；统一顶层关闭路径。 */
+  private uiLifecycle: UiLifecyclePort | null = null;
+  /** interrupt_result 事件订阅器；等待型取消按 requestId 关联。 */
+  private interruptResultListeners = new Set<
+    (requestId: string, sessionId: string, success: boolean, message?: string) => void
+  >();
+  /** WebSocket 断开订阅器；等待型取消按 CONNECTION_LOST reject。 */
+  private connectionLostListeners = new Set<() => void>();
+  /** AppState.stop 订阅器；等待型取消按 STATE_STOPPED reject。 */
+  private stopListeners = new Set<() => void>();
   private readonly eventDelegate: AppEventDelegate = {
     getConnectionStatus: () => this.connectionStatus,
     getSessionId: () => this.sessionId,
@@ -558,11 +582,20 @@ export class CliPiAppState {
         true,
       );
     },
+    notifyInterruptResult: (requestId, sessionId, success, message) => {
+      this.notifyInterruptResult(requestId, sessionId, success, message);
+    },
   };
 
   constructor(
     private readonly wsClient: WsClient,
     cliSession?: string,
+    supervision?: {
+      handoffPort?: HandoffPort | null;
+      taskLifecycle?: TaskLifecyclePort | null;
+      reauthPort?: ReauthenticationPort | null;
+      uiLifecycle?: UiLifecyclePort | null;
+    },
   ) {
     this.sessionId = cliSession || generateSessionId();
     const config = loadTuiConfig();
@@ -570,6 +603,11 @@ export class CliPiAppState {
       setCurrentThemeName(config.theme);
       this.themeName = config.theme;
     }
+    // 注入 /switch 公共契约端口（可选；未注入时回退到非托管实现）。
+    this.handoffPort = supervision?.handoffPort ?? null;
+    this.taskLifecycle = supervision?.taskLifecycle ?? null;
+    this.reauthPort = supervision?.reauthPort ?? null;
+    this.uiLifecycle = supervision?.uiLifecycle ?? null;
   }
 
   start(): void {
@@ -596,6 +634,16 @@ export class CliPiAppState {
   }
 
   stop(): void {
+    // 通知所有 stop 订阅器（等待型取消按 STATE_STOPPED reject）。
+    for (const listener of this.stopListeners) {
+      try {
+        listener();
+      } catch {
+        // ignore — 进程即将退出
+      }
+    }
+    this.stopListeners.clear();
+
     if (this.localPendingQuestion) {
       this.localPendingQuestion.reject(new Error("app stopped while awaiting input"));
       this.localPendingQuestion = null;
@@ -850,6 +898,15 @@ export class CliPiAppState {
           ? "Backend connection failed authentication. Stopped waiting for the current response."
           : "Backend closed the connection because the message was too large. Stopped waiting for the current response.",
       );
+      // 通知连接丢失订阅器（等待型取消按 CONNECTION_LOST reject）。
+      for (const listener of this.connectionLostListeners) {
+        try {
+          listener();
+        } catch {
+          // ignore
+        }
+      }
+      this.connectionLostListeners.clear();
     }
   }
 
@@ -1124,6 +1181,20 @@ export class CliPiAppState {
         return snapshot.cancellableWork;
       },
       setRunningCommand: (name: string | null) => this.setRunningCommand(name),
+      // ── /switch 公共契约端口 ──
+      checkHandoff: (target) => this.handoffPort?.checkHandoff(target)
+        ?? {
+          ok: false,
+          code: "NOT_SUPERVISED",
+          message: "Running outside agentos-tui launcher; start via `agentos-tui` to use /switch",
+        },
+      requestHandoff: (target) => this.handoffPort
+        ? this.handoffPort.requestHandoff(target)
+        : Promise.reject(new Error("Handoff port not available (not supervised)")),
+      hasServerTask: () => this.taskLifecycle?.hasServerTask() ?? this.hasServerTask(),
+      cancelAndWaitForIdle: (opts) => this.taskLifecycle
+        ? this.taskLifecycle.cancelAndWaitForIdle(opts)
+        : Promise.reject(new Error("Task lifecycle port not available")),
     };
   }
 
@@ -1192,6 +1263,78 @@ export class CliPiAppState {
   /** AppScreen 在初始化时注入 getInputValue 回调，使 app-state 可以读取输入框内容。 */
   getInputValueRef(ref: () => string): void {
     this._getInputValueRef = ref;
+  }
+
+  // ── TaskLifecyclePort 订阅接口 ──
+
+  /**
+   * 订阅 interrupt_result 事件；按 requestId + sessionId 关联。
+   * 返回取消订阅函数。迟到事件（waiter 已清除）由 listener 自行过滤。
+   */
+  onInterruptResult(
+    handler: (requestId: string, sessionId: string, success: boolean, message?: string) => void,
+  ): () => void {
+    this.interruptResultListeners.add(handler);
+    return () => {
+      this.interruptResultListeners.delete(handler);
+    };
+  }
+
+  /** 订阅 WebSocket 断开或认证失败。 */
+  onConnectionLost(handler: () => void): () => void {
+    this.connectionLostListeners.add(handler);
+    return () => {
+      this.connectionLostListeners.delete(handler);
+    };
+  }
+
+  /** 订阅 AppState.stop（进程退出前清理）。 */
+  onStop(handler: () => void): () => void {
+    this.stopListeners.add(handler);
+    return () => {
+      this.stopListeners.delete(handler);
+    };
+  }
+
+  /**
+   * 由 event-handlers 在收到 chat.interrupt_result 时调用；
+   * 通知所有订阅器，按 requestId + sessionId 关联。
+   */
+  notifyInterruptResult(
+    requestId: string,
+    sessionId: string,
+    success: boolean,
+    message?: string,
+  ): void {
+    for (const listener of this.interruptResultListeners) {
+      try {
+        listener(requestId, sessionId, success, message);
+      } catch {
+        // ignore — listener 错误不应影响其他订阅器或 UI 处理
+      }
+    }
+  }
+
+  /**
+   * 由 index.ts 在 AppState 构造后回填监督端口。
+   * TaskLifecyclePort、HandoffPort、ReauthenticationPort 依赖 AppState 方法，
+   * 无法在构造函数中直接创建。
+   */
+  setSupervisionPorts(ports: {
+    handoffPort: HandoffPort | null;
+    taskLifecycle: TaskLifecyclePort | null;
+    reauthPort: ReauthenticationPort | null;
+    uiLifecycle: UiLifecyclePort | null;
+  }): void {
+    this.handoffPort = ports.handoffPort;
+    this.taskLifecycle = ports.taskLifecycle;
+    this.reauthPort = ports.reauthPort;
+    this.uiLifecycle = ports.uiLifecycle;
+  }
+
+  /** 测试/外部用：获取 ReauthenticationPort（由 ws-client 在权威认证过期时调用）。 */
+  getReauthPort(): ReauthenticationPort | null {
+    return this.reauthPort;
   }
 
   readonly sendEventOnly = (
