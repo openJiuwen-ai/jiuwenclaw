@@ -961,7 +961,6 @@ class CronController:
                                 "Default 600 for normal modes and 1200 for team modes."
                             ),
                         },
-<<<<<<< HEAD
                         "model_name": {
                             "type": "string",
                             "description": (
