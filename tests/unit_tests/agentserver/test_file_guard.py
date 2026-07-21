@@ -1,7 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Unit tests for ``file_guard`` (phase 1)."""
-
+import os
 from jiuwenclaw.agentserver.permissions.file_guard import (
     FileGuardChecker,
     merged_file_guard_config,
@@ -189,3 +189,98 @@ def test_persist_file_operations_allow_writes_to_live_path_not_frozen_constant(m
     live_global = live_saved["permissions"].get("file_guard", {}).get("global", {})
     assert live_global, "文件操作权限应写入实时配置的 file_guard.global"
     assert not frozen_saved["permissions"].get("file_guard", {}).get("global"), "诱饵文件不应被写入"
+
+
+# ---------- _inject_system_default_trust ----------
+
+
+def _patch_runtime_venv(monkeypatch, venv_dir):
+    """Patch ``jiuwenclaw.runtime.get_runtime_venv_dir`` 返回固定路径。"""
+    import importlib
+    runtime_mod = importlib.import_module("jiuwenclaw.runtime")
+    monkeypatch.setattr(runtime_mod, "get_runtime_venv_dir", lambda: venv_dir)
+
+
+def test_system_default_trust_injects_isolation_venv(monkeypatch, tmp_path):
+    """isolation_venv/Scripts（或 bin）在缺省配置时应被注入到 trusted_exec_directory。"""
+    venv_dir = tmp_path / "isolation_venv"
+    venv_dir.mkdir()
+    _patch_runtime_venv(monkeypatch, venv_dir)
+
+    fg = merged_file_guard_config({"file_guard": {"workspace": {"rw_enabled": True}}})
+    ted = fg["trusted_exec_directory"]
+    expected = (venv_dir / ("Scripts" if os.name == "nt" else "bin")).resolve().as_posix()
+    assert expected in ted, f"期望注入 {expected}, 实际 {ted}"
+
+
+def test_system_default_trust_skips_when_already_configured(monkeypatch, tmp_path):
+    """用户已显式配置 isolation_venv 路径时，不重复注入。"""
+    venv_dir = tmp_path / "isolation_venv"
+    venv_dir.mkdir()
+    _patch_runtime_venv(monkeypatch, venv_dir)
+    expected = (venv_dir / ("Scripts" if os.name == "nt" else "bin")).resolve().as_posix()
+
+    fg = merged_file_guard_config({
+        "file_guard": {
+            "workspace": {"rw_enabled": True},
+            "trusted_exec_directory": [expected],
+        },
+    })
+    ted = fg["trusted_exec_directory"]
+    assert ted.count(expected) == 1, f"已配置路径不应重复注入, 实际 {ted}"
+
+
+def test_system_default_trust_uses_exact_path_not_substring(monkeypatch, tmp_path):
+    """回归：去重检查用精确 posix 路径比较，不能用 substring matching。
+
+    用户配置了超集路径（如 isolation_venv/Scripts-backup），scripts_dir
+    （isolation_venv/Scripts）不应被 substring 误判为已配置而跳过注入。
+    """
+    venv_dir = tmp_path / "isolation_venv"
+    venv_dir.mkdir()
+    _patch_runtime_venv(monkeypatch, venv_dir)
+    expected = (venv_dir / ("Scripts" if os.name == "nt" else "bin")).resolve().as_posix()
+    # 构造超集路径：expected + "-backup"（不是 expected 的父目录，是兄弟路径）
+    superset = expected + "-backup"
+
+    fg = merged_file_guard_config({
+        "file_guard": {
+            "workspace": {"rw_enabled": True},
+            "trusted_exec_directory": [superset],
+        },
+    })
+    ted = fg["trusted_exec_directory"]
+    assert expected in ted, f"超集路径不应阻止注入, 实际 {ted}"
+    assert superset in ted, "用户配置的超集路径应保留"
+
+
+def test_system_default_trust_silent_on_runtime_error(monkeypatch):
+    """get_runtime_venv_dir 抛异常时静默跳过，不影响其他配置。"""
+    def _raise():
+        raise RuntimeError("venv unavailable")
+    import importlib
+    runtime_mod = importlib.import_module("jiuwenclaw.runtime")
+    monkeypatch.setattr(runtime_mod, "get_runtime_venv_dir", _raise)
+
+    fg = merged_file_guard_config({
+        "file_guard": {
+            "workspace": {"rw_enabled": True},
+            "trusted_exec_directory": ["/user/explicit/path"],
+        },
+    })
+    # 异常时不注入，但已配置路径保留，workspace 等其他配置不受影响
+    assert fg["trusted_exec_directory"] == ["/user/explicit/path"]
+    assert fg["workspace"]["rw_enabled"] is True
+
+
+def test_system_default_trust_exec_axis_only(monkeypatch, tmp_path):
+    """isolation_venv 只信任 exec 轴，不扩散到 read/write（不写入 global）。"""
+    venv_dir = tmp_path / "isolation_venv"
+    venv_dir.mkdir()
+    _patch_runtime_venv(monkeypatch, venv_dir)
+
+    fg = merged_file_guard_config({"file_guard": {"workspace": {"rw_enabled": True}}})
+    # exec 轴被注入
+    assert fg["trusted_exec_directory"]
+    # read/write 轴（global）不应因 isolation_venv 而新增条目
+    assert not fg.get("global"), f"isolation_venv 不应扩散到 global, 实际 {fg.get('global')}"
