@@ -1655,8 +1655,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
         let sessionId = resolveEventSessionId(payload);
         // cron 广播 session_id 为空（后端对 web 通道置空），
-        // 优先使用 cronMeta.exec_session_id 路由到定时任务专属会话，
-        // 不再 fallback 到当前活跃会话，避免广播消息污染创建者会话。
+        // 优先使用 cronMeta.exec_session_id 路由到定时任务专属会话。
+        // 若后端未提供 exec_session_id，fallback 到当前活跃会话——仅当它是 cron_ 前缀时，
+        // 避免污染普通会话（用户在"立即执行"后正在查看 cron session 的场景）。
         if (!sessionId && cronMeta) {
           const execSessionId =
             typeof cronMeta.exec_session_id === 'string'
@@ -1665,6 +1666,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           if (execSessionId) {
             sessionId = execSessionId;
             ensureSessionRuntimes(sessionId);
+          } else {
+            const currentSid = useSessionStore.getState().currentSession?.session_id ?? '';
+            if (currentSid.startsWith('cron_')) {
+              sessionId = currentSid;
+            }
           }
         }
         if (!sessionId) return;

@@ -1708,7 +1708,7 @@ function AppContent() {
   ]);
 
   const handleRestoreSession = useCallback(
-    async (targetSessionId: string, targetMode?: string, targetSession?: Session) => {
+    async (targetSessionId: string, targetMode?: string, targetSession?: Session, options?: { skipHistoryLoad?: boolean }) => {
       if (!isRestorableSessionId(targetSessionId)) return;
 
       const resolvedMode = targetMode ?? targetSession?.mode ?? mode;
@@ -1742,7 +1742,9 @@ function AppContent() {
       }
       setActiveNav('chat');
       navigate({ kind: 'chat-session', sessionId: targetSessionId });
-      setHistoryBootstrapKey((k) => k + 1);
+      if (!options?.skipHistoryLoad) {
+        setHistoryBootstrapKey((k) => k + 1);
+      }
       requestComposerFocus();
       if (!targetSession) {
         void loadSessionMetadata(targetSessionId);
@@ -2066,6 +2068,8 @@ function AppContent() {
                     // 构造最小 Session 占位对象，让 upsertSessionMetadata 直接加入会话列表，
                     // 避免 loadSessionMetadata 立即失败导致"对话不存在或已删除"。
                     // 后续 cron 广播到达时会刷新会话列表补全完整元数据。
+                    // 跳过初始历史加载：session 是全新的，空响应的 replaceHistoryMessages
+                    // 会覆盖后续到达的广播消息。
                     void handleRestoreSession(session, undefined, {
                       session_id: session,
                       title: '',
@@ -2076,7 +2080,7 @@ function AppContent() {
                       message_count: 0,
                       created_at: new Date().toISOString(),
                       updated_at: new Date().toISOString(),
-                    });
+                    }, { skipHistoryLoad: true });
                     return;
                   }
                   requestSessionNavigation(session);
