@@ -68,6 +68,7 @@ enable_dev_mode_if_needed() {
     local file="$1"
     mount_claw_code_path "${file}"
     mount_runtime_code_path "${file}"
+    mount_core_code_path "${file}"
 
     # Force pod to be scheduled on current master node
     yq eval 'select(.kind == "Deployment").spec.template.spec.nodeName = "'"${DEPLOY_VARS["CURRENT_NODE_NAME"]}"'"' -i "${file}"
@@ -147,6 +148,40 @@ mount_runtime_code_path() {
             "name": "management-code",
             "hostPath": {
                 "path": "'"${mpath}"'",
+                "type": "Directory"
+            }
+        }]
+    ' -i "${file}"
+}
+
+# Mount core source code from host into container
+mount_core_code_path() {
+    if [ -z "${DEPLOY_VARS["CORE_CODE_PATH"]:-}" ]; then
+        return
+    fi
+
+    # jjiuwenbox, manager-server and manager-web components have no dependencies on agent-core.
+    local file="$1"
+    local msfile="${CONFIG["MANAGER_SERVER_FILE"]}"
+    if [ "${file}" == "${msfile}" ]; then
+        return
+    fi
+
+    local code="${DEPLOY_VARS["CORE_CODE_PATH"]}/openjiuwen"
+    local pod_code="${DEPLOY_VARS["CORE_CODE_POD_PATH"]}"
+
+    yq eval '
+        select(.kind == "Deployment").spec.template.spec.containers[0].volumeMounts += [{
+            "name": "core-code",
+            "mountPath": "'"${pod_code}"'"
+        }]
+    ' -i "${file}"
+
+    yq eval '
+        select(.kind == "Deployment").spec.template.spec.volumes += [{
+            "name": "core-code",
+            "hostPath": {
+                "path": "'"${code}"'",
                 "type": "Directory"
             }
         }]

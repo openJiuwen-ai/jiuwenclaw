@@ -458,6 +458,8 @@ class RuntimeManagementAgentClient(AgentServerClient):
         claw_code_pod_path = os.getenv("CLAW_CODE_POD_PATH")
         runtime_code_path = os.getenv("RUNTIME_CODE_PATH")
         runtime_code_pod_path = os.getenv("RUNTIME_CODE_POD_PATH")
+        core_code_path = os.getenv("CORE_CODE_PATH")
+        core_code_pod_path = os.getenv("CORE_CODE_POD_PATH")
         configmap_name = os.getenv("AGENT_SERVER_CONFIGMAP_NAME", "")
 
         agent_host_mounts: list[HostPathMount] = []
@@ -491,7 +493,16 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         host_path_type="Directory"
                     )
                 )
-
+            # 只有当 core_code_path 和 core_code_pod_path 都配置时，才添加挂载
+            if claw_code_path and core_code_pod_path:
+                agent_host_mounts.append(
+                    HostPathMount(
+                        host_path=core_code_path+"/openjiuwen",
+                        mount_path=core_code_pod_path,
+                        read_only=False,
+                        host_path_type="Directory"
+                    )
+                )
         agent_configmap_mounts: list[ConfigMapMount] = []
         if configmap_name:
             agent_configmap_mounts.append(
