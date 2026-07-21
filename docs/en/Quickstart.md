@@ -89,6 +89,13 @@ Configuration files, memory files, and other data will be stored in this directo
 
 The following installation methods are suitable for users who want to perform secondary development and adaptation based on JiuwenSwarm.
 
+First, clone the repository and enter the project directory:
+
+```bash
+git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
+cd jiuwenswarm
+```
+
 ### Install via `uv`
 - Create a new virtual environment using `uv`
   ```bash
@@ -119,6 +126,11 @@ The following installation methods are suitable for users who want to perform se
   - Static run (suitable for production deployment)
     ```bash
     npm run build
+    # Copy build output into the user workspace
+    # Windows:
+    xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
+    # macOS/Linux:
+    cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
     cd ../../../
     uv run jiuwenswarm-init
     uv run jiuwenswarm-start
@@ -140,6 +152,10 @@ The following installation methods are suitable for users who want to perform se
   conda create -n JiuwenSwarm python=3.11
   # or conda create -n JiuwenSwarm python=3.12
   # or conda create -n JiuwenSwarm python=3.13
+  ```
+- Activate the conda environment
+  ```bash
+  conda activate JiuwenSwarm
   ```
 - Install Python dependencies
 

@@ -86,7 +86,15 @@ jiuwenswarm-app
 - **Linux/Mac**：`~/.jiuwenswarm/`
 
 配置文件、记忆文件等数据将存储在该目录下。
-​适合基于JiuwenSwarm进行二次开发适配的用户。
+
+以下安装方式适合基于JiuwenSwarm进行二次开发适配的用户。
+
+首先克隆仓库并进入项目目录：
+
+```bash
+git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
+cd jiuwenswarm
+```
 
 ### `uv`方式安装
 - 使用`uv`新建虚拟环境
@@ -118,6 +126,11 @@ jiuwenswarm-app
   - 静态运行前端服务（适合生产环境部署）
     ```bash
     npm run build
+    # 复制构建产物到用户工作区
+    # Windows:
+    xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
+    # macOS/Linux:
+    cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
     cd ../../../
     uv run jiuwenswarm-init
     uv run jiuwenswarm-start
@@ -139,6 +152,10 @@ jiuwenswarm-app
   conda create -n JiuwenSwarm python=3.11
   # 或 conda create -n JiuwenSwarm python=3.12
   # 或 conda create -n JiuwenSwarm python=3.13
+  ```
+- 激活 conda 虚拟环境
+  ```bash
+  conda activate JiuwenSwarm
   ```
 - 安装python依赖
 
@@ -166,6 +183,11 @@ jiuwenswarm-app
   - 静态运行前端服务（适合生产环境部署）
     ```bash
     npm run build
+    # 复制构建产物到用户工作区
+    # Windows:
+    xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
+    # macOS/Linux:
+    cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
     cd ../../../
     jiuwenswarm-init
     jiuwenswarm-start

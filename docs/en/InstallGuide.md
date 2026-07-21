@@ -179,7 +179,7 @@ xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
 cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
 
 # Back to repo root
-cd ../..
+cd ../../..
 ```
 
 **Notes:**
@@ -276,7 +276,7 @@ xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
 cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
 
 # Back to repo root
-cd ../..
+cd ../../..
 ```
 
 **Notes:**
