@@ -346,10 +346,17 @@ class _FakeRebuildService:
         return bool(rebuild_context.get("archive_path"))
 
 
+def _mock_disk_evolution_store(adapter, monkeypatch, store: Any | None = None) -> Any:
+    """Wire prepare/finalize to a fake disk store (no SkillEvolutionRail)."""
+    disk_store = store if store is not None else _FakeEvolutionStore()
+    monkeypatch.setattr(adapter, "_get_disk_evolution_store", lambda: disk_store)
+    return disk_store
+
+
 @pytest.mark.asyncio
 async def test_prepare_rebuild_followup_returns_followup(adapter, monkeypatch):
-    store = _FakeEvolutionStore()
-    adapter._skill_evolution_rail = SimpleNamespace(store=store, auto_save=True)  # pylint: disable=protected-access
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    _mock_disk_evolution_store(adapter, monkeypatch)
     _FakeRebuildService.prepare_calls = []
     monkeypatch.setattr(interface_deep_module, "ExperienceRebuildService", _FakeRebuildService)
     monkeypatch.setattr(
@@ -376,14 +383,15 @@ async def test_prepare_rebuild_followup_returns_followup(adapter, monkeypatch):
             "subject": {"kind": "skill", "name": "demo-skill"},
             "user_intent": "improve examples",
             "record_ids": None,
-            "kwargs": {},
+            "kwargs": {"min_score": 0.5},
         }
     ]
 
 
 @pytest.mark.asyncio
-async def test_prepare_rebuild_followup_requires_skill_name(adapter):
-    adapter._skill_evolution_rail = SimpleNamespace(store=_FakeEvolutionStore(), auto_save=True)  # pylint: disable=protected-access
+async def test_prepare_rebuild_followup_requires_skill_name(adapter, monkeypatch):
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    _mock_disk_evolution_store(adapter, monkeypatch)
 
     result = await adapter._prepare_rebuild_followup("")  # pylint: disable=protected-access
 
@@ -394,11 +402,9 @@ async def test_prepare_rebuild_followup_requires_skill_name(adapter):
 
 
 @pytest.mark.asyncio
-async def test_prepare_rebuild_followup_validates_skill_exists(adapter):
-    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
-        store=_FakeEvolutionStore(exists=False),
-        auto_save=True,
-    )
+async def test_prepare_rebuild_followup_validates_skill_exists(adapter, monkeypatch):
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    _mock_disk_evolution_store(adapter, monkeypatch, _FakeEvolutionStore(exists=False))
 
     result = await adapter._prepare_rebuild_followup("missing-skill")  # pylint: disable=protected-access
 
@@ -413,7 +419,8 @@ async def test_prepare_rebuild_followup_handles_empty_context(adapter, monkeypat
     class _EmptyRebuildService(_FakeRebuildService):
         next_context = None
 
-    adapter._skill_evolution_rail = SimpleNamespace(store=_FakeEvolutionStore(), auto_save=True)  # pylint: disable=protected-access
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    _mock_disk_evolution_store(adapter, monkeypatch)
     monkeypatch.setattr(interface_deep_module, "ExperienceRebuildService", _EmptyRebuildService)
     monkeypatch.setattr(interface_deep_module, "build_rebuild_command_prompt", lambda **_kwargs: "unused")
 
@@ -423,6 +430,36 @@ async def test_prepare_rebuild_followup_handles_empty_context(adapter, monkeypat
         "output": "Skill 'demo-skill' 未生成可执行的重建指令。",
         "result_type": "error",
     }
+
+
+@pytest.mark.asyncio
+async def test_prepare_and_finalize_rebuild_without_rail(adapter, monkeypatch):
+    """prepare/finalize must work with rail=None via disk EvolutionStore."""
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    _mock_disk_evolution_store(adapter, monkeypatch)
+    _FakeRebuildService.prepare_calls = []
+    _FakeRebuildService.complete_rebuild_calls = []
+    _FakeRebuildService.next_context = {
+        "skill_name": "demo-skill",
+        "archive_path": "evolutions.v1.json",
+        "records": [],
+        "overflow_index": {},
+    }
+    monkeypatch.setattr(interface_deep_module, "ExperienceRebuildService", _FakeRebuildService)
+    monkeypatch.setattr(
+        interface_deep_module,
+        "build_rebuild_command_prompt",
+        lambda **_kwargs: "rebuild demo-skill",
+    )
+
+    prepared = await adapter._prepare_rebuild_followup("demo-skill")  # pylint: disable=protected-access
+    assert prepared["result_type"] == "followup"
+    assert adapter._skill_evolution_rail is None  # pylint: disable=protected-access
+
+    finalized = await adapter._finalize_rebuild_followup(prepared)  # pylint: disable=protected-access
+    assert finalized["cleared"] is True
+    assert _FakeRebuildService.complete_rebuild_calls
+    assert adapter._skill_evolution_rail is None  # pylint: disable=protected-access
 
 
 @pytest.mark.asyncio
@@ -521,9 +558,10 @@ def test_make_rebuild_service_warns_on_model_fallback(adapter, monkeypatch):
 async def test_finalize_rebuild_followup_completes_rebuild(adapter, monkeypatch):
     _FakeRebuildService.complete_rebuild_calls = []
     monkeypatch.setattr(interface_deep_module, "ExperienceRebuildService", _FakeRebuildService)
-    adapter._skill_evolution_rail = SimpleNamespace(store=_FakeEvolutionStore(), auto_save=True)  # pylint: disable=protected-access
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    _mock_disk_evolution_store(adapter, monkeypatch)
 
-    await adapter._finalize_rebuild_followup(  # pylint: disable=protected-access
+    finalized = await adapter._finalize_rebuild_followup(  # pylint: disable=protected-access
         {
             "action": "run_rebuild_followup",
             "rebuild_context": {
@@ -534,9 +572,185 @@ async def test_finalize_rebuild_followup_completes_rebuild(adapter, monkeypatch)
         }
     )
 
+    assert finalized["cleared"] is True
     assert _FakeRebuildService.complete_rebuild_calls == [
         {"skill_name": "demo-skill", "archive_path": "evolutions.v1.json"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_generate_evolution_merge_version_success(adapter, monkeypatch):
+    _FakeRebuildService.prepare_calls = []
+    _FakeRebuildService.complete_rebuild_calls = []
+    _FakeRebuildService.next_context = {
+        "skill_name": "demo-skill",
+        "archive_path": "evolutions.v1.json",
+        "records": [],
+        "overflow_index": {},
+    }
+    monkeypatch.setattr(interface_deep_module, "ExperienceRebuildService", _FakeRebuildService)
+    monkeypatch.setattr(
+        interface_deep_module,
+        "build_rebuild_command_prompt",
+        lambda **_kwargs: "rebuild demo-skill",
+    )
+
+    async def _fake_follow_up_stream(**_kwargs):
+        yield AgentResponseChunk(
+            request_id="req-merge",
+            channel_id="web",
+            payload={"event_type": "chat.delta", "content": "rewriting"},
+            is_complete=False,
+        )
+
+    monkeypatch.setattr(adapter, "_iter_skill_creator_follow_up_stream", _fake_follow_up_stream)
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    _mock_disk_evolution_store(adapter, monkeypatch)
+    stream_ctx = adapter.MergeVersionStreamContext(
+        base_inputs={"query": "hello"},
+        stream_request_id="req-merge",
+        channel_id="web",
+        session_id="sess-merge",
+    )
+
+    result = await adapter.generate_evolution_merge_version(
+        skill_name="demo-skill",
+        skill_path="/tmp/demo-skill/SKILL.md",
+        record_ids=["ev_1"],
+        user_intent="tighten docs",
+        stream_ctx=stream_ctx,
+    )
+
+    assert result["ok"] is True
+    assert result["cleared"] is True
+    assert result["archive_path"] == "evolutions.v1.json"
+    assert result["skill_path"] == "/tmp/demo-skill/SKILL.md"
+    assert len(stream_ctx.chunks) == 1
+    assert _FakeRebuildService.prepare_calls == [
+        {
+            "subject": {"kind": "skill", "name": "demo-skill"},
+            "user_intent": "tighten docs",
+            "record_ids": ["ev_1"],
+            "kwargs": {"min_score": 0.5},
+        }
+    ]
+    assert _FakeRebuildService.complete_rebuild_calls
+    assert _FakeRebuildService.complete_rebuild_calls[0]["skill_md_path"] == "/tmp/demo-skill/SKILL.md"
+
+
+@pytest.mark.asyncio
+async def test_generate_evolution_merge_version_skips_complete_on_rewrite_failure(
+    adapter, monkeypatch,
+):
+    _FakeRebuildService.prepare_calls = []
+    _FakeRebuildService.complete_rebuild_calls = []
+    _FakeRebuildService.next_context = {
+        "skill_name": "demo-skill",
+        "archive_path": "evolutions.v1.json",
+        "records": [],
+        "overflow_index": {},
+    }
+    monkeypatch.setattr(interface_deep_module, "ExperienceRebuildService", _FakeRebuildService)
+    monkeypatch.setattr(
+        interface_deep_module,
+        "build_rebuild_command_prompt",
+        lambda **_kwargs: "rebuild demo-skill",
+    )
+
+    async def _failing_follow_up_stream(**_kwargs):
+        yield AgentResponseChunk(
+            request_id="req-fail-merge",
+            channel_id="web",
+            payload={"event_type": "chat.error", "error": "boom"},
+            is_complete=False,
+        )
+
+    monkeypatch.setattr(adapter, "_iter_skill_creator_follow_up_stream", _failing_follow_up_stream)
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    _mock_disk_evolution_store(adapter, monkeypatch)
+    stream_ctx = adapter.MergeVersionStreamContext(
+        base_inputs={"query": "hello"},
+        stream_request_id="req-fail-merge",
+        channel_id="web",
+        session_id="sess-fail-merge",
+    )
+
+    result = await adapter.generate_evolution_merge_version(
+        skill_name="demo-skill",
+        stream_ctx=stream_ctx,
+    )
+
+    assert result["ok"] is False
+    assert "融合重写" in result["error"]
+    assert _FakeRebuildService.prepare_calls
+    assert _FakeRebuildService.complete_rebuild_calls == []
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_evolution_rebuild_rpc(adapter, monkeypatch):
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    monkeypatch.setattr(
+        adapter,
+        "generate_evolution_merge_version",
+        AsyncMock(
+            return_value={
+                "ok": True,
+                "skill_name": "demo-skill",
+                "skill_path": "/skills/demo-skill/SKILL.md",
+                "archive_path": "evolutions.v1.json",
+                "new_version": "1.2.0",
+                "cleared": True,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_guard_bootstrap_skill",
+        staticmethod(lambda _name: None),
+    )
+
+    payload = await adapter.handle_skills_evolution_rebuild(
+        {
+            "name": "demo-skill",
+            "skill_path": "/skills/demo-skill/SKILL.md",
+            "record_ids": ["ev_1", "ev_2"],
+            "user_intent": "merge notes",
+        }
+    )
+
+    assert payload == {
+        "success": True,
+        "name": "demo-skill",
+        "skill_path": "/skills/demo-skill/SKILL.md",
+        "archive_path": "evolutions.v1.json",
+        "new_version": "1.2.0",
+        "cleared": True,
+    }
+    adapter.generate_evolution_merge_version.assert_awaited_once_with(
+        skill_name="demo-skill",
+        skill_path="/skills/demo-skill/SKILL.md",
+        record_ids=["ev_1", "ev_2"],
+        user_intent="merge notes",
+        min_score=0.5,
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_evolution_rebuild_rpc_rejects_failure(adapter, monkeypatch):
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    monkeypatch.setattr(
+        adapter,
+        "generate_evolution_merge_version",
+        AsyncMock(return_value={"ok": False, "error": "no experiences"}),
+    )
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_guard_bootstrap_skill",
+        staticmethod(lambda _name: None),
+    )
+
+    with pytest.raises(ValueError, match="no experiences"):
+        await adapter.handle_skills_evolution_rebuild({"name": "demo-skill"})
 
 
 @pytest.mark.asyncio
@@ -598,10 +812,9 @@ async def test_iter_auto_rebuild_followups_prepare_and_finalize(adapter, monkeyp
         )
 
     monkeypatch.setattr(adapter, "_iter_skill_creator_follow_up_stream", _fake_follow_up_stream)
-    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
-        store=_FakeEvolutionStore(),
-        auto_save=True,
-    )
+    # auto_save gate still reads rail; store I/O uses disk EvolutionStore.
+    adapter._skill_evolution_rail = SimpleNamespace(auto_save=True)  # pylint: disable=protected-access
+    _mock_disk_evolution_store(adapter, monkeypatch)
     adapter._pending_auto_rebuild_skills = ["demo-skill"]  # pylint: disable=protected-access
 
     chunks = [
@@ -634,8 +847,8 @@ async def test_iter_auto_rebuild_followups_prepare_and_finalize(adapter, monkeyp
 
 @pytest.mark.asyncio
 async def test_iter_auto_rebuild_followups_skips_on_hitl(adapter, monkeypatch):
-    prepare = AsyncMock()
-    monkeypatch.setattr(adapter, "_prepare_rebuild_followup", prepare)
+    generate = AsyncMock()
+    monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
     adapter._skill_evolution_rail = SimpleNamespace(auto_save=True, store=_FakeEvolutionStore())  # pylint: disable=protected-access
     adapter._pending_auto_rebuild_skills = ["demo-skill"]  # pylint: disable=protected-access
 
@@ -651,14 +864,14 @@ async def test_iter_auto_rebuild_followups_skips_on_hitl(adapter, monkeypatch):
     ]
 
     assert chunks == []
-    prepare.assert_not_awaited()
+    generate.assert_not_awaited()
     assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
 
 
 @pytest.mark.asyncio
 async def test_iter_auto_rebuild_followups_skips_when_auto_save_false(adapter, monkeypatch):
-    prepare = AsyncMock()
-    monkeypatch.setattr(adapter, "_prepare_rebuild_followup", prepare)
+    generate = AsyncMock()
+    monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
     adapter._skill_evolution_rail = SimpleNamespace(auto_save=False, store=_FakeEvolutionStore())  # pylint: disable=protected-access
     adapter._pending_auto_rebuild_skills = ["demo-skill"]  # pylint: disable=protected-access
 
@@ -674,7 +887,7 @@ async def test_iter_auto_rebuild_followups_skips_when_auto_save_false(adapter, m
     ]
 
     assert chunks == []
-    prepare.assert_not_awaited()
+    generate.assert_not_awaited()
     assert adapter._pending_auto_rebuild_skills == []  # pylint: disable=protected-access
 
 
@@ -704,10 +917,8 @@ async def test_iter_auto_rebuild_followups_skips_complete_on_followup_error(adap
         )
 
     monkeypatch.setattr(adapter, "_iter_skill_creator_follow_up_stream", _failing_follow_up_stream)
-    adapter._skill_evolution_rail = SimpleNamespace(  # pylint: disable=protected-access
-        store=_FakeEvolutionStore(),
-        auto_save=True,
-    )
+    adapter._skill_evolution_rail = SimpleNamespace(auto_save=True)  # pylint: disable=protected-access
+    _mock_disk_evolution_store(adapter, monkeypatch)
     adapter._pending_auto_rebuild_skills = ["demo-skill"]  # pylint: disable=protected-access
 
     _ = [
