@@ -1033,8 +1033,10 @@ class AgentWebSocketServer:
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
-        # session_id → 正在运行的流式 asyncio.Task，用于 interrupt 时精确取消
-        self._session_stream_tasks: dict[str, asyncio.Task] = {}
+        # session_id → all live stream tasks. This is host lifecycle tracking
+        # for interrupt/connection cleanup only; it never decides interaction
+        # output ownership.
+        self._session_stream_tasks: dict[str, dict[asyncio.Task, asyncio.Event]] = {}
         # Scheduler service instance (for scheduled auto_harness tasks)
         self._scheduler_service: Optional[AutoHarnessService] = None
         # Model cache for scheduled task execution (same approach as interface_deep)
@@ -1718,41 +1720,42 @@ class AgentWebSocketServer:
 
                 # 只有 cancel/supplement 才取消流式任务
                 # pause/resume 不取消，因为任务仍在运行（pause 在 checkpoint 阻塞，resume 解除阻塞）
-                stream_task: asyncio.Task | None = None
+                stream_tasks: list[asyncio.Task] = []
                 if intent in ("cancel", "supplement"):
-                    stream_task = self._session_stream_tasks.get(sid)
-                    if stream_task is not None and not stream_task.done():
+                    entries = self._session_stream_tasks.get(sid, {})
+                    for stream_task, stream_stop_event in list(entries.items()):
+                        if stream_task.done():
+                            continue
                         logger.info(
                             "[AgentWebSocketServer] cancel: 终止 session 流式任务: session_id=%s intent=%s",
                             sid,
                             intent,
                         )
+                        stream_stop_event.set()
                         stream_task.cancel()
+                        stream_tasks.append(stream_task)
 
                 try:
                     # 专门处理 cancel，复用已有 agent（不再 fallthrough 到 _handle_unary）
+                    # allow_create=False：找不到已有 agent 时不 fallback 新建（见 _handle_cancel docstring）。
                     await self._handle_cancel(
                         ws,
                         request,
                         send_lock,
-                        allow_create=not cleanup_after_cancel,
+                        allow_create=False,
                     )
                 finally:
-                    # 等待被取消的 stream task 完成清理（finally 块中的 heartbeat 取消、
-                    # _session_stream_tasks 清理、plan mode exit 检查等），避免僵尸调用。
-                    if stream_task is not None and not stream_task.done():
-                        try:
-                            await stream_task
-                        except asyncio.CancelledError:
-                            pass
-                        except Exception as exc:
-                            logger.warning(
-                                "[AgentWebSocketServer] cancel: stream task cleanup failed: "
-                                "session_id=%s intent=%s error=%s",
-                                sid,
-                                intent,
-                                exc,
-                            )
+                    if stream_tasks:
+                        results = await asyncio.gather(*stream_tasks, return_exceptions=True)
+                        for result in results:
+                            if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+                                logger.warning(
+                                    "[AgentWebSocketServer] cancel: stream task cleanup failed: "
+                                    "session_id=%s intent=%s error=%s",
+                                    sid,
+                                    intent,
+                                    result,
+                                )
                     if cleanup_after_cancel and intent in ("cancel", "supplement"):
                         await self._cleanup_client_disconnect_session_runtime(request)
                 return
@@ -1882,13 +1885,22 @@ class AgentWebSocketServer:
         request: AgentRequest,
         send_lock: asyncio.Lock,
         *,
-        allow_create: bool = True,
+        allow_create: bool = False,
     ) -> None:
         """处理 CHAT_CANCEL 中断请求：复用已有 agent 实例，避免创建新实例。
 
         cancel 请求的 params 中可能没有 mode 信息，如果走 _handle_unary 的 get_agent(mode) 路径
         会按默认 mode 创建新的 agent 实例，导致 interrupt 设置到空实例上，无法终止真正运行的 agent。
         因此 cancel 请求必须直接定位已有 agent 来处理。
+
+        默认 allow_create=False：找不到已有 agent 时不 fallback 新建。
+        原作者的 fallback 是为"缓存竞态/意外清空"异常兜底设计；但在"agent 首次初始化慢"场景下有害——
+        此时目标 agent 仍在 create_instance 的 ensure_initialized 中、尚未写入缓存，get_agent_nowait
+        返回 None，fallback 会新建第二个 agent，既无法取消正在初始化的第一个（它在线程里跑、cancel 停不掉
+        其同步段），又叠一次阻塞、拖垮 gateway 等不到响应而 timeout。
+        改动3 已让主事件循环在初始化期间保持响应（esc 能被读到），配合这里 allow_create=False 直接回
+        success，gateway 拿到结果不 timeout、前端停转圈。后端那个初始化仍会在子线程跑完、随后进缓存复用，
+        不影响后续任务。
         """
         channel_id = request.channel_id or "default"
 
@@ -1914,6 +1926,9 @@ class AgentWebSocketServer:
         resp: AgentResponse | None = None
 
         if agent is None and not allow_create:
+            # 找不到已有 agent 即视为"无运行中任务"。这覆盖 esc 命中 agent 首次初始化窗口的情况：
+            # 目标 agent 仍在 create_instance 的 ensure_initialized 中、尚未写入缓存，
+            # get_agent_nowait 返回 None。直接回 success，不 fallback 新建（见 docstring 说明）。
             logger.info(
                 "[AgentWebSocketServer] cancel: no existing agent, skip create: "
                 "channel_id=%s session_id=%s",
@@ -1927,7 +1942,7 @@ class AgentWebSocketServer:
                 payload={
                     "event_type": "chat.interrupt_result",
                     "success": True,
-                    "message": "No active agent runtime",
+                    "message": "当前会话任务已终止",
                 },
             )
 
@@ -2312,13 +2327,15 @@ class AgentWebSocketServer:
             request.request_id,
         )
 
+
     async def _handle_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
         channel_id = request.channel_id or "default"
         session_id = request.session_id or "default"
         current_task = asyncio.current_task()
+        stream_stop_event = asyncio.Event()
         if current_task is not None:
-            self._session_stream_tasks[session_id] = current_task
+            self._session_stream_tasks.setdefault(session_id, {})[current_task] = stream_stop_event
 
         # 无状态流式请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
         # code mode 状态管理，直接走 process_message_stream 即可。用轻量 agent 获取，
@@ -2439,10 +2456,12 @@ class AgentWebSocketServer:
                     pass
                 except WebSocketConnectionClosed:
                     pass
-            # 清除 session 流式任务追踪（仅清除自身，避免误删后续新任务）
-            if self._session_stream_tasks.get(session_id) is current_task:
-                self._session_stream_tasks.pop(session_id, None)
-
+            # 清除自身的宿主生命周期记录；同 session 的其它请求不受影响。
+            entries = self._session_stream_tasks.get(session_id)
+            if entries is not None and current_task is not None:
+                entries.pop(current_task, None)
+                if not entries:
+                    self._session_stream_tasks.pop(session_id, None)
             # Push plan.mode_exited if exit_plan_mode restored mode during processing
             await self._check_post_process_plan_exit(request, agent)
 
@@ -6018,6 +6037,8 @@ class AgentWebSocketServer:
                 reload_kwargs["target_channel_id"] = target_channel_id
             if target_session_id:
                 reload_kwargs["target_session_id"] = target_session_id
+            if reload_scopes:
+                reload_kwargs["reload_scopes"] = reload_scopes
             agent_reload_scopes = {"model", "team", "permissions", "agent_runtime"}
             should_reload_agents = not reload_scopes or bool(reload_scopes & agent_reload_scopes)
             if should_reload_agents:

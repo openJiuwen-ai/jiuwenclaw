@@ -75,6 +75,19 @@ def _history_user_content(params: Any, query: Any) -> Any:
     return query
 
 
+def _should_record_user_history(params: Any) -> bool:
+    if not isinstance(params, dict):
+        return True
+    if params.get("log_as_user") is False:
+        return False
+    # Second-step goal attach is host control traffic, not a user utterance.
+    if params.get("attach_goal") is True:
+        return False
+    if is_interrupt_resume_payload(params):
+        return False
+    return str(params.get("source") or "") != "proactive_recommendation"
+
+
 def _history_media_string(item: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
         value = item.get(key)
@@ -1659,8 +1672,65 @@ class JiuWenSwarm:
             adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
             return await adapter.handle_user_answer(request)
 
+        # Non-stream goal command (GET, PAUSE, CLEAR)
+        if request.req_method == ReqMethod.COMMAND_GOAL:
+            try:
+                adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+                params = request.params if isinstance(request.params, dict) else {}
+                action = params.get("action", "get")
+                session_id = self._session_manager.get_session_id(request.session_id)
+                logger.info(
+                    "[Goal] COMMAND_GOAL received: request_id=%s action=%s "
+                    "resolved_session_id=%s",
+                    request.request_id, action, session_id,
+                )
+                # Pass protocol fields straight to the Goal capability adapter.
+                goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                if goal_result is not None:
+                    result_type = goal_result.get("result_type")
+                    ok = result_type not in {"goal_error", "goal_confirm_required"}
+                    return AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=ok,
+                        payload={
+                            "action": goal_result.get("action", action),
+                            "message": goal_result.get("output", goal_result.get("error", "")),
+                            "goal": goal_result.get("goal"),
+                            # Keep this field for the existing TUI command
+                            # surface; it is a copy of the authoritative goal.
+                            "record": goal_result.get("goal"),
+                            "cleared_goal": goal_result.get("cleared_goal"),
+                            "existing_goal": goal_result.get("existing_goal"),
+                            "requested_objective": goal_result.get("requested_objective"),
+                            "code": goal_result.get("error_code"),
+                        },
+                        metadata=request.metadata,
+                    )
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": "Goal command not handled"},
+                    metadata=request.metadata,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "[JiuWenSwarm] COMMAND_GOAL 处理失败: request_id=%s error=%s",
+                    request.request_id,
+                    exc,
+                )
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": f"Goal command error: {exc}"},
+                    metadata=request.metadata,
+                )
+
         # 无状态请求（skills / skilldev / plugins / symphony）不需要 adapter，
         # 在 _ensure_adapter 之前检查，避免触发 adapter 懒初始化。
+        # COMMAND_GOAL 已在上方单独处理（其内部按需 ensure），不影响本顺序。
         skilldev_response = await self._handle_skilldev_request(request)
         if skilldev_response is not None:
             return skilldev_response
@@ -1687,8 +1757,7 @@ class JiuWenSwarm:
         query = request.params.get("query", "")
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
-        if not is_interrupt_resume_payload(request.params) \
-                and str(request.params.get("source") or "") != "proactive_recommendation":
+        if _should_record_user_history(request.params):
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
@@ -1794,6 +1863,65 @@ class JiuWenSwarm:
 
         支持多 session 并发执行，同 session 内任务按先进后出顺序执行.
         """
+        # Streaming command.goal: get/pause/clear stay one-shot; set/resume
+        # continue into the DeepAdapter attach→set/resume→read path below.
+        if request.req_method == ReqMethod.COMMAND_GOAL:
+            params = request.params if isinstance(request.params, dict) else {}
+            action = str(params.get("action", "get") or "get").strip().lower()
+            if action not in {"set", "resume"}:
+                try:
+                    adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+                    session_id = self._session_manager.get_session_id(request.session_id)
+                    goal_result = await adapter.handle_goal_command_structured(params, session_id)
+                    if goal_result is None:
+                        yield AgentResponseChunk(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            payload={"event_type": "chat.error", "error": "Goal command not handled"},
+                            is_complete=True,
+                        )
+                        return
+                    result_type = goal_result.get("result_type")
+                    if result_type == "goal_error":
+                        yield AgentResponseChunk(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            payload={
+                                "event_type": "chat.error",
+                                "code": goal_result.get("error_code", "goal_error"),
+                                "error": goal_result.get("error", "goal operation failed"),
+                                "goal": goal_result.get("goal"),
+                            },
+                            is_complete=True,
+                        )
+                        return
+                    yield AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload={
+                            "event_type": "goal.snapshot",
+                            "action": goal_result.get("action", action),
+                            "goal": goal_result.get("goal"),
+                            "cleared_goal": goal_result.get("cleared_goal"),
+                            "message": goal_result.get("output", ""),
+                        },
+                        is_complete=True,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "[JiuWenSwarm] streaming COMMAND_GOAL failed: request_id=%s error=%s",
+                        request.request_id,
+                        exc,
+                    )
+                    yield AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload={"event_type": "chat.error", "error": f"Goal command error: {exc}"},
+                        is_complete=True,
+                    )
+                return
+            # set/resume: fall through to streaming adapter (no user-history write).
+
         # SkillDev 流式请求：直接委托给 SkillDevService，绕过 ReActAgent
         if request.req_method in _SKILLDEV_METHODS:
             service = self._get_skilldev_service()
@@ -1858,8 +1986,11 @@ class JiuWenSwarm:
 
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
-        if not is_interrupt_resume_payload(request.params) \
-                and str(request.params.get("source") or "") != "proactive_recommendation":
+        # Streaming command.goal set/resume is control traffic, not a user utterance.
+        if (
+            request.req_method != ReqMethod.COMMAND_GOAL
+            and _should_record_user_history(request.params)
+        ):
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
@@ -2027,15 +2158,20 @@ class JiuWenSwarm:
                 "[JiuWenSwarm] Team模式后续请求，直接执行: request_id=%s session_id=%s",
                 rid, session_id,
             )
-            asyncio.create_task(run_stream_task())
+            stream_task = asyncio.create_task(run_stream_task())
         elif is_auto_harness_resume:
             logger.info(
                 "[JiuWenSwarm] Auto-Harness resume请求，绕过Session队列: request_id=%s session_id=%s",
                 rid, session_id,
             )
-            asyncio.create_task(run_stream_task())
+            stream_task = asyncio.create_task(run_stream_task())
         else:
-            await self._session_manager.submit_task(session_id, run_stream_task)
+            # DeepAgentRuntimeController is the session scheduler for ordinary
+            # chat.  Starting this facade task immediately lets runtime_send()
+            # atomically route an arriving user input as a steer, follow-up, or
+            # replacement round; an outer SessionManager queue would otherwise
+            # wait behind the long-lived output consumer.
+            stream_task = asyncio.create_task(run_stream_task())
 
         suppress_a2ui_stream = False
         a2ui_pending_render_sent = False
@@ -2302,6 +2438,24 @@ class JiuWenSwarm:
         except asyncio.CancelledError:
             logger.info("[JiuWenSwarm] 流式处理被中断: request_id=%s", rid)
             raise
+        finally:
+            # The adapter producer owns RuntimeOutputStream.  Cancelling and
+            # awaiting it releases the runtime output lease and aborts the
+            # in-flight round when the outer WebSocket consumer disappears.
+            if not stream_task.done():
+                stream_task.cancel()
+            try:
+                await stream_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # run_stream_task normally converts producer failures into a
+                # queue item.  Do not let a cleanup failure mask cancellation.
+                logger.debug(
+                    "[JiuWenSwarm] stream producer cleanup failed: request_id=%s",
+                    rid,
+                    exc_info=True,
+                )
 
         assistant_message = final_answer_content or "".join(final_answer_chunks)
         repair_call = getattr(adapter, "repair_model_response", None)

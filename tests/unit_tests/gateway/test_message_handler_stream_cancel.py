@@ -127,6 +127,14 @@ async def _drain_robot_messages(handler: _TestMessageHandler) -> list[Message]:
         messages.append(msg)
 
 
+async def _wait_for_sent_request_count(count: int, timeout: float = 0.2) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while len(_FakeAgentClient.sent_requests) < count:
+        if asyncio.get_running_loop().time() >= deadline:
+            return
+        await asyncio.sleep(0.005)
+
+
 @pytest.mark.asyncio
 async def test_tui_non_stream_request_times_out_before_frontend_request(monkeypatch) -> None:
     handler = _TestMessageHandler.create_with_client(_HangingAgentClient())
@@ -373,6 +381,139 @@ def test_confirm_interrupt_answer_chat_send_keeps_existing_stream() -> None:
     assert not _should_cancel_existing_stream_before_chat_send(msg)
 
 
+def test_raw_goal_text_is_not_interaction_managed_without_explicit_mode() -> None:
+    _is_interaction_managed_chat_send = getattr(
+        MessageHandler,
+        "_is_interaction_managed_chat_send",
+    )
+
+    assert _is_interaction_managed_chat_send(
+        _chat_send_message(session_id="sess-goal", mode="agent.plan")
+    ) is False
+
+    goal_msg = _chat_send_message(session_id="sess-goal", mode="agent.plan")
+    goal_msg.params["query"] = "/goal set 完成项目重构"
+    assert _is_interaction_managed_chat_send(goal_msg) is False
+
+    objective_msg = _chat_send_message(session_id="sess-goal", mode="agent.plan")
+    objective_msg.params["query"] = "/goal 完成项目重构"
+    assert _is_interaction_managed_chat_send(objective_msg) is False
+
+    resume_msg = _chat_send_message(session_id="sess-goal", mode="agent.plan")
+    resume_msg.params["query"] = "/goal resume"
+    assert _is_interaction_managed_chat_send(resume_msg) is False
+
+    pause_msg = _chat_send_message(session_id="sess-goal", mode="agent.plan")
+    pause_msg.params["query"] = "/goal pause"
+    assert _is_interaction_managed_chat_send(pause_msg) is False
+
+    clear_msg = _chat_send_message(session_id="sess-goal", mode="agent.plan")
+    clear_msg.params["query"] = "/goal clear"
+    assert _is_interaction_managed_chat_send(clear_msg) is False
+
+    attach_msg = _chat_send_message(session_id="sess-goal", mode="agent")
+    attach_msg.params["query"] = ""
+    attach_msg.params["attach_goal"] = True
+    assert _is_interaction_managed_chat_send(attach_msg) is True
+
+    steer_msg = _chat_send_message(session_id="sess-goal", mode="agent")
+    steer_msg.params["input_mode"] = "steer"
+    assert _is_interaction_managed_chat_send(steer_msg) is True
+
+    follow_up_msg = _chat_send_message(session_id="sess-goal", mode="agent")
+    follow_up_msg.params["input_mode"] = "follow_up"
+    assert _is_interaction_managed_chat_send(follow_up_msg) is True
+
+    runtime_mode_msg = _chat_send_message(session_id="sess-goal", mode="agent")
+    runtime_mode_msg.params["runtime_mode"] = "steer"
+    assert _is_interaction_managed_chat_send(runtime_mode_msg) is True
+
+
+def test_goal_attach_chat_send_does_not_cancel_existing_user_stream() -> None:
+    _should_cancel_existing_stream_before_chat_send = getattr(
+        MessageHandler,
+        "_should_cancel_existing_stream_before_chat_send",
+    )
+    # Plain ``/goal set`` text without input_mode still replaces (pre-Goal lifecycle).
+    plain_goal_msg = _chat_send_message(channel_id="tui", session_id="sess-goal")
+    plain_goal_msg.params["query"] = "/goal set 查询石家庄天气"
+    assert _should_cancel_existing_stream_before_chat_send(plain_goal_msg) is True
+
+    # Second-step attach must keep the existing host stream.
+    attach_msg = _chat_send_message(channel_id="tui", session_id="sess-goal")
+    attach_msg.params["query"] = ""
+    attach_msg.params["attach_goal"] = True
+    assert _should_cancel_existing_stream_before_chat_send(attach_msg) is False
+
+
+@pytest.mark.asyncio
+async def test_interaction_managed_goal_input_does_not_cancel_existing_stream() -> None:
+    handler = _TestMessageHandler.create()
+    goal_task = _seed_stream_task(
+        handler, rid="rid-goal", channel_id="web", session_id="sess_goal",
+    )
+    msg = _chat_send_message(channel_id="web", session_id="sess_goal")
+    msg.params["input_mode"] = "steer"
+
+    assert not handler._should_cancel_existing_stream_before_chat_send(msg)
+    assert not goal_task.cancelled()
+    await asyncio.sleep(0)
+    assert len(_FakeAgentClient.sent_requests) == 0
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_send_still_replaces_existing_stream() -> None:
+    handler = _TestMessageHandler.create()
+    goal_task = _seed_stream_task(
+        handler, rid="rid-goal", channel_id="tui", session_id="sess_goal",
+    )
+    msg = _chat_send_message(channel_id="tui", session_id="sess_goal")
+    msg.params["query"] = "also check Tianjin weather"
+
+    try:
+        cancelled = await handler.cancel_stream_tasks_for_channel(msg)
+        assert cancelled == 1
+        assert goal_task.cancelled()
+    finally:
+        if not goal_task.done():
+            goal_task.cancel()
+        await asyncio.gather(goal_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_follow_up_input_keeps_existing_stream() -> None:
+    handler = _TestMessageHandler.create()
+    goal_task = _seed_stream_task(
+        handler, rid="rid-goal", channel_id="tui", session_id="sess_goal",
+    )
+    msg = _chat_send_message(channel_id="tui", session_id="sess_goal")
+    msg.params["runtime_mode"] = "follow_up"
+
+    try:
+        assert not handler._should_cancel_existing_stream_before_chat_send(msg)
+        assert not goal_task.cancelled()
+    finally:
+        goal_task.cancel()
+        await asyncio.gather(goal_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_steer_input_keeps_existing_stream() -> None:
+    handler = _TestMessageHandler.create()
+    goal_task = _seed_stream_task(
+        handler, rid="rid-goal", channel_id="web", session_id="sess_goal",
+    )
+    msg = _chat_send_message(channel_id="web", session_id="sess_goal")
+    msg.params["input_mode"] = "steer"
+
+    try:
+        assert not handler._should_cancel_existing_stream_before_chat_send(msg)
+        assert not goal_task.cancelled()
+    finally:
+        goal_task.cancel()
+        await asyncio.gather(goal_task, return_exceptions=True)
+
+
 def test_permission_interrupt_answer_chat_send_keeps_existing_stream() -> None:
     _should_cancel_existing_stream_before_chat_send = getattr(
         MessageHandler,
@@ -551,7 +692,7 @@ async def test_disconnect_cancel_can_be_delayed_until_grace_expires() -> None:
     await asyncio.sleep(0)
     assert _FakeAgentClient.sent_requests == []
 
-    await asyncio.sleep(0.03)
+    await _wait_for_sent_request_count(1)
     assert len(_FakeAgentClient.sent_requests) == 1
 
 

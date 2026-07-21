@@ -3,16 +3,17 @@
 """External memory configuration helpers.
 
 Reads `memory.external` from config.yaml. For provider=openjiuwen, also
-maps the jiuwenswarm-shaped config (`memory.external.stores` + top-level
-`embed`) into the config dict that OpenJiuwenMemoryProvider expects.
-Concrete Store / Embedding instances are built inside the provider — not
-here.
+maps the jiuwenswarm-shaped config (`memory.external.openjiuwen` + top-level
+`embed`) into the config dict that OpenJiuwenMemoryProvider expects, and
+builds the `MemoryScopeConfig` (LLM + embedding) the LTM engine needs to
+extract and retrieve memories. Concrete Store / Embedding instances are
+built inside the provider — not here.
 """
 
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from jiuwenswarm.common.utils import get_user_workspace_dir
 
@@ -85,8 +86,11 @@ def _resolve_ltm_dir() -> Path:
     return base
 
 
-def build_openjiuwen_provider_config(ext_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Map jiuwenswarm config into the dict OpenJiuwenMemoryProvider expects.
+def build_openjiuwen_provider_config(
+    ext_cfg: Dict[str, Any],
+    full_config: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Any], Any]:
+    """Map jiuwenswarm config into what OpenJiuwenMemoryProvider expects.
 
     Provider-expected shape:
         {
@@ -95,6 +99,16 @@ def build_openjiuwen_provider_config(ext_cfg: Dict[str, Any]) -> Dict[str, Any]:
           "db":        {"backend": "sqlite", "path": "..."},
           "embedding": {"model_name": "...", "base_url": "...", "api_key": "..."},
         }
+
+    Returns:
+        (provider_config, scope_config)
+        - provider_config: the dict above, consumed by the provider to build
+          its KV / Vector / DB stores and embedding model.
+        - scope_config: a ``MemoryScopeConfig`` (LLM + embedding) the LTM
+          engine needs to extract memories (sync_turn) and run vector search
+          (prefetch / ltm_search). None when the LLM (models.defaults[*] with
+          is_default: true) is not configured — storage of raw messages still
+          works, but fact extraction / vector search will be skipped.
     """
     oj_cfg = ext_cfg.get("openjiuwen") or {}
     ltm_dir = _resolve_ltm_dir()
@@ -119,9 +133,117 @@ def build_openjiuwen_provider_config(ext_cfg: Dict[str, Any]) -> Dict[str, Any]:
             "[external_memory] Embedding not configured — OpenJiuwen LTM will skip vector search"
         )
 
-    return {
+    provider_config = {
         "kv": {"backend": kv_backend, "path": kv_path},
         "vector": {"backend": vector_backend, "persist_directory": vector_dir},
         "db": {"backend": db_backend, "path": db_path},
         "embedding": embedding,
     }
+
+    scope_config = _build_scope_config(full_config, embedding)
+
+    return provider_config, scope_config
+
+
+def _build_scope_config(
+    full_config: Optional[Dict[str, Any]],
+    embedding: Dict[str, Any],
+) -> Any:
+    """Build ``MemoryScopeConfig`` from config.yaml's ``models.defaults`` list.
+
+    jiuwenswarm stores default models as a *list* under ``models.defaults``,
+    each entry carrying ``model_client_config`` (api_base/api_key/model_name/
+    client_provider/verify_ssl/timeout) + ``model_config_obj`` (temperature)
+    + an ``is_default: true`` marker. We pick the default entry.
+
+    Returns None when the LLM is not configured (no api_key / model_name /
+    api_base) — sync_turn (fact extraction) won't work in that case, but raw
+    message storage still proceeds.
+    """
+    from openjiuwen.core.memory.config.config import MemoryScopeConfig
+    from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
+    from openjiuwen.core.foundation.llm.schema.config import (
+        ModelRequestConfig,
+        ModelClientConfig,
+    )
+
+    cfg = full_config if full_config is not None else _load_config()
+    models_cfg = (cfg or {}).get("models", {}) if isinstance(cfg, dict) else {}
+
+    # models.defaults is a list; fall back to models.default (dict) for safety.
+    defaults = models_cfg.get("defaults") if isinstance(models_cfg, dict) else None
+    default_model: Dict[str, Any] = {}
+    if isinstance(defaults, list):
+        for entry in defaults:
+            if isinstance(entry, dict) and entry.get("is_default"):
+                default_model = entry
+                break
+        if not default_model and defaults:
+            default_model = defaults[0] if isinstance(defaults[0], dict) else {}
+    elif isinstance(defaults, dict):
+        default_model = defaults
+    else:
+        default_model = models_cfg.get("default", {}) if isinstance(models_cfg, dict) else {}
+
+    client_cfg = default_model.get("model_client_config", {}) if isinstance(default_model, dict) else {}
+    model_obj_cfg = default_model.get("model_config_obj", {}) if isinstance(default_model, dict) else {}
+
+    api_base = client_cfg.get("api_base", "")
+    api_key = client_cfg.get("api_key", "")
+    model_name = client_cfg.get("model_name", "")
+    client_provider = client_cfg.get("client_provider", "OpenAI")
+    verify_ssl = client_cfg.get("verify_ssl", True)
+    timeout = client_cfg.get("timeout", 1800)
+
+    if not api_key or not model_name or not api_base:
+        logger.warning(
+            "[external_memory] LLM not configured (models.defaults[is_default=true]) — "
+            "sync_turn (fact extraction) will not work"
+        )
+        return None
+
+    # ModelRequestConfig carries model_name + sampling params; ModelClientConfig
+    # carries connection settings (provider/api_key/api_base/timeout/verify_ssl).
+    # They are split by design in openjiuwen — model_name is NOT a client field.
+    model_cfg = ModelRequestConfig(
+        model_name=model_name,
+        temperature=model_obj_cfg.get("temperature", 0.2),
+        top_p=model_obj_cfg.get("top_p", 0.7),
+    )
+    model_client_cfg = ModelClientConfig(
+        client_provider=client_provider,
+        api_key=api_key,
+        api_base=api_base,
+        verify_ssl=verify_ssl,
+        timeout=timeout,
+    )
+
+    embed_model_name = embedding.get("model_name", "")
+    embed_base_url = embedding.get("base_url", "")
+    embed_api_key = embedding.get("api_key")
+    embed_cfg_obj = None
+    if embed_model_name and embed_base_url:
+        embed_cfg_obj = EmbeddingConfig(
+            model_name=embed_model_name,
+            base_url=embed_base_url,
+            api_key=embed_api_key,
+        )
+    else:
+        logger.warning(
+            "[external_memory] Embedding model_name or base_url missing — "
+            "MemoryScopeConfig will not include embedding_cfg"
+        )
+
+    scope_config_kwargs: Dict[str, Any] = {
+        "model_cfg": model_cfg,
+        "model_client_cfg": model_client_cfg,
+    }
+    if embed_cfg_obj is not None:
+        scope_config_kwargs["embedding_cfg"] = embed_cfg_obj
+
+    scope_config = MemoryScopeConfig(**scope_config_kwargs)
+    logger.info(
+        "[external_memory] LLM config built for LTM: model=%s api_base=%s",
+        model_name, api_base,
+    )
+    return scope_config

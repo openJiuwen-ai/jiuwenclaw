@@ -231,7 +231,7 @@ class CronJobStore:
             enabled=bool(enabled),
             cron_expr=str(cron_expr or "").strip(),
             timezone=str(timezone or "").strip(),
-            wake_offset_seconds=int(wake_offset_seconds) if wake_offset_seconds is not None else 300,
+            wake_offset_seconds=int(wake_offset_seconds) if wake_offset_seconds is not None else 0,
             description=str(description or ""),
             targets=str(targets or "").strip(),
             session_id=sid,

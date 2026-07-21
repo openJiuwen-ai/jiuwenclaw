@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CircleAlert, LoaderCircle } from 'lucide-react';
+import { Check, ChevronDown, CircleAlert, Code2, LoaderCircle, Workflow } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, type ChatRuntime } from '../../stores/chatStore';
 import { webClient } from '../../services/webClient';
+import { DeleteDialog } from '../dialogs/Dialogs';
 import {
   PROJECT_SESSION_PAGE_SIZE,
   useWorkspaceStore,
@@ -58,7 +59,7 @@ export type NewConversationOptions = {
 };
 
 function isDefaultProject(project: ProjectInfo): boolean {
-  return project.is_default || project.project_id === 'default';
+  return project.is_default || project.project_id === 'default' || project.project_id === 'default_code';
 }
 
 interface ConversationSidebarProps {
@@ -567,19 +568,16 @@ function ProjectDeleteDialog({
 }) {
   const { t } = useTranslation();
   return (
-    <div className="conversation-path-dialog-backdrop" role="presentation">
-      <div className="conversation-path-dialog" role="dialog" aria-modal="true" aria-labelledby="project-delete-title">
-        <div id="project-delete-title" className="conversation-path-dialog__title">{t('multiSession.project.deleteProject')}</div>
-        <div className="conversation-path-dialog__message">
-          {t('multiSession.project.deleteProjectDescription', { projectName: project.name })}
-        </div>
-        {error ? <div className="conversation-path-dialog__error">{error}</div> : null}
-        <div className="conversation-path-dialog__actions">
-          <button type="button" onClick={onCancel} disabled={deleting}>{t('multiSession.project.cancel')}</button>
-          <button type="button" onClick={onDelete} disabled={deleting}>{t('multiSession.delete')}</button>
-        </div>
-      </div>
-    </div>
+    <DeleteDialog
+      title={project.name}
+      dialogTitle={t('multiSession.project.deleteProject')}
+      descriptionKey="multiSession.project.deleteProjectDescription"
+      descriptionValues={{ projectName: project.name }}
+      deleting={deleting}
+      error={error ?? null}
+      onCancel={onCancel}
+      onDelete={onDelete}
+    />
   );
 }
 
@@ -610,9 +608,12 @@ export function ConversationSidebar({
   const [deleteProjectBusy, setDeleteProjectBusy] = useState(false);
   const [deleteProjectError, setDeleteProjectError] = useState<string | null>(null);
   const [projectAddMenuOpen, setProjectAddMenuOpen] = useState(false);
+  const [workModeMenuOpen, setWorkModeMenuOpen] = useState(false);
   const addMenuRef = useRef<HTMLDivElement>(null);
+  const workModeMenuRef = useRef<HTMLDivElement>(null);
   const previousProcessing = useRef<Record<string, boolean>>({});
   const {
+    workMode,
     projects,
     projectSessions,
     projectSessionTotals,
@@ -630,7 +631,31 @@ export function ConversationSidebar({
     collapseSessions,
     pinSession,
     renameSession,
+    setWorkMode,
   } = useWorkspaceStore();
+
+  useEffect(() => {
+    if (!workModeMenuOpen) return;
+    const close = (event: MouseEvent) => {
+      if (!workModeMenuRef.current?.contains(event.target as Node)) setWorkModeMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setWorkModeMenuOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [workModeMenuOpen]);
+
+  const switchWorkMode = async (nextMode: 'work' | 'code') => {
+    setWorkModeMenuOpen(false);
+    if (nextMode === workMode) return;
+    await setWorkMode(nextMode);
+    onNew();
+  };
 
   const cronJobs = useCronStore((s) => s.jobs);
   const loadCronJobs = useCronStore((s) => s.loadJobs);
@@ -1033,7 +1058,51 @@ export function ConversationSidebar({
 
   return (
     <aside className="conversation-sidebar" aria-label={t('multiSession.conversations')}>
-      <div className="conversation-sidebar__title">{t('multiSession.title')}</div>
+      <div ref={workModeMenuRef} className="conversation-sidebar__mode">
+        <button
+          type="button"
+          className="conversation-sidebar__mode-trigger"
+          onClick={() => setWorkModeMenuOpen((open) => !open)}
+          aria-haspopup="menu"
+          aria-expanded={workModeMenuOpen}
+          disabled={Boolean(activeSessionId && runtimes[activeSessionId]?.isProcessing)}
+        >
+          <span>{workMode === 'code' ? t('codeMode.code') : t('codeMode.work')}</span>
+          <ChevronDown size={15} className={workModeMenuOpen ? 'is-open' : ''} />
+        </button>
+        {workModeMenuOpen ? (
+          <div className="conversation-sidebar__mode-menu" role="menu">
+            <button
+              type="button"
+              className={workMode === 'work' ? 'is-active' : ''}
+              onClick={() => void switchWorkMode('work')}
+              role="menuitemradio"
+              aria-checked={workMode === 'work'}
+            >
+              <Workflow size={17} />
+              <span>
+                <strong>{t('codeMode.work')}</strong>
+                <small>{t('codeMode.workDescription')}</small>
+              </span>
+              {workMode === 'work' ? <Check size={16} /> : null}
+            </button>
+            <button
+              type="button"
+              className={workMode === 'code' ? 'is-active' : ''}
+              onClick={() => void switchWorkMode('code')}
+              role="menuitemradio"
+              aria-checked={workMode === 'code'}
+            >
+              <Code2 size={17} />
+              <span>
+                <strong>{t('codeMode.code')}</strong>
+                <small>{t('codeMode.codeDescription')}</small>
+              </span>
+              {workMode === 'code' ? <Check size={16} /> : null}
+            </button>
+          </div>
+        ) : null}
+      </div>
       <div className="conversation-sidebar__operations">
         <button type="button" className="conversation-sidebar__new" onClick={() => {
           setSelectedProject(null);

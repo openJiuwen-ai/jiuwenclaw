@@ -1144,7 +1144,7 @@ def ensure_team_evolution_watcher(
             source,
         )
         return
-    if not getattr(rail, "auto_scan", True) and not getattr(rail, "completion_followup_enabled", False):
+    if not rail.signal_trigger and not rail.review_trigger:
         logger.info(
             "[TeamHelpers] evolution monitor skipped because team evolution is disabled: "
             "channel_id=%s session_id=%s source=%s",
@@ -2479,7 +2479,7 @@ async def _watch_team_evolution_and_push(
             fallback_sec=TEAM_EVOLUTION_EVENT_TIMEOUT_SEC,
         )
         while True:
-            if not getattr(rail, "auto_scan", True):
+            if not rail.signal_trigger and not rail.review_trigger:
                 if active_cycle_request_id is not None:
                     await push_evolution_status(
                         push_context,

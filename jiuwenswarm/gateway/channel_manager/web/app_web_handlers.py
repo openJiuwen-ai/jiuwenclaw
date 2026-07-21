@@ -555,6 +555,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "session.switch",
     "acp.tool_response",
     "team.delete",
+    "command.goal",
     "chat.send",
     "chat.interrupt",
     "chat.resume",
@@ -645,6 +646,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "session.switch",
     "acp.tool_response",
     "team.delete",
+    "command.goal",
     "browser.start",
     "team.snapshot",
     "team.history.get",
@@ -1639,6 +1641,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 env_updates[env_key] = ""
             else:
                 env_updates[env_key] = str(val).strip()
+
+        if "evolution_auto_scan" in params:
+            env_updates["EVOLUTION_REVIEW_TRIGGER"] = env_updates["EVOLUTION_AUTO_SCAN"]
 
         raw = get_config_raw()
         preferred_lang = raw.get("preferred_language", "zh")

@@ -15,6 +15,7 @@ Code 模式独占逻辑全部收敛于此：
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -510,7 +511,30 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 
-        await self._instance.ensure_initialized()
+        # 改动3：让 agent 初始化（ensure_initialized）在独立线程 + 独立事件循环里跑，
+        # 主事件循环在初始化的十几秒里保持响应，esc 的 cancel 不再堵队列、后端能尽快停。
+        #
+        # 为什么不能直接 `await self._instance.ensure_initialized()`：
+        #   ensure_initialized 是 async def（openjiuwen/harness/deep_agent.py:864），但它内部
+        #   _ensure_initialized 里有同步阻塞段——init_workspace()（建目录）、rail_inst.init(self)
+        #   （各 rail init，ProjectMemoryRail 扫描项目记忆文件/建索引就在这）。这些是 CPU/磁盘密集
+        #   的同步调用，跑时不 yield 事件循环，主事件循环被占住，WebSocket recv() 读不进 esc 的
+        #   cancel 消息——用户按 esc 后后端要等十几秒才停（真 bug，日志 14:25:30→50 坐实）。
+        #
+        # 为什么不能用 asyncio.to_thread：to_thread 只能包同步函数；ensure_initialized 是 async def，
+        # 直接传会在无运行 loop 的线程里报错。必须用 asyncio.run 在子线程里另起独立 loop 来跑它。
+        #
+        # 做法：run_in_executor 把"在子线程跑 asyncio.run(ensure_initialized())"丢到线程池，
+        # 主事件循环 await 这个 future 时保持响应，期间能读取并处理 esc 的 cancel。
+        # 跑完后回主 loop 继续后续代码，时序与语义不变；唯一变化是初始化期间主 loop 活。
+        #
+        # 安全性：ensure_initialized 操作的是 self._pending_rails、workspace 文件等实例自己的资源，
+        # 不碰全局 asyncio 原语，不跨 loop 访问主 loop 对象，不会死锁。
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: asyncio.run(self._instance.ensure_initialized()),
+        )
         # 修正 .agent_history 写入路径：openjiuwen 文件工具默认将
         # .agent_history 写到 Workspace.root_path（即项目目录），
         # 这里覆写为 agent 系统 workspace，避免污染用户项目目录。

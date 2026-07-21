@@ -1044,7 +1044,8 @@
     },
     "search": {
       "placeholder": "Search",
-      "noResults": "No matching templates found. Try a different keyword."
+      "noResults": "No matching templates found. Try a different keyword.",
+      "noResultsJobs": "No matching tasks found. Try a different keyword."
     },
     "table": {
       "name": "Name",
@@ -2059,6 +2060,15 @@
       "sendFileDesc": "Send files to user"
     }
   },
+  "codeMode": {
+    "work": "Work",
+    "code": "Code",
+    "workDescription": "Office, collaboration, and general tasks",
+    "codeDescription": "Inspect and modify code in a project directory",
+    "environment": "Environment",
+    "changes": "Changes",
+    "review": "Review"
+  },
   "multiSession": {
     "title": "Work",
     "conversations": "Conversations",
@@ -2098,7 +2108,7 @@
       "noProjectMatches": "No matching projects",
       "noProjects": "No projects",
       "noConversations": "No conversations",
-      "noSessions": "No trigger sessions",
+      "noSessions": "No execution sessions",
       "startConversation": "Start a new conversation from {{projectName}}",
       "pinProject": "Pin project",
       "unpinProject": "Unpin project",
@@ -2110,7 +2120,7 @@
       "rename": "Rename",
       "renamePlaceholder": "Enter a new name",
       "deleteProject": "Delete project",
-      "deleteProjectDescription": "Remove “{{projectName}}”? Unpinned conversations in this project will temporarily move to the default project.",
+      "deleteProjectDescription": "Remove “<name>{{projectName}}</name>”? Unpinned conversations in this project will temporarily move to the default project.",
       "defaultProjectName": "Default Project",
       "absolutePathError": "Enter an absolute path, for example /Users/name/work/project",
       "errors": {
@@ -2121,7 +2131,7 @@
       "confirm": "Confirm"
     },
     "runtime": { "processing": "Processing" },
-    "deleteDialog": { "title": "Delete", "description": "Delete “{{title}}”? This action cannot be undone." },
+    "deleteDialog": { "title": "Delete", "description": "Delete “<name>{{title}}</name>”? This action cannot be undone." },
     "notFound": { "title": "Conversation not found or deleted", "newConversation": "New conversation" },
     "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
   },

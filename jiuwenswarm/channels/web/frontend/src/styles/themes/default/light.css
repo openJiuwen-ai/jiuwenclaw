@@ -87,6 +87,11 @@
   --color-chat-accent: #1476ff;
   --color-chat-accent-subtle: #deecff;
   --color-cron-running: var(--color-feedback-success);
+  --color-code-diff-added-surface: #e9f7ed;
+  --color-code-diff-added-gutter: #ccebd5;
+  --color-code-diff-removed-surface: #fdecec;
+  --color-code-diff-removed-gutter: #f7cccc;
+  --color-code-diff-line-marker: #9ca3af;
 
   /* Utility color roles */
   --color-backdrop: rgba(0, 0, 0, 0.35);

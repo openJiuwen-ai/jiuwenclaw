@@ -429,6 +429,15 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
         notes="受控通道安全审查：args 透传注入 prompt，"
               "由 Agent 执行 git status/diff/log 并做安全分析；无 git 预检。",
     ),
+    SlashCommandEntry(
+        id="goal",
+        canonical_text="/goal [set <objective>|pause|resume|clear]",
+        scope="client",
+        req_method="command.goal",
+        notes="TUI session-level persistent goal management. "
+              "SET/RESUME triggers a streaming goal round; "
+              "GET/PAUSE/CLEAR returns status immediately.",
+    ),
 )
 
 
