@@ -11,7 +11,11 @@ from zoneinfo import ZoneInfo
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 from jiuwenclaw.gateway.cron.store import CronJobStore
 from jiuwenclaw.gateway.cron.store_base import CronJobStoreBackend
-from jiuwenclaw.gateway.cron.cron_expr import iso_to_seven_field_cron, validate_cron_schedule_not_stale
+from jiuwenclaw.gateway.cron.cron_expr import (
+    clamp_wake_offset_for_delay_seconds,
+    iso_to_seven_field_cron,
+    validate_cron_schedule_not_stale,
+)
 from jiuwenclaw.gateway.cron.scheduler import _cron_next_push_dt, CronSchedulerService
 from jiuwenclaw.gateway.cron.models import (
     CronTargetChannel,
@@ -40,12 +44,15 @@ _cron_route_ctx: contextvars.ContextVar[CronToolRoute | None] = contextvars.Cont
 
 @dataclass(frozen=True, slots=True)
 class CronToolRoute:
-    """当前请求同步到 Gateway 时使用的路由（request_id / channel / session / chat_type）。"""
+    """当前请求同步到 Gateway 时使用的路由（含企业三元组）。"""
 
     request_id: str = ""
     channel_id: str = CronTargetChannel.WEB.value
     session_id: str | None = None
     chat_type: str | None = None  # "group" 表示群聊, "p2p" 或 None 表示私聊
+    group_id: str | None = None
+    bot_id: str | None = None
+    user_id: str | None = None
 
 
 class CronTools:
@@ -78,6 +85,9 @@ class CronTools:
 
     async def ensure_scheduler(self) -> CronSchedulerService | None:
         """Ensure the scheduler is started."""
+        # 企业就绪时由 Gateway 调度权威；Agent 不启本地 scheduler，避免双触发
+        if self._enterprise_ready():
+            return None
         if self._scheduler is not None and self._scheduler.is_running():
             return self._scheduler
         
@@ -180,11 +190,17 @@ class CronTools:
             else None
         )
         chat_type = str(metadata.get("chat_type") or "").strip() or None
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        group_id, bot_id, user_id = extract_routing_triple(metadata)
         return CronToolRoute(
             request_id=request_id,
             channel_id=channel_id,
             session_id=session_id,
             chat_type=chat_type,
+            group_id=group_id,
+            bot_id=bot_id,
+            user_id=user_id,
         )
 
     async def _shared_gateway_store(self) -> CronJobStoreBackend | None:
@@ -301,7 +317,111 @@ class CronTools:
         # 路由无 app_id（如 Web）但配置仅一个多 bot 子节点时，与网关 CronController 逻辑一致。
         return upgrade_bare_feishu_target_for_multi_bot_config(t)
 
+    def _routing_identity_payload(self) -> dict[str, str]:
+        r = self._route()
+        out: dict[str, str] = {}
+        if r.group_id:
+            out["group_id"] = r.group_id
+        if r.bot_id:
+            out["bot_id"] = r.bot_id
+        if r.user_id:
+            out["user_id"] = r.user_id
+        return out
+
+    @staticmethod
+    def _enterprise_ready() -> bool:
+        from jiuwenclaw.gateway.cron.enterprise_gate import enterprise_cron_enabled
+
+        return enterprise_cron_enabled()
+
+    async def _list_jobs_enterprise(self) -> list[dict[str, Any]]:
+        """企业路径：按 (group_id, bot_id, user_id) 只读查询。
+
+        有 ``jiuwenclaw_id`` 时走 GatewayDb（带实例隔离）；无 jid 时绕过
+        ``list_records`` 的空短路，直接用 DB handler 按三元组查。
+        """
+        from jiuwenclaw.gateway.cron.enterprise_gate import (
+            extract_routing_triple,
+            get_bound_jiuwenclaw_id,
+            routing_triple_complete,
+        )
+        from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
+
+        identity = self._routing_identity_payload()
+        g, b, u = extract_routing_triple(identity)
+        if not routing_triple_complete(g, b, u):
+            raise ValueError("enterprise cron list requires group_id, bot_id and user_id")
+
+        filters: dict[str, Any] = {"group_id": g, "bot_id": b, "user_id": u}
+        order_by: list[tuple[str, bool]] = [("updated_at", True)]
+        gdb_mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
+        jid = get_bound_jiuwenclaw_id()
+        if jid:
+            rows = await gdb_mod.GatewayDb.current().list_records(
+                "cron_job",
+                filters=filters,
+                order_by=order_by,
+            )
+        else:
+            logger.info(
+                "[CronTools] enterprise list without jiuwenclaw_id; "
+                "query cron_job by routing triple only"
+            )
+            db_mod = import_manager_ws_client_module("infrastructure.db")
+            handler = await db_mod.ensure_db_handler(log_prefix="cron_job")
+            raw_rows = await handler.list_records(
+                "cron_job",
+                filters,
+                limit=10_000,
+                offset=0,
+                order_by=order_by,
+            )
+            row_to_dict = getattr(gdb_mod, "_row_to_dict", None)
+            rows = []
+            for raw in raw_rows or []:
+                if callable(row_to_dict):
+                    rows.append(row_to_dict(raw))
+                elif isinstance(raw, dict):
+                    rows.append(raw)
+                elif hasattr(raw, "to_dict") and callable(raw.to_dict):
+                    rows.append(raw.to_dict())
+                else:
+                    rows.append(raw)
+
+        out: list[dict[str, Any]] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            job_id = str(row.get("job_id") or "").strip()
+            if not job_id:
+                continue
+            item = {
+                "id": job_id,
+                "name": row.get("name"),
+                "enabled": bool(row.get("enabled", False)),
+                "expired": bool(row.get("expired", False)),
+                "cron_expr": row.get("cron_expr"),
+                "timezone": row.get("timezone"),
+                "wake_offset_seconds": row.get("wake_offset_seconds"),
+                "description": row.get("description") or "",
+                "targets": row.get("targets"),
+                "session_id": row.get("session_id"),
+                "chat_type": row.get("chat_type"),
+                "mode": row.get("mode") or "agent",
+                "delete_after_run": bool(row.get("delete_after_run", False)),
+                "group_id": row.get("group_id"),
+                "bot_id": row.get("bot_id"),
+                "user_id": row.get("user_id"),
+                "created_at": row.get("created_at"),
+                "updated_at": row.get("updated_at"),
+            }
+            out.append(item)
+        return out
+
     async def list_jobs(self) -> Any:
+        # 与 ensure_scheduler 对齐：仅企业就绪（jid 已绑定）走企业只读
+        if self._enterprise_ready():
+            return await self._list_jobs_enterprise()
         jobs = await self._local_store.list_jobs()
         if jobs:
             return [j.to_dict() for j in jobs]
@@ -316,6 +436,12 @@ class CronTools:
             return []
 
     async def get_job(self, job_id: str) -> Any:
+        if self._enterprise_ready():
+            jobs = await self._list_jobs_enterprise()
+            for item in jobs:
+                if str(item.get("id") or "") == str(job_id or "").strip():
+                    return item
+            return None
         job = await self._local_store.get_job(job_id)
         if job is not None:
             return job.to_dict()
@@ -330,6 +456,9 @@ class CronTools:
             return None
 
     async def create_job(self, params: dict[str, Any]) -> Any:
+        from jiuwenclaw.gateway.cron.cron_job_mutations import build_new_cron_job
+        from jiuwenclaw.gateway.cron.enterprise_gate import routing_triple_complete
+
         normalized = dict(params or {})
         normalized.pop("session_id", None)
         targets_str = self._normalize_targets_param(normalized.get("targets"))
@@ -346,7 +475,37 @@ class CronTools:
             run_at = datetime.now(tz=ZoneInfo(timezone)) + timedelta(seconds=delay)
             cron_expr = iso_to_seven_field_cron(run_at.isoformat(), timezone=timezone)
             delete_after_run = True if delete_after_run is None else delete_after_run
-            logger.info("[CronTools] schedule one-shot via delay_seconds=%s cron_expr=%s", delay, cron_expr)
+            # 企业就绪：短 delay 时 harness 默认 wake_offset=300 会使 wake_at 早于 now；收敛到 ≤ delay
+            if self._enterprise_ready():
+                raw_wake = normalized.get("wake_offset_seconds")
+                clamped_wake = clamp_wake_offset_for_delay_seconds(raw_wake, delay)
+                if raw_wake is not None:
+                    try:
+                        before = int(raw_wake)
+                    except (TypeError, ValueError):
+                        before = raw_wake
+                else:
+                    before = None
+                if before != clamped_wake:
+                    logger.info(
+                        "[CronTools] clamp wake_offset for delay_seconds=%s: %s -> %s",
+                        delay,
+                        before,
+                        clamped_wake,
+                    )
+                normalized["wake_offset_seconds"] = clamped_wake
+                logger.info(
+                    "[CronTools] schedule one-shot via delay_seconds=%s cron_expr=%s wake_offset=%s",
+                    delay,
+                    cron_expr,
+                    clamped_wake,
+                )
+            else:
+                logger.info(
+                    "[CronTools] schedule one-shot via delay_seconds=%s cron_expr=%s",
+                    delay,
+                    cron_expr,
+                )
         elif not cron_expr:
             raise ValueError("cron_expr or delay_seconds is required")
         else:
@@ -366,6 +525,40 @@ class CronTools:
         chat_type = self._route().chat_type
         if chat_type:
             session_kw["chat_type"] = chat_type
+
+        identity = self._routing_identity_payload()
+
+        # 企业就绪写路径：不写本地权威；以 Gateway push 为写意图，Gateway 落库
+        if self._enterprise_ready():
+            if not routing_triple_complete(
+                identity.get("group_id"),
+                identity.get("bot_id"),
+                identity.get("user_id"),
+            ):
+                raise ValueError("enterprise cron requires group_id, bot_id and user_id")
+            job = build_new_cron_job(
+                job_id=str(normalized.get("id") or "").strip() or None,
+                name=str(normalized.get("name") or "").strip(),
+                cron_expr=cron_expr,
+                timezone=timezone,
+                description=str(normalized.get("description") or ""),
+                targets=targets_str,
+                enabled=bool(normalized.get("enabled", True)),
+                wake_offset_seconds=normalized.get("wake_offset_seconds"),
+                delete_after_run=delete_after_run,
+                mode=normalized.get("mode"),
+                group_id=identity.get("group_id"),
+                bot_id=identity.get("bot_id"),
+                user_id=identity.get("user_id"),
+                **session_kw,
+            )
+            try:
+                await self._send("create", job.to_dict())
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"enterprise cron create push failed: {exc}") from exc
+            return job.to_dict()
+
+        # 未就绪 / 非企业：本地 file store；身份仅经 push 带给 Gateway（若有）
         job = await self._local_store.create_job(
             job_id=str(normalized.get("id") or "").strip() or None,
             name=str(normalized.get("name") or "").strip(),
@@ -378,18 +571,22 @@ class CronTools:
             delete_after_run=delete_after_run,
             **session_kw,
         )
+        push_payload = job.to_dict()
+        push_payload.update(identity)
         try:
-            await self._send("create", job.to_dict())
+            await self._send("create", push_payload)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CronTools] sync create to gateway failed: %s", exc)
-        
+
         # Reload scheduler to pick up the new job
         await self._reload_scheduler()
-        
+
         return job.to_dict()
 
     async def update_job(self, job_id: str, patch: dict[str, Any]) -> Any:
-        normalized_patch = dict(patch or {})
+        from jiuwenclaw.gateway.cron.enterprise_gate import strip_sticky_identity_fields
+
+        normalized_patch = strip_sticky_identity_fields(dict(patch or {}))
         normalized_patch.pop("session_id", None)
         if "targets" in normalized_patch:
             normalized_patch["targets"] = self._normalize_targets_param(normalized_patch.get("targets"))
@@ -402,21 +599,47 @@ class CronTools:
                 normalized_patch["session_id"] = routing_sid
         chat_type = self._route().chat_type
         normalized_patch["chat_type"] = chat_type if chat_type else None
+        identity = self._routing_identity_payload()
+
+        if self._enterprise_ready():
+            try:
+                await self._send(
+                    "update",
+                    {"job_id": job_id, "patch": normalized_patch, **identity},
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"enterprise cron update push failed: {exc}") from exc
+            # 企业不以本地写为成功；返回 patch 后的只读视图（尽力）
+            current = await self.get_job(job_id)
+            if isinstance(current, dict):
+                merged = dict(current)
+                merged.update(normalized_patch)
+                return merged
+            return {"id": job_id, **normalized_patch, **identity}
+
         job = await self._local_store.update_job(job_id, normalized_patch)
         try:
-            await self._send("update", {"job_id": job_id, "patch": normalized_patch})
+            await self._send("update", {"job_id": job_id, "patch": normalized_patch, **identity})
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CronTools] sync update to gateway failed: %s", exc)
-        
+
         # Reload scheduler to pick up the changes
         await self._reload_scheduler()
-        
+
         return job.to_dict()
 
     async def delete_job(self, job_id: str) -> Any:
+        identity = self._routing_identity_payload()
+        if self._enterprise_ready():
+            try:
+                await self._send("delete", {"job_id": job_id, **identity})
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"enterprise cron delete push failed: {exc}") from exc
+            return True
+
         gateway_synced = False
         try:
-            await self._send("delete", {"job_id": job_id})
+            await self._send("delete", {"job_id": job_id, **identity})
             gateway_synced = True
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CronTools] sync delete to gateway failed: %s", exc)
@@ -436,40 +659,71 @@ class CronTools:
         return gateway_synced or deleted_local or deleted_shared
 
     async def toggle_job(self, job_id: str, enabled: bool) -> Any:
+        identity = self._routing_identity_payload()
+        if self._enterprise_ready():
+            try:
+                await self._send(
+                    "toggle",
+                    {"job_id": job_id, "enabled": bool(enabled), **identity},
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"enterprise cron toggle push failed: {exc}") from exc
+            current = await self.get_job(job_id)
+            if isinstance(current, dict):
+                current = dict(current)
+                current["enabled"] = bool(enabled)
+                return current
+            return {"id": job_id, "enabled": bool(enabled), **identity}
+
         job = await self._local_store.update_job(job_id, {"enabled": bool(enabled)})
         try:
-            await self._send("toggle", {"job_id": job_id, "enabled": bool(enabled)})
+            await self._send(
+                "toggle",
+                {"job_id": job_id, "enabled": bool(enabled), **identity},
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CronTools] sync toggle to gateway failed: %s", exc)
-        
+
         # Reload scheduler to pick up the changes
         await self._reload_scheduler()
-        
+
         return job.to_dict()
 
     async def preview_job(self, job_id: str, count: int = 5) -> Any:
-        job = await self._local_store.get_job(job_id)
-        if job is None:
-            raise KeyError("job not found")
+        if self._enterprise_ready():
+            job_dict = await self.get_job(job_id)
+            if job_dict is None:
+                raise KeyError("job not found")
+            cron_expr = str(job_dict.get("cron_expr") or "").strip()
+            timezone = str(job_dict.get("timezone") or "Asia/Shanghai").strip() or "Asia/Shanghai"
+            wake_offset = int(job_dict.get("wake_offset_seconds") or 0)
+        else:
+            job = await self._local_store.get_job(job_id)
+            if job is None:
+                raise KeyError("job not found")
+            cron_expr = job.cron_expr
+            timezone = job.timezone
+            wake_offset = int(job.wake_offset_seconds or 0)
         count = max(1, min(int(count), 50))
-        tz = ZoneInfo(job.timezone)
+        tz = ZoneInfo(timezone)
         base = datetime.now(tz=tz)
         out: list[dict[str, Any]] = []
         push_dt = base
         for _ in range(count):
             try:
-                push_dt = _cron_next_push_dt(job.cron_expr, push_dt)
+                push_dt = _cron_next_push_dt(cron_expr, push_dt)
             except Exception as exc:  # noqa: BLE001
                 msg = str(exc)
                 if "CroniterBadDateError" in msg or "failed to find next date" in msg:
                     break
                 raise
-            wake_dt = push_dt - timedelta(seconds=max(0, int(job.wake_offset_seconds or 0)))
+            wake_dt = push_dt - timedelta(seconds=max(0, wake_offset))
             out.append({"wake_at": wake_dt.isoformat(), "push_at": push_dt.isoformat()})
         return out
 
     async def run_now(self, job_id: str) -> Any:
-        return await self._send("run_now", {"job_id": job_id})
+        identity = self._routing_identity_payload()
+        return await self._send("run_now", {"job_id": job_id, **identity})
 
     async def _create_job_tool(self, **kwargs: Any) -> Any:
         params: dict[str, Any] = {

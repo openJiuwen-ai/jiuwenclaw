@@ -15,6 +15,10 @@ def sort_cron_jobs(jobs: list[CronJob]) -> list[CronJob]:
     return jobs
 
 
+def _opt_str(value: Any) -> str | None:
+    return str(value).strip() if isinstance(value, str) and str(value).strip() else None
+
+
 def build_new_cron_job(
     *,
     job_id: str | None = None,
@@ -29,10 +33,13 @@ def build_new_cron_job(
     chat_type: str | None = None,
     mode: str | None = None,
     delete_after_run: bool | None = None,
+    group_id: str | None = None,
+    bot_id: str | None = None,
+    user_id: str | None = None,
 ) -> CronJob:
     now = time.time()
-    sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
-    ct = str(chat_type).strip() if isinstance(chat_type, str) and chat_type.strip() else None
+    sid = _opt_str(session_id)
+    ct = _opt_str(chat_type)
     m = str(mode).strip().lower() if isinstance(mode, str) and mode.strip() else "agent"
     dar = bool(delete_after_run) if delete_after_run is not None else False
     job = CronJob(
@@ -50,13 +57,19 @@ def build_new_cron_job(
         chat_type=ct,
         mode=m,
         delete_after_run=dar,
+        group_id=_opt_str(group_id),
+        bot_id=_opt_str(bot_id),
+        user_id=_opt_str(user_id),
     )
     CronJob.from_dict(job.to_dict())
     return job
 
 
 def apply_cron_job_patch(existing: CronJob, patch: dict[str, Any]) -> CronJob:
-    patch = dict(patch or {})
+    from jiuwenclaw.gateway.cron.enterprise_gate import strip_sticky_identity_fields
+
+    # 身份字段 sticky：update 不得改租户归属
+    patch = strip_sticky_identity_fields(dict(patch or {}))
     updated = existing
     if "name" in patch:
         updated = replace(updated, name=str(patch.get("name") or "").strip())
