@@ -2,15 +2,19 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextvars
 import hashlib
 import importlib.util
+import io
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -126,14 +130,117 @@ def _write_report_markdown(final_result: dict, file_name: str, conversation_id: 
     return str(report_path)
 
 
-def _write_report_artifacts_stream(
+def _build_styled_export_llm_config() -> dict:
+    """Build llm_config dict for the SDK's report_style_llm_context().
+
+    Resolves LLM credentials from the same config source as the task
+    manager, formatted for the SDK's report_style_llm_context().
+    The SDK's LLMConfig only accepts ``"openai"`` or ``"siliconflow"``
+    as model_type; most providers are OpenAI-compatible and default to
+    ``"openai"``.
+    """
+    config = _get_task_manager_cls()._load_config()
+    api_key = config.get("LLM_API_KEY", "")
+    model_name = config.get("LLM_MODEL_NAME", "")
+    base_url = config.get("LLM_BASE_URL", "")
+    model_type = config.get("LLM_MODEL_TYPE", "openai").lower()
+
+    # LLMConfig.model_type only allows "openai" or "siliconflow";
+    # map everything else to "openai" (OpenAI-compatible).
+    if model_type not in ("openai", "siliconflow"):
+        model_type = "openai"
+
+    return {
+        "general": {
+            "model_name": model_name,
+            "model_type": model_type,
+            "base_url": base_url,
+            "api_key": bytearray(api_key, encoding="utf-8"),
+            "extension": {
+                "extra_body": {
+                    "thinking": {"type": "disabled"},
+                },
+            },
+            "verify_ssl": False,
+        },
+    }
+
+
+def _validate_zip_member(member_name: str) -> str:
+    """Normalize and validate a ZIP member path to prevent traversal attacks."""
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    normalized_name = member_name.replace("\\", "/")
+    posix_path = PurePosixPath(normalized_name)
+    windows_path = PureWindowsPath(member_name)
+    if posix_path.is_absolute() or windows_path.is_absolute() or ".." in posix_path.parts:
+        raise ValueError(f"unsafe ZIP member: {member_name}")
+    return normalized_name
+
+
+def _extract_styled_bundle(convert_content: str, destination: Path) -> Path:
+    """Decode base64 ZIP payload from SDK and extract to *destination*."""
+    try:
+        archive_bytes = base64.b64decode(convert_content, validate=True)
+    except ValueError as exc:
+        raise ValueError("invalid styled report base64 payload") from exc
+
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+        normalized_names = {
+            _validate_zip_member(member.filename)
+            for member in archive.infolist()
+        }
+        if "report_bundle/report.html" not in normalized_names:
+            raise ValueError("styled report bundle is missing report_bundle/report.html")
+        archive.extractall(destination)
+
+    return destination / "report_bundle"
+
+
+def _copy_asset_dir(source: Path, destination: Path) -> None:
+    """Copy an asset directory if it exists and is non-empty."""
+    if not source.is_dir() or not any(source.iterdir()):
+        return
+    shutil.copytree(source, destination, dirs_exist_ok=True)
+
+
+def _install_styled_bundle(bundle_root: Path, html_path: Path) -> None:
+    """Install the extracted bundle: copy assets and rewrite HTML references."""
+    report_base = html_path.with_suffix("")
+    infer_dir = report_base.with_name(f"{report_base.name}_infer")
+    chart_dir = report_base.with_name(f"{report_base.name}_charts")
+    _copy_asset_dir(bundle_root / "infer", infer_dir)
+    _copy_asset_dir(bundle_root / "charts", chart_dir)
+
+    html = (bundle_root / "report.html").read_text(encoding="utf-8")
+    html = html.replace('href="infer/', f'href="{infer_dir.name}/')
+    html = html.replace("href='infer/", f"href='{infer_dir.name}/")
+    html = html.replace('src="charts/', f'src="{chart_dir.name}/')
+    html = html.replace("src='charts/", f"src='{chart_dir.name}/")
+
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_html_path = html_path.with_suffix(f"{html_path.suffix}.tmp")
+    try:
+        temporary_html_path.write_text(html, encoding="utf-8", newline="\n")
+        temporary_html_path.replace(html_path)
+    finally:
+        temporary_html_path.unlink(missing_ok=True)
+
+
+async def _write_report_artifacts_stream(
     final_result: dict, file_name: str, conversation_id: str
 ) -> dict[str, str]:
-    """Build and write the completed report bundle as MD + HTML.
+    """Build and write the completed report bundle as MD + styled HTML.
 
     Follows the same pattern as ``DeepResearchTaskManager._write_report_artifacts``:
     Markdown is always written; HTML is a best-effort conversion that
     logs a warning on failure but never blocks the primary MD delivery.
+
+    The primary HTML path directly calls the SDK's
+    ``report_style_llm_context`` + ``stylize_report`` to produce an
+    LLM-styled report bundle, then extracts and installs it locally.
+    If that fails (e.g. SDK unavailable, LLM error), the function falls
+    back to the lightweight offline converter (``convert_md_to_html``).
 
     Returns:
         dict mapping format key (``"md"``, ``"html"``) to the
@@ -143,24 +250,52 @@ def _write_report_artifacts_stream(
     # Reuse the rewrite-aware Markdown writer so the hidden final-result and
     # provenance sidecars are created before any visible artifact is delivered.
     report_path_md = Path(
-        _write_report_markdown(final_result, file_name, conversation_id)
+        await asyncio.to_thread(
+            _write_report_markdown, final_result, file_name, conversation_id
+        )
     )
     artifacts: dict[str, str] = {"md": str(report_path_md)}
 
-    # --- HTML (best-effort) ---
+    # --- Styled HTML (primary, best-effort via SDK direct call) ---
     report_path_html = report_path_md.with_suffix(".html")
     try:
-        from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline import (
-            convert_md_to_html,
+        from openjiuwen_deepsearch.algorithm.report_style.service import (
+            stylize_report,
+        )
+        from openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime import (
+            report_style_llm_context,
         )
 
-        convert_md_to_html(str(report_path_md), str(report_path_html))
+        llm_config = _build_styled_export_llm_config()
+        async with report_style_llm_context(llm_config) as llm:
+            result = await stylize_report(final_result, llm)
+
+        # Extract the base64-encoded ZIP bundle and install to target path.
+        with tempfile.TemporaryDirectory(prefix="jiuwenclaw_report_") as temporary_dir:
+            bundle_root = _extract_styled_bundle(
+                result.convert_content, Path(temporary_dir)
+            )
+            _install_styled_bundle(bundle_root, report_path_html)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.warning(
-            "Optional HTML report generation failed. output=%s error=%s",
-            report_path_html,
+            "SDK styled HTML export failed, falling back to offline conversion. error=%s",
             exc,
         )
+        # --- Offline HTML fallback ---
+        try:
+            from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline import (
+                convert_md_to_html,
+            )
+
+            convert_md_to_html(str(report_path_md), str(report_path_html))
+        except Exception as fallback_exc:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "Offline HTML conversion also failed. output=%s error=%s",
+                report_path_html,
+                fallback_exc,
+            )
+        else:
+            artifacts["html"] = str(report_path_html)
     else:
         artifacts["html"] = str(report_path_html)
 
@@ -554,6 +689,13 @@ async def deepresearch_stream(
 
     route = _get_route()
     interactive_ask, _, _, _ = get_ask_request_context()
+    # Force HITL on: deepsearch-research SKILL.md requires feedback_handler
+    # interruption for research direction clarification.  The upstream
+    # ContextVar defaults to False when the frontend omits interactiveAsk,
+    # which causes DEEPSEARCH_HITL="false" and the SDK skips the
+    # feedback_handler node entirely.
+    if not interactive_ask:
+        interactive_ask = True
     outline_title_cache = _outline_title_cache(route)
     python_bin = _resolve_jiuwenclaw_python()
     script = _resolve_run_script()
@@ -719,8 +861,7 @@ async def deepresearch_stream(
                 has_chat_route = bool(route.get("session_id") and route.get("channel_id"))
                 if response_content and has_chat_route:
                     try:
-                        artifacts = await asyncio.to_thread(
-                            _write_report_artifacts_stream,
+                        artifacts = await _write_report_artifacts_stream(
                             final_result,
                             file_name,
                             chunk.get("conversation_id", outcome_cid),
