@@ -11,7 +11,8 @@ from typing import Any, Literal
 from openjiuwen.core.context_engine.qa_artifact.window import make_processor_ctx
 from openjiuwen.core.context_engine.qa_block.config import QABlockConfig
 from openjiuwen.core.context_engine.qa_block.freezer import FreezeCommitResult, QABlockFreezer
-from openjiuwen.core.context_engine.qa_block.registry import load_registry
+from openjiuwen.core.context_engine.qa_block.messages import extract_qa_native_messages
+from openjiuwen.core.context_engine.qa_block.registry import load_registry, save_registry
 from openjiuwen.core.context_engine.qa_block.selector import resolve_summarizer_model
 from openjiuwen.core.context_engine.qa_block.store import QABlockStore
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -132,6 +133,55 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             native_messages=native_messages,
         )
 
+    async def _clear_empty_current_qa_after_failed_freeze(
+        self,
+        session: Any,
+        context_engine: Any,
+        *,
+        session_id: str,
+        context: Any | None = None,
+        persist_context: bool = True,
+    ) -> None:
+        """Drop stale in-progress pointer when freeze had nothing to commit."""
+        registry = load_registry(session)
+        qa_id = registry.current_qa_id
+        if not qa_id:
+            return
+
+        if context is not None:
+            getter = getattr(context, "get_messages", None)
+            if callable(getter):
+                messages = getter() or []
+                native = extract_qa_native_messages(messages, registry)
+                if native:
+                    roles = {getattr(message, "role", None) for message in native}
+                    if "user" in roles or "tool" in roles:
+                        logger.info(
+                            "[QABlockFreezeRail] skip clear after failed freeze: "
+                            "native user/tool still present session_id=%s qa_id=%s",
+                            session_id,
+                            qa_id,
+                        )
+                        return
+
+        registry.current_qa_id = None
+        save_registry(session, registry)
+        clear_assembly_committed_qa_id(session)
+        if persist_context:
+            await context_engine.save_contexts(session)
+            await self._persist_freeze_checkpoint(session, session_id=session_id)
+        else:
+            # Registry pointer cleared; caller (orphan salvage) restores messages first,
+            # then persists context to avoid checkpointing a stripped-without-user buffer.
+            await self._persist_freeze_checkpoint(session, session_id=session_id)
+        logger.info(
+            "[QABlockFreezeRail] cleared empty current_qa_id after failed freeze "
+            "session_id=%s qa_id=%s persist_context=%s",
+            session_id,
+            qa_id,
+            persist_context,
+        )
+
     async def _persist_freeze_checkpoint(self, session: Any, *, session_id: str) -> None:
         """Flush registry after freeze; inner ReAct post_run may have checkpointed early."""
         try:
@@ -173,8 +223,14 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
         agent: Any,
         session: Any = None,
         status: Literal["completed", "interrupted"] = "interrupted",
+        persist_context: bool = True,
     ) -> None:
-        """Emergency freeze before plan cancel checkpoint."""
+        """Emergency freeze before plan cancel checkpoint.
+
+        ``persist_context=False`` skips ``save_contexts`` so callers (orphan salvage)
+        can restore temporarily stripped current-round user messages before persisting.
+        Registry/checkpoint flush still runs so ``current_qa_id`` updates are durable.
+        """
         if not self._config.enabled:
             return
         context_engine = resolve_context_engine(agent)
@@ -216,13 +272,26 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
         )
         if entry is not None:
             clear_assembly_committed_qa_id(actual_session)
-            await context_engine.save_contexts(actual_session)
-            await self._persist_freeze_checkpoint(actual_session, session_id=session_id)
+            if persist_context:
+                await context_engine.save_contexts(actual_session)
+                await self._persist_freeze_checkpoint(actual_session, session_id=session_id)
+            else:
+                await self._persist_freeze_checkpoint(actual_session, session_id=session_id)
             logger.info(
-                "[QABlockFreezeRail] cancel sync freeze done session_id=%s qa_id=%s status=%s",
+                "[QABlockFreezeRail] cancel sync freeze done session_id=%s qa_id=%s status=%s "
+                "persist_context=%s",
                 session_id,
                 entry.qa_id,
                 status,
+                persist_context,
+            )
+        else:
+            await self._clear_empty_current_qa_after_failed_freeze(
+                actual_session,
+                context_engine,
+                session_id=session_id,
+                context=context,
+                persist_context=persist_context,
             )
 
     async def _freeze_session(
@@ -297,6 +366,12 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             post_commit=lambda commit, s=session, c=context: self._on_freeze_commit(s, c, commit),
         )
         if entry is None:
+            await self._clear_empty_current_qa_after_failed_freeze(
+                session,
+                context_engine,
+                session_id=session_id,
+                context=context,
+            )
             return
 
         clear_assembly_committed_qa_id(session)

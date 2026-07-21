@@ -33,6 +33,7 @@ _spec.loader.exec_module(_module)
 JiuClawQABlockAssemblyRail = _module.JiuClawQABlockAssemblyRail
 PENDING_ORPHAN_SALVAGE_KEY: str = getattr(_module, "_PENDING_ORPHAN_SALVAGE_KEY")
 ASSEMBLY_COMMITTED_QA_ID_KEY: str = getattr(_module, "_ASSEMBLY_COMMITTED_QA_ID_KEY")
+INTERRUPT_RESUME_TURN_KEY: str = getattr(_module, "_INTERRUPT_RESUME_TURN_KEY")
 _is_task_continuation = _module._is_task_continuation
 _last_n_history_qa_ids = _module._last_n_history_qa_ids
 
@@ -180,6 +181,57 @@ class TestQABlockAssemblyRailGuard(unittest.IsolatedAsyncioTestCase):
                 await self.rail.before_model_call(ctx)
                 mock_allocate.assert_not_called()
 
+    async def test_before_invoke_repairs_empty_orphan_without_salvage(self) -> None:
+        ctx = _make_model_call_ctx(self.session, messages=[])
+        ctx.inputs = InvokeInputs(query="new question")
+        registry = _registry_with_active_qa("qa_005")
+
+        with patch.object(_module, "load_registry", return_value=registry):
+            with patch.object(_module, "save_registry") as mock_save:
+                with patch.object(_module, "post_agent_execute_for_session", new=AsyncMock()):
+                    await self.rail.before_invoke(ctx)
+
+        self.assertIsNone(registry.current_qa_id)
+        self.assertIsNone(self.session.get_state(PENDING_ORPHAN_SALVAGE_KEY))
+        mock_save.assert_called_once()
+
+    async def test_before_invoke_defers_orphan_when_context_unavailable(self) -> None:
+        """before_invoke often has no context; must not skip salvage blindly."""
+        ctx = AgentCallbackContext(
+            agent=SimpleNamespace(),
+            inputs=InvokeInputs(query="new question"),
+            session=self.session,
+        )
+        registry = _registry_with_active_qa("qa_005")
+
+        with patch.object(_module, "load_registry", return_value=registry):
+            with patch.object(_module, "save_registry") as mock_save:
+                await self.rail.before_invoke(ctx)
+
+        self.assertEqual(registry.current_qa_id, "qa_005")
+        self.assertEqual(self.session.get_state(PENDING_ORPHAN_SALVAGE_KEY), "qa_005")
+        mock_save.assert_not_called()
+
+    async def test_before_invoke_defers_orphan_with_native_work(self) -> None:
+        ctx = _make_model_call_ctx(self.session, messages=_qa_messages("qa_005"))
+        ctx.inputs = InvokeInputs(query="new question")
+        registry = _registry_with_active_qa("qa_005")
+        entry = QABlockEntry(
+            qa_id="qa_005",
+            qa_index=5,
+            status="interrupted",
+            message_count=2,
+        )
+        registry.blocks["qa_005"] = entry
+
+        with patch.object(_module, "load_registry", return_value=registry):
+            with patch.object(_module, "save_registry") as mock_save:
+                await self.rail.before_invoke(ctx)
+
+        self.assertEqual(registry.current_qa_id, "qa_005")
+        self.assertEqual(self.session.get_state(PENDING_ORPHAN_SALVAGE_KEY), "qa_005")
+        mock_save.assert_not_called()
+
     async def test_before_invoke_defers_orphan_without_freeze_rail(self) -> None:
         ctx = AgentCallbackContext(
             agent=SimpleNamespace(),
@@ -187,6 +239,13 @@ class TestQABlockAssemblyRailGuard(unittest.IsolatedAsyncioTestCase):
             session=self.session,
         )
         registry = _registry_with_active_qa("qa_005")
+        entry = QABlockEntry(
+            qa_id="qa_005",
+            qa_index=5,
+            status="interrupted",
+            message_count=1,
+        )
+        registry.blocks["qa_005"] = entry
 
         with patch.object(_module, "load_registry", return_value=registry):
             with patch.object(_module, "save_registry") as mock_save:
@@ -236,8 +295,13 @@ class TestQABlockAssemblyRailGuard(unittest.IsolatedAsyncioTestCase):
         salvaged.current_qa_id = "qa_006"
         self.rail.attach_freeze_rail(freeze_rail)
         self.session.update_state({PENDING_ORPHAN_SALVAGE_KEY: "qa_006"})
+        ctx.agent.context_engine.save_contexts = AsyncMock()
 
-        with patch.object(_module, "load_registry", side_effect=[registry, salvaged, salvaged, salvaged]):
+        with patch.object(
+            _module,
+            "load_registry",
+            side_effect=[registry, registry, salvaged, salvaged, salvaged],
+        ):
             with patch.object(_module, "maybe_compact_catalog_l1", return_value=salvaged):
                 with patch.object(
                     _module,
@@ -246,12 +310,15 @@ class TestQABlockAssemblyRailGuard(unittest.IsolatedAsyncioTestCase):
                 ):
                     with patch.object(_module, "allocate_qa_id", return_value=("qa_010", 10)) as mock_allocate:
                         with patch.object(_module, "save_registry"):
-                            with patch.object(_module, "QABlockLayer") as mock_layer_cls:
-                                layer = MagicMock()
-                                layer.build_window_qas.return_value = []
-                                mock_layer_cls.return_value = layer
-                                layer.hydrate_history_into_window = AsyncMock()
-                                await self.rail.before_model_call(ctx)
+                            with patch.object(
+                                _module, "post_agent_execute_for_session", new=AsyncMock()
+                            ):
+                                with patch.object(_module, "QABlockLayer") as mock_layer_cls:
+                                    layer = MagicMock()
+                                    layer.build_window_qas.return_value = []
+                                    mock_layer_cls.return_value = layer
+                                    layer.hydrate_history_into_window = AsyncMock()
+                                    await self.rail.before_model_call(ctx)
 
         freeze_rail.freeze_current_qa_sync.assert_awaited_once()
         self.assertIsNone(self.session.get_state(PENDING_ORPHAN_SALVAGE_KEY))
@@ -400,6 +467,114 @@ class TestQABlockAssemblyRailGuard(unittest.IsolatedAsyncioTestCase):
         mock_allocate.assert_called_once()
         self.assertEqual(registry.current_qa_id, "qa_011")
 
+    async def test_interrupt_resume_keeps_unfrozen_qa_without_allocate(self) -> None:
+        registry = _registry_with_active_qa("qa_003")
+        registry.blocks["qa_003"] = QABlockEntry(
+            qa_id="qa_003",
+            qa_index=3,
+            status="interrupted",
+        )
+        self.session.update_state({INTERRUPT_RESUME_TURN_KEY: True})
+        ctx = _make_model_call_ctx(self.session, messages=[])
+
+        with patch.object(_module, "load_registry", return_value=registry):
+            with patch.object(_module, "allocate_qa_id") as mock_allocate:
+                await self.rail.before_model_call(ctx)
+                mock_allocate.assert_not_called()
+
+        self.assertEqual(registry.current_qa_id, "qa_003")
+
+    async def test_interrupt_resume_stale_pointer_with_query_reallocates(self) -> None:
+        """Resume turn + no commit/native work + non-empty query → do not keep stale QA."""
+        registry = _registry_with_active_qa("qa_003")
+        registry.blocks["qa_003"] = QABlockEntry(
+            qa_id="qa_003",
+            qa_index=3,
+            status="interrupted",
+        )
+        self.session.update_state({INTERRUPT_RESUME_TURN_KEY: True})
+        # Only hydrated history for another QA → no active work for qa_003, but has user text.
+        ctx = _make_model_call_ctx(
+            self.session,
+            messages=[_history_message("qa_001", "follow up question")],
+        )
+        rail = JiuClawQABlockAssemblyRail(QABlockConfig(enabled=True, selector_enabled=False))
+
+        with patch.object(_module, "load_registry", return_value=registry):
+            with patch.object(_module, "maybe_compact_catalog_l1", return_value=registry):
+                with patch.object(
+                    _module,
+                    "reconcile_orphan_l0_blocks",
+                    new=AsyncMock(return_value=(registry, [])),
+                ):
+                    with patch.object(_module, "allocate_qa_id", return_value=("qa_004", 4)) as mock_allocate:
+                        with patch.object(_module, "save_registry"):
+                            with patch.object(_module, "QABlockLayer") as mock_layer_cls:
+                                layer = MagicMock()
+                                layer.build_window_qas.return_value = []
+                                mock_layer_cls.return_value = layer
+                                layer.hydrate_history_into_window = AsyncMock()
+                                await rail.before_model_call(ctx)
+
+        mock_allocate.assert_called_once()
+        self.assertEqual(registry.current_qa_id, "qa_004")
+
+    async def test_orphan_salvage_preserves_current_round_user(self) -> None:
+        ctx = _make_model_call_ctx(
+            self.session,
+            messages=[UserMessage(content="new user turn")],
+        )
+        registry = _registry_with_active_qa("qa_006")
+        freeze_rail = SimpleNamespace(freeze_current_qa_sync=AsyncMock())
+        salvaged = _frozen_registry("qa_006")
+        salvaged.current_qa_id = None
+        self.rail.attach_freeze_rail(freeze_rail)
+        self.session.update_state({PENDING_ORPHAN_SALVAGE_KEY: "qa_006"})
+        set_messages = MagicMock()
+        ctx.context.set_messages = set_messages
+        ctx.context.get_messages.return_value = [UserMessage(content="new user turn")]
+        ctx.agent.context_engine.save_contexts = AsyncMock()
+        ctx.agent.context_engine.get_history_qa_buffer.return_value = {}
+
+        with patch.object(
+            _module,
+            "load_registry",
+            side_effect=[registry, registry, salvaged, salvaged, salvaged],
+        ):
+            with patch.object(_module, "maybe_compact_catalog_l1", return_value=salvaged):
+                with patch.object(
+                    _module,
+                    "reconcile_orphan_l0_blocks",
+                    new=AsyncMock(return_value=(salvaged, [])),
+                ):
+                    with patch.object(_module, "allocate_qa_id", return_value=("qa_010", 10)):
+                        with patch.object(_module, "save_registry"):
+                            with patch.object(
+                                _module, "post_agent_execute_for_session", new=AsyncMock()
+                            ):
+                                with patch.object(_module, "QABlockLayer") as mock_layer_cls:
+                                    layer = MagicMock()
+                                    layer.build_window_qas.return_value = []
+                                    mock_layer_cls.return_value = layer
+                                    layer.hydrate_history_into_window = AsyncMock()
+                                    await self.rail.before_model_call(ctx)
+
+        freeze_rail.freeze_current_qa_sync.assert_awaited_once()
+        self.assertEqual(
+            freeze_rail.freeze_current_qa_sync.await_args.kwargs.get("persist_context"),
+            False,
+        )
+        ctx.agent.context_engine.save_contexts.assert_awaited()
+        restored_calls = [
+            call
+            for call in set_messages.call_args_list
+            if call.args and isinstance(call.args[0], list) and call.args[0]
+        ]
+        self.assertTrue(restored_calls)
+        restored = restored_calls[-1].args[0]
+        self.assertEqual(len(restored), 1)
+        self.assertEqual(getattr(restored[0], "content", ""), "new user turn")
+
     async def test_resume_empty_context_clears_stale_pointer_and_assembles(self) -> None:
         registry = _registry_with_active_qa("qa_008")
         ctx = _make_model_call_ctx(
@@ -493,6 +668,18 @@ class TestIsTaskContinuation(unittest.TestCase):
         )
         result = _is_task_continuation(ctx, "   \n\t  ")
         self.assertTrue(result)
+
+    def test_empty_query_with_interrupt_resume_session_returns_true(self) -> None:
+        session = FakeSession()
+        session.update_state({INTERRUPT_RESUME_TURN_KEY: True})
+        ctx = _make_ctx_for_continuation()
+        self.assertTrue(_is_task_continuation(ctx, "", session))
+
+    def test_non_empty_query_with_interrupt_resume_session_returns_false(self) -> None:
+        session = FakeSession()
+        session.update_state({INTERRUPT_RESUME_TURN_KEY: True})
+        ctx = _make_ctx_for_continuation()
+        self.assertFalse(_is_task_continuation(ctx, "follow up", session))
 
     def test_no_resume_key_in_extra_with_empty_query_returns_false(self) -> None:
         ctx = _make_ctx_for_continuation()
