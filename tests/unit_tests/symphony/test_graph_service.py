@@ -8,7 +8,7 @@ from jiuwenswarm.symphony.fingerprint.models import (
     ExtractedSkillSchema,
     ParameterSpec,
     RawSkillManifest,
-    SkillFingerprint,
+    Fingerprint,
     SkillFolder,
 )
 from jiuwenswarm.symphony.fingerprint.normalize import (
@@ -507,7 +507,8 @@ async def test_graph_matcher_uses_low_reasoning_for_forward_and_reverse(monkeypa
     )
     registry = SkillRegistry(
         skills={
-            "source": SkillFingerprint(
+            "source": Fingerprint(
+                type="skill",
                 id="source",
                 name="Source",
                 description="Produces result",
@@ -515,7 +516,8 @@ async def test_graph_matcher_uses_low_reasoning_for_forward_and_reverse(monkeypa
                 inputs=[],
                 outputs=[ArtifactSpec(name="result", type="text")],
             ),
-            "target": SkillFingerprint(
+            "target": Fingerprint(
+                type="skill",
                 id="target",
                 name="Target",
                 description="Consumes input",
@@ -1340,7 +1342,8 @@ async def test_normalized_calendar_memo_input_enables_expected_candidates(tmp_pa
     registry = SkillRegistry(
         skills={
             calendar_result.fingerprint.id: calendar_result.fingerprint,
-            "speech-to-text": SkillFingerprint(
+            "speech-to-text": Fingerprint(
+                type="skill",
                 id="speech-to-text",
                 name="speech-to-text",
                 description="Transcribe audio to text.",
@@ -1348,7 +1351,8 @@ async def test_normalized_calendar_memo_input_enables_expected_candidates(tmp_pa
                 inputs=[ParameterSpec(name="audio", type="audio")],
                 outputs=[ArtifactSpec(name="text", type="text")],
             ),
-            "general-writing": SkillFingerprint(
+            "general-writing": Fingerprint(
+                type="skill",
                 id="general-writing",
                 name="general-writing",
                 description="Write markdown content.",
@@ -1732,7 +1736,8 @@ async def test_fingerprint_extractor_extract_from_root_reports_removed_paths_and
 @pytest.mark.asyncio
 async def test_graph_builder_call_emits_progress_and_supports_no_progress():
     fingerprints = [
-        SkillFingerprint(
+        Fingerprint(
+            type="skill",
             id="skill-1",
             name="Skill 1",
             description="Test skill",

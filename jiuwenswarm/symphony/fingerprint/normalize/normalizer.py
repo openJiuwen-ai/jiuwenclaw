@@ -12,7 +12,7 @@ from jiuwenswarm.symphony.fingerprint.models import (
     NormalizationDecision,
     NormalizationResult,
     RawSkillManifest,
-    SkillFingerprint,
+    Fingerprint,
 )
 from jiuwenswarm.symphony.fingerprint.normalize.data_type_vocab import DataTypeVocabulary
 from jiuwenswarm.symphony.fingerprint.normalize.data_types import DataTypeNormalizer
@@ -47,7 +47,7 @@ class _NormalizationContext:
 
 
 class SkillFingerprintNormalizer:
-    """Convert ExtractedSkillSchema batches into SkillFingerprint v1."""
+    """Convert extracted Skill schemas into unified fingerprints."""
 
     def __init__(
         self,
@@ -166,7 +166,8 @@ class SkillFingerprintNormalizer:
             context.decisions,
         )
 
-        fingerprint = SkillFingerprint(
+        fingerprint = Fingerprint(
+            type="skill",
             id=context.skill_id,
             name=context.name,
             description=context.description,

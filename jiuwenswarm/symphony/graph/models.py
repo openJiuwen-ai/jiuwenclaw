@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from jiuwenswarm.symphony.fingerprint.models import SkillFingerprint
+from jiuwenswarm.symphony.fingerprint.models import Fingerprint
 
 
 ALLOWED_RELATION_TYPES = frozenset(
@@ -42,10 +42,10 @@ class GraphDiagnostic:
 class SkillRegistry:
     """Validated Skill registry keyed by Skill ID."""
 
-    skills: Dict[str, SkillFingerprint]
+    skills: Dict[str, Fingerprint]
     diagnostics: List[GraphDiagnostic] = field(default_factory=list)
 
-    def ordered_skills(self) -> List[SkillFingerprint]:
+    def ordered_skills(self) -> List[Fingerprint]:
         return [self.skills[skill_id] for skill_id in sorted(self.skills)]
 
 
@@ -245,7 +245,7 @@ class GraphBuildResult:
     """Complete graph build result."""
 
     manifest: BuildManifest
-    skills: List[SkillFingerprint]
+    skills: List[Fingerprint]
     candidates: List[RelationCandidate]
     llm_matches: List[LLMMatch]
     graph: SkillGraph

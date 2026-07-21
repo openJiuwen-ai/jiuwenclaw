@@ -13,7 +13,7 @@ from jiuwenswarm.symphony.graph.matcher import (
 )
 from jiuwenswarm.symphony.graph.models import BuildManifest, GraphBuildResult, GraphDiagnostic
 from jiuwenswarm.symphony.graph.registry import SkillRegistryBuilder
-from jiuwenswarm.symphony.fingerprint.models import SkillFingerprint
+from jiuwenswarm.symphony.fingerprint.models import Fingerprint
 
 GraphProgress = Callable[..., None]
 
@@ -38,7 +38,7 @@ class GraphBuilder:
 
     async def __call__(
         self,
-        fingerprints: Iterable[SkillFingerprint],
+        fingerprints: Iterable[Fingerprint],
         *,
         progress: GraphProgress | None = None,
     ) -> GraphBuildResult:
@@ -46,7 +46,7 @@ class GraphBuilder:
 
     async def build(
         self,
-        fingerprints: Iterable[SkillFingerprint],
+        fingerprints: Iterable[Fingerprint],
         *,
         progress: GraphProgress | None = None,
     ) -> GraphBuildResult:
