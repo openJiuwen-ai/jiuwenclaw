@@ -7,7 +7,7 @@
 import { useTranslation } from 'react-i18next';
 import './SessionSidebar.css';
 
-type MainNavKey = 'chat' | 'skills';
+type MainNavKey = 'chat' | 'skills' | 'cron';
 
 interface SessionSidebarProps {
   activeNav: MainNavKey;
@@ -49,6 +49,16 @@ export function SessionSidebar({
             />
           </svg>
           {t('nav.skills')}
+        </button>
+        <button
+          onClick={() => onNavigate('cron')}
+          className={`nav-item w-full ${activeNav === 'cron' ? 'active' : ''}`}
+          data-testid="nav-cron"
+        >
+          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          {t('nav.cron')}
         </button>
       </div>
 
