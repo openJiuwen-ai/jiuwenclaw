@@ -133,6 +133,14 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
 }
 
+# Evolution rail RPCs (rollback/archives) are handled by DeepAdapter, not SkillManager.
+_SKILL_EVOLUTION_RAIL_ROUTES: frozenset[ReqMethod] = frozenset(
+    {
+        ReqMethod.SKILLS_EVOLUTION_ARCHIVES,
+        ReqMethod.SKILLS_EVOLUTION_ROLLBACK,
+    }
+)
+
 # Tools 管理请求路由表
 _TOOL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.TOOLS_ADD: "handle_tools_add",
@@ -1031,8 +1039,57 @@ class JiuWenClaw:
             metadata=request.metadata,
         )
 
+    async def _handle_skills_evolution_rail_request(
+        self, request: AgentRequest,
+    ) -> AgentResponse:
+        """Forward skills.evolution.rollback/archives to DeepAdapter.
+
+        Disk control-plane only: DeepAdapter uses EvolutionStore and does not
+        require EvolutionRail / LLM initialization.
+        """
+        adapter = await self._ensure_adapter()
+        handler_name = (
+            "handle_skills_evolution_rollback"
+            if request.req_method == ReqMethod.SKILLS_EVOLUTION_ROLLBACK
+            else "handle_skills_evolution_archives"
+        )
+        handler = getattr(adapter, handler_name, None)
+        if handler is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": f"当前 adapter 不支持 {request.req_method.value}"},
+                metadata=request.metadata,
+            )
+        try:
+            payload = await handler(request.params or {})
+        except Exception as exc:
+            logger.error(
+                "[JiuWenClaw] skills.evolution rail 请求处理失败: %s",
+                exc,
+                extra={"user_visible": "critical"},
+            )
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+                metadata=request.metadata,
+            )
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
     async def _handle_skills_request(self, request: AgentRequest) -> AgentResponse | None:
         """处理 Skills 相关请求，返回 None 表示不是 Skills 请求."""
+        if request.req_method in _SKILL_EVOLUTION_RAIL_ROUTES:
+            return await self._handle_skills_evolution_rail_request(request)
+
         if request.req_method not in _SKILL_ROUTES:
             return None
 

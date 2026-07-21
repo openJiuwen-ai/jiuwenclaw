@@ -45,6 +45,15 @@ logger = logging.getLogger(__name__)
 
 ACP_DEFAULT_CAPABILITIES: dict[str, Any] = build_acp_initialize_result()
 
+# Disk control-plane RPCs: list/rollback archives via EvolutionStore only.
+# Must not call create_instance() (which constructs llm_OpenAI).
+_DISK_ONLY_EVOLUTION_METHODS: frozenset[str] = frozenset(
+    {
+        "skills.evolution.archives",
+        "skills.evolution.rollback",
+    }
+)
+
 
 def _build_acp_agent_config(extra_config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return the dedicated ACP agent profile config.
@@ -462,6 +471,47 @@ class AgentManager:
 
         return aggregate
 
+    async def _process_disk_only_evolution(self, request: Any) -> Any:
+        """Handle archives/rollback without create_instance / LLM client.
+
+        Prefer a warm agent if one already exists; otherwise use an ephemeral
+        JiuWenClaw that only constructs DeepAdapter + EvolutionStore.
+        """
+        channel_id = getattr(request, "channel_id", "") or "default"
+        session_id = getattr(request, "session_id", None)
+        params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
+        mode_full = params.get("mode", "agent.plan")
+        mode = str(mode_full).split(".")[0] if mode_full else "agent"
+
+        existing = self.get_agent_nowait(channel_id, mode, session_id)
+        if existing is not None:
+            return await existing.process_message(request)
+
+        from jiuwenclaw.agentserver.interface import JiuWenClaw
+
+        agent = JiuWenClaw(
+            user_workspace_dir=str(self.user_workspace_dir) if self.user_workspace_dir else None,
+            agent_id=self.agent_id,
+            service_id=self.service_id,
+        )
+        overlay_token = None
+        if self._latest_env_overrides:
+            overlay = build_effective_env_overlay(self._latest_env_overrides)
+            if overlay:
+                overlay_token = bind_task_env_overlay(overlay)
+        try:
+            logger.info(
+                "[AgentManager] disk-only evolution RPC via ephemeral agent "
+                "(skip create_instance): method=%s channel=%s",
+                getattr(getattr(request, "req_method", None), "value", getattr(request, "req_method", None)),
+                channel_id,
+                extra={"user_visible": "progress"},
+            )
+            return await agent.process_message(request)
+        finally:
+            if overlay_token is not None:
+                reset_task_env_overlay(overlay_token)
+
     async def process_message(self, request: Any) -> Any:
         """处理非流式请求.
 
@@ -479,6 +529,11 @@ class AgentManager:
             bool(getattr(request, "metadata", None)),
             extra={'user_visible': 'critical'}
         )
+
+        req_method = getattr(request, "req_method", None)
+        req_method_value = getattr(req_method, "value", req_method)
+        if isinstance(req_method_value, str) and req_method_value in _DISK_ONLY_EVOLUTION_METHODS:
+            return await self._process_disk_only_evolution(request)
 
         channel_id = getattr(request, "channel_id", "")
         session_id = getattr(request, "session_id", None)

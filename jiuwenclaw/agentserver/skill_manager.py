@@ -226,7 +226,7 @@ def _skillnet_network_context():
                 os.environ[key] = value
 
 
-def _safe_path_name(value: Any, label: str) -> str:
+def safe_path_name(value: Any, label: str) -> str:
     raw = str(value or "").strip()
     if not raw:
         raise ValueError(f"invalid {label} name")
@@ -241,6 +241,10 @@ def _safe_path_name(value: Any, label: str) -> str:
     if any(invalid_name_checks):
         raise ValueError(f"invalid {label} name: {raw}")
     return raw
+
+
+# Backward-compatible alias for in-module call sites / existing tests.
+_safe_path_name = safe_path_name
 
 
 def _safe_child_path(base: Path, name: Any, label: str) -> Path:

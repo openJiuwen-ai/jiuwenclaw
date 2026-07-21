@@ -81,6 +81,7 @@ from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload as _SkillTurboConfirmPayload
 from openjiuwen.core.runner.callback import AbortError as _SkillTurboAbortError
+from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.signal import SignalDetector
 try:
     from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
@@ -258,7 +259,10 @@ from jiuwenclaw.agentserver.tools.task_tools import clear_task_memory_service
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import (
-    SkillManager, enabled_skills_from_environ, resolve_string_or_list_config,
+    SkillManager,
+    safe_path_name,
+    enabled_skills_from_environ,
+    resolve_string_or_list_config,
 )
 from jiuwenclaw.agentserver.tools.memory_tools import (
     init_memory_manager_async,
@@ -5828,11 +5832,277 @@ class JiuWenClawDeepAdapter:
             "result_type": "answer",
         }
 
+    @staticmethod
+    def _is_body_archive_name(archive_name: str) -> bool:
+        # Match EvolutionStore.is_body_archive_filename: SKILL.vMAJOR.MINOR.PATCH.md
+        return (
+            archive_name.startswith("SKILL.v")
+            and archive_name.endswith(".md")
+            and archive_name != "SKILL.md"
+        )
+
+    def _get_disk_evolution_store(self) -> EvolutionStore:
+        """Build a disk-only EvolutionStore (no LLM / EvolutionRail)."""
+        return EvolutionStore(self._registered_skill_dirs_for_rail())
+
+    def _list_body_archive_versions(
+        self, skill_name: str, store: EvolutionStore | None = None,
+    ) -> list[str]:
+        """List body archive filenames for *skill_name* (newest-first by name)."""
+        evolution_store = store if store is not None else self._get_disk_evolution_store()
+        archives = evolution_store.list_archives(skill_name)
+        return [a for a in archives if self._is_body_archive_name(a)]
+
+    async def _rollback_skill_via_store(
+        self,
+        store: EvolutionStore,
+        skill_name: str,
+        version: str | None = None,
+    ) -> tuple[bool, bool]:
+        """Rollback skill via EvolutionStore only (no EvolutionRail / LLM).
+
+        ``version`` may be a body archive filename (``SKILL.v1.0.0.md``) or a bare
+        SemVer string (``1.0.0``). When omitted, the newest body archive by mtime
+        is used.
+
+        Returns ``(success, evo_restored)``. ``evo_restored`` is meaningful only
+        when ``success`` is True; False means body was rolled back but the paired
+        evolution log could not be restored.
+        """
+        archive = store.get_skill_archive_dir(skill_name)
+        if archive is None:
+            logger.warning("[JiuWenClaw] no archive dir for %s", skill_name)
+            return False, True
+
+        if version:
+            body_name = store.normalize_body_archive_name(version)
+            if body_name is None:
+                logger.warning(
+                    "[JiuWenClaw] invalid archive version for %s: %s", skill_name, version,
+                )
+                return False, True
+            body_archive = store.get_skill_archive_file(skill_name, body_name)
+            if body_archive is None:
+                logger.warning(
+                    "[JiuWenClaw] invalid archive version for %s: %s", skill_name, version,
+                )
+                return False, True
+        else:
+            body_files = sorted(
+                [
+                    f for f in archive.iterdir()
+                    if f.is_file() and store.is_body_archive_filename(f.name)
+                ],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if not body_files:
+                logger.warning("[JiuWenClaw] no archived body for %s", skill_name)
+                return False, True
+            body_archive = body_files[0]
+
+        evo_archive = store.resolve_paired_evolution_archive(skill_name, body_archive.name)
+
+        old_body = await store.read_archive_text(skill_name, body_archive.name)
+        if not old_body:
+            logger.warning(
+                "[JiuWenClaw] archived body is empty for %s: %s",
+                skill_name,
+                body_archive.name,
+            )
+            return False, True
+
+        await store.archive_current_state(skill_name)
+        await store.write_skill_content(skill_name, old_body)
+
+        # Body write is the primary commit. Evolution-log restore is best-effort:
+        # failure must not report overall rollback failure after body already changed.
+        evo_restored = True
+        if evo_archive is not None:
+            restored = await store.restore_evolution_log_from_archive(
+                skill_name, evo_archive.name,
+            )
+            if not restored:
+                evo_restored = False
+                logger.warning(
+                    "[JiuWenClaw] body rolled back but evolution log restore failed for %s: %s",
+                    skill_name,
+                    evo_archive.name,
+                )
+        else:
+            await store.clear_evolutions(skill_name)
+
+        render = getattr(store, "render_evolution_markdown", None)
+        if callable(render):
+            await render(skill_name)
+
+        deleted = await store.delete_archive_version(skill_name, body_archive.name)
+        if not deleted:
+            logger.warning(
+                "[JiuWenClaw] rollback succeeded but failed to remove target archive for %s: %s",
+                skill_name,
+                body_archive.name,
+            )
+
+        if evo_restored:
+            logger.info(
+                "[JiuWenClaw] disk rollback completed for %s -> %s",
+                skill_name,
+                body_archive.name,
+            )
+        else:
+            logger.warning(
+                "[JiuWenClaw] disk rollback completed for %s -> %s "
+                "(skill body restored; evolution log may be inconsistent)",
+                skill_name,
+                body_archive.name,
+            )
+        return True, evo_restored
+
+    async def _do_evolve_rollback(
+        self, skill_name: str, version: str | None,
+    ) -> dict[str, Any]:
+        """Shared rollback used by slash command and skills.evolution.rollback RPC.
+
+        Disk-only: uses EvolutionStore, does not require EvolutionRail / LLM.
+
+        Returns a structured dict:
+        - ``{ok, rolled_back: False, name, versions}`` when *version* is omitted (list only)
+        - ``{ok, rolled_back: True, name, version[, warning]}`` on successful rollback
+        - ``{ok: False, error}`` on failure
+        """
+        store = self._get_disk_evolution_store()
+
+        guard = self._guard_bootstrap_skill(skill_name)
+        if guard:
+            return {"ok": False, "error": guard["output"]}
+
+        if not store.skill_exists(skill_name):
+            available = (
+                "、".join(self._filter_evolution_eligible_skill_names(store.list_skill_names()))
+                or "（无可用 Skill）"
+            )
+            return {"ok": False, "error": f"未找到 Skill '{skill_name}'。当前可用：{available}"}
+
+        body_versions = self._list_body_archive_versions(skill_name, store=store)
+        if not body_versions:
+            return {"ok": False, "error": f"Skill '{skill_name}' 没有归档版本可回滚。"}
+
+        if not version:
+            return {
+                "ok": True,
+                "rolled_back": False,
+                "name": skill_name,
+                "versions": body_versions,
+            }
+
+        resolved = version
+        if resolved == "latest":
+            resolved = body_versions[0]
+        else:
+            normalize = getattr(store, "normalize_body_archive_name", None)
+            if callable(normalize):
+                normalized = normalize(resolved)
+                if normalized:
+                    resolved = normalized
+
+        if resolved not in body_versions:
+            hint = "、".join(f"`{v}`" for v in body_versions[:5])
+            return {"ok": False, "error": f"版本 `{version}` 不存在。可用版本：{hint}"}
+
+        try:
+            success, evo_ok = await asyncio.wait_for(
+                self._rollback_skill_via_store(store, skill_name, resolved),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[JiuWenClaw] evolve_rollback timed out for skill=%s version=%s "
+                "(filesystem may be partially updated)",
+                skill_name,
+                resolved,
+            )
+            return {
+                "ok": False,
+                "error": (
+                    "回滚操作超时，文件系统可能处于部分完成状态"
+                    "（body / evolution log / 归档可能不一致）。"
+                    f"请检查 Skill '{skill_name}' 的 archive 目录后再重试。"
+                ),
+            }
+        except Exception as exc:
+            logger.warning("[JiuWenClaw] evolve_rollback failed: %s", exc)
+            return {"ok": False, "error": f"回滚失败：{exc}"}
+
+        if success:
+            result: dict[str, Any] = {
+                "ok": True,
+                "rolled_back": True,
+                "name": skill_name,
+                "version": resolved,
+            }
+            if not evo_ok:
+                result["warning"] = (
+                    "Skill body 已回滚，但 evolution log 恢复失败，"
+                    "演进历史可能不一致。请检查该 Skill 的 archive 与 evolutions.json。"
+                )
+            return result
+        return {"ok": False, "error": f"Skill '{skill_name}' 回滚失败，请检查归档版本是否有效。"}
+
+    async def handle_skills_evolution_archives(self, params: dict) -> dict[str, Any]:
+        """RPC: skills.evolution.archives — list rollback archive versions (disk-only)."""
+        try:
+            skill_name = safe_path_name(params.get("name"), "skill")
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+
+        guard = self._guard_bootstrap_skill(skill_name)
+        if guard:
+            raise ValueError(guard["output"])
+
+        store = self._get_disk_evolution_store()
+        if not store.skill_exists(skill_name):
+            raise ValueError(f"未找到 Skill '{skill_name}'")
+
+        return {
+            "name": skill_name,
+            "versions": self._list_body_archive_versions(skill_name, store=store),
+        }
+
+    async def handle_skills_evolution_rollback(self, params: dict) -> dict[str, Any]:
+        """RPC: skills.evolution.rollback — rollback skill via disk EvolutionStore."""
+        try:
+            skill_name = safe_path_name(params.get("name"), "skill")
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+
+        raw_version = params.get("version")
+        version = str(raw_version).strip() if raw_version is not None and str(raw_version).strip() else None
+
+        result = await self._do_evolve_rollback(skill_name, version)
+        if not result.get("ok"):
+            raise ValueError(str(result.get("error") or "回滚失败"))
+
+        if result.get("rolled_back"):
+            payload = {
+                "success": True,
+                "name": result["name"],
+                "version": result["version"],
+                "rolled_back": True,
+            }
+            if result.get("warning"):
+                payload["warning"] = result["warning"]
+            return payload
+        return {
+            "success": True,
+            "name": result["name"],
+            "rolled_back": False,
+            "versions": result.get("versions") or [],
+        }
+
     async def _handle_evolve_rollback_command(self, query: str) -> dict[str, Any]:
         """/evolve_rollback <skill_name> [version] — Rollback skill to archived version."""
-        rail = self._skill_evolution_rail
-        assert rail is not None
-        store = rail.store
+        store = self._get_disk_evolution_store()
 
         parts = query.split(maxsplit=2)
         skill_name = parts[1] if len(parts) > 1 else ""
@@ -5841,8 +6111,7 @@ class JiuWenClawDeepAdapter:
         if not skill_name:
             archives_hint = ""
             for name in self._filter_evolution_eligible_skill_names(store.list_skill_names()):
-                archives = store.list_archives(name)
-                body_versions = [a for a in archives if a.startswith("SKILL.v")]
+                body_versions = self._list_body_archive_versions(name, store=store)
                 if body_versions:
                     archives_hint += f"\n  - **{name}**: {len(body_versions)} 个版本"
             return {
@@ -5852,30 +6121,17 @@ class JiuWenClawDeepAdapter:
                 ),
                 "result_type": "error",
             }
-        err = self._guard_bootstrap_skill(skill_name)
-        if err:
-            return err
 
-        if not store.skill_exists(skill_name):
-            available = "、".join(self._filter_evolution_eligible_skill_names(store.list_skill_names())) or "（无可用 Skill）"
-            return {
-                "output": f"未找到 Skill '{skill_name}'。当前可用：{available}",
-                "result_type": "error",
-            }
+        result = await self._do_evolve_rollback(skill_name, version)
+        if not result.get("ok"):
+            return {"output": str(result.get("error") or "回滚失败"), "result_type": "error"}
 
-        archives = store.list_archives(skill_name)
-        body_versions = [a for a in archives if a.startswith("SKILL.v")]
-        if not body_versions:
-            return {
-                "output": f"Skill '{skill_name}' 没有归档版本可回滚。",
-                "result_type": "error",
-            }
-
-        if not version:
+        if not result.get("rolled_back"):
+            body_versions = result.get("versions") or []
             lines = [f"**Skill '{skill_name}' 可用归档版本（最新在前）：**\n"]
             for i, v in enumerate(body_versions):
                 ts = v.replace("SKILL.v", "").replace(".md", "")
-                if len(ts) >= 15:
+                if len(ts) >= 15 and v.startswith("SKILL.v"):
                     display_ts = f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}:{ts[13:15]} UTC"
                 else:
                     display_ts = ts
@@ -5885,54 +6141,29 @@ class JiuWenClawDeepAdapter:
             lines.append(f"快捷回滚到最近版本：`/evolve_rollback {skill_name} latest`")
             return {"output": "\n".join(lines), "result_type": "answer"}
 
-        if version == "latest":
-            version = body_versions[0]
-
-        if version not in body_versions:
-            hint = "、".join(f"`{v}`" for v in body_versions[:5])
-            return {
-                "output": f"版本 `{version}` 不存在。可用版本：{hint}",
-                "result_type": "error",
-            }
-
-        try:
-            success = await asyncio.wait_for(
-                rail.rollback_skill(skill_name, version),
-                timeout=30.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("[JiuWenClaw] evolve_rollback timed out for skill=%s version=%s", skill_name, version)
-            return {"output": "回滚操作超时，请稍后重试。", "result_type": "error"}
-        except Exception as exc:
-            logger.warning("[JiuWenClaw] evolve_rollback failed: %s", exc)
-            return {"output": f"回滚失败：{exc}", "result_type": "error"}
-
-        if success:
-            return {
-                "output": (
-                    f"Skill '{skill_name}' 已成功回滚到 `{version}`。\n\n"
-                    f"（当前状态已自动归档，可再次回滚恢复。）"
-                ),
-                "result_type": "answer",
-            }
+        resolved = result.get("version") or version
+        output = (
+            f"Skill '{skill_name}' 已成功回滚到 `{resolved}`。\n\n"
+            f"（当前状态已自动归档，可再次回滚恢复。）"
+        )
+        if result.get("warning"):
+            output += f"\n\n⚠️ {result['warning']}"
         return {
-            "output": f"Skill '{skill_name}' 回滚失败，请检查归档版本是否有效。",
-            "result_type": "error",
+            "output": output,
+            "result_type": "answer",
         }
 
     async def _handle_evolve_rebuild_command(self, query: str) -> dict[str, Any]:
-        """/evolve_rebuild <skill_name> [user_intent] — Rebuild SKILL.md via agent followup."""
+        """/evolve_rebuild <skill_name> [--ids id1,id2] [user_intent] — Rebuild SKILL.md via agent followup."""
         rail = self._skill_evolution_rail
         assert rail is not None
         store = rail.store
 
-        parts = query.split(maxsplit=2)
-        skill_name = parts[1] if len(parts) > 1 else ""
-        user_intent = parts[2] if len(parts) > 2 else None
+        skill_name, record_ids, user_intent = self._parse_evolve_rebuild_query(query)
 
         if not skill_name:
             return {
-                "output": "请指定 Skill 名称：`/evolve_rebuild <skill_name> [user_intent]`",
+                "output": "请指定 Skill 名称：`/evolve_rebuild <skill_name> [--ids id1,id2] [user_intent]`",
                 "result_type": "error",
             }
 
@@ -5967,6 +6198,7 @@ class JiuWenClawDeepAdapter:
         rebuild_context = await rebuild_service.prepare_rebuild_context(
             subject,
             user_intent=user_intent,
+            record_ids=record_ids,
         )
         if rebuild_context is None:
             return {
@@ -5987,6 +6219,43 @@ class JiuWenClawDeepAdapter:
             "rebuild_context": rebuild_context,
             "result_type": "followup",
         }
+
+    @staticmethod
+    def _parse_evolve_rebuild_query(
+        query: str,
+    ) -> tuple[str, list[str] | None, str | None]:
+        """Parse `/evolve_rebuild <skill> [--ids id1,id2|id1 id2] [user_intent...]`."""
+        text = query.strip()
+        prefix = "/evolve_rebuild"
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):].strip()
+        if not text:
+            return "", None, None
+
+        tokens = text.split()
+        skill_name = tokens[0]
+        rest = tokens[1:]
+        record_ids: list[str] | None = None
+        intent_tokens: list[str] = []
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--ids":
+                i += 1
+                collected: list[str] = []
+                while i < len(rest) and rest[i] != "--ids" and (
+                    "," in rest[i] or rest[i].startswith("ev_")
+                ):
+                    collected.extend(
+                        part.strip() for part in rest[i].split(",") if part.strip()
+                    )
+                    i += 1
+                record_ids = collected or None
+                continue
+            intent_tokens.append(rest[i])
+            i += 1
+
+        user_intent = " ".join(intent_tokens).strip() or None
+        return skill_name, record_ids, user_intent
 
     async def _finalize_rebuild_followup(self, slash_result: dict[str, Any] | None) -> None:
         """Clear evolution log after a successful rebuild followup."""

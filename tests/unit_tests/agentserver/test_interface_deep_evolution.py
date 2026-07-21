@@ -317,6 +317,7 @@ async def test_evolve_command_auto_save_true_persists_without_approval(adapter, 
 class _FakeRebuildService:
     next_context: dict[str, Any] | None = {"records": [], "overflow_index": {}}
     complete_rebuild_calls: list[dict[str, Any]] = []
+    prepare_calls: list[dict[str, Any]] = []
 
     def __init__(self, *, store: Any, **kwargs: Any) -> None:
         self.store = store
@@ -327,7 +328,17 @@ class _FakeRebuildService:
         subject: dict[str, str],
         *,
         user_intent: str | None = None,
+        record_ids: list[str] | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any] | None:
+        self.prepare_calls.append(
+            {
+                "subject": dict(subject),
+                "user_intent": user_intent,
+                "record_ids": list(record_ids) if record_ids is not None else None,
+                "kwargs": dict(kwargs),
+            }
+        )
         return self.next_context
 
     async def complete_rebuild(self, rebuild_context: dict[str, Any]) -> bool:
@@ -339,6 +350,7 @@ class _FakeRebuildService:
 async def test_evolve_rebuild_command_returns_followup(adapter, monkeypatch):
     store = _FakeEvolutionStore()
     adapter._skill_evolution_rail = SimpleNamespace(store=store)  # pylint: disable=protected-access
+    _FakeRebuildService.prepare_calls = []
     monkeypatch.setattr(interface_deep_module, "ExperienceRebuildService", _FakeRebuildService)
     monkeypatch.setattr(
         interface_deep_module,
@@ -358,6 +370,77 @@ async def test_evolve_rebuild_command_returns_followup(adapter, monkeypatch):
         "rebuild_context": {"records": [], "overflow_index": {}},
         "result_type": "followup",
     }
+    assert _FakeRebuildService.prepare_calls == [
+        {
+            "subject": {"kind": "skill", "name": "demo-skill"},
+            "user_intent": "improve examples",
+            "record_ids": None,
+            "kwargs": {},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_evolve_rebuild_command_passes_record_ids(adapter, monkeypatch):
+    store = _FakeEvolutionStore()
+    adapter._skill_evolution_rail = SimpleNamespace(store=store)  # pylint: disable=protected-access
+    _FakeRebuildService.prepare_calls = []
+    monkeypatch.setattr(interface_deep_module, "ExperienceRebuildService", _FakeRebuildService)
+    monkeypatch.setattr(
+        interface_deep_module,
+        "build_rebuild_command_prompt",
+        lambda **kwargs: "rebuild prompt",
+    )
+
+    result = await adapter._handle_evolve_rebuild_command(  # pylint: disable=protected-access
+        "/evolve_rebuild demo-skill --ids ev_f3ce9d66,ev_f3ce9d67 improve examples"
+    )
+
+    assert result["result_type"] == "followup"
+    assert _FakeRebuildService.prepare_calls == [
+        {
+            "subject": {"kind": "skill", "name": "demo-skill"},
+            "user_intent": "improve examples",
+            "record_ids": ["ev_f3ce9d66", "ev_f3ce9d67"],
+            "kwargs": {},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_evolve_rebuild_command_passes_space_separated_record_ids(adapter, monkeypatch):
+    store = _FakeEvolutionStore()
+    adapter._skill_evolution_rail = SimpleNamespace(store=store)  # pylint: disable=protected-access
+    _FakeRebuildService.prepare_calls = []
+    monkeypatch.setattr(interface_deep_module, "ExperienceRebuildService", _FakeRebuildService)
+    monkeypatch.setattr(
+        interface_deep_module,
+        "build_rebuild_command_prompt",
+        lambda **kwargs: "rebuild prompt",
+    )
+
+    await adapter._handle_evolve_rebuild_command(  # pylint: disable=protected-access
+        "/evolve_rebuild demo-skill --ids ev_aaa ev_bbb keep going"
+    )
+
+    assert _FakeRebuildService.prepare_calls[0]["record_ids"] == ["ev_aaa", "ev_bbb"]
+    assert _FakeRebuildService.prepare_calls[0]["user_intent"] == "keep going"
+
+
+def test_parse_evolve_rebuild_query_variants(adapter):
+    parse = adapter._parse_evolve_rebuild_query  # pylint: disable=protected-access
+    assert parse("/evolve_rebuild") == ("", None, None)
+    assert parse("/evolve_rebuild demo-skill") == ("demo-skill", None, None)
+    assert parse("/evolve_rebuild demo-skill --ids ev_a,ev_b") == (
+        "demo-skill",
+        ["ev_a", "ev_b"],
+        None,
+    )
+    assert parse("/evolve_rebuild demo-skill intent only") == (
+        "demo-skill",
+        None,
+        "intent only",
+    )
 
 
 def test_make_rebuild_service_passes_llm_params(adapter, monkeypatch):
@@ -415,7 +498,7 @@ async def test_evolve_rebuild_command_requires_skill_name(adapter):
     result = await adapter._handle_evolve_rebuild_command("/evolve_rebuild")  # pylint: disable=protected-access
 
     assert result == {
-        "output": "请指定 Skill 名称：`/evolve_rebuild <skill_name> [user_intent]`",
+        "output": "请指定 Skill 名称：`/evolve_rebuild <skill_name> [--ids id1,id2] [user_intent]`",
         "result_type": "error",
     }
 

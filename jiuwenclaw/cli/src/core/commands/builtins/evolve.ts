@@ -106,14 +106,14 @@ export function createEvolveSimplifyCommand(): SlashCommand {
 
 /**
  * /evolve_rebuild - Rebuild SKILL.md via followup execution
- * Usage: /evolve_rebuild <skill_name> [<user_query>...]
+ * Usage: /evolve_rebuild <skill_name> [--ids id1,id2] [<user_query>...]
  */
 export function createEvolveRebuildCommand(): SlashCommand {
   return {
     name: "evolve_rebuild",
     description: "Rebuild SKILL.md from archived history and evolution records",
-    usage: "/evolve_rebuild <skill_name> [<user_query>...]",
-    example: "/evolve_rebuild pptx improve error handling",
+    usage: "/evolve_rebuild <skill_name> [--ids id1,id2] [<user_query>...]",
+    example: "/evolve_rebuild pptx --ids ev_f3ce9d66,ev_f3ce9d67 improve error handling",
     kind: CommandKind.BUILT_IN,
     hidden: true,
     takesArgs: true,
@@ -126,7 +126,7 @@ export function createEvolveRebuildCommand(): SlashCommand {
           makeItem(
             ctx.sessionId,
             "error",
-            "用法：/evolve_rebuild <skill_name> [<user_query>...] - 请指定 Skill 名称",
+            "用法：/evolve_rebuild <skill_name> [--ids id1,id2] [<user_query>...] - 请指定 Skill 名称",
           ),
         );
         return;
