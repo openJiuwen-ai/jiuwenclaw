@@ -341,6 +341,42 @@ def _resolve_ports_with_fallback(cmd: InstanceCommand, scan_range: int = 10) -> 
     return None
 
 
+def _sync_default_env_ports(ports: dict[str, int]) -> int | None:
+    """Sync the default instance's actual ports into ~/.jiuwenswarm/config/.env.
+
+    The default instance has no bootstrap .env; its subprocesses read ports
+    from ``~/.jiuwenswarm/config/.env`` via ``app.py``'s
+    ``load_dotenv(get_env_file(), override=True)``. So .env must ALWAYS
+    reflect the ports this launch actually uses — not just when a fallback
+    happened. Otherwise a previous fallback's ports (e.g. GATEWAY_PORT=20001)
+    linger in .env, and a later no-conflict launch silently binds the
+    subprocesses to 20001 instead of the default 19001.
+
+    Call this on EVERY default-instance launch path, with the ports actually
+    being used (index-0 defaults when no conflict, or the fallback group when
+    a conflict was resolved). Persistence failure is fatal (returns 1) for the
+    same reason as in ``_resolve_ports_with_fallback``: subprocesses would
+    otherwise read stale ports and crash on bind.
+
+    Returns:
+        None on success, 1 if persistence failed.
+    """
+    from jiuwenswarm.instance_manager.config import _upsert_env_ports
+
+    try:
+        _upsert_env_ports(get_env_file(), ports)
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.info(
+            f"[start_services] ERROR: Failed to sync ports to {get_env_file()}: {exc}"
+        )
+        logging.info(
+            "[start_services] Aborting: subprocesses would read stale ports and "
+            "crash on bind. Fix the .env location/permissions, then retry."
+        )
+        return 1
+    return None
+
+
 def do_stop_instance(cmd: InstanceCommand) -> int:
     """Execute stop operation for an instance.
 
@@ -557,6 +593,14 @@ def _run(mode: str) -> int:
 
     if cmd.check_ports_conflicts():
         if _resolve_ports_with_fallback(cmd) is not None:
+            return 1
+        # Fallback already persisted the resolved ports to .env.
+    else:
+        # No conflict: ensure .env reflects the index-0 defaults so a
+        # PREVIOUS fallback's ports (e.g. GATEWAY_PORT=20001) don't linger
+        # and make this launch's subprocesses bind stale ports. This is the
+        # "first-conflict-then-no-conflict" residue path.
+        if _sync_default_env_ports(cmd.config.ports) is not None:
             return 1
 
     commands = _build_commands(mode)

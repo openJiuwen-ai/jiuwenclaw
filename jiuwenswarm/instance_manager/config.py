@@ -366,7 +366,12 @@ def find_available_ports(
     """
     exclude_set = set(exclude_ports or [])
 
-    for offset in range(max(1, scan_range)):
+    # scan_range=0 means "scan nothing" → immediately None. (Previously this
+    # was clamped via max(1, scan_range), which silently scanned one index
+    # even when the caller asked for zero — making the exhausted-range error
+    # message in start_services.py ("scanned indices base..base+range-1")
+    # describe a range that did not match what was actually scanned.)
+    for offset in range(scan_range):
         index = base_index + offset
         candidate = calculate_instance_ports(index)
 

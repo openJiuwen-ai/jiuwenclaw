@@ -449,6 +449,29 @@ class TestInstancesYaml:
             assert "bob" in loaded["instances"]
             assert loaded["instances"]["bob"]["ports"]["agent_server"] == 28092
 
+    @staticmethod
+    def test_save_is_atomic_and_leaves_no_temp_residue(tmp_path):
+        """save_instances_yaml writes atomically and cleans up its temp file.
+
+        Regression guard for the concurrent-named-instance write race: the
+        file must never be observed half-written, and the sibling ``.tmp``
+        temp file must not be left behind after a successful save.
+        """
+        yaml_path = tmp_path / "instances.yaml"
+        with patch(
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
+            return_value=yaml_path,
+        ):
+            save_instances_yaml({"instances": {"alice": {"ports": {"gateway": 21001}}}})
+
+            # File is complete and loadable.
+            loaded = load_instances_yaml()
+            assert loaded["instances"]["alice"]["ports"]["gateway"] == 21001
+
+            # No leftover temp files in the same directory.
+            leftovers = [p.name for p in tmp_path.iterdir() if p.name != "instances.yaml"]
+            assert leftovers == [], f"temp residue left behind: {leftovers}"
+
 
 class TestGetInstanceConfig:
     """Test instance config loading."""
@@ -923,6 +946,22 @@ class TestPortFallback:
         assert result is None
 
     @staticmethod
+    def test_scan_range_zero_scans_nothing(monkeypatch):
+        """scan_range=0 means scan nothing → None immediately.
+
+        Regression guard: previously the loop was ``range(max(1, scan_range))``
+        which silently scanned ONE index even when the caller asked for zero,
+        making the exhausted-range error message in start_services.py describe
+        a range that did not match what was actually scanned.
+        """
+        monkeypatch.setattr(
+            "jiuwenswarm.instance_manager.config.is_port_available",
+            lambda host, port: True,  # all free, but range is 0
+        )
+        result = find_available_ports(base_index=5, scan_range=0)
+        assert result is None
+
+    @staticmethod
     def test_exclude_ports_treated_as_occupied(monkeypatch):
         """Ports in exclude_ports are skipped even if probe says free."""
         occupied = calculate_instance_ports(0)
@@ -1242,3 +1281,74 @@ class TestStartServicesFallback:
         # only the pre-existing content remains.
         assert "GATEWAY_PORT=20001" not in cfg_env.read_text()
         assert "API_KEY=sk-keep" in cfg_env.read_text()
+
+    @staticmethod
+    def test_no_conflict_launch_clears_stale_env_ports(tmp_path, monkeypatch):
+        """P2 regression: a previous fallback's ports must not linger in .env.
+
+        Scenario ("conflict-then-no-conflict"):
+          1. Prior launch hit a conflict and wrote GATEWAY_PORT=20001 to .env.
+          2. The conflict is now gone (index-0 ports are free again).
+          3. This launch has NO conflict → check_ports_conflicts() is empty.
+
+        Without the _sync_default_env_ports call on the no-conflict path,
+        .env would keep GATEWAY_PORT=20001 and subprocesses (which read .env
+        via load_dotenv) would bind 20001 instead of the default 19001. The
+        fix re-writes index-0 defaults into .env on every no-conflict launch.
+        """
+        from unittest.mock import patch as _patch
+        from jiuwenswarm import start_services
+
+        cfg_env = tmp_path / "config" / ".env"
+        cfg_env.parent.mkdir(parents=True, exist_ok=True)
+        # Simulate a stale fallback residue from a previous launch.
+        cfg_env.write_text(
+            "API_KEY=sk-keep\n"
+            "AGENT_SERVER_PORT=19092\n"  # stale fallback (index 1)
+            "GATEWAY_PORT=20001\n"       # stale fallback (index 1)
+            "MODEL_NAME=m-keep\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.start_services.get_env_file", lambda: cfg_env)
+        monkeypatch.setattr(
+            "jiuwenswarm.instance_manager.collect_all_ports",
+            lambda exclude_name=None: [],
+        )
+
+        cmd = start_services.InstanceCommand("default")
+        assert cmd.validate_and_load() is None
+
+        # Make index-0 ports look free (no conflict) so _run takes the
+        # no-conflict path. Other indices are irrelevant here.
+        monkeypatch.setattr(
+            "jiuwenswarm.instance_manager.config.is_port_available",
+            lambda host, port: True,
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.start_services.is_port_available",
+            lambda host, port: True,
+        )
+
+        # Stub out the actual subprocess launch — we only care about .env sync.
+        monkeypatch.setattr(
+            "jiuwenswarm.start_services._build_commands",
+            lambda mode: [("stub", ["true"], tmp_path)],
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.start_services._run_processes",
+            lambda commands: 0,
+        )
+
+        rc = start_services._run("app")
+        assert rc == 0
+
+        # .env must now carry the index-0 DEFAULTS (not the stale 20001).
+        txt = cfg_env.read_text()
+        assert "GATEWAY_PORT=19001" in txt, txt
+        assert "AGENT_SERVER_PORT=18092" in txt, txt
+        # Stale fallback ports must be gone.
+        assert "GATEWAY_PORT=20001" not in txt
+        assert "AGENT_SERVER_PORT=19092" not in txt
+        # And pre-existing unrelated keys preserved.
+        assert "API_KEY=sk-keep" in txt
+        assert "MODEL_NAME=m-keep" in txt
