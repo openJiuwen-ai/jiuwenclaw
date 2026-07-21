@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Prompt rail for Symphony orchestration guidance."""
+"""Prompt and candidate lifecycle rail for Symphony orchestration."""
 
 from __future__ import annotations
 
@@ -13,28 +13,118 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
 
-_ConfigBaseProvider = (
-    dict[str, Any] | Callable[[], dict[str, Any] | None] | None
-)
+_ConfigBaseProvider = dict[str, Any] | Callable[[], dict[str, Any] | None] | None
 _SHORTLIST_EXTRA_KEY = "symphony_candidate_skill_ids"
 
 
-def _render_symphony_orchestration_prompt(
-    config_base: dict[str, Any] | None = None,
-) -> str:
-    try:
-        from jiuwenswarm.symphony.config import load_symphony_config
+class SymphonyOrchestrationRail(DeepAgentRail):
+    """Manage Symphony guidance, candidate injection, and viewed Skills."""
 
-        config = (
-            load_symphony_config()
-            if config_base is None
-            else load_symphony_config(config_base)
+    priority = 98
+    SECTION_NAME = "symphony_orchestration"
+    SECTION_PRIORITY = 42
+    COMPOSE_TOOL_NAME = "symphony_compose_score"
+
+    def __init__(self, *, config_base: _ConfigBaseProvider = None) -> None:
+        super().__init__()
+        self._config_base = config_base
+        self.system_prompt_builder = None
+
+    def init(self, agent: Any) -> None:
+        self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+
+    def uninit(self, agent: Any) -> None:
+        _ = agent
+        if self.system_prompt_builder is not None:
+            self.system_prompt_builder.remove_section(self.SECTION_NAME)
+        self.system_prompt_builder = None
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        self._sync_orchestration_guidance(ctx)
+
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        self._inject_shortlisted_candidates(ctx)
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        self._remember_successful_skill_view(ctx)
+
+    def _sync_orchestration_guidance(self, ctx: AgentCallbackContext) -> None:
+        builder = self.system_prompt_builder
+        if builder is None:
+            return
+        if not self._has_compose_tool(ctx) or not self._orchestration_enabled():
+            builder.remove_section(self.SECTION_NAME)
+            return
+
+        language = getattr(builder, "language", "cn") or "cn"
+        builder.add_section(
+            PromptSection(
+                name=self.SECTION_NAME,
+                content={language: self._build_orchestration_guidance()},
+                priority=self.SECTION_PRIORITY,
+            )
         )
-        if not config.enabled:
-            return ""
-    except Exception:
-        return ""
-    return """
+
+    def _inject_shortlisted_candidates(
+        self,
+        ctx: AgentCallbackContext,
+    ) -> None:
+        if not isinstance(ctx.inputs, ToolCallInputs):
+            return
+        if self._tool_name(ctx.inputs) != self.COMPOSE_TOOL_NAME:
+            return
+
+        args = self._tool_args(ctx.inputs)
+        if "candidate_skill_ids" in args:
+            return
+        shortlisted = self._shortlisted_skill_ids(ctx)
+        if not shortlisted:
+            return
+
+        args["candidate_skill_ids"] = shortlisted
+        ctx.inputs.tool_args = args
+        if ctx.inputs.tool_call is not None:
+            ctx.inputs.tool_call.arguments = args
+
+    def _remember_successful_skill_view(
+        self,
+        ctx: AgentCallbackContext,
+    ) -> None:
+        if not isinstance(ctx.inputs, ToolCallInputs):
+            return
+        if not self._is_skill_tool(self._tool_name(ctx.inputs)):
+            return
+        if ctx.exception is not None:
+            return
+        if self._tool_result_failed(ctx.inputs.tool_result):
+            return
+
+        args = self._tool_args(ctx.inputs)
+        skill_name = str(args.get("skill_name") or args.get("skillName") or "").strip()
+        if not skill_name:
+            return
+        shortlisted = self._shortlisted_skill_ids(ctx)
+        if skill_name not in shortlisted:
+            shortlisted.append(skill_name)
+        ctx.extra[_SHORTLIST_EXTRA_KEY] = shortlisted
+
+    def _orchestration_enabled(self) -> bool:
+        try:
+            from jiuwenswarm.symphony.config import load_symphony_config
+
+            config_base = self._resolve_config_base()
+            config = (
+                load_symphony_config()
+                if config_base is None
+                else load_symphony_config(config_base)
+            )
+        except Exception:
+            return False
+        return bool(config.enabled)
+
+    @staticmethod
+    def _build_orchestration_guidance() -> str:
+        return """
 ## Symphony Orchestration
 
 When the user says to use skill(s) or 技能, or when you judge that skill
@@ -59,99 +149,10 @@ For clearly ordinary tasks that do not benefit from skill capabilities, continue
 normally without Symphony.
 """
 
-
-class SymphonyOrchestrationPromptRail(DeepAgentRail):
-    """Inject Symphony orchestration guidance only when the tool is available."""
-
-    priority = 98
-    SECTION_NAME = "symphony_orchestration"
-    SECTION_PRIORITY = 42
-    COMPOSE_TOOL_NAME = "symphony_compose_score"
-
-    def __init__(self, *, config_base: _ConfigBaseProvider = None) -> None:
-        super().__init__()
-        self._config_base = config_base
-        self.system_prompt_builder = None
-
-    def init(self, agent: Any) -> None:
-        self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
-
-    def uninit(self, agent: Any) -> None:
-        _ = agent
-        if self.system_prompt_builder is not None:
-            self.system_prompt_builder.remove_section(self.SECTION_NAME)
-        self.system_prompt_builder = None
-
-    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        if self.system_prompt_builder is None:
-            return
-
-        if not self._has_compose_tool(ctx):
-            self.system_prompt_builder.remove_section(self.SECTION_NAME)
-            return
-
-        language = getattr(self.system_prompt_builder, "language", "cn") or "cn"
-        content = _render_symphony_orchestration_prompt(
-            self._resolve_config_base(),
-        )
-        if not content.strip():
-            self.system_prompt_builder.remove_section(self.SECTION_NAME)
-            return
-
-        self.system_prompt_builder.add_section(
-            PromptSection(
-                name=self.SECTION_NAME,
-                content={language: content},
-                priority=self.SECTION_PRIORITY,
-            )
-        )
-
-    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
-        if not isinstance(ctx.inputs, ToolCallInputs):
-            return
-        if self._tool_name(ctx.inputs) != self.COMPOSE_TOOL_NAME:
-            return
-
-        args = self._tool_args(ctx.inputs)
-        if "candidate_skill_ids" in args:
-            return
-        shortlisted = self._shortlisted_skill_ids(ctx)
-        if not shortlisted:
-            return
-
-        args["candidate_skill_ids"] = shortlisted
-        ctx.inputs.tool_args = args
-        tool_call = ctx.inputs.tool_call
-        if tool_call is not None:
-            tool_call.arguments = args
-
-    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        if not isinstance(ctx.inputs, ToolCallInputs):
-            return
-        if not self._is_skill_tool(self._tool_name(ctx.inputs)):
-            return
-        if ctx.exception is not None or self._tool_result_failed(
-            ctx.inputs.tool_result
-        ):
-            return
-
-        args = self._tool_args(ctx.inputs)
-        skill_name = str(
-            args.get("skill_name") or args.get("skillName") or ""
-        ).strip()
-        if not skill_name:
-            return
-        shortlisted = self._shortlisted_skill_ids(ctx)
-        if skill_name not in shortlisted:
-            shortlisted.append(skill_name)
-        ctx.extra[_SHORTLIST_EXTRA_KEY] = shortlisted
-
     @staticmethod
     def _tool_name(inputs: ToolCallInputs) -> str:
         return str(
-            inputs.tool_name
-            or getattr(inputs.tool_call, "name", "")
-            or ""
+            inputs.tool_name or getattr(inputs.tool_call, "name", "") or ""
         ).strip()
 
     @staticmethod
@@ -189,8 +190,7 @@ class SymphonyOrchestrationPromptRail(DeepAgentRail):
         if not tools:
             return False
         return any(
-            cls._model_tool_name(tool) == cls.COMPOSE_TOOL_NAME
-            for tool in tools
+            cls._model_tool_name(tool) == cls.COMPOSE_TOOL_NAME for tool in tools
         )
 
     @staticmethod
@@ -218,4 +218,4 @@ class SymphonyOrchestrationPromptRail(DeepAgentRail):
         return self._config_base
 
 
-__all__ = ["SymphonyOrchestrationPromptRail"]
+__all__ = ["SymphonyOrchestrationRail"]

@@ -1061,7 +1061,7 @@ def test_symphony_orchestration_prompt_provider_is_leader_only() -> None:
     leader_rail = factory({}, SwarmBuildContext(role="leader"))
     teammate_rail = factory({}, SwarmBuildContext(role="teammate"))
 
-    assert type(leader_rail).__name__ == "SymphonyOrchestrationPromptRail"
+    assert type(leader_rail).__name__ == "SymphonyOrchestrationRail"
     assert teammate_rail is None
 
 

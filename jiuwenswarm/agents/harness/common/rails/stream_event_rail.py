@@ -34,17 +34,15 @@ from openjiuwen.harness.workspace.workspace import WorkspaceNode
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     convert_interactions_to_ask_user_question,
 )
-from jiuwenswarm.agents.harness.common.tool_progress_context import (
-    bind_tool_progress,
-    reset_tool_progress,
-)
 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
     strip_image_content_from_model_context,
+)
+from jiuwenswarm.agents.harness.common.rails.symphony import (
+    SymphonyToolStreamHandler,
 )
 from jiuwenswarm.common.utils import logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
-_TOOL_PROGRESS_TOKEN_KEY = "_tool_progress_token"
 
 
 def _structured_tool_result_payload(result: Any) -> Any | None:
@@ -54,32 +52,6 @@ def _structured_tool_result_payload(result: Any) -> Any | None:
     if isinstance(result, (dict, list)):
         return result
     return None
-
-
-def _symphony_direct_display_content(result: Any) -> str:
-    if not isinstance(result, dict):
-        return ""
-    if not bool(result.get("direct_display", False)):
-        return ""
-    rendered = result.get("content")
-    return rendered.strip() if isinstance(rendered, str) else ""
-
-
-def _copy_symphony_result_fields(
-    payload: dict[str, Any],
-    raw_output: Any,
-) -> None:
-    if not isinstance(raw_output, dict):
-        return
-    for key in (
-        "score_status",
-        "score_build",
-        "direct_display",
-        "continue_after_display",
-        "followup_action",
-    ):
-        if key in raw_output:
-            payload[key] = raw_output[key]
 
 
 def _parse_tool_call_arguments(tool_call: Any) -> dict[str, Any]:
@@ -277,6 +249,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # Store cancelled tool info for interrupt response (per-session to avoid
         # cross-session leakage in concurrent collect→get→clear sequences).
         self._cancelled_tool_results: dict[str, list[dict[str, Any]]] = {}
+        self._symphony_stream_handler = SymphonyToolStreamHandler()
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -643,13 +616,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             tc = ctx.inputs.tool_call
             await self._emit_tool_call(session, tc)
             await self._emit_tool_update(session, tc, status="in_progress")
-            if getattr(tc, "name", "") == "symphony_compose_score":
-                async def progress_callback(event: dict[str, Any]) -> None:
-                    await self._emit_symphony_tool_progress(session, tc, event)
-
-                ctx.extra[_TOOL_PROGRESS_TOKEN_KEY] = bind_tool_progress(
-                    progress_callback
-                )
+            self._symphony_stream_handler.bind_progress(ctx, session, tc)
             # Track in-flight tool call for cancellation
             tc_id = getattr(tc, "id", "")
             if tc_id:
@@ -670,13 +637,17 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
 
         tc = ctx.inputs.tool_call
         tc_id = getattr(tc, "id", "")
-        reset_tool_progress(ctx.extra.pop(_TOOL_PROGRESS_TOKEN_KEY, None))
+        self._symphony_stream_handler.reset_progress(ctx)
         # Remove from in-flight tracking on completion
         if tc_id:
             self._inflight_tool_calls.pop(tc_id, None)
 
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
-        self._request_symphony_force_finish(ctx, tc, ctx.inputs.tool_result)
+        self._symphony_stream_handler.request_force_finish(
+            ctx,
+            tc,
+            ctx.inputs.tool_result,
+        )
         await self._emit_ask_user_question_if_interrupted(
             session,
             tc,
@@ -729,8 +700,12 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         except Exception:
             logger.debug("tool_call emit failed", exc_info=True)
 
-    @staticmethod
-    async def _emit_tool_result(session: Session, tool_call: Any, result: Any) -> None:
+    async def _emit_tool_result(
+        self,
+        session: Session,
+        tool_call: Any,
+        result: Any,
+    ) -> None:
         try:
             raw_output = _structured_tool_result_payload(result)
             tool_result_payload = {
@@ -740,7 +715,11 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             }
             if raw_output is not None:
                 tool_result_payload["raw_output"] = raw_output
-                _copy_symphony_result_fields(tool_result_payload, raw_output)
+                self._symphony_stream_handler.enrich_result_payload(
+                    tool_call,
+                    tool_result_payload,
+                    raw_output,
+                )
             error_state = _infer_tool_result_error(raw_output if raw_output is not None else result)
             if error_state is not None:
                 tool_result_payload["success"] = not error_state
@@ -758,25 +737,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             )
         except Exception:
             logger.debug("tool_result emit failed", exc_info=True)
-
-    @staticmethod
-    def _request_symphony_force_finish(
-        ctx: AgentCallbackContext,
-        tool_call: Any,
-        result: Any,
-    ) -> None:
-        tool_name = str(getattr(tool_call, "name", "") if tool_call else "").strip()
-        if tool_name != "symphony_compose_score":
-            return
-        content = _symphony_direct_display_content(result)
-        if not content:
-            return
-        if (
-            isinstance(result, dict)
-            and _boolish_true(result.get("continue_after_display"))
-        ):
-            return
-        ctx.request_force_finish({"output": content, "result_type": "answer"})
 
     @staticmethod
     async def _emit_ask_user_question_if_interrupted(
@@ -825,33 +785,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             )
         except Exception:
             logger.debug("tool_update emit failed", exc_info=True)
-
-    @staticmethod
-    async def _emit_symphony_tool_progress(
-        session: Session,
-        tool_call: Any,
-        event: dict[str, Any],
-    ) -> None:
-        graph = event.get("graph")
-        if not isinstance(graph, dict):
-            return
-        try:
-            await session.write_stream(
-                OutputSchema(
-                    type="tool_update",
-                    index=0,
-                    payload={
-                        "tool_update": {
-                            "tool_name": getattr(tool_call, "name", ""),
-                            "tool_call_id": getattr(tool_call, "id", ""),
-                            "status": "in_progress",
-                            "beam_search_event": event,
-                        }
-                    },
-                )
-            )
-        except Exception:
-            logger.debug("Symphony tool progress emit failed", exc_info=True)
 
     async def _emit_todo_updated(self, session: Session, session_id: str) -> None:
         """Load the main agent's todo list and push a todo.updated event to the frontend."""

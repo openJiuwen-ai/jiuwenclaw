@@ -129,7 +129,7 @@ from jiuwenswarm.agents.harness.common.rails import (
     ResponsePromptRail,
     RuntimePromptRail,
     StructuredAskUserRail,
-    SymphonyOrchestrationPromptRail,
+    SymphonyOrchestrationRail,
 )
 from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
@@ -691,7 +691,7 @@ class JiuWenSwarmDeepAdapter:
         self._paid_search_tool: WebPaidSearchTool | None = None
         self._symphony_tools: list[Any] = []
         self._symphony_tools_registered: bool = False
-        self._symphony_orchestration_prompt_rail = None
+        self._symphony_orchestration_rail = None
         self._skill_retrieval_tools_registered: bool = False
         self._skill_retrieval_tools: list[Any] = []
         self._skill_retrieval_prompt_rail: SkillRetrievalPromptRail | None = None
@@ -3734,17 +3734,17 @@ class JiuWenSwarmDeepAdapter:
                 except (AttributeError, TypeError):
                     pass
 
-    def _build_symphony_orchestration_prompt_rail(
+    def _build_symphony_orchestration_rail(
         self,
-    ) -> SymphonyOrchestrationPromptRail | None:
+    ) -> SymphonyOrchestrationRail | None:
         """Build dynamic Symphony orchestration prompt guidance."""
         try:
-            return SymphonyOrchestrationPromptRail(
+            return SymphonyOrchestrationRail(
                 config_base=lambda: self._config_base_cache,
             )
         except Exception as exc:
             logger.warning(
-                "[JiuWenSwarmDeepAdapter] SymphonyOrchestrationPromptRail create failed: %s",
+                "[JiuWenSwarmDeepAdapter] SymphonyOrchestrationRail create failed: %s",
                 exc,
             )
             return None
@@ -3828,8 +3828,8 @@ class JiuWenSwarmDeepAdapter:
         rail_infos.insert(
             4 if self._filesystem_rail_enabled_for_profile() else 3,
             _RailBuildInfo(
-                "_symphony_orchestration_prompt_rail",
-                self._build_symphony_orchestration_prompt_rail,
+                "_symphony_orchestration_rail",
+                self._build_symphony_orchestration_rail,
             ),
         )
         if isinstance(mode, str) and mode.startswith("agent"):

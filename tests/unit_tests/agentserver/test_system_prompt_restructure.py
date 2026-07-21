@@ -23,8 +23,8 @@ from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
 from jiuwenswarm.agents.harness.common.rails import skill_retrieval_prompt_rail as _skill_retrieval_prompt_mod
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import SkillRetrievalPromptRail
-from jiuwenswarm.agents.harness.common.rails.symphony_orchestration_prompt_rail import (
-    SymphonyOrchestrationPromptRail,
+from jiuwenswarm.agents.harness.common.rails.symphony import (
+    SymphonyOrchestrationRail,
 )
 
 
@@ -138,7 +138,7 @@ def test_build_agent_identity_prompt_contains_identity_section_only():
 
 
 @pytest.mark.asyncio
-async def test_symphony_orchestration_prompt_rail_respects_config_snapshot():
+async def test_symphony_orchestration_rail_respects_config_snapshot():
     enabled_builder = SystemPromptBuilder(language="cn")
     enabled_agent = _FakeAgent(enabled_builder)
     enabled_ctx = AgentCallbackContext(
@@ -149,7 +149,7 @@ async def test_symphony_orchestration_prompt_rail_respects_config_snapshot():
         session=_FakeSession(),
         extra={},
     )
-    enabled_rail = SymphonyOrchestrationPromptRail(
+    enabled_rail = SymphonyOrchestrationRail(
         config_base={"symphony": {"enabled": True}},
     )
     enabled_rail.init(enabled_agent)
@@ -165,7 +165,7 @@ async def test_symphony_orchestration_prompt_rail_respects_config_snapshot():
         session=_FakeSession(),
         extra={},
     )
-    disabled_rail = SymphonyOrchestrationPromptRail(
+    disabled_rail = SymphonyOrchestrationRail(
         config_base={"symphony": {"enabled": False}},
     )
     disabled_rail.init(disabled_agent)
@@ -180,7 +180,7 @@ async def test_symphony_orchestration_prompt_rail_respects_config_snapshot():
 
 
 @pytest.mark.asyncio
-async def test_symphony_orchestration_prompt_rail_injects_when_tool_visible(
+async def test_symphony_orchestration_rail_injects_when_tool_visible(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -198,7 +198,7 @@ async def test_symphony_orchestration_prompt_rail_injects_when_tool_visible(
         extra={},
     )
 
-    rail = SymphonyOrchestrationPromptRail()
+    rail = SymphonyOrchestrationRail()
     rail.init(agent)
     await rail.before_model_call(ctx)
 
@@ -212,7 +212,7 @@ async def test_symphony_orchestration_prompt_rail_injects_when_tool_visible(
 
 @pytest.mark.asyncio
 async def test_symphony_orchestration_rail_backfills_viewed_skills():
-    rail = SymphonyOrchestrationPromptRail()
+    rail = SymphonyOrchestrationRail()
     invocation_extra: dict = {}
 
     for skill_name in (
@@ -242,7 +242,7 @@ async def test_symphony_orchestration_rail_backfills_viewed_skills():
 
 @pytest.mark.asyncio
 async def test_symphony_orchestration_rail_preserves_explicit_candidates():
-    rail = SymphonyOrchestrationPromptRail()
+    rail = SymphonyOrchestrationRail()
     invocation_extra: dict = {}
     await rail.after_tool_call(
         _tool_call_ctx(
@@ -266,7 +266,7 @@ async def test_symphony_orchestration_rail_preserves_explicit_candidates():
 
 @pytest.mark.asyncio
 async def test_symphony_orchestration_rail_does_not_reuse_other_invocation():
-    rail = SymphonyOrchestrationPromptRail()
+    rail = SymphonyOrchestrationRail()
     await rail.after_tool_call(
         _tool_call_ctx(
             "skill_tool",
@@ -287,7 +287,7 @@ async def test_symphony_orchestration_rail_does_not_reuse_other_invocation():
 
 @pytest.mark.asyncio
 async def test_symphony_orchestration_rail_ignores_disclosure_and_failed_views():
-    rail = SymphonyOrchestrationPromptRail()
+    rail = SymphonyOrchestrationRail()
     invocation_extra: dict = {}
     await rail.after_tool_call(
         _tool_call_ctx(
@@ -316,7 +316,7 @@ async def test_symphony_orchestration_rail_ignores_disclosure_and_failed_views()
 
 
 @pytest.mark.asyncio
-async def test_symphony_orchestration_prompt_rail_clears_when_unavailable(
+async def test_symphony_orchestration_rail_clears_when_unavailable(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -339,7 +339,7 @@ async def test_symphony_orchestration_prompt_rail_clears_when_unavailable(
         extra={},
     )
 
-    rail = SymphonyOrchestrationPromptRail()
+    rail = SymphonyOrchestrationRail()
     rail.init(agent)
     await rail.before_model_call(ctx)
 
@@ -347,7 +347,7 @@ async def test_symphony_orchestration_prompt_rail_clears_when_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_symphony_orchestration_prompt_rail_clears_when_disabled(
+async def test_symphony_orchestration_rail_clears_when_disabled(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -365,7 +365,7 @@ async def test_symphony_orchestration_prompt_rail_clears_when_disabled(
         extra={},
     )
 
-    rail = SymphonyOrchestrationPromptRail()
+    rail = SymphonyOrchestrationRail()
     rail.init(agent)
     await rail.before_model_call(ctx)
 

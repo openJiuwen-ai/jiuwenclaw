@@ -8,6 +8,9 @@ from openjiuwen.core.single_agent.rail.base import ToolCallInputs
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
     JiuSwarmStreamEventRail,
 )
+from jiuwenswarm.agents.harness.common.rails.symphony import (
+    SymphonyToolStreamHandler,
+)
 from jiuwenswarm.agents.harness.common.tool_progress_context import (
     current_tool_progress,
 )
@@ -36,6 +39,13 @@ class _ModelContext:
 
     async def add_messages(self, message):
         self.messages.append(message)
+
+
+def test_symphony_tool_stream_handler_matches_only_compose_tool():
+    handler = SymphonyToolStreamHandler()
+
+    assert handler.matches(SimpleNamespace(name="symphony_compose_score"))
+    assert not handler.matches(SimpleNamespace(name="todo_list"))
 
 
 def _ctx(

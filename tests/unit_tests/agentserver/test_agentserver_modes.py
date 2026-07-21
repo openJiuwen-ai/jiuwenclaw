@@ -1181,7 +1181,7 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     monkeypatch.setattr(adapter, "_build_subagent_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_skill_rail", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_build_skill_retrieval_prompt_rail", lambda: None)
-    monkeypatch.setattr(adapter, "_build_symphony_orchestration_prompt_rail", lambda: orchestration_rail)
+    monkeypatch.setattr(adapter, "_build_symphony_orchestration_rail", lambda: orchestration_rail)
     monkeypatch.setattr(adapter, "_build_structured_ask_user_rail", lambda: ask_user_rail)
     monkeypatch.setattr(interface_deep_module, "build_permission_rail", lambda **_kwargs: None)
     monkeypatch.setattr(interface_deep_module, "_build_context_processor_rail", lambda **_kwargs: None)
