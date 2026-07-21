@@ -224,15 +224,16 @@
 }
 
 .code-branch--environment .code-branch__create-hint {
-  right: calc(100% + 8px);
+  right: 0;
   left: auto;
-  transform: translateX(4px);
+  bottom: calc(100% + 6px);
+  transform: translateY(4px);
 }
 
 .code-branch--environment .code-branch__create-wrap.is-disabled:hover .code-branch__create-hint,
 .code-branch--environment .code-branch__create-wrap.is-disabled:focus .code-branch__create-hint,
 .code-branch--environment .code-branch__create-wrap.is-disabled:focus-within .code-branch__create-hint {
-  transform: translateX(0);
+  transform: translateY(0);
 }
 
 .code-branch__empty {
