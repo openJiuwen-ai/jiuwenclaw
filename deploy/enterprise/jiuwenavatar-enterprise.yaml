@@ -1,0 +1,160 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jiuwen-avatar
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jiuwenavatar-enterprise-env
+  namespace: jiuwen-avatar
+data:
+  DEPLOYMENT_MODE: enterprise
+  AGENT_SERVER_DEPLOY_MODE: k8s
+  GATEWAY_SESSION_MAP_BACKEND: redis
+  JIUWENAVATAR_STORE_BACKEND: postgres
+  JIUWENAVATAR_TENANT_WORKSPACE_ROOT: /data/jiuwenavatar-tenants
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  DATABASE_URL: postgresql://jiuwen:jiuwen@postgresql:5432/jiuwenavatar
+  AGENT_SERVER_URL: ws://agentserver:28092
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: jiuwen-avatar
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      serviceAccountName: gateway
+      containers:
+        - name: gateway
+          image: jiuwenavatar:latest
+          imagePullPolicy: IfNotPresent
+          command: ["jiuwenavatar-gateway"]
+          envFrom:
+            - configMapRef:
+                name: jiuwenavatar-enterprise-env
+          ports:
+            - containerPort: 29000
+          volumeMounts:
+            - name: tenant-workspace
+              mountPath: /data/jiuwenavatar-tenants
+      volumes:
+        - name: tenant-workspace
+          persistentVolumeClaim:
+            claimName: tenant-workspace
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentserver
+  namespace: jiuwen-avatar
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentserver
+  template:
+    metadata:
+      labels:
+        app: agentserver
+    spec:
+      containers:
+        - name: agentserver
+          image: jiuwenavatar:latest
+          imagePullPolicy: IfNotPresent
+          command: ["jiuwenavatar-agentserver"]
+          envFrom:
+            - configMapRef:
+                name: jiuwenavatar-enterprise-env
+          env:
+            - name: AGENT_SERVER_HOST
+              value: 0.0.0.0
+          ports:
+            - containerPort: 28092
+          volumeMounts:
+            - name: tenant-workspace
+              mountPath: /data/jiuwenavatar-tenants
+      volumes:
+        - name: tenant-workspace
+          persistentVolumeClaim:
+            claimName: tenant-workspace
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: jiuwen-avatar
+spec:
+  selector:
+    app: gateway
+  ports:
+    - name: web
+      port: 29000
+      targetPort: 29000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentserver
+  namespace: jiuwen-avatar
+spec:
+  selector:
+    app: agentserver
+  ports:
+    - name: ws
+      port: 28092
+      targetPort: 28092
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tenant-workspace
+  namespace: jiuwen-avatar
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gateway
+  namespace: jiuwen-avatar
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gateway-runtime-management
+  namespace: jiuwen-avatar
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gateway-runtime-management
+  namespace: jiuwen-avatar
+subjects:
+  - kind: ServiceAccount
+    name: gateway
+roleRef:
+  kind: Role
+  name: gateway-runtime-management
+  apiGroup: rbac.authorization.k8s.io

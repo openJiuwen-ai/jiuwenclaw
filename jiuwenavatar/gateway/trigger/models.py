@@ -76,5 +76,9 @@ class TriggerConfig(BaseModel):
     last_triggered_at: str | None = Field(None, description="最后触发时间")
     last_error: str | None = Field(None, description="最后错误信息")
 
+    # --- 租户隔离 ---
+    group_id: str | None = Field(None, description="租户/组织 ID")
+    owner_user_id: str | None = Field(None, description="分身创建者用户 ID")
+
     # --- 扩展 ---
     extra: dict[str, Any] = Field(default_factory=dict, description="扩展配置")

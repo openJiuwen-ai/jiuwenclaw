@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { webRequest } from '../../services/webClient';
+import { enterpriseUserContext } from '../../utils/enterpriseContext';
 import { PlatformPageLayout, PlatformEmpty } from '../AvatarPlatform/PlatformPageLayout';
 import '../AvatarPlatform/AvatarPlatform.css';
 
@@ -115,7 +116,9 @@ export function StatsPanel() {
     else setRefreshing(true);
     setError(null);
     try {
-      const res = await webRequest<{ stats?: UsageStats }>('missions.stats', {});
+      const res = await webRequest<{ stats?: UsageStats }>('missions.stats', {
+        ...enterpriseUserContext(),
+      });
       setStats(res.stats ?? null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

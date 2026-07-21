@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import asyncio
 import json
+import os
 import websockets
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
@@ -517,6 +518,140 @@ async def run_mock_agent_server(
         server = await websockets.serve(mock_agent_server_handler, host, port)
     logger.info("[MockAgentServer] 已启动: ws://%s:%s", host, port)
     return server
+
+
+def _routing_from_envelope(envelope: E2AEnvelope) -> dict[str, str]:
+    params = envelope.params if isinstance(envelope.params, dict) else {}
+    routing = params.get("routing") if isinstance(params.get("routing"), dict) else {}
+    service_id = str(params.get("service_id") or routing.get("service_id") or "").strip()
+    agent_id = str(params.get("agent_id") or routing.get("agent_id") or "").strip()
+    avatar_id = str(params.get("avatar_id") or routing.get("avatar_id") or "").strip()
+    return {"service_id": service_id, "agent_id": agent_id, "avatar_id": avatar_id}
+
+
+def _load_service_endpoint_map(config: dict[str, Any] | None = None) -> dict[str, str]:
+    """Load service_id -> ws endpoint mapping for enterprise runtime."""
+
+    mapping: dict[str, str] = {}
+    raw = os.getenv("AGENT_SERVICE_ENDPOINTS", "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                mapping.update({str(k): str(v) for k, v in parsed.items() if v})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("AGENT_SERVICE_ENDPOINTS parse failed: %s", exc)
+
+    runtime_cfg = (config or {}).get("runtime_management") or {}
+    endpoints = runtime_cfg.get("service_endpoints")
+    if isinstance(endpoints, dict):
+        mapping.update({str(k): str(v) for k, v in endpoints.items() if v})
+    return mapping
+
+
+class RuntimeManagementAgentClient(AgentServerClient):
+    """Enterprise-style AgentClient that routes by `routing.service_id`."""
+
+    def __init__(
+        self,
+        *,
+        default_endpoint: str | None = None,
+        config: dict[str, Any] | None = None,
+        ping_interval: float | None = 20.0,
+        ping_timeout: float | None = 600.0,
+    ) -> None:
+        self._default_endpoint = default_endpoint or os.getenv("AGENT_SERVER_URL", "")
+        self._service_endpoints = _load_service_endpoint_map(config)
+        self._clients: dict[str, WebSocketAgentServerClient] = {}
+        self._server_config: dict[str, Any] = dict(config or {})
+        self._server_env: dict[str, str] = {}
+        self._ping_interval = ping_interval
+        self._ping_timeout = ping_timeout
+        self._on_server_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+
+    def set_server_push_handler(
+        self, handler: Callable[[dict[str, Any]], Awaitable[None]] | None
+    ) -> None:
+        self._on_server_push = handler
+        for client in self._clients.values():
+            client.set_server_push_handler(handler)
+
+    def set_or_update_server_config(
+        self,
+        *,
+        config: dict[str, Any],
+        env: dict[str, str] | None = None,
+    ) -> None:
+        self._server_config = dict(config or {})
+        self._server_env = dict(env or {})
+        self._service_endpoints = _load_service_endpoint_map(config)
+        for client in self._clients.values():
+            client.set_or_update_server_config(config=config, env=env)
+
+    async def connect(self, uri: str) -> None:
+        if uri:
+            self._default_endpoint = uri
+        if not self._default_endpoint and self._service_endpoints:
+            self._default_endpoint = next(iter(self._service_endpoints.values()))
+        if self._default_endpoint:
+            await self._get_client_for_endpoint("__default__", self._default_endpoint)
+
+    async def disconnect(self) -> None:
+        clients = list(self._clients.values())
+        self._clients.clear()
+        for client in clients:
+            try:
+                await client.disconnect()
+            except Exception:
+                logger.warning("RuntimeManagement client disconnect failed", exc_info=True)
+
+    def _resolve_endpoint(self, service_id: str) -> tuple[str, str]:
+        endpoint = self._service_endpoints.get(service_id) if service_id else ""
+        endpoint = endpoint or self._default_endpoint
+        if not endpoint:
+            raise RuntimeError("No AgentServer endpoint configured for enterprise runtime")
+        key = service_id or "__default__"
+        return key, endpoint
+
+    async def _get_client_for_endpoint(self, key: str, endpoint: str) -> WebSocketAgentServerClient:
+        client = self._clients.get(key)
+        if client is not None and client.server_ready:
+            return client
+        client = WebSocketAgentServerClient(
+            ping_interval=self._ping_interval,
+            ping_timeout=self._ping_timeout,
+        )
+        if self._on_server_push is not None:
+            client.set_server_push_handler(self._on_server_push)
+        client.set_or_update_server_config(config=self._server_config, env=self._server_env)
+        await client.connect(endpoint)
+        self._clients[key] = client
+        return client
+
+    async def _get_client_for_envelope(self, envelope: E2AEnvelope) -> WebSocketAgentServerClient:
+        routing = _routing_from_envelope(envelope)
+        key, endpoint = self._resolve_endpoint(routing.get("service_id", ""))
+        logger.info(
+            "[RuntimeManagementAgentClient] route request_id=%s service_id=%s agent_id=%s endpoint=%s",
+            envelope.request_id,
+            routing.get("service_id") or "__default__",
+            routing.get("agent_id") or "",
+            endpoint,
+        )
+        return await self._get_client_for_endpoint(key, endpoint)
+
+    async def send_request(
+        self, envelope: E2AEnvelope, *, timeout: float | None = None
+    ) -> AgentResponse:
+        client = await self._get_client_for_envelope(envelope)
+        return await client.send_request(envelope, timeout=timeout)
+
+    async def send_request_stream(
+        self, envelope: E2AEnvelope
+    ) -> AsyncIterator[AgentResponseChunk]:
+        client = await self._get_client_for_envelope(envelope)
+        async for chunk in client.send_request_stream(envelope):
+            yield chunk
 
 
 # ---------------------------------------------------------------------------

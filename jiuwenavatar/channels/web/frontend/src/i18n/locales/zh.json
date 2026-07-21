@@ -955,14 +955,20 @@
       "gitcodeToken": "GitCode Token",
       "anthropicApiKey": "Anthropic API Key",
       "anthropicBaseUrl": "Anthropic Base URL",
-      "anthropicModel": "Anthropic Model"
+      "anthropicModel": "Anthropic Model",
+      "openaiApiKey": "OpenAI API Key",
+      "openaiBaseUrl": "OpenAI Base URL",
+      "codexModel": "Codex Model"
     },
     "keyHelp": {
       "skillCreate": "建议先安装 `skill-creator` 和 `teamskill-creator`，再开启",
       "gitcodeToken": "GitCode 个人访问令牌，用于 gitcode-repo 技能提交 PR 检视意见、Issue 评论等。在 GitCode「设置 → 个人访问令牌」创建后粘贴保存即可。",
       "anthropicApiKey": "Claude Code 使用的 API Key。若已用 claude login 订阅登录可留空。",
       "anthropicBaseUrl": "Anthropic API 代理/网关地址（可选）。",
-      "anthropicModel": "Claude Code 默认模型（可选，如 sonnet / opus）。"
+      "anthropicModel": "Claude Code 默认模型（可选，如 sonnet / opus）。",
+      "openaiApiKey": "Codex CLI 使用的 OpenAI API Key。",
+      "openaiBaseUrl": "Codex CLI 使用的 OpenAI 兼容 API 代理/网关地址（可选）。",
+      "codexModel": "Codex CLI 默认模型（可选）。"
     },
     "hideValue": "隐藏明文",
     "showValue": "显示明文",
@@ -1040,6 +1046,7 @@
       "modelAudio": { "label": "音频模型", "hint": "语音识别（可选）" },
       "modelVision": { "label": "视觉模型", "hint": "图像理解（可选）" },
       "modelClaudeCode": { "label": "Claude Code 模型", "hint": "Claude Code 编码后端使用的 Anthropic 模型与鉴权参数" },
+      "modelCodexCli": { "label": "Codex CLI 模型", "hint": "Codex CLI 编码后端使用的 OpenAI 模型与鉴权参数" },
       "model": { "label": "模型配置", "hint": "模型服务与鉴权参数" },
       "embed": { "label": "Embed配置", "hint": "Embed 服务与鉴权参数" },
       "thirdParty": { "label": "第三方服务配置", "hint": "GitHub、GitCode 等第三方 API Token 配置" },

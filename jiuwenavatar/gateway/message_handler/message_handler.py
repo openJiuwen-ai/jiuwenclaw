@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Literal
 from jiuwenavatar.gateway.channel_manager.base import ChannelType
 from jiuwenavatar.common.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS
+from jiuwenavatar.common.enterprise import make_service_id, merge_routing
 from jiuwenavatar.gateway.routing.session_map import SessionMap
 from jiuwenavatar.gateway.message_handler.command_parser.slash_command import (
     ParsedControlAction,
@@ -215,9 +216,9 @@ class MessageHandler(ABC):
         self._get_config_raw = get_config_raw
         self._update_channel_in_config = update_channel_in_config
 
-        from jiuwenavatar.gateway.routing.agent_client import WebSocketAgentServerClient
+        from jiuwenavatar.gateway.routing.agent_client import RuntimeManagementAgentClient, WebSocketAgentServerClient
 
-        if isinstance(self._agent_client, WebSocketAgentServerClient):
+        if isinstance(self._agent_client, (WebSocketAgentServerClient, RuntimeManagementAgentClient)):
             self._agent_client.set_server_push_handler(self._handle_agent_server_push)
 
     @classmethod
@@ -478,21 +479,28 @@ class MessageHandler(ABC):
             prompt = "手动聊天"
 
         try:
-            from jiuwenavatar.gateway.report.manager import ReportManager
+            from jiuwenavatar.gateway.report.manager import MissionManager
             from jiuwenavatar.gateway.report.models import MissionStatus
 
-            report_mgr = ReportManager.get_instance()
-            mission = report_mgr.create_mission(
+            route = self._resolve_avatar_route(avatar_id)
+            mission_mgr = MissionManager.get_instance()
+            mission = mission_mgr.create_mission(
                 avatar_id=avatar_id,
                 trigger_id=None,
                 prompt=prompt,
+                service_id=route.get("service_id") or None,
+                agent_id=route.get("agent_id") or None,
+                group_id=route.get("group_id") or None,
+                owner_user_id=route.get("owner_user_id") or None,
             )
-            report_mgr.update_mission_runtime(
+            mission_mgr.update_mission_runtime(
                 mission.id,
                 run_id=rid,
                 session_id=session_id,
+                service_id=route.get("service_id") or None,
+                agent_id=route.get("agent_id") or None,
             )
-            report_mgr.update_mission_status(mission.id, MissionStatus.RUNNING)
+            mission_mgr.update_mission_status(mission.id, MissionStatus.RUNNING)
             self._stream_mission_ids[rid] = mission.id
             logger.info(
                 "[MessageHandler] Avatar mission started: session_id=%s mission_id=%s",
@@ -501,6 +509,39 @@ class MessageHandler(ABC):
             )
         except Exception as exc:
             logger.warning("[MessageHandler] Failed to start avatar mission: %s", exc)
+
+    @staticmethod
+    def _resolve_avatar_route(avatar_id: str) -> dict[str, str]:
+        try:
+            from jiuwenavatar.server.runtime.persona import PersonaManager
+
+            avatar = PersonaManager.get_instance().get_avatar(avatar_id) or {}
+        except Exception:  # noqa: BLE001
+            avatar = {}
+        group_id = str(avatar.get("group_id") or "").strip()
+        owner_user_id = str(avatar.get("owner_user_id") or "").strip()
+        service_id = str(avatar.get("service_id") or "").strip()
+        if not service_id and avatar_id:
+            service_id = make_service_id(group_id or "default", avatar_id)
+        return {
+            "service_id": service_id,
+            "agent_id": str(avatar.get("agent_id") or owner_user_id or "").strip(),
+            "group_id": group_id,
+            "owner_user_id": owner_user_id,
+        }
+
+    def _inject_avatar_route(self, env: "E2AEnvelope", avatar_id: str) -> None:
+        if not avatar_id or not isinstance(env.params, dict):
+            return
+        route = self._resolve_avatar_route(avatar_id)
+        env.params = merge_routing(
+            env.params,
+            service_id=route.get("service_id", ""),
+            agent_id=route.get("agent_id", ""),
+            avatar_id=avatar_id,
+            group_id=route.get("group_id", ""),
+            user_id=route.get("owner_user_id", ""),
+        )
 
     @staticmethod
     def _is_single_user_channel(channel_id: str) -> bool:
@@ -2838,6 +2879,8 @@ class MessageHandler(ABC):
                 agent_msg = await self._prepare_agent_dispatch_message(msg)
                 await self._trigger_before_chat_request_hook(agent_msg)
                 env = self.message_to_e2a(agent_msg)
+                if isinstance(env.params, dict):
+                    self._inject_avatar_route(env, str(env.params.get("avatar_id") or "").strip())
                 stream_rid = env.request_id or msg.id
                 try:
                     if env.is_stream:
@@ -2918,6 +2961,7 @@ class MessageHandler(ABC):
         request_avatar_id = ""
         if isinstance(env.params, dict):
             request_avatar_id = str(env.params.get("avatar_id") or "").strip()
+            self._inject_avatar_route(env, request_avatar_id)
         is_chat_send = self._is_chat_send_envelope(env)
         if is_chat_send:
             self._ensure_avatar_mission_started(
@@ -3039,7 +3083,7 @@ class MessageHandler(ABC):
                 get_session_metadata,
                 update_session_metadata,
             )
-            from jiuwenavatar.gateway.report.manager import ReportManager
+            from jiuwenavatar.gateway.report.manager import MissionManager
             from jiuwenavatar.gateway.report.models import MissionStatus
             
             metadata = get_session_metadata(session_id, cache_bust=True)
@@ -3066,7 +3110,7 @@ class MessageHandler(ABC):
             # 检查该 session 是否已有 Mission（避免重复创建）
             if not mission_id:
                 mission_id = metadata.get("_mission_id")
-            report_mgr = ReportManager.get_instance()
+            mission_mgr = MissionManager.get_instance()
 
             summary = (result_text or "").strip()[:2000]
             if cancelled:
@@ -3078,9 +3122,9 @@ class MessageHandler(ABC):
             if mission_id:
                 # 更新 Mission 状态
                 status = MissionStatus.CANCELLED if cancelled else MissionStatus.COMPLETED
-                report_mgr.update_mission_status(mission_id, status, result_summary=summary)
+                mission_mgr.update_mission_status(mission_id, status, result_summary=summary)
                 if run_id or session_id:
-                    report_mgr.update_mission_runtime(
+                    mission_mgr.update_mission_runtime(
                         mission_id,
                         run_id=run_id,
                         session_id=session_id,
@@ -3094,19 +3138,19 @@ class MessageHandler(ABC):
                 title = metadata.get("title", "手动聊天")
                 user_query = self._get_session_last_user_query(session_id)
                 prompt = user_query or f"手动聊天: {title}"
-                mission = report_mgr.create_mission(
+                mission = mission_mgr.create_mission(
                     avatar_id=avatar_id,
                     trigger_id=None,  # 手动聊天无 trigger
                     prompt=prompt,
                 )
-                report_mgr.update_mission_runtime(
+                mission_mgr.update_mission_runtime(
                     mission.id,
                     run_id=run_id,
                     session_id=session_id,
                 )
                 # 直接标记为完成
                 status = MissionStatus.CANCELLED if cancelled else MissionStatus.COMPLETED
-                report_mgr.update_mission_status(mission.id, status, result_summary=summary)
+                mission_mgr.update_mission_status(mission.id, status, result_summary=summary)
                 logger.info(
                     "[MessageHandler] Avatar mission created and finalized: session_id=%s mission_id=%s status=%s summary_len=%d",
                     session_id, mission.id, status.value, len(summary),

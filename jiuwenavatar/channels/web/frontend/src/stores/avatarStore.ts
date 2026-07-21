@@ -4,6 +4,7 @@
 
 import { create } from 'zustand';
 import type { WebRequestOptions } from '../types';
+import { enterpriseUserContext } from '../utils/enterpriseContext';
 
 const PERSONA_GENERATE_TIMEOUT_MS = 90_000;
 
@@ -59,6 +60,12 @@ export interface AvatarConfig {
   name: string;
   persona_id: string;
   persona_version: string;
+  owner_user_id?: string;
+  group_id?: string;
+  service_id?: string;
+  agent_id?: string;
+  runtime_status?: 'unbound' | 'bound' | 'error';
+  agentserver_ref?: string;
   status: AvatarStatus;
   skills: string[];
   coding_engine?: CodingEngine | null;
@@ -250,7 +257,7 @@ export const useAvatarStore = create<AvatarState & AvatarActions>((set, get) => 
   fetchAvatars: async (sendRequest) => {
     set({ avatarsLoading: true });
     try {
-      const result = await sendRequest('avatars.list') as { avatars?: AvatarConfig[] };
+      const result = await sendRequest('avatars.list', enterpriseUserContext()) as { avatars?: AvatarConfig[] };
       set({ avatars: result?.avatars || [], avatarsLoading: false });
     } catch {
       set({ avatarsLoading: false });
@@ -258,7 +265,10 @@ export const useAvatarStore = create<AvatarState & AvatarActions>((set, get) => 
   },
 
   createAvatar: async (sendRequest, params) => {
-    const result = await sendRequest('avatars.create', params) as { avatar?: AvatarConfig; error?: string };
+    const result = await sendRequest(
+      'avatars.create',
+      { ...enterpriseUserContext(), ...params },
+    ) as { avatar?: AvatarConfig; error?: string };
     if (result?.avatar) {
       set((state) => ({ avatars: [...state.avatars, result.avatar!] }));
       return result.avatar;

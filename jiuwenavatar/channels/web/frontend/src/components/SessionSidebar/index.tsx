@@ -27,6 +27,11 @@ import { webRequest } from '../../services/webClient';
 
 type MainNavKey = 'chat' | 'avatars' | 'triggers' | 'reports' | 'stats' | 'channels' | 'config';
 
+interface EnterpriseUserContext {
+  userId: string;
+  groupId: string;
+}
+
 interface SessionSidebarProps {
   activeNav: MainNavKey;
   onNavigate: (nav: MainNavKey) => void;
@@ -34,6 +39,10 @@ interface SessionSidebarProps {
   appVersion: string;
   isConnected: boolean;
   onNewSession?: () => void;
+  enterpriseUser?: EnterpriseUserContext | null;
+  onEnterpriseLogout?: () => void;
+  /** Hide system config nav for enterprise members (admin-only). */
+  hideConfigNav?: boolean;
   collapsed?: boolean;
   onCollapse?: () => void;
   onExpand?: () => void;
@@ -274,11 +283,17 @@ export function SessionSidebar({
   appVersion,
   isConnected,
   onNewSession,
+  enterpriseUser = null,
+  onEnterpriseLogout,
+  hideConfigNav = false,
   collapsed = false,
   onCollapse,
   onExpand,
 }: SessionSidebarProps) {
   const { t } = useTranslation();
+  const visibleMainNavItems = hideConfigNav
+    ? mainNavItems.filter((item) => item.key !== 'config')
+    : mainNavItems;
   const [advancedConfigOpen, setAdvancedConfigOpen] = useState(false);
   const advancedBtnRef = useRef<HTMLButtonElement>(null);
 
@@ -375,7 +390,7 @@ export function SessionSidebar({
         </button>
 
         {/* Main nav icons */}
-        {mainNavItems.map((item) => (
+        {visibleMainNavItems.map((item) => (
           <Tooltip
             key={item.key}
             text={getNavItemLabel(item)}
@@ -383,7 +398,7 @@ export function SessionSidebar({
             visible={hoveredNav === item.key}
           />
         ))}
-        {mainNavItems.map((item) => (
+        {visibleMainNavItems.map((item) => (
           <button
             key={item.key}
             ref={(el) => {
@@ -482,7 +497,7 @@ export function SessionSidebar({
           </span>
         </button>
         <nav className="sidebar-nav">
-          {mainNavItems.map((item) => (
+          {visibleMainNavItems.map((item) => (
             <button
               key={item.key}
               className={`nav-item ${activeNav === item.key ? 'active' : ''}`}
@@ -515,18 +530,38 @@ export function SessionSidebar({
       )}
 
       {/* User Info Bar - Bottom Row */}
-      <div className="sidebar-bottom">
-        <div className="sidebar-user">
-          <span className="sidebar-user__name">{t('version', { version: appVersion })}</span>
+      <div className="sidebar-bottom-stack">
+        {enterpriseUser && (
+          <div className="sidebar-tenant-card">
+            <div className="sidebar-tenant-card__label">当前租户</div>
+            <div className="sidebar-tenant-card__group" title={enterpriseUser.groupId}>
+              {enterpriseUser.groupId}
+            </div>
+            <div className="sidebar-tenant-card__user" title={enterpriseUser.userId}>
+              用户：{enterpriseUser.userId}
+            </div>
+            <button
+              type="button"
+              className="sidebar-tenant-card__logout"
+              onClick={onEnterpriseLogout}
+            >
+              注销并重新登录
+            </button>
+          </div>
+        )}
+        <div className="sidebar-bottom">
+          <div className="sidebar-user">
+            <span className="sidebar-user__name">{t('version', { version: appVersion })}</span>
+          </div>
+          <button
+            ref={advancedBtnRef}
+            className="advanced-config-btn"
+            onClick={toggleAdvancedConfig}
+            title={t('sessionSidebar.advancedConfig')}
+          >
+            <img src={advancedConfigIcon} alt="" />
+          </button>
         </div>
-        <button
-          ref={advancedBtnRef}
-          className="advanced-config-btn"
-          onClick={toggleAdvancedConfig}
-          title={t('sessionSidebar.advancedConfig')}
-        >
-          <img src={advancedConfigIcon} alt="" />
-        </button>
       </div>
 
       <AdvancedConfigPanel

@@ -37,7 +37,9 @@ from jiuwenavatar.extensions.hook_event import AgentServerHookEvents
 from jiuwenavatar.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenavatar.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenavatar.extensions.hooks_context import AgentServerChatHookContext
+from jiuwenavatar.common.enterprise import bind_tenant_context
 from jiuwenavatar.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
+from jiuwenavatar.server.runtime.tenant_agent_pool import TenantAgentPool
 from jiuwenavatar.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenavatar.server.runtime.session.session_history import append_compact_history_records, read_team_history_records
 from jiuwenavatar.server.runtime.agent_adapter.sysop_builder import (
@@ -399,8 +401,9 @@ class AgentWebSocketServer:
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
-        # AgentManager 实例
+        # AgentManager 实例：单机默认仍用单 manager；企业模式通过 TenantAgentPool 按路由键隔离。
         self._agent_manager = AgentManager()
+        self._tenant_agent_pool = TenantAgentPool.get_instance()
         # session_id → 正在运行的流式 asyncio.Task，用于 interrupt 时精确取消
         self._session_stream_tasks: dict[str, asyncio.Task] = {}
         # Scheduler service instance (for scheduled auto_harness tasks)
@@ -731,6 +734,10 @@ class AgentWebSocketServer:
             await self._jiuwenbox_runner.stop()
         except Exception as exc:  # noqa: BLE001
             logger.warning("[AgentWebSocketServer] jiuwenbox_runner.stop failed: %s", exc)
+        try:
+            await self._tenant_agent_pool.cleanup()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentWebSocketServer] tenant_agent_pool.cleanup failed: %s", exc)
         logger.info("[AgentWebSocketServer] 已停止")
 
     # ---------- 连接处理 ----------
@@ -1167,6 +1174,9 @@ class AgentWebSocketServer:
             ReqMethod.CHAT_ANSWER,
         )
 
+    def _agent_manager_for_request(self, request: AgentRequest) -> AgentManager:
+        return self._tenant_agent_pool.get_manager_for_request(request)
+
     async def _trigger_before_chat_request_hook(self, request: AgentRequest) -> None:
         if not self._should_trigger_before_chat_request_hook(request):
             return
@@ -1194,6 +1204,8 @@ class AgentWebSocketServer:
         因此 cancel 请求必须直接定位已有 agent 来处理。
         """
         channel_id = request.channel_id or "default"
+        agent_manager = self._agent_manager_for_request(request)
+        tenant_context = self._tenant_agent_pool.context_for_request(request)
 
         # 1. 尝试按 params 中的 mode 查找已有 agent
         project_dir = resolve_request_project_dir(request)
@@ -1201,7 +1213,7 @@ class AgentWebSocketServer:
         if mode_param:
             mode, sub_mode, _canonical = resolve_agent_request_mode(mode_param)
             agent_mode = "agent" if mode == "auto_harness" else mode
-            agent = self._agent_manager.get_agent_nowait(
+            agent = agent_manager.get_agent_nowait(
                 channel_id,
                 mode=agent_mode,
                 project_dir=project_dir,
@@ -1212,7 +1224,7 @@ class AgentWebSocketServer:
 
         # 2. 如果按 mode 没找到，用 get_agent_nowait 找任何已有 agent
         if agent is None:
-            agent = self._agent_manager.get_agent_nowait(channel_id, project_dir=project_dir)
+            agent = agent_manager.get_agent_nowait(channel_id, project_dir=project_dir)
 
         # 3. 仍然没找到时 fallback 到 get_agent（异常场景）
         if agent is None:
@@ -1222,17 +1234,19 @@ class AgentWebSocketServer:
             )
             mode, sub_mode = _apply_resolved_mode_to_request(request)
             agent_mode = "agent" if mode == "auto_harness" else mode
-            agent = await self._agent_manager.get_agent(
-                channel_id=channel_id,
-                mode=agent_mode,
-                project_dir=project_dir,
-                sub_mode=sub_mode,
-            )
+            with bind_tenant_context(tenant_context):
+                agent = await agent_manager.get_agent(
+                    channel_id=channel_id,
+                    mode=agent_mode,
+                    project_dir=project_dir,
+                    sub_mode=sub_mode,
+                )
 
         if agent is None:
             raise ValueError("Failed to get agent for cancel request")
 
-        resp = await agent.process_message(request)
+        with bind_tenant_context(tenant_context):
+            resp = await agent.process_message(request)
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
@@ -1304,18 +1318,23 @@ class AgentWebSocketServer:
 
         mode, sub_mode = _apply_resolved_mode_to_request(request)
         agent_mode = "agent" if mode == "auto_harness" else mode
-        agent = await self._agent_manager.get_agent(
-            channel_id=channel_id,
-            mode=agent_mode,
-            project_dir=resolve_request_project_dir(request),
-            sub_mode=sub_mode,
-        )
+        agent_manager = self._agent_manager_for_request(request)
+        tenant_context = self._tenant_agent_pool.context_for_request(request)
+        with bind_tenant_context(tenant_context):
+            agent = await agent_manager.get_agent(
+                channel_id=channel_id,
+                mode=agent_mode,
+                project_dir=resolve_request_project_dir(request),
+                sub_mode=sub_mode,
+            )
         if agent is None:
             raise ValueError("Failed to get agent")
 
-        await self._ensure_code_mode_state(request, mode, sub_mode, agent)
+        with bind_tenant_context(tenant_context):
+            await self._ensure_code_mode_state(request, mode, sub_mode, agent)
 
-        resp = await agent.process_message(request)
+        with bind_tenant_context(tenant_context):
+            resp = await agent.process_message(request)
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
@@ -1334,16 +1353,20 @@ class AgentWebSocketServer:
             self._session_stream_tasks[session_id] = current_task
         mode, sub_mode = _apply_resolved_mode_to_request(request)
         agent_mode = "agent" if mode == "auto_harness" else mode
-        agent = await self._agent_manager.get_agent(
-            channel_id=channel_id,
-            mode=agent_mode,
-            project_dir=resolve_request_project_dir(request),
-            sub_mode=sub_mode,
-        )
+        agent_manager = self._agent_manager_for_request(request)
+        tenant_context = self._tenant_agent_pool.context_for_request(request)
+        with bind_tenant_context(tenant_context):
+            agent = await agent_manager.get_agent(
+                channel_id=channel_id,
+                mode=agent_mode,
+                project_dir=resolve_request_project_dir(request),
+                sub_mode=sub_mode,
+            )
         if agent is None:
             raise ValueError("Failed to get agent")
 
-        await self._ensure_code_mode_state(request, mode, sub_mode, agent)
+        with bind_tenant_context(tenant_context):
+            await self._ensure_code_mode_state(request, mode, sub_mode, agent)
 
         chunk_count = 0
         # 心跳控制：当有真实 chunk 发送时重置，空闲时发送心跳
@@ -1388,19 +1411,20 @@ class AgentWebSocketServer:
         heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
         try:
-            async for chunk in agent.process_message_stream(request):
-                chunk_count += 1
-                # 通知心跳任务有真实 chunk 发送，重置心跳计时
-                heartbeat_event.set()
-                wire = encode_agent_chunk_for_wire(
-                    chunk,
-                    response_id=request.request_id,
-                    sequence=chunk_count - 1,
-                )
-                async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
-                # 清除 event，让心跳任务重新开始计时
-                heartbeat_event.clear()
+            with bind_tenant_context(tenant_context):
+                async for chunk in agent.process_message_stream(request):
+                    chunk_count += 1
+                    # 通知心跳任务有真实 chunk 发送，重置心跳计时
+                    heartbeat_event.set()
+                    wire = encode_agent_chunk_for_wire(
+                        chunk,
+                        response_id=request.request_id,
+                        sequence=chunk_count - 1,
+                    )
+                    async with send_lock:
+                        await ws.send(json.dumps(wire, ensure_ascii=False))
+                    # 清除 event，让心跳任务重新开始计时
+                    heartbeat_event.clear()
         finally:
             # 停止心跳任务
             if heartbeat_task is not None:
@@ -1425,6 +1449,28 @@ class AgentWebSocketServer:
 
         sessions_dir = get_agent_sessions_dir()
         sessions = []
+        params = request.params if isinstance(request.params, dict) else {}
+        from jiuwenavatar.common.enterprise import parse_tenant_list_filters
+
+        tenant = parse_tenant_list_filters(params)
+        user_filter = ""
+        group_filter = ""
+        avatar_filter = str(params.get("avatar_id") or "").strip() if "avatar_id" in params else None
+        if tenant is not None:
+            if not tenant.is_valid:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={"sessions": []},
+                    metadata=request.metadata,
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                return
+            group_filter = tenant.group_id
+            user_filter = tenant.user_id
 
         try:
             if sessions_dir.exists():
@@ -1441,6 +1487,12 @@ class AgentWebSocketServer:
                             "message_count": 0,
                             "last_message_at": entry.stat().st_mtime,
                         }
+                    if group_filter and str(meta.get("group_id") or "").strip() != group_filter:
+                        continue
+                    if user_filter and str(meta.get("user_id") or "").strip() != user_filter:
+                        continue
+                    if avatar_filter is not None and str(meta.get("avatar_id") or "").strip() != avatar_filter:
+                        continue
                     sessions.append(meta)
         except Exception as exc:
             logger.warning("[AgentWebSocketServer] 扫描 sessions 目录失败: %s", exc)
@@ -4506,7 +4558,7 @@ class AgentWebSocketServer:
         try:
             params = request.params or {}
             engine = TriggerEngine.get_instance()
-            result = await engine.handle_triggers_get(trigger_id=params.get("trigger_id", ""))
+            result = await engine.handle_triggers_get(trigger_id=params.get("trigger_id", ""), **params)
             ok = "error" not in result
             resp = AgentResponse(request_id=request.request_id, channel_id=request.channel_id, ok=ok, payload=result)
         except Exception as e:
@@ -4558,7 +4610,7 @@ class AgentWebSocketServer:
         try:
             params = request.params or {}
             engine = TriggerEngine.get_instance()
-            result = await engine.handle_triggers_delete(trigger_id=params.get("trigger_id", ""))
+            result = await engine.handle_triggers_delete(trigger_id=params.get("trigger_id", ""), **params)
             ok = "error" not in result
             resp = AgentResponse(request_id=request.request_id, channel_id=request.channel_id, ok=ok, payload=result)
         except Exception as e:
@@ -4574,10 +4626,10 @@ class AgentWebSocketServer:
     # ------------------------------------------------------------------
 
     async def _handle_missions_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
         try:
             params = request.params or {}
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_missions_list(**params)
             resp = AgentResponse(request_id=request.request_id, channel_id=request.channel_id, ok=True, payload=result)
         except Exception as e:
@@ -4588,10 +4640,10 @@ class AgentWebSocketServer:
             await ws.send(json.dumps(wire, ensure_ascii=False))
 
     async def _handle_missions_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
         try:
             params = request.params or {}
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_missions_get(mission_id=params.get("mission_id", ""))
             ok = "error" not in result
             resp = AgentResponse(request_id=request.request_id, channel_id=request.channel_id, ok=ok, payload=result)
@@ -4618,10 +4670,10 @@ class AgentWebSocketServer:
             await ws.send(json.dumps(wire, ensure_ascii=False))
 
     async def _handle_missions_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
         try:
             params = request.params or {}
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_missions_delete(mission_id=params.get("mission_id", ""))
             ok = "error" not in result
             resp = AgentResponse(request_id=request.request_id, channel_id=request.channel_id, ok=ok, payload=result)
@@ -4633,10 +4685,10 @@ class AgentWebSocketServer:
             await ws.send(json.dumps(wire, ensure_ascii=False))
 
     async def _handle_reports_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
         try:
             params = request.params or {}
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_reports_list(**params)
             resp = AgentResponse(request_id=request.request_id, channel_id=request.channel_id, ok=True, payload=result)
         except Exception as e:
@@ -4647,10 +4699,10 @@ class AgentWebSocketServer:
             await ws.send(json.dumps(wire, ensure_ascii=False))
 
     async def _handle_reports_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
         try:
             params = request.params or {}
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_reports_get(report_id=params.get("report_id", ""))
             ok = "error" not in result
             resp = AgentResponse(request_id=request.request_id, channel_id=request.channel_id, ok=ok, payload=result)

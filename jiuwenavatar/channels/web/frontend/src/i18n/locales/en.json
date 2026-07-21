@@ -949,14 +949,20 @@
       "gitcodeToken": "GitCode Token",
       "anthropicApiKey": "Anthropic API Key",
       "anthropicBaseUrl": "Anthropic Base URL",
-      "anthropicModel": "Anthropic Model"
+      "anthropicModel": "Anthropic Model",
+      "openaiApiKey": "OpenAI API Key",
+      "openaiBaseUrl": "OpenAI Base URL",
+      "codexModel": "Codex Model"
     },
     "keyHelp": {
       "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling",
       "gitcodeToken": "GitCode personal access token for gitcode-repo (PR review comments, issues, etc.). Create one under GitCode Settings → Personal Access Tokens, then paste and save here.",
       "anthropicApiKey": "API key for Claude Code CLI. Leave empty if you use claude login subscription.",
       "anthropicBaseUrl": "Optional Anthropic API proxy/gateway base URL.",
-      "anthropicModel": "Optional default model for Claude Code (e.g. sonnet, opus)."
+      "anthropicModel": "Optional default model for Claude Code (e.g. sonnet, opus).",
+      "openaiApiKey": "OpenAI API key used by Codex CLI.",
+      "openaiBaseUrl": "Optional OpenAI-compatible proxy/gateway base URL used by Codex CLI.",
+      "codexModel": "Optional default model for Codex CLI."
     },
     "hideValue": "Hide value",
     "showValue": "Show value",
@@ -1034,6 +1040,7 @@
       "modelAudio": { "label": "Audio Model", "hint": "Speech recognition/synthesis model (optional)" },
       "modelVision": { "label": "Vision Model", "hint": "Image understanding model (optional)" },
       "modelClaudeCode": { "label": "Claude Code Model", "hint": "Anthropic model and authentication settings used by the Claude Code coding backend" },
+      "modelCodexCli": { "label": "Codex CLI Model", "hint": "OpenAI model and authentication settings used by the Codex CLI coding backend" },
       "model": { "label": "Model Configuration", "hint": "Model service and authentication settings" },
       "embed": { "label": "Embed Configuration", "hint": "Embed service and authentication settings" },
       "thirdParty": { "label": "Third-Party Services", "hint": "GitHub, GitCode, and other third-party API tokens" },

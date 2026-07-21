@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { FileViewer } from '../AgentPanel/FileViewer';
 import { containsIgnoredDirectory } from '../../features/fileTreeFilters';
 import { webRequest } from '../../services/webClient';
+import { enterpriseUserContext } from '../../utils/enterpriseContext';
 
 interface SessionsPanelProps {
   currentSessionId: string;
@@ -354,7 +355,10 @@ export function SessionsPanel({
   const loadSessions = useCallback(async () => {
     setLoadingSessions(true);
     try {
-      const payload = await webRequest<SessionListResponse>('session.list', { limit: 20 });
+      const payload = await webRequest<SessionListResponse>('session.list', {
+        limit: 20,
+        ...enterpriseUserContext(),
+      });
       const rows = Array.isArray(payload?.sessions) ? toSessionItems(payload.sessions) : [];
       setSessions(rows);
       setSessionsError(null);

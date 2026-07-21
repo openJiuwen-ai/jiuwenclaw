@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FileViewer } from '../AgentPanel/FileViewer';
 import { webRequest } from '../../services/webClient';
+import { enterpriseUserContext } from '../../utils/enterpriseContext';
 import { containsIgnoredDirectory } from '../../features/fileTreeFilters';
 
 interface SessionListResponse {
@@ -110,7 +111,9 @@ export function TeamPanel() {
   const loadTeams = useCallback(async () => {
     setLoadingTeams(true);
     try {
-      const payload = await webRequest<SessionListResponse>('session.list', {});
+      const payload = await webRequest<SessionListResponse>('session.list', {
+        ...enterpriseUserContext(),
+      });
       const nextTeams = Array.isArray(payload?.sessions) ? toTeamInfos(payload.sessions) : [];
       setTeams(nextTeams);
       setError(null);

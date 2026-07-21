@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Report Manager — 任务与报告管理器."""
+"""Mission Manager — 任务生命周期与执行报告管理器."""
 
 from __future__ import annotations
 
@@ -7,22 +7,23 @@ import logging
 from datetime import datetime
 from typing import Any
 
+from jiuwenavatar.common.enterprise import parse_tenant_list_filters
 from jiuwenavatar.gateway.report.models import Mission, MissionReport, MissionStatus
 from jiuwenavatar.gateway.report.store import ReportStore
 
 logger = logging.getLogger(__name__)
 
 
-class ReportManager:
-    """Singleton manager for missions and reports."""
+class MissionManager:
+    """Singleton manager for mission lifecycle and mission reports."""
 
-    _instance: ReportManager | None = None
+    _instance: MissionManager | None = None
 
     def __init__(self) -> None:
         self._store = ReportStore()
 
     @classmethod
-    def get_instance(cls) -> ReportManager:
+    def get_instance(cls) -> MissionManager:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
@@ -35,8 +36,26 @@ class ReportManager:
     # Mission lifecycle
     # ------------------------------------------------------------------
 
-    def create_mission(self, *, avatar_id: str, trigger_id: str | None, prompt: str) -> Mission:
-        mission = Mission(avatar_id=avatar_id, trigger_id=trigger_id, prompt=prompt)
+    def create_mission(
+        self,
+        *,
+        avatar_id: str,
+        trigger_id: str | None,
+        prompt: str,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+        group_id: str | None = None,
+        owner_user_id: str | None = None,
+    ) -> Mission:
+        mission = Mission(
+            avatar_id=avatar_id,
+            trigger_id=trigger_id,
+            prompt=prompt,
+            service_id=service_id,
+            agent_id=agent_id,
+            group_id=group_id,
+            owner_user_id=owner_user_id,
+        )
         self._store.save_mission(mission)
         self._record_usage(mission)
         logger.info("Created mission %s for avatar %s", mission.id, avatar_id)
@@ -57,7 +76,15 @@ class ReportManager:
         self._record_usage(mission)
         return mission
 
-    def update_mission_runtime(self, mission_id: str, *, run_id: str | None = None, session_id: str | None = None) -> Mission | None:
+    def update_mission_runtime(
+        self,
+        mission_id: str,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> Mission | None:
         mission = self._store.get_mission(mission_id)
         if mission is None:
             return None
@@ -65,6 +92,10 @@ class ReportManager:
             mission.run_id = run_id
         if session_id is not None:
             mission.session_id = session_id
+        if service_id is not None:
+            mission.service_id = service_id
+        if agent_id is not None:
+            mission.agent_id = agent_id
         self._store.save_mission(mission)
         return mission
 
@@ -108,9 +139,12 @@ class ReportManager:
     ) -> MissionReport:
         from jiuwenavatar.gateway.report.models import ReportSection
 
+        mission = self._store.get_mission(mission_id)
         report = MissionReport(
             mission_id=mission_id,
             avatar_id=avatar_id,
+            group_id=mission.group_id if mission else None,
+            owner_user_id=mission.owner_user_id if mission else None,
             avatar_persona=avatar_persona,
             title=title,
             summary=summary,
@@ -125,8 +159,23 @@ class ReportManager:
     # List / Get
     # ------------------------------------------------------------------
 
-    def list_missions(self, *, avatar_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
-        return [m.model_dump() for m in self._store.list_missions(avatar_id=avatar_id, limit=limit)]
+    def list_missions(
+        self,
+        *,
+        avatar_id: str | None = None,
+        group_id: str | None = None,
+        owner_user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        return [
+            m.model_dump()
+            for m in self._store.list_missions(
+                avatar_id=avatar_id,
+                group_id=group_id,
+                owner_user_id=owner_user_id,
+                limit=limit,
+            )
+        ]
 
     def get_mission(self, mission_id: str) -> dict[str, Any] | None:
         m = self._store.get_mission(mission_id)
@@ -149,8 +198,23 @@ class ReportManager:
             )
         return {"missions": missions, "reports": reports}
 
-    def list_reports(self, *, avatar_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
-        return [r.model_dump() for r in self._store.list_reports(avatar_id=avatar_id, limit=limit)]
+    def list_reports(
+        self,
+        *,
+        avatar_id: str | None = None,
+        group_id: str | None = None,
+        owner_user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        return [
+            r.model_dump()
+            for r in self._store.list_reports(
+                avatar_id=avatar_id,
+                group_id=group_id,
+                owner_user_id=owner_user_id,
+                limit=limit,
+            )
+        ]
 
     def get_report(self, report_id: str) -> dict[str, Any] | None:
         r = self._store.get_report(report_id)
@@ -170,8 +234,23 @@ class ReportManager:
 
     async def handle_missions_list(self, **kwargs: Any) -> dict[str, Any]:
         avatar_id = kwargs.get("avatar_id") or None
+        tenant = parse_tenant_list_filters(kwargs)
+        group_id = kwargs.get("group_id") if "group_id" in kwargs else None
+        owner_user_id = kwargs.get("owner_user_id") or kwargs.get("user_id") if ("owner_user_id" in kwargs or "user_id" in kwargs) else None
+        if tenant is not None:
+            if not tenant.is_valid:
+                return {"missions": []}
+            group_id = tenant.group_id
+            owner_user_id = tenant.user_id or owner_user_id
         limit = self._coerce_limit(kwargs.get("limit"))
-        return {"missions": self.list_missions(avatar_id=avatar_id, limit=limit)}
+        return {
+            "missions": self.list_missions(
+                avatar_id=avatar_id,
+                group_id=str(group_id) if group_id is not None else None,
+                owner_user_id=str(owner_user_id) if owner_user_id is not None else None,
+                limit=limit,
+            )
+        }
 
     async def handle_missions_get(self, *, mission_id: str, **kwargs: Any) -> dict[str, Any]:
         mission = self.get_mission(mission_id)
@@ -193,8 +272,23 @@ class ReportManager:
 
     async def handle_reports_list(self, **kwargs: Any) -> dict[str, Any]:
         avatar_id = kwargs.get("avatar_id") or None
+        tenant = parse_tenant_list_filters(kwargs)
+        group_id = kwargs.get("group_id") if "group_id" in kwargs else None
+        owner_user_id = kwargs.get("owner_user_id") or kwargs.get("user_id") if ("owner_user_id" in kwargs or "user_id" in kwargs) else None
+        if tenant is not None:
+            if not tenant.is_valid:
+                return {"reports": []}
+            group_id = tenant.group_id
+            owner_user_id = tenant.user_id or owner_user_id
         limit = self._coerce_limit(kwargs.get("limit"))
-        return {"reports": self.list_reports(avatar_id=avatar_id, limit=limit)}
+        return {
+            "reports": self.list_reports(
+                avatar_id=avatar_id,
+                group_id=str(group_id) if group_id is not None else None,
+                owner_user_id=str(owner_user_id) if owner_user_id is not None else None,
+                limit=limit,
+            )
+        }
 
     async def handle_reports_get(self, *, report_id: str, **kwargs: Any) -> dict[str, Any]:
         report = self.get_report(report_id)
@@ -228,20 +322,58 @@ class ReportManager:
             count_unread_missions_by_avatar,
         )
 
+        tenant = parse_tenant_list_filters(kwargs)
+        group_id = kwargs.get("group_id") if "group_id" in kwargs else None
+        owner_user_id = kwargs.get("owner_user_id") or kwargs.get("user_id") if ("owner_user_id" in kwargs or "user_id" in kwargs) else None
+        if tenant is not None:
+            if not tenant.is_valid:
+                return {"missions_by_avatar": {}, "active_by_avatar": {}}
+            group_id = tenant.group_id
+            owner_user_id = tenant.user_id or owner_user_id
         limit = self._coerce_limit(kwargs.get("limit"), default=500, maximum=1000)
+        scope = {
+            "limit": limit,
+            "group_id": str(group_id) if group_id is not None else None,
+            "owner_user_id": str(owner_user_id) if owner_user_id is not None else None,
+        }
         return {
-            "missions_by_avatar": count_unread_missions_by_avatar(limit=limit),
-            "active_by_avatar": count_active_missions_by_avatar(limit=limit),
+            "missions_by_avatar": count_unread_missions_by_avatar(**scope),
+            "active_by_avatar": count_active_missions_by_avatar(**scope),
         }
 
     async def handle_missions_stats(self, **kwargs: Any) -> dict[str, Any]:
+        from jiuwenavatar.common.enterprise import is_enterprise_mode
+        from jiuwenavatar.gateway.report.stats import compute_mission_usage_stats
         from jiuwenavatar.gateway.report.usage_stats import get_usage_stats
 
         avatar_id = kwargs.get("avatar_id") or None
+        tenant = parse_tenant_list_filters(kwargs)
+        group_id = kwargs.get("group_id") if "group_id" in kwargs else None
+        owner_user_id = kwargs.get("owner_user_id") or kwargs.get("user_id") if ("owner_user_id" in kwargs or "user_id" in kwargs) else None
+        if tenant is not None:
+            if not tenant.is_valid:
+                return {"stats": compute_mission_usage_stats([])}
+            group_id = tenant.group_id
+            owner_user_id = tenant.user_id or owner_user_id
         limit = self._coerce_limit(kwargs.get("limit"), default=10000, maximum=100000)
-        missions = self._store.list_missions(avatar_id=avatar_id, limit=limit)
+        missions = self._store.list_missions(
+            avatar_id=avatar_id,
+            group_id=str(group_id) if group_id is not None else None,
+            owner_user_id=str(owner_user_id) if owner_user_id is not None else None,
+            limit=limit,
+        )
+        if is_enterprise_mode():
+            return {"stats": compute_mission_usage_stats(missions)}
         return {"stats": get_usage_stats(missions)}
 
 
-def get_report_manager() -> ReportManager:
-    return ReportManager.get_instance()
+def get_mission_manager() -> MissionManager:
+    return MissionManager.get_instance()
+
+
+# Backward-compatible exports for existing integrations.
+ReportManager = MissionManager
+
+
+def get_report_manager() -> MissionManager:
+    return get_mission_manager()

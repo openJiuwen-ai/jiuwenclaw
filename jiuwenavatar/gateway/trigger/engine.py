@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any
 
 from jiuwenavatar.common.e2a.gateway_normalize import e2a_from_agent_fields
+from jiuwenavatar.common.enterprise import make_service_id, merge_routing, parse_tenant_list_filters
 from jiuwenavatar.common.schema.message import EventType, Message, ReqMethod
 from jiuwenavatar.gateway.trigger.models import TriggerConfig, TriggerStatus, TriggerType
 from jiuwenavatar.gateway.trigger.store import TriggerStore
@@ -119,6 +120,30 @@ class TriggerEngine:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _resolve_avatar_route(avatar_id: str) -> dict[str, str]:
+        """Resolve cloud routing fields for an Avatar, keeping standalone fallback."""
+
+        try:
+            from jiuwenavatar.server.runtime.persona import PersonaManager
+
+            avatar = PersonaManager.get_instance().get_avatar(avatar_id) or {}
+        except Exception:  # noqa: BLE001
+            avatar = {}
+
+        group_id = str(avatar.get("group_id") or "").strip()
+        owner_user_id = str(avatar.get("owner_user_id") or "").strip()
+        service_id = str(avatar.get("service_id") or "").strip()
+        if not service_id and avatar_id:
+            service_id = make_service_id(group_id or "default", avatar_id)
+        agent_id = str(avatar.get("agent_id") or owner_user_id or "").strip()
+        return {
+            "service_id": service_id,
+            "agent_id": agent_id,
+            "group_id": group_id,
+            "owner_user_id": owner_user_id,
+        }
+
     async def _dispatch_fire(self, config: TriggerConfig, prompt: str) -> None:
         """Real fire callback — dispatch the trigger prompt to the Avatar.
 
@@ -135,23 +160,34 @@ class TriggerEngine:
         ts = format(int(time.time() * 1000), "x")
         run_id = f"trigger-{config.id}-{ts}"
         session_id = f"trigger_{ts}_{config.id}"
+        route = self._resolve_avatar_route(config.avatar_id)
 
         # 执行记录：为本次触发建一条 Mission（running），完成后更新状态并按需生成
         # Report，使「报告」页（missions.list / reports.list）能同步看到这次执行。
-        report_mgr = self._get_report_manager()
+        mission_mgr = self._get_mission_manager()
         mission_id: str | None = None
-        if report_mgr is not None:
+        if mission_mgr is not None:
             try:
                 from jiuwenavatar.gateway.report.models import MissionStatus
 
-                mission = report_mgr.create_mission(
+                mission = mission_mgr.create_mission(
                     avatar_id=config.avatar_id,
                     trigger_id=config.id,
                     prompt=prompt,
+                    service_id=route.get("service_id") or None,
+                    agent_id=route.get("agent_id") or None,
+                    group_id=route.get("group_id") or None,
+                    owner_user_id=route.get("owner_user_id") or None,
                 )
                 mission_id = mission.id
-                report_mgr.update_mission_runtime(mission_id, run_id=run_id, session_id=session_id)
-                report_mgr.update_mission_status(mission_id, MissionStatus.RUNNING)
+                mission_mgr.update_mission_runtime(
+                    mission_id,
+                    run_id=run_id,
+                    session_id=session_id,
+                    service_id=route.get("service_id") or None,
+                    agent_id=route.get("agent_id") or None,
+                )
+                mission_mgr.update_mission_status(mission_id, MissionStatus.RUNNING)
                 self._mission_sessions[mission_id] = session_id
                 self._mission_runs[mission_id] = run_id
             except Exception:  # noqa: BLE001
@@ -160,7 +196,7 @@ class TriggerEngine:
         if self._agent_client is None:
             # Dispatch not configured — fall back to state-only behaviour.
             self._store.save_trigger(config)
-            self._finalize_mission(report_mgr, mission_id, ok=False, summary="dispatch not configured")
+            self._finalize_mission(mission_mgr, mission_id, ok=False, summary="dispatch not configured")
             return
 
         result_text = ""
@@ -171,12 +207,19 @@ class TriggerEngine:
                 channel_id="__trigger__",
                 session_id=session_id,
                 req_method=ReqMethod.CHAT_SEND,
-                params={
-                    "avatar_id": config.avatar_id,
-                    "content": prompt,
-                    "query": prompt,
-                    "mode": "agent",
-                },
+                params=merge_routing(
+                    {
+                        "avatar_id": config.avatar_id,
+                        "content": prompt,
+                        "query": prompt,
+                        "mode": "agent",
+                    },
+                    service_id=route.get("service_id", ""),
+                    agent_id=route.get("agent_id", ""),
+                    avatar_id=config.avatar_id,
+                    group_id=route.get("group_id", ""),
+                    user_id=route.get("owner_user_id", ""),
+                ),
                 is_stream=False,
                 timestamp=time.time(),
                 metadata={"trigger": {"trigger_id": config.id, "name": config.name, "run_id": run_id}},
@@ -203,14 +246,14 @@ class TriggerEngine:
         # 落地执行结果：更新 Mission 状态，成功且开启 generate_report 时生成报告。
         succeeded = ok and not config.last_error
         self._finalize_mission(
-            report_mgr,
+            mission_mgr,
             mission_id,
             ok=succeeded,
             summary=(result_text or config.last_error or "")[:2000],
         )
-        if report_mgr is not None and mission_id is not None and succeeded and config.generate_report:
+        if mission_mgr is not None and mission_id is not None and succeeded and config.generate_report:
             try:
-                report_mgr.create_report(
+                mission_mgr.create_report(
                     mission_id=mission_id,
                     avatar_id=config.avatar_id,
                     title=config.name or "执行报告",
@@ -250,10 +293,10 @@ class TriggerEngine:
 
     async def cancel_mission(self, mission_id: str) -> dict[str, Any]:
         """Cancel a running trigger mission and best-effort interrupt its AgentServer session."""
-        report_mgr = self._get_report_manager()
-        if report_mgr is None:
-            return {"error": "ReportManager unavailable"}
-        mission = report_mgr.get_mission(mission_id)
+        mission_mgr = self._get_mission_manager()
+        if mission_mgr is None:
+            return {"error": "MissionManager unavailable"}
+        mission = mission_mgr.get_mission(mission_id)
         if mission is None:
             return {"error": f"Mission not found: {mission_id}"}
         status = str(mission.get("status") or "")
@@ -270,7 +313,14 @@ class TriggerEngine:
                     channel_id="__trigger__",
                     session_id=session_id,
                     req_method=ReqMethod.CHAT_CANCEL,
-                    params={"session_id": session_id, "intent": "cancel"},
+                    params=merge_routing(
+                        {"session_id": session_id, "intent": "cancel"},
+                        service_id=str(mission.get("service_id") or ""),
+                        agent_id=str(mission.get("agent_id") or ""),
+                        avatar_id=str(mission.get("avatar_id") or ""),
+                        group_id=str(mission.get("group_id") or ""),
+                        user_id=str(mission.get("owner_user_id") or ""),
+                    ),
                     is_stream=False,
                     timestamp=time.time(),
                     metadata={"mission_cancel": {"mission_id": mission_id}},
@@ -281,7 +331,7 @@ class TriggerEngine:
                 interrupt_error = str(exc)
                 logger.warning("Mission %s interrupt failed: %s", mission_id, exc)
 
-        cancelled = report_mgr.cancel_mission(mission_id)
+        cancelled = mission_mgr.cancel_mission(mission_id)
         if cancelled is None:
             return {"error": f"Mission not found: {mission_id}"}
         return {
@@ -339,26 +389,26 @@ class TriggerEngine:
         return ""
 
     @staticmethod
-    def _get_report_manager() -> Any | None:
-        """Return the shared ReportManager, or None if unavailable."""
+    def _get_mission_manager() -> Any | None:
+        """Return the shared MissionManager, or None if unavailable."""
         try:
-            from jiuwenavatar.gateway.report import ReportManager
+            from jiuwenavatar.gateway.report import MissionManager
 
-            return ReportManager.get_instance()
+            return MissionManager.get_instance()
         except Exception:  # noqa: BLE001
-            logger.exception("TriggerEngine: ReportManager unavailable")
+            logger.exception("TriggerEngine: MissionManager unavailable")
             return None
 
     @staticmethod
-    def _finalize_mission(report_mgr: Any | None, mission_id: str | None, *, ok: bool, summary: str = "") -> None:
+    def _finalize_mission(mission_mgr: Any | None, mission_id: str | None, *, ok: bool, summary: str = "") -> None:
         """Mark a mission completed/failed; never raises."""
-        if report_mgr is None or mission_id is None:
+        if mission_mgr is None or mission_id is None:
             return
         try:
             from jiuwenavatar.gateway.report.models import MissionStatus
 
             status = MissionStatus.COMPLETED if ok else MissionStatus.FAILED
-            report_mgr.update_mission_status(mission_id, status, result_summary=summary)
+            mission_mgr.update_mission_status(mission_id, status, result_summary=summary)
         except Exception:  # noqa: BLE001
             logger.exception("Trigger: failed to finalize mission %s", mission_id)
 
@@ -510,21 +560,74 @@ class TriggerEngine:
     # CRUD
     # ------------------------------------------------------------------
 
-    def list_triggers(self, *, avatar_id: str | None = None) -> list[dict[str, Any]]:
-        """List triggers, optionally filtered by avatar_id."""
+    def list_triggers(
+        self,
+        *,
+        avatar_id: str | None = None,
+        group_id: str | None = None,
+        owner_user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List triggers, optionally filtered by avatar and tenant."""
         if avatar_id:
-            triggers = self._store.list_triggers_by_avatar(avatar_id)
+            triggers = self._store.list_triggers_by_avatar(
+                avatar_id,
+                group_id=group_id,
+                owner_user_id=owner_user_id,
+            )
         else:
-            triggers = self._store.list_triggers()
+            triggers = self._store.list_triggers(group_id=group_id, owner_user_id=owner_user_id)
         return [t.model_dump() for t in triggers]
 
-    def get_trigger(self, trigger_id: str) -> dict[str, Any] | None:
+    def _resolve_tenant_scope(self, kwargs: dict[str, Any]) -> tuple[str | None, str | None, bool]:
+        tenant = parse_tenant_list_filters(kwargs)
+        if tenant is None:
+            return None, None, True
+        if not tenant.is_valid:
+            return None, None, False
+        owner = tenant.user_id or None
+        return tenant.group_id, owner, True
+
+    def _trigger_matches_tenant(
+        self,
+        trigger: TriggerConfig,
+        *,
+        group_id: str | None,
+        owner_user_id: str | None,
+    ) -> bool:
+        if group_id is not None and (trigger.group_id or "") != group_id:
+            return False
+        if owner_user_id and (trigger.owner_user_id or "") != owner_user_id:
+            return False
+        return True
+
+    def _get_trigger_for_tenant(self, trigger_id: str, **kwargs: Any) -> TriggerConfig | None:
+        trigger = self._store.get_trigger(trigger_id)
+        if trigger is None:
+            return None
+        group_id, owner_user_id, allowed = self._resolve_tenant_scope(kwargs)
+        if not allowed:
+            return None
+        if group_id is None:
+            return trigger
+        if not self._trigger_matches_tenant(trigger, group_id=group_id, owner_user_id=owner_user_id):
+            return None
+        return trigger
+
+    def get_trigger(self, trigger_id: str, **kwargs: Any) -> dict[str, Any] | None:
         """Get a single trigger by ID."""
-        t = self._store.get_trigger(trigger_id)
-        return t.model_dump() if t else None
+        trigger = self._get_trigger_for_tenant(trigger_id, **kwargs)
+        return trigger.model_dump() if trigger else None
 
     async def create_trigger(self, **kwargs: Any) -> dict[str, Any]:
         """Create a new trigger, save it, and start it if enabled."""
+        group_id, owner_user_id, allowed = self._resolve_tenant_scope(kwargs)
+        if not allowed:
+            raise ValueError("group_id is required in enterprise mode")
+        if group_id is not None:
+            kwargs.setdefault("group_id", group_id)
+            if owner_user_id:
+                kwargs.setdefault("owner_user_id", owner_user_id)
+
         config = TriggerConfig(**kwargs)
 
         # Validate required fields per type
@@ -546,13 +649,14 @@ class TriggerEngine:
 
     async def update_trigger(self, trigger_id: str, **kwargs: Any) -> dict[str, Any]:
         """Update a trigger. Restarts it if running."""
-        existing = self._store.get_trigger(trigger_id)
+        existing = self._get_trigger_for_tenant(trigger_id, **kwargs)
         if existing is None:
             raise ValueError(f"Trigger not found: {trigger_id}")
 
         # Merge updates
         update_data = existing.model_dump()
         update_data.update(kwargs)
+        update_data.pop("trigger_id", None)
         update_data["updated_at"] = datetime.now().isoformat()
 
         config = TriggerConfig(**update_data)
@@ -567,8 +671,11 @@ class TriggerEngine:
         self._store.save_trigger(config)
         return config.model_dump()
 
-    async def delete_trigger(self, trigger_id: str) -> None:
+    async def delete_trigger(self, trigger_id: str, **kwargs: Any) -> None:
         """Delete a trigger and stop it if running."""
+        existing = self._get_trigger_for_tenant(trigger_id, **kwargs)
+        if existing is None:
+            raise ValueError(f"Trigger not found: {trigger_id}")
         if trigger_id in self._active_triggers:
             await self._stop_trigger(trigger_id)
         self._store.delete_trigger(trigger_id)
@@ -623,10 +730,19 @@ class TriggerEngine:
 
     async def handle_triggers_list(self, **kwargs: Any) -> dict[str, Any]:
         avatar_id = kwargs.get("avatar_id")
-        return {"triggers": self.list_triggers(avatar_id=avatar_id)}
+        group_id, owner_user_id, allowed = self._resolve_tenant_scope(kwargs)
+        if not allowed:
+            return {"triggers": []}
+        return {
+            "triggers": self.list_triggers(
+                avatar_id=avatar_id,
+                group_id=group_id,
+                owner_user_id=owner_user_id,
+            )
+        }
 
     async def handle_triggers_get(self, *, trigger_id: str, **kwargs: Any) -> dict[str, Any]:
-        trigger = self.get_trigger(trigger_id)
+        trigger = self.get_trigger(trigger_id, **kwargs)
         if trigger is None:
             return {"error": f"Trigger not found: {trigger_id}"}
         return {"trigger": trigger}
@@ -647,7 +763,7 @@ class TriggerEngine:
 
     async def handle_triggers_delete(self, *, trigger_id: str, **kwargs: Any) -> dict[str, Any]:
         try:
-            await self.delete_trigger(trigger_id)
+            await self.delete_trigger(trigger_id, **kwargs)
             return {"success": True}
         except ValueError as e:
             return {"error": str(e)}

@@ -136,6 +136,7 @@ def init_session_metadata(
     session_id: str,
     channel_id: str = "",
     user_id: str = "",
+    group_id: str = "",
     title: str = "",
     mode: str = "unknown",
     team_name: str = "",
@@ -150,6 +151,7 @@ def init_session_metadata(
         "session_id": session_id,
         "channel_id": channel_id,
         "user_id": user_id,
+        "group_id": group_id,
         "created_at": _current_timestamp(),
         "last_message_at": _current_timestamp(),
         "title": title,
@@ -167,6 +169,7 @@ def update_session_metadata(
     session_id: str,
     channel_id: str | None = None,
     user_id: str | None = None,
+    group_id: str | None = None,
     title: str | None = None,
     clear_title: bool = False,
     increment_message_count: bool = False,
@@ -198,6 +201,7 @@ def update_session_metadata(
             "session_id": session_id,
             "channel_id": channel_id or "",
             "user_id": user_id or "",
+            "group_id": group_id or "",
             "created_at": _current_timestamp(),
             "last_message_at": _current_timestamp(),
             "title": title or auto_title,
@@ -216,6 +220,8 @@ def update_session_metadata(
             metadata["channel_id"] = channel_id
         if user_id is not None:
             metadata["user_id"] = user_id
+        if group_id is not None:
+            metadata["group_id"] = group_id
         if mode is not None:
             metadata["mode"] = mode
         if team_name is not None:
@@ -323,6 +329,7 @@ def set_session_delivery_context(
             "session_id": session_id,
             "channel_id": normalized_channel_id,
             "user_id": "",
+            "group_id": "",
             "created_at": _current_timestamp(),
             "last_message_at": _current_timestamp(),
             "title": "",
@@ -423,12 +430,15 @@ def get_all_sessions_metadata(
     limit: int = 20,
     offset: int = 0,
     avatar_id: str | None = None,
+    user_id: str | None = None,
+    group_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """
     获取所有会话的元数据。
 
     Args:
         avatar_id: 若传入（含空字符串），仅返回绑定该分身的会话。
+        user_id/group_id: 若传入，仅返回当前租户/用户会话；旧单机无租户字段会被过滤掉。
 
     Returns:
         (sessions, total): 当前页的会话列表 和 会话总数
@@ -462,6 +472,20 @@ def get_all_sessions_metadata(
             }
 
         sessions.append(metadata)
+
+    if group_id is not None:
+        expected_group = str(group_id or "").strip()
+        sessions = [
+            item for item in sessions
+            if str(item.get("group_id") or "").strip() == expected_group
+        ]
+
+    if user_id is not None:
+        expected_user = str(user_id or "").strip()
+        sessions = [
+            item for item in sessions
+            if str(item.get("user_id") or "").strip() == expected_user
+        ]
 
     if avatar_id is not None:
         expected = str(avatar_id or "").strip()

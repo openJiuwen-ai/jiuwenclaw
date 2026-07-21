@@ -16,6 +16,13 @@ import { StatsPanel } from './components/StatsPanel';
 import { ChannelsPanel } from './components/ChannelsPanel';
 import { ConfigPanel } from './components/ConfigPanel';
 import {
+  EnterprisePanel,
+  readEnterpriseUser,
+  writeEnterpriseUser,
+  type LocalUser,
+  type ManagerStatus,
+} from './components/EnterprisePanel';
+import {
   ShareImageDocument,
   exportShareImageNode,
   type ShareImageSnapshot,
@@ -54,6 +61,7 @@ import {
   rememberAvatarSession,
   resolveSessionForAvatar,
 } from './utils/avatarSessionStorage';
+import { buildEnterpriseUserContext, isEnterpriseOrgAdmin } from './utils/enterpriseContext';
 
 type MainNavKey = 'chat' | 'avatars' | 'triggers' | 'reports' | 'stats' | 'channels' | 'config';
 
@@ -192,6 +200,13 @@ function AppContent() {
   const tRef = useRef(t);
   // 优先使用存储的会话 ID，避免每次刷新创建新会话
   const [sessionId, setSessionId] = useState<string>(() => {
+    try {
+      if (localStorage.getItem('jiuwenavatar_enterprise_enabled') === 'true') {
+        return 'new';
+      }
+    } catch {
+      // ignore storage failures
+    }
     const stored = getStoredSessionId();
     return stored || 'new';
   });
@@ -199,6 +214,9 @@ function AppContent() {
   const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
   const [reportDeepLink, setReportDeepLink] = useState<ReportDeepLink | null>(null);
   const [serverConfig, setServerConfig] = useState<Record<string, unknown> | null>(null);
+  const [managerStatus, setManagerStatus] = useState<ManagerStatus | null>(null);
+  const [managerStatusLoaded, setManagerStatusLoaded] = useState(false);
+  const [enterpriseUser, setEnterpriseUser] = useState<LocalUser | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [initialDataLoaded, setInitialDataLoaded] = useState(false);
   const [restartModalOpen, setRestartModalOpen] = useState(false);
@@ -214,6 +232,7 @@ function AppContent() {
   const [securityAlertVisible, setSecurityAlertVisible] = useState(false);
   const [securityAlertContent, setSecurityAlertContent] = useState('');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const loadedDataKeyRef = useRef('');
   const startupUpdateCheckRef = useRef(false);
   /** 启动后仅做一次：当前 session 与选中分身对齐 */
   const initialAvatarSessionSyncedRef = useRef(false);
@@ -429,11 +448,58 @@ function AppContent() {
     },
   });
 
+  const isEnterpriseRuntime = Boolean(
+    managerStatus?.enterprise_mode ||
+    managerStatus?.deployment_mode === 'enterprise' ||
+    managerStatus?.deployment_mode === 'active-standby' ||
+    managerStatus?.agent_server_deploy_mode === 'k8s',
+  );
+
+  const fetchManagerStatus = useCallback(async () => {
+    try {
+      const status = await request<ManagerStatus>('manager.status');
+      setManagerStatus(status);
+    } catch {
+      setManagerStatus({ enterprise_mode: false, deployment_mode: 'standalone' });
+    } finally {
+      setManagerStatusLoaded(true);
+    }
+  }, [request]);
+
+  useEffect(() => {
+    if (!isConnected || managerStatusLoaded) {
+      return;
+    }
+    void fetchManagerStatus();
+  }, [fetchManagerStatus, isConnected, managerStatusLoaded]);
+
+  useEffect(() => {
+    if (!managerStatusLoaded) {
+      return;
+    }
+    try {
+      if (isEnterpriseRuntime) {
+        localStorage.setItem('jiuwenavatar_enterprise_enabled', 'true');
+        if (enterpriseUser) {
+          writeEnterpriseUser(enterpriseUser);
+        }
+      } else {
+        localStorage.removeItem('jiuwenavatar_enterprise_enabled');
+        writeEnterpriseUser(null);
+        setEnterpriseUser(null);
+      }
+    } catch {
+      // ignore storage failures
+    }
+  }, [enterpriseUser, isEnterpriseRuntime, managerStatusLoaded]);
+
+
   // 获取会话列表
   const fetchSessions = useCallback(async () => {
     try {
       const payload = await request<{ sessions?: unknown[] }>('session.list', {
         limit: 100,
+        ...buildEnterpriseUserContext(enterpriseUser),
       });
       if (payload?.sessions && Array.isArray(payload.sessions)) {
         // 兼容新格式(对象数组)和旧格式(字符串数组)
@@ -451,12 +517,48 @@ function AppContent() {
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
     }
-  }, [request, setSessions]);
+  }, [enterpriseUser, request, setSessions]);
+
+  const resetEnterpriseWorkspaceView = useCallback(() => {
+    disposeInFlightHistoryHandles();
+    clearMessages();
+    clearSubtasks();
+    clearTodos();
+    resetHarnessStore();
+    setSessions([]);
+    setCurrentSession(null);
+    setHistoryPagerMeta(null);
+    sessionIdRef.current = 'new';
+    setSessionId('new');
+    storeSessionId(null);
+  }, [
+    clearMessages,
+    clearSubtasks,
+    clearTodos,
+    disposeInFlightHistoryHandles,
+    resetHarnessStore,
+    setCurrentSession,
+    setSessions,
+  ]);
+
+  useEffect(() => {
+    if (!managerStatusLoaded || !isEnterpriseRuntime || enterpriseUser) {
+      return;
+    }
+    const stored = readEnterpriseUser();
+    if (stored) {
+      loadedDataKeyRef.current = '';
+      setInitialDataLoaded(false);
+      setEnterpriseUser(stored);
+      resetEnterpriseWorkspaceView();
+    }
+  }, [enterpriseUser, isEnterpriseRuntime, managerStatusLoaded, resetEnterpriseWorkspaceView]);
 
   // 获取服务端配置（通过 WS 方法）
   const fetchConfig = useCallback(async () => {
+    const tenant = buildEnterpriseUserContext(enterpriseUser);
     try {
-      const config = await request<Record<string, unknown>>('config.get');
+      const config = await request<Record<string, unknown>>('config.get', tenant);
       setA2UIFeatureEnabled(normalizeA2UIEnabled(config.a2ui_enabled));
       setServerConfig(config);
       setConfigError(null);
@@ -467,14 +569,14 @@ function AppContent() {
     }
     // 同步获取多模型列表
     try {
-      const resp = await request<{ models: ModelEntry[]; active_model: string }>('models.list');
+      const resp = await request<{ models: ModelEntry[]; active_model: string }>('models.list', tenant);
       if (resp?.models) {
         setAvailableModels(resp.models, resp.active_model);
       }
     } catch (error) {
       console.warn('Failed to fetch models list:', error);
     }
-  }, [request, t, setAvailableModels]);
+  }, [enterpriseUser, request, t, setAvailableModels]);
 
   useEffect(() => {
     if (!FEATURE_APP_UPDATER_UI || !isConnected || startupUpdateCheckRef.current) {
@@ -548,25 +650,38 @@ function AppContent() {
     [request],
   );
 
+  const handleModelsCatalogSave = useCallback(async (models: ModelEntry[]) => {
+    await request('models.catalog.save', {
+      models,
+      ...buildEnterpriseUserContext(enterpriseUser),
+    });
+  }, [enterpriseUser, request]);
+
   const handleModelsReplaceAll = useCallback(async (models: ModelEntry[]) => {
     await request('models.replace_all', { models });
   }, [request]);
 
   const handleModelsRefresh = useCallback(async () => {
     try {
-      const resp = await request<{ models: ModelEntry[]; active_model: string }>('models.list');
+      const resp = await request<{ models: ModelEntry[]; active_model: string }>(
+        'models.list',
+        buildEnterpriseUserContext(enterpriseUser),
+      );
       if (resp?.models) {
         setAvailableModels(resp.models, resp.active_model);
       }
     } catch (error) {
       console.warn('Failed to refresh models list:', error);
     }
-  }, [request, setAvailableModels]);
+  }, [enterpriseUser, request, setAvailableModels]);
 
   const saveConfigAndRestart = useCallback(async (updates: Record<string, string>) => {
     const payload = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
       'config.set',
-      updates
+      {
+        ...updates,
+        ...buildEnterpriseUserContext(enterpriseUser),
+      }
     );
     if ('a2ui_enabled' in updates) {
       setA2UIFeatureEnabled(normalizeA2UIEnabled(updates.a2ui_enabled));
@@ -595,7 +710,7 @@ function AppContent() {
         closeRestartModal();
       }, 5000);
     }
-  }, [clearRestartAutoCloseTimer, closeRestartModal, request]);
+  }, [clearRestartAutoCloseTimer, closeRestartModal, enterpriseUser, i18n.language, request]);
 
   const applyConfigSaveUiState = useCallback((appliedWithoutRestart: boolean) => {
     setConfigError(null);
@@ -659,18 +774,24 @@ for (let i = payload.team.length; i < 10; i++) {
   const handleAgentsTeamsSave = useCallback(async (payload: AgentsTeamsSavePayload) => {
     const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
       'config.set',
-      payload as unknown as Record<string, string>
+      {
+        ...payload,
+        ...buildEnterpriseUserContext(enterpriseUser),
+      } as unknown as Record<string, string>
     );
     // 更新前端配置缓存
     const updates = buildAgentsTeamsFlatConfig(payload);
     setServerConfig((prev: Record<string, unknown> | null) => ({ ...prev, ...updates }));
     applyConfigSaveUiState(result?.applied_without_restart === true);
-  }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, request]);
+  }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, enterpriseUser, request]);
 
   const saveAllConfigAndRestart = useCallback(async (payload: ConfigSaveAllPayload) => {
     const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
       'config.save_all',
-      payload as unknown as Record<string, unknown>
+      {
+        ...payload,
+        ...buildEnterpriseUserContext(enterpriseUser),
+      } as unknown as Record<string, unknown>
     );
     setServerConfig((prev) => {
       const next: Record<string, unknown> = { ...(prev ?? {}) };
@@ -698,7 +819,7 @@ for (let i = payload.team.length; i < 10; i++) {
       return next;
     });
     applyConfigSaveUiState(result?.applied_without_restart === true);
-  }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, i18n.language, request]);
+  }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, enterpriseUser, i18n.language, request]);
 
   useEffect(() => {
     if (!restartModalOpen || restartSuccess) {
@@ -755,15 +876,32 @@ for (let i = payload.team.length; i < 10; i++) {
   }, [clearHeartbeatToastTimer, heartbeatMessage, heartbeatUpdatedAt]);
 
   useEffect(() => {
-    if (!isConnected || initialDataLoaded) {
+    if (!isConnected || !managerStatusLoaded) {
+      return;
+    }
+    if (isEnterpriseRuntime && !enterpriseUser) {
+      return;
+    }
+    const dataKey = isEnterpriseRuntime
+      ? `enterprise:${enterpriseUser?.group_id || ''}:${enterpriseUser?.sub || ''}:${enterpriseUser?.role || ''}`
+      : 'standalone';
+    if (loadedDataKeyRef.current === dataKey) {
       return;
     }
     void (async () => {
       await fetchConfig();
       await fetchSessions();
+      loadedDataKeyRef.current = dataKey;
       setInitialDataLoaded(true);
     })();
-  }, [fetchConfig, fetchSessions, initialDataLoaded, isConnected]);
+  }, [
+    enterpriseUser,
+    fetchConfig,
+    fetchSessions,
+    isConnected,
+    isEnterpriseRuntime,
+    managerStatusLoaded,
+  ]);
 
   // 聊天处理完成后刷新会话列表，以便拾取自动生成的标题等元数据更新
   const prevProcessingRef = useRef(false);
@@ -1022,6 +1160,7 @@ for (let i = payload.team.length; i < 10; i++) {
       const payload = await request<{ session_id?: string }>('session.create', {
         session_id: newSid,
         avatar_id: boundAvatarId || '',
+        ...buildEnterpriseUserContext(enterpriseUser),
       });
       const createdSid =
         typeof payload?.session_id === 'string' && payload.session_id
@@ -1591,6 +1730,43 @@ for (let i = payload.team.length; i < 10; i++) {
     ? `${heartbeatToastPreviewRaw.slice(0, 120)}...`
     : heartbeatToastPreviewRaw;
 
+  const handleEnterpriseLogin = (user: LocalUser) => {
+    writeEnterpriseUser(user);
+    loadedDataKeyRef.current = '';
+    setInitialDataLoaded(false);
+    setEnterpriseUser(user);
+    resetEnterpriseWorkspaceView();
+    handleNavigate('avatars');
+  };
+
+  const handleEnterpriseLogout = () => {
+    writeEnterpriseUser(null);
+    loadedDataKeyRef.current = '';
+    setInitialDataLoaded(false);
+    setServerConfig(null);
+    setAvailableModels([], '');
+    setEnterpriseUser(null);
+    resetEnterpriseWorkspaceView();
+    setActiveNav('avatars');
+  };
+
+  if (managerStatusLoaded && isEnterpriseRuntime && !enterpriseUser) {
+    return (
+      <EnterprisePanel
+        mode="login"
+        status={managerStatus}
+        user={enterpriseUser}
+        onLogin={handleEnterpriseLogin}
+      />
+    );
+  }
+
+  const enterpriseModelMode = !isEnterpriseRuntime
+    ? 'standalone' as const
+    : isEnterpriseOrgAdmin(enterpriseUser)
+      ? 'admin' as const
+      : 'member' as const;
+
   return (
     <div className={`shell ${sidebarCollapsed ? 'shell--collapsed' : ''}`} data-testid="app-shell" data-session-id={sessionId}>
       {/* Navigation Sidebar - always rendered, 48px icon strip when collapsed */}
@@ -1601,6 +1777,13 @@ for (let i = payload.team.length; i < 10; i++) {
         appVersion={typeof serverConfig?.app_version === 'string' ? serverConfig.app_version : '0.0.3'}
         isConnected={isConnected}
         onNewSession={handleNewSession}
+        enterpriseUser={
+          isEnterpriseRuntime && enterpriseUser
+            ? { userId: enterpriseUser.sub, groupId: enterpriseUser.group_id }
+            : null
+        }
+        onEnterpriseLogout={handleEnterpriseLogout}
+        hideConfigNav={false}
         collapsed={sidebarCollapsed}
         onCollapse={() => setSidebarCollapsed(true)}
         onExpand={() => setSidebarCollapsed(false)}
@@ -1723,11 +1906,13 @@ for (let i = payload.team.length; i < 10; i++) {
             <ConfigPanel
               config={serverConfig}
               isConnected={isConnected}
+              enterpriseModelMode={enterpriseModelMode}
               onSaveConfig={saveConfigAndRestart}
               onSaveAllConfig={saveAllConfigAndRestart}
               onValidateModel={validateModelConfig}
               initialExpandGroupTag={configInitialExpandGroup}
               onModelsReplaceAll={handleModelsReplaceAll}
+              onModelsCatalogSave={handleModelsCatalogSave}
               onModelValidate={validateModelConfig}
               onModelsRefresh={handleModelsRefresh}
               onAgentsTeamsSave={handleAgentsTeamsSave}

@@ -171,6 +171,8 @@ interface TeamEntry {
 interface ConfigPanelProps {
   config: Record<string, unknown> | null;
   isConnected: boolean;
+  /** standalone: full config; admin: tenant catalog; member: read-only message */
+  enterpriseModelMode?: 'standalone' | 'admin' | 'member';
   onSaveConfig: (updates: Record<string, string>) => Promise<void>;
   onSaveAllConfig?: (payload: ConfigSaveAllPayload) => Promise<void>;
   /** 校验默认模型配置（api_base / api_key / model / model_provider）能否完成一次最小 LLM 请求 */
@@ -184,6 +186,7 @@ interface ConfigPanelProps {
   initialExpandGroupTag?: string | null;
   /** 一次性原子提交完整模型列表，覆盖增删改重排 */
   onModelsReplaceAll?: (models: ModelEntry[]) => Promise<void>;
+  onModelsCatalogSave?: (models: ModelEntry[]) => Promise<void>;
   onModelValidate?: (fields: { api_base: string; api_key: string; model: string; model_provider: string }) => Promise<void>;
   onModelsRefresh?: () => Promise<void>;
   /** 多Agent和Teams操作回调 */
@@ -242,6 +245,7 @@ const MODEL_AUDIO_KEYS = new Set(["audio_api_base", "audio_api_key", "audio_mode
 const MODEL_VISION_KEYS = new Set(["vision_api_base", "vision_api_key", "vision_model", "vision_provider"]);
 const EMBED_KEYS = new Set(["embed_api_base", "embed_api_key", "embed_model"]);
 const CLAUDE_CODE_MODEL_KEYS = new Set(["anthropic_api_key", "anthropic_base_url", "anthropic_model"]);
+const CODEX_CLI_MODEL_KEYS = new Set(["openai_api_key", "openai_base_url", "codex_model"]);
 const EMAIL_KEYS = new Set(["email_address", "email_token"]);
 const THIRD_PARTY_API_KEYS = new Set([
   "jina_api_key",
@@ -254,6 +258,15 @@ const THIRD_PARTY_API_KEYS = new Set([
 const REQUIRED_MODEL_FIELDS = ["api_base", "api_key", "model", "model_provider"] as const;
 const REQUIRED_MODEL_FIELD_SET = new Set<string>(REQUIRED_MODEL_FIELDS);
 const EVOLUTION_KEYS = new Set(["evolution_auto_scan", "skill_create"]);
+const FREE_SEARCH_BOOLEAN_KEYS = new Set(["free_search_ddg_enabled", "free_search_bing_enabled"]);
+const ENTERPRISE_MEMBER_USER_CONFIG_KEYS = new Set([
+  ...THIRD_PARTY_API_KEYS,
+  "email_address",
+  "email_token",
+  "teamskills_user_token",
+  ...FREE_SEARCH_BOOLEAN_KEYS,
+  ...EVOLUTION_KEYS,
+]);
 
 // 模型字段长度校验常量
 const MAX_MODEL_NAME_LENGTH = 100;
@@ -279,6 +292,11 @@ function legacyModelFieldsFromEntry(primary: ModelEntry | undefined): Record<str
   };
 }
 
+function modelEntryHasCredential(model: ModelEntry | undefined): boolean {
+  if (!model) return false;
+  return Boolean((model.api_key || "").trim() || (model.secret_ref || "").trim() || model.has_key);
+}
+
 // 获取字段长度超限的错误信息（返回 i18n key）
 function getFieldLengthErrorKey(field: keyof ModelEntry, value: string): string | null {
   const length = value.length;
@@ -297,7 +315,6 @@ function getFieldLengthErrorKey(field: keyof ModelEntry, value: string): string 
 }
 const AGENT_KEYS = new Set(["name", "model", "skills", "completion_timeout"]);
 const TEAM_KEYS = new Set(["team_name", "lifecycle", "teammate_mode", "spawn_mode"]);
-const FREE_SEARCH_BOOLEAN_KEYS = new Set(["free_search_ddg_enabled", "free_search_bing_enabled"]);
 const FREE_SEARCH_KEYS = new Set([...FREE_SEARCH_BOOLEAN_KEYS]);
 const HIDDEN_CONFIG_KEYS = new Set(["free_search_proxy_url"]);
 const MEMORY_KEYS = new Set(["memory_forbidden_enabled", "memory_forbidden_description"]);
@@ -310,6 +327,7 @@ function classifyKey(key: string): string {
   if (MODEL_VISION_KEYS.has(key)) return "model_vision";
   if (EMBED_KEYS.has(key)) return "embed";
   if (CLAUDE_CODE_MODEL_KEYS.has(key)) return "model_claude_code";
+  if (CODEX_CLI_MODEL_KEYS.has(key)) return "model_codex_cli";
   if (THIRD_PARTY_API_KEYS.has(key)) return "third_party_api";
   if (EMAIL_KEYS.has(key)) return "email";
   if (EVOLUTION_KEYS.has(key)) return "evolution";
@@ -324,7 +342,7 @@ function classifyKey(key: string): string {
   return "other";
 }
 
-const MODEL_GROUP_TAGS = new Set(["model_default", "model_video", "model_audio", "model_vision", "model_claude_code"]);
+const MODEL_GROUP_TAGS = new Set(["model_default", "model_video", "model_audio", "model_vision", "model_claude_code", "model_codex_cli"]);
 const SECURITY_GROUP_TAGS = new Set(["permissions", "memory"]);
 
 type ConfigMainTab = "model" | "agent" | "security" | "other";
@@ -515,8 +533,9 @@ function getGroupMeta(t: (key: string) => string): Record<string, { label: strin
     model_audio: { label: t('config.groups.modelAudio.label'), order: 2, hint: t('config.groups.modelAudio.hint') },
     model_vision: { label: t('config.groups.modelVision.label'), order: 3, hint: t('config.groups.modelVision.hint') },
     model_claude_code: { label: t('config.groups.modelClaudeCode.label'), order: 4, hint: t('config.groups.modelClaudeCode.hint') },
-    embed: { label: t('config.groups.embed.label'), order: 5, hint: t('config.groups.embed.hint') },
-    third_party_api: { label: t('config.groups.thirdParty.label'), order: 6, hint: t('config.groups.thirdParty.hint') },
+    model_codex_cli: { label: t('config.groups.modelCodexCli.label'), order: 5, hint: t('config.groups.modelCodexCli.hint') },
+    embed: { label: t('config.groups.embed.label'), order: 6, hint: t('config.groups.embed.hint') },
+    third_party_api: { label: t('config.groups.thirdParty.label'), order: 7, hint: t('config.groups.thirdParty.hint') },
     free_search: { label: t('config.groups.freeSearch.label'), order: 6, hint: t('config.groups.freeSearch.hint') },
     evolution: { label: t('config.groups.evolution.label'), order: 7, hint: t('config.groups.evolution.hint') },
     agents: { label: t('config.groups.agents.label'), order: 7.5, hint: t('config.groups.agents.hint') },
@@ -551,6 +570,9 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   anthropic_api_key: "config.keys.anthropicApiKey",
   anthropic_base_url: "config.keys.anthropicBaseUrl",
   anthropic_model: "config.keys.anthropicModel",
+  openai_api_key: "config.keys.openaiApiKey",
+  openai_base_url: "config.keys.openaiBaseUrl",
+  codex_model: "config.keys.codexModel",
 };
 const KEY_PLACEHOLDER_I18N: Record<string, string> = {
   memory_forbidden_description: "config.keys.memoryForbiddenDescriptionPlaceholder",
@@ -561,6 +583,9 @@ const KEY_LABEL_HINT_I18N: Record<string, string> = {
   anthropic_api_key: "config.keyHelp.anthropicApiKey",
   anthropic_base_url: "config.keyHelp.anthropicBaseUrl",
   anthropic_model: "config.keyHelp.anthropicModel",
+  openai_api_key: "config.keyHelp.openaiApiKey",
+  openai_base_url: "config.keyHelp.openaiBaseUrl",
+  codex_model: "config.keyHelp.codexModel",
 };
 
 /** 组内字段排序优先级，数字越小越靠前 */
@@ -574,6 +599,9 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   anthropic_api_key: 0,
   anthropic_base_url: 1,
   anthropic_model: 2,
+  openai_api_key: 0,
+  openai_base_url: 1,
+  codex_model: 2,
   model: 0,
   skills: 1,
   completion_timeout: 3,
@@ -805,6 +833,20 @@ function GroupSection({
 }
 
 const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "DeepSeek"] as const;
+const ENTERPRISE_MODEL_TYPES = {
+  chat: 'chat',
+  claudeCode: 'claude_code',
+  codexCli: 'codex_cli',
+} as const;
+
+type EnterpriseModelType = typeof ENTERPRISE_MODEL_TYPES[keyof typeof ENTERPRISE_MODEL_TYPES];
+
+function normalizeModelType(value?: string): EnterpriseModelType {
+  const normalized = (value || ENTERPRISE_MODEL_TYPES.chat).trim().toLowerCase().replace(/-/g, '_');
+  if (normalized === ENTERPRISE_MODEL_TYPES.claudeCode) return ENTERPRISE_MODEL_TYPES.claudeCode;
+  if (normalized === ENTERPRISE_MODEL_TYPES.codexCli) return ENTERPRISE_MODEL_TYPES.codexCli;
+  return ENTERPRISE_MODEL_TYPES.chat;
+}
 
 /** 多默认模型管理（受控组件，编辑状态由父组件持有） */
 function MultiModelSection({
@@ -815,6 +857,9 @@ function MultiModelSection({
   agents,
   onDeleteModel,
   onClearExternalError,
+  modelType = ENTERPRISE_MODEL_TYPES.chat,
+  requireApiBase = true,
+  allowEmpty = false,
   t,
 }: {
   models: ModelEntry[];
@@ -824,6 +869,9 @@ function MultiModelSection({
   agents?: AgentEntry[];
   onDeleteModel?: (idx: number, modelName: string, references: string[]) => void;
   onClearExternalError?: () => void;
+  modelType?: EnterpriseModelType;
+  requireApiBase?: boolean;
+  allowEmpty?: boolean;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const [validatingModel, setValidatingModel] = useState<number | null>(null);
@@ -831,13 +879,13 @@ function MultiModelSection({
   const [expandedIdx, setExpandedIdx] = useState<number | null>(0);
   const [addingNew, setAddingNew] = useState(false);
   const [newModel, setNewModel] = useState<ModelEntry>({
-    model_name: "", api_base: "", api_key: "", model_provider: "OpenAI",
+    model_type: modelType, model_name: "", api_base: "", api_key: "", model_provider: "OpenAI",
   });
   const [localError, setLocalError] = useState<string | null>(null);
   const [validateToast, setValidateToast] = useState<{ show: boolean; success: boolean; message: string }>({ show: false, success: true, message: "" });
 
   const resetNewModelDraft = () => {
-    setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "" });
+    setNewModel({ model_type: modelType, model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "" });
     setLocalError(null);
   };
 
@@ -942,7 +990,7 @@ function MultiModelSection({
   };
 
   const removeModel = (idx: number) => {
-    if (models.length <= 1) {
+    if (!allowEmpty && models.length <= 1) {
       setLocalError(t("config.modelList.lastModelWarning"));
       return;
     }
@@ -1046,6 +1094,11 @@ function MultiModelSection({
       return;
     }
 
+    if (requireApiBase && !newModel.api_base.trim()) {
+      setLocalError(t("config.modelList.apiBaseRequired"));
+      return;
+    }
+
     // api_base URL 格式校验
     if (newModel.api_base && !validateBaseUrl(newModel.api_base)) {
       setLocalError(t("config.modelList.apiBaseUrlInvalid"));
@@ -1063,11 +1116,11 @@ function MultiModelSection({
     setLocalError(null);
     // 新增条目：同名组已有条目时 is_default=false，否则 is_default=true
     const sameNameExists = models.some((m) => m.model_name === name);
-    const entry: ModelEntry = { ...newModel, model_name: name, is_default: !sameNameExists };
+    const entry: ModelEntry = { ...newModel, model_type: modelType, model_name: name, is_default: !sameNameExists };
     onModelsChange([...models, entry]);
     setExpandedIdx(models.length); // 自动展开新增的条目
     setAddingNew(false);
-    setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "" });
+    setNewModel({ model_type: modelType, model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "" });
   };
 
   return (
@@ -1163,7 +1216,7 @@ function MultiModelSection({
                   <button
                     type="button"
                     onClick={() => removeModel(idx)}
-                    disabled={models.length <= 1}
+                    disabled={!allowEmpty && models.length <= 1}
                     className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-danger-subtle hover:text-danger disabled:opacity-40"
                   >
                     {t("config.modelList.removeModel")}
@@ -1175,7 +1228,7 @@ function MultiModelSection({
                   {(["model_name", "alias", "api_base", "api_key", "model_provider"] as const).map((field) => (
                     <div key={field} className="flex items-center gap-2 text-xs">
                       <label className="w-28 text-text-muted shrink-0">
-                        {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
+                        {field}{(["api_key", "model_name", "model_provider"].includes(field) || (field === "api_base" && requireApiBase)) && <span className="text-danger ml-0.5">*</span>}
                       </label>
                       {field === "model_provider" ? (
                         <select
@@ -1222,7 +1275,7 @@ function MultiModelSection({
             {(["model_name", "alias", "api_base", "api_key", "model_provider"] as const).map((field) => (
               <div key={field} className="flex items-center gap-2 text-xs">
                 <label className="w-28 text-text-muted shrink-0">
-                  {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
+                  {field}{(["api_key", "model_name", "model_provider"].includes(field) || (field === "api_base" && requireApiBase)) && <span className="text-danger ml-0.5">*</span>}
                 </label>
                 {field === "model_provider" ? (
                   <select
@@ -1249,7 +1302,7 @@ function MultiModelSection({
               <button
                 type="button"
                 onClick={handleAddNew}
-                disabled={!newModel.model_name.trim() || !newModel.api_base.trim() || !newModel.api_key.trim() || !newModel.model_provider.trim()}
+                disabled={!newModel.model_name.trim() || (requireApiBase && !newModel.api_base.trim()) || !newModel.api_key.trim() || !newModel.model_provider.trim()}
                 className="btn primary !px-3 !py-1 text-xs"
               >
                 {t("common.confirm")}
@@ -2327,18 +2380,31 @@ function TeamsSection({
 export function ConfigPanel({
   config,
   isConnected,
+  enterpriseModelMode = 'standalone',
   onSaveConfig,
   onSaveAllConfig,
   onValidateModel: _onValidateModel,
   initialExpandGroupTag = null,
   onModelsReplaceAll,
+  onModelsCatalogSave,
   onModelValidate,
   onModelsRefresh,
   onAgentsTeamsSave,
 }: ConfigPanelProps) {
+  const isEnterpriseMember = enterpriseModelMode === 'member';
+  const isEnterpriseAdmin = enterpriseModelMode === 'admin';
+  const visibleConfigTabs = isEnterpriseMember || isEnterpriseAdmin
+    ? (['model', 'other'] as const)
+    : (['model', 'agent', 'security', 'other'] as const);
   const { t, i18n } = useTranslation();
   const isProcessing = useChatStore((s) => s.isProcessing);
-  const { availableModels: storeAvailableModels, mode } = useSessionStore();
+  const {
+    availableModels: storeAvailableModels,
+    chatAvailableModels,
+    selectedModelName,
+    setSelectedModelName,
+    mode,
+  } = useSessionStore();
   const [draftValues, setDraftValues] = useState<Record<string, string>>(() => {
     if (!config) return {};
     const next: Record<string, string> = {};
@@ -2432,38 +2498,46 @@ export function ConfigPanel({
     if (!deleteModelConfirm) return;
     const model = draftModels[deleteModelConfirm.idx];
     if (model) {
+      const deletedModelType = normalizeModelType(model.model_type);
       const next = draftModels.filter((_, i) => i !== deleteModelConfirm.idx);
-      if (next.length > 0) {
-        const headName = next[0].model_name;
-        if (!next[0].is_default) {
-          next[0] = { ...next[0], is_default: true };
+      const sameTypeIndices = next
+        .map((item, idx) => ({ item, idx }))
+        .filter(({ item }) => normalizeModelType(item.model_type) === deletedModelType)
+        .map(({ idx }) => idx);
+      if (sameTypeIndices.length > 0) {
+        const firstIdx = sameTypeIndices[0];
+        const headName = next[firstIdx].model_name;
+        if (!next[firstIdx].is_default) {
+          next[firstIdx] = { ...next[firstIdx], is_default: true };
         }
-        for (let i = 1; i < next.length; i++) {
+        for (const i of sameTypeIndices.slice(1)) {
           if (next[i].model_name === headName && next[i].is_default) {
             next[i] = { ...next[i], is_default: false };
           }
         }
-        const mainModel = next[0];
-        setDraftAgents((prev) =>
-          prev.map((agent) => {
-            if (
-              agent.model.model === model.model_name &&
-              (agent.model.provider || "") === (model.model_provider || "") &&
-              (agent.model.api_base || "") === (model.api_base || "")
-            ) {
-              return {
-                ...agent,
-                model: {
-                  provider: mainModel.model_provider || "",
-                  api_base: mainModel.api_base || "",
-                  api_key: mainModel.api_key || "",
-                  model: mainModel.model_name || "",
-                },
-              };
-            }
-            return agent;
-          })
-        );
+        if (deletedModelType === ENTERPRISE_MODEL_TYPES.chat) {
+          const mainModel = next[firstIdx];
+          setDraftAgents((prev) =>
+            prev.map((agent) => {
+              if (
+                agent.model.model === model.model_name &&
+                (agent.model.provider || "") === (model.model_provider || "") &&
+                (agent.model.api_base || "") === (model.api_base || "")
+              ) {
+                return {
+                  ...agent,
+                  model: {
+                    provider: mainModel.model_provider || "",
+                    api_base: mainModel.api_base || "",
+                    api_key: mainModel.api_key || "",
+                    model: mainModel.model_name || "",
+                  },
+                };
+              }
+              return agent;
+            })
+          );
+        }
       }
       handleModelsChange(next);
     }
@@ -2691,7 +2765,16 @@ export function ConfigPanel({
       if (g.tag === "embed") embed.push(g);
       else if (SECURITY_GROUP_TAGS.has(g.tag)) security.push(g);
       else if (g.tag === "agents" || g.tag === "team") continue;
-      else otherTab.push(g);
+      else {
+        if (isEnterpriseMember) {
+          const memberKeys = g.keys.filter(([key]) => ENTERPRISE_MEMBER_USER_CONFIG_KEYS.has(key));
+          if (memberKeys.length > 0) {
+            otherTab.push({ ...g, keys: memberKeys });
+          }
+        } else {
+          otherTab.push(g);
+        }
+      }
     }
     const yamlModel = modelGroups.filter((g) => g.tag !== "model_default");
     return {
@@ -2700,7 +2783,7 @@ export function ConfigPanel({
       otherTabGroups: otherTab,
       yamlModelGroups: yamlModel,
     };
-  }, [otherGroups, modelGroups]);
+  }, [otherGroups, modelGroups, isEnterpriseMember]);
 
   useLayoutEffect(() => {
     if (!initialExpandGroupTag) return;
@@ -2742,8 +2825,12 @@ export function ConfigPanel({
       const om = storeAvailableModels[i];
       if (!om) return true;
       return dm.model_name !== om.model_name || dm.api_base !== om.api_base
+        || normalizeModelType(dm.model_type) !== normalizeModelType(om.model_type)
         || dm.api_key !== om.api_key || dm.model_provider !== om.model_provider
         || (dm.alias ?? "") !== (om.alias ?? "")
+        || (dm.secret_ref ?? "") !== (om.secret_ref ?? "")
+        || (dm.enabled ?? true) !== (om.enabled ?? true)
+        || (dm.verify_ssl ?? false) !== (om.verify_ssl ?? false)
         || dm.is_default !== om.is_default
         || (dm.temperature ?? 0.95) !== (om.temperature ?? 0.95)
         || (dm.timeout ?? 1800) !== (om.timeout ?? 1800);
@@ -2788,12 +2875,19 @@ export function ConfigPanel({
   }, [draftAgents, draftTeams, initialAgents, initialTeams]);
   const hasChanges = hasConfigChanges || hasModelChanges || hasAgentsTeamsChanges;
   const missingRequiredModelFields = useMemo(() => {
-    const legacyFromModels = legacyModelFieldsFromEntry(draftModels[0]);
+    const chatModels = draftModels.filter((model) => normalizeModelType(model.model_type) === ENTERPRISE_MODEL_TYPES.chat);
+    const legacyFromModels = legacyModelFieldsFromEntry(chatModels[0]);
     return REQUIRED_MODEL_FIELDS.filter((key) => {
+      if (isEnterpriseMember && key === "api_key") {
+        return false;
+      }
+      if (key === "api_key" && modelEntryHasCredential(draftModels[0])) {
+        return false;
+      }
       const value = legacyFromModels[key] ?? draftValues[key] ?? "";
       return !value.trim();
     });
-  }, [draftValues, draftModels]);
+  }, [draftValues, draftModels, isEnterpriseMember]);
   const hasMissingRequiredModelFields = missingRequiredModelFields.length > 0;
   const hasDuplicateAgentNames = useMemo(
     () => {
@@ -2803,11 +2897,11 @@ export function ConfigPanel({
     [draftAgents],
   );
   const hasMissingModelApiKey = useMemo(
-    () => draftModels.some((m) => !m.api_key.trim()),
-    [draftModels],
+    () => !isEnterpriseMember && draftModels.some((m) => !modelEntryHasCredential(m)),
+    [draftModels, isEnterpriseMember],
   );
   const hasMissingModelApiBase = useMemo(
-    () => draftModels.some((m) => !m.api_base.trim()),
+    () => draftModels.some((m) => normalizeModelType(m.model_type) === ENTERPRISE_MODEL_TYPES.chat && !m.api_base.trim()),
     [draftModels],
   );
 
@@ -2922,6 +3016,31 @@ export function ConfigPanel({
     }
   };
 
+  const getModelsByType = (modelType: EnterpriseModelType) =>
+    draftModels.filter((model) => normalizeModelType(model.model_type) === modelType);
+
+  const mergeModelsByType = (modelType: EnterpriseModelType, models: ModelEntry[]) => {
+    const typedModels = models.map((model) => ({ ...model, model_type: modelType }));
+    return [
+      ...draftModels.filter((model) => normalizeModelType(model.model_type) !== modelType),
+      ...typedModels,
+    ];
+  };
+
+  const handleTypedModelsChange = (modelType: EnterpriseModelType, models: ModelEntry[]) => {
+    handleModelsChange(mergeModelsByType(modelType, models));
+  };
+
+  const handleDeleteTypedModel = (modelType: EnterpriseModelType, localIdx: number, modelName: string, references: string[]) => {
+    const typedIndices = draftModels
+      .map((model, idx) => ({ model, idx }))
+      .filter(({ model }) => normalizeModelType(model.model_type) === modelType);
+    const globalIdx = typedIndices[localIdx]?.idx;
+    if (globalIdx !== undefined) {
+      handleDeleteModel(globalIdx, modelName, references);
+    }
+  };
+
   const handleCancel = () => {
     if (!hasChanges) return;
     setDraftValues(normalizedConfig);
@@ -2974,66 +3093,70 @@ export function ConfigPanel({
 
   const handleSaveAndRestart = async () => {
     if (!hasChanges || saving) return;
-    if (hasMissingRequiredModelFields) {
+    if (!isEnterpriseMember && hasMissingRequiredModelFields) {
       setConfigTab("model");
       setModelError(t('config.errors.requiredModelFields', { fields: missingRequiredModelFields.join('、') }));
       return;
     }
-    if (hasMissingModelApiKey) {
+    if (!isEnterpriseMember && hasMissingModelApiKey) {
       setConfigTab("model");
       setModelError(t('config.modelList.apiKeyRequired'));
       return;
     }
-    if (hasMissingModelApiBase) {
+    if (!isEnterpriseMember && hasMissingModelApiBase) {
       setConfigTab("model");
       setModelError(t('config.modelList.apiBaseRequired'));
       return;
     }
     // alias 唯一性校验
-    const aliasSeen = new Map<string, string>();
-    for (const m of draftModels) {
-      const a = (m.alias || "").trim();
-      if (!a) continue;
-      if (aliasSeen.has(a)) {
-        setConfigTab("model");
-        setModelError(`Alias '${a}' is used by multiple models`);
-        return;
-      }
-      aliasSeen.set(a, m.model_name);
-      if (draftModels.some((other) => other !== m && other.model_name === a)) {
-        setConfigTab("model");
-        setModelError(`Alias '${a}' conflicts with model name '${a}'`);
-        return;
+    if (!isEnterpriseMember) {
+      const aliasSeen = new Map<string, string>();
+      for (const m of draftModels) {
+        const a = (m.alias || "").trim();
+        if (!a) continue;
+        if (aliasSeen.has(a)) {
+          setConfigTab("model");
+          setModelError(`Alias '${a}' is used by multiple models`);
+          return;
+        }
+        aliasSeen.set(a, m.model_name);
+        if (draftModels.some((other) => other !== m && other.model_name === a)) {
+          setConfigTab("model");
+          setModelError(`Alias '${a}' conflicts with model name '${a}'`);
+          return;
+        }
       }
     }
 
     // 字段长度校验
-    for (const m of draftModels) {
-      if ((m.model_name || "").length > MAX_MODEL_NAME_LENGTH) {
-        setConfigTab("model");
-        setModelError(t("config.modelList.modelNameTooLong"));
-        return;
-      }
-      if ((m.alias || "").length > MAX_ALIAS_LENGTH) {
-        setConfigTab("model");
-        setModelError(t("config.modelList.aliasTooLong"));
-        return;
-      }
-      if ((m.api_base || "").length > MAX_API_BASE_LENGTH) {
-        setConfigTab("model");
-        setModelError(t("config.modelList.apiBaseTooLong"));
-        return;
-      }
-      if ((m.api_key || "").length > MAX_API_KEY_LENGTH) {
-        setConfigTab("model");
-        setModelError(t("config.modelList.apiKeyTooLong"));
-        return;
-      }
-      // api_base URL 格式校验
-      if (m.api_base && !validateBaseUrl(m.api_base)) {
-        setConfigTab("model");
-        setModelError(t("config.modelList.apiBaseUrlInvalid"));
-        return;
+    if (!isEnterpriseMember) {
+      for (const m of draftModels) {
+        if ((m.model_name || "").length > MAX_MODEL_NAME_LENGTH) {
+          setConfigTab("model");
+          setModelError(t("config.modelList.modelNameTooLong"));
+          return;
+        }
+        if ((m.alias || "").length > MAX_ALIAS_LENGTH) {
+          setConfigTab("model");
+          setModelError(t("config.modelList.aliasTooLong"));
+          return;
+        }
+        if ((m.api_base || "").length > MAX_API_BASE_LENGTH) {
+          setConfigTab("model");
+          setModelError(t("config.modelList.apiBaseTooLong"));
+          return;
+        }
+        if ((m.api_key || "").length > MAX_API_KEY_LENGTH) {
+          setConfigTab("model");
+          setModelError(t("config.modelList.apiKeyTooLong"));
+          return;
+        }
+        // api_base URL 格式校验
+        if (m.api_base && !validateBaseUrl(m.api_base)) {
+          setConfigTab("model");
+          setModelError(t("config.modelList.apiBaseUrlInvalid"));
+          return;
+        }
       }
     }
 
@@ -3047,12 +3170,21 @@ export function ConfigPanel({
     setError(null);
     setModelError(null);
     try {
+      let savedEnterpriseCatalog = false;
+      if (isEnterpriseAdmin && hasModelChanges && onModelsCatalogSave) {
+        await onModelsCatalogSave(draftModels);
+        if (onModelsRefresh) await onModelsRefresh();
+        savedEnterpriseCatalog = true;
+        if (!hasConfigChanges && !hasAgentsTeamsChanges) {
+          return;
+        }
+      }
       if (onSaveAllConfig) {
         const payload: ConfigSaveAllPayload = {};
         if (hasConfigChanges) {
           payload.config = configUpdates;
         }
-        if (hasModelChanges) {
+        if (hasModelChanges && !savedEnterpriseCatalog && !isEnterpriseMember) {
           payload.models = draftModels;
         }
         if (hasAgentsTeamsChanges) {
@@ -3061,7 +3193,7 @@ export function ConfigPanel({
           payload.team = agentsTeamsPayload.team;
         }
         await onSaveAllConfig(payload);
-        if (hasModelChanges && onModelsRefresh) await onModelsRefresh();
+        if (hasModelChanges && !savedEnterpriseCatalog && !isEnterpriseMember && onModelsRefresh) await onModelsRefresh();
         if (hasAgentsTeamsChanges) {
           updateCacheAfterSave();
           setInitialAgents(draftAgents);
@@ -3069,7 +3201,7 @@ export function ConfigPanel({
         }
       } else {
         // 兼容旧后端：按旧接口顺序保存，但只在普通配置实际变化时调用 config.set。
-        if (hasModelChanges && onModelsReplaceAll) {
+        if (hasModelChanges && !isEnterpriseMember && onModelsReplaceAll) {
           await onModelsReplaceAll(draftModels);
           if (onModelsRefresh) await onModelsRefresh();
         }
@@ -3119,7 +3251,7 @@ export function ConfigPanel({
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasDuplicateAgentNames || !!blockingAgentsTeamsValidationError || (isProcessing && mode !== 'team')}
+              disabled={!hasChanges || saving || (!isEnterpriseMember && (hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase)) || hasDuplicateAgentNames || !!blockingAgentsTeamsValidationError || (isProcessing && mode !== 'team')}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? t('common.saving') : t('common.save')}
@@ -3166,7 +3298,7 @@ export function ConfigPanel({
               <span className="mono">{t('config.paramsCount', { count: totalItems })}</span>
             </div>
             <div className="app-subtabs shrink-0" role="tablist" aria-label={t('config.tabsAriaLabel')}>
-              {(["model", "agent", "security", "other"] as const).map((tab) => (
+              {visibleConfigTabs.map((tab) => (
                 <button
                   key={tab}
                   type="button"
@@ -3184,6 +3316,36 @@ export function ConfigPanel({
             <div className="flex-1 min-h-0 overflow-auto pr-1 space-y-3 pt-1">
               {configTab === "model" ? (
                 <div role="tabpanel" aria-labelledby="config-tab-model" className="space-y-3 pb-2">
+                  {isEnterpriseMember ? (
+                    <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm">
+                      <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                        <span className="block text-sm font-medium text-text-strong">默认对话模型</span>
+                        <span className="block text-xs text-text-muted mt-0.5">模型由租户管理员维护，你可以选择自己的默认模型；对话页仍可临时下拉切换。</span>
+                      </div>
+                      <div className="p-4 space-y-3 text-sm">
+                        {chatAvailableModels.length === 0 ? (
+                          <p className="text-text-muted">当前租户还没有可用的对话模型。</p>
+                        ) : (
+                          <select
+                            value={selectedModelName ?? ""}
+                            onChange={(e) => setSelectedModelName(e.target.value)}
+                            className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                          >
+                            {chatAvailableModels.map((model, idx) => {
+                              const value = model.alias || model.model_name;
+                              return (
+                                <option key={`${model.model_name}-${idx}`} value={value}>
+                                  {model.alias ? `${model.alias} (${model.model_name})` : model.model_name}
+                                </option>
+                              );
+                            })}
+                          </select>
+                        )}
+                        <p className="text-xs text-text-muted">API Key、Provider、Base URL 由管理员统一配置，不对普通成员开放。</p>
+                      </div>
+                    </div>
+                  ) : (
+                  <>
                   {modelError ? (
                     <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {modelError}
@@ -3204,28 +3366,93 @@ export function ConfigPanel({
                       {t('config.modelList.apiBaseRequired')}
                     </div>
                   ) : null}
-                  <div
-                    id="config-group-model_default"
-                    className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
-                  >
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
-                      <span className="block text-sm font-medium text-text-strong">{t("config.groups.modelDefault.label")}</span>
-                      <span className="block text-xs text-text-muted mt-0.5">{t("config.groups.modelDefault.hint")}</span>
+                  {isEnterpriseAdmin ? (
+                    <>
+                      <div id="config-group-model_default" className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm">
+                        <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                          <span className="block text-sm font-medium text-text-strong">主对话模型</span>
+                          <span className="block text-xs text-text-muted mt-0.5">租户成员可在配置页设置默认模型，并在对话页下拉切换这些模型。</span>
+                        </div>
+                        <div className="p-3">
+                          <MultiModelSection
+                            models={getModelsByType(ENTERPRISE_MODEL_TYPES.chat)}
+                            onModelsChange={(models) => handleTypedModelsChange(ENTERPRISE_MODEL_TYPES.chat, models)}
+                            onModelValidate={onModelValidate}
+                            isConnected={isConnected}
+                            agents={draftAgents}
+                            onDeleteModel={(idx, modelName, references) => handleDeleteTypedModel(ENTERPRISE_MODEL_TYPES.chat, idx, modelName, references)}
+                            onClearExternalError={() => setModelError(null)}
+                            modelType={ENTERPRISE_MODEL_TYPES.chat}
+                            requireApiBase
+                            t={t}
+                          />
+                        </div>
+                      </div>
+                      <div id="config-group-model_claude_code" className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm">
+                        <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                          <span className="block text-sm font-medium text-text-strong">{t("config.groups.modelClaudeCode.label")}</span>
+                          <span className="block text-xs text-text-muted mt-0.5">租户 Claude Code 编码后端使用的模型列表；默认项会注入 ANTHROPIC_MODEL / ANTHROPIC_API_KEY。</span>
+                        </div>
+                        <div className="p-3">
+                          <MultiModelSection
+                            models={getModelsByType(ENTERPRISE_MODEL_TYPES.claudeCode)}
+                            onModelsChange={(models) => handleTypedModelsChange(ENTERPRISE_MODEL_TYPES.claudeCode, models)}
+                            onModelValidate={onModelValidate}
+                            isConnected={isConnected}
+                            onDeleteModel={(idx, modelName, references) => handleDeleteTypedModel(ENTERPRISE_MODEL_TYPES.claudeCode, idx, modelName, references)}
+                            onClearExternalError={() => setModelError(null)}
+                            modelType={ENTERPRISE_MODEL_TYPES.claudeCode}
+                            requireApiBase={false}
+                            allowEmpty
+                            t={t}
+                          />
+                        </div>
+                      </div>
+                      <div id="config-group-model_codex_cli" className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm">
+                        <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                          <span className="block text-sm font-medium text-text-strong">{t("config.groups.modelCodexCli.label")}</span>
+                          <span className="block text-xs text-text-muted mt-0.5">租户 Codex CLI 编码后端使用的模型列表；默认项会注入 CODEX_MODEL / OPENAI_API_KEY。</span>
+                        </div>
+                        <div className="p-3">
+                          <MultiModelSection
+                            models={getModelsByType(ENTERPRISE_MODEL_TYPES.codexCli)}
+                            onModelsChange={(models) => handleTypedModelsChange(ENTERPRISE_MODEL_TYPES.codexCli, models)}
+                            onModelValidate={onModelValidate}
+                            isConnected={isConnected}
+                            onDeleteModel={(idx, modelName, references) => handleDeleteTypedModel(ENTERPRISE_MODEL_TYPES.codexCli, idx, modelName, references)}
+                            onClearExternalError={() => setModelError(null)}
+                            modelType={ENTERPRISE_MODEL_TYPES.codexCli}
+                            requireApiBase={false}
+                            allowEmpty
+                            t={t}
+                          />
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div
+                      id="config-group-model_default"
+                      className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
+                    >
+                      <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                        <span className="block text-sm font-medium text-text-strong">{t("config.groups.modelDefault.label")}</span>
+                        <span className="block text-xs text-text-muted mt-0.5">{t("config.groups.modelDefault.hint")}</span>
+                      </div>
+                      <div className="p-3">
+                        <MultiModelSection
+                          models={draftModels}
+                          onModelsChange={handleModelsChange}
+                          onModelValidate={onModelValidate}
+                          isConnected={isConnected}
+                          agents={draftAgents}
+                          onDeleteModel={handleDeleteModel}
+                          onClearExternalError={() => setModelError(null)}
+                          t={t}
+                        />
+                      </div>
                     </div>
-                    <div className="p-3">
-                      <MultiModelSection
-                        models={draftModels}
-                        onModelsChange={handleModelsChange}
-                        onModelValidate={onModelValidate}
-                        isConnected={isConnected}
-                        agents={draftAgents}
-                        onDeleteModel={handleDeleteModel}
-                        onClearExternalError={() => setModelError(null)}
-                        t={t}
-                      />
-                    </div>
-                  </div>
-                  {yamlModelGroups.map((group) => (
+                  )}
+                  {!isEnterpriseAdmin && yamlModelGroups.map((group) => (
                     <GroupSection
                       key={group.tag}
                       group={group}
@@ -3247,10 +3474,12 @@ export function ConfigPanel({
                       t={t}
                     />
                   ))}
+                  </>
+                  )}
                 </div>
               ) : null}
 
-              {configTab === "agent" ? (
+              {configTab === "agent" && !isEnterpriseMember ? (
                 <div role="tabpanel" aria-labelledby="config-tab-agent" className="space-y-3 pb-2">
                   <div id="config-group-agents" className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm">
                     <div className="w-full flex items-center justify-between px-4 py-3 bg-secondary/30">

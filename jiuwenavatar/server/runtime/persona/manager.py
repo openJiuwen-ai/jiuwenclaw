@@ -22,12 +22,19 @@ from typing import Any
 
 import yaml
 
+from jiuwenavatar.common.postgres_json_store import (
+    PostgresJsonStore,
+    PostgresJsonStoreUnavailable,
+    postgres_store_enabled,
+)
 from jiuwenavatar.server.runtime.persona.models import (
     AvatarConfig,
+    AvatarRuntimeStatus,
     AvatarStatus,
     PersonaConfig,
     PersonaTriggerTemplate,
 )
+from jiuwenavatar.common.enterprise import make_service_id
 from jiuwenavatar.server.runtime.persona.loader import get_user_personas_dir, load_all_personas
 from jiuwenavatar.server.runtime.coding import CODING_ENGINE_CLAUDE_CODE, CODING_ENGINE_CODEX
 
@@ -124,6 +131,7 @@ class PersonaManager:
     def __init__(self) -> None:
         self._personas: dict[str, PersonaConfig] = {}
         self._avatars: dict[str, AvatarConfig] = {}
+        self._avatar_pg_store: PostgresJsonStore | None = None
         self._loaded = False
 
     @classmethod
@@ -167,6 +175,20 @@ class PersonaManager:
 
     def _load_avatars(self, *, log: bool = True) -> None:
         """Load avatar instances from user workspace."""
+        if postgres_store_enabled():
+            try:
+                self._avatar_pg_store = PostgresJsonStore("avatars")
+                for avatar_data in self._avatar_pg_store.list():
+                    avatar = AvatarConfig(**avatar_data)
+                    self._avatars[avatar.id] = avatar
+                if log:
+                    logger.info("Loaded %d avatar instances from PostgreSQL", len(self._avatars))
+                return
+            except PostgresJsonStoreUnavailable as exc:
+                logger.warning("Avatar PostgreSQL store unavailable, falling back to JSON: %s", exc)
+            except Exception:
+                logger.warning("Failed to load avatars from PostgreSQL, falling back to JSON", exc_info=True)
+
         json_path = _get_avatars_json_path()
         if not json_path.exists():
             return
@@ -183,6 +205,19 @@ class PersonaManager:
 
     def _save_avatars(self) -> None:
         """Persist avatar instances to disk."""
+        if self._avatar_pg_store is not None:
+            try:
+                for avatar in self._avatars.values():
+                    self._avatar_pg_store.save(
+                        avatar.id,
+                        avatar.model_dump(),
+                        group_id=avatar.group_id,
+                        owner_user_id=avatar.owner_user_id,
+                    )
+                return
+            except Exception:
+                logger.warning("Failed to save avatars to PostgreSQL, falling back to JSON", exc_info=True)
+
         json_path = _get_avatars_json_path()
         json_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -373,6 +408,11 @@ class PersonaManager:
         extra_skills: list[str] | None = None,
         report_channels: list[str] | None = None,
         coding_engine: str | None = None,
+        owner_user_id: str | None = None,
+        group_id: str | None = None,
+        agent_id: str | None = None,
+        service_id: str | None = None,
+        agentserver_ref: str | None = None,
     ) -> dict[str, Any]:
         """Create a new Avatar instance based on a Persona template.
 
@@ -408,6 +448,10 @@ class PersonaManager:
             explicit=coding_engine is not None,
         )
 
+        group = str(group_id or "").strip()
+        owner = str(owner_user_id or "").strip()
+        agent = str(agent_id or owner or "").strip()
+
         avatar = AvatarConfig(
             name=name or persona.display_name,
             persona_id=persona_id,
@@ -416,7 +460,14 @@ class PersonaManager:
             coding_engine=resolved_coding_engine,
             system_prompt=system_prompt,
             report_channels=report_channels or [],
+            owner_user_id=owner,
+            group_id=group,
+            agent_id=agent,
+            agentserver_ref=str(agentserver_ref or "").strip(),
         )
+        avatar.service_id = str(service_id or "").strip() or make_service_id(group or "default", avatar.id)
+        if avatar.service_id:
+            avatar.runtime_status = AvatarRuntimeStatus.BOUND
 
         self._avatars[avatar.id] = avatar
         self._save_avatars()
@@ -440,6 +491,10 @@ class PersonaManager:
 
         for tmpl in persona.trigger_templates:
             params = self._trigger_params_from_template(tmpl, avatar.id)
+            if avatar.group_id:
+                params["group_id"] = avatar.group_id
+            if avatar.owner_user_id:
+                params["owner_user_id"] = avatar.owner_user_id
             result = await engine.handle_triggers_create(**params)
             trigger = result.get("trigger") if isinstance(result, dict) else None
             if isinstance(trigger, dict) and trigger.get("id"):
@@ -507,10 +562,22 @@ class PersonaManager:
             params["event_type"] = tmpl.event_type
         return params
 
-    def list_avatars(self) -> list[dict[str, Any]]:
+    def list_avatars(
+        self,
+        *,
+        group_id: str | None = None,
+        owner_user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """List all avatar instances."""
         self.ensure_loaded()
-        return [a.model_dump() for a in sorted(self._avatars.values(), key=lambda a: a.created_at)]
+        group = str(group_id or "").strip()
+        owner = str(owner_user_id or "").strip()
+        avatars = sorted(self._avatars.values(), key=lambda a: a.created_at)
+        if group:
+            avatars = [a for a in avatars if a.group_id == group]
+        if owner:
+            avatars = [a for a in avatars if a.owner_user_id == owner]
+        return [a.model_dump() for a in avatars]
 
     def get_avatar(self, avatar_id: str) -> dict[str, Any] | None:
         """Get a single avatar instance by ID."""
@@ -578,6 +645,8 @@ class PersonaManager:
             raise ValueError(f"Avatar not found: {avatar_id}")
 
         del self._avatars[avatar_id]
+        if self._avatar_pg_store is not None:
+            self._avatar_pg_store.delete(avatar_id)
         self._save_avatars()
 
         logger.info("Deleted avatar %s", avatar_id)
@@ -592,11 +661,13 @@ class PersonaManager:
 
         await self._delete_avatar_triggers(avatar_id, avatar)
 
-        from jiuwenavatar.gateway.report.manager import ReportManager
+        from jiuwenavatar.gateway.report.manager import MissionManager
 
-        ReportManager.get_instance().purge_avatar_records(avatar_id)
+        MissionManager.get_instance().purge_avatar_records(avatar_id)
 
         del self._avatars[avatar_id]
+        if self._avatar_pg_store is not None:
+            self._avatar_pg_store.delete(avatar_id)
         self._save_avatars()
 
         logger.info(
@@ -810,9 +881,14 @@ class PersonaManager:
         except ValueError as e:
             return {"error": str(e)}
 
-    async def handle_avatars_list(self, **_kwargs: Any) -> dict[str, Any]:
+    async def handle_avatars_list(self, **kwargs: Any) -> dict[str, Any]:
         """Handler for `avatars.list` — list all avatar instances."""
-        return {"avatars": self.list_avatars()}
+        return {
+            "avatars": self.list_avatars(
+                group_id=kwargs.get("group_id"),
+                owner_user_id=kwargs.get("owner_user_id") or kwargs.get("user_id"),
+            )
+        }
 
     async def handle_avatars_get(self, *, avatar_id: str, **_kwargs: Any) -> dict[str, Any]:
         """Handler for `avatars.get` — get a single avatar instance."""
@@ -832,6 +908,11 @@ class PersonaManager:
                 extra_skills=kwargs.get("extra_skills"),
                 report_channels=kwargs.get("report_channels"),
                 coding_engine=kwargs.get("coding_engine"),
+                owner_user_id=kwargs.get("owner_user_id") or kwargs.get("user_id"),
+                group_id=kwargs.get("group_id"),
+                agent_id=kwargs.get("agent_id"),
+                service_id=kwargs.get("service_id"),
+                agentserver_ref=kwargs.get("agentserver_ref"),
             )
             avatar = AvatarConfig(**avatar_dict)
             persona = self._personas.get(persona_id)

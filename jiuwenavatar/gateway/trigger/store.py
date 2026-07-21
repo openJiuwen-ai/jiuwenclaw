@@ -8,6 +8,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from jiuwenavatar.common.postgres_json_store import (
+    PostgresJsonStore,
+    PostgresJsonStoreUnavailable,
+    postgres_store_enabled,
+)
 from jiuwenavatar.gateway.trigger.models import TriggerConfig
 
 logger = logging.getLogger(__name__)
@@ -32,6 +37,14 @@ class TriggerStore:
 
     def __init__(self, path: Path | None = None) -> None:
         self._path = path or _get_triggers_json_path()
+        self._pg_store: PostgresJsonStore | None = None
+        if path is None and postgres_store_enabled():
+            try:
+                self._pg_store = PostgresJsonStore("triggers")
+            except PostgresJsonStoreUnavailable as exc:
+                logger.warning("Trigger PostgreSQL store unavailable, falling back to JSON: %s", exc)
+            except Exception:
+                logger.warning("Trigger PostgreSQL store init failed, falling back to JSON", exc_info=True)
 
     @property
     def path(self) -> Path:
@@ -53,8 +66,26 @@ class TriggerStore:
             encoding="utf-8",
         )
 
-    def list_triggers(self) -> list[TriggerConfig]:
-        """List all triggers from storage."""
+    def list_triggers(
+        self,
+        *,
+        group_id: str | None = None,
+        owner_user_id: str | None = None,
+    ) -> list[TriggerConfig]:
+        """List triggers, optionally scoped to a tenant."""
+        if self._pg_store is not None:
+            triggers: list[TriggerConfig] = []
+            items = self._pg_store.list(
+                group_id=group_id or None,
+                owner_user_id=owner_user_id or None,
+            )
+            for item in items:
+                try:
+                    triggers.append(TriggerConfig(**item))
+                except Exception:
+                    logger.warning("Skipping invalid trigger entry from PostgreSQL", exc_info=True)
+            return triggers
+
         data = self._read_json()
         triggers_raw = data.get("triggers") or []
         triggers: list[TriggerConfig] = []
@@ -62,9 +93,15 @@ class TriggerStore:
             if not isinstance(item, dict):
                 continue
             try:
-                triggers.append(TriggerConfig(**item))
+                trigger = TriggerConfig(**item)
             except Exception:
                 logger.warning("Skipping invalid trigger entry", exc_info=True)
+                continue
+            if group_id is not None and (trigger.group_id or "") != group_id:
+                continue
+            if owner_user_id is not None and (trigger.owner_user_id or "") != owner_user_id:
+                continue
+            triggers.append(trigger)
         return triggers
 
     def get_trigger(self, trigger_id: str) -> TriggerConfig | None:
@@ -76,6 +113,15 @@ class TriggerStore:
 
     def save_trigger(self, trigger: TriggerConfig) -> None:
         """Create or update a trigger."""
+        if self._pg_store is not None:
+            self._pg_store.save(
+                trigger.id,
+                trigger.model_dump(),
+                group_id=trigger.group_id or "",
+                owner_user_id=trigger.owner_user_id or "",
+            )
+            return
+
         triggers = self.list_triggers()
         # Replace if exists
         found = False
@@ -90,6 +136,9 @@ class TriggerStore:
 
     def delete_trigger(self, trigger_id: str) -> bool:
         """Delete a trigger by ID. Returns True if deleted."""
+        if self._pg_store is not None:
+            return self._pg_store.delete(trigger_id)
+
         triggers = self.list_triggers()
         new_triggers = [t for t in triggers if t.id != trigger_id]
         if len(new_triggers) == len(triggers):
@@ -97,6 +146,15 @@ class TriggerStore:
         self._write_json({"triggers": [t.model_dump() for t in new_triggers]})
         return True
 
-    def list_triggers_by_avatar(self, avatar_id: str) -> list[TriggerConfig]:
+    def list_triggers_by_avatar(
+        self,
+        avatar_id: str,
+        *,
+        group_id: str | None = None,
+        owner_user_id: str | None = None,
+    ) -> list[TriggerConfig]:
         """List all triggers associated with an avatar."""
-        return [t for t in self.list_triggers() if t.avatar_id == avatar_id]
+        return [
+            t for t in self.list_triggers(group_id=group_id, owner_user_id=owner_user_id)
+            if t.avatar_id == avatar_id
+        ]

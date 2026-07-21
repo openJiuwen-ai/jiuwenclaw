@@ -32,6 +32,7 @@ import {
 import { useChatStore, useTodoStore, useSessionStore, useHarnessStore, useAvatarStore } from '../stores';
 import type { TeamTask, TeamTaskStatus } from '../stores/sessionStore';
 import { webClient } from '../services/webClient';
+import { enterpriseUserContext } from '../utils/enterpriseContext';
 import {
   fetchTtsAudio,
   playAudioBase64,
@@ -48,7 +49,10 @@ const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
 function getAvatarChatParams(): { avatar_id?: string } {
   const avatarId = useAvatarStore.getState().currentAvatarId;
-  return avatarId ? { avatar_id: avatarId } : {};
+  return {
+    ...enterpriseUserContext(),
+    ...(avatarId ? { avatar_id: avatarId } : {}),
+  };
 }
 
 const TEAM_TASK_STATUS_SET = new Set<TeamTaskStatus>([

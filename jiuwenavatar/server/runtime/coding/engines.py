@@ -26,6 +26,22 @@ from shutil import which
 
 logger = logging.getLogger(__name__)
 
+_ENTERPRISE_USER_ENV_MAP = {
+    "email_address": "EMAIL_ADDRESS",
+    "email_token": "EMAIL_TOKEN",
+    "jina_api_key": "JINA_API_KEY",
+    "bocha_api_key": "BOCHA_API_KEY",
+    "serper_api_key": "SERPER_API_KEY",
+    "perplexity_api_key": "PERPLEXITY_API_KEY",
+    "github_token": "GITHUB_TOKEN",
+    "gitcode_token": "GITCODE_TOKEN",
+    "teamskills_user_token": "TEAM_SKILLS_HUB_USER_TOKEN",
+    "free_search_ddg_enabled": "FREE_SEARCH_DDG_ENABLED",
+    "free_search_bing_enabled": "FREE_SEARCH_BING_ENABLED",
+    "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
+    "skill_create": "SKILL_CREATE",
+}
+
 # 当前请求绑定的分身（用于按分身隔离 CLI 引擎工作区，避免多分身产物互相覆盖）。
 # 用 ContextVar 而非引擎实例属性：引擎是模块级单例，ContextVar 天然按 async 上下文隔离。
 _WORKSPACE_AVATAR: ContextVar[str] = ContextVar("coding_workspace_avatar", default="")
@@ -391,9 +407,31 @@ class CliCodingEngine(CodingEngine):
 
     def _subprocess_env(self) -> dict[str, str]:
         env = dict(os.environ)
+        try:
+            from jiuwenavatar.common.enterprise import get_tenant_context, is_enterprise_mode
+
+            ctx = get_tenant_context()
+            group_id = str(ctx.group_id if ctx else "").strip()
+            user_id = str(ctx.user_id if ctx else "").strip()
+            if is_enterprise_mode() and group_id:
+                from jiuwenavatar.gateway.model_catalog import get_model_catalog_service
+
+                for key, value in get_model_catalog_service().resolve_coding_env(group_id, self.kind).items():
+                    if value:
+                        env[key] = value
+                if user_id:
+                    from jiuwenavatar.common.enterprise_user_config import get_enterprise_user_config_store
+
+                    user_config = get_enterprise_user_config_store().load(group_id, user_id)
+                    for config_key, env_key in _ENTERPRISE_USER_ENV_MAP.items():
+                        value = user_config.get(config_key, "")
+                        if value:
+                            env[env_key] = value
+        except Exception:
+            logger.debug("Failed to resolve tenant coding env for %s", self.kind, exc_info=True)
         for key in self.passthrough_env:
             val = os.environ.get(key, "").strip()
-            if val:
+            if val and key not in env:
                 env[key] = val
         return env
 
@@ -535,6 +573,19 @@ class ClaudeCodeEngine(CliCodingEngine):
     )
 
     def is_credentials_configured(self) -> bool:
+        try:
+            from jiuwenavatar.common.enterprise import get_tenant_context, is_enterprise_mode
+
+            ctx = get_tenant_context()
+            group_id = str(ctx.group_id if ctx else "").strip()
+            if is_enterprise_mode() and group_id:
+                from jiuwenavatar.gateway.model_catalog import get_model_catalog_service
+
+                env = get_model_catalog_service().resolve_coding_env(group_id, self.kind)
+                if env.get("ANTHROPIC_API_KEY"):
+                    return True
+        except Exception:
+            logger.debug("Failed to check tenant Claude Code credentials", exc_info=True)
         return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
 
     def resolve_executable(self) -> str | None:
@@ -626,6 +677,19 @@ class CodexEngine(CliCodingEngine):
     )
 
     def is_credentials_configured(self) -> bool:
+        try:
+            from jiuwenavatar.common.enterprise import get_tenant_context, is_enterprise_mode
+
+            ctx = get_tenant_context()
+            group_id = str(ctx.group_id if ctx else "").strip()
+            if is_enterprise_mode() and group_id:
+                from jiuwenavatar.gateway.model_catalog import get_model_catalog_service
+
+                env = get_model_catalog_service().resolve_coding_env(group_id, self.kind)
+                if env.get("OPENAI_API_KEY"):
+                    return True
+        except Exception:
+            logger.debug("Failed to check tenant Codex credentials", exc_info=True)
         return bool(os.environ.get("OPENAI_API_KEY", "").strip())
 
     def _prepare_workspace_extra(self, workspace: Path) -> None:
