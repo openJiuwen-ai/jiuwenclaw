@@ -263,6 +263,12 @@ JiuwenSwarm 使用独立的内部数据目录保存启动配置、Agent 身份�
 - 用户在某个 channel（如飞书）请求发送文件、或要求把文件发给指定 channel 时，传入 `target_channels`。
 - 省略 `target_channels` 时，文件会自动投递给当前会话已接入的所有用户 channel（team 模式下含飞书等 IM 端）。
 - 文件路径必须是服务端可访问的绝对路径。
+## 网页文件下载协作
+当用户要求下载、保存、导出网页上的某个文件（如示例视频、图片、文档、数据文件等）时，**不要让 browser_agent 直接下载**——browser_agent 不具备可靠的下载能力，直接点击下载按钮会触发浏览器异步下载，导致会话卡住、残留 `.crdownload` 文件、甚至在会话结束后还在后台下载。正确的协作方式是：
+1. 用 `task_tool` 指派 `browser_agent`，任务描述写明「**只找到该文件的下载 URL 并返回，不要点击下载按钮、不要下载文件**」；
+2. browser_agent 返回文件下载 URL 后，**你（主 agent）自己**用 bash `curl` 或 `wget` 把文件下载到 `{workspace_dir}` 下；
+3. 下载完成后用 `send_file_to_user` 把本地文件的绝对路径发给用户。
+即：browser_agent 只负责「找 URL」，下载由你用 bash 完成。派给 browser_agent 的任务描述里绝不要出现「下载文件」字样，应写成「返回下载 URL」。
 """
     else:
         content = (
@@ -346,7 +352,6 @@ or cmd step-by-step creation `mkdir parent && mkdir parent\\child`.
 ## Task Execution Principles
 
 - **Prefer skills**: This environment has many skills already deployed. Upon receiving a task, **first consult the skills to determine whether a skill can support it**; if unsure, consult the skills first to confirm their capabilities and applicable scenarios. **Whenever a skill exists that can handle the task, you MUST invoke that skill to complete it**; do not answer directly via ordinary tools or your own abilities. Only when no matching skill exists, or the matching skill is clearly unavailable or its invocation fails, may you fall back to other means.
-<<<<<<< HEAD
 - **Data fidelity**: Field values written to files or structured results MUST match the source
   character for character; never normalize, rewrite, translate, complete, or truncate.
 - **Follow the template**: If the task provides an output file/template/example, read it first.
@@ -407,6 +412,12 @@ to specify delivery targets by channel id (e.g. `["feishu", "xiaoyi", "web"]`).
 - When `target_channels` is omitted, the file is auto-delivered to every user channel
   joined to the current session, including IM endpoints like Feishu in team mode.
 - File paths must be absolute and server-accessible.
+## Web File Download Collaboration
+When the user asks to download, save, or export a file on a web page (e.g. a sample video, image, document, data file), **do NOT have browser_agent download it directly** — browser_agent has no reliable download capability; clicking a Download button triggers an async browser download that stalls the session, leaves `.crdownload` fragments, and keeps running after the session ends. The correct collaboration is:
+1. Delegate to `browser_agent` via `task_tool` with a task description that says "**only locate the download URL of the file and return it; do NOT click the Download button; do NOT download the file**";
+2. After browser_agent returns the file download URL, **you (the main agent)** download the file yourself with bash `curl` or `wget` into `{workspace_dir}`;
+3. Once downloaded, use `send_file_to_user` to send the local file absolute path to the user.
+In short: browser_agent only "finds the URL"; the download is done by you with bash. Never put "download the file" in the task description for browser_agent — write "return the download URL" instead.
 """
         )
     return PromptSection(
