@@ -11,7 +11,7 @@
 | Agent Studio | `openjiuwen-agent-studio/` | `agent-studio` | `agent-studio` | v0.1.8 | `vX.Y.Z` |
 | Agent Runtime | `openjiuwen-agent-runtime/` | `agent-runtime` | `agent-runtime` | v0.1.0 | `vX.Y.Z` |
 | DeepSearch | `openjiuwen-deepsearch/` | `deepsearch` | `deepsearch` | v0.1.7 | `vX.Y.Z`（可含 `.postN`） |
-| JiuwenSwarm | `openjiuwen-jiuwenswarm/` | `jiuwenswarm` | `jiuwenswarm` | 0.2.2 | `JiuwenSwarmX.Y.Z` 或 `X.Y.Z` |
+| JiuwenSwarm | `openjiuwen-jiuwenswarm/` | `jiuwenswarm` | `jiuwenswarm` | **0.2.3**（企业问答用 **`enterprise_kub`**） | 开源：`dev_release_X.Y.Z` / `JiuwenSwarmX.Y.Z` / `X.Y.Z`；企业：`dev/enterprise_kub` |
 
 ## 关键词 → 首选 skill
 
@@ -22,7 +22,8 @@
 | 画布、工作流编排 UI、FlowGram、Helm 装 Studio | agent-studio | 是否问 Runtime 部署 |
 | `DeploymentManager`、subprocess/docker/k8s 部署 Agent、runtime-server | agent-runtime | 是否问 Studio 里点部署 |
 | 深度检索、研究报告、溯源、citation、`deepsearch_agent` | deepsearch | 是否问 Core 通用 RAG |
-| jiuwenclaw、飞书/钉钉机器人、Gateway、jiuwenbox、Swarm Team | jiuwenswarm | — |
+| jiuwenclaw、飞书/钉钉机器人、Gateway、jiuwenbox、Swarm Team | jiuwenswarm | 企业版 / K8s → 子 skill 内用 `enterprise_kub` 索引 |
+| 企业版、企业 claw、企业 swarm、enterprise_kub、K8s 企业部署、Manager、RuntimeManagement、多租户云化 | jiuwenswarm（**`references/enterprise_kub.md`**） | 勿用开源 `0.2.x` 硬答 |
 
 ## 常见混淆与处理
 

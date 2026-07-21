@@ -920,45 +920,68 @@ async def _run(
     )
     logger.info("[App] TriggerEngine dispatch configured and triggers started")
 
-    # --- Webhook HTTP endpoint（默认关闭，WEBHOOK_ENABLED=true 开启）---
+    # --- Avatar HTTP API（始终开启）+ 可选 Webhook（WEBHOOK_ENABLED=true）---
+    # POST /avatar/chat 供外部以 HTTP 直接调用不同数字分身。
     _webhook_runner: web.AppRunner | None = None
+    _webhook_enabled = str(os.getenv("WEBHOOK_ENABLED", "")).strip().lower() in {"true", "1", "yes"}
 
-    if str(os.getenv("WEBHOOK_ENABLED", "")).strip().lower() in {"true", "1", "yes"}:
-        async def _webhook_handler(request: web.Request) -> web.Response:
-            path = request.path
-            body = await request.read()
-            headers = {k.lower(): v for k, v in request.headers.items()}
-            try:
-                result = await trigger_engine.handle_webhook_request(path, body, headers)
-            except Exception as exc:
-                logger.exception("[Webhook] handle_webhook_request error: %s", exc)
-                return web.json_response({"error": "internal server error"}, status=500)
-            if isinstance(result, dict):
-                payload = dict(result)
-                status_code = int(payload.pop("status", 200)) if isinstance(payload.get("status"), int) else 200
-            else:
-                payload, status_code = {"status": "ok"}, 200
-            return web.json_response(payload, status=status_code)
-
-        _webhook_app = web.Application()
-        _webhook_app.router.add_post("/webhook/{path:.*}", _webhook_handler)
-        async def _webhook_health(request: web.Request) -> web.Response:
-            return web.json_response({"status": "ok", "webhook": True})
-        _webhook_app.router.add_get("/webhook/health", _webhook_health)
-
-        _webhook_host = os.getenv("WEBHOOK_HOST", "127.0.0.1")
-        _webhook_port = int(os.getenv("WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT)))
-        _webhook_runner = web.AppRunner(_webhook_app)
-        await _webhook_runner.setup()
-        _webhook_site = web.TCPSite(_webhook_runner, _webhook_host, _webhook_port)
+    async def _webhook_handler(request: web.Request) -> web.Response:
+        path = request.path
+        body = await request.read()
+        headers = {k.lower(): v for k, v in request.headers.items()}
         try:
-            await _webhook_site.start()
+            result = await trigger_engine.handle_webhook_request(path, body, headers)
+        except Exception as exc:
+            logger.exception("[Webhook] handle_webhook_request error: %s", exc)
+            return web.json_response({"error": "internal server error"}, status=500)
+        if isinstance(result, dict):
+            payload = dict(result)
+            status_code = int(payload.pop("status", 200)) if isinstance(payload.get("status"), int) else 200
+        else:
+            payload, status_code = {"status": "ok"}, 200
+        return web.json_response(payload, status=status_code)
+
+    from jiuwenavatar.gateway.http_api import build_avatar_http_app
+
+    _avatar_http_app = build_avatar_http_app(
+        client,
+        include_webhook=_webhook_enabled,
+        webhook_handler=_webhook_handler if _webhook_enabled else None,
+    )
+    _avatar_http_host = (
+        os.getenv("AVATAR_HTTP_HOST")
+        or os.getenv("WEBHOOK_HOST")
+        or "0.0.0.0"
+    )
+    _avatar_http_port = int(
+        os.getenv("AVATAR_HTTP_PORT")
+        or os.getenv("WEBHOOK_PORT")
+        or str(DEFAULT_WEBHOOK_PORT)
+    )
+    _webhook_runner = web.AppRunner(_avatar_http_app)
+    await _webhook_runner.setup()
+    _webhook_site = web.TCPSite(_webhook_runner, _avatar_http_host, _avatar_http_port)
+    try:
+        await _webhook_site.start()
+        logger.info(
+            "[App] Avatar HTTP API enabled: http://%s:%s/avatar/chat",
+            _avatar_http_host,
+            _avatar_http_port,
+        )
+        if _webhook_enabled:
             logger.info(
                 "[App] Webhook endpoint enabled: http://%s:%s/webhook/  (WEBHOOK_ENABLED=true)",
-                _webhook_host, _webhook_port,
+                _avatar_http_host,
+                _avatar_http_port,
             )
-        except OSError as exc:
-            logger.warning("[App] Webhook endpoint failed on %s:%s: %s", _webhook_host, _webhook_port, exc)
+    except OSError as exc:
+        logger.warning(
+            "[App] Avatar HTTP API failed on %s:%s: %s",
+            _avatar_http_host,
+            _avatar_http_port,
+            exc,
+        )
+        _webhook_runner = None
 
     full_cfg: dict[str, Any] = {}
     heartbeat_cfg: dict | None = None

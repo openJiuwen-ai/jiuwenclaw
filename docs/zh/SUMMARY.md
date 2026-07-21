@@ -10,6 +10,8 @@
 - [A2UI 生成式界面](A2UI.md)
 - [配置说明](配置信息.md)
 - [JiuwenAvatar 分布式云化部署设计](JiuwenAvatar-分布式云化部署设计.md)
+- [企业单机烟测使用指导](企业单机烟测使用指导.md)
+- [单机部署与对外访问](单机部署与对外访问.md)
 - [分布式 Team](分布式Team.md)
 - [Agent Team 使用指南](AgentTeam.md)
 - [单机多实例运行](单机多实例运行.md)

@@ -13,7 +13,9 @@ interface ErrorWithCode {
 
 // 与 jiuwenavatar/common/service_ports.py 保持一致
 const DEFAULT_WEB_PORT = 29000
+const DEFAULT_WEBHOOK_PORT = 29002
 const DEFAULT_FRONTEND_PORT = 29173
+const AVATAR_HTTP_PORT = Number(process.env.AVATAR_HTTP_PORT || process.env.WEBHOOK_PORT || DEFAULT_WEBHOOK_PORT)
 
 /**
  * file-api 使用的项目根目录，需与后端 get_root_dir() 一致，前端编辑的 HEARTBEAT.md 才会被心跳读到。
@@ -637,6 +639,11 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: `http://127.0.0.1:${DEFAULT_WEB_PORT}`,
+        changeOrigin: true,
+      },
+      // 外部 HTTP 调用数字分身：POST /avatar/chat -> Gateway Avatar HTTP API
+      '/avatar': {
+        target: `http://127.0.0.1:${AVATAR_HTTP_PORT}`,
         changeOrigin: true,
       },
       '/ws': {

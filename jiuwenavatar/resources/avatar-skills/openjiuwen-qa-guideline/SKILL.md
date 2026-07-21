@@ -59,7 +59,7 @@ description: openJiuwen 产品线 QA 总入口与流程编排。凡用户提到 
 | studio、Agent Studio、低代码、画布、FlowGram | `openjiuwen-agent-studio` | `agent-studio` | v0.1.8 | `agent-studio` |
 | runtime、运行时、部署、DeploymentManager、k8s 部署 | `openjiuwen-agent-runtime` | `agent-runtime` | v0.1.0 | `agent-runtime` |
 | deepsearch、深度检索/研究、溯源、报告模板 | `openjiuwen-deepsearch` | `deepsearch` | v0.1.7 | `deepsearch` |
-| swarm、jiuwenswarm、jiuwenclaw、jiuwenbox、IM 接入 | `openjiuwen-jiuwenswarm` | `jiuwenswarm` | 0.2.2 | `jiuwenswarm` |
+| swarm、jiuwenswarm、jiuwenclaw、jiuwenbox、IM 接入、企业版/企业 claw/企业 swarm | `openjiuwen-jiuwenswarm` | `jiuwenswarm` | **0.2.3**（企业 → `enterprise_kub`） | `jiuwenswarm` |
 
 **易混边界**（加载子 skill 前心里过一遍）：
 
@@ -95,7 +95,7 @@ description: openJiuwen 产品线 QA 总入口与流程编排。凡用户提到 
 1. **立即阅读** 目标目录下的 `SKILL.md`（如 `openjiuwen-agent-core/SKILL.md`）。
 2. **分析**：定版本 → 读 `references/<version>.md` → 在 `assets/<version>/` 读文档/源码并归纳根因或用法（文档优先）；缺快照则先 `fetch.sh` / `fetch.ps1`（Windows 用 `.ps1`）。
 3. **答疑**：基于分析结果作答——声明版本、索引依据、`assets/` 内证据路径；区分「已证实行为」与「推测/需复现」。
-4. **版本约定**：`agent-core` / `studio` / `runtime` / `deepsearch` / `java` 的 tag 多为 `vX.Y.Z`，最新版本见上表「最新 reference 版本」列；**jiuwenswarm** 多为 `X.Y.Z`（无 `v`），可含 `.betaN` 等预发布后缀，以各包 `references/` 为准。如 `assets/` 目录中已存在对应版本的快照，优先使用已有快照，无需重新拉取。
+4. **版本约定**：`agent-core` / `studio` / `runtime` / `deepsearch` / `java` 的 tag 多为 `vX.Y.Z`，最新版本见上表「最新 reference 版本」列；**jiuwenswarm** 开源多为 `X.Y.Z`（无 `v`），最新 reference 为 **0.2.3**（分支 `dev_release_0.2.3`）；问企业版 / 企业 claw / 企业 swarm / K8s 企业部署时用索引 **`enterprise_kub`**（分支 `dev/enterprise_kub`）。如 `assets/` 目录中已存在对应版本的快照，优先使用已有快照，无需重新拉取。
 5. **是否进入 C**：分析已确认 Bug（有快照路径+行号）或用户要求记录 → 进入下方 C，**不**因已给出答疑而跳过登记。
 
 ### C. 疑似问题记录 → `record-bugs`
@@ -155,7 +155,7 @@ python record-bugs/scripts/record_bug.py \
 | `openjiuwen-agent-studio/` | Agent Studio 低代码平台 | v0.1.8 |
 | `openjiuwen-agent-runtime/` | Agent 运行时与部署 | v0.1.0 |
 | `openjiuwen-deepsearch/` | DeepSearch 深度检索 | v0.1.7 |
-| `openjiuwen-jiuwenswarm/` | JiuwenSwarm 个人 AI 管家 | 0.2.2 |
+| `openjiuwen-jiuwenswarm/` | JiuwenSwarm 个人 AI 管家（企业版见同包 `enterprise_kub`） | 0.2.3 |
 | `record-bugs/` | 疑似 Bug 写入 `PENDING_BUGS.md` | — |
 
 ---

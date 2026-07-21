@@ -1,6 +1,6 @@
 ---
 name: openjiuwen-jiuwenswarm
-description: **Sub-skill** of `openjiuwen-qa-guideline` — component Q&A for **JiuwenSwarm** (`jiuwenswarm` / `jiuwenclaw` on GitCode openJiuwen/jiuwenswarm). **Read `openjiuwen-qa-guideline/SKILL.md` first** for intent routing unless the user already @ the guideline or routing is already clear. Then use when the user mentions JiuwenSwarm, jiuwenclaw, jiuwenbox, IM integrations, `jiuwenswarm-init`/`jiuwenswarm-start`, Agent Team, or Swarm 安装/配置/排障. Resolves a **version** per question, then follows **`references/<version>.md`** into **`assets/<version>/`**. When snapshots are missing or the user asks to pull/sync/update, run **`scripts/fetch.sh`** or **`scripts/fetch.ps1`**. Do not confuse with **openjiuwen-agent-core** or **openjiuwen-agent-studio** unless explicitly linked.
+description: **Sub-skill** of `openjiuwen-qa-guideline` — component Q&A for **JiuwenSwarm** (`jiuwenswarm` / `jiuwenclaw` on GitCode openJiuwen/jiuwenswarm). **Read `openjiuwen-qa-guideline/SKILL.md` first** for intent routing unless the user already @ the guideline or routing is already clear. Then use when the user mentions JiuwenSwarm, jiuwenclaw, jiuwenbox, IM integrations, `jiuwenswarm-init`/`jiuwenswarm-start`, Agent Team, Swarm 安装/配置/排障, or **企业版 / 企业 claw / 企业 swarm / enterprise_kub / K8s 企业部署**. Resolves a **version or special index** per question (`0.2.3` latest open-source, or `enterprise_kub` for enterprise), then follows **`references/<version>.md`** into **`assets/<version>/`**. When snapshots are missing or the user asks to pull/sync/update, run **`scripts/fetch.sh`** or **`scripts/fetch.ps1`**. Do not confuse with **openjiuwen-agent-core** or **openjiuwen-agent-studio** unless explicitly linked.
 ---
 
 # JiuwenSwarm 问答助手
@@ -19,7 +19,7 @@ description: **Sub-skill** of `openjiuwen-qa-guideline` — component Q&A for **
 | **GitCode 仓库** | `openJiuwen/jiuwenswarm` |
 | **`record-bugs --module`** | `jiuwenswarm` |
 | **易混 skill** | `openjiuwen-agent-core`（SDK）、`openjiuwen-agent-studio` |
-| **版本 tag 习惯** | 多为 `X.Y.Z`（**无 `v` 前缀**），以 `references/` 为准 |
+| **版本 tag 习惯** | 开源多为 `X.Y.Z`（**无 `v` 前缀**）；企业版专用索引 **`enterprise_kub`**（分支 `dev/enterprise_kub`），以 `references/` 为准 |
 
 本技能**不负责**：社区数据查询（→ `openjiuwen-community-stats`）、跨产品线选路（→ guideline）、Bug 登记（→ `record-bugs`）。
 
@@ -30,10 +30,11 @@ description: **Sub-skill** of `openjiuwen-qa-guideline` — component Q&A for **
 本技能将 Agent 定位为 **JiuwenSwarm（jiuwenswarm / jiuwenclaw）的问答助手**：基于技能包内打包的文档与源码快照作答，而不是泛化的 LLM 应用开发闲聊。
 
 - **本文件（`SKILL.md`）**：通用问答流程，与具体版本号无关。
-- **`references/[0-9]*.md`**：某一版本的文档索引 + 代码索引（任务 → 最小阅读集合；文件名即 Git tag，如 `0.2.0.md`）。
+- **`references/[0-9]*.md`**：某一开源版本的文档索引 + 代码索引（任务 → 最小阅读集合；文件名即索引名，如 `0.2.3.md`；实际 Git 源见文件顶部 `<!-- git-ref: ... -->`）。
+- **`references/enterprise_kub.md`**：企业版 / K8s 云化专用索引（分支 `dev/enterprise_kub`）。
 - **`references/jiuwenswarm-sdk-notes.md`**：Gateway/AgentServer 分层、CLI 入口、与 SDK/Studio 边界（第三步取证时按需阅读）。
-- **`assets/<version>/`**：该版本对应的 `docs/`、`jiuwenclaw/`、`jiuwenbox/`、`tests/`、`docker/`、`scripts/` 等完整快照。
-- **`scripts/fetch.sh` / `scripts/fetch.ps1`**：从 GitCode 按 tag 拉取快照到 `assets/<tag>/`（见下文「快照拉取」）。
+- **`assets/<version>/`**：该版本对应的 `docs/`、主包源码、`tests/`、`docker/`/`deploy/`、`scripts/` 等完整快照。
+- **`scripts/fetch.sh` / `scripts/fetch.ps1`**：从 GitCode 按 reference 的 git-ref 拉取快照到 `assets/<name>/`（见下文「快照拉取」）。
 
 ---
 
@@ -47,49 +48,54 @@ description: **Sub-skill** of `openjiuwen-qa-guideline` — component Q&A for **
 | `scripts/fetch.ps1` | Windows PowerShell |
 
 **固定仓库**：`https://gitcode.com/openJiuwen/jiuwenswarm.git`  
-**输出目录**：`assets/<tag>/`（相对技能包根目录 `openjiuwen-jiuwenswarm/`，与 `references/<tag>.md` 同名）
+**输出目录**：`assets/<name>/`（相对技能包根目录 `openjiuwen-jiuwenswarm/`，与 `references/<name>.md` 同名）
 
-**Tag 命名**：本仓库 Git tag **不带** `v` 前缀（如 `0.2.0`、`0.1.11`）。用户写 `v0.2.0` 时，规范为 `0.2.0` 再拉取/索引。
+**Git 源**：每个 `references/<name>.md` 顶部可写 `<!-- git-ref: <branch-or-tag> -->`（如 `0.2.3` → `dev_release_0.2.3`，`enterprise_kub` → `dev/enterprise_kub`）。拉取脚本会优先使用该注释；无注释时用 `<name>` 本身作为 branch/tag。
+
+**Tag / 索引命名**：开源索引多为 **无 `v` 前缀** 的 `X.Y.Z`。用户写 `v0.2.3` 时规范为 `0.2.3`。企业问题使用索引名 **`enterprise_kub`**（不是语义化版本号）。
 
 ### 用法（Agent 可直接执行）
 
 ```bash
 bash openjiuwen-jiuwenswarm/scripts/fetch.sh auto
-bash openjiuwen-jiuwenswarm/scripts/fetch.sh 0.2.0
+bash openjiuwen-jiuwenswarm/scripts/fetch.sh 0.2.3
+bash openjiuwen-jiuwenswarm/scripts/fetch.sh enterprise_kub
 ```
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File openjiuwen-jiuwenswarm\scripts\fetch.ps1 -Tag auto
-powershell -ExecutionPolicy Bypass -File openjiuwen-jiuwenswarm\scripts\fetch.ps1 -Tag 0.2.0
+powershell -ExecutionPolicy Bypass -File openjiuwen-jiuwenswarm\scripts\fetch.ps1 -Tag 0.2.3
+powershell -ExecutionPolicy Bypass -File openjiuwen-jiuwenswarm\scripts\fetch.ps1 -Tag enterprise_kub
 ```
 
 | 模式 | 命令 | 行为 |
 |------|------|------|
-| **auto**（推荐批量） | `fetch.sh auto` / `-Tag auto` | 扫描 `references/[0-9]*.md`（忽略 `jiuwenswarm-sdk-notes.md` 等补充文档）；`assets/<tag>` **已存在则跳过**，不存在则浅克隆 |
-| **单 tag** | `fetch.sh 0.2.0` / `-Tag 0.2.0` | 仅拉取指定 tag；目录已存在且非空时报错（可用 `FORCE=1` 或 `-Force`） |
+| **auto**（推荐批量） | `fetch.sh auto` / `-Tag auto` | 扫描 `references/[0-9]*.md`，若存在则含 `enterprise_kub.md`；`assets/<name>` **已存在则跳过**，不存在则浅克隆 |
+| **单索引** | `fetch.sh 0.2.3` / `fetch.sh enterprise_kub` | 仅拉取指定索引；目录已存在且非空时报错（可用 `FORCE=1` 或 `-Force`） |
 
-**触发示例**：「拉取/更新全部快照」「补齐 assets」→ `auto`；「拉取 0.2.0」→ 单 tag。
+**触发示例**：「拉取/更新全部快照」「补齐 assets」→ `auto`；「拉取 0.2.3 / 企业版快照」→ 单索引。
 
-执行后说明已拉取 / 已跳过 / 失败的 tag；拉取失败时勿假装 `assets/` 内已有内容。
+执行后说明已拉取 / 已跳过 / 失败的 name；拉取失败时勿假装 `assets/` 内已有内容。
 
 ---
 
-## 第一步：确定版本
+## 第一步：确定版本 / 索引
 
-在查找任何文档或代码之前，先确定本次回答使用的 **版本标签** `<version>`（形如 `X.Y.Z` 或 `X.Y.Z.postN`）。
+在查找任何文档或代码之前，先确定本次回答使用的 **索引名** `<version>`（开源形如 `X.Y.Z`，或企业专用 `enterprise_kub`）。
 
 | 情况 | 做法 |
 |------|------|
-| 用户明确给出版本 | 采用用户指定值；若带 `v` 前缀则去掉（`v0.2.0` → `0.2.0`） |
-| 用户未指定版本 | 使用 **`references/` 中的最新版本**：列出 `references/[0-9]*.md`，按语义化版本取最大者；当前技能包内即以此为准 |
-| 用户指定版本但无对应资源 | 若缺 `references/<version>.md`：列出 `references/` 可用版本；若仅有索引、缺 `assets/<version>/`：**先执行「快照拉取」**（单 tag 或 `auto`）；未授权则说明缺失并询问是否执行 `scripts/fetch.*` |
+| 用户问 **企业版 / 企业 claw / 企业 swarm / enterprise / K8s 企业部署 / Manager / RuntimeManagement / 多租户云化** | **强制**使用 **`enterprise_kub`**（`references/enterprise_kub.md` → `assets/enterprise_kub/`），**不要**用开源最新 `0.2.x` 硬答 |
+| 用户明确给出版本 | 采用用户指定值；若带 `v` 前缀则去掉（`v0.2.3` → `0.2.3`） |
+| 用户未指定版本（且非企业问题） | 使用 **`references/` 中的最新开源版本**：列出 `references/[0-9]*.md`，按语义化版本取最大者；当前为 **`0.2.3`** |
+| 用户指定版本但无对应资源 | 若缺 `references/<version>.md`：列出 `references/` 可用索引；若仅有索引、缺 `assets/<version>/`：**先执行「快照拉取」**（单 name 或 `auto`）；未授权则说明缺失并询问是否执行 `scripts/fetch.*` |
 
 **硬性约束**：选定 `<version>` 后，后续所有路径 **仅** 使用：
 
-- 索引：`references/<version>.md`（例如 `references/0.2.0.md`）
-- 内容根：`assets/<version>/`（例如 `assets/0.2.0/`）
+- 索引：`references/<version>.md`（例如 `references/0.2.3.md` 或 `references/enterprise_kub.md`）
+- 内容根：`assets/<version>/`（例如 `assets/0.2.3/` 或 `assets/enterprise_kub/`）
 
-不得跨版本混读文档或源码。回答开头应简要声明本次依据的 `<version>`。
+不得跨版本混读文档或源码（尤其禁止把 `enterprise_kub` 的 `jiuwenclaw/` 路径套到 `0.2.3` 的 `jiuwenswarm/` 上）。回答开头应简要声明本次依据的 `<version>`。
 
 ---
 
@@ -124,9 +130,10 @@ powershell -ExecutionPolicy Bypass -File openjiuwen-jiuwenswarm\scripts\fetch.ps
 
 ### 3. 源码（文档不足或需确认行为/签名时）
 
-- 主运行时：`assets/<version>/jiuwenclaw/...`
+- 主运行时：开源 `0.2.x` 为 `assets/<version>/jiuwenswarm/...`；企业 `enterprise_kub` 为 `assets/enterprise_kub/jiuwenclaw/...`
 - 附属 Box 产品：`assets/<version>/jiuwenbox/...`（若问题相关）
-- TUI 包：`assets/<version>/packages/jiuwenswarm-tui/`
+- TUI / 企业扩展包：`assets/<version>/packages/`
+- 企业部署工具：仅 `enterprise_kub` → `assets/enterprise_kub/deploy/`
 
 ### 4. 测试（需确认边界或回归预期时）
 
@@ -152,7 +159,7 @@ powershell -ExecutionPolicy Bypass -File openjiuwen-jiuwenswarm\scripts\fetch.ps
 
 ## 触发与边界
 
-**适合使用本技能**：JiuwenSwarm 的安装初始化、Gateway/AgentServer/Web/TUI/桌面端、频道接入、Agent Team、技能/记忆/自演进、定时任务与心跳、E2A/ACP/A2A、配置与权限、打包 exe、分布式部署与排障等，且答案应来自技能包内 `assets/<version>/` 快照。用户要求**拉取/更新/同步**快照或补齐 `assets/` 时，按「快照拉取」执行 `scripts/fetch.sh` 或 `scripts/fetch.ps1`。
+**适合使用本技能**：JiuwenSwarm 的安装初始化、Gateway/AgentServer/Web/TUI/桌面端、频道接入、Agent Team、技能/记忆/自演进、定时任务与心跳、E2A/ACP/A2A、配置与权限、打包 exe、**企业版 K8s / Manager / 多租户**、分布式部署与排障等，且答案应来自技能包内 `assets/<version>/` 快照。用户要求**拉取/更新/同步**快照或补齐 `assets/` 时，按「快照拉取」执行 `scripts/fetch.sh` 或 `scripts/fetch.ps1`。
 
 **应转其它 skill**（勿用本 skill 硬答）：
 
@@ -174,21 +181,18 @@ powershell -ExecutionPolicy Bypass -File openjiuwen-jiuwenswarm\scripts\fetch.ps
 openjiuwen-jiuwenswarm/
 ├── SKILL.md                 # 本文件：通用 QA 流程
 ├── scripts/
-│   ├── fetch.sh             # 按 tag 拉取快照（Linux / Git Bash）
-│   └── fetch.ps1            # 按 tag 拉取快照（Windows）
+│   ├── fetch.sh             # 按索引拉取快照（Linux / Git Bash）
+│   └── fetch.ps1            # 按索引拉取快照（Windows）
 ├── references/
-│   ├── 0.2.0.md             # 版本索引（auto 模式据此发现 tag；无 v 前缀）
+│   ├── 0.2.3.md             # 开源最新索引（git-ref: dev_release_0.2.3）
+│   ├── enterprise_kub.md    # 企业版索引（git-ref: dev/enterprise_kub）
 │   └── jiuwenswarm-sdk-notes.md  # Gateway/AgentServer 分层、CLI、产品线边界
 └── assets/
-    └── 0.2.0/               # 与 references/0.2.0.md 同标签的快照根目录
-        ├── docs/
-        ├── jiuwenclaw/
-        ├── jiuwenbox/
-        ├── packages/
-        └── tests/
+    ├── 0.2.3/               # 与 references/0.2.3.md 对应
+    └── enterprise_kub/      # 与 references/enterprise_kub.md 对应
 ```
 
-新增版本时：先新增 `references/<version>.md`（文件名即 Git tag，如 `0.2.0.md`），再执行 `fetch.sh auto` 或单 tag 拉取生成 `assets/<version>/`；亦可手动放入快照。**无需**为每个版本复制本 `SKILL.md` 的流程说明。
+新增开源版本时：先新增 `references/<version>.md`（顶部写 `<!-- git-ref: <branch-or-tag> -->`），再执行 `fetch.sh auto` 或单 name 拉取生成 `assets/<version>/`。企业问答固定使用 `enterprise_kub`，**无需**为每个版本复制本 `SKILL.md` 的流程说明。
 
 ---
 
@@ -196,7 +200,8 @@ openjiuwen-jiuwenswarm/
 
 | 文件 | 何时阅读 |
 |------|----------|
-| `references/<version>.md` | 每次问答（定版本后必读） |
+| `references/<version>.md` | 每次问答（定版本/索引后必读） |
+| `references/enterprise_kub.md` | 企业版 / 企业 claw / 企业 swarm / K8s 部署 |
 | `references/jiuwenswarm-sdk-notes.md` | Gateway vs AgentServer 混淆、CLI 入口、与 SDK/Studio 边界 |
 | `openjiuwen-qa-guideline/references/product-routing.md` | 跨产品线消歧、用户话术含糊 |
 

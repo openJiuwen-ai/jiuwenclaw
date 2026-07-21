@@ -102,8 +102,9 @@ echo ""
 # ---------------------------------------------------------------------------
 
 # 释放开发端口：凡占用这些端口的进程一律尝试杀掉（先 SIGTERM，残留再 SIGKILL）。
-# 端口含义: 28092=AgentServer, 29000=Web Gateway, 29001=ACP/TUI Gateway, 29173=Vite 前端。
-DEV_PORTS=(28092 29000 29001 29173)
+# 端口含义: 28092=AgentServer, 29000=Web Gateway, 29001=ACP/TUI Gateway,
+# 29002=Avatar HTTP/Webhook, 29173=Vite 前端。
+DEV_PORTS=(28092 29000 29001 29002 29173)
 
 stop_stale_dev_services() {
   local port pid cmd attempt
@@ -154,11 +155,17 @@ fi
 
 # 启动后端 (AgentServer + Gateway)
 echo -e "${CYAN}[4/4] 启动后端服务 (jiuwenavatar-app)...${NC}"
-echo -e "  Web 地址: ${GREEN}http://localhost:29000${NC}"
+echo -e "  Web 地址: ${GREEN}http://0.0.0.0:29000${NC}"
+echo -e "  Avatar HTTP: ${GREEN}http://0.0.0.0:29002/avatar/chat${NC}"
 echo -e "  按 Ctrl+C 停止所有服务"
 echo ""
 
 stop_stale_dev_services
+
+# 单机对外访问：Gateway / Avatar HTTP 绑定 0.0.0.0
+export WEB_HOST="${WEB_HOST:-0.0.0.0}"
+export AVATAR_HTTP_HOST="${AVATAR_HTTP_HOST:-0.0.0.0}"
+export WEBHOOK_HOST="${WEBHOOK_HOST:-0.0.0.0}"
 
 if [ "$BACKEND_ONLY" = true ]; then
   uv run python -m jiuwenavatar.app
@@ -207,8 +214,9 @@ echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║  JiuwenAvatar 开发环境已启动!             ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
-echo -e "  后端 (Gateway):  ${CYAN}http://localhost:29000${NC}"
-echo -e "  前端 (Vite HMR): ${CYAN}http://localhost:29173${NC}"
+echo -e "  后端 (Gateway):  ${CYAN}http://0.0.0.0:29000${NC}"
+echo -e "  Avatar HTTP:     ${CYAN}http://0.0.0.0:29002/avatar/chat${NC}"
+echo -e "  前端 (Vite HMR): ${CYAN}http://0.0.0.0:29173${NC}"
 echo -e "  按 Ctrl+C 停止所有服务"
 echo ""
 

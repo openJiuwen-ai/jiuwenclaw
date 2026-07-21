@@ -2393,9 +2393,12 @@ export function ConfigPanel({
 }: ConfigPanelProps) {
   const isEnterpriseMember = enterpriseModelMode === 'member';
   const isEnterpriseAdmin = enterpriseModelMode === 'admin';
-  const visibleConfigTabs = isEnterpriseMember || isEnterpriseAdmin
+  // Enterprise member: personal/model only. Org admin keeps security (tool guardrails).
+  const visibleConfigTabs = isEnterpriseMember
     ? (['model', 'other'] as const)
-    : (['model', 'agent', 'security', 'other'] as const);
+    : isEnterpriseAdmin
+      ? (['model', 'security', 'other'] as const)
+      : (['model', 'agent', 'security', 'other'] as const);
   const { t, i18n } = useTranslation();
   const isProcessing = useChatStore((s) => s.isProcessing);
   const {
