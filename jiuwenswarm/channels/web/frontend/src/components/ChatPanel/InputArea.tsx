@@ -109,6 +109,13 @@ interface InputAreaProps {
   onSetGoal?: (sessionId: string, objective: string) => void;
   /** 工具栏"目标"标签的 × 按钮：目标已存在时点击等同删除目标 */
   onClearGoal?: (sessionId: string) => void;
+  /**
+   * 目标 active 时消息按设计走排队（见下方 isGoalActive 注释），但如果入队那一刻当前没有
+   * 任何任务在处理，现有的自动排空触发点（chat.processing_status/interrupt_result）都要求
+   * "之前在 processing"，不会命中，消息会永久卡住。入队后调用它兜底：内部会判断当前是否
+   * 真的空闲，空闲才会真正发送，不会重复触发。
+   */
+  onDrainTaskQueueIfIdle?: (sessionId: string) => void;
 }
 
 const ACCEPTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
@@ -242,6 +249,7 @@ export function InputArea({
   onSavePermission,
   onSetGoal,
   onClearGoal,
+  onDrainTaskQueueIfIdle,
 }: InputAreaProps) {
   const [pendingVoiceText, setPendingVoiceText] = useState('');
   const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
@@ -820,6 +828,8 @@ export function InputArea({
       if (isAgentMode) {
         if (sid) {
           useChatStore.getState().addToTaskQueue(sid, trimmed);
+          // 目标 active 但当前没有任务在处理时，常规的自动排空触发点不会命中，主动兜底一次
+          onDrainTaskQueueIfIdle?.(sid);
         }
       } else {
         onInterrupt(trimmed);
@@ -855,6 +865,7 @@ export function InputArea({
     queuePaused,
     goalArmed,
     onSetGoal,
+    onDrainTaskQueueIfIdle,
     t,
   ]);
 

@@ -98,11 +98,12 @@ function scheduleAfterTurnSettles(sessionId: string, run: () => void): void {
     window.clearTimeout(fallbackTimer);
     run();
   };
-  const unsubscribe = useChatStore.subscribe((state) => {
-    if (!(state.runtimes[sessionId]?.isProcessing ?? false)) {
-      finish();
+  const unsubscribe = useChatStore.subscribe(
+    (state) => state.runtimes[sessionId]?.isProcessing ?? false,
+    (isProcessing) => {
+      if (!isProcessing) finish();
     }
-  });
+  );
   fallbackTimer = window.setTimeout(finish, GOAL_COMPLETED_SETTLE_FALLBACK_MS);
 }
 
@@ -502,6 +503,7 @@ interface UseWebSocketReturn {
   resumeGoal: (sessionId: string) => Promise<void>;
   clearGoal: (sessionId: string) => Promise<void>;
   refreshGoal: (sessionId: string) => Promise<void>;
+  drainTaskQueueIfIdle: (sessionId: string) => void;
   getInflightCount: () => number;
 }
 
@@ -1117,7 +1119,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             // 补一次 get，不管 goal.snapshot/goal.updated 事件本身有没有到、到得对不对，都用
             // 这次 get 的结果把前端状态收敛回后端权威值一次——即使因为后端还没处理完这次 set
             // 而拿到旧数据也无妨，之后真正的事件到达时会再次覆盖纠正。
-            void goalAction(sessionId, 'get');
+            // 注意：不能直接 void goalAction(sessionId, 'get')——那会在第一行把 pendingAction
+            // 清成 null（因为它是 'get'），导致 GoalBar 的 loading 态在 set 真正被后端处理完
+            // 之前就恢复可点击，留出一个能打出冲突指令的窗口。这里直接调用不碰 pendingAction
+            // 的底层请求 + 落状态，让 pendingAction 继续留给 set 对应的 goal.updated 事件清。
+            void requestGoalAction({ sessionId, action: 'get', mode })
+              .then((goal) => applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current))
+              .catch(() => {
+                // 静默失败：这只是收敛用的兜底 get，真正的状态最终仍由 goal.updated 事件驱动。
+              });
           }
           return;
         }
@@ -1338,6 +1348,27 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   useEffect(() => {
     sendMessageRef.current = sendMessage;
   }, [sendMessage]);
+
+  /**
+   * 队列非空时主动尝试排空一次，供"入队那一刻本来就没有任务在处理"的场景兜底
+   * （典型是目标 active 但当前无聊天在跑时用户发消息——这条消息按设计要走排队，见
+   * InputArea.tsx 里 isGoalActive 相关注释，但常规的两处自动排空触发点——
+   * chat.processing_status 从 true→false、interrupt_result 完成——都要求"之前在
+   * processing"，这种场景两个都不会触发，消息会永久卡在队列里，只能靠用户手动点
+   * "恢复队列"）。isProcessing 为真时直接跳过，交给已有的 processing_status 处理器
+   * 在真正空闲下来时接管，不会重复发送。
+   */
+  const drainTaskQueueIfIdle = useCallback((sessionId: string) => {
+    const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
+    if (currentMode !== 'agent') return;
+    const runtime = useChatStore.getState().getRuntime(sessionId);
+    if (runtime?.isProcessing || runtime?.queuePaused) return;
+    const nextTask = runtime?.taskQueue[0];
+    if (nextTask && sendMessageRef.current) {
+      useChatStore.getState().removeFromTaskQueue(sessionId, nextTask.id);
+      sendMessageRef.current(nextTask.content, sessionId);
+    }
+  }, []);
 
   // 统一中断接口 - pause/cancel/supplement/resume
   const interrupt = useCallback(
@@ -3333,6 +3364,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     resumeGoal,
     clearGoal,
     refreshGoal,
+    drainTaskQueueIfIdle,
     getInflightCount: () => webClient.getInflightCount(),
   };
 }

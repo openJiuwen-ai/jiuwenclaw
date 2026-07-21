@@ -6,6 +6,7 @@
  */
 
 import { create } from 'zustand';
+import { subscribeWithSelector } from 'zustand/middleware';
 import {
   Message,
   ToolCall,
@@ -215,7 +216,7 @@ interface ChatState {
   ) => void;
 }
 
-export const useChatStore = create<ChatState>((set, get) => ({
+export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get) => ({
   runtimes: {},
   activeSessionId: null,
   globalTaskRunning: false,
@@ -1221,4 +1222,4 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
     });
   },
-}));
+})));

@@ -565,6 +565,7 @@ function AppContent() {
     resumeGoal,
     clearGoal,
     refreshGoal,
+    drainTaskQueueIfIdle,
   } = useWebSocket({
     activeSessionId: sessionId,
     onConnect: () => console.log('Connected'),
@@ -1633,7 +1634,7 @@ function AppContent() {
     } else {
       useChatStore.getState().setInputValue(currentSessionId, content);
     }
-  }, [disposeInFlightHistoryHandles, mode, navigate, request, sendMessage, t]);
+  }, [disposeInFlightHistoryHandles, mode, navigate, request, sendMessage, setGoalObjective, t]);
 
   const handlePersistMedia = useCallback((content: string, mediaItems: MediaItem[]) => {
     const currentSessionId = sessionIdRef.current;
@@ -2013,6 +2014,7 @@ function AppContent() {
                       onPauseGoal={pauseGoal}
                       onResumeGoal={resumeGoal}
                       onClearGoal={clearGoal}
+                      onDrainTaskQueueIfIdle={drainTaskQueueIfIdle}
                     />
                   </div>
                 </div>

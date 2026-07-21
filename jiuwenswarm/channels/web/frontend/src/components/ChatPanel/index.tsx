@@ -80,6 +80,8 @@ interface ChatPanelProps {
   onPauseGoal?: (sessionId: string) => void;
   onResumeGoal?: (sessionId: string) => void;
   onClearGoal?: (sessionId: string) => void;
+  /** 目标 active 但当前无处理中任务时，消息入队后主动排空一次，见 InputArea.tsx 对应调用点 */
+  onDrainTaskQueueIfIdle?: (sessionId: string) => void;
 }
 
 function ThinkingIndicator() {
@@ -674,6 +676,7 @@ export function ChatPanel({
   onPauseGoal,
   onResumeGoal,
   onClearGoal,
+  onDrainTaskQueueIfIdle,
 }: ChatPanelProps) {
   const { t } = useTranslation();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -1141,6 +1144,7 @@ export function ChatPanel({
             onSavePermission={onSavePermission}
             onSetGoal={onSetGoal}
             onClearGoal={onClearGoal}
+            onDrainTaskQueueIfIdle={onDrainTaskQueueIfIdle}
           />
         </div>
       )}
