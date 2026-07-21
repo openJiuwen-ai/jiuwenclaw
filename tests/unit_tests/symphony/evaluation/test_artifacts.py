@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import pytest
 
 import jiuwenswarm.symphony.evaluation as evaluation
+import jiuwenswarm.symphony.evaluation.artifacts as artifacts
 
 
 def fingerprint(
@@ -113,6 +114,31 @@ def test_write_quality_report_creates_public_atomic_artifact(tmp_path) -> None:
     }
     assert list(tmp_path.glob(".fingerprints.json.*.tmp")) == []
     assert "quality_score" not in target.read_text(encoding="utf-8")
+
+
+def test_write_quality_report_closes_descriptor_when_fdopen_fails(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    item = fingerprint()
+    closed_descriptors = []
+    real_close = artifacts.os.close
+
+    def fail_fdopen(*args, **kwargs):
+        raise OSError("simulated fdopen failure")
+
+    def close_descriptor(descriptor):
+        closed_descriptors.append(descriptor)
+        real_close(descriptor)
+
+    monkeypatch.setattr(artifacts.os, "fdopen", fail_fdopen)
+    monkeypatch.setattr(artifacts.os, "close", close_descriptor)
+
+    with pytest.raises(OSError, match="simulated fdopen failure"):
+        evaluation.write_quality_report(tmp_path, [item], [quality(item)])
+
+    assert len(closed_descriptors) == 1
+    assert list(tmp_path.glob(".fingerprints.json.*.tmp")) == []
 
 
 def test_write_quality_report_updates_by_composite_key_and_keeps_others(

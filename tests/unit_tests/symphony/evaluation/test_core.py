@@ -108,9 +108,7 @@ def test_success_rate_single_and_grouped_results_exclude_na() -> None:
 )
 def test_realtime_latency_thresholds(value: float, level: str, score: float) -> None:
     evaluator = evaluation.LatencyEvaluator("realtime_interaction")
-    result = evaluator.evaluate(
-        case(latency=evaluation.Latency(ttft=value))
-    )
+    result = evaluator.evaluate(case(latency=evaluation.Latency(ttft=value)))
 
     assert (result.level, result.score) == (level, score)
 
@@ -123,10 +121,7 @@ def test_short_and_long_latency_and_missing_data() -> None:
         short.evaluate(case(latency=evaluation.Latency(e2e=30_000))).level
         == "excellent"
     )
-    assert (
-        short.evaluate(case(latency=evaluation.Latency(e2e=90_001))).level
-        == "fail"
-    )
+    assert short.evaluate(case(latency=evaluation.Latency(e2e=90_001))).level == "fail"
     assert (
         long.evaluate(case(latency=evaluation.Latency(e2e=999_999))).level
         == "excellent"
@@ -165,9 +160,7 @@ def test_latency_aggregation_reports_both_distributions_and_grades_p95() -> None
     evaluator = evaluation.LatencyEvaluator("short_task")
     results = [
         evaluator.evaluate(
-            case(
-                latency=evaluation.Latency(ttft=first_response, e2e=total)
-            )
+            case(latency=evaluation.Latency(ttft=first_response, e2e=total))
         )
         for first_response, total in [(100, 10_000), (300, 20_000)]
     ]
@@ -186,6 +179,24 @@ def test_latency_aggregation_reports_both_distributions_and_grades_p95() -> None
     }
     assert aggregate.level == "excellent"
     assert aggregate.reason == ""
+
+
+def test_latency_aggregation_rejects_missing_scenario_distribution() -> None:
+    evaluator = evaluation.LatencyEvaluator("short_task")
+    malformed = evaluation.MetricResult(
+        metric="latency",
+        type="agent",
+        id="agent-a",
+        version="1.0.0",
+        event_time=None,
+        score=1.0,
+        level="excellent",
+        reason="",
+        metrics={"scenario": "short_task", "ttft": None, "e2e": None},
+    )
+
+    with pytest.raises(ValueError, match="required distribution"):
+        evaluator.new_accumulator().add(malformed).aggregate()
 
 
 class FakeLLM:
@@ -286,7 +297,7 @@ def test_llm_metric_prompt_uses_concise_binary_rubric(
         None,
         FakeLLM(RuntimeError("offline")),
         FakeLLM("not json"),
-        FakeLLM('{score: 1, reason: ok}'),
+        FakeLLM("{score: 1, reason: ok}"),
         FakeLLM('result: {"score": 1, "reason": "ok"}'),
         FakeLLM('{"score": 2, "reason": "bad"}'),
         FakeLLM('{"score": 0.5, "reason": "uncertain"}'),
@@ -436,9 +447,10 @@ def test_result_models_recursively_convert_dates_to_json_safe_values() -> None:
 
     payload = quality.to_dict()
     assert payload["metrics"]["accuracy"]["event_time"] == timestamp.isoformat()
-    assert payload["metrics"]["accuracy"]["metrics"]["nested"][0][
-        "measured_at"
-    ] == timestamp.isoformat()
+    assert (
+        payload["metrics"]["accuracy"]["metrics"]["nested"][0]["measured_at"]
+        == timestamp.isoformat()
+    )
     json.dumps(payload, allow_nan=False)
 
 

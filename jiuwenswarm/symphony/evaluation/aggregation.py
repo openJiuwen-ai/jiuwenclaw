@@ -94,5 +94,6 @@ class MetricAccumulator:
             metrics=metrics,
         )
 
-    def _aggregate_metrics(self, results: list[MetricResult]) -> dict[str, Any]:
+    @staticmethod
+    def _aggregate_metrics(results: list[MetricResult]) -> dict[str, Any]:
         return {}

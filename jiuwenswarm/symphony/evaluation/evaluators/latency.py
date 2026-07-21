@@ -163,7 +163,7 @@ class LatencyEvaluator(BaseEvaluator):
             return case.latency.ttft
         return case.latency.e2e
 
-    def _level(self, value: float, scenario: LatencyScenario) -> MetricLevel:
+    def level_for(self, value: float, scenario: LatencyScenario) -> MetricLevel:
         if scenario == "long":
             return "excellent"
         thresholds = self.thresholds_ms or self._default_thresholds(scenario)
@@ -186,10 +186,11 @@ class LatencyEvaluator(BaseEvaluator):
         value = self._value(case, scenario)
         if value is None:
             return self.not_applicable(case, "Required latency data is missing.")
-        level = self._level(value, scenario)
+        level = self.level_for(value, scenario)
         score = {"excellent": 1.0, "good": 0.8, "pass": 0.6, "fail": 0.0}[level]
         latency = case.latency
-        assert latency is not None
+        if latency is None:
+            return self.not_applicable(case, "Required latency data is missing.")
         return self.result(
             case,
             score,
@@ -257,8 +258,9 @@ class LatencyAccumulator(MetricAccumulator):
         if scenario not in LATENCY_SCENARIOS:
             raise ValueError("Latency result has an unsupported scenario.")
         selected = ttft if scenario == "realtime_interaction" else e2e
-        assert selected is not None
-        level = self.evaluator._level(selected["p95"], scenario)
+        if selected is None:
+            raise ValueError("Latency results are missing the required distribution.")
+        level = self.evaluator.level_for(selected["p95"], scenario)
         score = {"excellent": 1.0, "good": 0.8, "pass": 0.6, "fail": 0.0}[level]
         return MetricResult(
             metric=self.metric,

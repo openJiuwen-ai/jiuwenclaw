@@ -23,7 +23,9 @@ class ComplianceRule(Protocol):
     code: str
     severity: ComplianceSeverity
 
-    def evaluate(self, fingerprint: Fingerprint) -> AssertionResult: ...
+    def evaluate(self, fingerprint: Fingerprint) -> AssertionResult:
+        """Evaluate one fingerprint against this rule."""
+        ...
 
 
 class ComplianceEvaluator(BaseEvaluator):

@@ -131,16 +131,17 @@ def _quality_payload(result: QualityResult) -> dict[str, Any]:
 
 def _clean_mapping(value: Any) -> Any:
     if isinstance(value, dict):
-        return {
-            key: _clean_mapping(item)
-            for key, item in value.items()
-            if key not in {
-                "quality_score",
-                "static_data",
-                "assertions",
-                "evidence",
-            }
+        excluded = {
+            "quality_score",
+            "static_data",
+            "assertions",
+            "evidence",
         }
+        cleaned = {}
+        for key, item in value.items():
+            if key not in excluded:
+                cleaned[key] = _clean_mapping(item)
+        return cleaned
     if isinstance(value, list):
         return [_clean_mapping(item) for item in value]
     return value
@@ -188,19 +189,19 @@ def _sanitize_existing_quality(value: Any) -> dict[str, Any] | None:
 
 
 def _sanitize_existing(item: dict[str, Any]) -> dict[str, Any]:
-    cleaned = {
-        key: item[key]
-        for key in (
-            "type",
-            "id",
-            "name",
-            "description",
-            "version",
-            "inputs",
-            "outputs",
-        )
-        if key in item
-    }
+    cleaned = {}
+    public_fields = (
+        "type",
+        "id",
+        "name",
+        "description",
+        "version",
+        "inputs",
+        "outputs",
+    )
+    for key in public_fields:
+        if key in item:
+            cleaned[key] = item[key]
     quality = _sanitize_existing_quality(item.get("quality"))
     if quality is not None:
         cleaned["quality"] = quality
@@ -306,13 +307,16 @@ def write_quality_report(
             }
         )
     )
+    descriptor: int | None = None
     temporary_path: Path | None = None
     try:
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
         )
         temporary_path = Path(temporary_name)
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+        stream = os.fdopen(descriptor, "w", encoding="utf-8", newline="\n")
+        descriptor = None
+        with stream:
             json.dump(
                 report,
                 stream,
@@ -326,6 +330,8 @@ def write_quality_report(
         os.replace(temporary_path, target)
         temporary_path = None
     finally:
+        if descriptor is not None:
+            os.close(descriptor)
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
     return target
