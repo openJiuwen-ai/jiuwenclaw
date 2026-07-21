@@ -50,6 +50,24 @@ interface DevWsLogEntry {
   data: unknown;
 }
 
+const DEV_LOG_REDACTED_KEYS = new Set([
+  'user_code',
+  'verification_url',
+  'operation_id',
+  'loginId',
+  'login_id',
+]);
+
+function redactDevWsData(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactDevWsData);
+  if (!value || typeof value !== 'object') return value;
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    result[key] = DEV_LOG_REDACTED_KEYS.has(key) ? '[redacted]' : redactDevWsData(item);
+  }
+  return result;
+}
+
 function logDevWsTraffic(entry: DevWsLogEntry): void {
   if (!import.meta.env.DEV) {
     return;
@@ -57,6 +75,7 @@ function logDevWsTraffic(entry: DevWsLogEntry): void {
 
   const body = {
     ...entry,
+    data: redactDevWsData(entry.data),
     at: new Date().toISOString(),
   };
 

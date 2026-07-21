@@ -228,7 +228,9 @@ const MODEL_VALUE_SEPARATOR = "\x00";
 const MODEL_FORM_FIELDS: ModelFormField[] = ["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"];
 const MODEL_REQUIRED_FIELDS: ModelFormField[] = ["model_name", "api_base", "api_key", "model_provider"];
 const DEFAULT_MODEL_PROVIDER = "OpenAI";
-const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "DeepSeek"];
+const CODEX_SUBSCRIPTION_PROVIDER = "AI4ResearchCodex";
+const CODEX_SUBSCRIPTION_MODEL = "codex-subscription";
+const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "DeepSeek", CODEX_SUBSCRIPTION_PROVIDER];
 const REASONING_LEVEL_OPTIONS = ["", "off", "low", "medium", "high"];
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
@@ -4323,6 +4325,11 @@ export class AppScreen implements Component, Focusable {
       ? (currentIndex + direction + options.length) % options.length
       : 0;
     form.fields[field] = options[nextIndex];
+    if (field === "model_provider" && form.fields[field] === CODEX_SUBSCRIPTION_PROVIDER) {
+      form.fields.model_name = CODEX_SUBSCRIPTION_MODEL;
+      form.fields.api_base = "";
+      form.fields.api_key = "";
+    }
   }
 
   private modelFormConfigForSubmit(state: ModelListState): Record<string, string> {
@@ -4481,7 +4488,10 @@ export class AppScreen implements Component, Focusable {
       model_provider: fields.model_provider.trim(),
       reasoning_level: fields.reasoning_level.trim(),
     };
-    const missing = MODEL_REQUIRED_FIELDS
+    const requiredFields = trimmed.model_provider === CODEX_SUBSCRIPTION_PROVIDER
+      ? MODEL_REQUIRED_FIELDS.filter((field) => field !== "api_base" && field !== "api_key")
+      : MODEL_REQUIRED_FIELDS;
+    const missing = requiredFields
       .filter((field) => !(state.inputMode === "edit" && field === "api_key"))
       .filter((field) => !trimmed[field]);
     if (missing.length > 0) {

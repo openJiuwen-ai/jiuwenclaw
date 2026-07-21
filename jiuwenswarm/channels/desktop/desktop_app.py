@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from pathlib import Path
 
 from logging.handlers import RotatingFileHandler
@@ -263,6 +264,20 @@ class _WindowApi:
 
     def install_update(self, installer_path: str) -> bool:
         return self._runtime.install_update(installer_path)
+
+    def open_external_url(self, url: str) -> bool:
+        """Open a vetted provider-authentication URL in the system browser."""
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or parsed.hostname not in {"auth.openai.com", "chatgpt.com"}:
+            logger.warning("[desktop] rejected external authentication URL")
+            return False
+        try:
+            return bool(webbrowser.open(url, new=2, autoraise=True))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[desktop] failed to open external authentication URL: %s", type(exc).__name__)
+            return False
 
     def download_file(self, url: str, filename: str) -> bool:
         """通过 webview 下载文件，解决 exe 中无法使用 <a> 标签下载的问题。"""

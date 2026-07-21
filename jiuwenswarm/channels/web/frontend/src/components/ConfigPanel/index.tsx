@@ -1,10 +1,22 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState, useRef, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  useRef,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import { Music2, Workflow } from "lucide-react";
-import { useTranslation } from 'react-i18next';
-import { useChatStore, useSessionStore } from '../../stores';
-import type { ModelEntry } from '../../types';
-import { webRequest } from '../../services/webClient';
+import { useTranslation } from "react-i18next";
+import { useChatStore, useSessionStore } from "../../stores";
+import type { ModelEntry } from "../../types";
+import { webRequest } from "../../services/webClient";
+import {
+  shouldObserveCodexAuth,
+  shouldRetainCodexAuthHandoff,
+} from "./codexAuthHandoff";
 import { PermissionsToolsEditor } from "./PermissionsToolsEditor";
 
 function MultiSelectDropdown({
@@ -23,13 +35,19 @@ function MultiSelectDropdown({
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
-  const [dropdownPosition, setDropdownPosition] = useState({ top: 0, left: 0, width: 0 });
+  const [dropdownPosition, setDropdownPosition] = useState({
+    top: 0,
+    left: 0,
+    width: 0,
+  });
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as Node;
-      const clickedInContainer = containerRef.current && containerRef.current.contains(target);
-      const clickedInDropdown = dropdownRef.current && dropdownRef.current.contains(target);
+      const clickedInContainer =
+        containerRef.current && containerRef.current.contains(target);
+      const clickedInDropdown =
+        dropdownRef.current && dropdownRef.current.contains(target);
       if (!clickedInContainer && !clickedInDropdown) {
         setIsOpen(false);
       }
@@ -88,39 +106,40 @@ function MultiSelectDropdown({
           ))
         )}
       </div>
-      {isOpen && createPortal(
-        <div
-          ref={dropdownRef}
-          className="fixed z-[9999] max-h-60 overflow-auto rounded border border-border bg-card shadow-lg"
-          style={{
-            top: dropdownPosition.top,
-            left: dropdownPosition.left,
-            width: dropdownPosition.width,
-          }}
-        >
-          {options.length === 0 ? (
-            <div className="px-2 py-1.5 text-xs text-text-muted">
-              {emptyMessage || "No options available"}
-            </div>
-          ) : (
-            options.map((option) => (
-              <label
-                key={option}
-                className="flex items-center gap-2 px-2 py-1.5 hover:bg-secondary/50 cursor-pointer text-xs"
-              >
-                <input
-                  type="checkbox"
-                  checked={selected.includes(option)}
-                  onChange={() => toggleOption(option)}
-                  className="rounded border-border"
-                />
-                <span className="text-text">{option}</span>
-              </label>
-            ))
-          )}
-        </div>,
-        document.body
-      )}
+      {isOpen &&
+        createPortal(
+          <div
+            ref={dropdownRef}
+            className="fixed z-[9999] max-h-60 overflow-auto rounded border border-border bg-card shadow-lg"
+            style={{
+              top: dropdownPosition.top,
+              left: dropdownPosition.left,
+              width: dropdownPosition.width,
+            }}
+          >
+            {options.length === 0 ? (
+              <div className="px-2 py-1.5 text-xs text-text-muted">
+                {emptyMessage || "No options available"}
+              </div>
+            ) : (
+              options.map((option) => (
+                <label
+                  key={option}
+                  className="flex items-center gap-2 px-2 py-1.5 hover:bg-secondary/50 cursor-pointer text-xs"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selected.includes(option)}
+                    onChange={() => toggleOption(option)}
+                    className="rounded border-border"
+                  />
+                  <span className="text-text">{option}</span>
+                </label>
+              ))
+            )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -185,43 +204,109 @@ interface ConfigPanelProps {
   initialExpandGroupTag?: string | null;
   /** 一次性原子提交完整模型列表，覆盖增删改重排 */
   onModelsReplaceAll?: (models: ModelEntry[]) => Promise<void>;
-  onModelValidate?: (fields: { api_base: string; api_key: string; model: string; model_provider: string; reasoning_level?: string }) => Promise<void>;
+  onModelValidate?: (fields: {
+    api_base: string;
+    api_key: string;
+    model: string;
+    model_provider: string;
+    reasoning_level?: string;
+  }) => Promise<void>;
   onModelsRefresh?: () => Promise<void>;
+  onCodexAuthStatus?: () => Promise<CodexAuthStatus>;
+  onCodexAuthStart?: () => Promise<CodexAuthStatus>;
+  onCodexAuthCancel?: (operationId: string) => Promise<CodexAuthStatus>;
+  onCodexAuthLogout?: () => Promise<CodexAuthStatus>;
+  onOpenCodexAuthUrl?: (url: string) => Promise<boolean>;
   /** 多Agent和Teams操作回调 */
-  onAgentsTeamsSave?: (payload: {
-    agents: Record<string, {
-      model: { provider: string; api_base: string; api_key: string; model: string };
-      skills: string[];
-    }>;
-    team: Array<{
-      team_name: string;
-      lifecycle: string;
-      teammate_mode: string;
-      spawn_mode: string;
-      enable_permissions: boolean;
-      leader: { member_name: string; display_name: string; persona: string; agent_key: string };
-      teammate: { agent_key: string };
-      predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
-    }>;
-  }, showRestartModal?: boolean) => Promise<void>;
+  onAgentsTeamsSave?: (
+    payload: {
+      agents: Record<
+        string,
+        {
+          model: {
+            provider: string;
+            api_base: string;
+            api_key: string;
+            model: string;
+          };
+          skills: string[];
+        }
+      >;
+      team: Array<{
+        team_name: string;
+        lifecycle: string;
+        teammate_mode: string;
+        spawn_mode: string;
+        enable_permissions: boolean;
+        leader: {
+          member_name: string;
+          display_name: string;
+          persona: string;
+          agent_key: string;
+        };
+        teammate: { agent_key: string };
+        predefined_members: Array<{
+          member_name: string;
+          display_name: string;
+          persona: string;
+          prompt_hint: string;
+          agent_key: string;
+        }>;
+      }>;
+    },
+    showRestartModal?: boolean,
+  ) => Promise<void>;
   /** 草稿是否有未保存改动（派生值）变更时回调，供父组件感知（如 config.changed 广播时判断是否覆盖草稿） */
   onHasChangesChange?: (hasChanges: boolean) => void;
 }
 
+interface CodexAuthStatus {
+  provider: string;
+  enabled: boolean;
+  available?: boolean;
+  connected: boolean;
+  state: string;
+  operation_id?: string;
+  verification_url?: string;
+  user_code?: string;
+  expires_in_seconds?: number;
+  error_code?: string;
+  last_error_code?: string;
+}
+
 interface AgentsTeamsPayload {
-  agents: Record<string, {
-    model: { provider: string; api_base: string; api_key: string; model: string };
-    skills: string[];
-  }>;
+  agents: Record<
+    string,
+    {
+      model: {
+        provider: string;
+        api_base: string;
+        api_key: string;
+        model: string;
+      };
+      skills: string[];
+    }
+  >;
   team: Array<{
     team_name: string;
     lifecycle: string;
     teammate_mode: string;
     spawn_mode: string;
     enable_permissions: boolean;
-    leader: { member_name: string; display_name: string; persona: string; agent_key: string };
+    leader: {
+      member_name: string;
+      display_name: string;
+      persona: string;
+      agent_key: string;
+    };
     teammate: { agent_key: string };
-    predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
+    predefined_members: Array<{
+      member_name: string;
+      display_name: string;
+      persona: string;
+      prompt_hint: string;
+      agent_key: string;
+    }>;
   }>;
 }
 
@@ -239,10 +324,30 @@ interface ConfigGroup {
   order?: number;
 }
 
-const MODEL_DEFAULT_KEYS = new Set(["api_base", "api_key", "model", "model_provider"]);
-const MODEL_VIDEO_KEYS = new Set(["video_api_base", "video_api_key", "video_model", "video_provider"]);
-const MODEL_AUDIO_KEYS = new Set(["audio_api_base", "audio_api_key", "audio_model", "audio_provider"]);
-const MODEL_VISION_KEYS = new Set(["vision_api_base", "vision_api_key", "vision_model", "vision_provider"]);
+const MODEL_DEFAULT_KEYS = new Set([
+  "api_base",
+  "api_key",
+  "model",
+  "model_provider",
+]);
+const MODEL_VIDEO_KEYS = new Set([
+  "video_api_base",
+  "video_api_key",
+  "video_model",
+  "video_provider",
+]);
+const MODEL_AUDIO_KEYS = new Set([
+  "audio_api_base",
+  "audio_api_key",
+  "audio_model",
+  "audio_provider",
+]);
+const MODEL_VISION_KEYS = new Set([
+  "vision_api_base",
+  "vision_api_key",
+  "vision_model",
+  "vision_provider",
+]);
 const EMBED_KEYS = new Set(["embed_api_base", "embed_api_key", "embed_model"]);
 const EMAIL_KEYS = new Set(["email_address", "email_token"]);
 const THIRD_PARTY_API_KEYS = new Set([
@@ -252,7 +357,14 @@ const THIRD_PARTY_API_KEYS = new Set([
   "serper_api_key",
   "github_token",
 ]);
-const REQUIRED_MODEL_FIELDS = ["api_base", "api_key", "model", "model_provider"] as const;
+const CODEX_SUBSCRIPTION_PROVIDER = "AI4ResearchCodex";
+const CODEX_SUBSCRIPTION_MODEL = "codex-subscription";
+const REQUIRED_MODEL_FIELDS = [
+  "api_base",
+  "api_key",
+  "model",
+  "model_provider",
+] as const;
 const REQUIRED_MODEL_FIELD_SET = new Set<string>(REQUIRED_MODEL_FIELDS);
 const EVOLUTION_KEYS = new Set(["evolution_auto_scan", "skill_create"]);
 
@@ -269,25 +381,54 @@ function validateBaseUrl(url: string): boolean {
   return urlPattern.test(url);
 }
 
+function usesSubscriptionAuthentication(provider: string): boolean {
+  return provider.trim() === CODEX_SUBSCRIPTION_PROVIDER;
+}
+
+function requiredDefaultModelFields(
+  provider: string,
+): readonly (typeof REQUIRED_MODEL_FIELDS)[number][] {
+  return usesSubscriptionAuthentication(provider)
+    ? ["model", "model_provider"]
+    : REQUIRED_MODEL_FIELDS;
+}
+
 // 获取字段长度超限的错误信息（返回 i18n key）
-function getFieldLengthErrorKey(field: keyof ModelEntry, value: string): string | null {
+function getFieldLengthErrorKey(
+  field: keyof ModelEntry,
+  value: string,
+): string | null {
   const length = value.length;
   switch (field) {
     case "model_name":
-      return length > MAX_MODEL_NAME_LENGTH ? "config.modelList.modelNameTooLong" : null;
+      return length > MAX_MODEL_NAME_LENGTH
+        ? "config.modelList.modelNameTooLong"
+        : null;
     case "alias":
       return length > MAX_ALIAS_LENGTH ? "config.modelList.aliasTooLong" : null;
     case "api_base":
-      return length > MAX_API_BASE_LENGTH ? "config.modelList.apiBaseTooLong" : null;
+      return length > MAX_API_BASE_LENGTH
+        ? "config.modelList.apiBaseTooLong"
+        : null;
     case "api_key":
-      return length > MAX_API_KEY_LENGTH ? "config.modelList.apiKeyTooLong" : null;
+      return length > MAX_API_KEY_LENGTH
+        ? "config.modelList.apiKeyTooLong"
+        : null;
     default:
       return null;
   }
 }
 const AGENT_KEYS = new Set(["name", "model", "skills"]);
-const TEAM_KEYS = new Set(["team_name", "lifecycle", "teammate_mode", "spawn_mode"]);
-const FREE_SEARCH_BOOLEAN_KEYS = new Set(["free_search_ddg_enabled", "free_search_bing_enabled"]);
+const TEAM_KEYS = new Set([
+  "team_name",
+  "lifecycle",
+  "teammate_mode",
+  "spawn_mode",
+]);
+const FREE_SEARCH_BOOLEAN_KEYS = new Set([
+  "free_search_ddg_enabled",
+  "free_search_bing_enabled",
+]);
 const FREE_SEARCH_KEYS = new Set([...FREE_SEARCH_BOOLEAN_KEYS]);
 const HIDDEN_CONFIG_KEYS = new Set([
   "free_search_proxy_url",
@@ -308,13 +449,14 @@ const HIDDEN_CONFIG_KEYS = new Set([
   "skill_retrieval_build_total_timeout_seconds",
   "skill_retrieval_build_classification_batch_limit",
 ]);
-const MEMORY_KEYS = new Set(["memory_forbidden_enabled", "memory_forbidden_description"]);
+const MEMORY_KEYS = new Set([
+  "memory_forbidden_enabled",
+  "memory_forbidden_description",
+]);
 const A2UI_KEYS = new Set(["a2ui_enabled"]);
 const SWARMFLOW_KEYS = new Set(["swarmflow_enabled"]);
 const SYMPHONY_BOOLEAN_KEYS = new Set(["symphony_enabled"]);
-const SKILL_RETRIEVAL_BOOLEAN_KEYS = new Set([
-  "skill_retrieval_enabled",
-]);
+const SKILL_RETRIEVAL_BOOLEAN_KEYS = new Set(["skill_retrieval_enabled"]);
 const MULTILINE_CONFIG_KEYS = new Set([
   "skill_retrieval_build_root_categories",
 ]);
@@ -339,7 +481,9 @@ const PROACTIVE_KEYS = new Set([
 ]);
 // 调度频率已交给定时任务面板，ConfigPanel 不再暴露 tick_interval。
 // 即便后端残留下发，也在比较/提交时跳过，避免误提交空值。
-const PROACTIVE_HIDDEN_FROM_UI_KEYS = new Set(["proactive_recommendation_tick_interval_minutes"]);
+const PROACTIVE_HIDDEN_FROM_UI_KEYS = new Set([
+  "proactive_recommendation_tick_interval_minutes",
+]);
 
 function classifyKey(key: string): string {
   if (MODEL_DEFAULT_KEYS.has(key)) return "model_default";
@@ -358,13 +502,19 @@ function classifyKey(key: string): string {
   if (SWARMFLOW_KEYS.has(key)) return "swarmflow";
   if (SYMPHONY_KEYS.has(key)) return "symphony";
   if (PROACTIVE_KEYS.has(key)) return "proactive";
-  if (key === "context_engine_enabled" || key === "kv_cache_affinity_enabled") return "context_engine";
+  if (key === "context_engine_enabled" || key === "kv_cache_affinity_enabled")
+    return "context_engine";
   if (key === "permissions_enabled") return "permissions";
   if (key.startsWith("feishu")) return "feishu";
   return "other";
 }
 
-const MODEL_GROUP_TAGS = new Set(["model_default", "model_video", "model_audio", "model_vision"]);
+const MODEL_GROUP_TAGS = new Set([
+  "model_default",
+  "model_video",
+  "model_audio",
+  "model_vision",
+]);
 const SECURITY_GROUP_TAGS = new Set(["permissions", "memory"]);
 
 type ConfigMainTab = "model" | "agent" | "security" | "other";
@@ -379,61 +529,165 @@ function configTabForGroupTag(tag: string): ConfigMainTab {
 function getGroupIcon(tag: string) {
   if (MODEL_GROUP_TAGS.has(tag)) {
     return (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3v4.5m4.5-4.5V6M3 10.5h18M4.5 6.75h15A1.5 1.5 0 0121 8.25v9A3.75 3.75 0 0117.25 21h-10.5A3.75 3.75 0 013 17.25v-9a1.5 1.5 0 011.5-1.5z" />
+      <svg
+        className="w-3.5 h-3.5"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+        strokeWidth={1.8}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M9.75 3v4.5m4.5-4.5V6M3 10.5h18M4.5 6.75h15A1.5 1.5 0 0121 8.25v9A3.75 3.75 0 0117.25 21h-10.5A3.75 3.75 0 013 17.25v-9a1.5 1.5 0 011.5-1.5z"
+        />
       </svg>
     );
   }
   if (tag === "email") {
     return (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 7.5v9a2.25 2.25 0 01-2.25 2.25h-15A2.25 2.25 0 012.25 16.5v-9A2.25 2.25 0 014.5 5.25h15a2.25 2.25 0 012.25 2.25z" />
-        <path strokeLinecap="round" strokeLinejoin="round" d="M3 7.5l8.1 6.075a1.5 1.5 0 001.8 0L21 7.5" />
+      <svg
+        className="w-3.5 h-3.5"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+        strokeWidth={1.8}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M21.75 7.5v9a2.25 2.25 0 01-2.25 2.25h-15A2.25 2.25 0 012.25 16.5v-9A2.25 2.25 0 014.5 5.25h15a2.25 2.25 0 012.25 2.25z"
+        />
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M3 7.5l8.1 6.075a1.5 1.5 0 001.8 0L21 7.5"
+        />
       </svg>
     );
   }
   if (tag === "embed") {
     return (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M12 2.5l8.5 4.75v9.5L12 21.5l-8.5-4.75v-9.5L12 2.5z" />
-        <path strokeLinecap="round" strokeLinejoin="round" d="M12 12l8.5-4.75M12 12L3.5 7.25M12 12v9.5" />
+      <svg
+        className="w-3.5 h-3.5"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+        strokeWidth={1.8}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M12 2.5l8.5 4.75v9.5L12 21.5l-8.5-4.75v-9.5L12 2.5z"
+        />
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M12 12l8.5-4.75M12 12L3.5 7.25M12 12v9.5"
+        />
       </svg>
     );
   }
   if (tag === "third_party_api") {
     return (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 5.25h16.5A1.5 1.5 0 0121.75 6.75v10.5a1.5 1.5 0 01-1.5 1.5H3.75a1.5 1.5 0 01-1.5-1.5V6.75a1.5 1.5 0 011.5-1.5z" />
-        <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 9.75h9M7.5 14.25h5.25" />
+      <svg
+        className="w-3.5 h-3.5"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+        strokeWidth={1.8}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M3.75 5.25h16.5A1.5 1.5 0 0121.75 6.75v10.5a1.5 1.5 0 01-1.5 1.5H3.75a1.5 1.5 0 01-1.5-1.5V6.75a1.5 1.5 0 011.5-1.5z"
+        />
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M7.5 9.75h9M7.5 14.25h5.25"
+        />
       </svg>
     );
   }
   if (tag === "evolution") {
     return (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-        <path strokeLinecap="round" strokeLinejoin="round" d="M18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z" />
+      <svg
+        className="w-3.5 h-3.5"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+        strokeWidth={1.8}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"
+        />
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z"
+        />
       </svg>
     );
   }
   if (tag === "memory") {
     return (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M9 3.75H6.912a2.25 2.25 0 00-2.15 1.588L2.35 13.177a2.25 2.25 0 00-.1.661V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 00-2.15-1.588H15M2.25 13.5h3.86a2.25 2.25 0 012.012 1.244l.256.512a2.25 2.25 0 002.013 1.244h3.218a2.25 2.25 0 002.013-1.244l.256-.512a2.25 2.25 0 012.013-1.244h3.859" />
+      <svg
+        className="w-3.5 h-3.5"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+        strokeWidth={1.8}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M9 3.75H6.912a2.25 2.25 0 00-2.15 1.588L2.35 13.177a2.25 2.25 0 00-.1.661V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 00-2.15-1.588H15M2.25 13.5h3.86a2.25 2.25 0 012.012 1.244l.256.512a2.25 2.25 0 002.013 1.244h3.218a2.25 2.25 0 002.013-1.244l.256-.512a2.25 2.25 0 012.013-1.244h3.859"
+        />
       </svg>
     );
   }
   if (tag === "agents") {
     return (
-      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-hat-glasses-icon lucide-hat-glasses">
-        <path d="M14 18a2 2 0 0 0-4 0"/><path d="m19 11-2.11-6.657a2 2 0 0 0-2.752-1.148l-1.276.61A2 2 0 0 1 12 4H8.5a2 2 0 0 0-1.925 1.456L5 11"/><path d="M2 11h20"/><circle cx="17" cy="18" r="3"/><circle cx="7" cy="18" r="3"/>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="lucide lucide-hat-glasses-icon lucide-hat-glasses"
+      >
+        <path d="M14 18a2 2 0 0 0-4 0" />
+        <path d="m19 11-2.11-6.657a2 2 0 0 0-2.752-1.148l-1.276.61A2 2 0 0 1 12 4H8.5a2 2 0 0 0-1.925 1.456L5 11" />
+        <path d="M2 11h20" />
+        <circle cx="17" cy="18" r="3" />
+        <circle cx="7" cy="18" r="3" />
       </svg>
     );
   }
   if (tag === "team") {
     return (
-      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgb(217 70 239)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-users text-text-muted" aria-hidden="true">
-        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><path d="M16 3.128a4 4 0 0 1 0 7.744"></path>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="rgb(217 70 239)"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="lucide lucide-users text-text-muted"
+        aria-hidden="true"
+      >
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
+        <path d="M16 3.128a4 4 0 0 1 0 7.744"></path>
         <path d="M22 21v-2a4 4 0 0 0-3-3.87"></path>
         <circle cx="9" cy="7" r="4"></circle>
       </svg>
@@ -441,23 +695,57 @@ function getGroupIcon(tag: string) {
   }
   if (tag === "context_engine") {
     return (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5" />
+      <svg
+        className="w-3.5 h-3.5"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+        strokeWidth={1.8}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5"
+        />
       </svg>
     );
   }
   if (tag === "permissions") {
     return (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+      <svg
+        className="w-3.5 h-3.5"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+        strokeWidth={1.8}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"
+        />
       </svg>
     );
   }
   if (tag === "a2ui") {
     return (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 5.25h15A1.5 1.5 0 0121 6.75v10.5a1.5 1.5 0 01-1.5 1.5h-15A1.5 1.5 0 013 17.25V6.75a1.5 1.5 0 011.5-1.5z" />
-        <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 9.75h9M7.5 14.25h5.25" />
+      <svg
+        className="w-3.5 h-3.5"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+        strokeWidth={1.8}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M4.5 5.25h15A1.5 1.5 0 0121 6.75v10.5a1.5 1.5 0 01-1.5 1.5h-15A1.5 1.5 0 013 17.25V6.75a1.5 1.5 0 011.5-1.5z"
+        />
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M7.5 9.75h9M7.5 14.25h5.25"
+        />
       </svg>
     );
   }
@@ -469,57 +757,115 @@ function getGroupIcon(tag: string) {
   }
   if (tag === "skill_retrieval") {
     return (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 5.25h16.5M6 5.25v13.5m0 0h12.75M6 18.75l3.75-4.5 3 3 4.5-6" />
-        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 8.25h3M15.75 11.25h3" />
+      <svg
+        className="w-3.5 h-3.5"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+        strokeWidth={1.8}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M3.75 5.25h16.5M6 5.25v13.5m0 0h12.75M6 18.75l3.75-4.5 3 3 4.5-6"
+        />
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M15.75 8.25h3M15.75 11.25h3"
+        />
       </svg>
     );
   }
   if (tag === "proactive") {
     return (
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.454 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+      <svg
+        className="w-3.5 h-3.5"
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+        strokeWidth={1.8}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.454 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0"
+        />
       </svg>
     );
   }
   return (
-    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 6h9m-9 6h9m-9 6h9M3.75 6h.008v.008H3.75V6zm0 6h.008v.008H3.75V12zm0 6h.008v.008H3.75V18z" />
+    <svg
+      className="w-3.5 h-3.5"
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={1.8}
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M11.25 6h9m-9 6h9m-9 6h9M3.75 6h.008v.008H3.75V6zm0 6h.008v.008H3.75V12zm0 6h.008v.008H3.75V18z"
+      />
     </svg>
   );
 }
 
 function getGroupToneClass(tag: string): string {
-  if (tag === "model_default") return "text-blue-500 bg-blue-500/10 border-blue-500/20";
-  if (tag === "model_video") return "text-violet-500 bg-violet-500/10 border-violet-500/20";
-  if (tag === "model_audio") return "text-orange-500 bg-orange-500/10 border-orange-500/20";
-  if (tag === "model_vision") return "text-teal-500 bg-teal-500/10 border-teal-500/20";
+  if (tag === "model_default")
+    return "text-blue-500 bg-blue-500/10 border-blue-500/20";
+  if (tag === "model_video")
+    return "text-violet-500 bg-violet-500/10 border-violet-500/20";
+  if (tag === "model_audio")
+    return "text-orange-500 bg-orange-500/10 border-orange-500/20";
+  if (tag === "model_vision")
+    return "text-teal-500 bg-teal-500/10 border-teal-500/20";
   if (tag === "embed") return "text-cyan-500 bg-cyan-500/10 border-cyan-500/20";
-  if (tag === "third_party_api") return "text-indigo-500 bg-indigo-500/10 border-indigo-500/20";
-  if (tag === "free_search") return "text-lime-500 bg-lime-500/10 border-lime-500/20";
-  if (tag === "evolution") return "text-amber-500 bg-amber-500/10 border-amber-500/20";
-  if (tag === "agents") return "text-pink-500 bg-pink-500/10 border-pink-500/20";
-  if (tag === "team") return "text-fuchsia-500 bg-fuchsia-500/10 border-fuchsia-500/20";
-  if (tag === "memory") return "text-purple-500 bg-purple-500/10 border-purple-500/20";
-  if (tag === "context_engine") return "text-sky-500 bg-sky-500/10 border-sky-500/20";
-  if (tag === "permissions") return "text-rose-500 bg-rose-500/10 border-rose-500/20";
-  if (tag === "a2ui") return "text-fuchsia-500 bg-fuchsia-500/10 border-fuchsia-500/20";
-  if (tag === "swarmflow") return "text-blue-500 bg-blue-500/10 border-blue-500/20";
-  if (tag === "symphony") return "text-amber-500 bg-amber-500/10 border-amber-500/20";
-  if (tag === "skill_retrieval") return "text-emerald-500 bg-emerald-500/10 border-emerald-500/20";
-  if (tag === "proactive") return "text-sky-500 bg-sky-500/10 border-sky-500/20";
-  if (tag === "email") return "text-emerald-500 bg-emerald-500/10 border-emerald-500/20";
+  if (tag === "third_party_api")
+    return "text-indigo-500 bg-indigo-500/10 border-indigo-500/20";
+  if (tag === "free_search")
+    return "text-lime-500 bg-lime-500/10 border-lime-500/20";
+  if (tag === "evolution")
+    return "text-amber-500 bg-amber-500/10 border-amber-500/20";
+  if (tag === "agents")
+    return "text-pink-500 bg-pink-500/10 border-pink-500/20";
+  if (tag === "team")
+    return "text-fuchsia-500 bg-fuchsia-500/10 border-fuchsia-500/20";
+  if (tag === "memory")
+    return "text-purple-500 bg-purple-500/10 border-purple-500/20";
+  if (tag === "context_engine")
+    return "text-sky-500 bg-sky-500/10 border-sky-500/20";
+  if (tag === "permissions")
+    return "text-rose-500 bg-rose-500/10 border-rose-500/20";
+  if (tag === "a2ui")
+    return "text-fuchsia-500 bg-fuchsia-500/10 border-fuchsia-500/20";
+  if (tag === "swarmflow")
+    return "text-blue-500 bg-blue-500/10 border-blue-500/20";
+  if (tag === "symphony")
+    return "text-amber-500 bg-amber-500/10 border-amber-500/20";
+  if (tag === "skill_retrieval")
+    return "text-emerald-500 bg-emerald-500/10 border-emerald-500/20";
+  if (tag === "proactive")
+    return "text-sky-500 bg-sky-500/10 border-sky-500/20";
+  if (tag === "email")
+    return "text-emerald-500 bg-emerald-500/10 border-emerald-500/20";
   return "text-text-muted bg-secondary/70 border-border";
 }
 
 /** 模型子分组的嵌套样式：左侧色条 + 淡色底，与整体一致、易区分 */
 function getNestedModelStyle(tag: string): string {
-  if (tag === "model_default") return "border-l-2 border-l-blue-500/60 bg-blue-500/[0.06]";
-  if (tag === "model_video") return "border-l-2 border-l-violet-500/60 bg-violet-500/[0.06]";
-  if (tag === "model_audio") return "border-l-2 border-l-orange-500/60 bg-orange-500/[0.06]";
-  if (tag === "model_vision") return "border-l-2 border-l-teal-500/60 bg-teal-500/[0.06]";
-  if (tag === "context_engine") return "border-l-2 border-l-sky-500/60 bg-sky-500/[0.06]";
-  if (tag === "permissions") return "border-l-2 border-l-rose-500/60 bg-rose-500/[0.06]";
+  if (tag === "model_default")
+    return "border-l-2 border-l-blue-500/60 bg-blue-500/[0.06]";
+  if (tag === "model_video")
+    return "border-l-2 border-l-violet-500/60 bg-violet-500/[0.06]";
+  if (tag === "model_audio")
+    return "border-l-2 border-l-orange-500/60 bg-orange-500/[0.06]";
+  if (tag === "model_vision")
+    return "border-l-2 border-l-teal-500/60 bg-teal-500/[0.06]";
+  if (tag === "context_engine")
+    return "border-l-2 border-l-sky-500/60 bg-sky-500/[0.06]";
+  if (tag === "permissions")
+    return "border-l-2 border-l-rose-500/60 bg-rose-500/[0.06]";
   return "border-l-2 border-l-border bg-secondary/20";
 }
 
@@ -548,30 +894,50 @@ interface ProactiveIntSpec {
 }
 const PROACTIVE_INT_SPECS: Record<string, ProactiveIntSpec> = {
   proactive_recommendation_max_recommend_per_day: {
-    lo: 1, hi: 50, labelKey: "config.keys.proactiveMaxPerDay",
+    lo: 1,
+    hi: 50,
+    labelKey: "config.keys.proactiveMaxPerDay",
   },
   proactive_recommendation_max_rounds_per_tick: {
-    lo: 1, hi: 50, labelKey: "config.keys.proactiveMaxRounds",
+    lo: 1,
+    hi: 50,
+    labelKey: "config.keys.proactiveMaxRounds",
   },
 };
 
 function validateProactiveInt(
-  key: string, raw: string, t: (k: string, opts?: Record<string, unknown>) => string,
+  key: string,
+  raw: string,
+  t: (k: string, opts?: Record<string, unknown>) => string,
 ): string | null {
   const spec = PROACTIVE_INT_SPECS[key];
   if (!spec) return null;
   const field = t(spec.labelKey);
   const s = (raw ?? "").trim();
   if (!s) {
-    return t("config.errors.proactiveIntEmpty", { field, lo: spec.lo, hi: spec.hi });
+    return t("config.errors.proactiveIntEmpty", {
+      field,
+      lo: spec.lo,
+      hi: spec.hi,
+    });
   }
   // 正则一次挡住浮点(3.5)、负数(-1)、科学计数(1e5)、字符串(abc)
   if (!/^[0-9]+$/.test(s)) {
-    return t("config.errors.proactiveIntNotInteger", { field, value: s, lo: spec.lo, hi: spec.hi });
+    return t("config.errors.proactiveIntNotInteger", {
+      field,
+      value: s,
+      lo: spec.lo,
+      hi: spec.hi,
+    });
   }
   const n = parseInt(s, 10);
   if (n < spec.lo || n > spec.hi) {
-    return t("config.errors.proactiveIntOutOfRange", { field, lo: spec.lo, hi: spec.hi, value: n });
+    return t("config.errors.proactiveIntOutOfRange", {
+      field,
+      lo: spec.lo,
+      hi: spec.hi,
+      value: n,
+    });
   }
   return null;
 }
@@ -582,19 +948,19 @@ function parseBoolValue(value: string): boolean {
 
 function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
   const labels: Record<string, string> = {
-    evolution_auto_scan: t('config.booleanLabels.evolutionAutoScan'),
-    skill_create: t('config.booleanLabels.skillCreate'),
-    free_search_ddg_enabled: t('config.booleanLabels.freeSearchDdg'),
-    free_search_bing_enabled: t('config.booleanLabels.freeSearchBing'),
-    context_engine_enabled: t('config.booleanLabels.enabled'),
-    kv_cache_affinity_enabled: t('config.booleanLabels.kvCacheAffinity'),
-    permissions_enabled: t('config.booleanLabels.enabled'),
-    memory_forbidden_enabled: t('config.booleanLabels.enabled'),
-    a2ui_enabled: t('config.booleanLabels.enabled'),
-    swarmflow_enabled: t('config.booleanLabels.enabled'),
-    symphony_enabled: t('config.booleanLabels.enabled'),
-    skill_retrieval_enabled: t('config.booleanLabels.enabled'),
-    proactive_recommendation_enabled: t('config.booleanLabels.enabled'),
+    evolution_auto_scan: t("config.booleanLabels.evolutionAutoScan"),
+    skill_create: t("config.booleanLabels.skillCreate"),
+    free_search_ddg_enabled: t("config.booleanLabels.freeSearchDdg"),
+    free_search_bing_enabled: t("config.booleanLabels.freeSearchBing"),
+    context_engine_enabled: t("config.booleanLabels.enabled"),
+    kv_cache_affinity_enabled: t("config.booleanLabels.kvCacheAffinity"),
+    permissions_enabled: t("config.booleanLabels.enabled"),
+    memory_forbidden_enabled: t("config.booleanLabels.enabled"),
+    a2ui_enabled: t("config.booleanLabels.enabled"),
+    swarmflow_enabled: t("config.booleanLabels.enabled"),
+    symphony_enabled: t("config.booleanLabels.enabled"),
+    skill_retrieval_enabled: t("config.booleanLabels.enabled"),
+    proactive_recommendation_enabled: t("config.booleanLabels.enabled"),
   };
   return labels[key] ?? key;
 }
@@ -626,28 +992,110 @@ function normalizeConfigValue(value: unknown): string {
   }
 }
 
-function getGroupMeta(t: (key: string) => string): Record<string, { label: string; order: number; hint: string }> {
+function getGroupMeta(
+  t: (key: string) => string,
+): Record<string, { label: string; order: number; hint: string }> {
   return {
-    model_default: { label: t('config.groups.modelDefault.label'), order: 0, hint: t('config.groups.modelDefault.hint') },
-    model_video: { label: t('config.groups.modelVideo.label'), order: 1, hint: t('config.groups.modelVideo.hint') },
-    model_audio: { label: t('config.groups.modelAudio.label'), order: 2, hint: t('config.groups.modelAudio.hint') },
-    model_vision: { label: t('config.groups.modelVision.label'), order: 3, hint: t('config.groups.modelVision.hint') },
-    embed: { label: t('config.groups.embed.label'), order: 4, hint: t('config.groups.embed.hint') },
-    third_party_api: { label: t('config.groups.thirdParty.label'), order: 5, hint: t('config.groups.thirdParty.hint') },
-    free_search: { label: t('config.groups.freeSearch.label'), order: 6, hint: t('config.groups.freeSearch.hint') },
-    evolution: { label: t('config.groups.evolution.label'), order: 7, hint: t('config.groups.evolution.hint') },
-    agents: { label: t('config.groups.agents.label'), order: 7.5, hint: t('config.groups.agents.hint') },
-    team: { label: t('config.groups.team.label'), order: 7.6, hint: t('config.groups.team.hint') },
-    context_engine: { label: t('config.groups.contextEngine.label'), order: 8, hint: t('config.groups.contextEngine.hint') },
-    permissions: { label: t('config.groups.permissions.label'), order: 9, hint: t('config.groups.permissions.hint') },
-    a2ui: { label: t('config.groups.a2ui.label'), order: 10, hint: t('config.groups.a2ui.hint') },
-    swarmflow: { label: t('config.groups.swarmflow.label'), order: 10.2, hint: t('config.groups.swarmflow.hint') },
-    symphony: { label: t('config.groups.symphony.label'), order: 10.4, hint: t('config.groups.symphony.hint') },
-    skill_retrieval: { label: t('config.groups.skillRetrieval.label'), order: 10.5, hint: t('config.groups.skillRetrieval.hint') },
-    proactive: { label: t('config.groups.proactive.label'), order: 10.6, hint: t('config.groups.proactive.hint') },
-    memory: { label: t('config.groups.memory.label'), order: 11, hint: t('config.groups.memory.hint') },
-    email: { label: t('config.groups.email.label'), order: 12, hint: t('config.groups.email.hint') },
-    other: { label: t('config.groups.other.label'), order: 13, hint: t('config.groups.other.hint') },
+    model_default: {
+      label: t("config.groups.modelDefault.label"),
+      order: 0,
+      hint: t("config.groups.modelDefault.hint"),
+    },
+    model_video: {
+      label: t("config.groups.modelVideo.label"),
+      order: 1,
+      hint: t("config.groups.modelVideo.hint"),
+    },
+    model_audio: {
+      label: t("config.groups.modelAudio.label"),
+      order: 2,
+      hint: t("config.groups.modelAudio.hint"),
+    },
+    model_vision: {
+      label: t("config.groups.modelVision.label"),
+      order: 3,
+      hint: t("config.groups.modelVision.hint"),
+    },
+    embed: {
+      label: t("config.groups.embed.label"),
+      order: 4,
+      hint: t("config.groups.embed.hint"),
+    },
+    third_party_api: {
+      label: t("config.groups.thirdParty.label"),
+      order: 5,
+      hint: t("config.groups.thirdParty.hint"),
+    },
+    free_search: {
+      label: t("config.groups.freeSearch.label"),
+      order: 6,
+      hint: t("config.groups.freeSearch.hint"),
+    },
+    evolution: {
+      label: t("config.groups.evolution.label"),
+      order: 7,
+      hint: t("config.groups.evolution.hint"),
+    },
+    agents: {
+      label: t("config.groups.agents.label"),
+      order: 7.5,
+      hint: t("config.groups.agents.hint"),
+    },
+    team: {
+      label: t("config.groups.team.label"),
+      order: 7.6,
+      hint: t("config.groups.team.hint"),
+    },
+    context_engine: {
+      label: t("config.groups.contextEngine.label"),
+      order: 8,
+      hint: t("config.groups.contextEngine.hint"),
+    },
+    permissions: {
+      label: t("config.groups.permissions.label"),
+      order: 9,
+      hint: t("config.groups.permissions.hint"),
+    },
+    a2ui: {
+      label: t("config.groups.a2ui.label"),
+      order: 10,
+      hint: t("config.groups.a2ui.hint"),
+    },
+    swarmflow: {
+      label: t("config.groups.swarmflow.label"),
+      order: 10.2,
+      hint: t("config.groups.swarmflow.hint"),
+    },
+    symphony: {
+      label: t("config.groups.symphony.label"),
+      order: 10.4,
+      hint: t("config.groups.symphony.hint"),
+    },
+    skill_retrieval: {
+      label: t("config.groups.skillRetrieval.label"),
+      order: 10.5,
+      hint: t("config.groups.skillRetrieval.hint"),
+    },
+    proactive: {
+      label: t("config.groups.proactive.label"),
+      order: 10.6,
+      hint: t("config.groups.proactive.hint"),
+    },
+    memory: {
+      label: t("config.groups.memory.label"),
+      order: 11,
+      hint: t("config.groups.memory.hint"),
+    },
+    email: {
+      label: t("config.groups.email.label"),
+      order: 12,
+      hint: t("config.groups.email.hint"),
+    },
+    other: {
+      label: t("config.groups.other.label"),
+      order: 13,
+      hint: t("config.groups.other.hint"),
+    },
   };
 }
 
@@ -670,33 +1118,53 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   skills: "config.keys.agentSkills",
   symphony_enabled: "config.keys.symphonyEnabled",
   skill_retrieval_enabled: "config.keys.skillRetrievalEnabled",
-  skill_retrieval_build_branching_factor: "config.keys.skillRetrievalBuildBranchingFactor",
+  skill_retrieval_build_branching_factor:
+    "config.keys.skillRetrievalBuildBranchingFactor",
   skill_retrieval_build_max_depth: "config.keys.skillRetrievalBuildMaxDepth",
-  skill_retrieval_build_root_categories: "config.keys.skillRetrievalBuildRootCategories",
-  skill_retrieval_build_max_workers: "config.keys.skillRetrievalBuildMaxWorkers",
-  skill_retrieval_build_max_retries: "config.keys.skillRetrievalBuildMaxRetries",
-  skill_retrieval_build_request_timeout_seconds: "config.keys.skillRetrievalBuildTimeout",
-  skill_retrieval_build_total_timeout_seconds: "config.keys.skillRetrievalBuildTotalTimeout",
-  skill_retrieval_build_classification_batch_limit: "config.keys.skillRetrievalBuildClassificationBatchLimit",
-  skill_retrieval_build_discovery_seed: "config.keys.skillRetrievalBuildDiscoverySeed",
-  skill_retrieval_build_postprocess_enabled: "config.keys.skillRetrievalBuildPostprocessEnabled",
-  skill_retrieval_build_postprocess_max_passes: "config.keys.skillRetrievalBuildPostprocessMaxPasses",
-  skill_retrieval_build_postprocess_min_skills: "config.keys.skillRetrievalBuildPostprocessMinSkills",
-  skill_retrieval_build_equivalence_enabled: "config.keys.skillRetrievalBuildEquivalenceEnabled",
-  skill_retrieval_retrieve_compact_codes_enabled: "config.keys.skillRetrievalCompactCodes",
-  skill_retrieval_retrieve_flatten_tree: "config.keys.skillRetrievalFlattenTree",
-  skill_retrieval_retrieve_max_exposure_depth: "config.keys.skillRetrievalMaxExposureDepth",
+  skill_retrieval_build_root_categories:
+    "config.keys.skillRetrievalBuildRootCategories",
+  skill_retrieval_build_max_workers:
+    "config.keys.skillRetrievalBuildMaxWorkers",
+  skill_retrieval_build_max_retries:
+    "config.keys.skillRetrievalBuildMaxRetries",
+  skill_retrieval_build_request_timeout_seconds:
+    "config.keys.skillRetrievalBuildTimeout",
+  skill_retrieval_build_total_timeout_seconds:
+    "config.keys.skillRetrievalBuildTotalTimeout",
+  skill_retrieval_build_classification_batch_limit:
+    "config.keys.skillRetrievalBuildClassificationBatchLimit",
+  skill_retrieval_build_discovery_seed:
+    "config.keys.skillRetrievalBuildDiscoverySeed",
+  skill_retrieval_build_postprocess_enabled:
+    "config.keys.skillRetrievalBuildPostprocessEnabled",
+  skill_retrieval_build_postprocess_max_passes:
+    "config.keys.skillRetrievalBuildPostprocessMaxPasses",
+  skill_retrieval_build_postprocess_min_skills:
+    "config.keys.skillRetrievalBuildPostprocessMinSkills",
+  skill_retrieval_build_equivalence_enabled:
+    "config.keys.skillRetrievalBuildEquivalenceEnabled",
+  skill_retrieval_retrieve_compact_codes_enabled:
+    "config.keys.skillRetrievalCompactCodes",
+  skill_retrieval_retrieve_flatten_tree:
+    "config.keys.skillRetrievalFlattenTree",
+  skill_retrieval_retrieve_max_exposure_depth:
+    "config.keys.skillRetrievalMaxExposureDepth",
   proactive_recommendation_enabled: "config.keys.proactiveEnabled",
-  proactive_recommendation_max_recommend_per_day: "config.keys.proactiveMaxPerDay",
-  proactive_recommendation_max_rounds_per_tick: "config.keys.proactiveMaxRounds",
+  proactive_recommendation_max_recommend_per_day:
+    "config.keys.proactiveMaxPerDay",
+  proactive_recommendation_max_rounds_per_tick:
+    "config.keys.proactiveMaxRounds",
 };
 const KEY_PLACEHOLDER_I18N: Record<string, string> = {
-  memory_forbidden_description: "config.keys.memoryForbiddenDescriptionPlaceholder",
-  skill_retrieval_build_root_categories: "config.keys.skillRetrievalBuildRootCategoriesPlaceholder",
+  memory_forbidden_description:
+    "config.keys.memoryForbiddenDescriptionPlaceholder",
+  skill_retrieval_build_root_categories:
+    "config.keys.skillRetrievalBuildRootCategoriesPlaceholder",
 };
 const KEY_LABEL_HINT_I18N: Record<string, string> = {
   skill_create: "config.keyHelp.skillCreate",
-  skill_retrieval_build_root_categories: "config.keyHelp.skillRetrievalBuildRootCategories",
+  skill_retrieval_build_root_categories:
+    "config.keyHelp.skillRetrievalBuildRootCategories",
 };
 
 /** 组内字段排序优先级，数字越小越靠前 */
@@ -759,10 +1227,12 @@ function GroupSection({
   alwaysExpanded?: boolean;
 }) {
   const [open, setOpen] = useState(alwaysExpanded || defaultOpen);
-  const [visibleFields, setVisibleFields] = useState<Record<string, boolean>>({});
+  const [visibleFields, setVisibleFields] = useState<Record<string, boolean>>(
+    {},
+  );
   const toneClass = getGroupToneClass(group.tag);
   const groupMeta = getGroupMeta(t);
-  const hint = groupMeta[group.tag]?.hint ?? t('config.groupFallback');
+  const hint = groupMeta[group.tag]?.hint ?? t("config.groupFallback");
   const isOpen = alwaysExpanded || open;
   const showNestedChrome = nested && !alwaysExpanded;
 
@@ -771,30 +1241,46 @@ function GroupSection({
   };
 
   const nestedStyle = nested ? getNestedModelStyle(group.tag) : "";
-  const headerClass = `w-full flex items-center justify-between transition-colors text-sm ${showNestedChrome ? `py-2 pr-3 pl-4 ${nestedStyle} hover:opacity-90` : "px-4 py-3 bg-secondary/30"
-    } ${alwaysExpanded ? "" : showNestedChrome ? "" : "hover:bg-secondary/60"}`;
+  const headerClass = `w-full flex items-center justify-between transition-colors text-sm ${
+    showNestedChrome
+      ? `py-2 pr-3 pl-4 ${nestedStyle} hover:opacity-90`
+      : "px-4 py-3 bg-secondary/30"
+  } ${alwaysExpanded ? "" : showNestedChrome ? "" : "hover:bg-secondary/60"}`;
 
   const headerInner = (
     <>
       <span className="flex items-center gap-3 min-w-0">
-        <span className={`inline-flex items-center justify-center rounded-md border ${toneClass} ${showNestedChrome ? "w-6 h-6" : "w-7 h-7"}`}>
+        <span
+          className={`inline-flex items-center justify-center rounded-md border ${toneClass} ${showNestedChrome ? "w-6 h-6" : "w-7 h-7"}`}
+        >
           {getGroupIcon(group.tag)}
         </span>
         <span className="min-w-0 text-left">
-          <span className="block font-medium text-text-strong">{group.label}</span>
+          <span className="block font-medium text-text-strong">
+            {group.label}
+          </span>
           <span className="block text-xs text-text-muted truncate">{hint}</span>
         </span>
       </span>
-      <span className={`flex items-center gap-2 text-text-muted ${showNestedChrome ? "ml-2" : "ml-3"}`}>
+      <span
+        className={`flex items-center gap-2 text-text-muted ${showNestedChrome ? "ml-2" : "ml-3"}`}
+      >
         <span className="text-[11px] px-2 py-0.5 rounded-full border border-border bg-secondary/60">
-          {t('config.itemsCount', { count: group.keys.length })}
+          {t("config.itemsCount", { count: group.keys.length })}
         </span>
         {!alwaysExpanded ? (
           <svg
             className={`w-4 h-4 transition-transform ${isOpen ? "rotate-180" : ""}`}
-            fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            strokeWidth={2}
           >
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M19 9l-7 7-7-7"
+            />
           </svg>
         ) : null}
       </span>
@@ -815,7 +1301,11 @@ function GroupSection({
           {headerInner}
         </div>
       ) : (
-        <button type="button" onClick={() => setOpen(!open)} className={headerClass}>
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          className={headerClass}
+        >
           {headerInner}
         </button>
       )}
@@ -824,27 +1314,44 @@ function GroupSection({
           <table className="w-full text-sm border-t border-border">
             <tbody>
               {group.keys.map(([key, value]) => (
-                <tr key={key} className="border-t border-border first:border-t-0 even:bg-secondary/10 hover:bg-secondary/25 transition-colors">
-                  <td className="px-4 py-2.5 align-middle text-xs text-text-muted w-[32%]" title={key}>
+                <tr
+                  key={key}
+                  className="border-t border-border first:border-t-0 even:bg-secondary/10 hover:bg-secondary/25 transition-colors"
+                >
+                  <td
+                    className="px-4 py-2.5 align-middle text-xs text-text-muted w-[32%]"
+                    title={key}
+                  >
                     <div className="mono">{getKeyDisplayLabel(key, t)}</div>
                     {getKeyLabelHintText(key, t) ? (
                       <div className="mt-1 text-[11px] leading-4 text-text-muted">
                         {getKeyLabelHintText(key, t)}
                       </div>
                     ) : null}
-                    {PROACTIVE_INT_SPECS[key] ? (() => {
-                      const e = validateProactiveInt(key, draftValues[key] ?? "", t);
-                      return e ? (
-                        <div className="mt-1 text-[11px] leading-4 text-danger">{e}</div>
-                      ) : null;
-                    })() : null}
+                    {PROACTIVE_INT_SPECS[key]
+                      ? (() => {
+                          const e = validateProactiveInt(
+                            key,
+                            draftValues[key] ?? "",
+                            t,
+                          );
+                          return e ? (
+                            <div className="mt-1 text-[11px] leading-4 text-danger">
+                              {e}
+                            </div>
+                          ) : null;
+                        })()
+                      : null}
                   </td>
                   <td className="px-4 py-2.5 break-all text-[13px] align-middle">
                     {isBooleanKey(key) ? (
                       <div className="flex items-center gap-2">
                         <span
-                          className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${isRequiredModelField(key) ? "text-danger" : "text-transparent"
-                            }`}
+                          className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${
+                            isRequiredModelField(key)
+                              ? "text-danger"
+                              : "text-transparent"
+                          }`}
                           aria-hidden="true"
                         >
                           *
@@ -853,15 +1360,30 @@ function GroupSection({
                           <button
                             type="button"
                             role="switch"
-                            aria-checked={parseBoolValue(draftValues[key] ?? value)}
-                            onClick={() => onChange(key, parseBoolValue(draftValues[key] ?? value) ? "false" : "true")}
+                            aria-checked={parseBoolValue(
+                              draftValues[key] ?? value,
+                            )}
+                            onClick={() =>
+                              onChange(
+                                key,
+                                parseBoolValue(draftValues[key] ?? value)
+                                  ? "false"
+                                  : "true",
+                              )
+                            }
                             title={getBooleanKeyLabel(key, t) ?? key}
-                            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${parseBoolValue(draftValues[key] ?? value) ? "bg-ok" : "bg-secondary"
-                              }`}
+                            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                              parseBoolValue(draftValues[key] ?? value)
+                                ? "bg-ok"
+                                : "bg-secondary"
+                            }`}
                           >
                             <span
-                              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${parseBoolValue(draftValues[key] ?? value) ? "translate-x-4" : "translate-x-0"
-                                }`}
+                              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                parseBoolValue(draftValues[key] ?? value)
+                                  ? "translate-x-4"
+                                  : "translate-x-0"
+                              }`}
                             />
                           </button>
                         </div>
@@ -869,8 +1391,11 @@ function GroupSection({
                     ) : isProviderKey(key) ? (
                       <div className="flex items-center gap-2">
                         <span
-                          className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${isRequiredModelField(key) ? "text-danger" : "text-transparent"
-                            }`}
+                          className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${
+                            isRequiredModelField(key)
+                              ? "text-danger"
+                              : "text-transparent"
+                          }`}
                           aria-hidden="true"
                         >
                           *
@@ -881,25 +1406,41 @@ function GroupSection({
                             onChange={(e) => onChange(key, e.target.value)}
                             className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
                           >
-                            <option value="" disabled>{t('config.selectModelProvider')}</option>
+                            <option value="" disabled>
+                              {t("config.selectModelProvider")}
+                            </option>
                             <option value="OpenAI">OpenAI</option>
-                            {!key.includes('video_') && !key.includes('audio_') && !key.includes('vision_') && (
-                              <>
-                                <option value="DashScope">DashScope</option>
-                                <option value="SiliconFlow">SiliconFlow</option>
-                                <option value="InferenceAffinity">InferenceAffinity</option>
-                                <option value="DeepSeek">DeepSeek</option>
-                                <option value="OpenRouter">OpenRouter</option>
-                              </>
-                            )}
+                            {!key.includes("video_") &&
+                              !key.includes("audio_") &&
+                              !key.includes("vision_") && (
+                                <>
+                                  <option value="DashScope">DashScope</option>
+                                  <option value="SiliconFlow">
+                                    SiliconFlow
+                                  </option>
+                                  <option value="InferenceAffinity">
+                                    InferenceAffinity
+                                  </option>
+                                  <option value="DeepSeek">DeepSeek</option>
+                                  <option value="OpenRouter">OpenRouter</option>
+                                  {key === "model_provider" && (
+                                    <option value={CODEX_SUBSCRIPTION_PROVIDER}>
+                                      {CODEX_SUBSCRIPTION_PROVIDER}
+                                    </option>
+                                  )}
+                                </>
+                              )}
                           </select>
                         </div>
                       </div>
                     ) : isMultilineConfigKey(key) ? (
                       <div className="flex items-start gap-2">
                         <span
-                          className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none pt-2 ${isRequiredModelField(key) ? "text-danger" : "text-transparent"
-                            }`}
+                          className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none pt-2 ${
+                            isRequiredModelField(key)
+                              ? "text-danger"
+                              : "text-transparent"
+                          }`}
                           aria-hidden="true"
                         >
                           *
@@ -908,7 +1449,11 @@ function GroupSection({
                           <textarea
                             value={draftValues[key] ?? value}
                             onChange={(e) => onChange(key, e.target.value)}
-                            placeholder={KEY_PLACEHOLDER_I18N[key] ? t(KEY_PLACEHOLDER_I18N[key]) : t('config.enterValue')}
+                            placeholder={
+                              KEY_PLACEHOLDER_I18N[key]
+                                ? t(KEY_PLACEHOLDER_I18N[key])
+                                : t("config.enterValue")
+                            }
                             className="w-full min-h-[320px] rounded-md border border-border bg-bg px-3 py-2 font-mono text-[12px] leading-5 outline-none focus:border-accent whitespace-pre"
                             spellCheck={false}
                           />
@@ -917,18 +1462,29 @@ function GroupSection({
                     ) : (
                       <div className="flex items-center gap-2">
                         <span
-                          className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${isRequiredModelField(key) ? "text-danger" : "text-transparent"
-                            }`}
+                          className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${
+                            isRequiredModelField(key)
+                              ? "text-danger"
+                              : "text-transparent"
+                          }`}
                           aria-hidden="true"
                         >
                           *
                         </span>
                         <div className="relative flex-1">
                           <input
-                            type={isSensitiveKey(key) && !visibleFields[key] ? "password" : "text"}
+                            type={
+                              isSensitiveKey(key) && !visibleFields[key]
+                                ? "password"
+                                : "text"
+                            }
                             value={draftValues[key] ?? value}
                             onChange={(e) => onChange(key, e.target.value)}
-                            placeholder={KEY_PLACEHOLDER_I18N[key] ? t(KEY_PLACEHOLDER_I18N[key]) : t('config.enterValue')}
+                            placeholder={
+                              KEY_PLACEHOLDER_I18N[key]
+                                ? t(KEY_PLACEHOLDER_I18N[key])
+                                : t("config.enterValue")
+                            }
                             className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${isSensitiveKey(key) ? "pr-10" : ""}`}
                           />
                           {isSensitiveKey(key) ? (
@@ -936,20 +1492,64 @@ function GroupSection({
                               type="button"
                               onClick={() => toggleFieldVisible(key)}
                               className="absolute inset-y-0 right-0 flex items-center justify-center w-9 text-text-muted hover:text-text transition-colors"
-                              aria-label={visibleFields[key] ? t('config.hideValue') : t('config.showValue')}
-                              title={visibleFields[key] ? t('config.hideValue') : t('config.showValue')}
+                              aria-label={
+                                visibleFields[key]
+                                  ? t("config.hideValue")
+                                  : t("config.showValue")
+                              }
+                              title={
+                                visibleFields[key]
+                                  ? t("config.hideValue")
+                                  : t("config.showValue")
+                              }
                             >
                               {visibleFields[key] ? (
-                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 3l18 18" />
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M10.58 10.58A2 2 0 0013.42 13.42" />
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.88 5.09A10.94 10.94 0 0112 4.9c5.05 0 9.27 3.11 10.5 7.5a11.6 11.6 0 01-3.06 4.88" />
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M6.61 6.61A11.6 11.6 0 001.5 12.4c.53 1.9 1.63 3.56 3.11 4.79" />
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M14.12 14.12a3 3 0 01-4.24-4.24" />
+                                <svg
+                                  className="w-4 h-4"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth={1.8}
+                                >
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    d="M3 3l18 18"
+                                  />
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    d="M10.58 10.58A2 2 0 0013.42 13.42"
+                                  />
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    d="M9.88 5.09A10.94 10.94 0 0112 4.9c5.05 0 9.27 3.11 10.5 7.5a11.6 11.6 0 01-3.06 4.88"
+                                  />
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    d="M6.61 6.61A11.6 11.6 0 001.5 12.4c.53 1.9 1.63 3.56 3.11 4.79"
+                                  />
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    d="M14.12 14.12a3 3 0 01-4.24-4.24"
+                                  />
                                 </svg>
                               ) : (
-                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M1.5 12s3.75-7.5 10.5-7.5S22.5 12 22.5 12s-3.75 7.5-10.5 7.5S1.5 12 1.5 12z" />
+                                <svg
+                                  className="w-4 h-4"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth={1.8}
+                                >
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    d="M1.5 12s3.75-7.5 10.5-7.5S22.5 12 22.5 12s-3.75 7.5-10.5 7.5S1.5 12 1.5 12z"
+                                  />
                                   <circle cx="12" cy="12" r="3" />
                                 </svg>
                               )}
@@ -970,7 +1570,15 @@ function GroupSection({
   );
 }
 
-const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "DeepSeek"] as const;
+const MODEL_PROVIDER_OPTIONS = [
+  "OpenAI",
+  "OpenRouter",
+  "DashScope",
+  "SiliconFlow",
+  "InferenceAffinity",
+  "DeepSeek",
+  CODEX_SUBSCRIPTION_PROVIDER,
+] as const;
 const REASONING_LEVEL_OPTIONS = ["off", "low", "medium", "high"] as const;
 
 function getModelValidationKey(model: ModelEntry): string {
@@ -996,25 +1604,52 @@ function MultiModelSection({
 }: {
   models: ModelEntry[];
   onModelsChange: (models: ModelEntry[]) => void;
-  onModelValidate?: (fields: { api_base: string; api_key: string; model: string; model_provider: string; reasoning_level?: string }) => Promise<void>;
+  onModelValidate?: (fields: {
+    api_base: string;
+    api_key: string;
+    model: string;
+    model_provider: string;
+    reasoning_level?: string;
+  }) => Promise<void>;
   isConnected: boolean;
   agents?: AgentEntry[];
-  onDeleteModel?: (idx: number, modelName: string, references: string[]) => void;
+  onDeleteModel?: (
+    idx: number,
+    modelName: string,
+    references: string[],
+  ) => void;
   onClearExternalError?: () => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const [validatingModel, setValidatingModel] = useState<number | null>(null);
-  const [validateResults, setValidateResults] = useState<Record<string, "ok" | "err">>({});
+  const [validateResults, setValidateResults] = useState<
+    Record<string, "ok" | "err">
+  >({});
   const [expandedIdx, setExpandedIdx] = useState<number | null>(0);
   const [addingNew, setAddingNew] = useState(false);
   const [newModel, setNewModel] = useState<ModelEntry>({
-    model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", reasoning_level: "",
+    model_name: "",
+    api_base: "",
+    api_key: "",
+    model_provider: "OpenAI",
+    reasoning_level: "",
   });
   const [localError, setLocalError] = useState<string | null>(null);
-  const [validateToast, setValidateToast] = useState<{ show: boolean; success: boolean; message: string }>({ show: false, success: true, message: "" });
+  const [validateToast, setValidateToast] = useState<{
+    show: boolean;
+    success: boolean;
+    message: string;
+  }>({ show: false, success: true, message: "" });
 
   const resetNewModelDraft = () => {
-    setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "", reasoning_level: "" });
+    setNewModel({
+      model_name: "",
+      api_base: "",
+      api_key: "",
+      model_provider: "OpenAI",
+      alias: "",
+      reasoning_level: "",
+    });
     setLocalError(null);
   };
 
@@ -1033,16 +1668,33 @@ function MultiModelSection({
   const handleNewModelChange = (field: keyof ModelEntry, value: string) => {
     setLocalError(null);
     onClearExternalError?.();
-    setNewModel((prev) => ({ ...prev, [field]: value }));
+    setNewModel((prev) => {
+      if (field === "model_provider" && usesSubscriptionAuthentication(value)) {
+        return {
+          ...prev,
+          model_provider: value,
+          model_name: CODEX_SUBSCRIPTION_MODEL,
+          api_base: "",
+          api_key: "",
+        };
+      }
+      return { ...prev, [field]: value };
+    });
   };
 
-  const getModelAgentReferences = (modelName: string, modelProvider: string, modelApiBase: string): string[] => {
+  const getModelAgentReferences = (
+    modelName: string,
+    modelProvider: string,
+    modelApiBase: string,
+  ): string[] => {
     if (!agents) return [];
     const references: string[] = [];
     agents.forEach((agent) => {
-      if (agent.model.model === modelName &&
+      if (
+        agent.model.model === modelName &&
         agent.model.provider === modelProvider &&
-        agent.model.api_base === modelApiBase) {
+        agent.model.api_base === modelApiBase
+      ) {
         references.push(agent.name);
       }
     });
@@ -1060,18 +1712,31 @@ function MultiModelSection({
     });
     try {
       await onModelValidate({
-        api_base: model.api_base, api_key: model.api_key,
-        model: model.model_name, model_provider: model.model_provider,
+        api_base: model.api_base,
+        api_key: model.api_key,
+        model: model.model_name,
+        model_provider: model.model_provider,
         reasoning_level: model.reasoning_level || undefined,
       });
       setValidateResults((prev) => ({ ...prev, [validationKey]: "ok" }));
-      setValidateToast({ show: true, success: true, message: t("config.validateModel.success") });
+      setValidateToast({
+        show: true,
+        success: true,
+        message: t("config.validateModel.success"),
+      });
     } catch {
       setValidateResults((prev) => ({ ...prev, [validationKey]: "err" }));
-      setValidateToast({ show: true, success: false, message: t("config.validateModel.notWorking") });
+      setValidateToast({
+        show: true,
+        success: false,
+        message: t("config.validateModel.notWorking"),
+      });
     } finally {
       setValidatingModel(null);
-      setTimeout(() => setValidateToast((prev) => ({ ...prev, show: false })), 3000);
+      setTimeout(
+        () => setValidateToast((prev) => ({ ...prev, show: false })),
+        3000,
+      );
     }
   };
 
@@ -1092,9 +1757,14 @@ function MultiModelSection({
     if (field === "alias") {
       const alias = value.trim();
       if (alias) {
-        const conflict = models.find((m, i) => i !== idx && ((m.alias || "") === alias || m.model_name === alias));
+        const conflict = models.find(
+          (m, i) =>
+            i !== idx && ((m.alias || "") === alias || m.model_name === alias),
+        );
         if (conflict) {
-          setLocalError(`Alias '${alias}' is already used by model '${conflict.model_name}'`);
+          setLocalError(
+            `Alias '${alias}' is already used by model '${conflict.model_name}'`,
+          );
         } else {
           setLocalError(null);
         }
@@ -1107,6 +1777,14 @@ function MultiModelSection({
 
     const copy = [...models];
     copy[idx] = { ...copy[idx], [field]: value };
+    if (field === "model_provider" && usesSubscriptionAuthentication(value)) {
+      copy[idx] = {
+        ...copy[idx],
+        model_name: CODEX_SUBSCRIPTION_MODEL,
+        api_base: "",
+        api_key: "",
+      };
+    }
     if (field === "model_name" && value !== models[idx].model_name) {
       if (idx === 0) {
         // 主对话默认换组：成为新组的组内默认，新组原默认让位
@@ -1131,7 +1809,11 @@ function MultiModelSection({
     }
     setLocalError(null);
     const model = models[idx];
-    const references = getModelAgentReferences(model.model_name, model.model_provider, model.api_base);
+    const references = getModelAgentReferences(
+      model.model_name,
+      model.model_provider,
+      model.api_base,
+    );
     if (onDeleteModel) {
       onDeleteModel(idx, model.model_name, references);
     }
@@ -1162,7 +1844,9 @@ function MultiModelSection({
 
   const handleToggleDefault = (idx: number) => {
     const model = models[idx];
-    const sameNameCount = models.filter((m) => m.model_name === model.model_name).length;
+    const sameNameCount = models.filter(
+      (m) => m.model_name === model.model_name,
+    ).length;
     // 同名组仅一个条目时不可取消
     if (sameNameCount <= 1) return;
     const copy = [...models];
@@ -1181,7 +1865,9 @@ function MultiModelSection({
     } else {
       // 取消默认：同组第一个其他条目自动成为默认
       copy[idx] = { ...copy[idx], is_default: false };
-      const fallbackIdx = copy.findIndex((m, i) => i !== idx && m.model_name === model.model_name);
+      const fallbackIdx = copy.findIndex(
+        (m, i) => i !== idx && m.model_name === model.model_name,
+      );
       if (fallbackIdx >= 0) {
         copy[fallbackIdx] = { ...copy[fallbackIdx], is_default: true };
         newDefaultIdx = fallbackIdx;
@@ -1224,7 +1910,10 @@ function MultiModelSection({
       return;
     }
 
-    if (!newModel.api_key.trim()) {
+    if (
+      !usesSubscriptionAuthentication(newModel.model_provider) &&
+      !newModel.api_key.trim()
+    ) {
       setLocalError(t("config.modelList.apiKeyRequired"));
       return;
     }
@@ -1237,20 +1926,35 @@ function MultiModelSection({
 
     const alias = newModel.alias?.trim() ?? "";
     if (alias) {
-      const conflict = models.find((m) => (m.alias || "") === alias || m.model_name === alias);
+      const conflict = models.find(
+        (m) => (m.alias || "") === alias || m.model_name === alias,
+      );
       if (conflict) {
-        setLocalError(`Alias '${alias}' is already used by model '${conflict.model_name}'`);
+        setLocalError(
+          `Alias '${alias}' is already used by model '${conflict.model_name}'`,
+        );
         return;
       }
     }
     setLocalError(null);
     // 新增条目：同名组已有条目时 is_default=false，否则 is_default=true
     const sameNameExists = models.some((m) => m.model_name === name);
-    const entry: ModelEntry = { ...newModel, model_name: name, is_default: !sameNameExists };
+    const entry: ModelEntry = {
+      ...newModel,
+      model_name: name,
+      is_default: !sameNameExists,
+    };
     onModelsChange([...models, entry]);
     setExpandedIdx(models.length); // 自动展开新增的条目
     setAddingNew(false);
-    setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "", reasoning_level: "" });
+    setNewModel({
+      model_name: "",
+      api_base: "",
+      api_key: "",
+      model_provider: "OpenAI",
+      alias: "",
+      reasoning_level: "",
+    });
   };
 
   return (
@@ -1263,16 +1967,39 @@ function MultiModelSection({
         )}
         {validateToast.show && (
           <div
-            className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-6 py-3 rounded-xl shadow-lg flex items-center gap-3 animate-fade-in ${validateToast.success ? "bg-ok-subtle border border-ok text-ok" : "bg-danger-subtle border border-danger text-danger"
-              }`}
+            className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-6 py-3 rounded-xl shadow-lg flex items-center gap-3 animate-fade-in ${
+              validateToast.success
+                ? "bg-ok-subtle border border-ok text-ok"
+                : "bg-danger-subtle border border-danger text-danger"
+            }`}
           >
             {validateToast.success ? (
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+              <svg
+                className="w-5 h-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M5 13l4 4L19 7"
+                />
               </svg>
             ) : (
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              <svg
+                className="w-5 h-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M6 18L18 6M6 6l12 12"
+                />
               </svg>
             )}
             <span className="font-medium">{validateToast.message}</span>
@@ -1289,38 +2016,78 @@ function MultiModelSection({
             return acc;
           }, []);
           const sameNameCount = sameNameIndices.length;
-          const displayName = sameNameCount > 1
-            ? `${model.model_name} #${sameNameIndices.indexOf(idx) + 1}`
-            : model.model_name;
+          const displayName =
+            sameNameCount > 1
+              ? `${model.model_name} #${sameNameIndices.indexOf(idx) + 1}`
+              : model.model_name;
           return (
-            <div key={idx} className="rounded-lg border border-border bg-secondary/20">
+            <div
+              key={idx}
+              className="rounded-lg border border-border bg-secondary/20"
+            >
               <div className="flex items-center justify-between px-3 py-2 gap-2">
                 <button
                   type="button"
                   className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
                   onClick={() => setExpandedIdx(isExpanded ? null : idx)}
                 >
-                  <svg className={`w-3 h-3 transition-transform shrink-0 ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                  <svg
+                    className={`w-3 h-3 transition-transform shrink-0 ${isExpanded ? "rotate-90" : ""}`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                    strokeWidth={2}
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M9 5l7 7-7 7"
+                    />
                   </svg>
-                  <span className="truncate">{displayName || t("config.modelList.untitled")}</span>
+                  <span className="truncate">
+                    {displayName || t("config.modelList.untitled")}
+                  </span>
                   {isPrimaryDefault && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30">{t("config.modelList.primaryDefault")}</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30">
+                      {t("config.modelList.primaryDefault")}
+                    </span>
                   )}
                   {!isPrimaryDefault && isDefault && sameNameCount > 1 && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-secondary/40 text-text-muted border border-border">{t("config.modelList.groupDefault")}</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-secondary/40 text-text-muted border border-border">
+                      {t("config.modelList.groupDefault")}
+                    </span>
                   )}
                   {vr === "ok" && (
                     <span className="w-5 h-5 rounded-full bg-ok-subtle text-ok flex items-center justify-center">
-                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                      <svg
+                        className="w-3 h-3"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                        strokeWidth={3}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M5 13l4 4L19 7"
+                        />
                       </svg>
                     </span>
                   )}
                   {vr === "err" && (
                     <span className="w-5 h-5 rounded-full bg-danger-subtle text-danger flex items-center justify-center">
-                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      <svg
+                        className="w-3 h-3"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                        strokeWidth={3}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M6 18L18 6M6 6l12 12"
+                        />
                       </svg>
                     </span>
                   )}
@@ -1341,7 +2108,9 @@ function MultiModelSection({
                     disabled={!isConnected || validatingModel === idx}
                     className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-secondary/60 disabled:opacity-40"
                   >
-                    {validatingModel === idx ? "..." : t("config.validateModel.button")}
+                    {validatingModel === idx
+                      ? "..."
+                      : t("config.validateModel.button")}
                   </button>
                   <button
                     type="button"
@@ -1355,43 +2124,98 @@ function MultiModelSection({
               </div>
               {isExpanded && (
                 <div className="border-t border-border px-3 py-2 space-y-2">
-                  {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
-                    <div key={field} className="flex items-center gap-2 text-xs">
+                  {(
+                    [
+                      "model_name",
+                      "alias",
+                      "api_base",
+                      "api_key",
+                      "model_provider",
+                      "reasoning_level",
+                    ] as const
+                  ).map((field) => (
+                    <div
+                      key={field}
+                      className="flex items-center gap-2 text-xs"
+                    >
                       <label className="w-28 text-text-muted shrink-0">
-                        {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
+                        {field}
+                        {(["model_name", "model_provider"].includes(field) ||
+                          (!usesSubscriptionAuthentication(
+                            models[idx]?.model_provider ?? "",
+                          ) &&
+                            ["api_key", "api_base"].includes(field))) && (
+                          <span className="text-danger ml-0.5">*</span>
+                        )}
                       </label>
                       {field === "model_provider" ? (
                         <select
                           value={models[idx]?.[field] ?? ""}
-                          onChange={(e) => updateModel(idx, field, e.target.value)}
+                          onChange={(e) =>
+                            updateModel(idx, field, e.target.value)
+                          }
                           className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                         >
-                          <option value="" disabled>{t("config.selectModelProvider")}</option>
-                          {MODEL_PROVIDER_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
+                          <option value="" disabled>
+                            {t("config.selectModelProvider")}
+                          </option>
+                          {MODEL_PROVIDER_OPTIONS.map((p) => (
+                            <option key={p} value={p}>
+                              {p}
+                            </option>
+                          ))}
                         </select>
                       ) : field === "reasoning_level" ? (
                         <select
                           value={models[idx]?.reasoning_level ?? ""}
-                          onChange={(e) => updateModel(idx, field, e.target.value)}
+                          onChange={(e) =>
+                            updateModel(idx, field, e.target.value)
+                          }
                           className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                         >
-                          <option value="">{t("config.modelList.reasoningDefault")}</option>
-                          {REASONING_LEVEL_OPTIONS.map((level) => <option key={level} value={level}>{level}</option>)}
+                          <option value="">
+                            {t("config.modelList.reasoningDefault")}
+                          </option>
+                          {REASONING_LEVEL_OPTIONS.map((level) => (
+                            <option key={level} value={level}>
+                              {level}
+                            </option>
+                          ))}
                         </select>
                       ) : (
                         <input
                           type={field === "api_key" ? "password" : "text"}
                           value={models[idx]?.[field] ?? ""}
-                          onChange={(e) => updateModel(idx, field, e.target.value)}
+                          onChange={(e) =>
+                            updateModel(idx, field, e.target.value)
+                          }
+                          disabled={
+                            usesSubscriptionAuthentication(
+                              models[idx]?.model_provider ?? "",
+                            ) &&
+                            ["api_base", "api_key", "model_name"].includes(
+                              field,
+                            )
+                          }
                           className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
-                          placeholder={field === "api_key" ? t("config.modelList.apiKeyPlaceholder") : ""}
+                          placeholder={
+                            usesSubscriptionAuthentication(
+                              models[idx]?.model_provider ?? "",
+                            ) && ["api_base", "api_key"].includes(field)
+                              ? "Not used for subscription authentication"
+                              : field === "api_key"
+                                ? t("config.modelList.apiKeyPlaceholder")
+                                : ""
+                          }
                         />
                       )}
                     </div>
                   ))}
                   {/* is_default 勾选框 */}
                   <div className="flex items-center gap-2 text-xs">
-                    <label className="w-28 text-text-muted shrink-0">{t("config.modelList.isDefault")}</label>
+                    <label className="w-28 text-text-muted shrink-0">
+                      {t("config.modelList.isDefault")}
+                    </label>
                     <input
                       type="checkbox"
                       checked={isDefault}
@@ -1400,7 +2224,9 @@ function MultiModelSection({
                       className="rounded border-border"
                     />
                     {sameNameCount <= 1 && (
-                      <span className="text-text-muted text-[10px]">{t("config.modelList.onlyOneInGroup")}</span>
+                      <span className="text-text-muted text-[10px]">
+                        {t("config.modelList.onlyOneInGroup")}
+                      </span>
                     )}
                   </div>
                 </div>
@@ -1411,46 +2237,102 @@ function MultiModelSection({
 
         {addingNew ? (
           <div className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 space-y-2">
-            {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
+            {(
+              [
+                "model_name",
+                "alias",
+                "api_base",
+                "api_key",
+                "model_provider",
+                "reasoning_level",
+              ] as const
+            ).map((field) => (
               <div key={field} className="flex items-center gap-2 text-xs">
                 <label className="w-28 text-text-muted shrink-0">
-                  {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
+                  {field}
+                  {(["model_name", "model_provider"].includes(field) ||
+                    (!usesSubscriptionAuthentication(newModel.model_provider) &&
+                      ["api_key", "api_base"].includes(field))) && (
+                    <span className="text-danger ml-0.5">*</span>
+                  )}
                 </label>
                 {field === "model_provider" ? (
                   <select
                     value={newModel[field]}
-                    onChange={(e) => handleNewModelChange(field, e.target.value)}
+                    onChange={(e) =>
+                      handleNewModelChange(field, e.target.value)
+                    }
                     className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                   >
-                    <option value="" disabled>{t("config.selectModelProvider")}</option>
-                    {MODEL_PROVIDER_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
+                    <option value="" disabled>
+                      {t("config.selectModelProvider")}
+                    </option>
+                    {MODEL_PROVIDER_OPTIONS.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
                   </select>
                 ) : field === "reasoning_level" ? (
                   <select
                     value={newModel.reasoning_level ?? ""}
-                    onChange={(e) => handleNewModelChange(field, e.target.value)}
+                    onChange={(e) =>
+                      handleNewModelChange(field, e.target.value)
+                    }
                     className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                   >
-                    <option value="">{t("config.modelList.reasoningDefault")}</option>
-                    {REASONING_LEVEL_OPTIONS.map((level) => <option key={level} value={level}>{level}</option>)}
+                    <option value="">
+                      {t("config.modelList.reasoningDefault")}
+                    </option>
+                    {REASONING_LEVEL_OPTIONS.map((level) => (
+                      <option key={level} value={level}>
+                        {level}
+                      </option>
+                    ))}
                   </select>
                 ) : (
                   <input
                     type={field === "api_key" ? "password" : "text"}
                     value={newModel[field] ?? ""}
-                    onChange={(e) => handleNewModelChange(field, e.target.value)}
+                    onChange={(e) =>
+                      handleNewModelChange(field, e.target.value)
+                    }
+                    disabled={
+                      usesSubscriptionAuthentication(newModel.model_provider) &&
+                      ["api_base", "api_key", "model_name"].includes(field)
+                    }
                     className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
-                    placeholder={field === "model_name" ? "e.g. gpt-4o" : field === "api_key" ? t("config.modelList.apiKeyPlaceholder") : ""}
+                    placeholder={
+                      usesSubscriptionAuthentication(newModel.model_provider) &&
+                      ["api_base", "api_key"].includes(field)
+                        ? "Not used for subscription authentication"
+                        : field === "model_name"
+                          ? "e.g. gpt-4o"
+                          : field === "api_key"
+                            ? t("config.modelList.apiKeyPlaceholder")
+                            : ""
+                    }
                   />
                 )}
               </div>
             ))}
             <div className="flex justify-end gap-2 pt-1">
-              <button type="button" onClick={handleCancelAddNew} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
+              <button
+                type="button"
+                onClick={handleCancelAddNew}
+                className="btn !px-3 !py-1 text-xs"
+              >
+                {t("common.cancel")}
+              </button>
               <button
                 type="button"
                 onClick={handleAddNew}
-                disabled={!newModel.model_name.trim() || !newModel.api_base.trim() || !newModel.api_key.trim() || !newModel.model_provider.trim()}
+                disabled={
+                  !newModel.model_name.trim() ||
+                  !newModel.model_provider.trim() ||
+                  (!usesSubscriptionAuthentication(newModel.model_provider) &&
+                    (!newModel.api_base.trim() || !newModel.api_key.trim()))
+                }
                 className="btn primary !px-3 !py-1 text-xs"
               >
                 {t("common.confirm")}
@@ -1488,7 +2370,11 @@ function MultiAgentSection({
   onTeamsChange: (teams: TeamEntry[]) => void;
   availableModels: ModelEntry[];
   installedSkills?: { name: string; installed?: boolean }[];
-  onDeleteAgent?: (idx: number, agentName: string, references: string[]) => void;
+  onDeleteAgent?: (
+    idx: number,
+    agentName: string,
+    references: string[],
+  ) => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const [expandedIdx, setExpandedIdx] = useState<number | null>(0);
@@ -1540,7 +2426,11 @@ function MultiAgentSection({
     });
   };
 
-  const updateAgentField = (idx: number, field: keyof AgentEntry, value: string | number) => {
+  const updateAgentField = (
+    idx: number,
+    field: keyof AgentEntry,
+    value: string | number,
+  ) => {
     const copy = [...agents];
     if (field === "model") return;
     if (field === "name") {
@@ -1550,10 +2440,18 @@ function MultiAgentSection({
         if (references.length > 0) {
           const updatedTeams = teams.map((team) => ({
             ...team,
-            leader: team.leader?.agent_key === oldName ? { ...team.leader, agent_key: "" } : team.leader,
-            teammate: team.teammate?.agent_key === oldName ? { ...team.teammate, agent_key: "" } : team.teammate,
+            leader:
+              team.leader?.agent_key === oldName
+                ? { ...team.leader, agent_key: "" }
+                : team.leader,
+            teammate:
+              team.teammate?.agent_key === oldName
+                ? { ...team.teammate, agent_key: "" }
+                : team.teammate,
             predefined_members: team.predefined_members?.map((member) =>
-              member.agent_key === oldName ? { ...member, agent_key: "" } : member
+              member.agent_key === oldName
+                ? { ...member, agent_key: "" }
+                : member,
             ),
           }));
           onTeamsChange(updatedTeams);
@@ -1570,7 +2468,11 @@ function MultiAgentSection({
     let selectedModel: ModelEntry | undefined;
     if (sepIdx >= 0) {
       const modelIdx = parseInt(modelKey.slice(sepIdx + 1), 10);
-      if (!isNaN(modelIdx) && modelIdx >= 0 && modelIdx < availableModels.length) {
+      if (
+        !isNaN(modelIdx) &&
+        modelIdx >= 0 &&
+        modelIdx < availableModels.length
+      ) {
         selectedModel = availableModels[modelIdx];
       }
     }
@@ -1609,7 +2511,11 @@ function MultiAgentSection({
     onAgentsChange([...agents, { ...newAgent, name }]);
     setExpandedIdx(agents.length);
     setAddingNew(false);
-    setNewAgent({ name: "", model: { provider: "", api_base: "", api_key: "", model: "" }, skills: [] });
+    setNewAgent({
+      name: "",
+      model: { provider: "", api_base: "", api_key: "", model: "" },
+      skills: [],
+    });
   };
 
   const agentFields: (keyof AgentEntry)[] = ["name", "skills"];
@@ -1632,17 +2538,32 @@ function MultiAgentSection({
       {agents.map((agent, idx) => {
         const isExpanded = expandedIdx === idx;
         return (
-          <div key={idx} className="rounded-lg border border-border bg-secondary/20">
+          <div
+            key={idx}
+            className="rounded-lg border border-border bg-secondary/20"
+          >
             <div className="flex items-center justify-between px-3 py-2">
               <button
                 type="button"
                 className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
                 onClick={() => setExpandedIdx(isExpanded ? null : idx)}
               >
-                <svg className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                <svg
+                  className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-90" : ""}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M9 5l7 7-7 7"
+                  />
                 </svg>
-                <span className="truncate">{agent.name || t("config.agentList.untitled")}</span>
+                <span className="truncate">
+                  {agent.name || t("config.agentList.untitled")}
+                </span>
               </button>
               <div className="flex items-center gap-1 ml-2">
                 <button
@@ -1657,30 +2578,44 @@ function MultiAgentSection({
             {isExpanded && (
               <div className="border-t border-border px-3 py-2 space-y-2">
                 <div className="flex items-center gap-2 text-xs">
-                  <label className="w-28 text-text-muted shrink-0">{t("config.keys.agentModel")}</label>
+                  <label className="w-28 text-text-muted shrink-0">
+                    {t("config.keys.agentModel")}
+                  </label>
                   <select
                     value={(() => {
                       // 根据 agent 当前 model 配置反查 availableModels 中的 index
                       const matchIdx = availableModels.findIndex(
-                        (m) => m.model_name === agent.model.model
-                          && (m.model_provider || "") === (agent.model.provider || "")
-                          && (m.api_base || "") === (agent.model.api_base || ""),
+                        (m) =>
+                          m.model_name === agent.model.model &&
+                          (m.model_provider || "") ===
+                            (agent.model.provider || "") &&
+                          (m.api_base || "") === (agent.model.api_base || ""),
                       );
-                      return matchIdx >= 0 ? `${agent.model.model}#${matchIdx}` : (agent.model.model ?? "");
+                      return matchIdx >= 0
+                        ? `${agent.model.model}#${matchIdx}`
+                        : (agent.model.model ?? "");
                     })()}
                     onChange={(e) => handleModelSelect(idx, e.target.value)}
                     className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                   >
-                    <option value="" disabled>-- Select Model --</option>
+                    <option value="" disabled>
+                      -- Select Model --
+                    </option>
                     {availableModels.map((m, mi) => {
-                      const sameNameModels = availableModels.filter((x) => x.model_name === m.model_name);
+                      const sameNameModels = availableModels.filter(
+                        (x) => x.model_name === m.model_name,
+                      );
                       const sameNameCount = sameNameModels.length;
                       const sameNameIdx = sameNameModels.indexOf(m);
-                      const label = sameNameCount > 1
-                        ? `${m.model_name} #${sameNameIdx + 1}`
-                        : m.model_name;
+                      const label =
+                        sameNameCount > 1
+                          ? `${m.model_name} #${sameNameIdx + 1}`
+                          : m.model_name;
                       return (
-                        <option key={`${m.model_name}#${mi}`} value={`${m.model_name}#${mi}`}>
+                        <option
+                          key={`${m.model_name}#${mi}`}
+                          value={`${m.model_name}#${mi}`}
+                        >
                           {label}
                         </option>
                       );
@@ -1691,7 +2626,9 @@ function MultiAgentSection({
                   <div key={field} className="flex items-center gap-2 text-xs">
                     <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
                       {getAgentFieldLabel(field)}
-                      {AGENT_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+                      {AGENT_REQUIRED_FIELDS.has(field) && (
+                        <span className="text-danger">*</span>
+                      )}
                     </label>
                     {field === "skills" ? (
                       <MultiSelectDropdown
@@ -1709,7 +2646,9 @@ function MultiAgentSection({
                       <input
                         type="text"
                         value={(agent[field] as string) ?? ""}
-                        onChange={(e) => updateAgentField(idx, field, e.target.value)}
+                        onChange={(e) =>
+                          updateAgentField(idx, field, e.target.value)
+                        }
                         maxLength={field === "name" ? 64 : undefined}
                         className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                       />
@@ -1725,15 +2664,21 @@ function MultiAgentSection({
       {addingNew ? (
         <div className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 space-y-2">
           <div className="flex items-center gap-2 text-xs">
-            <label className="w-28 text-text-muted shrink-0">{t("config.keys.agentModel")}</label>
+            <label className="w-28 text-text-muted shrink-0">
+              {t("config.keys.agentModel")}
+            </label>
             <select
               value={(() => {
                 const matchIdx = availableModels.findIndex(
-                  (m) => m.model_name === newAgent.model.model
-                    && (m.model_provider || "") === (newAgent.model.provider || "")
-                    && (m.api_base || "") === (newAgent.model.api_base || ""),
+                  (m) =>
+                    m.model_name === newAgent.model.model &&
+                    (m.model_provider || "") ===
+                      (newAgent.model.provider || "") &&
+                    (m.api_base || "") === (newAgent.model.api_base || ""),
                 );
-                return matchIdx >= 0 ? `${newAgent.model.model}#${matchIdx}` : (newAgent.model.model ?? "");
+                return matchIdx >= 0
+                  ? `${newAgent.model.model}#${matchIdx}`
+                  : (newAgent.model.model ?? "");
               })()}
               onChange={(e) => {
                 const modelKey = e.target.value;
@@ -1741,13 +2686,20 @@ function MultiAgentSection({
                 let selectedModel: ModelEntry | undefined;
                 if (sepIdx >= 0) {
                   const modelIdx = parseInt(modelKey.slice(sepIdx + 1), 10);
-                  if (!isNaN(modelIdx) && modelIdx >= 0 && modelIdx < availableModels.length) {
+                  if (
+                    !isNaN(modelIdx) &&
+                    modelIdx >= 0 &&
+                    modelIdx < availableModels.length
+                  ) {
                     selectedModel = availableModels[modelIdx];
                   }
                 }
                 if (!selectedModel) {
-                  const modelName = sepIdx >= 0 ? modelKey.slice(0, sepIdx) : modelKey;
-                  selectedModel = availableModels.find((m) => m.model_name === modelName);
+                  const modelName =
+                    sepIdx >= 0 ? modelKey.slice(0, sepIdx) : modelKey;
+                  selectedModel = availableModels.find(
+                    (m) => m.model_name === modelName,
+                  );
                 }
                 if (!selectedModel) return;
                 setNewAgent((p) => ({
@@ -1762,16 +2714,24 @@ function MultiAgentSection({
               }}
               className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
             >
-              <option value="" disabled>-- Select Model --</option>
+              <option value="" disabled>
+                -- Select Model --
+              </option>
               {availableModels.map((m, mi) => {
-                const sameNameModels = availableModels.filter((x) => x.model_name === m.model_name);
+                const sameNameModels = availableModels.filter(
+                  (x) => x.model_name === m.model_name,
+                );
                 const sameNameCount = sameNameModels.length;
                 const sameNameIdx = sameNameModels.indexOf(m);
-                const label = sameNameCount > 1
-                  ? `${m.model_name} #${sameNameIdx + 1}`
-                  : m.model_name;
+                const label =
+                  sameNameCount > 1
+                    ? `${m.model_name} #${sameNameIdx + 1}`
+                    : m.model_name;
                 return (
-                  <option key={`${m.model_name}#${mi}`} value={`${m.model_name}#${mi}`}>
+                  <option
+                    key={`${m.model_name}#${mi}`}
+                    value={`${m.model_name}#${mi}`}
+                  >
                     {label}
                   </option>
                 );
@@ -1782,13 +2742,17 @@ function MultiAgentSection({
             <div key={field} className="flex items-center gap-2 text-xs">
               <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
                 {getAgentFieldLabel(field)}
-                {AGENT_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+                {AGENT_REQUIRED_FIELDS.has(field) && (
+                  <span className="text-danger">*</span>
+                )}
               </label>
               {field === "skills" ? (
                 <MultiSelectDropdown
                   options={(installedSkills || []).map((s) => s.name)}
                   selected={newAgent.skills || []}
-                  onChange={(selected) => setNewAgent((p) => ({ ...p, skills: selected }))}
+                  onChange={(selected) =>
+                    setNewAgent((p) => ({ ...p, skills: selected }))
+                  }
                   placeholder={t("config.keys.agentSkillsPlaceholder")}
                   emptyMessage={t("config.keys.agentSkillsEmpty")}
                 />
@@ -1798,7 +2762,8 @@ function MultiAgentSection({
                   value={newAgent[field] as string}
                   onChange={(e) => {
                     setNewAgent((p) => ({ ...p, [field]: e.target.value }));
-                    if (field === "name" && newAgentError) setNewAgentError(null);
+                    if (field === "name" && newAgentError)
+                      setNewAgentError(null);
                   }}
                   maxLength={field === "name" ? 64 : undefined}
                   className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
@@ -1807,9 +2772,26 @@ function MultiAgentSection({
             </div>
           ))}
           <div className="flex justify-end gap-2 pt-1">
-            {newAgentError && <span className="text-danger text-xs self-center">{newAgentError}</span>}
-            <button type="button" onClick={() => setAddingNew(false)} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
-            <button type="button" onClick={handleAddNew} disabled={!newAgent.name.trim()} className="btn primary !px-3 !py-1 text-xs">{t("common.confirm")}</button>
+            {newAgentError && (
+              <span className="text-danger text-xs self-center">
+                {newAgentError}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => setAddingNew(false)}
+              className="btn !px-3 !py-1 text-xs"
+            >
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              onClick={handleAddNew}
+              disabled={!newAgent.name.trim()}
+              className="btn primary !px-3 !py-1 text-xs"
+            >
+              {t("common.confirm")}
+            </button>
           </div>
         </div>
       ) : (
@@ -1838,7 +2820,11 @@ function TeamItemSection({
   team: TeamEntry;
   onTeamChange: (team: TeamEntry) => void;
   agents: AgentEntry[];
-  onDeleteTeamMember?: (teamIdx: number, memberIdx: number, memberName: string) => void;
+  onDeleteTeamMember?: (
+    teamIdx: number,
+    memberIdx: number,
+    memberName: string,
+  ) => void;
   teamIdx?: number;
   teams?: TeamEntry[];
   t: (key: string, options?: Record<string, unknown>) => string;
@@ -1846,17 +2832,34 @@ function TeamItemSection({
   const [openLeader, setOpenLeader] = useState(true);
   const [openTeammate, setOpenTeammate] = useState(true);
   const [openMembers, setOpenMembers] = useState(true);
-  const [expandedMemberIdx, setExpandedMemberIdx] = useState<number | null>(null);
-  const [memberNameError, setMemberNameError] = useState<{ field: 'leader' | number; error: string } | null>(null);
+  const [expandedMemberIdx, setExpandedMemberIdx] = useState<number | null>(
+    null,
+  );
+  const [memberNameError, setMemberNameError] = useState<{
+    field: "leader" | number;
+    error: string;
+  } | null>(null);
   const [addingNewMember, setAddingNewMember] = useState(false);
-  const [newMember, setNewMember] = useState<TeamMember>({ member_name: "", display_name: "", persona: "", prompt_hint: "", agent_key: "" });
-  const [newMemberNameError, setNewMemberNameError] = useState<string | null>(null);
+  const [newMember, setNewMember] = useState<TeamMember>({
+    member_name: "",
+    display_name: "",
+    persona: "",
+    prompt_hint: "",
+    agent_key: "",
+  });
+  const [newMemberNameError, setNewMemberNameError] = useState<string | null>(
+    null,
+  );
 
   useEffect(() => {
-    const allMembers = [...(team.predefined_members || []), team.leader].filter(Boolean) as { member_name: string }[];
-    const hasInvalidName = allMembers.some((m) => !/^[a-z][a-z0-9-]*$/.test(m.member_name));
+    const allMembers = [...(team.predefined_members || []), team.leader].filter(
+      Boolean,
+    ) as { member_name: string }[];
+    const hasInvalidName = allMembers.some(
+      (m) => !/^[a-z][a-z0-9-]*$/.test(m.member_name),
+    );
     const hasDuplicate = allMembers.some((m, i) =>
-      allMembers.some((m2, j) => i !== j && m.member_name === m2.member_name)
+      allMembers.some((m2, j) => i !== j && m.member_name === m2.member_name),
     );
 
     if (!hasInvalidName && !hasDuplicate) {
@@ -1864,7 +2867,11 @@ function TeamItemSection({
     }
   }, [team]);
 
-  const checkMemberNameDuplicate = (leaderName: string, members: TeamMember[], excludeIdx?: number): string | null => {
+  const checkMemberNameDuplicate = (
+    leaderName: string,
+    members: TeamMember[],
+    excludeIdx?: number,
+  ): string | null => {
     if (!leaderName) return null;
     for (let i = 0; i < members.length; i++) {
       if (excludeIdx !== undefined && i === excludeIdx) continue;
@@ -1905,21 +2912,43 @@ function TeamItemSection({
 
   const updateLeader = (field: keyof Leader, value: string) => {
     if (field === "member_name") {
-      const duplicateError = checkMemberNameDuplicate(value, team.predefined_members || []);
+      const duplicateError = checkMemberNameDuplicate(
+        value,
+        team.predefined_members || [],
+      );
       const englishError = checkEnglishOnly(value);
       const errors = [englishError, duplicateError].filter(Boolean);
-      setMemberNameError(errors.length > 0 ? { field: 'leader', error: errors.join("; ") } : null);
+      setMemberNameError(
+        errors.length > 0
+          ? { field: "leader", error: errors.join("; ") }
+          : null,
+      );
     }
     onTeamChange({ ...team, leader: { ...team.leader, [field]: value } });
   };
 
-  const updateMember = (idx: number, field: keyof TeamMember, value: string) => {
+  const updateMember = (
+    idx: number,
+    field: keyof TeamMember,
+    value: string,
+  ) => {
     if (field === "member_name") {
-      const duplicateError = checkMemberNameDuplicate(value, team.predefined_members, idx);
-      const leaderDuplicate = team.leader?.member_name === value ? t("config.team.duplicateMemberName") : null;
+      const duplicateError = checkMemberNameDuplicate(
+        value,
+        team.predefined_members,
+        idx,
+      );
+      const leaderDuplicate =
+        team.leader?.member_name === value
+          ? t("config.team.duplicateMemberName")
+          : null;
       const englishError = checkEnglishOnly(value);
-      const errors = [englishError, duplicateError, leaderDuplicate].filter((e): e is string => e !== null);
-      setMemberNameError(errors.length > 0 ? { field: idx, error: errors[0] } : null);
+      const errors = [englishError, duplicateError, leaderDuplicate].filter(
+        (e): e is string => e !== null,
+      );
+      setMemberNameError(
+        errors.length > 0 ? { field: idx, error: errors[0] } : null,
+      );
     }
     const updated = [...team.predefined_members];
     updated[idx] = { ...updated[idx], [field]: value };
@@ -1928,10 +2957,19 @@ function TeamItemSection({
 
   const validateNewMemberName = (value: string): boolean => {
     const englishError = checkEnglishOnly(value);
-    const duplicateInMembers = team.predefined_members.some((m) => m.member_name === value);
-    const duplicateError = duplicateInMembers ? t("config.team.duplicateMemberName") : null;
-    const leaderDuplicate = team.leader?.member_name === value ? t("config.team.duplicateMemberName") : null;
-    const errors = [englishError, duplicateError, leaderDuplicate].filter(Boolean);
+    const duplicateInMembers = team.predefined_members.some(
+      (m) => m.member_name === value,
+    );
+    const duplicateError = duplicateInMembers
+      ? t("config.team.duplicateMemberName")
+      : null;
+    const leaderDuplicate =
+      team.leader?.member_name === value
+        ? t("config.team.duplicateMemberName")
+        : null;
+    const errors = [englishError, duplicateError, leaderDuplicate].filter(
+      Boolean,
+    );
     setNewMemberNameError(errors.length > 0 ? errors[0] : null);
     return errors.length === 0;
   };
@@ -1950,13 +2988,25 @@ function TeamItemSection({
       ...team,
       predefined_members: [...team.predefined_members, newMember],
     });
-    setNewMember({ member_name: "", display_name: "", persona: "", prompt_hint: "", agent_key: "" });
+    setNewMember({
+      member_name: "",
+      display_name: "",
+      persona: "",
+      prompt_hint: "",
+      agent_key: "",
+    });
     setNewMemberNameError(null);
     setAddingNewMember(false);
   };
 
   const cancelAddNewMember = () => {
-    setNewMember({ member_name: "", display_name: "", persona: "", prompt_hint: "", agent_key: "" });
+    setNewMember({
+      member_name: "",
+      display_name: "",
+      persona: "",
+      prompt_hint: "",
+      agent_key: "",
+    });
     setNewMemberNameError(null);
     setAddingNewMember(false);
   };
@@ -1975,7 +3025,8 @@ function TeamItemSection({
   };
 
   const removeMember = (idx: number) => {
-    const memberName = team.predefined_members[idx]?.member_name || t("config.team.untitled");
+    const memberName =
+      team.predefined_members[idx]?.member_name || t("config.team.untitled");
     if (onDeleteTeamMember && teamIdx !== undefined) {
       onDeleteTeamMember(teamIdx, idx, memberName);
     } else {
@@ -1990,15 +3041,46 @@ function TeamItemSection({
     }
   };
 
-  const teamStringFields: (keyof TeamEntry)[] = ["team_name", "lifecycle", "teammate_mode", "spawn_mode"];
+  const teamStringFields: (keyof TeamEntry)[] = [
+    "team_name",
+    "lifecycle",
+    "teammate_mode",
+    "spawn_mode",
+  ];
   const teammateFields: (keyof Teammate)[] = ["agent_key"];
-  const leaderFields: (keyof Leader)[] = ["member_name", "display_name", "persona", "agent_key"];
-  const memberFields: (keyof TeamMember)[] = ["member_name", "display_name", "persona", "prompt_hint", "agent_key"];
+  const leaderFields: (keyof Leader)[] = [
+    "member_name",
+    "display_name",
+    "persona",
+    "agent_key",
+  ];
+  const memberFields: (keyof TeamMember)[] = [
+    "member_name",
+    "display_name",
+    "persona",
+    "prompt_hint",
+    "agent_key",
+  ];
 
   // Team 必填字段
-  const TEAM_REQUIRED_FIELDS = new Set(["team_name", "lifecycle", "teammate_mode", "spawn_mode"]);
-  const LEADER_REQUIRED_FIELDS = new Set(["member_name", "display_name", "persona", "agent_key"]);
-  const MEMBER_REQUIRED_FIELDS = new Set(["member_name", "display_name", "persona", "agent_key"]);
+  const TEAM_REQUIRED_FIELDS = new Set([
+    "team_name",
+    "lifecycle",
+    "teammate_mode",
+    "spawn_mode",
+  ]);
+  const LEADER_REQUIRED_FIELDS = new Set([
+    "member_name",
+    "display_name",
+    "persona",
+    "agent_key",
+  ]);
+  const MEMBER_REQUIRED_FIELDS = new Set([
+    "member_name",
+    "display_name",
+    "persona",
+    "agent_key",
+  ]);
 
   const getTeamFieldLabel = (field: string): string => {
     const labels: Record<string, string> = {
@@ -2039,7 +3121,9 @@ function TeamItemSection({
           <div key={field} className="flex items-center gap-2 text-xs">
             <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
               {getTeamFieldLabel(field)}
-              {TEAM_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+              {TEAM_REQUIRED_FIELDS.has(field) && (
+                <span className="text-danger">*</span>
+              )}
             </label>
             {field === "lifecycle" ? (
               <select
@@ -2047,8 +3131,12 @@ function TeamItemSection({
                 onChange={(e) => updateTeamField(field, e.target.value)}
                 className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
               >
-                <option value="persistent">{t("config.team.lifecyclePersistent")}</option>
-                <option value="temporary">{t("config.team.lifecycleTemporary")}</option>
+                <option value="persistent">
+                  {t("config.team.lifecyclePersistent")}
+                </option>
+                <option value="temporary">
+                  {t("config.team.lifecycleTemporary")}
+                </option>
               </select>
             ) : field === "teammate_mode" ? (
               <select
@@ -2056,8 +3144,12 @@ function TeamItemSection({
                 onChange={(e) => updateTeamField(field, e.target.value)}
                 className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
               >
-                <option value="build_mode">{t("config.team.teammateModeBuild")}</option>
-                <option value="plan_mode">{t("config.team.teammateModePlan")}</option>
+                <option value="build_mode">
+                  {t("config.team.teammateModeBuild")}
+                </option>
+                <option value="plan_mode">
+                  {t("config.team.teammateModePlan")}
+                </option>
               </select>
             ) : field === "spawn_mode" ? (
               <input
@@ -2087,12 +3179,14 @@ function TeamItemSection({
             aria-checked={team.enable_permissions}
             onClick={updateTeamPermissions}
             title={t("config.keys.teamEnablePermissions")}
-            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${team.enable_permissions ? "bg-ok" : "bg-secondary"
-              }`}
+            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+              team.enable_permissions ? "bg-ok" : "bg-secondary"
+            }`}
           >
             <span
-              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${team.enable_permissions ? "translate-x-4" : "translate-x-0"
-                }`}
+              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                team.enable_permissions ? "translate-x-4" : "translate-x-0"
+              }`}
             />
           </button>
         </div>
@@ -2106,8 +3200,18 @@ function TeamItemSection({
           className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-text"
         >
           <span>{t("config.team.leader")}</span>
-          <svg className={`w-3 h-3 transition-transform ${openLeader ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+          <svg
+            className={`w-3 h-3 transition-transform ${openLeader ? "rotate-180" : ""}`}
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M19 9l-7 7-7-7"
+            />
           </svg>
         </button>
         {openLeader && (
@@ -2116,7 +3220,9 @@ function TeamItemSection({
               <div key={field} className="flex items-center gap-2 text-xs">
                 <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
                   {getLeaderFieldLabel(field)}
-                  {LEADER_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+                  {LEADER_REQUIRED_FIELDS.has(field) && (
+                    <span className="text-danger">*</span>
+                  )}
                 </label>
                 {field === "agent_key" ? (
                   <select
@@ -2124,14 +3230,21 @@ function TeamItemSection({
                     onChange={(e) => updateLeader(field, e.target.value)}
                     className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                   >
-                    <option value="" disabled hidden>-- Select Agent --</option>
-                    <option value="" disabled>-- Select Agent --</option>
+                    <option value="" disabled hidden>
+                      -- Select Agent --
+                    </option>
+                    <option value="" disabled>
+                      -- Select Agent --
+                    </option>
                     {agents.map((agent) => {
                       const refs = getAgentTeamReferences(agent.name);
                       const isReferenced = refs.length > 0;
                       return (
                         <option key={agent.name} value={agent.name}>
-                          {agent.name || "(unnamed)"}{isReferenced ? ` (${t("config.team.referencedByTeams", { count: refs.length })})` : ""}
+                          {agent.name || "(unnamed)"}
+                          {isReferenced
+                            ? ` (${t("config.team.referencedByTeams", { count: refs.length })})`
+                            : ""}
                         </option>
                       );
                     })}
@@ -2143,11 +3256,14 @@ function TeamItemSection({
                       value={team.leader[field] ?? ""}
                       onChange={(e) => updateLeader(field, e.target.value)}
                       maxLength={field === "persona" ? 2048 : 64}
-                      className={`w-full rounded border bg-bg px-2 py-1 text-text text-xs ${field === "member_name" && memberNameError?.field === 'leader' ? "border-danger" : "border-border"}`}
+                      className={`w-full rounded border bg-bg px-2 py-1 text-text text-xs ${field === "member_name" && memberNameError?.field === "leader" ? "border-danger" : "border-border"}`}
                     />
-                    {field === "member_name" && memberNameError?.field === 'leader' && (
-                      <p className="text-[10px] text-danger mt-1">{memberNameError.error}</p>
-                    )}
+                    {field === "member_name" &&
+                      memberNameError?.field === "leader" && (
+                        <p className="text-[10px] text-danger mt-1">
+                          {memberNameError.error}
+                        </p>
+                      )}
                   </div>
                 )}
               </div>
@@ -2164,8 +3280,18 @@ function TeamItemSection({
           className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-text"
         >
           <span>{t("config.team.teammate")}</span>
-          <svg className={`w-3 h-3 transition-transform ${openTeammate ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+          <svg
+            className={`w-3 h-3 transition-transform ${openTeammate ? "rotate-180" : ""}`}
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M19 9l-7 7-7-7"
+            />
           </svg>
         </button>
         {openTeammate && (
@@ -2174,7 +3300,9 @@ function TeamItemSection({
               <div key={field} className="flex items-center gap-2 text-xs">
                 <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
                   {getLeaderFieldLabel(field)}
-                  {LEADER_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+                  {LEADER_REQUIRED_FIELDS.has(field) && (
+                    <span className="text-danger">*</span>
+                  )}
                 </label>
                 {field === "agent_key" ? (
                   <select
@@ -2182,14 +3310,21 @@ function TeamItemSection({
                     onChange={(e) => updateTeammate(field, e.target.value)}
                     className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                   >
-                    <option value="" disabled hidden>-- Select Agent --</option>
-                    <option value="" disabled>-- Select Agent --</option>
+                    <option value="" disabled hidden>
+                      -- Select Agent --
+                    </option>
+                    <option value="" disabled>
+                      -- Select Agent --
+                    </option>
                     {agents.map((agent) => {
                       const refs = getAgentTeamReferences(agent.name);
                       const isReferenced = refs.length > 0;
                       return (
                         <option key={agent.name} value={agent.name}>
-                          {agent.name || "(unnamed)"}{isReferenced ? ` (${t("config.team.referencedByTeams", { count: refs.length })})` : ""}
+                          {agent.name || "(unnamed)"}
+                          {isReferenced
+                            ? ` (${t("config.team.referencedByTeams", { count: refs.length })})`
+                            : ""}
                         </option>
                       );
                     })}
@@ -2216,9 +3351,22 @@ function TeamItemSection({
           onClick={() => setOpenMembers(!openMembers)}
           className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-text"
         >
-          <span>{t("config.team.predefinedMembers")} ({team.predefined_members.length})</span>
-          <svg className={`w-3 h-3 transition-transform ${openMembers ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+          <span>
+            {t("config.team.predefinedMembers")} (
+            {team.predefined_members.length})
+          </span>
+          <svg
+            className={`w-3 h-3 transition-transform ${openMembers ? "rotate-180" : ""}`}
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M19 9l-7 7-7-7"
+            />
           </svg>
         </button>
         {openMembers && (
@@ -2226,17 +3374,34 @@ function TeamItemSection({
             {team.predefined_members.map((member, idx) => {
               const isExpanded = expandedMemberIdx === idx;
               return (
-                <div key={idx} className="rounded border border-border bg-secondary/20">
+                <div
+                  key={idx}
+                  className="rounded border border-border bg-secondary/20"
+                >
                   <div className="flex items-center justify-between px-3 py-2">
                     <button
                       type="button"
                       className="flex items-center gap-2 text-xs font-medium text-text truncate flex-1 text-left"
-                      onClick={() => setExpandedMemberIdx(isExpanded ? null : idx)}
+                      onClick={() =>
+                        setExpandedMemberIdx(isExpanded ? null : idx)
+                      }
                     >
-                      <svg className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                      <svg
+                        className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-90" : ""}`}
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                        strokeWidth={2}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M9 5l7 7-7 7"
+                        />
                       </svg>
-                      <span className="truncate">{member.member_name || t("config.agentList.untitled")}</span>
+                      <span className="truncate">
+                        {member.member_name || t("config.agentList.untitled")}
+                      </span>
                     </button>
                     <div className="flex items-center gap-1 ml-2">
                       <button
@@ -2251,25 +3416,39 @@ function TeamItemSection({
                   {isExpanded && (
                     <div className="border-t border-border px-3 py-2 space-y-2">
                       {memberFields.map((field) => (
-                        <div key={field} className="flex items-center gap-2 text-xs">
+                        <div
+                          key={field}
+                          className="flex items-center gap-2 text-xs"
+                        >
                           <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
                             {getMemberFieldLabel(field)}
-                            {MEMBER_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+                            {MEMBER_REQUIRED_FIELDS.has(field) && (
+                              <span className="text-danger">*</span>
+                            )}
                           </label>
                           {field === "agent_key" ? (
                             <select
                               value={member[field] ?? ""}
-                              onChange={(e) => updateMember(idx, field, e.target.value)}
+                              onChange={(e) =>
+                                updateMember(idx, field, e.target.value)
+                              }
                               className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                             >
-                              <option value="" disabled hidden>-- Select Agent --</option>
-                              <option value="" disabled>-- Select Agent --</option>
+                              <option value="" disabled hidden>
+                                -- Select Agent --
+                              </option>
+                              <option value="" disabled>
+                                -- Select Agent --
+                              </option>
                               {agents.map((agent) => {
                                 const refs = getAgentTeamReferences(agent.name);
                                 const isReferenced = refs.length > 0;
                                 return (
                                   <option key={agent.name} value={agent.name}>
-                                    {agent.name || "(unnamed)"}{isReferenced ? ` (${t("config.team.referencedByTeams", { count: refs.length })})` : ""}
+                                    {agent.name || "(unnamed)"}
+                                    {isReferenced
+                                      ? ` (${t("config.team.referencedByTeams", { count: refs.length })})`
+                                      : ""}
                                   </option>
                                 );
                               })}
@@ -2279,13 +3458,24 @@ function TeamItemSection({
                               <input
                                 type="text"
                                 value={member[field] ?? ""}
-                                onChange={(e) => updateMember(idx, field, e.target.value)}
-                                maxLength={field === "prompt_hint" ? 4096 : (field === "persona" ? 2048 : 64)}
+                                onChange={(e) =>
+                                  updateMember(idx, field, e.target.value)
+                                }
+                                maxLength={
+                                  field === "prompt_hint"
+                                    ? 4096
+                                    : field === "persona"
+                                      ? 2048
+                                      : 64
+                                }
                                 className={`w-full rounded border bg-bg px-2 py-1 text-text text-xs ${field === "member_name" && memberNameError?.field === idx ? "border-danger" : "border-border"}`}
                               />
-                              {field === "member_name" && memberNameError?.field === idx && (
-                                <p className="text-[10px] text-danger mt-1">{memberNameError.error}</p>
-                              )}
+                              {field === "member_name" &&
+                                memberNameError?.field === idx && (
+                                  <p className="text-[10px] text-danger mt-1">
+                                    {memberNameError.error}
+                                  </p>
+                                )}
                             </div>
                           )}
                         </div>
@@ -2301,7 +3491,9 @@ function TeamItemSection({
                   <div key={field} className="flex items-center gap-2 text-xs">
                     <label className="w-28 text-text-muted shrink-0 flex items-center gap-0.5">
                       {getMemberFieldLabel(field)}
-                      {MEMBER_REQUIRED_FIELDS.has(field) && <span className="text-danger">*</span>}
+                      {MEMBER_REQUIRED_FIELDS.has(field) && (
+                        <span className="text-danger">*</span>
+                      )}
                     </label>
                     {field === "agent_key" ? (
                       <select
@@ -2309,14 +3501,21 @@ function TeamItemSection({
                         onChange={(e) => updateNewMember(field, e.target.value)}
                         className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                       >
-                        <option value="" disabled hidden>-- Select Agent --</option>
-                        <option value="" disabled>-- Select Agent --</option>
+                        <option value="" disabled hidden>
+                          -- Select Agent --
+                        </option>
+                        <option value="" disabled>
+                          -- Select Agent --
+                        </option>
                         {agents.map((agent) => {
                           const refs = getAgentTeamReferences(agent.name);
                           const isReferenced = refs.length > 0;
                           return (
                             <option key={agent.name} value={agent.name}>
-                              {agent.name || "(unnamed)"}{isReferenced ? ` (${t("config.team.referencedByTeams", { count: refs.length })})` : ""}
+                              {agent.name || "(unnamed)"}
+                              {isReferenced
+                                ? ` (${t("config.team.referencedByTeams", { count: refs.length })})`
+                                : ""}
                             </option>
                           );
                         })}
@@ -2326,20 +3525,43 @@ function TeamItemSection({
                         <input
                           type="text"
                           value={newMember[field] ?? ""}
-                          onChange={(e) => updateNewMember(field, e.target.value)}
-                          maxLength={field === "prompt_hint" ? 4096 : (field === "persona" ? 2048 : 64)}
+                          onChange={(e) =>
+                            updateNewMember(field, e.target.value)
+                          }
+                          maxLength={
+                            field === "prompt_hint"
+                              ? 4096
+                              : field === "persona"
+                                ? 2048
+                                : 64
+                          }
                           className={`w-full rounded border bg-bg px-2 py-1 text-text text-xs ${field === "member_name" && newMemberNameError ? "border-danger" : "border-border"}`}
                         />
                         {field === "member_name" && newMemberNameError && (
-                          <p className="text-[10px] text-danger mt-1">{newMemberNameError}</p>
+                          <p className="text-[10px] text-danger mt-1">
+                            {newMemberNameError}
+                          </p>
                         )}
                       </div>
                     )}
                   </div>
                 ))}
                 <div className="flex justify-end gap-2 pt-1">
-                  <button type="button" onClick={cancelAddNewMember} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
-                  <button type="button" onClick={handleAddNewMember} disabled={!newMember.member_name.trim()} className="btn primary !px-3 !py-1 text-xs">{t("common.confirm")}</button>
+                  <button
+                    type="button"
+                    onClick={cancelAddNewMember}
+                    className="btn !px-3 !py-1 text-xs"
+                  >
+                    {t("common.cancel")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAddNewMember}
+                    disabled={!newMember.member_name.trim()}
+                    className="btn primary !px-3 !py-1 text-xs"
+                  >
+                    {t("common.confirm")}
+                  </button>
                 </div>
               </div>
             ) : (
@@ -2371,7 +3593,11 @@ function TeamsSection({
   onTeamsChange: (teams: TeamEntry[]) => void;
   agents: AgentEntry[];
   onDeleteTeam?: (idx: number, teamName: string) => void;
-  onDeleteTeamMember?: (teamIdx: number, memberIdx: number, memberName: string) => void;
+  onDeleteTeamMember?: (
+    teamIdx: number,
+    memberIdx: number,
+    memberName: string,
+  ) => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const [expandedIdx, setExpandedIdx] = useState<number | null>(0);
@@ -2432,17 +3658,32 @@ function TeamsSection({
       {teams.map((team, idx) => {
         const isExpanded = expandedIdx === idx;
         return (
-          <div key={idx} className="rounded-lg border border-border bg-secondary/20">
+          <div
+            key={idx}
+            className="rounded-lg border border-border bg-secondary/20"
+          >
             <div className="flex items-center justify-between px-3 py-2">
               <button
                 type="button"
                 className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
                 onClick={() => setExpandedIdx(isExpanded ? null : idx)}
               >
-                <svg className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                <svg
+                  className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-90" : ""}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M9 5l7 7-7 7"
+                  />
                 </svg>
-                <span className="truncate">{team.team_name || t("config.agentList.untitled")}</span>
+                <span className="truncate">
+                  {team.team_name || t("config.agentList.untitled")}
+                </span>
               </button>
               <div className="flex items-center gap-1 ml-2">
                 <button
@@ -2474,17 +3715,34 @@ function TeamsSection({
       {addingNew ? (
         <div className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 space-y-2">
           <div className="flex items-center gap-2 text-xs">
-            <label className="w-28 text-text-muted shrink-0">{t("config.keys.teamName")}</label>
+            <label className="w-28 text-text-muted shrink-0">
+              {t("config.keys.teamName")}
+            </label>
             <input
               type="text"
               value={newTeam.team_name}
-              onChange={(e) => setNewTeam((p) => ({ ...p, team_name: e.target.value }))}
+              onChange={(e) =>
+                setNewTeam((p) => ({ ...p, team_name: e.target.value }))
+              }
               className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
             />
           </div>
           <div className="flex justify-end gap-2 pt-1">
-            <button type="button" onClick={() => setAddingNew(false)} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
-            <button type="button" onClick={handleAddNew} disabled={!newTeam.team_name.trim()} className="btn primary !px-3 !py-1 text-xs">{t("common.confirm")}</button>
+            <button
+              type="button"
+              onClick={() => setAddingNew(false)}
+              className="btn !px-3 !py-1 text-xs"
+            >
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              onClick={handleAddNew}
+              disabled={!newTeam.team_name.trim()}
+              className="btn primary !px-3 !py-1 text-xs"
+            >
+              {t("common.confirm")}
+            </button>
           </div>
         </div>
       ) : teams.length > 0 ? null : (
@@ -2511,6 +3769,11 @@ export function ConfigPanel({
   onModelsReplaceAll,
   onModelValidate,
   onModelsRefresh,
+  onCodexAuthStatus,
+  onCodexAuthStart,
+  onCodexAuthCancel,
+  onCodexAuthLogout,
+  onOpenCodexAuthUrl,
   onAgentsTeamsSave,
   onHasChangesChange,
 }: ConfigPanelProps) {
@@ -2520,17 +3783,17 @@ export function ConfigPanel({
   const { availableModels: storeAvailableModels, mode } = useSessionStore();
   // 调试日志：保存按钮锁定/解锁翻转时记录一次，便于还原“保存按钮为何一直禁用”。
   // 锁定条件与保存按钮 disabled 中的运行锁分支一致（team 模式豁免）。
-  const saveLocked = (isProcessing || globalTaskRunning) && mode !== 'team';
+  const saveLocked = (isProcessing || globalTaskRunning) && mode !== "team";
   const lockRef = useRef<boolean>(saveLocked);
   if (lockRef.current !== saveLocked) {
     console.info(
-      '[task.global_running] 保存锁切换: locked=',
+      "[task.global_running] 保存锁切换: locked=",
       saveLocked,
-      'isProcessing=',
+      "isProcessing=",
       isProcessing,
-      'globalTaskRunning=',
+      "globalTaskRunning=",
       globalTaskRunning,
-      'mode=',
+      "mode=",
       mode,
     );
     lockRef.current = saveLocked;
@@ -2543,7 +3806,9 @@ export function ConfigPanel({
     }
     return next;
   });
-  const [draftModels, setDraftModels] = useState<ModelEntry[]>(() => storeAvailableModels.map((m) => ({ ...m })));
+  const [draftModels, setDraftModels] = useState<ModelEntry[]>(() =>
+    storeAvailableModels.map((m) => ({ ...m })),
+  );
 
   const [draftAgents, setDraftAgents] = useState<AgentEntry[]>([]);
   const [draftTeams, setDraftTeams] = useState<TeamEntry[]>([]);
@@ -2559,11 +3824,157 @@ export function ConfigPanel({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modelError, setModelError] = useState<string | null>(null);
-  const [deleteAgentConfirm, setDeleteAgentConfirm] = useState<{ idx: number; agentName: string; references: string[] } | null>(null);
-  const [deleteModelConfirm, setDeleteModelConfirm] = useState<{ idx: number; modelName: string; references: string[] } | null>(null);
-  const [deleteTeamConfirm, setDeleteTeamConfirm] = useState<{ idx: number; teamName: string } | null>(null);
-  const [deleteTeamMemberConfirm, setDeleteTeamMemberConfirm] = useState<{ teamIdx: number; memberIdx: number; memberName: string } | null>(null);
-  const [installedSkills, setInstalledSkills] = useState<{ name: string; installed?: boolean }[]>([]);
+  const [codexAuth, setCodexAuth] = useState<CodexAuthStatus | null>(null);
+  const [codexAuthHandoff, setCodexAuthHandoff] =
+    useState<CodexAuthStatus | null>(null);
+  const [codexAuthBusy, setCodexAuthBusy] = useState(false);
+  const [codexAuthError, setCodexAuthError] = useState<string | null>(null);
+  const hasCodexDraft = useMemo(
+    () =>
+      draftModels.some((model) =>
+        usesSubscriptionAuthentication(model.model_provider),
+      ),
+    [draftModels],
+  );
+  const observeCodexAuth = shouldObserveCodexAuth(
+    hasCodexDraft,
+    codexAuth,
+    codexAuthHandoff,
+  );
+  const [deleteAgentConfirm, setDeleteAgentConfirm] = useState<{
+    idx: number;
+    agentName: string;
+    references: string[];
+  } | null>(null);
+  const [deleteModelConfirm, setDeleteModelConfirm] = useState<{
+    idx: number;
+    modelName: string;
+    references: string[];
+  } | null>(null);
+  const [deleteTeamConfirm, setDeleteTeamConfirm] = useState<{
+    idx: number;
+    teamName: string;
+  } | null>(null);
+  const [deleteTeamMemberConfirm, setDeleteTeamMemberConfirm] = useState<{
+    teamIdx: number;
+    memberIdx: number;
+    memberName: string;
+  } | null>(null);
+  const [installedSkills, setInstalledSkills] = useState<
+    { name: string; installed?: boolean }[]
+  >([]);
+
+  const refreshCodexAuth = useCallback(async () => {
+    if (!onCodexAuthStatus || !isConnected) return;
+    try {
+      const status = await onCodexAuthStatus();
+      setCodexAuth(status);
+      setCodexAuthHandoff((handoff) =>
+        shouldRetainCodexAuthHandoff(handoff, status) ? handoff : null,
+      );
+      if (status.connected) {
+        setCodexAuthError(null);
+      }
+    } catch (authError) {
+      setCodexAuthHandoff(null);
+      setCodexAuthError(
+        authError instanceof Error
+          ? authError.message
+          : "Could not read Codex connection status.",
+      );
+    }
+  }, [isConnected, onCodexAuthStatus]);
+
+  useEffect(() => {
+    if (hasCodexDraft) void refreshCodexAuth();
+  }, [hasCodexDraft, refreshCodexAuth]);
+
+  useEffect(() => {
+    if (
+      !codexAuth ||
+      !["waiting_for_user", "reconciling", "canceling"].includes(
+        codexAuth.state,
+      )
+    )
+      return;
+    const timer = window.setInterval(() => void refreshCodexAuth(), 2000);
+    return () => window.clearInterval(timer);
+  }, [codexAuth, refreshCodexAuth]);
+
+  useEffect(() => {
+    if (observeCodexAuth) return;
+    setCodexAuth(null);
+    setCodexAuthHandoff(null);
+    setCodexAuthError(null);
+  }, [observeCodexAuth]);
+
+  const startCodexAuth = async () => {
+    if (!onCodexAuthStart) return;
+    setCodexAuthBusy(true);
+    setCodexAuthError(null);
+    try {
+      const status = await onCodexAuthStart();
+      setCodexAuth(status);
+      if (status.verification_url && status.user_code && status.operation_id) {
+        setCodexAuthHandoff(status);
+        try {
+          await navigator.clipboard.writeText(status.user_code);
+        } catch {
+          // Clipboard access is optional; the code remains visible and selectable.
+        }
+        if (onOpenCodexAuthUrl) {
+          await onOpenCodexAuthUrl(status.verification_url);
+        }
+      }
+    } catch (authError) {
+      setCodexAuthError(
+        authError instanceof Error
+          ? authError.message
+          : "Could not start Codex login.",
+      );
+    } finally {
+      setCodexAuthBusy(false);
+    }
+  };
+
+  const cancelCodexAuth = async () => {
+    const operationId =
+      codexAuthHandoff?.operation_id ?? codexAuth?.operation_id;
+    if (!onCodexAuthCancel || !operationId) return;
+    setCodexAuthBusy(true);
+    setCodexAuthError(null);
+    try {
+      const status = await onCodexAuthCancel(operationId);
+      setCodexAuth(status);
+      setCodexAuthHandoff(null);
+    } catch (authError) {
+      setCodexAuthError(
+        authError instanceof Error
+          ? authError.message
+          : "Could not cancel Codex login.",
+      );
+    } finally {
+      setCodexAuthBusy(false);
+    }
+  };
+
+  const logoutCodexAuth = async () => {
+    if (!onCodexAuthLogout) return;
+    setCodexAuthBusy(true);
+    setCodexAuthError(null);
+    try {
+      setCodexAuth(await onCodexAuthLogout());
+      setCodexAuthHandoff(null);
+    } catch (authError) {
+      setCodexAuthError(
+        authError instanceof Error
+          ? authError.message
+          : "Could not disconnect Codex.",
+      );
+    } finally {
+      setCodexAuthBusy(false);
+    }
+  };
 
   const markAgentsTeamsEdited = () => {
     setAgentsTeamsEdited(true);
@@ -2573,10 +3984,9 @@ export function ConfigPanel({
 
   const fetchInstalledSkills = useCallback(async () => {
     try {
-      const data = await webRequest<{ skills?: { name: string; installed?: boolean }[] }>(
-        "skills.list",
-        { with_installed: true, session_id: sessionId }
-      );
+      const data = await webRequest<{
+        skills?: { name: string; installed?: boolean }[];
+      }>("skills.list", { with_installed: true, session_id: sessionId });
       const filteredSkills = (data.skills || [])
         .filter((s) => s.installed !== false)
         .sort((a, b) => a.name.localeCompare(b.name));
@@ -2589,7 +3999,7 @@ export function ConfigPanel({
   // 挂载时预加载（仅一次），之后仅在切到 Agent 配置 Tab 时刷新
   const skillsFetchInitRef = useRef(false);
   useEffect(() => {
-    if (skillsFetchInitRef.current && configTab !== 'agent') return;
+    if (skillsFetchInitRef.current && configTab !== "agent") return;
     skillsFetchInitRef.current = true;
     fetchInstalledSkills();
   }, [configTab, fetchInstalledSkills]);
@@ -2603,7 +4013,9 @@ export function ConfigPanel({
 
     const cleanedAgents = draftAgents.map((agent) => {
       const originalSkills = agent.skills || [];
-      const cleanedSkills = originalSkills.filter((skill) => installedSkillNames.has(skill));
+      const cleanedSkills = originalSkills.filter((skill) =>
+        installedSkillNames.has(skill),
+      );
       if (cleanedSkills.length !== originalSkills.length) {
         hasChanges = true;
         return { ...agent, skills: cleanedSkills };
@@ -2617,11 +4029,19 @@ export function ConfigPanel({
     }
   }, [installedSkills, draftAgents, setDraftAgents]);
 
-  const handleDeleteAgent = (idx: number, agentName: string, references: string[]) => {
+  const handleDeleteAgent = (
+    idx: number,
+    agentName: string,
+    references: string[],
+  ) => {
     setDeleteAgentConfirm({ idx, agentName, references });
   };
 
-  const handleDeleteModel = (idx: number, modelName: string, references: string[]) => {
+  const handleDeleteModel = (
+    idx: number,
+    modelName: string,
+    references: string[],
+  ) => {
     setDeleteModelConfirm({ idx, modelName, references });
   };
 
@@ -2659,7 +4079,7 @@ export function ConfigPanel({
               };
             }
             return agent;
-          })
+          }),
         );
       }
       handleModelsChange(next);
@@ -2670,22 +4090,26 @@ export function ConfigPanel({
   const confirmDeleteAgent = () => {
     if (!deleteAgentConfirm) return;
     const deletedName = deleteAgentConfirm.agentName;
-    setDraftAgents((prev) => prev.filter((_, i) => i !== deleteAgentConfirm.idx));
+    setDraftAgents((prev) =>
+      prev.filter((_, i) => i !== deleteAgentConfirm.idx),
+    );
     setDraftTeams((prev) =>
       prev.map((team) => ({
         ...team,
-        leader: team.leader?.agent_key === deletedName
-          ? { ...team.leader, agent_key: "" }
-          : team.leader,
-        teammate: team.teammate?.agent_key === deletedName
-          ? { agent_key: "" }
-          : team.teammate,
+        leader:
+          team.leader?.agent_key === deletedName
+            ? { ...team.leader, agent_key: "" }
+            : team.leader,
+        teammate:
+          team.teammate?.agent_key === deletedName
+            ? { agent_key: "" }
+            : team.teammate,
         predefined_members: (team.predefined_members || []).map((member) =>
           member.agent_key === deletedName
             ? { ...member, agent_key: "" }
-            : member
+            : member,
         ),
-      }))
+      })),
     );
     markAgentsTeamsEdited();
     setDeleteAgentConfirm(null);
@@ -2703,7 +4127,11 @@ export function ConfigPanel({
     setDeleteTeamConfirm(null);
   };
 
-  const handleDeleteTeamMember = (teamIdx: number, memberIdx: number, memberName: string) => {
+  const handleDeleteTeamMember = (
+    teamIdx: number,
+    memberIdx: number,
+    memberName: string,
+  ) => {
     setDeleteTeamMemberConfirm({ teamIdx, memberIdx, memberName });
   };
 
@@ -2717,7 +4145,9 @@ export function ConfigPanel({
         // with initialTeams, which would break the hasAgentsTeamsChanges check.
         copy[deleteTeamMemberConfirm.teamIdx] = {
           ...team,
-          predefined_members: team.predefined_members.filter((_, i) => i !== deleteTeamMemberConfirm.memberIdx),
+          predefined_members: team.predefined_members.filter(
+            (_, i) => i !== deleteTeamMemberConfirm.memberIdx,
+          ),
         };
       }
       return copy;
@@ -2730,9 +4160,14 @@ export function ConfigPanel({
     if (!config) return {};
     const next: Record<string, string> = {};
     for (const [key, value] of Object.entries(config)) {
-      if (key === 'memory_forbidden_description' && typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      if (
+        key === "memory_forbidden_description" &&
+        typeof value === "object" &&
+        value !== null &&
+        !Array.isArray(value)
+      ) {
         const dict = value as Record<string, string>;
-        next[key] = dict[i18n.language] || dict['zh'] || '';
+        next[key] = dict[i18n.language] || dict["zh"] || "";
       } else {
         next[key] = normalizeConfigValue(value);
       }
@@ -2747,26 +4182,44 @@ export function ConfigPanel({
   }, [normalizedConfig]);
 
   useEffect(() => {
-    setDraftModels(storeAvailableModels.map((m) => ({ ...m, alias: m.alias || "" })));
+    setDraftModels(
+      storeAvailableModels.map((m) => ({ ...m, alias: m.alias || "" })),
+    );
     setModelError(null);
   }, [storeAvailableModels]);
 
   const agentsFromConfig = useMemo<AgentEntry[]>(() => {
     const agents: AgentEntry[] = [];
     for (let i = 0; i < 10; i++) {
-      const name = normalizedConfig[`agent_name_${i}`] || normalizedConfig[`agent_${i}_name`];
+      const name =
+        normalizedConfig[`agent_name_${i}`] ||
+        normalizedConfig[`agent_${i}_name`];
       if (!name) continue;
-      const modelName = normalizedConfig[`agent_model_${i}`] || normalizedConfig[`agent_${i}_model`] || "";
-      const matchedModel = storeAvailableModels.find((m) => m.model_name === modelName);
+      const modelName =
+        normalizedConfig[`agent_model_${i}`] ||
+        normalizedConfig[`agent_${i}_model`] ||
+        "";
+      const matchedModel = storeAvailableModels.find(
+        (m) => m.model_name === modelName,
+      );
       agents.push({
         name,
-        model: matchedModel ? {
-          provider: matchedModel.model_provider || "",
-          api_base: matchedModel.api_base || "",
-          api_key: matchedModel.api_key || "",
-          model: matchedModel.model_name || "",
-        } : { provider: "", api_base: "", api_key: "", model: modelName },
-        skills: (normalizedConfig[`agent_skills_${i}`] || normalizedConfig[`agent_${i}_skills`] || "").split(/[,，]/).map((s: string) => s.trim()).filter(Boolean),
+        model: matchedModel
+          ? {
+              provider: matchedModel.model_provider || "",
+              api_base: matchedModel.api_base || "",
+              api_key: matchedModel.api_key || "",
+              model: matchedModel.model_name || "",
+            }
+          : { provider: "", api_base: "", api_key: "", model: modelName },
+        skills: (
+          normalizedConfig[`agent_skills_${i}`] ||
+          normalizedConfig[`agent_${i}_skills`] ||
+          ""
+        )
+          .split(/[,，]/)
+          .map((s: string) => s.trim())
+          .filter(Boolean),
       });
     }
     return agents;
@@ -2776,42 +4229,74 @@ export function ConfigPanel({
     const teams: TeamEntry[] = [];
     const validAgentKeys = new Set<string>();
     for (let i = 0; i < 10; i++) {
-      const name = normalizedConfig[`agent_name_${i}`] || normalizedConfig[`agent_${i}_name`];
+      const name =
+        normalizedConfig[`agent_name_${i}`] ||
+        normalizedConfig[`agent_${i}_name`];
       if (name) validAgentKeys.add(name);
     }
     for (let i = 0; i < 10; i++) {
-      const teamName = normalizedConfig[`team_name_${i}`] || normalizedConfig[`team_${i}_name`];
+      const teamName =
+        normalizedConfig[`team_name_${i}`] ||
+        normalizedConfig[`team_${i}_name`];
       if (!teamName) continue;
       // 解析 predefined_members JSON
       let predefinedMembers: TeamMember[] = [];
-      const membersJson = normalizedConfig[`team_predefined_members_${i}`] || normalizedConfig[`team_${i}_predefined_members`];
+      const membersJson =
+        normalizedConfig[`team_predefined_members_${i}`] ||
+        normalizedConfig[`team_${i}_predefined_members`];
       if (membersJson) {
         try {
           predefinedMembers = JSON.parse(membersJson);
         } catch (e) {
-          console.error('[ConfigPanel] Failed to parse predefined_members:', e);
+          console.error("[ConfigPanel] Failed to parse predefined_members:", e);
         }
       }
-      const leaderAgentKey = normalizedConfig[`team_leader_agent_key_${i}`] || normalizedConfig[`team_${i}_leader_agent_key`] || "";
-      const teammateAgentKey = normalizedConfig[`team_teammate_agent_key_${i}`] || normalizedConfig[`team_${i}_teammate_agent_key`] || "";
+      const leaderAgentKey =
+        normalizedConfig[`team_leader_agent_key_${i}`] ||
+        normalizedConfig[`team_${i}_leader_agent_key`] ||
+        "";
+      const teammateAgentKey =
+        normalizedConfig[`team_teammate_agent_key_${i}`] ||
+        normalizedConfig[`team_${i}_teammate_agent_key`] ||
+        "";
       teams.push({
         team_name: teamName,
-        lifecycle: normalizedConfig[`team_lifecycle_${i}`] || normalizedConfig[`team_${i}_lifecycle`] || "",
-        teammate_mode: normalizedConfig[`team_teammate_mode_${i}`] || normalizedConfig[`team_${i}_teammate_mode`] || "",
-        spawn_mode: normalizedConfig[`team_spawn_mode_${i}`] || normalizedConfig[`team_${i}_spawn_mode`] || "",
+        lifecycle:
+          normalizedConfig[`team_lifecycle_${i}`] ||
+          normalizedConfig[`team_${i}_lifecycle`] ||
+          "",
+        teammate_mode:
+          normalizedConfig[`team_teammate_mode_${i}`] ||
+          normalizedConfig[`team_${i}_teammate_mode`] ||
+          "",
+        spawn_mode:
+          normalizedConfig[`team_spawn_mode_${i}`] ||
+          normalizedConfig[`team_${i}_spawn_mode`] ||
+          "",
         enable_permissions: parseBoolValue(
           normalizedConfig[`team_enable_permissions_${i}`] ||
             normalizedConfig[`team_${i}_enable_permissions`] ||
             "false",
         ),
         leader: {
-          member_name: normalizedConfig[`team_leader_member_name_${i}`] || normalizedConfig[`team_${i}_leader_member_name`] || "",
-          display_name: normalizedConfig[`team_leader_display_name_${i}`] || normalizedConfig[`team_${i}_leader_display_name`] || "",
-          persona: normalizedConfig[`team_leader_persona_${i}`] || normalizedConfig[`team_${i}_leader_persona`] || "",
+          member_name:
+            normalizedConfig[`team_leader_member_name_${i}`] ||
+            normalizedConfig[`team_${i}_leader_member_name`] ||
+            "",
+          display_name:
+            normalizedConfig[`team_leader_display_name_${i}`] ||
+            normalizedConfig[`team_${i}_leader_display_name`] ||
+            "",
+          persona:
+            normalizedConfig[`team_leader_persona_${i}`] ||
+            normalizedConfig[`team_${i}_leader_persona`] ||
+            "",
           agent_key: validAgentKeys.has(leaderAgentKey) ? leaderAgentKey : "",
         },
         teammate: {
-          agent_key: validAgentKeys.has(teammateAgentKey) ? teammateAgentKey : "",
+          agent_key: validAgentKeys.has(teammateAgentKey)
+            ? teammateAgentKey
+            : "",
         },
         predefined_members: predefinedMembers.map((m) => ({
           ...m,
@@ -2832,13 +4317,15 @@ export function ConfigPanel({
       const savedTeams = savedTeamsRef.current;
 
       if (savedAgents && savedTeams) {
-        const teamsMatch = teamsFromConfig.length === savedTeams.length &&
+        const teamsMatch =
+          teamsFromConfig.length === savedTeams.length &&
           teamsFromConfig.every((t, i) => {
             const st = savedTeams[i];
             if (!st) return false;
             return t.team_name === st.team_name;
           });
-        const agentsMatch = agentsFromConfig.length === savedAgents.length &&
+        const agentsMatch =
+          agentsFromConfig.length === savedAgents.length &&
           agentsFromConfig.every((a, i) => {
             const sa = savedAgents[i];
             if (!sa) return false;
@@ -2862,7 +4349,14 @@ export function ConfigPanel({
       setInitialAgents(agentsFromConfig);
       setInitialTeams(teamsFromConfig);
     }
-  }, [agentsFromConfig, teamsFromConfig, agentsTeamsEdited, agentsTeamsJustSaved, draftTeams.length, initialTeams.length]);
+  }, [
+    agentsFromConfig,
+    teamsFromConfig,
+    agentsTeamsEdited,
+    agentsTeamsJustSaved,
+    draftTeams.length,
+    initialTeams.length,
+  ]);
 
   const groups = useMemo<ConfigGroup[]>(() => {
     if (!Object.keys(normalizedConfig).length) return [];
@@ -2886,8 +4380,13 @@ export function ConfigPanel({
     }
     const groupMeta = getGroupMeta(t);
     return Object.entries(buckets)
-      .filter(([tag]) => tag !== 'other')
-      .map(([tag, keys]) => ({ tag, label: groupMeta[tag]?.label ?? tag, keys, order: groupMeta[tag]?.order ?? 99 }))
+      .filter(([tag]) => tag !== "other")
+      .map(([tag, keys]) => ({
+        tag,
+        label: groupMeta[tag]?.label ?? tag,
+        keys,
+        order: groupMeta[tag]?.order ?? 99,
+      }))
       .sort((a, b) => a.order - b.order);
   }, [normalizedConfig, t]);
 
@@ -2901,33 +4400,40 @@ export function ConfigPanel({
     return { modelGroups: model, otherGroups: other };
   }, [groups]);
 
-  const { embedGroups, securityGroups, otherTabGroups, yamlModelGroups } = useMemo(() => {
-    const embed: ConfigGroup[] = [];
-    const security: ConfigGroup[] = [];
-    const otherTab: ConfigGroup[] = [];
-    for (const g of otherGroups) {
-      if (g.tag === "embed") embed.push(g);
-      else if (SECURITY_GROUP_TAGS.has(g.tag)) security.push(g);
-      else if (g.tag === "agents" || g.tag === "team") continue;
-      else otherTab.push(g);
-    }
-    const yamlModel = modelGroups.filter((g) => g.tag !== "model_default");
-    return {
-      embedGroups: embed,
-      securityGroups: security,
-      otherTabGroups: otherTab,
-      yamlModelGroups: yamlModel,
-    };
-  }, [otherGroups, modelGroups]);
+  const { embedGroups, securityGroups, otherTabGroups, yamlModelGroups } =
+    useMemo(() => {
+      const embed: ConfigGroup[] = [];
+      const security: ConfigGroup[] = [];
+      const otherTab: ConfigGroup[] = [];
+      for (const g of otherGroups) {
+        if (g.tag === "embed") embed.push(g);
+        else if (SECURITY_GROUP_TAGS.has(g.tag)) security.push(g);
+        else if (g.tag === "agents" || g.tag === "team") continue;
+        else otherTab.push(g);
+      }
+      const yamlModel = modelGroups.filter((g) => g.tag !== "model_default");
+      return {
+        embedGroups: embed,
+        securityGroups: security,
+        otherTabGroups: otherTab,
+        yamlModelGroups: yamlModel,
+      };
+    }, [otherGroups, modelGroups]);
 
   useLayoutEffect(() => {
     if (!initialExpandGroupTag) return;
     const tag = initialExpandGroupTag;
     setConfigTab(configTabForGroupTag(tag));
     const scrollId =
-      tag === "agents" ? "config-group-agents" : tag === "team" ? "config-group-team" : `config-group-${tag}`;
+      tag === "agents"
+        ? "config-group-agents"
+        : tag === "team"
+          ? "config-group-team"
+          : `config-group-${tag}`;
     const raf = requestAnimationFrame(() => {
-      document.getElementById(scrollId)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      document
+        .getElementById(scrollId)
+        ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
     return () => cancelAnimationFrame(raf);
   }, [groups, initialExpandGroupTag]);
@@ -2938,11 +4444,18 @@ export function ConfigPanel({
     }
   }, [configTab, modelError]);
 
-  const totalItems = useMemo(() => groups.reduce((sum, group) => sum + group.keys.length, 0), [groups]);
+  const totalItems = useMemo(
+    () => groups.reduce((sum, group) => sum + group.keys.length, 0),
+    [groups],
+  );
   const topLevelGroupCount = groups.length;
   const hasConfigChanges = useMemo(() => {
     const keys = Object.keys(normalizedConfig);
-    return keys.some((key) => !PROACTIVE_HIDDEN_FROM_UI_KEYS.has(key) && (draftValues[key] ?? "") !== normalizedConfig[key]);
+    return keys.some(
+      (key) =>
+        !PROACTIVE_HIDDEN_FROM_UI_KEYS.has(key) &&
+        (draftValues[key] ?? "") !== normalizedConfig[key],
+    );
   }, [draftValues, normalizedConfig]);
   const configUpdates = useMemo(() => {
     const updates: Record<string, string> = {};
@@ -2960,13 +4473,17 @@ export function ConfigPanel({
     return draftModels.some((dm, i) => {
       const om = storeAvailableModels[i];
       if (!om) return true;
-      return dm.model_name !== om.model_name || dm.api_base !== om.api_base
-        || dm.api_key !== om.api_key || dm.model_provider !== om.model_provider
-        || (dm.alias ?? "") !== (om.alias ?? "")
-        || (dm.reasoning_level ?? "") !== (om.reasoning_level ?? "")
-        || dm.is_default !== om.is_default
-        || (dm.temperature ?? 0.95) !== (om.temperature ?? 0.95)
-        || (dm.timeout ?? 1800) !== (om.timeout ?? 1800);
+      return (
+        dm.model_name !== om.model_name ||
+        dm.api_base !== om.api_base ||
+        dm.api_key !== om.api_key ||
+        dm.model_provider !== om.model_provider ||
+        (dm.alias ?? "") !== (om.alias ?? "") ||
+        (dm.reasoning_level ?? "") !== (om.reasoning_level ?? "") ||
+        dm.is_default !== om.is_default ||
+        (dm.temperature ?? 0.95) !== (om.temperature ?? 0.95) ||
+        (dm.timeout ?? 1800) !== (om.timeout ?? 1800)
+      );
     });
   }, [draftModels, storeAvailableModels]);
 
@@ -2978,9 +4495,18 @@ export function ConfigPanel({
       const ia = initialAgents[i];
       if (!ia) return true;
       if (da.name !== ia.name) return true;
-      if (da.skills.length !== ia.skills.length || da.skills.some((s, j) => s !== ia.skills[j])) return true;
-      if (da.model.provider !== ia.model.provider || da.model.api_base !== ia.model.api_base
-          || da.model.api_key !== ia.model.api_key || da.model.model !== ia.model.model) return true;
+      if (
+        da.skills.length !== ia.skills.length ||
+        da.skills.some((s, j) => s !== ia.skills[j])
+      )
+        return true;
+      if (
+        da.model.provider !== ia.model.provider ||
+        da.model.api_base !== ia.model.api_base ||
+        da.model.api_key !== ia.model.api_key ||
+        da.model.model !== ia.model.model
+      )
+        return true;
     }
     // 比较 teams
     if (draftTeams.length !== initialTeams.length) return true;
@@ -2988,87 +4514,182 @@ export function ConfigPanel({
       const dt = draftTeams[i];
       const it = initialTeams[i];
       if (!it) return true;
-      if (dt.team_name !== it.team_name || dt.lifecycle !== it.lifecycle
-          || dt.teammate_mode !== it.teammate_mode || dt.spawn_mode !== it.spawn_mode
-          || dt.enable_permissions !== it.enable_permissions) return true;
-      if (dt.leader.member_name !== it.leader.member_name || dt.leader.display_name !== it.leader.display_name
-          || dt.leader.persona !== it.leader.persona || dt.leader.agent_key !== it.leader.agent_key) return true;
+      if (
+        dt.team_name !== it.team_name ||
+        dt.lifecycle !== it.lifecycle ||
+        dt.teammate_mode !== it.teammate_mode ||
+        dt.spawn_mode !== it.spawn_mode ||
+        dt.enable_permissions !== it.enable_permissions
+      )
+        return true;
+      if (
+        dt.leader.member_name !== it.leader.member_name ||
+        dt.leader.display_name !== it.leader.display_name ||
+        dt.leader.persona !== it.leader.persona ||
+        dt.leader.agent_key !== it.leader.agent_key
+      )
+        return true;
       if (dt.teammate.agent_key !== it.teammate.agent_key) return true;
-      if (dt.predefined_members.length !== it.predefined_members.length) return true;
+      if (dt.predefined_members.length !== it.predefined_members.length)
+        return true;
       for (let j = 0; j < dt.predefined_members.length; j++) {
         const dpm = dt.predefined_members[j];
         const ipm = it.predefined_members[j];
         if (!ipm) return true;
-        if (dpm.member_name !== ipm.member_name || dpm.display_name !== ipm.display_name
-            || dpm.persona !== ipm.persona || dpm.prompt_hint !== ipm.prompt_hint
-            || dpm.agent_key !== ipm.agent_key) return true;
+        if (
+          dpm.member_name !== ipm.member_name ||
+          dpm.display_name !== ipm.display_name ||
+          dpm.persona !== ipm.persona ||
+          dpm.prompt_hint !== ipm.prompt_hint ||
+          dpm.agent_key !== ipm.agent_key
+        )
+          return true;
       }
     }
     return false;
   }, [draftAgents, draftTeams, initialAgents, initialTeams]);
-  const hasChanges = hasConfigChanges || hasModelChanges || hasAgentsTeamsChanges;
+  const hasChanges =
+    hasConfigChanges || hasModelChanges || hasAgentsTeamsChanges;
   // 将草稿是否有未保存改动上报给父组件，供 config.changed 广播到达时判断是否覆盖草稿。
   useEffect(() => {
     onHasChangesChange?.(hasChanges);
   }, [hasChanges, onHasChangesChange]);
-  const missingRequiredModelFields = useMemo(
-    () => REQUIRED_MODEL_FIELDS.filter((key) => !(draftValues[key] ?? "").trim()),
-    [draftValues],
-  );
+  const missingRequiredModelFields = useMemo(() => {
+    const active = draftModels[0];
+    if (!active) return ["model"];
+    const values: Record<(typeof REQUIRED_MODEL_FIELDS)[number], string> = {
+      model: active.model_name,
+      model_provider: active.model_provider,
+      api_base: active.api_base,
+      api_key: active.api_key,
+    };
+    return requiredDefaultModelFields(active.model_provider).filter(
+      (key) => !values[key].trim(),
+    );
+  }, [draftModels]);
   const hasMissingRequiredModelFields = missingRequiredModelFields.length > 0;
-  const hasDuplicateAgentNames = useMemo(
-    () => {
-      const agentNames = draftAgents.map((a) => a.name.trim().toLowerCase());
-      return new Set(agentNames).size !== agentNames.length;
-    },
-    [draftAgents],
-  );
+  const hasDuplicateAgentNames = useMemo(() => {
+    const agentNames = draftAgents.map((a) => a.name.trim().toLowerCase());
+    return new Set(agentNames).size !== agentNames.length;
+  }, [draftAgents]);
   const hasMissingModelApiKey = useMemo(
-    () => draftModels.some((m) => !m.api_key.trim()),
+    () =>
+      draftModels.some(
+        (m) =>
+          !usesSubscriptionAuthentication(m.model_provider) &&
+          !m.api_key.trim(),
+      ),
     [draftModels],
   );
   const hasMissingModelApiBase = useMemo(
-    () => draftModels.some((m) => !m.api_base.trim()),
+    () =>
+      draftModels.some(
+        (m) =>
+          !usesSubscriptionAuthentication(m.model_provider) &&
+          !m.api_base.trim(),
+      ),
     [draftModels],
   );
 
   const getAgentsTeamsValidationError = () => {
     for (const agent of draftAgents) {
-      if (!agent.name.trim()) return t('config.validation.agentNameRequired');
-      if (!agent.model.provider.trim()) return t('config.validation.agentModelProviderRequired');
-      if (!agent.model.api_base.trim()) return t('config.validation.agentModelApiBaseRequired');
-      if (!agent.model.api_key.trim()) return t('config.validation.agentModelApiKeyRequired');
-      if (!agent.model.model.trim()) return t('config.validation.agentModelNameRequired');
+      if (!agent.name.trim()) return t("config.validation.agentNameRequired");
+      if (!agent.model.provider.trim())
+        return t("config.validation.agentModelProviderRequired");
+      if (
+        !usesSubscriptionAuthentication(agent.model.provider) &&
+        !agent.model.api_base.trim()
+      )
+        return t("config.validation.agentModelApiBaseRequired");
+      if (
+        !usesSubscriptionAuthentication(agent.model.provider) &&
+        !agent.model.api_key.trim()
+      )
+        return t("config.validation.agentModelApiKeyRequired");
+      if (!agent.model.model.trim())
+        return t("config.validation.agentModelNameRequired");
     }
     if (draftAgents.length > 0 && draftTeams.length === 0) {
-      return t('config.validation.teamRequired');
+      return t("config.validation.teamRequired");
     }
     for (const team of draftTeams) {
-      const teamLabel = team.team_name?.trim() || t('config.team.untitled');
-      if (!team.team_name.trim()) return t('config.validation.teamNameRequired', { team: teamLabel });
-      if (!team.lifecycle?.trim()) return t('config.validation.teamLifecycleRequired', { team: teamLabel });
-      if (!team.teammate_mode?.trim()) return t('config.validation.teamTeammateModeRequired', { team: teamLabel });
-      if (!team.spawn_mode?.trim()) return t('config.validation.teamSpawnModeRequired', { team: teamLabel });
-      if (!team.leader?.member_name?.trim()) return t('config.validation.leaderMemberNameRequired', { team: teamLabel });
-      if (!/^[a-z][a-z0-9-]*$/.test(team.leader.member_name)) return t('config.validation.leaderMemberNameInvalid', { team: teamLabel, name: team.leader.member_name });
-      if (!team.leader?.display_name?.trim()) return t('config.validation.leaderDisplayNameRequired', { team: teamLabel });
-      if (!team.leader?.persona?.trim()) return t('config.validation.leaderPersonaRequired', { team: teamLabel });
-      if (!team.leader?.agent_key?.trim()) return t('config.validation.leaderAgentKeyRequired', { team: teamLabel });
-      if (!team.teammate?.agent_key?.trim()) return t('config.validation.teammateAgentKeyRequired', { team: teamLabel });
-      const leaderName = team.leader?.member_name?.trim() || '';
+      const teamLabel = team.team_name?.trim() || t("config.team.untitled");
+      if (!team.team_name.trim())
+        return t("config.validation.teamNameRequired", { team: teamLabel });
+      if (!team.lifecycle?.trim())
+        return t("config.validation.teamLifecycleRequired", {
+          team: teamLabel,
+        });
+      if (!team.teammate_mode?.trim())
+        return t("config.validation.teamTeammateModeRequired", {
+          team: teamLabel,
+        });
+      if (!team.spawn_mode?.trim())
+        return t("config.validation.teamSpawnModeRequired", {
+          team: teamLabel,
+        });
+      if (!team.leader?.member_name?.trim())
+        return t("config.validation.leaderMemberNameRequired", {
+          team: teamLabel,
+        });
+      if (!/^[a-z][a-z0-9-]*$/.test(team.leader.member_name))
+        return t("config.validation.leaderMemberNameInvalid", {
+          team: teamLabel,
+          name: team.leader.member_name,
+        });
+      if (!team.leader?.display_name?.trim())
+        return t("config.validation.leaderDisplayNameRequired", {
+          team: teamLabel,
+        });
+      if (!team.leader?.persona?.trim())
+        return t("config.validation.leaderPersonaRequired", {
+          team: teamLabel,
+        });
+      if (!team.leader?.agent_key?.trim())
+        return t("config.validation.leaderAgentKeyRequired", {
+          team: teamLabel,
+        });
+      if (!team.teammate?.agent_key?.trim())
+        return t("config.validation.teammateAgentKeyRequired", {
+          team: teamLabel,
+        });
+      const leaderName = team.leader?.member_name?.trim() || "";
       for (const member of team.predefined_members || []) {
-        if (!member.member_name.trim()) return t('config.validation.memberNameRequired', { team: teamLabel });
-        if (!/^[a-z][a-z0-9-]*$/.test(member.member_name)) return t('config.validation.memberNameInvalid', { team: teamLabel, name: member.member_name });
-        if (!member.display_name?.trim()) return t('config.validation.memberDisplayNameRequired', { team: teamLabel, name: member.member_name });
-        if (!member.persona?.trim()) return t('config.validation.memberPersonaRequired', { team: teamLabel, name: member.member_name });
-        if (!member.agent_key?.trim()) return t('config.validation.memberAgentKeyRequired', { team: teamLabel, name: member.member_name });
-        if (member.member_name.trim() === leaderName) return t('config.validation.memberNameConflictWithLeader', { team: teamLabel, name: member.member_name });
+        if (!member.member_name.trim())
+          return t("config.validation.memberNameRequired", { team: teamLabel });
+        if (!/^[a-z][a-z0-9-]*$/.test(member.member_name))
+          return t("config.validation.memberNameInvalid", {
+            team: teamLabel,
+            name: member.member_name,
+          });
+        if (!member.display_name?.trim())
+          return t("config.validation.memberDisplayNameRequired", {
+            team: teamLabel,
+            name: member.member_name,
+          });
+        if (!member.persona?.trim())
+          return t("config.validation.memberPersonaRequired", {
+            team: teamLabel,
+            name: member.member_name,
+          });
+        if (!member.agent_key?.trim())
+          return t("config.validation.memberAgentKeyRequired", {
+            team: teamLabel,
+            name: member.member_name,
+          });
+        if (member.member_name.trim() === leaderName)
+          return t("config.validation.memberNameConflictWithLeader", {
+            team: teamLabel,
+            name: member.member_name,
+          });
       }
     }
     return null;
   };
 
-  const agentsTeamsValidationError = agentsTeamsUserEdited ? getAgentsTeamsValidationError() : null;
+  const agentsTeamsValidationError = agentsTeamsUserEdited
+    ? getAgentsTeamsValidationError()
+    : null;
 
   const handleFieldChange = (key: string, value: string) => {
     setDraftValues((prev) => ({ ...prev, [key]: value }));
@@ -3092,22 +4713,23 @@ export function ConfigPanel({
     const updatedAgents = draftAgents.map((agent) => {
       // 找到agent当前引用的模型在旧模型列表中的索引
       const oldModelIndex = oldModels.findIndex(
-        (m) => m.model_name === agent.model.model
-          && m.model_provider === agent.model.provider
-          && m.api_base === agent.model.api_base
+        (m) =>
+          m.model_name === agent.model.model &&
+          m.model_provider === agent.model.provider &&
+          m.api_base === agent.model.api_base,
       );
-      
+
       if (oldModelIndex >= 0 && oldModelIndex < models.length) {
         const newModel = models[oldModelIndex];
         const oldModel = oldModels[oldModelIndex];
-        
+
         // 检查模型是否有变化
-        const hasModelChanged = 
+        const hasModelChanged =
           newModel.model_name !== oldModel.model_name ||
           newModel.model_provider !== oldModel.model_provider ||
           newModel.api_base !== oldModel.api_base ||
           newModel.api_key !== oldModel.api_key;
-        
+
         if (hasModelChanged) {
           return {
             ...agent,
@@ -3123,11 +4745,12 @@ export function ConfigPanel({
       return agent;
     });
 
-    const hasAgentModelUpdated = updatedAgents.some((agent, idx) => 
-      agent.model.model !== draftAgents[idx].model.model ||
-      agent.model.provider !== draftAgents[idx].model.provider ||
-      agent.model.api_base !== draftAgents[idx].model.api_base ||
-      agent.model.api_key !== draftAgents[idx].model.api_key
+    const hasAgentModelUpdated = updatedAgents.some(
+      (agent, idx) =>
+        agent.model.model !== draftAgents[idx].model.model ||
+        agent.model.provider !== draftAgents[idx].model.provider ||
+        agent.model.api_base !== draftAgents[idx].model.api_base ||
+        agent.model.api_key !== draftAgents[idx].model.api_key,
     );
 
     if (hasAgentModelUpdated) {
@@ -3139,7 +4762,9 @@ export function ConfigPanel({
   const handleCancel = () => {
     if (!hasChanges) return;
     setDraftValues(normalizedConfig);
-    setDraftModels(storeAvailableModels.map((m) => ({ ...m, alias: m.alias || "" })));
+    setDraftModels(
+      storeAvailableModels.map((m) => ({ ...m, alias: m.alias || "" })),
+    );
     setDraftAgents(initialAgents);
     setDraftTeams(initialTeams);
     setAgentsTeamsEdited(false);
@@ -3164,11 +4789,15 @@ export function ConfigPanel({
         ...t,
         leader: {
           ...t.leader,
-          agent_key: validAgentKeys.has(t.leader?.agent_key || "") ? t.leader?.agent_key : "",
+          agent_key: validAgentKeys.has(t.leader?.agent_key || "")
+            ? t.leader?.agent_key
+            : "",
         },
         teammate: {
           ...t.teammate,
-          agent_key: validAgentKeys.has(t.teammate?.agent_key || "") ? t.teammate?.agent_key : "",
+          agent_key: validAgentKeys.has(t.teammate?.agent_key || "")
+            ? t.teammate?.agent_key
+            : "",
         },
         predefined_members: (t.predefined_members || [])
           .filter((m) => m.agent_key && validAgentKeys.has(m.agent_key))
@@ -3184,22 +4813,25 @@ export function ConfigPanel({
     setAgentsTeamsUserEdited(false);
   };
 
-
   const handleSaveAndRestart = async () => {
     if (!hasChanges || saving) return;
     if (hasMissingRequiredModelFields) {
       setConfigTab("model");
-      setModelError(t('config.errors.requiredModelFields', { fields: missingRequiredModelFields.join('、') }));
+      setModelError(
+        t("config.errors.requiredModelFields", {
+          fields: missingRequiredModelFields.join("、"),
+        }),
+      );
       return;
     }
     if (hasMissingModelApiKey) {
       setConfigTab("model");
-      setModelError(t('config.modelList.apiKeyRequired'));
+      setModelError(t("config.modelList.apiKeyRequired"));
       return;
     }
     if (hasMissingModelApiBase) {
       setConfigTab("model");
-      setModelError(t('config.modelList.apiBaseRequired'));
+      setModelError(t("config.modelList.apiBaseRequired"));
       return;
     }
     // alias 唯一性校验
@@ -3321,10 +4953,13 @@ export function ConfigPanel({
     } catch (saveError) {
       // 后端兜底返回 code=TASK_RUNNING 时，用 i18n 文案提示（而非后端硬编码中文）。
       const errorCode = (saveError as { code?: string } | null)?.code;
-      if (errorCode === 'TASK_RUNNING') {
-        setError(t('config.errors.taskRunning'));
+      if (errorCode === "TASK_RUNNING") {
+        setError(t("config.errors.taskRunning"));
       } else {
-        const message = saveError instanceof Error ? saveError.message : t('config.errors.saveFailed');
+        const message =
+          saveError instanceof Error
+            ? saveError.message
+            : t("config.errors.saveFailed");
         setError(message);
       }
     } finally {
@@ -3337,14 +4972,16 @@ export function ConfigPanel({
       <div className="card w-full h-full flex flex-col">
         <div className="flex items-center justify-between gap-4 mb-4">
           <div>
-            <h2 className="text-lg font-semibold">{t('config.title')}</h2>
+            <h2 className="text-lg font-semibold">{t("config.title")}</h2>
             <p className="text-sm text-text-muted mt-1">
-              {t('config.subtitle')}
+              {t("config.subtitle")}
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {(isProcessing || globalTaskRunning) && mode !== 'team' ? (
-              <span className="text-xs text-amber-600 dark:text-amber-400">{t('config.errors.processingDisabled')}</span>
+            {(isProcessing || globalTaskRunning) && mode !== "team" ? (
+              <span className="text-xs text-amber-600 dark:text-amber-400">
+                {t("config.errors.processingDisabled")}
+              </span>
             ) : null}
             <button
               type="button"
@@ -3352,15 +4989,24 @@ export function ConfigPanel({
               disabled={!hasChanges || saving}
               className="btn !px-3 !py-1.5 disabled:cursor-not-allowed"
             >
-              {t('common.cancel')}
+              {t("common.cancel")}
             </button>
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || ((isProcessing || globalTaskRunning) && mode !== 'team')}
+              disabled={
+                !hasChanges ||
+                saving ||
+                hasMissingRequiredModelFields ||
+                hasMissingModelApiKey ||
+                hasMissingModelApiBase ||
+                hasDuplicateAgentNames ||
+                !!agentsTeamsValidationError ||
+                ((isProcessing || globalTaskRunning) && mode !== "team")
+              }
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {saving ? t('common.saving') : t('common.save')}
+              {saving ? t("common.saving") : t("common.save")}
             </button>
           </div>
         </div>
@@ -3371,39 +5017,45 @@ export function ConfigPanel({
         ) : null}
         {!error && hasMissingRequiredModelFields ? (
           <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-            {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
+            {t("config.requiredIncomplete")}:{" "}
+            {missingRequiredModelFields.join("、")}
           </div>
         ) : null}
         {!error && hasMissingModelApiBase ? (
           <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-            {t('config.modelList.apiBaseRequired')}
+            {t("config.modelList.apiBaseRequired")}
           </div>
         ) : null}
         {!error && hasDuplicateAgentNames ? (
           <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-            {t('config.agentList.duplicateName')}
+            {t("config.agentList.duplicateName")}
           </div>
-        ) : null
-        }
-        {
-          !error && agentsTeamsValidationError ? (
-            <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-              {agentsTeamsValidationError}
-            </div>
-          ) : null
-        }
+        ) : null}
+        {!error && agentsTeamsValidationError ? (
+          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+            {agentsTeamsValidationError}
+          </div>
+        ) : null}
 
         {!groups.length ? (
           <div className="text-sm text-text-muted flex-1 min-h-0">
-            {t('config.empty')}
+            {t("config.empty")}
           </div>
         ) : (
           <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
             <div className="flex items-center justify-between text-xs text-text-muted px-1 shrink-0 mb-1">
-              <span>{t('config.groupsCount', { count: topLevelGroupCount })}</span>
-              <span className="mono">{t('config.paramsCount', { count: totalItems })}</span>
+              <span>
+                {t("config.groupsCount", { count: topLevelGroupCount })}
+              </span>
+              <span className="mono">
+                {t("config.paramsCount", { count: totalItems })}
+              </span>
             </div>
-            <div className="app-subtabs shrink-0" role="tablist" aria-label={t('config.tabsAriaLabel')}>
+            <div
+              className="app-subtabs shrink-0"
+              role="tablist"
+              aria-label={t("config.tabsAriaLabel")}
+            >
               {(["model", "agent", "security", "other"] as const).map((tab) => (
                 <button
                   key={tab}
@@ -3421,7 +5073,11 @@ export function ConfigPanel({
             </div>
             <div className="flex-1 min-h-0 overflow-auto pr-1 space-y-3 pt-1">
               {configTab === "model" ? (
-                <div role="tabpanel" aria-labelledby="config-tab-model" className="space-y-3 pb-2">
+                <div
+                  role="tabpanel"
+                  aria-labelledby="config-tab-model"
+                  className="space-y-3 pb-2"
+                >
                   {modelError ? (
                     <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {modelError}
@@ -3429,17 +5085,115 @@ export function ConfigPanel({
                   ) : null}
                   {!modelError && hasMissingRequiredModelFields ? (
                     <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-                      {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
+                      {t("config.requiredIncomplete")}:{" "}
+                      {missingRequiredModelFields.join("、")}
                     </div>
                   ) : null}
                   {!modelError && hasMissingModelApiKey ? (
                     <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-                      {t('config.modelList.apiKeyRequired')}
+                      {t("config.modelList.apiKeyRequired")}
                     </div>
                   ) : null}
                   {!modelError && hasMissingModelApiBase ? (
                     <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-                      {t('config.modelList.apiBaseRequired')}
+                      {t("config.modelList.apiBaseRequired")}
+                    </div>
+                  ) : null}
+                  {observeCodexAuth ? (
+                    <div className="rounded-xl border border-border bg-card/70 p-4 shadow-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-medium text-text-strong">
+                            Codex subscription connection
+                          </div>
+                          <div className="mt-1 text-xs text-text-muted">
+                            Uses an isolated ChatGPT login for this Jiuwen
+                            instance. Jiuwen never receives your password or
+                            token.
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`text-xs ${codexAuth?.connected ? "text-ok" : codexAuth?.enabled === false || codexAuth?.state === "unavailable" ? "text-danger" : "text-text-muted"}`}
+                          >
+                            {codexAuth?.enabled === false
+                              ? "Disabled for this Jiuwen instance"
+                              : codexAuth?.connected
+                                ? "Connected"
+                                : codexAuth?.state === "waiting_for_user"
+                                  ? "Waiting for approval"
+                                  : codexAuth?.state === "reconciling"
+                                    ? "Finishing connection"
+                                    : codexAuth?.state === "busy"
+                                      ? "Provider busy"
+                                      : codexAuth?.state === "unavailable"
+                                        ? "Unavailable"
+                                        : "Not connected"}
+                          </span>
+                          {codexAuth?.connected ? (
+                            <button
+                              type="button"
+                              className="btn !px-3 !py-1 text-xs"
+                              disabled={codexAuthBusy}
+                              onClick={() => void logoutCodexAuth()}
+                            >
+                              Disconnect
+                            </button>
+                          ) : codexAuth?.state === "waiting_for_user" ||
+                            codexAuth?.state === "reconciling" ? (
+                            <button
+                              type="button"
+                              className="btn !px-3 !py-1 text-xs"
+                              disabled={codexAuthBusy}
+                              onClick={() => void cancelCodexAuth()}
+                            >
+                              Cancel
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn primary !px-3 !py-1 text-xs"
+                              disabled={
+                                codexAuthBusy ||
+                                codexAuth?.enabled === false ||
+                                codexAuth?.available === false ||
+                                !isConnected
+                              }
+                              onClick={() => void startCodexAuth()}
+                            >
+                              Connect Codex
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {codexAuthHandoff?.verification_url &&
+                      codexAuthHandoff.user_code ? (
+                        <div className="mt-3 rounded-lg border border-accent/30 bg-accent/5 p-3 text-xs">
+                          <div className="font-medium text-text-strong">
+                            Complete sign-in in the browser
+                          </div>
+                          <div className="mt-1 text-text-muted">
+                            The device code was copied when permitted. If the
+                            page asks for it, enter:
+                          </div>
+                          <code className="mt-2 inline-block select-all rounded bg-bg px-3 py-2 text-sm font-semibold tracking-wider text-text">
+                            {codexAuthHandoff.user_code}
+                          </code>
+                          <a
+                            className="ml-3 text-accent underline"
+                            href={codexAuthHandoff.verification_url}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Open sign-in page
+                          </a>
+                        </div>
+                      ) : null}
+                      {codexAuthError ? (
+                        <div className="mt-2 text-xs text-danger">
+                          {codexAuthError}
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                   <div
@@ -3447,8 +5201,12 @@ export function ConfigPanel({
                     className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
                   >
                     <div className="px-4 py-3 bg-secondary/30 border-b border-border">
-                      <span className="block text-sm font-medium text-text-strong">{t("config.groups.modelDefault.label")}</span>
-                      <span className="block text-xs text-text-muted mt-0.5">{t("config.groups.modelDefault.hint")}</span>
+                      <span className="block text-sm font-medium text-text-strong">
+                        {t("config.groups.modelDefault.label")}
+                      </span>
+                      <span className="block text-xs text-text-muted mt-0.5">
+                        {t("config.groups.modelDefault.hint")}
+                      </span>
                     </div>
                     <div className="p-3">
                       <MultiModelSection
@@ -3489,16 +5247,27 @@ export function ConfigPanel({
               ) : null}
 
               {configTab === "agent" ? (
-                <div role="tabpanel" aria-labelledby="config-tab-agent" className="space-y-3 pb-2">
-                  <div id="config-group-agents" className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm">
+                <div
+                  role="tabpanel"
+                  aria-labelledby="config-tab-agent"
+                  className="space-y-3 pb-2"
+                >
+                  <div
+                    id="config-group-agents"
+                    className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
+                  >
                     <div className="w-full flex items-center justify-between px-4 py-3 bg-secondary/30">
                       <span className="flex items-center gap-3 min-w-0">
                         <span className="inline-flex items-center justify-center rounded-md border w-7 h-7 text-pink-500 bg-pink-500/10 border-pink-500/20">
                           {getGroupIcon("agents")}
                         </span>
                         <span className="min-w-0 text-left">
-                          <span className="block text-sm font-medium text-text-strong">{t("config.groups.agents.label")}</span>
-                          <span className="block text-xs text-text-muted truncate">{t("config.groups.agents.hint")}</span>
+                          <span className="block text-sm font-medium text-text-strong">
+                            {t("config.groups.agents.label")}
+                          </span>
+                          <span className="block text-xs text-text-muted truncate">
+                            {t("config.groups.agents.hint")}
+                          </span>
                         </span>
                       </span>
                       <span className="text-[11px] px-2 py-0.5 rounded-full border border-border bg-secondary/60 text-text-muted shrink-0">
@@ -3513,7 +5282,10 @@ export function ConfigPanel({
                           markAgentsTeamsEdited();
                         }}
                         teams={draftTeams}
-                        onTeamsChange={(teams) => { setDraftTeams(teams); markAgentsTeamsEdited(); }}
+                        onTeamsChange={(teams) => {
+                          setDraftTeams(teams);
+                          markAgentsTeamsEdited();
+                        }}
                         availableModels={draftModels}
                         installedSkills={installedSkills}
                         onDeleteAgent={handleDeleteAgent}
@@ -3521,15 +5293,22 @@ export function ConfigPanel({
                       />
                     </div>
                   </div>
-                  <div id="config-group-team" className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm">
+                  <div
+                    id="config-group-team"
+                    className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
+                  >
                     <div className="w-full flex items-center justify-between px-4 py-3 bg-secondary/30">
                       <span className="flex items-center gap-3 min-w-0">
                         <span className="inline-flex items-center justify-center rounded-md border w-7 h-7 text-fuchsia-500 bg-fuchsia-500/10 border-fuchsia-500/20">
                           {getGroupIcon("team")}
                         </span>
                         <span className="min-w-0 text-left">
-                          <span className="block text-sm font-medium text-text-strong">{t("config.groups.team.label")}</span>
-                          <span className="block text-xs text-text-muted truncate">{t("config.groups.team.hint")}</span>
+                          <span className="block text-sm font-medium text-text-strong">
+                            {t("config.groups.team.label")}
+                          </span>
+                          <span className="block text-xs text-text-muted truncate">
+                            {t("config.groups.team.hint")}
+                          </span>
                         </span>
                       </span>
                       <span className="text-[11px] px-2 py-0.5 rounded-full border border-border bg-secondary/60 text-text-muted shrink-0">
@@ -3551,13 +5330,18 @@ export function ConfigPanel({
                     </div>
                   </div>
                 </div>
-              ) : null
-              }
+              ) : null}
 
               {configTab === "security" ? (
-                <div role="tabpanel" aria-labelledby="config-tab-security" className="space-y-3 pb-2">
+                <div
+                  role="tabpanel"
+                  aria-labelledby="config-tab-security"
+                  className="space-y-3 pb-2"
+                >
                   {securityGroups.length === 0 ? (
-                    <p className="text-sm text-text-muted px-1">{t("config.tabEmpty.security")}</p>
+                    <p className="text-sm text-text-muted px-1">
+                      {t("config.tabEmpty.security")}
+                    </p>
                   ) : (
                     securityGroups.map((group) => (
                       <GroupSection
@@ -3565,7 +5349,10 @@ export function ConfigPanel({
                         group={group}
                         draftValues={draftValues}
                         onChange={handleFieldChange}
-                        defaultOpen={initialExpandGroupTag != null && group.tag === initialExpandGroupTag}
+                        defaultOpen={
+                          initialExpandGroupTag != null &&
+                          group.tag === initialExpandGroupTag
+                        }
                         alwaysExpanded
                         t={t}
                         afterTable={
@@ -3580,9 +5367,15 @@ export function ConfigPanel({
               ) : null}
 
               {configTab === "other" ? (
-                <div role="tabpanel" aria-labelledby="config-tab-other" className="space-y-3 pb-2">
+                <div
+                  role="tabpanel"
+                  aria-labelledby="config-tab-other"
+                  className="space-y-3 pb-2"
+                >
                   {otherTabGroups.length === 0 ? (
-                    <p className="text-sm text-text-muted px-1">{t("config.tabEmpty.other")}</p>
+                    <p className="text-sm text-text-muted px-1">
+                      {t("config.tabEmpty.other")}
+                    </p>
                   ) : (
                     otherTabGroups.map((group) => (
                       <GroupSection
@@ -3590,7 +5383,10 @@ export function ConfigPanel({
                         group={group}
                         draftValues={draftValues}
                         onChange={handleFieldChange}
-                        defaultOpen={initialExpandGroupTag != null && group.tag === initialExpandGroupTag}
+                        defaultOpen={
+                          initialExpandGroupTag != null &&
+                          group.tag === initialExpandGroupTag
+                        }
                         t={t}
                       />
                     ))
@@ -3601,167 +5397,207 @@ export function ConfigPanel({
           </div>
         )}
       </div>
-      {
-        deleteAgentConfirm && (
-          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
-              <div className="flex flex-col items-center text-center">
-                <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
-                  <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-                  </svg>
-                </div>
-                <h3 className="text-base font-semibold text-text mb-1">
-                  {t("config.agentList.deleteConfirmTitle")}
-                </h3>
-                <p className="text-sm text-text-muted mb-5">
-                  {deleteAgentConfirm.references.length > 0
-                    ? t("config.agentList.deleteConfirmMessageSimple", { agentName: deleteAgentConfirm.agentName })
-                    : t("config.agentList.deleteConfirmMessage", { agentName: deleteAgentConfirm.agentName })}
-                </p>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setDeleteAgentConfirm(null)}
-                    className="btn !px-4 !py-2"
-                  >
-                    {t("common.cancel")}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={confirmDeleteAgent}
-                    className="btn danger !px-4 !py-2"
-                  >
-                    {t("common.delete")}
-                  </button>
-                </div>
+      {deleteAgentConfirm && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
+          <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
+                <svg
+                  className="w-7 h-7"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
+                  />
+                </svg>
+              </div>
+              <h3 className="text-base font-semibold text-text mb-1">
+                {t("config.agentList.deleteConfirmTitle")}
+              </h3>
+              <p className="text-sm text-text-muted mb-5">
+                {deleteAgentConfirm.references.length > 0
+                  ? t("config.agentList.deleteConfirmMessageSimple", {
+                      agentName: deleteAgentConfirm.agentName,
+                    })
+                  : t("config.agentList.deleteConfirmMessage", {
+                      agentName: deleteAgentConfirm.agentName,
+                    })}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteAgentConfirm(null)}
+                  className="btn !px-4 !py-2"
+                >
+                  {t("common.cancel")}
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDeleteAgent}
+                  className="btn danger !px-4 !py-2"
+                >
+                  {t("common.delete")}
+                </button>
               </div>
             </div>
           </div>
-        )
-      }
-      {
-        deleteModelConfirm && (
-          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
-              <div className="flex flex-col items-center text-center">
-                <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
-                  <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-                  </svg>
-                </div>
-                <h3 className="text-base font-semibold text-text mb-1">
-                  {t("config.model.deleteConfirmTitle")}
-                </h3>
-                <p className="text-sm text-text-muted mb-5">
-                  {deleteModelConfirm.references.length > 0
-                    ? t("config.model.deleteConfirmMessageSimple", { modelName: deleteModelConfirm.modelName, count: deleteModelConfirm.references.length })
-                    : t("config.model.deleteConfirmMessage", { modelName: deleteModelConfirm.modelName })}
-                </p>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setDeleteModelConfirm(null)}
-                    className="btn !px-4 !py-2"
-                  >
-                    {t("common.cancel")}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={confirmDeleteModel}
-                    className="btn danger !px-4 !py-2"
-                  >
-                    {t("common.delete")}
-                  </button>
-                </div>
+        </div>
+      )}
+      {deleteModelConfirm && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
+          <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
+                <svg
+                  className="w-7 h-7"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
+                  />
+                </svg>
+              </div>
+              <h3 className="text-base font-semibold text-text mb-1">
+                {t("config.model.deleteConfirmTitle")}
+              </h3>
+              <p className="text-sm text-text-muted mb-5">
+                {deleteModelConfirm.references.length > 0
+                  ? t("config.model.deleteConfirmMessageSimple", {
+                      modelName: deleteModelConfirm.modelName,
+                      count: deleteModelConfirm.references.length,
+                    })
+                  : t("config.model.deleteConfirmMessage", {
+                      modelName: deleteModelConfirm.modelName,
+                    })}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteModelConfirm(null)}
+                  className="btn !px-4 !py-2"
+                >
+                  {t("common.cancel")}
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDeleteModel}
+                  className="btn danger !px-4 !py-2"
+                >
+                  {t("common.delete")}
+                </button>
               </div>
             </div>
           </div>
-        )
-      }
-      {
-        deleteTeamConfirm && (
-          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
-              <div className="flex flex-col items-center text-center">
-                <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
-                  <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-                  </svg>
-                </div>
-                <h3 className="text-base font-semibold text-text mb-1">
-                  {t("config.team.deleteConfirmTitle")}
-                </h3>
-                <p className="text-sm text-text-muted mb-5">
-                  {t("config.team.deleteConfirmMessage", {
-                    teamName: deleteTeamConfirm.teamName,
-                  })}
-                </p>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setDeleteTeamConfirm(null)}
-                    className="btn !px-4 !py-2"
-                  >
-                    {t("common.cancel")}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={confirmDeleteTeam}
-                    className="btn danger !px-4 !py-2"
-                  >
-                    {t("common.delete")}
-                  </button>
-                </div>
+        </div>
+      )}
+      {deleteTeamConfirm && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
+          <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
+                <svg
+                  className="w-7 h-7"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
+                  />
+                </svg>
+              </div>
+              <h3 className="text-base font-semibold text-text mb-1">
+                {t("config.team.deleteConfirmTitle")}
+              </h3>
+              <p className="text-sm text-text-muted mb-5">
+                {t("config.team.deleteConfirmMessage", {
+                  teamName: deleteTeamConfirm.teamName,
+                })}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteTeamConfirm(null)}
+                  className="btn !px-4 !py-2"
+                >
+                  {t("common.cancel")}
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDeleteTeam}
+                  className="btn danger !px-4 !py-2"
+                >
+                  {t("common.delete")}
+                </button>
               </div>
             </div>
           </div>
-        )
-      }
-      {
-        deleteTeamMemberConfirm && (
-          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
-              <div className="flex flex-col items-center text-center">
-                <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
-                  <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-                  </svg>
-                </div>
-                <h3 className="text-base font-semibold text-text mb-1">
-                  {t("config.team.deleteMemberConfirmTitle")}
-                </h3>
-                <p className="text-sm text-text-muted mb-5">
-                  {t("config.team.deleteMemberConfirmMessage", {
-                    memberName: deleteTeamMemberConfirm.memberName,
-                  })}
-                </p>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setDeleteTeamMemberConfirm(null)}
-                    className="btn !px-4 !py-2"
-                  >
-                    {t("common.cancel")}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={confirmDeleteTeamMember}
-                    className="btn danger !px-4 !py-2"
-                  >
-                    {t("common.delete")}
-                  </button>
-                </div>
+        </div>
+      )}
+      {deleteTeamMemberConfirm && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
+          <div className="relative w-full max-w-96 rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-xl)] p-6">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
+                <svg
+                  className="w-7 h-7"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
+                  />
+                </svg>
+              </div>
+              <h3 className="text-base font-semibold text-text mb-1">
+                {t("config.team.deleteMemberConfirmTitle")}
+              </h3>
+              <p className="text-sm text-text-muted mb-5">
+                {t("config.team.deleteMemberConfirmMessage", {
+                  memberName: deleteTeamMemberConfirm.memberName,
+                })}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteTeamMemberConfirm(null)}
+                  className="btn !px-4 !py-2"
+                >
+                  {t("common.cancel")}
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDeleteTeamMember}
+                  className="btn danger !px-4 !py-2"
+                >
+                  {t("common.delete")}
+                </button>
               </div>
             </div>
           </div>
-        )
-      }
-
-    </div >
+        </div>
+      )}
+    </div>
   );
 }
