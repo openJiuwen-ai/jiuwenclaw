@@ -207,6 +207,68 @@ _POSIX_COMMANDS = frozenset({
 })
 _QUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?P<quote>['\"])(?P<path>[A-Za-z]:\\[^'\"]+)(?P=quote)")
 _UNQUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:\\[^\s|&;]+)")
+_POSIX_CMD_FLAGS_SILENT_ON_CMD = {
+    "mkdir": frozenset({"-p"}),
+}
+
+
+def _translate_mkdir_p_to_powershell(segment: str) -> str | None:
+    try:
+        tokens = shlex.split(segment, posix=False)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    base = _strip_matching_quotes(tokens[0]).rsplit("/", maxsplit=1)[-1].rsplit("\\", maxsplit=1)[-1].lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    if base != "mkdir":
+        return None
+    has_p = False
+    paths: list[str] = []
+    other_flags: list[str] = []
+    for tok in tokens[1:]:
+        stripped = _strip_matching_quotes(tok)
+        if stripped == "-p" or stripped == "--parents":
+            has_p = True
+        elif stripped.startswith("-"):
+            other_flags.append(stripped)
+        else:
+            paths.append(tok)
+    if not has_p:
+        return None
+    if other_flags:
+        return None
+    if not paths:
+        return None
+    items = []
+    for p in paths:
+        bare = _strip_matching_quotes(p)
+        escaped = bare.replace("'", "''")
+        items.append(f"New-Item -ItemType Directory -Path '{escaped}' -Force")
+    return "; ".join(items)
+
+
+def _translate_posix_segment_for_powershell(segment: str) -> str | None:
+    try:
+        tokens = shlex.split(segment, posix=False)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    base = _strip_matching_quotes(tokens[0]).rsplit("/", maxsplit=1)[-1].rsplit("\\", maxsplit=1)[-1].lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    if base == "mkdir":
+        return _translate_mkdir_p_to_powershell(segment)
+    return None
+
+
+def _translate_posix_for_powershell(command: str) -> str | None:
+    segments = _split_shell_segments(command)
+    if len(segments) != 1:
+        return None
+    return _translate_posix_segment_for_powershell(segments[0])
 
 
 def _clip_text(value: str, max_chars: int) -> str:
@@ -560,6 +622,12 @@ def _resolve_execution_plan(command: str, shell_type: str) -> tuple[list[str] | 
                 exe = _available_bash(allow_wsl=False)
                 if exe:
                     return [exe, "-lc", _normalize_windows_paths_for_bash(command)], False, "bash"
+                translated = _translate_posix_for_powershell(command)
+                ps_exe = _available_powershell()
+                if translated is not None and ps_exe:
+                    return [ps_exe, "-NoProfile", "-NonInteractive", "-Command", translated], False, "powershell"
+                if ps_exe:
+                    return [ps_exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
             normalized = "cmd"
         if normalized == "powershell":
             exe = _available_powershell()
