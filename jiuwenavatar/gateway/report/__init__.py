@@ -8,7 +8,7 @@ from jiuwenavatar.gateway.report.models import (
     ReportSection,
 )
 from jiuwenavatar.gateway.report.store import ReportStore
-from jiuwenavatar.gateway.report.manager import ReportManager, get_report_manager
+from jiuwenavatar.gateway.report.manager import MissionManager, ReportManager, get_mission_manager, get_report_manager
 
 __all__ = [
     "MissionStatus",
@@ -16,6 +16,8 @@ __all__ = [
     "MissionReport",
     "ReportSection",
     "ReportStore",
+    "MissionManager",
     "ReportManager",
+    "get_mission_manager",
     "get_report_manager",
 ]

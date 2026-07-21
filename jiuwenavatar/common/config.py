@@ -701,9 +701,24 @@ def _decrypt_model_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]
 def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """获取默认模型列表，兼容新旧格式。
 
-    优先级：models.defaults（列表） > models.default（单对象） > 环境变量回退
+    优先级：企业租户模型目录 > models.defaults（列表） > models.default（单对象） > 环境变量回退
     返回的 api_key 已解密。每个条目可能含顶层 alias 字段。
     """
+    from jiuwenavatar.common.enterprise import get_tenant_context, is_enterprise_mode
+
+    if is_enterprise_mode():
+        ctx = get_tenant_context()
+        group_id = str(ctx.group_id if ctx else "").strip()
+        if group_id:
+            try:
+                from jiuwenavatar.gateway.model_catalog import get_model_catalog_service
+
+                entries = get_model_catalog_service().resolve_runtime_entries(group_id)
+                if entries:
+                    return entries
+            except Exception:
+                logger.warning("Failed to resolve tenant model catalog for %s", group_id, exc_info=True)
+
     if config is None:
         config = get_config()
     models = config.get("models", {})
@@ -1390,6 +1405,26 @@ def get_model_config(name: str, index: int | None = None) -> dict[str, Any] | No
     当存在同名模型时，可通过 index 参数指定第几个匹配项（0-based）。
     若 index 为 None，返回 is_default=True 的条目；若无则返回第一个匹配。
     """
+    from jiuwenavatar.common.enterprise import get_tenant_context, is_enterprise_mode
+
+    if is_enterprise_mode():
+        ctx = get_tenant_context()
+        group_id = str(ctx.group_id if ctx else "").strip()
+        if group_id:
+            try:
+                from jiuwenavatar.gateway.model_catalog import get_model_catalog_service
+
+                for entry in get_model_catalog_service().resolve_runtime_entries(group_id):
+                    mcc = entry.get("model_client_config") if isinstance(entry, dict) else {}
+                    if not isinstance(mcc, dict):
+                        continue
+                    entry_name = str(mcc.get("model_name") or "")
+                    entry_alias = str(entry.get("alias") or "")
+                    if entry_name == name or (entry_alias and entry_alias == name):
+                        return entry
+            except Exception:
+                logger.warning("Failed to resolve tenant model %s for %s", name, group_id, exc_info=True)
+
     data = get_config_raw()
     models = data.get("models", {})
     defaults_list = models.get("defaults")

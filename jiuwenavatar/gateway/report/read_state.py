@@ -92,12 +92,21 @@ def is_report_unread(report_id: str, state: dict[str, Any] | None = None) -> boo
     return report_id not in st.get("reports", {})
 
 
-def count_unread_missions_by_avatar(*, limit: int = 500) -> dict[str, int]:
+def count_unread_missions_by_avatar(
+    *,
+    limit: int = 500,
+    group_id: str | None = None,
+    owner_user_id: str | None = None,
+) -> dict[str, int]:
     from jiuwenavatar.gateway.report.store import ReportStore
 
     state = load_read_state()
     counts: dict[str, int] = {}
-    for mission in ReportStore().list_missions(limit=limit):
+    for mission in ReportStore().list_missions(
+        limit=limit,
+        group_id=group_id,
+        owner_user_id=owner_user_id,
+    ):
         avatar_id = (mission.avatar_id or "").strip()
         if not avatar_id or not is_mission_unread(mission, state):
             continue
@@ -105,12 +114,21 @@ def count_unread_missions_by_avatar(*, limit: int = 500) -> dict[str, int]:
     return counts
 
 
-def count_active_missions_by_avatar(*, limit: int = 500) -> dict[str, int]:
+def count_active_missions_by_avatar(
+    *,
+    limit: int = 500,
+    group_id: str | None = None,
+    owner_user_id: str | None = None,
+) -> dict[str, int]:
     """按分身统计执行中/等待中的任务数（用于浮标忙碌指示）。"""
     from jiuwenavatar.gateway.report.store import ReportStore
 
     counts: dict[str, int] = {}
-    for mission in ReportStore().list_missions(limit=limit):
+    for mission in ReportStore().list_missions(
+        limit=limit,
+        group_id=group_id,
+        owner_user_id=owner_user_id,
+    ):
         avatar_id = (mission.avatar_id or "").strip()
         if not avatar_id or not is_mission_active(mission):
             continue

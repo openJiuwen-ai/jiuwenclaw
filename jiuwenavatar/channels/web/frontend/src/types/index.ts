@@ -31,11 +31,22 @@ export type AgentMode = 'agent.fast' | 'agent.plan' | 'team' | 'auto_harness';
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'interrupted';
 
 export interface ModelEntry {
+  /** Tenant catalog entry id (enterprise mode). */
+  id?: string;
+  /** Enterprise tenant model usage. Missing means chat for standalone/backward compatibility. */
+  model_type?: 'chat' | 'claude_code' | 'codex_cli' | string;
   model_name: string;
   api_base: string;
   api_key: string;
   model_provider: string;
+  /** Enterprise member list: server may omit api_key but set has_key. */
+  has_key?: boolean;
+  /** Enterprise catalog can reference a platform-managed secret env var. */
+  secret_ref?: string;
+  /** Whether tenant members can select this model. */
+  enabled?: boolean;
   timeout?: number;
+  verify_ssl?: boolean;
   temperature?: number;
   context_window_tokens?: number;
   /** 同 model_name 组内的默认勾选标识 */

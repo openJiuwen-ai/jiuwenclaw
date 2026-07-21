@@ -799,7 +799,11 @@ async def _run(
         DiscordChannelConfig
     from jiuwenavatar.gateway.channel_manager.im_platforms.wecom.wecom_connect import WecomChannel, WecomConfig
     from jiuwenavatar.common.config import get_config
-    from jiuwenavatar.gateway.routing.agent_client import WebSocketAgentServerClient
+    from jiuwenavatar.common.enterprise import is_enterprise_mode
+    from jiuwenavatar.gateway.routing.agent_client import (
+        RuntimeManagementAgentClient,
+        WebSocketAgentServerClient,
+    )
     from jiuwenavatar.gateway.channel_manager.channel_manager import ChannelManager
     from jiuwenavatar.gateway.cron import CronController, CronJobStore, CronSchedulerService
     from jiuwenavatar.gateway.heartbeat.heartbeat import GatewayHeartbeatService, HeartbeatConfig
@@ -856,14 +860,23 @@ async def _run(
 
     # 从扩展注册表获取 AgentServerClient
     agent_server_ext = extension_registry.get_agent_server_client_extension()
+    enterprise_mode = is_enterprise_mode()
     if agent_server_ext is not None:
         logger.info("[App] using extension AgentServerClient: %s", agent_server_ext.metadata.name)
         client = agent_server_ext.get_client()
+    elif enterprise_mode:
+        logger.info("[App] using RuntimeManagementAgentClient for enterprise routing")
+        client = RuntimeManagementAgentClient(
+            default_endpoint=agent_server_url,
+            config=get_config(),
+            ping_interval=20.0,
+            ping_timeout=600.0,
+        )
     else:
         client = WebSocketAgentServerClient(ping_interval=20.0, ping_timeout=600.0)
 
     # 如果是 WebSocket 客户端，需要连接；如果是 YuanrongFrontendAgentClient，无需连接
-    if isinstance(client, WebSocketAgentServerClient):
+    if isinstance(client, (WebSocketAgentServerClient, RuntimeManagementAgentClient)):
         await _connect_with_retry(
             client,
             agent_server_url,

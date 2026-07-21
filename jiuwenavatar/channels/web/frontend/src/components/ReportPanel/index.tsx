@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import { webRequest } from '../../services/webClient';
 import { PlatformPageLayout, PlatformEmpty } from '../AvatarPlatform/PlatformPageLayout';
 import type { ReportDeepLink } from '../../utils/reportDeepLink';
+import { enterpriseUserContext } from '../../utils/enterpriseContext';
 import {
   migrateLegacyReadStateIfNeeded,
   persistReportReadState,
@@ -165,10 +166,11 @@ export function ReportPanel({ deepLink }: ReportPanelProps) {
 
   const fetchData = useCallback(async () => {
     try {
+      const tenant = enterpriseUserContext();
       const [r, m, a] = await Promise.all([
-        webRequest<{ reports?: Report[] }>('reports.list', { limit: 200 }),
-        webRequest<{ missions?: Mission[] }>('missions.list', { limit: 200 }),
-        webRequest<{ avatars?: AvatarInfo[] }>('avatars.list'),
+        webRequest<{ reports?: Report[] }>('reports.list', { limit: 200, ...tenant }),
+        webRequest<{ missions?: Mission[] }>('missions.list', { limit: 200, ...tenant }),
+        webRequest<{ avatars?: AvatarInfo[] }>('avatars.list', tenant),
       ]);
       setReports(r?.reports || []);
       setMissions(m?.missions || []);

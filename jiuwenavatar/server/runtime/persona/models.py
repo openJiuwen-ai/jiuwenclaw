@@ -104,6 +104,14 @@ class AvatarStatus(str, Enum):
     ERROR = "error"
 
 
+class AvatarRuntimeStatus(str, Enum):
+    """Cloud runtime binding status."""
+
+    UNBOUND = "unbound"
+    BOUND = "bound"
+    ERROR = "error"
+
+
 class AvatarConfig(BaseModel):
     """Avatar 数字分身实例配置.
 
@@ -114,6 +122,17 @@ class AvatarConfig(BaseModel):
     name: str = Field(..., description="分身名称，如 '我的 Committer 分身'")
     persona_id: str = Field(..., description="所基于的 Persona 模板 ID")
     persona_version: str = Field("1.0.0", description="创建时的 Persona 版本")
+
+    # 云化多租户字段。单机版可保持为空；企业模式下由 Manager/Gateway 注入。
+    owner_user_id: str = Field("", description="分身创建者用户 ID")
+    group_id: str = Field("", description="租户/组织 ID")
+    service_id: str = Field("", description="RuntimeManagement 路由键")
+    agent_id: str = Field("", description="Pod 内用户隔离键")
+    runtime_status: AvatarRuntimeStatus = Field(
+        AvatarRuntimeStatus.UNBOUND,
+        description="云化运行时绑定状态",
+    )
+    agentserver_ref: str = Field("", description="当前绑定的 AgentServer/Pod 引用")
 
     # 运行状态
     status: AvatarStatus = Field(AvatarStatus.IDLE, description="当前状态")

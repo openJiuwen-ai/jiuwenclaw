@@ -9,6 +9,7 @@
 - [A2A 接入说明](A2A.md)
 - [A2UI 生成式界面](A2UI.md)
 - [配置说明](配置信息.md)
+- [JiuwenAvatar 分布式云化部署设计](JiuwenAvatar-分布式云化部署设计.md)
 - [分布式 Team](分布式Team.md)
 - [Agent Team 使用指南](AgentTeam.md)
 - [单机多实例运行](单机多实例运行.md)

@@ -5,6 +5,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { webRequest } from '../../services/webClient';
+import { enterpriseUserContext } from '../../utils/enterpriseContext';
 import { useAvatarStore } from '../../stores/avatarStore';
 import { PlatformPageLayout, PlatformEmpty } from '../AvatarPlatform/PlatformPageLayout';
 import '../AvatarPlatform/AvatarPlatform.css';
@@ -56,14 +57,16 @@ export function TriggerPanel() {
     [],
   );
 
+  const tenantParams = useCallback(() => enterpriseUserContext(), []);
+
   const fetchTriggers = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await webRequest<{ triggers?: TriggerConfig[] }>('triggers.list');
+      const res = await webRequest<{ triggers?: TriggerConfig[] }>('triggers.list', tenantParams());
       setTriggers(res?.triggers || []);
     } catch { /* ignore */ }
     setLoading(false);
-  }, []);
+  }, [tenantParams]);
 
   useEffect(() => {
     fetchTriggers();
@@ -130,7 +133,7 @@ export function TriggerPanel() {
                     type="button"
                     className="avatar-platform__btn avatar-platform__btn--ghost"
                     onClick={async () => {
-                      await webRequest('triggers.update', { trigger_id: tr.id, enabled: !tr.enabled });
+                      await webRequest('triggers.update', { trigger_id: tr.id, enabled: !tr.enabled, ...tenantParams() });
                       fetchTriggers();
                     }}
                   >
@@ -141,7 +144,7 @@ export function TriggerPanel() {
                     className="avatar-platform__btn avatar-platform__btn--danger"
                     onClick={async () => {
                       if (!confirm(t('trigger.confirmDelete', '确认删除？'))) return;
-                      await webRequest('triggers.delete', { trigger_id: tr.id });
+                      await webRequest('triggers.delete', { trigger_id: tr.id, ...tenantParams() });
                       fetchTriggers();
                     }}
                   >
@@ -212,9 +215,9 @@ function TriggerFormModal({
       if (type === 'event') { fields.event_source = eventSource; fields.event_type = eventType; }
 
       if (isEdit && existing) {
-        await webRequest('triggers.update', { trigger_id: existing.id, ...fields });
+        await webRequest('triggers.update', { trigger_id: existing.id, ...fields, ...enterpriseUserContext() });
       } else {
-        await webRequest('triggers.create', { type, ...fields });
+        await webRequest('triggers.create', { type, ...fields, ...enterpriseUserContext() });
       }
       onClose();
     } catch (e) {

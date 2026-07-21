@@ -8,6 +8,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from jiuwenavatar.common.postgres_json_store import (
+    PostgresJsonStore,
+    PostgresJsonStoreUnavailable,
+    postgres_store_enabled,
+)
 from jiuwenavatar.gateway.report.models import Mission, MissionReport
 
 logger = logging.getLogger(__name__)
@@ -23,6 +28,16 @@ class ReportStore:
 
     def __init__(self, path: Path | None = None) -> None:
         self._dir = path or _get_report_dir()
+        self._missions_pg: PostgresJsonStore | None = None
+        self._reports_pg: PostgresJsonStore | None = None
+        if path is None and postgres_store_enabled():
+            try:
+                self._missions_pg = PostgresJsonStore("missions")
+                self._reports_pg = PostgresJsonStore("mission_reports")
+            except PostgresJsonStoreUnavailable as exc:
+                logger.warning("Report PostgreSQL store unavailable, falling back to JSON: %s", exc)
+            except Exception:
+                logger.warning("Report PostgreSQL store init failed, falling back to JSON", exc_info=True)
 
     def _ensure_dir(self) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -48,13 +63,41 @@ class ReportStore:
 
     # --- Missions ---
 
-    def list_missions(self, *, avatar_id: str | None = None, limit: int = 50) -> list[Mission]:
+    def list_missions(
+        self,
+        *,
+        avatar_id: str | None = None,
+        group_id: str | None = None,
+        owner_user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[Mission]:
+        if self._missions_pg is not None:
+            missions = []
+            for item in self._missions_pg.list():
+                try:
+                    m = Mission(**item)
+                    if avatar_id and m.avatar_id != avatar_id:
+                        continue
+                    if group_id is not None and (m.group_id or "") != group_id:
+                        continue
+                    if owner_user_id is not None and (m.owner_user_id or "") != owner_user_id:
+                        continue
+                    missions.append(m)
+                except Exception:
+                    continue
+            missions.sort(key=lambda m: m.started_at, reverse=True)
+            return missions[:limit]
+
         items = self._read_json(self._missions_path())
         missions = []
         for item in items:
             try:
                 m = Mission(**item)
                 if avatar_id and m.avatar_id != avatar_id:
+                    continue
+                if group_id is not None and (m.group_id or "") != group_id:
+                    continue
+                if owner_user_id is not None and (m.owner_user_id or "") != owner_user_id:
                     continue
                 missions.append(m)
             except Exception:
@@ -69,6 +112,15 @@ class ReportStore:
         return None
 
     def save_mission(self, mission: Mission) -> None:
+        if self._missions_pg is not None:
+            self._missions_pg.save(
+                mission.id,
+                mission.model_dump(),
+                group_id=mission.group_id or "",
+                owner_user_id=mission.owner_user_id or "",
+            )
+            return
+
         missions = self.list_missions(limit=10000)
         found = False
         for i, m in enumerate(missions):
@@ -81,6 +133,9 @@ class ReportStore:
         self._write_json(self._missions_path(), [m.model_dump() for m in missions])
 
     def delete_mission(self, mission_id: str) -> bool:
+        if self._missions_pg is not None:
+            return self._missions_pg.delete(mission_id)
+
         missions = self.list_missions(limit=10000)
         kept = [m for m in missions if m.id != mission_id]
         if len(kept) == len(missions):
@@ -93,7 +148,12 @@ class ReportStore:
         kept = [m for m in missions if m.avatar_id != avatar_id]
         removed = len(missions) - len(kept)
         if removed:
-            self._write_json(self._missions_path(), [m.model_dump() for m in kept])
+            if self._missions_pg is not None:
+                for m in missions:
+                    if m.avatar_id == avatar_id:
+                        self._missions_pg.delete(m.id)
+            else:
+                self._write_json(self._missions_path(), [m.model_dump() for m in kept])
         return removed
 
     def delete_reports_for_avatar(self, avatar_id: str) -> int:
@@ -101,18 +161,51 @@ class ReportStore:
         kept = [r for r in reports if r.avatar_id != avatar_id]
         removed = len(reports) - len(kept)
         if removed:
-            self._write_json(self._reports_path(), [r.model_dump() for r in kept])
+            if self._reports_pg is not None:
+                for r in reports:
+                    if r.avatar_id == avatar_id:
+                        self._reports_pg.delete(r.id)
+            else:
+                self._write_json(self._reports_path(), [r.model_dump() for r in kept])
         return removed
 
     # --- Reports ---
 
-    def list_reports(self, *, avatar_id: str | None = None, limit: int = 50) -> list[MissionReport]:
+    def list_reports(
+        self,
+        *,
+        avatar_id: str | None = None,
+        group_id: str | None = None,
+        owner_user_id: str | None = None,
+        limit: int = 50,
+    ) -> list[MissionReport]:
+        if self._reports_pg is not None:
+            reports = []
+            for item in self._reports_pg.list():
+                try:
+                    r = MissionReport(**item)
+                    if avatar_id and r.avatar_id != avatar_id:
+                        continue
+                    if group_id is not None and (r.group_id or "") != group_id:
+                        continue
+                    if owner_user_id is not None and (r.owner_user_id or "") != owner_user_id:
+                        continue
+                    reports.append(r)
+                except Exception:
+                    continue
+            reports.sort(key=lambda r: r.created_at, reverse=True)
+            return reports[:limit]
+
         items = self._read_json(self._reports_path())
         reports = []
         for item in items:
             try:
                 r = MissionReport(**item)
                 if avatar_id and r.avatar_id != avatar_id:
+                    continue
+                if group_id is not None and (r.group_id or "") != group_id:
+                    continue
+                if owner_user_id is not None and (r.owner_user_id or "") != owner_user_id:
                     continue
                 reports.append(r)
             except Exception:
@@ -127,6 +220,15 @@ class ReportStore:
         return None
 
     def save_report(self, report: MissionReport) -> None:
+        if self._reports_pg is not None:
+            self._reports_pg.save(
+                report.id,
+                report.model_dump(),
+                group_id=report.group_id or "",
+                owner_user_id=report.owner_user_id or "",
+            )
+            return
+
         reports = self.list_reports(limit=10000)
         found = False
         for i, r in enumerate(reports):

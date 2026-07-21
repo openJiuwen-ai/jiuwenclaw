@@ -56,6 +56,7 @@ from jiuwenavatar.common.utils import (
 from jiuwenavatar.agents.harness.common.auto_harness import AutoHarnessService
 from jiuwenavatar.agents.harness.common.tools.web_file_download import build_file_download_info
 from jiuwenavatar.common.version import __version__
+from jiuwenavatar.common.enterprise import is_enterprise_mode, parse_enterprise_auth, require_org_admin
 
 for _jiuwen_log in LogManager.get_all_loggers().values():
     _jiuwen_log.set_level(logging.INFO)
@@ -382,6 +383,9 @@ _CONFIG_SET_ENV_MAP = {
     "anthropic_api_key": "ANTHROPIC_API_KEY",
     "anthropic_base_url": "ANTHROPIC_BASE_URL",
     "anthropic_model": "ANTHROPIC_MODEL",
+    "openai_api_key": "OPENAI_API_KEY",
+    "openai_base_url": "OPENAI_BASE_URL",
+    "codex_model": "CODEX_MODEL",
     "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
     "skill_create": "SKILL_CREATE",
     "teamskills_market_url": "TEAM_SKILLS_HUB_BASE_URL",
@@ -409,6 +413,21 @@ _CONFIG_SET_ENV_MAP = {
 }
 # 配置项键名列表，用于日志等说明
 CONFIG_KEYS = tuple(_CONFIG_SET_ENV_MAP.keys())
+_ENTERPRISE_USER_CONFIG_KEYS = {
+    "email_address",
+    "email_token",
+    "jina_api_key",
+    "bocha_api_key",
+    "serper_api_key",
+    "perplexity_api_key",
+    "github_token",
+    "gitcode_token",
+    "teamskills_user_token",
+    "free_search_ddg_enabled",
+    "free_search_bing_enabled",
+    "evolution_auto_scan",
+    "skill_create",
+}
 
 # 来自 config.yaml 的配置项（前端 param 名 -> config.yaml 路径）
 _CONFIG_YAML_KEYS = frozenset({
@@ -697,6 +716,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 payload.setdefault(key, value)
             payload.setdefault("free_search_ddg_enabled", "false")
             payload.setdefault("free_search_bing_enabled", "false")
+        auth = parse_enterprise_auth(params if isinstance(params, dict) else {})
+        if auth is not None:
+            from jiuwenavatar.gateway.model_catalog import get_model_catalog_service
+
+            payload = get_model_catalog_service().sanitize_config_payload(payload)
+            for key in _ENTERPRISE_USER_CONFIG_KEYS:
+                payload[key] = ""
+            if auth.group_id and auth.user_id:
+                from jiuwenavatar.common.enterprise_user_config import get_enterprise_user_config_store
+
+                user_config = get_enterprise_user_config_store().load(auth.group_id, auth.user_id)
+                for key in _ENTERPRISE_USER_CONFIG_KEYS:
+                    if key in user_config:
+                        payload[key] = user_config.get(key, "")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     def _persist_env_updates(updates: dict[str, str]) -> None:
@@ -735,6 +768,33 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     class _ConfigInternalError(RuntimeError):
         pass
+
+    def _save_enterprise_user_config(auth, params: dict[str, Any]) -> dict[str, str]:
+        updates = {
+            key: str(params.pop(key) or "").strip()
+            for key in list(params.keys())
+            if key in _ENTERPRISE_USER_CONFIG_KEYS
+        }
+        if updates:
+            if not auth.group_id or not auth.user_id:
+                raise _ConfigBadRequest("group_id and user_id are required for user-scoped config")
+            from jiuwenavatar.common.enterprise_user_config import get_enterprise_user_config_store
+
+            get_enterprise_user_config_store().save_updates(
+                auth.group_id,
+                auth.user_id,
+                updates,
+            )
+            if "gitcode_token" in updates:
+                try:
+                    from jiuwenavatar.common.enterprise import TenantRuntimeContext, bind_tenant_context
+                    from jiuwenavatar.common.gitcode_config import sync_gitcode_token_to_skill_config
+
+                    with bind_tenant_context(TenantRuntimeContext(group_id=auth.group_id, user_id=auth.user_id)):
+                        sync_gitcode_token_to_skill_config(updates["gitcode_token"])
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[config.set] sync tenant gitcode-repo.json failed: %s", exc)
+        return updates
 
     def _encrypt_config_params(params: dict[str, Any]) -> dict[str, Any]:
         encrypted = dict(params)
@@ -931,6 +991,32 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
+        auth = parse_enterprise_auth(params)
+        if auth is not None:
+            personal_params = dict(params)
+            for context_key in ("group_id", "user_id", "owner_user_id", "role", "routing", "tenant"):
+                personal_params.pop(context_key, None)
+            try:
+                user_updates = _save_enterprise_user_config(auth, personal_params)
+            except _ConfigBadRequest as exc:
+                await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+                return
+            if personal_params:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error="Enterprise mode can only update user-scoped config via config.set",
+                    code="FORBIDDEN",
+                )
+                return
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={"updated": list(user_updates.keys()), "applied_without_restart": True},
+            )
+            return
         try:
             env_updates, yaml_updated = _apply_config_payload(params)
         except _ConfigBadRequest as exc:
@@ -1084,7 +1170,51 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         每条带 ``origin_index`` 指向 ``models.defaults`` 中的位置，配合 replace_all
         在保存时识别"未编辑字段"并保留原 YAML 占位符（如 ``${API_KEY}``）。
+
+        企业模式：从租户模型目录读取；普通成员不返回 api_key。
         """
+        req_params = params if isinstance(params, dict) else {}
+        auth = parse_enterprise_auth(req_params)
+        if auth is not None:
+            try:
+                from jiuwenavatar.gateway.model_catalog import get_model_catalog_service
+
+                if not auth.group_id:
+                    await channel.send_response(
+                        ws,
+                        req_id,
+                        ok=True,
+                        payload={"models": [], "active_model": "", "enterprise_catalog": True},
+                    )
+                    return
+                svc = get_model_catalog_service()
+                result = svc.list_api_models(
+                    auth.group_id,
+                    include_secrets=auth.is_org_admin,
+                    include_disabled=auth.is_org_admin,
+                )
+                selectable = [
+                    item for item in result
+                    if item.get("enabled", True) and str(item.get("model_type") or "chat") == "chat"
+                ]
+                active_entry = next((item for item in selectable if item.get("is_default") is True), None)
+                if active_entry is None and selectable:
+                    active_entry = selectable[0]
+                active_model = str(active_entry.get("model_name") or "") if active_entry else ""
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=True,
+                    payload={
+                        "models": result,
+                        "active_model": active_model,
+                        "enterprise_catalog": True,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[models.list] enterprise catalog failed: %s", exc)
+                await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+            return
         try:
             config = get_config()
             models = get_default_models(config)
@@ -1139,6 +1269,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
+        if parse_enterprise_auth(params) is not None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="Enterprise mode uses models.catalog.save for tenant model catalog",
+                code="FORBIDDEN",
+            )
+            return
         try:
             new_models = _build_models_defaults_from_frontend(params.get("models"))
             update_default_models_in_config(new_models)
@@ -1154,6 +1293,33 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.warning("[models.replace_all] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
+    async def _models_catalog_save(ws, req_id, params, session_id):
+        """Replace tenant model catalog (org_admin only)."""
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        try:
+            auth = require_org_admin(parse_enterprise_auth(params))
+            from jiuwenavatar.gateway.model_catalog import get_model_catalog_service
+
+            models_raw = params.get("models")
+            if not isinstance(models_raw, list):
+                raise _ConfigBadRequest("models must be array")
+            catalog = get_model_catalog_service().save_from_api_payload(auth.group_id, models_raw)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={"count": len(catalog.models), "group_id": auth.group_id},
+            )
+        except PermissionError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="FORBIDDEN")
+        except _ConfigBadRequest as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[models.catalog.save] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
     async def _config_save_all(ws, req_id, params, session_id):
         """Batch-save config panel changes and trigger a single hot reload.
 
@@ -1165,8 +1331,28 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
+        auth = parse_enterprise_auth(params)
+        if auth is not None:
+            forbidden_parts = [
+                name
+                for name in ("models", "agents", "team")
+                if name in params
+            ]
+            if forbidden_parts:
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=(
+                        "Enterprise mode uses models.catalog.save for tenant model catalog; "
+                        f"config.save_all cannot update: {', '.join(forbidden_parts)}"
+                    ),
+                    code="FORBIDDEN",
+                )
+                return
 
         env_updates: dict[str, str] = {}
+        user_updates: dict[str, str] = {}
         yaml_updated: list[str] = []
         models_count: int | None = None
 
@@ -1181,6 +1367,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 if not isinstance(raw_config_params, dict):
                     raise _ConfigBadRequest("config must be object")
                 config_params.update(raw_config_params)
+            if auth is not None and config_params:
+                user_updates.update(_save_enterprise_user_config(auth, config_params))
+                if config_params and not auth.is_org_admin:
+                    raise _ConfigBadRequest(
+                        "Enterprise members can only update user-scoped config keys"
+                    )
 
             if "agents" in params:
                 config_params["agents"] = params.get("agents")
@@ -1202,7 +1394,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 req_id,
                 ok=True,
                 payload={
-                    "updated": [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated,
+                    "updated": [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated + list(user_updates.keys()),
+                    "user_updated": list(user_updates.keys()),
                     "applied_without_restart": True,
                     "models_count": models_count,
                 },
@@ -1233,6 +1426,62 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         else:
             channels = []
         await channel.send_response(ws, req_id, ok=True, payload={"channels": channels})
+
+    async def _auth_login(ws, req_id, params, session_id):
+        """Self-hosted management-console login shim."""
+        try:
+            payload = dict(params or {})
+            user_id = str(payload.get("user_id") or payload.get("username") or "local-user").strip()
+            group_id = str(payload.get("group_id") or "default").strip()
+            display_name = str(payload.get("display_name") or user_id).strip()
+            role = str(payload.get("role") or "member").strip().lower() or "member"
+            if role not in {"org_admin", "orgadmin", "member", "admin", "platform_admin", "tenant_admin", "group_admin"}:
+                role = "member"
+            token_payload = {
+                "sub": user_id,
+                "group_id": group_id,
+                "display_name": display_name,
+                "role": role,
+                "issuer": "jiuwenavatar-local-identity",
+            }
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={
+                    "access_token": json.dumps(token_payload, ensure_ascii=False),
+                    "token_type": "local-json",
+                    "user": token_payload,
+                },
+            )
+        except Exception as e:
+            logger.exception("[auth.login] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
+    async def _manager_status(ws, req_id, params, session_id):
+        """Return enterprise runtime status for the management console."""
+        try:
+            import os
+            from jiuwenavatar.common.enterprise import is_enterprise_mode
+
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=True,
+                payload={
+                    "enterprise_mode": is_enterprise_mode(),
+                    "deployment_mode": os.getenv("DEPLOYMENT_MODE", "standalone"),
+                    "agent_server_deploy_mode": os.getenv("AGENT_SERVER_DEPLOY_MODE", "process"),
+                    "store_backend": os.getenv("JIUWENAVATAR_STORE_BACKEND", "json"),
+                    "session_map_backend": os.getenv("GATEWAY_SESSION_MAP_BACKEND", "auto"),
+                    "runtime": {
+                        "agent_service_endpoints_configured": bool(os.getenv("AGENT_SERVICE_ENDPOINTS", "").strip()),
+                    },
+                },
+            )
+        except Exception as e:
+            logger.exception("[manager.status] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _updater_get_status(ws, req_id, params, session_id):
         service = updater_service or UpdaterService()
@@ -1317,12 +1566,30 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if isinstance(params, dict) and "avatar_id" in params:
             avatar_filter = str(params.get("avatar_id") or "")
 
+        from jiuwenavatar.common.enterprise import parse_tenant_list_filters
         from jiuwenavatar.server.runtime.session.session_metadata import get_all_sessions_metadata
+
+        tenant = parse_tenant_list_filters(params if isinstance(params, dict) else {})
+        user_filter: str | None = None
+        group_filter: str | None = None
+        if tenant is not None:
+            if not tenant.is_valid:
+                await channel.send_response(ws, req_id, ok=True, payload={
+                    "sessions": [],
+                    "total": 0,
+                    "limit": limit,
+                    "offset": offset,
+                })
+                return
+            group_filter = tenant.group_id
+            user_filter = tenant.user_id or None
 
         sessions, total = get_all_sessions_metadata(
             limit=limit,
             offset=offset,
             avatar_id=avatar_filter,
+            user_id=user_filter,
+            group_id=group_filter,
         )
 
         await channel.send_response(ws, req_id, ok=True, payload={
@@ -1364,6 +1631,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             session_id=session_id_to_create,
             channel_id=params.get("channel_id", ""),
             user_id=params.get("user_id", ""),
+            group_id=str(params.get("group_id") or ""),
             title=params.get("title", ""),
             mode=params.get("mode", "unknown"),
             avatar_id=str(params.get("avatar_id") or ""),
@@ -2278,8 +2546,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("config.validate_model", _config_validate_model)
     channel.register_method("models.list", _models_list)
     channel.register_method("models.replace_all", _models_replace_all)
+    channel.register_method("models.catalog.save", _models_catalog_save)
     channel.register_method("models.validate", _models_validate)
     channel.register_method("channel.get", _channel_get)
+    channel.register_method("auth.login", _auth_login)
+    channel.register_method("manager.status", _manager_status)
 
     channel.register_method("session.list", _session_list)
     channel.register_method("session.create", _session_create)
@@ -2446,7 +2717,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         try:
             _sync_platform_env_to_process(("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "OPENAI_API_KEY"))
-            result = {"engines": list_coding_engine_selectability()}
+            auth = parse_enterprise_auth(params if isinstance(params, dict) else {})
+            if auth is not None and auth.group_id:
+                from jiuwenavatar.common.enterprise import TenantRuntimeContext, bind_tenant_context
+
+                with bind_tenant_context(TenantRuntimeContext(group_id=auth.group_id, user_id=auth.user_id)):
+                    result = {"engines": list_coding_engine_selectability()}
+            else:
+                result = {"engines": list_coding_engine_selectability()}
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except Exception as e:
             logger.exception("[coding.engines.status] %s", e)
@@ -2473,7 +2751,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         try:
             manager = PersonaManager.get_instance()
-            result = await manager.handle_avatars_list()
+            result = await manager.handle_avatars_list(**(params or {}))
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except Exception as e:
             logger.exception("[avatars.list] %s", e)
@@ -2550,7 +2828,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         try:
             trigger_id = (params or {}).get("trigger_id", "")
             engine = TriggerEngine.get_instance()
-            result = await engine.handle_triggers_get(trigger_id=trigger_id)
+            result = await engine.handle_triggers_get(trigger_id=trigger_id, **(params or {}))
             ok = "error" not in result
             await channel.send_response(ws, req_id, ok=ok, payload=result, error=result.get("error") if not ok else None)
         except Exception as e:
@@ -2589,7 +2867,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         try:
             trigger_id = (params or {}).get("trigger_id", "")
             engine = TriggerEngine.get_instance()
-            result = await engine.handle_triggers_delete(trigger_id=trigger_id)
+            result = await engine.handle_triggers_delete(trigger_id=trigger_id, **(params or {}))
             ok = "error" not in result
             await channel.send_response(ws, req_id, ok=ok, payload=result, error=result.get("error") if not ok else None)
         except Exception as e:
@@ -2597,10 +2875,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _missions_list(ws, req_id, params, session_id):
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
 
         try:
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_missions_list(**(params or {}))
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except Exception as e:
@@ -2608,11 +2886,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _missions_get(ws, req_id, params, session_id):
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
 
         try:
             mission_id = (params or {}).get("mission_id", "")
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_missions_get(mission_id=mission_id)
             ok = "error" not in result
             await channel.send_response(ws, req_id, ok=ok, payload=result, error=result.get("error") if not ok else None)
@@ -2634,11 +2912,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _missions_delete(ws, req_id, params, session_id):
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
 
         try:
             mission_id = (params or {}).get("mission_id", "")
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_missions_delete(mission_id=mission_id)
             ok = "error" not in result
             await channel.send_response(ws, req_id, ok=ok, payload=result, error=result.get("error") if not ok else None)
@@ -2647,10 +2925,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _reports_list(ws, req_id, params, session_id):
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
 
         try:
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_reports_list(**(params or {}))
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except Exception as e:
@@ -2658,11 +2936,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _reports_get(ws, req_id, params, session_id):
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
 
         try:
             report_id = (params or {}).get("report_id", "")
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_reports_get(report_id=report_id)
             ok = "error" not in result
             await channel.send_response(ws, req_id, ok=ok, payload=result, error=result.get("error") if not ok else None)
@@ -2671,10 +2949,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _report_read_state_get(ws, req_id, params, session_id):
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
 
         try:
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_report_read_state_get(**(params or {}))
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except Exception as e:
@@ -2682,10 +2960,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _report_read_state_set(ws, req_id, params, session_id):
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
 
         try:
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_report_read_state_set(**(params or {}))
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except Exception as e:
@@ -2693,10 +2971,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _report_unread_counts(ws, req_id, params, session_id):
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
 
         try:
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_report_unread_counts(**(params or {}))
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except Exception as e:
@@ -2704,10 +2982,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _missions_stats(ws, req_id, params, session_id):
-        from jiuwenavatar.gateway.report import ReportManager
+        from jiuwenavatar.gateway.report import MissionManager
 
         try:
-            manager = ReportManager.get_instance()
+            manager = MissionManager.get_instance()
             result = await manager.handle_missions_stats(**(params or {}))
             await channel.send_response(ws, req_id, ok=True, payload=result)
         except Exception as e:

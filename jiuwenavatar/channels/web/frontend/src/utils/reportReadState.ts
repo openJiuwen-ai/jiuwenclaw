@@ -1,4 +1,5 @@
 import { webRequest } from '../services/webClient';
+import { enterpriseUserContext } from './enterpriseContext';
 
 export interface ViewRecord {
   viewedAt: string;
@@ -24,7 +25,7 @@ export async function persistReportReadState(readState: ReportReadState): Promis
 export async function fetchUnreadCountsByAvatar(): Promise<Record<string, number>> {
   const res = await webRequest<{ missions_by_avatar?: Record<string, number> }>(
     'report.unread_counts',
-    {},
+    { ...enterpriseUserContext() },
   );
   return res?.missions_by_avatar ?? {};
 }

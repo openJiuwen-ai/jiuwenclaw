@@ -1301,6 +1301,16 @@ def get_agent_workspace_dir() -> Path:
 
 
 def get_agent_root_dir() -> Path:
+    try:
+        from jiuwenavatar.common.enterprise import resolve_tenant_agent_root
+
+        tenant_root = resolve_tenant_agent_root()
+        if tenant_root is not None:
+            return tenant_root
+    except Exception:
+        # Path helpers are used during very early startup; enterprise helpers must
+        # never prevent standalone initialization.
+        pass
     return get_user_workspace_dir() / "agent"
 
 

@@ -32,6 +32,10 @@ class Mission(BaseModel):
     result_summary: str | None = Field(None, description="执行结果摘要")
     run_id: str | None = Field(None, description="触发器派发运行 ID")
     session_id: str | None = Field(None, description="触发器派发会话 ID")
+    service_id: str | None = Field(None, description="RuntimeManagement 路由键")
+    agent_id: str | None = Field(None, description="Pod 内租户隔离键")
+    group_id: str | None = Field(None, description="租户/组织 ID")
+    owner_user_id: str | None = Field(None, description="分身创建者用户 ID")
     cancel_requested_at: str | None = Field(None, description="取消请求时间")
 
 
@@ -49,6 +53,8 @@ class MissionReport(BaseModel):
     id: str = Field(default_factory=lambda: f"report-{uuid.uuid4().hex[:8]}")
     mission_id: str = Field(..., description="关联的任务 ID")
     avatar_id: str = Field(..., description="分身 ID")
+    group_id: str | None = Field(None, description="租户/组织 ID")
+    owner_user_id: str | None = Field(None, description="分身创建者用户 ID")
     avatar_persona: str = Field("", description="Persona 类型")
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
 

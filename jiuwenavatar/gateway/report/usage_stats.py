@@ -151,6 +151,13 @@ def build_usage_stats_response(
 
 def record_mission(mission: Mission, *, now: datetime | None = None) -> None:
     """Append/update cumulative stats; safe to call on create and status changes."""
+    from jiuwenavatar.common.enterprise import is_enterprise_mode
+
+    # Enterprise stats are computed from tenant-scoped mission lists; do not
+    # merge into the standalone cumulative ledger under ~/.jiuwenavatar.
+    if is_enterprise_mode():
+        return
+
     ledger = load_usage_ledger()
     sync_mission_to_ledger(ledger, mission, now=now)
     save_usage_ledger(ledger)
