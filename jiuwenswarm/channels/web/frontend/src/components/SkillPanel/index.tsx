@@ -11,7 +11,6 @@ import { SourceManagerModal } from "../../features/SourceManagerModal";
 import { SkillNetSearchModal } from "../../features/SkillNetSearchModal";
 import { ClawHubSearchModal } from "../../features/ClawHubSearchModal";
 import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
-import { OnlineSkillSearchPanel } from "../../features/OnlineSkillSearchPanel";
 import { SkillEvolutionModal } from "../../features/SkillEvolutionModal";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
 import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
@@ -1978,7 +1977,9 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                       ? t("skills.searchPlaceholder")
                       : marketplaceSubTab === "swarmskills"
                       ? t("skills.swarmskills.searchPlaceholder")
-                      : t("skills.onlineSearch.searchPlaceholder")
+                      : onlineSource === "skillnet"
+                      ? t("skills.skillNet.searchPlaceholder")
+                      : t("skills.clawhub.searchPlaceholder")
                   }
                   className="w-full px-3 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text placeholder:text-text-muted"
                 />
@@ -2101,14 +2102,35 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                 </div>
               )}
 
-              {marketplaceSubTab === "online" && (
-                <div className="h-full" key={`online-${searchTrigger}`}>
-                  <OnlineSkillSearchPanel
+              {marketplaceSubTab === "online" && onlineSource === "skillnet" && (
+                <div className="h-full" key={`skillnet-${searchTrigger}`}>
+                  <SkillNetSearchModal
+                    open={true}
+                    embedded={true}
                     sessionId={sessionId}
                     externalSearchQuery={debouncedSearch}
                     installedSkillNames={installedSkillNames}
                     installedSkillOrigins={installedSkillOrigins}
                     viewMode={viewMode}
+                    onClose={() => {}}
+                    onInstalled={(_skillName: string) => {
+                      void fetchSkills();
+                    }}
+                  />
+                </div>
+              )}
+
+              {marketplaceSubTab === "online" && onlineSource === "clawhub" && (
+                <div className="h-full" key={`clawhub-${searchTrigger}`}>
+                  <ClawHubSearchModal
+                    open={true}
+                    embedded={true}
+                    sessionId={sessionId}
+                    externalSearchQuery={debouncedSearch}
+                    installedSkillNames={installedSkillNames}
+                    installedSkillOrigins={installedSkillOrigins}
+                    viewMode={viewMode}
+                    onClose={() => {}}
                     onInstalled={(_skillName: string) => {
                       void fetchSkills();
                     }}

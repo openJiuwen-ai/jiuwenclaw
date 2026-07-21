@@ -358,13 +358,8 @@ export function ClawHubSearchModal({
                               {avatar.firstChar}
                             </div>
                             <div className="min-w-0 flex-1">
-                              <div className="flex min-w-0 items-center gap-2">
-                                <div className="min-w-0 truncate text-base font-semibold text-text-strong">
-                                  {item.slug}
-                                </div>
-                                <span className="flex-shrink-0 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-normal text-text-muted">
-                                  ClawHub
-                                </span>
+                              <div className="text-base font-semibold text-text-strong truncate">
+                                {item.slug}
                               </div>
                               <div className="text-sm text-text-muted mt-1 line-clamp-3">
                                 {item.summary || t("skills.noDescription")}
@@ -399,13 +394,8 @@ export function ClawHubSearchModal({
                               {avatar.firstChar}
                             </div>
                             <div className="min-w-0 flex-1">
-                              <div className="flex min-w-0 items-center gap-2">
-                                <div className="min-w-0 truncate text-sm font-semibold text-text-strong">
-                                  {item.slug}
-                                </div>
-                                <span className="flex-shrink-0 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-normal text-text-muted">
-                                  ClawHub
-                                </span>
+                              <div className="text-sm font-semibold text-text-strong truncate">
+                                {item.slug}
                               </div>
                               <div className="text-xs text-text-muted mt-1 line-clamp-2">
                                 {item.summary || t("skills.noDescription")}
@@ -649,13 +639,8 @@ export function ClawHubSearchModal({
                             {avatar.firstChar}
                           </div>
                           <div className="min-w-0 flex-1">
-                            <div className="flex min-w-0 items-center gap-2">
-                              <div className="min-w-0 truncate text-base font-semibold text-text-strong">
-                                {item.slug}
-                              </div>
-                              <span className="flex-shrink-0 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-normal text-text-muted">
-                                ClawHub
-                              </span>
+                            <div className="text-base font-semibold text-text-strong truncate">
+                              {item.slug}
                             </div>
                             <div className="text-sm text-text-muted mt-1 line-clamp-3">
                               {item.summary || t("skills.noDescription")}

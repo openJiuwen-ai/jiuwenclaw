@@ -538,8 +538,8 @@
   "sourceManager": {
     "closeAria": "关闭源管理弹窗",
     "title": "源管理",
-    "subtitle": "配置在线源",
-    "selectSource": "配置在线源",
+    "subtitle": "选择在线搜索源并配置",
+    "selectSource": "选择在线搜索源",
     "skillnetDesc": "开源技能库",
     "clawhubDesc": "企业技能库",
     "skillnetInfo": "SkillNet 在线搜索",
@@ -1352,16 +1352,7 @@
       "searchPlaceholder": "输入关键词搜索SwarmSkills"
     },
     "onlineSearch": {
-      "title": "Skills在线搜索",
-      "searchPlaceholder": "输入关键词同时搜索多个在线技能源",
-      "searchHint": "输入关键词后，将自动聚合可用在线源的搜索结果。",
-      "searchFailed": "在线技能搜索失败，请稍后重试。",
-      "partialFailure": "部分在线源暂不可用，已展示其余来源的结果。",
-      "clawhubSkipped": "当前已搜索 SkillNet；配置 ClawHub Token 后可同时聚合 ClawHub 结果。",
-      "noResults": "未找到匹配的在线技能。",
-      "installFailed": "安装技能失败。",
-      "installed": "已安装技能 {{name}}",
-      "sourceRank": "源内第 {{rank}} 名"
+      "title": "Skills在线搜索"
     },
     "actions": {
       "install": "安装",

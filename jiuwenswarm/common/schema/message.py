@@ -88,7 +88,6 @@ class ReqMethod(Enum):
     SKILLS_MARKETPLACE_REMOVE = "skills.marketplace.remove"
     SKILLS_MARKETPLACE_TOGGLE = "skills.marketplace.toggle"
     SKILLS_UNINSTALL = "skills.uninstall"
-    SKILLS_ONLINE_SEARCH = "skills.online_search.search"
     SKILLS_SKILLNET_SEARCH = "skills.skillnet.search"
     SKILLS_SKILLNET_INSTALL = "skills.skillnet.install"
     SKILLS_SKILLNET_INSTALL_STATUS = "skills.skillnet.install_status"
