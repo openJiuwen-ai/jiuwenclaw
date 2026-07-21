@@ -7,8 +7,6 @@ import json
 from abc import ABC, abstractmethod
 from typing import Any, Iterable, Sequence
 
-from json_repair import repair_json
-
 from jiuwenswarm.symphony.evaluation.aggregation import (
     MetricAccumulator,
     score_level,
@@ -70,7 +68,7 @@ class LLMScoreEvaluator(BaseEvaluator):
     """Shared fail-soft scoring flow for LLM-based metrics."""
 
     thresholds: tuple[float, float, float]
-    instruction: str
+    rubric: str
 
     def __init__(self, llm: EvaluationLLM | None = None) -> None:
         self.llm = llm
@@ -91,8 +89,8 @@ class LLMScoreEvaluator(BaseEvaluator):
         if isinstance(score, bool) or not isinstance(score, (int, float)):
             return self.not_applicable(case, "LLM response has no numeric score.")
         score = float(score)
-        if not 0 <= score <= 1:
-            return self.not_applicable(case, "LLM score is outside [0, 1].")
+        if score not in {0.0, 1.0}:
+            return self.not_applicable(case, "LLM score must be either 0 or 1.")
         reason = payload.get("reason")
         if not isinstance(reason, str):
             return self.not_applicable(case, "LLM response has no textual reason.")
@@ -104,8 +102,10 @@ class LLMScoreEvaluator(BaseEvaluator):
             "message": case.message,
         }
         return (
-            f"{self.instruction}\n"
-            "Return only JSON with score (0..1) and reason.\n"
+            f"{self.rubric}\n\n"
+            "输出要求：score 只能是数字 0 或 1；reason 只写一句简短理由，"
+            "指出决定性证据，不复述评分标准，不虚构依据。不要输出思考过程，"
+            "只返回 JSON：{\"score\": 0 或 1, \"reason\": \"理由\"}。\n"
             f"Evaluation data:\n{json.dumps(payload, ensure_ascii=False, default=str)}"
         )
 
@@ -113,7 +113,7 @@ class LLMScoreEvaluator(BaseEvaluator):
     def _parse(responses: Sequence[str]) -> dict[str, Any]:
         if not responses or not isinstance(responses[0], str):
             raise ValueError("LLM returned no response.")
-        repaired = repair_json(responses[0], return_objects=True)
-        if not isinstance(repaired, dict):
+        payload = json.loads(responses[0])
+        if not isinstance(payload, dict):
             raise ValueError("LLM response is not a JSON object.")
-        return repaired
+        return payload

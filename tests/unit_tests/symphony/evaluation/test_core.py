@@ -204,43 +204,80 @@ class FakeLLM:
 
 
 @pytest.mark.parametrize(
-    ("evaluator_type", "scores"),
+    ("evaluator_type", "score", "level"),
+    [
+        (evaluation.AccuracyEvaluator, 1, "excellent"),
+        (evaluation.AccuracyEvaluator, 0, "fail"),
+        (evaluation.CompletenessEvaluator, 1, "excellent"),
+        (evaluation.CompletenessEvaluator, 0, "fail"),
+    ],
+)
+def test_llm_metrics_accept_only_binary_scores(
+    evaluator_type: type, score: int, level: str
+) -> None:
+    llm = FakeLLM(f'{{"score": {score}, "reason": "结论正确。"}}')
+
+    result = evaluator_type(llm).evaluate(case())
+
+    assert (result.score, result.level) == (float(score), level)
+    assert "static_data" in llm.messages[0]["content"]
+    assert "Use Celsius" in llm.messages[0]["content"]
+    assert "call_weather" in llm.messages[0]["content"]
+
+
+@pytest.mark.parametrize(
+    ("evaluator_type", "rubric_terms"),
     [
         (
             evaluation.AccuracyEvaluator,
-            [(0.89, "fail"), (0.90, "pass"), (0.95, "good"), (0.99, "excellent")],
+            (
+                "无事实性错误，核心信息准确",
+                "完全符合客观事实，无任何事实性错误",
+                "逻辑严密，推理严谨，无逻辑谬误",
+                "符合行业规范/专业规范，表述专业",
+                "新知识/新产品场景",
+                "事实核查",
+                "逻辑验证",
+                "专业规范",
+                "新知识处理",
+                "只要存在事实性错误即判定为不及格",
+            ),
         ),
         (
             evaluation.CompletenessEvaluator,
-            [(0.59, "fail"), (0.60, "pass"), (0.80, "good"), (0.90, "excellent")],
+            (
+                "完整执行了用户请求的技能",
+                "从识别意图到执行技能的完整过程",
+                "声称具备的技能与实际执行能力一致",
+                "查询航班、预订服务",
+                "仅提供路径规划但未启动导航",
+                "订票、导航、预订、支付",
+                "功能执行",
+                "流程完整性",
+                "多步骤任务",
+                "技能一致性",
+                "重点关注技能描述中明确提到的步骤和要求",
+            ),
         ),
     ],
 )
-def test_llm_metric_thresholds(
-    evaluator_type: type, scores: list[tuple[float, str]]
+def test_llm_metric_prompt_uses_concise_binary_rubric(
+    evaluator_type: type, rubric_terms: tuple[str, ...]
 ) -> None:
-    for score, level in scores:
-        llm = FakeLLM(f'{{"score": {score}, "reason": "ok", "evidence": ["x"]}}')
-        result = evaluator_type(llm).evaluate(case())
-        assert result.level == level
-        assert not hasattr(result, "evidence")
-        assert "static_data" in llm.messages[0]["content"]
-        assert "Use Celsius" in llm.messages[0]["content"]
-        assert "call_weather" in llm.messages[0]["content"]
-        assert "optional evidence" not in llm.messages[0]["content"]
+    evaluator = evaluator_type(FakeLLM('{"score": 1, "reason": "已完成。"}'))
 
+    result = evaluator.evaluate(case())
 
-def test_completeness_prompt_evaluates_goal_coverage_and_execution_closure() -> None:
-    llm = FakeLLM('{"score": 0.8, "reason": "mostly complete"}')
-
-    result = evaluation.CompletenessEvaluator(llm).evaluate(case())
-
-    prompt = llm.messages[0]["content"]
-    assert result.metric == "completeness"
-    assert "user goals" in prompt
-    assert "multi-step" in prompt
-    assert "capability commitment" in prompt
-    assert "final result" in prompt
+    prompt = evaluator.llm.messages[0]["content"]
+    assert result.metric == evaluator.metric
+    assert hasattr(evaluator, "rubric")
+    assert not hasattr(evaluator, "instruction")
+    assert all(term in evaluator.rubric for term in rubric_terms)
+    assert evaluator.rubric in prompt
+    assert "数字 0 或 1" in prompt
+    assert "一句简短理由" in prompt
+    assert "不要输出思考过程" in prompt
+    assert "只返回 JSON" in prompt
 
 
 @pytest.mark.parametrize(
@@ -249,7 +286,12 @@ def test_completeness_prompt_evaluates_goal_coverage_and_execution_closure() -> 
         None,
         FakeLLM(RuntimeError("offline")),
         FakeLLM("not json"),
+        FakeLLM('{score: 1, reason: ok}'),
+        FakeLLM('result: {"score": 1, "reason": "ok"}'),
         FakeLLM('{"score": 2, "reason": "bad"}'),
+        FakeLLM('{"score": 0.5, "reason": "uncertain"}'),
+        FakeLLM('{"score": "1", "reason": "bad type"}'),
+        FakeLLM('{"score": true, "reason": "bad type"}'),
         FakeLLM('{"score": 0.9}'),
     ],
 )
@@ -266,16 +308,37 @@ def test_llm_metric_missing_input_or_output_is_not_applicable() -> None:
     assert evaluator.evaluate(no_output).level == "not_applicable"
 
 
-def test_accuracy_aggregation_uses_accuracy_thresholds() -> None:
-    evaluator = evaluation.AccuracyEvaluator(
-        FakeLLM('{"score": 0.92, "reason": "mostly accurate"}')
-    )
-    results = evaluator.evaluate_batch([case(), case()])
+@pytest.mark.parametrize(
+    ("evaluator_type", "passed", "total", "expected_score", "expected_level"),
+    [
+        (evaluation.AccuracyEvaluator, 8, 10, 0.8, "fail"),
+        (evaluation.AccuracyEvaluator, 9, 10, 0.9, "pass"),
+        (evaluation.AccuracyEvaluator, 19, 20, 0.95, "good"),
+        (evaluation.AccuracyEvaluator, 99, 100, 0.99, "excellent"),
+        (evaluation.CompletenessEvaluator, 5, 10, 0.5, "fail"),
+        (evaluation.CompletenessEvaluator, 6, 10, 0.6, "pass"),
+        (evaluation.CompletenessEvaluator, 8, 10, 0.8, "good"),
+        (evaluation.CompletenessEvaluator, 9, 10, 0.9, "excellent"),
+    ],
+)
+def test_binary_metric_aggregation_uses_metric_thresholds(
+    evaluator_type: type,
+    passed: int,
+    total: int,
+    expected_score: float,
+    expected_level: str,
+) -> None:
+    evaluator = evaluator_type(FakeLLM('{"score": 1, "reason": "通过。"}'))
+    successful = evaluator.evaluate(case())
+    evaluator.llm = FakeLLM('{"score": 0, "reason": "未通过。"}')
+    failed = evaluator.evaluate(case())
+    results = [successful] * passed + [failed] * (total - passed)
 
     aggregate = evaluator.new_accumulator().extend(results).aggregate()[0]
 
-    assert aggregate.score == pytest.approx(0.92)
-    assert aggregate.level == "pass"
+    assert aggregate.score == pytest.approx(expected_score)
+    assert aggregate.level == expected_level
+    assert aggregate.reason == ""
 
 
 @dataclass
