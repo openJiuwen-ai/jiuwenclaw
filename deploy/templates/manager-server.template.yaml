@@ -58,7 +58,6 @@ spec:
         - name: websocket
           containerPort: <<MANAGER_WS_PORT>>
         envFrom:
-            # 密码密钥变量
             - secretRef:
                 name: <<SECRET_CM_NAME>>
         env:

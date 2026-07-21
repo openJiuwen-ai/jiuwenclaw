@@ -2,14 +2,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: jiuwenclaw-gateway-sa
-  namespace: <<NAMESPACE>>
-
+  namespace: jiuwenclaw
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: jiuwenclaw-agentserver-creator
-  namespace: <<NAMESPACE>>
+  namespace: jiuwenclaw
 rules:
   - apiGroups: [""]
     resources: ["pods"]
@@ -20,62 +19,59 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch"]
-
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: jiuwenclaw-gateway-agentserver-binding
-  namespace: <<NAMESPACE>>
+  namespace: jiuwenclaw
 subjects:
   - kind: ServiceAccount
-    name: <<GATEWAY_SERVICE_ACCOUNT>>
-    namespace: <<NAMESPACE>>
+    name: jiuwenclaw-gateway-sa
+    namespace: jiuwenclaw
 roleRef:
   kind: Role
   name: jiuwenclaw-agentserver-creator
   apiGroup: rbac.authorization.k8s.io
-
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: <<GATEWAY_NAME>>
-  namespace: <<NAMESPACE>>
+  name: jiuwenclaw-gateway
+  namespace: jiuwenclaw
   labels:
-    app: <<GATEWAY_NAME>>
+    app: jiuwenclaw-gateway
 spec:
-  replicas: <<GATEWAY_REPLICAS>>
+  replicas: 2
   selector:
     matchLabels:
-      app: <<GATEWAY_NAME>>
+      app: jiuwenclaw-gateway
   template:
     metadata:
       labels:
-        app: <<GATEWAY_NAME>>
+        app: jiuwenclaw-gateway
     spec:
       affinity:
         podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:  # 软限制：优先把pod分开部署，但如果资源紧张、只有一个节点可用的时候，也允许它们挤在同一台机器上
-          - weight: 100                                     # 权重范围（1-100），取最高值，优先分开放置
-            podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                - key: app
-                  operator: In
-                  values:
-                  - <<GATEWAY_NAME>>
-              topologyKey: "kubernetes.io/hostname"
+          preferredDuringSchedulingIgnoredDuringExecution: # 软限制：优先把pod分开部署，但如果资源紧张、只有一个节点可用的时候，也允许它们挤在同一台机器上
+            - weight: 100 # 权重范围（1-100），取最高值，优先分开放置
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - jiuwenclaw-gateway
+                topologyKey: "kubernetes.io/hostname"
       containers:
         - name: gateway
           image: <<GATEWAY_IMAGE>>
           imagePullPolicy: IfNotPresent
-          # 用于调试模式：启用后容器将保持运行，可进入 Pod 手动调试程序
-          # command: ["/bin/sh"]
-          # args: ["-c", "sleep infinity"]
           envFrom:
             - secretRef:
-                name: <<SECRET_CM_NAME>>
+                name: jiuwenclaw-secret-configmap
+            - configMapRef:
+                name: jiuwenclaw-gateway-env
           env:
             # downward API：注入当前 Pod 身份，供 RuntimeManagementAgentClient
             # 构建 agentserver pod 的 ownerReference（指向本 Pod），实现级联清理。
@@ -99,7 +95,8 @@ spec:
       volumes:
         - name: gateway-config
           configMap:
-            name: <<GATEWAY_CONFIG_MAP_NAME>>
+            name: jiuwenclaw-gateway-config
             items:
               - key: config.yaml
                 path: config.yaml
+      serviceAccountName: jiuwenclaw-gateway-sa

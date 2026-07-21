@@ -65,9 +65,9 @@ spec:
             - :9001
           env:
             - name: MINIO_ROOT_USER
-              value: "<<MINIO_ROOT_USER>>"     
+              value: "<<OBS_ACCESS_KEY>>"
             - name: MINIO_ROOT_PASSWORD
-              value: "<<MINIO_ROOT_PASSWORD>>"
+              value: "<<OBS_SECRET_KEY>>"
             - name: TZ
               value: "<<TIMEZONE>>"
           ports:

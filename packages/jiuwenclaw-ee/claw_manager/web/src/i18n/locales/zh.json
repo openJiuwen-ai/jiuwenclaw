@@ -467,6 +467,7 @@
       "rawHint": "当前表达式无法解析为可视化条件，可继续编辑原文或重置为可视化编辑。",
       "resetToVisual": "重置为可视化编辑",
       "invalid": "请至少填写一条匹配条件的值",
+      "invalidSyntax": "匹配表达式不符合规范：仅支持 user_id / group_id / bot_id 与 == / != / and / or；全匹配请留空",
       "fields": {
         "group_id": "group_id",
         "user_id": "user_id",

@@ -18,6 +18,23 @@ gen_gateway_env_file() {
     fi
 
     render_config_template "${env_template_file}" "${env_file}" "DEPLOY_VARS"
+
+    echo "CLAW_MOUNT_TYPE=${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" >> "${env_file}"
+    if [ "${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" == "nfs" ]; then
+        echo "CLAW_NFS_SERVER=${DEPLOY_VARS["NFS_SERVER_ADDR"]}" >> "${env_file}"
+        echo "CLAW_NFS_PATH=${DEPLOY_VARS["NFS_SHARE_PATH"]}/jiuwenclaw" >> "${env_file}" 
+    else
+        echo "CLAW_PVC=${DEPLOY_VARS["CLAW_PVC"]}" >> "${env_file}"
+    fi
+
+    # 移除所有注释行、过滤空值行 KEY=、按变量名排序
+    # 注意：不能 sort > 同一个文件，shell 会在管道启动前就截断输出文件，
+    # 导致左侧 grep 读到空。先写临时文件再 mv 覆盖。
+    grep -v '^[[:space:]]*#' "${env_file}" \
+        | grep '=' \
+        | awk -F'=' '$2 != ""' \
+        | sort > "${env_file}.tmp" && mv -f "${env_file}.tmp" "${env_file}"
+
     kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${env_file} --dry-run=client -o yaml | yq eval 'del(.metadata.creationTimestamp)' > ${CONFIG_DIR}/gateway-env.configmap.yaml
 }
 
@@ -29,13 +46,6 @@ gen_gateway_config_file() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
     local conf_name="${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
     local conf_file="${CONFIG["GATEWAY_CONFIG_FILE"]}"
-    
-    info "AGENT_RUNTIME: ${client_type}"
-    if [ "${client_type}" == "yuanrong" ]; then
-        collect_oyr_info
-        field_name="feishu_enterprise"
-    fi
-
     
     info "GATEWAY_CONFIG_TEMPLATE_FILE: ${template_file}"
     render_config_template ${template_file} ${file} "DEPLOY_VARS"
@@ -204,4 +214,5 @@ uninstall_gateway() {
     if [[ "${mount_type}" == "pvc" && -z "${DEPLOY_VARS["CLAW_PVC"]:-}" ]]; then
         exec_cmd kubectl delete -f ${pvc_file}  --ignore-not-found=true
     fi
+    uninstall_secret_configmap
 }

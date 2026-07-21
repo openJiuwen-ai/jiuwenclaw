@@ -467,6 +467,7 @@
       "rawHint": "This expression cannot be parsed visually. Edit the raw text or reset to visual mode.",
       "resetToVisual": "Reset to visual editor",
       "invalid": "Fill in at least one condition value",
+      "invalidSyntax": "Match expression is invalid: only user_id / group_id / bot_id with == / != / and / or are allowed; leave empty for always-match",
       "fields": {
         "group_id": "group_id",
         "user_id": "user_id",
