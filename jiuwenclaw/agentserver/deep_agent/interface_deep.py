@@ -6251,7 +6251,23 @@ class JiuWenClawDeepAdapter:
                 finalized.get("error")
                 or f"Skill '{resolved_name}' 版本 bump / 清空 evolutions 失败"
             )
+            logger.warning(
+                "[JiuWenClawDeepAdapter] merge version partial failure: skill=%s "
+                "SKILL.md rewritten but finalize failed, evolution log may need manual cleanup",
+                resolved_name,
+                extra={"user_visible": "progress"},
+            )
         return result
+
+    def _validate_rebuild_skill_path(self, skill_path: str) -> str:
+        """Ensure RPC skill_path resolves under a registered skills directory."""
+        resolved = Path(skill_path).expanduser().resolve()
+        skill_dirs = [Path(d).expanduser().resolve() for d in self._registered_skill_dirs_for_rail()]
+        if not skill_dirs:
+            raise ValueError(f"skill_path not in allowed directories: {skill_path}")
+        if not any(resolved == d or resolved.is_relative_to(d) for d in skill_dirs):
+            raise ValueError(f"skill_path not in allowed directories: {skill_path}")
+        return str(resolved)
 
     async def handle_skills_evolution_rebuild(self, params: dict) -> dict[str, Any]:
         """RPC: skills.evolution.rebuild — generate a merged evolution version."""
@@ -6266,6 +6282,8 @@ class JiuWenClawDeepAdapter:
 
         raw_path = params.get("skill_path") or params.get("path")
         skill_path = str(raw_path).strip() if raw_path is not None and str(raw_path).strip() else None
+        if skill_path:
+            skill_path = self._validate_rebuild_skill_path(skill_path)
 
         raw_ids = params.get("record_ids")
         record_ids: list[str] | None = None
@@ -7402,7 +7420,8 @@ class JiuWenClawDeepAdapter:
 
         content = result if isinstance(result, (str, dict)) else str(result)
 
-        await self._finalize_rebuild_followup(slash_result)
+        # Finalize is owned by generate_evolution_merge_version (RPC / auto-rebuild).
+        # /evolve_rebuild no longer yields run_rebuild_followup slash results.
 
         return AgentResponse(
             request_id=request.request_id,
@@ -8020,7 +8039,8 @@ class JiuWenClawDeepAdapter:
                 ):
                     yield rebuild_chunk
 
-            await self._finalize_rebuild_followup(slash_result)
+            # Finalize is owned by generate_evolution_merge_version (RPC / auto-rebuild).
+            # /evolve_rebuild no longer yields run_rebuild_followup slash results.
 
             if evolution_status_started and not evolution_status_ended:
                 yield AgentResponseChunk(

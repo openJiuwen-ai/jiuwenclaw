@@ -687,8 +687,12 @@ async def test_generate_evolution_merge_version_skips_complete_on_rewrite_failur
 
 
 @pytest.mark.asyncio
-async def test_handle_skills_evolution_rebuild_rpc(adapter, monkeypatch):
+async def test_handle_skills_evolution_rebuild_rpc(adapter, monkeypatch, tmp_path: Path):
+    skill_md = tmp_path / "demo-skill" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("# demo\n", encoding="utf-8")
     adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    adapter._registered_skill_dirs = [str(tmp_path)]  # pylint: disable=protected-access
     monkeypatch.setattr(
         adapter,
         "generate_evolution_merge_version",
@@ -696,7 +700,7 @@ async def test_handle_skills_evolution_rebuild_rpc(adapter, monkeypatch):
             return_value={
                 "ok": True,
                 "skill_name": "demo-skill",
-                "skill_path": "/skills/demo-skill/SKILL.md",
+                "skill_path": str(skill_md),
                 "archive_path": "evolutions.v1.json",
                 "new_version": "1.2.0",
                 "cleared": True,
@@ -712,7 +716,7 @@ async def test_handle_skills_evolution_rebuild_rpc(adapter, monkeypatch):
     payload = await adapter.handle_skills_evolution_rebuild(
         {
             "name": "demo-skill",
-            "skill_path": "/skills/demo-skill/SKILL.md",
+            "skill_path": str(skill_md),
             "record_ids": ["ev_1", "ev_2"],
             "user_intent": "merge notes",
         }
@@ -721,18 +725,40 @@ async def test_handle_skills_evolution_rebuild_rpc(adapter, monkeypatch):
     assert payload == {
         "success": True,
         "name": "demo-skill",
-        "skill_path": "/skills/demo-skill/SKILL.md",
+        "skill_path": str(skill_md),
         "archive_path": "evolutions.v1.json",
         "new_version": "1.2.0",
         "cleared": True,
     }
     adapter.generate_evolution_merge_version.assert_awaited_once_with(
         skill_name="demo-skill",
-        skill_path="/skills/demo-skill/SKILL.md",
+        skill_path=str(skill_md.resolve()),
         record_ids=["ev_1", "ev_2"],
         user_intent="merge notes",
         min_score=0.5,
     )
+
+
+@pytest.mark.asyncio
+async def test_handle_skills_evolution_rebuild_rejects_path_traversal(adapter, monkeypatch, tmp_path: Path):
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    adapter._registered_skill_dirs = [str(tmp_path)]  # pylint: disable=protected-access
+    monkeypatch.setattr(
+        JiuWenClawDeepAdapter,
+        "_guard_bootstrap_skill",
+        staticmethod(lambda _name: None),
+    )
+    generate = AsyncMock()
+    monkeypatch.setattr(adapter, "generate_evolution_merge_version", generate)
+
+    with pytest.raises(ValueError, match="skill_path not in allowed directories"):
+        await adapter.handle_skills_evolution_rebuild(
+            {
+                "name": "demo-skill",
+                "skill_path": str(tmp_path / ".." / "evil.md"),
+            }
+        )
+    generate.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -752,6 +778,45 @@ async def test_handle_skills_evolution_rebuild_rpc_rejects_failure(adapter, monk
     with pytest.raises(ValueError, match="no experiences"):
         await adapter.handle_skills_evolution_rebuild({"name": "demo-skill"})
 
+
+@pytest.mark.asyncio
+async def test_generate_evolution_merge_version_warns_on_partial_finalize_failure(
+    adapter, monkeypatch,
+):
+    """CR-003: rewrite ok + finalize fail must log partial-failure warning."""
+    adapter._skill_evolution_rail = None  # pylint: disable=protected-access
+    _mock_disk_evolution_store(adapter, monkeypatch)
+    _FakeRebuildService.next_context = {
+        "skill_name": "demo-skill",
+        "archive_path": "evolutions.v1.json",
+        "records": [],
+        "overflow_index": {},
+    }
+    monkeypatch.setattr(interface_deep_module, "ExperienceRebuildService", _FakeRebuildService)
+    monkeypatch.setattr(
+        interface_deep_module,
+        "build_rebuild_command_prompt",
+        lambda **_kwargs: "rebuild demo-skill",
+    )
+    monkeypatch.setattr(adapter, "_execute_merge_version_rewrite", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        adapter,
+        "_finalize_rebuild_followup",
+        AsyncMock(return_value={"cleared": False, "error": "complete_rebuild failed"}),
+    )
+
+    records, detach = _attach_capture_handler(interface_deep_module.logger)
+    try:
+        result = await adapter.generate_evolution_merge_version(skill_name="demo-skill")
+    finally:
+        detach()
+
+    assert result["ok"] is False
+    assert "complete_rebuild failed" in result["error"]
+    assert any(
+        "merge version partial failure" in record.getMessage() and record.levelno == logging.WARNING
+        for record in records
+    )
 
 @pytest.mark.asyncio
 async def test_collect_evolution_summary_stashes_auto_rebuild_skills(adapter):
