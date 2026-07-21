@@ -279,8 +279,14 @@ async def lifespan(_application: FastAPI):
         # 不动 (docs/window沙箱.md 6.9 lifespan 改动).
         if sys.platform == "win32":
             from jiuwenbox.supervisor import win_proxy, win_setup
+            # 根 policy 的 read_acl_preinstall 作为首次安装的读 ACL 预装路径.
             try:
-                win_setup.ensure_windows_setup()
+                _root_policy = policy_reader.load_policy()
+                _preinstall = _root_policy.windows.filesystem.read_acl_preinstall
+            except Exception:  # noqa: BLE001
+                _preinstall = None
+            try:
+                win_setup.ensure_windows_setup(preinstall_paths=_preinstall)
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "ensure_windows_setup 失败; Windows 沙箱可能不可用",

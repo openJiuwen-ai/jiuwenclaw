@@ -35,6 +35,7 @@ from jiuwenbox.supervisor import win_constants as const
 from jiuwenbox.supervisor.daemon_ipc import (
     MAX_FILE_BYTES,
     MAX_HEADER_BYTES,
+    MAX_STDIN_BYTES,
     MAX_STDOUT_BYTES,
     recv_frame,
     send_frame,
@@ -200,7 +201,25 @@ def _get_kernel32() -> ctypes.WinDLL:
             wintypes.HANDLE, wintypes.UINT,
         ]
         _kernel32.TerminateProcess.restype = wintypes.BOOL
+        # SetHandleInformation: 关闭 box-server 持有端的继承, 防 runner/child
+        # 拿到多余 pipe 句柄 (对标 Linux close_fds=True 隔离).
+        _kernel32.SetHandleInformation.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+        ]
+        _kernel32.SetHandleInformation.restype = wintypes.BOOL
     return _kernel32
+
+
+# HANDLE_FLAG_INHERIT = 0x1, HANDLE_FLAG_PROTECT_FROM_CLOSE = 0x2.
+HANDLE_FLAG_INHERIT = 0x1
+
+
+def _clear_inherit(handle: int) -> None:
+    """关闭 handle 的继承位 (box-server 持有端, 不让 runner 拿到副本)."""
+    kernel32 = _get_kernel32()
+    kernel32.SetHandleInformation(
+        wintypes.HANDLE(handle), HANDLE_FLAG_INHERIT, 0,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -284,9 +303,13 @@ def two_hop_spawn(
     ):
         raise ctypes.WinError(ctypes.get_last_error())
 
-    # box-server 侧的写端/读端不继承 (防止后续子进程意外拿到).
-    # SetHandleInformation 不继承的简化: 通过 DuplicateHandle 或直接不设置.
-    # 这里用 CREATE_NO_WINDOW + 把 runner 的 stdin/stdout 指向 pipe.
+    # box-server 持有的端 (stdin 写端 + stdout 读端) 关闭继承, 确保 runner
+    # 只继承它该用的端 (stdin 读端 + stdout 写端). 否则 runner 之后
+    # CreateProcessAsUserW(bInheritHandle=True) 起 child 时, child 会继承
+    # runner 持有的全部句柄 (含 box-server 这两个端), 造成 pipe 隔离泄露
+    # (对标 Linux daemon 的 close_fds=True).
+    _clear_inherit(int(child_stdin_write.value))
+    _clear_inherit(int(child_stdout_read.value))
 
     startup = STARTUPINFOW()
     startup.cb = ctypes.sizeof(STARTUPINFOW)
@@ -579,8 +602,12 @@ def runner_main(argv: list[str]) -> int:
                 _send_response(stdout, {"ok": True})
                 break
             if req_type == "exec":
+                # exec 请求的 stdin body 帧 (紧跟 header).
+                stdin_size = int(header.get("stdin_size", 0))
+                stdin_bytes = recv_frame(stdin, MAX_STDIN_BYTES) if stdin_size > 0 else b""
                 _handle_exec_request(
                     stdout, header, restricted_token, args.workspace,
+                    stdin_bytes,
                 )
             elif req_type == "write_file":
                 _handle_write_file_request(stdout, header, stdin)
@@ -604,8 +631,11 @@ def _send_error_response(stream, detail: str) -> None:
     _send_response(stream, {"ok": False, "error": "io_error", "detail": detail})
 
 
-def _handle_exec_request(stream, header, restricted_token, workspace) -> None:
-    """处理 exec 请求: 以受限 token 起子命令, 回传 stdout/stderr/exit."""
+def _handle_exec_request(stream, header, restricted_token, workspace, stdin_bytes) -> None:
+    """处理 exec 请求: 以受限 token 起子命令, 回传 stdout/stderr/exit.
+
+    stdin_bytes 透传给子进程 stdin (若非空).
+    """
     command = header.get("command", [])
     if not command:
         _send_error_response(stream, "exec requires non-empty command")
@@ -621,15 +651,38 @@ def _handle_exec_request(stream, header, restricted_token, workspace) -> None:
         ctypes.byref(child_out_read), ctypes.byref(child_out_write),
         ctypes.byref(sa), 0,
     )
+    # 建立 stdin pipe: runner 写, child 读 (继承读端).
+    child_in_read = wintypes.HANDLE()
+    child_in_write = wintypes.HANDLE()
+    kernel32.CreatePipe(
+        ctypes.byref(child_in_read), ctypes.byref(child_in_write),
+        ctypes.byref(sa), 0,
+    )
+    # runner 持有的写端关闭继承, 防 child 拿到.
+    _clear_inherit(int(child_in_write.value))
     try:
         workdir = header.get("workdir")
         env = header.get("env")
         pid, proc_handle = _create_process_as_user(
             restricted_token, list(command), env, workdir,
-            stdin_fd=0,  # TODO: 支持 stdin 透传 (简化版暂用空 stdin)
+            stdin_fd=int(child_in_read.value),
             stdout_fd=int(child_out_write.value),
         )
+        # runner 不再需要 child 端的写端/读端副本.
+        kernel32.CloseHandle(child_in_read)
         kernel32.CloseHandle(child_out_write)
+        # 透传 stdin (若有).
+        if stdin_bytes:
+            import msvcrt  # type: ignore[import-not-found]
+            in_write_fd = msvcrt.open_osfhandle(
+                int(child_in_write.value), os.O_WRONLY | os.O_BINARY,
+            )
+            with os.fdopen(in_write_fd, "wb") as in_wf:
+                in_wf.write(stdin_bytes)
+            # 写完关闭写端让 child 读到 EOF.
+            kernel32.CloseHandle(child_in_write)
+        else:
+            kernel32.CloseHandle(child_in_write)
         # 读取子进程 stdout 全部输出.
         # 用 os.fdopen 包装 child_out_read handle -> 文件对象.
         import msvcrt  # type: ignore[import-not-found]

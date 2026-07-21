@@ -126,10 +126,17 @@ def create_job(
         raise ctypes.WinError(ctypes.get_last_error())
 
     # --- 1. 扩展限制: 内存上限 + KILL_ON_JOB_CLOSE ---
+    # memory_max 对齐 Linux cgroup memory.max (整个 job 的内存上限),
+    # 用 JOB_OBJECT_LIMIT_JOB_MEMORY + JobMemoryLimit; 同时设
+    # ProcessMemoryLimit 作为 per-process 上限双保险 (JOB_OBJECT_LIMIT_PROCESS_MEMORY).
     ext = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
     ext.BasicLimitInformation.LimitFlags = const.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
     if memory_max is not None and memory_max > 0:
-        ext.BasicLimitInformation.LimitFlags |= const.JOB_OBJECT_LIMIT_PROCESS_MEMORY
+        ext.BasicLimitInformation.LimitFlags |= (
+            const.JOB_OBJECT_LIMIT_JOB_MEMORY
+            | const.JOB_OBJECT_LIMIT_PROCESS_MEMORY
+        )
+        ext.JobMemoryLimit = int(memory_max)
         ext.ProcessMemoryLimit = int(memory_max)
     if max_processes is not None and max_processes > 0:
         ext.BasicLimitInformation.LimitFlags |= const.JOB_OBJECT_LIMIT_ACTIVE_PROCESS

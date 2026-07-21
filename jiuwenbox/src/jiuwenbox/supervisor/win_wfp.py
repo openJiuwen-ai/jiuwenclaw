@@ -333,20 +333,18 @@ def _build_loopback_v6_condition() -> FWPM_FILTER_CONDITION0:
     return cond
 
 
-def _build_port_range_condition(
-    port_start: int, port_end: int,
-) -> FWPM_FILTER_CONDITION0:
-    """构造 IP_REMOTE_PORT in [port_start, port_end] 条件 (用 EQUAL 单值近似).
+def _build_port_eq_condition(port: int) -> FWPM_FILTER_CONDITION0:
+    """构造 IP_REMOTE_PORT == port 条件 (FWP_MATCH_EQUAL).
 
-    注: WFP 的 FWP_MATCH_RANGE 需要两个 FWP_VALUE0 (low/high), ctypes 布局
-    复杂. 这里采用每个端口一个 filter 的简化实现会在实际验证时再展开;
-    当前用 port_start 单值 EQUAL 作为占位, 真实环境若需范围可扩展.
+    放行整个端口范围采用"每个端口一个 Permit filter"的方案: WFP 的
+    FWP_MATCH_RANGE 需 FWP_RANGE0 结构, ctypes 布局复杂且易错; 每端口一
+    个 EQUAL filter 更可靠, 端口范围通常 <=10 个, 开销可忽略.
     """
     cond = FWPM_FILTER_CONDITION0()
     cond.fieldKey = _guid_from_str(const.FWPM_CONDITION_IP_REMOTE_PORT)
     cond.matchType = const.FWP_MATCH_EQUAL
     cond.conditionValue.type = const.FWP_UINT16
-    cond.conditionValue.value.uint16 = port_start
+    cond.conditionValue.value.uint16 = port
     return cond
 
 
@@ -436,22 +434,30 @@ def install_wfp_filters(
                 )
 
             # --- Permit filters (V4 + V6) for loopback + port range ---
-            for layer, fkey in (
+            # 为端口范围内每个端口装一个独立 Permit filter (放行整个范围).
+            # filter key 形如 JiuwenBox-Permit-Loopback-V4-60080, 幂等安装/卸载.
+            for layer, base_key in (
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V4, const.JBX_FILTER_PERMIT_KEY_V4),
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V6, const.JBX_FILTER_PERMIT_KEY_V6),
             ):
-                conds = [
-                    _build_ale_user_condition(sid_ptr),
-                    _build_loopback_v4_condition() if "V4" in fkey else _build_loopback_v6_condition(),
-                    _build_port_range_condition(permit_port_start, permit_port_end),
-                ]
-                _add_filter(
-                    engine, fkey, layer, sublayer_key,
-                    conds,
-                    const.FWP_ACTION_PERMIT,
-                    const.FWP_WEIGHT_PERMIT,
-                    f"JiuwenBox-Permit-Loopback-{fkey}",
-                )
+                for port in range(permit_port_start, permit_port_end + 1):
+                    conds = [
+                        _build_ale_user_condition(sid_ptr),
+                        (
+                            _build_loopback_v4_condition()
+                            if "V4" in base_key
+                            else _build_loopback_v6_condition()
+                        ),
+                        _build_port_eq_condition(port),
+                    ]
+                    port_key = f"{base_key}-{port}"
+                    _add_filter(
+                        engine, port_key, layer, sublayer_key,
+                        conds,
+                        const.FWP_ACTION_PERMIT,
+                        const.FWP_WEIGHT_PERMIT,
+                        f"JiuwenBox-Permit-Loopback-{base_key}-{port}",
+                    )
 
             fwpu.FwpmTransactionCommit0(engine)
         except Exception:
@@ -465,26 +471,31 @@ def install_wfp_filters(
     )
 
 
-def uninstall_wfp_filters() -> None:
-    """卸载所有 JiuwenBox WFP filter + sublayer (幂等)."""
+def uninstall_wfp_filters(
+    permit_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
+    permit_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
+) -> None:
+    """卸载所有 JiuwenBox WFP filter + sublayer (幂等).
+
+    Permit filter 是每端口一个 (key 带 -port 后缀), 按端口范围遍历删除.
+    """
     _require_windows()
     fwpu = _get_fwpuclnt()
     engine = _open_engine()
     try:
+        # Block filter (固定 key).
         for fkey in (
             const.JBX_FILTER_BLOCK_KEY_V4,
             const.JBX_FILTER_BLOCK_KEY_V6,
+        ):
+            _delete_filter_by_key(fwpu, engine, fkey)
+        # Permit filter (每端口一个 key).
+        for base_key in (
             const.JBX_FILTER_PERMIT_KEY_V4,
             const.JBX_FILTER_PERMIT_KEY_V6,
         ):
-            try:
-                hr = fwpu.FwpmFilterDeleteByKey0(
-                    engine, ctypes.byref(_guid_from_str(fkey)),
-                )
-                if hr not in (0, 0x800700B7):  # 0x800700B7 = not found
-                    logger.warning("删除 WFP filter %s 返回 0x%X", fkey, hr)
-            except Exception:  # noqa: BLE001
-                logger.warning("删除 WFP filter %s 异常", fkey, exc_info=True)
+            for port in range(permit_port_start, permit_port_end + 1):
+                _delete_filter_by_key(fwpu, engine, f"{base_key}-{port}")
         try:
             hr = fwpu.FwpmSubLayerDeleteByKey0(
                 engine, ctypes.byref(_guid_from_str(const.JBX_SUBLAYER_KEY)),
@@ -496,6 +507,18 @@ def uninstall_wfp_filters() -> None:
     finally:
         fwpu.FwpmEngineClose0(engine)
     logger.info("WFP filter set 卸载完成")
+
+
+def _delete_filter_by_key(fwpu, engine, fkey: str) -> None:
+    """按 key 删除单个 WFP filter (幂等, not-found 静默)."""
+    try:
+        hr = fwpu.FwpmFilterDeleteByKey0(
+            engine, ctypes.byref(_guid_from_str(fkey)),
+        )
+        if hr not in (0, 0x800700B7):  # 0x800700B7 = not found
+            logger.warning("删除 WFP filter %s 返回 0x%X", fkey, hr)
+    except Exception:  # noqa: BLE001
+        logger.warning("删除 WFP filter %s 异常", fkey, exc_info=True)
 
 
 def install_firewall_rule_fallback(

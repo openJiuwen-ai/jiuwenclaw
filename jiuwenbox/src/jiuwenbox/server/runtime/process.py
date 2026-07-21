@@ -619,6 +619,10 @@ class ProcessRuntime(RuntimeAdapter):
         self._win_acl_paths: dict[str, str] = {}
         self._win_policies: dict[str, SecurityPolicy] = {}
         self._win_exec_sem: asyncio.Semaphore | None = None
+        # 每个 sandbox 的 runner pipe 是单连接同步通道: 同一时刻只能有一个
+        # roundtrip 在用, 否则多并发 exec 的请求帧会在 stdin 上交错. 用 per-
+        # sandbox asyncio.Lock 串行化 roundtrip.
+        self._win_pipe_locks: dict[str, asyncio.Lock] = {}
 
     @staticmethod
     def _load_policy(policy_path: Path) -> SecurityPolicy:
@@ -2801,10 +2805,22 @@ class ProcessRuntime(RuntimeAdapter):
             proxy_port_end=proxy_end,
             env=env,
         )
+        # 把 pipe HANDLE 转成 fd 并打开持久化文件对象: 每个 sandbox
+        # 一次 open_osfhandle, 后续所有 exec/file-op roundtrip 复用同一对
+        # 文件对象 (roundtrip 不 with/close, 销毁时统一 close). 反之每次
+        # roundtrip 都 open_osfhandle 同一 handle 会失败, 沙箱只能 exec 一次.
+        kernel32 = win_exec._get_kernel32()
+        stdin_fd = _osfhandle_to_fd(kernel32, stdin_w)
+        stdout_fd = _osfhandle_to_fd(kernel32, stdout_r)
+        # closefd 默认 True: f.close() 会同时关底层 fd (销毁时一次性清理).
+        stdin_wf = os.fdopen(stdin_fd, "wb")
+        stdout_rf = os.fdopen(stdout_fd, "rb")
         self._win_runners[sandbox_id] = {
             "pid": runner_pid,
             "stdin_handle": stdin_w,
             "stdout_handle": stdout_r,
+            "stdin_wf": stdin_wf,
+            "stdout_rf": stdout_rf,
             "process_handle": proc_handle,
             "workspace": workspace,
         }
@@ -2830,30 +2846,63 @@ class ProcessRuntime(RuntimeAdapter):
     async def _stop_windows(self, sandbox_id: str, timeout: float = 10.0) -> None:
         from jiuwenbox.supervisor import win_acl, win_exec, win_job
 
-        # 关 Job -> 内核强杀所有成员 (含 runner 及其子进程).
-        job = self._win_job_handles.pop(sandbox_id, None)
-        if job is not None:
-            win_job.teardown(job)
-
-        runner = self._win_runners.get(sandbox_id)
+        runner = self._win_runners.pop(sandbox_id, None)
         if runner is not None:
-            # 先发 shutdown, 再 TerminateProcess 兜底.
-            await self._send_runner_shutdown(sandbox_id)
+            # 1. 发 shutdown 让 runner 优雅退出 (它内部会停掉所有受限 token child).
+            await self._send_runner_shutdown(sandbox_id, runner)
+            # 2. TerminateProcess 兜底 (runner 没响应 shutdown).
             try:
                 win_exec._stop_runner(runner["pid"], runner["process_handle"])
             except Exception:  # noqa: BLE001
                 logger.debug(
                     "停止 runner 失败 sandbox=%s", sandbox_id, exc_info=True,
                 )
-            self._win_runners.pop(sandbox_id, None)
+            # 3. 关 Job: KILL_ON_JOB_CLOSE 内核强杀所有残留成员 (含
+            #    runner 未及回收的受限 child). 放在 terminate 之后确保 child
+            #    也被清理; 若放前面, Job kill 后 runner handle 失效.
+            job = self._win_job_handles.pop(sandbox_id, None)
+            if job is not None:
+                win_job.teardown(job)
+            # 4. 关闭持久化 pipe 文件对象 + 底层 fd/handle.
+            self._close_win_pipe_handles(runner)
+        else:
+            # runner 已不在, 仍需清 Job.
+            job = self._win_job_handles.pop(sandbox_id, None)
+            if job is not None:
+                win_job.teardown(job)
 
-        # 撤销文件 ACL.
+        # 5. 撤销文件 ACL.
         workspace = self._win_acl_paths.pop(sandbox_id, None)
         if workspace:
             try:
                 win_acl.revoke_sandbox_acl(workspace)
             except Exception:  # noqa: BLE001
                 logger.debug("撤销 ACL 失败 sandbox=%s", sandbox_id, exc_info=True)
+        # 清理 per-sandbox pipe lock.
+        self._win_pipe_locks.pop(sandbox_id, None)
+
+    @staticmethod
+    def _close_win_pipe_handles(runner: dict) -> None:
+        """关闭 _create_windows 打开的持久化 pipe 文件对象 + fd + HANDLE."""
+        from jiuwenbox.supervisor import win_exec
+        kernel32 = win_exec._get_kernel32()
+        for key in ("stdin_wf", "stdout_rf"):
+            f = runner.get(key)
+            if f is not None:
+                try:
+                    f.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        # 文件对象用 closefd=False 打开, with/f.close 不关底层 fd; 这里显式关.
+        for fd_key in ("stdin_handle", "stdout_handle"):
+            # 这些是原始 HANDLE, 不是 fd; fd 已被文件对象间接持有.
+            # open_osfhandle 产生的 fd 在文件对象关闭后仍需手动 close.
+            handle = runner.get(fd_key)
+            if isinstance(handle, int):
+                try:
+                    kernel32.CloseHandle(wintypes.HANDLE(handle))
+                except Exception:  # noqa: BLE001
+                    pass
 
     async def _is_running_windows(self, sandbox_id: str) -> bool:
         runner = self._win_runners.get(sandbox_id)
@@ -3005,6 +3054,42 @@ class ProcessRuntime(RuntimeAdapter):
             return RuntimeFileOpResult(ok=True, items=items)
         return self._file_op_result_from_response(response)
 
+    def _win_pipe_lock(self, sandbox_id: str) -> asyncio.Lock:
+        lock = self._win_pipe_locks.get(sandbox_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._win_pipe_locks[sandbox_id] = lock
+        return lock
+
+    @staticmethod
+    def _win_roundtrip_blocking(
+        stdin_wf, stdout_rf,
+        request_type: str, payload: dict[str, Any],
+        body_bytes: bytes | None,
+        want_body: bool,
+    ) -> "tuple[dict[str, Any] | None, bytes]":
+        """同步执行一次 runner pipe roundtrip (在 executor 线程调用).
+
+        复用 sandbox 创建时打开的持久化文件对象 (stdin_wf/stdout_rf),
+        不在此 open/close fd. 发请求帧 (+可选 body 帧) -> 读响应帧
+        (->可选 body 帧). 不 shutdown pipe (会单向关闭, 破坏后续 roundtrip).
+        """
+        import json
+        header_blob = encode_request(request_type=request_type, payload=payload)
+        send_frame(stdin_wf, header_blob)
+        stdin_wf.flush()
+        if body_bytes:
+            send_frame(stdin_wf, body_bytes)
+            stdin_wf.flush()
+        blob = recv_frame(stdout_rf, DAEMON_MAX_RESPONSE_BYTES)
+        response = json.loads(blob.decode("utf-8"))
+        body = b""
+        if want_body and response.get("ok"):
+            size = int(response.get("content_size") or 0)
+            if size > 0:
+                body = recv_frame(stdout_rf, MAX_FILE_BYTES)
+        return response, body
+
     async def _win_runner_roundtrip(
         self,
         sandbox_id: str,
@@ -3013,30 +3098,27 @@ class ProcessRuntime(RuntimeAdapter):
         payload: dict[str, Any],
         body_bytes: bytes | None,
     ) -> dict[str, Any] | None:
-        """发送请求帧 + (可选) body 帧, 读回单个响应帧 (JSON)."""
-        import json
-        from jiuwenbox.supervisor import win_exec
-        try:
-            kernel32 = win_exec._get_kernel32()
-            stdin_fd = _osfhandle_to_fd(kernel32, runner["stdin_handle"])
-            stdout_fd = _osfhandle_to_fd(kernel32, runner["stdout_handle"])
-            with os.fdopen(stdin_fd, "wb") as wf, \
-                 os.fdopen(stdout_fd, "rb") as rf:
-                header_blob = encode_request(request_type=request_type, payload=payload)
-                send_frame(wf, header_blob)
-                if body_bytes:
-                    send_frame(wf, body_bytes)
-                try:
-                    wf.shutdown(socket.SHUT_WR)
-                except OSError:
-                    pass
-                blob = recv_frame(rf, DAEMON_MAX_RESPONSE_BYTES)
-            return json.loads(blob.decode("utf-8"))
-        except (OSError, ConnectionError, ValueError) as exc:
-            logger.warning(
-                "Windows runner IPC 失败 (sandbox=%s): %s", sandbox_id, exc,
-            )
-            return None
+        """发送请求帧 + (可选) body 帧, 读回单个响应帧 (JSON).
+
+        用 per-sandbox asyncio.Lock 串行化: 同一 sandbox 的 runner pipe
+        是单连接, 并发 roundtrip 会让请求帧在 stdin 上交错.
+        """
+        lock = self._win_pipe_lock(sandbox_id)
+        loop = asyncio.get_running_loop()
+        async with lock:
+            try:
+                response, _ = await loop.run_in_executor(
+                    None,
+                    self._win_roundtrip_blocking,
+                    runner["stdin_wf"], runner["stdout_rf"],
+                    request_type, payload, body_bytes, False,
+                )
+                return response
+            except (OSError, ConnectionError, ValueError) as exc:
+                logger.warning(
+                    "Windows runner IPC 失败 (sandbox=%s): %s", sandbox_id, exc,
+                )
+                return None
 
     async def _win_runner_roundtrip_with_body(
         self,
@@ -3046,60 +3128,50 @@ class ProcessRuntime(RuntimeAdapter):
         payload: dict[str, Any],
     ) -> "tuple[dict[str, Any] | None, bytes]":
         """发送请求帧, 读回响应帧 + (若 ok) body 帧 (read_file)."""
-        import json
-        from jiuwenbox.supervisor import win_exec
-        try:
-            kernel32 = win_exec._get_kernel32()
-            stdin_fd = _osfhandle_to_fd(kernel32, runner["stdin_handle"])
-            stdout_fd = _osfhandle_to_fd(kernel32, runner["stdout_handle"])
-            with os.fdopen(stdin_fd, "wb") as wf, \
-                 os.fdopen(stdout_fd, "rb") as rf:
-                header_blob = encode_request(request_type=request_type, payload=payload)
-                send_frame(wf, header_blob)
-                try:
-                    wf.shutdown(socket.SHUT_WR)
-                except OSError:
-                    pass
-                blob = recv_frame(rf, DAEMON_MAX_RESPONSE_BYTES)
-            response = json.loads(blob.decode("utf-8"))
-            content = b""
-            if response.get("ok"):
-                size = int(response.get("content_size") or 0)
-                if size > 0:
-                    content = recv_frame(rf, MAX_FILE_BYTES)
-            return response, content
-        except (OSError, ConnectionError, ValueError) as exc:
-            logger.warning(
-                "Windows runner IPC 失败 (sandbox=%s): %s", sandbox_id, exc,
-            )
-            return None, b""
-
-    async def _send_runner_shutdown(self, sandbox_id: str) -> None:
-        runner = self._win_runners.get(sandbox_id)
-        if runner is None:
-            return
-        try:
-            await asyncio.wait_for(
-                asyncio.get_running_loop().run_in_executor(
+        lock = self._win_pipe_lock(sandbox_id)
+        loop = asyncio.get_running_loop()
+        async with lock:
+            try:
+                response, content = await loop.run_in_executor(
                     None,
-                    self._send_runner_shutdown_blocking,
-                    sandbox_id, runner,
-                ),
-                timeout=DAEMON_SHUTDOWN_TIMEOUT_SECONDS,
-            )
-        except (asyncio.TimeoutError, OSError) as exc:
-            logger.debug("Windows runner shutdown 失败 %s: %s", sandbox_id, exc)
+                    self._win_roundtrip_blocking,
+                    runner["stdin_wf"], runner["stdout_rf"],
+                    request_type, payload, None, True,
+                )
+                return response, content
+            except (OSError, ConnectionError, ValueError) as exc:
+                logger.warning(
+                    "Windows runner IPC 失败 (sandbox=%s): %s", sandbox_id, exc,
+                )
+                return None, b""
+
+    async def _send_runner_shutdown(self, sandbox_id: str, runner: dict) -> None:
+        """发 shutdown 请求让 runner 优雅退出 (复用持久化 pipe 文件对象)."""
+        lock = self._win_pipe_lock(sandbox_id)
+        loop = asyncio.get_running_loop()
+        async with lock:
+            try:
+                await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        self._send_runner_shutdown_blocking,
+                        runner,
+                    ),
+                    timeout=DAEMON_SHUTDOWN_TIMEOUT_SECONDS,
+                )
+            except (asyncio.TimeoutError, OSError) as exc:
+                logger.debug("Windows runner shutdown 失败 %s: %s", sandbox_id, exc)
 
     @staticmethod
-    def _send_runner_shutdown_blocking(sandbox_id: str, runner: dict) -> None:
-        from jiuwenbox.supervisor import win_exec
+    def _send_runner_shutdown_blocking(runner: dict) -> None:
         try:
-            kernel32 = win_exec._get_kernel32()
-            stdin_fd = _osfhandle_to_fd(kernel32, runner["stdin_handle"])
-            with os.fdopen(stdin_fd, "wb") as wf:
-                send_frame(wf, encode_request(request_type=REQUEST_TYPE_SHUTDOWN))
+            send_frame(
+                runner["stdin_wf"],
+                encode_request(request_type=REQUEST_TYPE_SHUTDOWN),
+            )
+            runner["stdin_wf"].flush()
         except Exception:  # noqa: BLE001
-            logger.debug("runner shutdown 发送异常 %s", sandbox_id, exc_info=True)
+            logger.debug("runner shutdown 发送异常", exc_info=True)
 
     async def exec(
         self,

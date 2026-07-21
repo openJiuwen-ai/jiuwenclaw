@@ -329,6 +329,7 @@ class TestProcessRuntimeWindowsBranch:
 
         # 跑 create.
         import asyncio as _asyncio
+        import os as _os
         from pathlib import Path
         # 确保包属性也指向 fake (from package import name 会先查包 __dict__).
         monkeypatch.setattr(supervisor_pkg, "win_acl", fake_win_acl, raising=False)
@@ -340,6 +341,12 @@ class TestProcessRuntimeWindowsBranch:
             __import__("jiuwenbox.supervisor.win_constants",
                        fromlist=["win_constants"]),
             raising=False,
+        )
+        # pipe fd/handle 转换在 Linux 无法真实运行, mock 成假文件对象.
+        monkeypatch.setattr(proc_mod, "_osfhandle_to_fd", lambda k, h: h)
+        monkeypatch.setattr(
+            _os, "fdopen",
+            lambda fd, mode, **kw: MagicMock(),
         )
         pid = _asyncio.run(runtime._create_windows("sb-1", Path("/tmp/p.yaml"), {}))
 
@@ -540,6 +547,70 @@ class TestWinAclAceConstruction:
         sid1 = win_acl.get_synthetic_write_sid()
         sid2 = win_acl.get_synthetic_write_sid()
         assert sid1 == sid2  # 固定, 幂等.
+
+    def test_parse_getace_tuple_5_elem(self):
+        """新版 pywin32 GetAce 返回 5 元组 (ace_type, flags, size, mask, sid)."""
+        from jiuwenbox.supervisor import win_acl
+        from jiuwenbox.supervisor import win_constants as const
+        # ace_type=1 (DENY).
+        ace_type, flags, mask, sid = win_acl._parse_getace_tuple(  # noqa: SLF001
+            (1, 0x3, 0x14, 0x10000, "deny-sid"),
+        )
+        assert ace_type == const.ACCESS_DENIED_ACE_TYPE
+        assert mask == 0x10000
+        assert sid == "deny-sid"
+
+    def test_parse_getace_tuple_3_elem_defaults_allow(self):
+        """旧版 3 元组无 ace_type, 默认视为 Allow."""
+        from jiuwenbox.supervisor import win_acl
+        from jiuwenbox.supervisor import win_constants as const
+        ace_type, _flags, mask, sid = win_acl._parse_getace_tuple(  # noqa: SLF001
+            (0x10000, 0x3, "old-sid"),
+        )
+        assert ace_type == const.ACCESS_ALLOWED_ACE_TYPE
+
+    def test_rebuild_acl_deny_before_allow(self, monkeypatch):
+        """重建 ACL 时 Deny ACE 必须排在 Allow ACE 之前 (文档 2.3)."""
+        from jiuwenbox.supervisor import win_acl
+        from jiuwenbox.supervisor import win_constants as const
+
+        calls: list[tuple[str, int, object]] = []  # (method, mask, sid)
+
+        class _FakeACL:
+            def AddAccessDeniedAceEx(self, flags, mask, sid):
+                calls.append(("deny", mask, sid))
+            def AddAccessAllowedAceEx(self, flags, mask, sid):
+                calls.append(("allow", mask, sid))
+
+        class _FakeDacl:
+            def GetAclSize(self):
+                return 3
+            def GetAce(self, i):
+                # 第 0 个是 Allow, 第 1 个是 Deny, 第 2 个是 Allow (乱序输入).
+                if i == 0:
+                    return (0, 0x1, 0x100, "allow1")  # Allow
+                if i == 1:
+                    return (1, 0x1, 0x200, "deny1")  # Deny
+                return (0, 0x1, 0x300, "allow2")  # Allow
+
+        fake_sec = MagicMock()
+        fake_sec.ACL = _FakeACL
+        monkeypatch.setattr(
+            win_acl, "_ensure_pywin32",
+            lambda: (fake_sec, MagicMock(), MagicMock()),
+        )
+        # 新增一个 Deny ACE.
+        new_ace = (const.ACCESS_DENIED_ACE_TYPE, 0x7, 0x400, "new-deny")
+        win_acl._rebuild_acl_with_order(_FakeDacl(), new_ace)  # noqa: SLF001
+        # 验证所有 deny 在所有 allow 之前.
+        deny_idx = [i for i, c in enumerate(calls) if c[0] == "deny"]
+        allow_idx = [i for i, c in enumerate(calls) if c[0] == "allow"]
+        assert deny_idx and allow_idx
+        assert max(deny_idx) < min(allow_idx), (
+            f"Deny {deny_idx} 必须在 Allow {allow_idx} 之前, 实际 calls={calls}"
+        )
+        # 新增的 deny ACE 应在其中.
+        assert ("deny", 0x400, "new-deny") in calls
 
 
 # ---------------------------------------------------------------------------

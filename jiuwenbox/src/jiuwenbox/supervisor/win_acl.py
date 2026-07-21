@@ -69,6 +69,64 @@ def get_synthetic_write_sid() -> str:
     )
 
 
+def _parse_getace_tuple(ace_tuple: tuple) -> "tuple[int, int, int, object]":
+    """解析 pywin32 ``PyACL.GetAce`` 的返回, 兼容不同版本.
+
+    pywin32 不同版本返回不同元数:
+      - 3 元组: (access_mask, ace_flags, sid)  — 旧版, 无 ace_type
+      - 5 元组: (ace_type, ace_flags, ace_size, access_mask, sid)  — 新版
+
+    返回 (ace_type, ace_flags, access_mask, sid). 旧版无 ace_type 时无法
+    区分 Allow/Deny, 默认按 Allow 处理 (保守: 宁可多放行再靠 Deny 显式拒绝).
+    """
+    if len(ace_tuple) == 5:
+        ace_type, ace_flags, _ace_size, access_mask, sid = ace_tuple
+    elif len(ace_tuple) == 4:
+        # 部分 4 元组变体: (ace_type, ace_flags, access_mask, sid)
+        ace_type, ace_flags, access_mask, sid = ace_tuple
+    else:
+        # 3 元组旧版: (access_mask, ace_flags, sid) — 无 type, 视为 Allow.
+        access_mask, ace_flags, sid = ace_tuple
+        ace_type = const.ACCESS_ALLOWED_ACE_TYPE
+    return int(ace_type), int(ace_flags), int(access_mask), sid
+
+
+def _rebuild_acl_with_order(
+    existing_dacl,
+    new_ace: "tuple[int, int, int, object] | None",
+) -> "object":
+    """重建 ACL: 所有 Deny ACE 在前, Allow ACE 在后 (NTFS 显式 Deny 优先).
+
+    现有 ACE 按类型分桶保留, 追加新 ACE 到对应桶, 再 Deny-then-Allow 串接.
+    保留现有 ACE 的 flags/mask/sid 不变 (修正旧实现把 Deny ACE 当 Allow
+    写回的 bug).
+    """
+    win32security, _, _ = _ensure_pywin32()
+    deny_aces: list[tuple[int, int, object]] = []  # (flags, mask, sid)
+    allow_aces: list[tuple[int, int, object]] = []
+    if existing_dacl is not None:
+        for i in range(existing_dacl.GetAclSize()):
+            ace_type, ace_flags, access_mask, sid = _parse_getace_tuple(
+                existing_dacl.GetAce(i),
+            )
+            if ace_type == const.ACCESS_DENIED_ACE_TYPE:
+                deny_aces.append((ace_flags, access_mask, sid))
+            else:
+                allow_aces.append((ace_flags, access_mask, sid))
+    if new_ace is not None:
+        nt, nf, nm, ns = new_ace
+        if nt == const.ACCESS_DENIED_ACE_TYPE:
+            deny_aces.append((nf, nm, ns))
+        else:
+            allow_aces.append((nf, nm, ns))
+    acl = win32security.ACL()
+    for flags, mask, sid in deny_aces:
+        acl.AddAccessDeniedAceEx(flags, mask, sid)
+    for flags, mask, sid in allow_aces:
+        acl.AddAccessAllowedAceEx(flags, mask, sid)
+    return acl
+
+
 def grant_ace(
     path: str,
     sid: str | object,
@@ -110,22 +168,12 @@ def grant_ace(
     )
     existing_dacl = sd.GetSecurityDescriptorDacl()
 
-    # 构造新 ACL: 先放 Deny ACE, 后放 Allow ACE (NTFS 评估: 显式 Deny 优先).
-    acl = win32security.ACL()
-    # 先拷贝现有 ACE (保持原有顺序), 再追加目标 ACE.
-    if existing_dacl is not None:
-        for i in range(existing_dacl.GetAclSize()):
-            existing_ace = existing_dacl.GetAce(i)
-            # existing_ace = (access_mask, ace_flags, sid)
-            acl.AddAccessAllowedAceEx(
-                existing_ace[1],
-                existing_ace[0],
-                existing_ace[2],
-            )
-    if ace_type == const.ACCESS_ALLOWED_ACE_TYPE:
-        acl.AddAccessAllowedAceEx(inherit_flags, rights, sid_obj)
-    else:
-        acl.AddAccessDeniedAceEx(inherit_flags, rights, sid_obj)
+    # 重建 ACL: 现有 ACE 按类型保留 + 新 ACE 按 Deny-then-Allow 顺序串接,
+    # 修正旧实现拷贝时把 Deny ACE 当 Allow 写回的 bug (文档 2.3: 显式 Deny 优先).
+    acl = _rebuild_acl_with_order(
+        existing_dacl,
+        (ace_type, inherit_flags, rights, sid_obj),
+    )
 
     # PROTECTED_DACL 阻止继承的 ACE 覆盖我们的显式规则; 仅在 recursive 时启用,
     # 避免把单文件路径从父目录继承链上切断导致读权限丢失.
@@ -225,21 +273,28 @@ def revoke_sandbox_acl(workspace: str) -> None:
             existing_dacl = sd.GetSecurityDescriptorDacl()
             if existing_dacl is None:
                 continue
-            acl = win32security.ACL()
+            # 按类型分桶, 过滤掉合成 SID 的 ACE, Deny 在前 Allow 在后重建.
+            deny_aces: list[tuple[int, int, object]] = []
+            allow_aces: list[tuple[int, int, object]] = []
             removed = 0
             for i in range(existing_dacl.GetAclSize()):
-                # pywin32 ACL.GetAce(i) -> (access_mask, ace_flags, sid)
-                ace_mask, ace_flags, ace_sid = existing_dacl.GetAce(i)
+                ace_type, ace_flags, ace_mask, ace_sid = _parse_getace_tuple(
+                    existing_dacl.GetAce(i),
+                )
                 if win32security.EqualSid(ace_sid, target_sid):
                     removed += 1
                     continue
-                # 保留非合成 SID 的 ACE, 按原掩码最高位区分 Allow/Deny 重建.
-                # ACCESS_DENIED_ACE_TYPE vs ACCESS_ALLOWED_ACE_TYPE 在 mask 高位无
-                # 可靠区分; 通过 ACL 顺序不变性 + 各自 API 重建即可 (pywin32 会
-                # 内部按 ACE 类型序号写回, 顺序保持).
-                acl.AddAccessAllowedAceEx(ace_flags, ace_mask, ace_sid)
+                if ace_type == const.ACCESS_DENIED_ACE_TYPE:
+                    deny_aces.append((ace_flags, ace_mask, ace_sid))
+                else:
+                    allow_aces.append((ace_flags, ace_mask, ace_sid))
             if removed == 0:
                 continue
+            acl = win32security.ACL()
+            for flags, mask, sid in deny_aces:
+                acl.AddAccessDeniedAceEx(flags, mask, sid)
+            for flags, mask, sid in allow_aces:
+                acl.AddAccessAllowedAceEx(flags, mask, sid)
             win32security.SetNamedSecurityInfo(
                 path,
                 win32con.SE_FILE_OBJECT,

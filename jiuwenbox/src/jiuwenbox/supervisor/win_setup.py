@@ -187,6 +187,30 @@ def _reg_get_str(name: str) -> str | None:
         advapi32.RegCloseKey(hkey)
 
 
+def _reg_set_dword_under(full_subkey: str, name: str, value: int) -> None:
+    """在 HKLM\\<full_subkey> 下写一个 REG_DWORD (用于隐藏登录界面用户等).
+
+    ``full_subkey`` 是相对 HKLM 的完整路径 (不拼 REG_BASE_KEY).
+    """
+    advapi32 = _get_advapi32()
+    hkey = wintypes.HKEY()
+    disp = wintypes.DWORD(0)
+    ret = advapi32.RegCreateKeyExW(
+        HKEY_LOCAL_MACHINE, full_subkey, 0, None, 0, KEY_READ_WRITE,
+        None, ctypes.byref(hkey), ctypes.byref(disp),
+    )
+    if ret != 0:
+        raise ctypes.WinError(ret)
+    try:
+        dword = wintypes.DWORD(value)
+        advapi32.RegSetValueExW(
+            hkey, name, 0, REG_DWORD, ctypes.byref(dword),
+            ctypes.sizeof(wintypes.DWORD),
+        )
+    finally:
+        advapi32.RegCloseKey(hkey)
+
+
 # ---------------------------------------------------------------------------
 # 用户/组创建.
 # ---------------------------------------------------------------------------
@@ -371,8 +395,12 @@ def _preinstall_read_acl(paths: list[str], sid: str) -> None:
         logger.warning("预装读 ACL 失败", exc_info=True)
 
 
-def _preinstall_read_acl_async(paths: list[str], sid: str) -> None:
-    """后台线程异步预装读 ACL, 不阻塞 install 返回."""
+def _preinstall_read_acl_async(paths: list[str], sid: str) -> threading.Thread:
+    """后台线程预装读 ACL.
+
+    返回线程对象供调用方 join. install() 作为提权子进程必须等预装完成再
+    退出, 否则 daemon 线程被强杀, 预装只做一半.
+    """
     thread = threading.Thread(
         target=_preinstall_read_acl,
         args=(paths, sid),
@@ -381,13 +409,30 @@ def _preinstall_read_acl_async(paths: list[str], sid: str) -> None:
     )
     thread.start()
     logger.info("读 ACL 预装已在后台线程启动 (%d 路径)", len(paths))
+    return thread
+
+
+# 预装读 ACL 的等待上限 (秒). 深度遍历大目录可能耗时, 但 install 作为
+# 提权子进程不应无限挂起; 超时后写 installed 标记, 剩余路径由后续 ensure
+# 补做 (grant_ace 幂等).
+PREINSTALL_JOIN_TIMEOUT_SECONDS = 120.0
 
 
 # ---------------------------------------------------------------------------
 # 公开 API.
 # ---------------------------------------------------------------------------
-def install(force: bool = False) -> None:
-    """执行一次性安装 (需管理员权限)."""
+def install(
+    force: bool = False,
+    preinstall_paths: list[str] | None = None,
+) -> None:
+    """执行一次性安装 (需管理员权限).
+
+    Args:
+        force: 忽略幂等标记强制重装.
+        preinstall_paths: 读 ACL 预装路径 (来自根 policy 的
+            ``windows.filesystem.read_acl_preinstall``). 为 None 时用
+            默认 4 个系统目录.
+    """
     _require_windows()
     if not _is_admin() and not force:
         _elevate_and_run_install()
@@ -404,6 +449,16 @@ def install(force: bool = False) -> None:
     password = _generate_password()
     _create_sandbox_user(password)
     _add_user_to_group()
+    # 从登录界面隐藏 jbx-sandbox 用户 (Winlogon SpecialAccounts\UserList=0).
+    try:
+        _reg_set_dword_under(
+            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+            r"\SpecialAccounts\UserList",
+            const.SANDBOX_USER_NAME,
+            0,
+        )
+    except Exception:  # noqa: BLE001 - 隐藏失败不阻断安装
+        logger.warning("隐藏登录界面用户失败, 不影响功能", exc_info=True)
 
     # 2. 查 SID 并存注册表.
     sid = _lookup_user_sid(const.SANDBOX_USER_NAME)
@@ -445,32 +500,54 @@ def install(force: bool = False) -> None:
         except Exception:  # noqa: BLE001
             logger.error("防火墙规则降级也失败, 网络隔离不可用", exc_info=True)
 
-    # 4. 异步预装读 ACL.
-    preinstall_paths = [
-        os.environ.get("USERPROFILE", ""),
-        os.environ.get("SystemRoot", r"C:\Windows"),
-        os.environ.get("ProgramFiles", r"C:\Program Files"),
-        os.environ.get("ProgramData", r"C:\ProgramData"),
-    ]
-    preinstall_paths = [p for p in preinstall_paths if p]
-    _preinstall_read_acl_async(preinstall_paths, sid)
+    # 4. 异步预装读 ACL. 路径优先取 policy 的 read_acl_preinstall,
+    # 否则用默认系统目录. install 是提权子进程, 必须等预装完成再退出,
+    # 否则 daemon 线程被强杀 (文档 6.4.3: 后台线程异步执行, 但 install
+    # 子进程本身要活到预装结束).
+    if preinstall_paths:
+        paths_to_preinstall = [
+            os.path.expandvars(p) for p in preinstall_paths if p
+        ]
+    else:
+        paths_to_preinstall = [
+            os.environ.get("USERPROFILE", ""),
+            os.environ.get("SystemRoot", r"C:\Windows"),
+            os.environ.get("ProgramFiles", r"C:\Program Files"),
+            os.environ.get("ProgramData", r"C:\ProgramData"),
+        ]
+        paths_to_preinstall = [p for p in paths_to_preinstall if p]
+    preinstall_thread = _preinstall_read_acl_async(paths_to_preinstall, sid)
+    preinstall_thread.join(timeout=PREINSTALL_JOIN_TIMEOUT_SECONDS)
+    if preinstall_thread.is_alive():
+        logger.warning(
+            "读 ACL 预装未在 %.0fs 内完成, 剩余路径将由后续创建沙箱补做",
+            PREINSTALL_JOIN_TIMEOUT_SECONDS,
+        )
 
     # 5. 写完成标记.
     _reg_set_str(const.REG_VALUE_INSTALLED, "1")
     logger.info("Windows 沙箱安装完成")
 
 
-def ensure_windows_setup(force: bool = False) -> None:
+def ensure_windows_setup(
+    force: bool = False,
+    preinstall_paths: list[str] | None = None,
+) -> None:
     """运行时入口: 确保安装已完成 (幂等).
 
     由 ProcessRuntime.create / app.py lifespan 在 win32 分支调用.
     非管理员进程时, 会通过 UAC 拉起提权子进程完成首次安装.
+
+    Args:
+        preinstall_paths: 读 ACL 预装路径 (根 policy 的
+            ``windows.filesystem.read_acl_preinstall``). 仅在首次安装时
+            生效; 已安装则忽略.
     """
     _require_windows()
     try:
         if not force and _reg_get_str(const.REG_VALUE_INSTALLED) == "1":
             return
-        install(force=force)
+        install(force=force, preinstall_paths=preinstall_paths)
     except Exception:  # noqa: BLE001
         logger.error("ensure_windows_setup 失败", exc_info=True)
         raise
