@@ -116,69 +116,93 @@ logger = logging.getLogger(__name__)
 
 def _get_friendly_error_hint(error_message: str) -> str:
     """
-    Return a friendly hint based on the error message (bilingual zh/en).
+    Return a friendly hint based on the error message and user's preferred language.
 
-    Provides user-friendly suggestions for common API errors to help users
-    quickly locate and resolve problems.
+    Reads preferred_language from config.yaml (default: zh) and returns
+    the corresponding language version of the hint, following the project's
+    i18n framework pattern.
 
     Returns:
-        Friendly hint string (Chinese + English), or empty string if no match.
+        Friendly hint string in user's preferred language, or empty string if no match.
     """
+    config_base = get_config()
+    lang = str(config_base.get("preferred_language", "zh")).strip().lower()
+
     error_lower = error_message.lower()
 
     if "chat/completions" in error_lower and ("endpoint" in error_lower or "method" in error_lower):
-        return (
-            "💡 提示：检测到 API 端点错误。如果您正在使用本地 LLM 服务（如 LM Studio、Ollama），"
-            "请检查 api_base 配置是否正确。本地服务通常需要包含 '/v1' 后缀，例如：\n"
-            "  - 当前可能: http://localhost:1234\n"
-            "  - 建议改为: http://localhost:1234/v1\n\n"
-            "💡 Hint: API endpoint error detected. If you are using a local LLM service "
-            "(e.g. LM Studio, Ollama), check the api_base config. Local services usually "
-            "require a '/v1' suffix, e.g.:\n"
-            "  - Current: http://localhost:1234\n"
-            "  - Suggested: http://localhost:1234/v1"
-        )
+        if lang == "zh":
+            return (
+                "💡 提示：检测到 API 端点错误。如果您正在使用本地 LLM 服务（如 LM Studio、Ollama），"
+                "请检查 api_base 配置是否正确。本地服务通常需要包含 '/v1' 后缀，例如：\n"
+                "  - 当前可能: http://localhost:1234\n"
+                "  - 建议改为: http://localhost:1234/v1"
+            )
+        else:
+            return (
+                "💡 Hint: API endpoint error detected. If you are using a local LLM service "
+                "(e.g. LM Studio, Ollama), check the api_base config. Local services usually "
+                "require a '/v1' suffix, e.g.:\n"
+                "  - Current: http://localhost:1234\n"
+                "  - Suggested: http://localhost:1234/v1"
+            )
 
     if "connection refused" in error_lower or "connection reset" in error_lower:
-        return (
-            "💡 提示：无法连接到模型服务。请检查：\n"
-            "  1. 模型服务（如 LM Studio、Ollama）是否已启动\n"
-            "  2. api_base 配置的地址和端口是否正确\n"
-            "  3. 防火墙是否允许访问该端口\n\n"
-            "💡 Hint: Cannot connect to the model service. Please check:\n"
-            "  1. Whether the model service (e.g. LM Studio, Ollama) is running\n"
-            "  2. Whether the api_base address and port are correct\n"
-            "  3. Whether the firewall allows access to the port"
-        )
+        if lang == "zh":
+            return (
+                "💡 提示：无法连接到模型服务。请检查：\n"
+                "  1. 模型服务（如 LM Studio、Ollama）是否已启动\n"
+                "  2. api_base 配置的地址和端口是否正确\n"
+                "  3. 防火墙是否允许访问该端口"
+            )
+        else:
+            return (
+                "💡 Hint: Cannot connect to the model service. Please check:\n"
+                "  1. Whether the model service (e.g. LM Studio, Ollama) is running\n"
+                "  2. Whether the api_base address and port are correct\n"
+                "  3. Whether the firewall allows access to the port"
+            )
 
     if "timeout" in error_lower:
-        return (
-            "💡 提示：请求超时。请检查：\n"
-            "  1. 模型服务是否正在运行且响应正常\n"
-            "  2. 网络连接是否稳定\n"
-            "  3. 考虑增加超时时间配置\n\n"
-            "💡 Hint: Request timed out. Please check:\n"
-            "  1. Whether the model service is running and responding normally\n"
-            "  2. Whether the network connection is stable\n"
-            "  3. Consider increasing the timeout configuration"
-        )
+        if lang == "zh":
+            return (
+                "💡 提示：请求超时。请检查：\n"
+                "  1. 模型服务是否正在运行且响应正常\n"
+                "  2. 网络连接是否稳定\n"
+                "  3. 考虑增加超时时间配置"
+            )
+        else:
+            return (
+                "💡 Hint: Request timed out. Please check:\n"
+                "  1. Whether the model service is running and responding normally\n"
+                "  2. Whether the network connection is stable\n"
+                "  3. Consider increasing the timeout configuration"
+            )
 
     if "api key" in error_lower or "invalid key" in error_lower:
-        return (
-            "💡 提示：API Key 无效或未配置。请检查 api_key 配置是否正确。\n"
-            "对于本地 LLM 服务（如 LM Studio），api_key 可以设置为任意非空字符串。\n\n"
-            "💡 Hint: API Key is invalid or not configured. Please check the api_key config.\n"
-            "For local LLM services (e.g. LM Studio), api_key can be set to any non-empty string."
-        )
+        if lang == "zh":
+            return (
+                "💡 提示：API Key 无效或未配置。请检查 api_key 配置是否正确。\n"
+                "对于本地 LLM 服务（如 LM Studio），api_key 可以设置为任意非空字符串。"
+            )
+        else:
+            return (
+                "💡 Hint: API Key is invalid or not configured. Please check the api_key config.\n"
+                "For local LLM services (e.g. LM Studio), api_key can be set to any non-empty string."
+            )
 
     if "model" in error_lower and ("not found" in error_lower or "invalid" in error_lower):
-        return (
-            "💡 提示：模型名称无效或未找到。请检查 model_name 配置是否与服务端可用的模型一致。\n"
-            "对于 LM Studio，请使用模型卡片上显示的完整模型名称。\n\n"
-            "💡 Hint: Model name is invalid or not found. Please check that model_name matches "
-            "an available model on the server.\n"
-            "For LM Studio, use the full model name shown on the model card."
-        )
+        if lang == "zh":
+            return (
+                "💡 提示：模型名称无效或未找到。请检查 model_name 配置是否与服务端可用的模型一致。\n"
+                "对于 LM Studio，请使用模型卡片上显示的完整模型名称。"
+            )
+        else:
+            return (
+                "💡 Hint: Model name is invalid or not found. Please check that model_name matches "
+                "an available model on the server.\n"
+                "For LM Studio, use the full model name shown on the model card."
+            )
 
     return ""
 
