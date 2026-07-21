@@ -2924,8 +2924,10 @@ class JiuWenClawDeepAdapter:
             metadata: dict[str, Any] | None,
             request_id: str | None,
             mode: str | None,
+            params: dict[str, Any] | None = None,
     ) -> tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None], Any]:
         from jiuwenclaw.agentserver import plan_todo_context as _plan_todo
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
 
         normalized_channel = str(channel_id or "").strip() or CronTargetChannel.WEB.value
         normalized_mode = str(mode).strip() if isinstance(mode, str) and mode.strip() else None
@@ -2934,6 +2936,14 @@ class JiuWenClawDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+        # 企业三元组：params → metadata → metadata.query（与 enterprise_config 同源）
+        g, b, u = extract_routing_triple(params or {}, normalized_metadata)
+        if g:
+            normalized_metadata["group_id"] = g
+        if b:
+            normalized_metadata["bot_id"] = b
+        if u:
+            normalized_metadata["user_id"] = u
         # 设置 DeepResearch 路由上下文
         dr_token = push_deepresearch_route(
             request_id=request_id or "",
@@ -4434,7 +4444,8 @@ class JiuWenClawDeepAdapter:
             session_id=request.session_id,
             metadata=request.metadata,
             request_id=request.request_id,
-            mode=mode
+            mode=mode,
+            params=request.params if isinstance(request.params, dict) else None,
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
@@ -4596,6 +4607,7 @@ class JiuWenClawDeepAdapter:
             metadata=request.metadata,
             request_id=request.request_id,
             mode=mode,
+            params=request.params if isinstance(request.params, dict) else None,
         )
 
         # Set telemetry context for OpenTelemetry span creation

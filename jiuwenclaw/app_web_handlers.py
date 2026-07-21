@@ -1984,8 +1984,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
-        jobs = await cc.list_jobs()
-        await channel.send_response(ws, req_id, ok=True, payload={"jobs": jobs})
+        try:
+            jobs = await cc.list_jobs(params if isinstance(params, dict) else None)
+            await channel.send_response(ws, req_id, ok=True, payload={"jobs": jobs})
+        except ValueError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+        except Exception as e:  # noqa: BLE001
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _cron_job_get(ws, req_id, params, session_id):
         cc = _get_cron()
@@ -1999,7 +2006,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
-        job = await cc.get_job(job_id)
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        g, b, u = extract_routing_triple(params)
+        job = await cc.get_job(job_id, group_id=g, bot_id=b, user_id=u)
         if job is None:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
@@ -2016,6 +2026,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         try:
             job = await cc.create_job(params)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
         except Exception as e:  # noqa: BLE001
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
 
@@ -2035,11 +2047,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(patch, dict):
             await channel.send_response(ws, req_id, ok=False, error="patch must be object", code="BAD_REQUEST")
             return
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        g, b, u = extract_routing_triple(params)
         try:
-            job = await cc.update_job(job_id, patch)
+            job = await cc.update_job(job_id, patch, group_id=g, bot_id=b, user_id=u)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
         except Exception as e:  # noqa: BLE001
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
 
@@ -2055,7 +2072,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
-        deleted = await cc.delete_job(job_id)
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        g, b, u = extract_routing_triple(params)
+        try:
+            deleted = await cc.delete_job(job_id, group_id=g, bot_id=b, user_id=u)
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
+            return
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            return
         if not deleted:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
@@ -2077,11 +2104,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if enabled is None:
             await channel.send_response(ws, req_id, ok=False, error="enabled is required", code="BAD_REQUEST")
             return
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        g, b, u = extract_routing_triple(params)
         try:
-            job = await cc.toggle_job(job_id, bool(enabled))
+            job = await cc.toggle_job(job_id, bool(enabled), group_id=g, bot_id=b, user_id=u)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except PermissionError as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="FORBIDDEN")
 
     async def _cron_job_preview(ws, req_id, params, session_id):
         cc = _get_cron()
@@ -2096,8 +2128,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        g, b, u = extract_routing_triple(params)
         try:
-            next_runs = await cc.preview_job(job_id, int(count) if count is not None else 5)
+            next_runs = await cc.preview_job(
+                job_id,
+                int(count) if count is not None else 5,
+                group_id=g,
+                bot_id=b,
+                user_id=u,
+            )
             await channel.send_response(ws, req_id, ok=True, payload={"next": next_runs})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
@@ -2116,8 +2157,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
+        from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+        g, b, u = extract_routing_triple(params)
         try:
-            run_id = await cc.run_now(job_id)
+            run_id = await cc.run_now(job_id, group_id=g, bot_id=b, user_id=u)
             await channel.send_response(ws, req_id, ok=True, payload={"run_id": run_id})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")

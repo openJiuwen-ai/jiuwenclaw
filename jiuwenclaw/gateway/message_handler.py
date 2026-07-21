@@ -31,6 +31,13 @@ from jiuwenclaw.utils import FileTransferStartParams
 
 logger = logging.getLogger(__name__)
 
+
+def _cron_routing_from_params(params: dict[str, Any] | None) -> tuple[str | None, str | None, str | None]:
+    from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+
+    return extract_routing_triple(params or {})
+
+
 _ACP_CHANNEL_ID = "acp"
 _ACP_ORIGINAL_SESSION_ID_KEY = "acp_original_session_id"
 _DEFAULT_INLINE_FILE_SIZE_LIMIT = 128 * 1024
@@ -1628,9 +1635,15 @@ class MessageHandler(ABC):
             params = {}
         try:
             if action == "list":
-                data = await cc.list_jobs()
+                data = await cc.list_jobs(params)
             elif action == "get":
-                data = await cc.get_job(str(params.get("job_id") or ""))
+                g, b, u = _cron_routing_from_params(params)
+                data = await cc.get_job(
+                    str(params.get("job_id") or ""),
+                    group_id=g,
+                    bot_id=b,
+                    user_id=u,
+                )
             elif action == "create":
                 # 从原始请求中获取 mode，覆盖 LLM 工具调用的默认值
                 request_mode = self._stream_modes.get(request_id)
@@ -1638,18 +1651,52 @@ class MessageHandler(ABC):
                     params["mode"] = request_mode
                 data = await cc.create_job(params)
             elif action == "update":
+                g, b, u = _cron_routing_from_params(params)
                 data = await cc.update_job(
                     str(params.get("job_id") or ""),
                     dict(params.get("patch") or {}),
+                    group_id=g,
+                    bot_id=b,
+                    user_id=u,
                 )
             elif action == "delete":
-                data = {"deleted": await cc.delete_job(str(params.get("job_id") or ""))}
+                g, b, u = _cron_routing_from_params(params)
+                data = {
+                    "deleted": await cc.delete_job(
+                        str(params.get("job_id") or ""),
+                        group_id=g,
+                        bot_id=b,
+                        user_id=u,
+                    )
+                }
             elif action == "toggle":
-                data = await cc.toggle_job(str(params.get("job_id") or ""), bool(params.get("enabled")))
+                g, b, u = _cron_routing_from_params(params)
+                data = await cc.toggle_job(
+                    str(params.get("job_id") or ""),
+                    bool(params.get("enabled")),
+                    group_id=g,
+                    bot_id=b,
+                    user_id=u,
+                )
             elif action == "preview":
-                data = await cc.preview_job(str(params.get("job_id") or ""), int(params.get("count", 5)))
+                g, b, u = _cron_routing_from_params(params)
+                data = await cc.preview_job(
+                    str(params.get("job_id") or ""),
+                    int(params.get("count", 5)),
+                    group_id=g,
+                    bot_id=b,
+                    user_id=u,
+                )
             elif action == "run_now":
-                data = {"run_id": await cc.run_now(str(params.get("job_id") or ""))}
+                g, b, u = _cron_routing_from_params(params)
+                data = {
+                    "run_id": await cc.run_now(
+                        str(params.get("job_id") or ""),
+                        group_id=g,
+                        bot_id=b,
+                        user_id=u,
+                    )
+                }
             else:
                 data = {"error": f"unknown cron action: {action}"}
         except Exception as exc:  # noqa: BLE001
