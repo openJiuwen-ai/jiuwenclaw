@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -11,7 +12,7 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
 
 
-def test_git_diff_from_subdir_excludes_untracked_files(tmp_path):
+def test_git_diff_from_subdir_includes_untracked_files(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init")
@@ -33,8 +34,13 @@ def test_git_diff_from_subdir_excludes_untracked_files(tmp_path):
 
     assert diff is not None
     assert str(tracked) in diff["files"]
-    assert str(untracked) not in diff["files"]
-    assert diff["stats"]["filesChanged"] == 1
+    assert str(untracked) in diff["files"]
+    untracked_info = diff["files"][str(untracked)]
+    assert untracked_info["status"] == "added"
+    assert untracked_info["isNewFile"] is True
+    assert untracked_info["isUntracked"] is True
+    assert untracked_info["hunks"] == []
+    assert diff["stats"]["filesChanged"] == 2
     assert diff["stats"]["linesAdded"] == 1
     assert diff["stats"]["linesRemoved"] == 1
 
@@ -66,6 +72,7 @@ def test_git_diff_stats_include_tracked_files_beyond_detail_cap(tmp_path):
     assert diff["stats"]["linesRemoved"] == 60
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows paths cannot contain tab characters")
 def test_git_diff_preserves_tabs_in_file_paths(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

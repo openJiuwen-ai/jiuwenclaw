@@ -3541,6 +3541,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         project_id = str(params.get("project_id") or "").strip()
         proj, err, code = _resolve_git_project(project_id)
         if proj is None:
+            if code == "NOT_FOUND":
+                code = "PROJECT_NOT_FOUND"
             await channel.send_response(
                 ws, req_id, ok=False, error=err, code=code, payload={},
             )
@@ -3806,6 +3808,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         project_id = str(params.get("project_id") or "").strip()
         proj, err, code = _resolve_git_project(project_id)
         if proj is None:
+            if code == "NOT_FOUND":
+                code = "PROJECT_NOT_FOUND"
             await channel.send_response(
                 ws, req_id, ok=False, error=err, code=code, payload={},
             )
@@ -3846,6 +3850,213 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             ws, req_id, ok=True,
             payload=status.to_dict(include_hunks=include_hunks),
         )
+
+    async def _validate_session_project_binding(
+        ws: Any, req_id: str, project_id: str, session_id: str,
+    ) -> tuple[bool, str | None, str | None]:
+        """校验 session 与 project 的绑定关系。"""
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
+        try:
+            session_meta = await asyncio.to_thread(
+                get_session_metadata, session_id,
+                cache_bust=True, enable_writeback=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ProjectGit] failed to read session metadata (session=%s): %s",
+                session_id, exc,
+            )
+            return False, f"failed to read session metadata: {exc}", "INTERNAL_ERROR"
+        if not session_meta:
+            return False, f"session not found: {session_id}", "SESSION_NOT_FOUND"
+        session_project_id = str(session_meta.get("project_id") or "").strip()
+        if not session_project_id:
+            return False, (
+                "session has no project_id binding; cannot verify project ownership"
+            ), "SESSION_NOT_BOUND"
+        if session_project_id != project_id:
+            return False, (
+                f"session_id does not belong to project_id: "
+                f"expected {project_id}, got {session_project_id}"
+            ), "PROJECT_SESSION_MISMATCH"
+        return True, None, None
+
+    async def _project_git_turn_diff_list(ws, req_id, params, session_id):
+        """查询历史 Diff 摘要列表。"""
+        if not isinstance(params, dict):
+            params = {}
+        project_id = str(params.get("project_id") or "").strip()
+        proj, err, code = _resolve_git_project(project_id)
+        if proj is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error=err, code=code, payload={},
+            )
+            return
+        session_id_param = str(params.get("session_id") or "").strip()
+        if not session_id_param:
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="session_id is required", code="BAD_REQUEST",
+            )
+            return
+        ok_val, v_err, v_code = await _validate_session_project_binding(
+            ws, req_id, project_id, session_id_param,
+        )
+        if not ok_val:
+            await channel.send_response(
+                ws, req_id, ok=False, error=v_err, code=v_code, payload={},
+            )
+            return
+        limit_raw = params.get("limit")
+        if limit_raw is None:
+            limit = 50
+        else:
+            try:
+                limit = int(limit_raw)
+            except (ValueError, TypeError):
+                limit = 50
+            if limit < 0:
+                limit = 50
+        cursor_raw = params.get("cursor", 0)
+        try:
+            cursor = int(cursor_raw)
+        except (ValueError, TypeError):
+            cursor = 0
+        if cursor < 0:
+            cursor = 0
+        from jiuwenswarm.server.runtime.session.git_diff_status import (
+            get_diff_status_service,
+        )
+        service = get_diff_status_service()
+        try:
+            result = await asyncio.to_thread(
+                service.get_turn_diff_list,
+                project=proj,
+                session_id=session_id_param,
+                limit=limit,
+                cursor=cursor,
+            )
+        except Exception as exc:  # noqa: BLE001
+            git_error = getattr(exc, "git_error", None)
+            if git_error is not None:
+                await _send_git_error_response(ws, req_id, git_error)
+                return
+            logger.warning(
+                "[ProjectGit] turn_diff_list failed (project=%s): %s",
+                proj.project_id, exc,
+            )
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=f"handler error: {exc}", code="INTERNAL_ERROR",
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=result)
+
+    async def _project_git_turn_diff(ws, req_id, params, session_id):
+        """查询指定轮次 Diff 详情。"""
+        if not isinstance(params, dict):
+            params = {}
+        project_id = str(params.get("project_id") or "").strip()
+        proj, err, code = _resolve_git_project(project_id)
+        if proj is None:
+            await channel.send_response(
+                ws, req_id, ok=False, error=err, code=code, payload={},
+            )
+            return
+        session_id_param = str(params.get("session_id") or "").strip()
+        if not session_id_param:
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error="session_id is required", code="BAD_REQUEST",
+            )
+            return
+        change_set_id = str(params.get("change_set_id") or "").strip() or None
+        turn_index: int | None = None
+        if change_set_id is None:
+            turn_index_raw = params.get("turn_index")
+            try:
+                turn_index = int(turn_index_raw)
+            except (ValueError, TypeError):
+                await channel.send_response(
+                    ws, req_id, ok=False,
+                    error="either change_set_id or turn_index (integer) is required",
+                    code="BAD_REQUEST",
+                )
+                return
+
+        def _bool_param(name: str, default: bool) -> bool:
+            raw = params.get(name, default)
+            if isinstance(raw, bool):
+                return raw
+            if raw is None:
+                return default
+            if isinstance(raw, (int, float)):
+                return bool(raw)
+            raw_str = str(raw).strip().lower()
+            if raw_str in {"1", "true", "yes", "on"}:
+                return True
+            if raw_str in {"0", "false", "no", "off"}:
+                return False
+            return default
+
+        include_hunks = _bool_param("include_hunks", True)
+        include_files = _bool_param("include_files", True) or include_hunks
+        ok_val, v_err, v_code = await _validate_session_project_binding(
+            ws, req_id, project_id, session_id_param,
+        )
+        if not ok_val:
+            await channel.send_response(
+                ws, req_id, ok=False, error=v_err, code=v_code, payload={},
+            )
+            return
+        from jiuwenswarm.server.runtime.session.git_diff_status import (
+            get_diff_status_service,
+        )
+        from jiuwenswarm.server.utils.diff_service import DiffHistoryExpiredError
+        service = get_diff_status_service()
+        try:
+            result = await asyncio.to_thread(
+                service.get_turn_diff_detail,
+                project=proj,
+                session_id=session_id_param,
+                turn_index=turn_index,
+                change_set_id=change_set_id,
+                include_files=include_files,
+                include_hunks=include_hunks,
+            )
+        except DiffHistoryExpiredError as exc:
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=str(exc) or "diff history expired",
+                code="DIFF_HISTORY_EXPIRED",
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            git_error = getattr(exc, "git_error", None)
+            if git_error is not None:
+                await _send_git_error_response(ws, req_id, git_error)
+                return
+            logger.warning(
+                "[ProjectGit] turn_diff failed (project=%s): %s",
+                proj.project_id, exc,
+            )
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=f"handler error: {exc}", code="INTERNAL_ERROR",
+            )
+            return
+        if result is None:
+            identifier = change_set_id or f"turn_index={turn_index}"
+            not_found_code = "CHANGE_SET_NOT_FOUND" if change_set_id else "TURN_DIFF_NOT_FOUND"
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=f"turn diff not found for {identifier}",
+                code=not_found_code,
+            )
+            return
+        await channel.send_response(ws, req_id, ok=True, payload=result)
 
     async def _path_get(ws, req_id, params, session_id):
         """读 browser.chrome_path 并返回给前端（会解析环境变量）。"""
@@ -4975,6 +5186,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("project.git.switch_branch", _project_git_switch_branch)
     channel.register_method("project.git.create_branch", _project_git_create_branch)
     channel.register_method("project.git.diff_status", _project_git_diff_status)
+    channel.register_method("project.git.turn_diff_list", _project_git_turn_diff_list)
+    channel.register_method("project.git.turn_diff", _project_git_turn_diff)
 
     channel.register_method("path.get", _path_get)
     channel.register_method("path.set", _path_set)
