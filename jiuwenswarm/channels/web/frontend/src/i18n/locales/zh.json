@@ -416,6 +416,35 @@
     "pending": "待处理",
     "completed": "已完成"
   },
+  "goal": {
+    "formSubmit": "确定",
+    "formCancel": "取消",
+    "editTitle": "编辑目标",
+    "toolbarTag": "目标",
+    "closeTag": "取消目标",
+    "badge": "设为目标",
+    "status": {
+      "active": "进行中",
+      "paused": "已暂停",
+      "completed": "已完成",
+      "blocked": "已阻塞"
+    },
+    "action": {
+      "editTooltip": "编辑目标",
+      "pauseTooltip": "暂停目标",
+      "resumeTooltip": "恢复目标",
+      "deleteTooltip": "删除目标"
+    },
+    "completedCardTitle": "目标已完成",
+    "completedMessageFallback": "目标已完成。",
+    "editStaleWarning": "目标在编辑期间已经完成，这次修改未保存。如需设置新目标，请重新通过「+」创建。",
+    "detail": {
+      "attempts": "已执行次数",
+      "tokens": "累计 Token",
+      "lastAssessment": "最近评估",
+      "lastStopReason": "最近停止原因"
+    }
+  },
   "sessions": {
     "title": "会话管理",
     "subtitle": "浏览并管理会话与文件",

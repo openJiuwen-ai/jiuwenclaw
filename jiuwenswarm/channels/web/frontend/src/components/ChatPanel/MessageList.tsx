@@ -8,7 +8,7 @@ import { useMemo } from 'react';
 import { Message, ToolExecution } from '../../types';
 import { MessageItem, getMessageActor } from './MessageItem';
 import { ToolGroupDisplay, collectViewedSkillIds } from './ToolGroupDisplay';
-import { useChatStore, useSessionStore } from '../../stores';
+import { useChatStore, useGoalStore, useSessionStore } from '../../stores';
 import { isTeamMemberCollaborationMessage } from './teamEventUtils';
 import { isA2UIClientEventContent } from '../../features/a2ui/a2uiContent';
 
@@ -37,6 +37,8 @@ interface ChatTimelineListProps {
   executions?: ToolExecution[];
   mode?: string;
   disableA2UIInteraction?: boolean;
+  /** 当前会话的目标文本，透传给 MessageItem 用于渲染"设为目标"徽章 */
+  goalObjective?: string | null;
 }
 
 type TimelineItem =
@@ -335,6 +337,7 @@ export function ChatTimelineList({
   executions = [],
   mode = 'default',
   disableA2UIInteraction = false,
+  goalObjective = null,
 }: ChatTimelineListProps) {
   const isTeamMode = mode === 'team';
   const renderItems = useMemo(
@@ -356,6 +359,7 @@ export function ChatTimelineList({
               message={item.message}
               showAvatar={item.showAvatar}
               disableA2UIInteraction={disableA2UIInteraction}
+              goalObjective={goalObjective}
             />
           );
         }
@@ -380,6 +384,7 @@ export function MessageList({ messages }: MessageListProps) {
   const toolExecutions = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutions ?? new Map());
   const toolExecutionOrder = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutionOrder ?? []);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const goalObjective = useGoalStore((s) => s.runtimes[activeSessionId ?? '']?.goal?.objective ?? null);
   const executions = useMemo(
     () => toolExecutionOrder
       .map((toolCallId) => toolExecutions.get(toolCallId))
@@ -387,5 +392,5 @@ export function MessageList({ messages }: MessageListProps) {
     [toolExecutions, toolExecutionOrder]
   );
 
-  return <ChatTimelineList messages={messages} executions={executions} mode={mode} />;
+  return <ChatTimelineList messages={messages} executions={executions} mode={mode} goalObjective={goalObjective} />;
 }

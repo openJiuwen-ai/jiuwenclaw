@@ -2,6 +2,7 @@
  * 类型导出
  */
 
+export * from './goal';
 export * from './message';
 export * from './skillTree';
 export * from './todo';

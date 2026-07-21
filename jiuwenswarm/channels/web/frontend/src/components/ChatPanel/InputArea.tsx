@@ -1,11 +1,11 @@
 ﻿﻿﻿import { useState, useRef, useCallback, KeyboardEvent, useEffect, ClipboardEvent, DragEvent, ChangeEvent, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { AtSign, CircleX, FileImage, Loader2, Plus, Square, X } from 'lucide-react';
+import { AtSign, CircleX, FileImage, Loader2, Plus, Square, Target, X } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
-import { useChatStore, useSessionStore, useWorkspaceStore } from '../../stores';
+import { useChatStore, useGoalStore, useSessionStore, useWorkspaceStore } from '../../stores';
 import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
@@ -105,6 +105,10 @@ interface InputAreaProps {
   onNavigateToSkills?: () => void;
   permissionsEnabled: boolean;
   onSavePermission: (updates: Record<string, string>) => Promise<void>;
+  /** 目标待设置态（"+"菜单选了「目标」）下发送时调用，取代普通 onSubmit/排队逻辑 */
+  onSetGoal?: (sessionId: string, objective: string) => void;
+  /** 工具栏"目标"标签的 × 按钮：目标已存在时点击等同删除目标 */
+  onClearGoal?: (sessionId: string) => void;
 }
 
 const ACCEPTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
@@ -236,6 +240,8 @@ export function InputArea({
   onNavigateToSkills,
   permissionsEnabled,
   onSavePermission,
+  onSetGoal,
+  onClearGoal,
 }: InputAreaProps) {
   const [pendingVoiceText, setPendingVoiceText] = useState('');
   const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
@@ -256,12 +262,16 @@ export function InputArea({
   const [composerSuggestion, setComposerSuggestion] = useState<ComposerSuggestionState | null>(null);
   const [composerSuggestionIndex, setComposerSuggestionIndex] = useState(0);
   const [modeMenuAnchor, setModeMenuAnchor] = useState<DOMRect | null>(null);
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [attachMenuAnchor, setAttachMenuAnchor] = useState<DOMRect | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   /** 保存技能插入前的光标位置，用于在光标处插入 chip */
   const savedRangeRef = useRef<Range | null>(null);
   const modeMenuRef = useRef<HTMLDivElement>(null);
   const workMenuRef = useRef<HTMLDivElement>(null);
   const modeMenuPortalRef = useRef<HTMLDivElement>(null);
+  const attachMenuRef = useRef<HTMLDivElement>(null);
+  const attachMenuPortalRef = useRef<HTMLDivElement>(null);
   const autoSendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuOpenedByLongPressRef = useRef(false);
@@ -292,12 +302,24 @@ export function InputArea({
   } = useWorkspaceStore();
   const loadedMsgLen = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages?.length ?? 0);
   const hasHistory = (currentSession?.message_count ?? 0) > 0 || loadedMsgLen > 0;
-  const isInterruptible = isProcessing || isPaused;
+  const goalArmed = useGoalStore((s) => s.runtimes[activeSessionId ?? '']?.armed ?? false);
+  const currentGoal = useGoalStore((s) => s.runtimes[activeSessionId ?? '']?.goal ?? null);
+  // 目标 active 时普通发送改走排队，而不是文档 §5.1 原定的 input_mode:'steer' 实时插话——
+  // 用户明确要求改成这个语义（steer 目前收不到任何反馈，体验上等同于消息发出去石沉大海，
+  // 见 backend-requests.md #1）。走排队后消息复用现有的通用队列机制，行为和普通排队一致。
+  const isGoalActive = currentGoal?.status === 'active';
+  const isInterruptible = isProcessing || isPaused || isGoalActive;
   const isAgentMode = mode === 'agent';
   const isTeamMode = mode === 'team';
   const isAutoHarnessMode = mode === 'auto_harness';
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const showWorkContextRow = activeSessionId === NEW_CONVERSATION_ID;
+  /** Goal 入口是否适用于当前上下文（agent 模式 + 已接入 onSetGoal，如欢迎页新会话就不适用） */
+  const canUseGoalMenu = isAgentMode && Boolean(onSetGoal);
+  // 只跟 armed 挂钩：这个 tag 是"下一条消息将用于设置目标"的过渡态指示，发送后 armed 变 false
+  // 就该跟着消失，不能靠"目标是否存在"续命——目标存在与否、当前状态、编辑/暂停/删除，已经由
+  // 输入框上方常驻的 GoalBar 完整覆盖，工具栏这里再挂一份重复的常驻入口只会显得"选择没解除"。
+  const goalTagVisible = canUseGoalMenu && goalArmed;
 
   const mentionableMembers = useMemo(() => {
     return teamMembers
@@ -608,6 +630,25 @@ export function InputArea({
   }, [isModeMenuOpen]);
 
   useEffect(() => {
+    if (!attachMenuOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (
+        !attachMenuRef.current?.contains(event.target as Node) &&
+        !attachMenuPortalRef.current?.contains(event.target as Node)
+      ) {
+        setAttachMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+    };
+  }, [attachMenuOpen]);
+
+  useEffect(() => {
     if (!attachmentMenuId) return;
 
     const handlePointerDown = (event: PointerEvent) => {
@@ -745,7 +786,22 @@ export function InputArea({
     }
 
     const sid = useChatStore.getState().activeSessionId;
-    if (isTeamMode) {
+    if (goalArmed && trimmed && sid && onSetGoal && sid !== NEW_CONVERSATION_ID) {
+      // command.goal 是独立控制信令，不受聊天排队影响，跳过 team/queue/interrupt 判断；
+      // 消息仍要本地落进 chatStore 才能在气泡上显示"设为目标"徽章（见 MessageItem.tsx）
+      useChatStore.getState().addMessage(sid, {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        content: trimmed,
+        timestamp: new Date().toISOString(),
+      });
+      useGoalStore.getState().setArmed(sid, false);
+      onSetGoal(sid, trimmed);
+    } else if (goalArmed && trimmed && sid === NEW_CONVERSATION_ID) {
+      // 欢迎页尚无真实 session，armed 状态先保留，交给 App.tsx 的 handleSendMessage
+      // 在 session.create 成功、拿到真实 session id 后再落地消息 + 调 onSetGoal
+      onSubmit(trimmed, readyMediaItems);
+    } else if (isTeamMode) {
       onSubmit(trimmed, readyMediaItems);
     } else if (queuePaused && isAgentMode && sid) {
       // 队列已暂停时，弹窗提示用户选择
@@ -797,6 +853,8 @@ export function InputArea({
     isAgentMode,
     isTeamMode,
     queuePaused,
+    goalArmed,
+    onSetGoal,
     t,
   ]);
 
@@ -1496,19 +1554,98 @@ export function InputArea({
             className="hidden"
             onChange={handleFileInputChange}
           />
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={imageInputDisabled}
-            className={cx(
-              'chat-input-btn chat-input-btn--add-file',
-              imageInputDisabled && 'chat-input-btn--disabled',
+          <div ref={attachMenuRef} className="chat-input-attach-menu-anchor">
+            {canUseGoalMenu ? (
+              <button
+                type="button"
+                onClick={() => {
+                  if (imageInputDisabled) return;
+                  if (!attachMenuOpen && attachMenuRef.current) {
+                    setAttachMenuAnchor(attachMenuRef.current.getBoundingClientRect());
+                  }
+                  setAttachMenuOpen((open) => !open);
+                }}
+                disabled={imageInputDisabled}
+                className={cx(
+                  'chat-input-btn chat-input-btn--add-file',
+                  imageInputDisabled && 'chat-input-btn--disabled',
+                )}
+                title={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
+                aria-label={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
+                aria-haspopup="menu"
+                aria-expanded={attachMenuOpen}
+              >
+                <Plus className="chat-input-btn-icon" strokeWidth={1.8} />
+              </button>
+            ) : (
+              // 没有 onSetGoal（如欢迎页新会话尚未创建）时，Goal 入口本来就不适用——
+              // 保持原来"+"直接打开文件选择器的单击行为，不额外套一层菜单
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={imageInputDisabled}
+                className={cx(
+                  'chat-input-btn chat-input-btn--add-file',
+                  imageInputDisabled && 'chat-input-btn--disabled',
+                )}
+                title={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
+                aria-label={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
+              >
+                <Plus className="chat-input-btn-icon" strokeWidth={1.8} />
+              </button>
             )}
-            title={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
-            aria-label={imageInputDisabled ? t('chat.addImageDisabled') : t('chat.addImage')}
-          >
-            <Plus className="chat-input-btn-icon" strokeWidth={1.8} />
-          </button>
+            {canUseGoalMenu && attachMenuOpen && attachMenuAnchor && createPortal(
+              <div
+                ref={attachMenuPortalRef}
+                className="chat-mode-select__menu"
+                role="menu"
+                style={{
+                  position: 'fixed',
+                  bottom: window.innerHeight - attachMenuAnchor.top + 10,
+                  left: attachMenuAnchor.left,
+                  zIndex: 9999,
+                }}
+              >
+                <button
+                  type="button"
+                  className="chat-mode-select__option"
+                  role="menuitem"
+                  onClick={() => {
+                    setAttachMenuOpen(false);
+                    fileInputRef.current?.click();
+                  }}
+                >
+                  <span className="chat-mode-select__option-main">
+                    <span className="chat-mode-select__icon" aria-hidden="true">
+                      <FileImage className="w-4 h-4" />
+                    </span>
+                    <span className="chat-mode-select__label">{t('chat.addImage')}</span>
+                  </span>
+                </button>
+                {isAgentMode && onSetGoal && (
+                  <button
+                    type="button"
+                    className="chat-mode-select__option"
+                    role="menuitem"
+                    onClick={() => {
+                      setAttachMenuOpen(false);
+                      if (activeSessionId) {
+                        useGoalStore.getState().setArmed(activeSessionId, true);
+                      }
+                    }}
+                  >
+                    <span className="chat-mode-select__option-main">
+                      <span className="chat-mode-select__icon" aria-hidden="true">
+                        <Target className="w-4 h-4" />
+                      </span>
+                      <span className="chat-mode-select__label">{t('goal.toolbarTag')}</span>
+                    </span>
+                  </button>
+                )}
+              </div>,
+              document.body
+            )}
+          </div>
           <div
             ref={modeMenuRef}
             className={clsx(
@@ -1609,6 +1746,33 @@ export function InputArea({
             onInsertSkill={insertSkillChip}
             onRemoveSkill={removeSkillChip}
           />}
+
+          {goalTagVisible && (
+            <div className="chat-goal-tag">
+              <button type="button" className="chat-mode-select__trigger">
+                <span className="chat-mode-select__value">
+                  <span className="chat-mode-select__icon" aria-hidden="true">
+                    <Target className="w-4 h-4" />
+                  </span>
+                  <span className="chat-mode-select__label">{t('goal.toolbarTag')}</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="chat-goal-tag__close"
+                title={t('goal.closeTag')}
+                onClick={() => {
+                  if (!activeSessionId) return;
+                  if (currentGoal) {
+                    onClearGoal?.(activeSessionId);
+                  }
+                  useGoalStore.getState().setArmed(activeSessionId, false);
+                }}
+              >
+                <X size={11} strokeWidth={2.5} />
+              </button>
+            </div>
+          )}
 
           {evolutionLabel && (
             <div className="chat-input-evolution-pill" title={evolutionLabel}>
