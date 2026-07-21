@@ -6761,6 +6761,10 @@ class JiuWenClawDeepAdapter:
             "audio_model_config": self._audio_model_config,
             "video_model_enabled": bool(self._video_model_config),
             "image_gen_enabled": bool(self._image_gen_enabled),
+            # 显式传入主 agent 的 sys_operation，确保 SkillTurbo 使用主 agent 的不受限 sysop
+            # （restrict_to_sandbox=False），而非走 Runner.resource_mgr.get_sys_operation()
+            # 无参数路径取到残留 subagent 的受限 sysop（restrict_to_sandbox=True）。
+            "sys_operation": self._sys_operation,
         }
 
     def _create_skill_turbo_fallback_handler(self) -> Any:

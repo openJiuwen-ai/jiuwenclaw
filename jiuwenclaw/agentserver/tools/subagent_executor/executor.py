@@ -756,6 +756,20 @@ Approach each task methodically and deliver high-quality results.
             )
         finally:
             reset_current_fork_agent_executor(executor_token)
+            # 清理 create_deep_agent 自动注册的子代理 sysop，防止 resource_mgr 残留
+            # 受限 sysop（restrict_to_sandbox=True）污染后续 skill_turbo 的 sysop 解析。
+            sysop_id = f"fork_{task.role_id}_{task.task_id}"
+            try:
+                remove_result = Runner.resource_mgr.remove_sys_operation(sysop_id)
+                if hasattr(remove_result, "is_err") and remove_result.is_err():
+                    logger.warning(
+                        "[ForkAgent] remove sys_operation failed: %s",
+                        remove_result.msg(),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[ForkAgent] remove sys_operation raised: %s", exc,
+                )
 
     async def execute_spawn(
         self,
@@ -907,6 +921,21 @@ Approach each task methodically and deliver high-quality results.
             )
         finally:
             reset_current_fork_agent_executor(executor_token)
+            # 清理 create_deep_agent 自动注册的子代理 sysop，防止 resource_mgr 残留
+            # 受限 sysop（restrict_to_sandbox=True）污染后续 skill_turbo 的 sysop 解析。
+            # sysop id 格式见 factory.py: "{card.name}_{card.id}"。
+            sysop_id = f"spawn_{task.role_id}_{task.task_id}"
+            try:
+                remove_result = Runner.resource_mgr.remove_sys_operation(sysop_id)
+                if hasattr(remove_result, "is_err") and remove_result.is_err():
+                    logger.warning(
+                        "[SpawnAgent] remove sys_operation failed: %s",
+                        remove_result.msg(),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[SpawnAgent] remove sys_operation raised: %s", exc,
+                )
 
     async def _create_spawn_agent(
         self,
