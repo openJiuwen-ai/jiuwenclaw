@@ -25,6 +25,7 @@ import { getTotalTaskVisualProgressPercent } from './taskProgress';
 type TaskPlanningPanelProps = {
   variant: 'compact' | 'expanded';
   tasks: SessionTeamTask[];
+  progressTasks?: SessionTeamTask[];
   members: TeamMember[];
   totalTasks: number;
   completedTasks: number;
@@ -49,6 +50,7 @@ const compactStatusIcons: Record<TaskColumnKey, string> = {
 export function TaskPlanningPanel({
   variant,
   tasks,
+  progressTasks = tasks,
   members,
   totalTasks,
   completedTasks,
@@ -94,11 +96,12 @@ export function TaskPlanningPanel({
     return () => window.clearInterval(timer);
   }, [variant]);
 
-  const completedProgressPercent = totalTasks > 0
-    ? Math.round((completedTasks / totalTasks) * 100)
+  const completedProgressTasks = progressTasks.filter((task) => task.status === 'completed').length;
+  const completedProgressPercent = progressTasks.length > 0
+    ? Math.round((completedProgressTasks / progressTasks.length) * 100)
     : 0;
   const progressPercent = variant === 'expanded'
-    ? getTotalTaskVisualProgressPercent(tasks, now)
+    ? getTotalTaskVisualProgressPercent(progressTasks, now)
     : completedProgressPercent;
 
   if (variant === 'compact') {

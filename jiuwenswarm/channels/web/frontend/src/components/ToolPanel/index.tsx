@@ -197,6 +197,7 @@ export function ToolPanel({
   const setTeamMembers = useSessionStore((s) => s.setTeamMembers);
   const setTeamTaskEvents = useSessionStore((s) => s.setTeamTaskEvents);
   const setTeamTasks = useSessionStore((s) => s.setTeamTasks);
+  const mergeTeamTaskProgressBaseline = useSessionStore((s) => s.mergeTeamTaskProgressBaseline);
   const setTeamMemberExecutionEvents = useSessionStore((s) => s.setTeamMemberExecutionEvents);
   const setTeamHistoryMessages = useSessionStore((s) => s.setTeamHistoryMessages);
   const setTeamHumanShareCommands = useSessionStore((s) => s.setTeamHumanShareCommands);
@@ -317,6 +318,7 @@ export function ToolPanel({
         if (mergedTasks.length > 0) {
           setTeamTasks(sessionId, mergedTasks);
         }
+        mergeTeamTaskProgressBaseline(sessionId, historyState.taskProgressBaseline);
 
         const mergedExecutionEvents = mergeById(
           historyState.executionEvents,
@@ -349,7 +351,7 @@ export function ToolPanel({
     return () => {
       controller.abort();
     };
-  }, [isConnected, isNewSessionPromotion, mode, sessionId, setTeamHistoryMessages, setTeamHumanShareCommands, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
+  }, [isConnected, isNewSessionPromotion, mergeTeamTaskProgressBaseline, mode, sessionId, setTeamHistoryMessages, setTeamHumanShareCommands, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
 
   const memoryDisplay =
     memoryUsage.rssMb == null

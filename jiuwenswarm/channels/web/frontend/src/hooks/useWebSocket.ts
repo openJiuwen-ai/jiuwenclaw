@@ -2941,6 +2941,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             content?: string;
             updated_at?: number | string | null;
           };
+          if (e.type === 'team.task.created' && e.task_id) {
+            useSessionStore.getState().registerConfirmedTeamTaskCreation(sessionId, e.task_id);
+          }
           useSessionStore.getState().addTeamTaskEvent(sessionId, {
             id: `task-${Date.now()}`,
             type: e.type || '',
