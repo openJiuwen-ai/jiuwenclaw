@@ -498,27 +498,15 @@ class XiaoyiChannel(BaseChannel):
                 self._accumulated_texts.pop(session_id, None)
             return
 
-        if not (
-            should_send_as_reasoning_text(msg.event_type)
-            or should_send_as_text(msg.event_type)
-        ):
-            logger.info(
-                "[GUI_AGENT_DIAG] phase=XIAOYI_EVENT_SKIPPED message_id=%s "
-                "session_id=%s event_type=%s reason=non_user_visible_event "
-                "payload=%r",
-                msg.id,
-                session_id,
-                getattr(msg.event_type, "value", msg.event_type),
-                msg.payload,
-            )
-            return
-
         # 问卷降级保底：端侧无选项点选卡片能力，把 chat.ask_user_question 降级为纯文本，
         # 走 text part 管道（A2A artifact-update kind:"text"），保证端侧一定能渲染出问卷。
-        # last_chunk=True：问卷作为一次性整段输出，按协议流式输出必须以 lastChunk=True 结束，
+        # 必须放在下方 non_user_visible SKIPPED 判断之前——chat.ask_user_question 既非
+        #   status_update 也非 reasoning/text，会被那段直接 SKIPPED，降级就永远到不了。
+        # 协议帧与普通正文回复末帧完全一致：append=False, lastChunk=True, final=True, kind="text"。
+        #   last_chunk=True：一次性整段输出，按协议流式输出必须以 lastChunk=True 结束，
         #   且 last_chunk=True 才走 kind:"text" 正文管道（False 会走 reasoningText 思考管道）。
-        # is_final=False：不把 final 置 true，保持端云任务通道不断，等待用户回答后 agent 接续处理。
-        #   清流逻辑在 send() 末尾的 final 分支，本分支提前 return，不会触及，故不会清流。
+        #   is_final=True：与普通回复末帧一致，本轮结束；用户回答问卷作为新一轮请求重新进来，
+        #   agent 拿到回答后再给出方案，与纯文本 ask_user 的处理方式完全相同。
         if msg.event_type == EventType.CHAT_ASK_USER_QUESTION:
             ask_payload = msg.payload if isinstance(msg.payload, dict) else {}
             ask_questions = ask_payload.get("questions", []) or []
@@ -549,8 +537,23 @@ class XiaoyiChannel(BaseChannel):
                         url_key,
                         append=False,
                         last_chunk=True,
-                        is_final=False,  # 不断通道，等待用户回答后 agent 接续处理
+                        is_final=True,  # 与普通回复末帧一致，本轮结束；用户回答作为新请求重新进来
                     )
+            return
+
+        if not (
+            should_send_as_reasoning_text(msg.event_type)
+            or should_send_as_text(msg.event_type)
+        ):
+            logger.info(
+                "[GUI_AGENT_DIAG] phase=XIAOYI_EVENT_SKIPPED message_id=%s "
+                "session_id=%s event_type=%s reason=non_user_visible_event "
+                "payload=%r",
+                msg.id,
+                session_id,
+                getattr(msg.event_type, "value", msg.event_type),
+                msg.payload,
+            )
             return
 
         content = ""
