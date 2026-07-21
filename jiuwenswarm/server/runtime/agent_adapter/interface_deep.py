@@ -290,6 +290,7 @@ from jiuwenswarm.common.utils import (
     get_agent_skills_dir,
     get_agent_workspace_dir,
     get_checkpoint_dir,
+    get_default_project_session_workspace_dir,
     get_env_file,
     get_prompt_attachment_dir,
     get_runtime_state_path,
@@ -4403,8 +4404,11 @@ class JiuWenSwarmDeepAdapter:
         )
 
         await self._instance.ensure_initialized()
-        self._seed_runtime_cwd(self._project_dir or self._workspace_dir)
-        setattr(self._instance, "_jiuwenswarm_project_dir", self._project_dir or self._workspace_dir)
+        initial_runtime_workspace = self._project_dir or str(
+            get_default_project_session_workspace_dir()
+        )
+        self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
+        setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
 
         self._sync_a2x_runtime_state()
         self._registered_mcp_server_ids.clear()
@@ -5082,13 +5086,14 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
-        self._seed_runtime_cwd(
-            runtime_config.cwd
+        task_workspace = (
+            runtime_config.workspace
             or runtime_config.project_dir
             or self._project_dir
-            or self._workspace_dir,
-            workspace=runtime_config.workspace,
+            or str(get_default_project_session_workspace_dir(runtime_config.session_id))
         )
+        task_cwd = runtime_config.cwd or task_workspace
+        self._seed_runtime_cwd(task_cwd, workspace=task_workspace)
         resolved_language = self._resolve_runtime_language()
         resolved_channel = (
             str(
@@ -5103,7 +5108,7 @@ class JiuWenSwarmDeepAdapter:
             self._runtime_prompt_rail.set_channel(resolved_channel)
             self._runtime_prompt_rail.set_trusted_dirs(runtime_config.trusted_dirs)
             self._runtime_prompt_rail.set_runtime_paths(
-                cwd=runtime_config.cwd,
+                cwd=task_cwd,
                 project_dir=runtime_config.project_dir or self._project_dir,
             )
             self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
@@ -5132,9 +5137,9 @@ class JiuWenSwarmDeepAdapter:
             channel=resolved_channel,
             session_id=runtime_config.session_id,
             project_dir=runtime_config.project_dir
-            or runtime_config.cwd
+            or task_cwd
             or self._project_dir
-            or self._workspace_dir,
+            or str(get_default_project_session_workspace_dir(runtime_config.session_id)),
         )
 
         await self._update_rails_for_mode(runtime_config.mode)

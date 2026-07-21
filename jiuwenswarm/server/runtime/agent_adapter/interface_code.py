@@ -75,7 +75,10 @@ from jiuwenswarm.common.coding_memory_paths import (
 from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import CodeAgentRail
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
-from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.common.utils import (
+    get_agent_workspace_dir,
+    get_default_project_session_workspace_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -542,19 +545,21 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             for tool in getattr(rail, 'tools', []) or []:
                 if hasattr(tool, '_workspace_path'):
                     setattr(tool, '_workspace_path', self._agent_workspace_dir)
-        initial_workspace = self._project_dir or self._workspace_dir
+        initial_workspace = self._project_dir or str(
+            get_default_project_session_workspace_dir()
+        )
         self._seed_runtime_cwd(initial_workspace, workspace=initial_workspace)
 
         setattr(self._instance, "_jiuwenswarm_adapter_mode", "code")
         setattr(
             self._instance,
             "_jiuwenswarm_code_project_dir",
-            self._project_dir or self._workspace_dir,
+            initial_workspace,
         )
         setattr(
             self._instance,
             "_jiuwenswarm_project_dir",
-            self._project_dir or self._workspace_dir,
+            initial_workspace,
         )
 
         # code 模式不传: vision_model_config, audio_model_config,
@@ -1194,17 +1199,13 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             raise RuntimeError("JiuwenSwarmCodeAdapter 未初始化，请先调用 create_instance()")
 
         project_workspace = (
-            runtime_config.project_dir
-            or self._project_dir
-            or self._workspace_dir
-        )
-        self._seed_runtime_cwd(
-            runtime_config.cwd
+            runtime_config.workspace
             or runtime_config.project_dir
             or self._project_dir
-            or self._workspace_dir,
-            workspace=project_workspace,
+            or str(get_default_project_session_workspace_dir(runtime_config.session_id))
         )
+        task_cwd = runtime_config.cwd or project_workspace
+        self._seed_runtime_cwd(task_cwd, workspace=project_workspace)
         resolved_language = self._resolve_runtime_language()
         resolved_channel = str(runtime_config.channel_id or
                                self._resolve_prompt_channel(runtime_config.session_id) or "web").strip() or "web"
@@ -1216,7 +1217,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             self._runtime_prompt_rail.set_mode(runtime_config.mode)
             self._runtime_prompt_rail.set_trusted_dirs(runtime_config.trusted_dirs)
             self._runtime_prompt_rail.set_runtime_paths(
-                cwd=runtime_config.cwd,
+                cwd=task_cwd,
                 project_dir=runtime_config.project_dir or self._project_dir,
             )
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
@@ -1238,7 +1239,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             channel=resolved_channel,
             session_id=runtime_config.session_id,
             project_dir=runtime_config.project_dir
-            or runtime_config.cwd
+            or task_cwd
             or self._project_dir
             or self._workspace_dir,
         )
