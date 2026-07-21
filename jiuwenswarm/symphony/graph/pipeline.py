@@ -101,6 +101,9 @@ class GraphBuilder:
         llm_metadata["token_usage"] = get_llm_token_usage_summary()
         manifest = BuildManifest(
             thresholds=_matcher_thresholds(self.matcher),
+            candidate_generation=_candidate_generator_metadata(
+                self.candidate_generator
+            ),
             llm=llm_metadata,
         )
 
@@ -153,3 +156,17 @@ def _matcher_thresholds(matcher: OntologyMatcher) -> dict:
     if hasattr(matcher, "thresholds"):
         return dict(matcher.thresholds)
     return dict(DEFAULT_THRESHOLDS)
+
+
+def _candidate_generator_metadata(candidate_generator: CandidateGenerator) -> dict:
+    return {
+        "max_candidates_per_skill_relation": int(
+            candidate_generator.max_candidates_per_skill_relation
+        ),
+        "max_port_mappings_per_candidate": int(
+            candidate_generator.max_port_mappings_per_candidate
+        ),
+        "max_exact_io_pair_fanout": int(
+            candidate_generator.max_exact_io_pair_fanout
+        ),
+    }

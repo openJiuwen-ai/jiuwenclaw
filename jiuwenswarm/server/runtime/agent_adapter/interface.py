@@ -63,6 +63,22 @@ class _TeamPlanApprovalPayloadError(ValueError):
     """Raised when a structured team.plan approval payload is malformed."""
 
 
+def _schedule_symphony_session_feedback(session_id: str, request_id: str) -> None:
+    """Submit session-based Symphony learning without delaying the response."""
+
+    try:
+        from jiuwenswarm.symphony.evolution.session_consumer import (
+            schedule_session_evolution_consume,
+        )
+
+        schedule_session_evolution_consume(session_id, request_id)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).debug(
+            "Failed to schedule Symphony session feedback: %s",
+            exc,
+        )
+
+
 def _history_user_content(params: Any, query: Any) -> Any:
     """返回写入历史记录的用户消息内容.
 
@@ -1924,6 +1940,7 @@ class JiuWenSwarm:
             if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
                 _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
 
+        _schedule_symphony_session_feedback(session_id, request.request_id)
         return result
 
     async def process_message_stream(
@@ -2594,6 +2611,7 @@ class JiuWenSwarm:
         if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
+        _schedule_symphony_session_feedback(session_id, rid)
         yield AgentResponseChunk(
             request_id=rid,
             channel_id=cid,

@@ -774,6 +774,7 @@
       "teamMemberPromptHint": "Prompt Hint",
       "teamMemberAgentKey": "Agent Key",
       "symphonyEnabled": "Enable skill orchestration",
+      "symphonyDynamicGraphEnabled": "Enable dynamic graph",
       "skillRetrievalEnabled": "Enable skill retrieval",
       "skillRetrievalBuildBranchingFactor": "Split threshold base",
       "skillRetrievalBuildMaxDepth": "Max tree depth",
@@ -802,6 +803,7 @@
     },
     "keyHelp": {
       "skillCreate": "Install `skill-creator` and `teamskill-creator` before enabling",
+      "symphonyDynamicGraphEnabled": "When disabled, planning uses only the static graph. Existing runtime data is retained.",
       "skillRetrievalBuildRootCategories": "Edit YAML/JSON containing tree_root_categories or root_categories directly. The page shows the default taxonomy as a reference; saving writes the config content itself, not an external file path."
     },
     "hideValue": "Hide value",
@@ -948,6 +950,7 @@
       "freeSearchDdg": "Enable DuckDuckGo (including DDG via Jina)",
       "freeSearchBing": "Enable Bing",
       "enabled": "Enable",
+      "dynamicGraph": "Enable dynamic graph",
       "kvCacheAffinity": "Compute affinity (KV cache release)"
     },
     "permissionsTools": {

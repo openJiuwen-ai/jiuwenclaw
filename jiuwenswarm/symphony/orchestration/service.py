@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Sequence
+from uuid import uuid4
 
-from jiuwenswarm.symphony.config import SymphonyOrchestrationConfig
+from jiuwenswarm.symphony.config import (
+    DEFAULT_ORCHESTRATION_MIN_EDGE_CONFIDENCE,
+    SymphonyOrchestrationConfig,
+)
+from jiuwenswarm.symphony.evolution.service import load_dynamic_overlay
 from jiuwenswarm.symphony.llm import LLMConfig
 from jiuwenswarm.symphony.orchestration.artifacts import (
     filter_disabled_score_artifacts,
@@ -24,9 +29,10 @@ async def plan_from_score(
     *,
     top_k: int = 3,
     max_depth: int = 4,
-    min_edge_confidence: float = 0.7,
+    min_edge_confidence: float = DEFAULT_ORCHESTRATION_MIN_EDGE_CONFIDENCE,
     llm_client: Any | None = None,
     orchestration_config: SymphonyOrchestrationConfig | None = None,
+    dynamic_graph_enabled: bool = False,
     candidate_skill_ids: Sequence[str] | None = None,
     disabled_skill_names: Sequence[str] | None = None,
     progress_callback: Any | None = None,
@@ -47,6 +53,10 @@ async def plan_from_score(
     if mode not in {"fast", "beam"}:
         raise ValueError(f"Unsupported orchestration mode: {mode}")
 
+    plan_id = str(uuid4())
+    dynamic_overlay = (
+        load_dynamic_overlay(artifacts.score_dir) if dynamic_graph_enabled else {}
+    )
     selected_candidate_skill_ids, skill_retrieval = _input_candidate_summary(
         candidate_skill_ids,
         skills=artifacts.skills,
@@ -72,8 +82,12 @@ async def plan_from_score(
             max_depth=max(1, int(max_depth)),
             candidate_skill_ids=selected_candidate_skill_ids,
             language=language,
+            dynamic_overlay=dynamic_overlay,
         ).plan(query)
     result["language"] = language
+    result["plan_id"] = plan_id
+    result["score_dir"] = str(artifacts.score_dir)
+    result["dynamic_graph_enabled"] = bool(dynamic_graph_enabled)
     result["skill_retrieval"] = skill_retrieval
     result["execution_graph"] = build_execution_graph(result, artifacts)
     return result

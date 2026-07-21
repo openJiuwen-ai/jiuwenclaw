@@ -640,6 +640,7 @@ def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
     raw = {
         "symphony": {
             "enabled": True,
+            "evolution": {"enabled": False},
             "orchestration": {"mode": "fast"},
             "skill_retrieval": {
                 "enabled": True,
@@ -652,6 +653,7 @@ def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
     flat = _flatten_symphony_for_config_panel(raw)
 
     assert flat["symphony_enabled"] == "true"
+    assert flat["symphony_dynamic_graph_enabled"] == "false"
     assert "symphony_orchestration_mode" not in flat
     assert flat["skill_retrieval_enabled"] == "true"
     assert flat["skill_retrieval_build_branching_factor"] == "64"
@@ -689,13 +691,14 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
         "req-3",
         {
             "symphony_enabled": "true",
+            "symphony_dynamic_graph_enabled": "false",
             "skill_retrieval_enabled": "false",
             "skill_retrieval_retrieve_flatten_tree": "true",
         },
         "sess-3",
     )
 
-    assert recorded_symphony == [{"enabled": True}]
+    assert recorded_symphony == [{"enabled": True, "evolution": {"enabled": False}}]
     assert recorded_skill_retrieval == [{"enabled": False, "retrieve": {"flatten_tree": True}}]
     assert channel.responses[-1] == {
         "id": "req-3",
@@ -703,6 +706,7 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
         "payload": {
             "updated": [
                 "symphony_enabled",
+                "symphony_dynamic_graph_enabled",
                 "skill_retrieval_enabled",
                 "skill_retrieval_retrieve_flatten_tree",
             ],
@@ -711,6 +715,12 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
         "error": None,
         "code": None,
     }
+
+
+def test_web_does_not_expose_symphony_evolution_rpc_methods():
+    assert "symphony.evolution_status" not in app_web_handlers._FORWARD_REQ_METHODS
+    assert "symphony.evolution_record_outcome" not in app_web_handlers._FORWARD_REQ_METHODS
+    assert "symphony.evolution_rebuild" not in app_web_handlers._FORWARD_REQ_METHODS
 
 
 # =====================================================================

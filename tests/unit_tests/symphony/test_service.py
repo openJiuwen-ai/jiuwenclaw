@@ -5,6 +5,7 @@ import pytest
 from jiuwenswarm.symphony.config import SymphonyOrchestrationConfig
 from jiuwenswarm.symphony.orchestration import service
 from jiuwenswarm.symphony.orchestration.artifacts import ScoreArtifacts
+from jiuwenswarm.symphony.orchestration.planning.fast import FastOneShotPlanner
 
 
 class _FakeLLMClient:
@@ -1011,3 +1012,140 @@ async def test_fast_plan_drops_self_loop_and_keeps_valid_edge(monkeypatch, tmp_p
     assert [(edge["source_id"], edge["target_id"]) for edge in edges] == [
         ("skill-a", "skill-b")
     ]
+
+
+def _dynamic_planner(artifacts, overlay, *, candidate_skill_ids=None):
+    return FastOneShotPlanner(
+        artifacts,
+        llm_config=None,
+        llm_client=object(),
+        min_edge_confidence=0.7,
+        candidate_skill_ids=candidate_skill_ids,
+        dynamic_overlay=overlay,
+    )
+
+
+def test_dynamic_overlay_reorders_query_relevant_static_edges(tmp_path):
+    planner = _dynamic_planner(
+        _artifacts(tmp_path),
+        {
+            "edges": {
+                "skill-b->skill-c:can_feed": {
+                    "source_id": "skill-b",
+                    "target_id": "skill-c",
+                    "relation_type": "can_feed",
+                    "runtime_weight": 1.5,
+                    "success_count": 10,
+                    "failure_count": 0,
+                    "attempt_count": 10,
+                    "representative_queries": ["publish the gamma report"],
+                }
+            }
+        },
+    )
+
+    edges = planner._sorted_eligible_edges("publish the gamma report")
+
+    assert (edges[0]["source"], edges[0]["target"]) == ("skill-b", "skill-c")
+    assert edges[0]["runtime_weight"] == 1.5
+    assert edges[0]["effective_score"] == pytest.approx(0.88 * 1.5)
+
+
+def test_dynamic_overlay_downranks_explicitly_failed_static_edge(tmp_path):
+    planner = _dynamic_planner(
+        _artifacts(tmp_path),
+        {
+            "edges": {
+                "skill-a->skill-b:can_feed": {
+                    "source_id": "skill-a",
+                    "target_id": "skill-b",
+                    "relation_type": "can_feed",
+                    "runtime_weight": 0.4,
+                    "success_count": 0,
+                    "failure_count": 12,
+                    "attempt_count": 12,
+                    "representative_queries": ["review the alpha draft"],
+                }
+            }
+        },
+    )
+
+    edges = planner._sorted_eligible_edges("review the alpha draft")
+
+    assert [(edge["source"], edge["target"]) for edge in edges[:2]] == [
+        ("skill-b", "skill-c"),
+        ("skill-a", "skill-b"),
+    ]
+    assert edges[1]["runtime_evidence"]["failure_count"] == 12
+
+
+@pytest.mark.parametrize("success_count", [1, 2])
+def test_runtime_only_edge_requires_repeated_clean_success(tmp_path, success_count):
+    planner = _dynamic_planner(
+        _artifacts(tmp_path),
+        {
+            "edges": {
+                "skill-c->skill-a:can_feed": {
+                    "source_id": "skill-c",
+                    "target_id": "skill-a",
+                    "relation_type": "can_feed",
+                    "runtime_weight": 1.1,
+                    "success_count": success_count,
+                    "failure_count": 0,
+                    "attempt_count": success_count,
+                }
+            }
+        },
+        candidate_skill_ids=["skill-c"],
+    )
+
+    edges = planner._sorted_eligible_edges("create an alpha draft from gamma")
+    runtime_edges = [edge for edge in edges if edge.get("runtime_only")]
+
+    assert bool(runtime_edges) is (success_count >= 2)
+
+
+def test_dynamic_overlay_is_neutral_for_unrelated_query(tmp_path):
+    planner = _dynamic_planner(
+        _artifacts(tmp_path),
+        {
+            "edges": {
+                "skill-a->skill-b:can_feed": {
+                    "source_id": "skill-a",
+                    "target_id": "skill-b",
+                    "relation_type": "can_feed",
+                    "runtime_weight": 2.0,
+                    "success_count": 20,
+                    "failure_count": 0,
+                    "attempt_count": 20,
+                    "representative_queries": ["verify an invoice"],
+                }
+            }
+        },
+    )
+
+    edges = planner._sorted_eligible_edges("show tomorrow's weather")
+
+    assert edges[0].get("runtime_evidence") is None
+    assert edges[0]["confidence"] == 0.91
+
+
+async def test_disabled_dynamic_graph_does_not_load_overlay(monkeypatch, tmp_path):
+    artifacts = _artifacts(tmp_path)
+    llm = _FakeLLMClient({"status": "no_plan", "steps": []})
+    monkeypatch.setattr(service, "load_score_artifacts", lambda score_dir: artifacts)
+
+    def fail_if_loaded(score_dir):
+        raise AssertionError(f"overlay should not be loaded from {score_dir}")
+
+    monkeypatch.setattr(service, "load_dynamic_overlay", fail_if_loaded)
+
+    result = await service.plan_from_score(
+        tmp_path,
+        "static only",
+        llm_client=llm,
+        dynamic_graph_enabled=False,
+    )
+
+    assert result["dynamic_graph_enabled"] is False
+    assert result["dynamic_overlay_used"] is False

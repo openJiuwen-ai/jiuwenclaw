@@ -34,8 +34,12 @@ symphony:
   build:
     workers: 4
     batch_size: 16
+    max_candidates_per_skill_relation: 32
     require_consensus: false
-    min_edge_confidence: 0.1
+    min_edge_confidence: 0.5
+
+  evolution:
+    enabled: false  # true = 消费 Session 轨迹并使用动态 overlay
 
   orchestration:
     # fast is the default one-shot path; beam enables bidirectional search.
@@ -43,7 +47,7 @@ symphony:
     # Beam-only candidate count retained after each search round.
     top_k: 3
     max_depth: 4
-    min_edge_confidence: 0.3
+    min_edge_confidence: 0.5
 
   skill_retrieval:
     enabled: false

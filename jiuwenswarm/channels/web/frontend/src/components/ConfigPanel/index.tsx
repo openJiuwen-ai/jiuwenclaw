@@ -359,7 +359,10 @@ const HIDDEN_CONFIG_KEYS = new Set([
 const MEMORY_KEYS = new Set(["memory_forbidden_enabled", "memory_forbidden_description"]);
 const A2UI_KEYS = new Set(["a2ui_enabled"]);
 const SWARMFLOW_KEYS = new Set(["swarmflow_enabled"]);
-const SYMPHONY_BOOLEAN_KEYS = new Set(["symphony_enabled"]);
+const SYMPHONY_BOOLEAN_KEYS = new Set([
+  "symphony_enabled",
+  "symphony_dynamic_graph_enabled",
+]);
 const SKILL_RETRIEVAL_BOOLEAN_KEYS = new Set([
   "skill_retrieval_enabled",
 ]);
@@ -641,6 +644,7 @@ function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
     a2ui_enabled: t('config.booleanLabels.enabled'),
     swarmflow_enabled: t('config.booleanLabels.enabled'),
     symphony_enabled: t('config.booleanLabels.enabled'),
+    symphony_dynamic_graph_enabled: t('config.booleanLabels.dynamicGraph'),
     skill_retrieval_enabled: t('config.booleanLabels.enabled'),
     proactive_recommendation_enabled: t('config.booleanLabels.enabled'),
   };
@@ -717,6 +721,7 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   model: "config.keys.agentModel",
   skills: "config.keys.agentSkills",
   symphony_enabled: "config.keys.symphonyEnabled",
+  symphony_dynamic_graph_enabled: "config.keys.symphonyDynamicGraphEnabled",
   skill_retrieval_enabled: "config.keys.skillRetrievalEnabled",
   skill_retrieval_build_branching_factor: "config.keys.skillRetrievalBuildBranchingFactor",
   skill_retrieval_build_max_depth: "config.keys.skillRetrievalBuildMaxDepth",
@@ -744,6 +749,7 @@ const KEY_PLACEHOLDER_I18N: Record<string, string> = {
 };
 const KEY_LABEL_HINT_I18N: Record<string, string> = {
   skill_create: "config.keyHelp.skillCreate",
+  symphony_dynamic_graph_enabled: "config.keyHelp.symphonyDynamicGraphEnabled",
   skill_retrieval_build_root_categories: "config.keyHelp.skillRetrievalBuildRootCategories",
 };
 
@@ -754,7 +760,8 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   free_search_ddg_enabled: 0,
   free_search_bing_enabled: 1,
   symphony_enabled: 0,
-  skill_retrieval_enabled: 1,
+  symphony_dynamic_graph_enabled: 1,
+  skill_retrieval_enabled: 2,
   proactive_recommendation_enabled: 0,
   proactive_recommendation_max_recommend_per_day: 2,
   proactive_recommendation_max_rounds_per_tick: 3,
