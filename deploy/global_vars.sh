@@ -35,6 +35,9 @@ declare -A CONFIG=(
     ["LOG_TEMPLATE_FILE"]="${TEMPLATE_DIR}/log.template.yaml"
     ["LOG_FILE"]="${CONFIG_DIR}/log.yaml"
 
+    ["JINA_TEMPLATE_FILE"]="${TEMPLATE_DIR}/jina.template.yaml"
+    ["JINA_FILE"]="${CONFIG_DIR}/jina.yaml"
+
     ["SECRET_CM_TEMPLATE_FILE"]="${TEMPLATE_DIR}/configmap-secret.template.yaml"
     ["SECRET_CM_FILE"]="${CONFIG_DIR}/configmap-secret.yaml"
 
@@ -74,15 +77,9 @@ declare -A ARGS=(
 
 
 # ==== All available modules ====
-declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "LOG" "GATEWAY" "WEB" "MANAGER")
+declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "LOG" "JINA" "GATEWAY" "WEB" "MANAGER")
 
 declare -ga MODULES=()
-
-declare -ga WORKER_NODE_IPS=()
-
-declare -ga OTHER_MASTER_IPS=()
-
-declare -ga OTHER_NODE_IPS=()
 
 declare -A DEPLOY_VARS=(
     ["AGENT_SERVER_HOME"]="/home/app"
@@ -95,11 +92,13 @@ declare -A DEPLOY_VARS=(
     ["CLAW_CODE_POD_PATH"]="/app/jiuwenclaw"
     ["CLAW_MOUNT_TYPE"]="pvc"
     ["CLAW_STORAGE_SIZE"]="1Gi"
+    ["CORE_CODE_PATH"]=""
+    ["CORE_CODE_POD_PATH"]="/usr/local/lib/python3.11/site-packages/openjiuwen"
     ["COLLECT_LOG_MASK_ENABLED"]="false"
     ["DB_TYPE"]="sqlite"
     ["DEPLOYMENT_MODE"]="standalone"
     ["ENTERPRISE_WEB_WS_PORT"]="19000"
-    ["ENABLE_EXTERNAL_MINIO"]="false"
+    ["ENABLE_EXTERNAL_OBS"]="false"
     ["ENABLE_EXTERNAL_MYSQL"]="false"
     ["ENABLE_EXTERNAL_NFS"]="false"
     ["ENABLE_EXTERNAL_PVC"]="false"
@@ -128,8 +127,14 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_SERVICE_ACCOUNT"]="jiuwenclaw-gateway-sa"
     ["GATEWAY_SQLITE_PATH"]="gateway.db"
     ["IS_UP_MANAGER_WEB"]="true"
+    ["IS_MOUNT_WEB_CODE"]="false"
     ["JIUWENBOX_CODE_POD_PATH"]="/usr/local/lib/python3.11/site-packages/jiuwenbox"
-    ["JIUWENCLAW_ID"]=""
+    ["JINA_NAME"]="jina"
+    ["JINA_CACHE_IMAGE"]="nginx:alpine"
+    ["JINA_READER_IMAGE"]="ghcr.1ms.run/jina-ai/reader:latest"
+    ["JINA_READER_ENDPOINT"]="https://r.jinaai.cn"
+    ["JINA_READER_NUM"]="2"
+    ["FLUENT_BIT_IMAGE"]="fluent/fluent-bit:3.0.0"
     ["MANAGER_DB_NAME"]="manager"
     ["MANAGER_PG_SCHEMA"]="public"
     ["MANAGER_REST_PORT"]="8765"
@@ -140,16 +145,14 @@ declare -A DEPLOY_VARS=(
     ["MANAGER_WS_PORT"]="8766"
     ["MINIO_IMAGE"]="minio/minio-arm64:RELEASE.2024-12-18T13-15-44Z"
     ["MINIO_NAME"]="minio"
-    ["MINIO_REGION"]="default"
-    ["MINIO_ROOT_PASSWORD"]="Minio@123456"
-    ["MINIO_ROOT_USER"]="minioadmin"
-    ["MINIO_SECURE"]="false"
     ["MINIO_STORAGE_SIZE"]="4Gi"
     ["MODE"]="product"
     ["MYSQL_IMAGE"]="mysql:8.0"
     ["MYSQL_NAME"]="mysql"
     ["MYSQL_ROOT_PASSWORD"]="Root@123456"
-    ["MYSQL_MAX_CONNECTION"]="151"
+    ["MYSQL_MAX_CONNECTION"]="400"
+    ["MYSQL_MEMORY_REQUEST"]="4Gi"
+    ["MYSQL_MEMORY_LIMIT"]="4Gi"
     ["MYSQL_STORAGE_SIZE"]="4Gi"
     ["NAMESPACE"]="default"
     ["NFS_HOST_PATH"]="/data/nfs"
@@ -161,14 +164,19 @@ declare -A DEPLOY_VARS=(
     ["NFS_SC_NAME"]="nfs-storage"
     ["NFS_SHARE_PATH"]="/"
     ["NO_CHECK_PORTS"]="false"
+    ["OBS_ACCESS_KEY"]="minioadmin"
+    ["OBS_SECRET_KEY"]="Minio@123456"
     ["OBS_BUCKET"]="jiuwenclaw"
+    ["OBS_REGION"]="default"
+    ["OBS_SECURE"]="false"
     ["OBS_PUBLIC_BASE_URL"]=""
-    ["OBS_TYPE"]="minio"
     ["POOL_ID"]="claw"
     ["POSTGRES_IMAGE"]="postgres:16"
     ["POSTGRES_NAME"]="postgresql"
     ["POSTGRES_PASSWORD"]="Root@123456"
-    ["POSTGRES_MAX_CONNECTION"]="100"
+    ["POSTGRES_MAX_CONNECTION"]="192"
+    ["POSTGRES_MEMORY_REQUEST"]="4Gi"
+    ["POSTGRES_MEMORY_LIMIT"]="4Gi"
     ["POSTGRES_STORAGE_SIZE"]="4Gi"
     ["PVC_NAME"]="pvc-nfs-shared"
     ["PV_NAME"]="pv-nfs-shared"
@@ -193,6 +201,7 @@ declare -A DEPLOY_VARS=(
     ["TIMEZONE"]="Asia/Shanghai"
     ["VECTOR_NAME"]="vector-receiver"
     ["VECTOR_IMAGE"]="timberio/vector:0.40.0-alpine"
+    ["VAR_LIB_DOCKER_PATH"]="/var/lib/containerd"
     ["WEB_NAME"]="jiuwenclaw-web"
     ["WS_ALLOWED_ORIGINS"]=""
     ["WS_ORIGIN_CHECK_ENABLED"]="false"

@@ -109,8 +109,8 @@ spec:
               mountPath: /fluent-bit/etc
             - name: varlog
               mountPath: /var/log
-            - name: varlibdockercontainers
-              mountPath: /var/lib/docker/containers
+            - name: varlib
+              mountPath: <<VAR_LIB_DOCKER_PATH>>
               readOnly: true
             - name: positions-db
               mountPath: /var/lib/fluent-bit
@@ -121,9 +121,9 @@ spec:
         - name: varlog
           hostPath:
             path: /var/log
-        - name: varlibdockercontainers
+        - name: varlib
           hostPath:
-            path: /var/lib/docker/containers
+            path: <<VAR_LIB_DOCKER_PATH>>
         - name: positions-db
           hostPath:
             path: /var/lib/fluent-bit
@@ -235,7 +235,7 @@ spec:
         app: <<VECTOR_NAME>>
     spec:
       # 固定调度到本master节点（运行部署工具的节点）
-      nodeName: <<MASTER_NODE_NAME>>
+      nodeName: <<CURRENT_NODE_NAME>>
       containers:
         - name: <<VECTOR_NAME>>
           image: <<VECTOR_IMAGE>>

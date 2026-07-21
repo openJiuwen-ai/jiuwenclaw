@@ -259,11 +259,57 @@ export function treeHasFilledCondition(node: MatchNode): boolean {
   return node.children.some(treeHasFilledCondition);
 }
 
+/** 与后端 validate_match_expr 对齐的轻量语法检查；完整校验由 API 兜底。 */
+export function validateMatchExprSyntax(expr: string | null | undefined): string | null {
+  const text = (expr ?? '').trim();
+  if (!text) return null;
+
+  if (text.startsWith('[')) {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (!Array.isArray(parsed)) return 'match_expr_invalid_syntax';
+      for (const item of parsed) {
+        const err = validateMatchExprSyntax(String(item));
+        if (err) return err;
+      }
+      return null;
+    } catch {
+      return 'match_expr_invalid_syntax';
+    }
+  }
+
+  if (/\$\{|===|!==|>=|<=|(?<![!=])>(?!=)|(?<!<|>)<(?!=)|\bservice_id\b|\bagent_id\b/i.test(text)) {
+    return 'match_expr_invalid_syntax';
+  }
+
+  if (!text.includes('==') && !text.includes('!=')) {
+    return null;
+  }
+
+  // 含比较符却无法被可视化解析，且也不像合法比较式时提示用户。
+  const model = parseMatchExpr(text);
+  if (model.raw?.trim()) {
+    const single =
+      /^\s*(group_id|user_id|bot_id)\s*(==|!=)\s*(['"])(?:\\.|(?!\3).)*\3\s*$/i;
+    const combined = text
+      .split(/\s+(?:and|or)\s+/i)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    // 带括号的复杂表达式交给后端；仅拦明显非法单行。
+    if (!/[()]/.test(text) && !combined.every((p) => single.test(p))) {
+      return 'match_expr_invalid_syntax';
+    }
+  }
+  return null;
+}
+
 export function validateMatchExprModel(model: MatchExprModel): string | null {
   if (model.mode === 'all') return null;
-  if (model.raw?.trim()) return null;
+  if (model.raw?.trim()) {
+    return validateMatchExprSyntax(model.raw);
+  }
   if (!treeHasFilledCondition(model.root)) {
-    return 'match expr condition value required';
+    return 'match_expr_value_required';
   }
   return null;
 }

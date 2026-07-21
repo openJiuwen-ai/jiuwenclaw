@@ -458,6 +458,8 @@ class RuntimeManagementAgentClient(AgentServerClient):
         claw_code_pod_path = os.getenv("CLAW_CODE_POD_PATH")
         runtime_code_path = os.getenv("RUNTIME_CODE_PATH")
         runtime_code_pod_path = os.getenv("RUNTIME_CODE_POD_PATH")
+        core_code_path = os.getenv("CORE_CODE_PATH")
+        core_code_pod_path = os.getenv("CORE_CODE_POD_PATH")
         configmap_name = os.getenv("AGENT_SERVER_CONFIGMAP_NAME", "")
 
         agent_host_mounts: list[HostPathMount] = []
@@ -491,7 +493,16 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         host_path_type="Directory"
                     )
                 )
-
+            # 只有当 core_code_path 和 core_code_pod_path 都配置时，才添加挂载
+            if claw_code_path and core_code_pod_path:
+                agent_host_mounts.append(
+                    HostPathMount(
+                        host_path=core_code_path+"/openjiuwen",
+                        mount_path=core_code_pod_path,
+                        read_only=False,
+                        host_path_type="Directory"
+                    )
+                )
         agent_configmap_mounts: list[ConfigMapMount] = []
         if configmap_name:
             agent_configmap_mounts.append(
@@ -576,6 +587,15 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 ("LOG_MASK_ENABLED", os.getenv("LOG_MASK_ENABLED")),
                 ("LOG_TO_FILE_ENABLED", os.getenv("LOG_TO_FILE_ENABLED")),
                 ("STREAMING_TOOL_WAIT_TIMEOUT_S", os.getenv("STREAMING_TOOL_WAIT_TIMEOUT_S")),
+                ("JINA_READER_ENDPOINT", os.getenv("JINA_READER_ENDPOINT")),
+                ("HTTP_PROXY", os.getenv("HTTP_PROXY")),
+                ("http_proxy", os.getenv("HTTP_PROXY")),
+                ("HTTPS_PROXY", os.getenv("HTTPS_PROXY")),
+                ("https_proxy", os.getenv("HTTPS_PROXY")),
+                ("NO_PROXY", os.getenv("NO_PROXY")),
+                ("no_proxy", os.getenv("NO_PROXY")),
+                ("FETCH_WEBPAGE_TIMEOUT", os.getenv("FETCH_WEBPAGE_TIMEOUT")),
+                ("FETCH_WEBPAGE_TOTAL_TIMEOUT", os.getenv("FETCH_WEBPAGE_TOTAL_TIMEOUT")),
             ):
                 if value is not None:
                     base[key] = value

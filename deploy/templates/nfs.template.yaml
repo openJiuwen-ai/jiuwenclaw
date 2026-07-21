@@ -18,7 +18,7 @@ spec:
         app: <<NFS_NAME>>
     spec:
       # 固定调度到本master节点（运行部署工具的节点）
-      nodeName: <<MASTER_NODE_NAME>>
+      nodeName: <<CURRENT_NODE_NAME>>
       hostNetwork: true
       containers:
         - name: <<NFS_NAME>>

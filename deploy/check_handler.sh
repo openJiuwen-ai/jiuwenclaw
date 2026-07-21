@@ -21,10 +21,6 @@ check_yq() {
 }
 
 check_cmds() {
-    if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "yuanrong" ]; then
-        check_cmd helm docker python3
-    fi
-
     for cmd in jq mount.nfs base64
     do
         check_cmd ${cmd}
@@ -54,32 +50,6 @@ check_if_root() {
     fi
 }
 
-check_if_master() {
-    if ! kubectl get node "$(hostname)" -o wide | awk '{print $3}' | grep -qEw "master|control-plane"; then
-        error "This script must be run on master node."
-    fi
-}
-
-# ======== Check passwordless SSH connectivity from Master to Worker nodes ========
-check_ssh_connectivity() {
-    if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" != "yuanrong" ]; then
-        return
-    fi
-
-    if [ "${CMD}" == "down" ]; then
-        return
-    fi
-
-    info "Validating passwordless SSH connectivity from current node to all other nodes..."
-    for node_ip in "${OTHER_NODE_IPS[@]}"; do
-        if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no ${node_ip} "echo 'SSH connected successfully'" >/dev/null 2>&1; then
-            success "Node ${node_ip} - SSH passwordless connectivity is normal"
-        else
-            error "Node ${node_ip} - SSH passwordless connectivity failed! Please configure SSH key authentication first."
-        fi
-    done
-}
-
 # ======== Check if the cluster has at least 2 nodes ======== 
 check_cluster_has_enough_nodes() {
     if [ "${CMD}" == "down"  ]; then
@@ -104,9 +74,7 @@ check_dependency(){
     fi
 
     check_cmds
-    check_if_master
     check_if_root
-    check_ssh_connectivity
     check_cluster_has_enough_nodes
 }
 
@@ -118,14 +86,18 @@ check_if_nfs_up() {
         return
     fi
 
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+        return
+    fi
+
     # No Build-In NFS server
     if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["NFS_NAME"]}"; then
         error "NFS is not deployed. Please deploy it first with: ./$(basename "$0") up nfs"
     fi
 
     info "Use built-in NFS server"
-    fetch_master_node_ip
-    DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["MASTER_NODE_IP"]}
+    fetch_current_node_ip
+    DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["CURRENT_NODE_IP"]}
 }
 
 check_if_nfs_sc_up() {
@@ -188,7 +160,6 @@ check_if_postgresql_up() {
         info "Use external PostgreSQL server"
         if [ -z "${DEPLOY_VARS["DB_PORT"]:-}" ]; then
             error "Please define DB_PORT in .env.custom"
-
         fi
         DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]="true"
         return
@@ -211,19 +182,17 @@ check_if_postgresql_up() {
 
 check_if_db_up() {
     local db_type="${DEPLOY_VARS["DB_TYPE"]}"
-    local external_mysql="${DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]}"
-    local external_postgresql="${DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]}"
-
     info "DB_TYPE: ${db_type}"
     if [ "${db_type}" == "sqlite" ]; then
         return
     fi 
     check_if_${db_type}_up
 
-    if [[ ${external_mysql} == "true" || "${external_postgresql}" == "true" ]]; then
+    if [[ "${DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]}" == "true" || "${DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]}" == "true" ]]; then
         if [ -z "${DEPLOY_VARS["MANAGER_DB_USER"]:-}" ]; then
             DEPLOY_VARS["MANAGER_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
         fi
+
         if [ -z "${DEPLOY_VARS["MANAGER_DB_USER"]:-}" ]; then
             error "Please set up MANAGER_DB_USER or DB_USER."
         fi
@@ -251,13 +220,13 @@ check_if_db_up() {
     fi
 }
 
-check_if_minio_up() {
+check_if_obs_up() {
     local name="${DEPLOY_VARS["MINIO_NAME"]}"
 
-    # Check if external Minio server
-    if [ -n "${DEPLOY_VARS["MINIO_URL"]:-}" ]; then
-        info "Use external Minio server"
-        DEPLOY_VARS["ENABLE_EXTERNAL_MINIO"]="true"
+    # Check if external OBS server
+    if [ -n "${DEPLOY_VARS["OBS_URL"]:-}" ]; then
+        info "Use external OBS server"
+        DEPLOY_VARS["ENABLE_EXTERNAL_OBS"]="true"
         return
     fi
 
@@ -267,16 +236,6 @@ check_if_minio_up() {
     fi
 
     info "Use built-in Minio server"
-}
-
-check_if_obs_up() {
-    local obs_type="${DEPLOY_VARS["OBS_TYPE"]}"
-
-    info "OBS_TYPE: ${obs_type}"
-    if [ "${obs_type}" != "minio" ]; then
-        return
-    fi
-    check_if_minio_up
 }
 
 check_if_redis_up() {
@@ -302,6 +261,17 @@ check_if_redis_up() {
     info "Use built-in Redis server"
     DEPLOY_VARS["REDIS_HOST"]="${name}.default.svc.cluster.local"
     DEPLOY_VARS["REDIS_PORT"]="6379"
+}
+
+check_if_jina_up() {
+    local name="${DEPLOY_VARS["JINA_NAME"]}"
+    local rname="${name}-reader"
+    local cname="${name}-cache-proxy"
+
+    if check_k8s_resource_exists "deployment" "${rname}" && check_k8s_resource_exists "deployment" "${cname}"; then
+        DEPLOY_VARS["JINA_READER_ENDPOINT"]="http://${name}-cache-proxy-svc.default"
+        info "Use built-in Jina server"
+    fi
 }
 
 check_if_rabbitmq_up() {
@@ -331,20 +301,15 @@ check_if_rabbitmq_up() {
 }
 
 check_nfs_up_dependency(){
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+        return
+    fi
+
     local arch=$(uname -m)
 
     if [[ "$arch" =~ ^aarch64 || "$arch" =~ arm ]]; then
         info "ARM arch unsupported for NFS, abort deployment."
     fi
-
-    # Check if NFS client command mount.nfs is installed on all worker nodes
-    for node_ip in "${OTHER_NODE_IPS[@]}"; do
-        if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no ${node_ip} "command -v mount.nfs" >/dev/null 2>&1; then
-            success "Node ${node_ip} - mount.nfs is installed."
-        else
-            error "Node ${node_ip} - mount.nfs is not installed."
-        fi
-    done
 }
 
 check_nfs_sc_up_dependency(){
@@ -356,6 +321,10 @@ check_mysql_up_dependency(){
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 
     check_if_nfs_up
+
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+        return
+    fi
 
     if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
         info "Preparing MySQL data directory: ${mysql_path}"
@@ -373,6 +342,10 @@ check_postgresql_up_dependency(){
 
     check_if_nfs_up
 
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+        return
+    fi
+
     if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
         info "Preparing PostgreSQL data directory: ${pg_path}"
         local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
@@ -389,6 +362,10 @@ check_minio_up_dependency(){
 
     check_if_nfs_up
 
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+        return
+    fi
+
     if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
         info "Preparing Minio data directory: ${minio_path}"
         local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
@@ -400,7 +377,7 @@ check_minio_up_dependency(){
 }
 
 check_redis_up_dependency() {
-    info "Redis module has no extra prerequisites (deploys to default namespace)"
+    info "Redis module has no dependencies"
 }
 
 check_rabbitmq_up_dependency(){
@@ -408,6 +385,10 @@ check_rabbitmq_up_dependency(){
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 
     check_if_nfs_up
+
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+        return
+    fi
 
     if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
         info "Preparing RabbitMQ data directory: ${rabbit_path}"
@@ -424,9 +405,17 @@ check_log_up_dependency(){
         DEPLOY_VARS["CLAW_LOG_DIR"]="${HOME}/claw_logs"
     fi
 
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+        return
+    fi
+
     local log_dir="${DEPLOY_VARS["CLAW_LOG_DIR"]}"
     exec_cmd mkdir -p "${log_dir}"
     exec_cmd chmod 755 "${log_dir}"
+}
+
+check_jina_up_dependency() {
+    info "JINA module has no dependencies"
 }
 
 check_gateway_up_dependency(){
@@ -436,7 +425,7 @@ check_gateway_up_dependency(){
     if [ "${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" == "nfs" ]; then
         check_if_nfs_up
 
-        if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+        if [[ "${DEPLOY_VARS["RENDER_ONLY"]}" != "true" && "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]]; then
             info "Preparing JiuwenClaw data directory: ${jiuwenclaw_path}"
             local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
             info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}\""
@@ -449,6 +438,7 @@ check_gateway_up_dependency(){
 
     check_if_db_up
     check_if_redis_up
+    check_if_jina_up
 }
 
 check_web_up_dependency(){
@@ -462,32 +452,4 @@ check_web_up_dependency(){
 check_manager_up_dependency(){
     #check_if_rabbitmq_up
     check_if_db_up
-}
-
-check_if_yr_exist()
-{
-    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-
-    if helm list -n ${namespace} --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
-        error "${namespace}/${OYL_CHART_NAME} is already deployed. Please uninstall it first with: ./$(basename "$0") down yr_claw"
-    fi
-}
-
-check_if_yr_claw_up() {
-    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-    local name="function-agent-${DEPLOY_VARS["POOL_ID"]}"
-    local err_msg="YR_CLAW is not deployed. Please deploy it first with: ./$(basename "$0") up yr_claw"
-
-    if ! helm list -n ${namespace} --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
-        error ${err_msg}
-    fi
-
-    if ! check_k8s_resource_exists "deployment" "${name}" "${namespace}"; then
-        error ${err_msg}
-    fi
-}
-
-check_yr_claw_up_dependency(){
-    check_if_nfs_up
-    check_if_yr_exist
 }

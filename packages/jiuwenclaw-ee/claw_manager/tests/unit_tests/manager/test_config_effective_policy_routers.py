@@ -753,3 +753,60 @@ async def test_mapping_list_search(manager_api: ManagerApiHarness):
     )
     assert by_policy_id["total"] == 1
     assert by_policy_id["items"][0]["policy_id"] == policy_uuid
+
+
+@pytest.mark.asyncio
+async def test_service_policy_rejects_invalid_match_expr(manager_api: ManagerApiHarness):
+    h = manager_api
+    await h.create_instance()
+    m1 = await _create_model_template(h)
+
+    resp = await h.http.post(
+        h.scoped_url("/config-effective/service-policies"),
+        json={
+            "service_id": "svc-1",
+            "priority": 1,
+            "match_expr": "group_id === 'g_demo_sales'",
+            "template_ref": {"default_model": [m1]},
+            "enabled": True,
+        },
+    )
+    assert resp.status_code == 400
+    assert "invalid match_expr" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_agent_policy_rejects_invalid_match_expr(manager_api: ManagerApiHarness):
+    h = manager_api
+    await h.create_instance()
+    m1 = await _create_model_template(h)
+
+    service = await h.post_json(
+        "/config-effective/service-policies",
+        {
+            "service_id": "svc-parent",
+            "priority": 1,
+            "template_ref": {"default_model": [m1]},
+            "enabled": True,
+        },
+    )
+    service_policy_id = service["policy_id"]
+    agent = await h.post_json(
+        "/config-effective/agent-policies",
+        {
+            "agent_id": "alice",
+            "service_policy_id": service_policy_id,
+            "priority": 10,
+            "match_expr": "user_id == 'alice'",
+            "template_ref": {"default_model": [m1]},
+            "enabled": True,
+        },
+    )
+    policy_id = int(agent["id"])
+
+    resp = await h.http.patch(
+        h.scoped_url(f"/config-effective/agent-policies/{policy_id}"),
+        json={"match_expr": "${user::carol}"},
+    )
+    assert resp.status_code == 400
+    assert "invalid match_expr" in resp.json()["detail"]

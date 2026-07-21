@@ -17,11 +17,11 @@ source "minio_handler.sh"
 source "rabbitmq_handler.sh"
 source "redis_handler.sh"
 source "log_handler.sh"
+source "jina_handler.sh"
 source "configmap_secret_handler.sh"
 source "gateway_handler.sh"
 source "manager_handler.sh"
 source "web_handler.sh"
-source "oyr_handler.sh"
 
 process_up() {
     # MODULES是ALL_MODULES的子集，启动顺序正着来
@@ -48,6 +48,7 @@ process_up() {
         local fname=${lmodule//-/_}
 
         if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+            check_${fname}_up_dependency
             render_${fname}_files
         else
             check_${fname}_up_dependency
