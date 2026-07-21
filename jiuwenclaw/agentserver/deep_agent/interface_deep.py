@@ -1251,6 +1251,8 @@ class JiuWenClawDeepAdapter:
         self._request_session_toolkits: dict[str, MultiSessionToolkit] = {}
         self._session_toolkit_requests: dict[str, set[str]] = {}
         self._pending_evolution_summary_by_session: dict[str, str] = {}
+        # Skills that auto_save evolution just persisted; drained for auto rebuild.
+        self._pending_auto_rebuild_skills: list[str] = []
         self._pending_reload: tuple[
             dict[str, Any] | None, dict[str, Any] | None, bool
         ] | None = None
@@ -3258,9 +3260,10 @@ class JiuWenClawDeepAdapter:
             if new_evolution_rail is not None:
                 evolution_rail_action = ("create", new_evolution_rail)
         elif self._skill_evolution_rail is not None and evolution_enabled:
-            # enabled unchanged (on): in-place update LLM / auto_scan, rail retained.
+            # enabled unchanged (on): in-place update LLM / auto_scan / auto_save, rail retained.
             self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
             self._skill_evolution_rail.auto_scan = config.get("evolution", {}).get("auto_scan", False)
+            self._skill_evolution_rail.auto_save = config.get("evolution", {}).get("auto_save", True)
 
         self._skill_rail = self._build_skill_rail(
             config,
@@ -6153,17 +6156,28 @@ class JiuWenClawDeepAdapter:
             "result_type": "answer",
         }
 
-    async def _handle_evolve_rebuild_command(self, query: str) -> dict[str, Any]:
-        """/evolve_rebuild <skill_name> [--ids id1,id2] [user_intent] — Rebuild SKILL.md via agent followup."""
+    async def _prepare_rebuild_followup(
+        self,
+        skill_name: str,
+        *,
+        user_intent: str | None = None,
+    ) -> dict[str, Any]:
+        """Prepare auto rebuild followup for a skill (online auto_save path only).
+
+        Fuses all live evolution experiences into a new SKILL.md version via
+        archive → agent rewrite prompt → later ``_finalize_rebuild_followup``.
+        """
         rail = self._skill_evolution_rail
-        assert rail is not None
+        if rail is None:
+            return {
+                "output": "演进功能未初始化，无法自动重建 Skill 版本。",
+                "result_type": "error",
+            }
         store = rail.store
-
-        skill_name, record_ids, user_intent = self._parse_evolve_rebuild_query(query)
-
+        skill_name = (skill_name or "").strip()
         if not skill_name:
             return {
-                "output": "请指定 Skill 名称：`/evolve_rebuild <skill_name> [--ids id1,id2] [user_intent]`",
+                "output": "未指定 Skill 名称，无法自动重建版本。",
                 "result_type": "error",
             }
 
@@ -6198,7 +6212,6 @@ class JiuWenClawDeepAdapter:
         rebuild_context = await rebuild_service.prepare_rebuild_context(
             subject,
             user_intent=user_intent,
-            record_ids=record_ids,
         )
         if rebuild_context is None:
             return {
@@ -6220,50 +6233,13 @@ class JiuWenClawDeepAdapter:
             "result_type": "followup",
         }
 
-    @staticmethod
-    def _parse_evolve_rebuild_query(
-        query: str,
-    ) -> tuple[str, list[str] | None, str | None]:
-        """Parse `/evolve_rebuild <skill> [--ids id1,id2|id1 id2] [user_intent...]`."""
-        text = query.strip()
-        prefix = "/evolve_rebuild"
-        if text.lower().startswith(prefix):
-            text = text[len(prefix):].strip()
-        if not text:
-            return "", None, None
-
-        tokens = text.split()
-        skill_name = tokens[0]
-        rest = tokens[1:]
-        record_ids: list[str] | None = None
-        intent_tokens: list[str] = []
-        i = 0
-        while i < len(rest):
-            if rest[i] == "--ids":
-                i += 1
-                collected: list[str] = []
-                while i < len(rest) and rest[i] != "--ids" and (
-                    "," in rest[i] or rest[i].startswith("ev_")
-                ):
-                    collected.extend(
-                        part.strip() for part in rest[i].split(",") if part.strip()
-                    )
-                    i += 1
-                record_ids = collected or None
-                continue
-            intent_tokens.append(rest[i])
-            i += 1
-
-        user_intent = " ".join(intent_tokens).strip() or None
-        return skill_name, record_ids, user_intent
-
-    async def _finalize_rebuild_followup(self, slash_result: dict[str, Any] | None) -> None:
+    async def _finalize_rebuild_followup(self, rebuild_result: dict[str, Any] | None) -> None:
         """Clear evolution log after a successful rebuild followup."""
-        if not isinstance(slash_result, dict):
+        if not isinstance(rebuild_result, dict):
             return
-        if slash_result.get("action") != "run_rebuild_followup":
+        if rebuild_result.get("action") != "run_rebuild_followup":
             return
-        rebuild_context = slash_result.get("rebuild_context")
+        rebuild_context = rebuild_result.get("rebuild_context")
         if not isinstance(rebuild_context, dict):
             return
         if ExperienceRebuildService is None:
@@ -6343,10 +6319,13 @@ class JiuWenClawDeepAdapter:
             return await self._handle_evolve_rollback_command(stripped)
 
         if stripped.startswith("/evolve_rebuild"):
-            err = self._ensure_evolution_rail_for_slash(mode)
-            if err:
-                return {"output": err, "result_type": "error"}
-            return await self._handle_evolve_rebuild_command(stripped)
+            return {
+                "output": (
+                    "`/evolve_rebuild` 已移除。\n"
+                    "开启 `evolution.auto_save` 后，在线自动演进落盘经验时会自动生成新版本。"
+                ),
+                "result_type": "answer",
+            }
 
         if stripped.startswith("/evolve"):
             err = self._ensure_evolution_rail_for_slash(mode)
@@ -7800,6 +7779,15 @@ class JiuWenClawDeepAdapter:
                     extra={'user_visible': 'critical'}
                 )
 
+                async for rebuild_chunk in self._iter_auto_rebuild_followups(
+                    base_inputs=inputs,
+                    stream_request_id=rid,
+                    channel_id=cid,
+                    session_id=session_id,
+                    hitl_pending=hitl_pending_stream,
+                ):
+                    yield rebuild_chunk
+
             await self._finalize_rebuild_followup(slash_result)
 
             if evolution_status_started and not evolution_status_ended:
@@ -7912,6 +7900,7 @@ class JiuWenClawDeepAdapter:
 
     def _collect_evolution_run_summary_text(self, request_id: str) -> str:
         """Drain and format evolution summary for UI footnote; log skip/drain outcomes."""
+        self._pending_auto_rebuild_skills = []
         if self._skill_evolution_rail is None:
             logger.info(
                 "[JiuWenClawDeepAdapter] evolution UI summary skipped: request_id=%s reason=skill_evolution_rail_none",
@@ -7922,6 +7911,18 @@ class JiuWenClawDeepAdapter:
         try:
             evolution_summary = self._skill_evolution_rail.take_run_summary()
             evolution_summary_text = self._format_evolution_summary_markdown(evolution_summary)
+            if (
+                isinstance(evolution_summary, dict)
+                and getattr(self._skill_evolution_rail, "auto_save", False)
+            ):
+                names: list[str] = []
+                for item in self._iter_evolution_summary_items(evolution_summary.get("skills")):
+                    if not isinstance(item, dict):
+                        continue
+                    skill_name = str(item.get("skill_name") or "").strip()
+                    if skill_name and skill_name not in names:
+                        names.append(skill_name)
+                self._pending_auto_rebuild_skills = names
         except Exception as exc:
             logger.warning(
                 "[JiuWenClawDeepAdapter] evolution UI summary format failed: request_id=%s error=%s",
@@ -7932,13 +7933,155 @@ class JiuWenClawDeepAdapter:
             )
             return ""
         logger.info(
-            "[JiuWenClawDeepAdapter] evolution UI summary drain: request_id=%s has_summary=%s chars=%d",
+            "[JiuWenClawDeepAdapter] evolution UI summary drain: request_id=%s has_summary=%s chars=%d "
+            "auto_rebuild_skills=%s",
             request_id,
             bool(evolution_summary),
             len(evolution_summary_text),
+            self._pending_auto_rebuild_skills,
             extra={"user_visible": "progress"},
         )
         return evolution_summary_text
+
+    def _take_pending_auto_rebuild_skills(self) -> list[str]:
+        """Return and clear skill names queued for auto rebuild after online evolution."""
+        skills = list(self._pending_auto_rebuild_skills)
+        self._pending_auto_rebuild_skills = []
+        return skills
+
+    async def _iter_auto_rebuild_followups(
+        self,
+        *,
+        base_inputs: dict[str, Any],
+        stream_request_id: str,
+        channel_id: str,
+        session_id: str,
+        hitl_pending: bool,
+    ) -> AsyncIterator[AgentResponseChunk]:
+        """Serially rebuild skills that online auto_save evolution just persisted."""
+        if hitl_pending:
+            self._pending_auto_rebuild_skills = []
+            logger.info(
+                "[JiuWenClawDeepAdapter] skip auto rebuild: HITL pending request_id=%s",
+                stream_request_id,
+                extra={"user_visible": "progress"},
+            )
+            return
+
+        rail = self._skill_evolution_rail
+        if rail is None or not getattr(rail, "auto_save", False):
+            self._pending_auto_rebuild_skills = []
+            return
+
+        skill_names = self._take_pending_auto_rebuild_skills()
+        if not skill_names:
+            return
+
+        for skill_name in skill_names:
+            try:
+                rebuild_result = await self._prepare_rebuild_followup(skill_name)
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] auto rebuild prepare failed: skill=%s error=%s",
+                    skill_name,
+                    exc,
+                    exc_info=True,
+                    extra={"user_visible": "progress"},
+                )
+                yield AgentResponseChunk(
+                    request_id=stream_request_id,
+                    channel_id=channel_id,
+                    payload={
+                        "event_type": "chat.delta",
+                        "content": f"\n\n> Skill `{skill_name}` 自动版本重建准备失败：{exc}",
+                    },
+                    is_complete=False,
+                )
+                continue
+
+            if rebuild_result.get("result_type") != "followup":
+                msg = str(rebuild_result.get("output") or "未生成重建指令")
+                logger.info(
+                    "[JiuWenClawDeepAdapter] auto rebuild skipped: skill=%s reason=%s",
+                    skill_name,
+                    msg,
+                    extra={"user_visible": "progress"},
+                )
+                yield AgentResponseChunk(
+                    request_id=stream_request_id,
+                    channel_id=channel_id,
+                    payload={
+                        "event_type": "chat.delta",
+                        "content": f"\n\n> Skill `{skill_name}` 未自动重建版本：{msg}",
+                    },
+                    is_complete=False,
+                )
+                continue
+
+            prompt = str(rebuild_result.get("followup_prompt") or "").strip()
+            if not prompt:
+                continue
+
+            yield AgentResponseChunk(
+                request_id=stream_request_id,
+                channel_id=channel_id,
+                payload={
+                    "event_type": "chat.delta",
+                    "content": f"\n\n> 正在将 Skill `{skill_name}` 的演进经验融合为新版本…",
+                },
+                is_complete=False,
+            )
+
+            rebuild_ok = True
+            try:
+                async for follow_chunk in self._iter_skill_creator_follow_up_stream(
+                    base_inputs=base_inputs,
+                    prompt=prompt,
+                    skill_create_request_id=f"auto_rebuild_{skill_name}",
+                    stream_request_id=stream_request_id,
+                    channel_id=channel_id,
+                    session_id=session_id,
+                ):
+                    payload = follow_chunk.payload if isinstance(follow_chunk.payload, dict) else {}
+                    if payload.get("event_type") == "chat.error":
+                        rebuild_ok = False
+                    yield follow_chunk
+            except Exception as exc:
+                rebuild_ok = False
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] auto rebuild followup failed: skill=%s error=%s",
+                    skill_name,
+                    exc,
+                    exc_info=True,
+                    extra={"user_visible": "progress"},
+                )
+                yield AgentResponseChunk(
+                    request_id=stream_request_id,
+                    channel_id=channel_id,
+                    payload={
+                        "event_type": "chat.delta",
+                        "content": f"\n\n> Skill `{skill_name}` 自动版本重建失败：{exc}",
+                    },
+                    is_complete=False,
+                )
+
+            if rebuild_ok:
+                await self._finalize_rebuild_followup(rebuild_result)
+                yield AgentResponseChunk(
+                    request_id=stream_request_id,
+                    channel_id=channel_id,
+                    payload={
+                        "event_type": "chat.delta",
+                        "content": f"\n\n> Skill `{skill_name}` 已自动生成新版本。",
+                    },
+                    is_complete=False,
+                )
+            else:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] auto rebuild not finalized after followup failure: skill=%s",
+                    skill_name,
+                    extra={"user_visible": "progress"},
+                )
 
     def _stash_pending_evolution_summary(
         self,
