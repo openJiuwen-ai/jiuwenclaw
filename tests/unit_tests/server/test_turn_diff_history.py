@@ -29,10 +29,12 @@ def _default_git_service(monkeypatch):
     service = SimpleNamespace(
         status=lambda project: SimpleNamespace(
             error=None,
+            is_git=True,
             repo_root="/proj",
             branch="main",
             head="abc123",
             transient=False,
+            is_dirty=False,
         ),
     )
     monkeypatch.setattr(
@@ -411,10 +413,12 @@ def _fake_git_service(repo_root="/proj", error=None):
     return SimpleNamespace(
         status=lambda project: SimpleNamespace(
             error=error,
+            is_git=error is None,
             repo_root=repo_root,
             branch="main",
             head="abc123",
             transient=False,
+            is_dirty=False,
         ),
     )
 
@@ -479,18 +483,103 @@ def test_turn_diff_detail_by_change_set_id():
     assert "file_a.py" in result["files"]
 
 
-def test_turn_diff_detail_returns_not_git_repository():
+def test_turn_diff_detail_falls_back_when_not_git_repository():
     ph, pa, pl, ps = _patch_diff_service()
     git_error = GitError("NOT_GIT_REPOSITORY", "not a git repository")
     with ph, pa, pl, ps, patch(
         "jiuwenswarm.server.runtime.session.project_git.get_project_git_service",
         return_value=_fake_git_service(repo_root=None, error=git_error),
     ):
-        with pytest.raises(GitOperationError) as excinfo:
-            DiffStatusService.get_turn_diff_detail(
-                project=_PROJECT, session_id="sess-1", turn_index=1,
-            )
-    assert excinfo.value.git_error.code == "NOT_GIT_REPOSITORY"
+        result = DiffStatusService.get_turn_diff_detail(
+            project=_PROJECT, session_id="sess-1", turn_index=1,
+        )
+    assert result is not None
+    assert result["repo_root"] == "/proj"
+    assert result["branch"] is None
+    assert result["base_head"] is None
+    assert "file_a.py" in result["files"]
+    assert result["files"]["file_a.py"]["hunks"]
+
+
+def test_turn_diff_detail_falls_back_when_git_not_found():
+    ph, pa, pl, ps = _patch_diff_service()
+    git_error = GitError("GIT_NOT_FOUND", "git executable not found")
+    with ph, pa, pl, ps, patch(
+        "jiuwenswarm.server.runtime.session.project_git.get_project_git_service",
+        return_value=_fake_git_service(repo_root=None, error=git_error),
+    ):
+        result = DiffStatusService.get_turn_diff_detail(
+            project=_PROJECT, session_id="sess-1", turn_index=1,
+        )
+    assert result is not None
+    assert result["repo_root"] == "/proj"
+    assert result["branch"] is None
+    assert result["base_head"] is None
+    assert "file_a.py" in result["files"]
+
+
+def test_diff_status_falls_back_to_last_turn_when_not_git_repository():
+    ph, pa, pl, ps = _patch_diff_service()
+    git_error = GitError("NOT_GIT_REPOSITORY", "not a git repository")
+    with ph, pa, pl, ps, patch(
+        "jiuwenswarm.server.runtime.session.project_git.get_project_git_service",
+        return_value=_fake_git_service(repo_root=None, error=git_error),
+    ):
+        result = DiffStatusService.get_project_diff_status(
+            project=_PROJECT,
+            session_id="sess-1",
+            include_files=True,
+            include_hunks=True,
+        ).to_dict(include_hunks=True)
+    assert result["repo"]["is_git"] is False
+    assert result["repo"]["repo_root"] == "/proj"
+    assert result["repo"]["branch"] is None
+    assert result["current"] is None
+    assert result["last_turn"] is not None
+    assert "file_b.py" in result["last_turn"]["files"]
+
+
+def test_diff_status_falls_back_to_last_turn_when_git_not_found():
+    ph, pa, pl, ps = _patch_diff_service()
+    git_error = GitError("GIT_NOT_FOUND", "git executable not found")
+    with ph, pa, pl, ps, patch(
+        "jiuwenswarm.server.runtime.session.project_git.get_project_git_service",
+        return_value=_fake_git_service(repo_root=None, error=git_error),
+    ):
+        result = DiffStatusService.get_project_diff_status(
+            project=_PROJECT,
+            session_id="sess-1",
+            include_files=True,
+            include_hunks=True,
+        ).to_dict(include_hunks=True)
+    assert result["repo"]["is_git"] is False
+    assert result["repo"]["repo_root"] == "/proj"
+    assert result["repo"]["branch"] is None
+    assert result["repo"]["head"] is None
+    assert result["current"] is None
+    assert result["last_turn"] is not None
+    assert "file_b.py" in result["last_turn"]["files"]
+
+
+def test_turn_diff_list_falls_back_when_not_git_repository():
+    ph, pa, pl, ps = _patch_diff_service()
+    git_error = GitError("NOT_GIT_REPOSITORY", "not a git repository")
+    with ph, pa, pl, ps, patch(
+        "jiuwenswarm.server.runtime.session.project_git.get_project_git_service",
+        return_value=_fake_git_service(repo_root=None, error=git_error),
+    ):
+        result = DiffStatusService.get_turn_diff_list(
+            project=_PROJECT, session_id="sess-1", limit=50,
+        )
+    assert result["project_id"] == "proj-1"
+    assert result["session_id"] == "sess-1"
+    assert result["repo_root"] == "/proj"
+    assert result["branch"] is None
+    assert result["base_head"] is None
+    assert result["total"] == 2
+    assert len(result["turns"]) == 2
+    assert "file_b.py" in result["turns"][0]["files"]
+    assert "file_a.py" in result["turns"][1]["files"]
 
 
 def test_turn_diff_detail_respects_include_flags():

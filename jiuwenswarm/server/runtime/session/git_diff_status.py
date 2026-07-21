@@ -432,6 +432,14 @@ def _convert_turn_summary(
     return result
 
 
+def _supports_no_git_fallback(error: Any) -> bool:
+    """Return True when Jiuwen file-op history can back the diff view."""
+    return str(getattr(error, "code", "") or "") in {
+        "NOT_GIT_REPOSITORY",
+        "GIT_NOT_FOUND",
+    }
+
+
 def _repo_context_from_status(project: Any, *, reject_transient: bool = False) -> dict[str, Any]:
     """读取 Git 上下文，必要时抛出结构化 Git 错误。"""
     from jiuwenswarm.server.runtime.session.project_git import (
@@ -440,6 +448,13 @@ def _repo_context_from_status(project: Any, *, reject_transient: bool = False) -
     git_service = get_project_git_service()
     repo_status = git_service.status(project)
     if repo_status.error is not None:
+        if _supports_no_git_fallback(repo_status.error):
+            project_dir = str(getattr(project, "project_dir", "") or "") or None
+            return {
+                "repo_root": project_dir,
+                "branch": None,
+                "base_head": None,
+            }
         raise GitOperationError(repo_status.error)
     if reject_transient and repo_status.transient:
         project_id = str(getattr(project, "project_id", "") or "")
@@ -510,19 +525,33 @@ class DiffStatusService:
         git_service = get_project_git_service()
         repo_status = git_service.status(project)
 
-        if repo_status.error is not None:
+        no_git_fallback = bool(
+            repo_status.error is not None
+            and _supports_no_git_fallback(repo_status.error)
+        )
+        if repo_status.error is not None and not no_git_fallback:
             raise GitOperationError(repo_status.error)
 
+        repo_root = (
+            getattr(repo_status, "repo_root", None)
+            or (str(project_dir) or None if no_git_fallback else None)
+        )
         repo_info = DiffRepoInfo(
-            is_git=repo_status.is_git,
-            repo_root=repo_status.repo_root,
-            branch=repo_status.branch,
-            head=repo_status.head,
-            transient=repo_status.transient,
+            is_git=bool(getattr(repo_status, "is_git", False)) and not no_git_fallback,
+            repo_root=repo_root,
+            branch=None if no_git_fallback else getattr(repo_status, "branch", None),
+            head=None if no_git_fallback else getattr(repo_status, "head", None),
+            transient=(
+                False
+                if no_git_fallback
+                else bool(getattr(repo_status, "transient", False))
+            ),
         )
 
         current: DiffSummary | None = None
-        if repo_status.is_git and not repo_status.transient:
+        repo_is_git = bool(getattr(repo_status, "is_git", False))
+        repo_is_transient = bool(getattr(repo_status, "transient", False))
+        if repo_is_git and not repo_is_transient:
             diff_service = get_diff_service()
             try:
                 raw_diff = diff_service.get_git_diff(project_dir)
@@ -534,10 +563,10 @@ class DiffStatusService:
                 raise
             current = _convert_current_diff(
                 raw_diff,
-                repo_root=repo_status.repo_root,
+                repo_root=repo_root,
                 include_files=effective_include_files,
                 include_hunks=include_hunks,
-                repo_is_dirty=repo_status.is_dirty,
+                repo_is_dirty=bool(getattr(repo_status, "is_dirty", False)),
             )
 
         last_turn: DiffTurnSummary | None = None
@@ -548,9 +577,9 @@ class DiffStatusService:
                     session_id,
                     project_dir,
                     repo_context={
-                        "repo_root": repo_status.repo_root,
-                        "branch": repo_status.branch,
-                        "base_head": repo_status.head,
+                        "repo_root": repo_root,
+                        "branch": repo_info.branch,
+                        "base_head": repo_info.head,
                     },
                 )
             except Exception as exc:  # noqa: BLE001
@@ -565,7 +594,7 @@ class DiffStatusService:
             if turns:
                 last_turn = _convert_turn_diff(
                     turns[0],
-                    repo_root=repo_status.repo_root,
+                    repo_root=repo_root,
                     include_files=effective_include_files,
                     include_hunks=include_hunks,
                 )
