@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, ChevronUp, Columns2, FileCode2, Files, Folder, GitBranch, List, LoaderCircle, RefreshCw, Search } from 'lucide-react';
-import type { ProjectInfo } from '../../types';
+import type { ProjectInfo, WebError } from '../../types';
 import { gitClient } from './gitClient';
-import type { GitDiffFile, GitDiffHunk, GitTurnDiff } from './types';
+import type { CodeReviewTarget, GitDiffFile, GitDiffHunk, GitTurnDiff } from './types';
 
 type DiffViewMode = 'unified' | 'split';
 type DiffLineKind = 'added' | 'removed' | 'context' | 'meta';
@@ -219,9 +219,25 @@ function FileDiff({ file, viewMode }: { file: GitDiffFile; viewMode: DiffViewMod
 interface CodeReviewPanelProps {
   project: ProjectInfo;
   sessionId: string;
+  target?: CodeReviewTarget | null;
 }
 
-export function CodeReviewPanel({ project, sessionId }: CodeReviewPanelProps) {
+function getReviewErrorMessage(error: unknown): string {
+  const webError = error as WebError;
+  switch (webError.code) {
+    case 'DIFF_HISTORY_EXPIRED':
+      return '该轮差异历史已过期，无法恢复详情。';
+    case 'CHANGE_SET_NOT_FOUND':
+    case 'TURN_DIFF_NOT_FOUND':
+      return '没有找到该轮代码修改记录。';
+    case 'GIT_TRANSIENT_STATE':
+      return '仓库正在合并或变基，暂时无法加载审核详情。';
+    default:
+      return webError.message || '加载审核结果失败';
+  }
+}
+
+export function CodeReviewPanel({ project, sessionId, target = null }: CodeReviewPanelProps) {
   const [diff, setDiff] = useState<GitTurnDiff | null>(null);
   const [branch, setBranch] = useState(project.git.branch);
   const [loading, setLoading] = useState(true);
@@ -233,25 +249,45 @@ export function CodeReviewPanel({ project, sessionId }: CodeReviewPanelProps) {
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set());
   const [expandedDirectories, setExpandedDirectories] = useState<Set<string>>(() => new Set());
   const fileSectionRefs = useRef(new Map<string, HTMLElement>());
+  const loadSequenceRef = useRef(0);
 
   const loadDiff = useCallback(async () => {
+    const loadSequence = loadSequenceRef.current + 1;
+    loadSequenceRef.current = loadSequence;
     setLoading(true);
     setError(null);
     try {
-      const status = await gitClient.diffStatus(project.project_id, sessionId, {
+      let resolvedTarget = target;
+      if (!resolvedTarget) {
+        const history = await gitClient.turnDiffList(project.project_id, sessionId, { limit: 1 });
+        const latestTurn = history.turns[0];
+        if (!latestTurn) {
+          if (loadSequenceRef.current === loadSequence) {
+            setDiff(null);
+            setBranch(history.branch || project.git.branch);
+          }
+          return;
+        }
+        resolvedTarget = {
+          changeSetId: latestTurn.change_set_id,
+          turnIndex: latestTurn.turn_index,
+        };
+      }
+      const turnDiff = await gitClient.turnDiff(project.project_id, sessionId, resolvedTarget, {
         includeFiles: true,
         includeHunks: true,
       });
-      setBranch(status.repo.branch || project.git.branch);
-      const lastTurn = status.last_turn;
-      setDiff(lastTurn && Object.keys(lastTurn.files).length > 0 ? lastTurn : null);
+      if (loadSequenceRef.current !== loadSequence) return;
+      setBranch(turnDiff.branch || project.git.branch);
+      setDiff(Object.keys(turnDiff.files).length > 0 ? turnDiff : null);
     } catch (nextError) {
+      if (loadSequenceRef.current !== loadSequence) return;
       setDiff(null);
-      setError(nextError instanceof Error ? nextError.message : '加载审核结果失败');
+      setError(getReviewErrorMessage(nextError));
     } finally {
-      setLoading(false);
+      if (loadSequenceRef.current === loadSequence) setLoading(false);
     }
-  }, [project, sessionId]);
+  }, [project, sessionId, target]);
 
   useEffect(() => {
     void loadDiff();
@@ -275,7 +311,7 @@ export function CodeReviewPanel({ project, sessionId }: CodeReviewPanelProps) {
     setExpandedPaths(new Set());
     setExpandedDirectories(new Set());
     fileSectionRefs.current.clear();
-  }, [project.project_id, sessionId]);
+  }, [project.project_id, sessionId, target?.changeSetId, target?.turnIndex]);
 
   const filteredFiles = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -421,7 +457,10 @@ export function CodeReviewPanel({ project, sessionId }: CodeReviewPanelProps) {
           )}
         </main>
       </div>
-      <footer className='code-review__footer'>当前展示最近一轮 Agent 修改；后续修改后历史差异可能变化。</footer>
+      <footer className='code-review__footer'>
+        当前展示第 {diff.turn_index} 轮 Agent 修改的历史快照
+        {diff.status === 'discarded' ? '（已撤销）' : ''}，后续修改不会覆盖该轮差异。
+      </footer>
     </section>
   );
 }

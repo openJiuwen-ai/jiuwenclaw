@@ -20,6 +20,7 @@ import type { ProjectInfo, TodoItem, TodoStatus } from '../../types';
 import teamProcessIcon from '../../assets/team-process.svg';
 import { CodeEnvironmentPanel } from '../../features/code-mode/CodeEnvironmentPanel';
 import { CodeReviewPanel } from '../../features/code-mode/CodeReviewPanel';
+import type { CodeReviewTarget } from '../../features/code-mode/types';
 import './ToolPanel.css';
 
 /** 规划/性能模式下把 TodoItem 降级映射为 TeamTask，复用 TaskPlanningPanel 紧凑态样式 */
@@ -48,10 +49,12 @@ interface ToolPanelProps {
   teamAreaActiveTab: TabType;
   teamAreaActiveDetailTab: TeamDetailTab;
   teamAreaSelectedMemberId?: string;
+  codeReviewTarget?: CodeReviewTarget | null;
   setTeamAreaExpanded: (expanded: boolean) => void;
   setTeamAreaActiveTab: (tab: TabType) => void;
   setTeamAreaActiveDetailTab: (detailTab: TeamDetailTab) => void;
   setTeamAreaSelectedMemberId: (memberId: string) => void;
+  setCodeReviewTarget?: (target: CodeReviewTarget | null) => void;
 }
 
 function isEmptyValue(value: unknown): boolean {
@@ -180,10 +183,12 @@ export function ToolPanel({
   teamAreaActiveTab,
   teamAreaActiveDetailTab,
   teamAreaSelectedMemberId,
+  codeReviewTarget = null,
   setTeamAreaExpanded,
   setTeamAreaActiveTab,
   setTeamAreaActiveDetailTab,
   setTeamAreaSelectedMemberId,
+  setCodeReviewTarget,
 }: ToolPanelProps) {
   const { t } = useTranslation();
   const { isConnected, memoryUsage, setMemoryUsage } = useSessionStore();
@@ -207,7 +212,7 @@ export function ToolPanel({
   const codeProject = project?.work_mode === 'code' && !project.is_default ? project : null;
   const canReviewCode = Boolean(codeProject && sessionId && sessionId !== 'new');
   const codeReviewPanel = canReviewCode && codeProject && sessionId
-    ? <CodeReviewPanel project={codeProject} sessionId={sessionId} />
+    ? <CodeReviewPanel project={codeProject} sessionId={sessionId} target={codeReviewTarget} />
     : undefined;
   const todoTeamTasks = useMemo(() => todos.map(todoItemToTeamTask), [todos]);
   const todoCompletedTasks = useMemo(
@@ -501,6 +506,7 @@ export function ToolPanel({
             sessionId={sessionId}
             isProcessing={isProcessing}
             onReview={() => {
+              setCodeReviewTarget?.(null);
               setTeamAreaActiveTab('review');
               setTeamAreaExpanded(true);
             }}

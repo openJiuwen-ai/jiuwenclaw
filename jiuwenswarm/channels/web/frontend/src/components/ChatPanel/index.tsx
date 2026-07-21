@@ -36,6 +36,8 @@ import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import welcomeBanner from '../../assets/home-banner.svg';
 import './ChatPanel.css';
 import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
+import { useCodeTurnDiffHistory } from '../../features/code-mode/useCodeTurnDiffHistory';
+import type { CodeReviewTarget } from '../../features/code-mode/types';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
@@ -76,7 +78,7 @@ interface ChatPanelProps {
   /** 切换右侧紧缩面板展开状态 */
   onToggleTeamArea?: (expanded: boolean) => void;
   /** 打开右侧面板并切换到代码审核 Tab */
-  onOpenCodeReview?: () => void;
+  onOpenCodeReview?: (target: CodeReviewTarget) => void;
   permissionsEnabled: boolean;
   onSavePermission: (updates: Record<string, string>) => Promise<void>;
   /** Goal（持续目标）控制，见 GoalBar 组件 */
@@ -740,6 +742,29 @@ export function ChatPanel({
   const shouldShowShareExport = Boolean(onExportShare);
   const shouldShowHumanShare = mode === 'team' && teamHumanShareCommands.length > 0;
   const [humanShareOpen, setHumanShareOpen] = React.useState(false);
+  const {
+    turnsByMessageId: codeTurnsByMessageId,
+    loading: codeTurnHistoryLoading,
+    reload: reloadCodeTurnHistory,
+  } = useCodeTurnDiffHistory({
+    project: sessionProject,
+    sessionId: activeSessionId,
+    isProcessing,
+    messages,
+  });
+  const renderCodeChangesAfterMessage = useCallback((message: Message) => {
+    const turns = codeTurnsByMessageId.get(message.id);
+    if (!turns?.length) return null;
+    return turns.map(turn => (
+      <CodeChangesCard
+        key={turn.change_set_id || `turn-${turn.turn_index}`}
+        diff={turn}
+        refreshing={codeTurnHistoryLoading}
+        onRefresh={() => void reloadCodeTurnHistory()}
+        onReview={target => onOpenCodeReview?.(target)}
+      />
+    ));
+  }, [codeTurnHistoryLoading, codeTurnsByMessageId, onOpenCodeReview, reloadCodeTurnHistory]);
 
   // 跟踪用户是否正在查看历史消息（不在底部）
   const userScrolledUpRef = useRef(false);
@@ -1063,15 +1088,7 @@ export function ChatPanel({
               )}
               {hasTimelineContent ? (
                 <>
-                  <MessageList messages={messages} />
-                  {activeSessionId && activeSessionId !== 'new' ? (
-                    <CodeChangesCard
-                      project={sessionProject}
-                      sessionId={activeSessionId}
-                      isProcessing={isProcessing}
-                      onReview={() => onOpenCodeReview?.()}
-                    />
-                  ) : null}
+                  <MessageList messages={messages} renderAfterMessage={renderCodeChangesAfterMessage} />
                   {shouldShowHumanShare && (
                     <HumanShareCard
                       commands={teamHumanShareCommands}

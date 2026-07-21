@@ -4,7 +4,7 @@
  * 消息列表显示：将普通消息与工具执行按时间线交错渲染。
  */
 
-import { useMemo } from 'react';
+import { Fragment, useMemo, type ReactNode } from 'react';
 import { Message, ToolExecution } from '../../types';
 import { MessageItem, getMessageActor } from './MessageItem';
 import { ToolGroupDisplay, collectViewedSkillIds } from './ToolGroupDisplay';
@@ -30,6 +30,7 @@ function getMessageRenderKey(message: Message): string {
 
 interface MessageListProps {
   messages: Message[];
+  renderAfterMessage?: (message: Message) => ReactNode;
 }
 
 interface ChatTimelineListProps {
@@ -39,6 +40,7 @@ interface ChatTimelineListProps {
   disableA2UIInteraction?: boolean;
   /** 当前会话的目标文本，透传给 MessageItem 用于渲染"设为目标"徽章 */
   goalObjective?: string | null;
+  renderAfterMessage?: (message: Message) => ReactNode;
 }
 
 type TimelineItem =
@@ -338,6 +340,7 @@ export function ChatTimelineList({
   mode = 'default',
   disableA2UIInteraction = false,
   goalObjective = null,
+  renderAfterMessage,
 }: ChatTimelineListProps) {
   const isTeamMode = mode === 'team';
   const renderItems = useMemo(
@@ -354,13 +357,15 @@ export function ChatTimelineList({
       {renderItems.map((item) => {
         if (item.type === 'message') {
           return (
-            <MessageItem
-              key={item.key}
-              message={item.message}
-              showAvatar={item.showAvatar}
-              disableA2UIInteraction={disableA2UIInteraction}
-              goalObjective={goalObjective}
-            />
+            <Fragment key={item.key}>
+              <MessageItem
+                message={item.message}
+                showAvatar={item.showAvatar}
+                disableA2UIInteraction={disableA2UIInteraction}
+                goalObjective={goalObjective}
+              />
+              {renderAfterMessage?.(item.message)}
+            </Fragment>
           );
         }
         return (
@@ -379,7 +384,7 @@ export function ChatTimelineList({
   );
 }
 
-export function MessageList({ messages }: MessageListProps) {
+export function MessageList({ messages, renderAfterMessage }: MessageListProps) {
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const toolExecutions = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutions ?? new Map());
   const toolExecutionOrder = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutionOrder ?? []);
@@ -392,5 +397,13 @@ export function MessageList({ messages }: MessageListProps) {
     [toolExecutions, toolExecutionOrder]
   );
 
-  return <ChatTimelineList messages={messages} executions={executions} mode={mode} goalObjective={goalObjective} />;
+  return (
+    <ChatTimelineList
+      messages={messages}
+      executions={executions}
+      mode={mode}
+      goalObjective={goalObjective}
+      renderAfterMessage={renderAfterMessage}
+    />
+  );
 }

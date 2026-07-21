@@ -24,6 +24,7 @@ import {
   exportShareImageNode,
   type ShareImageSnapshot,
 } from './features/shareImageExport';
+import type { CodeReviewTarget } from './features/code-mode/types';
 
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
 import { HeartbeatMessageModal } from './features/HeartbeatMessageModal';
@@ -437,6 +438,11 @@ function AppContent() {
   const teamTasks = useSessionStore((s) => s.runtimes[sessionId]?.teamTasks ?? []);
   const teamMembers = useSessionStore((s) => s.runtimes[sessionId]?.teamMembers ?? []);
   const [chatPanelWidthPct, setChatPanelWidthPct] = useState(33.33);
+  const [codeReviewTarget, setCodeReviewTarget] = useState<CodeReviewTarget | null>(null);
+
+  useEffect(() => {
+    setCodeReviewTarget(null);
+  }, [sessionId]);
 
   const handleToggleDetailPanel = useCallback((expanded: boolean) => {
     if (expanded && mode !== 'team' && teamAreaActiveTab === 'team') {
@@ -445,7 +451,8 @@ function AppContent() {
     setTeamAreaExpanded(expanded);
   }, [mode, setTeamAreaActiveTab, setTeamAreaExpanded, teamAreaActiveTab]);
 
-  const handleOpenCodeReview = useCallback(() => {
+  const handleOpenCodeReview = useCallback((target: CodeReviewTarget) => {
+    setCodeReviewTarget(target);
     setTeamAreaActiveTab('review');
     setTeamAreaExpanded(true);
   }, [setTeamAreaActiveTab, setTeamAreaExpanded]);
@@ -2064,10 +2071,12 @@ function AppContent() {
                     teamAreaActiveTab={teamAreaActiveTab}
                     teamAreaActiveDetailTab={teamAreaActiveDetailTab}
                     teamAreaSelectedMemberId={teamAreaSelectedMemberId}
+                    codeReviewTarget={codeReviewTarget}
                     setTeamAreaExpanded={setTeamAreaExpanded}
                     setTeamAreaActiveTab={setTeamAreaActiveTab}
                     setTeamAreaActiveDetailTab={setTeamAreaActiveDetailTab}
                     setTeamAreaSelectedMemberId={setTeamAreaSelectedMemberId}
+                    setCodeReviewTarget={setCodeReviewTarget}
                   />
                 )}
               </div>

@@ -137,6 +137,12 @@
   overflow-y: auto;
 }
 
+/* The branch selector below the welcome-page composer has less vertical room.
+ * Keep the popover within the main content shell and scroll only its branch list. */
+.code-branch--compact:not(.code-branch--environment) .code-branch__list {
+  max-height: 144px;
+}
+
 .code-branch__option,
 .code-branch__create {
   display: flex;
@@ -404,6 +410,10 @@
   box-shadow: var(--effect-shadow-sm);
 }
 
+.code-changes-card.is-discarded {
+  opacity: 0.72;
+}
+
 .code-changes-card__header {
   display: flex;
   align-items: center;
@@ -441,8 +451,17 @@
 
 .code-changes-card__heading span {
   display: flex;
+  align-items: center;
   gap: 7px;
   font-size: 12px;
+}
+
+.code-changes-card__status {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--color-surface-hover);
+  color: var(--color-text-secondary);
+  font-weight: 500;
 }
 
 .code-changes-card__refresh,
