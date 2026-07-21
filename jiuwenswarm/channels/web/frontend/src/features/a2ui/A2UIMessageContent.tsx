@@ -1,6 +1,6 @@
 ﻿// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, memo } from 'react';
 import { useA2UIActions } from '@a2ui/react';
 import { MarkdownRenderer } from '../../components/MarkdownRenderer';
 import {
@@ -46,7 +46,7 @@ function stableHash(input: string): string {
   return Math.abs(hash).toString(36);
 }
 
-export function A2UIMessageContent({
+export const A2UIMessageContent = memo(function A2UIMessageContent({
   content,
   messageId,
   isStreaming = false,
@@ -196,4 +196,4 @@ export function A2UIMessageContent({
       {isStreaming && <span className="streaming-cursor" />}
     </div>
   );
-}
+});

@@ -100,7 +100,7 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
   return (
     <div
       className="mt-4 pt-4 border-t border-border px-2.5"
-      style={{ borderColor: 'var(--border)' }}
+      style={{ borderColor: 'var(--color-border-default)' }}
     >
       <div
         className="flex items-center justify-between cursor-pointer"
@@ -110,11 +110,11 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
           <div
             className="w-7 h-7 rounded-lg flex items-center justify-center"
             style={{
-              background: 'linear-gradient(135deg, var(--accent), var(--accent-2))',
+              background: 'linear-gradient(135deg, var(--color-action-primary), var(--color-brand-secondary))',
             }}
           >
             <svg
-              className="w-4 h-4 text-white"
+              className="w-4 h-4 text-text-inverse"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -138,11 +138,11 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
         </div>
         <button
           className="w-6 h-6 rounded-md flex items-center justify-center"
-          style={{ backgroundColor: 'var(--bg-elevated)' }}
+          style={{ backgroundColor: 'var(--color-surface-elevated)' }}
           aria-label="toggle offload files"
         >
           <svg
-            className={`w-3.5 h-3.5 transition-transform ${
+            className={`w-3.5 h-3.5  ${
               isExpanded ? 'rotate-180' : ''
             }`}
             viewBox="0 0 20 20"
@@ -161,8 +161,8 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
         <div
           className="mt-3 rounded-lg border overflow-hidden"
           style={{
-            borderColor: 'var(--border)',
-            backgroundColor: 'var(--panel-strong)',
+            borderColor: 'var(--color-border-default)',
+            backgroundColor: 'var(--color-surface-panel-strong)',
           }}
         >
           <div className="max-h-40 overflow-y-auto">
@@ -185,13 +185,13 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
                 <button
                   key={filename}
                   onClick={() => handleOpenFile(filename)}
-                  className="w-full text-left px-3 py-2 text-xs transition-colors"
+                  className="w-full text-left px-3 py-2 text-xs "
                   style={{
-                    borderBottom: '1px solid var(--border)',
+                    borderBottom: '1px solid var(--color-border-default)',
                   }}
                   onMouseOver={(event) => {
                     event.currentTarget.style.backgroundColor =
-                      'var(--panel-hover)';
+                      'var(--color-surface-panel-hover)';
                   }}
                   onMouseOut={(event) => {
                     event.currentTarget.style.backgroundColor = 'transparent';
@@ -260,25 +260,25 @@ function OffloadFileModal({
       <div
         className="relative w-full max-w-2xl max-h-[80vh] overflow-hidden rounded-xl animate-rise"
         style={{
-          backgroundColor: 'var(--card)',
-          boxShadow: 'var(--shadow-xl)',
+          backgroundColor: 'var(--color-surface-card)',
+          boxShadow: 'var(--effect-shadow-xl)',
         }}
       >
         <div
           className="px-6 py-4 flex items-center gap-4"
           style={{
-            backgroundColor: 'var(--panel-strong)',
-            borderBottom: '1px solid var(--border)',
+            backgroundColor: 'var(--color-surface-panel-strong)',
+            borderBottom: '1px solid var(--color-border-default)',
           }}
         >
           <div
             className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
             style={{
-              background: 'linear-gradient(135deg, var(--accent), var(--accent-2))',
+              background: 'linear-gradient(135deg, var(--color-action-primary), var(--color-brand-secondary))',
             }}
           >
             <svg
-              className="w-5 h-5 text-white"
+              className="w-5 h-5 text-text-inverse"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -294,11 +294,11 @@ function OffloadFileModal({
           <div className="min-w-0">
             <h2
               className="text-lg font-semibold truncate"
-              style={{ color: 'var(--text-strong)' }}
+              style={{ color: 'var(--color-text-strong)' }}
             >
               {filename || t('offloadFiles.previewFallback')}
             </h2>
-            <p className="text-sm" style={{ color: 'var(--muted)' }}>
+            <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
               {t('offloadFiles.previewTitle')}
             </p>
           </div>
@@ -308,7 +308,7 @@ function OffloadFileModal({
           className="px-6 py-5 overflow-y-auto"
           style={{
             maxHeight: '50vh',
-            backgroundColor: 'var(--card)',
+            backgroundColor: 'var(--color-surface-card)',
           }}
         >
           {isLoading && (
@@ -320,7 +320,7 @@ function OffloadFileModal({
           {!isLoading && !errorMessage && (
             <pre
               className="text-sm whitespace-pre-wrap break-words"
-              style={{ color: 'var(--text)' }}
+              style={{ color: 'var(--color-text-primary)' }}
             >
               {content || t('offloadFiles.emptyContent')}
             </pre>
@@ -330,24 +330,24 @@ function OffloadFileModal({
         <div
           className="px-6 py-4 flex justify-end"
           style={{
-            backgroundColor: 'var(--panel-strong)',
-            borderTop: '1px solid var(--border)',
+            backgroundColor: 'var(--color-surface-panel-strong)',
+            borderTop: '1px solid var(--color-border-default)',
           }}
         >
           <button
             onClick={onClose}
-            className="px-4 py-2 text-sm font-medium rounded-lg transition-colors"
+            className="px-4 py-2 text-sm font-medium rounded-lg "
             style={{
-              color: 'var(--muted)',
+              color: 'var(--color-text-secondary)',
               backgroundColor: 'transparent',
             }}
             onMouseOver={(event) => {
-              event.currentTarget.style.backgroundColor = 'var(--bg-hover)';
-              event.currentTarget.style.color = 'var(--text)';
+              event.currentTarget.style.backgroundColor = 'var(--color-surface-hover)';
+              event.currentTarget.style.color = 'var(--color-text-primary)';
             }}
             onMouseOut={(event) => {
               event.currentTarget.style.backgroundColor = 'transparent';
-              event.currentTarget.style.color = 'var(--muted)';
+              event.currentTarget.style.color = 'var(--color-text-secondary)';
             }}
           >
             {t('common.close')}

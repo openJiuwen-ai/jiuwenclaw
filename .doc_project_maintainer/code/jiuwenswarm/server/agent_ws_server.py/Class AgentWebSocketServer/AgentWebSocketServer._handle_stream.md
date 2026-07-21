@@ -22,13 +22,14 @@ health:
   dependency_coupling: high
   test_coverage: partial
   observability: partial
-  performance_risk: medium
+  performance_risk: low
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:37:48Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:0f201b65eefd1358f01cf2a596973166607d2ae05d7d088411e035b929ed19e4
   confidence: confirmed
   expired_reason: null
 issues:
@@ -37,33 +38,38 @@ issues:
     severity: medium
     status: open
     summary: "Stream task registration can leak stale session entries before cleanup starts."
-    evidence: "The method registers _session_stream_tasks before agent resolution and mode sync, but the cleanup finally is only entered after heartbeat setup and stream iteration begin."
+    evidence: "Current HEAD 39feee89 registers current_task in _session_stream_tasks at lines 2195-2197.. See AgentWebSocketServer._handle_stream/risks.md#issue-001."
     suggested_action: "Wrap registration, agent resolution, heartbeat setup, streaming, and cleanup in one outer try/finally."
   - id: ISSUE-002
     dimension: performance_risk
     severity: medium
+    status: fixed
+    summary: "Heartbeat loop no longer leaves pending wait tasks behind."
+    evidence: "Current lines 2224-2227 directly await heartbeat_event.wait() through asyncio.wait_for; the prior. See AgentWebSocketServer._handle_stream/risks.md#issue-002."
+    suggested_action: "No code change required; add a heartbeat lifecycle regression test when practical."
+  - id: ISSUE-003
+    dimension: error_handling
+    severity: medium
     status: open
-    summary: "Heartbeat loop creates wait tasks without canceling pending waiters."
-    evidence: "Each heartbeat iteration creates heartbeat_event.wait() and stream_stop_event.wait() tasks via asyncio.ensure_future; pending tasks from asyncio.wait are ignored before the next loop."
-    suggested_action: "Cancel and await pending wait tasks, or restructure the loop around a reusable timeout/wait path."
-confidence: confirmed
-details: {}
+    summary: "Unexpected heartbeat failures can surface late and mask the stream outcome."
+    evidence: "The heartbeat loop catches only cancellation and WebSocketConnectionClosed. Finalization cancels and. See AgentWebSocketServer._handle_stream/risks.md#issue-003."
+    suggested_action: "Capture and log unexpected heartbeat exceptions, and prevent heartbeat teardown from replacing the primary stream."
+  - id: ISSUE-004
+    dimension: state_mutation
+    severity: medium
+    status: open
+    summary: "One task slot per session cannot represent concurrent streams."
+    evidence: "_session_stream_tasks[session_id] = current_task overwrites any existing stream for that session.. See AgentWebSocketServer._handle_stream/risks.md#issue-004."
+    suggested_action: "Use request-keyed or per-session task sets, or atomically cancel/reject the predecessor before replacement; add a."
 ---
 
-# `AgentWebSocketServer._handle_stream`
+# AgentWebSocketServer._handle_stream
 
 ## Actual Role
 
-Runs a streaming AgentServer request by registering the current task in `_session_stream_tasks`, resolving the agent/mode path, optionally restoring code-mode state, iterating agent stream chunks, sending E2A wire chunks, and running a heartbeat loop while long agent work is active.
+The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
 
-## Key Signals
+## Audit Details
 
-- Input: `AgentRequest` with stream flag and session context.
-- Output: multiple E2A chunk frames plus completion/error frames.
-- Main side effects: `_session_stream_tasks` mutation, heartbeat task, agent stream execution.
-- Main risk: stream registration and heartbeat cleanup span agent resolution, cancellation, WebSocket, and Gateway timeout boundaries.
-- Related tests: `test_agentserver_modes.py` covers selected stream mode paths; server-side heartbeat and cleanup tests are missing.
-
-## Detail Index
-
-- Detail docs pending.
+- [Reviewed behavior](AgentWebSocketServer._handle_stream/actual-behavior.md)
+- [Full issue evidence](AgentWebSocketServer._handle_stream/risks.md)

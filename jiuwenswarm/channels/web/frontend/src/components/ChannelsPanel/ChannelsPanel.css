@@ -6,12 +6,11 @@
   width: 2.25rem;
   align-items: center;
   justify-content: center;
-  color: var(--text-muted);
-  transition: color var(--duration-fast) ease;
+  color: var(--color-text-secondary);
 }
 
 .channels-panel__visibility-toggle:hover {
-  color: var(--text);
+  color: var(--color-text-primary);
 }
 
 .channels-panel__icon {
@@ -32,7 +31,7 @@
   align-items: center;
   justify-content: center;
   padding: 1rem;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--color-channel-backdrop);
 }
 
 .channels-panel__modal {

@@ -260,9 +260,13 @@ function spawnFallbackAsync(filePath: string, onExit?: () => void): void {
  * Open a folder in the system file explorer (not an editor).
  * - Windows: explorer
  * - macOS: open -R (reveals in Finder)
- * - Linux: xdg-open
+ * - Linux: xdg-open (requires a GUI/Display; falls back gracefully on headless servers)
+ *
+ * Returns true if an explorer was (likely) launched, false if the platform
+ * has no GUI explorer available (e.g. a headless Linux server). Callers can
+ * use the false return to show a copyable path hint instead.
  */
-export function openFolderInExplorer(folderPath: string): void {
+export function openFolderInExplorer(folderPath: string): boolean {
   const spawnOptions: SpawnSyncOptions = { stdio: "inherit" };
 
   // Ensure folder exists before opening (explorer opens Documents if path doesn't exist)
@@ -276,9 +280,23 @@ export function openFolderInExplorer(folderPath: string): void {
 
   if (process.platform === "win32") {
     spawnSync(`explorer "${folderPath}"`, { ...spawnOptions, shell: true });
+    return true;
   } else if (process.platform === "darwin") {
     spawnSync("open", ["-R", folderPath], spawnOptions);
+    return true;
   } else {
-    spawnSync("xdg-open", [folderPath], spawnOptions);
+    // Headless Linux server: no xdg-open, no DISPLAY → don't block on a
+    // spawnSync that will just hang or error out. Tell the caller to fall
+    // back to a path hint.
+    const hasDisplay = !!process.env.DISPLAY || !!process.env.WAYLAND_DISPLAY;
+    if (!hasDisplay) {
+      return false;
+    }
+    try {
+      const res = spawnSync("xdg-open", [folderPath], spawnOptions);
+      return res.status === 0 || res.status === null;
+    } catch {
+      return false;
+    }
   }
 }

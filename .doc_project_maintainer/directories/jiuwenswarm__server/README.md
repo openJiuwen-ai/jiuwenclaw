@@ -4,7 +4,7 @@ encoded: jiuwenswarm__server
 modules:
   - agentserver-runtime
 confidence: confirmed
-last_updated: 2026-07-07
+last_updated: 2026-07-15
 read_when: "Editing AgentServer entrypoints, WebSocket dispatch, runtime services, sandbox, hooks, or gateway push."
 ---
 
@@ -30,6 +30,11 @@ Contains the AgentServer process entrypoint, the WebSocket server used by Gatewa
 - `gateway-agentserver-e2a-chat`: normal request/response and streaming chat.
 - `agentserver-session-lifecycle`: session state, history, rewind, delete, fork.
 - `agentserver-server-push`: out-of-band downstream events.
+- `agentserver-command-mcp`: MCP config mutation, reload, and tool discovery.
+- `agentserver-sandbox-runtime`: persisted sandbox policy, JiuwenBox, and runtime application.
+- `agentserver-plan-mode-exit`: checkpoint mode restoration and exit push.
+- `agentserver-schedule-auto-harness`: durable scheduled tasks and autonomous execution.
+- `agentserver-history-stream`: paged history storage-to-frontend reconstruction.
 
 ## Related Code Symbols
 
@@ -42,4 +47,4 @@ Contains the AgentServer process entrypoint, the WebSocket server used by Gatewa
 
 ## Coverage
 
-Partial. `agent_ws_server.py` has 152 discovered symbols; selected high-risk cards exist, but most entry docs and all trusted audits remain pending.
+Partial at directory scope. `agent_ws_server.py` has 158 required symbols (1 class, 29 top-level functions, 128 methods); all 128 class methods have entry docs and remain `agent_audited`. The normalized-AST scan at `10afedf2` found 0 source-expired method audits. Current integrity verification trusts 59 records and flags 69 non-source-expired cards whose entry-document hashes changed. The frozen queue excludes 6 newly observed unaudited methods, and file/class/function coverage plus other `jiuwenswarm/server` classes remain incomplete.

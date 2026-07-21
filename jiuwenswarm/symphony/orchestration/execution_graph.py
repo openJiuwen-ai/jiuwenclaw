@@ -81,6 +81,7 @@ def _project_edge(edge: dict[str, Any]) -> dict[str, Any]:
         "target": target,
         "type": edge.get("type") or edge.get("relation_type") or "can_feed",
         "confidence": edge.get("confidence"),
+        "method": edge.get("method"),
         "evidence": edge.get("evidence") or edge.get("supporting_fields") or {},
     }
 

@@ -44,7 +44,13 @@ JiuwenSwarm session data is stored in the local workspace with the following str
 |------------------|------|-------------|
 | `sess_` | Regular Session | Conversation sessions initiated via Web, Feishu, etc. |
 | `heartbeat_` | Heartbeat Session | System heartbeat task sessions |
-| `cron_` | Cron Session | Scheduled task sessions triggered by cron jobs |
+| `cron_` | Cron Session | Scheduled task sessions (`cron_id` is non-empty in `metadata.json`) |
+
+**Session type distinction:**
+
+- **Regular sessions**: `cron_id` is empty; retrieved via `project.get_sessions`
+- **Cron sessions**: `cron_id` is non-empty (set to the `CronJob.id`); retrieved via `project.get_cron_sessions`, supports filtering by `cron_id` for all historical runs of a task
+- The two types are mutually exclusive in project view; `project.list` `session_count` only counts regular sessions
 
 **metadata.json File Content:**
 
@@ -60,6 +66,8 @@ JiuwenSwarm session data is stored in the local workspace with the following str
 | `title` | Session title (usually first message summary) | `Help me write a technical document` |
 | `message_count` | Total message count | `15` |
 | `mode` | Execution mode | `agent.plan` |
+| `project_id` | Project ID the session belongs to | `proj_abc123` (empty string = default project) |
+| `cron_id` | Source cron job ID | Empty for regular sessions; non-empty for cron-triggered sessions |
 
 **history.json File Content:**
 

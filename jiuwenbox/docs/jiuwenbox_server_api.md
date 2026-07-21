@@ -493,9 +493,11 @@ print(resp.json())
 
 接口：`POST /api/v1/sandboxes/{sandbox_id}/exec_background`
 
-用途：在沙箱内启动后台进程，进程创建后立即返回。`Popen` 成功即 `started=true`；**不**区分长任务与瞬时任务。
+用途：在沙箱内启动后台进程，进程创建后立即返回。与 ``exec`` 相同，命令由沙箱 daemon 在**同一 PID 命名空间**内 ``fork+exec``，不再为每次后台任务单独 spawn bubblewrap。
 
-`running`、`exit_code` 为**返回时刻的快照**：服务端在 spawn 后对跟踪的 bwrap 监控进程调用一次 `poll()`。命令本身可能很快结束，但 bwrap 清理/回收可能尚未完成，因此 `python3 --version` 这类瞬时命令在 `exec_background` 响应里 **`running` 仍常为 `true`**。要可靠判断结束并读取输出，请轮询 `GET .../background/{job_id}`。
+`running`、`exit_code` 为**返回时刻的快照**（daemon 在 spawn 后立即响应）。瞬时命令可能在 `exec_background` 响应里已显示 `running=false`；长任务则 `running=true`。要可靠判断结束并读取输出，请轮询 `GET .../background/{job_id}`。
+
+`pid` 为**沙箱 PID 命名空间内**的用户进程 pid（与 ``sandbox exec ps`` 中看到的 pid 一致），不是 host 上的 bwrap 监控进程 pid。
 
 请求体（`BackgroundExecRequest`）：
 
@@ -507,7 +509,7 @@ print(resp.json())
 | `env` | object | 否 | 额外环境变量 |
 | `stdin` | string | 否 | 标准输入文本 |
 | `timeout_seconds` | int | 否 | 预留字段 |
-| `capture_output` | bool | 否 | 默认 `true`；为 `true` 时将 stdout/stderr 写入 host `{control_dir}/bg-logs/{job_id}.out\|.err` |
+| `capture_output` | bool | 否 | 默认 `true`；为 `true` 时将 stdout/stderr 写入沙箱内 `/tmp/.jiuwenbox-bg/{job_id}.out\|.err`，由 daemon 在 `bg-get` 时经 IPC 读回 |
 
 错误码：`job_id` 格式非法 → **400**；同 sandbox 内 `job_id` 已占用 → **409**；沙箱非 ready → **409**。
 

@@ -8,7 +8,7 @@ class: AgentWebSocketServer
 signature: "_prepare_code_mode_chat_turn(request: AgentRequest, channel_id: str) -> tuple[str, str | None, Any]"
 health:
   overall: watch
-  name_behavior_match: good
+  name_behavior_match: partial
   responsibility_focus: single
   length: short
   complexity: low
@@ -36,8 +36,8 @@ issues:
     dimension: test_coverage
     severity: medium
     status: open
-    summary: "Direct target tests do not lock the AgentManager selection arguments."
-    evidence: "Direct tests assert returned mode/sub_mode and that get_agent was awaited, but not channel_id, mapped agent mode, project_dir, or sub_mode arguments. Adjacent tests cover mode resolution, project_dir resolution, stream team/code.team paths, and manager project_dir cache identity separately."
+    summary: "Direct tests do not lock AgentManager selection arguments."
+    evidence: "Tests assert returned mode/sub_mode and only that get_agent was awaited, not channel_id, mapped mode, project_dir, or sub_mode. The interrupt-resume case now duplicates the happy path because approval gates were removed."
     suggested_action: "Add direct _prepare_code_mode_chat_turn assertions for get_agent(channel_id, mode, project_dir, sub_mode), including params project_dir, metadata project_dir, auto_harness.plan mapping, and None-agent failure."
   - id: ISSUE-002
     dimension: observability
@@ -46,6 +46,13 @@ issues:
     summary: "No-agent failure loses selection context."
     evidence: "The method raises ValueError('Failed to get agent') after get_agent returns None; the outer handler reports only request_id plus the generic message."
     suggested_action: "Include channel_id, logical mode, agent_mode, sub_mode, and project_dir in the raised error or a structured log before propagating."
+  - id: ISSUE-003
+    dimension: name_behavior_match
+    severity: low
+    status: open
+    summary: "The method name understates its all-mode selection role."
+    evidence: "Unary and stream callers use it for every non-stateless chat turn; it resolves agent, team, code, and auto_harness modes rather than only code mode."
+    suggested_action: "Rename it to describe general chat-turn agent selection, or narrow its callers and contract to code mode."
 confidence: confirmed
 details: {}
 ---
@@ -61,8 +68,8 @@ Resolves and canonicalizes a chat request's mode, maps logical `auto_harness` to
 - Input: `AgentRequest` plus resolved `channel_id`.
 - Output: Tuple of logical mode, sub-mode, and resolved agent.
 - Main side effects: Canonicalizes `request.params["mode"]`; may create or reuse an agent through `AgentManager.get_agent`.
-- Main risk: The selection contract depends on helper side effects and exact mode/project_dir/sub_mode arguments that are only partially pinned by tests.
-- Related tests: Direct prepare tests exist, with adjacent helper, stream, and manager tests; exact `get_agent` argument coverage is partial.
+- Main risk: Its broad all-mode selection contract and exact manager arguments are only partially pinned by tests.
+- Related tests: Two direct tests exist, but one is a legacy duplicate and neither asserts manager arguments or failure. Local execution is blocked at collection by missing `openjiuwen.auto_harness`; the dedicated plan-exit flow remains pending.
 
 ## Detail Index
 

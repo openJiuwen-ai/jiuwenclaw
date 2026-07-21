@@ -36,16 +36,16 @@ issues:
     dimension: boundary_safety
     severity: high
     status: open
-    summary: "Common MCP credential headers can be returned unmasked."
-    evidence: "The helper only matches api_key with an underscore plus token/authorization/secret; MCP config accepts arbitrary headers and a key like x-api-key does not match."
-    suggested_action: "Normalize key separators and expand the sensitive vocabulary, or mask all values under env and headers by default."
+    summary: "Common MCP credentials can be returned unmasked."
+    evidence: "Only api_key, token, authorization, and secret substrings are matched. MCP accepts arbitrary headers/env, so x-api-key, password/passwd, credential, cookie, and access-key keys can pass through."
+    suggested_action: "Normalize separators and expand credential vocabulary; preferably mask all values inside env and headers containers by policy."
   - id: ISSUE-002
     dimension: test_coverage
     severity: medium
     status: open
-    summary: "Masking behavior has only indirect narrow coverage."
-    evidence: "Observed test coverage asserts env.TOKEN masking through command.mcp list only; no direct tests cover recursion, headers, password-like keys, or hyphenated API-key names."
-    suggested_action: "Add direct unit tests for nested env/headers, Authorization, x-api-key, password/passwd, and non-sensitive fields."
+    summary: "Masking behavior has only narrow indirect coverage."
+    evidence: "One command.mcp list test asserts env.TOKEN masking; no direct tests cover nested containers, response actions, headers, password-like keys, hyphenated API-key names, or safe fields."
+    suggested_action: "Add direct table-driven tests and response-path tests for every command.mcp action."
 confidence: confirmed
 details: {}
 ---
@@ -54,14 +54,14 @@ details: {}
 
 ## Actual Role
 
-Recursively copies dict/list payloads and replaces values with `***` when key names contain `api_key`, `token`, `authorization`, or `secret`, or when string values contain bearer/API-key/secret markers. It is used as the response-side masking boundary for `command.mcp` config items.
+Recursively copies dict/list payloads and replaces matched values with `***` based on key substrings or bearer/API-key/secret value markers. It is the response-side credential filter for `command.mcp` list, show, enable/disable, remove, and update results.
 
 ## Key Signals
 
-- Input: Any payload, practically MCP server config dicts/lists from config and normalized command payloads.
+- Input: any payload; practically nested MCP config dictionaries/lists containing headers, env, transport, and command fields.
 - Output: Same JSON-like shape with matched sensitive values masked; primitives are returned unchanged.
 - Main side effects: None.
-- Main risk: Pattern-based masking misses common credential names such as `x-api-key`, `password`, `credential`, `access_key`, and generic auth headers.
+- Main risk: denylist matching misses common arbitrary header/env credential names and can expose them over the websocket response.
 - Related tests: One indirect command.mcp list test asserts `env.TOKEN` is masked.
 
 ## Detail Index

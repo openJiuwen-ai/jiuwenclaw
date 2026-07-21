@@ -12,8 +12,8 @@ health:
   responsibility_focus: single
   length: short
   complexity: low
-  implementation_soundness: sound
-  boundary_safety: safe
+  implementation_soundness: partial
+  boundary_safety: partial
   input_contract: clear
   output_contract: clear
   side_effects: explicit
@@ -22,7 +22,7 @@ health:
   dependency_coupling: medium
   test_coverage: partial
   observability: clear
-  performance_risk: low
+  performance_risk: medium
 audit:
   status: unaudited
   auditor: null
@@ -33,6 +33,13 @@ audit:
   expired_reason: null
 issues:
   - id: ISSUE-001
+    dimension: boundary_safety
+    severity: medium
+    status: open
+    summary: "Checkpointer readiness has no timeout and is not revalidated after initial setup."
+    evidence: "The helper awaits ensure_persistent_checkpointer without a deadline. Its callee may wait on a process-global lock and CheckpointerFactory.create, then permanently short-circuits on _PERSISTENT_CHECKPOINTER_READY without checking the current default backend's health."
+    suggested_action: "Bound initialization/lock wait time and define a health or reset path so destructive callers fail closed when a previously initialized backend becomes unavailable."
+  - id: ISSUE-002
     dimension: test_coverage
     severity: low
     status: open
@@ -47,14 +54,14 @@ details: {}
 
 ## Actual Role
 
-Acts as a fail-closed delete-flow guard for persistent checkpoint storage. It imports and awaits the DeepAdapter persistent checkpointer initializer; on success it returns `None`, and on failure it logs the exception and returns an `AgentResponse` with `ok=false`, `code=CHECKPOINT_UNAVAILABLE`, request/channel identity, and request metadata preserved.
+Acts as the fail-closed checkpoint-setup guard used before `team.delete` and `session.delete`. It awaits the process-wide DeepAdapter initializer and returns `None` on success; any ordinary exception is logged and normalized into a metadata-preserving `CHECKPOINT_UNAVAILABLE` `AgentResponse`.
 
 ## Key Signals
 
 - Input: Active `AgentRequest`; uses request id, channel id, and metadata in the fallback response.
 - Output: `None` when persistent checkpointer setup succeeds, or a structured error `AgentResponse` when setup fails.
 - Main side effects: May initialize the process-wide sqlite persistence checkpointer and logs exceptions on failure.
-- Main risk: Behavior is only tested through delete handlers, not as a direct helper or live E2A wire contract.
+- Main risk: Initialization and lock waits are unbounded, while a process-wide ready flag suppresses later backend health checks; behavior is only tested through delete handlers.
 - Related tests: Adjacent tests cover `team.delete` and `session.delete` checkpointer-unavailable responses and session.delete success initialization.
 
 ## Detail Index

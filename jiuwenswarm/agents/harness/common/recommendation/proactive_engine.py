@@ -149,13 +149,20 @@ class ProactiveEngine:
         new_max_per_day = _safe_proactive_int(config.get("max_recommend_per_day", self._max_per_day), self._max_per_day)
         new_max_rounds = _safe_proactive_int(config.get("max_rounds_per_tick", self._max_rounds), self._max_rounds)
 
+        # 当日推荐计数 _daily_counts 不重置——它是"今天实际推了几条"的客观事实，清掉反而会让
+        # 调小上限时 count 归零 < 新上限，在已超额的情况下继续推送，违反上限语义。
+        # 上限提醒已改为前端弹窗 + 每次命中都推，无需清任何去重标记。
+
         self._max_per_day = new_max_per_day
         self._max_rounds = new_max_rounds
         self._enabled = new_enabled
         logger.info("[ProactiveEngine] config reloaded (enabled=%s, max_per_day=%d)",
                    new_enabled, new_max_per_day)
 
-    async def tick_now(self, target_channel: str | None = None) -> bool:
+    async def tick_now(
+        self,
+        target_channel: str | None = None,
+    ) -> bool:
         """Trigger a recommendation tick.
 
         This is the main API for external callers (CronScheduler, manual triggers).
@@ -230,7 +237,8 @@ class ProactiveEngine:
         if _today_recommend_count() >= self._max_per_day:
             logger.info("[ProactiveEngine] daily limit reached (%d/%d), skipping tick",
                        _today_recommend_count(), self._max_per_day)
-            # 推送通知提醒用户已到上限（每天最多推一次上限提醒，用 last_tick_at 兜底避免刷屏）
+            # 推送通知提醒用户已到上限。前端拦截 source=proactive_notification 后改走
+            # 顶部弹窗（不进会话历史），故这里每次命中上限都推一次，无需去重。
             if self._send_notification_callback is not None:
                 try:
                     await self._send_notification_callback(
@@ -282,6 +290,10 @@ class ProactiveEngine:
             return False
 
         # ── Step 5: Pick delivery target ───────────────────────
+        # 两种触发（cron 自然到点 / Cron 面板"立即执行"）统一：都用"最活跃会话"。
+        # find_session_for_channel / most_recent_active_session 的选法已修：不再要求历史
+        # 完整、_scan_sessions 走缓存拿最新 last_message_at，故刚发消息、assistant 还没
+        # 回完的当前会话也能被准确选为最活跃会话。
         if target_channel:
             target_session = report.find_session_for_channel(target_channel)
             if not target_session:
@@ -296,41 +308,49 @@ class ProactiveEngine:
                 return False
 
         # ── Step 6: Trigger main agent to generate & deliver ────
+        # fire-and-forget：trigger_main_agent 把主 agent 跑一轮丢后台 task，立即返回
+        # True（表示"已触发"），让调用方 cron 秒回不超时。Step 7 的状态更新不在
+        # 这里立即做，而是包成 on_delivered 回调——后台 task 真正跑完、推荐确实送达
+        # 后才回调执行计数/持久化，避免"触发即计数、后台失败却已计数"的名不副实。
         if self._trigger_main_agent_callback is None:
             logger.warning("[ProactiveEngine] no trigger_main_agent_callback, skipping")
             self._last_tick_at = time.time()
             return False
 
-        delivered = await _trigger_main_agent(
+        def _on_delivered() -> None:
+            """后台送达后才执行的状态更新（Step 7）。"""
+            _increment_daily_count()
+            _mark_recommended(decision.target, state)
+            state.add_recommendation({
+                "type": decision.type,
+                "target": decision.target,
+                "reason": decision.reason,
+                "urgency": decision.urgency,
+                "tick_at": time.time(),
+                "session_id": target_session.session_id,
+            })
+            state.touch()
+            save_recommendation_state(state)
+            logger.info("[ProactiveEngine] delivered '%s' (type=%s, urgency=%.2f, session=%s)",
+                         decision.target, decision.type, decision.urgency,
+                         target_session.session_id[:20])
+
+        triggered = await _trigger_main_agent(
             session_id=target_session.session_id,
             channel_id=target_channel,
             decision=decision,
             trigger_callback=self._trigger_main_agent_callback,
+            on_delivered=_on_delivered,
         )
-        if not delivered:
-            logger.info("[ProactiveEngine] not delivered (session busy or trigger failed), skipping")
+        if not triggered:
+            logger.info("[ProactiveEngine] not triggered (session busy, duplicate inflight, "
+                        "or trigger failed), skipping")
             self._last_tick_at = time.time()
             return False
 
-        # ── Step 7: Update state ────────────────────────────────
-        _increment_daily_count()
-        _mark_recommended(decision.target, state)
-        state.add_recommendation({
-            "type": decision.type,
-            "target": decision.target,
-            "reason": decision.reason,
-            "urgency": decision.urgency,
-            "tick_at": time.time(),
-            "session_id": target_session.session_id,
-        })
-        state.touch()
-
-        save_recommendation_state(state)
+        # 已 fire-and-forget 触发：立即返回，后台跑完会回调 _on_delivered 做计数。
+        # cron 端不等主 agent，秒回不超时；_last_tick_at 立即更新让下次 tick 排程正常。
         self._last_tick_at = time.time()
-
-        logger.info("[ProactiveEngine] delivered '%s' (type=%s, urgency=%.2f, session=%s)",
-                     decision.target, decision.type, decision.urgency,
-                     target_session.session_id[:20])
         return True
 
     # ── Maintenance helpers (called by Cron or manually) ─────────

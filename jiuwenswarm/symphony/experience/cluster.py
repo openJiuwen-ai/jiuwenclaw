@@ -144,7 +144,7 @@ def _faiss_cluster(
     try:
         import faiss
     except ImportError:
-        LOGGER.debug("FAISS not available, falling back to single-cluster")
+        LOGGER.warning("FAISS not available, falling back to single-cluster")
         return [0] * n
 
     # Normalize vectors for inner-product = cosine similarity

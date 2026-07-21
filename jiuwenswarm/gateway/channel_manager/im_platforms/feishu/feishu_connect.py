@@ -23,6 +23,11 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_file_service
     is_audio_file,
     is_video_file,
 )
+from jiuwenswarm.gateway.channel_manager.im_platforms.feishu.feishu_streaming_card import (
+    CardKitError,
+    FeishuCardKitClient,
+    FeishuStreamingSession,
+)
 from jiuwenswarm.gateway.channel_manager.im_platforms.platform_adapter.message import MessageStore
 from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
@@ -193,6 +198,10 @@ class FeishuChannel(BaseChannel):
         self._stopping = False
         # 按 request_id 聚合 chat.delta，避免同一任务被拆分成多条消息发送到飞书。
         self._stream_text_buffers: dict[str, str] = {}
+        self._cardkit_sessions: dict[str, FeishuStreamingSession] = {}
+        self._cardkit_buffers: dict[str, str] = {}
+        self._cardkit_lock = asyncio.Lock()
+        self._cardkit_client: FeishuCardKitClient | None = None
         # 文件服务（延迟初始化）
         self._file_service: FeishuFileService | None = None
         # 按 request_id 记录已通过 chat.file 发送的文件路径，用于兜底去重
@@ -551,6 +560,13 @@ class FeishuChannel(BaseChannel):
         self._running = False
         self._stopping = True
         self._stream_text_buffers.clear()
+        for session in list(self._cardkit_sessions.values()):
+            try:
+                await session.finalize()
+            except CardKitError:
+                logger.warning("停止时关闭飞书流式卡片失败", exc_info=True)
+        self._cardkit_sessions.clear()
+        self._cardkit_buffers.clear()
 
         if self._websocket_client and self._ws_thread_loop and self._ws_thread_loop.is_running():
             try:
@@ -754,8 +770,6 @@ class FeishuChannel(BaseChannel):
         chat_type = str(getattr(message, "chat_type", "") or "")
 
         result = text
-        target_user_open_id = self._get_target_user_open_id()
-
         # 从本次消息的 mentions 列表实时提取 bot 名（局部变量，不缓存）
         bot_name_in_msg = ""
 
@@ -1170,6 +1184,7 @@ class FeishuChannel(BaseChannel):
         content: str,
         timestamp_ms: int,
         metadata: dict[str, Any],
+        files: list[dict[str, Any]] | None = None,
     ) -> None:
         """将同一用户的连续消息做短暂聚合，再统一交给 gateway 入站链路。"""
         if self._is_control_message(content):
@@ -1198,6 +1213,7 @@ class FeishuChannel(BaseChannel):
                 merged_content=content,
                 timestamp_ms=timestamp_ms,
                 metadata=metadata,
+                files=files,
             )
             return
 
@@ -1218,6 +1234,7 @@ class FeishuChannel(BaseChannel):
                     "content": content,
                     "timestamp_ms": timestamp_ms,
                     "metadata": dict(metadata),
+                    "files": list(files) if files else None,
                 }
             )
 
@@ -1292,12 +1309,19 @@ class FeishuChannel(BaseChannel):
                 len(items),
             )
 
+        # 文件不合并：取末条带 files 的 item（文本已 merge，文件通常单条携带）。
+        merged_files: list[dict[str, Any]] | None = None
+        for item in reversed(items):
+            if item.get("files"):
+                merged_files = list(item["files"])
+                break
         await self._process_batched_message(
             chat_id=batch["chat_id"],
             open_id=batch["open_id"],
             merged_content=merged_content,
             timestamp_ms=int(last_item["timestamp_ms"]),
             metadata=merged_metadata,
+            files=merged_files,
         )
 
     async def _process_batched_message(
@@ -1308,6 +1332,7 @@ class FeishuChannel(BaseChannel):
         merged_content: str,
         timestamp_ms: int,
         metadata: dict[str, Any],
+        files: list[dict[str, Any]] | None = None,
     ) -> None:
         """对单条或合并后的消息做平台整理后转发。"""
         chat_type = metadata.get("chat_type", "")
@@ -1320,6 +1345,9 @@ class FeishuChannel(BaseChannel):
         enriched_metadata["im_sender_user_id"] = open_id
         enriched_metadata["im_thread_id"] = chat_id
 
+        params: dict[str, Any] = {"content": merged_content, "query": merged_content}
+        if files:
+            params["files"] = files
         inbound = FeishuInboundMessage(
             message_id=enriched_metadata.get("message_id", ""),
             chat_id=chat_id,
@@ -1327,6 +1355,7 @@ class FeishuChannel(BaseChannel):
             user_id=open_id,
             bot_id=self.config.app_id or "",
             metadata=enriched_metadata,
+            params=params,
         )
         await self._handle_message(inbound)
 
@@ -1568,6 +1597,11 @@ class FeishuChannel(BaseChannel):
                 await self._send_ask_user_question_card(msg)
                 return
 
+            if streaming_enabled and await self._handle_cardkit_streaming_event(
+                msg, event_name, payload, meta, route_delivery
+            ):
+                return
+
             # 流式增量：先缓存；若开启流式则实时发送，否则仅缓存不发送。
             if event_name == "chat.delta":
                 delta = self._extract_message_content(msg)
@@ -1779,6 +1813,151 @@ class FeishuChannel(BaseChannel):
         except Exception as e:
             logger.error(f"发送飞书消息时发生异常: {e}")
             raise
+
+    async def _handle_cardkit_streaming_event(
+        self,
+        msg: Message,
+        event_name: str,
+        payload: dict[str, Any],
+        metadata: dict[str, Any],
+        delivery: DeliveryTarget | None,
+    ) -> bool:
+        """Route model output to one CardKit card while it is being generated."""
+        if event_name not in {
+            "chat.delta",
+            "chat.final",
+            "chat.error",
+            "chat.interrupt_result",
+            "chat.processing_status",
+            "chat.tool_call",
+            "chat.tool_result",
+            "todo.updated",
+        }:
+            return False
+        if event_name in {"chat.tool_call", "chat.tool_result", "todo.updated"}:
+            return True
+        if (
+            event_name == "chat.interrupt_result"
+            and payload.get("intent") in {"pause", "resume"}
+            and payload.get("has_active_task") is True
+        ):
+            return True
+
+        if delivery is not None and delivery.chat_id:
+            receive_id = delivery.chat_id
+            id_type = delivery.id_type or "chat_id"
+        else:
+            receive_id, id_type = self._extract_receive_info(msg)
+        if not receive_id:
+            return False
+        key = f"{msg.id}\0{receive_id}\0{id_type}"
+        session = self._cardkit_sessions.get(key)
+
+        if event_name == "chat.processing_status":
+            if payload.get("is_processing") is False:
+                return await self._finalize_cardkit_session(key, session, "")
+            return await self._start_cardkit_session(key, receive_id, id_type)
+
+        if event_name == "chat.delta":
+            if not await self._start_cardkit_session(key, receive_id, id_type):
+                return False
+            session = self._cardkit_sessions[key]
+            text = self._cardkit_buffers.get(key, "") + self._extract_message_content(msg)
+            self._cardkit_buffers[key] = text
+            session.replace(self._filter_user_info_for_group(text, metadata))
+            return True
+
+        if event_name == "chat.final" and payload.get("is_complete") is False:
+            if not await self._start_cardkit_session(key, receive_id, id_type):
+                return False
+            session = self._cardkit_sessions[key]
+            text = self._merge_stream_and_final_content(
+                self._cardkit_buffers.get(key, ""), self._extract_message_content(msg)
+            )
+            self._cardkit_buffers[key] = text
+            session.replace(self._filter_user_info_for_group(text, metadata))
+            return True
+
+        if event_name == "chat.final" and session is None:
+            if not await self._start_cardkit_session(key, receive_id, id_type):
+                return False
+            session = self._cardkit_sessions[key]
+        if session is None:
+            return False
+
+        terminal_text = self._extract_message_content(msg)
+        text = self._merge_stream_and_final_content(
+            self._cardkit_buffers.get(key, ""), terminal_text
+        )
+        return await self._finalize_cardkit_session(
+            key,
+            session,
+            self._filter_user_info_for_group(text, metadata),
+        )
+
+    async def _start_cardkit_session(
+        self,
+        key: str,
+        receive_id: str,
+        id_type: str,
+    ) -> bool:
+        async with self._cardkit_lock:
+            if key in self._cardkit_sessions:
+                return True
+            if self._cardkit_client is None:
+                self._cardkit_client = FeishuCardKitClient(
+                    self.config.app_id, self.config.app_secret
+                )
+
+            async def send_card(content: str) -> None:
+                await self._create_and_send_message(
+                    FeishuMessageSendRequest(
+                        receive_id=receive_id,
+                        id_type=id_type,
+                        msg_type="interactive",
+                        content=content,
+                        log_label="cardkit_stream",
+                    )
+                )
+
+            session = FeishuStreamingSession(self._cardkit_client, send_card)
+            try:
+                await session.start()
+            except Exception:
+                request_id, _, target_type = key.partition("\0")
+                logger.warning(
+                    "创建飞书流式卡片失败: request_id=%s target_type=%s",
+                    request_id,
+                    target_type.rsplit("\0", 1)[-1],
+                    exc_info=True,
+                )
+                return False
+            self._cardkit_sessions[key] = session
+            return True
+
+    async def _finalize_cardkit_session(
+        self,
+        key: str,
+        session: FeishuStreamingSession | None,
+        final_text: str,
+    ) -> bool:
+        if session is None:
+            return False
+        try:
+            await session.finalize(final_text)
+            return True
+        except CardKitError:
+            request_id, _, target_type = key.partition("\0")
+            logger.warning(
+                "完成飞书流式卡片失败: request_id=%s target_type=%s",
+                request_id,
+                target_type.rsplit("\0", 1)[-1],
+                exc_info=True,
+            )
+            return False
+        finally:
+            self._cardkit_sessions.pop(key, None)
+            self._cardkit_buffers.pop(key, None)
 
     def _detect_workspace_files(self, text: str) -> list[str]:
         """从文本中提取 workspace 下实际存在的文件路径。
@@ -2456,7 +2635,7 @@ class FeishuChannel(BaseChannel):
             # 两者共用同一套校验与报错，拦截后直接回发提示并中止处理。
             _content_stripped = (content or "").strip()
             if (
-                self.config.enable_streaming == False
+                not self.config.enable_streaming
                 and (
                     _content_stripped == "/mode team"
                     or _content_stripped.startswith("/join ")
@@ -2517,11 +2696,6 @@ class FeishuChannel(BaseChannel):
             except Exception:
                 pass
 
-            # 构建消息参数
-            params = {"content": content, "query": content}
-            if file_info:
-                params["files"] = [file_info]
-
             # 构建基础 metadata
             base_metadata = {
                 "message_id": message.message_id,
@@ -2564,6 +2738,7 @@ class FeishuChannel(BaseChannel):
                     content=content,
                     timestamp_ms=_ts,
                     metadata=_meta,
+                    files=[file_info] if file_info else None,
                 )
             else:
                 await self._process_batched_message(
@@ -2572,6 +2747,7 @@ class FeishuChannel(BaseChannel):
                     merged_content=content,
                     timestamp_ms=_ts,
                     metadata=_meta,
+                    files=[file_info] if file_info else None,
                 )
 
         except Exception as e:

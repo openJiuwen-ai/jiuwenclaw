@@ -241,14 +241,26 @@ class TraceEvaluator:
 
     @staticmethod
     def _fallback(record: TraceRecord) -> None:
-        """Heuristic fallback when LLM is unavailable or fails.
+        """Conservative fallback when LLM evaluation is unavailable or fails.
 
-        When we cannot evaluate skill correctness, conservatively mark
-        records with a non-empty result as correct (skill selection was
-        reasonable), and records with empty/poor results as incorrect.
+        Without the LLM we cannot reliably judge whether the skill selection
+        was correct, so the safe choice is to NOT treat a record as a positive
+        sample: default to ``success=False`` with ``error_type="unevaluated"``
+        so it is excluded from the experience bank rather than polluting it
+        with unverified successes.
+
+        Only clearly-failing cases (no query, no result, or an execution error
+        already flagged upstream) are given a more specific ``error_type``;
+        everything else is conservatively marked ``unevaluated``. Result
+        length is deliberately not used as a correctness signal.
         """
-        query = record.query or ""
+        query = (record.query or "").strip()
         result = record.result or ""
+
+        # Defensive: result should already be a str (parser normalizes it),
+        # but the fallback must not assume that.
+        if not isinstance(result, str):
+            result = "" if result is None else str(result)
 
         if not query:
             record.success = False
@@ -256,21 +268,24 @@ class TraceEvaluator:
             record.error_detail = "No user query found"
             return
 
-        if not result:
+        if not result.strip():
             record.success = False
             record.error_type = "empty"
             record.error_detail = "Skill returned empty result"
             return
 
-        if len(result) < len(query) * 0.3 and len(result) < 20:
+        # Upstream already flagged an execution error (e.g. skill raised) —
+        # keep that classification, it is more precise than "unevaluated".
+        if record.error_type:
             record.success = False
-            record.error_type = "incomplete"
-            record.error_detail = "Result too short relative to query"
+            if not record.error_detail:
+                record.error_detail = "Upstream-flagged error, not LLM-evaluated"
             return
 
-        record.success = True
-        record.error_type = None
-        record.error_detail = None
+        # Cannot judge without the LLM — conservatively exclude from the KB.
+        record.success = False
+        record.error_type = "unevaluated"
+        record.error_detail = "LLM evaluation unavailable; conservatively excluded"
 
 
 __all__ = ["TraceEvaluator"]

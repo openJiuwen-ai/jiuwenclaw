@@ -15,7 +15,7 @@ health:
   implementation_soundness: questionable
   boundary_safety: risky
   input_contract: weak
-  output_contract: implicit
+  output_contract: weak
   side_effects: explicit
   error_handling: partial
   state_mutation: shared
@@ -24,53 +24,66 @@ health:
   observability: partial
   performance_risk: medium
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:38:40Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:832c3981f728d32a69229e7fcba8ab20ad495a34bd680451642597d1f778f718
   confidence: confirmed
   expired_reason: null
 issues:
   - id: ISSUE-001
     dimension: boundary_safety
-    severity: medium
+    severity: high
     status: open
     summary: "turn_index is not validated as a positive 1-based value."
-    evidence: "The handler defaults missing turn_index to 0 and passes it through; the adapter later indexes user_positions[turn_index - 1], so 0 selects the last user turn."
-    suggested_action: "Require a present integer turn_index >= 1 before delegating to the adapter."
+    evidence: "See AgentWebSocketServer._handle_command_compact_partial/risks.md#issue-001 for full evidence."
+    suggested_action: "Require a present integer turn_index >= 1 before resolving or calling an agent."
   - id: ISSUE-002
     dimension: implementation_soundness
     severity: high
     status: open
-    summary: "The delegated adapter reads only legacy history.json while current session history prefers history.jsonl."
-    evidence: "compact_partial builds sessions_dir/session_id/history.json directly, while session_history defaults read/write behavior to JSONL unless legacy mode is used."
-    suggested_action: "Use the shared session history resolver/load helpers and add JSONL integration coverage."
+    summary: "The delegated adapter reads only legacy history.json while current session history."
+    evidence: "See AgentWebSocketServer._handle_command_compact_partial/risks.md#issue-002 for full evidence."
+    suggested_action: "Use the shared session history resolver/load helpers and add JSONL integration."
   - id: ISSUE-003
+    dimension: boundary_safety
+    severity: high
+    status: open
+    summary: "session_id controls an unchecked history read path."
+    evidence: "See AgentWebSocketServer._handle_command_compact_partial/risks.md#issue-003 for full evidence."
+    suggested_action: "Validate a canonical session ID and enforce containment under sessions_dir."
+  - id: ISSUE-004
     dimension: test_coverage
     severity: medium
     status: open
-    summary: "No direct handler tests cover compact_partial routing, validation, response, and error behavior."
-    evidence: "Existing compact_partial tests focus on service behavior rather than _handle_command_compact_partial or E2A routing."
-    suggested_action: "Add handler tests for success, missing/invalid turn_index, adapter failures, and mode/project forwarding."
-confidence: confirmed
-details: {}
+    summary: "No direct handler tests cover compact_partial routing, validation, response, and error."
+    evidence: "See AgentWebSocketServer._handle_command_compact_partial/risks.md#issue-004 for full evidence."
+    suggested_action: "Add handler tests for success, missing/invalid turn_index, adapter failures."
+  - id: ISSUE-005
+    dimension: output_contract
+    severity: medium
+    status: open
+    summary: "Adapter-level failed and no-turn results are reported as top-level success."
+    evidence: "See AgentWebSocketServer._handle_command_compact_partial/risks.md#issue-005 for full evidence."
+    suggested_action: "Map adapter status to a stable top-level ok/error contract and test each normal."
+  - id: ISSUE-006
+    dimension: error_handling
+    severity: medium
+    status: open
+    summary: "The broad BaseException handler can swallow process-level exits."
+    evidence: "See AgentWebSocketServer._handle_command_compact_partial/risks.md#issue-006 for full evidence."
+    suggested_action: "Catch Exception, with an explicit CancelledError passthrough if required."
 ---
 
-# `AgentWebSocketServer._handle_command_compact_partial`
+# AgentWebSocketServer._handle_command_compact_partial
 
 ## Actual Role
 
-Handles `command.compact_partial` by parsing `session_id`, `turn_index`, `direction`, mode, sub-mode, channel, and project directory, then delegating to `agent.compact_partial`. It sends the adapter payload as a single response and preserves cancellation/keyboard interrupts while normalizing other failures to `status=failed`.
+The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
 
-## Key Signals
+## Audit Details
 
-- Input: `params.turn_index`, `params.direction`, optional `params.mode`, session id, channel id, and request project directory.
-- Output: One websocket response containing the adapter result, or a failed status payload.
-- Main side effects: Calls the scoped runtime adapter and sends a websocket frame.
-- Main risk: Invalid turn indexes and legacy-history reads can target the wrong turn or miss current JSONL session history.
-- Related tests: Service-level compact_partial tests exist; direct handler coverage is missing.
-
-## Detail Index
-
-- Detail docs pending.
+- [Reviewed behavior](AgentWebSocketServer._handle_command_compact_partial/actual-behavior.md)
+- [Full issue evidence](AgentWebSocketServer._handle_command_compact_partial/risks.md)

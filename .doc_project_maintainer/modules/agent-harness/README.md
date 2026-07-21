@@ -2,7 +2,7 @@
 id: agent-harness
 name: Agent Harness
 confidence: inferred
-last_updated: 2026-07-07
+last_updated: 2026-07-13
 read_when: "Working on agent adapters, rails, tools, team runtime, skills, memory, or AutoHarness execution."
 ---
 
@@ -20,6 +20,13 @@ Provides the agent execution machinery behind AgentServer: adapters, rails, memo
 ## Current Evidence
 
 AgentServer calls this module family through `AgentManager`, adapter methods such as `process_message` and `process_message_stream`, team manager helpers, scheduler services, ACP output callbacks, and sandbox runtime patches.
+
+## Related Flows
+
+- `agentserver-command-mcp`: adapter MCP reconciliation after persisted config changes.
+- `agentserver-sandbox-runtime`: Agent recreation, sys-operation policy, and runtime hot patching.
+- `agentserver-plan-mode-exit`: plan approval rails and checkpoint-backed mode restoration.
+- `agentserver-schedule-auto-harness`: durable scheduler tasks and autonomous Harness execution.
 
 ## Pending
 

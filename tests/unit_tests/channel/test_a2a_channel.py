@@ -3,7 +3,12 @@ import time
 
 import pytest
 
-from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import A2AChannel, A2AChannelConfig
+from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import (
+    A2A_THOUGHT_METADATA_KEY,
+    A2AChannel,
+    A2AChannelConfig,
+    _A2AAgentExecutor,
+)
 from jiuwenswarm.common.schema.message import EventType, Message
 
 
@@ -302,3 +307,208 @@ def test_executor_empty_query_emits_failed_task_lifecycle():
         assert status_event.status.state == TaskState.TASK_STATE_FAILED
 
     asyncio.run(_run())
+
+
+def _make_message(
+    *,
+    payload: dict,
+    event_type: EventType,
+    msg_id: str = "req-r",
+) -> Message:
+    return Message(
+        id=msg_id,
+        type="event",
+        channel_id="a2a",
+        session_id="s1",
+        params={},
+        timestamp=time.time(),
+        ok=True,
+        payload=payload,
+        event_type=event_type,
+    )
+
+
+def test_is_reasoning_message_detection():
+    reasoning_event = _make_message(
+        payload={"content": "let me think"},
+        event_type=EventType.CHAT_REASONING,
+    )
+    reasoning_delta = _make_message(
+        payload={"content": "thinking", "source_chunk_type": "llm_reasoning"},
+        event_type=EventType.CHAT_DELTA,
+    )
+    plain_delta = _make_message(
+        payload={"content": "answer"},
+        event_type=EventType.CHAT_DELTA,
+    )
+
+    assert A2AChannel.is_reasoning_message(reasoning_event) is True
+    assert A2AChannel.is_reasoning_message(reasoning_delta) is True
+    assert A2AChannel.is_reasoning_message(plain_delta) is False
+
+
+def test_message_to_a2a_parts_marks_thought_metadata():
+    pytest.importorskip("a2a.types")
+
+    reasoning_msg = _make_message(
+        payload={"content": "let me think"},
+        event_type=EventType.CHAT_REASONING,
+    )
+    plain_msg = _make_message(
+        payload={"content": "final answer"},
+        event_type=EventType.CHAT_DELTA,
+    )
+
+    thought_parts = A2AChannel.message_to_a2a_parts(reasoning_msg, fallback_to_text=False)
+    plain_parts = A2AChannel.message_to_a2a_parts(plain_msg, fallback_to_text=False)
+
+    assert len(thought_parts) == 1
+    assert dict(thought_parts[0].metadata)[A2A_THOUGHT_METADATA_KEY] is True
+    assert len(plain_parts) == 1
+    assert A2A_THOUGHT_METADATA_KEY not in dict(plain_parts[0].metadata)
+
+
+class _FakeEventQueue:
+    def __init__(self):
+        self.events = []
+        self.closed = False
+
+    async def enqueue_event(self, event):
+        self.events.append(event)
+
+    async def close(self, immediate: bool = False):
+        self.closed = True
+
+
+class _FakeContext:
+    def __init__(self, query: str = "hello"):
+        from a2a.types import Message as A2AMessage, Part, Role
+
+        self.task_id = "task-1"
+        self.context_id = "ctx-1"
+        self.current_task = None
+        self.message = A2AMessage(
+            role=Role.ROLE_USER,
+            parts=[Part(text=query)],
+            message_id="m-fake",
+            task_id=self.task_id,
+            context_id=self.context_id,
+        )
+        self.metadata = {}
+
+    def get_user_input(self):
+        return "hello"
+
+
+def _run_executor_with_stream(channel: A2AChannel, stream: list[Message]):
+    """Drive _A2AAgentExecutor.execute with a scripted message stream."""
+    pytest.importorskip("a2a.types")
+    executor = _A2AAgentExecutor(channel)
+    event_queue = _FakeEventQueue()
+
+    async def on_message(msg: Message):
+        pending = channel._pending[str(msg.id)]
+        for item in stream:
+            replayed = Message(**{**item.__dict__, "id": msg.id})
+            await pending.queue.put(replayed)
+
+    async def _run():
+        channel.on_message(on_message)
+        await executor.execute(_FakeContext(), event_queue)
+
+    asyncio.run(_run())
+    return event_queue
+
+
+def _stream_reasoning_then_final() -> list[Message]:
+    return [
+        _make_message(
+            payload={"content": "let me think", "source_chunk_type": "llm_reasoning"},
+            event_type=EventType.CHAT_DELTA,
+        ),
+        _make_message(
+            payload={"content": "final answer", "is_complete": True},
+            event_type=EventType.CHAT_FINAL,
+        ),
+    ]
+
+
+def _thought_status_updates(events) -> list:
+    """Status updates whose message parts carry the thought metadata marker."""
+    from a2a.types import TaskStatusUpdateEvent
+
+    result = []
+    for event in events:
+        if not isinstance(event, TaskStatusUpdateEvent):
+            continue
+        if not event.status.HasField("message"):
+            continue
+        for part in event.status.message.parts:
+            if dict(part.metadata).get(A2A_THOUGHT_METADATA_KEY):
+                result.append(event)
+                break
+    return result
+
+
+def test_executor_streams_reasoning_as_thought_status_updates_by_default():
+    pytest.importorskip("a2a.types")
+    from a2a.types import TaskArtifactUpdateEvent
+
+    channel = build_channel()
+    event_queue = _run_executor_with_stream(channel, _stream_reasoning_then_final())
+
+    artifact_events = [e for e in event_queue.events if isinstance(e, TaskArtifactUpdateEvent)]
+    assert len(artifact_events) == 1
+    assert [p.text for p in artifact_events[0].artifact.parts] == ["final answer"]
+
+    thought_updates = _thought_status_updates(event_queue.events)
+    assert len(thought_updates) == 1
+    thought_parts = list(thought_updates[0].status.message.parts)
+    assert thought_parts[0].text == "let me think"
+    assert dict(thought_parts[0].metadata)[A2A_THOUGHT_METADATA_KEY] is True
+
+
+def test_executor_drops_reasoning_when_disabled():
+    pytest.importorskip("a2a.types")
+    from a2a.types import TaskArtifactUpdateEvent
+
+    channel = A2AChannel(A2AChannelConfig(enabled=False, expose_reasoning=False), DummyBus())
+    event_queue = _run_executor_with_stream(channel, _stream_reasoning_then_final())
+
+    artifact_events = [e for e in event_queue.events if isinstance(e, TaskArtifactUpdateEvent)]
+    assert len(artifact_events) == 1
+    artifact_texts = [p.text for p in artifact_events[0].artifact.parts]
+    assert artifact_texts == ["final answer"]
+    assert _thought_status_updates(event_queue.events) == []
+
+
+def test_executor_terminal_reasoning_chunk_does_not_leak_into_artifact():
+    pytest.importorskip("a2a.types")
+    from a2a.types import TaskArtifactUpdateEvent, TaskState
+
+    channel = build_channel()
+    stream = [
+        _make_message(
+            payload={"content": "answer part"},
+            event_type=EventType.CHAT_DELTA,
+        ),
+        _make_message(
+            payload={
+                "content": "trailing thought",
+                "source_chunk_type": "llm_reasoning",
+                "is_complete": True,
+            },
+            event_type=EventType.CHAT_DELTA,
+        ),
+    ]
+    event_queue = _run_executor_with_stream(channel, stream)
+
+    artifact_events = [e for e in event_queue.events if isinstance(e, TaskArtifactUpdateEvent)]
+    all_texts = [p.text for e in artifact_events for p in e.artifact.parts]
+    assert "trailing thought" not in all_texts
+    assert "answer part" in all_texts
+    final_states = [
+        e.status.state for e in event_queue.events
+        if not isinstance(e, TaskArtifactUpdateEvent)
+    ]
+    assert TaskState.TASK_STATE_COMPLETED in final_states

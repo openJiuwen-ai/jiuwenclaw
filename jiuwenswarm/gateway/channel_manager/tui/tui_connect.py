@@ -41,6 +41,7 @@ from jiuwenswarm.common.config import (
     update_preferred_language_in_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.common.work_mode import DEFAULT_PROJECT_ID_CODE
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -207,6 +208,7 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "command.session",
         "command.workflows",
         "command.status",
+        "command.goal",
         "chat.send",
         "chat.interrupt",
         "chat.resume",
@@ -309,6 +311,7 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "command.session",
         "command.workflows",
         "command.status",
+        "command.goal",
         "browser.start",
         "skills.marketplace.list",
         "skills.list",
@@ -1011,14 +1014,30 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if env_updates:
             _persist_env_updates(env_updates)
 
-        # 当 models / embed / yaml 配置改动时，通知 AgentServer 清缓存并热重载
+        # 当 models / embed / yaml 配置改动时，后台通知 AgentServer 清缓存并热重载。
+        # 必须在 send_response 之前 fire-and-forget：reload 在 AgentServer 端要重建
+        # 全部 agent + session adapter（单次可达 25~44s），若同步 await 会阻塞当前
+        # WebSocket 消息循环（同连接 `async for raw in ws` 串行），导致后续 config.get
+        # 等本地帧排队等满 reload 超时（25s），前端 30s 超时报 request timeout: config.get。
+        # 写盘（上面 setter + _persist_env_updates）已同步完成，config.get 直接读
+        # config.yaml 即可立即验证；reload 仅用于 AgentServer 内存热更新，本就尽力而为，
+        # 故丢后台不阻塞回包。与 _command_model._model_switch_background 对齐。
         if yaml_updated or _yaml_sections_updated:
             real_client = (
                 agent_client.get("value")
                 if isinstance(agent_client, dict)
                 else agent_client
             )
-            await _clear_agent_config_cache(real_client)
+
+            async def _config_set_reload_background() -> None:
+                try:
+                    await _clear_agent_config_cache(real_client)
+                except Exception as _e_reload:
+                    logger.warning(
+                        "[cli config.set] AGENT_RELOAD_CONFIG failed: %s", _e_reload
+                    )
+
+            asyncio.create_task(_config_set_reload_background())
 
         updated_param_keys = [
             k for k, e in _CLI_CONFIG_SET_ENV_MAP.items() if e in env_updates
@@ -1343,6 +1362,26 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
             )
             return
+        # TUI 前置归属解析(设计文档 §4.1.6):按 cwd/project_dir 固定 work_mode="code"
+        # 查找/创建 code 项目并绑定真实 project_id;无目录或解析失败归 default_code
+        resolved_project_id = ""
+        resolved_project_dir = ""
+        work_mode = "code"
+        try:
+            from jiuwenswarm.server.runtime.session.project_store import (
+                find_or_create_code_project_for_tui_params,
+            )
+            proj = find_or_create_code_project_for_tui_params(params)
+            if proj is not None:
+                resolved_project_id = proj.project_id
+                resolved_project_dir = proj.project_dir
+                work_mode = proj.work_mode or "code"
+        except Exception:  # noqa: BLE001
+            # 解析失败(冲突/权限等)不阻断会话创建,会话归 default_code
+            logger.debug(
+                "[TUI] session.create project pre-resolution failed",
+                exc_info=True,
+            )
         workspace_session_dir = get_agent_sessions_dir()
         workspace_session_dir.mkdir(parents=True, exist_ok=True)
         session_dir = workspace_session_dir / target
@@ -1362,12 +1401,21 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             channel_id="tui",
             title=str(params.get("title") or "").strip(),
             mode=params.get("mode", "code.normal"),
+            project_dir=resolved_project_dir,
+            project_id=resolved_project_id,
+            work_mode=work_mode,
         )
         # 触发 SessionStart hook
         mh = bind.message_handler
         if mh:
             mh.trigger_session_start_hook(target, source="tui")
-        await channel.send_response(ws, req_id, ok=True, payload={"session_id": target})
+        # 响应带最终归属(设计文档 §4.1.6):未绑定真实项目时归 default_code
+        await channel.send_response(ws, req_id, ok=True, payload={
+            "session_id": target,
+            "project_id": resolved_project_id or DEFAULT_PROJECT_ID_CODE,
+            "project_dir": resolved_project_dir,
+            "work_mode": work_mode,
+        })
 
     async def _session_delete(ws, req_id, params, session_id):
         from jiuwenswarm.common.utils import get_agent_sessions_dir
@@ -2812,6 +2860,18 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         try:
             if session_id:
                 params["session_id"] = session_id
+            # project_dir 默认值：TUI 前端已自动注入；仅当「未传」时从当前会话 metadata 兜底
+            # 注意：显式传空串 "" 等价于归默认项目，不可覆盖——用 key presence 区分
+            if "project_dir" not in params and session_id:
+                try:
+                    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+                    meta = get_session_metadata(session_id, cache_bust=True)
+                    if isinstance(meta, dict):
+                        pd = meta.get("project_dir")
+                        if isinstance(pd, str) and pd.strip():
+                            params["project_dir"] = pd.strip()
+                except Exception:  # noqa: BLE001
+                    pass
             job = await cc.create_job(params)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except Exception as exc:
@@ -2932,8 +2992,21 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
         try:
-            run_id = await cc.run_now(job_id)
-            await channel.send_response(ws, req_id, ok=True, payload={"run_id": run_id})
+            # 先取 job 拿 last_session_id（回退值），再触发 run_now 取 run_id
+            # 对齐 chat.send 的 {accepted, session_id} 语义
+            job = await cc.get_job(job_id)
+            if job is None:
+                await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+                return
+            run_info = await cc.run_now_info(job_id)
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={
+                    "accepted": True,
+                    "run_id": run_info.get("run_id", ""),
+                    "session_id": run_info.get("session_id", ""),
+                },
+            )
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
         except Exception as exc:

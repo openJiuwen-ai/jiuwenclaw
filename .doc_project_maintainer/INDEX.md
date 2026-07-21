@@ -1,6 +1,6 @@
 # Project Maintainer Index
 
-Status: partial. First build is focused on AgentServer.
+Status: partial. A 2026-07-15 semantic-hash scan at `10afedf2` found 0 expired audits among the 128 existing `AgentWebSocketServer` method reviews; wider repository coverage remains partial.
 
 ## Project
 
@@ -27,9 +27,14 @@ Status: partial. First build is focused on AgentServer.
 - [Gateway AgentServer E2A Chat](project/flows/gateway-agentserver-e2a-chat.md)
 - [AgentServer Session Lifecycle](project/flows/agentserver-session-lifecycle.md)
 - [AgentServer Server Push](project/flows/agentserver-server-push.md)
+- [AgentServer MCP Command Lifecycle](project/flows/agentserver-command-mcp.md)
+- [AgentServer Sandbox Runtime](project/flows/agentserver-sandbox-runtime.md)
+- [AgentServer Plan Mode Exit](project/flows/agentserver-plan-mode-exit.md)
+- [AgentServer Scheduled Auto-Harness](project/flows/agentserver-schedule-auto-harness.md)
+- [AgentServer History Stream](project/flows/agentserver-history-stream.md)
 
 ## Priority Code Symbols
 
 - app entrypoint: [file](code/jiuwenswarm/server/app_agentserver.py/app_agentserver.py.md), [_run](code/jiuwenswarm/server/app_agentserver.py/_run.md), [main](code/jiuwenswarm/server/app_agentserver.py/main.md)
 - websocket server: [file](code/jiuwenswarm/server/agent_ws_server.py/agent_ws_server.py.md), [class](code/jiuwenswarm/server/agent_ws_server.py/Class%20AgentWebSocketServer/Class%20AgentWebSocketServer.md)
-- audited methods: see [AgentServer method queue](audit-queues/server-method-audit-queue.json) and `code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/`.
+- method delivery: [AgentServer method queue](audit-queues/server-method-audit-queue.json) keeps the previously frozen 823-method scope. All 128 `AgentWebSocketServer` methods remain documented and `agent_audited`, with 0 source-expired at `10afedf2`. The fresh scan observed 6 additional unaudited methods outside that frozen queue; they were not added or promoted. Current integrity verification trusts 59 records and flags 69 non-source-expired records with entry-document hash changes. Method cards live under `code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/`.

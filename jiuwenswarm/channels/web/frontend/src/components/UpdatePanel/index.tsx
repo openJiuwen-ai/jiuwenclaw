@@ -248,7 +248,7 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
 
   return (
     <div className="flex-1 min-h-0">
-      <div className="card w-full h-full flex flex-col gap-5">
+      <div className="card main-panel-card w-full h-full flex flex-col gap-5">
         <div className="flex items-center justify-between gap-4">
           <div>
             <h2 className="text-lg font-semibold">{t('updatePanel.title')}</h2>
@@ -321,7 +321,7 @@ export function UpdatePanel({ isConnected, request }: UpdatePanelProps) {
               <span className="mono">{progress}%{isPipMode ? '' : ` · ${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`}</span>
             </div>
             <div className="mt-3 h-2 overflow-hidden rounded-full bg-secondary/80">
-              <div className="h-full rounded-full bg-accent transition-all duration-200" style={{ width: `${progress}%` }} />
+              <div className="h-full rounded-full bg-accent  " style={{ width: `${progress}%` }} />
             </div>
             {currentActivity && (
               <div className="mt-2 text-xs font-mono text-text-muted truncate" title={currentActivity}>

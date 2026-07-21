@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Standalone AgentServer entrypoint.
 
 This process only starts:
@@ -18,6 +18,7 @@ import asyncio
 import logging
 import logging.handlers
 import os
+import sys
 
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import LogManager
@@ -27,6 +28,7 @@ from jiuwenswarm.dotenv_early import parse_dotenv_early
 parse_dotenv_early("jiuwenswarm-agentserver")
 
 # --- Now safe to import jiuwenswarm modules ---
+from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
     get_env_file,
     get_root_dir,
@@ -127,6 +129,14 @@ from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch
 
 apply_openai_sse_invoke_patch()
 
+# /debug 模式下捕获 builtin TaskTool 分发的 subagent 流（reasoning/tool_call/usage），
+# 内联写入主 dump。非 debug 或 include_subagent_flow 关闭时走原始 invoke，零回归。
+from jiuwenswarm.server.runtime.debug_trace.task_tool_patch import (
+    apply_task_tool_debug_patch,
+)
+
+apply_task_tool_debug_patch()
+
 
 
 async def _run(host: str, port: int) -> None:
@@ -152,22 +162,15 @@ async def _run(host: str, port: int) -> None:
     await extension_manager.load_all_extensions()
     logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
 
+    # 会话 metadata 的字段补全已改为惰性迁移:读取时按需推断并写回磁盘
+    # (见 session_metadata._apply_metadata_defaults_with_inference),无需启动全量扫描。
+
     server = AgentWebSocketServer.get_instance(
         host=host,
         port=port
     )
     await server.start()
 
-    # ---------- Trace HTTP 端点（可选）：POST /run -> OTel trace ----------
-    trace_http_server = None
-    if os.getenv("JIUWENSWARM_TRACE_HTTP_ENABLED", "").lower() in {"1", "true", "yes", "on"}:
-        try:
-            from jiuwenswarm.server.trace_http import TraceHttpServer
-            trace_http_server = TraceHttpServer(agent_manager=server._agent_manager)
-            await trace_http_server.start()
-        except Exception as exc:
-            logger.warning("[AgentServer] TraceHttpServer start failed: %s", exc)
-            trace_http_server = None
     # ---------- ProactiveEngine 初始化 ----------
     # 适配逻辑（建专用 agent + 触发主 agent 回调）封装在 proactive_adapter，
     # app_agentserver 只调 init_proactive_engine。
@@ -180,73 +183,12 @@ async def _run(host: str, port: int) -> None:
 
     stop_event = asyncio.Event()
     teammate_bootstrap_task: asyncio.Task | None = None
-    evolution_task: asyncio.Task | None = None
 
     # Distributed teammate can receive bootstrap before any team-mode request arrives.
     # Keep a lightweight daemon alive so remote member bootstrap is consumed proactively.
     teammate_bootstrap_task = asyncio.create_task(
         run_teammate_bootstrap_daemon(stop_event=stop_event)
     )
-
-    # ---- Evolution Scheduler (offline self-evolution) ----
-    # Starts only when evolve.enabled and evolve.trigger.periodic.enabled are both true.
-    try:
-        from jiuwenswarm.evolve import get_evolve_config
-
-        _evolve_cfg = get_evolve_config()
-        if _evolve_cfg.get("enabled") and _evolve_cfg.get("trigger", {}).get(
-            "periodic", {}
-        ).get("enabled"):
-            from jiuwenswarm.evolve.storage import create_evolution_store
-            from jiuwenswarm.evolve.trigger.sampler import LatestNSampler
-            from jiuwenswarm.evolve.trigger.scheduler import (
-                run_evolution_scheduler,
-            )
-
-            from jiuwenswarm.common.config import get_config
-
-            _main_config = get_config()
-
-            # Build pipeline from config
-            _store = create_evolution_store(_main_config)
-            _periodic_cfg = _evolve_cfg["trigger"]["periodic"]
-            _limits = _evolve_cfg.get("pipeline", {}).get("limits", {})
-            _max_traces = _limits.get("max_traces_per_batch", 10)
-
-            _sampler = LatestNSampler(
-                trace_reader=_store._sqlite,
-                max_traces=_max_traces,
-                source="periodic",
-            )
-
-            # Build pipeline lazily using the factory
-            from jiuwenswarm.evolve.cli import _build_pipeline_from_config
-
-            _pipeline = _build_pipeline_from_config(_config)
-            # Wire the store into training_writer
-            for _w in _pipeline._writers:
-                if getattr(_w, "name", "") == "training_writer":
-                    _w._store = _store
-
-            _interval = _periodic_cfg.get("interval_seconds", 3600)
-            evolution_task = asyncio.create_task(
-                run_evolution_scheduler(
-                    stop_event=stop_event,
-                    pipeline=_pipeline,
-                    sampler=_sampler,
-                    interval_seconds=_interval,
-                )
-            )
-            logger.info(
-                "[AgentServer] evolution scheduler started (interval=%ds, "
-                "max_traces=%d)",
-                _interval,
-                _max_traces,
-            )
-    except Exception as _exc:
-        logger.warning(
-            "[AgentServer] evolution scheduler failed to start: %s", _exc
-        )
 
     def _on_signal() -> None:
         stop_event.set()
@@ -266,19 +208,6 @@ async def _run(host: str, port: int) -> None:
         pass
     finally:
         logger.info("[AgentServer] stopping…")
-        if trace_http_server is not None:
-            try:
-                await trace_http_server.stop()
-            except Exception as exc:
-                logger.warning("[AgentServer] TraceHttpServer stop failed: %s", exc)
-        if evolution_task is not None:
-            evolution_task.cancel()
-            try:
-                await evolution_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                logger.warning("[AgentServer] evolution scheduler stop failed: %s", exc)
         if teammate_bootstrap_task is not None:
             teammate_bootstrap_task.cancel()
             try:
@@ -294,6 +223,16 @@ async def _run(host: str, port: int) -> None:
             shutdown_team_observability()
         except Exception as exc:
             logger.warning("[AgentServer] team observability shutdown failed: %s", exc)
+        # Shutdown single-agent / coding-agent observability. Independently
+        # tracked from team observability; no-op unless an agent run owned the
+        # provider (it will not tear down a provider the team still owns).
+        try:
+            from jiuwenswarm.agents.harness.agent_observability import (
+                shutdown_agent_observability,
+            )
+            shutdown_agent_observability()
+        except Exception as exc:
+            logger.warning("[AgentServer] agent observability shutdown failed: %s", exc)
         logger.info("[AgentServer] stopped")
 
 
@@ -341,9 +280,7 @@ def main() -> None:
         else:
             port = 18092
 
-    from jiuwenswarm.telemetry import init_telemetry
-    init_telemetry()
-
+    install_async_dump_handler("agentserver")
     asyncio.run(_run(host=host, port=port))
 
 

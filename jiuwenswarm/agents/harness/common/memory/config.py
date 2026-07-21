@@ -190,36 +190,40 @@ def create_memory_settings(
     return settings
 
 
+def is_agent_mode(mode: str) -> bool:
+    normalized_mode = (mode or "").strip()
+    return normalized_mode in ("agent", "agent.plan", "agent.fast", "plan", "fast")
+
+
 def _resolve_mode_memory(mode: str, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Locate the `memory:` block under modes for a given mode token.
 
     Accepts several mode formats used across the codebase:
-      - "agent.plan" / "agent.fast"  -> modes.agent.plan / modes.agent.fast
-      - "plan" / "fast"              -> modes.agent.plan / modes.agent.fast
+      - "agent"                      -> modes.agent (merged single mode)
+      - "agent.plan" / "agent.fast"  -> modes.agent (legacy tokens,归一)
+      - "plan" / "fast"              -> modes.agent (legacy sub-tokens, 归一)
       - "code" / "code.normal"       -> modes.code
+
+    plan / fast 已合并为单一 ``agent`` 模式，记忆配置统一读取
+    ``modes.agent.memory``；历史 ``agent.plan`` / ``agent.fast`` /
+    ``plan`` / ``fast`` 均归一到该节点。
     Returns {} when no block is found (callers treat missing as disabled).
     """
     modes_cfg = (config or {}).get("modes", {}) if isinstance(config, dict) else {}
     if not isinstance(modes_cfg, dict):
         return {}
 
-    token = (mode or "").strip()
-    if "." in token:
-        top, sub = token.split(".", 1)
-        # Special handling for "code.*" -> modes.code (ignore sub_mode)
-        if top == "code":
-            node = modes_cfg.get("code", {})
-        else:
-            node = modes_cfg.get(top, {})
-            if isinstance(node, dict):
-                node = node.get(sub, {})
-    elif token == "code":
+    normalized_mode = (mode or "").strip()
+    if is_agent_mode(normalized_mode):
+        # "agent" 或历史 "agent.plan" / "agent.fast" / 单独出现的 "plan" / "fast"
+        node = modes_cfg.get("agent", {})
+    elif normalized_mode == "code" or normalized_mode.startswith("code."):
+        # "code" 及其子模式（code.normal / code.plan / code.team...）统一读取 modes.code。
         node = modes_cfg.get("code", {})
     else:
-        # Bare "plan" / "fast" defaults to the agent namespace — the main
-        # entry point for mode-switching in interface_deep.
-        agent_node = modes_cfg.get("agent", {}) if isinstance(modes_cfg.get("agent"), dict) else {}
-        node = agent_node.get(token, {})
+        # 其它未识别的 mode（如 "team"、"team.plan"、"auto_harness"）没有对应的
+        # 记忆配置节点，不应落到 modes.agent / modes.code 兜底（否则会误读/误写）。
+        return {}
 
     if not isinstance(node, dict):
         return {}
@@ -230,7 +234,7 @@ def _resolve_mode_memory(mode: str, config: Optional[Dict[str, Any]]) -> Dict[st
 def is_memory_enabled(mode: str, config: Optional[Dict[str, Any]] = None) -> bool:
     """Check if built-in memory is enabled for the given mode.
 
-    Reads `modes.agent.<plan|fast>.memory.enabled` (or `modes.code.memory.enabled`).
+    Reads `modes.agent.memory.enabled` (or `modes.code.memory.enabled`).
 
     Args:
         config: Optional config dict. If provided, reads from it directly
@@ -238,13 +242,18 @@ def is_memory_enabled(mode: str, config: Optional[Dict[str, Any]] = None) -> boo
 
     Note:
         For 'code' mode, default is True (CodingMemoryRail was always mounted before).
-        For agent modes (plan/fast), default is False.
+        For the merged 'agent' mode, default is False.
     """
     try:
         mem_cfg = _resolve_mode_memory(mode, config)
         # code 模式默认开启（之前 CodingMemoryRail 是固定挂载的）
         # agent 模式默认关闭
-        default_value = True if mode == "code" else False
+        # 判断需与 _resolve_mode_memory 的 code 归一逻辑一致：code 及其子模式
+        # （code.normal / code.plan / code.team ...）都应默认开启，否则用户配置
+        # 缺 enabled 字段时子模式记忆会被错误默认关闭。
+        normalized_mode = (mode or "").strip()
+        is_code = normalized_mode == "code" or normalized_mode.startswith("code.")
+        default_value = True if is_code else False
         return bool(mem_cfg.get("enabled", default_value))
     except Exception as e:
         logger.warning(f"Invalid memory config, disable memory, error: {e}")
@@ -254,13 +263,17 @@ def is_memory_enabled(mode: str, config: Optional[Dict[str, Any]] = None) -> boo
 def is_proactive_memory(mode: str, config: Optional[Dict[str, Any]] = None) -> bool:
     """Check if proactive memory is enabled for the given mode.
 
-    When True: agent auto-records everything and searches before every response.
-    When False (default): agent only records/searches when user explicitly asks.
+    plan / fast 合并后，agent 模式**只保留被动记忆**：始终返回 ``False``
+    （注入被动模式记忆提示词，仅在用户明确要求时读写记忆）。``is_proactive``
+    配置开关已下线。code 等其他模式仍读取各自 ``memory.is_proactive``。
     """
     try:
+        # agent 合并模式（含历史 agent.plan / agent.fast / 单独出现的 plan|fast，
+        if is_agent_mode(mode):
+            return False
         return bool(_resolve_mode_memory(mode, config).get("is_proactive", False))
     except Exception as e:
-        logger.warning(f"Invalid memory config, disable proactive memory, error: {e}")
+        logger.warning(f"Invalid proactive memory config, disable proactive memory, error: {e}")
         return False
 
 

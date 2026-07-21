@@ -1101,6 +1101,7 @@ def prepare_workspace(
 
     # ----- DeepAgent workspace (standard DeepAgents schema) -----
     deepagent_workspace = agent_root / "workspace"
+    default_project_workspace = deepagent_workspace / "projects"
     agent_skills = deepagent_workspace / "skills"
     agent_memory = deepagent_workspace / "memory"
 
@@ -1205,6 +1206,7 @@ def prepare_workspace(
 
     # sessions is runtime-only (template may not include it)
     agent_sessions.mkdir(parents=True, exist_ok=True)
+    default_project_workspace.mkdir(parents=True, exist_ok=True)
 
     from jiuwenswarm.common.config import migrate_config_from_template, set_preferred_language_in_config_file
 
@@ -1434,6 +1436,40 @@ def get_agent_workspace_dir() -> Path:
         Path to agent workspace: ~/.jiuwenswarm/agent/workspace
     """
     return get_agent_root_dir() / "workspace"
+
+
+def get_default_project_workspace_dir() -> Path:
+    """Get the fallback task workspace used when no project is bound.
+
+    Agent-owned data such as memory, skills, todo, and sessions stays directly
+    under ``get_agent_workspace_dir()``. This directory is only the default cwd
+    / workspace boundary for user task artifacts when no project is selected.
+    """
+    return get_agent_workspace_dir() / "projects"
+
+
+def get_default_project_session_workspace_dir(session_id: str | None = None) -> Path:
+    """Get the no-project task workspace for a single conversation session.
+
+    Layout:
+        <agent-workspace>/projects/<session_id>
+
+    ``session_id`` is used when available so the same conversation keeps a stable
+    workspace. If it is missing during early adapter initialization, the shared
+    projects root is returned so no throwaway session directory is created.
+    """
+    base = get_default_project_workspace_dir()
+    raw_session = str(session_id or "").strip()
+    if not raw_session:
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+    safe_session = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_session).strip("._-")
+    if not safe_session:
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+    workspace = base / safe_session
+    workspace.mkdir(parents=True, exist_ok=True)
+    return workspace
 
 
 def get_prompt_attachment_dir() -> Path:

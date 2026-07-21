@@ -110,6 +110,10 @@ class TraceDistiller:
                         idx, clusters[idx].cluster_id, exc,
                         type(exc).__name__, exc,
                     )
+                    raise RuntimeError(
+                        f"TraceDistiller: distillation failed for cluster {idx} "
+                        f"(id={clusters[idx].cluster_id}): {exc}"
+                    ) from exc
 
         return [r for r in results if r is not None]
 

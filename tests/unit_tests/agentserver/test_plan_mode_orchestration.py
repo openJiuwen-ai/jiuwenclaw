@@ -70,6 +70,48 @@ async def test_prepare_code_mode_chat_turn_resolves_mode_and_agent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
+    """The session-locked project dir reaches TeamSpec request metadata.
+
+    Web ``chat.send`` requests do not repeat ``project_dir``. Team assembly reads
+    it from ``request.metadata``, so the effective value restored from session
+    metadata must be propagated after synchronization.
+    """
+    agent = MagicMock()
+    manager = MagicMock()
+    manager.get_agent = AsyncMock(return_value=agent)
+
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = manager
+    request = _chat_request("sess_team_project", mode="team")
+    request.metadata = {"member_name": "reviewer", "project_dir": "/tmp/stale"}
+
+    with patch.object(
+        agent_ws_server_module,
+        "_sync_chat_request_metadata",
+        return_value=" /tmp/locked-project ",
+    ):
+        mode, sub_mode, resolved_agent = await server._prepare_code_mode_chat_turn(
+            request, "web"
+        )
+
+    assert mode == "team"
+    assert sub_mode is None
+    assert resolved_agent is agent
+    assert request.params["project_dir"] == "/tmp/locked-project"
+    assert request.metadata == {
+        "member_name": "reviewer",
+        "project_dir": "/tmp/locked-project",
+    }
+    manager.get_agent.assert_awaited_once_with(
+        channel_id="web",
+        mode="team",
+        project_dir="/tmp/locked-project",
+        sub_mode=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_ensure_code_mode_state_syncs_plan_to_normal() -> None:
     """_ensure_code_mode_state syncs plan→normal when modes differ."""
     session_id = "sess_sync"

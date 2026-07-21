@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import time
 
 import pytest
@@ -32,12 +31,16 @@ class TestErrorBoundaries:
         sandbox_id = resp.json()["id"]
         wait_for_sandbox_ready(sandbox_id)
 
+        # Attempt to create a directory in a restricted path;
+        # mkdir should fail with permission denied (non-zero exit code)
         resp = exec_command(
             sandbox_id,
-            ["sh", "-c", "mkdir -p /root/test 2>&1 || echo 'permission-denied'"],
+            ["mkdir", "-p", "/root/test"],
             timeout_seconds=10,
         )
         assert resp.status_code == 200
+        assert resp.json()["exit_code"] != 0, \
+            "Expected permission denied when creating /root/test"
 
     @staticmethod
     def test_eb_003_disk_full_during_upload(client, wait_for_sandbox_ready):
@@ -106,7 +109,7 @@ class TestErrorBoundaries:
             rdm.degrade_network(loss=50, delay=500)
             resp = exec_command(
                 sandbox_id,
-                ["curl", "--connect-timeout", "5", "http://www.baidu.com"],
+                ["curl", "--connect-timeout", "5", "https://www.baidu.com"],
                 timeout_seconds=30,
             )
             assert resp.status_code in (200, 408)

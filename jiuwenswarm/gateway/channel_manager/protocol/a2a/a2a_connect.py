@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel
+from jiuwenswarm.common.e2a.acp.acp_tool_updates import is_reasoning_event
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
@@ -18,6 +19,11 @@ try:
     from a2a.server.agent_execution import AgentExecutor as _AgentExecutorBase
 except ImportError:
     _AgentExecutorBase = object
+
+# Part-level metadata key marking reasoning/thought content, mirroring the
+# convention popularized by Google ADK (`adk_thought`). A2A itself has no
+# first-class thought field; `Part.metadata` is the official extension point.
+A2A_THOUGHT_METADATA_KEY = "jiuwen_thought"
 
 
 def _raise_missing_a2a_sdk(exc: ImportError) -> None:
@@ -40,6 +46,12 @@ class A2AChannelConfig:
     app_name: str = "JiuwenSwarm Gateway A2A Server"
     app_description: str = "A2A ingress for JiuwenSwarm Gateway"
     app_version: str = "0.1.0"
+    # When True (default), reasoning (thinking) content is streamed to A2A
+    # callers as working-state TaskStatusUpdateEvent messages whose parts
+    # carry the `jiuwen_thought` metadata marker. When False, reasoning is
+    # dropped. Reasoning is never written into the final `response` artifact
+    # either way.
+    expose_reasoning: bool = True
 
 
 @dataclass
@@ -83,6 +95,8 @@ class _A2AAgentExecutor(_AgentExecutorBase):
         from a2a.helpers import new_text_status_update_event
         from a2a.types import (
             Artifact,
+            Message as A2AMessage,
+            Role,
             TaskArtifactUpdateEvent,
             TaskState,
             TaskStatus,
@@ -131,11 +145,47 @@ class _A2AAgentExecutor(_AgentExecutorBase):
             artifact_started = False
             while True:
                 response_msg = await pending.queue.get()
-                response_parts = self._channel.message_to_a2a_parts(
-                    response_msg,
-                    fallback_to_text=False,
-                )
                 is_terminal = self._channel.is_terminal_message(response_msg)
+                is_reasoning = self._channel.is_reasoning_message(response_msg)
+
+                # Reasoning never enters the response artifact. When exposed,
+                # it is streamed as working-state status updates with thought
+                # metadata so callers can render or ignore it structurally.
+                if not is_terminal and is_reasoning:
+                    if self._channel.config.expose_reasoning:
+                        thought_parts = self._channel.message_to_a2a_parts(
+                            response_msg,
+                            fallback_to_text=False,
+                        )
+                        if thought_parts:
+                            await event_queue.enqueue_event(
+                                TaskStatusUpdateEvent(
+                                    task_id=task_id,
+                                    context_id=context_id,
+                                    status=TaskStatus(
+                                        state=TaskState.TASK_STATE_WORKING,
+                                        message=A2AMessage(
+                                            message_id=f"{task_id}_thought_{uuid.uuid4().hex[:8]}",
+                                            task_id=task_id,
+                                            context_id=context_id,
+                                            role=Role.ROLE_AGENT,
+                                            parts=thought_parts,
+                                        ),
+                                    ),
+                                )
+                            )
+                    continue
+
+                # A terminal reasoning chunk still closes the task but must
+                # not leak thinking text into the response artifact.
+                response_parts = (
+                    []
+                    if is_reasoning
+                    else self._channel.message_to_a2a_parts(
+                        response_msg,
+                        fallback_to_text=False,
+                    )
+                )
                 if (
                     is_terminal
                     and not response_parts
@@ -392,6 +442,12 @@ class A2AChannel(BaseChannel):
         return ""
 
     @staticmethod
+    def is_reasoning_message(msg: Message) -> bool:
+        """Whether the message carries reasoning (thinking) content."""
+        payload = msg.payload if isinstance(msg.payload, dict) else {}
+        return is_reasoning_event(msg.event_type, payload)
+
+    @staticmethod
     def message_to_a2a_parts(msg: Message, *, fallback_to_text: bool = True) -> list[Any]:
         """Map internal message payload to A2A response parts."""
         from a2a.types import Part
@@ -404,13 +460,17 @@ class A2AChannel(BaseChannel):
             error_text = str(payload.get("error") or payload.get("content") or "agent request failed")
             return [Part(text=error_text)]
 
+        thought_metadata = (
+            {A2A_THOUGHT_METADATA_KEY: True} if A2AChannel.is_reasoning_message(msg) else None
+        )
+
         content = payload.get("content")
         if isinstance(content, str) and content.strip():
             normalized_content = content.strip()
             if not A2AChannel.is_completion_sentinel_text(normalized_content):
-                parts.append(Part(text=normalized_content))
+                parts.append(Part(text=normalized_content, metadata=thought_metadata))
         elif content is not None and not isinstance(content, (dict, list)):
-            parts.append(Part(text=str(content)))
+            parts.append(Part(text=str(content), metadata=thought_metadata))
         result = payload.get("result")
         if isinstance(result, str) and result.strip():
             normalized_result = result.strip()

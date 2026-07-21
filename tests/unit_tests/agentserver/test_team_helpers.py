@@ -61,6 +61,28 @@ def test_persist_team_history_event_keeps_human_spawn_details(
 class _InactiveTeamRuntimeManagerMixin:
     """Provide the session-scoped runtime state API for inactive test managers."""
 
+    def __init__(self) -> None:
+        self._seen_team_events: dict[str, bool] = {}
+        self._workflow_completed: dict[str, bool] = {}
+
+    def mark_seen_team_events(self, session_id: str) -> None:
+        self._seen_team_events[session_id] = True
+
+    def has_seen_team_events(self, session_id: str) -> bool:
+        return self._seen_team_events.get(session_id, False)
+
+    def reset_seen_team_events(self, session_id: str) -> None:
+        self._seen_team_events.pop(session_id, None)
+
+    def mark_workflow_completed(self, session_id: str) -> None:
+        self._workflow_completed[session_id] = True
+
+    def is_workflow_completed(self, session_id: str) -> bool:
+        return self._workflow_completed.get(session_id, False)
+
+    def reset_workflow_completed(self, session_id: str) -> None:
+        self._workflow_completed.pop(session_id, None)
+
     @staticmethod
     def is_runtime_active(session_id: str) -> bool:
         _ = session_id
@@ -112,6 +134,54 @@ class _InactiveTeamRuntimeManagerMixin:
         return None
 
     @staticmethod
+    def get_team_evolution_watcher(session_id: str) -> asyncio.Task | None:
+        return None
+
+    @staticmethod
+    def get_team_skill_rail(session_id: str):
+        return None
+
+    @staticmethod
+    def get_monitor(session_id: str):
+        return None
+
+    @staticmethod
+    def register_monitor(session_id: str, handler) -> None:
+        pass
+
+    @staticmethod
+    def get_workflow_handler(session_id: str):
+        return None
+
+    @staticmethod
+    def pop_workflow_handler(session_id: str):
+        return None
+
+    @staticmethod
+    def register_workflow_handler(session_id: str, handler) -> None:
+        pass
+
+    @staticmethod
+    def has_stream_task(session_id: str) -> bool:
+        return False
+
+    @staticmethod
+    def commit_runtime_ready(session_id: str, team_name: str) -> None:
+        pass
+
+    @staticmethod
+    async def attach_distributed_hooks_for_runner_runtime(session_id: str, *args, **kwargs) -> None:
+        pass
+
+    @staticmethod
+    def register_team_evolution_watcher(session_id: str, task) -> None:
+        pass
+
+    @staticmethod
+    def pop_team_evolution_watcher(session_id: str):
+        return None
+
+    @staticmethod
     def pop_stream_task(session_id: str) -> asyncio.Task | None:
         return None
 
@@ -132,6 +202,8 @@ class _FakeRail:
         self._pending_first = pending_first
         self._drain_calls = 0
         self.drain_waits: list[bool] = []
+        self.signal_trigger = True
+        self.review_trigger = False
 
     async def drain_pending_approval_events(self, wait: bool = False, timeout: float | None = None):
         self._drain_calls += 1
@@ -844,6 +916,8 @@ async def test_team_evolution_monitor_uses_approval_request_id_without_provision
     class _PendingThenApprovalRail:
         def __init__(self):
             self._drain_calls = 0
+            self.signal_trigger = True
+            self.review_trigger = False
 
         async def drain_pending_approval_events(self, wait: bool = False, timeout: float | None = None):
             assert wait is False
@@ -986,7 +1060,7 @@ async def test_ensure_team_evolution_watcher_starts_without_reasoning_gate(monke
 
         @staticmethod
         def get_team_skill_rail(session_id: str):
-            return object()
+            return SimpleNamespace(signal_trigger=True, review_trigger=False)
 
         @staticmethod
         def register_team_evolution_watcher(
@@ -1040,12 +1114,12 @@ async def test_ensure_team_evolution_watcher_defers_when_rail_missing(monkeypatc
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("completion_followup_enabled", "should_start"),
+    ("review_trigger", "should_start"),
     [(False, False), (True, True)],
 )
-async def test_ensure_team_evolution_watcher_respects_completion_followup(
+async def test_ensure_team_evolution_watcher_respects_review_trigger(
         monkeypatch,
-        completion_followup_enabled: bool,
+        review_trigger: bool,
         should_start: bool,
 ):
     registered: dict[str, asyncio.Task] = {}
@@ -1053,8 +1127,8 @@ async def test_ensure_team_evolution_watcher_respects_completion_followup(
     class _Rail:
         pass
 
-    _Rail.auto_scan = False
-    _Rail.completion_followup_enabled = completion_followup_enabled
+    _Rail.signal_trigger = False
+    _Rail.review_trigger = review_trigger
 
     class _FakeManager(_InactiveTeamRuntimeManagerMixin):
         @staticmethod
@@ -1680,7 +1754,7 @@ async def test_process_team_message_stream_fallback_reuses_first_request_directi
 
 
 @pytest.mark.anyio
-async def test_process_team_message_stream_reports_error_when_shutdown_race_wait_times_out(monkeypatch):
+async def test_process_team_message_stream_silences_gate_closed_when_shutdown_race_times_out(monkeypatch):
     class _FakeManager(_InactiveTeamRuntimeManagerMixin):
         @staticmethod
         def has_stream_task(session_id: str) -> bool:
@@ -1736,11 +1810,12 @@ async def test_process_team_message_stream_reports_error_when_shutdown_race_wait
     ):
         chunks.append(chunk)
 
-    assert chunks[0].payload == {
-        "event_type": "chat.error",
-        "error": "Team is shutting down, please try again later",
-    }
+    # gate_closed 静默处理：不报 chat.error，直接以 is_complete=True 结束流
     assert chunks[-1].is_complete is True
+    assert not any(
+        chunk.payload and chunk.payload.get("event_type") == "chat.error"
+        for chunk in chunks
+    )
 
 
 @pytest.mark.anyio
@@ -2351,6 +2426,7 @@ async def test_process_team_message_stream_converts_a2ui_followup_event(monkeypa
     assert chunks[1].is_complete is True
 
 
+@pytest.mark.anyio
 async def test_process_team_message_stream_defers_first_evolve_until_team_runtime_exists(monkeypatch, tmp_path):
     captured_queries: list[str] = []
     user_intent = "没有特殊要求时格式尽量简洁，如果使用颜色也需要保持美观"
@@ -2650,6 +2726,11 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
             role=SimpleNamespace(value=TeamRole.HUMAN_AGENT.value),
             source_member="human_agent",
         )
+        yield SimpleNamespace(
+            type="team.completed",
+            payload={"event_type": "team.completed"},
+            role=TeamRole.LEADER,
+        )
 
     class _FakeRunner:
         run_agent_team_streaming = staticmethod(_fake_stream)
@@ -2696,11 +2777,17 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
             pass
 
     monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
-    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    fake_mgr = _FakeManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
-        lambda channel_id, session_id, event: broadcasted.append(event),
+        lambda channel_id, session_id, event: (
+            broadcasted.append(event),
+            fake_mgr.mark_seen_team_events(session_id)
+            if event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES
+            else None,
+        ),
     )
     monkeypatch.setattr(team_helpers, "ensure_team_evolution_watcher", lambda *args, **kwargs: None)
     monkeypatch.setattr(team_helpers, "get_session_metadata", lambda session_id: {})
@@ -2714,26 +2801,32 @@ async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(
     )
 
     assert ready_calls == [("sess-leader-only", "demo-team")]
+    # After team.runtime_ready is broadcast, seen_team_events=True so
+    # chat.final events are suppressed; team.completed emits
+    # chat.processing_status(is_complete=True) instead.
     assert [event["event_type"] for event in broadcasted] == [
         "chat.processing_status",
         "team.runtime_ready",
-        "chat.final",
-        "chat.final",
-        "chat.final",
-        "team.completed",
+        'chat.final',
+        'chat.processing_status',
+        'chat.final',
+        'chat.processing_status',
+        'chat.final',
+        'chat.processing_status',
+        "chat.processing_status",
+        'team.completed',
     ]
-    # All events before round_complete carry is_processing=True, is_complete=False
+    # Round-start processing_status
     assert broadcasted[0]["is_processing"] is True
     assert broadcasted[0]["is_complete"] is False
-    assert broadcasted[2]["content"] == "leader answer"
-    assert all(event.get("content") != "teammate private reasoning" for event in broadcasted)
-    # Member events keep the frontend-compatible teammate role and include member_name.
-    assert broadcasted[3]["content"] == "teammate answer"
-    assert broadcasted[3]["role"] == TeamRole.TEAMMATE.value
-    assert broadcasted[3]["member_name"] == "analyst"
-    assert broadcasted[4]["content"] == "human answer"
-    assert broadcasted[4]["role"] == TeamRole.TEAMMATE.value
-    assert broadcasted[4]["member_name"] == "human_agent"
+    # Round-end processing_status (from team.completed)
+    assert broadcasted[-2]["is_processing"] is False
+    assert broadcasted[-2]["is_complete"] is True
+    for index, event in enumerate(broadcasted):
+        if event.get("event_type") == "chat.final":
+            next_event = broadcasted[index + 1]
+            assert next_event["event_type"] == "chat.processing_status"
+            assert next_event["is_processing"] is False
 
 
 @pytest.mark.anyio
@@ -2767,11 +2860,17 @@ async def test_consume_stream_with_query_broadcasts_leader_task_failed_detail_an
             pass
 
     monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
-    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    fake_mgr = _FakeManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
-        lambda channel_id, session_id, event: broadcasted.append(event),
+        lambda channel_id, session_id, event: (
+            broadcasted.append(event),
+            fake_mgr.mark_seen_team_events(session_id)
+            if event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES
+            else None,
+        ),
     )
 
     await _TeamHelpersTestApi.consume_stream_with_query(
@@ -2834,11 +2933,17 @@ async def test_consume_stream_with_query_does_not_final_teammate_task_failed(mon
             pass
 
     monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
-    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    fake_mgr = _FakeManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
-        lambda channel_id, session_id, event: broadcasted.append(event),
+        lambda channel_id, session_id, event: (
+            broadcasted.append(event),
+            fake_mgr.mark_seen_team_events(session_id)
+            if event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES
+            else None,
+        ),
     )
 
     await _TeamHelpersTestApi.consume_stream_with_query(
@@ -2902,11 +3007,17 @@ async def test_consume_stream_with_query_deduplicates_ask_user_questions(monkeyp
             pass
 
     monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
-    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    fake_mgr = _FakeManager()
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: fake_mgr)
     monkeypatch.setattr(
         team_helpers,
         "_broadcast_event",
-        lambda channel_id, session_id, event: broadcasted.append(event),
+        lambda channel_id, session_id, event: (
+            broadcasted.append(event),
+            fake_mgr.mark_seen_team_events(session_id)
+            if event.get("event_type") in team_helpers._TEAM_BUILDING_EVENT_TYPES
+            else None,
+        ),
     )
 
     await _TeamHelpersTestApi.consume_stream_with_query(

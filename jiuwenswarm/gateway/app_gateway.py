@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Standalone Gateway entrypoint (split deployment).
 
 This process starts:
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -38,7 +39,9 @@ parse_dotenv_early("jiuwenswarm-gateway")
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect import AcpGatewayBridge
 from jiuwenswarm.gateway.routing.agent_request_timeout import coerce_client_timeout_ms
+from jiuwenswarm.common.security.ws_origin import get_header_value
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
+from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
     get_cron_jobs_path,
     get_env_file,
@@ -121,14 +124,77 @@ def _normalize_gateway_message(msg):
         stream_seq=msg.stream_seq,
         stream_id=msg.stream_id,
         metadata=msg.metadata,
+        user_id=getattr(msg, "user_id", None),
     )
 
 
 async def _normalize_and_forward_message(msg, channel_manager) -> bool:
     normalized = _normalize_gateway_message(msg)
+    # ACP/直连转发路径(session.create 等)也需注入 work_mode 归一化,
+    # 与 _norm_and_forward(Web/TUI 主路径)保持一致。否则直连 AgentServer 的
+    # 调用方传真实 project_id + 合法但不匹配的 work_mode 时,AgentServer 侧
+    # _work_mode_explicit marker 缺失,不会返回设计要求的 BAD_REQUEST。
+    method_val = getattr(getattr(msg, "req_method", None), "value", None) or ""
+    if method_val == "session.create":
+        _inject_session_work_mode(normalized)
     await channel_manager.deliver_to_message_handler(normalized)
     logger.info("[App] Gateway inbound -> MessageHandler: id=%s channel_id=%s", msg.id, msg.channel_id)
     return False
+
+
+def _inject_session_work_mode(msg: Message) -> None:
+    """为 ``session.create`` 请求注入 work_mode 归一化(主路径兜底)。
+
+    与 fallback ``_session_create`` 共用同一 helper
+    ``resolve_session_work_mode_params``,保持主路径/fallback 一致。
+
+    成功时写回归一化后的 ``project_id`` / ``project_dir`` / ``work_mode`` 到
+    ``msg.params``;失败时(非法 work_mode)不写回,保留原始 params 由后续
+    AgentServer 或 fallback ``_session_create`` 返回 BAD_REQUEST。
+
+    本函数做参数归一化 + **TUI project_dir 预解析**(设计文档 §5.3.5):
+    - TUI 通道下,若 project_id 为默认项目且 project_dir 非空绝对路径,
+      按 work_mode="code" 查找/创建 code 项目,将真实 project_id 写回 params。
+    - 非 TUI 通道仅做纯参数归一化,最终 work_mode 以 Project 记录为准的
+      校验由 ``_session_create`` / AgentServer 侧完成。
+
+    显式性判定(``has_explicit_work_mode``)由 ``resolve_session_work_mode_params``
+    随 binding 返回。但 gateway → AgentServer 是跨进程通信,binding 结果不能
+    直接传递。因此 gateway 将 ``has_explicit_work_mode`` 注入 params 的
+    ``_work_mode_explicit`` 字段作为传输标记,AgentServer 消费后立即 pop。
+    AgentServer 直连调用方(非 gateway 路径)不携带此标记,此时 AgentServer
+    通过重新调用 ``resolve_session_work_mode_params`` 获取 binding 中的
+    ``has_explicit_work_mode``(直连场景 params 为原始值,计算结果正确)。
+    """
+    params = getattr(msg, "params", None)
+    if not isinstance(params, dict):
+        return
+    channel_id = getattr(msg, "channel_id", None)
+    try:
+        from jiuwenswarm.server.runtime.session.work_mode import resolve_session_work_mode_params
+        binding = resolve_session_work_mode_params(params, channel_id=channel_id)
+    except Exception:  # noqa: BLE001
+        # 归一化异常时不写回,保留原始 params 由后续处理
+        return
+    if binding.error:
+        return
+
+    resolved_project_id = binding.project_id
+    resolved_project_dir = binding.project_dir
+    resolved_work_mode = binding.work_mode
+
+    # 注意:TUI 通道的 session.create 不走 forward 路径(不在 CLI_FORWARD_REQ_METHODS),
+    # TUI 预解析在 tui_connect.py 的 _session_create 中通过 find_or_create_code_project_for_tui_params 完成。
+    # 此处仅处理 WEB/ACP 通道的 work_mode 绑定注入。
+
+    params["project_id"] = resolved_project_id
+    params["project_dir"] = resolved_project_dir
+    params["work_mode"] = resolved_work_mode
+    # _work_mode_explicit: 跨进程传输"请求是否显式传了 work_mode"标志。
+    # AgentServer 消费后立即 pop,不持久化、不序列化到日志。
+    # 该标志区分"用户显式传 work_mode"(需做 Project 一致性校验)与
+    # "gateway 注入通道默认 work_mode"(跳过一致性校验,以 Project 记录为准)。
+    params["_work_mode_explicit"] = binding.has_explicit_work_mode
 
 
 class _InboundGatewayServer:
@@ -314,6 +380,15 @@ class GatewayServerConfig:
             self.routes[path] = RouteConfig(path=path, channel_id=channel_id)
 
 
+@dataclass(frozen=True)
+class _LocalHandlerContext:
+    ws: Any
+    req_id: str
+    params: dict[str, Any]
+    session_id: str
+    user_id: str | None
+
+
 class GatewayServer:
     """通用多路路由 WebSocket Gateway Server。
 
@@ -342,6 +417,38 @@ class GatewayServer:
             idle_finalize_seconds=lambda: _PROMPT_IDLE_FINALIZE_SECONDS,
         )
         self._install_default_route_hooks()
+
+    @staticmethod
+    def _extract_ws_user_id(ws: Any) -> str | None:
+        """从 WebSocket 握手 HTTP Header 读取 X-User-Id（大小写不敏感）。"""
+        headers = (
+            getattr(getattr(ws, "request", None), "headers", None)
+            or getattr(ws, "request_headers", None)
+        )
+        raw = get_header_value(headers, "X-User-Id")
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        return text or None
+
+    @staticmethod
+    def _connection_user_id(ws: Any) -> str | None:
+        """返回连接建立时缓存的 user_id（来自握手 Header）。"""
+        uid = getattr(ws, "_gateway_user_id", None)
+        if uid is None:
+            return None
+        text = str(uid).strip()
+        return text or None
+
+    @staticmethod
+    def _invoke_local_handler(
+        handler: Callable[..., Awaitable[None]],
+        ctx: _LocalHandlerContext,
+    ) -> Awaitable[None]:
+        kwargs: dict[str, Any] = {}
+        if "user_id" in inspect.signature(handler).parameters:
+            kwargs["user_id"] = ctx.user_id
+        return handler(ctx.ws, ctx.req_id, ctx.params, ctx.session_id, **kwargs)
 
     @staticmethod
     def _client_route_key(
@@ -418,6 +525,32 @@ class GatewayServer:
         if session_key is None:
             return False
         return self._session_to_client.get(session_key) is ws
+
+    def get_active_session_ids(
+        self,
+        channel_id: str,
+        exclude_ws: Any = None,
+    ) -> set[str]:
+        """返回在指定 channel 下、仍处于活跃连接绑定的 session_id 集合。
+
+        用于 session.list 标记 active_in_window，供前端在 /resume 前拦截冲突会话。
+        排除 exclude_ws（通常是发起 session.list 请求的连接本身），并跳过已关闭的 ws，
+        与实时防线（forward 阶段 SESSION_IN_USE 检查）口径保持一致。
+        """
+        active: set[str] = set()
+        for key, client_ws in self._session_to_client.items():
+            if not isinstance(key, tuple) or len(key) < 2:
+                continue
+            if key[0] != channel_id:
+                continue
+            if client_ws is exclude_ws:
+                continue
+            if bool(getattr(client_ws, "closed", False)):
+                continue
+            session_id = key[1]
+            if isinstance(session_id, str) and session_id:
+                active.add(session_id)
+        return active
 
     @staticmethod
     def _extract_routing_session_id(msg, *, include_top_level: bool = True) -> str | None:
@@ -808,6 +941,11 @@ class GatewayServer:
             }
             if not msg.ok:
                 frame["error"] = str(payload.get("error") or "request failed")
+                # 提升 payload.code 为顶层 code(与本地 handler 的 send_response
+                # 错误帧结构一致,设计文档 §1.3 前端按顶层 code 分流)
+                code_val = payload.get("code")
+                if isinstance(code_val, str) and code_val.strip():
+                    frame["code"] = code_val.strip()
             await ws.send(json.dumps(frame, ensure_ascii=False))
             return
 
@@ -835,6 +973,17 @@ class GatewayServer:
             return
 
         self._clients.add(ws)
+
+        ws_user_id = self._extract_ws_user_id(ws)
+        setattr(ws, "_gateway_user_id", ws_user_id)
+        uid_marker = "" if ws_user_id else " uid_empty=yes"
+        logger.info(
+            "[Gateway] WS handshake X-User-Id: user_id=%r%s channel=%s path=%s",
+            ws_user_id,
+            uid_marker,
+            route.channel_id,
+            matched_path,
+        )
 
         # connection.ack
         try:
@@ -979,6 +1128,8 @@ class GatewayServer:
         session_id = (str(params.get("session_id") or "").strip()) or req_id
         session_key = self._client_route_key(route.channel_id, session_id) if explicit_session_id else None
 
+        req_user_id = self._connection_user_id(ws)
+
         # 1. forward 优先：方法在 forward_methods 中则转发到 MessageHandler
         if method in route.forward_methods:
             req_method = None
@@ -1033,7 +1184,7 @@ class GatewayServer:
             if session_key is not None:
                 await self._bind_route_session_client(route, session_id, ws)
 
-            default_mode = Mode.CODE_NORMAL if route.channel_id == "tui" else Mode.AGENT_PLAN
+            default_mode = Mode.CODE_NORMAL if route.channel_id == "tui" else Mode.AGENT
             mode = Mode.from_raw(params.get("mode"), default=default_mode)
 
             # 确保 mode 被设置到 params 中，以便后续转发到 AgentServer
@@ -1120,6 +1271,7 @@ class GatewayServer:
                 # 阶段2：tui ws_channel route 用合成的 _resolved_agent_ref（与 _register /
                 # GodView 同源）；非 ws_channel route 保留原 _agent_ref。
                 agent_ref=_resolved_agent_ref,
+                user_id=req_user_id,
             )
 
             if self._on_message_cb is not None:
@@ -1143,7 +1295,16 @@ class GatewayServer:
             if session_key is not None:
                 await self._bind_route_session_client(route, session_id, ws)
             try:
-                await local_handler(ws, req_id, params, session_id)
+                await self._invoke_local_handler(
+                    local_handler,
+                    _LocalHandlerContext(
+                        ws=ws,
+                        req_id=req_id,
+                        params=params,
+                        session_id=session_id,
+                        user_id=req_user_id,
+                    ),
+                )
             except Exception as e:
                 ws_closed = bool(getattr(ws, "closed", False))
                 if ws_closed:
@@ -1366,6 +1527,8 @@ async def _run(
 
     initial_channels_conf: dict = channels_cfg if isinstance(channels_cfg, dict) else {}
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
+    # 回填引用：MessageHandler 实例化早于 ChannelManager，广播全局事件时需经它取 web channel。
+    message_handler.set_channel_manager(channel_manager)
     updater_service = UpdaterService()
 
     async def _on_config_saved(
@@ -1455,6 +1618,16 @@ async def _run(
     web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
     web_channel = WebChannel(web_config, _DummyBus())
 
+    # 注入 Git diff 监控注册表(设计文档阶段10):
+    # 1. 让 ``_mark_git_watcher_dirty`` 能通过 ``channel.git_watcher_registry`` 唤醒轮询
+    # 2. 通过 ``set_channel`` 让 registry 拿到 send_event 的发送句柄
+    from jiuwenswarm.server.runtime.session.git_diff_watcher import (
+        get_git_diff_watcher_registry,
+    )
+    _git_watcher_registry = get_git_diff_watcher_registry()
+    web_channel.git_watcher_registry = _git_watcher_registry
+    _git_watcher_registry.set_channel(web_channel)
+
     _register_web_handlers(
         WebHandlersBindParams(
             channel=web_channel,
@@ -1478,6 +1651,14 @@ async def _run(
             if method_val not in forward_methods:
                 return False
             normalized = _normalize_gateway_message(msg)
+            # session.create 主路径注入 work_mode 归一化(与 fallback _session_create
+            # 共用同一 helper resolve_session_work_mode_params,保持主路径/fallback 一致):
+            # 成功时写回归一化后的 project_id/project_dir/work_mode 到 params,
+            # 转发到 AgentServer 后由其 session.create 处理逻辑使用;
+            # 失败时(非法 work_mode)不写回,保留原始 params 由 AgentServer 或
+            # fallback _session_create 返回 BAD_REQUEST。
+            if method_val == "session.create":
+                _inject_session_work_mode(normalized)
             await channel_manager.deliver_to_message_handler(normalized)
             logger.info("[App] %s 入站 -> MessageHandler: id=%s channel_id=%s", source_label, msg.id, msg.channel_id)
             if method_val in no_local_methods:
@@ -1585,6 +1766,8 @@ async def _run(
                 os.getenv("A2A_SERVER_APP_VERSION", "0.1.0")
             ).strip()
                         or "0.1.0",
+            expose_reasoning=str(os.getenv("A2A_SERVER_EXPOSE_REASONING", "true")).strip().lower()
+                             not in {"0", "false", "no", "off"},
         ),
         _DummyBus(),
     )
@@ -2137,6 +2320,8 @@ async def _run(
     await channel_manager.set_config(initial_channels_conf)
 
     await channel_manager.start_dispatch()
+    # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
+    # list_jobs() 读取时按需推断并写回磁盘(见 CronJobStore.list_jobs),无需启动全量扫描。
     await cron_scheduler.start()
     # 主动推荐：按 config 自动注册/删除 proactive.tick 定时 job
     try:
@@ -2366,9 +2551,7 @@ def main() -> None:
     web_port = args.port or int(os.getenv("WEB_PORT", "19000"))
     web_path = args.web_path or os.getenv("WEB_PATH", "/ws")
 
-    from jiuwenswarm.telemetry import init_telemetry
-    init_telemetry()
-
+    install_async_dump_handler("gateway")
     asyncio.run(
         _run(
             agent_server_url=agent_server_url,
