@@ -1737,8 +1737,20 @@ def _sanitize_log_text(text: str) -> str:
     return masked
 
 
+def mask_sensitive(text: Any) -> str:
+    """对任意文本做敏感信息脱敏，返回脱敏后的字符串。
+
+    作为对外稳定接口：调用方（如 ``agent_ws_server`` 打印模型配置/环境变量）
+    应统一走本函数，避免各自硬编码键名匹配（例如只命中 ``API_KEY``、漏掉
+    ``OPENAI_API_KEY`` / ``VISION_API_KEY`` 等带前缀变体）造成明文泄露。
+    """
+    if text is None:
+        return ""
+    return _sanitize_log_text(str(text))
+
+
 class SensitiveDataFilter(logging.Filter):
-    """Mask sensitive data in all log messages."""
+    """Mask sensitive data in all log messages and tracebacks."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
@@ -1747,6 +1759,24 @@ class SensitiveDataFilter(logging.Filter):
             record.args = ()
         except Exception:
             # Never block logging because of desensitization failure.
+            pass
+
+        # Traceback 由 Formatter.formatException() 在 record.exc_text 中单独渲染，
+        # 不经过 record.getMessage()，因此 message 脱敏覆盖不到。这里提前把
+        # traceback 文本脱敏写入 record.exc_text 并清空 record.exc_info，
+        # 使 logger.exception()/exc_info=True 的异常栈也不会泄露 api_key 等。
+        try:
+            exc_info = record.exc_info
+            if exc_info and not record.exc_text:
+                import traceback as _traceback
+
+                formatted = "".join(_traceback.format_exception(*exc_info))
+                record.exc_text = _sanitize_log_text(formatted)
+                record.exc_info = None
+            elif record.exc_text:
+                record.exc_text = _sanitize_log_text(record.exc_text)
+        except Exception:
+            # 同样不因脱敏失败而阻断日志输出。
             pass
         return True
 

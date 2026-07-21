@@ -21,7 +21,7 @@ from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService, r
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
 from jiuwenswarm.server.ws_send import send_wire_payload
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
-from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file
+from jiuwenswarm.common.utils import get_agent_sessions_dir, get_config_file, mask_sensitive
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
 from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
@@ -4049,7 +4049,7 @@ class AgentWebSocketServer:
                 logger.info(
                     "[command.model] switch_model: target=%s, env_updates=%s",
                     target,
-                    {k: (v if k != "API_KEY" else "***") for k, v in env_updates.items()},
+                    mask_sensitive(env_updates),
                 )
 
                 if not env_updates:
