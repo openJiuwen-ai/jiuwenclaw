@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.spawn.context import reset_session_id, set_session_id
 from openjiuwen.harness import DeepAgent
 
+from jiuwenclaw.agentserver.runtime_scope import RuntimeScopeKey
 from jiuwenclaw.agentserver.team.bootstrap import configure_agent_teams_home
 
 configure_agent_teams_home()
@@ -40,21 +41,35 @@ from jiuwenclaw.agentserver.tools.deepresearch_tools import (
 
 logger = logging.getLogger(__name__)
 
+# (service_id, agent_id, session_id)
+_TeamSessionKey = tuple[str, str, str]
+
 
 class TeamManager:
-    """Manage team instances across sessions."""
+    """Manage team instances across tenants and sessions.
+
+    Mutual exclusion (product 2b): within one ``(service_id, agent_id)`` at most
+    one live Team; creating a team for session B destroys other sessions of the
+    same tenant. Different tenants do not affect each other.
+    """
 
     def __init__(self):
-        self._team_agents: dict[str, TeamAgent] = {}
-        self._team_monitors: dict[str, TeamMonitorHandler] = {}
-        self._stream_tasks: dict[str, asyncio.Task] = {}
+        self._team_agents: dict[_TeamSessionKey, TeamAgent] = {}
+        self._team_monitors: dict[_TeamSessionKey, TeamMonitorHandler] = {}
+        self._stream_tasks: dict[_TeamSessionKey, asyncio.Task] = {}
         self._lock = asyncio.Lock()
 
-    def has_stream_task(self, session_id: str) -> bool:
-        return session_id in self._stream_tasks
+    @staticmethod
+    def _require_session_scope(scope: RuntimeScopeKey) -> _TeamSessionKey:
+        if not str(scope.session_id or "").strip():
+            raise ValueError("TeamManager requires RuntimeScopeKey.session_id")
+        return scope.session_key()
 
-    def pop_stream_task(self, session_id: str) -> asyncio.Task | None:
-        return self._stream_tasks.pop(session_id, None)
+    def has_stream_task(self, scope: RuntimeScopeKey) -> bool:
+        return self._require_session_scope(scope) in self._stream_tasks
+
+    def pop_stream_task(self, scope: RuntimeScopeKey) -> asyncio.Task | None:
+        return self._stream_tasks.pop(self._require_session_scope(scope), None)
 
     @staticmethod
     def _load_team_spec(session_id: str) -> TeamAgentSpec:
@@ -86,40 +101,65 @@ class TeamManager:
         request_id: str | None,
         channel_id: str | None,
         request_metadata: dict[str, Any] | None,
+        service_id: str | None = None,
+        tenant_agent_id: str | None = None,
     ) -> None:
+        from openjiuwen.core.runner import Runner
         from jiuwenclaw.config import get_config
         from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
         from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
         from jiuwenclaw.agentserver.tools.send_file_to_user import SendFileToolkit
-        from openjiuwen.core.runner import Runner
 
-        agent_id = getattr(getattr(agent, "card", None), "id", None)
+        member_agent_id = getattr(getattr(agent, "card", None), "id", None)
         if should_register_cron_tools():
             cron_runtime = CronRuntimeBridge()
+            cron_metadata = dict(request_metadata) if isinstance(request_metadata, dict) else {}
+            resolved_service_id = service_id or "default"
+            resolved_tenant_agent_id = tenant_agent_id or "default"
+            cron_metadata.setdefault("service_id", resolved_service_id)
+            cron_metadata.setdefault("agent_id", resolved_tenant_agent_id)
             cron_context = SimpleNamespace(
-                tool_scope=f"team_member_{agent_id or 'unknown'}",
+                tool_scope=f"team_member_{member_agent_id or 'unknown'}",
                 channel_id=channel_id or "web",
                 session_id=session_id,
-                metadata=request_metadata,
+                metadata=cron_metadata,
                 mode="team",
             )
 
             try:
-                cron_tools = cron_runtime.build_tools(context=cron_context, agent_id=agent_id)
+                cron_tools = cron_runtime.build_tools(
+                    context=cron_context,
+                    agent_id=member_agent_id,
+                    service_id=resolved_service_id,
+                    tenant_agent_id=resolved_tenant_agent_id,
+                )
                 for cron_tool in cron_tools:
                     if not Runner.resource_mgr.get_tool(cron_tool.card.id):
                         Runner.resource_mgr.add_tool(cron_tool)
                     agent.ability_manager.add(cron_tool.card)
-                logger.info("[TeamManager] Registered %d cron tools for member agent=%s", len(cron_tools), agent_id)
+                logger.info(
+                    "[TeamManager] Registered %d cron tools for member agent=%s",
+                    len(cron_tools),
+                    member_agent_id,
+                )
             except Exception as exc:
-                logger.warning("[TeamManager] cron tool registration failed for member agent=%s: %s", agent_id, exc)
+                logger.warning(
+                    "[TeamManager] cron tool registration failed for member agent=%s: %s",
+                    member_agent_id,
+                    exc,
+                )
         else:
-            logger.info("[TeamManager] skip cron tool registration for member agent=%s: disabled by env", agent_id)
+            logger.info(
+                "[TeamManager] skip cron tool registration for member agent=%s: disabled by env",
+                member_agent_id,
+            )
         # 设置 DeepResearch 路由上下文（Team 模式）
         dr_token = push_deepresearch_route(
             request_id=request_id or "",
             channel_id=channel_id or "web",
             session_id=session_id,
+            service_id=service_id or "default",
+            agent_id=tenant_agent_id or "default",
         )
 
         # 整个方法体放在 try-finally 中，确保路由上下文在退出时重置
@@ -171,15 +211,33 @@ class TeamManager:
         request_id: str | None = None,
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
+        runtime_scope: RuntimeScopeKey | None = None,
     ) -> Callable[..., None]:
         from jiuwenclaw.agentserver.deep_agent.rails.team_member_skill_toolkit_rail import (
             MemberSkillToolkitRail,
         )
         from jiuwenclaw.agentserver.skill_manager import SkillManager
         from jiuwenclaw.agentserver.extensions.rail_manager import get_rail_manager
-        from jiuwenclaw.utils import get_agent_skills_dir
+        from jiuwenclaw.utils import get_multi_tenant_skill_dirs
 
-        global_skills_dir = get_agent_skills_dir()
+        if runtime_scope is not None:
+            rail_scope = runtime_scope
+        else:
+            sid = getattr(deep_agent, "_env_service_id", None) or getattr(
+                deep_agent, "_service_id", None
+            )
+            aid = getattr(deep_agent, "_env_agent_id", None) or getattr(
+                deep_agent, "_agent_id", None
+            )
+            if sid is None or aid is None:
+                raise ValueError(
+                    "build_agent_customizer requires runtime_scope "
+                    "or deep_agent tenant ids (_env_service_id/_env_agent_id)"
+                )
+            rail_scope = RuntimeScopeKey.from_ids(sid, aid, session_id)
+        global_skills_dir = get_multi_tenant_skill_dirs(
+            rail_scope.service_id, rail_scope.agent_id
+        )[0]
         global_skills_state_path = global_skills_dir / "skills_state.json"
         resolved_channel = channel_id or "default"
         resolved_model_name = get_default_model_name()
@@ -426,6 +484,8 @@ class TeamManager:
                             member_id=getattr(agent.card, "id", None),
                             context_engine_enabled=_ce_enabled,
                             react_config=_react,
+                            service_id=rail_scope.service_id,
+                            agent_id=rail_scope.agent_id,
                         )
                     )
                     logger.info(
@@ -443,10 +503,11 @@ class TeamManager:
                 except Exception as exc:
                     logger.warning("[TeamManager] build_member_rails failed: %s", exc)
 
-            rail_manager = get_rail_manager()
+            rail_manager = get_rail_manager(rail_scope)
             for rail_name in rail_manager.get_registered_rail_names():
                 try:
-                    rail_instance = rail_manager.load_rail_instance_without_enabled_check(rail_name)
+                    # Team members must not share the main-agent cached rail instance.
+                    rail_instance = rail_manager.create_fresh_rail_instance(rail_name)
                     if rail_instance is not None:
                         agent.add_rail(rail_instance)
                         logger.info("[TeamManager] Added extension rail: %s", rail_name)
@@ -459,17 +520,24 @@ class TeamManager:
                 request_id=request_id,
                 channel_id=channel_id,
                 request_metadata=request_metadata,
+                service_id=rail_scope.service_id,
+                tenant_agent_id=rail_scope.agent_id,
             )
 
         return customizer
 
 
     @staticmethod
-    def _copy_global_skills_to_team_shared_dir(spec: TeamAgentSpec) -> None:
+    def _copy_global_skills_to_team_shared_dir(
+        spec: TeamAgentSpec,
+        *,
+        service_id: str,
+        agent_id: str,
+    ) -> None:
         """Copy global skills to team shared directory (executed once after team build)."""
-        from jiuwenclaw.utils import get_agent_skills_dir
+        from jiuwenclaw.utils import get_multi_tenant_skill_dirs
 
-        global_skills_dir = get_agent_skills_dir()
+        global_skills_dir = get_multi_tenant_skill_dirs(service_id, agent_id)[0]
         if not global_skills_dir.exists():
             logger.warning("[TeamManager] global_skills_dir does not exist: %s", global_skills_dir)
             return
@@ -498,13 +566,19 @@ class TeamManager:
 
     async def create_team(
         self,
-        session_id: str,
+        scope: RuntimeScopeKey,
         deep_agent: DeepAgent,
         request_id: str | None = None,
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
     ) -> TeamAgent:
-        logger.info("[TeamManager] building TeamAgentSpec: session_id=%s", session_id)
+        key = self._require_session_scope(scope)
+        session_id = scope.session_id
+        logger.info(
+            "[TeamManager] building TeamAgentSpec: scope=%s session_id=%s",
+            scope.tenant(),
+            session_id,
+        )
         spec = self._load_team_spec(session_id)
         deleted_tables, cleared_tables = await self._cleanup_team_runtime_state(spec)
         if deleted_tables or cleared_tables:
@@ -521,6 +595,7 @@ class TeamManager:
             request_id=request_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
+            runtime_scope=scope,
         )
 
         logger.info("[TeamManager] TeamAgentSpec ready: team_name=%s", spec.team_name)
@@ -529,13 +604,18 @@ class TeamManager:
         try:
             logger.info("[TeamManager] creating TeamAgent from spec")
             team_agent = spec.build()
-            self._team_agents[session_id] = team_agent
+            self._team_agents[key] = team_agent
 
             # After build, copy global skills to team shared directory (only once)
-            self._copy_global_skills_to_team_shared_dir(spec)
+            self._copy_global_skills_to_team_shared_dir(
+                spec,
+                service_id=scope.service_id,
+                agent_id=scope.agent_id,
+            )
 
             logger.info(
-                "[TeamManager] Team created: session_id=%s, team_name=%s",
+                "[TeamManager] Team created: scope=%s session_id=%s, team_name=%s",
+                scope.tenant(),
                 session_id,
                 spec.team_name,
             )
@@ -545,51 +625,75 @@ class TeamManager:
 
     async def get_or_create_team(
         self,
-        session_id: str,
+        scope: RuntimeScopeKey,
         deep_agent: DeepAgent,
         request_id: str | None = None,
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
     ) -> TeamAgent:
+        key = self._require_session_scope(scope)
         async with self._lock:
-            team_agent = self._team_agents.get(session_id)
+            team_agent = self._team_agents.get(key)
             if team_agent is not None:
                 return team_agent
 
-            await self._destroy_other_sessions(session_id)
+            # 2b: destroy other sessions of the same tenant only
+            await self._destroy_other_sessions_in_tenant(scope)
             return await self.create_team(
-                session_id,
+                scope,
                 deep_agent,
                 request_id,
                 channel_id,
                 request_metadata,
             )
 
-    async def interact(self, session_id: str, user_input: str) -> bool:
-        team_agent = self._team_agents.get(session_id)
+    async def interact(self, scope: RuntimeScopeKey, user_input: str) -> bool:
+        key = self._require_session_scope(scope)
+        team_agent = self._team_agents.get(key)
         if team_agent is None:
-            logger.warning("[TeamManager] interact failed, missing team: session_id=%s", session_id)
+            logger.warning(
+                "[TeamManager] interact failed, missing team: scope=%s session_id=%s",
+                scope.tenant(),
+                scope.session_id,
+            )
             return False
 
         try:
             await team_agent.interact(user_input)
-            logger.debug("[TeamManager] interact sent: session_id=%s", session_id)
+            logger.debug(
+                "[TeamManager] interact sent: scope=%s session_id=%s",
+                scope.tenant(),
+                scope.session_id,
+            )
             return True
         except Exception as exc:
-            logger.error("[TeamManager] interact failed: session_id=%s, error=%s", session_id, exc)
+            logger.error(
+                "[TeamManager] interact failed: scope=%s session_id=%s, error=%s",
+                scope.tenant(),
+                scope.session_id,
+                exc,
+            )
             return False
 
-    async def destroy_team(self, session_id: str) -> bool:
+    async def destroy_team(self, scope: RuntimeScopeKey) -> bool:
         async with self._lock:
-            return await self._destroy_team(session_id)
+            return await self._destroy_team(self._require_session_scope(scope))
 
-    async def _destroy_other_sessions(self, current_session_id: str) -> None:
-        stale_session_ids = [sid for sid in list(self._team_agents.keys()) if sid != current_session_id]
-        for stale_session_id in stale_session_ids:
-            await self._destroy_team(stale_session_id)
+    async def _destroy_other_sessions_in_tenant(self, current: RuntimeScopeKey) -> None:
+        """Destroy other sessions under the same (service_id, agent_id) only."""
+        tenant = current.tenant()
+        current_key = self._require_session_scope(current)
+        stale_keys = [
+            key
+            for key in list(self._team_agents.keys())
+            if key[:2] == tenant and key != current_key
+        ]
+        for stale_key in stale_keys:
+            await self._destroy_team(stale_key)
 
-    async def _destroy_team(self, session_id: str) -> bool:
-        stream_task = self._stream_tasks.pop(session_id, None)
+    async def _destroy_team(self, key: _TeamSessionKey) -> bool:
+        session_id = key[2]
+        stream_task = self._stream_tasks.pop(key, None)
         if stream_task and not stream_task.done():
             stream_task.cancel()
             try:
@@ -598,31 +702,31 @@ class TeamManager:
                 pass
             except Exception as exc:
                 logger.warning(
-                    "[TeamManager] stream stop failed: session_id=%s error=%s",
-                    session_id,
+                    "[TeamManager] stream stop failed: key=%s error=%s",
+                    key,
                     exc,
                 )
 
-        monitor_handler = self._team_monitors.pop(session_id, None)
+        monitor_handler = self._team_monitors.pop(key, None)
         if monitor_handler is not None:
             try:
                 await monitor_handler.stop()
             except Exception as exc:
                 logger.warning(
-                    "[TeamManager] monitor stop failed: session_id=%s error=%s",
-                    session_id,
+                    "[TeamManager] monitor stop failed: key=%s error=%s",
+                    key,
                     exc,
                 )
 
-        team_agent = self._team_agents.pop(session_id, None)
+        team_agent = self._team_agents.pop(key, None)
         cleaned = False
         cleanup_spec: TeamAgentSpec | None = None
         try:
             cleanup_spec = self._load_team_spec(session_id)
             if team_agent is None:
                 logger.info(
-                    "[TeamManager] no in-memory team for session_id=%s, run runtime cleanup fallback only",
-                    session_id,
+                    "[TeamManager] no in-memory team for key=%s, run runtime cleanup fallback only",
+                    key,
                 )
                 return False
 
@@ -633,14 +737,14 @@ class TeamManager:
                 reset_session_id(token)
 
             logger.info(
-                "[TeamManager] Team cleaned via core API: session_id=%s cleaned=%s",
-                session_id,
+                "[TeamManager] Team cleaned via core API: key=%s cleaned=%s",
+                key,
                 cleaned,
             )
         except Exception as exc:
             logger.error(
-                "[TeamManager] destroy team failed: session_id=%s error=%s",
-                session_id,
+                "[TeamManager] destroy team failed: key=%s error=%s",
+                key,
                 exc,
             )
         finally:
@@ -649,8 +753,8 @@ class TeamManager:
                     cleanup_spec = self._load_team_spec(session_id)
                 except Exception as exc:
                     logger.warning(
-                        "[TeamManager] failed to rebuild team spec for cleanup: session_id=%s error=%s",
-                        session_id,
+                        "[TeamManager] failed to rebuild team spec for cleanup: key=%s error=%s",
+                        key,
                         exc,
                     )
                     cleanup_spec = None
@@ -670,34 +774,34 @@ class TeamManager:
 
     async def cleanup_all(self) -> None:
         async with self._lock:
-            session_ids = list(self._team_agents.keys())
-            for session_id in session_ids:
-                await self._destroy_team(session_id)
+            keys = list(self._team_agents.keys())
+            for key in keys:
+                await self._destroy_team(key)
             logger.info("[TeamManager] all teams cleaned")
 
-    def get_team_agent(self, session_id: str) -> TeamAgent | None:
-        return self._team_agents.get(session_id)
+    def get_team_agent(self, scope: RuntimeScopeKey) -> TeamAgent | None:
+        return self._team_agents.get(self._require_session_scope(scope))
 
-    def register_monitor(self, session_id: str, handler: TeamMonitorHandler) -> None:
-        self._team_monitors[session_id] = handler
+    def register_monitor(self, scope: RuntimeScopeKey, handler: TeamMonitorHandler) -> None:
+        self._team_monitors[self._require_session_scope(scope)] = handler
 
-    def register_stream_task(self, session_id: str, task: asyncio.Task) -> None:
-        self._stream_tasks[session_id] = task
+    def register_stream_task(self, scope: RuntimeScopeKey, task: asyncio.Task) -> None:
+        self._stream_tasks[self._require_session_scope(scope)] = task
 
     async def cancel_all_stream_tasks(self, reason: str = "") -> None:
         """Gateway 与 AgentServer 断开时取消 Team 后台 stream 协程（含 create_task 绕开 SessionManager 的任务）。"""
         async with self._lock:
             pending = list(self._stream_tasks.items())
-        for session_id, task in pending:
+        for key, task in pending:
             if task.done():
                 continue
             logger.info(
-                "[TeamManager] %scancel stream task session_id=%s",
+                "[TeamManager] %scancel stream task key=%s",
                 reason,
-                session_id,
+                key,
             )
             task.cancel()
-        for session_id, task in pending:
+        for key, task in pending:
             if task.done():
                 continue
             try:
@@ -706,8 +810,8 @@ class TeamManager:
                 pass
             except Exception as exc:
                 logger.warning(
-                    "[TeamManager] stream task await after cancel failed session_id=%s: %s",
-                    session_id,
+                    "[TeamManager] stream task await after cancel failed key=%s: %s",
+                    key,
                     exc,
                 )
         async with self._lock:

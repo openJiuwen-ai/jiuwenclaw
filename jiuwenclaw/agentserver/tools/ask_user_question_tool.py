@@ -17,6 +17,7 @@ from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     ASK_REQUEST_PREFIX,
     AskUserQuestionRegistry,
     get_ask_request_context,
+    get_ask_runtime_scope,
 )
 
 logger = logging.getLogger(__name__)
@@ -278,9 +279,10 @@ def _first_outline_preview(questions: list[dict[str, Any]]) -> dict[str, Any] | 
 
 async def _ask_user_question_impl(questions: Any, max_options: int | None = None) -> dict[str, Any]:
     interactive, session_id, stream_rid, channel_id = get_ask_request_context()
+    scope = get_ask_runtime_scope()
     reg = AskUserQuestionRegistry.get_instance()
     if stream_rid and not interactive:
-        interactive = reg.stream_interactive_ask_enabled(stream_rid)
+        interactive = reg.stream_interactive_ask_enabled(scope, stream_rid)
     try:
         normalized = _normalize_questions(questions, max_options=max_options)
     except Exception as exc:

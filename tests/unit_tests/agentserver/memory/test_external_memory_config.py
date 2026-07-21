@@ -168,13 +168,20 @@ def _patch_embed(monkeypatch, api_key="k", base_url="u", model="m"):
     )
 
 
-def test_openjiuwen_provider_config_defaults(monkeypatch):
+def test_openjiuwen_provider_config_defaults(monkeypatch, tmp_path):
     _patch_embed(monkeypatch)
+    monkeypatch.setattr(
+        emc,
+        "_resolve_ltm_dir",
+        lambda service_id=None, agent_id=None: tmp_path / "ltm",
+    )
     out, _scope = emc.build_openjiuwen_provider_config({"openjiuwen": {}})
     assert out["kv"]["backend"] == "shelve"
     assert out["vector"]["backend"] == "chroma"
     assert out["db"]["backend"] == "sqlite"
-    assert "kv" in out["kv"]["path"] or out["kv"]["path"].endswith("kv")
+    assert out["kv"]["path"] == str(tmp_path / "ltm" / "kv")
+    assert out["vector"]["persist_directory"] == str(tmp_path / "ltm" / "chroma")
+    assert out["db"]["path"] == str(tmp_path / "ltm" / "ltm.db")
     assert out["embedding"]["model_name"] == "m"
     assert out["embedding"]["api_key"] == "k"
 
@@ -195,11 +202,67 @@ def test_openjiuwen_provider_config_overrides_applied(monkeypatch):
     assert out["db"]["path"] == "/custom/db.sqlite"
 
 
-def test_openjiuwen_provider_config_missing_embedding_does_not_raise(monkeypatch):
+def test_openjiuwen_empty_paths_use_tenant_ltm_dir(monkeypatch, tmp_path):
+    _patch_embed(monkeypatch)
+    roots: dict[tuple[str | None, str | None], Path] = {}
+
+    def fake_resolve(service_id=None, agent_id=None):
+        key = (service_id, agent_id)
+        if key not in roots:
+            roots[key] = tmp_path / f"{service_id}_{agent_id}" / "ltm"
+            roots[key].mkdir(parents=True, exist_ok=True)
+        return roots[key]
+
+    monkeypatch.setattr(emc, "_resolve_ltm_dir", fake_resolve)
+    a, _ = emc.build_openjiuwen_provider_config(
+        {"openjiuwen": {}},
+        service_id="svc_a",
+        agent_id="agent_a",
+    )
+    b, _ = emc.build_openjiuwen_provider_config(
+        {"openjiuwen": {}},
+        service_id="svc_b",
+        agent_id="agent_b",
+    )
+    assert a["kv"]["path"] != b["kv"]["path"]
+    assert "svc_a_agent_a" in a["kv"]["path"].replace("\\", "/")
+    assert "svc_b_agent_b" in b["kv"]["path"].replace("\\", "/")
+
+
+def test_openjiuwen_tip_env_overrides_config_path(monkeypatch, tmp_path):
+    _patch_embed(monkeypatch)
+    monkeypatch.setattr(
+        emc,
+        "_resolve_ltm_dir",
+        lambda service_id=None, agent_id=None: tmp_path / "ltm",
+    )
+    monkeypatch.setattr(emc, "read_env", lambda name, default="": {
+        "MEMORY_KV_PATH": "/tip/kv",
+        "MEMORY_VECTOR_DIR": "/tip/vec",
+        "MEMORY_DB_PATH": "/tip/db.sqlite",
+    }.get(name, default))
+    out, _ = emc.build_openjiuwen_provider_config({
+        "openjiuwen": {
+            "kv_path": "/config/kv",
+            "vector_persist_dir": "/config/vec",
+            "db_path": "/config/db.sqlite",
+        }
+    })
+    assert out["kv"]["path"] == "/tip/kv"
+    assert out["vector"]["persist_directory"] == "/tip/vec"
+    assert out["db"]["path"] == "/tip/db.sqlite"
+
+
+def test_openjiuwen_provider_config_missing_embedding_does_not_raise(monkeypatch, tmp_path):
     # When embed is absent the function must NOT raise; just warn.
     monkeypatch.setattr(
         emc, "get_embed_config",
         lambda: {"api_key": "", "base_url": "", "model": ""},
+    )
+    monkeypatch.setattr(
+        emc,
+        "_resolve_ltm_dir",
+        lambda service_id=None, agent_id=None: tmp_path / "ltm",
     )
     for var in ("EMBED_API_KEY", "EMBED_BASE_URL", "EMBED_MODEL"):
         monkeypatch.delenv(var, raising=False)
@@ -207,12 +270,30 @@ def test_openjiuwen_provider_config_missing_embedding_does_not_raise(monkeypatch
     assert out["embedding"]["model_name"] == ""
 
 
-def test_openjiuwen_provider_config_missing_subsection_uses_defaults(monkeypatch):
+def test_openjiuwen_provider_config_missing_subsection_uses_defaults(monkeypatch, tmp_path):
     _patch_embed(monkeypatch)
+    monkeypatch.setattr(
+        emc,
+        "_resolve_ltm_dir",
+        lambda service_id=None, agent_id=None: tmp_path / "ltm",
+    )
     out, _scope = emc.build_openjiuwen_provider_config({})
     assert out["kv"]["backend"] == "shelve"
     assert out["vector"]["backend"] == "chroma"
     assert out["db"]["backend"] == "sqlite"
+
+
+def test_resolve_ltm_dir_uses_tenant_workspace(monkeypatch, tmp_path):
+    def fake_workspace(service_id=None, agent_id=None):
+        return tmp_path / f"service_{service_id}" / f"agent_{agent_id}" / "agent" / "jiuwenclaw_workspace"
+
+    monkeypatch.setattr(
+        "jiuwenclaw.utils.resolve_tenant_agent_workspace_dir",
+        fake_workspace,
+    )
+    resolved = emc._resolve_ltm_dir("office", "bot1")
+    assert resolved == fake_workspace("office", "bot1") / "memory" / "ltm"
+    assert resolved.is_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +307,11 @@ def _base_external_cfg(**overrides):
             "external": {
                 "provider": "openjiuwen",
                 "user_id": "alice",
-                "openjiuwen": {"kv_path": "/data/kv"},
+                "openjiuwen": {
+                    "kv_path": "/data/kv",
+                    "vector_persist_dir": "/data/chroma",
+                    "db_path": "/data/ltm.db",
+                },
             },
         },
         "embed": {
@@ -257,6 +342,27 @@ def test_external_memory_fingerprint_changes_on_config_delta(monkeypatch, mutato
     after = _base_external_cfg()
     mutator(after)
     assert emc.external_memory_fingerprint(before) != emc.external_memory_fingerprint(after)
+
+
+def test_external_memory_fingerprint_differs_by_tenant_when_paths_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(emc, "get_embed_config", lambda: {})
+
+    def fake_resolve(service_id=None, agent_id=None):
+        p = tmp_path / f"{service_id}_{agent_id}" / "ltm"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    monkeypatch.setattr(emc, "_resolve_ltm_dir", fake_resolve)
+    cfg = {
+        "memory": {
+            "engine": "external",
+            "external": {"provider": "openjiuwen", "openjiuwen": {}},
+        },
+        "embed": {},
+    }
+    fp_a = emc.external_memory_fingerprint(cfg, service_id="s1", agent_id="a1")
+    fp_b = emc.external_memory_fingerprint(cfg, service_id="s1", agent_id="a2")
+    assert fp_a != fp_b
 
 
 def test_external_memory_fingerprint_engine_gate(monkeypatch):

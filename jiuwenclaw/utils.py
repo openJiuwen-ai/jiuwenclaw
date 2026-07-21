@@ -32,11 +32,6 @@ import copy
 import datetime
 import json
 import logging
-import asyncio
-import copy
-import datetime
-import json
-import logging
 import mimetypes
 import os
 import re
@@ -46,6 +41,7 @@ import threading
 import time
 import contextlib
 from collections import OrderedDict
+from collections.abc import Hashable
 from dataclasses import dataclass, field
 from logging.handlers import BaseRotatingHandler
 from pathlib import Path
@@ -150,6 +146,8 @@ class FileTransferStartParams:
     mime_type: str = ""
     session_id: str = ""
     channel_id: str = ""
+    service_id: str = ""
+    agent_id: str = ""
 
 
 @contextlib.contextmanager
@@ -1427,6 +1425,14 @@ def get_agent_workspace_dir() -> Path:
     Returns:
         Path to agent workspace: ~/.jiuwenclaw/agent/jiuwenclaw_workspace
     """
+    try:
+        from jiuwenclaw.agentserver.tenant_context import get_bound_jiuwenclaw_workspace
+
+        bound = get_bound_jiuwenclaw_workspace()
+        if bound is not None:
+            return bound
+    except ImportError:
+        logger.debug("tenant_context unavailable for workspace bind", exc_info=True)
     return get_agent_root_dir() / "jiuwenclaw_workspace"
 
 
@@ -1442,12 +1448,31 @@ def get_service_root_dir(service_id: str = "default") -> Path:
     return get_user_workspace_dir() / f"service_{service_id}"
 
 
+def get_gateway_dir() -> Path:
+    """Get the Gateway-scoped data directory under ``JIUWENCLAW_DATA_DIR``.
+
+    Path: ``{JIUWENCLAW_DATA_DIR}/.gateway``
+    Used for process-wide Gateway state (e.g. SessionMap), not per-agent data.
+    """
+    path = get_user_workspace_dir() / ".gateway"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def get_agent_root_dir() -> Path:
     """Get the agent root directory path (multi-tenant default).
 
     单租户作为多租户的默认特例，返回默认多租户路径。
     Path: ~/.jiuwenclaw/service_default/agent_default/agent/
     """
+    try:
+        from jiuwenclaw.agentserver.tenant_context import get_bound_agent_root
+
+        bound = get_bound_agent_root()
+        if bound is not None:
+            return bound
+    except ImportError:
+        logger.debug("tenant_context unavailable for agent root bind", exc_info=True)
     return get_multi_tenant_user_workspace_dir("default", "default") / "agent"
 
 
@@ -1477,6 +1502,124 @@ def get_multi_tenant_user_workspace_dir(service_id: str | None, agent_id: str | 
     workspace_dir = workspace_dir / f"service_{service_id}" if service_id else workspace_dir / "service"
     workspace_dir = workspace_dir / f"agent_{agent_id}" if agent_id else workspace_dir / "agents"
     return workspace_dir
+
+
+def resolve_tenant_env_ns(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> tuple[str, str]:
+    """Resolve ``(service_id, agent_id)``: explicit pair > bound env_ns > TypeError."""
+    from jiuwenclaw.local_env_config import get_bound_agent_env_ns
+
+    if service_id is not None or agent_id is not None:
+        if service_id is None or agent_id is None:
+            raise TypeError(
+                "tenant scope requires both service_id and agent_id when either is passed"
+            )
+        sid = str(service_id).strip()
+        aid = str(agent_id).strip()
+        if not sid or not aid:
+            raise TypeError("tenant service_id/agent_id must be non-empty strings")
+        return sid, aid
+    bound = get_bound_agent_env_ns()
+    if bound is not None:
+        return bound
+    raise TypeError(
+        "tenant scope is required: pass service_id=... and agent_id=..., "
+        "or bind_agent_env_ns before resolving tenant paths"
+    )
+
+
+def resolve_tenant_agent_workspace_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Resolve ``service_{sid}/agent_{aid}/agent/jiuwenclaw_workspace``."""
+    sid, aid = resolve_tenant_env_ns(service_id, agent_id)
+    workspace = get_multi_tenant_user_workspace_dir(sid, aid)
+    if workspace is None:
+        raise TypeError(
+            f"invalid tenant for workspace path: service_id={sid!r}, agent_id={aid!r}"
+        )
+    return workspace / "agent" / "jiuwenclaw_workspace"
+
+
+def resolve_tenant_agent_root_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Resolve ``service_{sid}/agent_{aid}/agent``."""
+    sid, aid = resolve_tenant_env_ns(service_id, agent_id)
+    workspace = get_multi_tenant_user_workspace_dir(sid, aid)
+    if workspace is None:
+        raise TypeError(
+            f"invalid tenant for agent root: service_id={sid!r}, agent_id={aid!r}"
+        )
+    return workspace / "agent"
+
+
+def resolve_gateway_cron_jobs_path(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Gateway per-tenant cron store: ``gateway/cron/service_{sid}/agent_{aid}/cron_jobs.json``."""
+    sid = str(service_id or "default").strip() or "default"
+    aid = str(agent_id or "default").strip() or "default"
+    return (
+        get_user_workspace_dir()
+        / "gateway"
+        / "cron"
+        / f"service_{sid}"
+        / f"agent_{aid}"
+        / "cron_jobs.json"
+    )
+
+
+def resolve_cron_tenant_scope(
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+    log_prefix: str = "[Cron]",
+) -> tuple[str, str]:
+    """Resolve cron tenant ids; missing values fall back to default/default (5b)."""
+    _logger = logging.getLogger(__name__)
+    sid = service_id
+    aid = agent_id
+    if sid is None and isinstance(metadata, dict):
+        sid = metadata.get("service_id")
+    if aid is None and isinstance(metadata, dict):
+        aid = metadata.get("agent_id")
+    if sid is None and isinstance(params, dict):
+        sid = params.get("service_id")
+    if aid is None and isinstance(params, dict):
+        aid = params.get("agent_id")
+    sid_s = str(sid).strip() if sid is not None else ""
+    aid_s = str(aid).strip() if aid is not None else ""
+    if not sid_s or not aid_s:
+        _logger.warning(
+            "%s missing service_id/agent_id; fallback to default/default (sid=%r aid=%r)",
+            log_prefix,
+            sid,
+            aid,
+        )
+    return sid_s or "default", aid_s or "default"
+
+
+def resolve_tenant_env_ns_from_agent(agent: Any) -> tuple[str, str] | None:
+    """Read tenant ids from a DeepAgent/adapter when env_* attrs are present."""
+    if agent is None:
+        return None
+    sid = getattr(agent, "_env_service_id", None) or getattr(agent, "_service_id", None)
+    aid = getattr(agent, "_env_agent_id", None) or getattr(agent, "_agent_id", None)
+    if sid is None or aid is None:
+        return None
+    sid_s = str(sid).strip()
+    aid_s = str(aid).strip()
+    if not sid_s or not aid_s:
+        return None
+    return sid_s, aid_s
 
 
 def get_agent_home_dir() -> Path:
@@ -1511,13 +1654,13 @@ def get_multi_tenant_skill_dirs(
     """Resolve the skills directory list for multi-tenant / single-tenant mode.
 
     - Multi-tenant (any of ``service_id`` / ``agent_id`` provided): returns
-      ``[<multi-tenant user workspace>/skills]``.
+      ``[<multi-tenant user workspace>/agent/jiuwenclaw_workspace/skills]``.
     - Single-tenant (both ``None``): returns ``[get_agent_skills_dir()]``.
     """
     if service_id or agent_id:
         workspace = get_multi_tenant_user_workspace_dir(service_id, agent_id)
         if workspace is not None:
-            return [workspace / "skills"]
+            return [workspace / "agent" / "jiuwenclaw_workspace" / "skills"]
     return [get_agent_skills_dir()]
 
 
@@ -1767,20 +1910,58 @@ def get_builtin_skills_dir() -> Path:
 
 
 def get_agent_sessions_dir() -> Path:
-    """Get the default sessions directory path.
+    """Get the sessions directory path.
 
-    返回默认多租户路径（单租户作为多租户的默认特例）：
+    Prefer request-bound tenant agent root when present; otherwise the default
+    multi-tenant path (single-tenant as the default special case):
     ~/.jiuwenclaw/service_default/agent_default/agent/sessions
     """
+    try:
+        from jiuwenclaw.agentserver.tenant_context import get_bound_agent_root
+
+        bound = get_bound_agent_root()
+        if bound is not None:
+            return bound / "sessions"
+    except ImportError:
+        logger.debug("tenant_context unavailable for sessions bind", exc_info=True)
     return get_multi_tenant_user_workspace_dir("default", "default") / "agent" / "sessions"
 
 
-def get_agent_evolution_trajectories_dir() -> Path:
-    """Get the default evolution execution trajectories directory.
+def resolve_tenant_sessions_dir(
+    service_id: str | None,
+    agent_id: str | None,
+) -> Path:
+    """Resolve ``service_{sid}/agent_{aid}/agent/sessions`` for a tenant pair.
 
-    返回默认多租户路径（单租户作为多租户的默认特例）：
-    ~/.jiuwenclaw/service_default/agent_default/agent/evolution_trajectories
+    Falls back to :func:`get_agent_sessions_dir` when the pair is incomplete.
     """
+    workspace = get_multi_tenant_user_workspace_dir(service_id, agent_id)
+    if workspace is not None:
+        return workspace / "agent" / "sessions"
+    return get_agent_sessions_dir()
+
+
+def normalize_tenant_scope_id(value: str | None, *, default: str = "default") -> str:
+    """Normalize a tenant ``service_id`` or ``agent_id`` segment."""
+    if value is None:
+        return default
+    stripped = str(value).strip()
+    return stripped or default
+
+
+def get_agent_evolution_trajectories_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Get evolution trajectories directory under the tenant agent root.
+
+    Path: ``service_{sid}/agent_{aid}/agent/evolution_trajectories``
+
+    When ``service_id``/``agent_id`` are omitted, uses ``get_agent_root_dir()``
+    (bound agent root, else ``service_default/agent_default/agent``).
+    """
+    if service_id is not None or agent_id is not None:
+        return resolve_tenant_agent_root_dir(service_id, agent_id) / "evolution_trajectories"
     return get_agent_root_dir() / "evolution_trajectories"
 
 
@@ -1805,46 +1986,52 @@ def _migrate_legacy_checkpoint_and_logs() -> None:
 
     # 目标路径
     service_root = get_service_root_dir()
-    agent_workspace = get_multi_tenant_user_workspace_dir("default", "default")
+    agent_default_path = get_multi_tenant_user_workspace_dir("default", "default")
     agent_root = get_agent_root_dir()
 
-    # 确保 target 目录存在
+    # 确保 service 级目录存在（.logs 等）
     service_root.mkdir(parents=True, exist_ok=True)
-    if agent_workspace:
-        agent_workspace.mkdir(parents=True, exist_ok=True)
-    agent_root.mkdir(parents=True, exist_ok=True)
 
     # 迁移 .checkpoint 到 agent_default 级别
-    checkpoint_target = agent_workspace / ".checkpoint" if agent_workspace else agent_root / ".checkpoint"
+    checkpoint_target = (
+        agent_default_path / ".checkpoint" if agent_default_path else agent_root / ".checkpoint"
+    )
     checkpoint_sources = [
         workspace / ".checkpoint",
         workspace / "agent" / ".checkpoint",
         agent_root / ".checkpoint",  # 从 agent 子目录迁移到 agent_default 级别
     ]
-    for legacy in checkpoint_sources:
-        if legacy.exists() and not checkpoint_target.exists():
-            checkpoint_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(legacy), str(checkpoint_target))
-        elif legacy.exists() and checkpoint_target.exists():
-            # 合并 checkpoint 文件
-            for f in legacy.iterdir():
-                if not (checkpoint_target / f.name).exists():
-                    shutil.move(str(f), str(checkpoint_target / f.name))
-
-    # 迁移 .logs 到 service 级别
-    logs_target = service_root / ".logs"
     logs_sources = [
         workspace / ".logs",
         workspace / "agent" / ".logs",
     ]
-    for legacy in logs_sources:
-        if legacy.exists() and not logs_target.exists():
-            shutil.move(str(legacy), str(logs_target))
-        elif legacy.exists() and logs_target.exists():
-            # 合并日志：移动旧日志文件到新目录
-            for f in legacy.iterdir():
-                if not (logs_target / f.name).exists():
-                    shutil.move(str(f), str(logs_target / f.name))
+    legacy_sources_exist = any(p.exists() for p in checkpoint_sources + logs_sources)
+
+    # agent_default 已存在（迁移归档）或确有 legacy 源待迁 → 才 mkdir / 搬文件
+    if agent_default_path and (agent_default_path.exists() or legacy_sources_exist):
+        if not agent_default_path.exists():
+            agent_default_path.mkdir(parents=True, exist_ok=True)
+        for legacy in checkpoint_sources:
+            if legacy.exists() and not checkpoint_target.exists():
+                checkpoint_target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(legacy), str(checkpoint_target))
+            elif legacy.exists() and checkpoint_target.exists():
+                for f in legacy.iterdir():
+                    if not (checkpoint_target / f.name).exists():
+                        shutil.move(str(f), str(checkpoint_target / f.name))
+
+        # 迁移 .logs 到 service 级别
+        logs_target = service_root / ".logs"
+        for legacy in logs_sources:
+            if legacy.exists() and not logs_target.exists():
+                shutil.move(str(legacy), str(logs_target))
+            elif legacy.exists() and logs_target.exists():
+                for f in legacy.iterdir():
+                    if not (logs_target / f.name).exists():
+                        shutil.move(str(f), str(logs_target / f.name))
+
+    if agent_default_path and (agent_default_path.exists() or legacy_sources_exist):
+        agent_root.mkdir(parents=True, exist_ok=True)
 
 
 def get_checkpoint_dir() -> Path:
@@ -1861,14 +2048,34 @@ def get_checkpoint_dir() -> Path:
     return get_agent_root_dir() / ".checkpoint"
 
 
-def get_logs_dir() -> Path:
+def _resolve_logs_service_id(service_id: str | None = None) -> str:
+    """Resolve service_id for logs: explicit > bound env_ns > default."""
+    if service_id is not None:
+        return normalize_tenant_scope_id(service_id)
+    try:
+        from jiuwenclaw.local_env_config import get_bound_agent_env_ns
+
+        ns = get_bound_agent_env_ns()
+        if ns is not None:
+            return normalize_tenant_scope_id(ns[0])
+    except Exception:
+        logger.debug("resolve logs service_id from bound env_ns failed", exc_info=True)
+    return "default"
+
+
+def get_logs_dir(service_id: str | None = None) -> Path:
     """Get the logs directory path (service-level).
 
-    多租户架构下，日志存放在 service 级别，便于多 agent 共享。
-    Path: ~/.jiuwenclaw/service_default/.logs
+    多租户架构下，日志存放在 service 级别，便于同 service 下多 agent 共享。
+
+    Path: ``~/.jiuwenclaw/service_{sid}/.logs``
+
+    ``service_id`` 解析顺序：显式参数 > 当前 ``bind_agent_env_ns`` 的 sid > ``default``。
+    进程启动时的 FileHandler（``setup_logger``）通常无 bind，仍落在 ``service_default/.logs``。
     """
     _migrate_legacy_checkpoint_and_logs()
-    return get_service_root_dir() / ".logs"
+    sid = _resolve_logs_service_id(service_id)
+    return get_service_root_dir(sid) / ".logs"
 
 
 def get_xy_tmp_dir() -> Path:
@@ -2829,7 +3036,7 @@ class AsyncLRUCache:
         max_size: int | None = None,
         ttl_seconds: int | None = None,
     ) -> None:
-        self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
+        self._cache: OrderedDict[Hashable, tuple[Any, float]] = OrderedDict()
         self._max_size = max_size
         self._ttl = ttl_seconds
         self._lock = asyncio.Lock()
@@ -2839,7 +3046,7 @@ class AsyncLRUCache:
             return False
         return time.time() - timestamp > self._ttl
 
-    async def get(self, key: str) -> Any | None:
+    async def get(self, key: Hashable) -> Any | None:
         """获取缓存值，如果不存在或已过期则返回 None.
 
         命中时会刷新访问时间（滑动过期：自最后一次 get/put 起算 ttl）。
@@ -2858,7 +3065,7 @@ class AsyncLRUCache:
             self._cache.move_to_end(key)
             return value
 
-    async def put(self, key: str, value: Any) -> None:
+    async def put(self, key: Hashable, value: Any) -> None:
         """存入缓存值，如果超过容量则淘汰最久未使用的."""
         async with self._lock:
             if key in self._cache:
@@ -2869,7 +3076,7 @@ class AsyncLRUCache:
 
             self._cache[key] = (value, time.time())
 
-    async def touch_if_same(self, key: str, value: Any) -> bool:
+    async def touch_if_same(self, key: Hashable, value: Any) -> bool:
         """若 key 存在且缓存值与 value 为同一对象，则刷新访问时间.
 
         用于请求结束时续约 TTL，避免无条件 put 用旧实例覆盖并发创建的新实例。
@@ -2887,7 +3094,7 @@ class AsyncLRUCache:
             self._cache.move_to_end(key)
             return True
 
-    async def remove(self, key: str) -> None:
+    async def remove(self, key: Hashable) -> None:
         """删除缓存项."""
         async with self._lock:
             self._cache.pop(key, None)
@@ -2912,7 +3119,7 @@ class AsyncLRUCache:
             values.append(entry[0])
         return values
 
-    async def keys(self) -> list[str]:
+    async def keys(self) -> list[Hashable]:
         async with self._lock:
             if self._ttl is not None:
                 expired_keys = [
@@ -3076,20 +3283,6 @@ def fix_json_arguments(arguments: str | dict) -> str | dict:
 
 
 @dataclass
-class FileTransferStartParams:
-    """文件传输开始参数（用于封装多参数方法调用）."""
-    transfer_id: str
-    filename: str
-    file_size: int
-    sha256: str
-    total_chunks: int
-    chunk_size: int
-    mime_type: str = ""
-    session_id: str = ""
-    channel_id: str = ""
-
-
-@dataclass
 class TransferProgress:
     """文件传输进度状态（Gateway 和 AgentServer 共用）."""
     transfer_id: str
@@ -3103,6 +3296,26 @@ class TransferProgress:
     mime_type: str = ""
     session_id: str = ""
     channel_id: str = ""  # Gateway 端需要，AgentServer 端可选
+    service_id: str = ""  # 落盘用；空则 normalize 为 default
+
+
+def resolve_file_transfer_received_dir(
+    received_files_dir: str,
+    service_id: str | None = None,
+) -> Path:
+    """Resolve service-scoped received_files root for one transfer.
+
+    - Absolute ``received_files_dir`` (tests / override): use as-is.
+    - Relative: ``service_{sid}/<received_files_dir>`` with sid defaulting to ``default``.
+    """
+    sub = Path(received_files_dir)
+    if sub.is_absolute():
+        sub.mkdir(parents=True, exist_ok=True)
+        return sub
+    sid = normalize_tenant_scope_id(service_id)
+    path = get_service_root_dir(sid) / sub
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def safe_filename(filename: str) -> str:

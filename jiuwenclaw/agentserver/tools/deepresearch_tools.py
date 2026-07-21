@@ -8,6 +8,11 @@ import logging
 
 from openjiuwen.core.foundation.tool import tool
 
+from jiuwenclaw.agentserver.runtime_scope import RuntimeScopeKey
+from jiuwenclaw.agentserver.tools.deepresearch_task_manager import (
+    DeepResearchTaskRequest,
+    get_deepresearch_manager,
+)
 from jiuwenclaw.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -19,42 +24,57 @@ _deepresearch_route_ctx: contextvars.ContextVar[dict[str, str] | None] = context
 )
 
 
-
-def push_deepresearch_route(request_id: str, channel_id: str, session_id: str) -> contextvars.Token:
-    """设置 DeepResearch 路由上下文。
-    
-    Args:
-        request_id: 请求 ID
-        channel_id: 渠道 ID
-        session_id: 会话 ID
-        
-    Returns:
-        contextvars.Token，用于恢复上下文
-    """
+def push_deepresearch_route(
+    request_id: str,
+    channel_id: str,
+    session_id: str,
+    *,
+    service_id: str = "default",
+    agent_id: str = "default",
+) -> contextvars.Token:
+    """设置 DeepResearch 路由上下文（含租户维度）。"""
     return _deepresearch_route_ctx.set({
-        "request_id": request_id,
-        "channel_id": channel_id,
-        "session_id": session_id,
+        "request_id": request_id or "",
+        "channel_id": channel_id or "",
+        "session_id": session_id or "",
+        "service_id": (service_id or "default").strip() or "default",
+        "agent_id": (agent_id or "default").strip() or "default",
     })
 
 
 def reset_deepresearch_route(token: contextvars.Token) -> None:
-    """恢复 DeepResearch 路由上下文。
-    
-    Args:
-        token: contextvars.Token
-    """
+    """恢复 DeepResearch 路由上下文。"""
     _deepresearch_route_ctx.reset(token)
 
 
 def _get_route() -> dict[str, str]:
-    """获取当前路由上下文。
-    
-    Returns:
-        包含 request_id、channel_id、session_id 的字典
-    """
+    """获取当前路由上下文（含 service_id / agent_id）。"""
     route = _deepresearch_route_ctx.get()
-    return route if route is not None else {"request_id": "", "channel_id": "", "session_id": ""}
+    if route is None:
+        return {
+            "request_id": "",
+            "channel_id": "",
+            "session_id": "",
+            "service_id": "default",
+            "agent_id": "default",
+        }
+    return {
+        "request_id": route.get("request_id", ""),
+        "channel_id": route.get("channel_id", ""),
+        "session_id": route.get("session_id", ""),
+        "service_id": route.get("service_id", "default") or "default",
+        "agent_id": route.get("agent_id", "default") or "default",
+    }
+
+
+def _route_scope():
+    """Build RuntimeScopeKey from the current DeepResearch route context."""
+    route = _get_route()
+    return RuntimeScopeKey.from_ids(
+        route.get("service_id"),
+        route.get("agent_id"),
+        route.get("session_id"),
+    )
 
 
 def _deepresearch_dependency_available() -> bool:
@@ -62,12 +82,13 @@ def _deepresearch_dependency_available() -> bool:
     return importlib.util.find_spec(_DEEPRESEARCH_DEPENDENCY) is not None
 
 
-def _get_task_manager_cls():
-    """Import DeepResearch implementation lazily so agent startup can skip it."""
-    from jiuwenclaw.agentserver.tools.deepresearch_task_manager import (  # pylint: disable=import-outside-toplevel
-        DeepResearchTaskManager,
-    )
-    return DeepResearchTaskManager
+async def _get_task_manager():
+    """Resolve the tenant-scoped DeepResearch task manager."""
+    return await get_deepresearch_manager(_route_scope())
+
+
+def _task_request_cls():
+    return DeepResearchTaskRequest
 
 
 @tool(
@@ -93,14 +114,18 @@ async def deepresearch_create_task(
     Returns:
         任务 ID
     """
-    manager = await _get_task_manager_cls().get_instance()
+    manager = await _get_task_manager()
     route = _get_route()
     task_id = await manager.create_task(
-        query=query,
-        file_name=file_name,
-        session_id=route.get("session_id", ""),
-        channel_id=route.get("channel_id", ""),
-        request_id=route.get("request_id", ""),
+        _task_request_cls()(
+            query=query,
+            file_name=file_name,
+            session_id=route.get("session_id", ""),
+            channel_id=route.get("channel_id", ""),
+            request_id=route.get("request_id", ""),
+            service_id=route.get("service_id", "default"),
+            agent_id=route.get("agent_id", "default"),
+        )
     )
 
     # 任务已在 create_task() 返回前写入 _tasks，无需等待
@@ -124,7 +149,7 @@ async def deepresearch_get_status(task_id: str) -> str:
     Returns:
         任务状态信息（JSON 格式字符串）
     """
-    manager = await _get_task_manager_cls().get_instance()
+    manager = await _get_task_manager()
     route = _get_route()
     task_info = await manager.get_task_status(
         task_id,
@@ -155,7 +180,7 @@ async def deepresearch_list_tasks(status: str = "") -> str:
     Returns:
         任务列表（JSON 格式字符串）
     """
-    manager = await _get_task_manager_cls().get_instance()
+    manager = await _get_task_manager()
     route = _get_route()
     status_filter = status if status else None
     tasks = await manager.list_tasks(
@@ -187,7 +212,7 @@ async def deepresearch_cancel_task(task_id: str) -> str:
     Returns:
         操作结果
     """
-    manager = await _get_task_manager_cls().get_instance()
+    manager = await _get_task_manager()
     route = _get_route()
     success = await manager.cancel_task(
         task_id,
@@ -216,7 +241,7 @@ async def deepresearch_get_result(task_id: str) -> str:
     Returns:
         任务结果
     """
-    manager = await _get_task_manager_cls().get_instance()
+    manager = await _get_task_manager()
     route = _get_route()
     result = await manager.get_task_result(
         task_id,
@@ -267,14 +292,18 @@ async def deepresearch_run_task(
     Returns:
         报告保存路径信息字符串
     """
-    manager = await _get_task_manager_cls().get_instance()
+    manager = await _get_task_manager()
     route = _get_route()
     result = await manager.run_task_direct(
-        query=query,
-        file_name=file_name,
-        session_id=route.get("session_id", ""),
-        channel_id=route.get("channel_id", ""),
-        request_id=route.get("request_id", ""),
+        _task_request_cls()(
+            query=query,
+            file_name=file_name,
+            session_id=route.get("session_id", ""),
+            channel_id=route.get("channel_id", ""),
+            request_id=route.get("request_id", ""),
+            service_id=route.get("service_id", "default"),
+            agent_id=route.get("agent_id", "default"),
+        )
     )
     return result
 
@@ -322,4 +351,6 @@ __all__ = [
     "deepresearch_get_result",
     "deepresearch_run_task",
     "get_deepresearch_tools",
+    "push_deepresearch_route",
+    "reset_deepresearch_route",
 ]

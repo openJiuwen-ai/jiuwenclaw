@@ -14,6 +14,7 @@ agent/sessions/{session_id}/ 文件。
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from dataclasses import dataclass
@@ -25,7 +26,27 @@ from pydantic import BaseModel
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
-from jiuwenclaw.utils import get_agent_sessions_dir
+from jiuwenclaw.utils import get_agent_sessions_dir, resolve_tenant_sessions_dir
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_todo_sessions_dir(
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> Path:
+    """Resolve sessions root for todo files via explicit ids or bound env_ns."""
+    if service_id is not None or agent_id is not None:
+        return resolve_tenant_sessions_dir(service_id, agent_id)
+    try:
+        from jiuwenclaw.local_env_config import get_bound_agent_env_ns
+
+        ns = get_bound_agent_env_ns()
+        if ns is not None:
+            return resolve_tenant_sessions_dir(ns[0], ns[1])
+    except Exception:
+        logger.debug("resolve todo sessions dir from bound env_ns failed", exc_info=True)
+    return get_agent_sessions_dir()
 
 
 class TaskStatus(str, Enum):
@@ -140,16 +161,28 @@ class TodoToolkit:
                 cls._session_locks[key] = threading.Lock()
             return cls._session_locks[key]
 
-    def __init__(self, session_id: Optional[str] = None, todo_dir: Path | None = None):
+    def __init__(
+        self,
+        session_id: Optional[str] = None,
+        todo_dir: Path | None = None,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ):
         """Initialize TodoToolkit for a session.
 
         Args:
             session_id: Session/conversation identifier for scoping todo files. 为 None
                 时每次工具调用从 plan_todo_context 动态解析，同一实例可被多 session 并发共用。
-            todo_dir: Optional custom directory. Defaults to agent/sessions/{session_id}/.
+            todo_dir: Optional custom directory. Defaults to
+                resolve_tenant_sessions_dir(sid, aid)/{session_id}/.
+            service_id / agent_id: Optional explicit tenant ids for sessions root.
+                When omitted, uses bound env_ns or get_agent_sessions_dir().
         """
         self._explicit_session_id: Optional[str] = session_id
         self._fixed_todo_dir: Optional[Path] = Path(todo_dir) if todo_dir is not None else None
+        self._service_id = service_id
+        self._agent_id = agent_id
 
     @property
     def session_id(self) -> str:
@@ -168,7 +201,10 @@ class TodoToolkit:
         if self._fixed_todo_dir is not None:
             todo_dir = self._fixed_todo_dir
         else:
-            todo_dir = get_agent_sessions_dir() / self.session_id
+            todo_dir = (
+                _resolve_todo_sessions_dir(self._service_id, self._agent_id)
+                / self.session_id
+            )
         todo_dir.mkdir(parents=True, exist_ok=True)
         return todo_dir
 

@@ -12,17 +12,24 @@ from jiuwenclaw.extensions.yuanrong_frontend_client import YuanrongFrontendAgent
 from jiuwenclaw.gateway.session_map import (
     SessionMap,
     SessionMapScope,
+    get_session_map_path,
     invoke_ids_from_identity,
     invoke_ids_from_session_id_string,
     invoke_service_id,
+    migrate_legacy_session_map_if_needed,
 )
 from jiuwenclaw.schema.agent import AgentRequest
 
 
 @pytest.fixture
-def checkpoint_tmp(monkeypatch, tmp_path):
-    monkeypatch.setattr("jiuwenclaw.gateway.session_map.get_checkpoint_dir", lambda: tmp_path)
-    return tmp_path
+def gateway_tmp(monkeypatch, tmp_path):
+    gateway_dir = tmp_path / ".gateway"
+    gateway_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        "jiuwenclaw.gateway.session_map.get_session_map_path",
+        lambda: gateway_dir / "session_map.json",
+    )
+    return gateway_dir
 
 
 def test_invoke_ids_from_identity() -> None:
@@ -45,10 +52,10 @@ def test_invoke_ids_from_session_id_string_shapes() -> None:
     assert s6 == invoke_service_id(c, b)
 
 
-def test_session_map_legacy_string_json(checkpoint_tmp) -> None:
+def test_session_map_legacy_string_json(gateway_tmp) -> None:
     legacy_sid = "prov::chatA::botB::abc::def12"
     key = "prov::chatA::botB"
-    path = checkpoint_tmp / "session_map.json"
+    path = gateway_tmp / "session_map.json"
     path.write_text(json.dumps({key: legacy_sid}, ensure_ascii=False), encoding="utf-8")
 
     m = SessionMap(scope=SessionMapScope.PER_CHAT_BOT)
@@ -59,11 +66,11 @@ def test_session_map_legacy_string_json(checkpoint_tmp) -> None:
     assert s.agent_id is None
 
 
-def test_session_map_dict_record_json(checkpoint_tmp) -> None:
+def test_session_map_dict_record_json(gateway_tmp) -> None:
     legacy_sid = "prov::chatA::botB::abc::def12"
     key = "prov::chatA::botB"
     svc = invoke_service_id("chatA", "botB")
-    path = checkpoint_tmp / "session_map.json"
+    path = gateway_tmp / "session_map.json"
     path.write_text(
         json.dumps(
             {key: {"session_id": legacy_sid, "service_id": svc, "agent_id": None}},
@@ -78,7 +85,7 @@ def test_session_map_dict_record_json(checkpoint_tmp) -> None:
     assert s.agent_id is None
 
 
-def test_session_map_get_session_and_rotate(checkpoint_tmp) -> None:
+def test_session_map_get_session_and_rotate(gateway_tmp) -> None:
     m = SessionMap(scope=SessionMapScope.PER_CHAT_BOT_USER)
     a = m.get_session("p", "c", "b", "u", rotate=False)
     b = m.get_session("p", "c", "b", "u", rotate=False)
@@ -89,6 +96,70 @@ def test_session_map_get_session_and_rotate(checkpoint_tmp) -> None:
     assert c.session_id != a.session_id
     assert c.service_id == a.service_id
     assert c.agent_id == "u"
+    assert (gateway_tmp / "session_map.json").exists()
+
+
+def test_session_map_migrates_from_checkpoint_legacy(tmp_path, monkeypatch) -> None:
+    legacy_dir = tmp_path / "agent_default" / ".checkpoint"
+    legacy_dir.mkdir(parents=True)
+    gateway_dir = tmp_path / ".gateway"
+    key = "prov::chatA::botB"
+    legacy_sid = "prov::chatA::botB::abc::def12"
+    (legacy_dir / "session_map.json").write_text(
+        json.dumps({key: legacy_sid}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.gateway.session_map.get_checkpoint_dir",
+        lambda: legacy_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.gateway.session_map.get_session_map_path",
+        lambda: gateway_dir / "session_map.json",
+    )
+
+    migrate_legacy_session_map_if_needed()
+    assert (gateway_dir / "session_map.json").exists()
+
+    m = SessionMap(scope=SessionMapScope.PER_CHAT_BOT)
+    s = m.get_session("prov", "chatA", "botB", "u")
+    assert s.session_id == legacy_sid
+
+
+def test_session_map_does_not_migrate_on_construct(tmp_path, monkeypatch) -> None:
+    """SessionMap construction must not relocate legacy files; startup migrate owns that."""
+    legacy_dir = tmp_path / "agent_default" / ".checkpoint"
+    legacy_dir.mkdir(parents=True)
+    gateway_dir = tmp_path / ".gateway"
+    (legacy_dir / "session_map.json").write_text(
+        json.dumps({"k": "prov::c::b::1::2"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.gateway.session_map.get_checkpoint_dir",
+        lambda: legacy_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.gateway.session_map.get_session_map_path",
+        lambda: gateway_dir / "session_map.json",
+    )
+
+    SessionMap(scope=SessionMapScope.PER_CHAT_BOT)
+    assert not (gateway_dir / "session_map.json").exists()
+
+
+def test_get_session_map_path_under_gateway(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "jiuwenclaw.utils.get_user_workspace_dir",
+        lambda: tmp_path,
+    )
+    # get_session_map_path imports get_gateway_dir from utils at call time via module binding
+    monkeypatch.setattr(
+        "jiuwenclaw.gateway.session_map.get_gateway_dir",
+        lambda: tmp_path / ".gateway",
+    )
+    path = get_session_map_path()
+    assert path == tmp_path / ".gateway" / "session_map.json"
 
 
 def test_yuanrong_client_requires_envelope_service_id() -> None:

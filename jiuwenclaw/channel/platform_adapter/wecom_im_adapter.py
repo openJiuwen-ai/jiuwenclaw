@@ -63,8 +63,13 @@ class WecomIMPlatformAdapter:
         self,
         thread_id: str,
         limit: int = 500,
+        *,
+        service_id: str | None = None,
+        agent_id: str | None = None,
     ) -> list[IMHistoryMessage]:
-        history = self._message_store.load_memory(thread_id)
+        history = self._message_store.load_memory(
+            thread_id, service_id=service_id, agent_id=agent_id
+        )
         if not isinstance(history, list):
             return []
 

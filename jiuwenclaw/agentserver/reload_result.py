@@ -40,6 +40,27 @@ EXTERNAL_MEMORY_ENV_KEYS = frozenset({
     "OPENVIKING_USER",
 })
 
+# Env keys that feed resolve_task_memory_config / TaskMemoryService fingerprint.
+TASK_MEMORY_ENV_KEYS = frozenset({
+    "TASK_MEMORY_LLM_MODEL",
+    "TASK_MEMORY_EMBED_MODEL",
+    "TASK_MEMORY_API_KEY",
+    "TASK_MEMORY_API_BASE",
+    "TASK_MEMORY_RETRIEVAL_ALGO",
+    "TASK_MEMORY_SUMMARY_ALGO",
+    "MODEL_NAME",
+    "MODEL_PROVIDER",
+    "API_KEY",
+    "API_BASE",
+    "EMBED_API_KEY",
+    "EMBED_KEY",
+    "EMBED_MODEL",
+    "EMBEDDING_MODEL",
+    "EMBED_API_BASE",
+    "EMBED_BASE",
+    "EMBED_BASE_URL",
+})
+
 SHARED_SKILLS_ENV_KEYS = frozenset({"JIUWENCLAW_SHARED_SKILLS_DIRS"})
 
 
@@ -56,6 +77,13 @@ def env_touches_memory(env_overrides: Any) -> bool:
         return False
     keys = {str(k) for k in env_overrides}
     return bool(keys & MEMORY_ENV_KEYS) or bool(keys & EXTERNAL_MEMORY_ENV_KEYS)
+
+
+def env_touches_task_memory(env_overrides: Any) -> bool:
+    """Return True when reload env payload may affect TaskMemoryService."""
+    if not isinstance(env_overrides, dict):
+        return False
+    return bool({str(k) for k in env_overrides} & TASK_MEMORY_ENV_KEYS)
 
 
 def env_touches_shared_skills_dirs(env_overrides: Any) -> bool:

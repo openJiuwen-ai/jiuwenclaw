@@ -439,8 +439,8 @@ def test_collector_prunes_inactive_orphan_accumulator(
 def test_collector_finalize_writes_jsonl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     init_perf_summary_config()
     monkeypatch.setattr(
-        "jiuwenclaw.perf.writer.get_agent_sessions_dir",
-        lambda: tmp_path,
+        "jiuwenclaw.perf.writer.resolve_tenant_sessions_dir",
+        lambda _sid, _aid: tmp_path,
     )
 
     collector = PerfCollector()
@@ -473,6 +473,42 @@ def test_collector_finalize_writes_jsonl(tmp_path: Path, monkeypatch: pytest.Mon
     payload = json.loads(out_path.read_text(encoding="utf-8").strip())
     assert payload["schema_version"] == 1
     assert payload["summary"]["stats"]["llm"]["total_s"] == 0.8
+
+
+def test_collector_finalize_writes_tenant_jsonl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    init_perf_summary_config()
+    monkeypatch.setattr(
+        "jiuwenclaw.utils.get_user_workspace_dir",
+        lambda: tmp_path,
+    )
+
+    collector = PerfCollector()
+    collector.begin_request(
+        session_id="sess-office",
+        request_id="req-office",
+        channel_id="officeclaw",
+        mode="agent.plan",
+        started_at=1000.0,
+        service_id="default",
+        agent_id="office",
+    )
+    collector.finalize_request("req-office", status="ok", ended_at=1001.0)
+    from jiuwenclaw.perf.writer import flush_request_summary_writer
+
+    flush_request_summary_writer()
+
+    out_path = (
+        tmp_path
+        / "service_default"
+        / "agent_office"
+        / "agent"
+        / "sessions"
+        / "sess-office"
+        / "request_summaries.jsonl"
+    )
+    assert out_path.exists()
+    payload = json.loads(out_path.read_text(encoding="utf-8").strip())
+    assert payload["meta"]["request_id"] == "req-office"
 
 
 def test_append_request_summary_sync_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

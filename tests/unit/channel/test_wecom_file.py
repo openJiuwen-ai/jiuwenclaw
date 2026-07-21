@@ -69,7 +69,7 @@ def test_wecom_file_service_init():
     
     assert service.max_download_size == 10 * 1024 * 1024
     assert service.download_timeout == 30
-    assert service.workspace_dir == "/tmp/test"
+    assert service._workspace_dir_override == "/tmp/test"
 
 
 def test_get_media_type_for_file():

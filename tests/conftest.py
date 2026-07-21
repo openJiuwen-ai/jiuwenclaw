@@ -54,9 +54,12 @@ def _install_openjiuwen_deepsearch_stubs() -> None:
     for package_name in [
         "openjiuwen_deepsearch",
         "openjiuwen_deepsearch.config",
+        "openjiuwen_deepsearch.algorithm",
+        "openjiuwen_deepsearch.algorithm.report_style",
         "openjiuwen_deepsearch.framework",
         "openjiuwen_deepsearch.framework.openjiuwen",
         "openjiuwen_deepsearch.framework.openjiuwen.agent",
+        "openjiuwen_deepsearch.framework.openjiuwen.llm",
         "openjiuwen_deepsearch.utils",
         "openjiuwen_deepsearch.utils.log_utils",
         "openjiuwen_deepsearch.utils.constants_utils",
@@ -148,9 +151,88 @@ def _install_openjiuwen_deepsearch_stubs() -> None:
     constants_utils_module.SearchEngine = SearchEngine
     sys.modules[constants_utils_module.__name__] = constants_utils_module
 
+    _install_openjiuwen_deepsearch_algorithm_stubs(ensure_package)
+
+
+def _install_openjiuwen_deepsearch_algorithm_stubs(ensure_package=None) -> None:
+    """Stub algorithm/report_style modules missing from incomplete deepsearch installs."""
+
+    def _ensure(name: str) -> types.ModuleType:
+        if ensure_package is not None:
+            return ensure_package(name)
+        module = sys.modules.get(name)
+        if module is None:
+            module = types.ModuleType(name)
+            module.__path__ = []
+            sys.modules[name] = module
+        return module
+
+    for package_name in [
+        "openjiuwen_deepsearch",
+        "openjiuwen_deepsearch.algorithm",
+        "openjiuwen_deepsearch.algorithm.report_style",
+        "openjiuwen_deepsearch.framework",
+        "openjiuwen_deepsearch.framework.openjiuwen",
+        "openjiuwen_deepsearch.framework.openjiuwen.llm",
+    ]:
+        _ensure(package_name)
+
+    service_name = "openjiuwen_deepsearch.algorithm.report_style.service"
+    if service_name not in sys.modules:
+        report_style_service = types.ModuleType(service_name)
+
+        class StyledReportResult:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        async def stylize_report(*_args, **_kwargs):
+            raise RuntimeError("openjiuwen_deepsearch.algorithm is stubbed in tests")
+
+        report_style_service.StyledReportResult = StyledReportResult
+        report_style_service.stylize_report = stylize_report
+        sys.modules[service_name] = report_style_service
+
+    runtime_name = (
+        "openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime"
+    )
+    if runtime_name not in sys.modules:
+        report_style_runtime = types.ModuleType(runtime_name)
+
+        class _NullReportStyleCtx:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def report_style_llm_context(*_args, **_kwargs):
+            return _NullReportStyleCtx()
+
+        report_style_runtime.report_style_llm_context = report_style_llm_context
+        sys.modules[runtime_name] = report_style_runtime
+
+
+def _openjiuwen_deepsearch_algorithm_missing() -> bool:
+    """True when deepsearch is installed but algorithm submodule is missing."""
+    import importlib
+
+    try:
+        importlib.import_module("openjiuwen_deepsearch")
+    except ModuleNotFoundError:
+        return False
+    try:
+        importlib.import_module("openjiuwen_deepsearch.algorithm")
+    except ModuleNotFoundError:
+        return True
+    return False
+
 
 if not _stdlib_bz2_available():
     _install_openjiuwen_deepsearch_stubs()
+elif _openjiuwen_deepsearch_algorithm_missing():
+    # CI may ship a partial openjiuwen_deepsearch without algorithm/;
+    # only stub the missing algorithm surface, keep real config/agent modules.
+    _install_openjiuwen_deepsearch_algorithm_stubs()
 
 
 def pytest_configure(config):

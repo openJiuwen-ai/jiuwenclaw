@@ -32,6 +32,7 @@ from jiuwenclaw.config import (
 from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
 from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
 from jiuwenclaw.version import __version__
+from jiuwenclaw.local_env_config import set_os_environ
 
 logger = logging.getLogger(__name__)
 apply_openai_model_client_patch()
@@ -482,6 +483,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         for env_key, value in env_updates.items():
             os.environ[env_key] = value
+            set_os_environ(env_key, value)
         # env 变量直接写 os.environ 立即生效；YAML 改动需要 agent 重启/热重载才生效
         applied_without_restart = not yaml_updated
 
@@ -1166,6 +1168,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if resp.ok:
             for k, v in env_updates.items():
                 os.environ[k] = v
+                set_os_environ(k, v)
             _persist_env_updates(env_updates)
             try:
                 config_templates = {

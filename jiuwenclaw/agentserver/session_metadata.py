@@ -21,6 +21,7 @@ _WORKER_LOCK = threading.Lock()
 _FILE_LOCK = threading.Lock()
 
 # 内存缓存: 解决异步写入时读取到陈旧磁盘数据的竞态条件
+# key = f"{sessions_root}\\n{session_id}"，避免多租户同 session_id 串缓存
 _METADATA_CACHE: dict[str, dict[str, Any]] = {}
 _CACHE_LOCK = threading.Lock()
 
@@ -31,6 +32,11 @@ _TITLE_MAX_LEN = 50
 def _current_timestamp() -> float:
     """返回显式使用 UTC 时区的当前时间戳"""
     return datetime.now(timezone.utc).timestamp()
+
+
+def _metadata_cache_key(session_id: str, sessions_root: str | None) -> str:
+    root = sessions_root if sessions_root is not None else str(get_agent_sessions_dir())
+    return f"{root}\n{session_id}"
 
 
 def _is_relative_to(path: Path, base: Path) -> bool:
@@ -127,8 +133,9 @@ def _read_metadata(session_id: str, sessions_root: str | None = None) -> dict[st
     否则会导致仅查询(session.rename 无 title 参数时)隐式创建空 session 目录，
     污染 session.list 结果。
     """
+    cache_key = _metadata_cache_key(session_id, sessions_root)
     with _CACHE_LOCK:
-        cached = _METADATA_CACHE.get(session_id)
+        cached = _METADATA_CACHE.get(cache_key)
         if cached is not None:
             return cached.copy()
     root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
@@ -185,8 +192,9 @@ def _ensure_worker_started() -> None:
 def _enqueue_write(session_id: str, metadata: dict[str, Any], sessions_root: str | None = None) -> None:
     """将写入操作放入异步队列,队列满时退化为同步写"""
     # 立即更新缓存,确保后续读取能看到最新状态
+    cache_key = _metadata_cache_key(session_id, sessions_root)
     with _CACHE_LOCK:
-        _METADATA_CACHE[session_id] = metadata.copy()
+        _METADATA_CACHE[cache_key] = metadata.copy()
     _ensure_worker_started()
     try:
         _METADATA_QUEUE.put_nowait((session_id, metadata, sessions_root))
@@ -308,18 +316,66 @@ def update_session_metadata(
     _enqueue_write(session_id, metadata, sessions_root_s)
 
 
-def get_session_metadata(session_id: str) -> dict[str, Any]:
-    """获取会话元数据"""
-    return _read_metadata(session_id)
+def get_session_metadata(
+    session_id: str,
+    sessions_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """获取会话元数据。
+
+    Args:
+        session_id: 会话 ID
+        sessions_root: 会话存储根目录；缺省为当前租户绑定或 ``agent_default``
+    """
+    sessions_root_s = str(sessions_root) if sessions_root else None
+    return _read_metadata(session_id, sessions_root_s)
 
 
-def remove_team_mode_session_dirs_at_startup() -> None:
-    """agentserver 启动时删除 metadata.json 中 mode 为 team 的会话目录。"""
-    sessions_dir = get_agent_sessions_dir()
+def iter_tenant_sessions_dirs(workspace_root: Path | None = None) -> list[Path]:
+    """Discover all ``service_*/agent_*/agent/sessions`` roots under the data dir.
+
+    Also includes the current :func:`get_agent_sessions_dir` (bound tenant or
+    ``agent_default``) so startup cleanup covers both multi-tenant and legacy
+    layouts. Results are de-duplicated by resolved path.
+    """
+    root = Path(workspace_root) if workspace_root is not None else get_user_workspace_dir()
+    found: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(path: Path) -> None:
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path
+        if key in seen:
+            return
+        seen.add(key)
+        found.append(path)
+
+    default_sessions = get_agent_sessions_dir()
+    if default_sessions.is_dir():
+        _add(default_sessions)
+
+    if root.is_dir():
+        for service_dir in sorted(root.iterdir()):
+            if not service_dir.is_dir() or not service_dir.name.startswith("service_"):
+                continue
+            for agent_dir in sorted(service_dir.iterdir()):
+                if not agent_dir.is_dir() or not agent_dir.name.startswith("agent_"):
+                    continue
+                sessions_dir = agent_dir / "agent" / "sessions"
+                if sessions_dir.is_dir():
+                    _add(sessions_dir)
+
+    return found
+
+
+def _remove_team_mode_sessions_under(sessions_dir: Path) -> int:
+    """Delete team-mode session dirs under one sessions root. Returns removed count."""
     if not sessions_dir.is_dir():
-        return
+        return 0
 
     removed = 0
+    sessions_root_s = str(sessions_dir)
     for session_dir in sessions_dir.iterdir():
         if not session_dir.is_dir():
             continue
@@ -329,7 +385,12 @@ def remove_team_mode_session_dirs_at_startup() -> None:
         try:
             raw = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
-            logger.warning("启动清理跳过会话 %s: 读取 metadata.json 失败: %s", session_dir.name, exc)
+            logger.warning(
+                "启动清理跳过会话 %s (%s): 读取 metadata.json 失败: %s",
+                session_dir.name,
+                sessions_dir,
+                exc,
+            )
             continue
         if not isinstance(raw, dict) or raw.get("mode") != "team":
             continue
@@ -337,11 +398,31 @@ def remove_team_mode_session_dirs_at_startup() -> None:
         session_id = session_dir.name
         try:
             shutil.rmtree(session_dir)
+            cache_key = _metadata_cache_key(session_id, sessions_root_s)
             with _CACHE_LOCK:
+                _METADATA_CACHE.pop(cache_key, None)
+                # 兼容旧缓存键（仅 session_id）
                 _METADATA_CACHE.pop(session_id, None)
             removed += 1
         except Exception as exc:  # noqa: BLE001
-            logger.warning("启动清理删除 team 会话目录失败 %s: %s", session_id, exc)
+            logger.warning(
+                "启动清理删除 team 会话目录失败 %s (%s): %s",
+                session_id,
+                sessions_dir,
+                exc,
+            )
+    return removed
+
+
+def remove_team_mode_session_dirs_at_startup() -> None:
+    """agentserver 启动时删除各租户 sessions 下 metadata.mode == team 的会话目录。
+
+    Scans every ``service_*/agent_*/agent/sessions`` under ``JIUWENCLAW_DATA_DIR``,
+    not only ``agent_default``.
+    """
+    removed = 0
+    for sessions_dir in iter_tenant_sessions_dirs():
+        removed += _remove_team_mode_sessions_under(sessions_dir)
 
     if removed:
         logger.info("启动清理: 已删除 %d 个 team 模式会话目录", removed)

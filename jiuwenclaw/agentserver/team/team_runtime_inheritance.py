@@ -105,6 +105,7 @@ class MemberRailConfig:
         context_engine_enabled: 是否挂载上下文工程 rail；Team 默认开启。
         react_config: 与主 agent 一致的 ``react`` 配置片段；默认预置链 B
             （见 ``session_memory``），可与主 agent 一致地改为链 A。
+        service_id / agent_id: 磁盘租户；缺省 ``default``/``default``。
     """
 
     skills_dir: str
@@ -116,6 +117,8 @@ class MemberRailConfig:
     member_id: str | None = None
     context_engine_enabled: bool = True
     react_config: dict[str, Any] | None = None
+    service_id: str = "default"
+    agent_id: str = "default"
 
 
 def build_member_rails(config: MemberRailConfig) -> list[Any]:
@@ -137,6 +140,8 @@ def build_member_rails(config: MemberRailConfig) -> list[Any]:
             channel=channel,
             agent_name=agent_name,
             model_name=model_name,
+            service_id=config.service_id,
+            agent_id=config.agent_id,
         )
         rails_list.append(rail)
         logger.info("[TeamRuntime] RuntimePromptRail created: channel=%s", channel)

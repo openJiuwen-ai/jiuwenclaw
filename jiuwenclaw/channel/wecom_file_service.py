@@ -11,9 +11,14 @@ import asyncio
 import os
 import re
 import time
+from contextvars import ContextVar
 from typing import Any
 
 from loguru import logger
+
+_WECOM_FILE_TENANT: ContextVar[tuple[str, str] | None] = ContextVar(
+    "wecom_file_tenant", default=None
+)
 
 
 # 文件魔数映射（用于格式检测）
@@ -102,7 +107,7 @@ class WecomFileService:
         ws_client: Any,
         max_download_size: int = 100 * 1024 * 1024,
         download_timeout: int = 60,
-        workspace_dir: str = "",
+        workspace_dir: str | None = None,
     ):
         """初始化文件服务。
 
@@ -110,17 +115,53 @@ class WecomFileService:
             ws_client: 企业微信 WebSocket 客户端（WSClient 实例）
             max_download_size: 最大下载文件大小（字节）
             download_timeout: 下载超时时间（秒）
-            workspace_dir: 工作空间目录
+            workspace_dir: 可选覆盖根目录（如 config.workspace_dir）；
+                为 None 时按消息 sid/aid 懒解析租户 workspace。
         """
         self._ws_client = ws_client
         self.max_download_size = max_download_size
         self.download_timeout = download_timeout
-        self.workspace_dir = workspace_dir
+        self._workspace_dir_override = (
+            str(workspace_dir).strip() if workspace_dir else None
+        ) or None
         self._download_semaphore = asyncio.Semaphore(3)
+
+    @staticmethod
+    def tenant_scope(
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ):
+        """Context manager: bind tenant for download path resolution in this task."""
+        from contextlib import contextmanager
+        from jiuwenclaw.channel.tenant_paths import normalize_channel_tenant_ids
+
+        @contextmanager
+        def _cm():
+            token = _WECOM_FILE_TENANT.set(
+                normalize_channel_tenant_ids(service_id, agent_id)
+            )
+            try:
+                yield
+            finally:
+                _WECOM_FILE_TENANT.reset(token)
+
+        return _cm()
+
+    def _resolve_workspace_dir(self) -> str:
+        if self._workspace_dir_override:
+            return self._workspace_dir_override
+        from jiuwenclaw.channel.tenant_paths import resolve_channel_agent_workspace
+
+        bound = _WECOM_FILE_TENANT.get()
+        if bound is not None:
+            return str(resolve_channel_agent_workspace(bound[0], bound[1]))
+        return str(resolve_channel_agent_workspace("default", "default"))
 
     def _get_download_dir(self, file_category: str) -> str:
         """获取下载目录路径。"""
-        base_dir = os.path.join(self.workspace_dir, "wecom_files", "downloads", file_category)
+        base_dir = os.path.join(
+            self._resolve_workspace_dir(), "wecom_files", "downloads", file_category
+        )
         os.makedirs(base_dir, exist_ok=True)
         return base_dir
 

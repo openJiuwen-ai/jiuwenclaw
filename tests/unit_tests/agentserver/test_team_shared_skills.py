@@ -9,6 +9,7 @@ from pathlib import Path
 
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 
+from jiuwenclaw.agentserver.runtime_scope import RuntimeScopeKey
 from jiuwenclaw.agentserver.team.team_manager import TeamManager
 
 
@@ -33,8 +34,8 @@ def test_copy_global_skills_to_team_shared_dir(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "jiuwenclaw.utils.get_agent_skills_dir",
-        lambda: global_skills_dir,
+        "jiuwenclaw.utils.get_multi_tenant_skill_dirs",
+        lambda service_id, agent_id: [global_skills_dir],
     )
 
     # Create team workspace config
@@ -56,7 +57,9 @@ def test_copy_global_skills_to_team_shared_dir(tmp_path, monkeypatch):
 
     # Call _copy_global_skills_to_team_shared_dir method directly
     manager = TeamManager()
-    manager._copy_global_skills_to_team_shared_dir(spec)
+    manager._copy_global_skills_to_team_shared_dir(
+        spec, service_id="default", agent_id="default"
+    )
 
     # Verify marker file exists in team shared skills directory
     assert (team_shared_skills / ".team_skills_copied").exists()
@@ -81,8 +84,8 @@ def test_copy_global_skills_not_copied_twice(tmp_path, monkeypatch):
     (global_skills_dir / "skills_state.json").write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr(
-        "jiuwenclaw.utils.get_agent_skills_dir",
-        lambda: global_skills_dir,
+        "jiuwenclaw.utils.get_multi_tenant_skill_dirs",
+        lambda service_id, agent_id: [global_skills_dir],
     )
 
     team_workspace = tmp_path / "team_workspace"
@@ -101,7 +104,9 @@ def test_copy_global_skills_not_copied_twice(tmp_path, monkeypatch):
     )
 
     manager = TeamManager()
-    manager._copy_global_skills_to_team_shared_dir(spec)
+    manager._copy_global_skills_to_team_shared_dir(
+        spec, service_id="default", agent_id="default"
+    )
 
     # Verify no new skill copied (marker file already exists)
     assert not (team_shared_skills / "skill-a").exists()
@@ -125,8 +130,8 @@ def test_member_configured_skills_copied_to_own_dir(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "jiuwenclaw.utils.get_agent_skills_dir",
-        lambda: global_skills_dir,
+        "jiuwenclaw.utils.get_multi_tenant_skill_dirs",
+        lambda service_id, agent_id: [global_skills_dir],
     )
     monkeypatch.setattr(
         "jiuwenclaw.agentserver.team.team_runtime_inheritance.build_member_rails",
@@ -134,11 +139,12 @@ def test_member_configured_skills_copied_to_own_dir(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "jiuwenclaw.agentserver.extensions.rail_manager.get_rail_manager",
-        lambda: type(
+        lambda *args, **kwargs: type(
             "_DummyRailManager",
             (),
             {
                 "get_registered_rail_names": lambda self: [],
+                "create_fresh_rail_instance": lambda self, name: None,
                 "load_rail_instance_without_enabled_check": lambda self, name: None,
             },
         )(),
@@ -178,6 +184,7 @@ def test_member_configured_skills_copied_to_own_dir(tmp_path, monkeypatch):
             "ability_manager": type("_AbilityManager", (), {"list": lambda self: []})(),
         })(),
         session_id="session-1",
+        runtime_scope=RuntimeScopeKey.from_ids("default", "default", "session-1"),
     )
 
     agent = type("_Agent", (), {
@@ -222,8 +229,8 @@ def test_member_no_configured_skills_has_state_file(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "jiuwenclaw.utils.get_agent_skills_dir",
-        lambda: global_skills_dir,
+        "jiuwenclaw.utils.get_multi_tenant_skill_dirs",
+        lambda service_id, agent_id: [global_skills_dir],
     )
     monkeypatch.setattr(
         "jiuwenclaw.agentserver.team.team_runtime_inheritance.build_member_rails",
@@ -231,8 +238,9 @@ def test_member_no_configured_skills_has_state_file(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "jiuwenclaw.agentserver.extensions.rail_manager.get_rail_manager",
-        lambda: type("_DummyRailManager", (), {
+        lambda *args, **kwargs: type("_DummyRailManager", (), {
             "get_registered_rail_names": lambda self: [],
+            "create_fresh_rail_instance": lambda self, name: None,
             "load_rail_instance_without_enabled_check": lambda self, name: None,
         })(),
     )
@@ -266,6 +274,7 @@ def test_member_no_configured_skills_has_state_file(tmp_path, monkeypatch):
             "ability_manager": type("_AbilityManager", (), {"list": lambda self: []})(),
         })(),
         session_id="session-1",
+        runtime_scope=RuntimeScopeKey.from_ids("default", "default", "session-1"),
     )
 
     agent = type("_Agent", (), {
