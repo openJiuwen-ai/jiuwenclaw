@@ -238,9 +238,9 @@ export function TaskPlanningPanel({
   return (
     <div className="flex-1 overflow-hidden bg-card">
       {view === 'list' ? (
-        <div className="flex h-full flex-col px-6 pb-6 pt-8">
+        <div className="flex h-full flex-col px-6 pb-6">
           <div className="flex h-8 items-center gap-3">
-            <h2 className="text-base font-medium leading-6 text-text-strong">{t('team.planning.progressTitle')}</h2>
+            <h2 className="text-sm font-medium leading-5 text-text-strong">{t('team.planning.progressTitle')}</h2>
             {viewSwitcher}
           </div>
           <ExpandedTaskList
@@ -252,8 +252,8 @@ export function TaskPlanningPanel({
         </div>
       ) : (
         <div className="flex h-full flex-col px-6 pb-6">
-          <div className="mb-5 flex items-center gap-3">
-            <h2 className="text-sm font-medium text-text-strong">{t('team.planning.progressTitle')}</h2>
+          <div className="mb-5 flex h-8 items-center gap-3">
+            <h2 className="text-sm font-medium leading-5 text-text-strong">{t('team.planning.progressTitle')}</h2>
             {viewSwitcher}
             <span className="text-sm font-medium text-text-strong">{progressPercent}%</span>
           </div>
