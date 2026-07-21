@@ -1918,7 +1918,7 @@ function AppContent() {
         isConnected={isConnected}
         onNewSession={handleNewSession}
         showNewSession={false}
-        hiddenNavItems={['sessions', 'extensions', 'browserpanel', 'updatepanel']}
+        hiddenNavItems={['sessions', 'browserpanel', 'updatepanel']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
       />
 

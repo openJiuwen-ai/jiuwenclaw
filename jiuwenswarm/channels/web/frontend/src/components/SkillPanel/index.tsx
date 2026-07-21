@@ -29,7 +29,7 @@ const ONLINE_SOURCE_STORAGE_KEY = "jiuwen:online_source";
 
 // SkillPanel 可见性开关 — 设为 true 显示，false 隐藏。
 const SKILL_PANEL_FLAGS = {
-  showImportLocal: false, // "导入本地技能" 按钮
+  showImportLocal: true, // "导入本地技能" 按钮
 };
 
 /** 获取保存的在线源 */
