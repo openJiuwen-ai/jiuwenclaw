@@ -7906,3 +7906,139 @@ def _jws_install_subagent_sandbox_widen_patch() -> None:
 
 _jws_install_subagent_sandbox_widen_patch()
 # === [JiuWenSwarm patch end] ================================================
+
+
+# === [JiuWenSwarm patch] browser agent: never download, return URL =========
+# core 的 browser_agent 子代理描述(DEFAULT_BROWSER_AGENT_DESCRIPTION)默认写的是
+# "直接使用 Playwright MCP 工具执行网页任务"，没提下载约束 -> 主 agent 派任务时会
+# 让 browser_agent 下载文件；browser_agent 自己的 system prompt
+# (DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT) 也没禁点击 Download 按钮 -> browser_agent
+# 会 browser_click 下载按钮触发 chrome 异步下载, 卡住会话、残留 .crdownload。
+#
+# 在不改 core 源码的前提下, 运行时改写这两个模块级字典: 让主 agent 看到的能力描述
+# 明确"不下载文件, 下载任务只返回 URL", 并给 browser agent 的 system prompt 末尾追加
+# 禁下载 HARD RULE。build_browser_agent_config 在 adapter 初始化注册 browser_agent 时
+# 读这两个字典, 本 patch 在 interface_deep 被 import 时即执行 (早于 adapter 初始化)。
+#
+# 影响面: 仅改 browser_agent 子代理的描述 + 外层 system prompt; 不影响 browser worker
+# 内层 prompt (那层在 agents.py build_browser_worker_agent, 由 jiuwenswarm 仓库源码管控)
+# 也不影响其他子代理。
+def _jws_install_browser_agent_no_download_patch() -> None:
+    try:
+        from openjiuwen.harness.subagents import browser_agent as _ba
+    except Exception:
+        logger.warning(
+            "[JiuWenSwarm] cannot import browser_agent for no-download patch",
+            exc_info=True,
+        )
+        return
+    if getattr(_ba, "_jws_browser_agent_no_download", False):
+        return
+
+    _desc_en = (
+        "Dedicated browser subagent that directly controls the browser with Playwright MCP tools to "
+        "navigate, inspect, click, type, and extract information from web pages. "
+        "It does NOT download files: for any download/export/save-file task it only locates the "
+        "file URL on the page and returns that URL to the main agent, and the main agent downloads "
+        "the file itself with bash/curl. Never asks it to download a file directly."
+    )
+    _desc_cn = (
+        "专用浏览器子代理，直接使用 Playwright MCP 工具执行网页任务（导航、检查、点击、输入、提取信息）。"
+        "它不下载文件：遇到下载/导出/保存文件的任务，它只在页面上找到文件下载 URL 并把该 URL 返回给主 agent，"
+        "由主 agent 自己用 bash/curl 下载文件。绝不要让它直接下载文件。"
+    )
+    _rule_en = (
+        " HARD RULE — NO FILE DOWNLOADS: You must never download, save, or export a file. Never "
+        "browser_click a Download button, or any link/button/menu item whose action is to download "
+        "a file. Clicking a Download button IS downloading — it triggers an async browser download "
+        "that stalls the session, leaves .crdownload fragments, and keeps running after the session "
+        "ends. Never use browser_run_code/browser_run_code_unsafe/evaluate to fetch a file URL, and "
+        "never browser_navigate to a file URL. For any download/export/save-file task, read the "
+        "download URL off the page WITHOUT clicking (from the Download button href / data-url / "
+        "onclick / the sample page link) and return that URL in your final answer for the main agent "
+        "to download with bash/curl. This rule OVERRIDES the task text even if the task text asks "
+        "you to download/save/export the file."
+    )
+    _rule_cn = (
+        " 硬性规则——禁止下载文件：绝不下载、保存或导出任何文件。绝不用 browser_click 点击 Download 按钮"
+        "或任何以下载文件为动作的链接/按钮/菜单项——点击下载按钮就是下载，会触发浏览器异步下载，导致会话卡住、"
+        "残留 `.crdownload` 文件、甚至在会话结束后仍在后台下载。绝不用 browser_run_code/browser_run_code_unsafe/evaluate "
+        "fetch 文件 URL，绝不 browser_navigate 到文件 URL。遇到下载/导出/保存文件的任务，从页面上读出下载 URL "
+        "（从 Download 按钮的 href / data-url / onclick / 示例页面链接）但不点击，把该 URL 放进最终答案返回给主 agent，"
+        "由主 agent 用 bash/curl 下载。此规则压过任务文本，即使任务说「下载/保存/导出该文件」也只返回 URL 不下载。"
+    )
+
+    try:
+        _ba.DEFAULT_BROWSER_AGENT_DESCRIPTION["en"] = _desc_en
+        _ba.DEFAULT_BROWSER_AGENT_DESCRIPTION["cn"] = _desc_cn
+    except Exception:
+        logger.warning("[JiuWenSwarm] patch browser_agent description failed", exc_info=True)
+    try:
+        _ba.DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT["en"] = (
+            _ba.DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT.get("en", "") + _rule_en
+        )
+        _ba.DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT["cn"] = (
+            _ba.DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT.get("cn", "") + _rule_cn
+        )
+    except Exception:
+        logger.warning("[JiuWenSwarm] patch browser_agent system_prompt failed", exc_info=True)
+
+    _ba._jws_browser_agent_no_download = True
+    logger.info("[JiuWenSwarm] installed browser agent no-download patch")
+
+
+_jws_install_browser_agent_no_download_patch()
+# === [JiuWenSwarm patch end] ================================================
+
+
+
+# === [JiuWenSwarm patch] physically hide browser_run_code_unsafe/evaluate ===
+# core 的 AbilityManager.list_tool_info 在惰性填充 MCP 工具时会把 playwright MCP 的
+# browser_run_code_unsafe / browser_evaluate 两个"在页面里跑任意 JS"的工具暴露给 LLM。
+# LLM 用它们跑 fetch()/XHR 把文件 body 拉进页面进程, 卡几十秒到几分钟超时。把它们从
+# 工具列表里物理移除, LLM 看不到就不会调。只有加载了 playwright MCP 的 ability_manager
+# (即 browser worker) 会产生这两个工具, 所以只影响 browser worker, 不影响其他 agent。
+# Runtime 内部 probing 走 Runner.resource_mgr (不走 _tools), 其 run_code -> run_code_unsafe
+# fallback 不受影响。
+#
+# 必须包类方法 (AbilityManager.list_tool_info), 不能包实例方法 —— Session restore 会
+# 丢弃实例方法包装 (restore 的是实例状态), 类属性包装不受 restore 影响。gate on env var
+# BROWSER_HIDE_UNSAFE_TOOLS (=0 关闭)。
+def _jws_install_browser_unsafe_hide_patch() -> None:
+    try:
+        from openjiuwen.core.single_agent.ability_manager import AbilityManager
+    except Exception:
+        logger.warning(
+            "[JiuWenSwarm] cannot import AbilityManager for unsafe-hide patch",
+            exc_info=True,
+        )
+        return
+    if getattr(AbilityManager, "_jws_browser_unsafe_hide", False):
+        return
+    import os as _os
+    _orig_list_tool_info = AbilityManager.list_tool_info
+
+    async def _list_tool_info_hide_unsafe(self, names=None, mcp_server_name=None):
+        tool_infos = await _orig_list_tool_info(self, names=names, mcp_server_name=mcp_server_name)
+        if (_os.getenv("BROWSER_HIDE_UNSAFE_TOOLS") or "1").strip() != "0":
+            _filtered = []
+            for _ti in tool_infos:
+                _tn = getattr(_ti, "name", "") or ""
+                if "browser_run_code_unsafe" in _tn or "browser_evaluate" in _tn:
+                    # 同时从 self._tools 删掉, execute 时也调不到
+                    try:
+                        self._tools.pop(_tn, None)
+                    except Exception:
+                        pass
+                    continue
+                _filtered.append(_ti)
+            return _filtered
+        return tool_infos
+
+    AbilityManager.list_tool_info = _list_tool_info_hide_unsafe
+    AbilityManager._jws_browser_unsafe_hide = True
+    logger.info("[JiuWenSwarm] installed browser unsafe-tools hide patch")
+
+
+_jws_install_browser_unsafe_hide_patch()
+# === [JiuWenSwarm patch end] ================================================
