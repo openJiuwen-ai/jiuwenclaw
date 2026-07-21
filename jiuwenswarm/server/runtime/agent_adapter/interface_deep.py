@@ -8042,3 +8042,84 @@ def _jws_install_browser_unsafe_hide_patch() -> None:
 
 _jws_install_browser_unsafe_hide_patch()
 # === [JiuWenSwarm patch end] ================================================
+# === [JiuWenSwarm patch] browser worker system prompt: never download, return URL ===
+# core 的 build_browser_worker_system_prompt (openjiuwen.harness.tools.browser_move.
+# playwright_runtime.agents) 生成 browser worker 的 system prompt, 默认没禁下载 ->
+# browser worker 会 browser_click 下载按钮 / fetch 文件 URL / navigate 到文件 URL,
+# 触发 chrome 异步下载, 卡住会话、残留 .crdownload、会话结束后还在后台下载。
+#
+# 在不改 core 源码的前提下, 运行时包装这个模块级函数: 调用原函数拿到原 prompt 字符串,
+# 末尾追加 HARD RULE (禁下载 + 只回传 URL + OVERRIDES task text) 后返回。
+# build_browser_worker_agent 在构造 browser worker 时调它拿 system prompt, 本 patch 在
+# interface_deep 被 import 时即执行。幂等标志挂在 core 模块上。
+def _jws_install_browser_worker_no_download_patch() -> None:
+    try:
+        from openjiuwen.harness.tools.browser_move.playwright_runtime import agents as _bwa
+    except Exception:
+        logger.warning(
+            "[JiuWenSwarm] cannot import browser_move agents for worker no-download patch",
+            exc_info=True,
+        )
+        return
+    if getattr(_bwa, "_jws_browser_worker_no_download", False):
+        return
+    _orig_build_sp = _bwa.build_browser_worker_system_prompt
+
+    _hard_rule = (
+        "\n"
+        "=== HARD RULE: NEVER DOWNLOAD FILES THROUGH THE BROWSER ===\n"
+        "The browser worker READS, NAVIGATES, CLICKS (for non-download navigation), "
+        "and EXTRACTS information. It must NEVER cause a file body to be downloaded — "
+        "not by fetch, not by clicking a download button, not by navigating to a file "
+        "URL. Downloading is FORBIDDEN in every form. ALL of these are forbidden:\n"
+        "(1) Never use browser_run_code / browser_run_code_unsafe / browser_evaluate "
+        "to run fetch(), XHR, axios, or any JS that pulls a file body into the page process.\n"
+        "(2) Never browser_click a Download button, or any link/button/menu item whose "
+        "action is to download a file (labels like Download, Get, Save, Save as, "
+        "Download .mp4, the file-size badge button on a sample page, etc.). Clicking "
+        "Download IS downloading — it triggers the browser to fetch the file body "
+        "asynchronously, which stalls, fills the Downloads folder with partial .crdownload "
+        "files, and keeps going even after this task ends. So NEVER click any "
+        "download-triggering element. Read the file URL from the page instead (from the "
+        "link href, the button data-url, or the sample page source) WITHOUT clicking it.\n"
+        "(3) Never navigate the browser toward a direct file URL (a .mp4/.mkv/.avi/.mov/"
+        ".zip/.iso/.pdf/.exe/.dmg/.tar/.gz etc.) expecting the body to be fetched — such a "
+        "navigate stalls for tens of seconds to minutes and usually times out, wasting "
+        "many iterations. Treat any file whose stated or estimated size is >= ~10 MB as "
+        "'large'; do not attempt to download it via the browser at all.\n"
+        "WHAT TO DO INSTEAD — RETURN THE URL, DO NOT DOWNLOAD:\n"
+        "If the task (even if its text literally says \"download\") is to obtain/get/"
+        "download a file, your ONLY job is to LOCATE the download URL and HAND IT BACK to "
+        "the orchestrator agent. Do NOT click Download, do NOT navigate to the file, do "
+        "NOT run any JS to fetch it. Read the download URL off the page WITHOUT clicking "
+        "(from the Download button href / data-url / onclick / the sample page link), then "
+        "STOP immediately. Put the exact download URL into the \"final\" field of your "
+        "output JSON and write a short note like \"Download URL found: <url>. The browser "
+        "cannot download this file; the orchestrator should download it with curl/wget.\" "
+        "Set ok=true once you have a concrete downloadable URL. Find the first working "
+        "download URL on the requested site (or after at most 2-3 candidate pages), return "
+        "it, and stop. Do NOT keep hopping across host after host hunting for a better link "
+        "— spending many iterations jumping between download sites without fetching anything "
+        "is a failure mode, stop early and report.\n"
+        "This rule OVERRIDES the task text. Even if the task says \"download the file\", "
+        "you do NOT download — you return the URL. Clicking Download, navigating to a file "
+        "URL, or running fetch JS are ALL violations. Returning a clean URL for the "
+        "orchestrator to download is the ONLY correct outcome, and it is a SUCCESS, not a "
+        "failure.\n"
+    )
+
+    def _build_sp_with_no_download(screenshot_subdir="screenshots", artifacts_subdir="artifacts"):
+        _orig_prompt = _orig_build_sp(screenshot_subdir, artifacts_subdir)
+        if not isinstance(_orig_prompt, str):
+            return _orig_prompt
+        if "NEVER DOWNLOAD FILES THROUGH THE BROWSER" in _orig_prompt:
+            return _orig_prompt
+        return _orig_prompt + _hard_rule
+
+    _bwa.build_browser_worker_system_prompt = _build_sp_with_no_download
+    _bwa._jws_browser_worker_no_download = True
+    logger.info("[JiuWenSwarm] installed browser worker no-download system-prompt patch")
+
+
+_jws_install_browser_worker_no_download_patch()
+# === [JiuWenSwarm patch end] ================================================
