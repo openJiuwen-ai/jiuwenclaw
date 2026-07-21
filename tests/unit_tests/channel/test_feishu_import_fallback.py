@@ -1,4 +1,3 @@
-# pylint: disable=protected-access
 """Tests for FeishuChannel import fallback when the lark_oapi SDK is absent.
 
 ``feishu_connect`` guards its ``lark_oapi`` imports with ``try/except
