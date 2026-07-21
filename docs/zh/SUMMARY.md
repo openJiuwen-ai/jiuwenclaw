@@ -14,6 +14,7 @@
 - [Agent Team 使用指南](AgentTeam.md)
 - [AgentTeam 人类成员联机协作（HITT）](AgentTeam人类成员联机协作.md)
 - [Auto Harness 特性说明](AutoHarness.md)
+- [openJiuwen Harness 与扩展装配](Harness.md)
 - [单机多实例运行](单机多实例运行.md)
 - [使用指南](README.md)
   - [对话](对话.md)

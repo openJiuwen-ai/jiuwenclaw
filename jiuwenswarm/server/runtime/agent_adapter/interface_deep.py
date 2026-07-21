@@ -24,7 +24,16 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
-from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, List, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    List,
+    Optional,
+    Tuple,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.harness.schema.config import SubAgentConfig
@@ -36,7 +45,7 @@ from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
-from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
+from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
@@ -214,6 +223,13 @@ from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
 )
 from jiuwenswarm.agents.harness.common.tools.video_tools import video_understanding
 from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
+from jiuwenswarm.extensions.harness import (  # noqa: E402
+    ExtensionBuildContext,
+    HarnessContribution,
+    merge_harness_specs,
+    resolve_harness_contribution,
+)
+from jiuwenswarm.extensions.registry import ExtensionRegistry  # noqa: E402
 
 from jiuwenswarm.agents.harness.common.tools import (
     SendFileToolkit,
@@ -752,6 +768,9 @@ class JiuWenSwarmDeepAdapter:
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
         self._tool_cards = None
+        self._extension_tools: list[Tool | ToolCard] = []
+        self._extension_rails: list[Any] = []
+        self._mounted_extension_tool_names: list[str] = []
         self._evolution_watcher_tasks: set[asyncio.Task] = set()
         self._sys_operation = None
         self._sys_operation_card: SysOperationCard | None = None
@@ -764,6 +783,7 @@ class JiuWenSwarmDeepAdapter:
         self._instance_overrides: dict[str, Any] = {}
         self._is_session_scoped_adapter: bool = False
         self._parent_session_id: str | None = None
+        self._runtime_tool_owner_nonce: str = os.urandom(8).hex()
         self._session_adapters: dict[str, JiuWenSwarmDeepAdapter] = {}
         self._session_adapter_locks: dict[str, asyncio.Lock] = {}
         self._session_adapter_last_used: dict[str, float] = {}
@@ -834,6 +854,26 @@ class JiuWenSwarmDeepAdapter:
     def mark_as_session_scoped(self, session_id: str) -> None:
         self._is_session_scoped_adapter = True
         self._parent_session_id = session_id
+
+    def _build_runtime_tool_owner_id(self) -> str:
+        """Return a stable, adapter-local owner id for stateful Tool resources.
+
+        The public AgentCard id remains ``jiuwenswarm`` for checkpoint and
+        interrupt-resume compatibility. Agent Core's separate ability owner id
+        uses a per-adapter nonce instead, so concurrent roots and session-scoped
+        adapters cannot overwrite or tear down each other's stateful Tools.
+        """
+        owner_scope = (
+            f"session:{self._session_adapter_key(self._parent_session_id)}"
+            if self._is_session_scoped_adapter
+            else "root"
+        )
+        adapter_type = f"{type(self).__module__}.{type(self).__qualname__}"
+        identity_seed = (
+            f"{adapter_type}:{owner_scope}:{self._runtime_tool_owner_nonce}"
+        )
+        digest = hashlib.sha256(identity_seed.encode("utf-8")).hexdigest()[:16]
+        return f"jiuwenswarm_tools_{digest}"
 
     def _get_cached_session_adapter(self, session_id: str | None) -> "JiuWenSwarmDeepAdapter | None":
         sid = self._session_adapter_key(session_id)
@@ -4159,7 +4199,299 @@ class JiuWenSwarmDeepAdapter:
             rails_list.append(self._avatar_rail)
         if self._permission_rail is not None:
             rails_list.append(self._permission_rail)
+        for rail in self._extension_rails:
+            if rail not in rails_list:
+                rails_list.append(rail)
         return rails_list
+
+    def _build_extension_harness_resources(
+        self,
+        *,
+        mode: str,
+        config_base: dict[str, Any],
+        agent_card: AgentCard,
+        workspace: Workspace,
+        model: Model,
+        sys_operation: SysOperation,
+        existing_tool_cards: list[Any],
+        sub_mode: str | None = None,
+    ) -> tuple[list[Tool | ToolCard], list[Any]]:
+        """Materialize loaded extensions' declarative Tool/Rail contributions.
+
+        Each extension is resolved atomically: if either its tools or rails fail
+        to build, none of that extension's resources are mounted on this agent.
+        A broken extension therefore cannot accidentally expose its tools without
+        the companion safety Rail it declared.
+        """
+        registry = ExtensionRegistry.get_optional_instance()
+        if registry is None:
+            self._extension_tools = []
+            self._extension_rails = []
+            return [], []
+
+        context = ExtensionBuildContext(
+            language=self._resolve_runtime_language(),
+            workspace=workspace,
+            member_card_id=self._build_runtime_tool_owner_id(),
+            project_dir=self._project_dir,
+            mode=str(mode or "agent"),
+            sub_mode=(str(sub_mode).strip() or None) if sub_mode is not None else None,
+            session_id=self._parent_session_id,
+            request_metadata={
+                "mode": str(mode or "agent"),
+                "sub_mode": (
+                    (str(sub_mode).strip() or None)
+                    if sub_mode is not None
+                    else None
+                ),
+            },
+            config=config_base,
+            extras={
+                "agent_card": agent_card,
+                "model": model,
+                "sys_operation": sys_operation,
+            },
+        )
+        named_contributions = registry.collect_harness_contributions(context)
+
+        resolved_tools: list[Tool | ToolCard] = []
+        resolved_rails: list[Any] = []
+        accepted_tool_specs: list[Any] = []
+        accepted_rail_specs: list[Any] = []
+        existing_names = {
+            str(getattr(getattr(item, "card", item), "name", "") or "")
+            for item in existing_tool_cards
+        }
+        existing_names.discard("")
+
+        for named in named_contributions:
+            merged_tools, merged_rails = merge_harness_specs(
+                tools=accepted_tool_specs,
+                rails=accepted_rail_specs,
+                contribution=named.contribution,
+            )
+            contribution = HarnessContribution(
+                tools=merged_tools[len(accepted_tool_specs):],
+                rails=merged_rails[len(accepted_rail_specs):],
+            )
+            if not contribution.tools and not contribution.rails:
+                continue
+            try:
+                resolved = resolve_harness_contribution(
+                    contribution,
+                    context=context,
+                )
+                extension_tools = resolved.tools
+            except Exception as exc:  # noqa: BLE001 - extension boundary isolation
+                if named.failure_policy == "raise":
+                    raise RuntimeError(
+                        f"required extension harness contributor '{named.name}' "
+                        "could not be materialized"
+                    ) from exc
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] extension harness contributor %s "
+                    "could not be materialized: %s",
+                    named.name,
+                    exc,
+                )
+                continue
+
+            # Materialization and validation succeeded for the whole extension.
+            # Validate every Tool conflict before exposing any Tool or Rail so
+            # the contribution remains all-or-nothing.
+            candidate_names: set[str] = set()
+            conflict_name = ""
+            for tool in extension_tools:
+                card = tool.card if isinstance(tool, Tool) else tool
+                card_name = str(card.name or "")
+                if card_name in existing_names or card_name in candidate_names:
+                    conflict_name = card_name or "<unnamed>"
+                    break
+                if card_name:
+                    candidate_names.add(card_name)
+
+            if conflict_name:
+                message = (
+                    f"extension '{named.name}' tool '{conflict_name}' duplicates "
+                    "an existing agent tool"
+                )
+                if named.failure_policy == "raise":
+                    raise RuntimeError(message)
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] %s; the whole contribution was skipped",
+                    message,
+                )
+                continue
+
+            for tool in extension_tools:
+                card = tool.card if isinstance(tool, Tool) else tool
+                card_name = str(card.name or "")
+                resolved_tools.append(tool)
+                if card_name:
+                    existing_names.add(card_name)
+
+            resolved_rails.extend(resolved.rails)
+            accepted_tool_specs = merged_tools
+            accepted_rail_specs = merged_rails
+
+        self._extension_tools = resolved_tools
+        self._extension_rails = resolved_rails
+        return resolved_tools, resolved_rails
+
+    def _mount_extension_tools(
+        self,
+        tools: list[Tool | ToolCard],
+    ) -> None:
+        """Mount extension Tools after every host/extension Rail initialized.
+
+        Delaying Tool registration until Rail initialization succeeds prevents a
+        failed governance Rail from leaving an unguarded Tool behind. It also
+        makes conflict checks observe Tools registered by host Rails, not only
+        the cards known before lazy Rail initialization.
+        """
+        if not tools:
+            self._mounted_extension_tool_names = []
+            return
+        if self._instance is None:
+            raise RuntimeError("cannot mount extension tools before agent creation")
+
+        manager = self._instance.ability_manager
+        owner_id = self._build_runtime_tool_owner_id()
+        existing_cards = list(manager.list() or [])
+        existing_names = {
+            str(getattr(card, "name", "") or "").strip()
+            for card in existing_cards
+        }
+        existing_ids = {
+            str(getattr(card, "id", "") or "").strip()
+            for card in existing_cards
+        }
+        candidate_names: set[str] = set()
+        candidate_ids: set[str] = set()
+        planned: list[Tool | ToolCard] = []
+
+        for item in tools:
+            card = item.card if isinstance(item, Tool) else item
+            name = str(card.name or "").strip()
+            if not name:
+                raise RuntimeError("extension ToolCard.name must not be empty")
+            final_id = (
+                manager.qualify_tool_id(card, owner_id)
+                if isinstance(item, Tool)
+                else str(card.id or "").strip()
+            )
+            if not final_id:
+                raise RuntimeError(
+                    f"extension tool '{name}' has no usable registration id"
+                )
+            if name in existing_names or name in candidate_names:
+                raise RuntimeError(
+                    f"extension tool '{name}' duplicates an initialized agent tool"
+                )
+            if final_id in existing_ids or final_id in candidate_ids:
+                raise RuntimeError(
+                    f"extension tool '{name}' duplicates resource id '{final_id}'"
+                )
+
+            planned_item: Tool | ToolCard = item
+            registered = Runner.resource_mgr.get_tool(final_id)
+            if isinstance(item, Tool) and card.stateless and registered is not None:
+                registered_card = getattr(registered, "card", None)
+                if not isinstance(registered_card, ToolCard) or (
+                    registered_card.model_dump(mode="python")
+                    != card.model_dump(mode="python")
+                ):
+                    raise RuntimeError(
+                        f"stateless extension tool '{name}' conflicts with an "
+                        f"existing resource under id '{final_id}'"
+                    )
+                planned_item = registered_card
+
+            planned.append(planned_item)
+            candidate_names.add(name)
+            candidate_ids.add(final_id)
+
+        added_names: list[str] = []
+        try:
+            for item in planned:
+                card = item.card if isinstance(item, Tool) else item
+                result = (
+                    manager.add_ability(card, item)
+                    if isinstance(item, Tool)
+                    else manager.add(card)
+                )
+                if not result.added:
+                    raise RuntimeError(
+                        f"extension tool '{card.name}' could not be mounted: "
+                        f"{result.reason}"
+                    )
+                added_names.append(card.name)
+                if self._tool_cards is not None:
+                    self._tool_cards.append(card)
+        except Exception:
+            if added_names:
+                manager.remove_ability(added_names)
+            self._mounted_extension_tool_names = []
+            raise
+
+        self._extension_tools = planned
+        self._mounted_extension_tool_names = added_names
+
+    async def _teardown_extension_harness_resources(self) -> None:
+        """Unregister extension Rails and Tools from every lazy-reload state."""
+        if self._instance is not None:
+            for rail in list(self._extension_rails):
+                try:
+                    # unregister_rail is intentionally called unconditionally:
+                    # after hot reload the same Rail can be stale and pending,
+                    # while is_registered_rail() is already false.
+                    await self._instance.unregister_rail(rail)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] extension Rail teardown failed: %s",
+                        exc,
+                    )
+
+            tool_names = list(dict.fromkeys(self._mounted_extension_tool_names))
+            if tool_names:
+                try:
+                    self._instance.ability_manager.remove_ability(tool_names)
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] extension Tool teardown failed: %s",
+                        exc,
+                    )
+
+        self._extension_tools = []
+        self._extension_rails = []
+        self._mounted_extension_tool_names = []
+
+    async def _teardown_failed_create_resources(self, *, log_prefix: str) -> None:
+        """Release extension Rails and all agent-owned Tools after create fails."""
+        await self._teardown_extension_harness_resources()
+        if self._instance is None:
+            return
+        try:
+            self._instance.ability_manager.teardown_tools()
+        except Exception as exc:  # noqa: BLE001 - best-effort failure cleanup
+            logger.warning(
+                "[%s] failed-create Tool teardown failed: %s",
+                log_prefix,
+                exc,
+            )
+
+    async def _run_guarded_create_step(
+        self,
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        log_prefix: str,
+    ) -> Any:
+        """Run one asynchronous create step and clean resources on failure."""
+        try:
+            return await operation()
+        except BaseException:
+            await self._teardown_failed_create_resources(log_prefix=log_prefix)
+            raise
 
     async def _get_tool_cards(self, agent_id: str):
         """Get tool cards."""
@@ -4434,6 +4766,21 @@ class JiuWenSwarmDeepAdapter:
             raise RuntimeError("sys_operation is not available, maybe task is not running")
 
         self._sys_operation = sys_operation
+        workspace = Workspace(
+            root_path=self._workspace_dir or "./",
+            language=self._resolve_runtime_language(),
+        )
+        extension_tools, extension_rails = self._build_extension_harness_resources(
+            mode=mode,
+            config_base=config_base,
+            agent_card=agent_card,
+            workspace=workspace,
+            model=model,
+            sys_operation=sys_operation,
+            existing_tool_cards=tool_cards,
+            sub_mode=sub_mode,
+        )
+        rails_list.extend(extension_rails)
         configured_subagents, should_add_general_agent = self._build_configured_subagents(model, config, config_base)
         should_enable_general_agent = should_add_general_agent and (
             sub_mode == "plan" or (isinstance(mode, str) and mode.startswith("agent"))
@@ -4450,12 +4797,10 @@ class JiuWenSwarmDeepAdapter:
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
             add_general_purpose_agent=should_enable_general_agent,
             max_iterations=config.get("max_iterations", 15),
-            workspace=Workspace(
-                root_path=self._workspace_dir or "./",
-                language=self._resolve_runtime_language(),
-            ),
+            workspace=workspace,
             sys_operation=sys_operation,
             language=self._resolve_runtime_language(),
+            ability_owner_id=self._build_runtime_tool_owner_id(),
             auto_create_workspace=False
         )
 
@@ -4471,27 +4816,59 @@ class JiuWenSwarmDeepAdapter:
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 
-        await self._instance.ensure_initialized()
+        await self._run_guarded_create_step(
+            lambda: self._instance.ensure_initialized(),
+            log_prefix="JiuWenSwarmDeepAdapter",
+        )
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
         self._ensure_project_gitignore_agent_history(initial_runtime_workspace)
-        self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
-        setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
+        self._seed_runtime_cwd(
+            initial_runtime_workspace,
+            workspace=initial_runtime_workspace,
+        )
+        setattr(
+            self._instance,
+            "_jiuwenswarm_project_dir",
+            initial_runtime_workspace,
+        )
 
         self._sync_a2x_runtime_state()
         self._registered_mcp_server_ids.clear()
         self._registered_mcp_servers.clear()
-        await self._register_mcp_servers_from_config(config_base, tag=f"agent.{mode}")
+        await self._run_guarded_create_step(
+            lambda: self._register_mcp_servers_from_config(
+                config_base,
+                tag=f"agent.{mode}",
+            ),
+            log_prefix="JiuWenSwarmDeepAdapter",
+        )
         logger.info(
             "[JiuWenSwarmDeepAdapter] 初始化完成: agent_name=%s, mode=%s, sub_mode=%s", self._agent_name, mode, sub_mode
         )
 
         # 加载已激活的 packages（skills, rails, tools）
-        await self._load_active_packages()
+        await self._run_guarded_create_step(
+            self._load_active_packages,
+            log_prefix="JiuWenSwarmDeepAdapter",
+        )
 
         # 动态加载用户自定义的 Rail 扩展
-        await self.load_user_rails()
+        await self._run_guarded_create_step(
+            self.load_user_rails,
+            log_prefix="JiuWenSwarmDeepAdapter",
+        )
+
+        try:
+            # Mount extension Tools last so host/package/user Rails have already
+            # registered their own abilities before the final conflict check.
+            self._mount_extension_tools(extension_tools)
+        except Exception:
+            await self._teardown_failed_create_resources(
+                log_prefix="JiuWenSwarmDeepAdapter"
+            )
+            raise
 
     @staticmethod
     def _ensure_project_gitignore_agent_history(project_dir: str | None) -> None:
@@ -4730,6 +5107,10 @@ class JiuWenSwarmDeepAdapter:
             tool_cards=self._tool_cards if self._tool_cards else [],
             rails=rails_list,
         )
+        # Keep reload compatible with legacy/custom config objects that do not
+        # yet expose Agent Core's optional Tool ownership field.
+        if hasattr(deep_cfg, "ability_owner_id"):
+            deep_cfg.ability_owner_id = self._build_runtime_tool_owner_id()
         omitted_fields, reload_fingerprints = self._omit_unchanged_reload_fields(deep_cfg)
         try:
             self._instance.configure(deep_cfg)
@@ -5440,6 +5821,15 @@ class JiuWenSwarmDeepAdapter:
         if self._memory_reindex_task is not None and not self._memory_reindex_task.done():
             self._memory_reindex_task.cancel()
         self._memory_reindex_task = None
+        await self._teardown_extension_harness_resources()
+        if self._instance is not None:
+            try:
+                self._instance.ability_manager.teardown_tools()
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] tool teardown failed during cleanup: %s",
+                    exc,
+                )
         await self._close_a2x_client()
 
     def _collect_registered_ability_names(self) -> set[str]:

@@ -13,6 +13,7 @@
 - [Agent Team Human in the Team (HITT)](AgentTeamHumanInTheTeam.md)
 - [Multi-Instance](MultiInstance.md)
 - [Auto Harness Feature Overview](AutoHarness.md)
+- [openJiuwen Harness and Extension Assembly](Harness.md)
 - [User guide](README.md)
   - [Conversation](Conversation.md)
   - [Channels](Channels.md)

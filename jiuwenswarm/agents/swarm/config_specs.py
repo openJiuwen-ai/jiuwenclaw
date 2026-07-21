@@ -50,6 +50,7 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
 )
 from jiuwenswarm.agents.swarm import registry
 from jiuwenswarm.agents.swarm.providers import tools as _tools
+from jiuwenswarm.extensions.harness import HarnessContribution, merge_harness_specs
 
 # Modes that route to the code adapter and get the code member profile.
 _CODE_MODES: frozenset[str] = frozenset({"code.team", "team.plan"})
@@ -664,6 +665,7 @@ def build_member_deep_agent_spec(
     *,
     enable_permissions: bool = False,
     mcp_configs: list[McpServerConfig] | None = None,
+    extension_contribution: HarnessContribution | None = None,
 ) -> DeepAgentSpec:
     """Fold the member capability specs onto *base_spec*.
 
@@ -678,6 +680,8 @@ def build_member_deep_agent_spec(
         base_spec: The base member ``DeepAgentSpec`` to extend.
         enable_permissions: Effective team permission toggle from TeamAgentSpec.
         mcp_configs: MCP server configs inherited from ``config.yaml``.
+        extension_contribution: Declarative Tool/Rail specs supplied by loaded
+            JiuwenSwarm extensions for this member context.
 
     Returns:
         A new ``DeepAgentSpec`` with the capability specs applied.
@@ -690,6 +694,11 @@ def build_member_deep_agent_spec(
     merged_rails.extend(rails_specs)
     merged_tools = list(base_spec.tools or [])
     merged_tools.extend(tool_specs)
+    merged_tools, merged_rails = merge_harness_specs(
+        tools=merged_tools,
+        rails=merged_rails,
+        contribution=extension_contribution,
+    )
     merged_mcps = _merge_mcp_configs(base_spec.mcps, mcp_configs)
 
     retrieval_enabled = _retrieval_enabled(config)

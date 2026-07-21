@@ -601,6 +601,77 @@ SubAgentConfig(
 
 Implement `StopConditionEvaluator` for a custom stop condition, then pass it to `TaskCompletionRail(evaluators=[...])`. The outer loop evaluates all stop conditions with OR semantics.
 
+### 6.5 Automatic Tool and Rail Assembly from a JiuwenSwarm Extension
+
+A standard JiuwenSwarm extension can declare Agent Core Tool/Rail capabilities and have JiuwenSwarm assemble them automatically for regular agents, code agents, team leaders, and teammates. The extension describes the required capabilities instead of mutating a live agent.
+
+```python
+from openjiuwen.agent_teams.harness.manifest import ElementKind, harness_element
+from openjiuwen.agent_teams.schema.deep_agent_spec import BuiltinToolSpec, RailSpec
+
+from jiuwenswarm.extensions import HarnessContribution
+
+
+@harness_element(
+    kind=ElementKind.TOOL,
+    name="example.lookup_tool",
+    description="Build the example lookup tool",
+)
+def build_lookup_tool(params, context):
+    return create_lookup_tool(params=params, context=context)
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name="example.audit_rail",
+    description="Build the example audit rail",
+)
+def build_audit_rail(params, context):
+    return AuditRail(**params)
+
+
+def contribute_harness(context):
+    # Use context.mode, getattr(context, "sub_mode", None), context.role,
+    # context.project_dir, and similar fields to target specific agents.
+    # Return None when the extension does not apply.
+    if context.mode not in {"agent", "code", "team", "code.team", "team.plan"}:
+        return None
+    return HarnessContribution(
+        tools=[BuiltinToolSpec(type="example.lookup_tool")],
+        rails=[RailSpec(type="example.audit_rail")],
+    )
+
+
+async def register_extensions(registry):
+    registry.register_harness_contributor(
+        "example.harness",
+        contribute_harness,
+        failure_policy="raise",
+    )
+```
+
+Constraints and failure behavior:
+
+- A contributor must be a synchronous, I/O-free lightweight function, and its registration name must be unique.
+- A contributor returns only `BuiltinToolSpec` / `RailSpec`; providers construct the live Tool/Rail objects.
+- `context.mode` identifies the main adapter mode. `context.sub_mode` further distinguishes a regular/code-agent sub-mode when the host has one; use `getattr(context, "sub_mode", None)` because team contexts do not promise this field.
+- `failure_policy` is deliberately narrow: for regular/code agents it applies only while calling the contributor and constructing the declared provider objects. `"skip"` (the default) logs and skips an optional contribution; mandatory governance capabilities should use `"raise"`. It is not a general runtime recovery policy.
+- A mandatory extension must also declare `required: true` in its `extension.yaml`. Import, dependency, or factory failures happen before its contributor exists, so `failure_policy="raise"` alone cannot protect startup; the manifest flag makes AgentServer startup fail instead of continuing without the extension.
+- Rail lifecycle initialization, Rail runtime callbacks, and capability mount/name conflicts always fail closed; `failure_policy="skip"` does not downgrade them. For teams, the policy controls the contributor callback during initial Spec assembly only. Provider construction may happen later or on another process and always fails member construction because the policy is not serialized.
+- Rails are constructed before Tools. For a regular or code agent, if one extension cannot be materialized, none of that extension's capabilities are mounted.
+- Every declared Spec must construct at least one valid resource. For conditional disablement, return `None` from the contributor or omit that Spec instead of returning an empty provider result. The remote team path currently relies on providers honoring this contract.
+- Team contributor contexts describe the member template being assembled: `role` is normally `leader` or `teammate`, and `member_name` is the template/card name. A later Worker, Avatar, predefined member, or dynamically spawned member can have a more specific final identity. Providers that make identity-sensitive decisions must inspect the live provider context they receive, rather than treating the contributor's template identity as the final runtime identity.
+- Team declarations cross process boundaries and are persisted as part of the team Spec. Their `params` must therefore contain JSON-safe configuration only and must never contain tokens, API keys, passwords, or other credentials. Read credentials from the receiving node's local secret/configuration source when the Provider runs.
+- Every AgentServer node must install and load the same extension version. A missing provider on a remote node fails explicitly instead of silently bypassing a safety Rail.
+- Cold recovery reuses the Tool/Rail declarations captured when the team was created; it does not re-run contributors to adopt newly changed extension configuration. Create a new team after changing extension code, contributor rules, or related configuration.
+- If a provider returns a pure `ToolCard`, its Tool must already be registered and the returned card must exactly match the registered Tool's card. A stateful ToolCard must also use the current agent's qualified id. Returning a live Tool is normally preferred so Agent Core can isolate it by session.
+- A stateful Tool provider should return a fresh instance for every build. Mark a Tool as `stateless` only when it is genuinely safe to share. Tools may be called concurrently, so mutable internal state must be reentrant or protected by locking.
+- Use a stable, unique namespace for extension `ToolCard.name` values (for example, `cloudrobo_*`) to avoid collisions with built-in tools or other extensions.
+- Assembly is append-only and does not replace host Rails. An extension must not redeclare a permission or security Rail already mounted by the host; enable and configure the existing host Rail when native approval behavior is required.
+- "Skip the whole contribution" only guarantees that failed resources are not mounted on the agent. External side effects already performed while a provider was constructing objects cannot be rolled back automatically, so providers should stay close to pure object construction.
+- Regular/code-agent capabilities are assembled when the agent is created or rebuilt; already-created agents are not guaranteed to hot-reload them. Team declarations follow the stricter creation/recovery rule described above.
+- This interface currently covers Tool/Rail assembly only. Automatic Skill assembly is outside its scope.
+
 ## 7. Code Directory
 
 The core Harness implementation is located at:

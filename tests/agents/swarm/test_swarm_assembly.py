@@ -83,6 +83,8 @@ from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_workspace_path,
 )
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.extensions.harness import HarnessContribution
+from jiuwenswarm.extensions.registry import ExtensionRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +158,109 @@ def _make_team_spec() -> TeamAgentSpec:
         team_name="unit_team",
         leader=LeaderSpec(member_name="team_leader"),
     )
+
+
+def test_enrich_team_spec_mounts_extension_contributions_per_role() -> None:
+    ExtensionRegistry.reset_instance()
+    extension_registry = ExtensionRegistry.create_instance(None, {}, MagicMock())
+    observed_roles: list[str | None] = []
+
+    def _contributor(context):
+        observed_roles.append(context.role)
+        return HarnessContribution(
+            tools=[
+                BuiltinToolSpec(
+                    type="extension.team.tool",
+                    params={"role": context.role},
+                )
+            ],
+            rails=[
+                RailSpec(
+                    type="extension.team.rail",
+                    params={"role": context.role},
+                )
+            ],
+        )
+
+    extension_registry.register_harness_contributor("team-extension", _contributor)
+    spec = _make_team_spec()
+    try:
+        enrich_team_spec_for_swarm(spec, session_id="s", mode="team")
+
+        assert observed_roles == ["leader", "teammate"]
+        for role in ("leader", "teammate"):
+            member = spec.agents[role]
+            matching_tools = [
+                item
+                for item in member.tools
+                if isinstance(item, BuiltinToolSpec)
+                and item.type == "extension.team.tool"
+            ]
+            matching_rails = [
+                item for item in member.rails if item.type == "extension.team.rail"
+            ]
+            assert len(matching_tools) == 1
+            assert matching_tools[0].params == {"role": role}
+            assert len(matching_rails) == 1
+            assert matching_rails[0].params == {"role": role}
+
+        rebuilt = TeamAgentSpec.model_validate(spec.model_dump(mode="json"))
+        for role in ("leader", "teammate"):
+            rebuilt_tools = [
+                item
+                for item in rebuilt.agents[role].tools
+                if isinstance(item, BuiltinToolSpec)
+                and item.type == "extension.team.tool"
+            ]
+            rebuilt_rails = [
+                item
+                for item in rebuilt.agents[role].rails
+                if item.type == "extension.team.rail"
+            ]
+            assert rebuilt_tools[0].params == {"role": role}
+            assert rebuilt_rails[0].params == {"role": role}
+    finally:
+        ExtensionRegistry.reset_instance()
+
+
+@pytest.mark.parametrize(
+    ("member_language", "team_language", "preferred_language", "expected"),
+    [
+        ("en", "cn", "cn", {"leader": "en", "teammate": "cn"}),
+        (None, "en", "cn", {"leader": "en", "teammate": "en"}),
+        (None, None, "en", {"leader": "en", "teammate": "en"}),
+    ],
+)
+def test_team_extension_context_language_fallback_order(
+    monkeypatch: pytest.MonkeyPatch,
+    member_language: str | None,
+    team_language: str | None,
+    preferred_language: str,
+    expected: dict[str, str],
+) -> None:
+    ExtensionRegistry.reset_instance()
+    extension_registry = ExtensionRegistry.create_instance(None, {}, MagicMock())
+    observed: dict[str, str] = {}
+
+    def _contributor(context):
+        observed[str(context.role)] = context.language
+        return None
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.swarm.assembly.get_config",
+        lambda: {"preferred_language": preferred_language},
+    )
+    extension_registry.register_harness_contributor("team-language", _contributor)
+    spec = _make_team_spec().model_copy(update={"language": team_language})
+    spec.agents["leader"] = spec.agents["leader"].model_copy(
+        update={"language": member_language}
+    )
+    try:
+        enrich_team_spec_for_swarm(spec, session_id="s", mode="team")
+
+        assert observed == expected
+    finally:
+        ExtensionRegistry.reset_instance()
 
 
 def _agentic_retrieval_config(enabled: bool = True) -> dict:

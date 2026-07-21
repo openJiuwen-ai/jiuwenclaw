@@ -26,6 +26,7 @@ from typing import Any
 from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
+from openjiuwen.harness.prompts import resolve_language
 
 from jiuwenswarm.agents.swarm.config_specs import build_member_deep_agent_spec
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
@@ -33,6 +34,8 @@ from jiuwenswarm.agents.swarm.registry import register_swarm_providers
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.mcp_config import build_enabled_mcp_server_configs
 from jiuwenswarm.common.utils import get_agent_skills_dir
+from jiuwenswarm.extensions.harness import merge_harness_contributions
+from jiuwenswarm.extensions.registry import ExtensionRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -122,13 +125,40 @@ def enrich_team_spec_for_swarm(
 
     for role in _MEMBER_ROLES:
         if role in spec.agents:
+            base_member_spec = spec.agents[role]
+            member_card = getattr(base_member_spec, "card", None)
+            member_context = base.derive(
+                role=role,
+                member_name=(
+                    str(getattr(member_card, "name", "") or "").strip() or role
+                ),
+                language=resolve_language(
+                    str(getattr(base_member_spec, "language", "") or "").strip()
+                    or str(getattr(spec, "language", "") or "").strip()
+                    or str(config.get("preferred_language", "zh") or "").strip()
+                    or "zh"
+                ),
+                member_card_id=(
+                    str(getattr(member_card, "id", "") or "").strip() or None
+                ),
+            )
+            extension_registry = ExtensionRegistry.get_optional_instance()
+            extension_contribution = None
+            if extension_registry is not None:
+                named_contributions = extension_registry.collect_harness_contributions(
+                    member_context
+                )
+                extension_contribution = merge_harness_contributions(
+                    item.contribution for item in named_contributions
+                )
             member_spec = build_member_deep_agent_spec(
                 config,
                 mode,
                 role,
-                spec.agents[role],
+                base_member_spec,
                 enable_permissions=spec.enable_permissions,
                 mcp_configs=mcp_configs,
+                extension_contribution=extension_contribution,
             )
             if _worktree_enabled(spec):
                 member_spec = _with_project_workspace(member_spec, project_dir)

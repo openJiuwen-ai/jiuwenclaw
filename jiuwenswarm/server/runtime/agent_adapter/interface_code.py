@@ -496,6 +496,17 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             agent_workspace_dir=self._agent_workspace_dir,
             description="Coding Agent 记忆模块",
         )
+        extension_tools, extension_rails = self._build_extension_harness_resources(
+            mode=mode,
+            config_base=config_base,
+            agent_card=agent_card,
+            workspace=workspace,
+            model=model,
+            sys_operation=sys_operation,
+            existing_tool_cards=tool_cards,
+            sub_mode=sub_mode,
+        )
+        rails_list.extend(extension_rails)
 
         self._instance = create_deep_agent(
             model=model,
@@ -509,6 +520,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             workspace=workspace,
             sys_operation=sys_operation,
             language=self._resolve_runtime_language(),
+            ability_owner_id=self._build_runtime_tool_owner_id(),
             enable_read_image_multimodal=False,
             auto_create_workspace=False,
             completion_timeout=config.get("completion_timeout", 3600.0),
@@ -534,9 +546,12 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # 安全性：ensure_initialized 操作的是 self._pending_rails、workspace 文件等实例自己的资源，
         # 不碰全局 asyncio 原语，不跨 loop 访问主 loop 对象，不会死锁。
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: asyncio.run(self._instance.ensure_initialized()),
+        await self._run_guarded_create_step(
+            lambda: loop.run_in_executor(
+                None,
+                lambda: asyncio.run(self._instance.ensure_initialized()),
+            ),
+            log_prefix="JiuwenSwarmCodeAdapter",
         )
         # 修正 .agent_history 写入路径：openjiuwen 文件工具默认将
         # .agent_history 写到 Workspace.root_path（即项目目录），
@@ -568,10 +583,26 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         self._registered_mcp_server_ids.clear()
         self._registered_mcp_servers.clear()
-        await self._register_mcp_servers_from_config(config_base, tag="code")
+        await self._run_guarded_create_step(
+            lambda: self._register_mcp_servers_from_config(config_base, tag="code"),
+            log_prefix="JiuwenSwarmCodeAdapter",
+        )
         logger.info("[JiuwenSwarmCodeAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
-        await self.load_user_rails()
+        await self._run_guarded_create_step(
+            self.load_user_rails,
+            log_prefix="JiuwenSwarmCodeAdapter",
+        )
+
+        try:
+            # Mount extension Tools only after every host/user Rail has had a
+            # chance to register its own abilities.
+            self._mount_extension_tools(extension_tools)
+        except Exception:
+            await self._teardown_failed_create_resources(
+                log_prefix="JiuwenSwarmCodeAdapter"
+            )
+            raise
 
     # ─── Rails 构建 ──────────────────────────
 

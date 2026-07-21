@@ -436,6 +436,38 @@ Generally, from highest to lowest: **values you save in the web Configuration UI
 
 > 💡 **Tip**: If changes do not seem to apply immediately, wait briefly or ask an admin whether services have reloaded.
 
+### 10.4 Extension directories
+
+Administrators can configure extension directories directly in the main configuration without injecting environment variables:
+
+An extension root contains `extension.py` and may also contain `extension.yaml`. For example:
+
+```text
+D:/extensions/
+├── cloudrobo/
+│   ├── extension.py
+│   └── extension.yaml
+└── common/
+    ├── extension.py
+    └── extension.yaml
+```
+
+You may point to the parent directory that contains multiple extension roots:
+
+```yaml
+extensions:
+  extension_dirs: "D:/extensions"
+```
+
+Or point directly to one or more extension roots:
+
+```yaml
+extensions:
+  extension_dirs: "D:/extensions/cloudrobo;D:/extensions/common"
+```
+
+Separate multiple entries with semicolons. Each entry may be either a collection directory or a direct extension root. JiuwenSwarm also adds the built-in `jiuwenswarm/extensions` directory automatically. Extensions are normally loaded during service startup, so restart the relevant AgentServer after changing the directories or extension code.
+
 ---
 
 ## FAQ
