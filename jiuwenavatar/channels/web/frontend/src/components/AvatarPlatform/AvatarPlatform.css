@@ -171,6 +171,39 @@
   color: var(--muted);
 }
 
+.avatar-platform__card-id {
+  margin-top: 0.35rem;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.avatar-platform__card-id-label {
+  flex-shrink: 0;
+}
+
+.avatar-platform__card-id-value {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+  color: var(--text-strong);
+  background: var(--bg-muted);
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.25rem;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.avatar-platform__btn--compact {
+  padding: 0.15rem 0.45rem;
+  font-size: 0.6875rem;
+  line-height: 1.2;
+}
+
 .avatar-platform__card-desc {
   margin-top: 0.75rem;
   font-size: 0.8125rem;

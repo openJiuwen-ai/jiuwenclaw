@@ -1,19 +1,22 @@
 # ---------------------------------------------------------------
-# 按 tag 拉取 openJiuwen jiuwenswarm 快照到 assets/<tag>
+# 按 reference 名拉取 openJiuwen jiuwenswarm 快照到 assets/<name>
 #
 # 用法:
-#   powershell -ExecutionPolicy Bypass -File scripts\fetch.ps1 -Tag 0.2.0
+#   powershell -ExecutionPolicy Bypass -File scripts\fetch.ps1 -Tag 0.2.3
+#   powershell -ExecutionPolicy Bypass -File scripts\fetch.ps1 -Tag enterprise_kub
 #   powershell -ExecutionPolicy Bypass -File scripts\fetch.ps1 -Tag auto
-#   powershell -ExecutionPolicy Bypass -File scripts\fetch.ps1   # 交互输入 tag / auto
 #
 # 参数:
-#   -Tag    tag 名（如 0.2.0），或 auto（扫描 references/[0-9]*.md 批量拉取）
-#   -Force  单 tag 模式：目标目录非空时仍尝试克隆
+#   -Tag    索引名（如 0.2.3 / enterprise_kub），或 auto
+#   -Force  单 name 模式：目标目录非空时仍尝试克隆
+#
+# Git 源解析:
+#   - 优先读取 references/<name>.md 顶部的 <!-- git-ref: <branch-or-tag> -->
+#   - 若无注释，则用 <name> 本身作为 git branch/tag
 #
 # auto 模式:
-#   - 从 references/ 读取 [0-9]*.md（版本索引），文件名（去 .md）即 tag
-#   - 忽略 references/ 下非 [0-9]*.md 的补充文档（如 jiuwenswarm-sdk-notes.md）
-#   - assets/<tag> 已存在则跳过；不存在则拉取
+#   - 扫描 references/[0-9]*.md；若存在 enterprise_kub.md 一并纳入
+#   - assets/<name> 已存在则跳过；不存在则拉取
 # ---------------------------------------------------------------
 
 param(
@@ -47,13 +50,14 @@ function Test-DirEmpty {
     return ($null -eq $items -or $items.Count -eq 0)
 }
 
-function Test-TagSafe {
+function Test-NameSafe {
     param([string]$Value)
     if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
-    return $Value -notmatch '[\\/]|\.\.'
+    if ($Value -match '\.\.|[\\/]') { return $false }
+    return $Value -match '^[A-Za-z0-9._-]+$'
 }
 
-function Normalize-Tag {
+function Normalize-Name {
     param([string]$Value)
     $t = $Value.Trim()
     if ($t -match '^[vV]([0-9].*)$') {
@@ -62,33 +66,59 @@ function Normalize-Tag {
     return $t
 }
 
-function Get-ReferenceTags {
+function Resolve-GitRef {
+    param([string]$Name)
+    $refFile = Join-Path $ReferencesRoot "$Name.md"
+    if (Test-Path -LiteralPath $refFile) {
+        $line = Get-Content -LiteralPath $refFile -TotalCount 20 |
+            Where-Object { $_ -match '^<!--\s*git-ref:\s*(\S+)\s*-->\s*$' } |
+            Select-Object -First 1
+        if ($line -match '^<!--\s*git-ref:\s*(\S+)\s*-->\s*$') {
+            return $Matches[1]
+        }
+    }
+    return $Name
+}
+
+function Get-ReferenceNames {
     if (-not (Test-Path -LiteralPath $ReferencesRoot)) {
         throw "references 目录不存在: $ReferencesRoot"
     }
-    $tags = Get-ChildItem -LiteralPath $ReferencesRoot -File |
-        Where-Object { $_.Name -match '^[0-9].*\.md$' } |
-        ForEach-Object { $_.BaseName } |
-        Where-Object { Test-TagSafe -Value $_ } |
-        Sort-Object { [version]($_ -replace '\.post(\d+)$', '.$1') }
-    return ,$tags
+    $names = @(
+        Get-ChildItem -LiteralPath $ReferencesRoot -File |
+            Where-Object { $_.Name -match '^[0-9].*\.md$' } |
+            ForEach-Object { $_.BaseName } |
+            Where-Object { Test-NameSafe -Value $_ }
+    )
+    $enterprise = Join-Path $ReferencesRoot "enterprise_kub.md"
+    if (Test-Path -LiteralPath $enterprise) {
+        $names += "enterprise_kub"
+    }
+    # Keep version-like names sorted; append special names at end without breaking version sort
+    $versionNames = @($names | Where-Object { $_ -match '^[0-9]' } | Sort-Object {
+        try { [version]($_ -replace '\.post(\d+)$', '.$1') } catch { $_ }
+    })
+    $otherNames = @($names | Where-Object { $_ -notmatch '^[0-9]' } | Sort-Object)
+    return @($versionNames + $otherNames | Select-Object -Unique)
 }
 
-function Invoke-FetchTag {
+function Invoke-FetchName {
     param(
-        [string]$TagName,
+        [string]$Name,
         [switch]$SkipIfExists,
         [switch]$AllowForce
     )
 
-    $targetDir = Join-Path $AssetsRoot $TagName
+    $targetDir = Join-Path $AssetsRoot $Name
+    $gitRef = Resolve-GitRef -Name $Name
 
-    Write-Info "标签: $TagName"
+    Write-Info "索引名: $Name"
+    Write-Info "Git 源: $gitRef"
     Write-Info "目标: $targetDir"
 
     if (Test-Path -LiteralPath $targetDir) {
         if ($SkipIfExists) {
-            Write-Skip "$TagName — assets 已存在，跳过"
+            Write-Skip "$Name — assets 已存在，跳过"
             return @{ Status = "skipped" }
         }
         if (-not (Test-DirEmpty -Path $targetDir)) {
@@ -99,16 +129,16 @@ function Invoke-FetchTag {
         }
     }
 
-    Write-Info "正在浅克隆 tag $TagName ..."
+    Write-Info "正在浅克隆 $gitRef ..."
     if (Test-Path -LiteralPath $targetDir) {
         Push-Location $targetDir
         try {
-            & git clone --branch $TagName --depth 1 --single-branch $RepoUrl .
+            & git clone --branch $gitRef --depth 1 --single-branch $RepoUrl .
         } finally {
             Pop-Location
         }
     } else {
-        & git clone --branch $TagName --depth 1 --single-branch $RepoUrl $targetDir
+        & git clone --branch $gitRef --depth 1 --single-branch $RepoUrl $targetDir
     }
 
     if ($LASTEXITCODE -ne 0) {
@@ -124,38 +154,38 @@ function Invoke-FetchTag {
         Pop-Location
     }
 
-    Write-Ok "已拉取 $TagName 到 $targetDir"
+    Write-Ok "已拉取 $Name ($gitRef) 到 $targetDir"
     Write-Ok "HEAD: $head  $describe"
     return @{ Status = "fetched"; Head = $head }
 }
 
 function Invoke-AutoFetch {
-    $tags = @(Get-ReferenceTags)
-    if ($tags.Count -eq 0) {
-        Write-Err "references 中未找到 [0-9]*.md 版本索引，无法执行 auto"
+    $names = @(Get-ReferenceNames)
+    if ($names.Count -eq 0) {
+        Write-Err "references 中未找到可拉取索引，无法执行 auto"
         exit 1
     }
 
-    Write-Info "auto 模式：自 references/ 发现 $($tags.Count) 个 tag"
+    Write-Info "auto 模式：自 references/ 发现 $($names.Count) 个索引"
     Write-Info "仓库: $RepoUrl"
-    Write-Info "tags: $($tags -join ', ')"
+    Write-Info "names: $($names -join ', ')"
 
     $fetched = 0
     $skipped = 0
     $failed = 0
 
-    foreach ($t in $tags) {
+    foreach ($n in $names) {
         Write-Host ""
-        Write-Info "---- $t ----"
+        Write-Info "---- $n ----"
         try {
-            $result = Invoke-FetchTag -TagName $t -SkipIfExists
+            $result = Invoke-FetchName -Name $n -SkipIfExists
             switch ($result.Status) {
                 "skipped" { $skipped++ }
                 "fetched" { $fetched++ }
             }
         } catch {
             $failed++
-            Write-Err "$t — $($_.Exception.Message)"
+            Write-Err "$n — $($_.Exception.Message)"
         }
     }
 
@@ -165,9 +195,9 @@ function Invoke-AutoFetch {
 }
 
 if ([string]::IsNullOrWhiteSpace($Tag)) {
-    $Tag = Read-Host "请输入 tag (例如 0.2.0) 或 auto"
+    $Tag = Read-Host "请输入索引名 (例如 0.2.3 / enterprise_kub) 或 auto"
 }
-$Tag = Normalize-Tag $Tag
+$Tag = Normalize-Name $Tag
 
 Test-GitAvailable
 
@@ -180,14 +210,14 @@ if ($Tag -ieq "auto") {
     exit 0
 }
 
-if (-not (Test-TagSafe -Value $Tag)) {
-    Write-Err "无效的 tag: $Tag（不可包含路径分隔符或 ..）"
+if (-not (Test-NameSafe -Value $Tag)) {
+    Write-Err "无效的索引名: $Tag（仅允许字母数字 . _ -，不可含路径分隔符）"
     exit 1
 }
 
 Write-Info "仓库: $RepoUrl"
 try {
-    Invoke-FetchTag -TagName $Tag -AllowForce | Out-Null
+    Invoke-FetchName -Name $Tag -AllowForce | Out-Null
 } catch {
     Write-Err $_.Exception.Message
     exit 1

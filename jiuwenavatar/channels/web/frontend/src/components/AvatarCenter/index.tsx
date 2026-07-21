@@ -568,6 +568,23 @@ function MyAvatarsList({
                         <> · {codingEngineLabel(avatar.coding_engine, t)}</>
                       )}
                     </p>
+                    <p className="avatar-platform__card-id">
+                      <span className="avatar-platform__card-id-label">{t('avatar.instanceId', '分身 ID')}</span>
+                      <code className="avatar-platform__card-id-value" title={avatar.id}>{avatar.id}</code>
+                      <button
+                        type="button"
+                        className="avatar-platform__btn avatar-platform__btn--ghost avatar-platform__btn--compact"
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(avatar.id);
+                          } catch {
+                            window.prompt(t('avatar.copyIdFallback', '请手动复制分身 ID'), avatar.id);
+                          }
+                        }}
+                      >
+                        {t('avatar.copyId', '复制')}
+                      </button>
+                    </p>
                   </div>
                 </div>
                 <div className="flex gap-2 shrink-0">

@@ -26,7 +26,11 @@ from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
 # --- Early --dotenv parsing (before jiuwenavatar imports) ---
-from jiuwenavatar.common.service_ports import DEFAULT_FRONTEND_PORT, DEFAULT_WEB_PORT
+from jiuwenavatar.common.service_ports import (
+    DEFAULT_FRONTEND_PORT,
+    DEFAULT_WEBHOOK_PORT,
+    DEFAULT_WEB_PORT,
+)
 from jiuwenavatar.dotenv_early import parse_dotenv_early
 parse_dotenv_early("jiuwenavatar-web")
 
@@ -154,6 +158,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     }
 
     api_target = ""
+    avatar_target = ""
     ws_target = ""
     ws_disable_compress = False
     project_root = get_user_workspace_dir()
@@ -175,6 +180,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     }
     _WS_LOG_MAX_CHARS = 2000
     _HTTP_PROXY_TIMEOUT = 30
+    # Avatar chat may run long-lived agent tasks (code review etc.).
+    _AVATAR_HTTP_PROXY_TIMEOUT = 1800
     _WS_CONNECT_TIMEOUT = 10
     _WS_SELECT_TIMEOUT = 60
     _WS_RECV_BUFFER = 65536
@@ -349,6 +356,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     def _is_api_route(self) -> bool:
         return urlparse(self.path).path.startswith("/api")
 
+    def _is_avatar_route(self) -> bool:
+        return urlparse(self.path).path.startswith("/avatar")
+
     def _is_ws_route(self) -> bool:
         return urlparse(self.path).path.startswith("/ws")
 
@@ -363,21 +373,23 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         connection = self.headers.get("Connection", "")
         return "websocket" in upgrade.lower() and "upgrade" in connection.lower()
 
-    def _proxy_http(self) -> None:
-        parsed = urlparse(self.api_target)
+    def _proxy_http(self, *, target: str | None = None, timeout: float | None = None) -> None:
+        proxy_target = (target or self.api_target or "").strip()
+        parsed = urlparse(proxy_target)
+        proxy_timeout = self._HTTP_PROXY_TIMEOUT if timeout is None else timeout
         if parsed.scheme == "https":
             ssl_ctx = None if get_ssl_verify() else get_insecure_ssl_context()
             conn: http.client.HTTPConnection = http.client.HTTPSConnection(
                 parsed.hostname,
                 parsed.port or self._DEFAULT_HTTPS_PORT,
-                timeout=self._HTTP_PROXY_TIMEOUT,
+                timeout=proxy_timeout,
                 context=ssl_ctx,
             )
         else:
             conn = http.client.HTTPConnection(
                 parsed.hostname,
                 parsed.port or self._DEFAULT_HTTP_PORT,
-                timeout=self._HTTP_PROXY_TIMEOUT,
+                timeout=proxy_timeout,
             )
 
         try:
@@ -513,6 +525,12 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     def _dispatch_proxy(self) -> bool:
         if self._is_api_route():
             self._proxy_http()
+            return True
+        if self._is_avatar_route():
+            self._proxy_http(
+                target=self.avatar_target,
+                timeout=self._AVATAR_HTTP_PROXY_TIMEOUT,
+            )
             return True
         if self._is_ws_route():
             if self._is_websocket_upgrade():
@@ -1034,6 +1052,23 @@ def _normalize_api_target(value: str) -> str:
     return value.rstrip("/")
 
 
+def _default_avatar_target() -> str:
+    host = (
+        os.getenv("AVATAR_HTTP_HOST")
+        or os.getenv("WEBHOOK_HOST")
+        or "127.0.0.1"
+    )
+    # Frontend proxy talks to local loopback even when the API binds 0.0.0.0.
+    if host in {"0.0.0.0", "::", "[::]"}:
+        host = "127.0.0.1"
+    port = int(
+        os.getenv("AVATAR_HTTP_PORT")
+        or os.getenv("WEBHOOK_PORT")
+        or str(DEFAULT_WEBHOOK_PORT)
+    )
+    return f"http://{host}:{port}"
+
+
 def _normalize_ws_target(value: str) -> str:
     parsed = urlparse(value)
     if parsed.scheme in ("http", "https"):
@@ -1071,6 +1106,7 @@ def _build_frontend_server(
     *,
     dist_dir: Path | None = None,
     api_target: str = "",
+    avatar_target: str = "",
     ws_target: str = "",
     log_level: str = "INFO",
     ws_disable_compress: bool = False,
@@ -1084,6 +1120,7 @@ def _build_frontend_server(
 
     proxy_target = proxy_target.strip()
     resolved_api = _normalize_api_target(api_target.strip() or proxy_target)
+    resolved_avatar = _normalize_api_target(avatar_target.strip() or _default_avatar_target())
     resolved_ws = _normalize_ws_target(ws_target.strip() or proxy_target)
 
     project_root = get_user_workspace_dir()
@@ -1096,6 +1133,7 @@ def _build_frontend_server(
         pass
 
     _ConfiguredHandler.api_target = resolved_api
+    _ConfiguredHandler.avatar_target = resolved_avatar
     _ConfiguredHandler.ws_target = resolved_ws
     _ConfiguredHandler.ws_disable_compress = ws_disable_compress
     _ConfiguredHandler.project_root = project_root
@@ -1109,6 +1147,7 @@ def _build_frontend_server(
     logger.info("[jiuwenavatar-web] serving %s", resolved_dist)
     logger.info("[jiuwenavatar-web] http://%s:%s", host, port)
     logger.info("[jiuwenavatar-web] /api -> %s", resolved_api)
+    logger.info("[jiuwenavatar-web] /avatar -> %s", resolved_avatar)
     logger.info("[jiuwenavatar-web] /ws  -> %s", resolved_ws)
     logger.info("[jiuwenavatar-web] ws disable compress: %s", ws_disable_compress)
     logger.info(
