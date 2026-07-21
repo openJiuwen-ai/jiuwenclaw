@@ -6154,18 +6154,16 @@ class JiuWenClawDeepAdapter:
         }
 
     async def _handle_evolve_rebuild_command(self, query: str) -> dict[str, Any]:
-        """/evolve_rebuild <skill_name> [user_intent] — Rebuild SKILL.md via agent followup."""
+        """/evolve_rebuild <skill_name> [--ids id1,id2] [user_intent] — Rebuild SKILL.md via agent followup."""
         rail = self._skill_evolution_rail
         assert rail is not None
         store = rail.store
 
-        parts = query.split(maxsplit=2)
-        skill_name = parts[1] if len(parts) > 1 else ""
-        user_intent = parts[2] if len(parts) > 2 else None
+        skill_name, record_ids, user_intent = self._parse_evolve_rebuild_query(query)
 
         if not skill_name:
             return {
-                "output": "请指定 Skill 名称：`/evolve_rebuild <skill_name> [user_intent]`",
+                "output": "请指定 Skill 名称：`/evolve_rebuild <skill_name> [--ids id1,id2] [user_intent]`",
                 "result_type": "error",
             }
 
@@ -6200,6 +6198,7 @@ class JiuWenClawDeepAdapter:
         rebuild_context = await rebuild_service.prepare_rebuild_context(
             subject,
             user_intent=user_intent,
+            record_ids=record_ids,
         )
         if rebuild_context is None:
             return {
@@ -6220,6 +6219,43 @@ class JiuWenClawDeepAdapter:
             "rebuild_context": rebuild_context,
             "result_type": "followup",
         }
+
+    @staticmethod
+    def _parse_evolve_rebuild_query(
+        query: str,
+    ) -> tuple[str, list[str] | None, str | None]:
+        """Parse `/evolve_rebuild <skill> [--ids id1,id2|id1 id2] [user_intent...]`."""
+        text = query.strip()
+        prefix = "/evolve_rebuild"
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):].strip()
+        if not text:
+            return "", None, None
+
+        tokens = text.split()
+        skill_name = tokens[0]
+        rest = tokens[1:]
+        record_ids: list[str] | None = None
+        intent_tokens: list[str] = []
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--ids":
+                i += 1
+                collected: list[str] = []
+                while i < len(rest) and rest[i] != "--ids" and (
+                    "," in rest[i] or rest[i].startswith("ev_")
+                ):
+                    collected.extend(
+                        part.strip() for part in rest[i].split(",") if part.strip()
+                    )
+                    i += 1
+                record_ids = collected or None
+                continue
+            intent_tokens.append(rest[i])
+            i += 1
+
+        user_intent = " ".join(intent_tokens).strip() or None
+        return skill_name, record_ids, user_intent
 
     async def _finalize_rebuild_followup(self, slash_result: dict[str, Any] | None) -> None:
         """Clear evolution log after a successful rebuild followup."""
