@@ -65,6 +65,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         invoke_timeout_s: float = 60.0,
         agent_timeout_s: float = 300.0,
         agent_namespace: str = "default",
+        session_ttl_s: int = 900,
     ) -> None:
         self._frontend_endpoint = (frontend_endpoint or "").rstrip("/")
         self._function_version_urn = (function_version_urn or "").strip()
@@ -72,6 +73,9 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         self._invoke_timeout_s = float(invoke_timeout_s)
         self._agent_timeout_s = float(agent_timeout_s)
         self._agent_namespace = str(agent_namespace or "default").strip() or "default"
+        # yuanrong X-Instance-Session.sessionTTL，单位：秒；0 = 立即解绑。
+        # 默认 900s（15 分钟），保证会话对实例的亲和性，避免每次调用重建实例。
+        self._session_ttl_s = max(int(session_ttl_s), 0)
         self._connected = False
         self._server_ready = False
 
@@ -472,7 +476,11 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         headers = {
             "Content-Type": "application/json",
             "X-Instance-Session": json.dumps(
-                {"sessionID": session_id, "concurrency": self._concurrency},
+                {
+                    "sessionID": session_id,
+                    "sessionTTL": self._session_ttl_s,
+                    "concurrency": self._concurrency,
+                },
                 ensure_ascii=False,
             ),
         }

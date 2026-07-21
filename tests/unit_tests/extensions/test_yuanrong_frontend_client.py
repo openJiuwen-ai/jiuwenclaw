@@ -45,14 +45,14 @@ def test_invoke_headers_without_user_id(client: YuanrongFrontendAgentClientProbe
 
     assert "X-Session-Context" not in headers
     instance = json.loads(headers["X-Instance-Session"])
-    assert instance == {"sessionID": "sess-1", "concurrency": 2}
+    assert instance == {"sessionID": "sess-1", "sessionTTL": 900, "concurrency": 2}
 
 
 def test_invoke_headers_with_user_id(client: YuanrongFrontendAgentClientProbe):
     headers = client.invoke_headers("sess-1", user_id="alice")
 
     assert json.loads(headers["X-Session-Context"]) == {"sessionCtx": "alice"}
-    assert json.loads(headers["X-Instance-Session"]) == {"sessionID": "sess-1", "concurrency": 2}
+    assert json.loads(headers["X-Instance-Session"]) == {"sessionID": "sess-1", "sessionTTL": 900, "concurrency": 2}
 
 
 def test_invoke_headers_stream_accepts_sse(client: YuanrongFrontendAgentClientProbe):
