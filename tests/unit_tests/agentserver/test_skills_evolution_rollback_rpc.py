@@ -358,6 +358,37 @@ def test_facade_forwards_evolution_rail_rpc(monkeypatch):
 
 
 @pytest.mark.unit
+def test_facade_forwards_evolution_rebuild_rpc(monkeypatch):
+    from jiuwenclaw.agentserver.interface import JiuWenClaw
+    from jiuwenclaw.schema.agent import AgentRequest
+    from jiuwenclaw.schema.message import ReqMethod
+
+    claw = object.__new__(JiuWenClaw)
+    adapter = SimpleNamespace(
+        handle_skills_evolution_rebuild=AsyncMock(
+            return_value={
+                "success": True,
+                "name": "docx-craft",
+                "new_version": "1.2.0",
+                "cleared": True,
+            }
+        )
+    )
+    claw._ensure_adapter = AsyncMock(return_value=adapter)
+
+    request = AgentRequest(
+        request_id="req-rebuild",
+        channel_id="web",
+        req_method=ReqMethod.SKILLS_EVOLUTION_REBUILD,
+        params={"name": "docx-craft", "record_ids": ["ev_1"]},
+    )
+    response = asyncio.run(claw._handle_skills_evolution_rail_request(request))
+    assert response.ok is True
+    assert response.payload["new_version"] == "1.2.0"
+    adapter.handle_skills_evolution_rebuild.assert_awaited_once()
+
+
+@pytest.mark.unit
 def test_agent_manager_disk_only_evolution_skips_create_instance(monkeypatch):
     from jiuwenclaw.agentserver.agent_manager import AgentManager
     from jiuwenclaw.schema.agent import AgentRequest
@@ -482,3 +513,13 @@ def test_agent_manager_disk_only_evolution_reuses_existing_agent(monkeypatch):
     assert response.payload["versions"] == ["SKILL.v1.0.0.md"]
     existing.process_message.assert_awaited_once_with(request)
     manager.get_agent.assert_not_called()
+
+
+@pytest.mark.unit
+def test_rebuild_not_in_disk_only_evolution_methods():
+    """skills.evolution.rebuild needs agent merge rewrite; must not be disk-only ephemeral."""
+    from jiuwenclaw.agentserver.agent_manager import _DISK_ONLY_EVOLUTION_METHODS
+
+    assert "skills.evolution.archives" in _DISK_ONLY_EVOLUTION_METHODS
+    assert "skills.evolution.rollback" in _DISK_ONLY_EVOLUTION_METHODS
+    assert "skills.evolution.rebuild" not in _DISK_ONLY_EVOLUTION_METHODS

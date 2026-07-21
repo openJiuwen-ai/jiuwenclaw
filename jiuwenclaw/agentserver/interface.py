@@ -133,11 +133,12 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
 }
 
-# Evolution rail RPCs (rollback/archives) are handled by DeepAdapter, not SkillManager.
+# Evolution rail RPCs are handled by DeepAdapter (not SkillManager).
 _SKILL_EVOLUTION_RAIL_ROUTES: frozenset[ReqMethod] = frozenset(
     {
         ReqMethod.SKILLS_EVOLUTION_ARCHIVES,
         ReqMethod.SKILLS_EVOLUTION_ROLLBACK,
+        ReqMethod.SKILLS_EVOLUTION_REBUILD,
     }
 )
 
@@ -1042,17 +1043,14 @@ class JiuWenClaw:
     async def _handle_skills_evolution_rail_request(
         self, request: AgentRequest,
     ) -> AgentResponse:
-        """Forward skills.evolution.rollback/archives to DeepAdapter.
-
-        Disk control-plane only: DeepAdapter uses EvolutionStore and does not
-        require EvolutionRail / LLM initialization.
-        """
+        """Forward skills.evolution.* rail RPCs to DeepAdapter."""
         adapter = await self._ensure_adapter()
-        handler_name = (
-            "handle_skills_evolution_rollback"
-            if request.req_method == ReqMethod.SKILLS_EVOLUTION_ROLLBACK
-            else "handle_skills_evolution_archives"
-        )
+        if request.req_method == ReqMethod.SKILLS_EVOLUTION_ROLLBACK:
+            handler_name = "handle_skills_evolution_rollback"
+        elif request.req_method == ReqMethod.SKILLS_EVOLUTION_REBUILD:
+            handler_name = "handle_skills_evolution_rebuild"
+        else:
+            handler_name = "handle_skills_evolution_archives"
         handler = getattr(adapter, handler_name, None)
         if handler is None:
             return AgentResponse(
