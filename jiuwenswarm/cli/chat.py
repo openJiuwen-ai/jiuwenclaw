@@ -43,6 +43,7 @@ from jiuwenswarm.cli._terminal import write_stderr, write_stdout
 from jiuwenswarm.cli.gateway_client import GatewayClient
 from jiuwenswarm.cli.events import (
     event_kind,
+    is_content_final,
     is_terminal_event,
 )
 from jiuwenswarm.cli.render import HumanRenderer, JsonRenderer, JsonlRenderer
@@ -637,6 +638,11 @@ async def _run_interactive_loop(
                 if payload.get("event_type") == "team.error":
                     renderer.handle_error(payload)
                     return 1
+                # Unknown/control event types are transported in a chat.final
+                # envelope. They must not consume HumanRenderer's one final
+                # slot or arm the team idle timer.
+                if not is_content_final(payload):
+                    continue
                 renderer.handle_final(payload)
                 # In team mode, the leader's chat.final is a turn boundary
                 # but not a terminal event.  Start the idle-watch timer so
