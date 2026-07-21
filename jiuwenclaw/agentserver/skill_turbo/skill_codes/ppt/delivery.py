@@ -97,6 +97,11 @@ class DeliveryNode(PlanNode):
         else:
             delivery_status = "ok"
 
+        # 当 PPT 已成功发送给用户时，HTML 页面校验失败不应影响"任务已完成"判定：
+        # send_file_status=sent 表示用户已实际收到 PPT，task_completed 用于 __artifact__.info，
+        # 让 DeepAgent 主链路 LLM 能明确识别任务已完成，避免误调 skill_tool 重跑流程。
+        task_completed = send_file_status == "sent"
+
         need_artifact = send_file_status != "sent"
         artifact_tag = f"<!-- artifact:pptx {pages_dir} -->" if need_artifact and pages_dir else ""
 
@@ -105,10 +110,11 @@ class DeliveryNode(PlanNode):
         )
 
         logger.info(
-            "[P10] 交付完成 status=%s send=%s pptx=%s",
+            "[P10] 交付完成 status=%s send=%s pptx=%s task_completed=%s",
             delivery_status,
             send_file_status,
             pptx_filename,
+            task_completed,
         )
 
         return {
@@ -116,6 +122,19 @@ class DeliveryNode(PlanNode):
             "artifact_tag": artifact_tag,
             "send_file_status": send_file_status,
             "summary": summary,
+            # __artifact__ 字段供 SkillTurboExecutor._collect_node_artifact 提取，
+            # 记录到 _node_artifacts_holder，最终由 _build_artifact_summary 构建产物摘要，
+            # 追加到 skill_acceleration_exec 返回给 DeepAgent 主链路的 tool_result 中。
+            # 没有 __artifact__ 时产物摘要为空，LLM 偶发性因看不到产物证据而误调 skill_tool 重跑。
+            "__artifact__": {
+                "info": {
+                    "delivery_status": delivery_status,
+                    "send_file_status": send_file_status,
+                    "pptx_filename": pptx_filename,
+                    "task_completed": task_completed,
+                },
+                "files": [{"path": pptx_path}] if pptx_path else [],
+            },
         }
 
     async def _send_file(self, pptx_path: str) -> str:
@@ -244,12 +263,14 @@ class DeliveryNode(PlanNode):
     ) -> str:
         if status == "failed":
             return f"PPT 生成失败，HTML 页面目录：{pages_dir}"
+        # PPT 已发送给用户时，无论 pages_ok 是否通过，都明确说明"已发送"，
+        # 避免 delivery_status=partial 时的"部分完成"措辞让 LLM 误判任务未完成。
+        if send_file_status == "sent":
+            return f"PPT 已生成并发送给用户，页数：{page_count}，文件：{pptx_filename or '未生成'}"
         if status == "partial":
             return f"PPT 部分完成，页数：{page_count}，文件：{pptx_filename or '未生成'}"
         send_info = ""
-        if send_file_status == "sent":
-            send_info = "，已发送给用户"
-        elif send_file_status == "failed":
+        if send_file_status == "failed":
             send_info = "，文件发送失败"
         return f"PPT 生成完成，页数：{page_count}，文件：{pptx_filename}{send_info}"
 
