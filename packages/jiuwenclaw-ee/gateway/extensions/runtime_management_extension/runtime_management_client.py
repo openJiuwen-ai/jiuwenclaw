@@ -596,6 +596,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 ("no_proxy", os.getenv("NO_PROXY")),
                 ("FETCH_WEBPAGE_TIMEOUT", os.getenv("FETCH_WEBPAGE_TIMEOUT")),
                 ("FETCH_WEBPAGE_TOTAL_TIMEOUT", os.getenv("FETCH_WEBPAGE_TOTAL_TIMEOUT")),
+                ("AGENT_EXTRA_RAILS", os.getenv("AGENT_EXTRA_RAILS")),
             ):
                 if value is not None:
                     base[key] = value
