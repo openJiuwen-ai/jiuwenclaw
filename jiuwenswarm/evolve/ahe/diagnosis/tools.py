@@ -172,6 +172,15 @@ class DiagnosisToolExecutor:
 
         elif target == "tool_calls":
             messages = nt.get("messages", [])
+            # Map tool_call_id -> tool result content from role="tool" messages,
+            # so each tool_call shows the result it actually produced (not "").
+            results_by_id: dict[str, str] = {}
+            for msg in messages:
+                if msg.get("role") == "tool":
+                    tcid = msg.get("tool_call_id", "")
+                    if tcid:
+                        results_by_id[tcid] = str(msg.get("content", ""))[:2000]
+
             tool_calls = []
             for msg in messages:
                 for tc in msg.get("tool_calls", []):
@@ -190,10 +199,20 @@ class DiagnosisToolExecutor:
                         except json.JSONDecodeError:
                             input_data = args_str[:500]  # Fallback to truncated string
 
+                    # Match this tool_call to its result by tool_call_id.
+                    tc_id = (
+                        tc.get("id", "")
+                        or func.get("id", "")
+                        or tc.get("tool_call_id", "")
+                    )
+                    output = results_by_id.get(tc_id, "") or str(
+                        tc.get("output", "")
+                    )
+
                     tool_calls.append({
                         "name": func.get("name", tc.get("name", "")),
                         "input": input_data,  # Complete input parameters (dict or string)
-                        "output": str(tc.get("output", ""))[:500],
+                        "output": output[:500],
                         "latency": tc.get("latency"),
                     })
             total = len(tool_calls)
