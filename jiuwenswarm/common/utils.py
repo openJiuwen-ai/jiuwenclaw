@@ -1813,7 +1813,13 @@ class SensitiveDataFilter(logging.Filter):
             if exc_info and not record.exc_text:
                 import traceback as _traceback
 
-                formatted = "".join(_traceback.format_exception(*exc_info))
+                # exc_info 是 (type, value, tb) 三元组。Python 3.10+ 的
+                # traceback.format_exception 新签名只接受单个异常实例：
+                # format_exception(exc, /, limit=None, chain=True)。
+                # 旧的 format_exception(*exc_info)（拆包成 3 个位置参数）依赖
+                # 兼容层，未来版本可能移除；改用 exc_info[1]（异常实例）是
+                # 官方推荐写法，面向未来且行为等价（None 时输出 "NoneType: None"）。
+                formatted = "".join(_traceback.format_exception(exc_info[1]))
                 record.exc_text = _sanitize_log_text(formatted)
                 record.exc_info = None
             elif record.exc_text:
