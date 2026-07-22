@@ -8,7 +8,9 @@ import asyncio
 import base64
 import hashlib
 import json
-from contextlib import asynccontextmanager
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager, suppress
 
 import os
 import sys
@@ -213,49 +215,143 @@ async def test_styled_report_llm_context_uses_bridge_tls_only_for_entry(monkeypa
     assert os.environ.get("LLM_SSL_VERIFY") == "ambient"
 
 
-def test_styled_report_llm_context_lock_works_across_event_loops(monkeypatch):
+def test_styled_report_llm_context_serializes_concurrent_event_loops(monkeypatch):
     monkeypatch.setenv("LLM_SSL_VERIFY", "ambient")
     monkeypatch.setattr(
         dt,
         "_build_bridge_env",
         lambda _source: {"LLM_SSL_VERIFY": "resolved-by-bridge"},
     )
+    start_barrier = threading.Barrier(3)
+    observation_lock = threading.Lock()
     observed = []
+    active_entries = 0
+    max_active_entries = 0
+    errors = []
 
     @asynccontextmanager
     async def fake_context_factory(_llm_config):
-        observed.append(("entry", os.environ.get("LLM_SSL_VERIFY")))
-        await asyncio.sleep(0.01)
+        nonlocal active_entries, max_active_entries
+        with observation_lock:
+            active_entries += 1
+            max_active_entries = max(max_active_entries, active_entries)
+            observed.append(("entry", os.environ.get("LLM_SSL_VERIFY")))
+        await asyncio.sleep(0.02)
+        with observation_lock:
+            active_entries -= 1
         yield "runtime-llm"
 
     async def use_context():
         async with dt._scoped_report_style_llm_context(
             fake_context_factory, {"general": {}}
         ):
-            observed.append(("yielded", os.environ.get("LLM_SSL_VERIFY")))
+            with observation_lock:
+                observed.append(("yielded", os.environ.get("LLM_SSL_VERIFY")))
 
-    async def run_contending_pair():
-        await asyncio.gather(use_context(), use_context())
+    def run_in_thread():
+        try:
+            start_barrier.wait(timeout=1)
+            asyncio.run(use_context())
+        except BaseException as exc:  # pragma: no cover - assertion reports details
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run_in_thread) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    start_barrier.wait(timeout=1)
+    for thread in threads:
+        thread.join(timeout=1)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert max_active_entries == 1
+    assert len(observed) == 4
+    assert observed.count(("entry", "resolved-by-bridge")) == 2
+    assert observed.count(("yielded", "ambient")) == 2
+    assert os.environ.get("LLM_SSL_VERIFY") == "ambient"
+
+
+def test_styled_report_llm_context_wait_cancellation_allows_loop_shutdown():
+    lock = dt._REPORT_STYLE_LLM_INIT_LOCK
+    lock.acquire()
+    cancellation_started = threading.Event()
+    runner_errors = []
+
+    @asynccontextmanager
+    async def fake_context_factory(_llm_config):
+        yield "runtime-llm"  # pragma: no cover - lock stays held by the test
+
+    def run_cancelled_waiter():
+        async def scenario():
+            context = dt._scoped_report_style_llm_context(
+                fake_context_factory, {"general": {}}
+            )
+            task = asyncio.create_task(context.__aenter__())
+            await asyncio.sleep(0.02)
+            task.cancel()
+            cancellation_started.set()
+            with suppress(asyncio.CancelledError):
+                await task
+
+        try:
+            asyncio.run(scenario())
+        except BaseException as exc:  # pragma: no cover - assertion reports details
+            runner_errors.append(exc)
+
+    thread = threading.Thread(target=run_cancelled_waiter)
+    thread.start()
+    try:
+        assert cancellation_started.wait(timeout=1)
+        thread.join(timeout=0.2)
+        shutdown_completed_while_locked = not thread.is_alive()
+    finally:
+        lock.release()
+        thread.join(timeout=1)
+
+    assert shutdown_completed_while_locked is True
+    assert not thread.is_alive()
+    assert runner_errors == []
+    assert lock.acquire(blocking=False)
+    lock.release()
+
+
+def test_styled_report_llm_context_does_not_starve_limited_default_executor():
+    lock = dt._REPORT_STYLE_LLM_INIT_LOCK
+    lock.acquire()
+
+    @asynccontextmanager
+    async def fake_context_factory(_llm_config):
+        yield "runtime-llm"  # pragma: no cover - lock stays held by the test
+
+    async def scenario():
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=1)
+        )
+        context = dt._scoped_report_style_llm_context(
+            fake_context_factory, {"general": {}}
+        )
+        waiter = asyncio.create_task(context.__aenter__())
+        await asyncio.sleep(0.02)
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(lambda: "executor-available"),
+                timeout=0.1,
+            )
+        finally:
+            waiter.cancel()
+            lock.release()
+            with suppress(asyncio.CancelledError):
+                await waiter
 
     previous_loop = asyncio.get_event_loop_policy().get_event_loop()
     try:
-        asyncio.run(run_contending_pair())
-        assert os.environ.get("LLM_SSL_VERIFY") == "ambient"
-        asyncio.run(run_contending_pair())
+        result = asyncio.run(scenario())
     finally:
         asyncio.set_event_loop(previous_loop)
 
-    assert observed == [
-        ("entry", "resolved-by-bridge"),
-        ("yielded", "ambient"),
-        ("entry", "resolved-by-bridge"),
-        ("yielded", "ambient"),
-        ("entry", "resolved-by-bridge"),
-        ("yielded", "ambient"),
-        ("entry", "resolved-by-bridge"),
-        ("yielded", "ambient"),
-    ]
-    assert os.environ.get("LLM_SSL_VERIFY") == "ambient"
+    assert result == "executor-available"
+    assert lock.acquire(blocking=False)
+    lock.release()
 
 
 @pytest.mark.asyncio
@@ -277,6 +373,63 @@ async def test_styled_report_llm_context_restores_unset_tls_after_entry_failure(
             pass
 
     assert "LLM_SSL_VERIFY" not in os.environ
+
+    @asynccontextmanager
+    async def succeeding_context_factory(_llm_config):
+        yield "runtime-llm"
+
+    async def reenter():
+        async with dt._scoped_report_style_llm_context(
+            succeeding_context_factory, {"general": {}}
+        ) as llm:
+            assert llm == "runtime-llm"
+
+    await asyncio.wait_for(reenter(), timeout=0.1)
+    assert "LLM_SSL_VERIFY" not in os.environ
+
+
+@pytest.mark.asyncio
+async def test_styled_report_llm_context_releases_after_repeated_entry_cancellation(
+    monkeypatch,
+):
+    monkeypatch.setenv("LLM_SSL_VERIFY", "ambient")
+    monkeypatch.setattr(
+        dt,
+        "_build_bridge_env",
+        lambda _source: {"LLM_SSL_VERIFY": "resolved-by-bridge"},
+    )
+    entry_started = asyncio.Event()
+
+    @asynccontextmanager
+    async def blocked_context_factory(_llm_config):
+        assert os.environ.get("LLM_SSL_VERIFY") == "resolved-by-bridge"
+        entry_started.set()
+        await asyncio.Event().wait()
+        yield "runtime-llm"  # pragma: no cover
+
+    context = dt._scoped_report_style_llm_context(
+        blocked_context_factory, {"general": {}}
+    )
+    task = asyncio.create_task(context.__aenter__())
+    await asyncio.wait_for(entry_started.wait(), timeout=0.1)
+    task.cancel()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.1)
+
+    assert os.environ.get("LLM_SSL_VERIFY") == "ambient"
+
+    @asynccontextmanager
+    async def succeeding_context_factory(_llm_config):
+        yield "runtime-llm"
+
+    async def reenter():
+        async with dt._scoped_report_style_llm_context(
+            succeeding_context_factory, {"general": {}}
+        ):
+            pass
+
+    await asyncio.wait_for(reenter(), timeout=0.1)
 
 
 def _patch_env(tool_lines):

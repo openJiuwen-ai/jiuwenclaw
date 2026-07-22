@@ -223,22 +223,13 @@ def _build_styled_export_llm_config() -> dict:
 async def _scoped_report_style_llm_context(context_factory, llm_config):
     """Scope the SDK's env-based TLS setting to runtime LLM initialization."""
     async with AsyncExitStack() as stack:
-        acquire_task = asyncio.create_task(
-            asyncio.to_thread(_REPORT_STYLE_LLM_INIT_LOCK.acquire)
-        )
+        acquired = False
         try:
-            await asyncio.shield(acquire_task)
-        except asyncio.CancelledError:
-            while not acquire_task.done():
-                try:
-                    await asyncio.shield(acquire_task)
-                except asyncio.CancelledError:
-                    continue
-            if acquire_task.result():
-                _REPORT_STYLE_LLM_INIT_LOCK.release()
-            raise
+            while not acquired:
+                acquired = _REPORT_STYLE_LLM_INIT_LOCK.acquire(blocking=False)
+                if not acquired:
+                    await asyncio.sleep(0.001)
 
-        try:
             previous_ssl_verify = os.environ.get("LLM_SSL_VERIFY")
             resolved_ssl_verify = _build_bridge_env(os.environ)["LLM_SSL_VERIFY"]
             os.environ["LLM_SSL_VERIFY"] = resolved_ssl_verify
@@ -250,7 +241,8 @@ async def _scoped_report_style_llm_context(context_factory, llm_config):
                 else:
                     os.environ["LLM_SSL_VERIFY"] = previous_ssl_verify
         finally:
-            _REPORT_STYLE_LLM_INIT_LOCK.release()
+            if acquired:
+                _REPORT_STYLE_LLM_INIT_LOCK.release()
 
         yield llm
 
