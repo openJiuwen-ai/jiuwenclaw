@@ -33,6 +33,7 @@ import {
 } from "./core/event-handlers.js";
 import { isTeamMode, type ClientMode } from "./core/modes.js";
 import { isEventFrame, type EventFrame, type FileAttachment } from "./core/protocol.js";
+import { QuestionBusyError, QuestionCancelledError } from "./core/question-errors.js";
 import {
   StreamingState,
   type ContextCompressionStats,
@@ -189,12 +190,7 @@ function normalizePreferredLanguage(value: unknown): PreferredLanguage {
   return typeof value === "string" && value.trim().toLowerCase() === "en" ? "en" : "zh";
 }
 
-const LOCAL_FILE_SEARCH_TOOL_NAMES = new Set([
-  "grep",
-  "rg",
-  "ripgrep",
-  "search",
-]);
+const LOCAL_FILE_SEARCH_TOOL_NAMES = new Set(["grep", "rg", "ripgrep", "search"]);
 
 const DEFERRED_TRANSCRIPT_EVENTS = new Set([
   "chat.delta",
@@ -642,7 +638,9 @@ export class CliPiAppState {
         await this.fetchModelInfo();
       }
       if (status === "message_too_big") {
-        this.addItem(addError(this.sessionId, "消息过大，服务器拒绝了连接。请缩短输入内容后重新发送。"));
+        this.addItem(
+          addError(this.sessionId, "消息过大，服务器拒绝了连接。请缩短输入内容后重新发送。"),
+        );
       }
     });
 
@@ -668,7 +666,9 @@ export class CliPiAppState {
     this.stopListeners.clear();
 
     if (this.localPendingQuestion) {
-      this.localPendingQuestion.reject(new Error("app stopped while awaiting input"));
+      this.localPendingQuestion.reject(
+        new QuestionCancelledError("app stopped while awaiting input"),
+      );
       this.localPendingQuestion = null;
     }
     if (this.historyFlushTimer) {
@@ -802,7 +802,9 @@ export class CliPiAppState {
   }
 
   private hasActiveResponseStream(): boolean {
-    return this.connectionStatus === "connected" && this.streamingState === StreamingState.Responding;
+    return (
+      this.connectionStatus === "connected" && this.streamingState === StreamingState.Responding
+    );
   }
 
   private handleStreamingStateChanged(wasActiveResponseStream: boolean): void {
@@ -838,10 +840,13 @@ export class CliPiAppState {
       return;
     }
     const idleMs = Date.now() - this.lastStreamActivityAt;
-    this.streamStallNoticeTimer = setTimeout(() => {
-      this.streamStallNoticeTimer = null;
-      void this.handleStreamStallNotice();
-    }, Math.max(0, ACTIVE_NETWORK_CHECK_INTERVAL_MS - idleMs));
+    this.streamStallNoticeTimer = setTimeout(
+      () => {
+        this.streamStallNoticeTimer = null;
+        void this.handleStreamStallNotice();
+      },
+      Math.max(0, ACTIVE_NETWORK_CHECK_INTERVAL_MS - idleMs),
+    );
   }
 
   private clearStreamStallTimers(): void {
@@ -882,12 +887,15 @@ export class CliPiAppState {
   }
 
   private isStreamProgressFrame(frame: EventFrame): boolean {
-    const event = typeof frame.payload.event_type === "string" ? frame.payload.event_type : frame.event;
-    return event !== "chat.processing_status" &&
+    const event =
+      typeof frame.payload.event_type === "string" ? frame.payload.event_type : frame.event;
+    return (
+      event !== "chat.processing_status" &&
       event !== "connection.ack" &&
       event !== "history.message" &&
       event !== "context.usage" &&
-      event !== "context.compression_state";
+      event !== "context.compression_state"
+    );
   }
 
   private handleConnectionStatusChanged(status: ConnectionStatus): void {
@@ -1779,7 +1787,7 @@ export class CliPiAppState {
 
   readonly clearEntries = (): void => {
     if (this.localPendingQuestion) {
-      this.localPendingQuestion.reject(new Error("input flow was interrupted"));
+      this.localPendingQuestion.reject(new QuestionCancelledError("input flow was interrupted"));
       this.localPendingQuestion = null;
     }
     this.entries = [];
@@ -1938,7 +1946,12 @@ export class CliPiAppState {
     // server max_size is 8 MB; leave 1 MB margin for JSON overhead).
     const estimatedSize = JSON.stringify({ type: "req", method: "chat.send", params }).length;
     if (estimatedSize > 7 * 1024 * 1024) {
-      this.addItem(addError(this.sessionId, `消息过大（约 ${Math.round(estimatedSize / 1024 / 1024)} MB），请缩短输入内容。`));
+      this.addItem(
+        addError(
+          this.sessionId,
+          `消息过大（约 ${Math.round(estimatedSize / 1024 / 1024)} MB），请缩短输入内容。`,
+        ),
+      );
       this.emitChange();
       return null;
     }
@@ -1947,11 +1960,7 @@ export class CliPiAppState {
       this.suppressInterruptResult = true;
       this.sendEventOnly("chat.interrupt", { intent: "cancel", mode: this.mode });
     }
-    const requestId = this.sendEventOnly(
-      "chat.send",
-      params,
-      true,
-    );
+    const requestId = this.sendEventOnly("chat.send", params, true);
     if (planEntrySource) {
       this.pendingPlanEntrySource = null;
     }
@@ -1985,9 +1994,22 @@ export class CliPiAppState {
     const trimmed = content.trim();
     if (!trimmed) return null;
     // Same pre-check as sendMessage: reject oversized frames.
-    const estimatedSize = JSON.stringify({ type: "req", method: "chat.interrupt", params: { intent: "supplement", new_input: trimmed, ...(attachments?.length ? { attachments } : {}) } }).length;
+    const estimatedSize = JSON.stringify({
+      type: "req",
+      method: "chat.interrupt",
+      params: {
+        intent: "supplement",
+        new_input: trimmed,
+        ...(attachments?.length ? { attachments } : {}),
+      },
+    }).length;
     if (estimatedSize > 7 * 1024 * 1024) {
-      this.addItem(addError(this.sessionId, `消息过大（约 ${Math.round(estimatedSize / 1024 / 1024)} MB），请缩短输入内容。`));
+      this.addItem(
+        addError(
+          this.sessionId,
+          `消息过大（约 ${Math.round(estimatedSize / 1024 / 1024)} MB），请缩短输入内容。`,
+        ),
+      );
       this.emitChange();
       return null;
     }
@@ -2029,7 +2051,7 @@ export class CliPiAppState {
     }
     // Reject local pending question immediately so local commands (e.g. /export) can terminate
     if (this.localPendingQuestion) {
-      this.localPendingQuestion.reject(new Error("interrupted by Ctrl+C"));
+      this.localPendingQuestion.reject(new QuestionCancelledError("interrupted by Ctrl+C"));
       this.localPendingQuestion = null;
       this.pendingQuestion = null;
       this.setStreamingStateInternal(StreamingState.Idle);
@@ -2162,10 +2184,7 @@ export class CliPiAppState {
       if (this.pendingQuestion.evolutionMeta) {
         params.evolution_meta = this.pendingQuestion.evolutionMeta;
       }
-      this.sendEventOnly(
-        "chat.user_answer",
-        params,
-      );
+      this.sendEventOnly("chat.user_answer", params);
     }
     this.pendingQuestion = null;
     if (this.streamingState !== StreamingState.Responding) {
@@ -2179,6 +2198,20 @@ export class CliPiAppState {
     this.submitQuestionAnswers([{ selected_options: [answer], custom_input: answer }]);
   }
 
+  readonly cancelQuestion = (message = "question cancelled"): boolean => {
+    if (!this.localPendingQuestion) return false;
+    const pending = this.localPendingQuestion;
+    this.localPendingQuestion = null;
+    this.pendingQuestion = null;
+    this.setStreamingStateInternal(
+      this.streamingStateBeforeQuestion ?? StreamingState.Idle,
+    );
+    this.streamingStateBeforeQuestion = null;
+    pending.reject(new QuestionCancelledError(message));
+    this.emitChange();
+    return true;
+  };
+
   readonly askQuestions = (
     questions: PendingQuestionItem[],
     source = "local_command",
@@ -2187,7 +2220,7 @@ export class CliPiAppState {
       return Promise.resolve([]);
     }
     if (this.pendingQuestion || this.localPendingQuestion) {
-      return Promise.reject(new Error("another question is already active"));
+      return Promise.reject(new QuestionBusyError());
     }
 
     const requestId = `local_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;

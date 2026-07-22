@@ -1,5 +1,11 @@
 import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
+import {
+  getOpenAIAccountAuthStatus,
+  isOpenAIAccountProvider,
+  isOpenAIAccountReady,
+  type OpenAIAccountAuthStatus,
+} from "./auth.js";
 
 export interface ModelMeta {
   name: string;
@@ -16,6 +22,53 @@ export interface ModelListPayload {
   current?: string;
   available_models?: string[];
   models?: ModelMeta[];
+}
+
+export type ModelConfigField =
+  | "model_name"
+  | "alias"
+  | "api_base"
+  | "api_key"
+  | "model_provider"
+  | "reasoning_level";
+
+export const SUPPORTED_MODEL_PROVIDERS = [
+  "OpenAI",
+  "OpenRouter",
+  "DashScope",
+  "SiliconFlow",
+  "InferenceAffinity",
+  "DeepSeek",
+  "OpenAIAccount",
+] as const;
+
+export const MANUALLY_CREATABLE_MODEL_PROVIDERS = SUPPORTED_MODEL_PROVIDERS.filter(
+  (provider) => provider !== "OpenAIAccount",
+);
+
+const MODEL_REQUEST_TIMEOUT_MS = 75_000;
+const OAUTH_EDITABLE_MODEL_FIELDS = new Set<ModelConfigField>(["alias", "reasoning_level"]);
+
+export function isSupportedModelProvider(provider: string): boolean {
+  const normalized = provider.trim().toLowerCase();
+  return SUPPORTED_MODEL_PROVIDERS.some((candidate) => candidate.toLowerCase() === normalized);
+}
+
+export function isManuallyCreatableModelProvider(provider: string): boolean {
+  const normalized = provider.trim().toLowerCase();
+  return MANUALLY_CREATABLE_MODEL_PROVIDERS.some(
+    (candidate) => candidate.toLowerCase() === normalized,
+  );
+}
+
+export function isModelConfigFieldEditable(
+  field: ModelConfigField,
+  provider: string,
+  mode: "add" | "edit",
+): boolean {
+  return (
+    mode === "add" || !isOpenAIAccountProvider(provider) || OAUTH_EDITABLE_MODEL_FIELDS.has(field)
+  );
 }
 
 /** Reserved keys under config.yaml `models` for multimodal profiles; configure via /config, not via /model switch */
@@ -40,13 +93,7 @@ export function createModelCommand(): SlashCommand {
       if (raw.match(/^add\s+\S+/)) {
         const parts = raw.split(/\s+/);
         if (parts.length < 3) {
-          ctx.addItem(
-            addInfo(
-              ctx.sessionId,
-              "Usage: /model add <name> key=value ...",
-              "m",
-            ),
-          );
+          ctx.addItem(addInfo(ctx.sessionId, "Usage: /model add <name> key=value ...", "m"));
           return;
         }
 
@@ -62,12 +109,41 @@ export function createModelCommand(): SlashCommand {
           }
         }
 
+        const requestedProvider = settings.provider ?? settings.client_provider ?? "";
+        if (isOpenAIAccountProvider(requestedProvider)) {
+          ctx.addItem(
+            addError(
+              ctx.sessionId,
+              "OpenAI Account models are managed through /auth login or /auth models.",
+            ),
+          );
+          return;
+        }
+
         try {
-          await ctx.request("command.model", {
-            action: "add_model",
-            target: target,
-            config: settings,
-          });
+          const payload = await ctx.request<{
+            saved?: boolean;
+            applied?: boolean;
+            apply_error?: string;
+          }>(
+            "command.model",
+            {
+              action: "add_model",
+              target: target,
+              config: settings,
+            },
+            MODEL_REQUEST_TIMEOUT_MS,
+          );
+          if (payload.saved === true && payload.applied !== true) {
+            ctx.addItem(
+              addError(
+                ctx.sessionId,
+                payload.apply_error ??
+                  "Model configuration was saved but not applied; restart or retry.",
+              ),
+            );
+            return;
+          }
           ctx.addItem(
             addInfo(ctx.sessionId, `Added/Updated model config: ${target}`, "m", {
               view: "kv",
@@ -97,7 +173,10 @@ export function createModelCommand(): SlashCommand {
             return;
           }
           const skipped = models.filter((m) => isReservedMultimodalModelKey(m));
-          const selectable = models.filter((m) => !isReservedMultimodalModelKey(m));
+          const selectableWithOriginalIndex = models
+            .map((name, index) => ({ name, index }))
+            .filter((entry) => !isReservedMultimodalModelKey(entry.name));
+          const selectable = selectableWithOriginalIndex.map((entry) => entry.name);
           if (skipped.length > 0) {
             ctx.addItem(
               addInfo(
@@ -112,16 +191,25 @@ export function createModelCommand(): SlashCommand {
             return;
           }
           const modelsMeta = payload.models ?? [];
+          let openAIAccountStatus: OpenAIAccountAuthStatus | null = null;
+          if (modelsMeta.some((meta) => isOpenAIAccountProvider(meta.model_provider))) {
+            try {
+              openAIAccountStatus = await getOpenAIAccountAuthStatus(ctx.request);
+            } catch {
+              openAIAccountStatus = null;
+            }
+          }
           // 优先用后端 is_current 标记判断当前模型（同名模型仅靠名字无法区分），
           // 回退到 name-matching（兼容不带 is_current 的旧后端）
-          const currentIdx = selectable.findIndex((m, i) => {
-            const meta = modelsMeta[i];
+          const currentIdx = selectableWithOriginalIndex.findIndex((entry) => {
+            const meta = modelsMeta[entry.index];
             return meta?.is_current === true;
           });
           const fallbackCurrentIdx = currentIdx < 0 ? selectable.findIndex((m) => m === current) : currentIdx;
           const nameOccurrence: Record<string, number> = {};
-          const items = selectable.map((m, i) => {
-            const meta = modelsMeta[i];
+          const items = selectableWithOriginalIndex.map((entry, i) => {
+            const m = entry.name;
+            const meta = modelsMeta[entry.index];
             const isCurrent = i === fallbackCurrentIdx;
             // 统计同名出现次序
             const seq = (nameOccurrence[m] ?? 0) + 1;
@@ -137,6 +225,14 @@ export function createModelCommand(): SlashCommand {
             } else {
               displayName = m;
             }
+            const isOpenAIAccount = isOpenAIAccountProvider(meta?.model_provider);
+            const availability = isOpenAIAccount
+              ? openAIAccountStatus === null
+                ? "auth status unavailable"
+                : isOpenAIAccountReady(openAIAccountStatus)
+                  ? ""
+                  : "login required"
+              : "";
             // 仅当同名模型且 provider+api_base 也完全相同时（真正无法区分）才显示 key 末4位
             // 避免泄露过多 key 明文，且只在必要时露出尾号
             let keySuffix = "";
@@ -144,8 +240,8 @@ export function createModelCommand(): SlashCommand {
               const _mk = (mm: ModelMeta | undefined) =>
                 `${mm?.model_provider ?? ""}|${mm?.api_base ?? ""}`;
               const myFingerprint = _mk(meta);
-              const conflictCount = selectable.reduce((acc, _x, xi) => {
-                const xm = modelsMeta[xi];
+              const conflictCount = selectableWithOriginalIndex.reduce((acc, candidate) => {
+                const xm = modelsMeta[candidate.index];
                 return xm && _mk(xm) === myFingerprint ? acc + 1 : acc;
               }, 0);
               if (conflictCount > 1) {
@@ -154,7 +250,7 @@ export function createModelCommand(): SlashCommand {
             }
             return {
               label: String(i + 1),
-              value: `${displayName}${keySuffix}${isCurrent ? " (current)" : ""}`,
+              value: `${displayName}${keySuffix}${isCurrent ? " (current)" : ""}${availability ? ` (${availability})` : ""}`,
             };
           });
           ctx.addItem(
@@ -178,15 +274,43 @@ export function createModelCommand(): SlashCommand {
         }
 
         // Switch to specific model
+        const configured = await ctx.request<ModelListPayload>("command.model", {});
+        const targetMeta = (configured.models ?? []).find(
+          (meta) => meta.name === value || meta.alias === value || meta.model_name === value,
+        );
+        if (targetMeta && isOpenAIAccountProvider(targetMeta.model_provider)) {
+          const status = await getOpenAIAccountAuthStatus(ctx.request);
+          if (!isOpenAIAccountReady(status)) {
+            ctx.addItem(
+              addError(
+                ctx.sessionId,
+                `Model '${value}' is unavailable because OpenAI Account is logged out. Run /auth login first.`,
+              ),
+            );
+            return;
+          }
+        }
         const payload = await ctx.request<{
           current?: string;
           requested?: string;
+          saved?: boolean;
           applied?: boolean;
+          apply_error?: string;
           type?: string;
-        }>("command.model", { model: value });
+        }>("command.model", { model: value }, MODEL_REQUEST_TIMEOUT_MS);
 
         const isSwitch = !!payload.requested;
         if (isSwitch) {
+          if (payload.applied !== true) {
+            ctx.addItem(
+              addError(
+                ctx.sessionId,
+                payload.apply_error ??
+                  "Model configuration was saved but not applied; restart or retry.",
+              ),
+            );
+            return;
+          }
           ctx.setModel(payload.current ?? payload.requested ?? "");
         }
         const title = isSwitch

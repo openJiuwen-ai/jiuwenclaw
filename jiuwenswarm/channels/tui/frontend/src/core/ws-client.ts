@@ -17,6 +17,29 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface WsRequestErrorOptions {
+  code?: string;
+  payload?: Record<string, unknown>;
+  requestId?: string;
+  retriable?: boolean;
+}
+
+export class WsRequestError extends Error {
+  readonly code?: string;
+  readonly payload: Record<string, unknown>;
+  readonly requestId?: string;
+  readonly retriable: boolean;
+
+  constructor(message: string, options: WsRequestErrorOptions = {}) {
+    super(message);
+    this.name = "WsRequestError";
+    this.code = options.code;
+    this.payload = options.payload ?? {};
+    this.requestId = options.requestId;
+    this.retriable = options.retriable ?? this.payload.retriable === true;
+  }
+}
+
 export class WsClient {
   private ws: WebSocket | null = null;
   private readonly url: string;
@@ -105,7 +128,12 @@ export class WsClient {
   ): Promise<ResFrame> {
     return new Promise((resolve, reject) => {
       if (this.ws?.readyState !== WebSocket.OPEN) {
-        reject(new Error(`socket not connected: ${method}`));
+        reject(
+          new WsRequestError(`socket not connected: ${method}`, {
+            code: "WS_NOT_READY",
+            retriable: true,
+          }),
+        );
         return;
       }
       const frame: ReqFrame = {
@@ -118,7 +146,13 @@ export class WsClient {
       };
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`request timeout: ${method}`));
+        reject(
+          new WsRequestError(`request timeout: ${method}`, {
+            code: "REQUEST_TIMEOUT",
+            requestId: id,
+            retriable: true,
+          }),
+        );
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.send(frame);
@@ -203,7 +237,11 @@ export class WsClient {
           setTimeout(
             () =>
               pending.reject(
-                new Error(frame.error ?? `request failed: ${frame.code ?? "unknown"}`),
+                new WsRequestError(frame.error ?? `request failed: ${frame.code ?? "unknown"}`, {
+                  code: frame.code,
+                  payload: frame.payload,
+                  requestId: frame.id,
+                }),
               ),
             0,
           );
@@ -252,7 +290,12 @@ export class WsClient {
     if (pending) {
       clearTimeout(pending.timer);
       this.pending.delete(id);
-      pending.reject(new Error(reason));
+      pending.reject(
+        new WsRequestError(reason, {
+          code: "REQUEST_CANCELLED",
+          requestId: id,
+        }),
+      );
     }
   }
 

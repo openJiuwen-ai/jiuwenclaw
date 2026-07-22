@@ -3,7 +3,6 @@
 import asyncio
 import os
 import threading
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +17,9 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     _normalize_xiaoyi_conf,
     _register_web_handlers,
     _validate_wechat_numeric_params,
+)
+from jiuwenswarm.gateway.channel_manager.openai_account_service import (
+    OpenAIAccountService,
 )
 
 
@@ -87,15 +89,6 @@ class FakeHeartbeatService:
         return dict(self.config)
 
 
-@pytest.fixture
-def cleared_openai_account_login_jobs():
-    with app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS_LOCK:
-        app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS.clear()
-    yield
-    with app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS_LOCK:
-        app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS.clear()
-
-
 class FakeOpenAIAccountAuthManager:
     authenticated = False
     needs_refresh = False
@@ -120,6 +113,15 @@ class FakeOpenAIAccountAuthManager:
             expires_at=None,
             needs_refresh=self.needs_refresh,
             error=None,
+        )
+
+    def start_device_login(self):
+        return SimpleNamespace(
+            user_code="TEST-CODE",
+            device_auth_id="device-1",
+            verification_uri="https://example.test/device",
+            interval=5,
+            expires_in=60,
         )
 
     def poll_device_login(self, device_code):
@@ -148,17 +150,19 @@ class FakeOpenAIAccountModelCatalog:
 
 
 @pytest.mark.asyncio
-async def test_openai_account_models_list_returns_refreshed_auth_status(
-        monkeypatch,
-        cleared_openai_account_login_jobs,
-):
-    del cleared_openai_account_login_jobs
+async def test_openai_account_models_list_returns_refreshed_auth_status():
     FakeOpenAIAccountAuthManager.reset()
     FakeOpenAIAccountAuthManager.needs_refresh = True
-    monkeypatch.setattr(app_web_handlers, "OpenAIAccountAuthManager", FakeOpenAIAccountAuthManager)
-    monkeypatch.setattr(app_web_handlers, "OpenAIAccountModelCatalog", FakeOpenAIAccountModelCatalog)
+    service = OpenAIAccountService(
+        auth_manager_factory=FakeOpenAIAccountAuthManager,
+        model_catalog_factory=lambda base_url: FakeOpenAIAccountModelCatalog(
+            base_url=base_url
+        ),
+    )
     channel = FakeWebChannel()
-    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, openai_account_service=service)
+    )
 
     await channel.methods["openai_account.models.list"](object(), "req-models", {}, "sess-1")
 
@@ -179,49 +183,34 @@ async def test_openai_account_models_list_returns_refreshed_auth_status(
 
 
 @pytest.mark.asyncio
-async def test_openai_account_logout_clears_pending_login_jobs(
-        monkeypatch,
-        cleared_openai_account_login_jobs,
-):
-    del cleared_openai_account_login_jobs
+async def test_openai_account_logout_clears_pending_login_jobs():
     FakeOpenAIAccountAuthManager.reset()
     FakeOpenAIAccountAuthManager.authenticated = True
-    monkeypatch.setattr(app_web_handlers, "OpenAIAccountAuthManager", FakeOpenAIAccountAuthManager)
-    app_web_handlers._store_openai_account_login_job(
-        "login-1",
-        app_web_handlers._OpenAIAccountLoginJob(
-            device_code=SimpleNamespace(),
-            created_at=time.time(),
-            expires_at=time.time() + 60,
-        ),
-    )
+    service = OpenAIAccountService(auth_manager_factory=FakeOpenAIAccountAuthManager)
+    service.start_login()
     channel = FakeWebChannel()
-    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, openai_account_service=service)
+    )
 
     await channel.methods["openai_account.auth.logout"](object(), "req-logout", {}, "sess-1")
 
     assert channel.responses[-1]["ok"] is True
-    assert app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS == {}
+    assert service.pending_login()["status"] == "none"
 
 
 @pytest.mark.asyncio
-async def test_openai_account_logout_wins_against_inflight_poll(
-        monkeypatch,
-        cleared_openai_account_login_jobs,
-):
-    del cleared_openai_account_login_jobs
+async def test_openai_account_logout_wins_against_inflight_poll():
     FakeOpenAIAccountAuthManager.reset()
-    monkeypatch.setattr(app_web_handlers, "OpenAIAccountAuthManager", FakeOpenAIAccountAuthManager)
-    app_web_handlers._store_openai_account_login_job(
-        "login-1",
-        app_web_handlers._OpenAIAccountLoginJob(
-            device_code=SimpleNamespace(),
-            created_at=time.time(),
-            expires_at=time.time() + 60,
-        ),
+    service = OpenAIAccountService(
+        auth_manager_factory=FakeOpenAIAccountAuthManager,
+        login_id_factory=lambda: "login-1",
     )
+    service.start_login()
     channel = FakeWebChannel()
-    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, openai_account_service=service)
+    )
 
     poll_task = asyncio.create_task(channel.methods["openai_account.auth.poll_login"](
         object(), "req-poll", {"login_id": "login-1"}, "sess-1",
@@ -235,7 +224,7 @@ async def test_openai_account_logout_wins_against_inflight_poll(
     await asyncio.gather(poll_task, logout_task)
 
     assert FakeOpenAIAccountAuthManager.authenticated is False
-    assert app_web_handlers._OPENAI_ACCOUNT_LOGIN_JOBS == {}
+    assert service.pending_login()["status"] == "none"
 
 
 @pytest.mark.asyncio

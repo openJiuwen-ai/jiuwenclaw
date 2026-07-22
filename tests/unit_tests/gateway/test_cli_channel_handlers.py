@@ -2,6 +2,10 @@ import asyncio
 
 import pytest
 
+from openjiuwen.extensions.external_provider.openai_auth.openai_account_auth import (
+    OpenAIAccountAuthError,
+)
+
 from jiuwenswarm.gateway.channel_manager.tui import tui_connect as tui_connect_module
 from jiuwenswarm.gateway.channel_manager.tui.tui_connect import (
     CliHandlersBindParams,
@@ -59,6 +63,78 @@ class FakeMessageHandler:
         return True
 
 
+class FakeOpenAIAccountService:
+    def __init__(self, *, authenticated=False):
+        self.calls = []
+        self.authenticated = authenticated
+
+    def status(self):
+        self.calls.append(("status", None))
+        return {"authenticated": self.authenticated}
+
+    def start_login(self):
+        self.calls.append(("start_login", None))
+        return {"status": "pending", "login_id": "login-1"}
+
+    def pending_login(self):
+        self.calls.append(("pending_login", None))
+        return {"status": "pending", "login_id": "login-1"}
+
+    def poll_login(self, login_id):
+        self.calls.append(("poll_login", login_id))
+        return {"status": "authenticated", "authenticated": True}
+
+    def logout(self):
+        self.calls.append(("logout", None))
+        return {"logged_out": True}
+
+    def list_models(self):
+        self.calls.append(("list_models", None))
+        return {
+            "models": ["gpt-test"],
+            "base_url": "https://example.test/codex",
+            "auth": {"authenticated": self.authenticated},
+        }
+
+
+@pytest.mark.parametrize(
+    "client_config",
+    [
+        {
+            "client_provider": "OpenAIAccount",
+            "model_name": "gpt-test",
+            "api_base": "https://example.test/codex",
+            "api_key": "",
+        },
+        {
+            "client_provider": "intelli_router",
+            "model_name": "router-model",
+            "api_base": "",
+            "api_key": "",
+            "intelli_router_deployments": [],
+        },
+    ],
+)
+def test_model_client_validation_uses_provider_specific_core_contract(client_config):
+    tui_connect_module._validate_model_client_config(
+        client_config,
+        model_label=client_config["model_name"],
+    )
+
+
+def test_model_client_validation_still_requires_openai_api_key():
+    with pytest.raises(tui_connect_module._ModelOpError, match="api_key is required"):
+        tui_connect_module._validate_model_client_config(
+            {
+                "client_provider": "OpenAI",
+                "model_name": "gpt-test",
+                "api_base": "https://api.example.test/v1",
+                "api_key": "",
+            },
+            model_label="gpt-test",
+        )
+
+
 @pytest.mark.asyncio
 async def test_register_cli_handlers_registers_local_methods():
     server = FakeGatewayServer()
@@ -81,6 +157,13 @@ async def test_register_cli_handlers_registers_local_methods():
     assert "chat.resume" in cli_handlers
     assert "history.get" in cli_handlers
     assert "tui.disconnect" in cli_handlers
+    assert "openai_account.auth.status" in cli_handlers
+    assert "openai_account.auth.start_login" in cli_handlers
+    assert "openai_account.auth.pending_login" in cli_handlers
+    assert "openai_account.auth.poll_login" in cli_handlers
+    assert "openai_account.auth.logout" in cli_handlers
+    assert "openai_account.models.list" in cli_handlers
+    assert "openai_account.models.use" in cli_handlers
 
     await cli_handlers["chat.send"](object(), "req-1", {}, "sess-1")
 
@@ -93,6 +176,246 @@ async def test_register_cli_handlers_registers_local_methods():
             "code": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_openai_account_handlers_delegate_to_injected_service():
+    server = FakeGatewayServer()
+    service = FakeOpenAIAccountService()
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            openai_account_service=service,
+        )
+    )
+    handlers = server.local_handlers["/tui"]
+
+    calls = [
+        ("openai_account.auth.status", {}),
+        ("openai_account.auth.start_login", {}),
+        ("openai_account.auth.pending_login", {}),
+        ("openai_account.auth.poll_login", {"login_id": "login-1"}),
+        ("openai_account.auth.logout", {}),
+        ("openai_account.models.list", {}),
+    ]
+    for index, (method, params) in enumerate(calls):
+        await handlers[method](object(), f"req-{index}", params, "sess-1")
+
+    assert service.calls == [
+        ("status", None),
+        ("start_login", None),
+        ("pending_login", None),
+        ("poll_login", "login-1"),
+        ("logout", None),
+        ("list_models", None),
+    ]
+    assert all(response["ok"] is True for response in server.responses)
+
+
+@pytest.mark.asyncio
+async def test_openai_account_handler_preserves_typed_retryable_error():
+    server = FakeGatewayServer()
+
+    class FailingService(FakeOpenAIAccountService):
+        def poll_login(self, login_id):
+            raise OpenAIAccountAuthError(
+                f"temporary poll failure for {login_id}",
+                code="openai_account_device_code_poll_network_error",
+            )
+
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            openai_account_service=FailingService(),
+        )
+    )
+
+    await server.local_handlers["/tui"]["openai_account.auth.poll_login"](
+        object(),
+        "req-poll",
+        {"login_id": "login-1"},
+        "sess-1",
+    )
+
+    response = server.responses[-1]
+    assert response["ok"] is False
+    assert response["code"] == "openai_account_device_code_poll_network_error"
+    assert response["payload"]["retriable"] is True
+
+
+@pytest.mark.asyncio
+async def test_command_model_rejects_manual_openai_account_creation(monkeypatch):
+    server = FakeGatewayServer()
+
+    def fail_if_config_is_written(_mutator, **_kwargs):
+        raise AssertionError(
+            "manual OpenAIAccount add must be rejected before config write"
+        )
+
+    monkeypatch.setattr(tui_connect_module, "update_config", fail_if_config_is_written)
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=object(),
+            openai_account_service=FakeOpenAIAccountService(authenticated=True),
+        )
+    )
+
+    await server.local_handlers["/tui"]["command.model"](
+        object(),
+        "req-add-oauth",
+        {
+            "action": "add_model",
+            "target": "gpt-test",
+            "config": {
+                "model_name": "gpt-test",
+                "model_provider": "OpenAIAccount",
+                "api_base": "https://example.test/codex",
+                "api_key": "",
+            },
+        },
+        "sess-1",
+    )
+
+    response = server.responses[-1]
+    assert response["ok"] is False
+    assert "/auth login or /auth models" in response["error"]
+
+
+@pytest.mark.asyncio
+async def test_openai_account_model_use_derives_managed_fields_and_applies_once(
+    monkeypatch,
+):
+    server = FakeGatewayServer()
+    service = FakeOpenAIAccountService(authenticated=True)
+    config = {"models": {"defaults": []}}
+    apply_calls = []
+
+    def fake_update_config(mutator, **_kwargs):
+        return mutator(config)
+
+    async def on_config_saved(
+        updated_keys, *, env_updates, config_payload, reload_options
+    ):
+        apply_calls.append((updated_keys, env_updates, config_payload, reload_options))
+        return True
+
+    monkeypatch.setattr(tui_connect_module, "update_config", fake_update_config)
+    monkeypatch.setattr(tui_connect_module, "get_config", lambda: config)
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=object(),
+            on_config_saved=on_config_saved,
+            openai_account_service=service,
+        )
+    )
+
+    await server.local_handlers["/tui"]["openai_account.models.use"](
+        object(),
+        "req-use-oauth",
+        {"model_id": "gpt-test"},
+        "sess-1",
+    )
+
+    response = server.responses[-1]
+    assert response["ok"] is True
+    assert response["payload"] == {
+        "type": "switched",
+        "current": "gpt-test",
+        "requested": "gpt-test",
+        "saved": True,
+        "applied": True,
+    }
+    stored = config["models"]["defaults"][0]
+    assert stored["model_client_config"]["model_name"] == "gpt-test"
+    assert stored["model_client_config"]["client_provider"] == "OpenAIAccount"
+    assert stored["model_client_config"]["api_base"] == "https://example.test/codex"
+    assert stored["model_client_config"]["api_key"] == ""
+    assert len(apply_calls) == 1
+    assert apply_calls[0][3]["reason"] == "openai_account_model_use"
+
+
+@pytest.mark.asyncio
+async def test_openai_account_model_use_maps_unexpected_storage_failure(monkeypatch):
+    server = FakeGatewayServer()
+
+    def fail_update_config(_mutator, **_kwargs):
+        raise RuntimeError("unexpected storage implementation failure")
+
+    monkeypatch.setattr(tui_connect_module, "update_config", fail_update_config)
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            openai_account_service=FakeOpenAIAccountService(authenticated=True),
+        )
+    )
+
+    await server.local_handlers["/tui"]["openai_account.models.use"](
+        object(),
+        "req-use-oauth-failure",
+        {"model_id": "gpt-test"},
+        "sess-1",
+    )
+
+    response = server.responses[-1]
+    assert response["ok"] is False
+    assert response["code"] == "INTERNAL_ERROR"
+    assert response["error"] == "OpenAI Account model configuration failed"
+    assert "unexpected storage" not in response["error"]
+
+
+@pytest.mark.asyncio
+async def test_command_model_rejects_managed_field_update_for_openai_account(
+    monkeypatch,
+):
+    server = FakeGatewayServer()
+    config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "model_name": "gpt-test",
+                        "client_provider": "OpenAIAccount",
+                        "api_base": "https://example.test/codex",
+                        "api_key": "",
+                    },
+                    "model_config_obj": {},
+                }
+            ]
+        }
+    }
+
+    def fake_update_config(mutator, **_kwargs):
+        return mutator(config)
+
+    monkeypatch.setattr(tui_connect_module, "update_config", fake_update_config)
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=object(),
+            openai_account_service=FakeOpenAIAccountService(authenticated=True),
+        )
+    )
+
+    await server.local_handlers["/tui"]["command.model"](
+        object(),
+        "req-update-oauth",
+        {
+            "action": "update_model",
+            "index": 0,
+            "config": {"api_base": "https://attacker.example/v1"},
+        },
+        "sess-1",
+    )
+
+    response = server.responses[-1]
+    assert response["ok"] is False
+    assert "managed by /auth login and /auth models" in response["error"]
+    assert (
+        config["models"]["defaults"][0]["model_client_config"]["api_base"]
+        == "https://example.test/codex"
+    )
 
 
 @pytest.mark.asyncio
@@ -271,9 +594,10 @@ async def test_config_validate_model_handler_uses_local_probe(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_command_model_switch_sends_scoped_agent_reload(monkeypatch):
+async def test_command_model_switch_waits_for_single_config_apply(monkeypatch):
     server = FakeGatewayServer()
-    sent_envs = []
+    direct_reload_calls = []
+    apply_calls = []
     defaults = [
         {
             "alias": "glm",
@@ -298,7 +622,14 @@ async def test_command_model_switch_sends_scoped_agent_reload(monkeypatch):
     ]
 
     async def fake_send_tui_agent_request(_client, env, *, label):
-        sent_envs.append((env, label))
+        direct_reload_calls.append((env, label))
+
+    async def on_config_saved(
+        updated_keys, *, env_updates, config_payload, reload_options
+    ):
+        await asyncio.sleep(0)
+        apply_calls.append((updated_keys, env_updates, config_payload, reload_options))
+        return True
 
     def fake_update_config(mutator, **kwargs):
         data = {"models": {"defaults": [dict(d) for d in defaults]}}
@@ -318,7 +649,7 @@ async def test_command_model_switch_sends_scoped_agent_reload(monkeypatch):
             channel=server,
             agent_client=object(),
             message_handler=None,
-            on_config_saved=None,
+            on_config_saved=on_config_saved,
             path="/tui",
         )
     )
@@ -329,8 +660,6 @@ async def test_command_model_switch_sends_scoped_agent_reload(monkeypatch):
         {"model": "glm"},
         "tui_session_1",
     )
-    await asyncio.sleep(0)
-
     assert server.responses[-1] == {
         "id": "req-switch",
         "ok": True,
@@ -338,21 +667,73 @@ async def test_command_model_switch_sends_scoped_agent_reload(monkeypatch):
             "current": "GLM-5",
             "requested": "glm",
             "type": "switched",
+            "saved": True,
             "applied": True,
         },
         "error": None,
         "code": None,
     }
-    assert len(sent_envs) == 1
-    env, label = sent_envs[0]
-    assert label == "command.model.switch"
-    assert env.params["target_channel_id"] == "tui"
-    assert env.params["target_session_id"] == "tui_session_1"
-    assert env.params["reason"] == "model_switch"
+    assert direct_reload_calls == []
+    assert len(apply_calls) == 1
+    assert apply_calls[0][3] == {
+        "target_channel_id": "tui",
+        "target_session_id": "tui_session_1",
+        "reason": "model_switch",
+    }
 
 
 @pytest.mark.asyncio
-async def test_session_list_returns_agent_timeout_before_tui_request_timeout(monkeypatch):
+async def test_command_model_reports_saved_but_not_applied(monkeypatch):
+    server = FakeGatewayServer()
+    defaults = [
+        {
+            "alias": "glm",
+            "model_client_config": {
+                "api_key": "key",
+                "api_base": "https://example.test/v1",
+                "model_name": "GLM-5",
+                "client_provider": "openai",
+            },
+            "model_config_obj": {},
+        }
+    ]
+
+    def fake_update_config(mutator, **_kwargs):
+        return mutator({"models": {"defaults": defaults}})
+
+    async def on_config_saved(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(tui_connect_module, "update_config", fake_update_config)
+    monkeypatch.setattr(
+        tui_connect_module, "get_config", lambda: {"models": {"defaults": defaults}}
+    )
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=object(),
+            on_config_saved=on_config_saved,
+        )
+    )
+
+    await server.local_handlers["/tui"]["command.model"](
+        object(),
+        "req-switch-not-applied",
+        {"model": "glm"},
+        "sess-1",
+    )
+
+    response = server.responses[-1]
+    assert response["ok"] is True
+    assert response["payload"]["saved"] is True
+    assert response["payload"]["applied"] is False
+    assert "restart or retry" in response["payload"]["apply_error"]
+
+
+@pytest.mark.asyncio
+async def test_session_list_returns_agent_timeout_before_tui_request_timeout(
+    monkeypatch,
+):
     server = FakeGatewayServer()
 
     class HangingAgentClient:

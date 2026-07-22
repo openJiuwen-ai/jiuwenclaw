@@ -20,6 +20,12 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
 )
+from openjiuwen.extensions.external_provider.openai_auth.openai_account_auth import (
+    OpenAIAccountAuthError,
+)
+from openjiuwen.extensions.external_provider.openai_auth.openai_account_models import (
+    OpenAIAccountModelListError,
+)
 from openjiuwen.auto_harness.schema import load_auto_harness_config
 
 from jiuwenswarm.common.config import (
@@ -38,6 +44,11 @@ from jiuwenswarm.common.config import (
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.work_mode import DEFAULT_PROJECT_ID_CODE
+from jiuwenswarm.gateway.channel_manager.openai_account_service import (
+    OPENAI_ACCOUNT_LOCAL_ERRORS,
+    OpenAIAccountService,
+    openai_account_auth_error_payload,
+)
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -54,6 +65,112 @@ logger = logging.getLogger(__name__)
 
 class _ModelOpError(Exception):
     """模型操作校验失败：在 update_config 事务内抛出，事务外转成 RPC 错误响应。"""
+
+
+_OPENAI_ACCOUNT_PROVIDER = "openaiaccount"
+_MODEL_APPLY_ERROR = "Model configuration was saved but not applied; restart or retry."
+
+
+def _is_openai_account_provider(value: Any) -> bool:
+    return str(value or "").strip().lower() == _OPENAI_ACCOUNT_PROVIDER
+
+
+def _model_entry_identity(entry: dict[str, Any]) -> tuple[str, str, str]:
+    client_config = entry.get("model_client_config") or {}
+    model_name = resolve_env_vars(str(client_config.get("model_name", "")))
+    alias = resolve_env_vars(str(entry.get("alias", ""))) if entry.get("alias") else ""
+    provider = resolve_env_vars(str(client_config.get("client_provider", "")))
+    return model_name, alias, provider
+
+
+def _find_model_entry(
+    defaults: list[Any],
+    *,
+    target: str,
+    model_index: Any = None,
+) -> tuple[int, dict[str, Any]]:
+    if model_index is not None:
+        try:
+            index = int(model_index)
+        except (TypeError, ValueError) as exc:
+            raise _ModelOpError("model index not found") from exc
+        if 0 <= index < len(defaults) and isinstance(defaults[index], dict):
+            return index, defaults[index]
+        raise _ModelOpError("model index not found")
+
+    available: list[str] = []
+    for index, entry in enumerate(defaults):
+        if not isinstance(entry, dict):
+            continue
+        model_name, alias, _provider = _model_entry_identity(entry)
+        if alias and model_name and alias != model_name:
+            available.append(f"{alias} ({model_name})")
+        elif model_name:
+            available.append(model_name)
+        if target in {model_name, alias}:
+            return index, entry
+    raise _ModelOpError(
+        f"Model '{target}' not found. Available: {', '.join(available)}"
+    )
+
+
+def _activate_model_entry(
+    models: dict[str, Any],
+    defaults: list[Any],
+    *,
+    target_index: int,
+    model_label: str,
+) -> str:
+    target_entry = defaults[target_index]
+    if not isinstance(target_entry, dict):
+        raise _ModelOpError("model config not found")
+    target_config = target_entry.get("model_client_config") or {}
+    _validate_model_client_config(target_config, model_label=model_label)
+    target_name = resolve_env_vars(str(target_config.get("model_name", "")))
+    target_entry["is_default"] = True
+    for index, entry in enumerate(defaults):
+        if index == target_index or not isinstance(entry, dict):
+            continue
+        other_config = entry.get("model_client_config") or {}
+        other_name = resolve_env_vars(str(other_config.get("model_name", "")))
+        if other_name == target_name and entry.get("is_default") is True:
+            entry["is_default"] = False
+    models["defaults"] = [target_entry] + [
+        entry for index, entry in enumerate(defaults) if index != target_index
+    ]
+    return target_name
+
+
+def _validate_model_client_config(
+    client_cfg: dict[str, Any], *, model_label: str
+) -> None:
+    """Validate stored model settings with agent-core's provider contract."""
+    resolved = resolve_env_vars(dict(client_cfg))
+    missing = [
+        display
+        for field, display in (
+            ("model_name", "model_name"),
+            ("client_provider", "model_provider"),
+        )
+        if not str(resolved.get(field) or "").strip()
+    ]
+    if missing:
+        raise _ModelOpError(
+            f"Model '{model_label}' missing required config: {', '.join(missing)}"
+        )
+
+    try:
+        ModelClientConfig(**resolved)
+    except Exception as exc:
+        message = str(exc)
+        for sensitive_key in ("api_key", "access_token", "refresh_token", "token"):
+            sensitive_value = resolved.get(sensitive_key)
+            if isinstance(sensitive_value, str) and sensitive_value:
+                message = message.replace(sensitive_value, "****")
+        raise _ModelOpError(
+            f"Model '{model_label}' has invalid provider config: {message}"
+        ) from exc
+
 
 # Auto-Harness config file path
 _DEFAULT_REPO_URL = "https://gitcode.com/openJiuwen/agent-core.git"
@@ -94,7 +211,9 @@ def _get_auto_harness_config() -> dict[str, Any]:
         load_auto_harness_config(str(_AUTO_HARNESS_CONFIG_FILE))
 
     try:
-        config = yaml.safe_load(_AUTO_HARNESS_CONFIG_FILE.read_text(encoding="utf-8")) or {}
+        config = (
+            yaml.safe_load(_AUTO_HARNESS_CONFIG_FILE.read_text(encoding="utf-8")) or {}
+        )
     except Exception as e:
         logger.warning("[auto-harness config] Failed to load: %s", e)
         config = {}
@@ -140,8 +259,11 @@ def _get_auto_harness_config() -> dict[str, Any]:
     if needs_save:
         config["ci_gate"] = ci_gate
         _save_auto_harness_config(config)
-        logger.info("[auto-harness config] Auto-filled ci_gate defaults: python_executable=%s, install_command=%s",
-                    ci_gate.get("python_executable"), ci_gate.get("install_command"))
+        logger.info(
+            "[auto-harness config] Auto-filled ci_gate defaults: python_executable=%s, install_command=%s",
+            ci_gate.get("python_executable"),
+            ci_gate.get("install_command"),
+        )
 
     return config
 
@@ -150,8 +272,10 @@ def _save_auto_harness_config(config: dict[str, Any]) -> None:
     """Save auto-harness config.yaml."""
     _AUTO_HARNESS_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     _AUTO_HARNESS_CONFIG_FILE.write_text(
-        yaml.dump(config, allow_unicode=True, sort_keys=False, default_flow_style=False),
-        encoding="utf-8"
+        yaml.dump(
+            config, allow_unicode=True, sort_keys=False, default_flow_style=False
+        ),
+        encoding="utf-8",
     )
 
 
@@ -188,6 +312,7 @@ def _update_auto_harness_gitcode_access_token(value: str) -> None:
         config["gitcode"] = {}
     config["gitcode"]["access_token"] = value
     _save_auto_harness_config(config)
+
 
 # ── 需要转发到 Agent 的方法集合 ──────────────────────────────
 
@@ -403,6 +528,7 @@ class CliHandlersBindParams:
     on_config_saved: Any = None
     path: str = "/tui"
     cron_controller: Any = None
+    openai_account_service: OpenAIAccountService | None = None
 
 
 @dataclass
@@ -414,6 +540,7 @@ class CliRouteBindParams:
     path: str = "/tui"
     channel_id: str = "tui"
     cron_controller: Any = None
+    openai_account_service: OpenAIAccountService | None = None
     # V2: 委托 ws 注册的 TuiChannel 实例。GatewayServer 仍作 /tui ws 宿主 + 入站帧解析，
     # 但把 ws + RoutingKey 委托注册进 TuiChannel 的五维索引，出站由 ChannelManager
     # 派发到 TuiChannel.send（按 delivery.ws_id 物理寻址）。
@@ -498,98 +625,340 @@ def _build_config_schema() -> list[dict]:
     empty = ""
     return [
         # Model
-        {"key": "model", "label": "默认模型", "group": "Model", "type": "string",
-         "source": "env", "default": empty},
-        {"key": "model_provider", "label": "模型供应商", "group": "Model", "type": "select",
-         "options": available_providers, "source": "env", "default": default_provider},
-        {"key": "api_base", "label": "API 地址", "group": "Model", "type": "string",
-         "source": "env", "default": empty},
-        {"key": "api_key", "label": "API Key", "group": "Model", "type": "password",
-         "sensitive": True, "source": "env", "default": empty},
-        # Vision
-        {"key": "vision_model", "label": "视觉模型", "group": "Vision", "type": "string",
-         "source": "env", "default": empty},
-        {"key": "vision_provider", "label": "视觉供应商", "group": "Vision", "type": "select",
-         "options": available_providers, "source": "env", "default": default_provider},
-        {"key": "vision_api_base", "label": "视觉API地址", "group": "Vision", "type": "string",
-         "source": "env", "default": empty},
-        {"key": "vision_api_key", "label": "视觉API Key", "group": "Vision", "type": "password",
-         "sensitive": True, "source": "env", "default": empty},
-        # Video
-        {"key": "video_model", "label": "视频模型", "group": "Video", "type": "string",
-         "source": "env", "default": empty},
-        {"key": "video_provider", "label": "视频供应商", "group": "Video", "type": "select",
-         "options": available_providers, "source": "env", "default": default_provider},
-        {"key": "video_api_base", "label": "视频API地址", "group": "Video", "type": "string",
-         "source": "env", "default": empty},
-        {"key": "video_api_key", "label": "视频API Key", "group": "Video", "type": "password",
-         "sensitive": True, "source": "env", "default": empty},
-        # Audio
-        {"key": "audio_model", "label": "音频模型", "group": "Audio", "type": "string",
-         "source": "env", "default": empty},
-        {"key": "audio_provider", "label": "音频供应商", "group": "Audio", "type": "select",
-         "options": available_providers, "source": "env", "default": default_provider},
-        {"key": "audio_api_base", "label": "音频API地址", "group": "Audio", "type": "string",
-         "source": "env", "default": empty},
-        {"key": "audio_api_key", "label": "音频API Key", "group": "Audio", "type": "password",
-         "sensitive": True, "source": "env", "default": empty},
-        # Embedding
-        {"key": "embed_api_key", "label": "嵌入API Key", "group": "Embedding", "type": "password",
-         "sensitive": True, "source": "env", "default": empty},
-        {"key": "embed_api_base", "label": "嵌入API地址", "group": "Embedding", "type": "string",
-         "source": "env", "default": empty},
-        {"key": "embed_model", "label": "嵌入模型", "group": "Embedding", "type": "string",
-         "source": "env", "default": empty},
-        # Search & External
-        {"key": "jina_api_key", "label": "Jina API Key", "group": "Search & External", "type": "password",
-         "sensitive": True, "source": "env", "default": empty},
-        {"key": "serper_api_key", "label": "Serper API Key", "group": "Search & External", "type": "password",
-         "sensitive": True, "source": "env", "default": empty},
-        {"key": "perplexity_api_key", "label": "Perplexity API Key", "group": "Search & External", "type": "password",
-         "sensitive": True, "source": "env", "default": empty},
-        {"key": "github_token", "label": "GitHub Token", "group": "Search & External", "type": "password",
-         "sensitive": True, "source": "env", "default": empty},
-        # TeamSkills
-        {"key": "teamskills_market_url", "label": "TeamSkills Hub 地址", "group": "TeamSkills", "type": "string",
-         "source": "env", "default": empty},
-        {"key": "teamskills_user_token", "label": "TeamSkills 用户Token", "group": "TeamSkills", "type": "password",
-         "sensitive": True, "source": "env", "default": empty},
-        {"key": "teamskills_system_token", "label": "TeamSkills 系统Token", "group": "TeamSkills", "type": "password",
-         "sensitive": True, "source": "env", "default": empty},
         {
-         "key": "teamskills_allowed_download_hosts",
-         "label": "TeamSkills 下载白名单Hosts(逗号分隔)",
-         "group": "TeamSkills",
-         "type": "string",
-         "source": "env", "default": empty},
+            "key": "model",
+            "label": "默认模型",
+            "group": "Model",
+            "type": "string",
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "model_provider",
+            "label": "模型供应商",
+            "group": "Model",
+            "type": "select",
+            "options": available_providers,
+            "source": "env",
+            "default": default_provider,
+        },
+        {
+            "key": "api_base",
+            "label": "API 地址",
+            "group": "Model",
+            "type": "string",
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "api_key",
+            "label": "API Key",
+            "group": "Model",
+            "type": "password",
+            "sensitive": True,
+            "source": "env",
+            "default": empty,
+        },
+        # Vision
+        {
+            "key": "vision_model",
+            "label": "视觉模型",
+            "group": "Vision",
+            "type": "string",
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "vision_provider",
+            "label": "视觉供应商",
+            "group": "Vision",
+            "type": "select",
+            "options": available_providers,
+            "source": "env",
+            "default": default_provider,
+        },
+        {
+            "key": "vision_api_base",
+            "label": "视觉API地址",
+            "group": "Vision",
+            "type": "string",
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "vision_api_key",
+            "label": "视觉API Key",
+            "group": "Vision",
+            "type": "password",
+            "sensitive": True,
+            "source": "env",
+            "default": empty,
+        },
+        # Video
+        {
+            "key": "video_model",
+            "label": "视频模型",
+            "group": "Video",
+            "type": "string",
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "video_provider",
+            "label": "视频供应商",
+            "group": "Video",
+            "type": "select",
+            "options": available_providers,
+            "source": "env",
+            "default": default_provider,
+        },
+        {
+            "key": "video_api_base",
+            "label": "视频API地址",
+            "group": "Video",
+            "type": "string",
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "video_api_key",
+            "label": "视频API Key",
+            "group": "Video",
+            "type": "password",
+            "sensitive": True,
+            "source": "env",
+            "default": empty,
+        },
+        # Audio
+        {
+            "key": "audio_model",
+            "label": "音频模型",
+            "group": "Audio",
+            "type": "string",
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "audio_provider",
+            "label": "音频供应商",
+            "group": "Audio",
+            "type": "select",
+            "options": available_providers,
+            "source": "env",
+            "default": default_provider,
+        },
+        {
+            "key": "audio_api_base",
+            "label": "音频API地址",
+            "group": "Audio",
+            "type": "string",
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "audio_api_key",
+            "label": "音频API Key",
+            "group": "Audio",
+            "type": "password",
+            "sensitive": True,
+            "source": "env",
+            "default": empty,
+        },
+        # Embedding
+        {
+            "key": "embed_api_key",
+            "label": "嵌入API Key",
+            "group": "Embedding",
+            "type": "password",
+            "sensitive": True,
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "embed_api_base",
+            "label": "嵌入API地址",
+            "group": "Embedding",
+            "type": "string",
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "embed_model",
+            "label": "嵌入模型",
+            "group": "Embedding",
+            "type": "string",
+            "source": "env",
+            "default": empty,
+        },
+        # Search & External
+        {
+            "key": "jina_api_key",
+            "label": "Jina API Key",
+            "group": "Search & External",
+            "type": "password",
+            "sensitive": True,
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "serper_api_key",
+            "label": "Serper API Key",
+            "group": "Search & External",
+            "type": "password",
+            "sensitive": True,
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "perplexity_api_key",
+            "label": "Perplexity API Key",
+            "group": "Search & External",
+            "type": "password",
+            "sensitive": True,
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "github_token",
+            "label": "GitHub Token",
+            "group": "Search & External",
+            "type": "password",
+            "sensitive": True,
+            "source": "env",
+            "default": empty,
+        },
+        # TeamSkills
+        {
+            "key": "teamskills_market_url",
+            "label": "TeamSkills Hub 地址",
+            "group": "TeamSkills",
+            "type": "string",
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "teamskills_user_token",
+            "label": "TeamSkills 用户Token",
+            "group": "TeamSkills",
+            "type": "password",
+            "sensitive": True,
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "teamskills_system_token",
+            "label": "TeamSkills 系统Token",
+            "group": "TeamSkills",
+            "type": "password",
+            "sensitive": True,
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "teamskills_allowed_download_hosts",
+            "label": "TeamSkills 下载白名单Hosts(逗号分隔)",
+            "group": "TeamSkills",
+            "type": "string",
+            "source": "env",
+            "default": empty,
+        },
         # Email
-        {"key": "email_address", "label": "邮箱地址", "group": "Email", "type": "string",
-         "source": "env", "default": empty},
-        {"key": "email_token", "label": "邮箱Token", "group": "Email", "type": "password",
-         "sensitive": True, "source": "env", "default": empty},
+        {
+            "key": "email_address",
+            "label": "邮箱地址",
+            "group": "Email",
+            "type": "string",
+            "source": "env",
+            "default": empty,
+        },
+        {
+            "key": "email_token",
+            "label": "邮箱Token",
+            "group": "Email",
+            "type": "password",
+            "sensitive": True,
+            "source": "env",
+            "default": empty,
+        },
         # Features
-        {"key": "context_engine_enabled", "label": "上下文压缩", "group": "Features",
-         "type": "toggle", "source": "yaml", "default": "false"},
-        {"key": "permissions_enabled", "label": "权限管控", "group": "Features",
-         "type": "toggle", "source": "yaml", "default": "false"},
-        {"key": "memory_forbidden_enabled", "label": "敏感信息过滤", "group": "Features",
-         "type": "toggle", "source": "yaml", "default": "false"},
-        {"key": "preferred_language", "label": "显示语言", "group": "Features", "type": "select",
-         "options": ["zh", "en"], "source": "yaml", "default": "zh"},
-        {"key": "auto_recap_enabled", "label": "自动回顾", "group": "Features",
-         "type": "toggle", "source": "yaml", "default": "true"},
-        {"key": "evolution_auto_scan", "label": "自动扫描技能", "group": "Features",
-         "type": "toggle", "source": "env", "default": "false"},
+        {
+            "key": "context_engine_enabled",
+            "label": "上下文压缩",
+            "group": "Features",
+            "type": "toggle",
+            "source": "yaml",
+            "default": "false",
+        },
+        {
+            "key": "permissions_enabled",
+            "label": "权限管控",
+            "group": "Features",
+            "type": "toggle",
+            "source": "yaml",
+            "default": "false",
+        },
+        {
+            "key": "memory_forbidden_enabled",
+            "label": "敏感信息过滤",
+            "group": "Features",
+            "type": "toggle",
+            "source": "yaml",
+            "default": "false",
+        },
+        {
+            "key": "preferred_language",
+            "label": "显示语言",
+            "group": "Features",
+            "type": "select",
+            "options": ["zh", "en"],
+            "source": "yaml",
+            "default": "zh",
+        },
+        {
+            "key": "auto_recap_enabled",
+            "label": "自动回顾",
+            "group": "Features",
+            "type": "toggle",
+            "source": "yaml",
+            "default": "true",
+        },
+        {
+            "key": "evolution_auto_scan",
+            "label": "自动扫描技能",
+            "group": "Features",
+            "type": "toggle",
+            "source": "env",
+            "default": "false",
+        },
         # Auto-Harness (定时任务配置) - 合并为三项
-        {"key": "auto_harness_git_user_name", "label": "用户名", "group": "Auto-Harness",
-         "type": "string", "source": "yaml", "default": empty,
-         "description": "GitCode用户名，用于 git commit、创建 PR"},
-        {"key": "auto_harness_git_user_email", "label": "邮箱", "group": "Auto-Harness",
-         "type": "string", "source": "yaml", "default": empty,
-         "description": "GitCode用户邮箱，用于 git commit"},
-        {"key": "auto_harness_gitcode_access_token", "label": "GitCode Access Token", "group": "Auto-Harness",
-         "type": "password", "sensitive": True, "source": "yaml", "default": empty,
-         "description": "GitCode Access token，也可通过环境变量 GITCODE_ACCESS_TOKEN 配置"},
+        {
+            "key": "auto_harness_git_user_name",
+            "label": "用户名",
+            "group": "Auto-Harness",
+            "type": "string",
+            "source": "yaml",
+            "default": empty,
+            "description": "GitCode用户名，用于 git commit、创建 PR",
+        },
+        {
+            "key": "auto_harness_git_user_email",
+            "label": "邮箱",
+            "group": "Auto-Harness",
+            "type": "string",
+            "source": "yaml",
+            "default": empty,
+            "description": "GitCode用户邮箱，用于 git commit",
+        },
+        {
+            "key": "auto_harness_gitcode_access_token",
+            "label": "GitCode Access Token",
+            "group": "Auto-Harness",
+            "type": "password",
+            "sensitive": True,
+            "source": "yaml",
+            "default": empty,
+            "description": "GitCode Access token，也可通过环境变量 GITCODE_ACCESS_TOKEN 配置",
+        },
     ]
 
 
@@ -601,7 +970,6 @@ def _normalize_provider_value(value: str) -> str:
     available_model_providers = [provider.value for provider in ProviderType]
     lookup = {provider.lower(): provider for provider in available_model_providers}
     return lookup.get(normalized.lower(), normalized)
-
 
 
 async def _clear_agent_config_cache(agent_client=None) -> None:
@@ -700,6 +1068,32 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     from jiuwenswarm.gateway.routing.third_agent import get_unsupported_third_agent
 
     third_agent = bind.third_agent if bind.third_agent is not None else get_unsupported_third_agent()
+    openai_account_service = bind.openai_account_service or OpenAIAccountService()
+
+    async def _apply_saved_model_config(
+        config_payload: dict[str, Any],
+        *,
+        label: str,
+        reload_options: dict[str, Any] | None = None,
+    ) -> tuple[bool, str | None]:
+        if on_config_saved is None:
+            logger.warning("[%s] model config saved without a reload callback", label)
+            return False, _MODEL_APPLY_ERROR
+        try:
+            result = on_config_saved(
+                set(),
+                env_updates={},
+                config_payload=config_payload,
+                reload_options=dict(reload_options or {}),
+            )
+            if inspect.isawaitable(result):
+                result = await result
+            if result is True:
+                return True, None
+            logger.warning("[%s] model config reload was not applied", label)
+        except Exception:
+            logger.warning("[%s] model config reload failed", label, exc_info=True)
+        return False, _MODEL_APPLY_ERROR
 
     async def _config_get(ws, req_id, params, session_id):
         payload = {
@@ -789,18 +1183,26 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         _smcc = _section.get("model_client_config") or {}
                         for _pk, _yk in _key_map.items():
                             if not payload.get(_pk):
-                                _resolved = resolve_env_vars(str(_smcc.get(_yk, ""))) if _smcc.get(_yk) else ""
+                                _resolved = (
+                                    resolve_env_vars(str(_smcc.get(_yk, "")))
+                                    if _smcc.get(_yk)
+                                    else ""
+                                )
                                 if _resolved:
                                     payload[_pk] = _resolved
                 except Exception as e:
-                    logger.warning("[config.get] Failed to resolve %s model config: %s", _section_name, e)
+                    logger.warning(
+                        "[config.get] Failed to resolve %s model config: %s",
+                        _section_name,
+                        e,
+                    )
         except Exception:
             payload.setdefault("auto_recap_enabled", "true")
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("preferred_language", "zh")
-        
+
         # Auto-Harness config values (from ~/.jiuwenswarm/auto-harness/config.yaml)
         # 合并显示：用户名、邮箱、Access Token 三项
         try:
@@ -810,7 +1212,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload["auto_harness_git_user_name"] = git_cfg.get("user_name") or ""
             payload["auto_harness_git_user_email"] = git_cfg.get("user_email") or ""
             # Check env var first for access_token
-            ah_token = os.getenv("GITCODE_ACCESS_TOKEN") or gitcode_cfg.get("access_token") or ""
+            ah_token = (
+                os.getenv("GITCODE_ACCESS_TOKEN")
+                or gitcode_cfg.get("access_token")
+                or ""
+            )
             payload["auto_harness_gitcode_access_token"] = ah_token
         except Exception:
             payload.setdefault("auto_harness_git_user_name", "")
@@ -951,6 +1357,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         # ── 单事务改 models.defaults[0] / 多模态 / embed，避免并发丢失更新 ──
         if _changed_main_params or _changed_mm_by_section or _changed_embed_params:
+
             def _sync_models_embed(data):
                 if _changed_main_params:
                     _models = data.get("models")
@@ -1023,6 +1430,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         list(_changed_embed_params.keys()),
                     )
                 return data
+
             try:
                 update_config(_sync_models_embed)
                 # 仅在写盘成功后登记改动段，避免失败时误报"需要重启"与误清缓存
@@ -1328,9 +1736,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 session_project = os.path.realpath(session_project)
             except OSError:
                 pass
-            return (
-                session_project == project_dir
-                or session_project.startswith(project_dir + "/")
+            return session_project == project_dir or session_project.startswith(
+                project_dir + "/"
             )
 
         cli_sessions = []
@@ -1388,7 +1795,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
     async def _session_create(ws, req_id, params, session_id):
         from jiuwenswarm.common.utils import get_agent_sessions_dir
-        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+        )
 
         if not isinstance(params, dict):
             await channel.send_response(
@@ -1410,6 +1819,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             from jiuwenswarm.server.runtime.session.project_store import (
                 find_or_create_code_project_for_tui_params,
             )
+
             proj = find_or_create_code_project_for_tui_params(params)
             if proj is not None:
                 resolved_project_id = proj.project_id
@@ -1449,16 +1859,23 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if mh:
             mh.trigger_session_start_hook(target, source="tui")
         # 响应带最终归属(设计文档 §4.1.6):未绑定真实项目时归 default_code
-        await channel.send_response(ws, req_id, ok=True, payload={
-            "session_id": target,
-            "project_id": resolved_project_id or DEFAULT_PROJECT_ID_CODE,
-            "project_dir": resolved_project_dir,
-            "work_mode": work_mode,
-        })
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={
+                "session_id": target,
+                "project_id": resolved_project_id or DEFAULT_PROJECT_ID_CODE,
+                "project_dir": resolved_project_dir,
+                "work_mode": work_mode,
+            },
+        )
 
     async def _session_delete(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.utils import get_agent_sessions_dir
-        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+        )
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
 
@@ -1511,7 +1928,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 )
                 return
             except Exception as e:
-                logger.warning("[cli session.delete] forward to agent failed, fallback local: %s", e)
+                logger.warning(
+                    "[cli session.delete] forward to agent failed, fallback local: %s",
+                    e,
+                )
 
         metadata = get_session_metadata(target)
         if str(metadata.get("mode") or "").strip().lower() == "team":
@@ -1560,7 +1980,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 channel_id="tui",
                 session_id=params.target_sid,
                 req_method=params.req_method,
-                params={"session_id": params.target_sid, "turn_index": params.turn_index},
+                params={
+                    "session_id": params.target_sid,
+                    "turn_index": params.turn_index,
+                },
                 is_stream=False,
                 timestamp=time.time(),
                 user_id=params.user_id,
@@ -1574,10 +1997,18 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 return True
             pl = resp.payload if isinstance(resp.payload, dict) else {}
             err = pl.get("error", params.error_label)
-            logger.warning("[cli %s] AgentServer returned error, fallback local: %s", params.error_label, err)
+            logger.warning(
+                "[cli %s] AgentServer returned error, fallback local: %s",
+                params.error_label,
+                err,
+            )
             return False
         except Exception as e:
-            logger.warning("[cli %s] forward to agent failed, fallback local: %s", params.error_label, e)
+            logger.warning(
+                "[cli %s] forward to agent failed, fallback local: %s",
+                params.error_label,
+                e,
+            )
             return False
 
     async def _compact_partial_via_e2a(
@@ -1649,7 +2080,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             turn_index = int(turn_index)
         except (ValueError, TypeError):
             await channel.send_response(
-                ws, req_id, ok=False, error="turn_index must be an integer", code="BAD_REQUEST"
+                ws,
+                req_id,
+                ok=False,
+                error="turn_index must be an integer",
+                code="BAD_REQUEST",
             )
             return
 
@@ -1675,7 +2110,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _history_list_turns(ws, req_id, params, session_id):
-        from jiuwenswarm.agents.harness.common.session_ops_service import list_session_turns
+        from jiuwenswarm.agents.harness.common.session_ops_service import (
+            list_session_turns,
+        )
 
         if not isinstance(params, dict):
             params = {}
@@ -1720,7 +2157,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             turn_index = int(turn_index)
         except (ValueError, TypeError):
             await channel.send_response(
-                ws, req_id, ok=False, error="turn_index must be an integer", code="BAD_REQUEST"
+                ws,
+                req_id,
+                ok=False,
+                error="turn_index must be an integer",
+                code="BAD_REQUEST",
             )
             return
 
@@ -1754,7 +2195,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
     async def _session_restore_files(ws, req_id, params, session_id):
         """session.restore_files: 仅恢复文件，不截断对话."""
-        from jiuwenswarm.agents.harness.common.session_ops_service import restore_session_files
+        from jiuwenswarm.agents.harness.common.session_ops_service import (
+            restore_session_files,
+        )
 
         if not isinstance(params, dict):
             await channel.send_response(
@@ -1777,7 +2220,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             turn_index = int(turn_index)
         except (ValueError, TypeError):
             await channel.send_response(
-                ws, req_id, ok=False, error="turn_index must be an integer", code="BAD_REQUEST"
+                ws,
+                req_id,
+                ok=False,
+                error="turn_index must be an integer",
+                code="BAD_REQUEST",
             )
             return
         try:
@@ -1812,12 +2259,20 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             turn_index = int(turn_index)
         except (ValueError, TypeError):
             await channel.send_response(
-                ws, req_id, ok=False, error="turn_index must be an integer", code="BAD_REQUEST"
+                ws,
+                req_id,
+                ok=False,
+                error="turn_index must be an integer",
+                code="BAD_REQUEST",
             )
             return
         if direction not in ("from", "up_to"):
             await channel.send_response(
-                ws, req_id, ok=False, error="direction must be 'from' or 'up_to'", code="BAD_REQUEST"
+                ws,
+                req_id,
+                ok=False,
+                error="direction must be 'from' or 'up_to'",
+                code="BAD_REQUEST",
             )
             return
 
@@ -1872,7 +2327,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
         # Fallback: local truncation + record writing
         try:
-            from jiuwenswarm.agents.harness.common.session_ops_service import compact_partial_session
+            from jiuwenswarm.agents.harness.common.session_ops_service import (
+                compact_partial_session,
+            )
+
             result = compact_partial_session(
                 session_id=target_sid,
                 turn_index=turn_index,
@@ -1890,7 +2348,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
 
     async def _session_rename(ws, req_id, params, session_id, user_id=None):
         """优先经 E2A 转发至 AgentWebSocketServer._handle_session_rename；无 agent 或转发失败时本地回退。"""
-        from jiuwenswarm.server.runtime.session.session_rename import apply_session_rename
+        from jiuwenswarm.server.runtime.session.session_rename import (
+            apply_session_rename,
+        )
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
 
@@ -1971,16 +2431,22 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if color is None:
             # 查询模式
             metadata = get_session_metadata(target)
-            accent_color = metadata.get("accent_color", "default") if metadata else "default"
+            accent_color = (
+                metadata.get("accent_color", "default") if metadata else "default"
+            )
             await channel.send_response(
                 ws, req_id, ok=True,
-                payload={"session_id": target, "accent_color": accent_color}
+                payload={"session_id": target, "accent_color": accent_color},
             )
             return
 
         if str(color) not in valid_colors:
             await channel.send_response(
-                ws, req_id, ok=False, error=f"invalid color: {color}", code="BAD_REQUEST"
+                ws,
+                req_id,
+                ok=False,
+                error=f"invalid color: {color}",
+                code="BAD_REQUEST",
             )
             return
 
@@ -1989,18 +2455,20 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         metadata["accent_color"] = str(color)
         _write_metadata_sync(target, metadata)
         await channel.send_response(
-            ws, req_id, ok=True,
-            payload={"session_id": target, "accent_color": str(color)}
+            ws,
+            req_id,
+            ok=True,
+            payload={"session_id": target, "accent_color": str(color)},
         )
 
     async def _session_preview(ws, req_id, params, session_id):
         """获取 session 预览信息，包括最新几条完整对话内容。"""
-        from jiuwenswarm.server.runtime.session.session_history import load_history_records
+        from jiuwenswarm.server.runtime.session.session_history import (
+            load_history_records,
+        )
 
         if not isinstance(params, dict):
-            await channel.send_response(
-                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
-            )
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         target = str(params.get("session_id") or session_id).strip()
         if not target:
@@ -2068,8 +2536,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             logger.warning("[session.preview] read history failed: %s", exc)
 
         await channel.send_response(
-            ws, req_id, ok=True,
-            payload={"session_id": target, "preview_messages": preview_messages}
+            ws,
+            req_id,
+            ok=True,
+            payload={"session_id": target, "preview_messages": preview_messages},
         )
 
     async def _chat_send(ws, req_id, params, session_id):
@@ -2133,51 +2603,238 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 payload["page_idx"] = params.get("page_idx")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
-    async def _command_model(ws, req_id, params, session_id, user_id=None):
-        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
+    async def _run_openai_account_action(ws, req_id, method, action, *args):
+        try:
+            payload = await asyncio.to_thread(action, *args)
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except OpenAIAccountAuthError as exc:
+            logger.warning("[%s] %s", method, exc)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code=exc.code,
+                payload=openai_account_auth_error_payload(exc),
+            )
+        except OpenAIAccountModelListError as exc:
+            logger.warning("[%s] %s", method, exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="MODEL_LIST_ERROR"
+            )
+        except OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
+            logger.warning("[%s] %s", method, exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
+    async def _openai_account_auth_status(ws, req_id, params, session_id):
+        del params, session_id
+        await _run_openai_account_action(
+            ws,
+            req_id,
+            "openai_account.auth.status",
+            openai_account_service.status,
+        )
+
+    async def _openai_account_auth_start_login(ws, req_id, params, session_id):
+        del params, session_id
+        await _run_openai_account_action(
+            ws,
+            req_id,
+            "openai_account.auth.start_login",
+            openai_account_service.start_login,
+        )
+
+    async def _openai_account_auth_pending_login(ws, req_id, params, session_id):
+        del params, session_id
+        await _run_openai_account_action(
+            ws,
+            req_id,
+            "openai_account.auth.pending_login",
+            openai_account_service.pending_login,
+        )
+
+    async def _openai_account_auth_poll_login(ws, req_id, params, session_id):
+        del session_id
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        login_id = str(params.get("login_id") or "").strip()
+        if not login_id:
+            await channel.send_response(
+                ws, req_id, ok=False, error="login_id is required", code="BAD_REQUEST"
+            )
+            return
+        await _run_openai_account_action(
+            ws,
+            req_id,
+            "openai_account.auth.poll_login",
+            openai_account_service.poll_login,
+            login_id,
+        )
+
+    async def _openai_account_auth_logout(ws, req_id, params, session_id):
+        del params, session_id
+        await _run_openai_account_action(
+            ws,
+            req_id,
+            "openai_account.auth.logout",
+            openai_account_service.logout,
+        )
+
+    async def _openai_account_models_list(ws, req_id, params, session_id):
+        del params, session_id
+        await _run_openai_account_action(
+            ws,
+            req_id,
+            "openai_account.models.list",
+            openai_account_service.list_models,
+        )
+
+    async def _openai_account_models_use(ws, req_id, params, session_id):
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        model_id = str(params.get("model_id") or "").strip()
+        if not model_id:
+            await channel.send_response(
+                ws, req_id, ok=False, error="model_id is required", code="BAD_REQUEST"
+            )
+            return
+
+        try:
+            catalog_payload = await asyncio.to_thread(
+                openai_account_service.list_models
+            )
+            auth = catalog_payload.get("auth") or {}
+            if not bool(auth.get("authenticated")):
+                raise _ModelOpError(
+                    "OpenAI Account is not authenticated. Run /auth login first."
+                )
+            available_models = catalog_payload.get("models") or []
+            if model_id not in available_models:
+                raise _ModelOpError(
+                    f"OpenAI Account model '{model_id}' is not available"
+                )
+            base_url = str(catalog_payload.get("base_url") or "").strip()
+            if not base_url:
+                raise _ModelOpError("OpenAI Account model catalog has no base_url")
+
+            use_result: dict[str, str] = {}
+
+            def _use_mutate(data):
+                models = data.get("models")
+                if not isinstance(models, dict):
+                    models = {}
+                    data["models"] = models
+                defaults = models.get("defaults")
+                if not isinstance(defaults, list):
+                    defaults = []
+                    models["defaults"] = defaults
+                models.pop("default", None)
+
+                target_index: int | None = None
+                target_entry: dict[str, Any] | None = None
+                for index, entry in enumerate(defaults):
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_name, _alias, provider = _model_entry_identity(entry)
+                    if entry_name == model_id and _is_openai_account_provider(provider):
+                        target_index = index
+                        target_entry = entry
+                        break
+
+                if target_entry is None:
+                    target_entry = {
+                        "alias": "",
+                        "model_client_config": {},
+                        "model_config_obj": {"temperature": 0.95},
+                    }
+                    defaults.append(target_entry)
+                    target_index = len(defaults) - 1
+
+                client_config = target_entry.get("model_client_config")
+                if not isinstance(client_config, dict):
+                    client_config = {}
+                    target_entry["model_client_config"] = client_config
+                client_config.update(
+                    {
+                        "model_name": model_id,
+                        "client_provider": "OpenAIAccount",
+                        "api_base": base_url,
+                        "api_key": "",
+                        "verify_ssl": False,
+                        "timeout": 1800,
+                    }
+                )
+                model_config = target_entry.get("model_config_obj")
+                if not isinstance(model_config, dict):
+                    target_entry["model_config_obj"] = {"temperature": 0.95}
+
+                use_result["name"] = _activate_model_entry(
+                    models,
+                    defaults,
+                    target_index=target_index,
+                    model_label=model_id,
+                )
+                return data
+
+            update_config(_use_mutate)
+            config_payload = get_config()
+            applied, apply_error = await _apply_saved_model_config(
+                config_payload,
+                label="openai_account.models.use",
+                reload_options={
+                    "target_channel_id": "tui",
+                    "target_session_id": session_id,
+                    "reason": "openai_account_model_use",
+                },
+            )
+            payload: dict[str, Any] = {
+                "type": "switched",
+                "current": use_result.get("name", model_id),
+                "requested": model_id,
+                "saved": True,
+                "applied": applied,
+            }
+            if apply_error:
+                payload["apply_error"] = apply_error
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except _ModelOpError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except OpenAIAccountAuthError as exc:
+            logger.warning("[openai_account.models.use] %s", exc)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code=exc.code,
+                payload=openai_account_auth_error_payload(exc),
+            )
+        except OpenAIAccountModelListError as exc:
+            logger.warning("[openai_account.models.use] %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="MODEL_LIST_ERROR"
+            )
+        except OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
+            logger.warning("[openai_account.models.use] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+        except Exception:
+            logger.exception("[openai_account.models.use] unexpected failure")
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="OpenAI Account model configuration failed",
+                code="INTERNAL_ERROR",
+            )
+
+    async def _command_model(ws, req_id, params, session_id, user_id=None):
         if not isinstance(params, dict):
             params = {}
         action = params.get("action")
         model_name = params.get("model")
         model_index = params.get("index")
-
-        real_client = (
-            agent_client.get("value")
-            if isinstance(agent_client, dict)
-            else agent_client
-        )
-        if real_client is None:
-            await channel.send_response(
-                ws, req_id, ok=False, error="agent client not available"
-            )
-            return
-
-        async def _reload_model_config_background(config_payload: dict[str, Any], label: str) -> None:
-            _reload_env = e2a_from_agent_fields(
-                request_id=req_id,
-                channel_id="cli",
-                session_id=session_id,
-                req_method=ReqMethod.AGENT_RELOAD_CONFIG,
-                params={"config": config_payload, "env": {}},
-                is_stream=False,
-                timestamp=time.time(),
-                user_id=user_id,
-            )
-            try:
-                await _send_tui_agent_request(
-                    real_client, _reload_env, label=f"command.model.{label}",
-                )
-            except Exception as _e_reload:
-                logger.warning("[cli command.model] %s AGENT_RELOAD_CONFIG failed: %s", label, _e_reload)
-            if on_config_saved:
-                try:
-                    _cb = on_config_saved(set(), env_updates={}, config_payload=config_payload)
-                    if inspect.isawaitable(_cb):
-                        await _cb
-                except Exception as _e_saved:
-                    logger.warning("[cli command.model] %s on_config_saved failed: %s", label, _e_saved)
 
         if action == "add_model":
             target = str(params.get("target", "")).strip()
@@ -2238,7 +2895,12 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             if "temperature" not in model_config_obj:
                 model_config_obj["temperature"] = 0.95
             _reasoning_level = str(model_config_obj.get("reasoning_level", "")).strip()
-            if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
+            if _reasoning_level and _reasoning_level not in {
+                "off",
+                "low",
+                "medium",
+                "high",
+            }:
                 await channel.send_response(
                     ws,
                     req_id,
@@ -2256,12 +2918,26 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             entry_alias = client_cfg.pop("alias", None)
             effective_alias = str(entry_alias).strip() if entry_alias else ""
 
+            if _is_openai_account_provider(client_cfg.get("client_provider")):
+                await channel.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=(
+                        "OpenAI Account models are managed by /auth login or /auth models; "
+                        "they cannot be created through /model add."
+                    ),
+                )
+                return
+
             new_entry = {
                 "model_client_config": client_cfg,
                 "model_config_obj": model_config_obj,
             }
             # alias 带双引号写出，避免 yes/no/on/off 被 YAML 1.1 解析为布尔
-            new_entry["alias"] = DoubleQuotedScalarString(effective_alias) if effective_alias else ""
+            new_entry["alias"] = (
+                DoubleQuotedScalarString(effective_alias) if effective_alias else ""
+            )
             try:
                 # 单事务读-校验-改：避免 ensure+update 两步间的 TOCTOU 窗口
                 def _add_mutate(data):
@@ -2288,30 +2964,37 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     for _e in _raw_defs:
                         if not isinstance(_e, dict):
                             continue
-                        _emn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
-                        _eab = resolve_env_vars(str((_e.get("model_client_config") or {}).get("api_base", "")))
-                        _eak = resolve_env_vars(str((_e.get("model_client_config") or {}).get("api_key", "")))
-                        if _emn == effective_name and _eab == _effective_api_base and _eak == _effective_api_key:
+                        _emn = resolve_env_vars(
+                            str(
+                                (_e.get("model_client_config") or {}).get(
+                                    "model_name", ""
+                                )
+                            )
+                        )
+                        _eab = resolve_env_vars(
+                            str(
+                                (_e.get("model_client_config") or {}).get(
+                                    "api_base", ""
+                                )
+                            )
+                        )
+                        _eak = resolve_env_vars(
+                            str(
+                                (_e.get("model_client_config") or {}).get("api_key", "")
+                            )
+                        )
+                        if (
+                            _emn == effective_name
+                            and _eab == _effective_api_base
+                            and _eak == _effective_api_key
+                        ):
                             raise _ModelOpError(
                                 f"Model '{effective_name}' with the same api_base and api_key already exists"
                             )
-                    _missing = []
-                    for field, display in {
-                        "api_key": "api_key",
-                        "api_base": "api_base",
-                        "model_name": "model_name",
-                        "client_provider": "model_provider",
-                    }.items():
-                        if not resolve_env_vars(str(client_cfg.get(field, ""))):
-                            _missing.append(display)
-                    if _missing:
-                        raise _ModelOpError(
-                            f"Failed to add model '{effective_name}'. "
-                            f"Required fields missing: {', '.join(_missing)}. "
-                            f"Usage: /model add <name> "
-                            f"api_base=xxx api_key=xxx "
-                            f"model=<name> model_provider=<provider>"
-                        )
+                    _validate_model_client_config(
+                        client_cfg,
+                        model_label=str(effective_name),
+                    )
                     if effective_alias:
                         for _e in _raw_defs:
                             if not isinstance(_e, dict):
@@ -2324,11 +3007,14 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                                 raise _ModelOpError(f"Alias '{effective_alias}' conflicts with model name '{_emn}'")
                     _raw_defs.append(new_entry)
                     return data
+
                 update_config(_add_mutate)
                 logger.info(
                     "[cli command.model] 新增模型: name=%s, "
                     "client_cfg=%s, model_config_obj=%s",
-                    effective_name, client_cfg, model_config_obj,
+                    effective_name,
+                    {"client_provider": client_cfg.get("client_provider", "")},
+                    model_config_obj,
                 )
             except _ModelOpError as _op_err:
                 await channel.send_response(ws, req_id, ok=False, error=str(_op_err))
@@ -2337,10 +3023,21 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 await channel.send_response(ws, req_id, ok=False, error=str(e))
                 return
             _config_payload = get_config()
-            await _reload_model_config_background(_config_payload, "model.add")
+            applied, apply_error = await _apply_saved_model_config(
+                _config_payload,
+                label="command.model.add",
+            )
+            payload: dict[str, Any] = {
+                "type": "model_added",
+                "name": target,
+                "saved": True,
+                "applied": applied,
+            }
+            if apply_error:
+                payload["apply_error"] = apply_error
             await channel.send_response(
                 ws, req_id, ok=True,
-                payload={"type": "model_added", "name": target},
+                payload=payload,
             )
             return
 
@@ -2365,7 +3062,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     _raw_defs = models.get("defaults")
                     if not (isinstance(_raw_defs, list) and _raw_defs):
                         raise _ModelOpError("model index not found")
-                    if _idx < 0 or _idx >= len(_raw_defs) or not isinstance(_raw_defs[_idx], dict):
+                    if (
+                        _idx < 0
+                        or _idx >= len(_raw_defs)
+                        or not isinstance(_raw_defs[_idx], dict)
+                    ):
                         raise _ModelOpError("model index not found")
                     _entry = _raw_defs[_idx]
                     _client_cfg = _entry.get("model_client_config")
@@ -2380,6 +3081,16 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         "url": "api_base", "base_url": "api_base", "timeout": "timeout",
                         "verify_ssl": "verify_ssl", "ssl_cert": "ssl_cert", "alias": "alias",
                     }
+                    if _is_openai_account_provider(_client_cfg.get("client_provider")):
+                        invalid_fields = sorted(
+                            {key_map.get(str(key).lower(), str(key)) for key in configs}
+                            - {"alias", "reasoning_level"}
+                        )
+                        if invalid_fields:
+                            raise _ModelOpError(
+                                "OpenAI Account model identity is managed by /auth login and "
+                                "/auth models; only alias and reasoning_level can be edited."
+                            )
                     _model_cfg_obj = _entry.get("model_config_obj")
                     if not isinstance(_model_cfg_obj, dict):
                         _model_cfg_obj = {}
@@ -2401,30 +3112,44 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                             continue
                         else:
                             _client_cfg[mapped_k] = v
-                    _reasoning_level = str(_model_cfg_obj.get("reasoning_level", "")).strip()
-                    if _reasoning_level and _reasoning_level not in {"off", "low", "medium", "high"}:
-                        raise _ModelOpError("reasoning_level must be one of: off, low, medium, high")
+                    _reasoning_level = str(
+                        _model_cfg_obj.get("reasoning_level", "")
+                    ).strip()
+                    if _reasoning_level and _reasoning_level not in {
+                        "off",
+                        "low",
+                        "medium",
+                        "high",
+                    }:
+                        raise _ModelOpError(
+                            "reasoning_level must be one of: off, low, medium, high"
+                        )
                     if "verify_ssl" not in _client_cfg:
                         _client_cfg["verify_ssl"] = False
                     if "timeout" not in _client_cfg:
                         _client_cfg["timeout"] = 1800
-                    _missing_fields = []
-                    for _req_field, _display in [
-                        ("api_key", "api_key"), ("api_base", "api_base"),
-                        ("model_name", "model_name"), ("client_provider", "model_provider"),
-                    ]:
-                        if not resolve_env_vars(str(_client_cfg.get(_req_field, ""))):
-                            _missing_fields.append(_display)
-                    if _missing_fields:
-                        raise _ModelOpError(f"Model missing required config: {', '.join(_missing_fields)}")
-                    _effective_alias = resolve_env_vars(str(_entry.get("alias", ""))) if _entry.get("alias") else ""
+                    _validate_model_client_config(
+                        _client_cfg,
+                        model_label=str(_client_cfg.get("model_name") or _idx),
+                    )
+                    _effective_alias = (
+                        resolve_env_vars(str(_entry.get("alias", "")))
+                        if _entry.get("alias")
+                        else ""
+                    )
                     if _effective_alias:
                         for _other_idx, _other in enumerate(_raw_defs):
                             if _other_idx == _idx or not isinstance(_other, dict):
                                 continue
                             _other_mcc = _other.get("model_client_config") or {}
-                            _other_mn = resolve_env_vars(str(_other_mcc.get("model_name", "")))
-                            _other_alias = resolve_env_vars(str(_other.get("alias", ""))) if _other.get("alias") else ""
+                            _other_mn = resolve_env_vars(
+                                str(_other_mcc.get("model_name", ""))
+                            )
+                            _other_alias = (
+                                resolve_env_vars(str(_other.get("alias", "")))
+                                if _other.get("alias")
+                                else ""
+                            )
                             if _other_alias == _effective_alias:
                                 raise _ModelOpError(
                                     f"Alias '{_effective_alias}' is already used by model '{_other_mn}'"
@@ -2435,10 +3160,19 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                                 )
                     # 展示字段从锁内 data 直接取，避免事务后再开锁读取
                     _upd_mcc = _entry.get("model_client_config") or {}
-                    _update_result["updated_name"] = resolve_env_vars(str(_upd_mcc.get("model_name", "")))
-                    _cur_mcc = (_raw_defs[0].get("model_client_config") or {}) if _raw_defs else {}
-                    _update_result["current_name"] = resolve_env_vars(str(_cur_mcc.get("model_name", "")))
+                    _update_result["updated_name"] = resolve_env_vars(
+                        str(_upd_mcc.get("model_name", ""))
+                    )
+                    _cur_mcc = (
+                        (_raw_defs[0].get("model_client_config") or {})
+                        if _raw_defs
+                        else {}
+                    )
+                    _update_result["current_name"] = resolve_env_vars(
+                        str(_cur_mcc.get("model_name", ""))
+                    )
                     return data
+
                 update_config(_update_mutate)
             except _ModelOpError as _op_err:
                 await channel.send_response(ws, req_id, ok=False, error=str(_op_err))
@@ -2449,13 +3183,21 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             _updated_name = _update_result.get("updated_name", "")
             _current_name = _update_result.get("current_name", "")
             _config_payload = get_config()
-            await _reload_model_config_background(_config_payload, "model.update")
-            await channel.send_response(ws, req_id, ok=True, payload={
+            applied, apply_error = await _apply_saved_model_config(
+                _config_payload,
+                label="command.model.update",
+            )
+            payload = {
                 "type": "model_updated",
                 "name": _updated_name,
                 "index": _idx,
                 "current": _current_name,
-            })
+                "saved": True,
+                "applied": applied,
+            }
+            if apply_error:
+                payload["apply_error"] = apply_error
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
             return
 
         if action == "delete_model":
@@ -2466,6 +3208,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 return
             _removed_holder: dict = {}
             try:
+
                 def _delete_mutate(data):
                     models = data.get("models")
                     if not isinstance(models, dict):
@@ -2476,13 +3219,24 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                         raise _ModelOpError("model index not found")
                     if len(_raw_defs) <= 1:
                         raise _ModelOpError("Cannot delete the last model")
-                    if _idx < 0 or _idx >= len(_raw_defs) or not isinstance(_raw_defs[_idx], dict):
+                    if (
+                        _idx < 0
+                        or _idx >= len(_raw_defs)
+                        or not isinstance(_raw_defs[_idx], dict)
+                    ):
                         raise _ModelOpError("model index not found")
                     _removed_holder["entry"] = _raw_defs.pop(_idx)
                     # 展示字段从锁内 data 直接取，避免事务后再开锁读取
-                    _cur_mcc = (_raw_defs[0].get("model_client_config") or {}) if _raw_defs else {}
-                    _removed_holder["current_name"] = resolve_env_vars(str(_cur_mcc.get("model_name", "")))
+                    _cur_mcc = (
+                        (_raw_defs[0].get("model_client_config") or {})
+                        if _raw_defs
+                        else {}
+                    )
+                    _removed_holder["current_name"] = resolve_env_vars(
+                        str(_cur_mcc.get("model_name", ""))
+                    )
                     return data
+
                 update_config(_delete_mutate)
             except _ModelOpError as _op_err:
                 await channel.send_response(ws, req_id, ok=False, error=str(_op_err))
@@ -2494,12 +3248,20 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             _removed_name = resolve_env_vars(str((_removed.get("model_client_config") or {}).get("model_name", "")))
             _current_name = _removed_holder.get("current_name", "")
             _config_payload = get_config()
-            await _reload_model_config_background(_config_payload, "model.delete")
-            await channel.send_response(ws, req_id, ok=True, payload={
+            applied, apply_error = await _apply_saved_model_config(
+                _config_payload,
+                label="command.model.delete",
+            )
+            payload = {
                 "type": "model_deleted",
                 "name": _removed_name,
                 "current": _current_name,
-            })
+                "saved": True,
+                "applied": applied,
+            }
+            if apply_error:
+                payload["apply_error"] = apply_error
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
             return
 
         if not model_name or not str(model_name).strip():
@@ -2518,10 +3280,24 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             _raw = get_config_raw()
             _defs = (_raw.get("models") or {}).get("defaults")
             if isinstance(_defs, list) and _defs:
-                _first_name = resolve_env_vars(str((_defs[0].get("model_client_config") or {}).get("model_name", "")))
-                _first_alias = resolve_env_vars(str(_defs[0].get("alias", ""))) if _defs[0].get("alias") else ""
-                payload["current"] = _first_alias or _first_name or os.getenv("MODEL_NAME", "unknown")
-                payload["current_model_name"] = _first_name or os.getenv("MODEL_NAME", "unknown")
+                _first_name = resolve_env_vars(
+                    str(
+                        (_defs[0].get("model_client_config") or {}).get(
+                            "model_name", ""
+                        )
+                    )
+                )
+                _first_alias = (
+                    resolve_env_vars(str(_defs[0].get("alias", "")))
+                    if _defs[0].get("alias")
+                    else ""
+                )
+                payload["current"] = (
+                    _first_alias or _first_name or os.getenv("MODEL_NAME", "unknown")
+                )
+                payload["current_model_name"] = _first_name or os.getenv(
+                    "MODEL_NAME", "unknown"
+                )
 
                 def _model_meta(i: int, e: dict) -> dict:
                     mcc = e.get("model_client_config") or {}
@@ -2556,8 +3332,53 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             "[cli command.model] 切换模型: target=%s, model_index=%s, params=%s",
             target, model_index, params,
         )
+        oauth_authenticated = False
+        try:
+            snapshot = get_config_raw()
+            snapshot_defaults = (snapshot.get("models") or {}).get("defaults")
+            if isinstance(snapshot_defaults, list) and snapshot_defaults:
+                try:
+                    _snapshot_index, snapshot_entry = _find_model_entry(
+                        snapshot_defaults,
+                        target=target,
+                        model_index=model_index,
+                    )
+                except _ModelOpError:
+                    snapshot_entry = None
+                if snapshot_entry is not None:
+                    _snapshot_name, _snapshot_alias, snapshot_provider = (
+                        _model_entry_identity(snapshot_entry)
+                    )
+                    if _is_openai_account_provider(snapshot_provider):
+                        auth_status = await asyncio.to_thread(
+                            openai_account_service.status
+                        )
+                        oauth_authenticated = bool(auth_status.get("authenticated"))
+                        if not oauth_authenticated:
+                            raise _ModelOpError(
+                                "OpenAI Account is logged out. Run /auth login before using this model."
+                            )
+        except _ModelOpError as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc))
+            return
+        except OpenAIAccountAuthError as exc:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code=exc.code,
+                payload=openai_account_auth_error_payload(exc),
+            )
+            return
+        except OPENAI_ACCOUNT_LOCAL_ERRORS as exc:
+            logger.warning("[cli command.model] auth status failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+            return
+
         _switch_result: dict = {}
         try:
+
             def _switch_mutate(data):
                 models = data.get("models")
                 if not isinstance(models, dict):
@@ -2574,77 +3395,29 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     }]
                     models["defaults"] = _raw_defaults
                     models.pop("default", None)
-                _valid_names: set[str] = set()
-                _avail_parts: list[str] = []
-                for _e in _raw_defaults:
-                    if not isinstance(_e, dict):
-                        continue
-                    _mn = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
-                    _al = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
-                    if _mn:
-                        _valid_names.add(_mn)
-                    if _al:
-                        _valid_names.add(_al)
-                    if _al and _mn and _al != _mn:
-                        _avail_parts.append(f"{_al} ({_mn})")
-                    elif _mn:
-                        _avail_parts.append(_mn)
-                _skip_name_check = model_index is not None
-                if not _skip_name_check and target not in _valid_names:
-                    logger.warning(
-                        "[cli command.model] 模型不存在: %s, 可用: %s",
-                        target, _avail_parts,
-                    )
+                target_index, target_entry = _find_model_entry(
+                    _raw_defaults,
+                    target=target,
+                    model_index=model_index,
+                )
+                _entry_name, _entry_alias, target_provider = _model_entry_identity(
+                    target_entry
+                )
+                if (
+                    _is_openai_account_provider(target_provider)
+                    and not oauth_authenticated
+                ):
                     raise _ModelOpError(
-                        f"Model '{target}' not found. "
-                        f"Available: {', '.join(_avail_parts) or ''}"
+                        "OpenAI Account is logged out. Run /auth login before using this model."
                     )
-                _target_entry = None
-                _target_idx = None
-                if model_index is not None:
-                    try:
-                        _idx = int(model_index)
-                        if 0 <= _idx < len(_raw_defaults) and isinstance(_raw_defaults[_idx], dict):
-                            _target_entry = _raw_defaults[_idx]
-                            _target_idx = _idx
-                    except (ValueError, TypeError):
-                        pass
-                if _target_entry is None:
-                    for _i, _e in enumerate(_raw_defaults):
-                        if not isinstance(_e, dict):
-                            continue
-                        _ename = resolve_env_vars(str((_e.get("model_client_config") or {}).get("model_name", "")))
-                        _ealias = resolve_env_vars(str(_e.get("alias", ""))) if _e.get("alias") else ""
-                        if _ename == target or _ealias == target:
-                            _target_entry = _e
-                            _target_idx = _i
-                            break
-                if _target_entry is None:
-                    raise _ModelOpError(f"Model '{target}' config not found")
-                _target_mcc = _target_entry.get("model_client_config") or {}
-                _missing_fields = []
-                for _req_field, _display in [
-                    ("api_key", "api_key"), ("api_base", "api_base"),
-                    ("model_name", "model_name"), ("client_provider", "client_provider"),
-                ]:
-                    if not resolve_env_vars(str(_target_mcc.get(_req_field, ""))):
-                        _missing_fields.append(_display)
-                if _missing_fields:
-                    raise _ModelOpError(f"Model '{target}' missing required config: {', '.join(_missing_fields)}")
-                _target_model_name_resolved = resolve_env_vars(str(_target_mcc.get("model_name", "")))
-                _target_entry["is_default"] = True
-                for _i, _e in enumerate(_raw_defaults):
-                    if _i == _target_idx or not isinstance(_e, dict):
-                        continue
-                    _other_mcc = _e.get("model_client_config") or {}
-                    _other_name = resolve_env_vars(str(_other_mcc.get("model_name", "")))
-                    if _other_name == _target_model_name_resolved and _e.get("is_default") is True:
-                        _e["is_default"] = False
-                _others = [_e for _i, _e in enumerate(_raw_defaults) if _i != _target_idx]
-                models["defaults"] = [_target_entry] + _others
-                _switch_result["name"] = resolve_env_vars(
-                    str((_target_entry.get("model_client_config") or {}).get("model_name", target)))
+                _switch_result["name"] = _activate_model_entry(
+                    models,
+                    _raw_defaults,
+                    target_index=target_index,
+                    model_label=target,
+                )
                 return data
+
             update_config(_switch_mutate)
         except _ModelOpError as _op_err:
             await channel.send_response(ws, req_id, ok=False, error=str(_op_err))
@@ -2654,52 +3427,31 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             return
         logger.info("[cli command.model] 切换，已更新 models.defaults 首位: %s", target)
         _target_model_name = _switch_result.get("name", target)
-
-        # 先回包再执行 Agent 热重载（与 config.set 保持一致），
-        # 避免 WebSocket 长时间无响应、CLI 误以为无反馈 / 超时。
-        await channel.send_response(ws, req_id, ok=True, payload={
+        _config_payload = get_config()
+        applied, apply_error = await _apply_saved_model_config(
+            _config_payload,
+            label="command.model.switch",
+            reload_options={
+                "target_channel_id": "tui",
+                "target_session_id": session_id,
+                "reason": "model_switch",
+            },
+        )
+        payload = {
             "current": _target_model_name,
             "requested": target,
             "type": "switched",
-            "applied": True,
-        })
-
-        # 后台触发 AgentServer reload + on_config_saved（不阻塞 WS 消息循环）
-        _config_payload = get_config()
-
-        async def _model_switch_background():
-            _reload_env = e2a_from_agent_fields(
-                request_id=req_id,
-                channel_id="cli",
-                session_id=session_id,
-                req_method=ReqMethod.AGENT_RELOAD_CONFIG,
-                params={
-                    "config": _config_payload,
-                    "env": {},
-                    "target_channel_id": "tui",
-                    "target_session_id": session_id,
-                    "reason": "model_switch",
-                },
-                is_stream=False,
-                timestamp=time.time(),
-                user_id=user_id,
-            )
-            try:
-                await _send_tui_agent_request(
-                    real_client, _reload_env, label="command.model.switch",
-                )
-            except Exception as _e_reload:
-                logger.warning("[cli model.switch] AGENT_RELOAD_CONFIG failed: %s", _e_reload)
-            if on_config_saved:
-                try:
-                    _cb = on_config_saved(set(), env_updates={}, config_payload=_config_payload)
-                    if inspect.isawaitable(_cb):
-                        await _cb
-                except Exception as _e2:
-                    logger.warning("[cli model.switch] on_config_saved failed: %s", _e2)
-            logger.info("[cli command.model] 切换完成: current=%s", _target_model_name)
-
-        asyncio.create_task(_model_switch_background())
+            "saved": True,
+            "applied": applied,
+        }
+        if apply_error:
+            payload["apply_error"] = apply_error
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+        logger.info(
+            "[cli command.model] 切换完成: current=%s, applied=%s",
+            _target_model_name,
+            applied,
+        )
         return
 
     async def _models_list(ws, req_id, params, session_id):
@@ -2714,25 +3466,41 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 # 解析模型的上下文窗口大小
                 context_window_tokens = 0
                 try:
-                    from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-                    context_window_tokens = ContextUtils.resolve_context_max(model_name=model_name)
+                    from openjiuwen.core.context_engine.context.context_utils import (
+                        ContextUtils,
+                    )
+
+                    context_window_tokens = ContextUtils.resolve_context_max(
+                        model_name=model_name
+                    )
                 except Exception:
-                    logger.debug("Failed to resolve context_window_tokens for model %s", model_name, exc_info=True)
-                result.append({
-                    "model_name": model_name,
-                    "api_base": mcc.get("api_base", ""),
-                    "api_key": mcc.get("api_key", ""),
-                    "model_provider": mcc.get("client_provider", ""),
-                    "temperature": mco.get("temperature", 0.95),
-                    "reasoning_level": "off" if mco.get("reasoning_level") is False else mco.get("reasoning_level", ""),
-                    "alias": entry.get("alias", ""),
-                    "context_window_tokens": context_window_tokens,
-                })
+                    logger.debug(
+                        "Failed to resolve context_window_tokens for model %s",
+                        model_name,
+                        exc_info=True,
+                    )
+                result.append(
+                    {
+                        "model_name": model_name,
+                        "api_base": mcc.get("api_base", ""),
+                        "api_key": mcc.get("api_key", ""),
+                        "model_provider": mcc.get("client_provider", ""),
+                        "temperature": mco.get("temperature", 0.95),
+                        "reasoning_level": "off"
+                        if mco.get("reasoning_level") is False
+                        else mco.get("reasoning_level", ""),
+                        "alias": entry.get("alias", ""),
+                        "context_window_tokens": context_window_tokens,
+                    }
+                )
             active_model = result[0]["model_name"] if result else ""
-            await channel.send_response(ws, req_id, ok=True, payload={
-                "models": result,
-                "active_model": active_model,
-            })
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={
+                    "models": result,
+                    "active_model": active_model,
+                },
+            )
         except Exception as exc:
             logger.warning("[models.list] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
@@ -2835,20 +3603,44 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "chat.user_answer", _chat_user_answer)
     channel.register_local_handler(path, "chat.swarmflow_reply", _chat_swarmflow_reply)
     channel.register_local_handler(path, "history.get", _history_get)
+    channel.register_local_handler(
+        path, "openai_account.auth.status", _openai_account_auth_status
+    )
+    channel.register_local_handler(
+        path, "openai_account.auth.start_login", _openai_account_auth_start_login
+    )
+    channel.register_local_handler(
+        path, "openai_account.auth.pending_login", _openai_account_auth_pending_login
+    )
+    channel.register_local_handler(
+        path, "openai_account.auth.poll_login", _openai_account_auth_poll_login
+    )
+    channel.register_local_handler(
+        path, "openai_account.auth.logout", _openai_account_auth_logout
+    )
+    channel.register_local_handler(
+        path, "openai_account.models.list", _openai_account_models_list
+    )
+    channel.register_local_handler(
+        path, "openai_account.models.use", _openai_account_models_use
+    )
     channel.register_local_handler(path, "command.model", _command_model)
 
     # ── Hooks RPC handlers ─────────────────────────────────────────────
     async def _hooks_list(ws, req_id, params, session_id):
         from jiuwenswarm.common.hooks_config import load_hooks_config
+
         try:
             hooks_config = load_hooks_config(get_config())
             summary = hooks_config.get_event_summary()
-            await channel.send_response(ws, req_id, ok=True,
-                                        payload={
-                                            "events": summary,
-                                            "disable_all_hooks": hooks_config.disable_all_hooks,
-                                            "source": "config.yaml",
-                                        })
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={
+                    "events": summary,
+                    "disable_all_hooks": hooks_config.disable_all_hooks,
+                    "source": "config.yaml",
+                },
+            )
         except Exception as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
@@ -3010,7 +3802,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             # 注意：显式传空串 "" 等价于归默认项目，不可覆盖——用 key presence 区分
             if "project_dir" not in params and session_id:
                 try:
-                    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+                    from jiuwenswarm.server.runtime.session.session_metadata import (
+                        get_session_metadata,
+                    )
+
                     meta = get_session_metadata(session_id, cache_bust=True)
                     if isinstance(meta, dict):
                         pd = meta.get("project_dir")
@@ -3131,7 +3926,9 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
         if not isinstance(params, dict):
-            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
             return
         job_id = str(params.get("id") or "").strip()
         if not job_id:
@@ -3181,6 +3978,7 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
                 on_config_saved=bind.on_config_saved,
                 path=bind.path,
                 cron_controller=bind.cron_controller,
+                openai_account_service=bind.openai_account_service,
             )
         )
 

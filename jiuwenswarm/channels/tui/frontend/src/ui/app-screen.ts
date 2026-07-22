@@ -18,7 +18,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import type { CliPiAppState } from "../app-state.js";
-import { openFileInEditor as openInExternalEditor, openFolderInExplorer } from "../core/utils/editor.js";
+import {
+  openFileInEditor as openInExternalEditor,
+  openFolderInExplorer,
+} from "../core/utils/editor.js";
 import {
   extractAttachmentsFromText,
   extractFilePathsFromPaste,
@@ -40,10 +43,22 @@ import { copyToClipboard } from "../core/commands/clipboard.js";
 import { CheckboxList, CheckboxGroup as CheckboxGroupType } from "./components/checkbox-list.js";
 import type { FileAttachment } from "../core/protocol.js";
 import {
+  MANUALLY_CREATABLE_MODEL_PROVIDERS,
+  SUPPORTED_MODEL_PROVIDERS,
+  isManuallyCreatableModelProvider,
+  isModelConfigFieldEditable,
   type ModelMeta,
   type ModelListPayload,
+  type ModelConfigField,
   isReservedMultimodalModelKey,
+  isSupportedModelProvider,
 } from "../core/commands/builtins/model.js";
+import {
+  getOpenAIAccountAuthStatus,
+  isOpenAIAccountProvider,
+  isOpenAIAccountReady,
+  type OpenAIAccountAuthStatus,
+} from "../core/commands/builtins/auth.js";
 import {
   sanitizeSessionList,
   type SessionListPayload,
@@ -53,7 +68,13 @@ import type { ConfigItemSchema } from "../core/commands/builtins/config.js";
 import type { McpListItem, McpListPayload } from "../core/commands/builtins/mcp.js";
 import { buildModeAutocompleteItems } from "../core/commands/builtins/mode.js";
 import { MemoryViewController, type MemoryViewTab } from "./memory-view.js";
-import { PIPELINE_VALUES, PIPELINE_OPTIONS, INTERVAL_VALUES, INTERVAL_OPTIONS, FLAG_OPTIONS } from "../core/commands/builtins/auto-harness.js";
+import {
+  PIPELINE_VALUES,
+  PIPELINE_OPTIONS,
+  INTERVAL_VALUES,
+  INTERVAL_OPTIONS,
+  FLAG_OPTIONS,
+} from "../core/commands/builtins/auto-harness.js";
 import { isTeamMode } from "../core/modes.js";
 import {
   countCompletedWorkflowAgents,
@@ -106,7 +127,13 @@ import {
   orderedMemberIds,
   teamWorkingStartedAtMs,
 } from "./components/team-shared.js";
-import { padToWidth, prefixedLines, renderMarkdownLines, renderStyledMarkdownLines, renderWrappedText } from "./rendering/text.js";
+import {
+  padToWidth,
+  prefixedLines,
+  renderMarkdownLines,
+  renderStyledMarkdownLines,
+  renderWrappedText,
+} from "./rendering/text.js";
 import { chalk, editorTheme, palette, selectListTheme, setCurrentThemeName } from "./theme.js";
 import type { Hunk, GitDiffData, GitDiffStats, TurnDiff } from "../core/types.js";
 
@@ -137,9 +164,7 @@ function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
-function parseSgrMouseRelease(
-  data: string,
-): { button: number; col: number; row: number } | null {
+function parseSgrMouseRelease(data: string): { button: number; col: number; row: number } | null {
   const match = data.match(SGR_MOUSE_RE);
   if (!match || match[4] !== "m") {
     return null;
@@ -217,7 +242,7 @@ type PreviewMessage = {
   event_type: string;
 };
 
-type ModelFormField = "model_name" | "alias" | "api_base" | "api_key" | "model_provider" | "reasoning_level";
+type ModelFormField = ModelConfigField;
 
 type ModelFormState = {
   fields: Record<ModelFormField, string>;
@@ -238,12 +263,32 @@ type ModelListState = {
   inputError?: string;
 };
 
+type ModelMutationPayload = {
+  type?: string;
+  current?: string;
+  saved?: boolean;
+  applied?: boolean;
+  apply_error?: string;
+};
+
 const MODEL_VALUE_SEPARATOR = "\x00";
-const MODEL_FORM_FIELDS: ModelFormField[] = ["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"];
-const MODEL_REQUIRED_FIELDS: ModelFormField[] = ["model_name", "api_base", "api_key", "model_provider"];
+const MODEL_FORM_FIELDS: ModelFormField[] = [
+  "model_name",
+  "alias",
+  "api_base",
+  "api_key",
+  "model_provider",
+  "reasoning_level",
+];
+const MODEL_REQUIRED_FIELDS: ModelFormField[] = [
+  "model_name",
+  "api_base",
+  "api_key",
+  "model_provider",
+];
 const DEFAULT_MODEL_PROVIDER = "OpenAI";
-const MODEL_PROVIDER_OPTIONS = ["OpenAI", "OpenRouter", "DashScope", "SiliconFlow", "InferenceAffinity", "DeepSeek"];
 const REASONING_LEVEL_OPTIONS = ["", "off", "low", "medium", "high"];
+const MODEL_REQUEST_TIMEOUT_MS = 75_000;
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
 const MAX_API_BASE_LENGTH = 512;
@@ -654,7 +699,10 @@ function expandHomePrefix(filePath: string): string {
   return filePath;
 }
 
-function buildAtCompletionValue(filePath: string, opts: { isAtPrefix: boolean; isQuotedPrefix: boolean }): string {
+function buildAtCompletionValue(
+  filePath: string,
+  opts: { isAtPrefix: boolean; isQuotedPrefix: boolean },
+): string {
   const needsQuotes = opts.isQuotedPrefix || filePath.includes(" ");
   const at = opts.isAtPrefix ? "@" : "";
   if (!needsQuotes) return `${at}${filePath}`;
@@ -769,7 +817,9 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
   constructor(
     private readonly inner: AutocompleteProvider,
     private readonly cwd: string,
-    private readonly memoryArgCompletion?: (sub: string) => Promise<{ label: string; description: string }[]>,
+    private readonly memoryArgCompletion?: (
+      sub: string,
+    ) => Promise<{ label: string; description: string }[]>,
   ) {}
 
   async getSuggestions(
@@ -829,7 +879,7 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
         const argPrefix = textBeforeCursor.slice(lastSpaceIdx + 1).toLowerCase();
         if (argPrefix) {
           const filtered = innerResult.items.filter((item) =>
-            item.label.toLowerCase().startsWith(argPrefix)
+            item.label.toLowerCase().startsWith(argPrefix),
           );
           if (filtered.length > 0 && filtered.length < innerResult.items.length) {
             return { ...innerResult, items: filtered };
@@ -1193,10 +1243,7 @@ const planApprovalSelectListTheme = {
     if (!match?.index) {
       return selectListTheme.selectedText(value);
     }
-    return (
-      selectListTheme.selectedText(value.slice(0, match.index)) +
-      chalk.dim(match[1])
-    );
+    return selectListTheme.selectedText(value.slice(0, match.index)) + chalk.dim(match[1]);
   },
   description: (value: string) => chalk.dim(value),
 };
@@ -1388,11 +1435,12 @@ function filterConfigItems(
   // 有搜索词时：纯扁平过滤列表
   if (normalizedQuery) {
     return schemas
-      .filter((schema) =>
-        schema.key.toLowerCase().includes(normalizedQuery) ||
-        schema.label.toLowerCase().includes(normalizedQuery) ||
-        (schema.description ?? "").toLowerCase().includes(normalizedQuery) ||
-        schema.group.toLowerCase().includes(normalizedQuery)
+      .filter(
+        (schema) =>
+          schema.key.toLowerCase().includes(normalizedQuery) ||
+          schema.label.toLowerCase().includes(normalizedQuery) ||
+          (schema.description ?? "").toLowerCase().includes(normalizedQuery) ||
+          schema.group.toLowerCase().includes(normalizedQuery),
       )
       .map((schema) => {
         const val = currentValues[schema.key] ?? "";
@@ -1559,8 +1607,8 @@ export class AppScreen implements Component, Focusable {
       }
     };
     this.editor.onSubmit = async (value) => {
-      void await this.handleSubmit(value);
-      void await this.commands.refreshSkills(this.state.getCommandContext());
+      void (await this.handleSubmit(value));
+      void (await this.commands.refreshSkills(this.state.getCommandContext()));
     };
     this.unsubscribe = this.state.onChange(() => {
       this.handleStateChange();
@@ -1627,7 +1675,14 @@ export class AppScreen implements Component, Focusable {
           : null;
       case "darwin":
         return process.env.HOME
-          ? path.join(process.env.HOME, "Library", "Application Support", "Code", "User", "settings.json")
+          ? path.join(
+              process.env.HOME,
+              "Library",
+              "Application Support",
+              "Code",
+              "User",
+              "settings.json",
+            )
           : null;
       case "linux":
         return process.env.HOME
@@ -1768,15 +1823,24 @@ export class AppScreen implements Component, Focusable {
         this.tui.requestRender();
         return;
       case "fileViewer:lineDown":
-        this.fileViewerState.scrollOffset = Math.min(maxScroll, this.fileViewerState.scrollOffset + 1);
+        this.fileViewerState.scrollOffset = Math.min(
+          maxScroll,
+          this.fileViewerState.scrollOffset + 1,
+        );
         this.tui.requestRender();
         return;
       case "fileViewer:pageUp":
-        this.fileViewerState.scrollOffset = Math.max(0, this.fileViewerState.scrollOffset - availableHeight);
+        this.fileViewerState.scrollOffset = Math.max(
+          0,
+          this.fileViewerState.scrollOffset - availableHeight,
+        );
         this.tui.requestRender();
         return;
       case "fileViewer:pageDown":
-        this.fileViewerState.scrollOffset = Math.min(maxScroll, this.fileViewerState.scrollOffset + availableHeight);
+        this.fileViewerState.scrollOffset = Math.min(
+          maxScroll,
+          this.fileViewerState.scrollOffset + availableHeight,
+        );
         this.tui.requestRender();
         return;
       case "fileViewer:top":
@@ -1852,9 +1916,11 @@ export class AppScreen implements Component, Focusable {
 
   private _currentDiffSource(): DiffSourceEntry | null {
     if (!this.diffViewerState) return null;
-    return this.diffViewerState.sources[this.diffViewerState.sourceIndex]
-      ?? this.diffViewerState.sources[0]
-      ?? null;
+    return (
+      this.diffViewerState.sources[this.diffViewerState.sourceIndex] ??
+      this.diffViewerState.sources[0] ??
+      null
+    );
   }
 
   private _selectDiffSource(sourceIndex: number): void {
@@ -1959,18 +2025,27 @@ export class AppScreen implements Component, Focusable {
       }
       if (matchesKey(data, "down") || data.toLowerCase() === "j") {
         const maxScroll = Math.max(0, totalLines - availableHeight);
-        this.diffViewerState.scrollOffset = Math.min(maxScroll, this.diffViewerState.scrollOffset + 1);
+        this.diffViewerState.scrollOffset = Math.min(
+          maxScroll,
+          this.diffViewerState.scrollOffset + 1,
+        );
         this.tui.requestRender();
         return;
       }
       if (matchesKey(data, "pageUp")) {
-        this.diffViewerState.scrollOffset = Math.max(0, this.diffViewerState.scrollOffset - availableHeight);
+        this.diffViewerState.scrollOffset = Math.max(
+          0,
+          this.diffViewerState.scrollOffset - availableHeight,
+        );
         this.tui.requestRender();
         return;
       }
       if (matchesKey(data, "pageDown")) {
         const maxScroll = Math.max(0, totalLines - availableHeight);
-        this.diffViewerState.scrollOffset = Math.min(maxScroll, this.diffViewerState.scrollOffset + availableHeight);
+        this.diffViewerState.scrollOffset = Math.min(
+          maxScroll,
+          this.diffViewerState.scrollOffset + availableHeight,
+        );
         this.tui.requestRender();
         return;
       }
@@ -2084,7 +2159,9 @@ export class AppScreen implements Component, Focusable {
         .join(palette.text.dim(" · "));
       lines.push(padToWidth(`  ${selector}`, safeWidth));
     }
-    lines.push(padToWidth(palette.text.dim(`  ${"─".repeat(Math.max(0, safeWidth - 4))}`), safeWidth));
+    lines.push(
+      padToWidth(palette.text.dim(`  ${"─".repeat(Math.max(0, safeWidth - 4))}`), safeWidth),
+    );
 
     if (this.diffViewerState.viewMode === "list") {
       // Paginate to MAX_VISIBLE files with the selected file centered,
@@ -2112,10 +2189,12 @@ export class AppScreen implements Component, Focusable {
 
         if (start > 0) {
           const more = start;
-          lines.push(padToWidth(
-            palette.text.dim(`  ↑ ${more} more ${more === 1 ? "file" : "files"}`),
-            safeWidth,
-          ));
+          lines.push(
+            padToWidth(
+              palette.text.dim(`  ↑ ${more} more ${more === 1 ? "file" : "files"}`),
+              safeWidth,
+            ),
+          );
         }
 
         for (let i = start; i < end; i++) {
@@ -2165,10 +2244,9 @@ export class AppScreen implements Component, Focusable {
           const sourceLabel = file.isNewFile && !file.isUntracked ? "(new)" : "";
           const line = `${pointer}${displayPath}`;
           const rightLabel = [sourceLabel, statsLabel].filter(Boolean).join(" ");
-          const rightStyled = [
-            sourceLabel ? palette.text.dim(sourceLabel) : "",
-            statsStyled,
-          ].filter(Boolean).join(" ");
+          const rightStyled = [sourceLabel ? palette.text.dim(sourceLabel) : "", statsStyled]
+            .filter(Boolean)
+            .join(" ");
           const fullLine = rightLabel
             ? `${padToWidth(line, Math.max(1, safeWidth - rightLabel.length - 1))}${rightStyled}`
             : padToWidth(line, safeWidth);
@@ -2181,10 +2259,12 @@ export class AppScreen implements Component, Focusable {
 
         if (end < total) {
           const more = total - end;
-          lines.push(padToWidth(
-            palette.text.dim(`  ↓ ${more} more ${more === 1 ? "file" : "files"}`),
-            safeWidth,
-          ));
+          lines.push(
+            padToWidth(
+              palette.text.dim(`  ↓ ${more} more ${more === 1 ? "file" : "files"}`),
+              safeWidth,
+            ),
+          );
         }
       }
     } else {
@@ -2271,7 +2351,7 @@ export class AppScreen implements Component, Focusable {
       this.swarmWorkflowsViewState !== null ||
       this.configEditorState !== null ||
       this.diffViewerState !== null ||
-      this.mvController !== null && this.mvController.isOpen;
+      (this.mvController !== null && this.mvController.isOpen);
 
     if (
       !pendingQuestion &&
@@ -2579,26 +2659,46 @@ export class AppScreen implements Component, Focusable {
           this.setMouseTrackingEnabled(false);
           void this.handleResumeSessionSelection(this.resumeSessionList.preview.session_id);
         } else if (matchesKey(data, "space") || matchesKey(data, "escape")) {
-          this.resumeSessionList = { ...this.resumeSessionList, preview: null, previewMessages: [], previewLoading: false };
+          this.resumeSessionList = {
+            ...this.resumeSessionList,
+            preview: null,
+            previewMessages: [],
+            previewLoading: false,
+          };
           this.setMouseTrackingEnabled(false);
           this.tui.requestRender();
         } else {
           // Handle scroll in preview
-          const wheelOffset = getSgrMouseWheelOffset(data, this.resumeSessionList.previewScrollOffset);
+          const wheelOffset = getSgrMouseWheelOffset(
+            data,
+            this.resumeSessionList.previewScrollOffset,
+          );
           if (wheelOffset !== null) {
-            this.resumeSessionList = { ...this.resumeSessionList, previewScrollOffset: Math.max(0, wheelOffset) };
+            this.resumeSessionList = {
+              ...this.resumeSessionList,
+              previewScrollOffset: Math.max(0, wheelOffset),
+            };
             this.tui.requestRender();
             return;
           }
           const pageSize = Math.max(1, Math.floor(this.tui.terminal.rows * 0.8));
           const scrollAction = resolveAction("Scroll", data);
           if (scrollAction === "scroll:pageUp" || matchesKey(data, "pageUp")) {
-            this.resumeSessionList = { ...this.resumeSessionList, previewScrollOffset: this.resumeSessionList.previewScrollOffset + pageSize };
+            this.resumeSessionList = {
+              ...this.resumeSessionList,
+              previewScrollOffset: this.resumeSessionList.previewScrollOffset + pageSize,
+            };
             this.tui.requestRender();
             return;
           }
           if (scrollAction === "scroll:pageDown" || matchesKey(data, "pageDown")) {
-            this.resumeSessionList = { ...this.resumeSessionList, previewScrollOffset: Math.max(0, this.resumeSessionList.previewScrollOffset - pageSize) };
+            this.resumeSessionList = {
+              ...this.resumeSessionList,
+              previewScrollOffset: Math.max(
+                0,
+                this.resumeSessionList.previewScrollOffset - pageSize,
+              ),
+            };
             this.tui.requestRender();
             return;
           }
@@ -3028,7 +3128,12 @@ export class AppScreen implements Component, Focusable {
         const key = this.configEditorState.selectedKey;
         const schema = this.configEditorState.schemaList.find((s) => s.key === key);
         if (schema) {
-          void this.applyConfigEditorSetAndStay(key, text, schema, this.configEditorState.currentValues);
+          void this.applyConfigEditorSetAndStay(
+            key,
+            text,
+            schema,
+            this.configEditorState.currentValues,
+          );
         }
         this.editor.setText("");
         this.composerAttachments = [];
@@ -3104,9 +3209,7 @@ export class AppScreen implements Component, Focusable {
       const question =
         snapshot.pendingQuestion.questions[this.activeQuestionIndex]?.question ?? "";
       if (question) {
-        this.state.submitQuestionAnswers([
-          { selected_options: [text], custom_input: text },
-        ]);
+        this.state.submitQuestionAnswers([{ selected_options: [text], custom_input: text }]);
       } else {
         this.state.answerQuestion(text);
       }
@@ -3138,7 +3241,7 @@ export class AppScreen implements Component, Focusable {
       const spaceIdx = trimmed.indexOf(" ");
       const rawName = spaceIdx > 0 ? trimmed.slice(0, spaceIdx).trim() : trimmed;
       const name = rawName.replace(/[,，]+$/, "").trim();
-      const desc = spaceIdx > 0 ? trimmed.slice(spaceIdx + 1).trim() : (name || "");
+      const desc = spaceIdx > 0 ? trimmed.slice(spaceIdx + 1).trim() : name || "";
 
       const when_to_use = `当你需要${desc}时使用`;
       const defaultPrompt = [
@@ -3851,9 +3954,7 @@ export class AppScreen implements Component, Focusable {
     if (!this.resumeSessionList) return;
     const selected = this.resumeSessionList.list.getSelectedItem();
     if (!selected) return;
-    const session = this.resumeSessionList.sessions.find(
-      (s) => s.session_id === selected.value,
-    );
+    const session = this.resumeSessionList.sessions.find((s) => s.session_id === selected.value);
     if (!session) return;
     // 先设置 preview 状态并标记加载中，显示基本信息
     this.resumeSessionList = {
@@ -3867,10 +3968,10 @@ export class AppScreen implements Component, Focusable {
     this.tui.requestRender();
     // 异步获取预览消息
     try {
-      const resp = await this.state.request<{ session_id: string; preview_messages: PreviewMessage[] }>(
-        "session.preview",
-        { session_id: session.session_id, count: 30 },
-      );
+      const resp = await this.state.request<{
+        session_id: string;
+        preview_messages: PreviewMessage[];
+      }>("session.preview", { session_id: session.session_id, count: 30 });
       if (this.resumeSessionList && this.resumeSessionList.preview?.session_id === session.session_id) {
         this.resumeSessionList = {
           ...this.resumeSessionList,
@@ -3894,9 +3995,7 @@ export class AppScreen implements Component, Focusable {
     if (!this.resumeSessionList) return;
     const selected = this.resumeSessionList.list.getSelectedItem();
     if (!selected) return;
-    const session = this.resumeSessionList.sessions.find(
-      (s) => s.session_id === selected.value,
-    );
+    const session = this.resumeSessionList.sessions.find((s) => s.session_id === selected.value);
     if (!session) return;
     this.resumeSessionList = {
       ...this.resumeSessionList,
@@ -3919,9 +4018,7 @@ export class AppScreen implements Component, Focusable {
       const newTitle = resp.title ?? title;
       // 就地更新本地会话标题并重建列表项
       const sessions = sanitizeSessionList(
-        st.sessions.map((s) =>
-          s.session_id === sessionId ? { ...s, title: newTitle } : s,
-        ),
+        st.sessions.map((s) => (s.session_id === sessionId ? { ...s, title: newTitle } : s)),
       );
       const items = computeResumeItems(sessions, {
         query: st.searchQuery,
@@ -3943,29 +4040,36 @@ export class AppScreen implements Component, Focusable {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.resumeSessionList = { ...st, rename: null };
-      this.state.addItem(
-        addError(this.state.getSnapshot().sessionId, `rename failed: ${message}`),
-      );
+      this.state.addItem(addError(this.state.getSnapshot().sessionId, `rename failed: ${message}`));
       this.tui.requestRender();
     }
   }
 
-  private buildResumeSessionRenameLines(width: number, session: SessionMeta | undefined, value: string): string[] {
+  private buildResumeSessionRenameLines(
+    width: number,
+    session: SessionMeta | undefined,
+    value: string,
+  ): string[] {
     const placeholder = session?.title?.trim() || session?.session_id || "";
     return [
       padToWidth(palette.status.warning("Rename session"), width),
       padToWidth(palette.text.dim(session?.session_id ?? ""), width),
       "",
-      padToWidth(`${palette.text.dim("Title: ")}${palette.text.primary(value)}${END_CURSOR}`, width),
-      value.length === 0
-        ? padToWidth(palette.text.dim(`(current: ${placeholder})`), width)
-        : "",
+      padToWidth(
+        `${palette.text.dim("Title: ")}${palette.text.primary(value)}${END_CURSOR}`,
+        width,
+      ),
+      value.length === 0 ? padToWidth(palette.text.dim(`(current: ${placeholder})`), width) : "",
       "",
       padToWidth(palette.text.dim("Enter save · Esc cancel · empty clears title"), width),
     ].filter((l) => l !== "");
   }
 
-  private buildResumeSessionPreviewLines(width: number, session: SessionMeta, previewMessages: PreviewMessage[]): string[] {
+  private buildResumeSessionPreviewLines(
+    width: number,
+    session: SessionMeta,
+    previewMessages: PreviewMessage[],
+  ): string[] {
     const title = session.title?.trim() || "(untitled)";
     const project = session.project_dir?.trim() || "-";
 
@@ -4048,11 +4152,20 @@ export class AppScreen implements Component, Focusable {
       padToWidth(palette.text.primary(`Current folder: ${cwd}`), width),
       "",
       padToWidth(palette.text.dim("Is this a project you created or one you trust?"), width),
-      padToWidth(palette.text.dim("(e.g. your own code, well-known open source, or team project)"), width),
-      padToWidth(palette.text.dim("If unfamiliar, please review the folder contents before proceeding."), width),
+      padToWidth(
+        palette.text.dim("(e.g. your own code, well-known open source, or team project)"),
+        width,
+      ),
+      padToWidth(
+        palette.text.dim("If unfamiliar, please review the folder contents before proceeding."),
+        width,
+      ),
       "",
       ...this.startupPromptList.render(width),
-      padToWidth(palette.text.dim("↑/↓ choose · Enter confirm · Esc / Ctrl+C use default workspace"), width),
+      padToWidth(
+        palette.text.dim("↑/↓ choose · Enter confirm · Esc / Ctrl+C use default workspace"),
+        width,
+      ),
     ];
   }
 
@@ -4066,7 +4179,11 @@ export class AppScreen implements Component, Focusable {
       return this.buildResumeSessionRenameLines(width, session, r.value);
     }
     if (this.resumeSessionList.preview !== null) {
-      return this.buildResumeSessionPreviewLines(width, this.resumeSessionList.preview, this.resumeSessionList.previewMessages);
+      return this.buildResumeSessionPreviewLines(
+        width,
+        this.resumeSessionList.preview,
+        this.resumeSessionList.previewMessages,
+      );
     }
     const showAll = this.resumeSessionList.showAllProjects;
     const branchOn = this.resumeSessionList.branchFilterEnabled;
@@ -4078,7 +4195,10 @@ export class AppScreen implements Component, Focusable {
     const toggleHint = `${projectHint} · ${branchHint}`;
     const scopeSuffix = branchOn ? ` · branch:${this.resumeSessionList.currentBranch}` : "";
     const searchBox = this.resumeSessionList.searchQuery
-      ? padToWidth(palette.text.primary(`🔍: ${this.resumeSessionList.searchQuery}${END_CURSOR}`), width)
+      ? padToWidth(
+          palette.text.primary(`🔍: ${this.resumeSessionList.searchQuery}${END_CURSOR}`),
+          width,
+        )
       : padToWidth(palette.text.dim(`🔍: Type to search · Esc to cancel`), width);
     const st = this.resumeSessionList;
     const visibleCount = computeResumeItems(st.sessions, {
@@ -4109,7 +4229,7 @@ export class AppScreen implements Component, Focusable {
         palette.text.dim(
           this.resumeSessionList.searchQuery
             ? `Backspace to delete · Enter to resume · Space to preview · Ctrl+R to rename · ${toggleHint} · Esc to clear`
-            : `↑/↓ to choose · Enter to resume · Space to preview · Ctrl+R to rename · ${toggleHint} · Esc to cancel`
+            : `↑/↓ to choose · Enter to resume · Space to preview · Ctrl+R to rename · ${toggleHint} · Esc to cancel`,
         ),
         width,
       ),
@@ -4148,6 +4268,14 @@ export class AppScreen implements Component, Focusable {
       }
 
       const modelsMeta = payload.models ?? [];
+      let openAIAccountStatus: OpenAIAccountAuthStatus | null = null;
+      if (modelsMeta.some((meta) => isOpenAIAccountProvider(meta.model_provider))) {
+        try {
+          openAIAccountStatus = await getOpenAIAccountAuthStatus(this.state.request);
+        } catch {
+          openAIAccountStatus = null;
+        }
+      }
       // 优先用后端 is_current 标记判断当前模型（同名模型仅靠名字无法区分），
       // 回退到 name-matching（兼容不带 is_current 的旧后端）
       const currentIdx = selectableWithOrigIdx.findIndex((entry) => {
@@ -4192,9 +4320,21 @@ export class AppScreen implements Component, Focusable {
         const provider = meta?.model_provider ? ` · ${meta.model_provider}` : "";
         const apiBase = meta?.api_base ? ` · ${meta.api_base}` : "";
         const reasoning = meta?.reasoning_level ? ` · reasoning:${meta.reasoning_level}` : "";
+        const isOpenAIAccount = isOpenAIAccountProvider(meta?.model_provider);
+        const availability = isOpenAIAccount
+          ? openAIAccountStatus === null
+            ? "auth status unavailable"
+            : isOpenAIAccountReady(openAIAccountStatus)
+              ? ""
+              : "login required"
+          : "";
+        const availabilityDescription = availability ? ` · unavailable:${availability}` : "";
         return {
-          label: `${i + 1}. ${displayName}${labelSuffix}${isCurrent ? " (current)" : ""}`,
-          description: `${provider}${apiBase}${reasoning}`.replace(/^ · /, ""),
+          label: `${i + 1}. ${displayName}${labelSuffix}${isCurrent ? " (current)" : ""}${availability ? ` (${availability})` : ""}`,
+          description: `${provider}${apiBase}${reasoning}${availabilityDescription}`.replace(
+            /^ · /,
+            "",
+          ),
           value: `${m}${MODEL_VALUE_SEPARATOR}${entry.origIdx}`,
         };
       });
@@ -4289,7 +4429,15 @@ export class AppScreen implements Component, Focusable {
 
       const list = new CheckboxList(groups, 10);
       list.onSelect = (selectedTools) => {
-        this.handleToolSelection(selectedTools, name, description, when_to_use, defaultPrompt, location, generate);
+        this.handleToolSelection(
+          selectedTools,
+          name,
+          description,
+          when_to_use,
+          defaultPrompt,
+          location,
+          generate,
+        );
       };
       list.onCancel = () => {
         this.toolSelector = null;
@@ -4307,9 +4455,7 @@ export class AppScreen implements Component, Focusable {
       };
       this.tui.requestRender();
     } catch (e) {
-      this.state.addItem(
-        addError(snapshot.sessionId, `获取工具列表失败: ${e}`),
-      );
+      this.state.addItem(addError(snapshot.sessionId, `获取工具列表失败: ${e}`));
       this.tui.requestRender();
     }
   }
@@ -4344,20 +4490,41 @@ export class AppScreen implements Component, Focusable {
   private createModelForm(mode: "add" | "edit", target?: { index: number }): ModelFormState {
     const meta = target ? this.modelList?.modelsMeta[target.index] : undefined;
     const fields: Record<ModelFormField, string> = {
-      model_name: mode === "edit" ? meta?.model_name ?? "" : "",
-      alias: mode === "edit" ? meta?.alias ?? "" : "",
-      api_base: mode === "edit" ? meta?.api_base ?? "" : "",
+      model_name: mode === "edit" ? (meta?.model_name ?? "") : "",
+      alias: mode === "edit" ? (meta?.alias ?? "") : "",
+      api_base: mode === "edit" ? (meta?.api_base ?? "") : "",
       api_key: "",
-      model_provider: mode === "edit"
-        ? meta?.model_provider ?? DEFAULT_MODEL_PROVIDER
-        : DEFAULT_MODEL_PROVIDER,
-      reasoning_level: mode === "edit" ? meta?.reasoning_level ?? "" : "",
+      model_provider:
+        mode === "edit" ? (meta?.model_provider ?? DEFAULT_MODEL_PROVIDER) : DEFAULT_MODEL_PROVIDER,
+      reasoning_level: mode === "edit" ? (meta?.reasoning_level ?? "") : "",
     };
+    const selectedField = MODEL_FORM_FIELDS.findIndex((field) =>
+      isModelConfigFieldEditable(field, fields.model_provider, mode),
+    );
     return {
       fields,
-      selectedField: 0,
+      selectedField: Math.max(0, selectedField),
       original: { ...fields },
     };
+  }
+
+  private isModelFormFieldEditable(state: ModelListState, field: ModelFormField): boolean {
+    const provider = state.form?.fields.model_provider ?? "";
+    return isModelConfigFieldEditable(field, provider, state.inputMode ?? "add");
+  }
+
+  private moveModelFormSelection(state: ModelListState, direction: -1 | 1): void {
+    const form = state.form;
+    if (!form) return;
+    for (let offset = 1; offset <= MODEL_FORM_FIELDS.length; offset++) {
+      const nextIndex =
+        (form.selectedField + direction * offset + MODEL_FORM_FIELDS.length) %
+        MODEL_FORM_FIELDS.length;
+      if (this.isModelFormFieldEditable(state, MODEL_FORM_FIELDS[nextIndex])) {
+        form.selectedField = nextIndex;
+        return;
+      }
+    }
   }
 
   private openModelInput(mode: "add" | "edit", target?: { name: string; index: number }): void {
@@ -4402,14 +4569,15 @@ export class AppScreen implements Component, Focusable {
     if (!form) return;
     state.inputError = undefined;
     if (matchesKey(data, "up")) {
-      form.selectedField = form.selectedField === 0 ? MODEL_FORM_FIELDS.length - 1 : form.selectedField - 1;
+      this.moveModelFormSelection(state, -1);
       return;
     }
     if (matchesKey(data, "down") || matchesKey(data, "tab")) {
-      form.selectedField = form.selectedField === MODEL_FORM_FIELDS.length - 1 ? 0 : form.selectedField + 1;
+      this.moveModelFormSelection(state, 1);
       return;
     }
     const field = MODEL_FORM_FIELDS[form.selectedField];
+    if (!this.isModelFormFieldEditable(state, field)) return;
     if (field === "reasoning_level" || field === "model_provider") {
       if (matchesKey(data, "left") || matchesKey(data, "backspace") || matchesKey(data, "delete")) {
         this.cycleModelFormOption(field, -1);
@@ -4434,10 +4602,14 @@ export class AppScreen implements Component, Focusable {
     }
   }
 
-  private cycleModelFormOption(field: "model_provider" | "reasoning_level", direction: -1 | 1): void {
+  private cycleModelFormOption(
+    field: "model_provider" | "reasoning_level",
+    direction: -1 | 1,
+  ): void {
     const form = this.modelList?.form;
     if (!form) return;
-    const options = field === "model_provider" ? MODEL_PROVIDER_OPTIONS : REASONING_LEVEL_OPTIONS;
+    const options =
+      field === "model_provider" ? MANUALLY_CREATABLE_MODEL_PROVIDERS : REASONING_LEVEL_OPTIONS;
     const current = form.fields[field].trim();
     const currentIndex = options.indexOf(current);
     const nextIndex = currentIndex >= 0
@@ -4451,6 +4623,7 @@ export class AppScreen implements Component, Focusable {
     if (!form) return {};
     const config: Record<string, string> = {};
     for (const field of MODEL_FORM_FIELDS) {
+      if (!this.isModelFormFieldEditable(state, field)) continue;
       const value = form.fields[field].trim();
       const configKey = field === "model_provider" ? "provider" : field;
       if (state.inputMode === "edit") {
@@ -4541,12 +4714,29 @@ export class AppScreen implements Component, Focusable {
     }
     if (state.inputMode === "add") {
       try {
-        await this.state.request("command.model", {
-          action: "add_model",
-          target: config.model_name,
-          config,
-        });
-        this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `Added model: ${config.alias || config.model_name}`, "m"));
+        const payload = await this.state.request<ModelMutationPayload>(
+          "command.model",
+          {
+            action: "add_model",
+            target: config.model_name,
+            config,
+          },
+          MODEL_REQUEST_TIMEOUT_MS,
+        );
+        if (payload.saved === true && payload.applied !== true) {
+          state.inputError =
+            payload.apply_error ??
+            "Model configuration was saved but not applied; restart or retry.";
+          this.tui.requestRender();
+          return;
+        }
+        this.state.addItem(
+          addInfo(
+            this.state.getSnapshot().sessionId,
+            `Added model: ${config.alias || config.model_name}`,
+            "m",
+          ),
+        );
         await this.state.refreshModelInfo();
         this.editor.setText("");
         await this.openModelList();
@@ -4567,17 +4757,29 @@ export class AppScreen implements Component, Focusable {
       return;
     }
     try {
-      const payload = await this.state.request<{ type?: string }>("command.model", {
-        action: "update_model",
-        index: state.target.index,
-        config,
-      });
+      const payload = await this.state.request<ModelMutationPayload>(
+        "command.model",
+        {
+          action: "update_model",
+          index: state.target.index,
+          config,
+        },
+        MODEL_REQUEST_TIMEOUT_MS,
+      );
       if (payload.type !== "model_updated") {
         state.inputError = "Failed to edit model: backend does not support model editing yet. Restart the TUI/backend and try again.";
         this.tui.requestRender();
         return;
       }
-      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `Updated model: ${state.target.name}`, "m"));
+      if (payload.saved === true && payload.applied !== true) {
+        state.inputError =
+          payload.apply_error ?? "Model configuration was saved but not applied; restart or retry.";
+        this.tui.requestRender();
+        return;
+      }
+      this.state.addItem(
+        addInfo(this.state.getSnapshot().sessionId, `Updated model: ${state.target.name}`, "m"),
+      );
       await this.state.refreshModelInfo();
       this.editor.setText("");
       await this.openModelList();
@@ -4602,9 +4804,9 @@ export class AppScreen implements Component, Focusable {
       model_provider: fields.model_provider.trim(),
       reasoning_level: fields.reasoning_level.trim(),
     };
-    const missing = MODEL_REQUIRED_FIELDS
-      .filter((field) => !(state.inputMode === "edit" && field === "api_key"))
-      .filter((field) => !trimmed[field]);
+    const missing = MODEL_REQUIRED_FIELDS.filter(
+      (field) => !(state.inputMode === "edit" && field === "api_key"),
+    ).filter((field) => !trimmed[field]);
     if (missing.length > 0) {
       return `Missing: ${missing.join(", ")}`;
     }
@@ -4623,8 +4825,14 @@ export class AppScreen implements Component, Focusable {
     if (trimmed.api_base && !/^https?:\/\//i.test(trimmed.api_base)) {
       return "api_base must start with http:// or https://";
     }
-    if (!MODEL_PROVIDER_OPTIONS.includes(trimmed.model_provider)) {
-      return `model_provider must be one of: ${MODEL_PROVIDER_OPTIONS.join(", ")}`;
+    const providerIsValid =
+      state.inputMode === "add"
+        ? isManuallyCreatableModelProvider(trimmed.model_provider)
+        : isSupportedModelProvider(trimmed.model_provider);
+    if (!providerIsValid) {
+      const options =
+        state.inputMode === "add" ? MANUALLY_CREATABLE_MODEL_PROVIDERS : SUPPORTED_MODEL_PROVIDERS;
+      return `model_provider must be one of: ${options.join(", ")}`;
     }
     if (!REASONING_LEVEL_OPTIONS.includes(trimmed.reasoning_level)) {
       return "reasoning_level must be default, off, low, medium, or high";
@@ -4645,16 +4853,36 @@ export class AppScreen implements Component, Focusable {
     const target = this.modelList?.target;
     if (!target) return;
     try {
-      await this.state.request("command.model", {
-        action: "delete_model",
-        index: target.index,
-      });
-      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `Deleted model: ${target.name}`, "m"));
+      const payload = await this.state.request<ModelMutationPayload>(
+        "command.model",
+        {
+          action: "delete_model",
+          index: target.index,
+        },
+        MODEL_REQUEST_TIMEOUT_MS,
+      );
+      if (payload.saved === true && payload.applied !== true) {
+        this.state.addItem(
+          addError(
+            this.state.getSnapshot().sessionId,
+            payload.apply_error ??
+              "Model configuration was saved but not applied; restart or retry.",
+          ),
+        );
+        await this.state.refreshModelInfo();
+        await this.openModelList();
+        return;
+      }
+      this.state.addItem(
+        addInfo(this.state.getSnapshot().sessionId, `Deleted model: ${target.name}`, "m"),
+      );
       await this.state.refreshModelInfo();
       await this.openModelList();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.state.addItem(addError(this.state.getSnapshot().sessionId, `Failed to delete model: ${message}`));
+      this.state.addItem(
+        addError(this.state.getSnapshot().sessionId, `Failed to delete model: ${message}`),
+      );
       this.returnToModelList();
     }
   }
@@ -4665,6 +4893,13 @@ export class AppScreen implements Component, Focusable {
     }
     // Parse "modelName\x00origIdx" format from SelectList (null separator avoids collision with model names)
     const { modelName, modelIndex } = this.parseModelValue(modelValue);
+    const selectedMeta =
+      modelIndex !== undefined
+        ? this.modelList?.modelsMeta[modelIndex]
+        : this.modelList?.modelsMeta.find(
+            (meta) =>
+              meta.name === modelName || meta.alias === modelName || meta.model_name === modelName,
+          );
 
     if (isReservedMultimodalModelKey(modelName)) {
       this.modelList = null;
@@ -4677,6 +4912,33 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
       return;
     }
+    if (selectedMeta && isOpenAIAccountProvider(selectedMeta.model_provider)) {
+      try {
+        const status = await getOpenAIAccountAuthStatus(this.state.request);
+        if (!isOpenAIAccountReady(status)) {
+          this.modelList = null;
+          this.state.addItem(
+            addError(
+              this.state.getSnapshot().sessionId,
+              `Model '${modelName}' is unavailable because OpenAI Account is logged out. Run /auth login first.`,
+            ),
+          );
+          this.tui.requestRender();
+          return;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.modelList = null;
+        this.state.addItem(
+          addError(
+            this.state.getSnapshot().sessionId,
+            `Cannot verify OpenAI Account status for '${modelName}': ${message}`,
+          ),
+        );
+        this.tui.requestRender();
+        return;
+      }
+    }
     this.modelList = null;
     try {
       const reqParams: Record<string, unknown> = { model: modelName };
@@ -4686,8 +4948,21 @@ export class AppScreen implements Component, Focusable {
       const payload = await this.state.request<{
         current?: string;
         requested?: string;
+        saved?: boolean;
         applied?: boolean;
-      }>("command.model", reqParams);
+        apply_error?: string;
+      }>("command.model", reqParams, MODEL_REQUEST_TIMEOUT_MS);
+      if (payload.applied !== true) {
+        this.state.addItem(
+          addError(
+            this.state.getSnapshot().sessionId,
+            payload.apply_error ??
+              "Model configuration was saved but not applied; restart or retry.",
+          ),
+        );
+        this.tui.requestRender();
+        return;
+      }
       const nextModel = payload.current ?? modelName;
       this.state.setModel(nextModel);
       this.state.addItem(
@@ -4738,9 +5013,7 @@ export class AppScreen implements Component, Focusable {
 
       const snapshot = this.state.getSnapshot();
       if (payload.error) {
-        this.state.addItem(
-          addError(snapshot.sessionId, `创建失败: ${payload.error}`),
-        );
+        this.state.addItem(addError(snapshot.sessionId, `创建失败: ${payload.error}`));
       } else {
         const generated = payload.generated ? " (LLM 生成)" : "";
         const locLabel = location !== "user" ? ` (${location})` : "";
@@ -4753,9 +5026,7 @@ export class AppScreen implements Component, Focusable {
         );
       }
     } catch (e) {
-      this.state.addItem(
-        addError(this.state.getSnapshot().sessionId, `创建失败: ${e}`),
-      );
+      this.state.addItem(addError(this.state.getSnapshot().sessionId, `创建失败: ${e}`));
     }
     this.tui.requestRender();
   }
@@ -4777,16 +5048,25 @@ export class AppScreen implements Component, Focusable {
     }
     if (this.modelList.phase === "delete_confirm") {
       return [
-        padToWidth(palette.status.error(`Delete model: ${this.modelList.target?.name ?? "unknown"}`), width),
+        padToWidth(
+          palette.status.error(`Delete model: ${this.modelList.target?.name ?? "unknown"}`),
+          width,
+        ),
         padToWidth(palette.text.dim("Enter confirm · Esc cancel"), width),
       ];
     }
     const listLines = this.modelList.list
       ? this.modelList.list.render(width)
-      : [padToWidth(palette.text.dim(this.modelList.emptyMessage ?? "No models configured"), width)];
-    const hint = this.modelList.models.length > 0
-      ? "↑/↓ choose · Enter switch · a add · e edit · d delete · Esc close"
-      : "a add · Esc close";
+      : [
+          padToWidth(
+            palette.text.dim(this.modelList.emptyMessage ?? "No models configured"),
+            width,
+          ),
+        ];
+    const hint =
+      this.modelList.models.length > 0
+        ? "↑/↓ choose · Enter switch · a add · e edit · d delete · Esc close"
+        : "a add · Esc close";
     return [
       padToWidth(
         palette.status.warning(`Available models (${this.modelList.models.length} total)`),
@@ -4802,35 +5082,62 @@ export class AppScreen implements Component, Focusable {
     const form = state?.form;
     if (!state || !form) return [];
     const activeField = MODEL_FORM_FIELDS[form.selectedField];
-    const activeValue = this.formatModelFormValue(activeField, form.fields[activeField], state.inputMode);
-    const activeHint = activeField === "reasoning_level"
-      ? "    ←/→ default, off, low, medium, high"
-      : activeField === "model_provider"
-        ? `    ←/→ ${MODEL_PROVIDER_OPTIONS.join(", ")}`
-        : "";
+    const activeEditable = this.isModelFormFieldEditable(state, activeField);
+    const activeValue = this.formatModelFormValue(
+      activeField,
+      form.fields[activeField],
+      state.inputMode,
+      form.fields.model_provider,
+    );
+    const activeHint = !activeEditable
+      ? "    managed by OAuth"
+      : activeField === "reasoning_level"
+        ? "    ←/→ default, off, low, medium, high"
+        : activeField === "model_provider"
+          ? `    ←/→ ${MANUALLY_CREATABLE_MODEL_PROVIDERS.join(", ")}`
+          : "";
     const lines = [
-      padToWidth(`${palette.text.primary(`${activeField}: ${activeValue}${END_CURSOR}`)}${palette.text.dim(activeHint)}`, width),
+      padToWidth(
+        `${palette.text.primary(`${activeField}: ${activeValue}${activeEditable ? END_CURSOR : ""}`)}${palette.text.dim(activeHint)}`,
+        width,
+      ),
     ];
     if (state.inputError) {
       lines.push(padToWidth(palette.status.error(`! ${state.inputError}`), width));
     }
     for (const [index, field] of MODEL_FORM_FIELDS.entries()) {
       const selected = index === form.selectedField;
-      const required = MODEL_REQUIRED_FIELDS.includes(field) && !(state.inputMode === "edit" && field === "api_key");
-      const label = `${selected ? "> " : "  "}${field}${required ? " *" : ""}`;
-      const value = this.formatModelFormValue(field, form.fields[field], state.inputMode);
+      const required =
+        MODEL_REQUIRED_FIELDS.includes(field) &&
+        !(state.inputMode === "edit" && field === "api_key");
+      const editable = this.isModelFormFieldEditable(state, field);
+      const label = `${selected ? "> " : "  "}${field}${required ? " *" : ""}${editable ? "" : " [managed]"}`;
+      const value = this.formatModelFormValue(
+        field,
+        form.fields[field],
+        state.inputMode,
+        form.fields.model_provider,
+      );
       const line = `${label.padEnd(24, " ")}${value}`;
       lines.push(padToWidth(selected ? palette.text.primary(line) : palette.text.dim(line), width));
     }
     return lines;
   }
 
-  private formatModelFormValue(field: ModelFormField, rawValue: string, mode?: "add" | "edit"): string {
+  private formatModelFormValue(
+    field: ModelFormField,
+    rawValue: string,
+    mode?: "add" | "edit",
+    provider = "",
+  ): string {
     if (field === "reasoning_level" && !rawValue) {
       return "<default>";
     }
     if (field !== "api_key") {
       return rawValue;
+    }
+    if (mode === "edit" && isOpenAIAccountProvider(provider)) {
+      return "<managed by OAuth>";
     }
     if (rawValue) {
       return "*".repeat(Math.min(rawValue.length, 12));
@@ -4890,13 +5197,25 @@ export class AppScreen implements Component, Focusable {
       if (payload.type === "detail" && payload.item) {
         const enabled = Boolean(payload.item.enabled !== false);
         const actionItems: SelectItem[] = [];
-        actionItems.push({ label: "View tools", value: "view_tools", description: "Browse tools from this server" });
+        actionItems.push({
+          label: "View tools",
+          value: "view_tools",
+          description: "Browse tools from this server",
+        });
         if (enabled) {
-          actionItems.push({ label: "Disable", value: "disable", description: "Stop and disable this server" });
+          actionItems.push({
+            label: "Disable",
+            value: "disable",
+            description: "Stop and disable this server",
+          });
         } else {
           actionItems.push({ label: "Enable", value: "enable", description: "Enable this server" });
         }
-        actionItems.push({ label: "Remove", value: "remove", description: "Remove this server from config" });
+        actionItems.push({
+          label: "Remove",
+          value: "remove",
+          description: "Remove this server from config",
+        });
         const actionsList = new SelectList(actionItems, actionItems.length, selectListTheme, {
           minPrimaryColumnWidth: 24,
           maxPrimaryColumnWidth: 42,
@@ -4982,18 +5301,29 @@ export class AppScreen implements Component, Focusable {
     boxedLines.push(padToWidth(palette.status.warning(`MCP Server: ${serverName}`), contentWidth));
 
     // Detail fields
-    boxedLines.push(padToWidth(
-      `  Status: ${enabled ? palette.status.success("✔ enabled") : palette.text.dim("○ disabled")}`,
-      contentWidth,
-    ));
+    boxedLines.push(
+      padToWidth(
+        `  Status: ${enabled ? palette.status.success("✔ enabled") : palette.text.dim("○ disabled")}`,
+        contentWidth,
+      ),
+    );
     if (info.transport) {
-      boxedLines.push(padToWidth(palette.text.dim(`  Transport: ${String(info.transport)}`), contentWidth));
+      boxedLines.push(
+        padToWidth(palette.text.dim(`  Transport: ${String(info.transport)}`), contentWidth),
+      );
     }
     if (info.command) {
-      boxedLines.push(padToWidth(palette.text.dim(`  Command: ${String(info.command)}`), contentWidth));
+      boxedLines.push(
+        padToWidth(palette.text.dim(`  Command: ${String(info.command)}`), contentWidth),
+      );
     }
     if (typeof info.tool_count === "number") {
-      boxedLines.push(padToWidth(palette.text.dim(`  Tools: ${info.tool_count} tool${info.tool_count === 1 ? "" : "s"}`), contentWidth));
+      boxedLines.push(
+        padToWidth(
+          palette.text.dim(`  Tools: ${info.tool_count} tool${info.tool_count === 1 ? "" : "s"}`),
+          contentWidth,
+        ),
+      );
     }
     if (info.args) {
       const argsStr = Array.isArray(info.args) ? info.args.join(" ") : String(info.args);
@@ -5003,7 +5333,9 @@ export class AppScreen implements Component, Focusable {
       boxedLines.push(padToWidth(palette.text.dim(`  URL: ${String(info.url)}`), contentWidth));
     }
     if (info.timeout_s) {
-      boxedLines.push(padToWidth(palette.text.dim(`  Timeout: ${String(info.timeout_s)}s`), contentWidth));
+      boxedLines.push(
+        padToWidth(palette.text.dim(`  Timeout: ${String(info.timeout_s)}s`), contentWidth),
+      );
     }
 
     // Blank separator line
@@ -5017,7 +5349,9 @@ export class AppScreen implements Component, Focusable {
     lines.push(" " + borderFn("╭" + "─".repeat(innerWidth) + "╮"));
     // Boxed content
     for (const bl of boxedLines) {
-      lines.push(" " + borderFn(borderV) + " " + padToWidth(bl, contentWidth) + " " + borderFn(borderV));
+      lines.push(
+        " " + borderFn(borderV) + " " + padToWidth(bl, contentWidth) + " " + borderFn(borderV),
+      );
     }
     // Bottom border
     lines.push(" " + borderFn("╰" + "─".repeat(innerWidth) + "╯"));
@@ -5038,12 +5372,21 @@ export class AppScreen implements Component, Focusable {
       const toolItems: SelectItem[] = tools.map((t) => ({
         label: t.name,
         value: t.id,
-        description: t.description ? (t.description.length > 60 ? t.description.slice(0, 57) + "..." : t.description) : "",
+        description: t.description
+          ? t.description.length > 60
+            ? t.description.slice(0, 57) + "..."
+            : t.description
+          : "",
       }));
-      const list = new SelectList(toolItems, Math.min(Math.max(toolItems.length, 1), 10), selectListTheme, {
-        minPrimaryColumnWidth: 24,
-        maxPrimaryColumnWidth: 50,
-      });
+      const list = new SelectList(
+        toolItems,
+        Math.min(Math.max(toolItems.length, 1), 10),
+        selectListTheme,
+        {
+          minPrimaryColumnWidth: 24,
+          maxPrimaryColumnWidth: 50,
+        },
+      );
       list.onSelect = (item) => {
         const tool = tools.find((t) => t.id === item.value);
         if (tool) {
@@ -5077,10 +5420,22 @@ export class AppScreen implements Component, Focusable {
     const innerWidth = contentWidth + 2;
 
     const boxedLines: string[] = [];
-    boxedLines.push(padToWidth(palette.status.warning(`Tools for ${serverName} (${tools.length} tool${tools.length === 1 ? "" : "s"})`), contentWidth));
+    boxedLines.push(
+      padToWidth(
+        palette.status.warning(
+          `Tools for ${serverName} (${tools.length} tool${tools.length === 1 ? "" : "s"})`,
+        ),
+        contentWidth,
+      ),
+    );
 
     if (tools.length === 0) {
-      boxedLines.push(padToWidth(palette.text.dim("  No tools available. Enable the server first."), contentWidth));
+      boxedLines.push(
+        padToWidth(
+          palette.text.dim("  No tools available. Enable the server first."),
+          contentWidth,
+        ),
+      );
     } else {
       const listLines = list.render(contentWidth);
       boxedLines.push(...listLines);
@@ -5089,7 +5444,9 @@ export class AppScreen implements Component, Focusable {
     // Top border
     lines.push(" " + borderFn("╭" + "─".repeat(innerWidth) + "╮"));
     for (const bl of boxedLines) {
-      lines.push(" " + borderFn(borderV) + " " + padToWidth(bl, contentWidth) + " " + borderFn(borderV));
+      lines.push(
+        " " + borderFn(borderV) + " " + padToWidth(bl, contentWidth) + " " + borderFn(borderV),
+      );
     }
     lines.push(" " + borderFn("╰" + "─".repeat(innerWidth) + "╯"));
 
@@ -5110,7 +5467,9 @@ export class AppScreen implements Component, Focusable {
     const boxedLines: string[] = [];
 
     // Title: toolname (serverName)
-    boxedLines.push(padToWidth(palette.status.warning(`${tool.name} (${serverName})`), contentWidth));
+    boxedLines.push(
+      padToWidth(palette.status.warning(`${tool.name} (${serverName})`), contentWidth),
+    );
 
     // Tool name / Full name
     boxedLines.push(padToWidth("", contentWidth));
@@ -5152,7 +5511,9 @@ export class AppScreen implements Component, Focusable {
     // Top border
     lines.push(" " + borderFn("╭" + "─".repeat(innerWidth) + "╮"));
     for (const bl of boxedLines) {
-      lines.push(" " + borderFn(borderV) + " " + padToWidth(bl, contentWidth) + " " + borderFn(borderV));
+      lines.push(
+        " " + borderFn(borderV) + " " + padToWidth(bl, contentWidth) + " " + borderFn(borderV),
+      );
     }
     lines.push(" " + borderFn("╰" + "─".repeat(innerWidth) + "╯"));
 
@@ -6140,12 +6501,7 @@ export class AppScreen implements Component, Focusable {
     if (state.loading || workflows.length === 0) {
       return [...headerLines, "", helpLine];
     }
-    return [
-      ...headerLines,
-      "",
-      ...state.list.render(width),
-      helpLine,
-    ];
+    return [...headerLines, "", ...state.list.render(width), helpLine];
   }
 
   private countPendingListWaitingEntries(
@@ -7236,7 +7592,12 @@ export class AppScreen implements Component, Focusable {
   private buildOutgoingMessage(text: string): { content: string; attachments: FileAttachment[] } {
     const expandedText = this.expandPastedText(text);
     return {
-      content: this.expandPastedText(text.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+\n/g, "\n").trim()),
+      content: this.expandPastedText(
+        text
+          .replace(/[ \t]{2,}/g, " ")
+          .replace(/[ \t]+\n/g, "\n")
+          .trim(),
+      ),
       attachments: this.collectComposerAttachments(expandedText),
     };
   }
@@ -7356,10 +7717,20 @@ export class AppScreen implements Component, Focusable {
       lines.push(padToWidth(palette.status.warning(title), width));
     } else if (state.phase === "select_value") {
       const schema = state.schemaList.find((s) => s.key === state.selectedKey);
-      lines.push(padToWidth(palette.status.warning(`选择 "${schema?.label ?? state.selectedKey}" 的值`), width));
+      lines.push(
+        padToWidth(
+          palette.status.warning(`选择 "${schema?.label ?? state.selectedKey}" 的值`),
+          width,
+        ),
+      );
     } else {
       const schema = state.schemaList.find((s) => s.key === state.selectedKey);
-      lines.push(padToWidth(palette.status.warning(`输入 "${schema?.label ?? state.selectedKey}" 的新值`), width));
+      lines.push(
+        padToWidth(
+          palette.status.warning(`输入 "${schema?.label ?? state.selectedKey}" 的新值`),
+          width,
+        ),
+      );
     }
 
     lines.push(blank);  // Gap between title and content
@@ -7370,7 +7741,9 @@ export class AppScreen implements Component, Focusable {
         ? "输入搜索 · ↑/↓ 选择 · Enter/空格 重置 · / 搜索 · Esc 关闭"
         : "输入搜索 · ↑/↓ 选择 · Enter/空格 修改 · / 搜索 · Esc 关闭";
       if (state.searchMode) {
-        lines.push(padToWidth(palette.text.primary(`搜索: ${state.searchQuery}${END_CURSOR}`), width));
+        lines.push(
+          padToWidth(palette.text.primary(`搜索: ${state.searchQuery}${END_CURSOR}`), width),
+        );
       } else {
         lines.push(padToWidth(palette.text.dim(searchHint), width));
       }
@@ -7441,9 +7814,7 @@ export class AppScreen implements Component, Focusable {
     this.tui.requestRender();
   }
 
-  private handleConfigItemSelectionFromFlatList(
-    schema: ConfigItemSchema,
-  ): void {
+  private handleConfigItemSelectionFromFlatList(schema: ConfigItemSchema): void {
     const currentValues = this.configEditorState!.currentValues;
     const mode = this.configEditorState!.mode;
 
@@ -7453,7 +7824,9 @@ export class AppScreen implements Component, Focusable {
       if (defaultValue) {
         void this.applyConfigEditorSetAndStay(schema.key, defaultValue, schema, currentValues);
       } else {
-        this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `${schema.key} has no default value`, "c"));
+        this.state.addItem(
+          addInfo(this.state.getSnapshot().sessionId, `${schema.key} has no default value`, "c"),
+        );
       }
       return;
     }
@@ -7530,7 +7903,13 @@ export class AppScreen implements Component, Focusable {
     if (key === "theme") {
       this.state.setThemeName(value as import("./theme.js").ThemeName);
       currentValues[key] = value;
-      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, `✓ ${key}: ${valueDisplay} (${statusLabel})`, "c"));
+      this.state.addItem(
+        addInfo(
+          this.state.getSnapshot().sessionId,
+          `✓ ${key}: ${valueDisplay} (${statusLabel})`,
+          "c",
+        ),
+      );
       this.refreshConfigEditorList();
       return;
     }
@@ -7546,7 +7925,9 @@ export class AppScreen implements Component, Focusable {
       this.state.addItem(addInfo(this.state.getSnapshot().sessionId, msg, "c"));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.state.addItem(addError(this.state.getSnapshot().sessionId, `config.set failed: ${message}`));
+      this.state.addItem(
+        addError(this.state.getSnapshot().sessionId, `config.set failed: ${message}`),
+      );
     }
     this.refreshConfigEditorList();
   }
@@ -7623,7 +8004,9 @@ export class AppScreen implements Component, Focusable {
     const editorMode: ConfigEditorMode = mode ?? "edit";
     const schemaList = configPayload?.schema ?? [];
     if (schemaList.length === 0) {
-      this.state.addItem(addError(this.state.getSnapshot().sessionId, "No config schema available"));
+      this.state.addItem(
+        addError(this.state.getSnapshot().sessionId, "No config schema available"),
+      );
       return;
     }
     const currentValues: Record<string, string> = {};
@@ -7700,10 +8083,9 @@ export class AppScreen implements Component, Focusable {
     // Fetch status payload
     let statusPayload: import("../core/commands/builtins/status.js").StatusPayload | null = null;
     try {
-      statusPayload = await this.state.request<import("../core/commands/builtins/status.js").StatusPayload>(
-        "command.status",
-        {},
-      );
+      statusPayload = await this.state.request<
+        import("../core/commands/builtins/status.js").StatusPayload
+      >("command.status", {});
     } catch {
       // proceed with null — tab will show placeholder
     }
@@ -7711,10 +8093,9 @@ export class AppScreen implements Component, Focusable {
     // Fetch config payload (needed for Config tab)
     let configPayload: (Record<string, unknown> & { schema?: ConfigItemSchema[] }) | null = null;
     try {
-      configPayload = await this.state.request<Record<string, unknown> & { schema?: ConfigItemSchema[] }>(
-        "config.get",
-        {},
-      );
+      configPayload = await this.state.request<
+        Record<string, unknown> & { schema?: ConfigItemSchema[] }
+      >("config.get", {});
     } catch {
       // proceed with null
     }
@@ -7744,10 +8125,15 @@ export class AppScreen implements Component, Focusable {
           ? this.buildUsageTabItems()
           : this.buildConfigTabItems(configPayload, searchQuery);
 
-    const list = new SelectList(items, tab === "status" ? items.length : Math.min(Math.max(items.length, 1), 10), selectListTheme, {
-      minPrimaryColumnWidth: 20,
-      maxPrimaryColumnWidth: 50,
-    });
+    const list = new SelectList(
+      items,
+      tab === "status" ? items.length : Math.min(Math.max(items.length, 1), 10),
+      selectListTheme,
+      {
+        minPrimaryColumnWidth: 20,
+        maxPrimaryColumnWidth: 50,
+      },
+    );
     list.onSelect = (item) => {
       if (tab === "config" && item.value !== "__display__") {
         this.transitionToConfigEditor(item.value);
@@ -7768,14 +8154,34 @@ export class AppScreen implements Component, Focusable {
     const snapshot = this.state.getSnapshot();
     const items: SelectItem[] = [
       { value: "__display__", label: `version: ${payload.version || "unknown"}`, description: "" },
-      { value: "__display__", label: `session: ${payload.session_id || snapshot.sessionId}`, description: "" },
-      { value: "__display__", label: `name: ${snapshot.sessionTitle || "/rename to add a name"}`, description: "" },
+      {
+        value: "__display__",
+        label: `session: ${payload.session_id || snapshot.sessionId}`,
+        description: "",
+      },
+      {
+        value: "__display__",
+        label: `name: ${snapshot.sessionTitle || "/rename to add a name"}`,
+        description: "",
+      },
       { value: "__display__", label: `cwd: ${payload.cwd || "unknown"}`, description: "" },
       { value: "__display__", label: `mode: ${snapshot.mode}`, description: "" },
       { value: "__display__", label: `model: ${payload.model || "unknown"}`, description: "" },
-      { value: "__display__", label: `provider: ${payload.provider || "unknown"}`, description: "" },
-      { value: "__display__", label: `api_base: ${payload.api_base || "unknown"}`, description: "" },
-      { value: "__display__", label: `connection: ${payload.connection_status || snapshot.connectionStatus}`, description: "" },
+      {
+        value: "__display__",
+        label: `provider: ${payload.provider || "unknown"}`,
+        description: "",
+      },
+      {
+        value: "__display__",
+        label: `api_base: ${payload.api_base || "unknown"}`,
+        description: "",
+      },
+      {
+        value: "__display__",
+        label: `connection: ${payload.connection_status || snapshot.connectionStatus}`,
+        description: "",
+      },
     ];
 
     const mcpServers = payload.mcp_servers ?? [];
@@ -7791,7 +8197,11 @@ export class AppScreen implements Component, Focusable {
     for (const s of sources) {
       items.push({ value: "__display__", label: `config_source: ${s}`, description: "" });
     }
-    items.push({ value: "__display__", label: `config_path: ${payload.config_path || "unknown"}`, description: "" });
+    items.push({
+      value: "__display__",
+      label: `config_path: ${payload.config_path || "unknown"}`,
+      description: "",
+    });
 
     const warnings = payload.memory_warnings ?? [];
     for (const w of warnings) {
@@ -7805,14 +8215,30 @@ export class AppScreen implements Component, Focusable {
     const summary = this.state.getUsageSummary();
     const fmt = (n: number) => n.toLocaleString("en-US");
     const items: SelectItem[] = [
-      { value: "__display__", label: `input_tokens: ${fmt(summary.total_input_tokens)}`, description: "" },
-      { value: "__display__", label: `output_tokens: ${fmt(summary.total_output_tokens)}`, description: "" },
-      { value: "__display__", label: `total_tokens: ${fmt(summary.total_tokens)}`, description: "" },
+      {
+        value: "__display__",
+        label: `input_tokens: ${fmt(summary.total_input_tokens)}`,
+        description: "",
+      },
+      {
+        value: "__display__",
+        label: `output_tokens: ${fmt(summary.total_output_tokens)}`,
+        description: "",
+      },
+      {
+        value: "__display__",
+        label: `total_tokens: ${fmt(summary.total_tokens)}`,
+        description: "",
+      },
     ];
 
     for (const entry of summary.byModel) {
       items.push(
-        { value: "__display__", label: `model: ${entry.model}`, description: `${fmt(entry.total_tokens)} tokens` },
+        {
+          value: "__display__",
+          label: `model: ${entry.model}`,
+          description: `${fmt(entry.total_tokens)} tokens`,
+        },
         { value: "__display__", label: `  input`, description: fmt(entry.input_tokens) },
         { value: "__display__", label: `  output`, description: fmt(entry.output_tokens) },
       );
@@ -7842,7 +8268,9 @@ export class AppScreen implements Component, Focusable {
       : schemaList;
 
     if (filteredSchemaList.length === 0) {
-      return [{ value: "__display__", label: `No config items match "${searchQuery}"`, description: "" }];
+      return [
+        { value: "__display__", label: `No config items match "${searchQuery}"`, description: "" },
+      ];
     }
 
     const groups: Record<string, ConfigItemSchema[]> = {};
@@ -7855,7 +8283,11 @@ export class AppScreen implements Component, Focusable {
     const items: SelectItem[] = [];
     for (const groupName of Object.keys(groups)) {
       const groupSchemas = groups[groupName];
-      items.push({ value: "__display__", label: groupName, description: `${groupSchemas.length} items` });
+      items.push({
+        value: "__display__",
+        label: groupName,
+        description: `${groupSchemas.length} items`,
+      });
       for (const schema of groupSchemas) {
         const val = String(configPayload[schema.key] ?? "");
         const displayVal =
@@ -7927,7 +8359,14 @@ export class AppScreen implements Component, Focusable {
       lines.push(padToWidth(palette.status.warning("Status"), width));
     }
     lines.push(...this.statusViewState.list.render(width));
-    lines.push(padToWidth(palette.text.dim(this.getTabHint(this.statusViewState.tab, this.statusViewState.searchMode)), width));
+    lines.push(
+      padToWidth(
+        palette.text.dim(
+          this.getTabHint(this.statusViewState.tab, this.statusViewState.searchMode),
+        ),
+        width,
+      ),
+    );
     return lines;
   }
 
@@ -7960,19 +8399,17 @@ export class AppScreen implements Component, Focusable {
   private async refreshStatusViewPayloads(): Promise<void> {
     if (!this.statusViewState) return;
     try {
-      const statusPayload = await this.state.request<import("../core/commands/builtins/status.js").StatusPayload>(
-        "command.status",
-        {},
-      );
+      const statusPayload = await this.state.request<
+        import("../core/commands/builtins/status.js").StatusPayload
+      >("command.status", {});
       this.statusViewState.statusPayload = statusPayload;
     } catch {
       // keep stale payload if refresh fails
     }
     try {
-      const configPayload = await this.state.request<Record<string, unknown> & { schema?: ConfigItemSchema[] }>(
-        "config.get",
-        {},
-      );
+      const configPayload = await this.state.request<
+        Record<string, unknown> & { schema?: ConfigItemSchema[] }
+      >("config.get", {});
       this.statusViewState.configPayload = configPayload;
     } catch {
       // keep stale payload if refresh fails
@@ -8125,7 +8562,8 @@ export class AppScreen implements Component, Focusable {
     const cwd = getCurrentCwd() || process.cwd();
     return extractAttachmentsFromText(text, {
       cwd,
-      classifyAttachment: (path) => (this.isAcceptedAttachment(path) ? (isImageAttachment(path) ? "image" : "file") : null),
+      classifyAttachment: (path) =>
+        this.isAcceptedAttachment(path) ? (isImageAttachment(path) ? "image" : "file") : null,
     }).map(({ resolvedPath, ...attachment }) => attachment);
   }
 
@@ -8416,122 +8854,138 @@ export class AppScreen implements Component, Focusable {
         description: command.description,
         getArgumentCompletions: hasAnyCompletion(command)
           ? async (argumentPrefix: string): Promise<AutocompleteItem[] | null> => {
-            const trimmed = argumentPrefix.trim();
-            // Traverse subcommand chain to find the deepest command with completion
-            let currentCommand: typeof command = command;
-            let matchedPath: string[] = [];
-            let remainingTokens: string[] = [];
+              const trimmed = argumentPrefix.trim();
+              // Traverse subcommand chain to find the deepest command with completion
+              let currentCommand: typeof command = command;
+              let matchedPath: string[] = [];
+              let remainingTokens: string[] = [];
 
-            if (currentCommand.subCommands?.length && trimmed.length > 0) {
-              const tokens = trimmed.split(/\s+/).filter(Boolean);
-              let matchIndex = 0;
+              if (currentCommand.subCommands?.length && trimmed.length > 0) {
+                const tokens = trimmed.split(/\s+/).filter(Boolean);
+                let matchIndex = 0;
 
-              for (let i = 0; i < tokens.length; i++) {
-                const token = tokens[i];
-                const matchedSub = currentCommand.subCommands?.find(
-                  (sub) => sub.name === token || sub.altNames?.includes(token)
-                );
-                if (!matchedSub) {
-                  // No more subcommand matches, remaining tokens are args
-                  remainingTokens = tokens.slice(i);
-                  break;
+                for (let i = 0; i < tokens.length; i++) {
+                  const token = tokens[i];
+                  const matchedSub = currentCommand.subCommands?.find(
+                    (sub) => sub.name === token || sub.altNames?.includes(token),
+                  );
+                  if (!matchedSub) {
+                    // No more subcommand matches, remaining tokens are args
+                    remainingTokens = tokens.slice(i);
+                    break;
+                  }
+
+                  matchedPath.push(matchedSub.name);
+                  currentCommand = matchedSub;
+                  matchIndex = i + 1;
                 }
 
-                matchedPath.push(matchedSub.name);
-                currentCommand = matchedSub;
-                matchIndex = i + 1;
+                // If all tokens matched subcommands, remainingTokens is empty
+                if (matchIndex >= tokens.length) {
+                  remainingTokens = [];
+                }
               }
 
-              // If all tokens matched subcommands, remainingTokens is empty
-              if (matchIndex >= tokens.length) {
-                remainingTokens = [];
-              }
-            }
+              // Use the deepest matched command's completion if available
+              if (currentCommand.completion) {
+                if (currentCommand.name === "mode") {
+                  return buildModeAutocompleteItems();
+                }
+                // Special handling for auto-harness completions with descriptions
+                // Check top-level command name (command.name) since matchedPath only contains subcommands
+                if (command.name === "auto-harness") {
+                  const remainingArgs =
+                    remainingTokens.length > 0 ? remainingTokens.join(" ") : trimmed;
+                  const items = await currentCommand.completion(
+                    this.state.getCommandContext(),
+                    remainingArgs,
+                  );
+                  const prefix = matchedPath.length > 0 ? matchedPath.join(" ") + " " : "";
 
-            // Use the deepest matched command's completion if available
-            if (currentCommand.completion) {
-              if (currentCommand.name === "mode") {
-                return buildModeAutocompleteItems();
-              }
-              // Special handling for auto-harness completions with descriptions
-              // Check top-level command name (command.name) since matchedPath only contains subcommands
-              if (command.name === "auto-harness") {
-                const remainingArgs = remainingTokens.length > 0 ? remainingTokens.join(" ") : trimmed;
-                const items = await currentCommand.completion(this.state.getCommandContext(), remainingArgs);
-                const prefix = matchedPath.length > 0 ? matchedPath.join(" ") + " " : "";
+                  // Map completions to AutocompleteItem with descriptions
+                  return items.map((value) => {
+                    let desc = "";
 
-                // Map completions to AutocompleteItem with descriptions
-                return items.map((value) => {
-                  let desc = "";
-
-                  // Check for subcommand descriptions (schedule -> start, list, etc.)
-                  if (currentCommand.subCommands) {
-                    const subCmd = currentCommand.subCommands.find(s => value.includes(s.name) || value === s.name);
-                    if (subCmd) {
-                      desc = subCmd.description;
+                    // Check for subcommand descriptions (schedule -> start, list, etc.)
+                    if (currentCommand.subCommands) {
+                      const subCmd = currentCommand.subCommands.find(
+                        (s) => value.includes(s.name) || value === s.name,
+                      );
+                      if (subCmd) {
+                        desc = subCmd.description;
+                      }
                     }
-                  }
 
-                  // Check for flag descriptions (--interval, --pipeline, -i, -p)
-                  const flagMatch = Object.keys(FLAG_OPTIONS).find(f => value.includes(f));
-                  if (flagMatch) {
-                    const flagDesc = FLAG_OPTIONS[flagMatch as keyof typeof FLAG_OPTIONS]?.desc || "";
-                    desc = desc ? `${desc} | ${flagDesc}` : flagDesc;
-                  }
+                    // Check for flag descriptions (--interval, --pipeline, -i, -p)
+                    const flagMatch = Object.keys(FLAG_OPTIONS).find((f) => value.includes(f));
+                    if (flagMatch) {
+                      const flagDesc =
+                        FLAG_OPTIONS[flagMatch as keyof typeof FLAG_OPTIONS]?.desc || "";
+                      desc = desc ? `${desc} | ${flagDesc}` : flagDesc;
+                    }
 
-                  // Check for pipeline descriptions
-                  const pipelineName = PIPELINE_VALUES.find((p: string) => value.includes(p));
-                  if (pipelineName) {
-                    const pipelineDesc = PIPELINE_OPTIONS[pipelineName as keyof typeof PIPELINE_OPTIONS]?.desc || "";
-                    desc = desc ? `${desc} | ${pipelineDesc}` : pipelineDesc;
-                  }
+                    // Check for pipeline descriptions
+                    const pipelineName = PIPELINE_VALUES.find((p: string) => value.includes(p));
+                    if (pipelineName) {
+                      const pipelineDesc =
+                        PIPELINE_OPTIONS[pipelineName as keyof typeof PIPELINE_OPTIONS]?.desc || "";
+                      desc = desc ? `${desc} | ${pipelineDesc}` : pipelineDesc;
+                    }
 
-                  // Check for interval descriptions
-                  const intervalValue = INTERVAL_VALUES.find((v: string) => {
-                    const parts = value.split(/\s+/);
-                    return parts.includes(v) && (parts.includes("--interval") || parts.includes("-i"));
+                    // Check for interval descriptions
+                    const intervalValue = INTERVAL_VALUES.find((v: string) => {
+                      const parts = value.split(/\s+/);
+                      return (
+                        parts.includes(v) && (parts.includes("--interval") || parts.includes("-i"))
+                      );
+                    });
+                    if (intervalValue) {
+                      const intervalDesc =
+                        INTERVAL_OPTIONS[intervalValue as keyof typeof INTERVAL_OPTIONS]?.desc ||
+                        "";
+                      desc = desc ? `${desc} | ${intervalDesc}` : intervalDesc;
+                    }
+
+                    return {
+                      value: prefix + value,
+                      label: value,
+                      description: desc,
+                    };
                   });
-                  if (intervalValue) {
-                    const intervalDesc = INTERVAL_OPTIONS[intervalValue as keyof typeof INTERVAL_OPTIONS]?.desc || "";
-                    desc = desc ? `${desc} | ${intervalDesc}` : intervalDesc;
-                  }
-
-                  return {
-                    value: prefix + value,
-                    label: value,
-                    description: desc,
-                  };
-                });
-              }
-              const remainingArgs = remainingTokens.length > 0 ? remainingTokens.join(" ") : trimmed;
-              const items = await currentCommand.completion(this.state.getCommandContext(), remainingArgs);
-              const prefix = matchedPath.length > 0 ? matchedPath.join(" ") + " " : "";
-              const suffix = currentCommand.completionSuffix ?? "";
-              return items.map((value) => ({
-                value: prefix + value + suffix,
-                label: value,
-                description: "",
-              }));
-            }
-
-            // 子命令名补全：当输入前缀未精确匹配任何子命令时，
-            // 提示以该前缀开头的子命令名（如 /memory edi → edit）。
-            // 输入为空时提示全部子命令（如 /memory <space>）。
-            if (matchedPath.length === 0 && command.subCommands?.length) {
-              const prefix = trimmed.toLowerCase();
-              const matchingSubs = command.subCommands.filter(
-                (sub) => !prefix || sub.name.toLowerCase().startsWith(prefix),
-              );
-              if (matchingSubs.length > 0) {
-                return matchingSubs.map((sub) => ({
-                  label: sub.name,
-                  description: sub.description ?? "",
-                  value: sub.name,
-                  usage: sub.usage,
-                  example: sub.example,
+                }
+                const remainingArgs =
+                  remainingTokens.length > 0 ? remainingTokens.join(" ") : trimmed;
+                const items = await currentCommand.completion(
+                  this.state.getCommandContext(),
+                  remainingArgs,
+                );
+                const prefix = matchedPath.length > 0 ? matchedPath.join(" ") + " " : "";
+                const suffix = currentCommand.completionSuffix ?? "";
+                return items.map((value) => ({
+                  value: prefix + value + suffix,
+                  label: value,
+                  description: "",
                 }));
               }
-            }
+
+              // 子命令名补全：当输入前缀未精确匹配任何子命令时，
+              // 提示以该前缀开头的子命令名（如 /memory edi → edit）。
+              // 输入为空时提示全部子命令（如 /memory <space>）。
+              if (matchedPath.length === 0 && command.subCommands?.length) {
+                const prefix = trimmed.toLowerCase();
+                const matchingSubs = command.subCommands.filter(
+                  (sub) => !prefix || sub.name.toLowerCase().startsWith(prefix),
+                );
+                if (matchingSubs.length > 0) {
+                  return matchingSubs.map((sub) => ({
+                    label: sub.name,
+                    description: sub.description ?? "",
+                    value: sub.name,
+                    usage: sub.usage,
+                    example: sub.example,
+                  }));
+                }
+              }
 
             return null;
           }
@@ -8575,7 +9029,9 @@ export class AppScreen implements Component, Focusable {
         pendingQuestion.planApprovalKind,
       );
       lines.push(
-        ...wrapPlainText(title, width).map((line) => padToWidth(palette.status.warning(line), width)),
+        ...wrapPlainText(title, width).map((line) =>
+          padToWidth(palette.status.warning(line), width),
+        ),
       );
     } else if (permissionRequest && !this.otherInputMode) {
       const summary = parsePermissionSummary(question.question);
@@ -8819,13 +9275,15 @@ export class AppScreen implements Component, Focusable {
     const question =
       pendingQuestion.questions[this.activeQuestionIndex] ?? pendingQuestion.questions[0];
     const selected = this.questionList.getSelectedItem();
-    return !!question &&
+    return (
+      !!question &&
       !!selected &&
       shouldAppendPlanRejectFeedback(
         pendingQuestion.source,
         selected.value,
         pendingQuestion.planApprovalKind,
-      );
+      )
+    );
   }
 
   private isInlinePlanRejectCursorInput(data: string): boolean {
@@ -8898,7 +9356,9 @@ export class AppScreen implements Component, Focusable {
         this.handleMultiSelectConfirm(selectedValues);
       };
       checkboxList.onCancel = () => {
-        this.handleQuestionSelection("");
+        if (!this.state.cancelQuestion()) {
+          this.handleQuestionSelection("");
+        }
       };
       this.questionCheckboxList = checkboxList;
       this.setMouseTrackingEnabled(true);
@@ -8982,6 +9442,9 @@ export class AppScreen implements Component, Focusable {
       this.handleQuestionSelection(item.value);
     };
     list.onCancel = () => {
+      if (this.state.cancelQuestion()) {
+        return;
+      }
       const reject = question.options.find((option) => option.label === "拒绝");
       if (reject) {
         this.handleQuestionSelection(reject.label);

@@ -256,11 +256,18 @@ async def test_web_channel_invoke_method_handler_injects_user_id():
 @pytest.mark.asyncio
 async def test_openai_account_unexpected_error_uses_method_dispatcher(monkeypatch):
     channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
-    _register_web_handlers(WebHandlersBindParams(channel=channel))
     responses: list[dict[str, Any]] = []
 
-    def raise_unexpected_error():
-        raise RuntimeError("unexpected OAuth failure")
+    class UnexpectedOpenAIAccountService:
+        def status(self):
+            raise RuntimeError("unexpected OAuth failure")
+
+    _register_web_handlers(
+        WebHandlersBindParams(
+            channel=channel,
+            openai_account_service=UnexpectedOpenAIAccountService(),
+        )
+    )
 
     async def capture_response(ws, req_id, *, ok, payload=None, error=None, code=None):
         responses.append({
@@ -271,10 +278,6 @@ async def test_openai_account_unexpected_error_uses_method_dispatcher(monkeypatc
             "code": code,
         })
 
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._openai_account_auth_status_payload",
-        raise_unexpected_error,
-    )
     monkeypatch.setattr(channel, "send_response", capture_response)
     handler = channel._method_handlers["openai_account.auth.status"]
 
