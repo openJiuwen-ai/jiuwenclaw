@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import threading
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping
@@ -12,6 +13,7 @@ from typing import TypeVar
 
 
 _MISSING = object()
+logger = logging.getLogger(__name__)
 DEEPRESEARCH_TLS_ENV_LOCK = threading.Lock()
 TASK_MANAGER_TLS_ENV = {
     "LLM_SSL_VERIFY": "false",
@@ -26,7 +28,11 @@ _T = TypeVar("_T")
 async def scoped_deepresearch_tls_env(
     overrides: Mapping[str, str] | Callable[[], Mapping[str, str]],
 ):
-    """Temporarily install SDK TLS env without losing unrelated concurrent writes."""
+    """Install SDK TLS env, restoring values that still match our overrides.
+
+    Same-value external writes are indistinguishable. Repository-controlled writers
+    must use this shared scope.
+    """
     acquired = False
     backoff = 0.001
     try:
@@ -61,14 +67,32 @@ async def iterate_with_scoped_tls_initialization(
     overrides: Mapping[str, str],
 ) -> AsyncIterator[_T]:
     """Scope SDK env reads to the first iteration that initializes models and tools."""
-    async with scoped_deepresearch_tls_env(overrides):
-        resolved_source = source() if callable(source) else source
-        iterator = aiter(resolved_source)
-        try:
-            first_item = await anext(iterator)
-        except StopAsyncIteration:
-            return
+    iterator = None
+    primary_error: BaseException | None = None
+    try:
+        async with scoped_deepresearch_tls_env(overrides):
+            resolved_source = source() if callable(source) else source
+            iterator = aiter(resolved_source)
+            try:
+                first_item = await anext(iterator)
+            except StopAsyncIteration:
+                return
 
-    yield first_item
-    async for item in iterator:
-        yield item
+        yield first_item
+        async for item in iterator:
+            yield item
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        close = getattr(iterator, "aclose", None)
+        if callable(close):
+            try:
+                await close()
+            except BaseException:
+                if primary_error is None:
+                    raise
+                logger.warning(
+                    "Failed to close DeepResearch iterator after an earlier error",
+                    exc_info=True,
+                )

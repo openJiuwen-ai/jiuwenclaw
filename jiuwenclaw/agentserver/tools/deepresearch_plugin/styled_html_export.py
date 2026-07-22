@@ -6,6 +6,7 @@ import io
 import logging
 import shutil
 import zipfile
+from contextlib import AsyncExitStack
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from tempfile import TemporaryDirectory
 
@@ -15,6 +16,11 @@ from openjiuwen_deepsearch.algorithm.report_style.service import (
 )
 from openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime import (
     report_style_llm_context,
+)
+
+from jiuwenclaw.agentserver.tools._deepresearch_tls import (
+    TASK_MANAGER_TLS_ENV,
+    scoped_deepresearch_tls_env,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,7 +90,9 @@ async def export_styled_html(
     *,
     html_path: str | Path,
 ) -> StyledReportResult:
-    async with report_style_llm_context(llm_config) as llm:
+    async with AsyncExitStack() as stack:
+        async with scoped_deepresearch_tls_env(TASK_MANAGER_TLS_ENV):
+            llm = await stack.enter_async_context(report_style_llm_context(llm_config))
         result = await stylize_report(final_result, llm)
 
     target_html_path = Path(html_path)
