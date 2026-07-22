@@ -427,6 +427,7 @@ __all__ = [
     "SYMPHONY_ORCHESTRATION_PROMPT",
     "TEAM_PERMISSION",
     "TEAM_PERMISSION_POLICY",
+    "TEAM_VERIFICATION",
 ]
 
 
@@ -551,4 +552,75 @@ def _build_team_permission_rail(params: dict[str, Any], context: Any) -> Any | N
     return TeamPermissionRail(
         config=narrowed_config,
         host=host,
+    )
+
+
+# ---------------------------------------------------------------------------
+# team.verification — TeamVerificationRail (verification-aware planning, veriMAP)
+# ---------------------------------------------------------------------------
+
+
+TEAM_VERIFICATION = "swarm.team_verification"
+
+
+class TeamVerificationInput(ConstructionInput):
+    """Construction inputs for the verification-aware planning rail."""
+
+    mode: str = param_field(
+        default="none",
+        description="Verification mode: none / generic / structured.",
+    )
+    max_iterations: int = param_field(
+        default=2,
+        description="Max bounded revision attempts before escalating.",
+    )
+    output_enforcement: bool = param_field(
+        default=False,
+        description="Require structured (JSON) output in structured mode.",
+    )
+    apply_to_roles: list[str] = param_field(
+        default_factory=lambda: ["teammate"],
+        description="Roles whose deliverables are gated by the verifier.",
+    )
+    role: str = context_field(
+        attr="role",
+        default="",
+        description="This member's role (leader / teammate).",
+    )
+    language: str = context_field(
+        attr="language",
+        default="cn",
+        description="Resolved member language code.",
+    )
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=TEAM_VERIFICATION,
+    description="Verification-aware planning: emits acceptance criteria on the "
+    "leader and gates teammate deliverables with an inline verifier.",
+    input_model=TeamVerificationInput,
+)
+def _build_team_verification_rail(
+    params: dict[str, Any],
+    context: SwarmBuildContext,
+) -> Any | None:
+    """Build the verification rail (skipped when verification is disabled)."""
+    from jiuwenswarm.agents.harness.team.verification import is_enabled
+
+    inp = TeamVerificationInput.resolve(params, context)
+    if not is_enabled(inp.mode):
+        return None
+
+    from jiuwenswarm.agents.harness.team.rails.team_verification_rail import (
+        TeamVerificationRail,
+    )
+
+    return TeamVerificationRail(
+        mode=inp.mode,
+        max_iterations=inp.max_iterations,
+        output_enforcement=inp.output_enforcement,
+        apply_to_roles=inp.apply_to_roles,
+        role=inp.role,
+        language=inp.language,
     )

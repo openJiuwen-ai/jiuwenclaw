@@ -300,6 +300,26 @@ def _permission_params(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _verification_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Attribute params for the verification-aware planning rail (veriMAP)."""
+    section = _config_section(config, "verification")
+    roles = section.get("apply_to_roles")
+    if not isinstance(roles, list) or not roles:
+        roles = ["teammate"]
+    return {
+        "mode": str(section.get("mode", "none") or "none"),
+        "max_iterations": int(section.get("max_iterations", 2) or 0),
+        "output_enforcement": bool(section.get("output_enforcement", False)),
+        "apply_to_roles": [str(role).strip() for role in roles if str(role).strip()],
+    }
+
+
+def _verification_enabled(config: dict[str, Any]) -> bool:
+    """Return whether the inline verification gate is turned on in config."""
+    mode = _config_section(config, "verification").get("mode", "none")
+    return str(mode or "none").strip().lower() in {"generic", "structured", "vanilla"}
+
+
 def _team_evolution_rail_params(config: dict[str, Any]) -> dict[str, Any]:
     """Attribute params for the leader team skill-evolution rail."""
     auto_scan = get_evolution_auto_scan_enabled(config)
@@ -331,6 +351,7 @@ _RAIL_PARAM_BUILDERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
         "additional_directories": _additional_directories(c)
     },
     registry.PERMISSION_INTERRUPT: _permission_params,
+    registry.TEAM_VERIFICATION: _verification_params,
     registry.TEAM_PERMISSION: lambda c: {
         "permissions_config": _config_section(c, "permissions"),
     },
@@ -416,6 +437,11 @@ def _build_team_capability_specs(
     ]
     if role == "leader":
         rails_specs.append(RailSpec(type=registry.STRUCTURED_ASK_USER))
+        # GUARDIAN anomaly rail (self-gated on guardian.enabled by the provider).
+        # Guarded: the guardian provider is an in-progress feature that may not be
+        # registered yet; skip gracefully instead of crashing team assembly.
+        if hasattr(registry, "GUARDIAN_MONITOR"):
+            rails_specs.append(RailSpec(type=registry.GUARDIAN_MONITOR))
 
     if _retrieval_enabled(config):
         rails_specs.append(
@@ -448,6 +474,14 @@ def _build_team_capability_specs(
                 type=registry.TEAM_PERMISSION_POLICY,
                 params=_rail_params(registry.TEAM_PERMISSION_POLICY, config),
             ),
+        )
+
+    if _verification_enabled(config):
+        rails_specs.append(
+            RailSpec(
+                type=registry.TEAM_VERIFICATION,
+                params=_verification_params(config),
+            )
         )
 
     rails_specs.extend(_role_evolution_rails(config, role))
@@ -496,6 +530,12 @@ def _build_code_capability_specs(
     if is_team_plan_leader:
         rails_specs.append(RailSpec(type=registry.TEAM_PLAN_APPROVAL))
 
+    if role == "leader":
+        # GUARDIAN anomaly rail (self-gated on guardian.enabled by the provider).
+        # Guarded: skip gracefully when the in-progress guardian provider is absent.
+        if hasattr(registry, "GUARDIAN_MONITOR"):
+            rails_specs.append(RailSpec(type=registry.GUARDIAN_MONITOR))
+
     if enable_permissions and role == "teammate":
         rails_specs.append(
             RailSpec(
@@ -529,6 +569,14 @@ def _build_code_capability_specs(
         RailSpec(type=name, params=_rail_params(name, config))
         for name in _CODE_SHARED_RAIL_NAMES
     )
+    if _verification_enabled(config):
+        rails_specs.append(
+            RailSpec(
+                type=registry.TEAM_VERIFICATION,
+                params=_verification_params(config),
+            )
+        )
+
     rails_specs.extend(_role_evolution_rails(config, role))
 
     tool_specs: list[BuiltinToolSpec] = [
