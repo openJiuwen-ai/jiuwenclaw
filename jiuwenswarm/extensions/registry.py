@@ -65,10 +65,13 @@ class ExtensionRegistry:
         # 根据配置自动加载认证器
         auth_config = config.get("auth", {})
         auth_type = auth_config.get("type", "passthrough")
-        if auth_type == "agentos":
+        if auth_type != "agentos":
+            pass
+        else:
+            agentos_config = auth_config.get("agentos", {})
             authenticator = AgentOSAuthenticator(
-                auth_service_url=auth_config["auth_service_url"],
-                gateway_secret_key=auth_config.get("gateway_secret_key"),
+                auth_service_url=agentos_config["auth_service_url"],
+                gateway_secret_key=agentos_config.get("gateway_secret_key"),
             )
             cls._instance.register_authenticator(authenticator)
         return cls._instance

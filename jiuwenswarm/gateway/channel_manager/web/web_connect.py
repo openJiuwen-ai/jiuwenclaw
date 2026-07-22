@@ -939,6 +939,9 @@ class WebChannel(BaseWsChannel):
                         describe_ws_exception(e),
                     ),
                 )
+        auth_result = await self._handle_connect(ws, path)
+        if not auth_result:
+            return
 
         try:
             async for raw in ws:
@@ -1070,6 +1073,86 @@ class WebChannel(BaseWsChannel):
                 "[WebChannel] /ws/git 连接清理完成: remote=%s",
                 remote,
             )
+        ## ── 3rd agent ──
+
+    def extract_token(self, ws: Any) -> str | None:
+        """从 WebSocket 连接中提取 JWT token。
+
+        优先级：
+        1. URL 查询参数 ?token=xxx
+        2. HTTP 请求头 Authorization: Bearer xxx
+        3. HTTP 请求头 X-Token: xxx
+        """
+        # 1. 从 URL 查询参数提取
+        path = getattr(ws, "path", "")
+        parsed = urlparse(path)
+        query = parse_qs(parsed.query)
+        token = query.get("token")
+        if token and token[0]:
+            return token[0]
+
+        # 2. 从请求头提取
+        headers = (
+                getattr(getattr(ws, "request", None), "headers", None)
+                or getattr(ws, "request_headers", None)
+        )
+        if headers:
+            # Authorization: Bearer xxx
+            auth_header = get_header_value(headers, "Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                return auth_header[7:]
+
+            # X-Token: xxx
+            token_header = get_header_value(headers, "X-Token")
+            if token_header:
+                return token_header
+
+        return None
+
+    def extract_headers(self, ws: Any) -> dict:
+        """提取 WebSocket 连接的 HTTP 请求头"""
+        headers = (
+                getattr(getattr(ws, "request", None), "headers", None)
+                or getattr(ws, "request_headers", None)
+        )
+        if headers:
+            return dict(headers)
+        return {}
+
+    def get_remote_addr(self, ws: Any) -> str:
+        """获取客户端 IP 地址"""
+        remote = getattr(ws, "remote_address", None)
+        if remote:
+            return str(remote)
+        return ""
+
+        # TODO
+
+    async def _handle_connect(self, ws: Any, path) -> bool:
+        try:
+            context = AuthContext(
+                channel_type="web",
+                credentials={"token": self.extract_token(ws)},
+                headers=self.extract_headers(ws),
+                remote_addr=self.get_remote_addr(ws)
+            )
+
+            authenticator = get_auth_handler()
+            result = await authenticator.authenticate(context)
+
+            if not result.success:
+                await ws.close()
+                return False
+
+            # 认证成功，将用户信息存储到 ws 对象上，供后续使用
+            ws.user_id = result.user_id
+            for key, value in (result.extensions or {}).items():
+                setattr(ws, f"auth_{key}", value)
+            return True
+
+        except Exception:
+            await ws.close()
+            return False
 
     async def _handle_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
         try:
@@ -1198,77 +1281,6 @@ class WebChannel(BaseWsChannel):
                 ws, req_id, ok=False,
                 error=f"unknown method: {method}", code="METHOD_NOT_FOUND",
             )
-
-        ## ── 3rd agent ──
-        def extract_token(self, ws: Any) -> str | None:
-            """从 WebSocket 连接中提取 JWT token。
-
-            优先级：
-            1. URL 查询参数 ?token=xxx
-            2. HTTP 请求头 Authorization: Bearer xxx
-            3. HTTP 请求头 X-Token: xxx
-            """
-            # 1. 从 URL 查询参数提取
-            path = getattr(ws, "path", "")
-            parsed = urlparse(path)
-            query = parse_qs(parsed.query)
-            token = query.get("token")
-            if token and token[0]:
-                return token[0]
-
-            # 2. 从请求头提取
-            headers = (
-                    getattr(getattr(ws, "request", None), "headers", None)
-                    or getattr(ws, "request_headers", None)
-            )
-            if headers:
-                # Authorization: Bearer xxx
-                auth_header = get_header_value(headers, "Authorization")
-                if auth_header and auth_header.startswith("Bearer "):
-                    return auth_header[7:]
-
-                # X-Token: xxx
-                token_header = get_header_value(headers, "X-Token")
-                if token_header:
-                    return token_header
-
-            return None
-
-        def extract_headers(self, ws: Any) -> dict:
-            """提取 WebSocket 连接的 HTTP 请求头"""
-            headers = (
-                    getattr(getattr(ws, "request", None), "headers", None)
-                    or getattr(ws, "request_headers", None)
-            )
-            if headers:
-                return dict(headers)
-            return {}
-
-        def get_remote_addr(self, ws: Any) -> str:
-            """获取客户端 IP 地址"""
-            remote = getattr(ws, "remote_address", None)
-            if remote:
-                return str(remote)
-            return ""
-
-        # TODO
-        async def _handle_connect(self, ws: Any, path):
-            context = AuthContext(
-                channel_type="web",
-                credentials={"token": self.extract_token(ws)},
-                headers=self.extract_headers(ws),
-                remote_addr=self.get_remote_addr(ws)
-            )
-
-            authenticator = get_auth_handler()
-            result = await authenticator.authenticate(context)
-
-            if not result.success:
-                await ws.close()
-                return
-
-            user_info = {"user_id": result.user_id, **result.extensions}
-
 
     async def _broadcast_to(self, frame: dict[str, Any], clients: set[Any]) -> None:
         """向指定 clients 集合广播帧（走 per-ws writer，非阻塞入队）."""

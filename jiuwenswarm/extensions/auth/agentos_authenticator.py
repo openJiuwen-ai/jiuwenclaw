@@ -83,15 +83,14 @@ class AgentOSAuthenticator(CredentialAuthenticator):
         if extra_headers:
             headers.update(extra_headers)
 
+        # 添加 Authorization header（不覆盖用户自定义的 Authorization）
+        headers.setdefault("Authorization", f"Bearer {token}")
+
         try:
             resp = await self._auth_client.post(
                 f"{self._auth_service_url}/api/v1/auth/verify",
                 json={"token": token, "resource_id": "", "action_id": ""},
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                    "X-Forwarded-For": "10.0.0.1",
-                },
+                headers=headers,
                 timeout=self._timeout,
             )
 

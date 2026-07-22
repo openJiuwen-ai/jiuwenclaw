@@ -30,6 +30,7 @@ def channel():
 
 # ── TestExtractToken ─────────────────────────────────
 
+#PASS
 class TestExtractToken:
 
     def test_from_query_param(self, channel):
@@ -84,6 +85,7 @@ class TestExtractToken:
 
 # ── TestExtractHeaders ───────────────────────────────
 
+#pass
 class TestExtractHeaders:
 
     def test_returns_dict(self, channel):
@@ -111,6 +113,7 @@ class TestExtractHeaders:
 
 # ── TestGetRemoteAddr ────────────────────────────────
 
+#pass
 class TestGetRemoteAddr:
 
     def test_from_tuple(self, channel):

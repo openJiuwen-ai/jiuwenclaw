@@ -18,13 +18,6 @@ from cryptography.hazmat.primitives.serialization import (
 from datetime import datetime, timezone
 
 
-# 生成 RSA 私钥（2048 位）
-private_key = rsa.generate_private_key(
-    public_exponent=65537,
-    key_size=2048,
-    backend=default_backend()
-)
-
 class PassthroughAuthenticator(CredentialAuthenticator):
 
     def __init__(self, ca_private_key_pem: bytes | None = None):
@@ -45,6 +38,13 @@ class PassthroughAuthenticator(CredentialAuthenticator):
         # raise UnsupportedOperationError("generate_api_key not supported in PassthroughAuthenticator")
 
     def generate_user_keypair(self) -> KeyPair:
+        # 生成 RSA 私钥（2048 位）
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend()
+        )
+
         # 序列化私钥为 PEM 格式（未加密）
         private_pem = private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
