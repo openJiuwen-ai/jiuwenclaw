@@ -227,7 +227,7 @@ def _cron_next_push_dt(cron_expr: str, base_dt: datetime) -> datetime:
     return nxt
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, order=True)
 class _Event:
     at_ts: float
     seq: int
@@ -377,7 +377,10 @@ class CronSchedulerService:
             if ev.kind == "push_update" and ev.job_id in new_job_ids
         ]
         self._events.clear()
-        self._seq = 0
+        # 不重置 _seq：保留的 push_update 事件携带原始 seq 值，
+        # 若重置为 0，新调度事件的 seq 会从 1 开始递增，与保留事件的 seq 碰撞。
+        # 当 at_ts 也相同时，heapq 元组比较回退到 _Event 比较（即使 _Event
+        # 已加 order=True，仍应避免 seq 碰撞以保证排序语义正确）。
         for item in pending_push_updates:
             heapq.heappush(self._events, item)
 
