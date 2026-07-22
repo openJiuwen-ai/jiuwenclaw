@@ -138,9 +138,6 @@ def _make_request(session_id: str = "web_a2x_system_test") -> tuple[AgentRequest
 
 def _make_fake_model(model_name: str, provider: str) -> MagicMock:
     """Create a fake Model with a valid ModelClientConfig for testing."""
-    # Construct through a built-in provider so the real config type validates,
-    # then preserve the requested identity. This direct adapter test bypasses
-    # AgentServer's custom-provider registration startup.
     fake_mcc = ModelClientConfig(
         client_provider="OpenAI",
         api_key="system-test-key",
@@ -157,7 +154,7 @@ def _make_fake_model(model_name: str, provider: str) -> MagicMock:
 
 
 def _mock_create_model(self, config: dict) -> MagicMock:
-    """Mirror the production legacy model identity/cache registration."""
+    """Mirror the production model identity/cache registration."""
     default_model_config = config.get("models", {}).get("default", {})
     react_config = config.get("react", {})
     model_client_config = (
@@ -185,14 +182,33 @@ async def _create_adapter_and_run_chat(
     config_base: dict,
     *,
     expected_error_code: str | None = None,
-) -> tuple[AsyncMock, AgentRequest]:
+) -> SimpleNamespace:
+    """Create adapter, run one chat turn via interaction attach/send_input path.
+
+    Returns the fake DeepAgent so callers can assert on ``send_input``.
+    """
+
+    class _FakeInteractionStream:
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            yield SimpleNamespace(type="llm_output", payload={"content": "PONG"})
+
+        async def close(self, *, abort_active_round: bool = False) -> None:
+            return None
+
     created_agent = SimpleNamespace(
         card=SimpleNamespace(id="jiuwenswarm", name="main_agent"),
-        ensure_initialized=AsyncMock(),
         react_agent=SimpleNamespace(
             set_llm=MagicMock(),
             config=SimpleNamespace(),
         ),
+        ensure_initialized=AsyncMock(),
+        start=AsyncMock(),
+        attach_output=AsyncMock(return_value=_FakeInteractionStream()),
+        send_input=AsyncMock(),
+        goal_manager=None,
     )
     request, inputs = _make_request()
 
@@ -210,11 +226,6 @@ async def _create_adapter_and_run_chat(
         patch.object(interface_module, "init_permission_engine", return_value=None),
         patch.object(interface_module, "create_deep_agent", return_value=created_agent),
         patch.dict("os.environ", {"API_KEY": "system-test-key"}),
-        patch.object(
-            interface_module.Runner,
-            "run_agent",
-            AsyncMock(return_value={"output": "PONG"}),
-        ) as run_agent_mock,
     ):
         adapter = JiuWenSwarmDeepAdapter()
         await adapter.create_instance()
@@ -226,16 +237,13 @@ async def _create_adapter_and_run_chat(
 
     if expected_error_code is None:
         assert response.ok is True
-        assert request.metadata[E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY] == {
-            "canonical_model_key": adapter._default_model_name,
-            "provider": adapter._model_client_config.client_provider,
-            "source_request_id": request.request_id,
-            "mode": request.params["mode"],
-        }
+        assert response.payload.get("content") == "PONG"
+        created_agent.send_input.assert_awaited()
     else:
         assert captured.value.code == expected_error_code
         assert E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY not in request.metadata
-    return run_agent_mock, request
+        created_agent.send_input.assert_not_awaited()
+    return created_agent
 
 
 @pytest.mark.asyncio
@@ -247,7 +255,7 @@ async def test_a2x_teammate_registers_blank_agent_during_runtime(
     fake_module.AsyncA2XRegistryClient = _FakeAsyncA2XRegistryClient
     monkeypatch.setitem(sys.modules, "jiuwenswarm.agents.harness.team.a2x.client", fake_module)
 
-    run_agent_mock, _request = await _create_adapter_and_run_chat(
+    await _create_adapter_and_run_chat(
         _make_config(
             "teammate",
             dataset="system_test_dataset",
@@ -255,7 +263,6 @@ async def test_a2x_teammate_registers_blank_agent_during_runtime(
         )
     )
 
-    run_agent_mock.assert_called_once()
     assert len(_FakeAsyncA2XRegistryClient.instances) == 1
     assert _FakeAsyncA2XRegistryClient.instances[0].blank_registrations == [
         {
@@ -276,11 +283,8 @@ async def test_a2x_teamleader_skips_blank_agent_registration(
     fake_module.AsyncA2XRegistryClient = _FakeAsyncA2XRegistryClient
     monkeypatch.setitem(sys.modules, "jiuwenswarm.agents.harness.team.a2x.client", fake_module)
 
-    run_agent_mock, _request = await _create_adapter_and_run_chat(
-        _make_config("teamleader")
-    )
+    await _create_adapter_and_run_chat(_make_config("teamleader"))
 
-    run_agent_mock.assert_called_once()
     assert len(_FakeAsyncA2XRegistryClient.instances) == 1
     assert _FakeAsyncA2XRegistryClient.instances[0].blank_registrations == []
 
@@ -293,15 +297,11 @@ async def test_a2x_init_failure_does_not_block_runtime(
     fake_module.AsyncA2XRegistryClient = _FailingAsyncA2XRegistryClient
     monkeypatch.setitem(sys.modules, "jiuwenswarm.agents.harness.team.a2x.client", fake_module)
 
-    run_agent_mock, _request = await _create_adapter_and_run_chat(
-        _make_config("teammate")
-    )
-
-    run_agent_mock.assert_called_once()
+    await _create_adapter_and_run_chat(_make_config("teammate"))
 
 
 @pytest.mark.asyncio
-async def test_a2x_codex_plan_rejected_before_runner(
+async def test_a2x_codex_plan_rejected_before_interaction_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_module = ModuleType("jiuwenswarm.agents.harness.team.a2x.client")
@@ -311,7 +311,8 @@ async def test_a2x_codex_plan_rejected_before_runner(
         "jiuwenswarm.agents.harness.team.a2x.client",
         fake_module,
     )
-    run_agent_mock, request = await _create_adapter_and_run_chat(
+
+    await _create_adapter_and_run_chat(
         _make_config(
             "teamleader",
             model_name=CODEX_MODEL_ALIAS,
@@ -319,6 +320,3 @@ async def test_a2x_codex_plan_rejected_before_runner(
         ),
         expected_error_code="unsupported_consumer",
     )
-
-    run_agent_mock.assert_not_awaited()
-    assert E2A_INTERNAL_ACTUAL_MODEL_ROUTE_KEY not in request.metadata

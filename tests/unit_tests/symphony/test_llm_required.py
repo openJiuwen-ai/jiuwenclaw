@@ -23,7 +23,6 @@ async def test_fast_planner_requires_llm_config_or_client(tmp_path):
         llm_config=None,
         llm_client=None,
         min_edge_confidence=0.7,
-        top_k=1,
     )
 
     with pytest.raises(ValueError, match="requires llm_config or llm_client"):

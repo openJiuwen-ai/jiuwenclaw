@@ -1,7 +1,8 @@
 ﻿// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, memo } from 'react';
 import { useA2UIActions } from '@a2ui/react';
+import { useTranslation } from 'react-i18next';
 import { MarkdownRenderer } from '../../components/MarkdownRenderer';
 import {
   extractA2UISurfaceIds,
@@ -46,7 +47,7 @@ function stableHash(input: string): string {
   return Math.abs(hash).toString(36);
 }
 
-export function A2UIMessageContent({
+export const A2UIMessageContent = memo(function A2UIMessageContent({
   content,
   messageId,
   isStreaming = false,
@@ -54,6 +55,7 @@ export function A2UIMessageContent({
   testId,
 }: A2UIMessageContentProps) {
   const { processMessages } = useA2UIActions();
+  const { t } = useTranslation();
   const namespace = useMemo(() => `msg_${safeNamespace(messageId)}`, [messageId]);
   const a2uiEnabled = isA2UIFeatureEnabled();
 
@@ -61,6 +63,8 @@ export function A2UIMessageContent({
     const parsed = parseA2UIContent(content, {
       enabled: a2uiEnabled,
       isStreaming,
+      pendingText: t('a2ui.generating'),
+      invalidText: t('a2ui.unavailable'),
     });
     return parsed.map((part, index) => {
       if (part.kind === 'text') {
@@ -82,7 +86,7 @@ export function A2UIMessageContent({
         resetKey,
       };
     });
-  }, [a2uiEnabled, content, isStreaming, namespace, messageId]);
+  }, [a2uiEnabled, content, isStreaming, namespace, messageId, t]);
 
   useEffect(() => {
     for (const part of renderParts) {
@@ -169,7 +173,7 @@ export function A2UIMessageContent({
         if (!Renderer) {
           return (
             <div key={part.key} className="text-sm text-danger">
-              Unsupported A2UI protocol version: {part.protocolVersion}
+              {t('a2ui.unsupportedProtocol', { version: part.protocolVersion })}
             </div>
           );
         }
@@ -180,6 +184,16 @@ export function A2UIMessageContent({
               <A2UIErrorBoundary
                 key={`${surfaceId}:${part.resetKey}`}
                 resetKey={part.resetKey}
+                fallback={(
+                  <div className="a2ui-error-boundary p-4 border border-danger/30 rounded-lg bg-danger/5">
+                    <p className="text-danger text-sm font-medium mb-1">
+                      {t('a2ui.unavailableTitle')}
+                    </p>
+                    <p className="text-text-muted text-xs">
+                      {t('a2ui.retry')}
+                    </p>
+                  </div>
+                )}
               >
                 {disableInteraction ? (
                   <div className="pointer-events-none opacity-75">
@@ -196,4 +210,4 @@ export function A2UIMessageContent({
       {isStreaming && <span className="streaming-cursor" />}
     </div>
   );
-}
+});

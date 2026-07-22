@@ -114,6 +114,8 @@ async def test_evolve_slash_allows_team_without_lazy_registering(monkeypatch):
 @pytest.mark.parametrize("auto_save", [False, True])
 @pytest.mark.anyio
 async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch, auto_save):
+    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+
     class _FakeSkillEvolutionRail:
         pass
 
@@ -141,7 +143,12 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = _FakeInstance()  # pylint: disable=protected-access
     adapter._config_cache = {  # pylint: disable=protected-access
-        "evolution": {"enabled": True, "auto_scan": False, "auto_save": auto_save},
+        "evolution": {
+            "enabled": True,
+            "signal_trigger": False,
+            "review_trigger": False,
+            "auto_save": auto_save,
+        },
         "model_name": "configured-model",
     }
     adapter._skill_manager = _FakeSkillManager()  # pylint: disable=protected-access
@@ -179,8 +186,8 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
             "skills_dir": str(interface_deep_module.get_agent_skills_dir()),
             "llm": adapter._model,  # pylint: disable=protected-access
             "model": "default-model",
-            "auto_scan": True,
-            "fuzzy_review": True,
+            "signal_trigger": False,
+            "review_trigger": False,
             "auto_save": auto_save,
             "disabled_skills": ["disabled-demo"],
             "language": "en",
@@ -452,30 +459,54 @@ def _adapter_ready_for_followup_execution(monkeypatch: pytest.MonkeyPatch) -> Ji
     return adapter
 
 
+def _install_interaction_followup_agent(
+    adapter: JiuWenSwarmDeepAdapter,
+    *,
+    chunk: SimpleNamespace,
+    seen_inputs: list[dict],
+) -> None:
+    """Wire attach_output/send_input so slash follow-up continues into interaction."""
+
+    class _FakeInteractionStream:
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            yield chunk
+
+        async def close(self, *, abort_active_round: bool = False) -> None:
+            return None
+
+    async def _send_input(request) -> None:
+        seen_inputs.append(dict(request.inputs))
+
+    adapter._instance.attach_output = AsyncMock(  # pylint: disable=protected-access
+        return_value=_FakeInteractionStream()
+    )
+    adapter._instance.send_input = AsyncMock(  # pylint: disable=protected-access
+        side_effect=_send_input
+    )
+
+
 @pytest.mark.anyio
 async def test_agent_non_stream_slash_followup_continues_into_runner(monkeypatch):
     adapter = _adapter_ready_for_followup_execution(monkeypatch)
     seen_inputs: list[dict] = []
+    _install_interaction_followup_agent(
+        adapter,
+        chunk=SimpleNamespace(type="llm_output", payload={"content": "agent completed"}),
+        seen_inputs=seen_inputs,
+    )
 
-    async def _fake_slash_command(_query, _session_id, _mode):
+    async def _fake_slash_command(_query, _session_id, _mode, channel_id=None):
+        _ = channel_id
         return {
             "action": "run_evolve_followup",
             "followup_prompt": "review and evolve code-runner",
             "result_type": "followup",
         }
 
-    class _FakeRunner:
-        @staticmethod
-        async def run_agent(agent, inputs):
-            assert adapter._instance is not None  # pylint: disable=protected-access
-            seen_inputs.append(dict(inputs))
-            return "agent completed"
-
     monkeypatch.setattr(adapter, "_handle_slash_command", _fake_slash_command)
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.Runner",
-        _FakeRunner,
-    )
 
     response = await adapter.process_message_impl(
         AgentRequest(
@@ -504,26 +535,21 @@ async def test_agent_non_stream_slash_followup_continues_into_runner(monkeypatch
 async def test_agent_stream_slash_followup_continues_into_runner(monkeypatch):
     adapter = _adapter_ready_for_followup_execution(monkeypatch)
     seen_inputs: list[dict] = []
+    _install_interaction_followup_agent(
+        adapter,
+        chunk=SimpleNamespace(type="llm_output", payload={"content": "agent delta"}),
+        seen_inputs=seen_inputs,
+    )
 
-    async def _fake_slash_command(_query, _session_id, _mode):
+    async def _fake_slash_command(_query, _session_id, _mode, channel_id=None):
+        _ = channel_id
         return {
             "action": "run_simplify_followup",
             "followup_prompt": "review and simplify code-runner",
             "result_type": "followup",
         }
 
-    class _FakeRunner:
-        @staticmethod
-        async def run_agent_streaming(agent, inputs):
-            assert adapter._instance is not None  # pylint: disable=protected-access
-            seen_inputs.append(dict(inputs))
-            yield SimpleNamespace(type="llm_output", payload={"content": "agent delta"})
-
     monkeypatch.setattr(adapter, "_handle_slash_command", _fake_slash_command)
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.Runner",
-        _FakeRunner,
-    )
 
     chunks = []
     async for chunk in adapter.process_message_stream_impl(
@@ -543,3 +569,67 @@ async def test_agent_stream_slash_followup_continues_into_runner(monkeypatch):
     ]
     assert chunks[0].payload == {"event_type": "chat.delta", "content": "agent delta"}
     assert chunks[-1].is_complete is True
+
+
+@pytest.mark.anyio
+async def test_team_stream_injects_image_tool_context_for_non_vision_model(monkeypatch):
+    """Team mode must preserve the same local-image tool context as agent mode."""
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._instance = SimpleNamespace()  # pylint: disable=protected-access
+    adapter._is_session_scoped_adapter = True  # pylint: disable=protected-access
+    captured: dict[str, object] = {}
+    resolved_model = SimpleNamespace(
+        model_client_config=SimpleNamespace(client_provider="OpenAI"),
+        model_config=SimpleNamespace(model_name="test-model"),
+    )
+    adapter._model_cache = {  # pylint: disable=protected-access
+        "test-model#0": resolved_model
+    }
+    adapter._model_canonical_key_by_object_id = {  # pylint: disable=protected-access
+        id(resolved_model): "test-model#0"
+    }
+
+    monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _model_name="": True)
+    monkeypatch.setattr(
+        adapter,
+        "_resolve_model_for_request",
+        lambda _request: resolved_model,
+    )
+    monkeypatch.setattr(adapter, "_apply_model_to_react_agent", lambda _model: None)
+    monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "cn")
+    monkeypatch.setattr(adapter, "_native_image_input_enabled", lambda *_args: False)
+    monkeypatch.setattr(adapter, "_write_runtime_state", lambda **_kwargs: None)
+
+    async def _capture_team_inputs(_request, inputs, _instance):
+        captured.update(inputs)
+        if False:
+            yield None
+
+    from jiuwenswarm.server.runtime.agent_adapter import team_helpers
+
+    monkeypatch.setattr(team_helpers, "process_team_message_stream", _capture_team_inputs)
+
+    request = AgentRequest(
+        request_id="req-team-image",
+        channel_id="web",
+        session_id="sess-team-image",
+        params={
+            "mode": "team",
+            "query": "解析图片内容",
+            "media_items": [
+                {
+                    "type": "image",
+                    "filename": "persisted.png",
+                    "path": "agent/sessions/sess-team-image/uploads/persisted.png",
+                    "mime_type": "image/png",
+                }
+            ],
+        },
+        is_stream=True,
+    )
+
+    async for _ in adapter.process_message_stream_impl(request, {"query": "解析图片内容"}):
+        pass
+
+    assert "jiuwenswarm_image_tool_context" in captured["query"]
+    assert "agent/sessions/sess-team-image/uploads/persisted.png" in captured["query"]

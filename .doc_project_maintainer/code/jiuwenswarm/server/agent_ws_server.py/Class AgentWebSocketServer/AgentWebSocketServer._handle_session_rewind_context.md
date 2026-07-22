@@ -12,7 +12,7 @@ health:
   responsibility_focus: mixed
   length: long
   complexity: medium
-  implementation_soundness: partial
+  implementation_soundness: questionable
   boundary_safety: risky
   input_contract: implicit
   output_contract: weak
@@ -24,11 +24,12 @@ health:
   observability: partial
   performance_risk: medium
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:38:08Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:2e2b50d3f897235d671a834cc252c00759006b3725bc18cc68867110aa8688a8
   confidence: confirmed
   expired_reason: null
 issues:
@@ -37,47 +38,45 @@ issues:
     severity: high
     status: open
     summary: "Non-atomic rewind can leave history truncated after context failure."
-    evidence: "The handler calls rewind_session before rewind_session_context; later exceptions become error responses after durable history mutation."
-    suggested_action: "Add per-session transaction/backup rollback or make partial state explicit."
+    evidence: "Current handler calls synchronous rewind_session first; it truncates history, queues metadata count. See AgentWebSocketServer._handle_session_rewind_context/risks.md#issue-001."
+    suggested_action: "Add per-session transaction/rollback or explicit partial-state recovery."
   - id: ISSUE-002
-    dimension: boundary_safety
-    severity: medium
+    dimension: output_contract
+    severity: high
     status: open
-    summary: "Target session is accepted without ownership check."
-    evidence: "target_sid comes from params.session_id or request.session_id; agent resolution is channel-only, then history/context mutate target_sid."
-    suggested_action: "Require param and envelope session ids to match, or validate ownership before mutation."
+    summary: "Context durability failure can still return ok=true."
+    evidence: "The handler always builds ok=true after both calls and only exposes context_ok in payload, so. See AgentWebSocketServer._handle_session_rewind_context/risks.md#issue-002."
+    suggested_action: "Fail or return explicit partial status unless context durability is confirmed."
   - id: ISSUE-003
+    dimension: boundary_safety
+    severity: high
+    status: open
+    summary: "session_id is an unchecked path component."
+    evidence: "target_sid is only str/strip-normalized from params or request and is passed to rewind_session; its. See AgentWebSocketServer._handle_session_rewind_context/risks.md#issue-003."
+    suggested_action: "Validate the ID and enforce containment under sessions root."
+  - id: ISSUE-004
     dimension: test_coverage
     severity: medium
     status: open
     summary: "No direct handler tests cover rewind_context."
-    evidence: "Only adapter/service tests were found; visible TUI paths use session.rewind rather than session.rewind_context."
-    suggested_action: "Add async tests for success, no-agent, wire shape, and partial-failure semantics."
-  - id: ISSUE-004
+    evidence: "Repository search finds rewind_session_context helper cases in test_compact_partial.py but no direct or. See AgentWebSocketServer._handle_session_rewind_context/risks.md#issue-004."
+    suggested_action: "Test success, invalid input, no-agent, wire shape, and partial failures."
+  - id: ISSUE-005
     dimension: output_contract
     severity: low
     status: open
     summary: "Error codes are inconsistent."
-    evidence: "Bad params use BAD_REQUEST; no-agent and generic exception responses omit stable codes."
+    evidence: "Missing/invalid params and ValueError use BAD_REQUEST; the no-agent response calls _send_error_response. See AgentWebSocketServer._handle_session_rewind_context/risks.md#issue-005."
     suggested_action: "Add stable codes such as AGENT_UNAVAILABLE and INTERNAL_ERROR."
-confidence: confirmed
-details: {}
 ---
 
-# `AgentWebSocketServer._handle_session_rewind_context`
+# AgentWebSocketServer._handle_session_rewind_context
 
 ## Actual Role
 
-Handles `session.rewind_context` by validating `session_id` and `turn_index`, resolving the live channel agent, truncating persisted session history, rebuilding and persisting context from that truncated history, and sending one encoded E2A response.
+The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
 
-## Key Signals
+## Audit Details
 
-- Input: Request params or envelope session id, channel id, and send lock.
-- Output: E2A AgentResponse; success payload merges rewind result with `rewind_context`.
-- Main side effects: Truncates history, updates metadata/diff state, clears/recreates context, and saves DeepAgent/checkpointer state.
-- Main risk: Durable history is changed before context rebuild is proven durable.
-- Related tests: `rewind_session_context` callee tests exist; no direct handler test was found.
-
-## Detail Index
-
-- Detail docs pending.
+- [Reviewed behavior](AgentWebSocketServer._handle_session_rewind_context/actual-behavior.md)
+- [Full issue evidence](AgentWebSocketServer._handle_session_rewind_context/risks.md)

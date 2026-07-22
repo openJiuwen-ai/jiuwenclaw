@@ -1,6 +1,7 @@
 ---
 name: project-maintainer
 description: Use when initializing or updating structured in-repository project-maintenance docs; exploring existing code; analyzing a full project or repository; documenting complete source symbol coverage, coverage maps, symbol audit maps, or health for every top-level class, top-level function, and class method; summarizing git history; using project-maintainer as maintenance-aware context during a bug fix, feature change, or refactor; or syncing docs after verified code changes.
+license: Apache-2.0
 ---
 
 # Project Maintainer
@@ -184,14 +185,15 @@ Use `project/symbol-audit-map.json` as the machine-readable audit ledger for eve
    - `script_assessed`: the controlled audit integrity entrypoint processed the symbol, but no agent or human audit has been accepted for trusted closure.
    - `agent_audited`: an agent audit claim was accepted through `scripts/audit_integrity.py promote` with an agent call signature; it is provisional until `verify` or `report` classifies it as `trusted_agent_audit`.
    - `human_audited`: a human reviewed or confirmed the symbol and recorded health plus issues with evidence.
-   - `audit_expired`: the symbol was audited, but current source hash differs from the audited source hash.
+   - `audit_expired`: the symbol was audited, but its current symbol hash differs from the audited symbol hash. Legacy records without a symbol hash use the containing file hash until they can be safely migrated.
    - `out_of_scope`: the symbol is intentionally excluded with a reason.
 4. Record health as a fixed-dimension snapshot: `overall`, `name_behavior_match`, `responsibility_focus`, `length`, `complexity`, `implementation_soundness`, `input_contract`, `output_contract`, `boundary_safety`, `side_effects`, `state_mutation`, `error_handling`, `dependency_coupling`, `test_coverage`, `observability`, and `performance_risk`.
 5. Record concrete findings in `issues[]`; each issue needs `dimension`, `severity`, `status`, `summary`, `evidence`, and `suggested_action`. Health dimensions classify the risk; issues explain the evidence.
-6. Preserve previous `agent_audited` or `human_audited` records when the current source hash still matches `audited_source_hash`.
-7. Automatically treat a previously audited symbol as `audit_expired` when the source hash changes. Do not silently keep old health or issues as current.
-8. Do not mark default product/runtime health audit or a full-repository health-audit goal `current` while required symbols in the requested audit scope remain `unaudited`, `script_assessed`, `audit_expired`, or untrusted `agent_audited`, unless they are explicitly `out_of_scope` with a reason.
-9. Treat health-audit closure as a derived predicate, not a raw status count: `closure_eligible` is true only for `human_audited`, `out_of_scope`, or `agent_audited` records whose latest integrity verification result is `trusted_agent_audit`. `script_assessed`, `provisional_agent_audit`, `suspicious_agent_audit`, and `invalid_agent_audit` must remain pending for closure.
+6. Preserve previous `agent_audited` or `human_audited` records when the current symbol hash still matches `audited_symbol_hash`. For Python, use a normalized AST hash so comments, formatting, and line movement do not expire an otherwise unchanged symbol.
+7. Automatically treat a previously audited symbol as `audit_expired` when its symbol hash changes. A changed method expires that method and its containing class audit, but not unchanged sibling methods. When reliable symbol boundaries are unavailable, fall back conservatively to the containing file hash and keep parser uncertainty actionable.
+8. Migrate a legacy audit that has only `audited_source_hash` by first confirming that the containing file hash is unchanged, then recording the current `audited_symbol_hash`. If the file changed before migration, expire the legacy audit conservatively because the changed symbol cannot be identified safely.
+9. Do not mark default product/runtime health audit or a full-repository health-audit goal `current` while required symbols in the requested audit scope remain `unaudited`, `script_assessed`, `audit_expired`, or untrusted `agent_audited`, unless they are explicitly `out_of_scope` with a reason.
+10. Treat health-audit closure as a derived predicate, not a raw status count: `closure_eligible` is true only for `human_audited`, `out_of_scope`, or `agent_audited` records whose latest integrity verification result is `trusted_agent_audit`. `script_assessed`, `provisional_agent_audit`, `suspicious_agent_audit`, and `invalid_agent_audit` must remain pending for closure.
 
 ### Generate Audit Visualization Report
 

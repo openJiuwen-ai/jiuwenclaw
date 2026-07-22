@@ -73,7 +73,7 @@ class _FakeEvolutionRail:
         )
         self.drain_waits: list[bool] = []
         self.cleanup_calls = 0
-        self.auto_scan = True
+        self.signal_trigger = True
         self.llm_updates: list[tuple[object, str | None]] = []
 
     def update_llm(self, model: object, model_name: str | None) -> None:
@@ -146,10 +146,10 @@ class _TestAdapter(JiuWenSwarmDeepAdapter):
 
 
 @pytest.mark.asyncio
-async def test_normal_evolution_watcher_skips_status_when_auto_scan_disabled(monkeypatch):
+async def test_normal_evolution_watcher_skips_status_when_signal_trigger_disabled(monkeypatch):
     _FakeTransport.pushes = []
     rail = _FakeEvolutionRail()
-    rail.auto_scan = False
+    rail.signal_trigger = False
     adapter = _TestAdapter.build_with_rail(rail)
 
     monkeypatch.setattr(

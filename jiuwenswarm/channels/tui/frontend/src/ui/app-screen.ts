@@ -31,7 +31,6 @@ import {
 } from "../core/attachments.js";
 import {
   CommandService,
-  isCommandDisabled,
   parseSlashCommand,
   type InstalledSkillEntry,
 } from "../core/commands/CommandService.js";
@@ -58,12 +57,27 @@ import { PIPELINE_VALUES, PIPELINE_OPTIONS, INTERVAL_VALUES, INTERVAL_OPTIONS, F
 import { isTeamMode } from "../core/modes.js";
 import {
   countCompletedWorkflowAgents,
+  countWaitingForHuman,
   countWorkflowAgents,
+  sessionTurnLabelNumber,
+  canOpenSessionHistory,
+  isSessionNode,
   findWorkflowAgent,
+  formatWorkflowAgentKindLabel,
   formatWorkflowTimingText,
+  groupWorkflowAgentsByName,
+  HUMAN_TURN_CACHED_ANSWER,
+  HUMAN_TURN_CACHED_QUESTION,
+  isHumanTurnCached,
+  pendingHumanViewHint,
+  pendingInputsBannerText,
   runningWorkflowsBannerText,
+  sessionMembersInPhase,
+  shouldShowTurnInDetailOrReply,
   workflowStatusBannerText,
   workflowStatusIcon,
+  type WorkflowAgent,
+  type WorkflowNodeType,
   type WorkflowRun,
   type WorkflowStatus,
 } from "../core/workflows.js";
@@ -235,7 +249,7 @@ const REASONING_LEVEL_OPTIONS = ["", "off", "low", "medium", "high"];
 const MAX_MODEL_NAME_LENGTH = 100;
 const MAX_ALIAS_LENGTH = 100;
 const MAX_API_BASE_LENGTH = 512;
-const MAX_API_KEY_LENGTH = 500;
+const MAX_API_KEY_LENGTH = 2048;
 
 type ToolSelectorState = {
   list: CheckboxList;
@@ -314,6 +328,28 @@ type StatusViewState = {
   searchQuery: string;
 };
 
+type PendingListPreviousPhase = "chat" | "list" | "workflow" | "agent" | "session-detail" | null;
+
+type PendingListEntry =
+  | { kind: "workflow-header"; workflowId: string; workflowName: string }
+  | {
+      kind: "session-parent";
+      sessionLabel: string;
+      done: number;
+      total: number;
+    }
+  | {
+      kind: "waiting";
+      workflowId: string;
+      phaseId: string;
+      agentId: string;
+      sessionLabel: string;
+      turn: number;
+      isSessionChild: boolean;
+      /** Single-turn session node rendered flat (no tree); distinguishes from human()/agent(). */
+      isSession: boolean;
+    };
+
 type SwarmWorkflowsViewState =
   | {
       phase: "list";
@@ -327,12 +363,77 @@ type SwarmWorkflowsViewState =
       focus: "phases" | "agents";
       phaseList: SelectList;
       agentList: SelectList;
+      loadingDetail: boolean;
     }
   | {
       phase: "agent";
       workflowId: string;
       agentId: string;
+      returnTo?: SessionDetailReturnTo;
+    }
+  | {
+      phase: "pending-list";
+      entries: PendingListEntry[];
+      selectedIndex: number;
+      previous_phase: PendingListPreviousPhase;
+    }
+  | {
+      phase: "session-detail";
+      workflowId: string;
+      sessionLabel: string;
+      phaseId: string;
+      /** Isolates human_session vs agent_session when labels collide in a phase. */
+      nodeType: WorkflowNodeType;
+      returnTo: SessionDetailReturnTo;
+      scrollOffset: number;
     };
+
+type SessionDetailReturnTo =
+  | { kind: "pending-list"; previous_phase: PendingListPreviousPhase }
+  | { kind: "agent"; workflowId: string; agentId: string }
+  | { kind: "workflow"; workflowId: string; selectedPhaseId: string; selectedAgentId?: string };
+
+/** Prefer exact session primitive; fall back from kind for legacy payloads. */
+function sessionNodeTypeOf(
+  agent: Pick<WorkflowAgent, "node_type" | "kind">,
+): WorkflowNodeType {
+  if (agent.node_type === "agent_session" || agent.node_type === "human_session") {
+    return agent.node_type;
+  }
+  return agent.kind === "human" ? "human_session" : "agent_session";
+}
+
+function sessionSelectValue(
+  sessionLabel: string,
+  phaseId: string,
+  nodeType: WorkflowNodeType,
+): string {
+  return `session:${nodeType}:${sessionLabel}:${phaseId}`;
+}
+
+function parseSessionSelectValue(
+  value: string,
+): { sessionLabel: string; phaseId: string; nodeType: WorkflowNodeType } | null {
+  if (!value.startsWith("session:")) return null;
+  const rest = value.slice("session:".length);
+  const firstSep = rest.indexOf(":");
+  const lastSep = rest.lastIndexOf(":");
+  if (firstSep <= 0 || lastSep <= firstSep) return null;
+  const nodeType = rest.slice(0, firstSep);
+  if (
+    nodeType !== "agent_session" &&
+    nodeType !== "human_session" &&
+    nodeType !== "agent" &&
+    nodeType !== "human"
+  ) {
+    return null;
+  }
+  return {
+    nodeType,
+    sessionLabel: rest.slice(firstSep + 1, lastSep),
+    phaseId: rest.slice(lastSep + 1),
+  };
+}
 
 function formatSwarmWorkflowsSummary(workflows: WorkflowRun[]): string {
   if (workflows.length === 0) return "No workflows";
@@ -689,9 +790,8 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
     }
 
     // /memory edit|toggle + 空格：直接调用 completion 获取文件/key 列表，绕过 CombinedAutocompleteProvider
-    // memory 被屏蔽（isCommandDisabled）时跳过本块，避免对已禁用命令补全参数而暴露其存在。
     const memArgMatch = textBeforeCursor.match(/^\/memory\s+(edit|toggle)\s+(\S*)$/);
-    if (memArgMatch && this.memoryArgCompletion && !isCommandDisabled("memory")) {
+    if (memArgMatch && this.memoryArgCompletion) {
       try {
         const sub = memArgMatch[1];
         const argPrefix = memArgMatch[2].toLowerCase();
@@ -719,8 +819,7 @@ class ComposerAutocompleteProvider implements AutocompleteProvider {
     // inner provider 会以 "edit" 为 prefix 返回文件列表，applyCompletion 时会把
     // "edit" 替换成文件名 → /memory JIUWENSWARM.local.md（丢失子命令）。
     // 用户需要先输入空格，才走上面的 memArgMatch 路径正确展示文件列表。
-    // memory 被屏蔽时不抑制（让 inner provider 按未知命令处理）。
-    if (!isCommandDisabled("memory") && /^\/memory\s+(edit|toggle)$/.test(textBeforeCursor)) {
+    if (/^\/memory\s+(edit|toggle)$/.test(textBeforeCursor)) {
       return null;
     }
 
@@ -1104,6 +1203,11 @@ const planApprovalSelectListTheme = {
   description: (value: string) => chalk.dim(value),
 };
 
+const swarmWorkflowSelectListTheme = {
+  ...selectListTheme,
+  description: (value: string) => palette.text.secondary(value),
+};
+
 function wrapPlainText(text: string, width: number): string[] {
   const maxWidth = Math.max(12, width - 1);
   const source = text.replace(/\r/g, "").split("\n");
@@ -1133,6 +1237,33 @@ function wrapPlainText(text: string, width: number): string[] {
   return lines.length > 0 ? lines : [text.slice(0, maxWidth)];
 }
 
+/** Skip separator/blank lines when showing a compact human-question preview in lists. */
+function isDecorativeQuestionLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return true;
+  if (/^[=\-_─━*#~.·•]{4,}$/.test(trimmed)) return true;
+  const compact = trimmed.replace(/\s/g, "");
+  return compact.length >= 4 && /^[=\-_─━*#~.+]{4,}$/.test(compact);
+}
+
+function prepareHumanQuestionPreviewLines(
+  text: string,
+  width: number,
+  maxLines = 3,
+): { lines: string[]; truncated: boolean } {
+  const contentLines = text
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => !isDecorativeQuestionLine(line));
+  const source = contentLines.length > 0 ? contentLines.join("\n") : text.trim();
+  const wrapped = wrapPlainText(source, width);
+  return {
+    lines: wrapped.slice(0, maxLines),
+    truncated: wrapped.length > maxLines,
+  };
+}
+
 function workflowStatusTone(status: WorkflowStatus): (value: string) => string {
   switch (status) {
     case "planned":
@@ -1146,13 +1277,19 @@ function workflowStatusTone(status: WorkflowStatus): (value: string) => string {
       return palette.status.error;
     case "stopped":
       return palette.text.dim;
+    case "waiting_for_human":
+      return palette.text.humanInput;
     default:
-      return palette.text.dim;
+      return palette.text.secondary;
   }
 }
 
 function formatWorkflowStatus(status: WorkflowStatus): string {
   return workflowStatusTone(status)(`${workflowStatusIcon(status)} ${status}`);
+}
+
+function formatWorkflowStatusWord(status: WorkflowStatus): string {
+  return status === "waiting_for_human" ? "waiting" : status;
 }
 
 function formatWorkflowDuration(durationMs?: number | null): string | null {
@@ -1317,8 +1454,6 @@ export class AppScreen implements Component, Focusable {
   private questionPreviewMap: Map<string, string> | null = null;
   private questionOptionRows: QuestionOptionRowHit[] = [];
   private otherInputMode = false;
-  private ctrlCPendingForQuestion = false;
-  private ctrlCPendingForQuestionTimer: ReturnType<typeof setTimeout> | null = null;
   private resumeSessionList: ResumeSessionListState | null = null;
   private modelList: ModelListState | null = null;
   private toolSelector: ToolSelectorState | null = null;
@@ -1331,6 +1466,14 @@ export class AppScreen implements Component, Focusable {
   private statusViewState: StatusViewState | null = null;
   private mvController: MemoryViewController | null = null;
   private swarmWorkflowsViewState: SwarmWorkflowsViewState | null = null;
+  /** Currently-active swarmflow human reply input (null = not replying). */
+  private replyingToHumanPrompt: {
+    workflowRunId: string;
+    correlationId: string;
+    label: string;
+    turn: number;
+    isSession: boolean;
+  } | null = null;
   private startupPromptList: SelectList | null = null;
   private todosCollapsed = false;
   private showTeamPanel = false;
@@ -1569,21 +1712,12 @@ export class AppScreen implements Component, Focusable {
       this.transientNoticeTimer = null;
     }
     this.clearEscClearPending();
-    this.clearCtrlCPendingForQuestion();
     if (this.animationTimer) {
       clearInterval(this.animationTimer);
       this.animationTimer = null;
     }
     this.tui.terminal.write(DISABLE_MOUSE_TRACKING);
     this.unsubscribe();
-  }
-
-  private clearCtrlCPendingForQuestion(): void {
-    this.ctrlCPendingForQuestion = false;
-    if (this.ctrlCPendingForQuestionTimer) {
-      clearTimeout(this.ctrlCPendingForQuestionTimer);
-      this.ctrlCPendingForQuestionTimer = null;
-    }
   }
 
   /** 清除 ESC 双击清空输入框的待触发状态及其提示定时器。 */
@@ -1693,7 +1827,7 @@ export class AppScreen implements Component, Focusable {
     const totalLines = contentLines.length;
     const scrollPercent = totalLines > 0 ? Math.round((scrollOffset / totalLines) * 100) : 0;
     const positionInfo = totalLines > availableHeight ? ` [${scrollOffset + 1}-${Math.min(scrollOffset + availableHeight, totalLines)}/${totalLines} (${scrollPercent}%)]` : "";
-    const hintText = `按 Esc/q 退出 | ↑↓ 滚动 | PgUp/PgDown 翻页${positionInfo}`;
+    const hintText = `↑/↓ scroll · PgUp/PgDown page · Esc/← back${positionInfo}`;
     lines.push(padToWidth(palette.text.dim(hintText), safeWidth));
 
     return lines;
@@ -2266,48 +2400,38 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    // Ctrl+C during pending question: first press shows hint, second press within 3s exits
-    if (pendingQuestion && matchesKey(data, "ctrl+c")) {
-      if (this.ctrlCPendingForQuestion) {
-        this.clearCtrlCPendingForQuestion();
-        this.transientNotice = null;
-        this.exit();
-        return;
-      }
-      this.ctrlCPendingForQuestion = true;
-      this.transientNotice = "Press Ctrl+C again to exit";
-      this.ctrlCPendingForQuestionTimer = setTimeout(() => {
-        this.ctrlCPendingForQuestion = false;
-        this.ctrlCPendingForQuestionTimer = null;
-        this.transientNotice = null;
-        this.tui.requestRender();
-      }, 3000);
-      this.tui.requestRender();
-      return;
-    }
-
-    // Ctrl+D during pending question: same double-press mechanism as Ctrl+C
-    if (pendingQuestion && matchesKey(data, "ctrl+d")) {
-      if (this.ctrlCPendingForQuestion) {
-        this.clearCtrlCPendingForQuestion();
-        this.transientNotice = null;
-        this.interruptTask();
-        return;
-      }
-      this.ctrlCPendingForQuestion = true;
-      this.transientNotice = "Press Ctrl+D again to cancel";
-      this.ctrlCPendingForQuestionTimer = setTimeout(() => {
-        this.ctrlCPendingForQuestion = false;
-        this.ctrlCPendingForQuestionTimer = null;
-        this.transientNotice = null;
-        this.tui.requestRender();
-      }, 3000);
+    // 审批框（pendingQuestion）激活时：Ctrl+C 或 Esc 按一次即中断任务并关闭审批框，
+    // 不再需要双击，也不再退出 TUI 进程；Ctrl+D 不再响应。
+    if (
+      pendingQuestion &&
+      (matchesKey(data, "ctrl+c") || matchesKey(data, "escape"))
+    ) {
+      this.transientNotice = null;
+      this.interruptTask();
       this.tui.requestRender();
       return;
     }
 
     if (pendingQuestion && this.handlePendingQuestionInput(data, snapshot)) {
       this.tui.requestRender();
+      return;
+    }
+
+    // Swarmflow human reply input — lower priority than PendingQuestion, higher than chat.
+    if (this.replyingToHumanPrompt && this.handleSwarmflowHumanReplyInput(data)) {
+      this.tui.requestRender();
+      return;
+    }
+
+    // h key: open pending human-input list from the main chat screen.
+    if (
+      !hasOverlay &&
+      !pendingQuestion &&
+      !this.replyingToHumanPrompt &&
+      data === "h" &&
+      (snapshot.pendingHumanPrompts?.size ?? 0) > 0
+    ) {
+      void this.enterSwarmWorkflowsPendingList();
       return;
     }
 
@@ -2775,7 +2899,8 @@ export class AppScreen implements Component, Focusable {
       this.resumeSessionList !== null ||
       this.state.isHelpVisible() ||
       this.modelList !== null ||
-      (this.mvController?.isOpen ?? false);
+      (this.mvController?.isOpen ?? false) ||
+      this.replyingToHumanPrompt !== null;
     const editorLines = hideMainEditor
       ? []
       : this.applySlashCommandHint(this.editor.render(width), width);
@@ -2794,7 +2919,8 @@ export class AppScreen implements Component, Focusable {
       ...this.buildMcpToolDetailLines(width),
       ...this.buildThemeListLines(width),
       ...(this.swarmWorkflowsViewState ? [] : this.buildWorkflowRuntimeLines(width)),
-      ...this.buildSwarmWorkflowsLines(width),
+      ...(this.swarmWorkflowsViewState ? this.buildSwarmWorkflowsLines(width) : []),
+      ...this.buildSwarmflowHumanReplyInputLines(width),
       ...this.buildPendingQuestionLines(snapshot, width),
     ];
     const showFullThinking = snapshot.transcriptMode === "detailed";
@@ -3130,9 +3256,7 @@ export class AppScreen implements Component, Focusable {
         await this.openModelList();
         return;
       }
-      // /mcp 入口：未被屏蔽时直接开 MCP 列表界面；被屏蔽（isCommandDisabled）则跳过本块，
-      // 落到下方命令分发器显示 "Unknown command: /mcp"。屏蔽名单见 CommandService.DISABLED_COMMANDS。
-      if (!isCommandDisabled("mcp") && /^\/mcp(?:\s+list)?\s*$/.test(text)) {
+      if (/^\/mcp(?:\s+list)?\s*$/.test(text)) {
         this.editor.addToHistory(text);
         this.editor.setText("");
         this.state.addItem(addCommandEcho(snapshot.sessionId, text));
@@ -3154,10 +3278,8 @@ export class AppScreen implements Component, Focusable {
       // /memory（无参）及 /memory <edit|status|toggle|open>（无后续参数）
       // 打开 MemoryView 页签控制台；带参数的形式（/memory edit <path>、/memory toggle <key>）
       // 不匹配，继续走命令分发器（保留 completion）。
-      // 被屏蔽（isCommandDisabled）时跳过本块，落到分发器显示 "Unknown command: /memory"。
-      // 屏蔽名单见 CommandService.DISABLED_COMMANDS，恢复时删名字即可，本块无需改动。
       const memMatch = text.match(/^\/memory(?:\s+(edit|status|toggle|open))?$/);
-      if (memMatch && !isCommandDisabled("memory")) {
+      if (memMatch) {
         this.editor.addToHistory(text);
         this.editor.setText("");
         this.state.addItem(addCommandEcho(snapshot.sessionId, text));
@@ -3198,7 +3320,7 @@ export class AppScreen implements Component, Focusable {
             openInExternalEditor(this.tui, filePath);
           },
           openFolder: (folderPath: string) => {
-            openFolderInExplorer(folderPath);
+            return openFolderInExplorer(folderPath);
           },
           enterFileViewer: (content, title, source) => {
             this.enterFileViewer(content, title, source);
@@ -3298,7 +3420,6 @@ export class AppScreen implements Component, Focusable {
         this.editor.setText(this.draftBeforeQuestion);
       }
       this.draftBeforeQuestion = "";
-      this.clearCtrlCPendingForQuestion();
     }
     this.syncEditorSubmitState(snapshot);
     this.syncTeamPanelSelection(snapshot);
@@ -5112,7 +5233,135 @@ export class AppScreen implements Component, Focusable {
 
   private async enterSwarmWorkflowsView(): Promise<void> {
     this.state.beginDeferredTranscript();
+    this.transcriptScrollOffset = 0;
     await this.openSwarmWorkflowsView();
+  }
+
+  private async enterSwarmWorkflowsPendingList(): Promise<void> {
+    this.state.beginDeferredTranscript();
+    this.transcriptScrollOffset = 0;
+    this.swarmWorkflowsViewState = this.buildPendingListState("chat");
+    this.tui.requestRender();
+    try {
+      await this.state.loadWorkflowSnapshot();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.state.addItem(
+        addError(this.state.getSnapshot().sessionId, `workflow list failed: ${message}`),
+      );
+    }
+    const detailIds = new Set<string>();
+    for (const pending of this.state.getSnapshot().pendingHumanPrompts?.values() ?? []) {
+      detailIds.add(pending.workflow_run_id);
+    }
+    for (const wf of this.state.getSnapshot().workflowRuns) {
+      for (const phase of wf.phases ?? []) {
+        for (const agent of phase.agents ?? []) {
+          if (agent.status === "waiting_for_human" && agent.kind === "human") {
+            detailIds.add(wf.id);
+          }
+        }
+      }
+    }
+    await Promise.all(
+      [...detailIds].map((workflowId) =>
+        this.state.loadWorkflowDetail(workflowId).catch(() => undefined),
+      ),
+    );
+    const promptLoads: Array<Promise<void>> = [];
+    for (const wf of this.state.getSnapshot().workflowRuns) {
+      for (const phase of wf.phases ?? []) {
+        for (const agent of phase.agents ?? []) {
+          if (agent.status === "waiting_for_human" && agent.kind === "human") {
+            promptLoads.push(this.state.ensureHumanPromptLoaded(wf.id, agent.id));
+          }
+        }
+      }
+    }
+    await Promise.all(promptLoads.map((task) => task.catch(() => undefined)));
+    this.swarmWorkflowsViewState = this.buildPendingListState("chat");
+    this.tui.requestRender();
+  }
+
+  private lookupPendingHumanPrompt(workflowId: string, agentId: string) {
+    const lookup = findWorkflowAgent(this.state.getSnapshot().workflowRuns, workflowId, agentId);
+    const corr = lookup?.agent.correlation_id ?? agentId;
+    return this.state.getSnapshot().pendingHumanPrompts?.get(`${workflowId}:${corr}`);
+  }
+
+  private getHumanQuestionText(workflowId: string, agentId: string): string {
+    const lookup = findWorkflowAgent(this.state.getSnapshot().workflowRuns, workflowId, agentId);
+    if (lookup && isHumanTurnCached(lookup.agent)) {
+      return HUMAN_TURN_CACHED_QUESTION;
+    }
+    if (lookup?.agent.human_prompt?.trim()) {
+      return lookup.agent.human_prompt.trim();
+    }
+    const pending = this.lookupPendingHumanPrompt(workflowId, agentId);
+    if (pending?.prompt?.trim()) {
+      return pending.prompt.trim();
+    }
+    return "";
+  }
+
+  private async openAgentDetailFromPendingList(
+    waiting: Extract<PendingListEntry, { kind: "waiting" }>,
+    previous_phase: PendingListPreviousPhase,
+  ): Promise<void> {
+    this.replyingToHumanPrompt = null;
+    this.editor.setText("");
+    this.editor.focused = false;
+    try {
+      await this.state.loadWorkflowDetail(waiting.workflowId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.state.addItem(
+        addError(this.state.getSnapshot().sessionId, `workflow detail failed: ${message}`),
+      );
+    }
+    this.swarmWorkflowsViewState = {
+      phase: "agent",
+      workflowId: waiting.workflowId,
+      agentId: waiting.agentId,
+      returnTo: { kind: "pending-list", previous_phase },
+    };
+    this.tui.requestRender();
+  }
+
+  private async reloadSwarmWorkflowsKeepingView(): Promise<void> {
+    const current = this.swarmWorkflowsViewState;
+    try {
+      await this.state.loadWorkflowSnapshot();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.state.addItem(
+        addError(this.state.getSnapshot().sessionId, `workflow refresh failed: ${message}`),
+      );
+    }
+    if (current?.phase === "pending-list") {
+      const detailIds = new Set<string>();
+      for (const entry of current.entries) {
+        if (entry.kind === "waiting") detailIds.add(entry.workflowId);
+      }
+      await Promise.all(
+        [...detailIds].map((id) => this.state.loadWorkflowDetail(id).catch(() => undefined)),
+      );
+    } else if (
+      current?.phase === "workflow" ||
+      current?.phase === "agent" ||
+      current?.phase === "session-detail"
+    ) {
+      try {
+        await this.state.loadWorkflowDetail(current.workflowId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.state.addItem(
+          addError(this.state.getSnapshot().sessionId, `workflow detail refresh failed: ${message}`),
+        );
+      }
+    }
+    this.refreshSwarmWorkflowsView();
+    this.tui.requestRender();
   }
 
   private closeSwarmWorkflowsView(): void {
@@ -5132,6 +5381,13 @@ export class AppScreen implements Component, Focusable {
       );
       return;
     }
+    if (current.phase === "pending-list") {
+      this.swarmWorkflowsViewState = this.buildPendingListState(
+        current.previous_phase ?? "list",
+        current.selectedIndex,
+      );
+      return;
+    }
     if (current.phase === "workflow") {
       const selectedAgentId =
         current.focus === "agents" ? current.agentList.getSelectedItem()?.value : undefined;
@@ -5143,6 +5399,11 @@ export class AppScreen implements Component, Focusable {
       );
       return;
     }
+    if (current.phase === "session-detail") {
+      // Re-render only — buildSessionDetailLines reads live workflow snapshot.
+      return;
+    }
+    // current.phase === "agent"
     const lookup = findWorkflowAgent(
       this.state.getSnapshot().workflowRuns,
       current.workflowId,
@@ -5155,6 +5416,7 @@ export class AppScreen implements Component, Focusable {
         phase: "agent",
         workflowId: lookup.workflow.id,
         agentId: lookup.agent.id,
+        returnTo: current.returnTo,
       };
     }
   }
@@ -5185,8 +5447,7 @@ export class AppScreen implements Component, Focusable {
       list.setSelectedIndex(selectedWorkflowIndex);
     }
     list.onSelect = (item) => {
-      this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(item.value);
-      this.tui.requestRender();
+      void this.openSwarmWorkflowDetail(item.value);
     };
     list.onCancel = () => {
       this.closeSwarmWorkflowsView();
@@ -5194,11 +5455,80 @@ export class AppScreen implements Component, Focusable {
     return { phase: "list", list, loading };
   }
 
+  private async openSwarmWorkflowDetail(
+    workflowId: string,
+    selectedPhaseId?: string,
+    focus: "phases" | "agents" = "phases",
+    selectedAgentId?: string,
+  ): Promise<void> {
+    this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
+      workflowId,
+      selectedPhaseId,
+      focus,
+      selectedAgentId,
+      true,
+    );
+    this.tui.requestRender();
+    try {
+      await this.state.loadWorkflowDetail(workflowId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.state.addItem(
+        addError(this.state.getSnapshot().sessionId, `workflow detail failed: ${message}`),
+      );
+    }
+    this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
+      workflowId,
+      selectedPhaseId,
+      focus,
+      selectedAgentId,
+      false,
+    );
+    this.tui.requestRender();
+  }
+
+  /** Open agent detail or session history from the agents SelectList. */
+  private selectSwarmWorkflowAgentListItem(
+    workflowId: string,
+    activePhaseId: string,
+    item: SelectItem,
+  ): void {
+    const sessionRef = parseSessionSelectValue(item.value);
+    if (sessionRef) {
+      this.openSessionDetail(
+        workflowId,
+        sessionRef.sessionLabel,
+        sessionRef.phaseId,
+        sessionRef.nodeType,
+        {
+          kind: "workflow",
+          workflowId,
+          selectedPhaseId: activePhaseId,
+          selectedAgentId: item.value,
+        },
+      );
+      return;
+    }
+    const lookup = findWorkflowAgent(
+      this.state.getSnapshot().workflowRuns,
+      workflowId,
+      item.value,
+    );
+    if (!lookup) return;
+    this.swarmWorkflowsViewState = {
+      phase: "agent",
+      workflowId,
+      agentId: item.value,
+    };
+    this.tui.requestRender();
+  }
+
   private buildSwarmWorkflowDetailState(
     workflowId: string,
     selectedPhaseId?: string,
     focus: "phases" | "agents" = "phases",
     selectedAgentId?: string,
+    loadingDetail = false,
   ): SwarmWorkflowsViewState {
     const workflow = this.state.getSnapshot().workflowRuns.find((item) => item.id === workflowId);
     if (!workflow) return this.buildSwarmWorkflowsListState(false, workflowId);
@@ -5222,7 +5552,7 @@ export class AppScreen implements Component, Focusable {
     const phaseList = new SelectList(
       phaseItems,
       Math.min(Math.max(phaseItems.length, 1), 8),
-      selectListTheme,
+      swarmWorkflowSelectListTheme,
       {
         minPrimaryColumnWidth: 22,
         maxPrimaryColumnWidth: 36,
@@ -5250,32 +5580,60 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
     };
 
-    const agentItems: SelectItem[] = (selectedPhase?.agents ?? []).map((agent) => ({
-      value: agent.id,
-      label: `${formatWorkflowStatus(agent.status)} ${agent.name}`,
-      description: agent.model ?? "",
-    }));
+    // Build agent SelectList: session trees (incl. single-turn) + one-shots
+    const agents = selectedPhase?.agents ?? [];
+    const agentItems: SelectItem[] = [];
+    const { sessions, oneShots } = groupWorkflowAgentsByName(agents);
+
+    for (const { label, members } of sessions) {
+      const firstMember = members[0]!;
+      const aggregateStatus = this.aggregateSessionStatus(members);
+      const modelOrHuman = formatWorkflowAgentKindLabel(firstMember);
+      const nodeType = sessionNodeTypeOf(firstMember);
+      agentItems.push({
+        value: sessionSelectValue(label, activePhaseId, nodeType),
+        label: `${formatWorkflowStatus(aggregateStatus)} ${label}`,
+        description: `${this.formatSessionProgress(members)} · ${modelOrHuman}`,
+      });
+
+      for (let i = 0; i < members.length; i++) {
+        const member = members[i]!;
+        const turn = this.agentTurnNumber(member, i);
+        const isLast = i === members.length - 1;
+        const branch = isLast ? "└" : "├";
+        const turnModelOrHuman = formatWorkflowAgentKindLabel(member);
+        agentItems.push({
+          value: member.id,
+          label: this.formatSessionTurnSelectLabel(branch, turn, member.status),
+          description: isHumanTurnCached(member)
+            ? `${turnModelOrHuman} · cached`
+            : turnModelOrHuman,
+        });
+      }
+    }
+
+    for (const agent of oneShots) {
+      agentItems.push({
+        value: agent.id,
+        label: `${formatWorkflowStatus(agent.status)} ${agent.name}`,
+        description: formatWorkflowAgentKindLabel(agent),
+      });
+    }
     const agentList = new SelectList(
       agentItems,
       Math.min(Math.max(agentItems.length, 1), 10),
-      selectListTheme,
+      swarmWorkflowSelectListTheme,
       {
         minPrimaryColumnWidth: 24,
         maxPrimaryColumnWidth: 44,
       },
     );
-    const selectedAgentIndex = Math.max(
-      0,
-      agentItems.findIndex((agent) => agent.value === selectedAgentId),
-    );
+    const selectedAgentIndex = selectedAgentId
+      ? Math.max(0, agentItems.findIndex((agent) => agent.value === selectedAgentId))
+      : 0;
     agentList.setSelectedIndex(selectedAgentIndex);
     agentList.onSelect = (item) => {
-      this.swarmWorkflowsViewState = {
-        phase: "agent",
-        workflowId,
-        agentId: item.value,
-      };
-      this.tui.requestRender();
+      this.selectSwarmWorkflowAgentListItem(workflowId, activePhaseId, item);
     };
     agentList.onCancel = () => {
       this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
@@ -5292,6 +5650,7 @@ export class AppScreen implements Component, Focusable {
       focus,
       phaseList,
       agentList,
+      loadingDetail,
     };
   }
 
@@ -5300,28 +5659,65 @@ export class AppScreen implements Component, Focusable {
     if (!state) return;
     const action = resolveAction("SwarmWorkflows", data);
     if (action === "swarm:back") {
+      if (state.phase === "pending-list") {
+        this.restoreFromPendingList(state.previous_phase);
+        this.tui.requestRender();
+        return;
+      }
       if (state.phase === "list") {
         this.closeSwarmWorkflowsView();
       } else if (state.phase === "workflow") {
         this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false, state.workflowId);
-      } else {
-        const lookup = findWorkflowAgent(
-          this.state.getSnapshot().workflowRuns,
-          state.workflowId,
-          state.agentId,
-        );
-        this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
-          state.workflowId,
-          lookup?.phase.id,
-          "agents",
-          state.agentId,
-        );
+      } else if (state.phase === "agent") {
+        if (state.returnTo?.kind === "pending-list") {
+          this.replyingToHumanPrompt = null;
+          this.editor.setText("");
+          this.editor.focused = false;
+          this.swarmWorkflowsViewState = this.buildPendingListState(
+            state.returnTo.previous_phase ?? "chat",
+          );
+        } else {
+          const lookup = findWorkflowAgent(
+            this.state.getSnapshot().workflowRuns,
+            state.workflowId,
+            state.agentId,
+          );
+          this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
+            state.workflowId,
+            lookup?.phase.id,
+            "agents",
+            state.agentId,
+          );
+        }
+      } else if (state.phase === "session-detail") {
+        this.restoreFromSessionDetail(state.returnTo);
       }
+      // pending-list phase is handled separately above
       this.tui.requestRender();
       return;
     }
     if (action === "swarm:left") {
+      if (state.phase === "list") {
+        this.closeSwarmWorkflowsView();
+        this.tui.requestRender();
+        return;
+      }
+      if (state.phase === "pending-list") {
+        this.restoreFromPendingList(state.previous_phase);
+        this.tui.requestRender();
+        return;
+      }
       if (state.phase === "agent") {
+        if (state.returnTo?.kind === "pending-list") {
+          this.replyingToHumanPrompt = null;
+          this.editor.setText("");
+          this.editor.focused = false;
+          this.swarmWorkflowsViewState = this.buildPendingListState(
+            state.returnTo.previous_phase ?? "chat",
+          );
+          this.tui.requestRender();
+          return;
+        }
         const lookup = findWorkflowAgent(
           this.state.getSnapshot().workflowRuns,
           state.workflowId,
@@ -5333,6 +5729,8 @@ export class AppScreen implements Component, Focusable {
           "agents",
           state.agentId,
         );
+      } else if (state.phase === "session-detail") {
+        this.restoreFromSessionDetail(state.returnTo);
       } else if (state.phase === "workflow") {
         this.swarmWorkflowsViewState =
           state.focus === "agents"
@@ -5347,14 +5745,33 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
       return;
     }
-    if (state.phase === "workflow" && action === "swarm:nextFocus") {
-      const nextFocus = state.focus === "phases" ? "agents" : "phases";
-      this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
-        state.workflowId,
-        state.selectedPhaseId,
-        nextFocus,
-      );
-      this.tui.requestRender();
+    if (action === "swarm:nextFocus") {
+      if (state.phase === "list") {
+        const item = state.list.getSelectedItem();
+        if (item) {
+          void this.openSwarmWorkflowDetail(item.value);
+        }
+        return;
+      }
+      if (state.phase === "workflow") {
+        if (state.focus === "phases") {
+          this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
+            state.workflowId,
+            state.selectedPhaseId,
+            "agents",
+          );
+          this.tui.requestRender();
+        } else {
+          const item = state.agentList.getSelectedItem();
+          if (item) {
+            this.selectSwarmWorkflowAgentListItem(
+              state.workflowId,
+              state.selectedPhaseId,
+              item,
+            );
+          }
+        }
+      }
       return;
     }
     if (state.phase === "workflow" && action === "swarm:logs") {
@@ -5362,11 +5779,27 @@ export class AppScreen implements Component, Focusable {
       return;
     }
     if (state.phase === "agent") {
-      if (action === "swarm:viewPrompt") {
+      // For human nodes, Q key shows question; for agent nodes, P key shows prompt
+      const lookup = findWorkflowAgent(
+        this.state.getSnapshot().workflowRuns,
+        state.workflowId,
+        state.agentId,
+      );
+      const isHuman = lookup?.agent.kind === "human";
+
+      if (action === "swarm:viewPrompt" || (!isHuman && matchesKey(data, "p"))) {
         this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "prompt");
         return;
       }
-      if (action === "swarm:viewOutcome") {
+      if (isHuman && matchesKey(data, "q")) {
+        this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "human_prompt");
+        return;
+      }
+      if (isHuman && matchesKey(data, "a")) {
+        this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "human_reply");
+        return;
+      }
+      if (!isHuman && action === "swarm:viewOutcome") {
         this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "outcome");
         return;
       }
@@ -5374,10 +5807,161 @@ export class AppScreen implements Component, Focusable {
         this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "error");
         return;
       }
+      // S: session history for agent_session / human_session nodes only
+      if (
+        matchesKey(data, "s") &&
+        lookup &&
+        canOpenSessionHistory(lookup.agent)
+      ) {
+        if (
+          this.tryOpenSessionDetailFromAgent(state.workflowId, state.agentId, {
+            kind: "agent",
+            workflowId: state.workflowId,
+            agentId: state.agentId,
+          })
+        ) {
+          return;
+        }
+      }
+      // Tab on a waiting_for_human node enters reply mode.
+      if (matchesKey(data, "tab")) {
+        if (lookup?.agent.status === "waiting_for_human") {
+          this.replyingToHumanPrompt = {
+            workflowRunId: state.workflowId,
+            correlationId: lookup.agent.correlation_id ?? lookup.agent.id,
+            label: lookup.agent.name,
+            turn: sessionTurnLabelNumber(lookup.agent, lookup.phase.agents ?? []) ?? 0,
+            isSession: shouldShowTurnInDetailOrReply(lookup.agent),
+          };
+          this.editor.setText("");
+          this.editor.focused = true;
+          this.tui.requestRender();
+          return;
+        }
+      }
+    }
+    if (state.phase === "session-detail") {
+      // Scroll / paging over the (potentially long) session history body.
+      // Render clamps scrollOffset to the real max, so overshoot is safe here.
+      const page = Math.max(1, this.sessionDetailBodyViewport(5) - 1);
+      if (matchesKey(data, "up") || matchesKey(data, "k")) {
+        state.scrollOffset = Math.max(0, state.scrollOffset - 1);
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "down") || matchesKey(data, "j")) {
+        state.scrollOffset = state.scrollOffset + 1;
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "pageUp")) {
+        state.scrollOffset = Math.max(0, state.scrollOffset - page);
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "pageDown")) {
+        state.scrollOffset = state.scrollOffset + page;
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "home")) {
+        state.scrollOffset = 0;
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "end")) {
+        state.scrollOffset = Number.MAX_SAFE_INTEGER;
+        this.tui.requestRender();
+        return;
+      }
+      // Tab: enter reply mode for the waiting turn (if any)
+      if (matchesKey(data, "tab")) {
+        const workflow = this.state.getSnapshot().workflowRuns.find((w) => w.id === state.workflowId);
+        const phase = workflow?.phases.find((item) => item.id === state.phaseId);
+        if (phase) {
+          for (const agent of phase.agents ?? []) {
+            if (
+              agent.name === state.sessionLabel &&
+              agent.status === "waiting_for_human" &&
+              agent.kind === "human" &&
+              sessionNodeTypeOf(agent) === state.nodeType
+            ) {
+              this.replyingToHumanPrompt = {
+                workflowRunId: state.workflowId,
+                correlationId: agent.correlation_id ?? agent.id,
+                label: agent.name,
+                turn: sessionTurnLabelNumber(agent, phase.agents ?? []) ?? 0,
+                isSession: shouldShowTurnInDetailOrReply(agent),
+              };
+              this.editor.setText("");
+              this.editor.focused = true;
+              this.tui.requestRender();
+              return;
+            }
+          }
+        }
+      }
     }
     if (action === "swarm:refresh") {
+      if (
+        state.phase === "session-detail" ||
+        state.phase === "agent" ||
+        state.phase === "workflow" ||
+        state.phase === "pending-list"
+      ) {
+        void this.reloadSwarmWorkflowsKeepingView();
+        return;
+      }
       void this.openSwarmWorkflowsView();
       this.tui.requestRender();
+      return;
+    }
+    // Esc / navigation from pending-list
+    if (state.phase === "pending-list") {
+      if (matchesKey(data, "return") || matchesKey(data, "right")) {
+        const waiting = this.getSelectedPendingListWaiting(state);
+        if (waiting) {
+          void this.openAgentDetailFromPendingList(waiting, state.previous_phase);
+        }
+        return;
+      }
+      if (matchesKey(data, "q")) {
+        const waiting = this.getSelectedPendingListWaiting(state);
+        if (waiting) {
+          void this.state.ensureHumanPromptLoaded(waiting.workflowId, waiting.agentId).then(() => {
+            this.openSwarmWorkflowAgentText(waiting.workflowId, waiting.agentId, "human_prompt");
+            this.tui.requestRender();
+          });
+        }
+        return;
+      }
+      if (matchesKey(data, "s")) {
+        const waiting = this.getSelectedPendingListWaiting(state);
+        if (
+          waiting &&
+          this.tryOpenSessionDetailFromAgent(waiting.workflowId, waiting.agentId, {
+            kind: "pending-list",
+            previous_phase: state.previous_phase,
+          })
+        ) {
+          return;
+        }
+      }
+      if (matchesKey(data, "tab")) {
+        void this.startReplyFromPendingListWaiting(state);
+        return;
+      }
+      if (matchesKey(data, "up") || matchesKey(data, "k")) {
+        state.selectedIndex = Math.max(0, state.selectedIndex - 1);
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "down") || matchesKey(data, "j")) {
+        const count = this.countPendingListWaitingEntries(state);
+        state.selectedIndex = Math.min(Math.max(count - 1, 0), state.selectedIndex + 1);
+        this.tui.requestRender();
+        return;
+      }
       return;
     }
     if (state.phase === "list") {
@@ -5386,6 +5970,30 @@ export class AppScreen implements Component, Focusable {
       return;
     }
     if (state.phase === "workflow") {
+      // Entry B: Tab key in agents focus mode → quick reply to selected waiting human turn
+      if (matchesKey(data, "tab") && state.focus === "agents") {
+        const selectedItem = state.agentList.getSelectedItem();
+        if (selectedItem && !selectedItem.value.startsWith("session:")) {
+          const lookup = findWorkflowAgent(
+            this.state.getSnapshot().workflowRuns,
+            state.workflowId,
+            selectedItem.value,
+          );
+          if (lookup && lookup.agent.status === "waiting_for_human" && lookup.agent.kind === "human") {
+            this.replyingToHumanPrompt = {
+              workflowRunId: state.workflowId,
+              correlationId: lookup.agent.correlation_id ?? lookup.agent.id,
+              label: lookup.agent.name,
+              turn: sessionTurnLabelNumber(lookup.agent, lookup.phase.agents ?? []) ?? 0,
+              isSession: shouldShowTurnInDetailOrReply(lookup.agent),
+            };
+            this.editor.setText("");
+            this.editor.focused = true;
+            this.tui.requestRender();
+            return;
+          }
+        }
+      }
       const activeList = state.focus === "phases" ? state.phaseList : state.agentList;
       activeList.handleInput(data);
       this.tui.requestRender();
@@ -5408,14 +6016,36 @@ export class AppScreen implements Component, Focusable {
   private openSwarmWorkflowAgentText(
     workflowId: string,
     agentId: string,
-    field: "prompt" | "outcome" | "error",
+    field: "prompt" | "outcome" | "error" | "human_prompt" | "human_reply",
   ): void {
     const lookup = findWorkflowAgent(this.state.getSnapshot().workflowRuns, workflowId, agentId);
     if (!lookup) return;
-    const value = lookup.agent[field];
+    const cached = isHumanTurnCached(lookup.agent);
+    const value =
+      field === "human_prompt"
+        ? cached
+          ? HUMAN_TURN_CACHED_QUESTION
+          : lookup.agent.human_prompt || this.getHumanQuestionText(workflowId, agentId)
+        : field === "human_reply"
+          ? cached
+            ? HUMAN_TURN_CACHED_ANSWER
+            : lookup.agent.human_reply
+          : lookup.agent[field];
     if (!value) return;
-    const label = field.charAt(0).toUpperCase() + field.slice(1);
-    this.enterFileViewer(value, `${label} - ${lookup.agent.name}`, lookup.workflow.name);
+    const label =
+      field === "human_reply"
+        ? "Answer"
+        : field === "human_prompt"
+          ? "Question"
+          : field.charAt(0).toUpperCase() + field.slice(1);
+    let display = value;
+    try {
+      const parsed = JSON.parse(value);
+      display = JSON.stringify(parsed, null, 2);
+    } catch {
+      // not JSON, use as-is
+    }
+    this.enterFileViewer(display, `${label} - ${lookup.agent.name}`, lookup.workflow.name);
   }
 
   private buildSwarmWorkflowsLines(width: number): string[] {
@@ -5424,33 +6054,66 @@ export class AppScreen implements Component, Focusable {
     if (state.phase === "list") {
       return this.buildSwarmWorkflowsListLines(state, width);
     }
+    if (state.phase === "pending-list") {
+      return this.buildPendingListLines(state, width);
+    }
     if (state.phase === "workflow") {
       return this.buildSwarmWorkflowDetailLines(state, width);
+    }
+    if (state.phase === "session-detail") {
+      return this.buildSessionDetailLines(state, width);
     }
     return this.buildSwarmWorkflowAgentLines(state, width);
   }
 
   private buildWorkflowRuntimeLines(width: number): string[] {
-    const runningWorkflows = this.state
-      .getSnapshot()
-      .workflowRuns.filter((item) => item.status === "running");
-    if (runningWorkflows.length === 0) return [];
-    const spinner = palette.status.warning(["◐", "◓", "◑", "◒"][this.animationPhase % 4]!);
+    const snapshot = this.state.getSnapshot();
+    const workflowRuns = snapshot.workflowRuns;
+    const pendingPrompts = snapshot.pendingHumanPrompts;
 
-    const renderRow = (workflow: WorkflowRun, prefix: string): string =>
-      padToWidth(
-        `${prefix}${palette.text.dim(workflow.name)} ${palette.text.dim(formatWorkflowTimingText(workflow))}`,
+    const runningWorkflows = workflowRuns.filter((item) => item.status === "running");
+    const totalPending = pendingPrompts?.size ?? 0;
+
+    if (runningWorkflows.length === 0 && totalPending === 0) return [];
+
+    const waitingIcon = workflowStatusIcon("waiting_for_human");
+    const spinner =
+      totalPending > 0
+        ? palette.text.humanInput(`${waitingIcon} `)
+        : palette.status.warning(["◐", "◓", "◑", "◒"][this.animationPhase % 4]!);
+
+    const renderRow = (workflow: WorkflowRun): string => {
+      const pendingCount = countWaitingForHuman(workflow);
+      const nameAndTime = `${palette.text.dim(workflow.name)} ${palette.text.dim(formatWorkflowTimingText(workflow))}`;
+      const suffix = pendingCount > 0 ? ` ${palette.text.dim(`· ${pendingCount} waiting`)}` : "";
+      return padToWidth(`  ${nameAndTime}${suffix}`, width);
+    };
+
+    if (totalPending > 0) {
+      const runningSuffix =
+        runningWorkflows.length > 0
+          ? ` · ${palette.text.assistant(runningWorkflowsBannerText(runningWorkflows.length))}`
+          : "";
+      const firstLine = padToWidth(
+        `${spinner}${palette.text.humanInput(pendingInputsBannerText(totalPending))} · ${palette.text.dim(pendingHumanViewHint())}${runningSuffix}`,
         width,
       );
+      const lines = [firstLine];
+      for (const wf of runningWorkflows) {
+        lines.push(renderRow(wf));
+      }
+      return lines;
+    }
 
+    // No pending — original behaviour.
     if (runningWorkflows.length === 1) {
       const workflow = runningWorkflows[0]!;
       return [
+        padToWidth(`${spinner} ${palette.text.assistant(runningWorkflowsBannerText(1))}`, width),
         padToWidth(
-          `${spinner} ${palette.text.assistant(runningWorkflowsBannerText(1))}`,
+          `  ${palette.text.dim(workflow.name)} ${palette.text.dim(formatWorkflowTimingText(workflow))}`,
           width,
         ),
-        renderRow(workflow, "  "),
       ];
     }
 
@@ -5460,8 +6123,8 @@ export class AppScreen implements Component, Focusable {
         width,
       ),
     ];
-    for (const workflow of runningWorkflows) {
-      lines.push(renderRow(workflow, "  "));
+    for (const wf of runningWorkflows) {
+      lines.push(renderRow(wf));
     }
     return lines;
   }
@@ -5481,7 +6144,7 @@ export class AppScreen implements Component, Focusable {
       ),
     ];
     const helpLine = padToWidth(
-      palette.text.dim("up/down select - Enter view - r refresh - Esc close"),
+      palette.text.dim("↑/↓ select · Enter/→ load detail · r refresh · Esc/← close"),
       width,
     );
     if (state.loading || workflows.length === 0) {
@@ -5493,6 +6156,278 @@ export class AppScreen implements Component, Focusable {
       ...state.list.render(width),
       helpLine,
     ];
+  }
+
+  private countPendingListWaitingEntries(
+    state: Extract<SwarmWorkflowsViewState, { phase: "pending-list" }>,
+  ): number {
+    return state.entries.filter((entry) => entry.kind === "waiting").length;
+  }
+
+  private getSelectedPendingListWaiting(
+    state: Extract<SwarmWorkflowsViewState, { phase: "pending-list" }>,
+  ): Extract<PendingListEntry, { kind: "waiting" }> | null {
+    const waitingEntries = state.entries.filter(
+      (entry): entry is Extract<PendingListEntry, { kind: "waiting" }> => entry.kind === "waiting",
+    );
+    return waitingEntries[state.selectedIndex] ?? null;
+  }
+
+  private prefetchPendingListQuestion(waiting: Extract<PendingListEntry, { kind: "waiting" }>): void {
+    void this.state.ensureHumanPromptLoaded(waiting.workflowId, waiting.agentId).then(() => {
+      if (this.swarmWorkflowsViewState?.phase === "pending-list") {
+        this.tui.requestRender();
+      }
+    });
+  }
+
+  private startReplyFromPendingListWaiting(
+    state: Extract<SwarmWorkflowsViewState, { phase: "pending-list" }>,
+  ): boolean {
+    const waiting = this.getSelectedPendingListWaiting(state);
+    if (!waiting) return false;
+    void this.state.ensureHumanPromptLoaded(waiting.workflowId, waiting.agentId).then(() => {
+      if (this.startReplyFromPendingListWaitingSync(state)) {
+        this.tui.requestRender();
+      }
+    });
+    return true;
+  }
+
+  private startReplyFromPendingListWaitingSync(
+    state: Extract<SwarmWorkflowsViewState, { phase: "pending-list" }>,
+  ): boolean {
+    const waiting = this.getSelectedPendingListWaiting(state);
+    if (!waiting) return false;
+    const lookup = findWorkflowAgent(
+      this.state.getSnapshot().workflowRuns,
+      waiting.workflowId,
+      waiting.agentId,
+    );
+    if (!lookup || lookup.agent.status !== "waiting_for_human") return false;
+    this.replyingToHumanPrompt = {
+      workflowRunId: waiting.workflowId,
+      correlationId: lookup.agent.correlation_id ?? lookup.agent.id,
+      label: lookup.agent.name,
+      turn: waiting.turn,
+      isSession: shouldShowTurnInDetailOrReply(lookup.agent),
+    };
+    this.editor.setText("");
+    this.editor.focused = true;
+    this.tui.requestRender();
+    return true;
+  }
+
+  private restoreFromPendingList(previous_phase: PendingListPreviousPhase): void {
+    this.replyingToHumanPrompt = null;
+    this.editor.setText("");
+    this.editor.focused = false;
+    if (previous_phase === "chat") {
+      this.closeSwarmWorkflowsView();
+      return;
+    }
+    if (previous_phase === "list") {
+      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false);
+      return;
+    }
+    if (previous_phase === "workflow") {
+      const workflows = this.state.getSnapshot().workflowRuns;
+      if (workflows.length > 0) {
+        this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(workflows[0]!.id);
+      } else {
+        this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false);
+      }
+      return;
+    }
+    if (previous_phase === "agent" || previous_phase === "session-detail") {
+      this.swarmWorkflowsViewState = this.buildSwarmWorkflowsListState(false);
+      return;
+    }
+    this.closeSwarmWorkflowsView();
+  }
+
+  private buildPendingListState(
+    previous_phase: PendingListPreviousPhase,
+    selectedIndex = 0,
+  ): SwarmWorkflowsViewState {
+    const workflows = this.state.getSnapshot().workflowRuns;
+    const entries: PendingListEntry[] = [];
+
+    for (const workflow of workflows) {
+      let workflowHeaderAdded = false;
+
+      for (const phase of workflow.phases ?? []) {
+        const waitingAgents = (phase.agents ?? []).filter(
+          (agent) => agent.status === "waiting_for_human" && agent.kind === "human",
+        );
+        if (waitingAgents.length === 0) continue;
+
+        if (!workflowHeaderAdded) {
+          entries.push({
+            kind: "workflow-header",
+            workflowId: workflow.id,
+            workflowName: workflow.name,
+          });
+          workflowHeaderAdded = true;
+        }
+
+        const { sessions, oneShots } = groupWorkflowAgentsByName(phase.agents ?? []);
+        const waitingIds = new Set(waitingAgents.map((agent) => agent.id));
+
+        for (const { label, members } of sessions) {
+          const waitingMembers = members.filter((member) => waitingIds.has(member.id));
+          if (waitingMembers.length === 0) continue;
+
+          entries.push({
+            kind: "session-parent",
+            sessionLabel: label,
+            done: this.sessionDoneCount(members),
+            total: this.sessionTotalCount(members),
+          });
+
+          for (const member of waitingMembers) {
+            const turnIndex = members.findIndex((item) => item.id === member.id);
+            entries.push({
+              kind: "waiting",
+              workflowId: workflow.id,
+              phaseId: phase.id,
+              agentId: member.id,
+              sessionLabel: label,
+              turn: this.agentTurnNumber(member, Math.max(turnIndex, 0)),
+              isSessionChild: true,
+              isSession: true,
+            });
+          }
+        }
+
+        for (const agent of oneShots) {
+          if (!waitingIds.has(agent.id)) continue;
+          const isSession = isSessionNode(agent);
+          entries.push({
+            kind: "waiting",
+            workflowId: workflow.id,
+            phaseId: phase.id,
+            agentId: agent.id,
+            sessionLabel: agent.name,
+            turn: sessionTurnLabelNumber(agent, phase.agents ?? []) ?? 0,
+            isSessionChild: false,
+            isSession,
+          });
+        }
+      }
+    }
+
+    const waitingCount = entries.filter((entry) => entry.kind === "waiting").length;
+    return {
+      phase: "pending-list",
+      entries,
+      selectedIndex: Math.min(Math.max(selectedIndex, 0), Math.max(waitingCount - 1, 0)),
+      previous_phase,
+    };
+  }
+
+  private buildPendingListLines(
+    state: Extract<SwarmWorkflowsViewState, { phase: "pending-list" }>,
+    width: number,
+    options: { overlay?: boolean } = {},
+  ): string[] {
+    const overlay = options.overlay ?? false;
+    const divider = padToWidth(palette.text.dim("─".repeat(Math.max(1, width))), width);
+    const waitingCount = this.countPendingListWaitingEntries(state);
+    const headerLines = overlay
+      ? [
+          divider,
+          padToWidth(
+            palette.text.humanInput(
+              `${workflowStatusIcon("waiting_for_human")} Pending human replies`,
+            ),
+            width,
+          ),
+          padToWidth(
+            palette.text.secondary(
+              waitingCount === 0
+                ? "No pending replies · Esc/← back to chat"
+                : `${waitingCount} waiting · Esc/← back to chat`,
+            ),
+            width,
+          ),
+          divider,
+        ]
+      : [
+          padToWidth(palette.text.humanInput("Pending human replies"), width),
+          padToWidth(
+            palette.text.secondary(
+              waitingCount === 0 ? "No pending replies" : `${waitingCount} waiting`,
+            ),
+            width,
+          ),
+        ];
+    const helpLine = padToWidth(
+      palette.text.secondary(
+        overlay
+          ? "↑/↓ select · Enter detail · Tab reply · s session · q question · Esc/← back to chat"
+          : "↑/↓ select · Enter detail · Tab reply · s session · q question · Esc/← back",
+      ),
+      width,
+    );
+    if (waitingCount === 0) {
+      return [...headerLines, "", helpLine, ...(overlay ? ["", divider] : [])];
+    }
+
+    const lines: string[] = [...headerLines, ""];
+    const waitingIcon = palette.text.humanInput(workflowStatusIcon("waiting_for_human"));
+    const waitingPrefix = `${waitingIcon} `;
+    let waitingCursor = 0;
+    for (const entry of state.entries) {
+      if (entry.kind === "workflow-header") {
+        lines.push(padToWidth(palette.text.accent(entry.workflowName), width));
+        continue;
+      }
+      if (entry.kind === "session-parent") {
+        lines.push(
+          padToWidth(
+            `  ${entry.sessionLabel} ${palette.text.secondary(`· human · ${entry.done}/${entry.total}`)}`,
+            width,
+          ),
+        );
+        continue;
+      }
+
+      const selected = waitingCursor === state.selectedIndex;
+      waitingCursor += 1;
+      const marker = selected ? palette.text.accent("›") : " ";
+      const label = entry.isSessionChild
+        ? `${palette.text.dim("    └")} ${waitingPrefix}turn ${entry.turn} ${palette.text.secondary("· waiting")}`
+        : entry.isSession
+          ? `${waitingPrefix}${entry.sessionLabel} ${palette.text.secondary(`· turn ${entry.turn} · waiting`)}`
+          : `${waitingPrefix}${entry.sessionLabel} ${palette.text.secondary("· waiting")}`;
+      lines.push(padToWidth(`${marker}${selected ? " " : "  "}${label}`, width));
+      if (selected) {
+        const question = this.getHumanQuestionText(entry.workflowId, entry.agentId);
+        if (question) {
+          const previewWidth = Math.max(20, width - 10);
+          const { lines: previewLines, truncated } = prepareHumanQuestionPreviewLines(
+            question,
+            previewWidth,
+            3,
+          );
+          lines.push(padToWidth(palette.text.secondary("      Question"), width));
+          for (const qLine of previewLines) {
+            lines.push(padToWidth(palette.text.dim(`        ${qLine}`), width));
+          }
+          if (truncated) {
+            lines.push(padToWidth(palette.text.dim("        … press q for full question"), width));
+          }
+        } else {
+          lines.push(
+            padToWidth(palette.text.dim("      Question: (loading…)"), width),
+          );
+        }
+      }
+    }
+
+    lines.push("", ...(overlay ? [divider, ""] : []), helpLine);
+    return lines;
   }
 
   private buildSwarmWorkflowDetailLines(
@@ -5523,6 +6458,16 @@ export class AppScreen implements Component, Focusable {
         width,
       ),
       padToWidth(palette.text.dim(formatWorkflowTimingText(workflow)), width),
+      ...(state.loadingDetail
+        ? [padToWidth(palette.text.dim("Loading workflow details…"), width)]
+        : workflow.truncated
+          ? [
+              padToWidth(
+                palette.status.warning("⚠ Large workflow — some fields were truncated"),
+                width,
+              ),
+            ]
+          : []),
       ...(workflow.status === "failed" && workflow.error
         ? wrapPlainText(workflow.error, width).map((line) =>
             padToWidth(palette.status.error(line), width),
@@ -5546,7 +6491,14 @@ export class AppScreen implements Component, Focusable {
       lines.push(...this.renderSwarmWorkflowPhaseRows(workflow, state.selectedPhaseId, width));
     }
     lines.push("");
-    const agentsTitle = selectedPhase ? `Agents · ${selectedPhase.name}` : "Agents";
+    const agentsTitle =
+      state.focus === "agents"
+        ? selectedPhase
+          ? `select agents · ${selectedPhase.name}`
+          : "select agents"
+        : selectedPhase
+          ? `Agents · ${selectedPhase.name}`
+          : "Agents";
     lines.push(
       padToWidth(
         state.focus === "agents"
@@ -5568,13 +6520,13 @@ export class AppScreen implements Component, Focusable {
     } else {
       lines.push(padToWidth(palette.text.dim("No agents"), width));
     }
-    lines.push(padToWidth(palette.text.dim("press l to see full logs"), width));
+    lines.push(padToWidth(palette.text.secondary("press l to see full logs"), width));
     lines.push(
       padToWidth(
-        palette.text.dim(
+        palette.text.secondary(
           state.focus === "phases"
-            ? "up/down select phase · Enter show agents · Tab/Right agents · Esc back"
-            : "up/down select agent · Enter detail · Tab/Left phases · r refresh · Esc back",
+            ? "↑/↓ select phase · Enter/→ show agents · Esc/← back"
+            : "↑/↓ select · Enter/→ detail/session · Tab reply (human) · ← phases · Esc/← back",
         ),
         width,
       ),
@@ -5618,29 +6570,547 @@ export class AppScreen implements Component, Focusable {
     });
   }
 
+  /** Phase-local 0-based turn label (see ``phaseLocalTurnNumber`` in workflows.ts). */
+  private agentTurnNumber(
+    agent: WorkflowRun["phases"][number]["agents"][number],
+    indexInSession: number,
+  ): number {
+    return indexInSession;
+  }
+
+  private formatSessionTurnSelectLabel(
+    branch: string,
+    turn: number,
+    status: WorkflowStatus,
+  ): string {
+    const icon = workflowStatusIcon(status);
+    const tone = workflowStatusTone(status);
+    const statusWord = formatWorkflowStatusWord(status);
+    return `  ${branch} ${tone(`${icon} turn ${turn} · ${statusWord}`)}`;
+  }
+
+  /** Total session turns visible in the current phase. */
+  private sessionTotalCount(members: WorkflowRun["phases"][number]["agents"]): number {
+    return members.length;
+  }
+
+  private sessionDetailReturnToForCurrentView(
+    workflowId: string,
+    agentId: string,
+  ): SessionDetailReturnTo {
+    const state = this.swarmWorkflowsViewState;
+    if (state?.phase === "pending-list") {
+      return { kind: "pending-list", previous_phase: state.previous_phase };
+    }
+    if (state?.phase === "agent") {
+      return { kind: "agent", workflowId: state.workflowId, agentId: state.agentId };
+    }
+    if (state?.phase === "workflow") {
+      return {
+        kind: "workflow",
+        workflowId: state.workflowId,
+        selectedPhaseId: state.selectedPhaseId,
+        selectedAgentId:
+          state.focus === "agents" ? state.agentList.getSelectedItem()?.value : undefined,
+      };
+    }
+    return { kind: "agent", workflowId, agentId };
+  }
+
+  private openSessionDetail(
+    workflowId: string,
+    sessionLabel: string,
+    phaseId: string,
+    nodeType: WorkflowNodeType,
+    returnTo: SessionDetailReturnTo,
+  ): void {
+    this.swarmWorkflowsViewState = {
+      phase: "session-detail",
+      workflowId,
+      sessionLabel,
+      phaseId,
+      nodeType,
+      returnTo,
+      scrollOffset: 0,
+    };
+    this.tui.requestRender();
+  }
+
+  private restoreFromSessionDetail(returnTo: SessionDetailReturnTo): void {
+    switch (returnTo.kind) {
+      case "pending-list":
+        this.swarmWorkflowsViewState = this.buildPendingListState(returnTo.previous_phase ?? "list");
+        break;
+      case "agent":
+        this.swarmWorkflowsViewState = {
+          phase: "agent",
+          workflowId: returnTo.workflowId,
+          agentId: returnTo.agentId,
+        };
+        break;
+      case "workflow":
+        this.swarmWorkflowsViewState = this.buildSwarmWorkflowDetailState(
+          returnTo.workflowId,
+          returnTo.selectedPhaseId,
+          "agents",
+          returnTo.selectedAgentId,
+        );
+        break;
+    }
+  }
+
+  private tryOpenSessionDetailFromAgent(
+    workflowId: string,
+    agentId: string,
+    returnTo: SessionDetailReturnTo,
+  ): boolean {
+    const lookup = findWorkflowAgent(this.state.getSnapshot().workflowRuns, workflowId, agentId);
+    if (!lookup) return false;
+    if (!canOpenSessionHistory(lookup.agent)) {
+      return false;
+    }
+    this.openSessionDetail(
+      workflowId,
+      lookup.agent.name,
+      lookup.phase.id,
+      sessionNodeTypeOf(lookup.agent),
+      returnTo,
+    );
+    return true;
+  }
+
+  private aggregateSessionStatus(
+    members: WorkflowRun["phases"][number]["agents"],
+  ): WorkflowStatus {
+    let aggregateStatus: WorkflowStatus = "completed";
+    for (const member of members) {
+      if (member.status === "running") {
+        return "running";
+      }
+      if (member.status === "waiting_for_human") {
+        aggregateStatus = "waiting_for_human";
+      } else if (member.status === "failed" && aggregateStatus === "completed") {
+        aggregateStatus = "failed";
+      } else if (member.status !== "completed" && aggregateStatus === "completed") {
+        aggregateStatus = member.status;
+      }
+    }
+    return aggregateStatus;
+  }
+
+  /** Done turns for session parent progress (completed / failed / stopped). */
+  private sessionDoneCount(members: WorkflowRun["phases"][number]["agents"]): number {
+    return members.filter(
+      (member) =>
+        member.status === "completed" ||
+        member.status === "failed" ||
+        member.status === "stopped",
+    ).length;
+  }
+
+  private formatSessionProgress(members: WorkflowRun["phases"][number]["agents"]): string {
+    return `${this.sessionDoneCount(members)}/${this.sessionTotalCount(members)}`;
+  }
+
+  private formatWorkflowAgentFieldText(value: string): string {
+    try {
+      const parsed = JSON.parse(value);
+      return JSON.stringify(parsed, null, 2);
+    } catch {
+      return value;
+    }
+  }
+
+  private appendLabeledFullText(
+    lines: string[],
+    width: number,
+    label: string,
+    value?: string,
+    error = false,
+  ): void {
+    if (!value) return;
+    lines.push(
+      padToWidth(error ? palette.status.error(label) : palette.text.secondary(label), width),
+    );
+    const color = error ? palette.status.error : palette.text.secondary;
+    const display = this.formatWorkflowAgentFieldText(value);
+    lines.push(
+      ...wrapPlainText(display, width).map((line) => padToWidth(color(line), width)),
+    );
+    lines.push("");
+  }
+
+  /** Cached human turn — honest placeholder, not replayed journal text. */
+  private appendHumanTurnCachedPlaceholder(
+    lines: string[],
+    width: number,
+    label: string,
+    placeholder: string,
+  ): void {
+    lines.push(padToWidth(palette.text.secondary(label), width));
+    lines.push(padToWidth(palette.text.dim(placeholder), width));
+    lines.push("");
+  }
+
+  /** Human / human_session turn-detail action hint. */
+  private formatHumanAgentActionHint(
+    agent: WorkflowAgent,
+    options?: { tabReply?: boolean },
+  ): string {
+    const parts: string[] = [];
+    if (options?.tabReply) parts.push("Tab to reply");
+    if (canOpenSessionHistory(agent)) parts.push("s session history");
+    parts.push("press q to see full question");
+    if (agent.status !== "waiting_for_human") {
+      parts.push("a answer");
+    }
+    // Match agent / agent_session: always advertise e error (no-op when empty).
+    parts.push("e error");
+    return parts.join(" · ");
+  }
+
+  /** Agent / agent_session turn-detail action hint — mirrors human hint structure. */
+  private formatAgentAgentActionHint(agent: WorkflowAgent): string {
+    const parts: string[] = [];
+    if (canOpenSessionHistory(agent)) parts.push("s session history");
+    parts.push("press p to see full prompt");
+    parts.push("o outcome");
+    parts.push("e error");
+    return parts.join(" · ");
+  }
+
+  private formatSwarmSessionDetailFooterHint(
+    scrollHint: string,
+    options: { waiting?: boolean; composing?: boolean },
+  ): string {
+    const parts: string[] = [];
+    if (scrollHint) parts.push(scrollHint);
+    if (options.composing) {
+      parts.push("Enter submit");
+    } else if (options.waiting) {
+      parts.push("Tab to reply");
+    }
+    parts.push("r refresh");
+    parts.push("Esc/← back to agents");
+    return parts.join(" · ");
+  }
+
   private renderSwarmWorkflowAgentRows(
     agents: WorkflowRun["phases"][number]["agents"],
     width: number,
     maxRows = agents.length,
   ): string[] {
     if (agents.length === 0) return [padToWidth(palette.text.dim("No agents"), width)];
-    const visibleAgents = agents.slice(0, maxRows);
-    const lines = visibleAgents.map((agent) =>
-      padToWidth(
-        `  ${formatWorkflowStatus(agent.status)} ${agent.name}${agent.model ? ` ${palette.text.dim(`· ${agent.model}`)}` : ""}`,
-        width,
-      ),
-    );
-    const hiddenCount = agents.length - visibleAgents.length;
-    if (hiddenCount > 0) {
+
+    const { sessions, oneShots } = groupWorkflowAgentsByName(agents);
+
+    type DisplayGroup =
+      | { type: "session"; label: string; members: WorkflowRun["phases"][number]["agents"] }
+      | { type: "oneshot"; agent: WorkflowRun["phases"][number]["agents"][number] };
+
+    const displayGroups: DisplayGroup[] = [
+      ...sessions.map(({ label, members }) => ({ type: "session" as const, label, members })),
+      ...oneShots.map((agent) => ({ type: "oneshot" as const, agent })),
+    ];
+
+    const lines: string[] = [];
+    let renderedRows = 0;
+
+    for (const group of displayGroups) {
+      if (renderedRows >= maxRows) break;
+
+      if (group.type === "session") {
+        const { label, members } = group;
+        const firstMember = members[0];
+        const modelOrHuman = formatWorkflowAgentKindLabel(firstMember ?? {});
+
+        // Aggregate status: any running → ◐, any waiting → ☺, all completed → ✓
+        const aggregateStatus = this.aggregateSessionStatus(members);
+
+        const icon = workflowStatusIcon(aggregateStatus);
+        const statusColor =
+          aggregateStatus === "waiting_for_human"
+            ? palette.text.humanInput
+            : (s: string) => s;
+
+        // Session parent summary row (phases preview only)
+        lines.push(
+          padToWidth(
+            `  ${statusColor(icon)} ${label} ${palette.text.dim(`· ${this.formatSessionProgress(members)} · ${modelOrHuman}`)}`,
+            width,
+          ),
+        );
+        renderedRows++;
+
+        const hasActiveTurn = members.some(
+          (member) =>
+            member.status === "waiting_for_human" ||
+            member.status === "running" ||
+            member.status === "pending",
+        );
+        if (hasActiveTurn || renderedRows < maxRows) {
+          for (let i = 0; i < members.length && renderedRows < maxRows; i++) {
+            const member = members[i]!;
+            const turn = this.agentTurnNumber(member, i);
+            const isLast = i === members.length - 1;
+            const branch = isLast ? "└" : "├";
+            const turnIcon = workflowStatusIcon(member.status);
+            const turnStatusColor =
+              member.status === "waiting_for_human"
+                ? palette.text.humanInput
+                : (s: string) => s;
+            const statusWord = formatWorkflowStatusWord(member.status);
+            const cachedSuffix = isHumanTurnCached(member)
+              ? palette.text.dim(" · cached")
+              : "";
+
+            lines.push(
+              padToWidth(
+                `    ${palette.text.dim(branch)} ${turnStatusColor(turnIcon)} turn ${turn} ${palette.text.secondary(`· ${statusWord}`)}${cachedSuffix}`,
+                width,
+              ),
+            );
+            renderedRows++;
+          }
+        }
+      } else {
+        // Plain agent() / human() one-shot (session nodes always use the tree above)
+        const { agent } = group;
+        const icon = workflowStatusIcon(agent.status);
+        const label = formatWorkflowAgentKindLabel(agent);
+        const labelPart = label ? ` ${palette.text.secondary(`· ${label}`)}` : "";
+        const statusColor =
+          agent.status === "waiting_for_human"
+            ? palette.text.humanInput
+            : (s: string) => s;
+
+        lines.push(
+          padToWidth(
+            `  ${statusColor(icon)} ${agent.name}${labelPart}`,
+            width,
+          ),
+        );
+        renderedRows++;
+      }
+    }
+
+    const totalGroups = displayGroups.length;
+    const hiddenGroups = Math.max(0, totalGroups - displayGroups.slice(0, displayGroups.findIndex((_, i) => {
+      let count = 0;
+      for (let j = 0; j <= i; j++) {
+        const g = displayGroups[j];
+        if (!g) continue;
+        if (g.type === "oneshot") {
+          count++;
+        } else {
+          count++; // summary row
+          const hasWaiting = g.members.some(m => m.status === "waiting_for_human");
+          if (hasWaiting) {
+            count += g.members.length; // all turn sub-rows
+          }
+        }
+      }
+      return count >= maxRows;
+    }) + 1).length);
+
+    if (renderedRows >= maxRows && hiddenGroups > 0) {
       lines.push(
         padToWidth(
-          palette.text.dim(`  ... ${hiddenCount} more agents - Tab/Right to browse`),
+          palette.text.dim(`  ... ${hiddenGroups} more - Enter/→ show agents`),
           width,
         ),
       );
     }
+
     return lines;
+  }
+
+  private buildSessionDetailLines(
+    state: Extract<SwarmWorkflowsViewState, { phase: "session-detail" }>,
+    width: number,
+  ): string[] {
+    const workflow = this.state.getSnapshot().workflowRuns.find((w) => w.id === state.workflowId);
+    if (!workflow) return [padToWidth(palette.status.error("Workflow not found"), width)];
+
+    const phase = workflow.phases.find((item) => item.id === state.phaseId);
+
+    const sessionAgents = sessionMembersInPhase(
+      phase?.agents ?? [],
+      state.sessionLabel,
+      state.nodeType,
+    ).map((agent) => ({ agent }));
+
+    if (sessionAgents.length === 0) {
+      return [padToWidth(palette.status.error("Session not found"), width)];
+    }
+
+    const firstAgent = sessionAgents[0]!.agent;
+    const isHumanSession =
+      state.nodeType === "human_session" ||
+      firstAgent.node_type === "human_session" ||
+      (firstAgent.node_type === undefined && firstAgent.kind === "human");
+    const sessionType =
+      state.nodeType === "human_session" || state.nodeType === "agent_session"
+        ? state.nodeType
+        : isHumanSession
+          ? "human_session"
+          : "agent_session";
+    const phaseName = phase?.name ?? state.phaseId;
+    const aggregateStatus = this.aggregateSessionStatus(sessionAgents.map(({ agent }) => agent));
+
+    const divider = padToWidth(palette.text.dim("─".repeat(Math.max(1, width))), width);
+
+    const headerLines: string[] = [
+      padToWidth(palette.text.accent(`${state.sessionLabel} · ${phaseName}`), width),
+      padToWidth(
+        palette.text.dim(
+          `${workflow.name} · ${sessionType} · ${formatWorkflowStatus(aggregateStatus)} · ${this.formatSessionProgress(sessionAgents.map(({ agent }) => agent))} turns`,
+        ),
+        width,
+      ),
+      divider,
+      "",
+    ];
+
+    const bodyLines: string[] = [];
+    const memberAgents = sessionAgents.map(({ agent }) => agent);
+    for (let i = 0; i < sessionAgents.length; i++) {
+      const { agent } = sessionAgents[i]!;
+      const turn = this.agentTurnNumber(agent, i);
+      const turnLabel = `Turn ${turn}`;
+      const isWaiting = agent.status === "waiting_for_human";
+      const isRunning = agent.status === "running";
+      const duration = formatWorkflowDuration(agent.duration_ms);
+
+      let turnHeader: string;
+      if (isWaiting) {
+        turnHeader = `${turnLabel} ${palette.text.humanInput(`${workflowStatusIcon("waiting_for_human")} waiting`)}`;
+      } else if (isRunning) {
+        turnHeader = `${turnLabel} ${palette.text.dim(`◐ ${agent.status}`)}`;
+      } else if (agent.status === "completed") {
+        turnHeader = `${turnLabel} ${palette.text.dim("✓ completed")}`;
+      } else {
+        turnHeader = `${turnLabel} ${palette.status.error(workflowStatusIcon(agent.status))} ${palette.text.dim(agent.status)}`;
+      }
+      bodyLines.push(padToWidth(turnHeader, width));
+      if (duration) {
+        bodyLines.push(padToWidth(palette.text.dim(`  duration ${duration}`), width));
+      }
+      bodyLines.push("");
+
+      if (isHumanSession) {
+        if (isHumanTurnCached(agent)) {
+          this.appendHumanTurnCachedPlaceholder(
+            bodyLines,
+            width,
+            "Question",
+            HUMAN_TURN_CACHED_QUESTION,
+          );
+          if (!isRunning && !isWaiting) {
+            this.appendHumanTurnCachedPlaceholder(
+              bodyLines,
+              width,
+              "Answer",
+              HUMAN_TURN_CACHED_ANSWER,
+            );
+          }
+        } else {
+          this.appendLabeledFullText(
+            bodyLines,
+            width,
+            "Question",
+            this.getHumanQuestionText(state.workflowId, agent.id),
+          );
+          if (isWaiting) {
+            bodyLines.push(padToWidth(palette.text.secondary("Answer"), width));
+            if (this.replyingToHumanPrompt) {
+              bodyLines.push(padToWidth(palette.text.dim("  (composing reply below)"), width));
+            } else {
+              bodyLines.push(padToWidth(palette.text.dim("  (waiting for reply)"), width));
+            }
+            bodyLines.push("");
+          } else if (!isRunning) {
+            this.appendLabeledFullText(bodyLines, width, "Answer", agent.human_reply);
+          }
+        }
+        // Always surface Error when present (e.g. timeout → failed), same as agent_session.
+        this.appendLabeledFullText(bodyLines, width, "Error", agent.error, true);
+      } else {
+        this.appendLabeledFullText(bodyLines, width, "Prompt", agent.prompt);
+        if (agent.activity?.length) {
+          bodyLines.push(padToWidth(palette.text.secondary("Activity"), width));
+          for (const item of agent.activity) {
+            const prefix = item.type ? `${item.type}: ` : "";
+            bodyLines.push(
+              ...wrapPlainText(`- ${prefix}${item.content}`, width).map((line) =>
+                padToWidth(palette.text.dim(line), width),
+              ),
+            );
+          }
+          bodyLines.push("");
+        }
+        if (isRunning) {
+          bodyLines.push(padToWidth(palette.text.secondary("Outcome"), width));
+          bodyLines.push(padToWidth(palette.text.dim("  (running...)"), width));
+          bodyLines.push("");
+        } else {
+          this.appendLabeledFullText(bodyLines, width, "Outcome", agent.outcome);
+        }
+        // Show Error whenever set — not only after the turn leaves running.
+        this.appendLabeledFullText(bodyLines, width, "Error", agent.error, true);
+      }
+
+      if (i < sessionAgents.length - 1) {
+        bodyLines.push(divider);
+        bodyLines.push("");
+      }
+    }
+
+    // Windowed viewport: header/footer stay fixed, body scrolls.
+    // The layout pins questionLines to the top and drops overflow, so we clamp
+    // the panel to the terminal height ourselves and window the body region.
+    const bodyViewport = this.sessionDetailBodyViewport(headerLines.length);
+    const maxScroll = Math.max(0, bodyLines.length - bodyViewport);
+    const scrollOffset = Math.min(Math.max(0, state.scrollOffset), maxScroll);
+    state.scrollOffset = scrollOffset;
+    const canScroll = bodyLines.length > bodyViewport;
+    const visibleBody = canScroll
+      ? bodyLines.slice(scrollOffset, scrollOffset + bodyViewport)
+      : bodyLines;
+
+    const lines: string[] = [...headerLines];
+    if (canScroll && scrollOffset > 0) {
+      lines.push(padToWidth(palette.text.dim(`  ↑ ${scrollOffset} more lines above`), width));
+    }
+    lines.push(...visibleBody);
+    const belowCount = bodyLines.length - (scrollOffset + visibleBody.length);
+    if (canScroll && belowCount > 0) {
+      lines.push(padToWidth(palette.text.dim(`  ↓ ${belowCount} more lines below`), width));
+    }
+
+    const scrollHint = canScroll ? "↑/↓ scroll · PgUp/PgDn page" : "";
+    const waitingAgent = sessionAgents.find(({ agent }) => agent.status === "waiting_for_human");
+    lines.push(
+      padToWidth(
+        palette.text.secondary(
+          this.formatSwarmSessionDetailFooterHint(scrollHint, {
+            waiting: Boolean(waitingAgent) && !this.replyingToHumanPrompt,
+            composing: Boolean(waitingAgent) && Boolean(this.replyingToHumanPrompt),
+          }),
+        ),
+        width,
+      ),
+    );
+
+    return lines;
+  }
+
+  /** Rows of session-detail body visible per page, mirrors buildSessionDetailLines. */
+  private sessionDetailBodyViewport(headerRows: number): number {
+    const reservedChrome = (this.replyingToHumanPrompt ? 4 : 0) + 6;
+    const maxPanelRows = Math.max(8, this.tui.terminal.rows - reservedChrome);
+    // Reserve 3 rows for the two scroll indicators plus the footer hint.
+    return Math.max(3, maxPanelRows - headerRows - 3);
   }
 
   private buildSwarmWorkflowAgentLines(
@@ -5655,37 +7125,91 @@ export class AppScreen implements Component, Focusable {
     if (!lookup) return [padToWidth(palette.status.error("Agent not found"), width)];
     const { workflow, phase, agent } = lookup;
     const duration = formatWorkflowDuration(agent.duration_ms);
+    const isHuman = agent.kind === "human";
+    const kindLabel = formatWorkflowAgentKindLabel(agent);
+
+    const statusStr = isHuman
+      ? `${workflowStatusTone(agent.status)(`${workflowStatusIcon(agent.status)} ${agent.status}`)} · ${kindLabel}`
+      : `${workflowStatusTone(agent.status)(`${workflowStatusIcon(agent.status)} ${agent.status}`)}${agent.model ? ` · ${palette.text.secondary(agent.model)}` : ""}`;
+
+    const turnNumber = sessionTurnLabelNumber(agent, phase.agents ?? []);
+    const titleLine = turnNumber !== null ? `${agent.name} · turn ${turnNumber}` : agent.name;
+
     const lines: string[] = [
-      padToWidth(palette.text.accent(agent.name), width),
+      padToWidth(palette.text.accent(titleLine), width),
       padToWidth(palette.text.dim(`${workflow.name} · ${phase.name}`), width),
-      padToWidth(
-        `${formatWorkflowStatus(agent.status)}${agent.model ? ` ${palette.text.dim(`· ${agent.model}`)}` : ""}`,
-        width,
-      ),
+      padToWidth(statusStr, width),
       "",
     ];
     if (duration) {
       lines.splice(3, 0, padToWidth(palette.text.dim(`duration ${duration}`), width));
     }
-    this.appendLabeledWrappedPreview(lines, width, "Prompt", agent.prompt, "p");
-    if (agent.activity?.length) {
-      lines.push(padToWidth(palette.text.secondary("Activity"), width));
-      for (const item of agent.activity) {
-        const prefix = item.type ? `${item.type}: ` : "";
+
+    // Show full details for current turn
+    if (isHuman) {
+      if (isHumanTurnCached(agent)) {
+        this.appendHumanTurnCachedPlaceholder(
+          lines,
+          width,
+          "Question",
+          HUMAN_TURN_CACHED_QUESTION,
+        );
+        this.appendHumanTurnCachedPlaceholder(lines, width, "Answer", HUMAN_TURN_CACHED_ANSWER);
+        this.appendLabeledWrappedPreview(lines, width, "Error", agent.error, "e", true);
         lines.push(
-          ...wrapPlainText(`- ${prefix}${item.content}`, width).map((line) =>
-            padToWidth(palette.text.dim(line), width),
+          padToWidth(
+            palette.text.secondary(this.formatHumanAgentActionHint(agent)),
+            width,
+          ),
+        );
+      } else {
+        this.appendLabeledWrappedPreview(lines, width, "Question", agent.human_prompt || this.getHumanQuestionText(state.workflowId, state.agentId), "q");
+        if (agent.status === "waiting_for_human") {
+          lines.push(padToWidth(palette.text.secondary("Answer"), width));
+          lines.push(padToWidth(palette.text.secondary("  (waiting for reply)"), width));
+          lines.push("");
+        } else {
+          this.appendLabeledWrappedPreview(lines, width, "Answer", agent.human_reply, "a");
+        }
+        this.appendLabeledWrappedPreview(lines, width, "Error", agent.error, "e", true);
+        lines.push(
+          padToWidth(
+            palette.text.secondary(
+              this.formatHumanAgentActionHint(agent, {
+                tabReply: agent.status === "waiting_for_human",
+              }),
+            ),
+            width,
           ),
         );
       }
-      lines.push("");
+    } else {
+      // Agent / agent_session: Prompt + Outcome + Error + Activity
+      this.appendLabeledWrappedPreview(lines, width, "Prompt", agent.prompt, "p");
+      if (agent.activity?.length) {
+        lines.push(padToWidth(palette.text.secondary("Activity"), width));
+        for (const item of agent.activity) {
+          const prefix = item.type ? `${item.type}: ` : "";
+          lines.push(
+            ...wrapPlainText(`- ${prefix}${item.content}`, width).map((line) =>
+              padToWidth(palette.text.dim(line), width),
+            ),
+          );
+        }
+        lines.push("");
+      }
+      this.appendLabeledWrappedPreview(lines, width, "Outcome", agent.outcome, "o");
+      this.appendLabeledWrappedPreview(lines, width, "Error", agent.error, "e", true);
+      lines.push(
+        padToWidth(palette.text.secondary(this.formatAgentAgentActionHint(agent)), width),
+      );
     }
-    this.appendLabeledWrappedPreview(lines, width, "Outcome", agent.outcome, "o");
-    this.appendLabeledWrappedPreview(lines, width, "Error", agent.error, "e", true);
-    lines.push(
-      padToWidth(palette.text.dim("press p to see full prompt - o outcome - e error"), width),
-    );
-    lines.push(padToWidth(palette.text.dim("Esc/← back"), width));
+
+    const backHint =
+      state.returnTo?.kind === "pending-list"
+        ? "Esc/← back to pending list"
+        : "Esc/← back to agents";
+    lines.push(padToWidth(palette.text.secondary(backHint), width));
     return lines;
   }
 
@@ -5701,7 +7225,7 @@ export class AppScreen implements Component, Focusable {
     lines.push(
       padToWidth(error ? palette.status.error(label) : palette.text.secondary(label), width),
     );
-    const color = error ? palette.status.error : palette.text.dim;
+    const color = error ? palette.status.error : palette.text.secondary;
     const wrapped = wrapPlainText(value, width);
     const visible = wrapped.slice(0, SWARM_WORKFLOW_AGENT_TEXT_PREVIEW_ROWS);
     lines.push(...visible.map((line) => padToWidth(color(line), width)));
@@ -7178,9 +8702,6 @@ export class AppScreen implements Component, Focusable {
         ),
       );
     }
-    if (this.ctrlCPendingForQuestion) {
-      lines.push(padToWidth(palette.status.warning("Press Ctrl+C again to exit"), width));
-    }
     return lines;
   }
 
@@ -7593,5 +9114,83 @@ export class AppScreen implements Component, Focusable {
     if (collectPlanRejectFeedback) {
       this.editor.setText("");
     }
+  }
+
+  /**
+   * Handle keyboard input when the user is replying to a swarmflow human-session turn.
+   * Enter submits; Esc cancels without sending.
+   */
+  private handleSwarmflowHumanReplyInput(data: string): boolean {
+    if (!this.replyingToHumanPrompt) return false;
+
+    if (matchesKey(data, "escape")) {
+      this.replyingToHumanPrompt = null;
+      this.editor.setText("");
+      this.editor.focused = false;
+      return true;
+    }
+
+    if (matchesKey(data, "return") || matchesKey(data, "enter")) {
+      const answer = this.editor.getText().trim();
+      if (!answer) return true; // block empty submit
+      const { workflowRunId, correlationId } = this.replyingToHumanPrompt;
+      const snapshot = this.state.getSnapshot();
+      this.state.sendEventOnly("chat.swarmflow_reply", {
+        session_id: snapshot.sessionId,
+        run_id: workflowRunId,
+        correlation_id: correlationId,
+        answer,
+      });
+      this.replyingToHumanPrompt = null;
+      this.editor.setText("");
+      this.editor.focused = false;
+      return true;
+    }
+
+    this.editor.handleInput(data);
+    return true;
+  }
+
+  private findAgentIdForHumanReply(workflowId: string, correlationId: string): string {
+    const workflow = this.state.getSnapshot().workflowRuns.find((item) => item.id === workflowId);
+    if (!workflow) return correlationId;
+    for (const phase of workflow.phases ?? []) {
+      for (const agent of phase.agents ?? []) {
+        if (agent.id === correlationId) return agent.id;
+        if ((agent.correlation_id ?? agent.id) === correlationId) return agent.id;
+      }
+    }
+    return correlationId;
+  }
+
+  /** Build the reply input banner shown when `replyingToHumanPrompt` is set. */
+  private buildSwarmflowHumanReplyInputLines(width: number): string[] {
+    if (!this.replyingToHumanPrompt) return [];
+    const { label, turn, workflowRunId, correlationId, isSession } = this.replyingToHumanPrompt;
+    const agentId = this.findAgentIdForHumanReply(workflowRunId, correlationId);
+    const question = this.getHumanQuestionText(workflowRunId, agentId);
+    const header = isSession ? `Reply to ${label} · turn ${turn}` : `Reply to ${label}`;
+    const lines = [padToWidth(palette.text.humanInput(header), width)];
+    if (question) {
+      lines.push(padToWidth(palette.text.secondary("Question"), width));
+      const { lines: previewLines, truncated } = prepareHumanQuestionPreviewLines(
+        question,
+        width,
+        6,
+      );
+      for (const qLine of previewLines) {
+        lines.push(padToWidth(palette.text.dim(`  ${qLine}`), width));
+      }
+      if (truncated) {
+        lines.push(padToWidth(palette.text.dim("  …"), width));
+      }
+      lines.push("");
+    }
+    lines.push(
+      padToWidth(palette.text.secondary("Your answer"), width),
+      ...this.editor.render(width),
+      padToWidth(palette.text.dim("Enter submit · Esc cancel"), width),
+    );
+    return lines;
   }
 }

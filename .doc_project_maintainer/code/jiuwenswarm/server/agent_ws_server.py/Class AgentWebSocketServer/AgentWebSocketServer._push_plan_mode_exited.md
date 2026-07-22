@@ -5,7 +5,7 @@ source: jiuwenswarm/server/agent_ws_server.py
 source_role: runtime_source
 audit_scope: default_health_audit
 class: AgentWebSocketServer
-signature: "_push_plan_mode_exited(request: AgentRequest) -> None"
+signature: "_push_plan_mode_exited(self, request: AgentRequest) -> None"
 health:
   overall: watch
   name_behavior_match: good
@@ -29,6 +29,7 @@ audit:
   audited_at: null
   audited_commit: null
   audited_source_hash: null
+  audited_symbol_hash: null
   confidence: confirmed
   expired_reason: null
 issues:
@@ -37,14 +38,14 @@ issues:
     severity: medium
     status: open
     summary: "Missing direct tests for the plan-mode-exited push contract."
-    evidence: "Search found only tests that mock _push_plan_mode_exited or test generic push forwarding; no test asserts no-session behavior or the emitted event_type, mode, channel, and session payload."
+    evidence: "Plan-mode orchestration tests replace _push_plan_mode_exited with AsyncMock or only assert it was not awaited; generic push tests do not assert this helper's no-session branch or event/channel/session/mode payload."
     suggested_action: "Add focused async tests for missing session_id, explicit/default channel_id, and send_push payload shape for plan.mode_exited."
   - id: ISSUE-002
     dimension: output_contract
     severity: low
     status: open
     summary: "The emitted mode field is not preserved by the WebChannel structured-event path."
-    evidence: "The helper sends payload.mode=code.normal, but WebChannel does not include plan.mode_exited in its full-payload allowlist, so the frontend currently relies on its own default."
+    evidence: "The helper sends payload.mode='code.normal', but web_connect.py:615-627 omits plan.mode_exited from its full-payload allowlist and its fallback retains only content/session fields. The TUI handler defaults a missing mode to code.normal, but no WebChannel contract test pins this behavior."
     suggested_action: "Either add plan.mode_exited to the structured WebChannel event allowlist with a gateway/frontend test, or document that frame.event alone is the contract."
 confidence: confirmed
 details: {}
@@ -54,7 +55,7 @@ details: {}
 
 ## Actual Role
 
-Sends a server-push notification that a plan-mode session has returned to `code.normal`. It returns without side effects when `request.session_id` is missing; otherwise it forwards a push payload through `send_push` with `event_type: plan.mode_exited`, the request channel or `"default"`, the session id, and `mode: code.normal`.
+Returns immediately when the request has no session id; otherwise sends a `plan.mode_exited` server-push for that session and channel, declaring `mode: code.normal`. Callers use it after persisted plan exit, restored normal mode, or stale plan re-entry rejection so the client can synchronize its mode.
 
 ## Key Signals
 
@@ -62,7 +63,7 @@ Sends a server-push notification that a plan-mode session has returned to `code.
 - Output: None; emits a server-push payload containing `event_type=plan.mode_exited` and `mode=code.normal`.
 - Main side effects: Calls `AgentWebSocketServer.send_push`, which writes an E2A server-push frame to the active Gateway WebSocket.
 - Main risk: The direct payload contract is not pinned by tests, and one gateway path may drop `payload.mode`.
-- Related tests: Indirect orchestration tests mock this helper; no direct payload or transport test was found.
+- Related tests: Plan-mode orchestration tests mock this helper or assert a no-call branch; no direct payload, missing-session, default-channel, or end-to-end consumer test was found.
 
 ## Detail Index
 

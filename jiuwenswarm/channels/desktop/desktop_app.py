@@ -293,6 +293,10 @@ class _WindowApi:
         """保存前端生成的 data URL 文件，供分享图片导出使用。"""
         return self._runtime.save_data_url(data_url, filename)
 
+    def select_project_directory(self) -> str | None:
+        """打开系统目录选择器，返回用户选择的项目目录绝对路径。"""
+        return self._runtime.select_project_directory()
+
 
 class DesktopRuntime:
     def __init__(
@@ -433,6 +437,29 @@ class DesktopRuntime:
         if isinstance(selected_paths, str):
             return Path(selected_paths)
         return Path(selected_paths[0])
+
+    def select_project_directory(self) -> str | None:
+        if self.window is None or not hasattr(self.window, "create_file_dialog"):
+            logger.error("[desktop] project directory picker unavailable")
+            return None
+
+        try:
+            selected_paths = self.window.create_file_dialog(
+                webview.FileDialog.FOLDER,
+                directory=str(Path.home()),
+                allow_multiple=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[desktop] project directory picker failed: %s", exc)
+            return None
+
+        if not selected_paths:
+            return None
+        selected_path = selected_paths if isinstance(selected_paths, str) else selected_paths[0]
+        try:
+            return str(Path(selected_path).expanduser().resolve())
+        except Exception:  # noqa: BLE001
+            return str(Path(selected_path).expanduser())
 
     def save_data_url(self, data_url: str, filename: str) -> DesktopSaveResult:
         """选择保存位置并保存 PNG data URL。"""

@@ -13,6 +13,7 @@ except Exception:
 
 from indexing.catalog.records import CatalogRecord
 from indexing.tree.root_categories import RootCategoryInput, resolve_tree_root_categories
+from shared.tags import normalize_tags
 
 
 class BuildMethod(IntFlag):
@@ -252,6 +253,10 @@ def build_catalog_records_from_nodes(
         select_when = str(raw_node.get("select_when") or "").strip()
         dont_select_when = str(raw_node.get("dont_select_when") or "").strip()
         skill_path = str(scanned.get("path") or "")
+        # Scanner outputs expose one canonical, normalized tag field. In
+        # particular, the JSONL scanner has already merged top-level and
+        # contentExtendParam tag/device fields into this value.
+        tags = normalize_tags(scanned.get("tags"))
         records.append(
             CatalogRecord(
                 worker_id=worker_id,
@@ -273,7 +278,9 @@ def build_catalog_records_from_nodes(
                     "source_description": source_description,
                     "select_when": select_when,
                     "dont_select_when": dont_select_when,
+                    "tags": list(tags),
                 },
+                tags=tags,
             )
         )
     return sorted(records, key=lambda item: item.cid)
@@ -299,6 +306,7 @@ def write_catalog(records: Sequence[CatalogRecord], path: Path) -> None:
                 "category": record.category,
                 "retrieval_text": record.retrieval_text,
                 "metadata": record.metadata,
+                "tags": list(normalize_tags(record.tags, record.metadata.get("tags"))),
             },
             ensure_ascii=False,
         )

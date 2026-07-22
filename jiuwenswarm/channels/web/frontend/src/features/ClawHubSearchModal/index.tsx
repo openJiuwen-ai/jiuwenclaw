@@ -307,9 +307,9 @@ export function ClawHubSearchModal({
       <div className="flex flex-col h-full">
         <div className="overflow-auto flex-1 min-h-0">
           {message && message.type === "success" && (
-            <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-black shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "#d5f2dc", width: "564px", height: "40px" }}>
-              <span className="w-4 h-4 rounded-full bg-[#1a991d] flex items-center justify-center flex-shrink-0">
-                <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "var(--color-feedback-success-toast)", width: "564px", height: "40px" }}>
+              <span className="w-4 h-4 rounded-full bg-[var(--color-feedback-success-indicator)] flex items-center justify-center flex-shrink-0">
+                <svg className="w-3 h-3 text-text-inverse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
                 </svg>
               </span>
@@ -317,7 +317,7 @@ export function ClawHubSearchModal({
               <button
                 type="button"
                 onClick={() => showMessage("success", "")}
-                className="ml-auto w-6 h-6 flex items-center justify-center hover:bg-white/30 rounded-full transition-colors"
+                className="ml-auto w-6 h-6 flex items-center justify-center hover:bg-card/30 rounded-full "
               >
                 <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -354,12 +354,17 @@ export function ClawHubSearchModal({
                       {viewMode === "list" ? (
                         <>
                           <div className="flex items-center gap-3 min-w-0 flex-1">
-                            <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-white font-semibold`}>
+                            <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold`}>
                               {avatar.firstChar}
                             </div>
                             <div className="min-w-0 flex-1">
-                              <div className="text-base font-semibold text-text-strong truncate">
-                                {item.slug}
+                              <div className="flex min-w-0 items-center gap-2">
+                                <div className="min-w-0 truncate text-base font-semibold text-text-strong">
+                                  {item.slug}
+                                </div>
+                                <span className="flex-shrink-0 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-normal text-text-muted">
+                                  ClawHub
+                                </span>
                               </div>
                               <div className="text-sm text-text-muted mt-1 line-clamp-3">
                                 {item.summary || t("skills.noDescription")}
@@ -368,7 +373,7 @@ export function ClawHubSearchModal({
                           </div>
                           <div className="flex flex-col items-end gap-2 flex-shrink-0">
                             {isInstalled ? (
-                              <span className="px-4 h-[28px] flex items-center rounded-2xl text-sm whitespace-nowrap border border-[color:var(--border-ok)] bg-ok-subtle text-ok">
+                              <span className="px-4 h-[28px] flex items-center rounded-2xl text-sm whitespace-nowrap border border-[color:var(--color-border-success)] bg-ok-subtle text-ok">
                                 {t("skills.status.installed")}
                               </span>
                             ) : (
@@ -376,7 +381,7 @@ export function ClawHubSearchModal({
                                 type="button"
                                 onClick={() => void handleInstall(item)}
                                 disabled={isInstalling}
-                                className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                                className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50  whitespace-nowrap ${
                                   isInstalling
                                     ? "text-text-muted cursor-not-allowed"
                                     : "text-text"
@@ -390,12 +395,17 @@ export function ClawHubSearchModal({
                       ) : (
                         <>
                           <div className="flex items-start gap-3 flex-shrink-0">
-                            <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-white font-semibold text-sm`}>
+                            <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
                               {avatar.firstChar}
                             </div>
                             <div className="min-w-0 flex-1">
-                              <div className="text-sm font-semibold text-text-strong truncate">
-                                {item.slug}
+                              <div className="flex min-w-0 items-center gap-2">
+                                <div className="min-w-0 truncate text-sm font-semibold text-text-strong">
+                                  {item.slug}
+                                </div>
+                                <span className="flex-shrink-0 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-normal text-text-muted">
+                                  ClawHub
+                                </span>
                               </div>
                               <div className="text-xs text-text-muted mt-1 line-clamp-2">
                                 {item.summary || t("skills.noDescription")}
@@ -412,7 +422,7 @@ export function ClawHubSearchModal({
                             </div>
                             <div className="flex-shrink-0 ml-auto">
                               {isInstalled ? (
-                                <span className="px-4 h-[28px] flex items-center rounded-2xl text-sm whitespace-nowrap border border-[color:var(--border-ok)] bg-ok-subtle text-ok">
+                                <span className="px-4 h-[28px] flex items-center rounded-2xl text-sm whitespace-nowrap border border-[color:var(--color-border-success)] bg-ok-subtle text-ok">
                                   {t("skills.status.installed")}
                                 </span>
                               ) : (
@@ -420,7 +430,7 @@ export function ClawHubSearchModal({
                                   type="button"
                                   onClick={() => void handleInstall(item)}
                                   disabled={isInstalling}
-                                  className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                                  className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50  whitespace-nowrap ${
                                     isInstalling
                                       ? "text-text-muted cursor-not-allowed"
                                       : "text-text"
@@ -476,7 +486,7 @@ export function ClawHubSearchModal({
                 <button
                   type="button"
                   onClick={() => setShowToken(!showToken)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text transition-colors"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text "
                   aria-label={showToken ? t("common.hide") : t("common.show")}
                 >
                   {showToken ? (
@@ -496,7 +506,7 @@ export function ClawHubSearchModal({
               <button
                 type="button"
                 onClick={onClose}
-                className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors"
+                className="w-[76px] h-[28px] rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50 "
               >
                 {t("common.cancel")}
               </button>
@@ -504,10 +514,10 @@ export function ClawHubSearchModal({
                 type="button"
                 onClick={handleSaveToken}
                 disabled={loading || !token.trim()}
-                className={`w-[76px] h-[28px] rounded-[24px] text-sm transition-colors ${
+                className={`w-[76px] h-[28px] rounded-[24px] text-sm  ${
                   loading || !token.trim()
                     ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                    : "bg-[#191919] text-white hover:bg-gray-800"
+                    : "bg-control-emphasis text-control-emphasis-foreground hover:bg-control-emphasis-hover"
                 }`}
               >
                 {loading ? t("common.saving") : "确定"}
@@ -555,7 +565,7 @@ export function ClawHubSearchModal({
               <button
                 type="button"
                 onClick={() => setShowTokenConfig(true)}
-                className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors"
+                className="w-[76px] h-[28px] rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50 "
               >
                 {t("common.modify")}
               </button>
@@ -563,7 +573,7 @@ export function ClawHubSearchModal({
             <button
               type="button"
               onClick={onClose}
-              className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors"
+              className="w-[76px] h-[28px] rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50 "
             >
               {t("common.close")}
             </button>
@@ -572,9 +582,9 @@ export function ClawHubSearchModal({
 
         <div className="p-5 overflow-auto flex-1 min-h-0">
           {message && message.type === "success" && (
-            <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-black shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "#d5f2dc", width: "564px", height: "40px" }}>
-              <span className="w-4 h-4 rounded-full bg-[#1a991d] flex items-center justify-center flex-shrink-0">
-                <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "var(--color-feedback-success-toast)", width: "564px", height: "40px" }}>
+              <span className="w-4 h-4 rounded-full bg-[var(--color-feedback-success-indicator)] flex items-center justify-center flex-shrink-0">
+                <svg className="w-3 h-3 text-text-inverse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
                 </svg>
               </span>
@@ -582,7 +592,7 @@ export function ClawHubSearchModal({
               <button
                 type="button"
                 onClick={() => showMessage("success", "")}
-                className="ml-auto w-6 h-6 flex items-center justify-center hover:bg-white/30 rounded-full transition-colors"
+                className="ml-auto w-6 h-6 flex items-center justify-center hover:bg-card/30 rounded-full "
               >
                 <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -608,7 +618,7 @@ export function ClawHubSearchModal({
               type="button"
               onClick={() => void handleSearch()}
               disabled={loadState === "loading" || !query.trim()}
-              className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors ${
+              className={`w-[76px] h-[28px] rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50  ${
                 loadState === "loading" || !query.trim()
                   ? "text-text-muted cursor-not-allowed"
                   : "text-text"
@@ -635,12 +645,17 @@ export function ClawHubSearchModal({
                         className="p-4 rounded-lg border border-border bg-panel flex items-start justify-between gap-4"
                       >
                         <div className="flex items-center gap-3 min-w-0 flex-1">
-                          <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-white font-semibold`}>
+                          <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold`}>
                             {avatar.firstChar}
                           </div>
                           <div className="min-w-0 flex-1">
-                            <div className="text-base font-semibold text-text-strong truncate">
-                              {item.slug}
+                            <div className="flex min-w-0 items-center gap-2">
+                              <div className="min-w-0 truncate text-base font-semibold text-text-strong">
+                                {item.slug}
+                              </div>
+                              <span className="flex-shrink-0 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-normal text-text-muted">
+                                ClawHub
+                              </span>
                             </div>
                             <div className="text-sm text-text-muted mt-1 line-clamp-3">
                               {item.summary || t("skills.noDescription")}
@@ -654,7 +669,7 @@ export function ClawHubSearchModal({
                         </div>
                         <div className="flex flex-col items-end gap-2 flex-shrink-0">
                           {isInstalled ? (
-                            <span className="px-4 py-2 rounded-2xl text-sm whitespace-nowrap border border-[color:var(--border-ok)] bg-ok-subtle text-ok">
+                            <span className="px-4 py-2 rounded-2xl text-sm whitespace-nowrap border border-[color:var(--color-border-success)] bg-ok-subtle text-ok">
                               {t("skills.status.installed")}
                             </span>
                           ) : (
@@ -662,7 +677,7 @@ export function ClawHubSearchModal({
                               type="button"
                               onClick={() => void handleInstall(item)}
                               disabled={isInstalling}
-                              className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                              className={`min-w-[76px] h-[28px] px-3 rounded-[24px] text-sm text-text border border-text hover:bg-secondary/50  whitespace-nowrap ${
                                 isInstalling
                                   ? "text-text-muted cursor-not-allowed"
                                   : "text-text"

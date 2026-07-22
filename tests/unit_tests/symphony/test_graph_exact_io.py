@@ -3,7 +3,7 @@ import pytest
 from jiuwenswarm.symphony.fingerprint.models import (
     ArtifactSpec,
     ParameterSpec,
-    SkillFingerprint,
+    Fingerprint,
 )
 from jiuwenswarm.symphony.graph.builders import ScoreLookupBuilder
 from jiuwenswarm.symphony.graph.candidates import CandidateGenerator
@@ -39,6 +39,154 @@ def test_candidate_generator_emits_exact_io_match():
             ),
             "match_method": "exact_io_match",
         }
+    ]
+
+
+def test_candidate_generator_default_candidate_limit_is_thirty_two():
+    assert CandidateGenerator().max_candidates_per_skill_relation == 32
+
+
+def test_candidate_generator_keeps_stronger_candidates_before_target_name():
+    candidates = CandidateGenerator(max_candidates_per_skill_relation=1).generate(
+        SkillRegistry(
+            skills={
+                "source": _skill(
+                    "source",
+                    outputs=[
+                        ArtifactSpec(
+                            name="outline",
+                            type="markdown",
+                            description="shared research slides evidence",
+                        )
+                    ],
+                ),
+                "aaa-weak": _skill(
+                    "aaa-weak",
+                    inputs=[
+                        ParameterSpec(
+                            name="report",
+                            type="text",
+                            description="shared research slides evidence",
+                        )
+                    ],
+                ),
+                "zzz-content": _skill(
+                    "zzz-content",
+                    inputs=[
+                        ParameterSpec(
+                            name="content",
+                            type="markdown",
+                            description="shared research slides evidence",
+                        )
+                    ],
+                ),
+            }
+        )
+    )
+
+    assert [candidate.key for candidate in candidates] == ["source->zzz-content"]
+    assert candidates[0].candidate_methods == [
+        "semantic_overlap_match",
+        "textual_coercion_match",
+    ]
+
+
+def test_candidate_generator_keeps_more_port_mapping_evidence_before_target_name():
+    candidates = CandidateGenerator(max_candidates_per_skill_relation=1).generate(
+        SkillRegistry(
+            skills={
+                "source": _skill(
+                    "source",
+                    outputs=[
+                        ArtifactSpec(
+                            name="brief",
+                            type="text",
+                            description="shared planning evidence",
+                        ),
+                        ArtifactSpec(
+                            name="outline",
+                            type="text",
+                            description="shared planning evidence",
+                        ),
+                    ],
+                ),
+                "aaa-weak": _skill(
+                    "aaa-weak",
+                    inputs=[
+                        ParameterSpec(
+                            name="request",
+                            type="text",
+                            description="shared planning evidence",
+                        )
+                    ],
+                ),
+                "zzz-rich": _skill(
+                    "zzz-rich",
+                    inputs=[
+                        ParameterSpec(
+                            name="content",
+                            type="text",
+                            description="shared planning evidence",
+                        ),
+                        ParameterSpec(
+                            name="text",
+                            type="text",
+                            description="shared planning evidence",
+                        ),
+                    ],
+                ),
+            }
+        )
+    )
+
+    assert [candidate.key for candidate in candidates] == ["source->zzz-rich"]
+    evidence = candidates[0].evidence["directions"]["source->zzz-rich"]
+    assert len(evidence["port_mappings"]) > 1
+
+
+def test_candidate_generator_candidate_limit_sorting_is_stable():
+    skills = [
+        _skill(
+            "source",
+            outputs=[
+                ArtifactSpec(
+                    name="outline",
+                    type="markdown",
+                    description="shared research slides evidence",
+                )
+            ],
+        ),
+        _skill(
+            "aaa-weak",
+            inputs=[
+                ParameterSpec(
+                    name="report",
+                    type="text",
+                    description="shared research slides evidence",
+                )
+            ],
+        ),
+        _skill(
+            "zzz-content",
+            inputs=[
+                ParameterSpec(
+                    name="content",
+                    type="markdown",
+                    description="shared research slides evidence",
+                )
+            ],
+        ),
+    ]
+
+    first = CandidateGenerator(max_candidates_per_skill_relation=1).generate(
+        SkillRegistry(skills={skill.id: skill for skill in skills})
+    )
+    second = CandidateGenerator(max_candidates_per_skill_relation=1).generate(
+        SkillRegistry(skills={skill.id: skill for skill in reversed(skills)})
+    )
+
+    assert [candidate.key for candidate in first] == [
+        candidate.key for candidate in second
     ]
 
 
@@ -481,7 +629,7 @@ def test_score_lookup_emits_text_term_lookup():
     }
 
 
-def _candidates(*skills: SkillFingerprint):
+def _candidates(*skills: Fingerprint):
     return CandidateGenerator().generate(
         SkillRegistry(skills={skill.id: skill for skill in skills})
     )
@@ -492,8 +640,9 @@ def _skill(
     *,
     inputs: list[ParameterSpec] | None = None,
     outputs: list[ArtifactSpec] | None = None,
-) -> SkillFingerprint:
-    return SkillFingerprint(
+) -> Fingerprint:
+    return Fingerprint(
+        type="skill",
         id=skill_id,
         name=skill_id,
         description="",

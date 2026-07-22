@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from openjiuwen.core.foundation.llm import ProviderType
+from openjiuwen.core.foundation.llm.utils.provider_utils import (
+    is_openai_account_provider,
+)
 
 from .constants import CODEX_MODEL_ALIAS, CODEX_PROVIDER_NAME
 
@@ -23,6 +26,11 @@ _CODEX_CAPABILITIES = ModelProviderCapabilities(
     fixed_model_name=CODEX_MODEL_ALIAS,
     subscription_auth=True,
 )
+_OPENAI_ACCOUNT_CAPABILITIES = ModelProviderCapabilities(
+    requires_api_base=True,
+    requires_api_key=False,
+    subscription_auth=True,
+)
 
 
 def provider_name(value: object) -> str:
@@ -30,8 +38,11 @@ def provider_name(value: object) -> str:
 
 
 def get_model_provider_capabilities(value: object) -> ModelProviderCapabilities:
-    if provider_name(value) == CODEX_PROVIDER_NAME:
+    normalized = provider_name(value)
+    if normalized == CODEX_PROVIDER_NAME:
         return _CODEX_CAPABILITIES
+    if is_openai_account_provider(normalized):
+        return _OPENAI_ACCOUNT_CAPABILITIES
     return ModelProviderCapabilities()
 
 

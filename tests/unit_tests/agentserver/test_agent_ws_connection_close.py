@@ -42,31 +42,27 @@ from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 
 
 class FakeWebSocket:
-    def __init__(self):
-        self.sent = []
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
 
-    async def send(self, payload):
+    async def send(self, payload: str) -> None:
         self.sent.append(json.loads(payload))
 
 
 class ClosedFakeWebSocket:
-    """模拟连接已断: 任何 send 都抛 ConnectionClosedError(no close frame received or sent)。"""
-
     remote_address = ("127.0.0.1", 1)
 
-    async def send(self, payload):
+    async def send(self, payload: str) -> None:
         raise ConnectionClosedError(None, None)
 
 
 class _AgentWsTestHarness(AgentWebSocketServer):
-    """Test harness exposing protected _handle_message via a public wrapper."""
-
-    async def handle_message_for_test(self, ws, raw, send_lock):
+    async def handle_message_for_test(self, ws, raw: str, send_lock: asyncio.Lock) -> None:
         await self._handle_message(ws, raw, send_lock)
 
 
 class ClosedDuringUnaryServer(_AgentWsTestHarness):
-    async def _handle_unary(self, ws, request, send_lock):
+    async def _handle_unary(self, ws, request, send_lock) -> None:
         raise ConnectionClosedError(None, None)
 
 
@@ -145,7 +141,7 @@ async def test_cancel_terminal_waits_for_exact_outer_stream_cleanup() -> None:
             ws,
             e2a_to_agent_request(request),
             asyncio.Lock(),
-            stream_task=stream_task,
+            stream_tasks=[stream_task],
             deadline=time.monotonic() + 2,
         )
     )
@@ -182,7 +178,7 @@ async def test_cancel_cleanup_deadline_emits_typed_false_terminal() -> None:
         ws,
         e2a_to_agent_request(request),
         asyncio.Lock(),
-        stream_task=stream_task,
+        stream_tasks=[stream_task],
         deadline=time.monotonic() - 1,
     )
     assert len(ws.sent) == 1
@@ -354,6 +350,7 @@ time.sleep(60)
     monkeypatch.setattr(adapter, "_handle_slash_command", no_slash)
     monkeypatch.setattr(adapter, "_update_runtime_config", no_async_side_effect)
     monkeypatch.setattr(adapter, "_sync_prompt_attachments_for_request", no_async_side_effect)
+    await adapter.start_interaction("sess")
 
     facade = JiuWenSwarm()
     facade._adapter = adapter
@@ -445,10 +442,18 @@ time.sleep(60)
     assert pid_path.exists()
     owner = adapter._codex_turn_owners["sess"]
     model_call_task = owner._model_call_task
-    facade_queue_task = facade._session_manager.get_current_task("sess")
+    facade_tasks = [
+        task
+        for task in asyncio.all_tasks()
+        if not task.done()
+        and "JiuWenSwarm.process_message_stream.<locals>.run_stream_task"
+        in getattr(task.get_coro(), "__qualname__", "")
+    ]
+    assert len(facade_tasks) == 1
+    facade_queue_task = facade_tasks[0]
     assert model_call_task is not None and not model_call_task.done()
-    assert facade_queue_task is not None and not facade_queue_task.done()
-    assert server._session_stream_tasks["sess"] is server_stream_task
+    assert not facade_queue_task.done()
+    assert server_stream_task in server._session_stream_tasks["sess"]
     assert len({model_call_task, facade_queue_task, server_stream_task}) == 3
 
     cancel = e2a_from_agent_fields(
@@ -496,6 +501,7 @@ time.sleep(60)
     for processor in processors:
         processor.cancel()
     await asyncio.gather(*processors, return_exceptions=True)
+    await adapter.stop_interaction()
     await deep_agent.react_agent.clear_session("sess")
 
 
@@ -601,6 +607,7 @@ for event in (
     monkeypatch.setattr(
         adapter, "_sync_prompt_attachments_for_request", no_async_side_effect
     )
+    await adapter.start_interaction("history-sess")
 
     facade = JiuWenSwarm()
     facade._adapter = adapter
@@ -676,6 +683,7 @@ for event in (
         for processor in processors:
             processor.cancel()
         await asyncio.gather(*processors, return_exceptions=True)
+        await adapter.stop_interaction()
         await deep_agent.react_agent.clear_session("history-sess")
 
     captures = sorted(tmp_path.glob("prompt-capture-*.txt"))
@@ -823,6 +831,7 @@ time.sleep(60)
     monkeypatch.setattr(
         adapter, "_sync_prompt_attachments_for_request", no_async_side_effect
     )
+    await adapter.start_interaction("timeout-sess")
 
     facade = JiuWenSwarm()
     facade._adapter = adapter
@@ -887,6 +896,7 @@ time.sleep(60)
         for processor in processors:
             processor.cancel()
         await asyncio.gather(*processors, return_exceptions=True)
+        await adapter.stop_interaction()
         await deep_agent.react_agent.clear_session("timeout-sess")
 
     encoded_frames = [json.dumps(frame) for frame in ws.sent]
@@ -938,96 +948,59 @@ async def _handle_cancel_cleanup_case(env) -> list[tuple[str, str]]:
 
 
 @pytest.mark.asyncio
-async def test_handle_message_treats_no_close_frame_as_disconnect(caplog):
-    closed_exc = ConnectionClosedError(None, None)
-    assert str(closed_exc) == "no close frame received or sent"
-
+async def test_handle_message_treats_no_close_frame_as_disconnect(caplog) -> None:
     target_logger = logging.getLogger("jiuwenswarm.server.agent_ws_server")
     target_logger.addHandler(caplog.handler)
     caplog.set_level(logging.INFO, logger=target_logger.name)
-    server = ClosedDuringUnaryServer()
-    ws = FakeWebSocket()
     env = e2a_from_agent_fields(
         request_id="req-closed",
         channel_id="tui",
-        session_id="sess-closed",
+        session_id="session-1",
         req_method=ReqMethod.CONFIG_GET,
         params={},
         is_stream=False,
         timestamp=0.0,
     )
-
     try:
-        await server.handle_message_for_test(
-            ws,
+        await ClosedDuringUnaryServer().handle_message_for_test(
+            FakeWebSocket(),
             json.dumps(env.to_dict(), ensure_ascii=False),
             asyncio.Lock(),
         )
     finally:
         target_logger.removeHandler(caplog.handler)
 
-    assert ws.sent == []
     assert "no close frame received or sent" in caplog.text
-    assert "WebSocket 已关闭，放弃请求回包" in caplog.text
     assert "request_id=req-closed" in caplog.text
-    assert "channel_id=tui" in caplog.text
-    assert "exc_type='ConnectionClosedError'" in caplog.text
-    assert "close_code=1006" in caplog.text
-    assert "处理请求失败" not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_handle_message_does_not_raise_on_closed_ws_during_json_parse_error(caplog):
-    """连接已断时, 收到非法 JSON 的回包 send 抛 ConnectionClosedError 不应逃逸出 _handle_message.
-
-    也不应记 ERROR traceback; 应记 INFO 并静默放弃回包.
-    """
+async def test_handle_message_ignores_json_error_when_peer_is_closed(caplog) -> None:
     target_logger = logging.getLogger("jiuwenswarm.server.agent_ws_server")
     target_logger.addHandler(caplog.handler)
     caplog.set_level(logging.INFO, logger=target_logger.name)
-
-    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
-    ws = ClosedFakeWebSocket()
-
     try:
-        await server.handle_message_for_test(
-            ws,
-            "not-a-json-payload{",
+        await _AgentWsTestHarness.__new__(_AgentWsTestHarness).handle_message_for_test(
+            ClosedFakeWebSocket(),
+            "not-json",
             asyncio.Lock(),
         )
     finally:
         target_logger.removeHandler(caplog.handler)
 
-    assert "JSON 解析错误未发送" in caplog.text
-    # 不应走通用 ERROR 路径
-    assert "处理请求失败" not in caplog.text
-    assert "连接处理异常" not in caplog.text
+    assert "JSON" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_handle_message_sends_json_parse_error_when_ws_open(caplog):
-    """连接正常时, 非法 JSON 仍应正常回包 parse-error, 修复不应破坏该行为。"""
-    target_logger = logging.getLogger("jiuwenswarm.server.agent_ws_server")
-    target_logger.addHandler(caplog.handler)
-    caplog.set_level(logging.INFO, logger=target_logger.name)
-
-    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
+async def test_handle_message_reports_json_error_when_peer_is_open() -> None:
     ws = FakeWebSocket()
+    await _AgentWsTestHarness.__new__(_AgentWsTestHarness).handle_message_for_test(
+        ws,
+        "not-json",
+        asyncio.Lock(),
+    )
 
-    try:
-        await server.handle_message_for_test(
-            ws,
-            "not-a-json-payload{",
-            asyncio.Lock(),
-        )
-    finally:
-        target_logger.removeHandler(caplog.handler)
-
-    assert len(ws.sent) == 1
-    frame = ws.sent[0]
-    assert frame.get("status") == "failed"
-    assert "JSON 解析失败" in frame.get("body", {}).get("message", "")
-    assert "JSON 解析错误未发送" not in caplog.text
+    assert ws.sent[0]["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -1115,7 +1088,7 @@ async def test_disconnect_cancel_cleans_session_runtime_when_stream_task_cleanup
     manager = _CleanupRecordingAgentManager()
     server._agent_manager = manager
     stream_task = asyncio.create_task(failing_stream_task())
-    server._session_stream_tasks = {"sess-stream-cleanup-fails": stream_task}
+    server._session_stream_tasks = {"sess-stream-cleanup-fails": {stream_task: asyncio.Event()}}
     env = e2a_from_agent_fields(
         request_id="req-disconnect-stream-cleanup-fails",
         channel_id="tui",

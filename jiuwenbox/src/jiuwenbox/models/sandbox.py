@@ -114,7 +114,6 @@ class BackgroundExecRequest(BaseModel):
     env: dict[str, str] | None = None
     stdin: str | None = None
     timeout_seconds: int | None = None
-    capture_output: bool = True
 
 
 class BackgroundExecResult(BaseModel):
@@ -125,7 +124,6 @@ class BackgroundExecResult(BaseModel):
     running: bool | None = None
     exit_code: int | None = None
     error_message: str | None = None
-    capture_output: bool = True
 
 
 class BackgroundJobSummary(BaseModel):
@@ -136,7 +134,6 @@ class BackgroundJobSummary(BaseModel):
     exit_code: int | None
     started_at: datetime
     finished_at: datetime | None
-    capture_output: bool
 
 
 class BackgroundJobStatus(BaseModel):
@@ -148,7 +145,7 @@ class BackgroundJobStatus(BaseModel):
     exit_code: int | None
     started_at: datetime
     finished_at: datetime | None
-    capture_output: bool
+    # Background jobs discard stdout/stderr; fields stay for API stability.
     stdout: str = ""
     stderr: str = ""
     workdir: str | None = None

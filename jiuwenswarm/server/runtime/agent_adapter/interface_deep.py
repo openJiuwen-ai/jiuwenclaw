@@ -19,6 +19,7 @@ import platform
 import re
 import secrets
 import subprocess
+import threading
 import time
 from collections import Counter, deque
 from functools import partial
@@ -38,6 +39,7 @@ import yaml
 from dotenv import load_dotenv
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
+from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.runner import Runner
@@ -91,6 +93,19 @@ from openjiuwen.harness.tools import (
     create_audio_tools,
     create_vision_tools,
 )
+from openjiuwen.harness.goal.schema import GoalOperationError, GoalStatus
+from openjiuwen.harness.schema.interaction import (
+    InteractionEventType,
+    InputDispatchMode,
+    SendInputRequest,
+)
+from jiuwenswarm.common.model_route import (
+    ActualModelRouteReceipt,
+    ModelRouteCandidate,
+    actual_model_route_metadata,
+    build_model_route_index,
+    parse_expected_model_route,
+)
 from jiuwenswarm.integrations.ai4research_subscription.consumer_policy import (
     CODEX_CALL_PERMIT_KWARG,
     CodexConsumer,
@@ -101,17 +116,19 @@ from jiuwenswarm.integrations.ai4research_subscription.consumer_policy import (
     require_codex_consumer,
     require_codex_model_consumer,
 )
-from jiuwenswarm.common.model_route import (
-    ActualModelRouteReceipt,
-    ModelRouteCandidate,
-    actual_model_route_metadata,
-    build_model_route_index,
-    parse_expected_model_route,
-)
 from jiuwenswarm.integrations.ai4research_subscription.errors import (
     CodexProviderError,
     provider_error_payload,
 )
+from jiuwenswarm.server.runtime.agent_adapter.stream_lifecycle import (
+    close_owned_async_iterator,
+)
+
+GOAL_UPDATED_EVENT_TYPE = InteractionEventType.GOAL_UPDATED.value
+_ERROR_EVENT = getattr(InteractionEventType, "EXECUTION_ERROR", None)
+if _ERROR_EVENT is None:
+    _ERROR_EVENT = getattr(InteractionEventType, "RUNTIME_ERROR")
+ERROR_EVENT_TYPE = _ERROR_EVENT.value
 
 try:
     from openjiuwen.harness.tools import is_paid_search_enabled
@@ -159,7 +176,7 @@ from jiuwenswarm.agents.harness.common.rails import (
     ResponsePromptRail,
     RuntimePromptRail,
     StructuredAskUserRail,
-    SymphonyOrchestrationPromptRail,
+    SymphonyOrchestrationRail,
 )
 from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
@@ -221,9 +238,6 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
     handle_evolution_slash_command,
 )
 from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload
-from jiuwenswarm.server.runtime.agent_adapter.stream_lifecycle import (
-    close_owned_async_iterator,
-)
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_image_gen_model_config_from_yaml,
@@ -248,7 +262,6 @@ from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import 
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
-from jiuwenswarm.agents.harness.common.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     get_user_location,
@@ -283,7 +296,9 @@ from jiuwenswarm.common.config import (
     get_config,
     get_default_models,
     get_evolution_auto_scan_enabled,
+    get_evolution_review_trigger_enabled,
     get_evolution_auto_save_enabled,
+    get_evolution_signal_trigger_enabled,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
     get_skill_create_enabled,
@@ -305,10 +320,12 @@ from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACK
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.gateway.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.utils import (
     get_agent_skills_dir,
     get_agent_workspace_dir,
     get_checkpoint_dir,
+    get_default_project_session_workspace_dir,
     get_env_file,
     get_prompt_attachment_dir,
     get_runtime_state_path,
@@ -491,8 +508,58 @@ class _CodexTurnOwner:
         self._on_complete(self)
 
 
-_PERSISTENT_CHECKPOINTER_LOCK = asyncio.Lock()
+_PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
+_PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
+_PERSISTENT_CHECKPOINTER_LOCK_INIT = threading.Lock()
 _PERSISTENT_CHECKPOINTER_READY = False
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
+async def _get_persistent_checkpointer_lock() -> asyncio.Lock:
+    """Lazy-init or rebind the process-wide checkpointer lock to the running loop.
+
+    ``asyncio.Lock`` binds to the loop of its first ``acquire()``; any later
+    acquire from a different loop raises ``RuntimeError("... is bound to a
+    different event loop")``. The first call may have happened on a transient
+    loop (test harness, ephemeral worker) that is gone by the time AgentServer's
+    main loop needs the lock. To stay correct under that drift we:
+
+    1. Lazily construct the Lock inside the caller's running loop (guarded by a
+       ``threading.Lock`` so concurrent first-acquires from different threads
+       cannot create two Locks).
+    2. Before returning, verify the Lock is still bound to the current loop. If
+       it is bound to a dead/foreign loop, drop and rebuild it so the caller can
+       re-acquire safely. This rebinding is also done under the threading guard.
+
+    After ``_PERSISTENT_CHECKPOINTER_READY`` flips True no one acquires the lock,
+    so rebinding is a no-op for the steady state.
+    """
+    global _PERSISTENT_CHECKPOINTER_LOCK, _PERSISTENT_CHECKPOINTER_LOCK_LOOP
+    current = _running_loop()
+    if current is None:
+        raise RuntimeError(
+            "_get_persistent_checkpointer_lock must be called from a running event loop"
+        )
+    with _PERSISTENT_CHECKPOINTER_LOCK_INIT:
+        bound = _PERSISTENT_CHECKPOINTER_LOCK_LOOP
+        if _PERSISTENT_CHECKPOINTER_LOCK is None or bound is None or bound is not current:
+            if bound is not None and bound is not current and not bound.is_closed():
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] _PERSISTENT_CHECKPOINTER_LOCK rebound: "
+                    "old_loop=%r new_loop=%r (lock repr=%r)",
+                    bound,
+                    current,
+                    _PERSISTENT_CHECKPOINTER_LOCK,
+                )
+            _PERSISTENT_CHECKPOINTER_LOCK = asyncio.Lock()
+            _PERSISTENT_CHECKPOINTER_LOCK_LOOP = current
+    return _PERSISTENT_CHECKPOINTER_LOCK
 
 _ACP_BLOCKED_DEFAULT_TOOL_NAMES = frozenset(
     {
@@ -510,6 +577,16 @@ _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
         "skill_branch_peek",
     }
 )
+
+
+def _set_skill_evolution_triggers(
+    rail: Any,
+    *,
+    signal_trigger: bool,
+    review_trigger: bool,
+) -> None:
+    rail.signal_trigger = signal_trigger
+    rail.review_trigger = review_trigger
 
 
 class _CallBoundCodexModel:
@@ -944,20 +1021,23 @@ def _mcc_looks_usable(mcc: dict) -> bool:
         model_client_config_looks_usable,
     )
 
+    api_base = str(mcc.get("api_base", "") or "").strip()
+    provider = mcc.get("client_provider", mcc.get("model_provider", ""))
+    provider = getattr(provider, "value", provider)
+    if is_openai_account_provider(str(provider or "")):
+        return bool(api_base and not is_placeholder_api_base(api_base))
+
     if not model_client_config_looks_usable(mcc):
         return False
     capabilities = get_model_provider_capabilities(
-        mcc.get("client_provider", mcc.get("model_provider", ""))
+        provider
     )
     if not capabilities.requires_api_base:
         return True
+    if not api_base or is_placeholder_api_base(api_base):
+        return False
     api_key = str(mcc.get("api_key", "") or "").strip()
-    api_base = str(mcc.get("api_base", "") or "").strip()
-    if not api_key or not api_base:
-        return False
-    if is_placeholder_api_base(api_base):
-        return False
-    return True
+    return bool(api_key)
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -1059,7 +1139,7 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
             session_memory=session_memory_cfg,
         )
         logger.info(
-            "[JiuWenSwarmDeepAdapter] ContextProcessorRail create success for agent.plan mode, "
+            "[JiuWenSwarmDeepAdapter] ContextProcessorRail create success for agent mode, "
             "user_processors=%s session_memory=%s",
             [p[0] for p in user_processors] if user_processors else "none",
             "enabled" if isinstance(session_memory_cfg, dict) else "disabled",
@@ -1077,7 +1157,21 @@ async def ensure_persistent_checkpointer() -> None:
     if _PERSISTENT_CHECKPOINTER_READY:
         return
 
-    async with _PERSISTENT_CHECKPOINTER_LOCK:
+    lock = await _get_persistent_checkpointer_lock()
+    acquired = False
+    try:
+        try:
+            await lock.acquire()
+        except RuntimeError as acquire_exc:
+            logger.exception(
+                "[JiuWenSwarmDeepAdapter] _PERSISTENT_CHECKPOINTER_LOCK acquire failed: %s "
+                "(lock repr=%r, running_loop=%r)",
+                acquire_exc,
+                lock,
+                asyncio.get_event_loop(),
+            )
+            raise
+        acquired = True
         if _PERSISTENT_CHECKPOINTER_READY:
             return
 
@@ -1102,12 +1196,19 @@ async def ensure_persistent_checkpointer() -> None:
                 exc,
             )
             raise RuntimeError("persistent checkpointer initialization failed") from exc
+    finally:
+        if acquired:
+            lock.release()
 
 
 _MODE_DISPLAY_MAP: dict[str, dict[str, str]] = {
-    "agent.plan": {"cn": "规划模式", "en": "Planning Mode"},
-    "agent.fast": {"cn": "性能模式", "en": "Performance Mode"},
+    "agent": {"cn": "智能体模式", "en": "Agent Mode"},
+    # 历史 token 归一到合并后的 agent 显示名（兼容旧会话 / 旧请求）。
+    "agent.plan": {"cn": "智能体模式", "en": "Agent Mode"},
+    "agent.fast": {"cn": "智能体模式", "en": "Agent Mode"},
     "team": {"cn": "集群模式", "en": "Cluster Mode"},
+    "team.plan": {"cn": "集群计划模式", "en": "Cluster Plan Mode"},
+    "code.team": {"cn": "代码集群模式", "en": "Code Team Mode"},
 }
 
 
@@ -1276,14 +1377,14 @@ class JiuWenSwarmDeepAdapter:
         self._pending_session_reload_config_base: dict[str, Any] | None = None
         self._pending_session_reload_env_overrides: dict[str, Any] | None = None
         self._session_instance_config: dict[str, Any] | None = None
-        self._session_instance_mode: str = "agent.plan"
+        self._session_instance_mode: str = "agent"
         self._session_instance_sub_mode: str | None = None
         self._xiaoyi_phone_tools_registered: bool = False
         self._paid_search_registered: bool = False
         self._paid_search_tool: WebPaidSearchTool | None = None
         self._symphony_tools: list[Any] = []
         self._symphony_tools_registered: bool = False
-        self._symphony_orchestration_prompt_rail = None
+        self._symphony_orchestration_rail = None
         self._skill_retrieval_tools_registered: bool = False
         self._skill_retrieval_tools: list[Any] = []
         self._skill_retrieval_prompt_rail: SkillRetrievalPromptRail | None = None
@@ -1558,6 +1659,9 @@ class JiuWenSwarmDeepAdapter:
                 mode=self._session_instance_mode,
                 sub_mode=self._session_instance_sub_mode,
             )
+
+            await adapter.start_interaction(session_id=sid)
+
             self._session_adapters[sid] = adapter
             # A brand-new session adapter is created from ``_session_instance_config``
             # (which may predate the latest global reload). If a global reload left a
@@ -4368,6 +4472,11 @@ class JiuWenSwarmDeepAdapter:
         """Build SkillEvolutionRail."""
         try:
             evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+            evolution_signal_trigger = get_evolution_signal_trigger_enabled(config)
+            evolution_review_trigger = get_evolution_review_trigger_enabled(
+                config,
+                fallback=evolution_auto_scan,
+            )
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
             skill_evolution_rail = SkillEvolutionRail(
@@ -4375,8 +4484,8 @@ class JiuWenSwarmDeepAdapter:
                 llm=self._model,
                 model=model_name,
                 review_runtime=EvolutionReviewRuntime(),
-                auto_scan=evolution_auto_scan,
-                fuzzy_review=evolution_auto_scan,
+                signal_trigger=evolution_signal_trigger,
+                review_trigger=evolution_review_trigger,
                 auto_save=evolution_auto_save,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
             )
@@ -4394,6 +4503,11 @@ class JiuWenSwarmDeepAdapter:
 
         resolved_language = self._resolve_runtime_language()
         evolution_auto_scan = get_evolution_auto_scan_enabled(self._config_cache)
+        evolution_signal_trigger = get_evolution_signal_trigger_enabled(self._config_cache)
+        evolution_review_trigger = get_evolution_review_trigger_enabled(
+            self._config_cache,
+            fallback=evolution_auto_scan,
+        )
         evolution_auto_save = get_evolution_auto_save_enabled(self._config_cache)
         if (
             self._skill_evolution_rail is not None
@@ -4412,15 +4526,19 @@ class JiuWenSwarmDeepAdapter:
             llm=self._model,
             model=self._default_model_name
             or self._config_cache.get("model_name", "gpt-4"),
-            auto_scan=evolution_auto_scan,
-            fuzzy_review=evolution_auto_scan,
+            signal_trigger=evolution_signal_trigger,
+            review_trigger=evolution_review_trigger,
             auto_save=evolution_auto_save,
             disabled_skills=disabled_skills,
             language=resolved_language,
         )
         self._refresh_active_evolution_rail_refs()
         if self._skill_evolution_rail is not None:
-            _set_skill_evolution_auto_scan(self._skill_evolution_rail, evolution_auto_scan)
+            _set_skill_evolution_triggers(
+                self._skill_evolution_rail,
+                signal_trigger=evolution_signal_trigger,
+                review_trigger=evolution_review_trigger,
+            )
 
     async def _unconfigure_active_evolution_rails(self) -> None:
         """Remove cached single-agent evolution rails before rebuilding them."""
@@ -4561,7 +4679,7 @@ class JiuWenSwarmDeepAdapter:
         return subagent_rail
 
     def _build_structured_ask_user_rail(self) -> StructuredAskUserRail | None:
-        """Build StructuredAskUserRail for agent.plan clarification."""
+        """Build StructuredAskUserRail for agent mode clarification."""
         try:
             return StructuredAskUserRail(language=self._resolve_runtime_language())
         except Exception as exc:
@@ -4822,23 +4940,23 @@ class JiuWenSwarmDeepAdapter:
                 except (AttributeError, TypeError):
                     pass
 
-    def _build_symphony_orchestration_prompt_rail(
+    def _build_symphony_orchestration_rail(
         self,
-    ) -> SymphonyOrchestrationPromptRail | None:
+    ) -> SymphonyOrchestrationRail | None:
         """Build dynamic Symphony orchestration prompt guidance."""
         try:
-            return SymphonyOrchestrationPromptRail(
+            return SymphonyOrchestrationRail(
                 config_base=lambda: self._config_base_cache,
             )
         except Exception as exc:
             logger.warning(
-                "[JiuWenSwarmDeepAdapter] SymphonyOrchestrationPromptRail create failed: %s",
+                "[JiuWenSwarmDeepAdapter] SymphonyOrchestrationRail create failed: %s",
                 exc,
             )
             return None
 
     def _build_agent_rails(
-        self, config: dict[str, Any], config_base: dict[str, Any], *, mode: str = "agent.plan"
+        self, config: dict[str, Any], config_base: dict[str, Any], *, mode: str = "agent"
     ) -> list[Any]:
         """Build DeepAgent rails consistently for cold start and hot reload."""
 
@@ -4916,8 +5034,8 @@ class JiuWenSwarmDeepAdapter:
         rail_infos.insert(
             4 if self._filesystem_rail_enabled_for_profile() else 3,
             _RailBuildInfo(
-                "_symphony_orchestration_prompt_rail",
-                self._build_symphony_orchestration_prompt_rail,
+                "_symphony_orchestration_rail",
+                self._build_symphony_orchestration_rail,
             ),
         )
         if isinstance(mode, str) and mode.startswith("agent"):
@@ -4959,6 +5077,19 @@ class JiuWenSwarmDeepAdapter:
                 )
         except Exception as e:
             logger.warning("[JiuWenSwarmDeepAdapter] Failed to load UserHookRail: %s", e)
+        # Observability rail: opens an agent-layer span (agent.<name>.task_iteration.<n>
+        # for task-loop runs, or agent.<name>.invoke for single-round) under the root
+        # run span per iteration/round. It is the only thing that creates the
+        # task_iteration / invoke spans that llm.call + tool.* nest under. It
+        # self-disables (before_* returns early when get_team_span() is None), so
+        # attaching it unconditionally is safe and also adapts to runtime
+        # enable/disable of agent_observability without rebuilding the agent.
+        try:
+            from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+            rails_list.append(ObservabilityRail())
+            logger.info("[JiuWenSwarmDeepAdapter] ObservabilityRail attached")
+        except Exception as e:
+            logger.warning("[JiuWenSwarmDeepAdapter] Failed to attach ObservabilityRail: %s", e)
         return rails_list
 
     @staticmethod
@@ -4967,10 +5098,10 @@ class JiuWenSwarmDeepAdapter:
     ) -> bool:
         """Resolve enable_task_loop considering evolution rail requirements.
 
-        SkillCreateRail and auto-scan SkillEvolutionRail follow-ups require
+        SkillCreateRail and review-trigger SkillEvolutionRail follow-ups require
         task-loop mode (enable_task_loop=True) because they use
         AFTER_TASK_ITERATION events and enqueue_follow_up().
-        When skill_create=True or auto_scan=True, we force enable_task_loop=True
+        When skill_create=True or review_trigger=True, we force enable_task_loop=True
         regardless of user config.
 
         Args:
@@ -4982,7 +5113,10 @@ class JiuWenSwarmDeepAdapter:
         """
         config_base = config_base or get_config()
         skill_create_enabled = get_skill_create_enabled(config_base)
-        evolution_auto_scan_enabled = get_evolution_auto_scan_enabled(config_base)
+        evolution_review_trigger_enabled = get_evolution_review_trigger_enabled(
+            config_base,
+            fallback=get_evolution_auto_scan_enabled(config_base),
+        )
         configured_value = config.get("enable_task_loop", True)
 
         if skill_create_enabled:
@@ -4993,10 +5127,10 @@ class JiuWenSwarmDeepAdapter:
                     configured_value,
                 )
             return True
-        if evolution_auto_scan_enabled:
+        if evolution_review_trigger_enabled:
             if not configured_value:
                 logger.warning(
-                    "[JiuWenSwarmDeepAdapter] evolution.auto_scan=True requires "
+                    "[JiuWenSwarmDeepAdapter] evolution.review_trigger=True requires "
                     "enable_task_loop=True; overriding user config (enable_task_loop=%s -> True)",
                     configured_value,
                 )
@@ -5077,9 +5211,14 @@ class JiuWenSwarmDeepAdapter:
         # Apply in-place updates to skill_evolution_rail (no re-init needed).
         if self._skill_evolution_rail is not None:
             self._skill_evolution_rail.update_llm(self._model, self._default_model_name)
-            _set_skill_evolution_auto_scan(
+            evolution_auto_scan = get_evolution_auto_scan_enabled(config)
+            _set_skill_evolution_triggers(
                 self._skill_evolution_rail,
-                get_evolution_auto_scan_enabled(config),
+                signal_trigger=get_evolution_signal_trigger_enabled(config),
+                review_trigger=get_evolution_review_trigger_enabled(
+                    config,
+                    fallback=evolution_auto_scan,
+                ),
             )
 
         # Reuse existing SkillUseRail to preserve dynamically loaded skills
@@ -5341,7 +5480,7 @@ class JiuWenSwarmDeepAdapter:
         return None
 
     async def create_instance(
-        self, config: dict[str, Any] | None = None, *, mode: str = "agent.plan", sub_mode: str = None
+        self, config: dict[str, Any] | None = None, *, mode: str = "agent", sub_mode: str = None
     ) -> None:
         """初始化 DeepAgent 实例.
 
@@ -5350,7 +5489,7 @@ class JiuWenSwarmDeepAdapter:
                 - agent_name: Agent 名称，默认 "main_agent"。
                 - workspace_dir: 工作区目录，默认 "workspace/agent"。
                 - 其余字段透传给 DeepAgentConfig。
-            mode: 实例化模式，默认 "agent.plan"，使用 create_deep_agent。
+            mode: 实例化模式，默认 "agent"，使用 create_deep_agent。
             sub_mode: 子模式
         """
         self._session_instance_config = dict(config or {}) if isinstance(config, dict) else None
@@ -5433,8 +5572,12 @@ class JiuWenSwarmDeepAdapter:
         )
 
         await self._instance.ensure_initialized()
-        self._seed_runtime_cwd(self._project_dir or self._workspace_dir)
-        setattr(self._instance, "_jiuwenswarm_project_dir", self._project_dir or self._workspace_dir)
+        initial_runtime_workspace = self._project_dir or str(
+            get_default_project_session_workspace_dir()
+        )
+        self._ensure_project_gitignore_agent_history(initial_runtime_workspace)
+        self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
+        setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
 
         self._sync_a2x_runtime_state()
         self._registered_mcp_server_ids.clear()
@@ -5449,6 +5592,86 @@ class JiuWenSwarmDeepAdapter:
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
+
+    @staticmethod
+    def _ensure_project_gitignore_agent_history(project_dir: str | None) -> None:
+        """Ensure JiuwenSwarm's file operation logs stay out of project git diffs."""
+        if not project_dir:
+            return
+        try:
+            repo_probe = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return
+        if repo_probe.returncode != 0:
+            return
+
+        repo_root_text = repo_probe.stdout.strip()
+        if not repo_root_text:
+            return
+        gitignore_path = Path(repo_root_text) / ".gitignore"
+        try:
+            existing_bytes = gitignore_path.read_bytes() if gitignore_path.exists() else b""
+        except OSError as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] read .gitignore for agent history rule failed: %s",
+                exc,
+            )
+            return
+
+        if JiuWenSwarmDeepAdapter._gitignore_covers_agent_history(existing_bytes):
+            return
+
+        existing = existing_bytes.decode("utf-8", errors="replace")
+        prefix = "" if not existing else ("\n" if existing.endswith(("\n", "\r")) else "\n\n")
+        addition = (
+            f"{prefix}# JiuwenSwarm runtime file operation logs\n.agent_history/\n"
+        ).encode("utf-8")
+        try:
+            gitignore_path.write_bytes(existing_bytes + addition)
+        except OSError as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ensure .agent_history gitignore failed: %s",
+                exc,
+            )
+
+    @staticmethod
+    def _gitignore_covers_agent_history(content: bytes) -> bool:
+        """Return True if .gitignore content already ignores .agent_history/.
+
+        Recognizes equivalent forms such as ``.agent_history``,
+        ``.agent_history/``, ``.agent_history/*``, ``.agent_history/**``,
+        ``.agent_history/**/*``, ``**/.agent_history`` and combinations
+        thereof, so that the rule is idempotent across pre-existing project
+        configurations.
+        """
+        text = content.decode("utf-8", errors="replace")
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # Skip negation rules; they re-include paths rather than ignore
+            # the directory.
+            if line.startswith("!"):
+                continue
+            # Strip leading glob prefix like `**/`.
+            if line.startswith("**/"):
+                line = line[3:]
+            # Split into segments. The rule covers `.agent_history` if the
+            # first segment matches and any following segments are wildcards
+            # that target the directory contents.
+            segments = [seg for seg in line.split("/") if seg]
+            if not segments or segments[0] != ".agent_history":
+                continue
+            if all(seg in ("*", "**") for seg in segments[1:]):
+                return True
+        return False
 
     async def _sync_prompt_attachments_for_request(self, session_id: str) -> None:
         """Hot-load prompt attachment files for the current request.
@@ -5741,9 +5964,9 @@ class JiuWenSwarmDeepAdapter:
 
         # 主动刷新 memory rail（不等下次请求的 _update_rails_for_mode）：
         # 让 embedding 配置变更立即走指纹检测 + 重建 rail + 延时重索引。
-        # 若从未处理过请求（_last_mode 为 None），退化为下次请求自然触发。
+        # 若从未处理过请求（_last_mode 为 None，如冷启动后首次 reload），退化为默认 agent。
         try:
-            mode = self._last_mode or "agent.plan"
+            mode = self._last_mode or "agent"
             await self._handle_memory_rail_by_config(mode)
         except Exception as e:
             logger.warning(
@@ -5760,6 +5983,7 @@ class JiuWenSwarmDeepAdapter:
         metadata: dict[str, Any] | None,
         request_id: str | None,
         mode: str | None,
+        project_dir: str | None = None,
     ) -> tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None], Token[str | None]]:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             set_shell_session_id,
@@ -5772,6 +5996,9 @@ class JiuWenSwarmDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+        # 注入 project_dir 供 cron tool 路由解析任务归属项目（设计文档 §5.1）
+        if isinstance(project_dir, str) and project_dir.strip():
+            normalized_metadata.setdefault("project_dir", project_dir.strip())
         return (
             _CRON_TOOL_CHANNEL_ID.set(normalized_channel),
             _CRON_TOOL_SESSION_ID.set(session_id),
@@ -5798,48 +6025,49 @@ class JiuWenSwarmDeepAdapter:
         _CRON_TOOL_CHANNEL_ID.reset(channel_token)
 
     async def _update_rails_for_mode(self, mode: str) -> None:
-        """按 mode 注册或卸载 rails。"""
-        # 记录最近一次请求的 mode，供 reload_agent_config 主动刷新 memory rail 时使用
-        self._last_mode = mode
-        if mode == "agent.plan":
-            await self._update_plan_mode_rails()
-        else:
-            await self._update_agent_mode_rails(mode)  # 透传 mode
+        """装配 agent 模式 rails。
 
-    async def _update_plan_mode_rails(self) -> None:
-        """plan 模式：注册 plan 专属 rails，卸载 agent 专属资源。"""
+        plan / fast 已合并为单一 ``agent`` 模式：统一挂载 plan 档能力
+        （TaskPlanning / Subagent / 演进 rail 等），记忆固定为被动模式，
+        不再按子模式分叉。历史 ``agent.plan`` / ``agent.fast`` 归一到此路径。
+        """
+        self._last_mode = mode
+        await self._update_agent_rails()
+
+    async def _update_agent_rails(self) -> None:
+        """agent 模式：注册 agent 专属 rails（原 plan 档能力并集）。"""
         if self._task_planning_rail is None:
             self._task_planning_rail = self._build_task_planning_rail()
             if self._task_planning_rail is not None:
                 await self._instance.register_rail(self._task_planning_rail)
-                logger.info("[JiuWenSwarmDeepAdapter] TaskPlanningRail registered for plan mode")
+                logger.info("[JiuWenSwarmDeepAdapter] TaskPlanningRail registered for agent mode")
         if self._ask_user_rail is None:
             self._ask_user_rail = self._build_structured_ask_user_rail()
             if self._ask_user_rail is not None:
                 await self._instance.register_rail(self._ask_user_rail)
-                logger.info("[JiuWenSwarmDeepAdapter] StructuredAskUserRail registered for plan mode")
+                logger.info("[JiuWenSwarmDeepAdapter] StructuredAskUserRail registered for agent mode")
         # 卸载 multi-session 工具
         for existing in list(self._instance.ability_manager.list() or []):
             if getattr(existing, "name", "").startswith(
                 ("session_new", "session_cancel", "session_list")
             ):
                 self._instance.ability_manager.remove(existing.name)
-        # plan 模式，根据config选择是否注册或者卸载memory rail
-        await self._handle_memory_rail_by_config("plan")
+        # agent 模式，根据config选择是否注册或者卸载memory rail（固定被动记忆）
+        await self._handle_memory_rail_by_config("agent")
         # 外接记忆 rail（mode-independent，注册一次，跨 reload 持久）
         await self._handle_external_memory_rail_by_config()
-        # 上下文 rail（仅 plan 模式）
+        # 上下文 rail
         context_enabled = self._config_cache.get("context_engine_config", {}).get("enabled", False)
 
-        if self._context_assemble_rail is None or self._context_assemble_mode != "agent.plan":
+        if self._context_assemble_rail is None or self._context_assemble_mode != "agent":
             if self._context_assemble_rail is not None:
                 await self._instance.unregister_rail(self._context_assemble_rail)
                 self._context_assemble_rail = None
             self._context_assemble_rail = _build_context_assemble_rail()
-            self._context_assemble_mode = "agent.plan"
+            self._context_assemble_mode = "agent"
             await self._instance.register_rail(self._context_assemble_rail)
             logger.info(
-                "[JiuWenSwarmDeepAdapter] %s registered for plan mode", "ContextAssembleRail"
+                "[JiuWenSwarmDeepAdapter] %s registered for agent mode", "ContextAssembleRail"
             )
 
         # ContextProcessorRail
@@ -5849,14 +6077,14 @@ class JiuWenSwarmDeepAdapter:
                 if self._context_processor_rail is not None:
                     await self._instance.register_rail(self._context_processor_rail)
                     logger.info(
-                        "[JiuWenSwarmDeepAdapter] ContextProcessorRail registered for plan mode"
+                        "[JiuWenSwarmDeepAdapter] ContextProcessorRail registered for agent mode"
                     )
         else:
             if self._context_processor_rail is not None:
                 await self._instance.unregister_rail(self._context_processor_rail)
                 self._context_processor_rail = None
                 logger.info(
-                    "[JiuWenSwarmDeepAdapter] ContextProcessorRail unregistered for plan mode (disabled)"
+                    "[JiuWenSwarmDeepAdapter] ContextProcessorRail unregistered for agent mode (disabled)"
                 )
 
         # SkillEvolutionRail runtime configure creates/reuses and registers its rail set.
@@ -5885,66 +6113,13 @@ class JiuWenSwarmDeepAdapter:
                 self._skill_create_rail = self._build_skill_create_rail(self._config_cache)
             if self._skill_create_rail is not None:
                 await self._instance.register_rail(self._skill_create_rail)
-                logger.info("[JiuWenSwarmDeepAdapter] SkillCreateRail registered for plan mode")
+                logger.info("[JiuWenSwarmDeepAdapter] SkillCreateRail registered for agent mode")
         else:
             # skill_create disabled: unregister if exists
             if self._skill_create_rail is not None:
                 await self._instance.unregister_rail(self._skill_create_rail)
                 self._skill_create_rail = None
                 logger.info("[JiuWenSwarmDeepAdapter] SkillCreateRail unregistered (skill_create=false)")
-
-    async def _update_agent_mode_rails(self, mode: str | None = None) -> None:
-        """agent 模式：卸载 plan 专属 rails，按需注册 agent 专属 rails。"""
-        # 卸载 plan 专属 rails
-        rail_specs = (
-            ("_task_planning_rail", "TaskPlanningRail"),
-            ("_skill_evolution_rail", "SkillEvolutionRail"),
-            ("_evolution_interrupt_rail", "EvolutionInterruptRail"),
-            ("_skill_create_rail", "SkillCreateRail"),
-            ("_subagent_rail", "SubagentRail"),
-        )
-
-        for attr, label in rail_specs:
-            rail = getattr(self, attr)
-            if rail is not None:
-                await self._instance.unregister_rail(rail)
-                setattr(self, attr, None)
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] %s unregistered for %s mode",
-                    label,
-                    mode or "agent",
-                )
-
-        if self._ask_user_rail is None:
-            self._ask_user_rail = self._build_structured_ask_user_rail()
-            if self._ask_user_rail is not None:
-                await self._instance.register_rail(self._ask_user_rail)
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] StructuredAskUserRail registered for %s mode",
-                    mode or "agent",
-                )
-
-        # agent 模式，根据 config 选择是否注册或者卸载 memory rail
-        await self._handle_memory_rail_by_config("fast")
-        # 外接记忆 rail（mode-independent，注册一次，跨 reload 持久）
-        await self._handle_external_memory_rail_by_config()
-        # agent/智能模式：恢复上下文 rail（仅配置启用时）
-        if self._context_assemble_rail is None or self._context_assemble_mode == "agent.plan":
-            if self._context_assemble_rail is not None:
-                await self._instance.unregister_rail(self._context_assemble_rail)
-                self._context_assemble_rail = None
-            self._context_assemble_rail = _build_context_assemble_rail()
-            self._context_assemble_mode = "agent.fast"
-            await self._instance.register_rail(self._context_assemble_rail)
-
-        if self._context_processor_rail is None:
-            self._context_processor_rail = _build_context_processor_rail(self._config_cache)
-            if self._context_processor_rail is not None:
-                await self._instance.register_rail(self._context_processor_rail)
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] ContextProcessorRail registered for %s mode",
-                    mode or "agent.fast",
-                )
 
     @staticmethod
     def _acp_runtime_tools_enabled(
@@ -5987,35 +6162,21 @@ class JiuWenSwarmDeepAdapter:
     async def _update_tools_for_mode(
         self, mode: str, session_id: str | None, request_id: str | None
     ) -> None:
-        """按 mode 注册或卸载 multi-session 工具。"""
-        if mode != "agent.fast":
-            return
-        if not (request_id and session_id and self._model_client_config is not None):
-            return
+        """multi-session 工具装配。
+
+        plan / fast 合并为单一 ``agent`` 模式后，多会话工具
+        （session_new / session_cancel / session_list）不再注册：
+        清理任何遗留的 session_* 工具后返回。
+        """
+        # 清理历史遗留的 multi-session 工具（旧 agent.fast 会话切换而来）
         try:
             for existing in list(self._instance.ability_manager.list() or []):
                 if getattr(existing, "name", "").startswith(
                     ("session_new", "session_cancel", "session_list")
                 ):
                     self._instance.ability_manager.remove(existing.name)
-            sub_agent_config = ReActAgentConfig(
-                model_client_config=self._model_client_config,
-                model_config_obj=self._model_request_config,
-            )
-            multi_session_toolkit = MultiSessionToolkit(
-                session_id=session_id,
-                channel_id=_CRON_TOOL_CHANNEL_ID.get(),
-                request_id=request_id,
-                sub_agent_config=sub_agent_config,
-                max_concurrent_tasks=20,  # 最多同时运行20个子任务
-                task_timeout=600.0,  # 每个子任务超时时间10分钟
-            )
-            for ms_tool in multi_session_toolkit.get_tools():
-                Runner.resource_mgr.add_tool(ms_tool)
-                self._instance.ability_manager.add(ms_tool.card)
-            logger.info("[JiuWenSwarmDeepAdapter] MultiSessionToolkit registered for agent mode")
         except Exception as exc:
-            logger.error("[JiuWenSwarmDeepAdapter] MultiSessionToolkit 注册失败: %s", exc)
+            logger.debug("[JiuWenSwarmDeepAdapter] 清理 multi-session 工具失败: %s", exc)
 
     async def _update_session_tools(
         self,
@@ -6178,7 +6339,7 @@ class JiuWenSwarmDeepAdapter:
         """Per-request runtime config bundle for _update_runtime_config."""
 
         session_id: str | None = None
-        mode: str = "agent.plan"
+        mode: str = "agent"
         request_id: str | None = None
         channel_id: str | None = None
         request_metadata: dict[str, Any] | None = None
@@ -6192,13 +6353,14 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
-        self._seed_runtime_cwd(
-            runtime_config.cwd
+        task_workspace = (
+            runtime_config.workspace
             or runtime_config.project_dir
             or self._project_dir
-            or self._workspace_dir,
-            workspace=runtime_config.workspace,
+            or str(get_default_project_session_workspace_dir(runtime_config.session_id))
         )
+        task_cwd = runtime_config.cwd or task_workspace
+        self._seed_runtime_cwd(task_cwd, workspace=task_workspace)
         resolved_language = self._resolve_runtime_language()
         resolved_channel = (
             str(
@@ -6213,7 +6375,7 @@ class JiuWenSwarmDeepAdapter:
             self._runtime_prompt_rail.set_channel(resolved_channel)
             self._runtime_prompt_rail.set_trusted_dirs(runtime_config.trusted_dirs)
             self._runtime_prompt_rail.set_runtime_paths(
-                cwd=runtime_config.cwd,
+                cwd=task_cwd,
                 project_dir=runtime_config.project_dir or self._project_dir,
             )
             self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
@@ -6242,9 +6404,9 @@ class JiuWenSwarmDeepAdapter:
             channel=resolved_channel,
             session_id=runtime_config.session_id,
             project_dir=runtime_config.project_dir
-            or runtime_config.cwd
+            or task_cwd
             or self._project_dir
-            or self._workspace_dir,
+            or str(get_default_project_session_workspace_dir(runtime_config.session_id)),
         )
 
         await self._update_rails_for_mode(runtime_config.mode)
@@ -6331,11 +6493,47 @@ class JiuWenSwarmDeepAdapter:
             return False
         return has_runtime_capability
 
+    async def start_interaction(self, session_id: str) -> None:
+        """Bind a product Session and start this adapter's DeepAgent interaction loop.
+
+        Public entry for the facade/session-pool path. No-op when
+        ``create_instance`` has not produced an underlying agent yet. Failures
+        are logged and swallowed — same contract as the former inline start.
+        """
+        if self._instance is None:
+            return
+        try:
+            from openjiuwen.core.session.agent import create_agent_session
+
+            session = create_agent_session(
+                session_id=session_id,
+                card=getattr(self._instance, "card", None),
+            )
+            await session.pre_run(inputs={})
+            await self._instance.start(session=session)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] start completed: session_id=%s",
+                session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] start failed: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+
+    async def stop_interaction(self) -> None:
+        """Stop this adapter's DeepAgent interaction loop if it was started."""
+        if self._instance is None:
+            return
+        await self._instance.stop()
+
     async def cleanup(self) -> None:
         """Release adapter-owned external runtime resources."""
         if not self._is_session_scoped_adapter:
             for adapter in list(self._session_adapters.values()):
                 try:
+                    await adapter.stop_interaction()
                     await adapter.cleanup()
                 except Exception as exc:
                     logger.warning(
@@ -6347,6 +6545,14 @@ class JiuWenSwarmDeepAdapter:
             self._session_adapter_last_used.clear()
             self._session_adapter_versions.clear()
             self._session_adapter_reload_failures.clear()
+        else:
+            try:
+                await self.stop_interaction()
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] stop failed during cleanup: %s",
+                    exc,
+                )
         # 取消未到期的延时重索引 task，避免 adapter cleanup 后仍有孤儿 task
         # 去触发 manager.sync（此时 rail/manager 可能已失效）。
         if self._memory_reindex_task is not None and not self._memory_reindex_task.done():
@@ -6429,9 +6635,167 @@ class JiuWenSwarmDeepAdapter:
             )
         return cancelled_tool_results
 
+    def _has_active_goal_round(self) -> bool:
+        """Whether DeepAgent is currently executing a goal round.
+
+        A goal round is a session-level persistent objective that must survive
+        stray stream cancellations (``stream_cancel``) and ``chat.interrupt``.
+        It is controlled exclusively via ``/goal pause | clear``, never by a
+        generic abort — otherwise a new chat.send (which the frontend precedes
+        with chat.interrupt cancel) would tear down the goal producer.
+        """
+        if self._instance is None:
+            return False
+        if not self._instance_interaction_started():
+            return False
+        active = self._instance.active_round
+        return active is not None and getattr(active, "run_kind", None) == "goal"
+
+    def _instance_interaction_started(self) -> bool:
+        """Prefer the public ``interaction_started`` flag; fall back for older SDKs."""
+        if self._instance is None:
+            return False
+        started = getattr(self._instance, "interaction_started", None)
+        if isinstance(started, bool):
+            return started
+        return bool(getattr(self._instance, "_interaction_started", False))
+
+    def _has_active_goal_interaction(self) -> bool:
+        """Whether the shared DeepAgent still owns an active goal interaction."""
+        if self._has_active_goal_round():
+            return True
+        if self._instance is None:
+            return False
+        manager = getattr(self._instance, "goal_manager", None)
+        if manager is None:
+            return False
+        try:
+            peek = getattr(manager, "peek", None)
+            record = peek() if callable(peek) else manager.get_store().load()
+        except Exception:
+            logger.debug("[Goal] failed to inspect active goal status", exc_info=True)
+            return False
+        status = getattr(record, "status", None)
+        status_value = getattr(status, "value", status)
+        return status_value == "active"
+
+    def _adapt_goal_intermediate_final(self, parsed: dict | None) -> dict | None:
+        if not isinstance(parsed, dict):
+            return parsed
+        if parsed.get("event_type") != "chat.final":
+            return parsed
+        if not self._has_active_goal_interaction():
+            return parsed
+        adapted = dict(parsed)
+        adapted["event_type"] = "chat.delta"
+        adapted["goal_intermediate"] = True
+        return adapted
+
+    @staticmethod
+    def _resolve_input_dispatch_mode(params: Any) -> InputDispatchMode | None:
+        """Map host ``input_mode`` / ``runtime_mode`` onto OpenJiuwen dispatch mode.
+
+        Missing or unknown values keep pre-Goal Gateway replace semantics
+        (``None`` → OpenJiuwen default FOLLOW_UP boundary when idle).
+        """
+        if not isinstance(params, dict):
+            return None
+        input_mode = str(
+            params.get("input_mode") or params.get("runtime_mode") or ""
+        ).strip().lower()
+        if input_mode == "follow_up":
+            return InputDispatchMode.FOLLOW_UP
+        if input_mode == "steer":
+            return InputDispatchMode.STEER
+        return None
+
+    @staticmethod
+    def _wants_attach_goal(params: Any) -> bool:
+        return isinstance(params, dict) and params.get("attach_goal") is True
+
+    @staticmethod
+    def _should_parse_tui_goal_slash(
+        *,
+        pending_goal_op: dict[str, Any] | None,
+        attach_goal_request: bool,
+        channel_id: Any,
+        query: Any,
+    ) -> bool:
+        """Whether to parse chat text ``/goal ...`` (TUI only, when no structured op)."""
+        if pending_goal_op is not None or attach_goal_request:
+            return False
+        if str(channel_id or "").strip().lower() != "tui":
+            return False
+        return isinstance(query, str)
+
+    @staticmethod
+    def _parse_goal_slash_intent(query: str) -> dict[str, Any] | None:
+        """Parse ``/goal ...`` into an action dict without touching GoalManager."""
+        text = query.strip()
+        if not text.startswith("/goal"):
+            return None
+        args = text[5:].strip()
+        if not args:
+            return {"action": "get"}
+        lower = args.lower()
+        if lower in {"pause", "resume", "clear"}:
+            return {"action": lower}
+        if lower.startswith("set "):
+            return {"action": "set", "objective": args[4:].strip()}
+        if lower == "set":
+            return {"action": "set", "objective": ""}
+        return {"action": "set", "objective": args}
+
+    def _is_ack_only_dispatch(self, params: Any) -> bool:
+        """Steer / follow_up prefer an existing reader when one is present."""
+        mode = self._resolve_input_dispatch_mode(params)
+        return mode in (InputDispatchMode.STEER, InputDispatchMode.FOLLOW_UP)
+
+    @staticmethod
+    def _structured_goal_op_from_request(
+        request: AgentRequest,
+    ) -> dict[str, Any] | None:
+        """Map streaming ``command.goal`` set/resume onto the attach→control path.
+
+        Plain chat text like ``/goal set ...`` is never parsed here — only an
+        explicit ``command.goal`` method (Web/TUI structured API).
+        """
+        if request.req_method != ReqMethod.COMMAND_GOAL:
+            return None
+        raw = request.params if isinstance(request.params, dict) else {}
+        action = str(raw.get("action", "get") or "get").strip().lower()
+        if action not in {"set", "resume"}:
+            return None
+        op: dict[str, Any] = {"action": action}
+        if action == "set":
+            objective = raw.get("objective")
+            op["objective"] = objective if isinstance(objective, str) else ""
+            op["overwrite_confirmed"] = bool(raw.get("overwrite_confirmed", False))
+            for key in ("token_budget", "max_attempts"):
+                value = raw.get(key)
+                if value is None or isinstance(value, bool):
+                    continue
+                if isinstance(value, int):
+                    op[key] = value
+                elif isinstance(value, str) and value.strip().lstrip("-").isdigit():
+                    op[key] = int(value.strip())
+        return op
+
     async def _abort_shared_agent_if_safe(self, normalized_sid: str, intent: str) -> None:
         """Global DeepAgent/scheduler abort when safe for unrelated sessions."""
         if self._instance is None:
+            return
+        # Never abort while a goal round is in flight.  The goal supervisor owns
+        # its lifecycle; aborting the shared DeepAgent here (e.g. from a
+        # stream_cancel triggered by the frontend's cancel-before-send) would
+        # kill the goal producer and freeze the backend for the goal session.
+        if self._has_active_goal_round():
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] interrupt(%s): active goal round -> "
+                "skip instance.abort (goal controlled via /goal pause|clear): session=%s",
+                intent,
+                normalized_sid,
+            )
             return
         other_count = self._other_active_sessions(normalized_sid)
         if other_count > 0:
@@ -6468,14 +6832,56 @@ class JiuWenSwarmDeepAdapter:
             AgentResponse 包含 interrupt_result 事件数据
         """
         if not self._is_session_scoped_adapter:
-            session_adapter = await self._get_or_create_session_adapter(request.session_id)
-            try:
-                return await session_adapter.process_interrupt(request)
-            finally:
-                await self._evict_idle_session_adapters()
+            if isinstance(request.params, dict):
+                intent_for_dispatch = request.params.get("intent", "cancel")
+            else:
+                intent_for_dispatch = "cancel"
+            if intent_for_dispatch in ("cancel", "supplement"):
+                # cancel/supplement：若该 session 尚无 session-scoped adapter（即没有 in-flight 流），
+                # 则不创建——创建会跑完整 agent 初始化（17 rail + ensure_initialized，
+                # 真实场景含 ProjectMemoryRail 扫描，耗时可达数十秒），把 cancel 处理本身卡住，
+                # 后续 esc 的 interrupt 全堵在队列里 → AgentServer 响应超时。
+                # 拿不到 cached adapter 即"无运行中任务"，直接 fallthrough 到主 adapter 的
+                # cancel 逻辑（下方 `not _session_is_active` 分支会跑 per-session teardown 并返回 success）。
+                cached = self._get_cached_session_adapter(request.session_id)
+                if cached is None:
+                    logger.info(
+                        "[JiuWenSwarmDeepAdapter] interrupt(%s): no cached session adapter for "
+                        "session=%s, skip create (no in-flight stream) — fallthrough to shared teardown",
+                        intent_for_dispatch,
+                        request.session_id,
+                    )
+                else:
+                    try:
+                        return await cached.process_interrupt(request)
+                    finally:
+                        await self._evict_idle_session_adapters()
+            else:
+                # pause/resume：需要 session-scoped adapter 的 StreamEventRail，按原逻辑创建。
+                session_adapter = await self._get_or_create_session_adapter(request.session_id)
+                try:
+                    return await session_adapter.process_interrupt(request)
+                finally:
+                    await self._evict_idle_session_adapters()
 
         intent = request.params.get("intent", "cancel")
         new_input = request.params.get("new_input")
+
+        # Interaction-managed sessions: route cancel/supplement through
+        # DeepAgent.cancel_round instead of the global DeepAgent abort + raw
+        # asyncio-task cancellation path.  The global path kills the shared
+        # stream producer out-of-band, which leaves the interaction supervisor's
+        # session stream consumer hanging forever and stops the
+        # backend from responding to any further messages.  The owning output
+        # stream closes with abort_active_round=True for stream requests (primary
+        # path).  cancel_round below is the idempotent unary fallback: it aborts
+        # the current user OR goal attempt but never clears GoalRecord.
+        if (
+            self._instance is not None
+            and self._instance_interaction_started()
+            and intent in ("cancel", "supplement")
+        ):
+            return await self._process_interaction_interrupt(request, intent, new_input)
 
         # Session guard: only execute interrupt operations if the target session
         # is currently active on this adapter. Without this guard, a shared adapter
@@ -6504,7 +6910,8 @@ class JiuWenSwarmDeepAdapter:
                 cancel_deadline = time.monotonic() + 15.0
         if not _session_is_active and intent in ("pause", "resume"):
             logger.info(
-                "[JiuWenSwarmDeepAdapter] interrupt(%s): session=%s not active on this adapter, "
+                "[JiuWenSwarmDeepAdapter] interrupt(%s):",
+                "session=%s not active on this adapter, ",
                 "skipping pause/resume (active_sessions=%s)",
                 intent,
                 request.session_id,
@@ -6706,6 +7113,66 @@ class JiuWenSwarmDeepAdapter:
             metadata=request.metadata,
         )
 
+    async def _process_interaction_interrupt(
+        self,
+        request: "AgentRequest",
+        intent: str,
+        new_input: Any,
+    ) -> "AgentResponse":
+        """Handle cancel/supplement for an interaction-managed session.
+
+        Closing the owning interaction output stream is the primary shutdown
+        path for streaming hosts.  This unary handler is the idempotent
+        fallback: ``cancel_round`` aborts the current user or goal attempt
+        without clearing GoalRecord.
+        """
+        cancelled = False
+        try:
+            cancelled = await self._instance.cancel_round(
+                reason="user_cancel",
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] interrupt(%s): interaction round cancel "
+                "cancelled=%s session=%s",
+                intent,
+                cancelled,
+                request.session_id,
+            )
+        except Exception:
+            logger.exception(
+                "[JiuWenSwarmDeepAdapter] interrupt(%s): interaction cancel failed",
+                intent,
+            )
+        message = "任务已切换" if intent == "supplement" else "任务已取消"
+
+        payload: dict[str, Any] = {
+            "event_type": "chat.interrupt_result",
+            "intent": intent,
+            "success": True,
+            "message": message,
+        }
+        if new_input:
+            payload["new_input"] = new_input
+
+        # Best-effort todo cancellation for user cancel (does not touch runtime).
+        if cancelled and intent == "cancel" and request.session_id:
+            try:
+                updated_todos = await self._cancel_pending_todos(request.session_id)
+                if updated_todos is not None:
+                    payload["todos"] = updated_todos
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] 标记 todo cancelled 失败: %s", exc,
+                )
+
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
     def _cancel_scheduler_running_tasks(self) -> None:
         """Cancel in-flight asyncio.Tasks in the Controller's TaskScheduler.
 
@@ -6843,6 +7310,89 @@ class JiuWenSwarmDeepAdapter:
             channel_id=request.channel_id,
             ok=True,
             payload={"accepted": True, "resolved": resolved},
+            metadata=request.metadata,
+        )
+
+    async def handle_swarmflow_reply(self, request: AgentRequest) -> AgentResponse:
+        """Handle chat.swarmflow_reply — deliver a person's reply to a human turn.
+
+        Builds a HumanAgentMessage addressed to ``swarmflow:<run_id>:<corr>``
+        (run-scoped; falls back to ``swarmflow:<corr>`` when no run_id) and
+        delivers it via ``TeamManager.interact`` — the agent-core thin route
+        resolves the pending human-session future on the run's reply topic.
+        """
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(request.session_id)
+            try:
+                return await session_adapter.handle_swarmflow_reply(request)
+            finally:
+                await self._evict_idle_session_adapters()
+
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = params.get("session_id") or request.session_id or ""
+        run_id = params.get("run_id")
+        corr = params.get("correlation_id") or ""
+        answer = params.get("answer") or ""
+        logger.info(
+            "[WF_DBG] chat.swarmflow_reply req channel_id=%s session_id=%s request_id=%s "
+            "run_id=%s correlation_id=%s answer_len=%d",
+            request.channel_id,
+            session_id,
+            request.request_id,
+            run_id,
+            corr,
+            len(answer) if isinstance(answer, str) else 0,
+        )
+        if not session_id or not corr or answer == "":
+            logger.warning(
+                "[WF_DBG] chat.swarmflow_reply res ok=False session_id=%s correlation_id=%s error=missing_params",
+                session_id,
+                corr,
+            )
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"ok": False, "error": "missing session_id/correlation_id/answer"},
+                metadata=request.metadata,
+            )
+
+        from jiuwenswarm.agents.harness.team import get_team_manager
+        from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
+        from openjiuwen.agent_teams.interaction.payload import HumanAgentMessage
+
+        from openjiuwen.agent_teams.schema.events import format_swarmflow_human_reply_target
+
+        target = format_swarmflow_human_reply_target(corr, run_id)
+        msg = HumanAgentMessage(
+            sender=USER_PSEUDO_MEMBER_NAME,
+            target=target,
+            body=answer,
+        )
+        try:
+            team_manager = get_team_manager(request.channel_id)
+            ok, reason = await team_manager.interact(session_id, msg)
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] swarmflow reply delivery failed: "
+                "session_id=%s corr=%s error=%s",
+                session_id, corr, exc,
+            )
+            ok, reason = False, "exception"
+
+        logger.log(
+            logging.WARNING if not ok else logging.INFO,
+            "[WF_DBG] chat.swarmflow_reply res ok=%s session_id=%s correlation_id=%s error=%s",
+            ok,
+            session_id,
+            corr,
+            None if ok else (reason or "failed"),
+        )
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=bool(ok),
+            payload={"ok": True} if ok else {"ok": False, "error": reason or "failed"},
             metadata=request.metadata,
         )
 
@@ -7261,7 +7811,8 @@ class JiuWenSwarmDeepAdapter:
 
         Returns None when the rail is (or becomes) available, or an error message string.
         """
-        if mode != "agent.plan":
+        # 合并后演进能力在 agent 模式可用（兼容历史 agent.plan token）。
+        if mode not in ("agent", "agent.plan"):
             display_mode = str(mode or "当前").strip() or "当前"
             return f"{display_mode} 模式下演进功能不可用。"
         if not self._config_cache.get("evolution", {}).get("enabled", False):
@@ -7276,11 +7827,13 @@ class JiuWenSwarmDeepAdapter:
                 self._skill_create_rail = self._build_skill_create_rail(self._config_cache)
         return None
 
+
     async def _handle_slash_command(
         self,
         query: Any,
         session_id: str = "default",
-        mode: str = "agent.plan",
+        mode: str = "agent",
+        channel_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Intercept slash commands before agent invocation.
 
@@ -7290,6 +7843,17 @@ class JiuWenSwarmDeepAdapter:
         """
         if not isinstance(query, str):
             return None
+
+        # Goal slash text is a TUI convenience only. Web (and other channels)
+        # must use structured ``command.goal`` / ``attach_goal``; a plain
+        # chat message like "/goal set ..." stays ordinary user text.
+        if str(channel_id or "").strip().lower() == "tui":
+            goal_result = await self._handle_goal_slash_command(
+                query,
+                session_id,
+            )
+            if goal_result is not None:
+                return goal_result
 
         stripped = query.strip()
 
@@ -7311,6 +7875,206 @@ class JiuWenSwarmDeepAdapter:
             )
 
         return None
+
+    # Goal capability adapter -------------------------------------------------
+
+    @staticmethod
+    def _goal_record_payload(record: Any | None) -> dict[str, Any] | None:
+        if record is None:
+            return None
+        to_dict = getattr(record, "to_dict", None)
+        return to_dict() if callable(to_dict) else None
+
+    @staticmethod
+    def _format_goal_control_message(action: str, goal: dict[str, Any] | None) -> str:
+        if action == "get":
+            return "No goal in this session." if goal is None else f"Goal: {goal.get('objective', '')}"
+        if action == "pause":
+            return "Goal paused." if goal is not None else "No goal in this session."
+        if action == "clear":
+            return "Goal cleared." if goal is None else "Goal was not cleared."
+        if action == "resume":
+            return "Goal resumed." if goal is not None else "No goal in this session."
+        return "Goal set." if goal is not None else "Goal was not set."
+
+    @staticmethod
+    def _interaction_goal_updated_payload(payload: Any) -> dict[str, Any]:
+        """Normalize goal updates to the public Web/TUI payload shape."""
+        if not isinstance(payload, dict):
+            return {"event_type": GOAL_UPDATED_EVENT_TYPE, "goal": None}
+        if "goal" in payload:
+            return {
+                "event_type": GOAL_UPDATED_EVENT_TYPE,
+                "goal": payload.get("goal"),
+            }
+        return {
+            "event_type": GOAL_UPDATED_EVENT_TYPE,
+            "goal": payload or None,
+        }
+
+    def _get_goal_manager(self) -> Any:
+        if self._instance is None:
+            return None
+        return getattr(self._instance, "goal_manager", None)
+
+    async def dispatch_goal_control(
+        self,
+        *,
+        action: str,
+        objective: str | None = None,
+        overwrite_confirmed: bool = False,
+        token_budget: int | None = None,
+        max_attempts: int | None = None,
+        session_id: str = "default",
+    ) -> dict[str, Any] | None:
+        """Public Goal control entry used by the facade/session-pool adapter."""
+        return await self._dispatch_goal_control(
+            action=action,
+            objective=objective,
+            overwrite_confirmed=overwrite_confirmed,
+            token_budget=token_budget,
+            max_attempts=max_attempts,
+            session_id=session_id,
+        )
+
+    async def _dispatch_goal_control(
+        self,
+        *,
+        action: str,
+        objective: str | None = None,
+        overwrite_confirmed: bool = False,
+        token_budget: int | None = None,
+        max_attempts: int | None = None,
+        session_id: str = "default",
+    ) -> dict[str, Any] | None:
+        """Map JiuwenSwarm protocol fields to the independent Goal methods."""
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(session_id)
+            try:
+                return await session_adapter.dispatch_goal_control(
+                    action=action,
+                    objective=objective,
+                    overwrite_confirmed=overwrite_confirmed,
+                    token_budget=token_budget,
+                    max_attempts=max_attempts,
+                    session_id=session_id,
+                )
+            finally:
+                await self._evict_idle_session_adapters()
+        if self._instance is None:
+            return None
+
+        normalized_action = action.strip().lower()
+        goal_manager = self._get_goal_manager()
+        if goal_manager is None:
+            return {
+                "result_type": "goal_error",
+                "action": normalized_action,
+                "error_code": "goal_manager_not_started",
+                "error": "goal manager is not started",
+            }
+        try:
+            if normalized_action == "get":
+                goal = await goal_manager.get()
+            elif normalized_action == "set":
+                goal = await goal_manager.set(
+                    objective or "",
+                    overwrite_confirmed=overwrite_confirmed,
+                    token_budget=token_budget,
+                    max_attempts=max_attempts,
+                )
+            elif normalized_action == "pause":
+                goal = await goal_manager.pause()
+            elif normalized_action == "resume":
+                goal = await goal_manager.resume()
+            elif normalized_action == "clear":
+                removed = await goal_manager.clear()
+                return {
+                    "result_type": "goal_control",
+                    "action": normalized_action,
+                    "goal": None,
+                    "cleared_goal": self._goal_record_payload(removed),
+                    "output": self._format_goal_control_message(normalized_action, None),
+                }
+            else:
+                return {
+                    "result_type": "goal_error",
+                    "action": normalized_action,
+                    "error_code": "invalid_action",
+                    "error": f"unsupported goal action: {action}",
+                }
+        except GoalOperationError as exc:
+            if exc.code == "already_exists":
+                return {
+                    "result_type": "goal_confirm_required",
+                    "action": normalized_action,
+                    "error_code": exc.code,
+                    "error": str(exc),
+                    "existing_goal": self._goal_record_payload(exc.goal),
+                    "requested_objective": objective,
+                }
+            return {
+                "result_type": "goal_error",
+                "action": normalized_action,
+                "error_code": exc.code,
+                "error": str(exc),
+                "goal": self._goal_record_payload(exc.goal),
+            }
+
+        goal_payload = self._goal_record_payload(goal)
+        active = goal is not None and goal.status is GoalStatus.ACTIVE
+        return {
+            "result_type": "goal_stream"
+            if normalized_action in {"set", "resume"} and active
+            else "goal_control",
+            "action": normalized_action,
+            "goal": goal_payload,
+            "output": self._format_goal_control_message(normalized_action, goal_payload),
+        }
+
+    async def handle_goal_command_structured(
+        self,
+        params: dict[str, Any] | None,
+        session_id: str = "default",
+    ) -> dict[str, Any] | None:
+        """Structured ``command.goal`` endpoint."""
+        raw = params if isinstance(params, dict) else {}
+        objective = raw.get("objective")
+        return await self._dispatch_goal_control(
+            action=str(raw.get("action", "get")),
+            objective=objective if isinstance(objective, str) else None,
+            overwrite_confirmed=bool(raw.get("overwrite_confirmed", False)),
+            token_budget=raw.get("token_budget"),
+            max_attempts=raw.get("max_attempts"),
+            session_id=session_id,
+        )
+
+    async def _handle_goal_slash_command(
+        self,
+        query: str,
+        session_id: str = "default",
+    ) -> dict[str, Any] | None:
+        """Translate only product syntax; the SDK receives capability calls."""
+        text = query.strip()
+        if not text.startswith("/goal"):
+            return None
+        args = text[5:].strip()
+        if not args:
+            return await self._dispatch_goal_control(action="get", session_id=session_id)
+        lower = args.lower()
+        if lower in {"pause", "resume", "clear"}:
+            return await self._dispatch_goal_control(action=lower, session_id=session_id)
+        if lower.startswith("set "):
+            objective = args[4:].strip()
+        elif lower == "set":
+            objective = ""
+        else:
+            # ``get`` and ``stop`` are not user command words.  They remain
+            # valid goal text in the documented ``/goal <objective>`` form.
+            objective = args
+        return await self._dispatch_goal_control(
+            action="set", objective=objective, session_id=session_id
+        )
 
     async def _cancel_pending_todos(self, session_id: str) -> list[dict] | None:
         """将未完成的 todo 项标记为 cancelled.
@@ -7404,10 +8168,65 @@ class JiuWenSwarmDeepAdapter:
 
         session_id = request.session_id or "default"
         query = request.params.get("query", "")
-        mode = request.params.get("mode", "agent.plan")
+        mode = request.params.get("mode", "agent")
 
-        slash_result = await self._handle_slash_command(query, session_id, mode)
+        slash_result = await self._handle_slash_command(
+            query,
+            session_id,
+            mode,
+            channel_id=request.channel_id,
+        )
         if slash_result is not None:
+            result_type = slash_result.get("result_type")
+            if result_type == "goal_stream":
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={
+                        "event_type": "goal.snapshot",
+                        "action": slash_result.get("action"),
+                        "goal": slash_result.get("goal"),
+                        "message": "Goal is ready to run through a streaming request.",
+                    },
+                    metadata=request.metadata,
+                )
+            elif result_type == "goal_control":
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={
+                        "event_type": "goal.snapshot",
+                        "action": slash_result.get("action"),
+                        "goal": slash_result.get("goal"),
+                        "cleared_goal": slash_result.get("cleared_goal"),
+                    },
+                    metadata=request.metadata,
+                )
+            elif result_type == "goal_confirm_required":
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={
+                        "event_type": "goal.confirm_required",
+                        "existing_goal": slash_result.get("existing_goal"),
+                        "requested_objective": slash_result.get("requested_objective"),
+                    },
+                    metadata=request.metadata,
+                )
+            elif result_type == "goal_error":
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={
+                        "event_type": ERROR_EVENT_TYPE,
+                        "code": slash_result.get("error_code", "goal_error"),
+                        "message": slash_result.get("error", "goal operation failed"),
+                        "goal": slash_result.get("goal"),
+                    },
+                    metadata=request.metadata,
+                )
             followup_prompt = self._extract_followup_prompt(slash_result)
             if followup_prompt is not None:
                 inputs = dict(inputs)
@@ -7448,6 +8267,7 @@ class JiuWenSwarmDeepAdapter:
             metadata=request.metadata,
             request_id=request.request_id,
             mode=mode,
+            project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
@@ -7456,7 +8276,15 @@ class JiuWenSwarmDeepAdapter:
         if self._stream_event_rail is not None:
             self._stream_event_rail.reset_abort(session_id)
         image_files_token = None
+        _run_span: Any = None
+        collected_content: list[str] = []
+        interaction_stream = None
+        interaction_stream_abort = True
         processor_state = None
+        from jiuwenswarm.agents.harness.agent_observability import (
+            close_agent_run_span,
+        )
+
         try:
             processor_state = await self._begin_model_turn(
                 session_id,
@@ -7502,7 +8330,76 @@ class JiuWenSwarmDeepAdapter:
             image_files_token = set_current_multimodal_image_files(
                 inputs.pop("_multimodal_image_files", []) or []
             )
-            result = await Runner.run_agent(agent=self._instance, inputs=inputs)
+            # Sync single-agent / coding-agent observability with current
+            # config before running, and open a root span so OtelCallbackHandler
+            # has a parent for LLM/tool spans (see streaming path for details).
+            from jiuwenswarm.agents.harness.agent_observability import (
+                open_agent_run_span,
+                sync_agent_observability,
+            )
+            sync_agent_observability()
+            _run_span = open_agent_run_span(session_id=session_id, mode=mode)
+            attach_goal = self._wants_attach_goal(request.params)
+            dispatch_mode = self._resolve_input_dispatch_mode(request.params)
+            if attach_goal:
+                gm = self._get_goal_manager()
+                peek = getattr(gm, "peek", None) if gm is not None else None
+                record = peek() if callable(peek) else None
+                status = getattr(getattr(record, "status", None), "value", getattr(record, "status", None))
+                if status != "active":
+                    return AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=True,
+                        payload={"event_type": "runtime.accepted", "request_id": request.request_id},
+                        metadata=request.metadata,
+                    )
+                interaction_stream = await self._instance.attach_output()
+            elif self._is_ack_only_dispatch(request.params):
+                # Steal the reader if idle; otherwise inject into the existing stream.
+                interaction_stream = await self._instance.attach_output()
+                await self._instance.send_input(
+                    SendInputRequest(
+                        request_id=request.request_id,
+                        inputs=inputs,
+                        mode=dispatch_mode,
+                    )
+                )
+            else:
+                interaction_stream = await self._instance.attach_output()
+                if interaction_stream is not None:
+                    await self._instance.send_input(
+                        SendInputRequest(
+                            request_id=request.request_id,
+                            inputs=inputs,
+                            mode=dispatch_mode,
+                        )
+                    )
+            if interaction_stream is None:
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={"event_type": "runtime.accepted", "request_id": request.request_id},
+                    metadata=request.metadata,
+                )
+            async for chunk in interaction_stream:
+                if hasattr(chunk, "type") and hasattr(chunk, "payload"):
+                    if chunk.type in ("llm_output", "answer"):
+                        text = (
+                            chunk.payload.get("content", "")
+                            if isinstance(chunk.payload, dict)
+                            else str(chunk.payload)
+                        )
+                        if text:
+                            collected_content.append(text)
+                else:
+                    parsed = self._parse_stream_chunk(chunk)
+                    if parsed is not None:
+                        text = parsed.get("content", "")
+                        if text:
+                            collected_content.append(text)
+            interaction_stream_abort = False
         except asyncio.CancelledError:
             logger.info(
                 "[JiuWenSwarmDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s",
@@ -7514,6 +8411,14 @@ class JiuWenSwarmDeepAdapter:
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
+            close_agent_run_span(_run_span)
+            if interaction_stream is not None:
+                try:
+                    await interaction_stream.close(
+                        abort_active_round=interaction_stream_abort,
+                    )
+                except Exception:
+                    logger.debug("[Goal] interaction stream close failed", exc_info=True)
             try:
                 await self._finish_model_turn(processor_state, turn_model)
             finally:
@@ -7529,7 +8434,7 @@ class JiuWenSwarmDeepAdapter:
                 self._reset_runtime_cron_context(cron_context_tokens)
                 self._unmark_session_active(session_id)
 
-        content = result if isinstance(result, (str, dict)) else str(result)
+        content = "".join(collected_content) if collected_content else ""
 
         return AgentResponse(
             request_id=request.request_id,
@@ -7581,7 +8486,7 @@ class JiuWenSwarmDeepAdapter:
         rid = request.request_id
         cid = request.channel_id
         query = request.params.get("query", "")
-        mode = request.params.get("mode", "agent.plan")
+        mode = request.params.get("mode", "agent")
         resolved_model = self._resolve_model_for_request(request)
         codex_consumer = self._preflight_codex_request(request, resolved_model)
         actual_route_receipt = None
@@ -7596,6 +8501,16 @@ class JiuWenSwarmDeepAdapter:
         if mode in ("team", "team.plan", "code.team"):
             from jiuwenswarm.server.runtime.agent_adapter.team_helpers import process_team_message_stream
 
+            inputs = self._prepare_multimodal_image_inputs(request, inputs)
+            enable_read_image_multimodal = self._native_image_input_enabled(
+                self._config_cache,
+                resolved_model,
+            )
+            inputs = self._prepare_react_image_tool_prompt(
+                request,
+                inputs,
+                enable_read_image_multimodal=enable_read_image_multimodal,
+            )
             team_state = await self._begin_model_turn(
                 session_id,
                 turn_model,
@@ -7692,9 +8607,78 @@ class JiuWenSwarmDeepAdapter:
             finally:
                 await self._finish_model_turn(auto_state, turn_model)
 
-        # 拦截斜杠命令
-        slash_result = await self._handle_slash_command(query, session_id, mode)
+        # 拦截斜杠命令 / 结构化 command.goal
+        goal_stream_request = False
+        goal_snapshot: dict[str, Any] | None = None
+        goal_action: str | None = None
+        pending_goal_op: dict[str, Any] | None = None
+        attach_goal_request = self._wants_attach_goal(request.params)
+        # Structured command.goal set/resume (Web/TUI): same attach→set→read path.
+        # Plain chat text "/goal ..." is NOT parsed here for Web — only TUI slash.
+        pending_goal_op = self._structured_goal_op_from_request(request)
+        if self._should_parse_tui_goal_slash(
+            pending_goal_op=pending_goal_op,
+            attach_goal_request=attach_goal_request,
+            channel_id=request.channel_id,
+            query=query,
+        ):
+            intent = self._parse_goal_slash_intent(query)
+            if intent is not None and intent.get("action") in {"set", "resume"}:
+                # Defer set/resume until after attach_output (attach → set).
+                pending_goal_op = intent
+        slash_result = None
+        if pending_goal_op is None and not attach_goal_request:
+            slash_result = await self._handle_slash_command(
+                query,
+                session_id,
+                mode,
+                channel_id=request.channel_id,
+            )
         if slash_result is not None:
+            result_type = slash_result.get("result_type")
+            if result_type == "goal_stream":
+                # Legacy path: control already applied; attach will ensure work.
+                goal_stream_request = True
+                goal_snapshot = slash_result.get("goal")
+                goal_action = slash_result.get("action")
+            elif result_type == "goal_control":
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": "goal.snapshot",
+                        "action": slash_result.get("action"),
+                        "goal": slash_result.get("goal"),
+                        "cleared_goal": slash_result.get("cleared_goal"),
+                    },
+                    is_complete=True,
+                )
+                return
+            elif result_type == "goal_confirm_required":
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": "goal.confirm_required",
+                        "existing_goal": slash_result.get("existing_goal"),
+                        "requested_objective": slash_result.get("requested_objective"),
+                    },
+                    is_complete=True,
+                )
+                return
+            elif result_type == "goal_error":
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": ERROR_EVENT_TYPE,
+                        "code": slash_result.get("error_code", "goal_error"),
+                        "message": slash_result.get("error", "goal operation failed"),
+                        "goal": slash_result.get("goal"),
+                    },
+                    is_complete=True,
+                )
+                return
             followup_prompt = self._extract_followup_prompt(slash_result)
             if followup_prompt is not None:
                 inputs = dict(inputs)
@@ -7768,6 +8752,7 @@ class JiuWenSwarmDeepAdapter:
             metadata=request.metadata,
             request_id=request.request_id,
             mode=mode,
+            project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
@@ -7775,8 +8760,12 @@ class JiuWenSwarmDeepAdapter:
         self._register_session_agent_task(session_id)
         stream_consumer_cancelled = False
         image_files_token = None
+        _run_span: Any = None
+        _debug_logger = None
+        _debug_trace_token = None  # reset token for the ContextVar-bound logger
+        interaction_stream = None
+        interaction_stream_abort = True
         processor_state = None
-        runner_stream = None
         try:
             processor_state = await self._begin_model_turn(
                 session_id,
@@ -7839,10 +8828,209 @@ class JiuWenSwarmDeepAdapter:
             image_files_token = set_current_multimodal_image_files(
                 inputs.pop("_multimodal_image_files", []) or []
             )
-            runner_stream = Runner.run_agent_streaming(self._instance, inputs)
-            async for chunk in runner_stream:
+            # Resolve debug-trace settings early: its otel_enabled drives the
+            # OTel force-enable below. Best-effort (config read never raises).
+            from jiuwenswarm.server.runtime.debug_trace.config import (
+                resolve_debug_trace_settings,
+            )
+            _dbg_settings = resolve_debug_trace_settings(
+                mode=mode, request_debug=bool(inputs.get("_request_debug"))
+            )
+            # Sync single-agent / coding-agent observability with current config
+            # before running.
+            from jiuwenswarm.agents.harness.agent_observability import (
+                close_agent_run_span,
+                open_agent_run_span,
+                sync_agent_observability,
+            )
+            sync_agent_observability(force=_dbg_settings.otel_enabled)
+            _run_span = open_agent_run_span(session_id=session_id, mode=mode)
+            _otel_trace_id = ""
+            _otel_span_id = ""
+            if _run_span is not None:
+                try:
+                    _span_ctx = _run_span.get_span_context()
+                    _otel_trace_id = format(_span_ctx.trace_id, "032x")
+                    _otel_span_id = format(_span_ctx.span_id, "016x")
+                except Exception:
+                    pass
+            try:
+                from jiuwenswarm.server.runtime.debug_trace.context import (
+                    set_debug_trace_logger,
+                )
+                from jiuwenswarm.server.runtime.debug_trace.paths import debug_trace_file
+                from jiuwenswarm.server.runtime.debug_trace.stream_logger import (
+                    DebugTraceLogger,
+                )
+                if _dbg_settings.enabled and _dbg_settings.dump_enabled:
+                    _debug_logger = DebugTraceLogger(
+                        file_path=debug_trace_file(mode, session_id),
+                        mode=mode,
+                        session_id=session_id,
+                        request_id=rid,
+                        settings=_dbg_settings,
+                    )
+                    _debug_logger.start_run(
+                        input_text=inputs.get("query"),
+                        otel_trace_id=_otel_trace_id,
+                        otel_span_id=_otel_span_id,
+                    )
+                    # Publish the logger so subagent dispatch sites (TaskTool in
+                    # the SDK, AgentTool in jiuwenswarm) can capture subagent
+                    # streams into this same dump. asyncio.create_task copies the
+                    # current ContextVar, so background subagents inherit it too.
+                    _debug_trace_token = set_debug_trace_logger(_debug_logger)
+            except Exception as _dbg_exc:
+                logger.warning("[JiuWenSwarmDeepAdapter] debug trace init failed: %s", _dbg_exc)
+                _debug_logger = None
+
+            async def _yield_runtime_accepted() -> AsyncIterator[AgentResponseChunk]:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={"event_type": "runtime.accepted", "request_id": rid},
+                    is_complete=False,
+                )
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload=None,
+                    is_complete=True,
+                )
+
+            if pending_goal_op is not None:
+                interaction_stream = await self._instance.attach_output()
+                control = await self._dispatch_goal_control(
+                    action=str(pending_goal_op.get("action") or "get"),
+                    objective=pending_goal_op.get("objective")
+                    if isinstance(pending_goal_op.get("objective"), str)
+                    else None,
+                    overwrite_confirmed=bool(pending_goal_op.get("overwrite_confirmed", False)),
+                    token_budget=pending_goal_op.get("token_budget"),
+                    max_attempts=pending_goal_op.get("max_attempts"),
+                    session_id=session_id,
+                )
+                result_type = (control or {}).get("result_type")
+                if result_type == "goal_confirm_required":
+                    if interaction_stream is not None:
+                        await interaction_stream.close(abort_active_round=False)
+                        interaction_stream = None
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload={
+                            "event_type": "goal.confirm_required",
+                            "existing_goal": control.get("existing_goal"),
+                            "requested_objective": control.get("requested_objective"),
+                        },
+                        is_complete=True,
+                    )
+                    interaction_stream_abort = False
+                    return
+                if result_type == "goal_error":
+                    if interaction_stream is not None:
+                        await interaction_stream.close(abort_active_round=False)
+                        interaction_stream = None
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload={
+                            "event_type": ERROR_EVENT_TYPE,
+                            "code": control.get("error_code", "goal_error"),
+                            "message": control.get("error", "goal operation failed"),
+                            "goal": control.get("goal"),
+                        },
+                        is_complete=True,
+                    )
+                    interaction_stream_abort = False
+                    return
+                goal_snapshot = (control or {}).get("goal")
+                goal_action = (control or {}).get("action")
+                if goal_snapshot is not None:
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload={
+                            "event_type": "goal.snapshot",
+                            "action": goal_action,
+                            "goal": goal_snapshot,
+                        },
+                        is_complete=False,
+                    )
+                # Only keep the lease when set/resume left an ACTIVE goal to run.
+                if result_type != "goal_stream" or interaction_stream is None:
+                    if interaction_stream is not None:
+                        await interaction_stream.close(abort_active_round=False)
+                        interaction_stream = None
+                    async for chunk in _yield_runtime_accepted():
+                        yield chunk
+                    interaction_stream_abort = False
+                    return
+            elif goal_stream_request or attach_goal_request:
+                if goal_snapshot is not None:
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload={
+                            "event_type": "goal.snapshot",
+                            "action": goal_action,
+                            "goal": goal_snapshot,
+                        },
+                        is_complete=False,
+                    )
+                if attach_goal_request:
+                    gm = self._get_goal_manager()
+                    peek = getattr(gm, "peek", None) if gm is not None else None
+                    record = peek() if callable(peek) else None
+                    status = getattr(getattr(record, "status", None), "value", getattr(record, "status", None))
+                    if status != "active":
+                        async for chunk in _yield_runtime_accepted():
+                            yield chunk
+                        interaction_stream_abort = False
+                        return
+                interaction_stream = await self._instance.attach_output()
+                if interaction_stream is None:
+                    async for chunk in _yield_runtime_accepted():
+                        yield chunk
+                    interaction_stream_abort = False
+                    return
+            elif self._is_ack_only_dispatch(request.params):
+                # Idle → become the reader; busy → inject and accept.
+                interaction_stream = await self._instance.attach_output()
+                await self._instance.send_input(
+                    SendInputRequest(
+                        request_id=rid,
+                        inputs=inputs,
+                        mode=self._resolve_input_dispatch_mode(request.params),
+                    )
+                )
+                if interaction_stream is None:
+                    async for chunk in _yield_runtime_accepted():
+                        yield chunk
+                    interaction_stream_abort = False
+                    return
+            else:
+                interaction_stream = await self._instance.attach_output()
+                if interaction_stream is None:
+                    async for chunk in _yield_runtime_accepted():
+                        yield chunk
+                    interaction_stream_abort = False
+                    return
+                await self._instance.send_input(
+                    SendInputRequest(
+                        request_id=rid,
+                        inputs=inputs,
+                        mode=self._resolve_input_dispatch_mode(request.params),
+                    )
+                )
+            async for chunk in interaction_stream:
+                if _debug_logger is not None:
+                    _debug_logger.feed(chunk)
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
-                    parsed = self._with_codex_error_receipts(self._parse_stream_chunk(chunk))
+                    parsed = self._with_codex_error_receipts(
+                        self._parse_stream_chunk(chunk)
+                    )
+                    parsed = self._adapt_goal_intermediate_final(parsed)
                     if parsed is not None:
                         if should_skip_duplicate_ask_user(parsed):
                             continue
@@ -7967,6 +9155,7 @@ class JiuWenSwarmDeepAdapter:
                         parsed = self._with_codex_error_receipts(
                             self._parse_stream_chunk(chunk, _has_streamed_content=True)
                         )
+                        parsed = self._adapt_goal_intermediate_final(parsed)
                         if parsed is not None:
                             if should_skip_duplicate_ask_user(parsed):
                                 continue
@@ -7977,7 +9166,10 @@ class JiuWenSwarmDeepAdapter:
                                 is_complete=False,
                             )
                         continue
-                    parsed = self._with_codex_error_receipts(self._parse_stream_chunk(chunk))
+                    parsed = self._with_codex_error_receipts(
+                        self._parse_stream_chunk(chunk)
+                    )
+                    parsed = self._adapt_goal_intermediate_final(parsed)
                     if parsed is not None:
                         if should_skip_duplicate_ask_user(parsed):
                             continue
@@ -8005,7 +9197,10 @@ class JiuWenSwarmDeepAdapter:
                         is_complete=False,
                     )
                     accumulated_reasoning = ""
-                parsed = self._with_codex_error_receipts(self._parse_stream_chunk(chunk))
+                parsed = self._with_codex_error_receipts(
+                    self._parse_stream_chunk(chunk)
+                )
+                parsed = self._adapt_goal_intermediate_final(parsed)
                 if parsed is not None:
                     if should_skip_duplicate_ask_user(parsed):
                         continue
@@ -8017,10 +9212,15 @@ class JiuWenSwarmDeepAdapter:
                     )
 
             if accumulated_text:
+                final_event_type = (
+                    "chat.delta"
+                    if self._has_active_goal_interaction()
+                    else "chat.final"
+                )
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
-                    payload={"event_type": "chat.final", "content": accumulated_text},
+                    payload={"event_type": final_event_type, "content": accumulated_text},
                     is_complete=False,
                 )
             if accumulated_reasoning:
@@ -8042,6 +9242,9 @@ class JiuWenSwarmDeepAdapter:
                 )
                 task.add_done_callback(self._on_evolution_watcher_done)
                 self._evolution_watcher_tasks.add(task)
+            if _debug_logger is not None:
+                _debug_logger.end_run(status="ok")
+            interaction_stream_abort = False
         except (asyncio.CancelledError, GeneratorExit):
             stream_consumer_cancelled = True
             logger.info(
@@ -8050,16 +9253,16 @@ class JiuWenSwarmDeepAdapter:
                 rid,
                 session_id,
             )
-            # Use _abort_shared_agent_if_safe to guard against cross-session
-            # collateral damage — instance.abort() is global on the shared
-            # DeepAgent and must not fire when other sessions are active.
-            await self._abort_shared_agent_if_safe(
-                self._resolve_interrupt_session_id(session_id),
-                "stream_cancel",
-            )
+            # InteractionOutputStream.close() in ``finally`` owns the targeted
+            # round abort. Do not issue a second adapter-level abort here:
+            # it can race with a newly attached output consumer.
+            if _debug_logger is not None:
+                _debug_logger.end_run(status="cancelled")
             raise
         except Exception as exc:
             logger.exception("[JiuWenSwarmDeepAdapter] 流式任务异常: %s", exc)
+            if _debug_logger is not None:
+                _debug_logger.end_run(status="error", error=exc)
             error_payload = (
                 provider_error_payload(
                     exc,
@@ -8078,32 +9281,43 @@ class JiuWenSwarmDeepAdapter:
                 is_complete=False,
             )
         finally:
-            try:
-                if runner_stream is not None:
-                    await close_owned_async_iterator(runner_stream)
-            finally:
-                try:
-                    await self._finish_model_turn_resilient(processor_state, turn_model)
-                finally:
-                    if image_files_token is not None:
-                        from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
-                            reset_current_multimodal_image_files,
-                        )
+            close_agent_run_span(_run_span)
+            if _debug_logger is not None:
+                _debug_logger.flush()
+            if _debug_trace_token is not None:
+                from jiuwenswarm.server.runtime.debug_trace.context import (
+                    reset_debug_trace_logger,
+                )
+                reset_debug_trace_logger(_debug_trace_token)
+            if image_files_token is not None:
+                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                    reset_current_multimodal_image_files,
+                )
 
-                        reset_current_multimodal_image_files(image_files_token)
-                    self._unregister_session_agent_task(session_id)
-                    TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
-                    cleanup_permission_context(token_perm)
-                    if not stream_consumer_cancelled:
-                        self._reset_runtime_cron_context(cron_context_tokens)
-                    # Always clean up rail state — process_interrupt's
-                    # _stop_session_interrupt_work sets abort flags but does NOT
-                    # call cleanup_session(), so skipping cleanup here would leak
-                    # _abort_requested / _pause_events entries on long-lived adapters.
-                    self._unmark_session_active(
-                        session_id,
-                        cleanup_rail=True,
+                reset_current_multimodal_image_files(image_files_token)
+            if interaction_stream is not None:
+                try:
+                    await interaction_stream.close(
+                        abort_active_round=interaction_stream_abort,
                     )
+                except Exception:
+                    logger.debug("[Goal] interaction stream close failed", exc_info=True)
+            try:
+                await self._finish_model_turn_resilient(processor_state, turn_model)
+            finally:
+                self._unregister_session_agent_task(session_id)
+                TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+                cleanup_permission_context(token_perm)
+                if not stream_consumer_cancelled:
+                    self._reset_runtime_cron_context(cron_context_tokens)
+                # Always clean up rail state — process_interrupt's
+                # _stop_session_interrupt_work sets abort flags but does NOT
+                # call cleanup_session(), so skipping cleanup here would leak
+                # _abort_requested / _pause_events entries on long-lived adapters.
+                self._unmark_session_active(
+                    session_id,
+                    cleanup_rail=True,
+                )
 
         summary = {
             "input_tokens": usage_accumulator["input_tokens"],
@@ -8219,6 +9433,18 @@ class JiuWenSwarmDeepAdapter:
             if hasattr(chunk, "type") and hasattr(chunk, "payload"):
                 chunk_type = chunk.type
                 payload = chunk.payload
+
+                if chunk_type == GOAL_UPDATED_EVENT_TYPE:
+                    return JiuWenSwarmDeepAdapter._interaction_goal_updated_payload(payload)
+
+                if chunk_type == ERROR_EVENT_TYPE:
+                    err_payload = payload if isinstance(payload, dict) else {}
+                    return {
+                        "event_type": ERROR_EVENT_TYPE,
+                        "code": err_payload.get("code", "execution_error"),
+                        "message": err_payload.get("message", "execution error"),
+                        "goal": err_payload.get("goal"),
+                    }
 
                 if chunk_type == "controller_output" and payload is not None:
                     inner_t = getattr(payload, "type", None)
@@ -8538,6 +9764,22 @@ class JiuWenSwarmDeepAdapter:
             if isinstance(chunk, dict):
                 if "traceId" in chunk or "invokeId" in chunk:
                     return None
+                # Interaction loop lifecycle events emitted by DeepAgent
+                # (goal.updated snapshot etc.) forwarded to the TUI goal status bar.
+                interaction_evt = chunk.get("type")
+                if interaction_evt == GOAL_UPDATED_EVENT_TYPE:
+                    return JiuWenSwarmDeepAdapter._interaction_goal_updated_payload(
+                        chunk.get("payload")
+                    )
+                if interaction_evt == ERROR_EVENT_TYPE:
+                    err_payload = chunk.get("payload")
+                    err_payload = err_payload if isinstance(err_payload, dict) else {}
+                    return {
+                        "event_type": ERROR_EVENT_TYPE,
+                        "code": err_payload.get("code", "execution_error"),
+                        "message": err_payload.get("message", "execution error"),
+                        "goal": err_payload.get("goal"),
+                    }
                 if chunk.get("result_type") == "error":
                     return {
                         "event_type": "chat.error",
@@ -8617,9 +9859,9 @@ class JiuWenSwarmDeepAdapter:
     async def _handle_external_memory_rail_by_config(self):
         """Register / unregister ExternalMemoryRail based on config.
 
-        External memory is mode-independent — configured once and active for
-        both plan and fast modes. `_external_memory_rail_registered` dedups
-        calls from both _update_plan_mode_rails() and _update_agent_mode_rails().
+        External memory is mode-independent — configured once and active in
+        the merged agent mode. `_external_memory_rail_registered` dedups
+        repeated calls from `_update_agent_rails()`.
         Not part of `_get_current_agent_rails()`, so it is not torn down on
         config hot-reload (preserves prefetch cache + circuit breaker state).
         """
@@ -9485,7 +10727,7 @@ class JiuWenSwarmDeepAdapter:
         try:
             if self._skill_evolution_rail is None:
                 return
-            if not getattr(self._skill_evolution_rail, "auto_scan", True):
+            if not self._skill_evolution_rail.signal_trigger:
                 return
 
             active = False
@@ -9498,7 +10740,7 @@ class JiuWenSwarmDeepAdapter:
             while True:
                 if self._skill_evolution_rail is None:
                     return
-                if not getattr(self._skill_evolution_rail, "auto_scan", True):
+                if not self._skill_evolution_rail.signal_trigger:
                     if active:
                         await _push_status("end", "hidden", "")
                     await _cleanup_evolution_rail()

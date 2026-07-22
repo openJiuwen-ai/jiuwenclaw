@@ -15,6 +15,8 @@ class ReqMethod(Enum):
     CHAT_RESUME = "chat.resume"
     CHAT_CANCEL = "chat.interrupt"
     CHAT_ANSWER = "chat.user_answer"
+    CHAT_SWARMFLOW_REPLY = "chat.swarmflow_reply"
+    SSH_RELAY = "ssh.relay"
     HISTORY_GET = "history.get"
     COMMAND_BTW = "command.btw"
     COMMAND_ADD_DIR = "command.add_dir"
@@ -69,6 +71,7 @@ class ReqMethod(Enum):
     MEMORY_COMPUTE = "memory.compute"
 
     PROACTIVE_TICK = "proactive.tick"  # Trigger proactive recommendation tick (from Cron)
+    COMMAND_GOAL = "command.goal"
 
     FILES_LIST = "files.list"
     FILES_GET = "files.get"
@@ -82,6 +85,8 @@ class ReqMethod(Enum):
     AGENTS_ENABLE = "agents.enable"
     AGENTS_DISABLE = "agents.disable"
     AGENTS_TOOLS_LIST = "agents.tools_list"
+    AGENT_SWITCH = "3rdagent.switch"
+    AGENT_LIST = "3rdagent.list"
 
     SKILLS_MARKETPLACE_LIST = "skills.marketplace.list"
     SKILLS_LIST = "skills.list"
@@ -94,6 +99,7 @@ class ReqMethod(Enum):
     SKILLS_MARKETPLACE_REMOVE = "skills.marketplace.remove"
     SKILLS_MARKETPLACE_TOGGLE = "skills.marketplace.toggle"
     SKILLS_UNINSTALL = "skills.uninstall"
+    SKILLS_ONLINE_SEARCH = "skills.online_search.search"
     SKILLS_SKILLNET_SEARCH = "skills.skillnet.search"
     SKILLS_SKILLNET_INSTALL = "skills.skillnet.install"
     SKILLS_SKILLNET_INSTALL_STATUS = "skills.skillnet.install_status"
@@ -233,6 +239,10 @@ class EventType(Enum):
     CHAT_ASK_USER_QUESTION = "chat.ask_user_question"
     PLAN_APPROVAL_REQUIRED = "plan.approval_required"
     CHAT_SESSION_RESULT = "chat.session_result"
+    GOAL_SNAPSHOT = "goal.snapshot"
+    GOAL_UPDATED = "goal.updated"
+    RUNTIME_ACCEPTED = "runtime.accepted"
+    EXECUTION_ERROR = "execution.error"
     TEAM_MEMBER = "team.member"
     TEAM_TASK = "team.task"
     TEAM_MESSAGE = "team.message"
@@ -243,6 +253,8 @@ class EventType(Enum):
 
 
 class Mode(Enum):
+    AGENT = "agent"
+    # 历史值：plan / fast 已合并为 agent，保留以兼容旧序列化数据的反解析。
     AGENT_PLAN = "agent.plan"
     AGENT_FAST = "agent.fast"
     CODE_PLAN = "code.plan"
@@ -252,22 +264,34 @@ class Mode(Enum):
 
     @classmethod
     def from_raw(cls, raw_mode: Any, default: "Mode | None" = None) -> "Mode":
-        """解析 mode，仅接受新值(agent.plan/agent.fast/code.plan/code.normal/team)。"""
-        fallback = default or cls.AGENT_PLAN
+        """解析 mode。plan / fast 已合并：agent.plan / agent.fast 归一为 agent。"""
+        fallback = default or cls.AGENT
         if isinstance(raw_mode, Mode):
+            # 历史枚举成员归一到合并后的 AGENT。
+            if raw_mode in (cls.AGENT_PLAN, cls.AGENT_FAST):
+                return cls.AGENT
             return raw_mode
         if not isinstance(raw_mode, str):
             return fallback
         normalized = raw_mode.strip().lower()
         if not normalized:
             return fallback
+        # 任何 agent* 请求（agent / agent.plan / agent.fast）归一到 AGENT。
+        if normalized.split(".", 1)[0] == "agent":
+            return cls.AGENT
+        # 历史裸 plan / fast（同 CLI MODE_ALIASES）显式归一到 AGENT，
+        # 不依赖 fallback 默认值恰好等于 AGENT。
+        if normalized in ("plan", "fast"):
+            return cls.AGENT
         try:
             return cls(normalized)
         except ValueError:
             return fallback
 
     def to_runtime_mode(self) -> str:
-        """输出新 mode 值本身。"""
+        """输出 runtime mode 值；历史 agent.plan / agent.fast 归一为 agent。"""
+        if self in (Mode.AGENT_PLAN, Mode.AGENT_FAST):
+            return Mode.AGENT.value
         return self.value
 
 
@@ -290,7 +314,7 @@ class Message:
     payload: dict | None = None
     req_method: ReqMethod | None = None
     event_type: EventType | None = None
-    mode: Mode = Mode.AGENT_PLAN
+    mode: Mode = Mode.AGENT
     is_stream: bool = False
     stream_seq: int | None = None
     stream_id: str | None = None

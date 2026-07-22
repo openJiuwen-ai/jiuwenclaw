@@ -144,6 +144,9 @@ def fork_session(
         "message_count": source_meta.get("message_count", 0),
         "mode": source_mode,
         "forked_from": source_session_id,
+        # 复制源会话的项目归属字段，确保分叉会话继承原项目归属
+        "project_id": source_meta.get("project_id", ""),
+        "project_dir": source_meta.get("project_dir", ""),
     }
     # 复制源会话的 channel_metadata，确保分叉会话在 /resume 按项目目录过滤时可见
     source_channel_meta = source_meta.get("channel_metadata")
@@ -486,15 +489,67 @@ def list_session_turns(
     return {"turns": turns, "total": user_count}
 
 
+def get_last_turn_info(
+    *,
+    session_id: str,
+) -> dict[str, Any]:
+    """返回最后一轮 user message 的 turn_index 和 timestamp.
+
+    用于"撤销本轮代码修改"(``project.git.discard_turn_changes``)功能:
+    该接口需要最后一轮的 turn_index(传给 ``restore_session_files``)和
+    timestamp(传给 ``truncate_file_ops_by_timestamp``)。
+
+    与 ``list_session_turns`` 不同,本函数不过滤不可选的 user message,
+    返回的是最后一条 user message 的信息(包括系统注入的消息)。
+
+    Returns:
+        ``{"turn_index": int, "timestamp": float}``;
+        无 history 或无 user message 时返回 ``{"turn_index": 0, "timestamp": 0.0}``。
+    """
+    if not history_exists(session_id):
+        return {"turn_index": 0, "timestamp": 0.0}
+
+    try:
+        history = load_history_records(session_id)
+    except Exception as exc:
+        logger.warning("get_last_turn_info: failed to read history: %s", exc)
+        return {"turn_index": 0, "timestamp": 0.0}
+
+    if not isinstance(history, list):
+        return {"turn_index": 0, "timestamp": 0.0}
+
+    user_count = 0
+    last_timestamp: float = 0.0
+    for record in history:
+        if record.get("role") != "user":
+            continue
+        user_count += 1
+        ts = record.get("timestamp", 0)
+        if isinstance(ts, (int, float)):
+            last_timestamp = float(ts)
+
+    return {"turn_index": user_count, "timestamp": last_timestamp}
+
+
 def restore_session_files(
     *,
     session_id: str,
     turn_index: int,
+    project_dir: str | None = None,
+    extra_history_roots: list[str] | None = None,
 ) -> dict[str, Any]:
     """恢复指定 turn 之后所有被修改的文件到目标 turn 开始前的状态.
 
     基于 DiffService.get_files_to_restore() 确定需要恢复的文件，
     然后将每个文件写回其 old_content（或删除 agent 新建的文件）。
+
+    Args:
+        session_id: 会话 ID
+        turn_index: 目标回退轮次(1-based)
+        project_dir: 项目目录路径。显式传入可避免底层从 metadata 推断,
+            覆盖 ``channel_metadata.cwd`` 缺失的场景(如 Web/code 模式新会话)。
+            为 ``None`` 时底层从 session metadata 推断(读取顺序见
+            ``DiffService._get_project_dir_from_metadata``)。
 
     局限性（底层暂不支持，后续迭代）：
     - bash 命令修改的文件不在 file_ops 日志中，无法恢复
@@ -505,7 +560,12 @@ def restore_session_files(
     from jiuwenswarm.server.utils.diff_service import get_diff_service
 
     diff_service = get_diff_service()
-    files_to_restore = diff_service.get_files_to_restore(session_id, turn_index)
+    files_to_restore = diff_service.get_files_to_restore(
+        session_id,
+        turn_index,
+        project_dir=project_dir,
+        extra_history_roots=extra_history_roots,
+    )
 
     if not files_to_restore:
         return {

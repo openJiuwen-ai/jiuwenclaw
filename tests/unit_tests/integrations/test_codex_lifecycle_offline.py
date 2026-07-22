@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import textwrap
 from pathlib import Path
 
 import pytest
 
+from jiuwenswarm.integrations.ai4research_subscription import process_lifecycle
 from jiuwenswarm.integrations.ai4research_subscription.auth_controller import (
     CodexAuthController,
 )
@@ -26,6 +28,10 @@ from jiuwenswarm.integrations.ai4research_subscription.locking import (
 from jiuwenswarm.integrations.ai4research_subscription.profiles import (
     build_codex_environment,
     ensure_codex_profile,
+)
+from jiuwenswarm.integrations.ai4research_subscription.process_lifecycle import (
+    ProcessTreeCleanupError,
+    terminate_process_group,
 )
 from jiuwenswarm.integrations.ai4research_subscription.quarantine import (
     profile_is_quarantined,
@@ -64,11 +70,108 @@ def _version_arguments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: 
     return binary, environment, profile
 
 
+def _pid_exists(pid: int) -> bool:
+    if Path("/proc").is_dir():
+        return Path(f"/proc/{pid}").exists()
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 async def _wait_for_pids_to_exit(pids: list[int]) -> None:
     for _ in range(200):
-        if all(not Path(f"/proc/{pid}").exists() for pid in pids):
+        if all(not _pid_exists(pid) for pid in pids):
             return
         await asyncio.sleep(0.01)
+
+
+class _ExitedParentProcess:
+    pid = 4312
+    returncode = 0
+
+
+class _MissingProcPath:
+    def __init__(self, _value: str) -> None:
+        pass
+
+    def is_dir(self) -> bool:
+        return False
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="process-group cleanup is POSIX-specific")
+async def test_non_proc_group_remaining_after_kill_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group_alive = True
+    signals: list[int] = []
+    events: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(process_lifecycle, "Path", _MissingProcPath)
+    monkeypatch.setattr(process_lifecycle, "_PROCESS_SCAN_INTERVAL_SECONDS", 0.001)
+
+    def fake_killpg(_pgid: int, sig: int) -> None:
+        if sig == 0:
+            if group_alive:
+                return
+            raise ProcessLookupError
+        signals.append(sig)
+
+    monkeypatch.setattr(process_lifecycle.os, "killpg", fake_killpg)
+
+    with pytest.raises(ProcessTreeCleanupError):
+        await terminate_process_group(
+            _ExitedParentProcess(),
+            _ExitedParentProcess.pid,
+            lambda event, **fields: events.append((event, fields)),
+            grace_seconds=0.02,
+        )
+
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert events[-1][0] == "cleanup_failed"
+    assert events[-1][1]["group_empty"] is False
+    assert events[-1][1]["live_group_empty"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="process-group cleanup is POSIX-specific")
+async def test_non_proc_group_disappearing_after_kill_is_reaped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group_alive = True
+    signals: list[int] = []
+    events: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(process_lifecycle, "Path", _MissingProcPath)
+    monkeypatch.setattr(process_lifecycle, "_PROCESS_SCAN_INTERVAL_SECONDS", 0.001)
+
+    def fake_killpg(_pgid: int, sig: int) -> None:
+        nonlocal group_alive
+        if sig == 0:
+            if group_alive:
+                return
+            raise ProcessLookupError
+        signals.append(sig)
+        if sig == signal.SIGKILL:
+            group_alive = False
+
+    monkeypatch.setattr(process_lifecycle.os, "killpg", fake_killpg)
+
+    await terminate_process_group(
+        _ExitedParentProcess(),
+        _ExitedParentProcess.pid,
+        lambda event, **fields: events.append((event, fields)),
+        grace_seconds=0.02,
+    )
+
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert events[-1][0] == "group_reaped"
+    assert events[-1][1]["group_empty"] is True
+    assert events[-1][1]["live_group_empty"] is True
 
 
 @pytest.mark.asyncio
@@ -180,7 +283,7 @@ time.sleep(60)
 
     pids = json.loads(pid_path.read_text(encoding="utf-8"))
     await _wait_for_pids_to_exit(pids)
-    assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+    assert all(not _pid_exists(pid) for pid in pids)
 
 
 @pytest.mark.asyncio

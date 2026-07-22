@@ -44,6 +44,6 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-; shellexec 让程序通过 ShellExecute 启动，正确处理 UAC 权限请求
+; 通过 Explorer 代启动程序，使安装完成后的启动上下文更接近桌面快捷方式启动
 ; postinstall 在安装向导最后一页显示"运行 JiuwenSwarm"复选框，由用户决定是否启动
-Filename: "{app}\{#MyAppExeName}"; Flags: nowait postinstall shellexec
+Filename: "{win}\explorer.exe"; Parameters: """{app}\{#MyAppExeName}"""; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall

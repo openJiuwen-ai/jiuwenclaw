@@ -36,23 +36,23 @@ issues:
     dimension: boundary_safety
     severity: high
     status: open
-    summary: "Resolver uses only channel_id, not session identity."
-    evidence: "It calls get_agent_nowait(channel_id=...) without mode, project, sub-mode, or session filters; rewind_session_context then rebuilds context for the requested session on that live DeepAgent."
-    suggested_action: "Resolve by session metadata or explicit session-to-agent mapping before context rebuild."
+    summary: "Channel-only lookup can select the wrong cached agent."
+    evidence: "AgentManager caches multiple mode/sub-mode/project identities per channel, but this method passes only channel_id; get_agent_nowait then returns the first channel entry before any preferred-agent fallback."
+    suggested_action: "Resolve with request/session mode, sub-mode, and project identity, or maintain an explicit session-to-agent mapping."
   - id: ISSUE-002
     dimension: error_handling
     severity: medium
     status: open
-    summary: "Unexpected agent shape failures are not normalized."
-    evidence: "agent.get_instance() and deep_agent.react_agent are direct dereferences; in full rewind this can fail after history has already been changed."
-    suggested_action: "Guard lookup with getattr or catch resolver errors before destructive rewind steps."
+    summary: "Malformed or stale wrappers raise instead of resolving unavailable state."
+    evidence: "agent.get_instance() and deep_agent.react_agent are unguarded. Full rewind may hit this after history truncation; rewind_context invokes the resolver outside its local try block."
+    suggested_action: "Guard wrapper/instance access and normalize lookup failure before destructive rewind work."
   - id: ISSUE-003
     dimension: test_coverage
     severity: medium
     status: open
-    summary: "No direct tests pin resolver behavior."
-    evidence: "No tests were found for no wrapper, no DeepAgent, no react_agent, default channel fallback, or multi-agent channel selection."
-    suggested_action: "Add focused fake-AgentManager tests for each resolver branch."
+    summary: "No direct tests pin resolver selection and failure behavior."
+    evidence: "Only lower-level rewind_session_context tests were found; resolver branches, default normalization, and multi-agent channel selection are untested."
+    suggested_action: "Add focused fake-AgentManager tests, including multiple mode/project entries in one channel."
 confidence: confirmed
 details: {}
 ---
@@ -61,15 +61,15 @@ details: {}
 
 ## Actual Role
 
-Synchronously finds an already-created AgentManager wrapper for a channel, unwraps its DeepAgent instance, requires a non-null `react_agent`, and returns both objects for rewind context rebuilding. It performs no creation or mutation; callers decide whether missing state is an error or partial rewind.
+Selects an already-created wrapper by channel, unwraps its DeepAgent and `react_agent`, and returns both for context reconstruction. It creates no runtime; callers treat missing state differently—full rewind reports partial context failure, while context-only rewind returns an error.
 
 ## Key Signals
 
-- Input: `channel_id`; blank values become `"default"`.
+- Input: `channel_id`; blank values normalize to `"default"`; session/mode/project identity is unavailable.
 - Output: `(deep_agent, react_agent)` tuple, or `None`.
-- Main side effects: None directly; returned live objects are later used to rebuild and persist session context.
-- Main risk: Channel-only lookup can select the wrong live agent when a channel has multiple agent instances.
-- Related tests: Lower-level `rewind_session_context` tests exist; no direct resolver tests were found.
+- Main side effects: None; callers mutate and persist the selected agent's session context.
+- Main risk: ambiguous selection when one channel contains multiple cached agent identities.
+- Related tests: lower-level context reconstruction and AgentManager project-cache identity have coverage; this resolver does not.
 
 ## Detail Index
 

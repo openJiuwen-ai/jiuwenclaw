@@ -859,20 +859,25 @@ async function openMemoryDir(
       return;
     }
 
-    // 优先调系统文件管理器打开；不支持时显示可复制路径 + 平台命令提示
-    if (ctx.openFolder) {
-      ctx.openFolder(selectedValue);
+    // 优先调系统文件管理器打开；不支持时(无 GUI 或未注入回调)显示可复制路径提示
+    const opened = ctx.openFolder?.(selectedValue);
+    if (opened) {
       ctx.addItem(addInfo(ctx.sessionId, `Opened memory folder: ${selectedValue}`, "m"));
     } else {
-      const cmd = process.platform === "win32"
-        ? `explorer "${selectedValue}"`
-        : process.platform === "darwin"
-          ? `open "${selectedValue}"`
-          : `xdg-open "${selectedValue}"`;
+      // 无 GUI explorer(如无头 Linux 服务器)或未注入 openFolder 回调:
+      // 显示可复制路径 + 平台命令,避免误导用户以为文件夹已打开。
+      let cmd: string;
+      if (process.platform === "win32") {
+        cmd = `explorer "${selectedValue}"`;
+      } else if (process.platform === "darwin") {
+        cmd = `open "${selectedValue}"`;
+      } else {
+        cmd = `xdg-open "${selectedValue}"`;
+      }
       ctx.addItem(
         addInfo(
           ctx.sessionId,
-          `Cannot open directly. Path: ${selectedValue}\nOpen with:  ${cmd}`,
+          `No GUI explorer detected. Path: ${selectedValue}\nOpen with:  ${cmd}`,
           "i",
         ),
       );

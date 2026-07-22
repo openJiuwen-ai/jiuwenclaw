@@ -185,7 +185,7 @@ export function SkillEvolutionModal({
             <button
               type="button"
               onClick={() => void fetchEntries()}
-              className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong transition-colors"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong "
               title={t("common.refresh")}
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -195,7 +195,7 @@ export function SkillEvolutionModal({
             <button
               type="button"
               onClick={onClose}
-              className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong transition-colors"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong "
               aria-label={t("skills.evolution.closeAria")}
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -272,7 +272,7 @@ export function SkillEvolutionModal({
                     <button
                       type="button"
                       onClick={() => handleDeleteEntry(entry.id)}
-                      className="w-7 h-7 flex items-center justify-center rounded-lg text-danger hover:text-danger/80 transition-colors"
+                      className="w-7 h-7 flex items-center justify-center rounded-lg text-danger hover:text-danger/80 "
                       title={t("skills.evolution.actions.delete")}
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -300,10 +300,10 @@ export function SkillEvolutionModal({
             <button
               type="button"
               onClick={handleSave}
-              className={`w-[72px] h-[28px] rounded-[16px] text-sm transition-colors ${
+              className={`w-[72px] h-[28px] rounded-[16px] text-sm  ${
                 saving || !!formatError
                   ? "bg-gray-400 text-text-muted cursor-not-allowed"
-                  : "bg-[#191919] text-white hover:bg-[#333333]"
+                  : "bg-control-emphasis text-control-emphasis-foreground hover:bg-control-emphasis-hover-strong"
               }`}
               disabled={saving || !!formatError}
             >

@@ -535,6 +535,57 @@ async def test_codex_auto_harness_stream_rejects_before_runtime_or_service(
     assert request.metadata is None
 
 
+@pytest.mark.asyncio
+async def test_unary_begin_model_turn_error_is_not_masked_by_span_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.agents.harness import agent_observability
+
+    adapter = JiuWenSwarmDeepAdapter()
+    adapter._is_session_scoped_adapter = True
+    adapter._instance = object()
+    adapter._stream_event_rail = None
+    model = _turn_model("api-model")
+    original = CodexProviderError("route_unavailable", "begin model turn failed")
+    closed_spans: list[object | None] = []
+
+    async def no_slash_command(*_args, **_kwargs):
+        return None
+
+    async def fail_begin_model_turn(*_args, **_kwargs):
+        raise original
+
+    monkeypatch.setattr(adapter, "_has_valid_model_config", lambda _name: True)
+    monkeypatch.setattr(adapter, "_handle_slash_command", no_slash_command)
+    monkeypatch.setattr(adapter, "_resolve_model_for_request", lambda _request: model)
+    monkeypatch.setattr(adapter, "_begin_model_turn", fail_begin_model_turn)
+    monkeypatch.setattr(
+        agent_observability,
+        "close_agent_run_span",
+        closed_spans.append,
+    )
+    request = AgentRequest(
+        request_id="unary-begin-model-turn-error",
+        channel_id="web",
+        session_id="unary-error-session",
+        params={"mode": "agent.fast", "query": "hello"},
+    )
+
+    with pytest.raises(CodexProviderError) as captured:
+        await adapter.process_message_impl(
+            request,
+            {
+                "query": "hello",
+                "conversation_id": request.session_id,
+            },
+        )
+
+    assert captured.value is original
+    assert closed_spans == [None]
+    assert adapter._session_agent_tasks == {}
+    assert adapter._active_session_ids == {}
+
+
 def _processor_adapter(
     config_processors: list[object],
     context_processors: list[object],

@@ -72,9 +72,21 @@ async def _wait_for_file(path: Path) -> None:
     raise AssertionError(f"timed out waiting for {path.name}")
 
 
+def _pid_exists(pid: int) -> bool:
+    if Path("/proc").is_dir():
+        return Path(f"/proc/{pid}").exists()
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 async def _wait_for_pids_to_exit(pids: list[int]) -> None:
     for _ in range(400):
-        if all(not Path(f"/proc/{pid}").exists() for pid in pids):
+        if all(not _pid_exists(pid) for pid in pids):
             return
         await asyncio.sleep(0.005)
 
@@ -378,8 +390,9 @@ async def test_model_spawn_double_cancel_owns_tree_and_omits_comm_canary(
         f'''#!/usr/bin/env python3
 import json, os, pathlib, signal, subprocess, sys, time
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
-pathlib.Path("/proc/self/comm").write_text("secret-comm-canary")
-child_code = "import pathlib,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path('/proc/self/comm').write_text('secret-child'); time.sleep(60)"
+comm_path = pathlib.Path("/proc/self/comm")
+if comm_path.exists(): comm_path.write_text("secret-comm-canary")
+child_code = "import pathlib,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); p=pathlib.Path('/proc/self/comm'); p.write_text('secret-child') if p.exists() else None; time.sleep(60)"
 child = subprocess.Popen([sys.executable, "-c", child_code])
 pathlib.Path({str(pid_path)!r}).write_text(json.dumps([os.getpid(), child.pid]))
 time.sleep(60)
@@ -421,7 +434,7 @@ time.sleep(60)
 
     pids = json.loads(pid_path.read_text(encoding="utf-8"))
     await _wait_for_pids_to_exit(pids)
-    assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+    assert all(not _pid_exists(pid) for pid in pids)
     assert list(profile.turns_dir.iterdir()) == []
     recovered = acquire_profile_lock(profile)
     release_profile_lock(recovered)
@@ -481,7 +494,7 @@ time.sleep(60)
         await task
     pids = json.loads(pid_path.read_text(encoding="utf-8"))
     await _wait_for_pids_to_exit(pids)
-    assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+    assert all(not _pid_exists(pid) for pid in pids)
     assert not profile_is_quarantined(profile)
 
 
@@ -532,7 +545,7 @@ time.sleep(60)
         await task
     pids = json.loads(pid_path.read_text(encoding="utf-8"))
     await _wait_for_pids_to_exit(pids)
-    assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+    assert all(not _pid_exists(pid) for pid in pids)
     assert client._process is None
     assert not profile_is_quarantined(profile)
 
@@ -581,7 +594,7 @@ time.sleep(60)
     await reconcile_profile_quarantine(profile)
     pids = json.loads(pid_path.read_text(encoding="utf-8"))
     await _wait_for_pids_to_exit(pids)
-    assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+    assert all(not _pid_exists(pid) for pid in pids)
     assert not profile_is_quarantined(profile)
     recovered = acquire_profile_lock(profile)
     release_profile_lock(recovered)
@@ -629,7 +642,7 @@ time.sleep(60)
     await reconcile_profile_quarantine(profile)
     pids = json.loads(pid_path.read_text(encoding="utf-8"))
     await _wait_for_pids_to_exit(pids)
-    assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+    assert all(not _pid_exists(pid) for pid in pids)
 
 
 @pytest.mark.asyncio

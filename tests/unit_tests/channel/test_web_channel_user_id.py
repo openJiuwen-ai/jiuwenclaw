@@ -51,6 +51,10 @@ class FakeWebSocket:
 
 
 class FakeWebChannelForHandlers:
+    # 与真实 WebChannel.channel_id 保持一致(production handler 通过
+    # ``channel.channel_id`` 读取,见 app_web_handlers._session_create)
+    channel_id = "web"
+
     def __init__(self) -> None:
         self.methods: dict[str, object] = {}
         self.responses: list[dict[str, Any]] = []
@@ -247,6 +251,52 @@ async def test_web_channel_invoke_method_handler_injects_user_id():
     )
 
     assert captured == ["alice"]
+
+
+@pytest.mark.asyncio
+async def test_openai_account_unexpected_error_uses_method_dispatcher(monkeypatch):
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    responses: list[dict[str, Any]] = []
+
+    def raise_unexpected_error():
+        raise RuntimeError("unexpected OAuth failure")
+
+    async def capture_response(ws, req_id, *, ok, payload=None, error=None, code=None):
+        responses.append({
+            "id": req_id,
+            "ok": ok,
+            "payload": payload,
+            "error": error,
+            "code": code,
+        })
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._openai_account_auth_status_payload",
+        raise_unexpected_error,
+    )
+    monkeypatch.setattr(channel, "send_response", capture_response)
+    handler = channel._method_handlers["openai_account.auth.status"]
+
+    handled = await channel._invoke_method_handler(
+        _MethodHandlerInvocation(
+            FakeWebSocket(),
+            "openai_account.auth.status",
+            "req-oauth-error",
+            {},
+            "sess-oauth-error",
+            handler,
+        ),
+    )
+
+    assert handled is False
+    assert responses == [{
+        "id": "req-oauth-error",
+        "ok": False,
+        "payload": None,
+        "error": "handler error: unexpected OAuth failure",
+        "code": "INTERNAL_ERROR",
+    }]
 
 
 @pytest.mark.asyncio

@@ -38,7 +38,9 @@ symphony:
     min_edge_confidence: 0.1
 
   orchestration:
+    # fast is the default one-shot path; beam enables bidirectional search.
     mode: fast
+    # Beam-only candidate count retained after each search round.
     top_k: 3
     max_depth: 4
     min_edge_confidence: 0.3
@@ -192,7 +194,7 @@ models:
     - model_client_config:
         api_base: ${API_BASE}
         api_key: ${API_KEY}
-        model_name: ${MODEL_NAME:-xiaomi/mimo-v2-omni}
+        model_name: ${MODEL_NAME}
         client_provider: ${MODEL_PROVIDER}
         timeout: 1800
         verify_ssl: false
@@ -204,7 +206,7 @@ models:
       model_client_config:
         api_base: ${VIDEO_API_BASE}
         api_key: ${VIDEO_API_KEY}
-        model_name: ${VIDEO_MODEL_NAME:-xiaomi/mimo-v2-omni}
+        model_name: ${VIDEO_MODEL_NAME}
         client_provider: ${VIDEO_PROVIDER}
         timeout: 1800
         verify_ssl: false
@@ -214,7 +216,7 @@ models:
       model_client_config:
         api_base: ${AUDIO_API_BASE}
         api_key: ${AUDIO_API_KEY}
-        model_name: ${AUDIO_MODEL_NAME:-openai/gpt-4o-audio-preview}
+        model_name: ${AUDIO_MODEL_NAME}
         client_provider: ${AUDIO_PROVIDER}
         verify_ssl: false
         timeout: 1800
@@ -224,7 +226,7 @@ models:
       model_client_config:
         api_base: ${VISION_API_BASE}
         api_key: ${VISION_API_KEY}
-        model_name: ${VISION_MODEL_NAME:-bytedance-seed/seed-2.0-mini}
+        model_name: ${VISION_MODEL_NAME}
         client_provider: ${VISION_PROVIDER}
         verify_ssl: false
         timeout: 1800
@@ -232,10 +234,10 @@ models:
         temperature: 0.95
   image_gen:
       model_client_config:
-        api_base: ${IMAGE_GEN_API_BASE:-https://dashscope.aliyuncs.com/api/v1}
+        api_base: ${IMAGE_GEN_API_BASE}
         api_key: ${IMAGE_GEN_API_KEY}
-        model_name: ${IMAGE_GEN_MODEL_NAME:-qwen-image-max}
-        client_provider: ${IMAGE_GEN_PROVIDER:-DashScope}
+        model_name: ${IMAGE_GEN_MODEL_NAME}
+        client_provider: ${IMAGE_GEN_PROVIDER}
         verify_ssl: false
         timeout: 1800
       model_config_obj:
@@ -350,7 +352,7 @@ react:
   agent_name: main_agent
   enable_task_loop: false
   max_iterations: 100
-  model_name: ${MODEL_NAME:-deepseek-chat}
+  model_name: ${MODEL_NAME}
   skill_mode: all
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
   # browser_agent: code.team 路径通过此 key 门控（单 agent 路径仍由 browser runtime 开关决定）
@@ -474,14 +476,16 @@ gateway:
   session_map_scope: <<GATEWAY_SESSION_MAP_SCOPE>>
 
   # AgentClient 配置 - Gateway 连接到 AgentServer 的方式
-  # type: websocket（默认，WebSocket 连接） | yuanrong（openYuanRong 函数调用）
+  # type: websocket（默认） | yuanrong（直接函数调用） | agentos_router（AgentOS 扩展）
   agent_client:
-    type: yuanrong # websocket | yuanrong
+    type: yuanrong # websocket | yuanrong | agentos_router
     # yuanrong 函数模式配置下面参数
     frontend_endpoint: http://<<MASTER_NODE_IP>>:<<FRONTEND_PORT>>
     function_version_urn: <<FUNCTION_ID>>
     concurrency: <<GATEWAY_CONCURRENCY>>
     invoke_timeout_s: <<GATEWAY_INVOKE_TIMEOUT>>
+    agent_timeout_s: 300
+    agent_namespace: default
 
 heartbeat:
   # 心跳间隔（秒），默认 3600

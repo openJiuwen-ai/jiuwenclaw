@@ -175,7 +175,7 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
       </div>
 
       {!isConnected ? (
-        <p className="text-xs text-amber-600 dark:text-amber-400">{t("config.permissionsTools.needConnection")}</p>
+        <p className="text-xs text-warn">{t("config.permissionsTools.needConnection")}</p>
       ) : null}
 
       {error ? (

@@ -2,16 +2,29 @@
 
 from __future__ import annotations
 
+import heapq
 import json
+import re
+from collections import defaultdict
 from typing import Any, Sequence
 
+from jiuwenswarm.symphony.evolution.models import (
+    CAN_FEED,
+    edge_key as evolution_edge_key,
+)
 from jiuwenswarm.symphony.llm import LLMConfig, create_llm_client, llm_usage_context
 from jiuwenswarm.symphony.orchestration.artifacts import ScoreArtifacts
+from jiuwenswarm.symphony.orchestration.language import (
+    default_fast_no_plan_title,
+    planner_language_instruction,
+)
 from jiuwenswarm.symphony.orchestration.planning.plan_builder import edge_plan_item
-from jiuwenswarm.symphony.orchestration.planning.utils import skill_id
-
-FAST_PLANNER_MAX_SKILLS = 40
-FAST_PLANNER_MAX_EDGES = 80
+from jiuwenswarm.symphony.orchestration.planning.utils import (
+    eligible_can_feed_edges,
+    normalize_known_skill_ids,
+    skill_id,
+    skill_payload,
+)
 
 FAST_PLANNER_SYSTEM_PROMPT = """You are Symphony's fast Skill planner.
 Return strict JSON only.
@@ -22,11 +35,23 @@ You receive:
 - Candidate can_feed relationships between those Skills.
 
 Task:
-- Select the best existing Skill execution path for the query.
+- Select the best Skill execution plan for the query.
+- Return the single best plan using the schema below.
 - Use only provided skill IDs.
-- Use only provided can_feed edges.
-- Do not invent Skills, inputs, outputs, or edge relationships.
+- Prefer provided can_feed edges. Infer a missing relationship only when needed to form
+  the plan.
+- Give a short reason when explicitly including an inferred edge in can_feed_edges.
+- When can_feed_edges is omitted, Symphony infers adjacent step edges during validation.
+- Do not judge compatibility from Skill I/O because it is not provided; Symphony handles
+  Skill I/O after validating the plan.
+- missing_inputs does not describe a Skill I/O schema. Use it only for information the
+  user must provide when that need can be determined from the query and Skill
+  descriptions.
+- Do not invent Skills, inputs, or outputs.
 - Prefer the shortest path that satisfies the user's intent.
+- When runtime_weight and planner_score are present, use them only as tie-breakers
+  between otherwise relevant relationships. planner_score already combines static and
+  scoped runtime evidence.
 - If required information is missing, set status to "needs_input" and list it.
 - If no useful plan exists from the candidates, set status to "no_plan".
 
@@ -39,7 +64,7 @@ Schema:
     {"skill_id": "skill-a", "reason": "why this step is used"}
   ],
   "can_feed_edges": [
-    {"source_id": "skill-a", "target_id": "skill-b"}
+    {"source_id": "skill-a", "target_id": "skill-b", "reason": "why the relationship is needed"}
   ],
   "missing_inputs": [
     {"skill_id": "skill-a", "name": "input name", "type": "unknown", "reason": "why it is needed"}
@@ -49,7 +74,7 @@ Schema:
 
 
 class FastOneShotPlanner:
-    """Ask the LLM for one validated plan from a bounded score subgraph."""
+    """Ask the LLM for one validated plan from a compact score subgraph."""
 
     def __init__(
         self,
@@ -58,49 +83,56 @@ class FastOneShotPlanner:
         llm_config: LLMConfig | None,
         llm_client: Any | None,
         min_edge_confidence: float,
-        top_k: int,
+        max_depth: int = 4,
         candidate_skill_ids: Sequence[str] | None = None,
+        language: str = "cn",
+        dynamic_overlay: dict[str, Any] | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.llm_config = llm_config
         self.llm_client = llm_client
         self.min_edge_confidence = min_edge_confidence
-        self.top_k = max(1, int(top_k))
-        self.candidate_skill_ids = self._normalize_candidate_skill_ids(
+        self.max_depth = max(1, int(max_depth))
+        self.language = language
+        self.dynamic_overlay = (
+            dynamic_overlay if isinstance(dynamic_overlay, dict) else {}
+        )
+        self.candidate_skill_ids = normalize_known_skill_ids(
             candidate_skill_ids,
             known_skill_ids=set(artifacts.skill_by_id),
         )
 
     async def plan(self, query: str) -> dict[str, Any]:
         client = self._client()
-        subgraph = self._candidate_subgraph()
+        subgraph = self._candidate_subgraph(query)
         prompt_payload = {
             "query": query,
-            "top_k": self.top_k,
-            "min_edge_confidence": self.min_edge_confidence,
             "skills": subgraph["skills"],
             "can_feed_edges": subgraph["edges"],
-            "planning_instructions": [
-                "Return the single best plan as strict JSON.",
-                "Use only skill IDs from skills.",
-                "Use only can_feed_edges from can_feed_edges.",
-                "Do not rely on skill inputs or outputs; they are filled by Symphony after validation.",
-            ],
         }
         with llm_usage_context("orchestration", "one_shot_fast_planning"):
             raw = await client.complete_json_async(
-                system_prompt=FAST_PLANNER_SYSTEM_PROMPT,
+                system_prompt=(
+                    f"{FAST_PLANNER_SYSTEM_PROMPT}\n"
+                    f"{planner_language_instruction(self.language)}"
+                ),
                 user_content=json.dumps(prompt_payload, ensure_ascii=False),
                 error_context="Symphony one-shot fast planning",
+                request_overrides={
+                    "extra_body": {"thinking": {"type": "disabled"}},
+                },
             )
 
         base = {
             "query": query,
+            "language": self.language,
             "score_dir": str(self.artifacts.score_dir),
             "planning_mode": "one_shot_fast",
             "llm_call_count": 1,
             "candidate_skill_count": len(subgraph["skills"]),
             "candidate_edge_count": len(subgraph["edges"]),
+            "dynamic_overlay_used": bool(subgraph["runtime_summary"]["applied_edges"]),
+            "runtime_scoring_summary": subgraph["runtime_summary"],
         }
         try:
             selection = json.loads(raw)
@@ -141,134 +173,363 @@ class FastOneShotPlanner:
             raise ValueError("fast Symphony planning requires llm_config or llm_client.")
         return create_llm_client(self.llm_config)
 
-    def _candidate_subgraph(self) -> dict[str, Any]:
+    def _candidate_subgraph(self, query: str) -> dict[str, Any]:
         if self.candidate_skill_ids:
-            return self._retrieval_candidate_subgraph()
-        return self._default_candidate_subgraph()
+            return self._retrieval_candidate_subgraph(query)
+        return self._default_candidate_subgraph(query)
 
-    def _default_candidate_subgraph(self) -> dict[str, Any]:
-        skill_by_id = self.artifacts.skill_by_id
-        sorted_edges = self._sorted_eligible_edges()
-        selected: set[str] = set()
-        for edge in sorted_edges:
-            for key in ("source", "target"):
-                edge_skill_id = skill_id(edge.get(key))
-                if (
-                    edge_skill_id in skill_by_id
-                    and len(selected) < FAST_PLANNER_MAX_SKILLS
-                ):
-                    selected.add(edge_skill_id)
-            if len(selected) >= FAST_PLANNER_MAX_SKILLS:
-                break
-
-        candidate_edges = []
-        for edge in sorted_edges:
-            if (
-                skill_id(edge.get("source")) in selected
-                and skill_id(edge.get("target")) in selected
-            ):
-                candidate_edges.append(edge)
-        candidate_edges.sort(
-            key=lambda item: (
-                -float(item.get("confidence") or 0.0),
-                skill_id(item.get("source")),
-                skill_id(item.get("target")),
-            )
-        )
-        candidate_edges = candidate_edges[:FAST_PLANNER_MAX_EDGES]
-
+    def _default_candidate_subgraph(self, query: str) -> dict[str, Any]:
+        candidate_edges = self._known_edges(self._sorted_eligible_edges(query))
+        selected = []
+        selected_set = set()
         for edge in candidate_edges:
-            for key in ("source", "target"):
-                edge_skill_id = skill_id(edge.get(key))
-                if (
-                    edge_skill_id in skill_by_id
-                    and len(selected) < FAST_PLANNER_MAX_SKILLS
-                ):
-                    selected.add(edge_skill_id)
-
+            self._append_skill(selected, selected_set, skill_id(edge.get("source")))
+            self._append_skill(selected, selected_set, skill_id(edge.get("target")))
         if not selected:
-            for skill in self.artifacts.skills[:FAST_PLANNER_MAX_SKILLS]:
+            for skill in self.artifacts.skills:
                 current_skill_id = str(skill.get("id") or "")
-                if current_skill_id.strip():
-                    selected.add(current_skill_id)
-
-        filtered_candidate_edges = []
-        for edge in candidate_edges:
-            if (
-                skill_id(edge.get("source")) in selected
-                and skill_id(edge.get("target")) in selected
-            ):
-                filtered_candidate_edges.append(edge)
-        candidate_edges = filtered_candidate_edges
+                self._append_skill(selected, selected_set, current_skill_id)
         return self._subgraph_payload(selected, candidate_edges)
 
-    def _retrieval_candidate_subgraph(self) -> dict[str, Any]:
-        skill_by_id = self.artifacts.skill_by_id
-        sorted_edges = self._sorted_eligible_edges()
-        selected: set[str] = set()
+    def _retrieval_candidate_subgraph(self, query: str) -> dict[str, Any]:
+        sorted_edges = self._known_edges(self._sorted_eligible_edges(query))
+        edge_by_key = {
+            (skill_id(edge.get("source")), skill_id(edge.get("target"))): edge
+            for edge in sorted_edges
+        }
+        seeds = list(self.candidate_skill_ids)
+        adjacency: dict[str, list[str]] = defaultdict(list)
+        for source_id, target_id in edge_by_key:
+            adjacency[source_id].append(target_id)
+        for source_id in adjacency:
+            adjacency[source_id].sort()
 
-        def add_skill(current_skill_id: str) -> None:
-            if (
-                current_skill_id in skill_by_id
-                and current_skill_id not in selected
-                and len(selected) < FAST_PLANNER_MAX_SKILLS
-            ):
-                selected.add(current_skill_id)
-
-        for current_skill_id in self.candidate_skill_ids:
-            add_skill(current_skill_id)
-        if not selected:
-            return self._default_candidate_subgraph()
-
-        seed_ids = set(selected)
-        for edge in sorted_edges:
-            source_id = skill_id(edge.get("source"))
-            target_id = skill_id(edge.get("target"))
-            if source_id not in seed_ids and target_id not in seed_ids:
-                continue
-            add_skill(source_id)
-            add_skill(target_id)
-            if len(selected) >= FAST_PLANNER_MAX_SKILLS:
-                break
-
+        selected = list(seeds)
+        selected_set = set(seeds)
         candidate_edges = []
-        for edge in sorted_edges:
-            if (
-                skill_id(edge.get("source")) in selected
-                and skill_id(edge.get("target")) in selected
-            ):
-                candidate_edges.append(edge)
-            if len(candidate_edges) >= FAST_PLANNER_MAX_EDGES:
-                break
+        candidate_edge_keys = set()
+        parent = {seed_id: seed_id for seed_id in seeds}
+
+        def find(current_skill_id: str) -> str:
+            while parent[current_skill_id] != current_skill_id:
+                parent[current_skill_id] = parent[parent[current_skill_id]]
+                current_skill_id = parent[current_skill_id]
+            return current_skill_id
+
+        def union(left: str, right: str) -> None:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+        connections = []
+        for left_index, left_seed in enumerate(seeds):
+            for right_index in range(left_index + 1, len(seeds)):
+                right_seed = seeds[right_index]
+                paths = [
+                    self._best_directed_path(
+                        left_seed,
+                        right_seed,
+                        adjacency=adjacency,
+                        edge_by_key=edge_by_key,
+                    ),
+                    self._best_directed_path(
+                        right_seed,
+                        left_seed,
+                        adjacency=adjacency,
+                        edge_by_key=edge_by_key,
+                    ),
+                ]
+                ranked_paths = [
+                    (self._path_rank(path), path) for path in paths if path
+                ]
+                if ranked_paths:
+                    path_rank, path = min(ranked_paths, key=lambda item: item[0])
+                    connections.append((path_rank, left_index, right_index, path))
+
+        seed_set = set(seeds)
+        for _, left_index, right_index, path in sorted(connections):
+            left_seed = seeds[left_index]
+            right_seed = seeds[right_index]
+            if find(left_seed) == find(right_seed):
+                continue
+            for edge in path:
+                self._append_candidate_edge(
+                    candidate_edges,
+                    candidate_edge_keys,
+                    edge,
+                )
+                self._append_skill(
+                    selected,
+                    selected_set,
+                    skill_id(edge.get("source")),
+                )
+                self._append_skill(
+                    selected,
+                    selected_set,
+                    skill_id(edge.get("target")),
+                )
+            path_seeds = [skill for skill in self._path_skill_ids(path) if skill in seed_set]
+            for path_seed in path_seeds[1:]:
+                union(path_seeds[0], path_seed)
+
+        components: dict[str, list[str]] = defaultdict(list)
+        for seed_id in seeds:
+            components[find(seed_id)].append(seed_id)
+        neighbor_owners: dict[str, str] = {}
+        for component_seeds in components.values():
+            if len(component_seeds) != 1:
+                continue
+            seed_id = component_seeds[0]
+            incoming = next(
+                (edge for edge in sorted_edges if skill_id(edge.get("target")) == seed_id),
+                None,
+            )
+            outgoing = next(
+                (edge for edge in sorted_edges if skill_id(edge.get("source")) == seed_id),
+                None,
+            )
+            for edge in (incoming, outgoing):
+                if edge is None:
+                    continue
+                source_id = skill_id(edge.get("source"))
+                target_id = skill_id(edge.get("target"))
+                neighbor_id = source_id if target_id == seed_id else target_id
+                owner = neighbor_owners.get(neighbor_id)
+                if neighbor_id in seed_set or (owner is not None and owner != seed_id):
+                    continue
+                neighbor_owners[neighbor_id] = seed_id
+                self._append_candidate_edge(candidate_edges, candidate_edge_keys, edge)
+                self._append_skill(selected, selected_set, source_id)
+                self._append_skill(selected, selected_set, target_id)
         return self._subgraph_payload(selected, candidate_edges)
 
-    def _sorted_eligible_edges(self) -> list[dict[str, Any]]:
-        filtered_edges = []
-        for edge in self.artifacts.graph.get("edges", []):
-            edge_confidence = float(edge.get("confidence") or 0.0)
-            if edge.get("type") == "can_feed" and edge_confidence >= self.min_edge_confidence:
-                filtered_edges.append(edge)
+    def _best_directed_path(
+        self,
+        source_id: str,
+        target_id: str,
+        *,
+        adjacency: dict[str, list[str]],
+        edge_by_key: dict[tuple[str, str], dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        queue = [(0, -1.0, 0.0, (source_id,))]
+        while queue:
+            hops, negative_minimum, negative_total, nodes = heapq.heappop(queue)
+            current_id = nodes[-1]
+            if current_id == target_id and hops:
+                return [
+                    edge_by_key[(nodes[index], nodes[index + 1])]
+                    for index in range(len(nodes) - 1)
+                ]
+            if hops >= self.max_depth:
+                continue
+            minimum_confidence = -negative_minimum
+            total_confidence = -negative_total
+            for next_id in adjacency.get(current_id, []):
+                if next_id in nodes:
+                    continue
+                edge = edge_by_key[(current_id, next_id)]
+                confidence = self._edge_rank_score(edge)
+                heapq.heappush(
+                    queue,
+                    (
+                        hops + 1,
+                        -min(minimum_confidence, confidence),
+                        -(total_confidence + confidence),
+                        (*nodes, next_id),
+                    ),
+                )
+        return []
+
+    def _sorted_eligible_edges(self, query: str) -> list[dict[str, Any]]:
+        graph_edges = self.artifacts.graph.get("edges", [])
+        static_keys = {
+            evolution_edge_key(
+                skill_id(edge.get("source")),
+                skill_id(edge.get("target")),
+                CAN_FEED,
+            )
+            for edge in graph_edges
+            if edge.get("type") == CAN_FEED
+        }
+        eligible_edges = eligible_can_feed_edges(
+            graph_edges,
+            known_skill_ids=set(self.artifacts.skill_by_id),
+            min_confidence=self.min_edge_confidence,
+        )
+        filtered_edges = [
+            self._with_runtime_score(
+                edge,
+                self._overlay_edges().get(
+                    evolution_edge_key(
+                        skill_id(edge.get("source")),
+                        skill_id(edge.get("target")),
+                        CAN_FEED,
+                    )
+                ),
+                query=query,
+            )
+            for edge in eligible_edges
+        ]
+        filtered_edges.extend(self._runtime_only_edges(query, static_keys=static_keys))
         return sorted(
             filtered_edges,
             key=lambda item: (
-                -float(item.get("confidence") or 0.0),
+                -self._edge_rank_score(item),
                 str(item.get("source") or ""),
                 str(item.get("target") or ""),
             ),
         )
 
+    def _runtime_only_edges(
+        self,
+        query: str,
+        *,
+        static_keys: set[str],
+    ) -> list[dict[str, Any]]:
+        known_skill_ids = set(self.artifacts.skill_by_id)
+        output = []
+        for current_key, stats in self._overlay_edges().items():
+            if current_key in static_keys or not isinstance(stats, dict):
+                continue
+            source_id = str(stats.get("source_id") or "").strip()
+            target_id = str(stats.get("target_id") or "").strip()
+            relation_type = str(stats.get("relation_type") or CAN_FEED)
+            success_count = int(stats.get("success_count") or 0)
+            failure_count = int(stats.get("failure_count") or 0)
+            attempt_count = max(int(stats.get("attempt_count") or 0), success_count)
+            if relation_type != CAN_FEED:
+                continue
+            if source_id not in known_skill_ids or target_id not in known_skill_ids:
+                continue
+            if success_count < 2 or failure_count > 0:
+                continue
+            if not self._runtime_is_query_relevant(stats, query, require_seed=True):
+                continue
+            runtime_confidence = (success_count + 1) / (attempt_count + 2)
+            runtime_weight = self._runtime_weight(stats)
+            output.append(
+                {
+                    "type": CAN_FEED,
+                    "source": source_id,
+                    "target": target_id,
+                    "confidence": runtime_confidence,
+                    "method": "runtime_observed",
+                    "evidence": {
+                        "reasons": ["Repeated successful Session executions"],
+                    },
+                    "runtime_only": True,
+                    "runtime_weight": runtime_weight,
+                    "effective_score": runtime_confidence * runtime_weight,
+                    "runtime_evidence": self._runtime_evidence(stats),
+                }
+            )
+        return output
+
+    def _with_runtime_score(
+        self,
+        edge: dict[str, Any],
+        stats: dict[str, Any] | None,
+        *,
+        query: str,
+    ) -> dict[str, Any]:
+        if not isinstance(stats, dict) or not self._runtime_is_query_relevant(stats, query):
+            return edge
+        runtime_weight = self._runtime_weight(stats)
+        confidence = float(edge.get("confidence") or 0.0)
+        return {
+            **edge,
+            "runtime_weight": runtime_weight,
+            "effective_score": confidence * runtime_weight,
+            "runtime_evidence": self._runtime_evidence(stats),
+        }
+
+    def _runtime_is_query_relevant(
+        self,
+        stats: dict[str, Any],
+        query: str,
+        *,
+        require_seed: bool = False,
+    ) -> bool:
+        endpoints = {
+            str(stats.get("source_id") or "").strip(),
+            str(stats.get("target_id") or "").strip(),
+        }
+        seeds = set(self.candidate_skill_ids or ())
+        touches_seed = bool(seeds & endpoints)
+        representative_queries = [
+            str(value).strip()
+            for value in stats.get("representative_queries") or []
+            if str(value).strip()
+        ]
+        query_matches = any(
+            self._text_overlap(query, example) >= 0.2
+            for example in representative_queries
+        )
+        if require_seed:
+            return (
+                touches_seed and (query_matches or not representative_queries)
+            ) or (not seeds and query_matches)
+        return touches_seed or query_matches
+
+    def _overlay_edges(self) -> dict[str, dict[str, Any]]:
+        edges = self.dynamic_overlay.get("edges")
+        return edges if isinstance(edges, dict) else {}
+
+    @staticmethod
+    def _runtime_weight(stats: dict[str, Any]) -> float:
+        try:
+            value = float(stats.get("runtime_weight") or 1.0)
+        except (TypeError, ValueError):
+            value = 1.0
+        return max(0.2, min(2.0, value))
+
+    @staticmethod
+    def _runtime_evidence(stats: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success_count": int(stats.get("success_count") or 0),
+            "failure_count": int(stats.get("failure_count") or 0),
+            "needs_input_count": int(stats.get("needs_input_count") or 0),
+            "attempt_count": int(stats.get("attempt_count") or 0),
+        }
+
+    @staticmethod
+    def _edge_rank_score(edge: dict[str, Any]) -> float:
+        return float(edge.get("effective_score") or edge.get("confidence") or 0.0)
+
+    @classmethod
+    def _text_overlap(cls, left: str, right: str) -> float:
+        left_tokens = cls._text_tokens(left)
+        right_tokens = cls._text_tokens(right)
+        if not left_tokens or not right_tokens:
+            return 0.0
+        return len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens))
+
+    @staticmethod
+    def _text_tokens(value: str) -> set[str]:
+        normalized = str(value or "").lower()
+        tokens = set(re.findall(r"[a-z0-9][a-z0-9_-]+", normalized))
+        cjk_runs = re.findall(r"[\u3400-\u9fff]+", normalized)
+        for run in cjk_runs:
+            if len(run) == 1:
+                tokens.add(run)
+            else:
+                tokens.update(run[index:index + 2] for index in range(len(run) - 1))
+        return tokens
+
     def _subgraph_payload(
         self,
-        selected: set[str],
+        selected: Sequence[str],
         candidate_edges: list[dict[str, Any]],
     ) -> dict[str, Any]:
         skill_by_id = self.artifacts.skill_by_id
         skill_payloads = [
-            self._skill_payload(skill_by_id[current_skill_id])
-            for current_skill_id in sorted(selected)
+            skill_payload(skill_by_id[current_skill_id])
+            for current_skill_id in selected
             if current_skill_id in skill_by_id
         ]
         edge_payloads = [self._edge_payload(edge) for edge in candidate_edges]
+        runtime_edges = [edge for edge in candidate_edges if edge.get("runtime_evidence")]
         return {
             "skills": skill_payloads,
             "edges": edge_payloads,
@@ -277,7 +538,67 @@ class FastOneShotPlanner:
                 (skill_id(edge.get("source")), skill_id(edge.get("target"))): edge
                 for edge in candidate_edges
             },
+            "runtime_summary": {
+                "available": bool(self._overlay_edges()),
+                "applied_edges": len(runtime_edges),
+                "runtime_only_edges": sum(
+                    1 for edge in runtime_edges if edge.get("runtime_only")
+                ),
+            },
         }
+
+    def _known_edges(self, edges: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+        known_skill_ids = set(self.artifacts.skill_by_id)
+        output = []
+        seen = set()
+        for edge in edges:
+            key = (skill_id(edge.get("source")), skill_id(edge.get("target")))
+            if key in seen or key[0] not in known_skill_ids or key[1] not in known_skill_ids:
+                continue
+            seen.add(key)
+            output.append(edge)
+        return output
+
+    @staticmethod
+    def _append_skill(output: list[str], seen: set[str], current_skill_id: str) -> None:
+        current_skill_id = str(current_skill_id or "").strip()
+        if current_skill_id and current_skill_id not in seen:
+            seen.add(current_skill_id)
+            output.append(current_skill_id)
+
+    @staticmethod
+    def _append_candidate_edge(
+        output: list[dict[str, Any]],
+        seen: set[tuple[str, str]],
+        edge: dict[str, Any],
+    ) -> None:
+        key = (skill_id(edge.get("source")), skill_id(edge.get("target")))
+        if key not in seen:
+            seen.add(key)
+            output.append(edge)
+
+    @staticmethod
+    def _path_skill_ids(path: Sequence[dict[str, Any]]) -> list[str]:
+        if not path:
+            return []
+        return [
+            skill_id(path[0].get("source")),
+            *(skill_id(edge.get("target")) for edge in path),
+        ]
+
+    @classmethod
+    def _path_rank(cls, path: Sequence[dict[str, Any]]) -> tuple[Any, ...]:
+        confidences = [cls._edge_rank_score(edge) for edge in path]
+        edge_ids = tuple(
+            (skill_id(edge.get("source")), skill_id(edge.get("target")))
+            for edge in path
+        )
+        return (
+            len(path),
+            -min(confidences),
+            -sum(confidences),
+            edge_ids,
+        )
 
     def _materialize_selection(
         self,
@@ -297,7 +618,8 @@ class FastOneShotPlanner:
                 "detail": "",
                 "plan": {
                     "title": str(
-                        selection.get("title") or "No Symphony fast plan"
+                        selection.get("title")
+                        or default_fast_no_plan_title(self.language)
                     ).strip(),
                     "status": "no_plan",
                     "steps": [],
@@ -322,19 +644,6 @@ class FastOneShotPlanner:
                 "detail": f"Fast planner selected unknown skill IDs: {unknown_ids}",
             }
         skill_by_id = self.artifacts.skill_by_id
-        missing_artifact_ids = [
-            current_skill_id
-            for current_skill_id in step_ids
-            if current_skill_id not in skill_by_id
-        ]
-        if missing_artifact_ids:
-            return {
-                "valid": False,
-                "detail": (
-                    "Fast planner selected missing artifact skill IDs: "
-                    f"{missing_artifact_ids}"
-                ),
-            }
 
         selected_edges_result = self._normalize_selected_edges(
             selection.get("can_feed_edges") or []
@@ -348,17 +657,33 @@ class FastOneShotPlanner:
                     f"{selected_edges_result['invalid']}"
                 ),
             }
+        if selected_edges_result["duplicates"]:
+            return {
+                "valid": False,
+                "detail": (
+                    "Fast planner returned duplicate can_feed edges: "
+                    f"{selected_edges_result['duplicates']}"
+                ),
+            }
         if len(step_ids) > 1 and not selected_edges:
             selected_edges = [
                 (step_ids[index], step_ids[index + 1])
                 for index in range(len(step_ids) - 1)
             ]
 
-        invalid_edges = [edge for edge in selected_edges if edge not in candidate_edges]
-        if invalid_edges:
+        step_id_set = set(step_ids)
+        unknown_edge_endpoints = [
+            edge
+            for edge in selected_edges
+            if edge[0] not in step_id_set or edge[1] not in step_id_set
+        ]
+        if unknown_edge_endpoints:
             return {
                 "valid": False,
-                "detail": f"Fast planner selected illegal can_feed edges: {invalid_edges}",
+                "detail": (
+                    "Fast planner selected edges outside plan steps: "
+                    f"{unknown_edge_endpoints}"
+                ),
             }
         order = {current_skill_id: index for index, current_skill_id in enumerate(step_ids)}
         backward_edges = [
@@ -413,7 +738,19 @@ class FastOneShotPlanner:
                 }
             )
 
-        edge_items = [edge_plan_item(candidate_edges[edge]) for edge in selected_edges]
+        edge_items = []
+        has_inferred_edges = False
+        for edge in selected_edges:
+            if edge in candidate_edges:
+                edge_items.append(edge_plan_item(candidate_edges[edge]))
+                continue
+            has_inferred_edges = True
+            edge_items.append(
+                self._inferred_edge_plan_item(
+                    edge,
+                    selected_edges_result["reasons"].get(edge, ""),
+                )
+            )
         if missing_inputs:
             status = "needs_input"
         return {
@@ -436,7 +773,11 @@ class FastOneShotPlanner:
                     if status == "ready"
                     else "structurally_valid_but_incomplete"
                 ),
-                "connectivity_trace": ["can_feed"] if edge_items else [],
+                "connectivity_trace": (
+                    ["can_feed", "fast_llm_inferred"]
+                    if has_inferred_edges
+                    else (["can_feed"] if edge_items else [])
+                ),
                 "source": "one_shot_fast",
             },
         }
@@ -463,19 +804,36 @@ class FastOneShotPlanner:
         return payload
 
     @staticmethod
-    def _skill_payload(skill: dict[str, Any]) -> dict[str, Any]:
-        current_skill_id = str(skill.get("id") or "")
-        return {
-            "id": current_skill_id,
-            "name": str(skill.get("name") or current_skill_id),
-            "description": str(skill.get("description") or "")[:800],
-        }
-
-    @staticmethod
     def _edge_payload(edge: dict[str, Any]) -> dict[str, Any]:
-        return {
+        payload = {
             "source_id": skill_id(edge.get("source")),
             "target_id": skill_id(edge.get("target")),
+        }
+        if isinstance(edge.get("runtime_evidence"), dict):
+            payload.update(
+                {
+                    "runtime_weight": edge.get("runtime_weight"),
+                    "planner_score": edge.get("effective_score"),
+                    "runtime_only": bool(edge.get("runtime_only")),
+                }
+            )
+        return payload
+
+    @staticmethod
+    def _inferred_edge_plan_item(
+        edge: tuple[str, str],
+        reason: str,
+    ) -> dict[str, Any]:
+        return {
+            "source_id": edge[0],
+            "target_id": edge[1],
+            "confidence": None,
+            "method": "fast_llm_inferred",
+            "port_mappings": [],
+            "source_outputs": [],
+            "target_inputs": [],
+            "reasons": [reason] if reason else [],
+            "reason": reason,
         }
 
     @staticmethod
@@ -494,9 +852,16 @@ class FastOneShotPlanner:
     @staticmethod
     def _normalize_selected_edges(raw_edges: Any) -> dict[str, Any]:
         if not isinstance(raw_edges, list):
-            return {"edges": [], "invalid": [raw_edges]}
+            return {
+                "edges": [],
+                "invalid": [raw_edges],
+                "duplicates": [],
+                "reasons": {},
+            }
         edges = []
         invalid = []
+        duplicates = []
+        reasons = {}
         for item in raw_edges:
             if not isinstance(item, dict):
                 invalid.append(item)
@@ -506,10 +871,20 @@ class FastOneShotPlanner:
             if not source or not target:
                 invalid.append(item)
                 continue
+            if source == target:
+                continue
             edge = (source, target)
-            if edge not in edges:
-                edges.append(edge)
-        return {"edges": edges, "invalid": invalid}
+            if edge in edges:
+                duplicates.append(edge)
+                continue
+            edges.append(edge)
+            reasons[edge] = str(item.get("reason") or "").strip()
+        return {
+            "edges": edges,
+            "invalid": invalid,
+            "duplicates": duplicates,
+            "reasons": reasons,
+        }
 
     @staticmethod
     def _normalize_missing_inputs(
@@ -547,25 +922,3 @@ class FastOneShotPlanner:
             ):
                 return str(item.get("reason") or "").strip()
         return ""
-
-    @staticmethod
-    def _normalize_candidate_skill_ids(
-        values: Sequence[str] | None,
-        *,
-        known_skill_ids: set[str],
-    ) -> tuple[str, ...] | None:
-        if values is None:
-            return None
-        output = []
-        seen = set()
-        for value in values:
-            current_skill_id = str(value or "").strip()
-            if (
-                not current_skill_id
-                or current_skill_id in seen
-                or current_skill_id not in known_skill_ids
-            ):
-                continue
-            seen.add(current_skill_id)
-            output.append(current_skill_id)
-        return tuple(output) if output else None

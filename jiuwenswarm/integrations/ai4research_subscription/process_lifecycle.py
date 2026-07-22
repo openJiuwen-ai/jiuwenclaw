@@ -193,11 +193,12 @@ async def terminate_process_group(
         except ProcessLookupError:
             pass
 
+    final_group_empty = os.name != "posix"
     try:
         async with asyncio.timeout_at(deadline):
             await wait_process_exit(process)
             if os.name == "posix":
-                await _wait_for_group_exit(
+                final_group_empty = await _wait_for_group_exit(
                     pgid,
                     deadline,
                     include_zombies=True,
@@ -209,18 +210,22 @@ async def terminate_process_group(
     remaining = process_group_snapshot(pgid)
     live_remaining = [member for member in remaining if member["state"] != "Z"]
     elapsed = max(0.0, loop.time() - started)
-    event = "group_reaped" if not remaining and process.returncode is not None else "cleanup_failed"
+    cleanup_complete = (
+        final_group_empty and not remaining and process.returncode is not None
+    )
+    live_group_empty = not live_remaining if remaining else final_group_empty
+    event = "group_reaped" if cleanup_complete else "cleanup_failed"
     observe(
         event,
         pgid=pgid,
-        group_empty=not remaining and process.returncode is not None,
-        live_group_empty=not live_remaining,
+        group_empty=cleanup_complete,
+        live_group_empty=live_group_empty,
         zombie_count=sum(member["state"] == "Z" for member in remaining),
         cleanup_elapsed_seconds=elapsed,
         cleanup_deadline_seconds=grace_seconds,
         process_scan_count=scans[0],
     )
-    if remaining or process.returncode is None:
+    if not cleanup_complete:
         raise ProcessTreeCleanupError(
             "Codex process ownership could not be closed before its deadline."
         )

@@ -237,10 +237,23 @@ def _get_model(temperature: float = 0.0) -> Any:
     mcc = entry.get("model_client_config", {})
     model_name = mcc.get("model_name", "")
     mcc_fields = {k: v for k, v in mcc.items() if k != "model_name"}
+    # 关闭 thinking：proactive 决策是轻量单轮 JSON 产出（skill 选择/痛点判断），
+    # 不需要思维链，开了反而拖慢 tick、占 token。与 symphony 其它模块（openai_api
+    # client、fast planner、tree llm_runtime、graph matcher）保持一致。
+    # ModelRequestConfig 的 model_config={"extra":"allow"}，extra_body 会经
+    # base_model_client._build_request_params 的 model_dump 透传到底层
+    # chat.completions.create(extra_body=...)。
     try:
         return Model(
             model_client_config=ModelClientConfig(**mcc_fields),
-            model_config=ModelRequestConfig(model=model_name, temperature=temperature),
+            model_config=ModelRequestConfig(
+                model=model_name,
+                temperature=temperature,
+                extra_body={
+                    "thinking": {"type": "disabled"},
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
+            ),
         )
     except Exception:
         return None

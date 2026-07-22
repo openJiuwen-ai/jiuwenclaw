@@ -5,12 +5,13 @@
  */
 
 import { useTranslation } from 'react-i18next';
-import { useTodoStore } from '../../stores';
+import { useChatStore, useTodoStore } from '../../stores';
 import { TodoItem } from './TodoItem';
 
 export function TodoList() {
   const { t } = useTranslation();
-  const { todos } = useTodoStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
 
   if (todos.length === 0) {
     return (

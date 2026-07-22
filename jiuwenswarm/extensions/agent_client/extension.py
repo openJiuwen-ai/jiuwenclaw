@@ -40,6 +40,7 @@ async def register_extensions(registry):
 
     frontend_endpoint = str(agent_client.get("frontend_endpoint") or "").strip()
     function_version_urn = str(agent_client.get("function_version_urn") or "").strip()
+    agent_namespace = str(agent_client.get("agent_namespace") or "default").strip() or "default"
     if not frontend_endpoint or not function_version_urn:
         raise ValueError(
             "gateway.agent_client.frontend_endpoint and function_version_urn are required in yuanrong mode"
@@ -51,6 +52,8 @@ async def register_extensions(registry):
             function_version_urn=function_version_urn,
             concurrency=int(agent_client.get("concurrency") or 1),
             invoke_timeout_s=float(agent_client.get("invoke_timeout_s") or 60.0),
+            agent_timeout_s=float(agent_client.get("agent_timeout_s") or 300.0),
+            agent_namespace=agent_namespace,
         )
     )
     registry.register_agent_server_client(ext)

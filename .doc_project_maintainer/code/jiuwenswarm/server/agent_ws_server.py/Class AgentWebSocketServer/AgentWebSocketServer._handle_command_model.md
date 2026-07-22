@@ -5,7 +5,7 @@ source: jiuwenswarm/server/agent_ws_server.py
 source_role: runtime_source
 audit_scope: default_health_audit
 class: AgentWebSocketServer
-signature: "_handle_command_model(ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None"
+signature: "_handle_command_model(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None"
 health:
   overall: risky
   name_behavior_match: partial
@@ -15,7 +15,7 @@ health:
   implementation_soundness: questionable
   boundary_safety: risky
   input_contract: weak
-  output_contract: implicit
+  output_contract: weak
   side_effects: explicit
   error_handling: partial
   state_mutation: global
@@ -24,11 +24,12 @@ health:
   observability: partial
   performance_risk: low
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:38:43Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:c00da85bb512fa02bdb985530f474c6e45c92c902a1c44beb7809979d495f5f0
   confidence: confirmed
   expired_reason: null
 issues:
@@ -37,40 +38,45 @@ issues:
     severity: medium
     status: open
     summary: "add_model and list behavior are stubs on the direct AgentServer path."
-    evidence: "add_model returns model_added without validating target or using params.config; the default branch returns available=['default-model'] while gateway-local handling performs real config validation and listing."
-    suggested_action: "Route model management through the gateway-local handler, or make AgentServer behavior match the durable config contract."
+    evidence: "Current add_model only string/strips target, logs it, and returns model_added even when blank; it. See AgentWebSocketServer._handle_command_model/risks.md#issue-001."
+    suggested_action: "Route through the gateway handler or implement its durable config contract."
   - id: ISSUE-002
     dimension: error_handling
     severity: high
     status: open
     summary: "switch_model can report applied=true after partial failure."
-    evidence: "os.environ is mutated before cache clear/reload; clear_config_cache and reload_agents_config exceptions are swallowed before an ok=true applied=true response is sent."
-    suggested_action: "Propagate reload failure or return applied=false/partial status, and validate env_updates before arbitrary global env writes."
+    evidence: "Current switch loops over arbitrary env_updates into os.environ, swallows cache-clear and reload. See AgentWebSocketServer._handle_command_model/risks.md#issue-002."
+    suggested_action: "Propagate reload failure or return applied=false/partial status, and validate env_updates before arbitrary global env."
   - id: ISSUE-003
     dimension: test_coverage
     severity: medium
     status: open
     summary: "The direct AgentServer switch_model path lacks coverage."
-    evidence: "Direct tests cover only no-action and add_model; they do not cover env mutation, missing env_updates, reload failure, or non-dict env_updates."
-    suggested_action: "Add focused unit tests for switch_model success, missing env_updates, reload failure, and config/list contract expectations."
-confidence: confirmed
-details: {}
+    evidence: "test_agentserver_cli_commands.py directly covers only no-action status and add_model. Switch success. See AgentWebSocketServer._handle_command_model/risks.md#issue-003."
+    suggested_action: "Add direct switch_model success, validation, and reload-failure tests."
+  - id: ISSUE-004
+    dimension: boundary_safety
+    severity: high
+    status: open
+    summary: "switch_model logging can expose API credentials."
+    evidence: "The switch log comprehension masks only the exact key API_KEY; VIDEO_API_KEY, VISION_API_KEY. See AgentWebSocketServer._handle_command_model/risks.md#issue-004."
+    suggested_action: "Use the shared sensitive-field masker before logging env_updates."
+  - id: ISSUE-005
+    dimension: state_mutation
+    severity: high
+    status: open
+    summary: "Process-global model switching has no serialization or rollback."
+    evidence: "The connection layer runs requests concurrently, while this method mutates os.environ key-by-key, clears. See AgentWebSocketServer._handle_command_model/risks.md#issue-005."
+    suggested_action: "Serialize model switches and apply validated updates transactionally, restoring the previous environment/cache state on."
 ---
 
-# `AgentWebSocketServer._handle_command_model`
+# AgentWebSocketServer._handle_command_model
 
 ## Actual Role
 
-Handles direct `command.model` requests by acknowledging `add_model`, applying `switch_model` environment updates to `os.environ`, clearing the memory config cache, asking `AgentManager` to reload config, or returning the current `MODEL_NAME` with a hard-coded fallback model list.
+The reviewed behavior, contracts, side effects, callers, callees, tests, and documentation evidence are preserved in the linked detail pages.
 
-## Key Signals
+## Audit Details
 
-- Input: `params.action` plus `target`, `model`, and `env_updates` for supported actions.
-- Output: One websocket response with model status, or an error payload.
-- Main side effects: Mutates process environment, clears config cache, calls agent config reload, logs, and sends a frame.
-- Main risk: Direct AgentServer behavior diverges from gateway/frontend model management and can report success after partial reload failure.
-- Related tests: Direct tests cover no-action and add_model only; gateway tests cover a separate model switch path.
-
-## Detail Index
-
-- Detail docs pending.
+- [Reviewed behavior](AgentWebSocketServer._handle_command_model/actual-behavior.md)
+- [Full issue evidence](AgentWebSocketServer._handle_command_model/risks.md)

@@ -2286,7 +2286,7 @@ class AutoHarnessService:
         Stacked activation flow:
         1. Load the new package config (stack on any existing active packages)
         2. Update metadata: add package_id to active_package_ids list
-        3. Broadcast to all agent.fast/agent.plan instances in the channel
+        3. Broadcast to all agent-mode instances in the channel
 
         Args:
             package_id: The package ID to activate
@@ -2343,7 +2343,7 @@ class AutoHarnessService:
             loaded_resources = await self._agent.load_harness_config(config_path)
             self.update_active_status(package_id, "add")
 
-            # Broadcast to all agent.fast/agent.plan instances (skip current, already loaded)
+            # Broadcast to all agent-mode instances (skip current, already loaded)
             if self._agent_manager:
                 await self._agent_manager.broadcast_package_change_to_single_agents(
                     package_id,
@@ -2364,7 +2364,7 @@ class AutoHarnessService:
                 "runtime_path": package.get("runtime_path", ""),
                 "config_path": config_path,
                 "loaded_resources": loaded_resources,
-                "message": f"扩展已热生效（规划与性能模式），加载资源: {len(loaded_resources)} 项",
+                "message": f"扩展已热生效（agent 模式），加载资源: {len(loaded_resources)} 项",
             }
         except FileNotFoundError as exc:
             raise ValueError(f"配置文件不存在: {exc}") from exc
@@ -2383,7 +2383,7 @@ class AutoHarnessService:
 
         Deactivation flow:
         1. Unload from current agent instance
-        2. Broadcast to all agent.fast/agent.plan instances in the channel
+        2. Broadcast to all agent-mode instances in the channel
         3. Update metadata: remove package_id from active_package_ids list
 
         Args:
@@ -2440,7 +2440,7 @@ class AutoHarnessService:
                     exc,
                 )
 
-        # Broadcast to all agent.fast/agent.plan instances before updating status
+        # Broadcast to all agent-mode instances before updating status
         if self._agent_manager and config_path and Path(config_path).exists():
             await self._agent_manager.broadcast_package_change_to_single_agents(
                 package_id,
@@ -2513,7 +2513,7 @@ class AutoHarnessService:
                         exc,
                     )
 
-            # Broadcast to all agent.fast/agent.plan instances
+            # Broadcast to all agent-mode instances
             if self._agent_manager and config_path and Path(config_path).exists():
                 await self._agent_manager.broadcast_package_change_to_single_agents(
                     package_id,

@@ -29,6 +29,7 @@ audit:
   audited_at: null
   audited_commit: null
   audited_source_hash: null
+  audited_symbol_hash: null
   confidence: confirmed
   expired_reason: null
 issues:
@@ -37,14 +38,14 @@ issues:
     severity: medium
     status: open
     summary: "Missing direct tests for stateless predicate and unary bypass behavior."
-    evidence: "Search found only the implementation and two call sites for _is_stateless_method_request; tests cover adjacent behavior such as ReqMethod.SKILLS_* enum values, _should_sync_code_mode_state for skills.list, and the symphony adapter handler directly."
+    evidence: "No test invokes this predicate. test_skills_list_does_not_sync_code_mode covers the separate _should_sync_code_mode_state helper, while symphony/skill tests exercise downstream handlers rather than the unary/stream bypass at lines 2149 and 2202."
     suggested_action: "Add parameterized tests for None, chat.*, skills.*, plugins.*, symphony.*, and skilldev contract cases; add a fake-agent _handle_unary test proving stateless requests use mode='agent' and skip code-mode preparation."
   - id: ISSUE-002
     dimension: input_contract
     severity: medium
     status: open
     summary: "skilldev prefix is currently unreachable through normal ReqMethod parsing."
-    evidence: "AgentRequest.req_method is typed as ReqMethod | None; E2A and legacy parsing convert strings with ReqMethod(value). ReqMethod currently lacks skilldev values, while skilldev service code references ReqMethod.SKILLDEV_* names."
+    evidence: "AgentRequest.req_method is ReqMethod | None and both wire paths construct ReqMethod(value). message.py defines skills/plugins/symphony values but no skilldev values, while skilldev/service.py references missing ReqMethod.SKILLDEV_* members."
     suggested_action: "Align the protocol contract: either add ReqMethod.SKILLDEV_* values plus tests, or remove/adjust skilldev from this stateless predicate until the enum and service dispatch are wired consistently."
 confidence: confirmed
 details: {}
@@ -54,7 +55,7 @@ details: {}
 
 ## Actual Role
 
-Pure routing predicate that returns true when an `AgentRequest` has a `ReqMethod` whose value starts with `skills.`, `skilldev.`, `plugins.`, or `symphony.`. Unary and streaming handlers use a true result to bypass mode parsing and code-mode state synchronization and send the request to an agent-mode JiuWenSwarm instance directly.
+Pure routing predicate that returns true when an `AgentRequest` has a non-null `ReqMethod` whose value starts with `skills.`, `skilldev.`, `plugins.`, or `symphony.`. Unary and streaming handlers use it to obtain a lightweight stateless agent and bypass mode parsing, adapter rebuild, and code-mode synchronization.
 
 ## Key Signals
 
@@ -62,7 +63,7 @@ Pure routing predicate that returns true when an `AgentRequest` has a `ReqMethod
 - Output: Boolean; true only for matching stateless RPC method prefixes.
 - Main side effects: None.
 - Main risk: The prefix list is hard-coded and can drift from `ReqMethod` and adapter route tables; `skilldev` is named here but no current `ReqMethod` skilldev values were found.
-- Related tests: Nearby tests cover selected skills enum values, skills.list code-mode sync, and symphony adapter RPC behavior; no direct predicate or real stateless unary-path test was found.
+- Related tests: Adjacent tests cover skills code-mode-sync exclusion and downstream symphony behavior; no direct prefix matrix or unary/stream stateless-bypass test was found.
 
 ## Detail Index
 

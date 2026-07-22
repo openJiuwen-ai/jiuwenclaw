@@ -32,11 +32,12 @@ Input:
 
 Process:
 
-1. start from the current visible subtree
-2. if the structure is trivial, use deterministic shortcuts
-3. otherwise ask the LLM to choose among the current visible boundary nodes
-4. recurse into selected branches or terminate on selected items
-5. reduce branch results to the requested `top_k`
+1. apply request tag filters to catalog leaves and prune empty tree branches
+2. start from the resulting visible subtree
+3. if the structure is trivial, use deterministic shortcuts
+4. otherwise ask the LLM to choose among the current visible boundary nodes
+5. recurse into selected branches or terminate on selected items
+6. reduce branch results to the requested `top_k`
 
 Important rules:
 

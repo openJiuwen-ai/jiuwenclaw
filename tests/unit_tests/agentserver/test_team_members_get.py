@@ -1,6 +1,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Tests for AgentWebSocketServer._handle_team_members_get (/join seat validation)."""
+"""Tests for AgentWebSocketServer._handle_team_members_get (/join seat validation).
+
+路线 B 后 server 退化为纯查询透传：mismatch 校验与对外文案均在 gateway，
+server 只查 member、过滤 human_agent、回 ok/members。查不到 → ok=False
+（payload 不带文案，gateway 拼"team 不存在"）。
+"""
 
 from __future__ import annotations
 
@@ -38,11 +43,15 @@ def _make_request(
 
 
 async def _invoke(
-    helpers_result: tuple[list[dict[str, Any]], str | None],
+    helpers_result: list[dict[str, Any]],
     team_name: str = "jiwen-team_sess-1",
     channel_id: str = "feishu",
 ):
-    """Call _handle_team_members_get with ``query_team_human_members_for_join`` mocked."""
+    """Call _handle_team_members_get with ``query_team_human_members_for_join`` mocked.
+
+    helpers_result 是 query_team_human_members_for_join 的新返回值（list[dict]，
+    未 role 过滤，由 server 过滤 human_agent）。
+    """
     from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_unary
     from jiuwenswarm.server import agent_ws_server
 
@@ -66,35 +75,37 @@ async def _invoke(
 
 
 @pytest.mark.anyio
-async def test_returns_members_and_team_name() -> None:
-    """helpers 返回 members + team_name → server 包进 payload。"""
+async def test_returns_human_agent_members() -> None:
+    """helpers 返回全部成员 → server 过滤 role==human_agent 后回传。"""
     members = [
-        {"member_id": "reviewer-1", "role": "human_agent", "name": "r", "status": "ready",
-         "execution_status": "idle", "mode": "build_mode"},
-        {"member_id": "pm-1", "role": "human_agent", "name": "p", "status": "ready",
-         "execution_status": "idle", "mode": "build_mode"},
+        {"member_id": "reviewer-1", "role": "human_agent"},
+        {"member_id": "leader-1", "role": "team_leader"},
+        {"member_id": "pm-1", "role": "human_agent"},
     ]
-    resp = await _invoke((members, "jiwen-team_sess-1"))
+    resp = await _invoke(members)
 
     assert resp.request_id == "req-1"
     assert resp.ok is True
     assert [m["member_id"] for m in resp.payload["members"]] == ["reviewer-1", "pm-1"]
-    assert resp.payload["team_name"] == "jiwen-team_sess-1"
+    # 路线 B 不再回传 team_name（gateway 不消费）
+    assert "team_name" not in resp.payload
 
 
 @pytest.mark.anyio
-async def test_empty_members_team_name_none() -> None:
-    """team_name 空或 helpers 返回空 → server 透传。"""
-    resp = await _invoke(([], None), team_name="")
+async def test_empty_members_returns_not_ok() -> None:
+    """helpers 返回空 list（team 不存在 / DB miss）→ server ok=False，不带文案。"""
+    resp = await _invoke([])
 
-    assert resp.ok is True
-    assert resp.payload == {"members": [], "team_name": None}
+    assert resp.ok is False
+    assert resp.payload.get("members") == []
 
 
 @pytest.mark.anyio
-async def test_empty_members_with_team_name() -> None:
-    """members 空但 team_name 有值 → server 仍回传 team_name（gateway 据此做一致性校验）。"""
-    resp = await _invoke(([], "jiwen-team_sess-1"))
+async def test_only_non_human_members_returns_not_ok() -> None:
+    """helpers 有成员但全是 team_leader（无 human_agent）→ 过滤后空 → ok=False。"""
+    resp = await _invoke([
+        {"member_id": "leader-1", "role": "team_leader"},
+    ])
 
-    assert resp.ok is True
-    assert resp.payload == {"members": [], "team_name": "jiwen-team_sess-1"}
+    assert resp.ok is False
+    assert resp.payload.get("members") == []

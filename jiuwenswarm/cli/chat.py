@@ -43,6 +43,7 @@ from jiuwenswarm.cli._terminal import write_stderr, write_stdout
 from jiuwenswarm.cli.gateway_client import GatewayClient
 from jiuwenswarm.cli.events import (
     event_kind,
+    is_content_final,
     is_terminal_event,
 )
 from jiuwenswarm.cli.render import HumanRenderer, JsonRenderer, JsonlRenderer
@@ -206,12 +207,14 @@ def _prompt_and_cleanup_dirs() -> None:
                 write_stderr(f"Failed to remove trusted directory: {d}\n")
 
 MODE_ALIASES: dict[str, str] = {
-    "agent": "agent.plan",
+    "plan": "agent",
+    "fast": "agent",
     "code": "code.normal",
 }
 
+# plan / fast 已合并为单一 agent 模式；agent.plan / agent.fast 作为历史别名仍可接受，归一到 agent。
 VALID_MODES = frozenset({
-    "agent.plan", "agent.fast", "code.plan", "code.normal", "code.team", "team",
+    "agent", "agent.plan", "agent.fast", "code.plan", "code.normal", "code.team", "team", "team.plan",
 })
 
 # Sources that require the answer to be sent via ``chat.send`` (streaming) to
@@ -228,6 +231,8 @@ def resolve_mode(raw: str) -> str:
     normalized = raw.strip().lower()
     if normalized in MODE_ALIASES:
         normalized = MODE_ALIASES[normalized]
+    if normalized in ("agent.plan", "agent.fast"):
+        normalized = "agent"
     if normalized in VALID_MODES:
         return normalized
     raise ValueError(
@@ -258,7 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--mode", default="code.normal",
-        help="Execution mode: agent|code|team|agent.plan|agent.fast|code.plan|code.normal|code.team"
+        help="Execution mode: agent|code|team|team.plan|code.plan|code.normal|code.team"
              " (default: code.normal).",
     )
     p.add_argument(
@@ -415,7 +420,7 @@ async def _run_interactive_loop(
     # We track plan_exited (set when plan.mode_exited is received) to
     # distinguish "agent finished implementing after approval" from "agent
     # ended turn with text, waiting for user follow-up".
-    plan_mode = request.get("params", {}).get("mode", "") in ("code.plan", "agent.plan")
+    plan_mode = request.get("params", {}).get("mode", "") in ("code.plan", "agent", "agent.plan")
     plan_exited = False
     # When we send an interrupt-resume answer (chat.send with source), the
     # previous stream's trailing chat.final / processing_status(False) may
@@ -633,6 +638,11 @@ async def _run_interactive_loop(
                 if payload.get("event_type") == "team.error":
                     renderer.handle_error(payload)
                     return 1
+                # Unknown/control event types are transported in a chat.final
+                # envelope. They must not consume HumanRenderer's one final
+                # slot or arm the team idle timer.
+                if not is_content_final(payload):
+                    continue
                 renderer.handle_final(payload)
                 # In team mode, the leader's chat.final is a turn boundary
                 # but not a terminal event.  Start the idle-watch timer so
@@ -1011,11 +1021,23 @@ def run_chat(args: argparse.Namespace) -> int:
         logger.error("no prompt provided and stdin is empty")
         return 2
 
-    # Check for newly persisted dirs before sending the message,
-    # so the user gets a chance to clean up from previous sessions.
-    _prompt_and_cleanup_dirs()
+    # Ctrl+C during the synchronous startup phase (before _run_interactive_loop
+    # installs its async SIGINT handler) would otherwise bubble up as a raw
+    # KeyboardInterrupt traceback. Mirror the TUI's keymap.ts behavior: print
+    # a friendly hint and exit with the conventional 128+SIGINT code instead.
+    # The TUI uses a 3-second double-press-to-exit window, but that requires
+    # an event loop already pumping input — the CLI sync phase has none, so a
+    # single Ctrl+C exits cleanly. Once asyncio.run starts, the in-loop
+    # handler takes over with its own double-press semantics.
+    try:
+        # Check for newly persisted dirs before sending the message,
+        # so the user gets a chance to clean up from previous sessions.
+        _prompt_and_cleanup_dirs()
 
-    return asyncio.run(_run_chat(args, prompt))
+        return asyncio.run(_run_chat(args, prompt))
+    except KeyboardInterrupt:
+        logger.warning("Interrupted. Exiting (press Ctrl+C again during chat to cancel a running task).")
+        return 130
 
 
 def _run_repl(args: argparse.Namespace) -> int:

@@ -32,6 +32,7 @@ parse_dotenv_early("jiuwenswarm-web")
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
 from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
+from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
 from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
     get_agent_sessions_dir, get_root_dir, get_user_workspace_dir, is_package_installation, wait_for_tcp_port
@@ -828,6 +829,34 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self._write_json(200, {"files": files})
             return
 
+        if path == "/file-api/raw-file":
+            file_arg = query.get("path", "")
+            if not file_arg:
+                self._write_json(400, {"error": "missing_file_path"})
+                return
+            full_path = (self.project_root / file_arg).resolve()
+            if not self._is_path_under_allowed_root(full_path):
+                self._write_json(403, {"error": "forbidden_path"})
+                return
+            if not full_path.is_file():
+                self._write_json(404, {"error": "file_not_found"})
+                return
+
+            mime_type, _ = mimetypes.guess_type(full_path.name)
+            self.send_response(200)
+            self.send_header("Content-Type", mime_type or "application/octet-stream")
+            self.send_header("Content-Length", str(full_path.stat().st_size))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command != "HEAD":
+                with full_path.open("rb") as file_obj:
+                    while True:
+                        chunk = file_obj.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            return
+
         if path == "/file-api/file-content":
             file_arg = query.get("path", "")
             encoding_arg = query.get("encoding", "utf-8")
@@ -1218,6 +1247,8 @@ def main() -> None:
         help="Load environment from .env file (processed at startup, not used here).",
     )
     args = parser.parse_args()
+
+    install_async_dump_handler("web")
 
     dist_dir = Path(args.dist).expanduser().resolve()
     if not dist_dir.exists():

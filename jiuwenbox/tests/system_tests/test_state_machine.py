@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from tests.system_tests.test_config import TestConfig
 from tests.system_tests.test_utils import StateMachineValidator, ChaosInjector
 
 
@@ -20,7 +21,7 @@ _PROVISIONING_ERROR_POLICY = {
     "network": {
         "mode": "isolated",
         "egress": {"default": "allow"},
-        "uplink": {"subnet": "169.254.0.0/24"},
+        "uplink": {"subnet": TestConfig.PROVISIONING_ERROR_SUBNET},
     },
     "environment": {"PATH": "/opt/python3.11/bin:/usr/local/bin:/usr/bin:/bin"},
 }
@@ -282,7 +283,7 @@ class TestStateMachineInvalidTransitions:
         resp = client.post(
             f"/api/v1/sandboxes/{sandbox_id}/exec",
             json={
-                "command": ["python3", "-c", "import os; os._exit(0)"],
+                "command": ["python3", "-c", "import sys; sys.exit(0)"],
                 "timeout_seconds": 5,
             },
         )

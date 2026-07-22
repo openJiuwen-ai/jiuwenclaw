@@ -7,7 +7,7 @@ audit_scope: default_health_audit
 class: AgentWebSocketServer
 signature: "_handle_unary(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None"
 health:
-  overall: watch
+  overall: risky
   name_behavior_match: good
   responsibility_focus: mixed
   length: medium
@@ -24,11 +24,12 @@ health:
   observability: clear
   performance_risk: low
 audit:
-  status: unaudited
-  auditor: null
-  audited_at: null
-  audited_commit: null
-  audited_source_hash: null
+  status: agent_audited
+  auditor: codex
+  audited_at: 2026-07-14T11:37:47Z
+  audited_commit: 39feee89e00dc6b0b6a6b16ca80a527beb631bd7
+  audited_source_hash: sha256:5fbbae5104a1791ca98014aeed0b81fea243b57dcd2faac3f8f37886833c4fa5
+  audited_symbol_hash: sha256:9b7fd3efb8a44f6abdb8414dd5d632e92b304e1d3deb58ea45884b31562030d8
   confidence: confirmed
   expired_reason: null
 issues:
@@ -37,14 +38,14 @@ issues:
     severity: medium
     status: open
     summary: "Post-process plan-exit check can mask the original agent failure."
-    evidence: "_handle_unary awaits _check_post_process_plan_exit in a finally block after agent.process_message; if both raise, the post-process exception replaces the original failure before _handle_message builds the error response."
+    evidence: "Current source awaits agent.process_message inside try and awaits _check_post_process_plan_exit unguarded in finally; if both raise, Python propagates the finally exception and _handle_message's outer error response loses the original agent failure."
     suggested_action: "Guard post-process plan-exit checking so it logs its own failure without masking process_message exceptions."
   - id: ISSUE-002
     dimension: test_coverage
     severity: medium
     status: open
     summary: "No direct tests exercise the real _handle_unary success and send-failure branches."
-    evidence: "Existing closed-WebSocket tests override _handle_unary to raise; encoder and outer dispatcher paths are covered, but real stateless and code-mode unary paths are not directly verified."
+    evidence: "test_agent_ws_connection_close overrides _handle_unary to raise, plan-mode tests cover helper methods, and test_ws_send directly exercises only _handle_stream; no located test invokes the real stateless or code-mode _handle_unary body."
     suggested_action: "Add direct fake-agent tests for stateless success, code-mode success, process_message exception, and send failure propagation through _handle_message."
 confidence: confirmed
 details: {}
@@ -54,15 +55,15 @@ details: {}
 
 ## Actual Role
 
-Handles non-stream requests by routing initialize/session/tool-response methods to dedicated handlers, sending stateless skill/plugin requests directly to an agent, and otherwise preparing code-mode state before `agent.process_message`. It encodes and sends one E2A response, leaving closed-WebSocket and generic error normalization to `_handle_message`.
+Routes non-stream initialize, session-create/fork, and ACP tool-response requests to dedicated handlers. Stateless methods use the lightweight agent directly; other requests prepare mode/agent state, reconcile plan mode, invoke `process_message`, run the plan-exit check, preserve or fill `agent_ref`, then encode and send one bounded response under the connection lock. `_handle_message` owns cancellation, closed-socket, and generic-error normalization.
 
 ## Key Signals
 
-- Input: non-stream `AgentRequest`.
-- Output: one E2A response frame.
-- Main side effects: agent invocation, possible code-mode state restore and plan-mode exit push.
-- Main risk: post-process plan-exit checks share the same exception boundary as agent processing.
-- Related tests: ACP and CLI command tests, mode tests, wire codec tests; direct real `_handle_unary` tests are missing.
+- Input: non-stream `AgentRequest`, WebSocket, and the connection send lock.
+- Output: `None` after delegation or after one normal/fallback bounded wire frame is sent.
+- Main side effects: resolves/creates an agent, may persist mode and push plan-exit state, invokes the agent, fills a missing response `agent_ref`, and sends on the WebSocket.
+- Main risk: plan-exit post-processing can replace the original `process_message` exception.
+- Related tests: `test_plan_mode_orchestration.py` covers helpers, `test_agent_ws_connection_close.py` covers outer disconnect handling through an override, and `test_ws_send.py` covers stream/bounded sending. No direct real-body unary success, agent failure, post-process double-failure, or send-failure test was found. The linked Gateway-AgentServer flow remains partial.
 
 ## Detail Index
 

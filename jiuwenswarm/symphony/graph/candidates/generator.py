@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, MutableMapping, Set, Tuple
 from jiuwenswarm.symphony.fingerprint.models import (
     ArtifactSpec,
     ParameterSpec,
-    SkillFingerprint,
+    Fingerprint,
 )
 from jiuwenswarm.symphony.fingerprint.normalize.data_type_vocab import (
     DataTypeVocabulary,
@@ -61,7 +61,7 @@ class CandidateGenerator:
     def __init__(
         self,
         *,
-        max_candidates_per_skill_relation: int = 12,
+        max_candidates_per_skill_relation: int = 32,
         max_port_mappings_per_candidate: int = 12,
         generic_io_names: Iterable[str] = IO_NAMES_EXCLUDED_FROM_EDGE_BUILDING,
         max_exact_io_pair_fanout: int = 64,
@@ -186,7 +186,7 @@ class CandidateGenerator:
 
     def _add_semantic_overlap_candidates(
         self,
-        skills: List[SkillFingerprint],
+        skills: List[Fingerprint],
         skill_terms: Dict[str, Set[str]],
         candidates: MutableMapping[Tuple[str, str], RelationCandidate],
     ) -> None:
@@ -245,7 +245,7 @@ class CandidateGenerator:
 
     def _add_textual_coercion_candidates(
         self,
-        skills: List[SkillFingerprint],
+        skills: List[Fingerprint],
         skill_terms: Dict[str, Set[str]],
         candidates: MutableMapping[Tuple[str, str], RelationCandidate],
     ) -> None:
@@ -330,6 +330,7 @@ class CandidateGenerator:
                 buckets[key],
                 key=lambda item: (
                     -PRIORITY_RANK.get(item.priority, 0),
+                    _candidate_quality_rank(item),
                     item.target_id,
                     ",".join(item.relation_hints),
                 ),
@@ -372,7 +373,7 @@ class CandidateIndexes:
         )
 
     @classmethod
-    def from_skills(cls, skills: Iterable[SkillFingerprint]) -> "CandidateIndexes":
+    def from_skills(cls, skills: Iterable[Fingerprint]) -> "CandidateIndexes":
         indexes = cls()
         for skill in skills:
             for output in skill.outputs:
@@ -512,6 +513,35 @@ def _limit_port_mappings_for_candidate(
     )
 
 
+def _candidate_quality_rank(candidate: RelationCandidate) -> tuple[int, int, int, int]:
+    port_mapping_count = 0
+    content_input_count = 0
+    for evidence in dict(candidate.evidence.get("directions", {})).values():
+        if not isinstance(evidence, dict):
+            continue
+        mappings = [
+            mapping
+            for mapping in evidence.get("port_mappings", [])
+            if isinstance(mapping, dict)
+        ]
+        port_mapping_count += len(mappings)
+        for mapping in mappings:
+            target_input = str(mapping.get("target_input") or "")
+            if target_input in GENERIC_CONTENT_INPUT_NAMES:
+                content_input_count += 1
+        for item in evidence.get("target_inputs", []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("name") or "") in GENERIC_CONTENT_INPUT_NAMES:
+                content_input_count += 1
+    return (
+        -len(set(candidate.candidate_methods)),
+        -int(port_mapping_count > 0),
+        -port_mapping_count,
+        -content_input_count,
+    )
+
+
 def _dedupe_port_mappings(values: List[dict]) -> List[dict]:
     seen = set()
     result = []
@@ -573,7 +603,7 @@ def _debug_candidate_generated(
 _DATA_TYPE_VOCAB = DataTypeVocabulary.default()
 
 
-def _skill_terms(skill: SkillFingerprint) -> Set[str]:
+def _skill_terms(skill: Fingerprint) -> Set[str]:
     terms: Set[str] = set()
     chunks = [skill.id, skill.name, skill.description]
     chunks.extend(item.name for item in skill.inputs)

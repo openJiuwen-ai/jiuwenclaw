@@ -15,6 +15,7 @@ Code 模式独占逻辑全部收敛于此：
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -74,7 +75,10 @@ from jiuwenswarm.common.coding_memory_paths import (
 from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import CodeAgentRail
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
-from jiuwenswarm.common.utils import get_agent_workspace_dir
+from jiuwenswarm.common.utils import (
+    get_agent_workspace_dir,
+    get_default_project_session_workspace_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -510,7 +514,30 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 
-        await self._instance.ensure_initialized()
+        # 改动3：让 agent 初始化（ensure_initialized）在独立线程 + 独立事件循环里跑，
+        # 主事件循环在初始化的十几秒里保持响应，esc 的 cancel 不再堵队列、后端能尽快停。
+        #
+        # 为什么不能直接 `await self._instance.ensure_initialized()`：
+        #   ensure_initialized 是 async def（openjiuwen/harness/deep_agent.py:864），但它内部
+        #   _ensure_initialized 里有同步阻塞段——init_workspace()（建目录）、rail_inst.init(self)
+        #   （各 rail init，ProjectMemoryRail 扫描项目记忆文件/建索引就在这）。这些是 CPU/磁盘密集
+        #   的同步调用，跑时不 yield 事件循环，主事件循环被占住，WebSocket recv() 读不进 esc 的
+        #   cancel 消息——用户按 esc 后后端要等十几秒才停（真 bug，日志 14:25:30→50 坐实）。
+        #
+        # 为什么不能用 asyncio.to_thread：to_thread 只能包同步函数；ensure_initialized 是 async def，
+        # 直接传会在无运行 loop 的线程里报错。必须用 asyncio.run 在子线程里另起独立 loop 来跑它。
+        #
+        # 做法：run_in_executor 把"在子线程跑 asyncio.run(ensure_initialized())"丢到线程池，
+        # 主事件循环 await 这个 future 时保持响应，期间能读取并处理 esc 的 cancel。
+        # 跑完后回主 loop 继续后续代码，时序与语义不变；唯一变化是初始化期间主 loop 活。
+        #
+        # 安全性：ensure_initialized 操作的是 self._pending_rails、workspace 文件等实例自己的资源，
+        # 不碰全局 asyncio 原语，不跨 loop 访问主 loop 对象，不会死锁。
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: asyncio.run(self._instance.ensure_initialized()),
+        )
         # 修正 .agent_history 写入路径：openjiuwen 文件工具默认将
         # .agent_history 写到 Workspace.root_path（即项目目录），
         # 这里覆写为 agent 系统 workspace，避免污染用户项目目录。
@@ -518,19 +545,22 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             for tool in getattr(rail, 'tools', []) or []:
                 if hasattr(tool, '_workspace_path'):
                     setattr(tool, '_workspace_path', self._agent_workspace_dir)
-        initial_workspace = self._project_dir or self._workspace_dir
+        initial_workspace = self._project_dir or str(
+            get_default_project_session_workspace_dir()
+        )
+        self._ensure_project_gitignore_agent_history(initial_workspace)
         self._seed_runtime_cwd(initial_workspace, workspace=initial_workspace)
 
         setattr(self._instance, "_jiuwenswarm_adapter_mode", "code")
         setattr(
             self._instance,
             "_jiuwenswarm_code_project_dir",
-            self._project_dir or self._workspace_dir,
+            initial_workspace,
         )
         setattr(
             self._instance,
             "_jiuwenswarm_project_dir",
-            self._project_dir or self._workspace_dir,
+            initial_workspace,
         )
 
         # code 模式不传: vision_model_config, audio_model_config,
@@ -667,6 +697,19 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 )
         except Exception as e:
             logger.warning("[JiuwenSwarmCodeAdapter] Failed to load UserHookRail: %s", e)
+        # Observability rail: opens an agent-layer span (agent.<name>.task_iteration.<n>
+        # for task-loop runs, or agent.<name>.invoke for single-round) under the root
+        # run span per iteration/round. It is the only thing that creates the
+        # task_iteration / invoke spans that llm.call + tool.* nest under. It
+        # self-disables (before_* returns early when get_team_span() is None), so
+        # attaching it unconditionally is safe and also adapts to runtime
+        # enable/disable of agent_observability without rebuilding the agent.
+        try:
+            from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+            rails_list.append(ObservabilityRail())
+            logger.info("[JiuwenSwarmCodeAdapter] ObservabilityRail attached")
+        except Exception as e:
+            logger.warning("[JiuwenSwarmCodeAdapter] Failed to attach ObservabilityRail: %s", e)
         return rails_list
 
     # ─── Code 专属 Rail 构建 ────────────────
@@ -685,7 +728,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """构建 CodeAgentModeRail。
 
         与 Claude Code 对齐：
-        - ``plan_mode_system_note``: 静态注入 system prompt（KV-cache 友好），
+        - ``plan_mode_attachment_note``: 通过 prompt attachment 注入 plan 提示，
+          不修改 system prompt，保持 KV-cache 稳定，
           告知 LLM 必须先调 ``enter_plan_mode``。
         - ``enter_plan_instructions``: 追加到 ``enter_plan_mode`` 的 tool_result，
           包含完整的 5-phase 工作流说明（指令在对话中，不在 system prompt）。
@@ -699,7 +743,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
             return CodeAgentModeRail(
                 allowed_tools=_CODE_PLAN_ALLOWED_TOOLS,
-                plan_mode_system_note=_PLAN_MODE_SYSTEM_NOTE,
+                plan_mode_attachment_note=_PLAN_MODE_SYSTEM_NOTE,
                 enter_plan_instructions=_ENTER_PLAN_MODE_INSTRUCTIONS_EN,
                 exit_plan_notification=_EXIT_PLAN_MODE_NOTIFICATION,
             )
@@ -1046,7 +1090,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         # ── 自定义 agent 不加入 deep_config.subagents ──
         # Code 模式下，自定义 agent 由 CodeAgentRail 的 Agent 工具管理，
         # 不走 SubagentRail 的 task_tool 路径。
-        # （agent.plan / agent.fast 模式仍由 interface_deep.py 的 _load_custom_subagents 管理）
+        # （agent 模式仍由 interface_deep.py 的 _load_custom_subagents 管理）
 
         return subagents or None, False
 
@@ -1157,17 +1201,13 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             raise RuntimeError("JiuwenSwarmCodeAdapter 未初始化，请先调用 create_instance()")
 
         project_workspace = (
-            runtime_config.project_dir
-            or self._project_dir
-            or self._workspace_dir
-        )
-        self._seed_runtime_cwd(
-            runtime_config.cwd
+            runtime_config.workspace
             or runtime_config.project_dir
             or self._project_dir
-            or self._workspace_dir,
-            workspace=project_workspace,
+            or str(get_default_project_session_workspace_dir(runtime_config.session_id))
         )
+        task_cwd = runtime_config.cwd or project_workspace
+        self._seed_runtime_cwd(task_cwd, workspace=project_workspace)
         resolved_language = self._resolve_runtime_language()
         resolved_channel = str(runtime_config.channel_id or
                                self._resolve_prompt_channel(runtime_config.session_id) or "web").strip() or "web"
@@ -1179,7 +1219,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             self._runtime_prompt_rail.set_mode(runtime_config.mode)
             self._runtime_prompt_rail.set_trusted_dirs(runtime_config.trusted_dirs)
             self._runtime_prompt_rail.set_runtime_paths(
-                cwd=runtime_config.cwd,
+                cwd=task_cwd,
                 project_dir=runtime_config.project_dir or self._project_dir,
             )
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
@@ -1201,7 +1241,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             channel=resolved_channel,
             session_id=runtime_config.session_id,
             project_dir=runtime_config.project_dir
-            or runtime_config.cwd
+            or task_cwd
             or self._project_dir
             or self._workspace_dir,
         )

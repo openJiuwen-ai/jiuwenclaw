@@ -6,7 +6,7 @@
 
 import { useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useTodoStore, useSessionStore } from '../../stores';
+import { useChatStore, useTodoStore, useSessionStore } from '../../stores';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 
 interface MemberTaskDrawerProps {
@@ -43,7 +43,7 @@ const ChevronIcon = ({ expanded }: { expanded: boolean }) => (
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
-    className={`transition-transform duration-200 ${expanded ? '' : '-rotate-90'}`}
+    className={`  ${expanded ? '' : '-rotate-90'}`}
   >
     <path d="M18 15l-6-6-6 6" />
   </svg>
@@ -58,7 +58,10 @@ const TaskStatusIcon = ({ status }: { status: string }) => {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
         </svg>
       );
+    // Running family: execution plus the planning / in_review gates.
     case 'in_progress':
+    case 'planning':
+    case 'in_review':
       return (
         <svg className="w-4 h-4 text-blue-500 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -91,11 +94,11 @@ interface CollapsibleTaskGroupProps {
 
 function CollapsibleTaskGroup({ title, count, expanded, onToggle, children }: CollapsibleTaskGroupProps) {
   return (
-    <div className="border-b border-border bg-white">
+    <div className="border-b border-border bg-card">
       {/* 标题栏 */}
       <button
         onClick={onToggle}
-        className="w-full flex items-center justify-between px-4 py-3 bg-white hover:bg-gray-50 transition-colors"
+        className="w-full flex items-center justify-between px-4 py-3 bg-card hover:bg-gray-50 "
       >
         <div className="flex items-center gap-2">
           <h3 className="text-sm font-medium text-text">{title}</h3>
@@ -109,7 +112,7 @@ function CollapsibleTaskGroup({ title, count, expanded, onToggle, children }: Co
       <div className="border-t border-border" />
       {/* 内容区域 */}
       {expanded && (
-        <div className="px-4 py-3 bg-white space-y-3">
+        <div className="px-4 py-3 bg-card space-y-3">
           {children}
         </div>
       )}
@@ -119,8 +122,9 @@ function CollapsibleTaskGroup({ title, count, expanded, onToggle, children }: Co
 
 export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
   const { t } = useTranslation();
-  const { todos } = useTodoStore();
-  const { teamTaskEvents } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
+  const teamTaskEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTaskEvents ?? []);
 
   const [inProgressExpanded, setInProgressExpanded] = useState(true);
   const [completedExpanded, setCompletedExpanded] = useState(false);
@@ -158,8 +162,9 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
     return Array.from(taskMap.values());
   }, [todos, teamTaskEvents, memberId]);
 
-  // 按状态分组
-  const inProgressTasks = memberTasks.filter(t => t.status === 'in_progress');
+  // 按状态分组：planning / in_review 两个门控态归入"进行中"
+  const inProgressStatuses = new Set(['in_progress', 'planning', 'in_review']);
+  const inProgressTasks = memberTasks.filter(t => inProgressStatuses.has(t.status));
   const completedTasks = memberTasks.filter(t => t.status === 'completed');
   const pendingTasks = memberTasks.filter(t => t.status === 'pending' || t.status === 'queued');
 
@@ -182,7 +187,7 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
       {/* 抽屉面板 */}
       <div className="relative w-[420px] max-w-full h-full bg-bg shadow-xl flex flex-col animate-slide-in-right">
         {/* 头部 */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-white">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-card">
           <div className="flex items-center gap-3">
             <TeamMemberAvatar
               member={memberId}
@@ -197,7 +202,7 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-secondary/50 transition-colors"
+            className="p-1.5 rounded-lg hover:bg-secondary/50 "
           >
             <svg className="w-5 h-5 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -206,7 +211,7 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
         </div>
 
         {/* 任务统计 */}
-        <div className="px-4 py-3 bg-white border-b border-border">
+        <div className="px-4 py-3 bg-card border-b border-border">
           <div className="grid grid-cols-3 gap-4 text-center">
             <div>
               <div className="text-lg font-semibold text-text">{inProgressTasks.length}</div>

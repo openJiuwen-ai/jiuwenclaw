@@ -107,9 +107,21 @@ def _valid_jsonl(payload: dict | None = None) -> bytes:
     return ("\n".join(json.dumps(event) for event in events) + "\n").encode()
 
 
+def _pid_exists(pid: int) -> bool:
+    if Path("/proc").is_dir():
+        return Path(f"/proc/{pid}").exists()
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 async def _wait_for_posix_pids_to_exit(pids: list[int]) -> None:
     for _ in range(100):
-        if all(not Path(f"/proc/{pid}").exists() for pid in pids):
+        if all(not _pid_exists(pid) for pid in pids):
             return
         await asyncio.sleep(0.01)
 
@@ -458,6 +470,87 @@ def test_gateway_log_json_removes_nested_codex_auth_payloads_and_capabilities() 
     assert "[redacted]" in logged
 
 
+def test_gateway_log_json_redacts_provider_credentials_and_exception_messages() -> None:
+    canaries = {
+        "openai": "openai-api-key-canary",
+        "openai_value": "openai-api-key-value-canary",
+        "openrouter": "openrouter-api-key-canary",
+        "auth_token": "vendor-auth-token-canary",
+        "secret": "service-secret-canary",
+        "password": "database-password-canary",
+        "aws": "aws-access-key-canary",
+        "google": "google-credentials-canary",
+        "azure": "azure-key-canary",
+        "cookie": "cookie-value-canary",
+        "set_cookie": "set-cookie-value-canary",
+        "exception": "exception-message-canary",
+        "secretary": "secretary-name-canary",
+        "public_key": "github-public-key-canary",
+    }
+    logged = _to_json(
+        {
+            "request_id": "safe-request-id",
+            "channel": "web",
+            "method": "chat.send",
+            "model_name": "safe-model",
+            "usage": {
+                "input_tokens": 17,
+                "output_tokens": 3,
+                "token_count": 20,
+                "canonical_model_key": "safe-model#0",
+            },
+            "env": {
+                "OPENAI_API_KEY": canaries["openai"],
+                "OPENAI_API_KEY_VALUE": canaries["openai_value"],
+                "oPeNrOuTeR_aPi_KeY": canaries["openrouter"],
+                "VENDOR_AUTH_TOKEN": canaries["auth_token"],
+                "SERVICE_SECRET_BACKUP": canaries["secret"],
+                "DATABASE_PASSWORD_HASH": canaries["password"],
+                "AWS_ACCESS_KEY_ID": canaries["aws"],
+                "GOOGLE_APPLICATION_CREDENTIALS": canaries["google"],
+                "azureOpenAIKey": canaries["azure"],
+                "Cookie": canaries["cookie"],
+                "Set-Cookie": canaries["set_cookie"],
+                "secretary_name": canaries["secretary"],
+                "github_public_key": canaries["public_key"],
+            },
+            "nested": [
+                {"safe_field": "safe-value"},
+                RuntimeError(canaries["exception"]),
+            ],
+        }
+    )
+    decoded = json.loads(logged)
+
+    secret_canaries = {
+        value
+        for key, value in canaries.items()
+        if key not in {"secretary", "public_key"}
+    }
+    assert all(canary not in logged for canary in secret_canaries)
+    assert decoded["env"]["secretary_name"] == canaries["secretary"]
+    assert decoded["env"]["github_public_key"] == canaries["public_key"]
+    assert all(
+        value == "[redacted]"
+        for key, value in decoded["env"].items()
+        if key not in {"secretary_name", "github_public_key"}
+    )
+    assert decoded["nested"] == [
+        {"safe_field": "safe-value"},
+        "[redacted exception: RuntimeError]",
+    ]
+    assert decoded["request_id"] == "safe-request-id"
+    assert decoded["channel"] == "web"
+    assert decoded["method"] == "chat.send"
+    assert decoded["model_name"] == "safe-model"
+    assert decoded["usage"] == {
+        "canonical_model_key": "safe-model#0",
+        "input_tokens": 17,
+        "output_tokens": 3,
+        "token_count": 20,
+    }
+
+
 def test_jsonl_parser_decodes_schema_safe_tool_arguments() -> None:
     result = parse_codex_jsonl(
         _valid_jsonl(
@@ -712,11 +805,8 @@ time.sleep(60)
             timeout=0.1,
         )
     pids = json.loads((tmp_path / "pids.json").read_text(encoding="utf-8"))
-    for _ in range(100):
-        if all(not Path(f"/proc/{pid}").exists() for pid in pids):
-            break
-        await asyncio.sleep(0.01)
-    assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+    await _wait_for_posix_pids_to_exit(pids)
+    assert all(not _pid_exists(pid) for pid in pids)
     assert list(profile.turns_dir.iterdir()) == []
 
 
@@ -1224,7 +1314,7 @@ time.sleep(60)
 
     pids = json.loads(pid_path.read_text(encoding="utf-8"))
     await _wait_for_posix_pids_to_exit(pids)
-    assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+    assert all(not _pid_exists(pid) for pid in pids)
     assert list(profile.turns_dir.iterdir()) == []
     lock_handle = await _acquire_profile_lock_eventually(profile)
     release_profile_lock(lock_handle)
@@ -1299,7 +1389,7 @@ for event in [
 
     pids = json.loads(pid_path.read_text(encoding="utf-8"))
     await _wait_for_posix_pids_to_exit(pids)
-    assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+    assert all(not _pid_exists(pid) for pid in pids)
     assert list(profile.turns_dir.iterdir()) == []
     lock_handle = await _acquire_profile_lock_eventually(profile)
     release_profile_lock(lock_handle)
@@ -1387,7 +1477,7 @@ for line in sys.stdin:
 
     pid = int((tmp_path / "auth-timeout-pid").read_text(encoding="utf-8"))
     await _wait_for_posix_pids_to_exit([pid])
-    assert not Path(f"/proc/{pid}").exists()
+    assert not _pid_exists(pid)
     profile = ensure_codex_profile()
     lock_handle = await _acquire_profile_lock_eventually(profile)
     release_profile_lock(lock_handle)
@@ -1442,7 +1532,7 @@ for line in sys.stdin:
 
     pid = int((tmp_path / "auth-reader-exit-pid").read_text(encoding="utf-8"))
     await _wait_for_posix_pids_to_exit([pid])
-    assert not Path(f"/proc/{pid}").exists()
+    assert not _pid_exists(pid)
     profile = ensure_codex_profile()
     lock_handle = await _acquire_profile_lock_eventually(profile)
     release_profile_lock(lock_handle)
@@ -1493,7 +1583,7 @@ for line in sys.stdin:
     await controller.shutdown()
     pid = int((tmp_path / "auth-shutdown-pid").read_text(encoding="utf-8"))
     await _wait_for_posix_pids_to_exit([pid])
-    assert not Path(f"/proc/{pid}").exists()
+    assert not _pid_exists(pid)
     lock_handle = await _acquire_profile_lock_eventually(profile)
     release_profile_lock(lock_handle)
 
@@ -1613,6 +1703,6 @@ raise SystemExit({exit_code})
     pid = int((tmp_path / f"canary-pid-{exit_code}").read_text(encoding="utf-8"))
     if os.name == "posix":
         await _wait_for_posix_pids_to_exit([pid])
-        assert not Path(f"/proc/{pid}").exists()
+        assert not _pid_exists(pid)
     lock_handle = await _acquire_profile_lock_eventually(profile)
     release_profile_lock(lock_handle)

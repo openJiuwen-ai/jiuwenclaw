@@ -4,12 +4,15 @@
 
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Minimize2, Users } from 'lucide-react';
-import { useSessionStore, useTodoStore } from '../../stores';
+import { FileCheck2, FileText, Minimize2 } from 'lucide-react';
+import type { ReactNode } from 'react';
+import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
 import type { Message } from '../../types';
+import { ArtifactsPanel, useSessionArtifactsCount } from '../ArtifactsPanel';
 import { TaskPlanningPanel } from './TaskPlanningPanel';
 import { TeamMembersPanel } from './TeamMembersPanel';
 import teamProcessIcon from '../../assets/team-process.svg';
+import teamIcon from '../../assets/team.svg';
 import {
   normalizeTaskStatus,
   type TabType,
@@ -17,10 +20,20 @@ import {
   type TeamAreaProps,
   type TeamMember,
 } from './shared';
+import { getTasksForCurrentProgress } from '../../features/teamTaskProgressBaseline';
 
 function useTaskPlanningMetrics() {
-  const { todos } = useTodoStore();
-  const { teamTaskEvents, teamTasks } = useSessionStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const todos = useTodoStore((s) => s.runtimes[activeSessionId ?? '']?.todos ?? []);
+  const teamTaskEvents = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTaskEvents ?? []);
+  const teamTasks = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTasks ?? []);
+  const taskProgressBaseline = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamTaskProgressBaseline);
+  const progressTasks = useMemo(
+    () => taskProgressBaseline
+      ? getTasksForCurrentProgress(teamTasks, taskProgressBaseline)
+      : teamTasks,
+    [taskProgressBaseline, teamTasks]
+  );
 
   const totalTasks = useMemo(() => {
     if (teamTasks.length > 0) return teamTasks.length;
@@ -48,7 +61,7 @@ function useTaskPlanningMetrics() {
     return completed.size;
   }, [teamTaskEvents, teamTasks, todos]);
 
-  return { completedTasks, teamTasks, totalTasks };
+  return { completedTasks, progressTasks, teamTasks, totalTasks };
 }
 
 function CompactTeamArea({
@@ -58,13 +71,14 @@ function CompactTeamArea({
   members: TeamMember[];
   onExpand?: (tab: TabType, memberId?: string) => void;
 }) {
-  const { completedTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
+  const { completedTasks, progressTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
 
   return (
     <>
       <TaskPlanningPanel
         variant="compact"
         tasks={teamTasks}
+        progressTasks={progressTasks}
         members={members}
         totalTasks={totalTasks}
         completedTasks={completedTasks}
@@ -93,6 +107,7 @@ function ExpandedTeamArea({
   onDetailTabChange,
   onMemberSelect,
   onCollapse,
+  reviewPanel,
 }: {
   members: TeamMember[];
   historyMessages?: Message[];
@@ -103,9 +118,12 @@ function ExpandedTeamArea({
   onDetailTabChange: (tab: TeamDetailTab) => void;
   onMemberSelect?: (memberId: string) => void;
   onCollapse?: () => void;
+  reviewPanel?: ReactNode;
 }) {
   const { t } = useTranslation();
-  const { completedTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
+  const { completedTasks, progressTasks, teamTasks, totalTasks } = useTaskPlanningMetrics();
+  const artifactsCount = useSessionArtifactsCount();
+  const resolvedTab = activeTab === 'review' && !reviewPanel ? 'planning' : activeTab;
 
   const selectedMember = useMemo(() => {
     if (!externalSelectedMemberId) return null;
@@ -126,19 +144,26 @@ function ExpandedTeamArea({
     {
       key: 'team',
       label: t('team.membersTab'),
-      icon: <Users size={16} />,
+      icon: <img src={teamIcon} width={16} height={16} />,
     },
-  ] as const;
+    {
+      key: 'artifacts',
+      label: t('artifacts.tab'),
+      count: artifactsCount,
+      icon: <FileText size={16} />,
+    },
+    ...(reviewPanel ? [{ key: 'review' as const, label: t('codeMode.review'), icon: <FileCheck2 size={16} /> }] : []),
+  ];
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-card">
-      <div className="flex shrink-0 items-center justify-between px-6 py-6 bg-card border-border">
+      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-b border-border">
         <div className="flex items-center gap-2">
           {tabs.map((tab) => (
             <button
               key={tab.key}
-              className={`h-9 rounded-lg px-4 text-sm transition-colors flex items-center gap-2 ${
-                activeTab === tab.key
+              className={`h-9 rounded-lg px-4 text-sm  flex items-center gap-2 ${
+                resolvedTab === tab.key
                   ? 'bg-secondary font-medium text-text'
                   : 'text-text-muted hover:bg-secondary/50 hover:text-text'
               }`}
@@ -152,22 +177,29 @@ function ExpandedTeamArea({
 
         <button
           onClick={onCollapse}
-          className="rounded p-2 text-text-muted transition-colors hover:bg-secondary hover:text-text"
+          className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
           title={t('team.collapse')}
         >
-          <Minimize2 size={16} />
+          <Minimize2 size={12} />
         </button>
       </div>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {activeTab === 'planning' ? (
+        {resolvedTab === 'planning' ? (
           <TaskPlanningPanel
             variant="expanded"
             tasks={teamTasks}
+            progressTasks={progressTasks}
             members={members}
             totalTasks={totalTasks}
             completedTasks={completedTasks}
           />
+        ) : resolvedTab === 'artifacts' ? (
+          <div className="flex min-w-0 flex-1 overflow-hidden">
+            <ArtifactsPanel />
+          </div>
+        ) : resolvedTab === 'review' && reviewPanel ? (
+          <div className="flex min-w-0 flex-1 overflow-hidden">{reviewPanel}</div>
         ) : (
           <TeamMembersPanel
             variant="expanded"
@@ -186,7 +218,7 @@ function ExpandedTeamArea({
 }
 
 export function TeamArea(props: TeamAreaProps) {
-  const { members, historyMessages = [] } = props;
+  const { members, historyMessages = [], reviewPanel } = props;
 
   if (props.expanded) {
     return (
@@ -200,6 +232,7 @@ export function TeamArea(props: TeamAreaProps) {
         onDetailTabChange={props.onDetailTabChange}
         onMemberSelect={props.onMemberSelect}
         onCollapse={props.onCollapse}
+        reviewPanel={reviewPanel}
       />
     );
   }

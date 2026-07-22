@@ -8,8 +8,6 @@ interface SourceManagerModalProps {
   open: boolean;
   sessionId: string;
   onClose: () => void;
-  onSourceChange?: (source: SourceType) => void;
-  currentSource?: SourceType;
   onNavigateToConfig?: () => void;
 }
 
@@ -17,12 +15,10 @@ export function SourceManagerModal({
   open,
   sessionId,
   onClose,
-  onSourceChange,
-  currentSource = "skillnet",
   onNavigateToConfig,
 }: SourceManagerModalProps) {
   const { t } = useTranslation();
-  const [selectedSource, setSelectedSource] = useState<SourceType>(currentSource);
+  const [selectedSource, setSelectedSource] = useState<SourceType>("skillnet");
   const [clawhubToken, setClawhubToken] = useState("");
   const [tokenLoading, setTokenLoading] = useState(false);
   const [tokenSaving, setTokenSaving] = useState(false);
@@ -57,9 +53,8 @@ export function SourceManagerModal({
 
   useEffect(() => {
     if (!open) return;
-    setSelectedSource(currentSource);
     void fetchClawhubToken();
-  }, [open, currentSource, fetchClawhubToken]);
+  }, [open, fetchClawhubToken]);
 
   useEffect(() => {
     if (!open) return;
@@ -73,13 +68,6 @@ export function SourceManagerModal({
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [open, onClose]);
-
-  const handleSourceSelect = useCallback((source: SourceType) => {
-    setSelectedSource(source);
-    if (onSourceChange) {
-      onSourceChange(source);
-    }
-  }, [onSourceChange]);
 
   const handleSaveToken = useCallback(async () => {
     const token = clawhubToken.trim();
@@ -121,7 +109,7 @@ export function SourceManagerModal({
           <button
             type="button"
             onClick={onClose}
-            className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong transition-colors"
+            className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong "
             aria-label={t("sourceManager.closeAria")}
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -136,10 +124,10 @@ export function SourceManagerModal({
             <div className="flex gap-3">
               <button
                 type="button"
-                onClick={() => handleSourceSelect("skillnet")}
-                className={`flex-1 py-3 px-4 rounded-lg border transition-all ${
+                onClick={() => setSelectedSource("skillnet")}
+                className={`flex-1 py-3 px-4 rounded-lg border  ${
                   selectedSource === "skillnet"
-                    ? "border-[#191919] bg-[#EAEAEB] text-[#191919]"
+                    ? "border-text bg-[var(--color-source-selected-surface)] text-text"
                     : "border-border bg-card text-text-muted hover:border-gray-400"
                 }`}
               >
@@ -150,10 +138,10 @@ export function SourceManagerModal({
               </button>
               <button
                 type="button"
-                onClick={() => handleSourceSelect("clawhub")}
-                className={`flex-1 py-3 px-4 rounded-lg border transition-all ${
+                onClick={() => setSelectedSource("clawhub")}
+                className={`flex-1 py-3 px-4 rounded-lg border  ${
                   selectedSource === "clawhub"
-                    ? "border-[#191919] bg-[#EAEAEB] text-[#191919]"
+                    ? "border-text bg-[var(--color-source-selected-surface)] text-text"
                     : "border-border bg-card text-text-muted hover:border-gray-400"
                 }`}
               >
@@ -203,10 +191,10 @@ export function SourceManagerModal({
                         type="button"
                         onClick={() => void handleSaveToken()}
                         disabled={tokenSaving || !clawhubToken.trim()}
-                        className={`ml-auto w-[76px] h-[28px] rounded-[24px] text-sm transition-colors ${
+                        className={`ml-auto w-[76px] h-[28px] rounded-[24px] text-sm  ${
                           tokenSaving || !clawhubToken.trim()
                             ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                            : "bg-[#191919] text-white hover:bg-gray-800"
+                            : "bg-control-emphasis text-control-emphasis-foreground hover:bg-control-emphasis-hover"
                         }`}
                       >
                         {tokenSaving ? t("common.saving") : t("common.save")}

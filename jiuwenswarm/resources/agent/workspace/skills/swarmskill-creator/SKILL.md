@@ -4,7 +4,7 @@ description: |
   Creates, converts, or modifies Swarm Skills — the multi-role (多角色团队) extension of the Skills standard, optionally with an executable SwarmFlow orchestration script.
   Use when building or refactoring a multi-agent team, generating workflow (工作流/编排) orchestration code, or upgrading a single-agent skill into a collaborating team.
   Do NOT use for ordinary single-agent skills — use create-skill instead.
-version: "0.4"
+version: "0.5"
 ---
 
 # Swarm Skill Creator
@@ -161,6 +161,8 @@ Do not let the script invent a different workflow from `workflow.md`; do not let
 
 Generate `scripts/workflow.py` from [templates/scripts/workflow.py.template](templates/scripts/workflow.py.template). Before editing, read that template's `TEMPLATE AUTHORING CONSTRAINTS` block; it is the single full source for executable SwarmFlow script constraints. Keep this stage focused on routing and topology synchronization rather than restating those rules.
 
+Choose the interaction primitive from the requested participant and memory semantics: one-shot human input uses `human`, stateful multi-turn human or agent interaction uses the corresponding session primitive, and one-shot agent work continues to use `agent`. The template remains the canonical source for call, lifecycle, and resource rules. Nested `workflow(...)` composition remains outside the supported surface and must not be generated.
+
 For the full Markdown spec + SwarmFlow shape, the final script must match the topology in `workflow.md` and the executable constraints in `bind.md`: same phases, same parallel or sequential structure, same integration point, and no extra hidden workflow that the Markdown spec does not describe.
 
 For script-only mode, derive the script directly from the user's requested orchestration. Keep `SKILL.md` minimal but explicit: describe when to invoke the skill, state that `scripts/workflow.py` is the execution definition, and list the script under `## Files`.
@@ -219,7 +221,7 @@ The validator checks two output shapes:
 **Script-only SwarmFlow**
 - **Structural**: exactly `SKILL.md` + `scripts/workflow.py`; no `roles/`, `workflow.md`, `bind.md`, `dependencies.yaml`, or `prompts/`
 - **SKILL.md**: valid frontmatter plus `## Workflow` and `## Files`; `roles:` omitted or empty
-- **SwarmFlow script safety envelope**: standalone script shape, inline prompts, safe imports, phase/agent consistency, schema permissiveness, and blocked runtime patterns
+- **SwarmFlow script safety envelope**: standalone script shape, inline prompts, safe imports, phase/agent consistency, human/session call discipline, schema permissiveness, and blocked runtime patterns
 
 **Exit code 0 = compliant**. Non-zero exit prints the failing checks with file:line references.
 

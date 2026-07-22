@@ -37,7 +37,13 @@ The skill score is the graph used by orchestration. Each node represents a skill
 
 ![Skill score](../assets/images/symphony_score.png)
 
-The skill score shows connectable candidate relationships. It is not execution history, and it does not guarantee every visible connection can be chained directly for every task. Always check the skill details, required inputs, and current task goal.
+The skill score shows statically built connectable candidate relationships, and it does not guarantee every visible connection can be chained directly for every task. Always check the skill details, required inputs, and current task goal.
+
+#### Improve orchestration from Session execution traces
+
+When **Dynamic Graph** is enabled, Symphony asynchronously reads JiuwenSwarm's existing Session JSON history after each conversation completes. It correlates the orchestration result with observed Skill calls and results. Repeated successful edges receive bounded reinforcement for later relevant tasks, while explicitly failed edges are downranked. A displayed orchestration graph without an observed Skill call is not counted as success evidence.
+
+Dynamic data is a replayable overlay on top of the static graph; it never overwrites the permanent static graph. Turning the switch off immediately returns planning to static-only behavior while retaining existing dynamic data.
 
 #### What problem does it solve?
 
@@ -70,6 +76,10 @@ Skill Orchestration builds a skill chain from the task goal, candidate skills, a
 User confirms
   v
 JiuwenSwarm continues with concrete skill execution
+  v
+Asynchronously consume Session JSON after the conversation (dynamic graph only)
+  v
+Update runtime events and the dynamic overlay for later orchestration
 ```
 
 Skill Retrieval mainly finds skills. Skill Orchestration organizes candidate skills into a task-oriented execution route. The skill score records and displays whether skills can connect, giving orchestration the graph relationships it needs. Skill Retrieval and Skill Orchestration are Symphony's two core capabilities.
@@ -213,10 +223,10 @@ When a skill looks relevant, the agent may read its `SKILL.md` before executing 
 #### Before you use it
 
 1. Open left sidebar -> **Configuration** -> **Other configuration**.
-2. Expand **Skill Symphony**, turn on **Enable Skill Symphony**, then click **Save** in the top-right corner.
+2. Expand **Skill Symphony** and turn on **Enable skill orchestration**. To learn from real execution traces, also turn on **Enable dynamic graph**, then click **Save** in the top-right corner.
 3. Confirm the required skills are installed. If you recently added, removed, or changed skills, open **Skills** -> **Skill Graph** and run **Incremental build**. If you only need to confirm the current score state, use **Read score**.
 
-The **Skill Symphony** switch enables Symphony orchestration. Skill Retrieval is still controlled by the separate **Skill Retrieval** switch.
+**Enable skill orchestration** is the Symphony master switch. **Enable dynamic graph** takes effect only while orchestration is enabled. Skill Retrieval is still controlled by the separate **Skill Retrieval** switch.
 
 ![Skill Symphony configuration](../assets/images/symphony_config.png)
 
@@ -264,7 +274,7 @@ After seeing the route, you can respond in one of these ways:
 
 ## Configuration
 
-The Web configuration page exposes two related switches: **Enable Skill Retrieval** controls skill-tree retrieval tools, and **Enable Skill Symphony** controls skill score and orchestration tools. The Skill Index page provides index build, rebuild, cancel, status, and tree viewing operations. The Skill Graph page provides score reading, incremental build, pause build, and full rebuild operations.
+The Web configuration page exposes three related switches: **Enable Skill Retrieval** controls skill-tree retrieval tools, **Enable skill orchestration** controls skill score and orchestration tools, and **Enable dynamic graph** controls whether Session execution traces are learned from and used by later orchestration. The Skill Index page provides index build, rebuild, cancel, status, and tree viewing operations. The Skill Graph page provides score reading, incremental build, pause build, and full rebuild operations.
 
 Advanced build, retrieval, and orchestration settings are configured in the user runtime config file:
 
@@ -288,6 +298,10 @@ The skill source directory and skill score artifact directory. Both default temp
 
 `symphony_refresh_score` reads skills from `skills_root` and refreshes the skill score. `symphony_read_score` and `symphony_compose_score` read score artifacts from `score_dir`. Configure these paths explicitly when the score needs to be cached in a fixed location or reused across runtime environments.
 
+#### `symphony.build`
+
+Graph construction keeps up to `32` candidates per Skill/relation and uses `0.5` as the edge acceptance threshold by default. Tune the cap with `max_candidates_per_skill_relation`; the effective value is recorded in the build manifest for reproducibility and diagnosis.
+
 #### `symphony.orchestration`
 
 Runtime parameters for Skill Orchestration. The current template is:
@@ -295,11 +309,10 @@ Runtime parameters for Skill Orchestration. The current template is:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `mode` | `fast` | Orchestration mode. The current runtime tools use the fast orchestration path and prioritize an executable skill chain |
-| `top_k` | `3` | Maximum number of candidate routes retained per orchestration round. Larger values cover more alternatives but can make output less focused |
 | `max_depth` | `4` | Maximum skill-chain search depth, limiting how many skills can be chained in one task |
-| `min_edge_confidence` | `0.3` | Minimum confidence threshold for skill-score edges. Edges below this value are not preferred for orchestration |
+| `min_edge_confidence` | `0.5` | Minimum confidence threshold for skill-score edges. Edges below this value are not preferred for orchestration |
 
-These settings tune how candidate skills are connected into a route. If routes are too short or often miss intermediate steps, consider increasing `max_depth`. If routes are too broad or unstable, consider lowering `top_k` or increasing `min_edge_confidence`.
+These settings tune how candidate skills are connected into a route. If routes are too short or often miss intermediate steps, consider increasing `max_depth`. If routes often use low-confidence connections, consider increasing `min_edge_confidence`.
 
 #### `symphony.skill_retrieval.enabled`
 
@@ -407,11 +420,17 @@ symphony:
     skills_root: ""
     score_dir: ""
 
+  build:
+    max_candidates_per_skill_relation: 32
+    min_edge_confidence: 0.5
+
+  evolution:
+    enabled: true
+
   orchestration:
     mode: fast
-    top_k: 3
     max_depth: 4
-    min_edge_confidence: 0.3
+    min_edge_confidence: 0.5
 
   skill_retrieval:
     enabled: true

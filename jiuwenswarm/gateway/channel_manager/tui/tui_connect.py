@@ -33,9 +33,11 @@ from jiuwenswarm.common.config import (
     update_permissions_enabled_in_config,
     get_model_names,
     update_preferred_language_in_config,
+    update_swarmflow_enabled_in_config,
     update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.common.work_mode import DEFAULT_PROJECT_ID_CODE
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
@@ -216,10 +218,12 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "command.session",
         "command.workflows",
         "command.status",
+        "command.goal",
         "chat.send",
         "chat.interrupt",
         "chat.resume",
         "chat.user_answer",
+        "chat.swarmflow_reply",
         "history.get",
         "browser.start",
         "skills.marketplace.list",
@@ -318,6 +322,7 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "command.session",
         "command.workflows",
         "command.status",
+        "command.goal",
         "browser.start",
         "skills.marketplace.list",
         "skills.list",
@@ -404,6 +409,7 @@ class CliHandlersBindParams:
     channel: Any  # GatewayServer instance
     agent_client: Any = None
     message_handler: Any = None
+    third_agent: Any = None
     on_config_saved: Any = None
     path: str = "/tui"
     cron_controller: Any = None
@@ -413,6 +419,7 @@ class CliHandlersBindParams:
 class CliRouteBindParams:
     agent_client: Any = None
     message_handler: Any = None
+    third_agent: Any = None
     on_config_saved: Any = None
     path: str = "/tui"
     channel_id: str = "tui"
@@ -475,6 +482,7 @@ _CLI_CONFIG_YAML_SETTERS: dict[str, Any] = {
     "permissions_enabled": update_permissions_enabled_in_config,
     "memory_forbidden_enabled": update_memory_forbidden_enabled_in_config,
     "preferred_language": update_preferred_language_in_config,
+    "enable_swarmflow": update_swarmflow_enabled_in_config,
     # Auto-Harness config items (stored in ~/.jiuwenswarm/auto-harness/config.yaml)
     # 用户名同时设置 git.user_name, fork_owner, gitcode.username（三者合一）
     "auto_harness_git_user_name": _update_auto_harness_git_user_name,
@@ -687,12 +695,22 @@ def _load_env_from_file() -> dict[str, str]:
     return result
 
 
+def resolve_3rdagent_switch_session_id(params: dict | None) -> str:
+    """Explicit ``params.session_id`` for 3rdagent.switch (never gateway req_id fallback)."""
+    if not isinstance(params, dict):
+        return ""
+    return str(params.get("session_id") or "").strip()
+
+
 def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel = bind.channel
     agent_client = bind.agent_client
     on_config_saved = bind.on_config_saved
     path = bind.path
     cron_controller_ref = bind.cron_controller
+    from jiuwenswarm.gateway.routing.third_agent import get_unsupported_third_agent
+
+    third_agent = bind.third_agent if bind.third_agent is not None else get_unsupported_third_agent()
 
     async def _config_get(ws, req_id, params, session_id):
         payload = {
@@ -727,6 +745,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload["auto_recap_enabled"] = (
                 "true" if auto_recap_cfg.get("enabled", True) else "false"
             )
+            # swarmflow toggle lives at modes.team.jiuwen_team.enable_swarmflow
+            _team_cfg = (raw.get("modes") or {}).get("team") or {}
+            _jiuwen_team_cfg = _team_cfg.get("jiuwen_team") or {}
+            _swarmflow_enabled = bool(_jiuwen_team_cfg.get("enable_swarmflow", False))
+            payload["enable_swarmflow"] = "true" if _swarmflow_enabled else "false"
 
             # Resolve model-related fields from config.yaml.
             # When models.defaults list is in use, it is the canonical source
@@ -1048,14 +1071,30 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if env_updates:
             _persist_env_updates(env_updates)
 
-        # 当 models / embed / yaml 配置改动时，通知 AgentServer 清缓存并热重载
+        # 当 models / embed / yaml 配置改动时，后台通知 AgentServer 清缓存并热重载。
+        # 必须在 send_response 之前 fire-and-forget：reload 在 AgentServer 端要重建
+        # 全部 agent + session adapter（单次可达 25~44s），若同步 await 会阻塞当前
+        # WebSocket 消息循环（同连接 `async for raw in ws` 串行），导致后续 config.get
+        # 等本地帧排队等满 reload 超时（25s），前端 30s 超时报 request timeout: config.get。
+        # 写盘（上面 setter + _persist_env_updates）已同步完成，config.get 直接读
+        # config.yaml 即可立即验证；reload 仅用于 AgentServer 内存热更新，本就尽力而为，
+        # 故丢后台不阻塞回包。与 _command_model._model_switch_background 对齐。
         if yaml_updated or _yaml_sections_updated:
             real_client = (
                 agent_client.get("value")
                 if isinstance(agent_client, dict)
                 else agent_client
             )
-            await _clear_agent_config_cache(real_client)
+
+            async def _config_set_reload_background() -> None:
+                try:
+                    await _clear_agent_config_cache(real_client)
+                except Exception as _e_reload:
+                    logger.warning(
+                        "[cli config.set] AGENT_RELOAD_CONFIG failed: %s", _e_reload
+                    )
+
+            asyncio.create_task(_config_set_reload_background())
 
         updated_param_keys = [
             k for k, e in _CLI_CONFIG_SET_ENV_MAP.items() if e in env_updates
@@ -1504,6 +1543,26 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
             )
             return
+        # TUI 前置归属解析(设计文档 §4.1.6):按 cwd/project_dir 固定 work_mode="code"
+        # 查找/创建 code 项目并绑定真实 project_id;无目录或解析失败归 default_code
+        resolved_project_id = ""
+        resolved_project_dir = ""
+        work_mode = "code"
+        try:
+            from jiuwenswarm.server.runtime.session.project_store import (
+                find_or_create_code_project_for_tui_params,
+            )
+            proj = find_or_create_code_project_for_tui_params(params)
+            if proj is not None:
+                resolved_project_id = proj.project_id
+                resolved_project_dir = proj.project_dir
+                work_mode = proj.work_mode or "code"
+        except Exception:  # noqa: BLE001
+            # 解析失败(冲突/权限等)不阻断会话创建,会话归 default_code
+            logger.debug(
+                "[TUI] session.create project pre-resolution failed",
+                exc_info=True,
+            )
         workspace_session_dir = get_agent_sessions_dir()
         workspace_session_dir.mkdir(parents=True, exist_ok=True)
         session_dir = workspace_session_dir / target
@@ -1523,12 +1582,21 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             channel_id="tui",
             title=str(params.get("title") or "").strip(),
             mode=params.get("mode", "code.normal"),
+            project_dir=resolved_project_dir,
+            project_id=resolved_project_id,
+            work_mode=work_mode,
         )
         # 触发 SessionStart hook
         mh = bind.message_handler
         if mh:
             mh.trigger_session_start_hook(target, source="tui")
-        await channel.send_response(ws, req_id, ok=True, payload={"session_id": target})
+        # 响应带最终归属(设计文档 §4.1.6):未绑定真实项目时归 default_code
+        await channel.send_response(ws, req_id, ok=True, payload={
+            "session_id": target,
+            "project_id": resolved_project_id or DEFAULT_PROJECT_ID_CODE,
+            "project_dir": resolved_project_dir,
+            "work_mode": work_mode,
+        })
 
     async def _session_delete(ws, req_id, params, session_id, user_id=None):
         from jiuwenswarm.common.utils import get_agent_sessions_dir
@@ -2190,6 +2258,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         if isinstance(request_id, str) and request_id:
             payload["request_id"] = request_id
         await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _chat_swarmflow_reply(ws, req_id, params, session_id):
+        # Empty-ack shell — standard 3-layer routing forwards the reply to the
+        # agent adapter, which builds HumanAgentMessage and calls team_manager.
+        await channel.send_response(
+            ws, req_id, ok=True, payload={"accepted": True, "session_id": session_id}
+        )
 
     async def _history_get(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
@@ -2901,10 +2976,86 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             logger.warning("[models.list] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
+    async def _3rdagent_list(ws, req_id, params, session_id, user_id=None):
+        params = params if isinstance(params, dict) else {}
+        current = str(
+            getattr(ws, "_gateway_agent_type", None)
+            or params.get("agent_type")
+            or "jiuwenswarm"
+        ).strip() or "jiuwenswarm"
+        uid = str(user_id or getattr(ws, "_gateway_user_id", None) or "").strip()
+        try:
+            result = await third_agent.thirdagent_list(
+                user_id=uid,
+                current_agent_type=current,
+            )
+        except Exception as exc:
+            logger.warning("[3rdagent.list] %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
+            )
+            return
+        if not result.get("ok"):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(result.get("error") or "3rdagent.list unsupported"),
+                code=str(result.get("code") or "UNSUPPORTED"),
+            )
+            return
+        await channel.send_response(
+            ws, req_id, ok=True, payload=dict(result.get("payload") or {})
+        )
+
+    async def _3rdagent_switch(ws, req_id, params, session_id, user_id=None):
+        del session_id  # do not use gateway req_id fallback; require explicit params.session_id
+        params = params if isinstance(params, dict) else {}
+        uid = str(user_id or getattr(ws, "_gateway_user_id", None) or "").strip()
+        explicit_session_id = resolve_3rdagent_switch_session_id(params)
+        if not explicit_session_id:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="session_id is required for 3rdagent.switch",
+                code="BAD_REQUEST",
+            )
+            return
+        try:
+            result = await third_agent.thirdagent_switch(
+                user_id=uid,
+                agent_type=str(params.get("agent_type") or ""),
+                session_id=explicit_session_id,
+                params=params,
+            )
+        except Exception as exc:
+            logger.warning("[3rdagent.switch] %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR"
+            )
+            return
+        if not result.get("ok"):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(result.get("error") or "3rdagent.switch unsupported"),
+                code=str(result.get("code") or "UNSUPPORTED"),
+            )
+            return
+        payload = dict(result.get("payload") or {})
+        switched = str(payload.get("agent_type") or "").strip()
+        if switched:
+            setattr(ws, "_gateway_agent_type", switched)
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
     channel.register_local_handler(path, "config.get", _config_get)
     channel.register_local_handler(path, "config.set", _config_set)
     channel.register_local_handler(path, "config.validate_model", _config_validate_model)
     channel.register_local_handler(path, "models.list", _models_list)
+    channel.register_local_handler(path, "3rdagent.list", _3rdagent_list)
+    channel.register_local_handler(path, "3rdagent.switch", _3rdagent_switch)
     channel.register_local_handler(path, "session.list", _session_list)
     channel.register_local_handler(path, "session.create", _session_create)
     channel.register_local_handler(path, "session.delete", _session_delete)
@@ -2921,6 +3072,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "chat.interrupt", _chat_interrupt)
     channel.register_local_handler(path, "tui.disconnect", _tui_disconnect_request)
     channel.register_local_handler(path, "chat.user_answer", _chat_user_answer)
+    channel.register_local_handler(path, "chat.swarmflow_reply", _chat_swarmflow_reply)
     channel.register_local_handler(path, "history.get", _history_get)
     channel.register_local_handler(path, "command.model", _command_model)
     channel.register_local_handler(path, "provider.codex.auth.status", _codex_auth_status)
@@ -3097,6 +3249,18 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         try:
             if session_id:
                 params["session_id"] = session_id
+            # project_dir 默认值：TUI 前端已自动注入；仅当「未传」时从当前会话 metadata 兜底
+            # 注意：显式传空串 "" 等价于归默认项目，不可覆盖——用 key presence 区分
+            if "project_dir" not in params and session_id:
+                try:
+                    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+                    meta = get_session_metadata(session_id, cache_bust=True)
+                    if isinstance(meta, dict):
+                        pd = meta.get("project_dir")
+                        if isinstance(pd, str) and pd.strip():
+                            params["project_dir"] = pd.strip()
+                except Exception:  # noqa: BLE001
+                    pass
             job = await cc.create_job(params)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except Exception as exc:
@@ -3217,8 +3381,21 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
         try:
-            run_id = await cc.run_now(job_id)
-            await channel.send_response(ws, req_id, ok=True, payload={"run_id": run_id})
+            # 先取 job 拿 last_session_id（回退值），再触发 run_now 取 run_id
+            # 对齐 chat.send 的 {accepted, session_id} 语义
+            job = await cc.get_job(job_id)
+            if job is None:
+                await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+                return
+            run_info = await cc.run_now_info(job_id)
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={
+                    "accepted": True,
+                    "run_id": run_info.get("run_id", ""),
+                    "session_id": run_info.get("session_id", ""),
+                },
+            )
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
         except Exception as exc:
@@ -3243,6 +3420,7 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
                 channel=channel,
                 agent_client=bind.agent_client,
                 message_handler=bind.message_handler,
+                third_agent=bind.third_agent,
                 on_config_saved=bind.on_config_saved,
                 path=bind.path,
                 cron_controller=bind.cron_controller,

@@ -32,6 +32,9 @@ from jiuwenswarm.instance_manager import (
     get_instance_workspace_path,
     get_instance_index,
     calculate_instance_ports,
+    find_available_ports,
+    is_port_available,
+    collect_all_ports,
     update_instances_yaml,
     validate_instance_name,
     InstanceConfig,
@@ -99,6 +102,37 @@ def run_init(force: bool = False, name: Optional[str] = None) -> int:
         # Calculate ports (using same index as update_instances_yaml will use)
         index = get_instance_index(name)
         ports = calculate_instance_ports(index)
+
+        # Proactively scan for a conflict-free port group so the instance is
+        # launchable immediately (otherwise the first jiuwenswarm-start --name
+        # would hit a port clash and have to fall back at start time). If the
+        # index's own group is fully available, keep it; otherwise scan upward.
+        conflict_ports = [
+            p for p in ports.values()
+            if not is_port_available("127.0.0.1", p)
+        ]
+        if conflict_ports:
+            # Exclude ports already claimed by other configured instances so
+            # the scan never picks a group that collides with a sibling.
+            exclude_ports = collect_all_ports(exclude_name=name)
+            found = find_available_ports(
+                base_index=index,
+                host="127.0.0.1",
+                scan_range=20,
+                exclude_ports=exclude_ports,
+            )
+            if found is None:
+                logging.info(
+                    f"[jiuwenswarm-init] WARNING: No available port group within "
+                    f"scan_range=20 (from index {index}). Falling back to index "
+                    f"{index} ports; 'jiuwenswarm-start --name {name}' will retry."
+                )
+            else:
+                ports, index = found
+                logging.info(
+                    f"[jiuwenswarm-init] Reserved conflict-free port group "
+                    f"(index {index}) for instance '{name}': {ports}"
+                )
 
         # Update YAML with full configuration (workspace + ports)
         update_instances_yaml(name, workspace_path, ports)

@@ -55,29 +55,29 @@
 		<g id="path4" />
 		<g id="mask" mask="url(#mask_9)">
 			<path id="path5" d="M8 0.5C12.1421 0.5 15.5 3.85786 15.5 8C15.5 12.1421 12.1421 15.5 8 15.5C7.58498 15.5 7.17782 15.4663 6.78113 15.4015C5.441 13.2544 4.66667 10.7176 4.66667 8C4.66667 5.28236 5.44101 2.74557 6.7811 0.598236C7.17782 0.533711 7.58498 0.5 8 0.5Z" fill="rgb(255,255,255)" fill-opacity="0" fill-rule="evenodd" />
-			<path id="path5" d="M15.5 8C15.5 12.1421 12.1421 15.5 8 15.5C7.58498 15.5 7.17782 15.4663 6.78113 15.4015C5.441 13.2544 4.66667 10.7176 4.66667 8C4.66667 5.28236 5.44101 2.74557 6.7811 0.598236C7.17782 0.533711 7.58498 0.5 8 0.5C12.1421 0.5 15.5 3.85786 15.5 8Z" fill-rule="evenodd" stroke="rgb(25,25,25)" stroke-linecap="round" stroke-linejoin="round" stroke-width="1" />
+			<path id="path5" d="M15.5 8C15.5 12.1421 12.1421 15.5 8 15.5C7.58498 15.5 7.17782 15.4663 6.78113 15.4015C5.441 13.2544 4.66667 10.7176 4.66667 8C4.66667 5.28236 5.44101 2.74557 6.7811 0.598236C7.17782 0.533711 7.58498 0.5 8 0.5C12.1421 0.5 15.5 3.85786 15.5 8Z" fill-rule="evenodd" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1" />
 		</g>
 		<g id="mask" mask="url(#mask_10)">
 			<path id="path6" d="M8 0.5C8.41503 0.5 8.82218 0.533711 9.21887 0.598544C10.559 2.74557 11.3333 5.28236 11.3333 8C11.3333 10.7176 10.559 13.2544 9.21893 15.4017C8.82218 15.4663 8.41503 15.5 8 15.5C3.85786 15.5 0.5 12.1421 0.5 8C0.5 3.85786 3.85786 0.5 8 0.5Z" fill="rgb(255,255,255)" fill-opacity="0" fill-rule="evenodd" />
-			<path id="path6" d="M9.21887 0.598544C10.559 2.74557 11.3333 5.28236 11.3333 8C11.3333 10.7176 10.559 13.2544 9.21893 15.4017C8.82218 15.4663 8.41503 15.5 8 15.5C3.85786 15.5 0.5 12.1421 0.5 8C0.5 3.85786 3.85786 0.5 8 0.5C8.41503 0.5 8.82218 0.533711 9.21887 0.598544Z" fill-rule="evenodd" stroke="rgb(25,25,25)" stroke-linecap="round" stroke-linejoin="round" stroke-width="1" />
+			<path id="path6" d="M9.21887 0.598544C10.559 2.74557 11.3333 5.28236 11.3333 8C11.3333 10.7176 10.559 13.2544 9.21893 15.4017C8.82218 15.4663 8.41503 15.5 8 15.5C3.85786 15.5 0.5 12.1421 0.5 8C0.5 3.85786 3.85786 0.5 8 0.5C8.41503 0.5 8.82218 0.533711 9.21887 0.598544Z" fill-rule="evenodd" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1" />
 		</g>
 		<g id="mask" mask="url(#mask_11)">
 			<path id="path7" d="M8.00001 0.5C10.2805 0.5 12.3233 1.51785 13.6989 3.12405C11.9582 3.90148 10.0295 4.33333 8.00001 4.33333C5.97046 4.33333 4.04177 3.90147 2.30084 3.12462C3.67668 1.51785 5.71948 0.5 8.00001 0.5Z" fill="rgb(255,255,255)" fill-opacity="0" fill-rule="evenodd" />
-			<path id="path7" d="M13.6989 3.12405C11.9582 3.90148 10.0295 4.33333 8.00001 4.33333C5.97046 4.33333 4.04177 3.90147 2.30084 3.12462C3.67668 1.51785 5.71948 0.5 8.00001 0.5C10.2805 0.5 12.3233 1.51785 13.6989 3.12405Z" fill-rule="evenodd" stroke="rgb(25,25,25)" stroke-linecap="round" stroke-linejoin="round" stroke-width="1" />
+			<path id="path7" d="M13.6989 3.12405C11.9582 3.90148 10.0295 4.33333 8.00001 4.33333C5.97046 4.33333 4.04177 3.90147 2.30084 3.12462C3.67668 1.51785 5.71948 0.5 8.00001 0.5C10.2805 0.5 12.3233 1.51785 13.6989 3.12405Z" fill-rule="evenodd" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1" />
 		</g>
 		<g id="mask" mask="url(#mask_12)">
 			<path id="path8" d="M7.99999 11.6667C10.0295 11.6667 11.9582 12.0986 13.6991 12.8754C12.3233 14.4822 10.2805 15.5001 7.99999 15.5001C5.71947 15.5001 3.67667 14.4822 2.30112 12.876C4.0417 12.0986 5.97041 11.6667 7.99999 11.6667Z" fill="rgb(255,255,255)" fill-opacity="0" fill-rule="evenodd" />
-			<path id="path8" d="M13.6991 12.8754C12.3233 14.4822 10.2805 15.5001 7.99999 15.5001C5.71947 15.5001 3.67667 14.4822 2.30112 12.876C4.0417 12.0986 5.97041 11.6667 7.99999 11.6667C10.0295 11.6667 11.9582 12.0986 13.6991 12.8754Z" fill-rule="evenodd" stroke="rgb(25,25,25)" stroke-linecap="round" stroke-linejoin="round" stroke-width="1" />
+			<path id="path8" d="M13.6991 12.8754C12.3233 14.4822 10.2805 15.5001 7.99999 15.5001C5.71947 15.5001 3.67667 14.4822 2.30112 12.876C4.0417 12.0986 5.97041 11.6667 7.99999 11.6667C10.0295 11.6667 11.9582 12.0986 13.6991 12.8754Z" fill-rule="evenodd" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1" />
 		</g>
 		<g id="mask" mask="url(#mask_13)">
 			<circle id="path9" cx="8" cy="8" r="7.5" fill="rgb(255,255,255)" fill-opacity="0" />
-			<circle id="path9" cx="8" cy="8" r="7.5" stroke="rgb(25,25,25)" stroke-linecap="round" stroke-linejoin="round" stroke-width="1" />
+			<circle id="path9" cx="8" cy="8" r="7.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1" />
 		</g>
 		<g id="path10" />
 		<g id="mask" mask="url(#mask_14)">
 			<circle id="path11" cx="8" cy="8" r="7.5" fill="rgb(255,255,255)" fill-opacity="0" />
 			<circle id="path11" cx="8" cy="8" r="7.5" stroke="rgb(255,255,255)" stroke-opacity="0" stroke-linecap="round" stroke-linejoin="round" stroke-width="1" />
 		</g>
-		<line id="path12" x1="0.333328247" x2="15.6666613" y1="8" y2="8" stroke="rgb(25,25,25)" stroke-linejoin="round" stroke-width="1" />
+		<line id="path12" x1="0.333328247" x2="15.6666613" y1="8" y2="8" stroke="currentColor" stroke-linejoin="round" stroke-width="1" />
 	</g>
 </svg>

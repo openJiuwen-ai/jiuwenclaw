@@ -53,6 +53,13 @@ issues:
     summary: "WebSocket listener opens before sandbox bootstrap has settled."
     evidence: "start() binds the WebSocket server before awaiting this method; a Gateway could connect before the effective sandbox URL is persisted after a successful port change."
     suggested_action: "Gate request handling until bootstrap finishes, or document and test that Gateway connections occur only after the app-level ready point."
+  - id: ISSUE-004
+    dimension: state_mutation
+    severity: medium
+    status: open
+    summary: "Persistence failures can leave enabled state paired with a stale endpoint."
+    evidence: "After ensure_running succeeds, endpoint-write errors are logged but enabled=True is still written; after port reassignment, later agents can read the old endpoint."
+    suggested_action: "Persist both values atomically, or do not enable runtime when endpoint persistence fails."
 confidence: confirmed
 details: {}
 ---
@@ -61,14 +68,14 @@ details: {}
 
 ## Actual Role
 
-Best-effort startup hook that auto-starts a local jiuwenbox subprocess only on Linux and only when `sandbox.startup_mode` is explicitly `internal`. It resolves endpoint and policy configuration, allocates a usable port, delegates process startup to `JiuwenBoxRunner.ensure_running`, and persists the effective endpoint plus `sandbox.enabled=True` after success.
+Best-effort startup hook that, only on Linux with explicit `sandbox.startup_mode: internal`, resolves endpoint and policy, allocates a usable port, and awaits `JiuwenBoxRunner.ensure_running`. After success it separately persists the effective endpoint and `sandbox.enabled=True`; failures are logged and suppressed so AgentServer startup continues.
 
 ## Key Signals
 
 - Input: process platform and sandbox configuration from `config.yaml`.
 - Output: no return value; startup success or skip/failure is communicated through logs and persisted config updates.
 - Main side effects: may spawn a jiuwenbox subprocess, mutate sandbox endpoint/runtime config, and log warnings for best-effort failures.
-- Main risk: broad config dependency and inline process startup can make sandbox readiness timing hard to reason about.
+- Main risk: broad config dependency, inline process startup, and independent persistence writes can expose delayed readiness or partially updated configuration.
 - Related tests: no direct tests found; pending flow slice `agentserver-sandbox-runtime` should cover this path.
 
 ## Detail Index

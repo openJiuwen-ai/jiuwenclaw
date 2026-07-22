@@ -23,7 +23,7 @@ memory:
   #
   # 外接 rail 的启用 = (engine ∈ {external, both}) AND (external.provider 非空)
   # 内置 rail 的启用 = (engine ∈ {builtin, both})  AND (mode=local)
-  #                    AND modes.agent.<当前 mode>.memory.enabled=true
+  #                    AND modes.agent.memory.enabled=true
   # ============================================================
 
   mode: ${MEMORY_MODE:-local}            # 内置记忆存储位置：local | cloud
@@ -73,7 +73,7 @@ memory:
   #   └─────────────┴───────────────┴──────────────────────────────────────┘
   #
   # 说明：
-  # - 外接记忆 mode-independent：配置一次，plan / fast 模式全程生效，
+  # - 外接记忆 mode-independent：配置一次，agent 模式全程生效，
   #   跨 config 热重载持久存活（保留 prefetch 缓存、电路断路器、会话状态）
   # - 单 provider 策略：同一时刻 provider 只能选一个
   # - 失败降级：provider 构建失败或网络异常不阻塞主流程
@@ -118,7 +118,7 @@ models:
     model_client_config:
       api_base: ${API_BASE}
       api_key: ${API_KEY}
-      model_name: ${MODEL_NAME:-xiaomi/mimo-v2-omni}
+      model_name: ${MODEL_NAME}
       client_provider: ${MODEL_PROVIDER}
       timeout: 1800
       verify_ssl: false
@@ -129,7 +129,7 @@ models:
     model_client_config:
       api_base: ${VIDEO_API_BASE}
       api_key: ${VIDEO_API_KEY}
-      model_name: ${VIDEO_MODEL_NAME:-xiaomi/mimo-v2-omni}
+      model_name: ${VIDEO_MODEL_NAME}
       client_provider: ${VIDEO_PROVIDER}
       timeout: 1800
       verify_ssl: false
@@ -139,7 +139,7 @@ models:
     model_client_config:
       api_base: ${AUDIO_API_BASE}
       api_key: ${AUDIO_API_KEY}
-      model_name: ${AUDIO_MODEL_NAME:-openai/gpt-4o-audio-preview}
+      model_name: ${AUDIO_MODEL_NAME}
       client_provider: ${AUDIO_PROVIDER}
       verify_ssl: false
       timeout: 1800
@@ -149,7 +149,7 @@ models:
     model_client_config:
       api_base: ${VISION_API_BASE}
       api_key: ${VISION_API_KEY}
-      model_name: ${VISION_MODEL_NAME:-bytedance-seed/seed-2.0-mini}
+      model_name: ${VISION_MODEL_NAME}
       client_provider: ${VISION_PROVIDER}
       verify_ssl: false
       timeout: 1800
@@ -157,10 +157,10 @@ models:
       temperature: 0.95
   image_gen:
     model_client_config:
-      api_base: ${IMAGE_GEN_API_BASE:-https://dashscope.aliyuncs.com/api/v1}
+      api_base: ${IMAGE_GEN_API_BASE}
       api_key: ${IMAGE_GEN_API_KEY}
-      model_name: ${IMAGE_GEN_MODEL_NAME:-qwen-image-max}
-      client_provider: ${IMAGE_GEN_PROVIDER:-DashScope}
+      model_name: ${IMAGE_GEN_MODEL_NAME}
+      client_provider: ${IMAGE_GEN_PROVIDER}
       verify_ssl: false
       timeout: 1800
     model_config_obj:
@@ -189,7 +189,7 @@ telemetry:
 react:
   agent_name: main_agent
   max_iterations: 100
-  model_name: ${MODEL_NAME:-deepseek-chat}
+  model_name: ${MODEL_NAME}
   skill_mode: all
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
   # browser_agent 保持原行为，仍由浏览器 runtime 开关决定是否默认注册；这里只支持覆盖其参数
@@ -258,7 +258,9 @@ react:
   # Skills 在线自演进配置
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进
-    auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
+    auto_scan: false           # 兼容开关：leader 触发 review
+    signal_trigger:            # leader 规则触发保持关闭；保留字段以对齐通用配置
+    review_trigger:            # true / false = 显式覆盖软触发；留空时回退 auto_scan
     auto_save: false           # true = 自演进审批无需用户点击自动通过（内部开关）
     skill_base_dir: "agent/skills"  # Skill 根目录
   a2x_registry:
@@ -708,19 +710,11 @@ mcp:
 modes:
   # 一级模式 agent / code / team
   agent:
-    # agent 模式支持 性能/规划/集群
-    fast:
-      memory:
-        enabled: true
-        is_proactive: false
-      rails:
-      tools:
-    plan:
-      memory:
-        enabled: true
-        is_proactive: true
-      rails:
-      tools:
+    # plan / fast 已合并为单一 agent 模式：记忆固定被动（is_proactive 开关已下线）。
+    memory:
+      enabled: true
+    rails:
+    tools:
   code:
     # 动态 Rails — 列表中出现的 = 启用；不出现的 = 不启用
     # 固定 Rails（以下 Rails 已在代码中固定挂载，无需在此配置）：

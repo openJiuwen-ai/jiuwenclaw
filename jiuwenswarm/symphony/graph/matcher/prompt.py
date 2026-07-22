@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any, Dict, List
 
-from jiuwenswarm.symphony.fingerprint.models import SkillFingerprint
+from jiuwenswarm.symphony.fingerprint.models import Fingerprint
 from jiuwenswarm.symphony.graph.models import (
     ALLOWED_RELATION_TYPES,
     RelationCandidate,
@@ -56,7 +56,7 @@ def _ordered_skill_ids_for_candidates(
     return ordered
 
 
-def _skill_context(skill: SkillFingerprint) -> Dict[str, Any]:
+def _skill_context(skill: Fingerprint) -> Dict[str, Any]:
     return {
         "id": skill.id,
         "name": skill.name,

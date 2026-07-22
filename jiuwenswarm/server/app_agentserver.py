@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Standalone AgentServer entrypoint.
 
 This process only starts:
@@ -28,6 +28,7 @@ from jiuwenswarm.dotenv_early import parse_dotenv_early
 parse_dotenv_early("jiuwenswarm-agentserver")
 
 # --- Now safe to import jiuwenswarm modules ---
+from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
     get_env_file,
     get_root_dir,
@@ -131,6 +132,14 @@ from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch
 
 apply_openai_sse_invoke_patch()
 
+# /debug 模式下捕获 builtin TaskTool 分发的 subagent 流（reasoning/tool_call/usage），
+# 内联写入主 dump。非 debug 或 include_subagent_flow 关闭时走原始 invoke，零回归。
+from jiuwenswarm.server.runtime.debug_trace.task_tool_patch import (
+    apply_task_tool_debug_patch,
+)
+
+apply_task_tool_debug_patch()
+
 
 
 async def _run(host: str, port: int) -> None:
@@ -155,6 +164,9 @@ async def _run(host: str, port: int) -> None:
     )
     await extension_manager.load_all_extensions()
     logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
+
+    # 会话 metadata 的字段补全已改为惰性迁移:读取时按需推断并写回磁盘
+    # (见 session_metadata._apply_metadata_defaults_with_inference),无需启动全量扫描。
 
     server = AgentWebSocketServer.get_instance(
         host=host,
@@ -214,6 +226,16 @@ async def _run(host: str, port: int) -> None:
             shutdown_team_observability()
         except Exception as exc:
             logger.warning("[AgentServer] team observability shutdown failed: %s", exc)
+        # Shutdown single-agent / coding-agent observability. Independently
+        # tracked from team observability; no-op unless an agent run owned the
+        # provider (it will not tear down a provider the team still owns).
+        try:
+            from jiuwenswarm.agents.harness.agent_observability import (
+                shutdown_agent_observability,
+            )
+            shutdown_agent_observability()
+        except Exception as exc:
+            logger.warning("[AgentServer] agent observability shutdown failed: %s", exc)
         logger.info("[AgentServer] stopped")
 
 
@@ -261,6 +283,7 @@ def main() -> None:
         else:
             port = 18092
 
+    install_async_dump_handler("agentserver")
     asyncio.run(_run(host=host, port=port))
 
 

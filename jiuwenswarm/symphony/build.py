@@ -28,6 +28,7 @@ from jiuwenswarm.symphony.fingerprint import (
     SkillSchemaExtractor,
     write_extraction_result,
 )
+from jiuwenswarm.symphony.graph.candidates import CandidateGenerator
 from jiuwenswarm.symphony.graph.matcher import (
     CachedOntologyMatcher,
     OntologyMatcher,
@@ -344,7 +345,14 @@ class SymphonyScoreBuilder:
                 output_dir / "cache" / "relation_matches.json",
                 fingerprints=extraction_result.fingerprints,
             )
-        graph_builder = GraphBuilder(matcher=matcher)
+        graph_builder = GraphBuilder(
+            matcher=matcher,
+            candidate_generator=CandidateGenerator(
+                max_candidates_per_skill_relation=(
+                    runtime_config.build.max_candidates_per_skill_relation
+                )
+            ),
+        )
         checkpoint.record("graph.start", status="running")
         graph_result = await graph_builder.build(
             extraction_result.fingerprints,

@@ -28,13 +28,14 @@ from jiuwenswarm.dotenv_early import parse_dotenv_early
 parse_dotenv_early("jiuwenswarm-start")
 
 # --- Now safe to import jiuwenswarm modules ---
-from jiuwenswarm.common.utils import get_root_dir, get_user_workspace_dir, is_package_installation
+from jiuwenswarm.common.utils import get_env_file, get_root_dir, get_user_workspace_dir, is_package_installation
 from jiuwenswarm.instance_manager import (
     InstanceConfig,
     InstanceLock,
     InstanceStatus,
     calculate_instance_ports,
     create_bootstrap_env,
+    find_available_ports,
     format_status_line,
     get_default_instance_status,
     get_instance_config,
@@ -46,6 +47,7 @@ from jiuwenswarm.instance_manager import (
     validate_instance_name,
     write_pid_file,
     PORT_TYPES,
+    PORT_ENV_NAMES,
     compute_auto_port,
 )
 
@@ -155,11 +157,29 @@ class InstanceCommand:
         Returns:
             Error code if port conflicts, None if all ports available.
         """
-        if self.config is None:
+        conflicts = self.check_ports_conflicts()
+        if conflicts:
+            logging.info("[start_services] ERROR: Port conflicts detected, cannot start instance.")
             return 1
 
+        return None
+
+    def check_ports_conflicts(self) -> list[tuple[str, int]]:
+        """Check all instance ports and return the list of conflicts.
+
+        Unlike ``check_ports_available`` (which returns an exit code), this
+        returns the structured conflict list so callers (e.g. the fallback
+        path) can decide whether to scan for alternative ports.
+
+        Returns:
+            List of ``(port_type, port)`` tuples that are already in use.
+            Empty list if all ports are available.
+        """
+        if self.config is None:
+            return []
+
         logging.info(f"[start_services] Checking ports for instance '{self.name}'...")
-        conflicts = []
+        conflicts: list[tuple[str, int]] = []
 
         for port_type, port in self.config.ports.items():
             if not is_port_available("127.0.0.1", port):
@@ -168,11 +188,7 @@ class InstanceCommand:
             else:
                 logging.info(f"  ✓ {port_type}: {port} - available")
 
-        if conflicts:
-            logging.info("[start_services] ERROR: Port conflicts detected, cannot start instance.")
-            return 1
-
-        return None
+        return conflicts
 
 
 def print_instance_details(status: InstanceStatus) -> None:
@@ -195,6 +211,170 @@ def print_instance_details(status: InstanceStatus) -> None:
         from datetime import datetime
         started_dt = datetime.fromtimestamp(status.started_at)
         logging.info(f"Started at:   {started_dt.isoformat()}")
+
+
+def _log_port_table(prefix: str, ports: dict[str, int]) -> None:
+    """Log a port table with the given prefix line."""
+    logging.info(prefix)
+    for port_type in PORT_TYPES:
+        logging.info(f"  {port_type}: {ports.get(port_type, 0)}")
+
+
+def _resolve_ports_with_fallback(cmd: InstanceCommand, scan_range: int = 10) -> int | None:
+    """Resolve port conflicts by scanning for an available port group.
+
+    Called when ``cmd.check_ports_conflicts()`` is non-empty. Scans upward from
+    the instance's own index (0 for default) for the first fully-available
+    group that does not collide with other configured instances. On success:
+
+    - Updates ``cmd.config.ports`` in place so downstream launch uses them.
+    - Persists the resolved ports:
+        * Named instance → ``instances.yaml`` (via ``update_instances_yaml``)
+          + bootstrap ``.env`` (via ``create_bootstrap_env``), so the next
+          ``jiuwenswarm-start --name <n>`` and the spawned subprocesses both
+          read the new ports.
+        * Default instance → ``~/.jiuwenswarm/config/.env`` (via
+          ``_upsert_env_ports``), which ``app.py`` loads with
+          ``override=True`` so the default-instance subprocesses and the TUI /
+          CLI (which read ``GATEWAY_PORT``) pick them up automatically.
+    - Emits a warning + the new port table + a TUI/CLI connection hint.
+
+    Returns:
+        ``None`` on success (ports resolved and persisted), ``1`` if no
+        available group was found within ``scan_range``.
+    """
+    # Local imports to avoid any circular dependency at module load time.
+    from jiuwenswarm.instance_manager import (
+        collect_all_ports,
+        get_instance_index,
+        update_instances_yaml,
+    )
+    from jiuwenswarm.instance_manager.config import (
+        _format_url_hint,
+        _upsert_env_ports,
+    )
+
+    if cmd.config is None:
+        return 1
+
+    # Determine the scan starting index: the instance's own declared index.
+    if cmd.is_default:
+        base_index = 0
+    else:
+        base_index = get_instance_index(cmd.name)
+
+    # Exclude ports already claimed by OTHER instances so fallback never
+    # silently collides with a running sibling.
+    exclude_ports = collect_all_ports(exclude_name="default" if cmd.is_default else cmd.name)
+
+    result = find_available_ports(
+        base_index=base_index,
+        host="127.0.0.1",
+        scan_range=scan_range,
+        exclude_ports=exclude_ports,
+    )
+
+    if result is None:
+        logging.info(
+            f"[start_services] ERROR: No available port group within scan_range={scan_range} "
+            f"(scanned indices {base_index}..{base_index + scan_range - 1})."
+        )
+        # Tailor the stop command and the port-inspection command to the
+        # actual instance name and host platform so the hint is actionable.
+        import platform as _platform
+        stop_hint = f"jiuwenswarm-start --stop {cmd.name}"
+        if _platform.system().lower() == "windows":
+            port_hint = "netstat -ano | findstr :<port>   (then taskkill /PID <pid> /F)"
+        else:
+            port_hint = "lsof -i :<port>   (or: ss -ltnp | grep <port>)"
+        logging.info(
+            f"[start_services] Suggestions: stop the occupying instance ({stop_hint}), "
+            f"find the holder ({port_hint}), increase scan_range, "
+            f"or set JIUWENSWARM_<TYPE>_PORT env vars to move the base."
+        )
+        return 1
+
+    alt_ports, actual_idx = result
+    logging.info(
+        f"[start_services] ⚠️  Original ports conflict. "
+        f"Falling back to alternative port group (index {actual_idx}):"
+    )
+    _log_port_table("[start_services] Using ports:", alt_ports)
+
+    # Mutate the in-memory config so _build_commands / _wait_for_services_ready
+    # and the PID file reflect the resolved ports.
+    cmd.config = InstanceConfig(
+        name=cmd.config.name,
+        workspace=cmd.config.workspace,
+        ports=alt_ports,
+    )
+
+    # Persist so subprocesses + next launch + TUI/CLI all see the new ports.
+    # Failure to persist is FATAL for the launch: subprocesses read the ports
+    # from .env (default instance via app.py's load_dotenv) or from the
+    # bootstrap .env (named instance via --dotenv). If we write neither, the
+    # spawned subprocesses still see the OLD conflicting ports and crash with
+    # OSError [Errno 10048] on bind. So we must surface this to the caller as a
+    # hard failure (return 1) rather than silently proceeding.
+    persist_where = (
+        f"{get_env_file()}" if cmd.is_default
+        else f"instances.yaml + {cmd.config.get_bootstrap_env_path()}"
+    )
+    try:
+        if cmd.is_default:
+            _upsert_env_ports(get_env_file(), alt_ports)
+        else:
+            update_instances_yaml(cmd.name, cmd.config.workspace, alt_ports)
+            create_bootstrap_env(cmd.config)
+    except Exception as exc:
+        logging.info(
+            f"[start_services] ERROR: Failed to persist fallback ports to {persist_where}: {exc}"
+        )
+        logging.info(
+            "[start_services] Aborting: subprocesses would read the old (conflicting) "
+            "ports and crash on bind. Free up the port file location, fix permissions, "
+            "then retry."
+        )
+        return 1
+
+    logging.info(_format_url_hint(alt_ports))
+    return None
+
+
+def _sync_default_env_ports(ports: dict[str, int]) -> int | None:
+    """Sync the default instance's actual ports into ~/.jiuwenswarm/config/.env.
+
+    The default instance has no bootstrap .env; its subprocesses read ports
+    from ``~/.jiuwenswarm/config/.env`` via ``app.py``'s
+    ``load_dotenv(get_env_file(), override=True)``. So .env must ALWAYS
+    reflect the ports this launch actually uses — not just when a fallback
+    happened. Otherwise a previous fallback's ports (e.g. GATEWAY_PORT=20001)
+    linger in .env, and a later no-conflict launch silently binds the
+    subprocesses to 20001 instead of the default 19001.
+
+    Call this on EVERY default-instance launch path, with the ports actually
+    being used (index-0 defaults when no conflict, or the fallback group when
+    a conflict was resolved). Persistence failure is fatal (returns 1) for the
+    same reason as in ``_resolve_ports_with_fallback``: subprocesses would
+    otherwise read stale ports and crash on bind.
+
+    Returns:
+        None on success, 1 if persistence failed.
+    """
+    from jiuwenswarm.instance_manager.config import _upsert_env_ports
+
+    try:
+        _upsert_env_ports(get_env_file(), ports)
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.info(
+            f"[start_services] ERROR: Failed to sync ports to {get_env_file()}: {exc}"
+        )
+        logging.info(
+            "[start_services] Aborting: subprocesses would read stale ports and "
+            "crash on bind. Fix the .env location/permissions, then retry."
+        )
+        return 1
+    return None
 
 
 def do_stop_instance(cmd: InstanceCommand) -> int:
@@ -396,7 +576,33 @@ def _run_processes(commands: list[tuple[str, list[str], Path]]) -> int:
 
 
 def _run(mode: str) -> int:
-    """Run default instance (existing behavior)."""
+    """Run default instance.
+
+    Unlike named instances, the default instance has no bootstrap .env and no
+    instances.yaml entry — its ports come from code defaults (or env-var
+    overrides) and are read by subprocesses via ``app.py``'s
+    ``load_dotenv(get_env_file(), override=True)``. So on port conflict we
+    probe the default port group, fall back to a free group, and persist the
+    resolved ports into ``~/.jiuwenswarm/config/.env``; the spawned app/web
+    subprocesses and the TUI/CLI (which read ``GATEWAY_PORT``) then pick them
+    up automatically without any --dotenv plumbing.
+    """
+    cmd = InstanceCommand("default")
+    if cmd.validate_and_load():
+        return 1
+
+    if cmd.check_ports_conflicts():
+        if _resolve_ports_with_fallback(cmd) is not None:
+            return 1
+        # Fallback already persisted the resolved ports to .env.
+    else:
+        # No conflict: ensure .env reflects the index-0 defaults so a
+        # PREVIOUS fallback's ports (e.g. GATEWAY_PORT=20001) don't linger
+        # and make this launch's subprocesses bind stale ports. This is the
+        # "first-conflict-then-no-conflict" residue path.
+        if _sync_default_env_ports(cmd.config.ports) is not None:
+            return 1
+
     commands = _build_commands(mode)
     if not commands:
         logging.info(f"[start_services] no commands to run for mode: {mode}")
@@ -530,8 +736,13 @@ def _start_named_instance(name: str, mode: str) -> int:
     if cmd.check_running():
         logging.info(f"[start_services] ERROR: Instance '{cmd.name}' is already running (PID={cmd.status.pid})")
         return 1
-    if cmd.check_ports_available():
-        return 1
+
+    # Port availability: on conflict, try to fall back to a free port group
+    # (persists to instances.yaml + bootstrap .env so subprocesses/TUI/CLI
+    # pick up the new ports). Only hard-fail if no fallback is possible.
+    if cmd.check_ports_conflicts():
+        if _resolve_ports_with_fallback(cmd) is not None:
+            return 1
 
     config = cmd.config
     if config is None:
@@ -658,6 +869,16 @@ def _dispatch_action(args: argparse.Namespace) -> int:
 def main() -> None:
     """CLI entry point."""
     signal.signal(signal.SIGTERM, signal.default_int_handler)
+
+    # Configure logging here (inside the entry point, not at module import time)
+    # so that ``--list``/``--status`` output and service-startup messages are
+    # actually emitted. The root logger otherwise keeps its default WARNING
+    # level and every ``logging.info`` call is silently dropped — the process
+    # runs but nothing is printed to the terminal. Locating the call here
+    # (rather than at module scope) also avoids import-time side effects on the
+    # global logger configuration.
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+
     args = _parse_args()
     exit_code = _dispatch_action(args)
     raise SystemExit(exit_code)

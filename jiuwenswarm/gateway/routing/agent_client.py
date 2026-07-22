@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import asyncio
 import json
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any, AsyncIterator
@@ -40,6 +41,8 @@ _LOG_SENSITIVE_KEYS = frozenset({
     "apikey",
     "authorization",
     "authurl",
+    "cookie",
+    "cookies",
     "devicecode",
     "idtoken",
     "loginid",
@@ -47,10 +50,44 @@ _LOG_SENSITIVE_KEYS = frozenset({
     "password",
     "refreshtoken",
     "secret",
+    "setcookie",
     "token",
     "usercode",
     "verificationurl",
 })
+_LOG_SENSITIVE_KEY_SUFFIXES = (
+    "accesstoken",
+    "apikey",
+    "accesskeyid",
+    "authtoken",
+    "bearertoken",
+    "clientsecret",
+    "credential",
+    "credentials",
+    "idtoken",
+    "password",
+    "privatekey",
+    "refreshtoken",
+    "secretaccesskey",
+    "token",
+)
+_LOG_PROVIDER_KEY_NAMESPACES = (
+    "anthropic",
+    "aws",
+    "azure",
+    "cohere",
+    "dashscope",
+    "deepseek",
+    "github",
+    "google",
+    "groq",
+    "huggingface",
+    "mistral",
+    "moonshot",
+    "openai",
+    "openrouter",
+    "volcengine",
+)
 
 
 class _ReceiverFailure:
@@ -69,9 +106,40 @@ def _normalized_log_key(key: object) -> str:
     return "".join(character for character in str(key).lower() if character.isalnum())
 
 
+def _log_key_tokens(key: object) -> set[str]:
+    raw = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", str(key))
+    return {
+        token.lower()
+        for token in re.split(r"[^A-Za-z0-9]+", raw)
+        if token
+    }
+
+
+def _is_sensitive_log_key(key: object) -> bool:
+    """Recognize credential fields without hiding unrelated public metadata."""
+
+    normalized = _normalized_log_key(key)
+    credential_name = (
+        normalized[: -len("value")] if normalized.endswith("value") else normalized
+    )
+    if credential_name.endswith("publickey"):
+        return False
+    if normalized in _LOG_SENSITIVE_KEYS or credential_name in _LOG_SENSITIVE_KEYS:
+        return True
+    if _log_key_tokens(key) & {"credential", "credentials", "password", "secret"}:
+        return True
+    if credential_name.endswith(_LOG_SENSITIVE_KEY_SUFFIXES):
+        return True
+    return credential_name.endswith("key") and any(
+        namespace in credential_name for namespace in _LOG_PROVIDER_KEY_NAMESPACES
+    )
+
+
 def _redact_log_value(value: Any) -> Any:
     """Recursively remove auth handoffs and authentication capabilities from logs."""
 
+    if isinstance(value, BaseException):
+        return f"[redacted exception: {type(value).__name__}]"
     if isinstance(value, dict):
         is_codex_auth = any(
             str(item).startswith(_CODEX_AUTH_METHOD_PREFIX)
@@ -81,7 +149,7 @@ def _redact_log_value(value: Any) -> Any:
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
             normalized_key = _normalized_log_key(key)
-            if normalized_key in _LOG_SENSITIVE_KEYS:
+            if _is_sensitive_log_key(key):
                 redacted[key] = _LOG_REDACTED_VALUE
             elif is_codex_auth and normalized_key in {"params", "payload", "result"}:
                 redacted[key] = _LOG_REDACTED_VALUE

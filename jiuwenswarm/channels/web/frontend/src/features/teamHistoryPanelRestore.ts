@@ -7,6 +7,11 @@ import type {
   TeamTaskStatus,
 } from '../stores/sessionStore';
 import { normalizeFinalContent } from '../utils/finalContent';
+import {
+  createTaskProgressBaseline,
+  registerConfirmedTaskCreation,
+  type TaskProgressBaseline,
+} from './teamTaskProgressBaseline';
 
 interface TeamMember {
   id: string;
@@ -40,6 +45,7 @@ export interface TeamHistoryPanelState {
   executionEvents: TeamMemberExecutionEvent[];
   messages: Message[];
   humanShareCommands: HumanShareCommand[];
+  taskProgressBaseline: TaskProgressBaseline;
 }
 
 interface TeamHistoryGetResponse {
@@ -52,8 +58,9 @@ interface TeamHistoryGetResponse {
 const TEAM_TASK_STATUSES = new Set<TeamTaskStatus>([
   'pending',
   'blocked',
-  'claimed',
-  'plan_approved',
+  'planning',
+  'in_progress',
+  'in_review',
   'completed',
   'cancelled',
 ]);
@@ -170,14 +177,10 @@ function normalizeTaskStatusWithFallback(
     : fallback;
 }
 
-function statusFromTaskEvent(type: string, status: unknown): TeamTaskStatus {
-  const normalized = normalizeTaskStatus(status);
-  if (type === 'team.task.claimed') return normalized === 'pending' ? 'claimed' : normalized;
-  if (type === 'team.task.completed') return normalized === 'pending' ? 'completed' : normalized;
-  if (type === 'team.task.cancelled') return normalized === 'pending' ? 'cancelled' : normalized;
-  if (type === 'team.task.unblocked') return normalized;
-  return normalized;
-}
+// Task status is resolved server-side (swarm layer) and carried on the event,
+// so restore reads it directly instead of re-deriving it from the event type.
+// Records persisted before the convergence may lack a status; those fall back
+// to 'pending' via normalizeTaskStatus.
 
 function shouldKeepMember(memberId: string): boolean {
   return Boolean(memberId) && memberId !== 'user' && memberId !== 'team_leader';
@@ -332,6 +335,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
   const humanShareCommands = new Map<string, HumanShareCommand>();
   const messages: Message[] = [];
   const shutdownMembers = new Set<string>();
+  let taskProgressBaseline = createTaskProgressBaseline();
   let hasSeenMember = false;
 
   const addMember = (memberId: string, timestamp: number) => {
@@ -479,12 +483,12 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     if (name === 'claim_task') {
       const task = { ...args };
       if (!task.status) {
-        task.status = 'claimed';
+        task.status = 'in_progress';
       }
       if (!pickString(task, ['assignee', 'member_id', 'claimed_by', 'claimedBy']) && memberId) {
         task.member_id = memberId;
       }
-      upsertTask(task, timestamp, 'claimed', false);
+      upsertTask(task, timestamp, 'in_progress', false);
     }
   };
 
@@ -528,7 +532,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
           merged.status = nextStatus;
         }
       }
-      upsertTask(merged, timestamp, name === 'claim_task' ? 'claimed' : 'pending', false);
+      upsertTask(merged, timestamp, name === 'claim_task' ? 'in_progress' : 'pending', false);
     }
   };
 
@@ -744,11 +748,19 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       continue;
     }
     const type = pickString(event, ['type']);
-    const status = statusFromTaskEvent(type, event.status);
+    const status = normalizeTaskStatus(event.status);
     const assignee = pickString(event, ['assignee', 'member_id', 'claimed_by', 'claimedBy', 'from_member']);
     const title = pickString(event, ['title', 'name', 'description']);
     const content = pickString(event, ['content']);
     const teamId = pickString(event, ['team_id']);
+
+    if (type === 'team.task.created') {
+      taskProgressBaseline = registerConfirmedTaskCreation(
+        Array.from(tasks.values()),
+        taskProgressBaseline,
+        taskId
+      );
+    }
 
     taskEvents.set(taskId, {
       id: `hist-task-${taskId}-${timestamp}`,
@@ -775,6 +787,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
       executionEvents: [],
       messages: [],
       humanShareCommands: [],
+      taskProgressBaseline: createTaskProgressBaseline(),
     };
   }
 
@@ -785,6 +798,7 @@ function collectTeamState(records: Record<string, unknown>[], sessionId: string)
     executionEvents: Array.from(executionEvents.values()),
     messages,
     humanShareCommands: Array.from(humanShareCommands.values()),
+    taskProgressBaseline,
   };
 }
 

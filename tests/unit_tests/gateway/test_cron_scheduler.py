@@ -204,6 +204,12 @@ class FakeAgentClient:
             )
 
 
+class FailingAgentClient(FakeAgentClient):
+    async def send_request(self, envelope, *a, **kw):
+        self.unary_requests.append(envelope)
+        raise RuntimeError("agent unavailable")
+
+
 class FakeMessageHandler:
     """Stub MessageHandler that records published messages."""
 
@@ -250,6 +256,52 @@ def _make_scheduler(store, handler=None, agent_client=None):
 
 
 # ── _check_store_changed ─────────────────────────────────────────────────────
+
+
+class TestCronLastSessionId:
+    @pytest.mark.asyncio
+    async def test_failed_agent_request_does_not_record_last_session_id(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await _create_one_job(store)
+        svc = _make_scheduler(store, agent_client=FailingAgentClient())
+
+        run_id = f"{job.id}:1234"
+        await svc.on_wake(job, run_id)
+        await svc.run_tasks[run_id]
+
+        stored = await store.get_job(job.id)
+        assert stored is not None
+        assert stored.last_session_id is None
+
+    @pytest.mark.asyncio
+    async def test_successful_agent_request_records_last_session_id(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await _create_one_job(store)
+        svc = _make_scheduler(store)
+
+        run_id = f"{job.id}:1234"
+        await svc.on_wake(job, run_id)
+        await svc.run_tasks[run_id]
+
+        stored = await store.get_job(job.id)
+        assert stored is not None
+        assert stored.last_session_id
+        assert stored.last_session_id.startswith("cron_")
+        assert stored.last_session_id.endswith(f"_{job.id}")
+
+    @pytest.mark.asyncio
+    async def test_run_now_info_returns_current_execution_session_id(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await _create_one_job(store)
+        svc = _make_scheduler(store)
+
+        info = await svc.trigger_run_now_info(job.id)
+
+        assert info["run_id"].startswith(f"{job.id}:")
+        assert info["session_id"].startswith("cron_")
+        assert info["session_id"].endswith(f"_{job.id}")
+        state = svc.runs[info["run_id"]]
+        assert state.exec_session_id == info["session_id"]
 
 
 class TestCheckStoreChanged:
@@ -460,6 +512,33 @@ class TestHandleEventStoreValidation:
         assert len(handler.published) == 1
         content = _cron_published_content(handler.published[0])
         assert content == "result: 9am now"
+
+    @pytest.mark.asyncio
+    async def test_web_push_update_includes_execution_session_id(self, tmp_path):
+        store_file = tmp_path / "cron_jobs.json"
+        store = CronJobStore(path=store_file)
+        job = await _create_one_job(store, targets="web")
+
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler)
+        await svc.reload()
+
+        run_info = await svc.trigger_run_now_info(job.id)
+        run_id = run_info["run_id"]
+        state = svc.runs[run_id]
+        state.result_text = "web result"
+        state.status = "succeeded"
+
+        ev = _Event(at_ts=time.time(), seq=1, kind="push_update", job_id=job.id, run_id=run_id)
+        await svc.handle_event(ev)
+
+        assert len(handler.published) == 1
+        msg = handler.published[0]
+        cron = msg.payload["cron"]
+        assert msg.channel_id == "web"
+        assert msg.session_id is None
+        assert cron["exec_channel_id"] == "__cron__"
+        assert cron["exec_session_id"] == run_info["session_id"]
 
     @pytest.mark.asyncio
     async def test_wake_executes_normally_when_job_present(self, tmp_path):
@@ -925,6 +1004,25 @@ class TestTeamModeWake:
         state = svc.runs[run_id]
         assert state.status == "succeeded"
         assert state.result_text == "done"
+
+    @pytest.mark.asyncio
+    async def test_agent_wake_passes_model_as_model_name(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(description="simple reminder", targets="tui", model_name="fast-model")
+
+        agent = FakeAgentClient()
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler, agent_client=agent)
+
+        run_id = f"{job.id}:1234"
+        await svc.on_wake(job, run_id)
+        task = svc.run_tasks.get(run_id)
+        assert task is not None
+        await task
+
+        env = agent.unary_requests[0]
+        assert env.params["model_name"] == "fast-model"
+        assert "model" not in env.params
 
     @pytest.mark.asyncio
     async def test_team_wake_stream_timeout(self, tmp_path):

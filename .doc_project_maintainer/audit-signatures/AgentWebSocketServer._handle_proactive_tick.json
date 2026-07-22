@@ -1,22 +1,19 @@
 {
   "calls": [
     {
-      "tool_name": "multi_agent_v1.spawn_agent",
+      "tool_name": "collaboration.followup_task",
       "raw_input": {
-        "agent_id": "019f4099-7890-76c1-9ecf-9f47f6cddb35",
-        "agent_type": "explorer",
+        "target": "/root/reaudit_ws_key",
         "symbol_id": "AgentWebSocketServer._handle_proactive_tick",
-        "assignment": "Audit exactly one symbol: AgentWebSocketServer._handle_proactive_tick in jiuwenswarm/server/agent_ws_server.py."
+        "assignment": "Re-audit exactly one expired symbol against current source."
       }
     },
     {
-      "tool_name": "multi_agent_v1.wait_agent",
+      "tool_name": "collaboration.wait_agent",
       "raw_input": {
-        "agent_id": "019f4099-7890-76c1-9ecf-9f47f6cddb35",
-        "nickname": "Huygens",
+        "target": "/root/reaudit_ws_key",
         "symbol_id": "AgentWebSocketServer._handle_proactive_tick",
-        "completed": true,
-        "finding_count": 2
+        "completed": true
       }
     }
   ]
