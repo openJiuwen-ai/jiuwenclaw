@@ -214,7 +214,7 @@ class ReActAgentConfig(BaseModel):
             api_key: str,
             api_base: str,
             model_name: str,
-            verify_ssl: bool = False
+            verify_ssl: bool = True
     ) -> 'ReActAgentConfig':
         """Configure model client for LLM initialization
 
@@ -226,7 +226,8 @@ class ReActAgentConfig(BaseModel):
             api_key: API key
             api_base: API base URL
             model_name: Model name
-            verify_ssl: Whether to verify SSL (default False)
+            verify_ssl: Whether to verify SSL (default True)
+            ssl_cert: Optional path to a CA bundle for self-signed certs (default None)
 
         Returns:
             self (supports chaining)

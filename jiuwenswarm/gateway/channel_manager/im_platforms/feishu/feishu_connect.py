@@ -48,6 +48,8 @@ class FeishuConfig(BaseModel):
     chat_id: str = ""  # 可选：固定推送目标 chat_id（群聊 oc_xxx 或个人 open_id）
     channel_id: str = "feishu"  # ChannelManager 路由键，支持多实例
     bot_key: str = ""  # 企业飞书多 bot 配置键（仅 feishu_enterprise 使用）
+    # 飞书开放平台 API 域名前缀（由 app_gateway 从 config.yaml 加载并兜底，此处不硬编码默认值）
+    api_base: str = ""
     # 收消息时写入 config.yaml，用于无 metadata 时的回发兜底（与 session_id 解耦）
     last_chat_id: str = ""
     last_open_id: str = ""
@@ -388,7 +390,7 @@ class FeishuChannel(BaseChannel):
 
         try:
             # 1. 获取 tenant_access_token
-            token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+            token_url = f"{self.config.api_base}/open-apis/auth/v3/tenant_access_token/internal"
             token_resp = requests.post(
                 token_url,
                 json={
@@ -411,7 +413,7 @@ class FeishuChannel(BaseChannel):
                 return
 
             # 2. 调用 bot/v3/info 获取机器人信息
-            bot_info_url = "https://open.feishu.cn/open-apis/bot/v3/info"
+            bot_info_url = f"{self.config.api_base}/open-apis/bot/v3/info"
             bot_resp = requests.get(
                 bot_info_url,
                 headers={"Authorization": f"Bearer {tenant_access_token}"},

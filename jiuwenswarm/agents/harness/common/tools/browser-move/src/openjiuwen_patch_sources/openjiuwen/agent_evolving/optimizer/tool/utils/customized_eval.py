@@ -242,7 +242,8 @@ class SimpleEval:
                 client_provider="OpenAI",
                 api_base="https://api.openai.com/v1",
                 api_key=self.config['llm_api_key'],
-                verify_ssl=False
+                verify_ssl=self.config.get("verify_ssl", True),
+                ssl_cert=self.config.get("ssl_cert", None),
             )
             client = OpenAIModelClient(
                 model_config=model_config,

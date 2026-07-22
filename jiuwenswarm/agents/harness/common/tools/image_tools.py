@@ -22,6 +22,7 @@ from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_image_gen_model_config_from_yaml,
     apply_vision_model_config_from_yaml,
+    _get_model_config,
 )
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_requests_verify
 
@@ -335,9 +336,18 @@ async def _invoke_model_image_generation(prompt: str, size: str = "1024x1024", q
     """
     from openjiuwen.core.foundation.llm import ModelClientConfig, Model, UserMessage, ModelRequestConfig
 
-    api_key, api_base, model, provider = _get_image_gen_api_credentials()
+    # 与主链路（apply_image_gen_model_config_from_yaml）同源：直接读 config.yaml
+    # 的 models.image_gen.model_client_config，避免与主链路配置脱节。
+    from jiuwenswarm.common.config import get_config
+    mc = _get_model_config(get_config() or {}, "image_gen")
+    api_key = str(mc.get("api_key") or os.getenv("IMAGE_GEN_API_KEY") or os.getenv("API_KEY") or "").strip()
+    api_base = str(mc.get("api_base") or os.getenv("IMAGE_GEN_API_BASE") or os.getenv("API_BASE") or "").strip()
     if not api_key:
         return {"error": "[ERROR]: IMAGE_GEN_API_KEY or API_KEY is not configured for image generation."}
+
+    model = str(mc.get("model_name") or mc.get("model") or os.getenv("IMAGE_GEN_MODEL_NAME") or "wanx-v1").strip()
+    provider = str(mc.get("client_provider") or mc.get("model_provider")
+                   or os.getenv("IMAGE_GEN_PROVIDER") or "DashScope").strip()
 
     try:
         model_client_config = ModelClientConfig(
@@ -345,7 +355,9 @@ async def _invoke_model_image_generation(prompt: str, size: str = "1024x1024", q
             client_provider=provider,
             api_key=api_key,
             api_base=api_base,
-            verify_ssl=False
+            verify_ssl=mc.get("verify_ssl", True),
+            ssl_cert=mc.get("ssl_cert"),
+            timeout=mc.get("timeout", 1800),
         )
 
         model_config = ModelRequestConfig(
