@@ -13,7 +13,7 @@ from jiuwenclaw.agentserver.tools import deepresearch_tools as dt
 from jiuwenclaw.agentserver.tools import deepresearch_rewrite_tools as rt
 
 
-def _document(root: Path):
+def _document(root: Path, citation_artifacts: dict[str, str] | None = None):
     body = "原句。\n"
     report = root / "report.md"
     report.write_text(body, encoding="utf-8")
@@ -45,6 +45,8 @@ def _document(root: Path):
         "chart_manifest": [],
         "rewrite_history": [],
     }
+    if citation_artifacts is not None:
+        provenance["citation_artifacts"] = citation_artifacts
     report.with_suffix(".provenance.json").write_text(json.dumps(provenance), encoding="utf-8")
     return report, provenance
 
@@ -396,6 +398,117 @@ async def test_prepare_and_commit_tools_return_short_outcomes_and_deliver_file(t
     assert Path(committed["report_path"]).is_file()
     push.send_push.assert_awaited_once()
     assert push.send_push.await_args.args[0]["payload"]["event_type"] == "chat.file"
+
+
+@pytest.mark.asyncio
+async def test_commit_inherits_and_delivers_hidden_citation_artifacts(tmp_path):
+    citation_artifacts = {
+        "raw_report_path": str(tmp_path / "report.raw_report.md"),
+        "citations_preview_path": str(tmp_path / "report.citations.preview.json"),
+    }
+    report, _ = _document(tmp_path, citation_artifacts=citation_artifacts)
+    route = {"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}
+    with patch.object(rt, "_get_route", return_value=route), patch.object(
+        rt, "get_effective_request_output_dir", return_value=str(tmp_path)
+    ):
+        prepared = json.loads(
+            await rt.deepresearch_prepare_rewrite._func(
+                report_path=str(report),
+                action="polish",
+                selection=_selection(),
+                instruction="",
+            )
+        )
+        push = AsyncMock()
+        with patch(
+            "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
+            return_value=push,
+        ):
+            committed = json.loads(
+                await rt.deepresearch_commit_rewrite._func(
+                    context_token=prepared["context_token"],
+                    structured_result=_structured_result(prepared),
+                )
+            )
+
+    child_provenance = json.loads(
+        Path(committed["provenance_path"]).read_text(encoding="utf-8")
+    )
+    assert child_provenance["citation_artifacts"] == citation_artifacts
+    payload = push.send_push.await_args.args[0]["payload"]
+    assert payload["files"] == [{
+        "path": committed["report_path"],
+        "name": Path(committed["report_path"]).name,
+    }]
+    assert payload["metadata"] == {
+        "artifactBundle": {
+            "schemaVersion": "1.0",
+            "relatedArtifacts": [
+                {
+                    "type": "raw_report",
+                    "path": citation_artifacts["raw_report_path"],
+                    "contentType": "text/markdown",
+                    "relatedToPathIndex": 0,
+                },
+                {
+                    "type": "citations_preview",
+                    "path": citation_artifacts["citations_preview_path"],
+                    "contentType": "application/json",
+                    "schemaVersion": "1.1",
+                    "relatedToPathIndex": 0,
+                },
+            ],
+        }
+    }
+    assert "citations_path" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provenance_content",
+    [None, "not-json", "[]", '{"citation_artifacts": "invalid"}'],
+)
+async def test_deliver_report_omits_metadata_for_unusable_provenance(
+    tmp_path, provenance_content
+):
+    provenance_path = tmp_path / "child.provenance.json"
+    if provenance_content is not None:
+        provenance_path.write_text(provenance_content, encoding="utf-8")
+    push = AsyncMock()
+    route = {"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}
+    with patch(
+        "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
+        return_value=push,
+    ):
+        delivered = await rt._deliver_report(
+            str(tmp_path / "child.md"), str(provenance_path), route
+        )
+
+    assert delivered is True
+    payload = push.send_push.await_args.args[0]["payload"]
+    assert payload["event_type"] == "chat.file"
+    assert "metadata" not in payload
+
+
+@pytest.mark.asyncio
+async def test_deliver_report_omits_metadata_for_oversized_provenance(tmp_path):
+    provenance_path = tmp_path / "child.provenance.json"
+    provenance_path.write_text(
+        json.dumps({"citation_artifacts": {"raw_report_path": "x" * 100}}),
+        encoding="utf-8",
+    )
+    push = AsyncMock()
+    route = {"request_id": "R1", "channel_id": "CH1", "session_id": "S1"}
+    with patch.object(rt, "_CITATION_PROVENANCE_MAX_BYTES", 32), patch(
+        "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
+        return_value=push,
+    ):
+        delivered = await rt._deliver_report(
+            str(tmp_path / "child.md"), str(provenance_path), route
+        )
+
+    assert delivered is True
+    assert "metadata" not in push.send_push.await_args.args[0]["payload"]
 
 
 @pytest.mark.asyncio

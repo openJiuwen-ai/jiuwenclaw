@@ -317,7 +317,8 @@ def test_write_report_markdown_builds_inference_bundle_and_strips_internal_marke
     assert "html_base64" not in json.dumps(provenance)
 
 
-def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
+@pytest.mark.asyncio
+async def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
     final_result = {
         "response_content": "# 报告\n\n正文",
         "infer_messages": [],
@@ -335,17 +336,34 @@ def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
         "jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline.convert_md_to_html",
         side_effect=_convert,
     ):
-        artifacts = dt._write_report_artifacts_stream(final_result, "研究报告.md", "C1")
+        artifacts = await dt._write_report_artifacts_stream(
+            final_result,
+            "研究报告.md",
+            "C1",
+            {
+                "raw_report_path": "/skill/data/C1.raw_report.md",
+                "citations_preview_path": "/skill/data/C1.citations.preview.json",
+                "citations_path": "/skill/data/C1.citations.json",
+            },
+        )
 
     assert artifacts == {
         "md": str(tmp_path / "研究报告.md"),
         "html": str(tmp_path / "研究报告.html"),
     }
     assert (tmp_path / "研究报告.final-result.json").is_file()
-    assert (tmp_path / "研究报告.provenance.json").is_file()
+    provenance = json.loads(
+        (tmp_path / "研究报告.provenance.json").read_text(encoding="utf-8")
+    )
+    assert provenance["citation_artifacts"] == {
+        "raw_report_path": "/skill/data/C1.raw_report.md",
+        "citations_preview_path": "/skill/data/C1.citations.preview.json",
+    }
+    assert "citations_path" not in provenance["citation_artifacts"]
 
 
-def test_write_report_artifacts_keeps_rewrite_sidecars_when_html_fails(tmp_path):
+@pytest.mark.asyncio
+async def test_write_report_artifacts_keeps_rewrite_sidecars_when_html_fails(tmp_path):
     final_result = {
         "response_content": "# 报告\n\n正文",
         "infer_messages": [],
@@ -359,11 +377,47 @@ def test_write_report_artifacts_keeps_rewrite_sidecars_when_html_fails(tmp_path)
         "jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline.convert_md_to_html",
         side_effect=RuntimeError("converter unavailable"),
     ):
-        artifacts = dt._write_report_artifacts_stream(final_result, "研究报告.md", "C1")
+        artifacts = await dt._write_report_artifacts_stream(
+            final_result, "研究报告.md", "C1"
+        )
 
     assert artifacts == {"md": str(tmp_path / "研究报告.md")}
     assert (tmp_path / "研究报告.final-result.json").is_file()
     assert (tmp_path / "研究报告.provenance.json").is_file()
+
+
+def test_build_related_artifact_bundle_exposes_only_hidden_preview_companions():
+    marker = {
+        "raw_report_path": "/skill/data/C1.raw_report.md",
+        "citations_path": "/skill/data/C1.citations.json",
+        "citations_preview_path": "/skill/data/C1.citations.preview.json",
+    }
+
+    assert dt._build_related_artifact_bundle(marker, 0) == {
+        "schemaVersion": "1.0",
+        "relatedArtifacts": [
+            {
+                "type": "raw_report",
+                "path": "/skill/data/C1.raw_report.md",
+                "contentType": "text/markdown",
+                "relatedToPathIndex": 0,
+            },
+            {
+                "type": "citations_preview",
+                "path": "/skill/data/C1.citations.preview.json",
+                "contentType": "application/json",
+                "schemaVersion": "1.1",
+                "relatedToPathIndex": 0,
+            },
+        ],
+    }
+
+
+def test_build_related_artifact_bundle_ignores_blank_companion_paths():
+    assert dt._build_related_artifact_bundle(
+        {"raw_report_path": " ", "citations_preview_path": None},
+        0,
+    ) is None
 
 
 @pytest.mark.asyncio
@@ -376,6 +430,9 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
             "__deepsearch_status__": "completed",
             "conversation_id": "C1",
             "final_result": final_result,
+            "raw_report_path": "/skill/data/C1.raw_report.md",
+            "citations_path": "/skill/data/C1.citations.json",
+            "citations_preview_path": "/skill/data/C1.citations.preview.json",
         }),
     ]
     push = AsyncMock()
@@ -384,7 +441,11 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
          patch.object(dt, "_get_route", return_value={
              "request_id": "R1", "channel_id": "CH1", "session_id": "S1"
          }), \
-         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md") as write_report, \
+         patch.object(
+             dt,
+             "_write_report_artifacts_stream",
+             return_value={"md": "/tmp/r.md", "html": "/tmp/r.html"},
+         ) as write_report, \
          patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_Proc(lines))), \
          patch(
              "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
@@ -395,8 +456,44 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
     report_frames = [payload for payload in payloads if payload.get("event_type") == "chat.delta"]
     assert report_frames == []
-    write_report.assert_called_once_with(final_result, "r", "C1")
-    assert {"event_type": "chat.file", "files": [{"path": "/tmp/r.md", "name": "r.md"}]} in payloads
+    write_report.assert_called_once_with(
+        final_result,
+        "r",
+        "C1",
+        {
+            "raw_report_path": "/skill/data/C1.raw_report.md",
+            "citations_preview_path": "/skill/data/C1.citations.preview.json",
+        },
+    )
+    file_payload = next(payload for payload in payloads if payload.get("event_type") == "chat.file")
+    assert file_payload == {
+        "event_type": "chat.file",
+        "files": [
+            {"path": "/tmp/r.md", "name": "r.md"},
+            {"path": "/tmp/r.html", "name": "r.html"},
+        ],
+        "metadata": {
+            "artifactBundle": {
+                "schemaVersion": "1.0",
+                "relatedArtifacts": [
+                    {
+                        "type": "raw_report",
+                        "path": "/skill/data/C1.raw_report.md",
+                        "contentType": "text/markdown",
+                        "relatedToPathIndex": 0,
+                    },
+                    {
+                        "type": "citations_preview",
+                        "path": "/skill/data/C1.citations.preview.json",
+                        "contentType": "application/json",
+                        "schemaVersion": "1.1",
+                        "relatedToPathIndex": 0,
+                    },
+                ],
+            },
+        },
+    }
+    assert "C1.citations.json" not in json.dumps(file_payload)
     assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 6, None]
     assert json.loads(result) == {
         "status": "completed",
@@ -694,6 +791,52 @@ async def test_outline_titles_are_reused_by_section_stream_after_resume():
     assert [_active_stage(update) for update in _task_updates(payloads)] == [
         1, 2, 2, 3, 6, None,
     ]
+
+
+@pytest.mark.asyncio
+async def test_outline_titles_are_reused_when_workflow_continues_without_interrupt():
+    outline = json.dumps({
+        "title": "AI Agent 入门",
+        "sections": [
+            {"id": "1", "title": "AI Agent 概念定义与核心区分"},
+            {"id": "2", "title": "AI Agent 技术架构与工作原理"},
+        ],
+    }, ensure_ascii=False)
+    lines = [
+        json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+        json.dumps({"agent": "outline", "content": outline}),
+        json.dumps({
+            "agent": "plan_reasoning",
+            "section_idx": "2",
+            "event": "message",
+            "content": "章节规划过程",
+        }),
+        json.dumps({"__deepsearch_status__": "error", "conversation_id": "C1",
+                    "error": "stop after section evidence"}),
+    ]
+    push = AsyncMock()
+    with patch.object(dt, "_resolve_jiuwenclaw_python", return_value="/p"), \
+         patch.object(dt, "_resolve_run_script", return_value="/s"), \
+         patch.object(dt, "_get_route", return_value={
+             "request_id": "R1", "channel_id": "CH1", "session_id": "S1"
+         }), \
+         patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_Proc(lines))), \
+         patch(
+             "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
+             return_value=push,
+         ):
+        await dt.deepresearch_stream._func(action="start", query="X", file_name="r")
+
+    section_payloads = [
+        call.args[0]["payload"]
+        for call in push.send_push.await_args_list
+        if call.args[0]["payload"].get("stream_source_id") == "deepresearch_section_2"
+    ]
+    assert section_payloads
+    assert all(
+        payload["task_content"] == "AI Agent 技术架构与工作原理"
+        for payload in section_payloads
+    )
 
 
 @pytest.mark.asyncio

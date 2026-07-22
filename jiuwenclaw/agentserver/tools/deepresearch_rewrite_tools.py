@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 
 from openjiuwen.core.common.exception.errors import StatusCode, ValidationError
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
@@ -15,12 +16,17 @@ from jiuwenclaw.agentserver.tools.deepresearch_plugin.document_rewrite import (
     commit_rewrite,
     prepare_rewrite,
 )
-from jiuwenclaw.agentserver.tools.deepresearch_tools import _get_route
+from jiuwenclaw.agentserver.tools.deepresearch_tools import (
+    _build_related_artifact_bundle,
+    _get_route,
+)
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
     get_effective_request_output_dir,
 )
 
 logger = logging.getLogger(__name__)
+
+_CITATION_PROVENANCE_MAX_BYTES = 4 * 1024 * 1024
 
 _PREPARE_INPUT_SCHEMA = {
     "type": "object",
@@ -283,7 +289,26 @@ async def deepresearch_prepare_rewrite(
     return json.dumps({"status": "prepared", **result}, ensure_ascii=False)
 
 
-async def _deliver_report(report_path: str, route: dict[str, object]) -> bool:
+def _load_citation_artifacts(provenance_path: str) -> object:
+    """Best-effort load of hidden citation associations from child provenance."""
+    try:
+        with Path(provenance_path).open("rb") as stream:
+            raw = stream.read(_CITATION_PROVENANCE_MAX_BYTES + 1)
+        if len(raw) > _CITATION_PROVENANCE_MAX_BYTES:
+            return None
+        provenance = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(provenance, dict):
+        return None
+    return provenance.get("citation_artifacts")
+
+
+async def _deliver_report(
+    report_path: str,
+    provenance_path: str,
+    route: dict[str, object],
+) -> bool:
     if not route.get("session_id") or not route.get("channel_id"):
         return False
     from jiuwenclaw.agentserver.gateway_push.transport import (  # pylint: disable=import-outside-toplevel
@@ -291,14 +316,20 @@ async def _deliver_report(report_path: str, route: dict[str, object]) -> bool:
     )
 
     transport = WebSocketGatewayPushTransport()
+    payload = {
+        "event_type": "chat.file",
+        "files": [{"path": report_path, "name": os.path.basename(report_path)}],
+    }
+    artifact_bundle = _build_related_artifact_bundle(
+        _load_citation_artifacts(provenance_path), markdown_index=0
+    )
+    if artifact_bundle is not None:
+        payload["metadata"] = {"artifactBundle": artifact_bundle}
     await transport.send_push({
         "request_id": route.get("request_id", ""),
         "channel_id": route["channel_id"],
         "session_id": route["session_id"],
-        "payload": {
-            "event_type": "chat.file",
-            "files": [{"path": report_path, "name": os.path.basename(report_path)}],
-        },
+        "payload": payload,
         "is_complete": False,
     })
     return True
@@ -349,7 +380,9 @@ async def deepresearch_commit_rewrite(
         })
 
     try:
-        delivered = await _deliver_report(result["report_path"], route)
+        delivered = await _deliver_report(
+            result["report_path"], result["provenance_path"], route
+        )
     except Exception:  # pylint: disable=broad-exception-caught
         logger.exception("deepresearch rewrite artifact delivery failed")
         delivered = False
