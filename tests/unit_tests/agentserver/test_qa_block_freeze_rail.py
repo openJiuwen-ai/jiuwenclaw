@@ -9,10 +9,13 @@ import pathlib
 import unittest
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from openjiuwen.core.context_engine.qa_block.freezer import FreezeCommitResult
-from openjiuwen.core.context_engine.qa_block.schema import QABlockEntry
+from openjiuwen.core.context_engine.qa_block.schema import QABlockEntry, QABlockRegistry
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 
 _MODULE_PATH = (
     pathlib.Path(__file__).resolve().parents[3]
@@ -41,6 +44,50 @@ async def _schedule_freeze_artifact_produce_async(rail: Any, **kwargs: Any) -> N
 
 def _on_freeze_commit(rail: Any, session: Any, context: Any, commit: FreezeCommitResult) -> None:
     getattr(rail, "_on_freeze_commit")(session, context, commit)
+
+
+def _make_freeze_ctx(
+    *,
+    query: Any = None,
+    interruption: Any = None,
+) -> tuple[AgentCallbackContext, Any, Any]:
+    state: dict[str, Any] = {}
+    if interruption is not None:
+        state[INTERRUPTION_KEY] = interruption
+
+    def get_state(key: str, default: Any = None) -> Any:
+        return state.get(key, default)
+
+    def update_state(updates: dict[str, Any]) -> None:
+        state.update(updates)
+
+    session = SimpleNamespace(
+        get_session_id=lambda: "session-1",
+        get_state=get_state,
+        update_state=update_state,
+        _state=state,
+    )
+    context = MagicMock()
+    context.context_id.return_value = "ctx-1"
+    context_engine = MagicMock()
+    context_engine.get_context.return_value = context
+    context_engine.get_history_qa_buffer.return_value = []
+    context_engine.save_contexts = AsyncMock()
+    agent = SimpleNamespace()
+    if query is None:
+        query = InteractiveInput()
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=InvokeInputs(query=query),
+        session=session,
+    )
+    return ctx, context_engine, session
+
+
+def _make_interactive_freeze_ctx(
+    *, interruption: Any = None
+) -> tuple[AgentCallbackContext, Any, Any]:
+    return _make_freeze_ctx(interruption=interruption)
 
 
 class TestQABlockFreezeRailProduceSchedule(unittest.IsolatedAsyncioTestCase):
@@ -120,6 +167,177 @@ class TestQABlockFreezeRailProduceSchedule(unittest.IsolatedAsyncioTestCase):
         with patch.object(asyncio, "get_running_loop", side_effect=RuntimeError):
             _on_freeze_commit(self.rail, object(), MagicMock(), commit)
         self.mgr.schedule_freeze_artifact_produce.assert_not_called()
+
+
+class TestQABlockFreezeRailInteractiveResume(unittest.IsolatedAsyncioTestCase):
+    """InteractiveInput resume: freeze only when interruption is settled."""
+
+    def setUp(self) -> None:
+        self.rail = JiuClawQABlockFreezeRail()
+        self.rail.workspace = SimpleNamespace(root_path="/tmp/ws")
+        self.freeze_mock = AsyncMock(return_value=_make_commit().entry)
+        self.rail._freezer = SimpleNamespace(freeze=self.freeze_mock)
+        self.rail._maybe_await_overview_before_freeze = AsyncMock()
+
+    async def test_interactive_resume_with_none_result_freezes_when_no_interrupt(self) -> None:
+        ctx, context_engine, _session = _make_interactive_freeze_ctx()
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "clear_assembly_committed_qa_id"), patch.object(
+            _module, "QABlockStore", return_value=MagicMock()
+        ), patch.object(_module, "post_agent_execute_for_session", new_callable=AsyncMock):
+            await self.rail.after_invoke(ctx)
+
+        self.freeze_mock.assert_awaited_once()
+
+    async def test_interactive_resume_skips_when_session_still_interrupted(self) -> None:
+        ctx, context_engine, _session = _make_interactive_freeze_ctx(
+            interruption=SimpleNamespace(original_query="paused"),
+        )
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "QABlockStore", return_value=MagicMock()):
+            await self.rail.after_invoke(ctx)
+
+        self.freeze_mock.assert_not_awaited()
+
+    async def test_interactive_resume_skips_when_result_type_interrupt(self) -> None:
+        ctx, context_engine, _session = _make_interactive_freeze_ctx()
+        ctx.inputs.result = {"result_type": "interrupt", "interrupt_ids": ["id-1"]}
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "QABlockStore", return_value=MagicMock()):
+            await self.rail.after_invoke(ctx)
+
+        self.freeze_mock.assert_not_awaited()
+
+    async def test_failed_freeze_clears_empty_current_qa_id(self) -> None:
+        ctx, context_engine, session = _make_interactive_freeze_ctx()
+        registry = QABlockRegistry(session_id="session-1", current_qa_id="qa_stale", next_qa_index=2)
+        self.freeze_mock.return_value = None
+
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "clear_assembly_committed_qa_id"), patch.object(
+            _module, "QABlockStore", return_value=MagicMock()
+        ), patch.object(_module, "load_registry", return_value=registry), patch.object(
+            _module, "save_registry"
+        ) as mock_save, patch.object(
+            _module, "post_agent_execute_for_session", new_callable=AsyncMock
+        ) as mock_flush:
+            await self.rail.after_invoke(ctx)
+
+        self.freeze_mock.assert_awaited_once()
+        self.assertIsNone(registry.current_qa_id)
+        mock_save.assert_called_once()
+        mock_flush.assert_awaited_once()
+        context_engine.save_contexts.assert_awaited()
+
+    async def test_failed_freeze_skips_save_contexts_when_persist_context_false(self) -> None:
+        context_engine = MagicMock()
+        context_engine.get_context.return_value = MagicMock(context_id=lambda: "ctx-1")
+        context_engine.get_history_qa_buffer.return_value = []
+        context_engine.save_contexts = AsyncMock()
+        session = SimpleNamespace(get_session_id=lambda: "session-1", get_state=lambda *_a, **_k: None)
+        registry = QABlockRegistry(session_id="session-1", current_qa_id="qa_stale", next_qa_index=2)
+        self.freeze_mock.return_value = None
+        agent = SimpleNamespace()
+
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "clear_assembly_committed_qa_id"), patch.object(
+            _module, "QABlockStore", return_value=MagicMock()
+        ), patch.object(_module, "load_registry", return_value=registry), patch.object(
+            _module, "save_registry"
+        ), patch.object(_module, "post_agent_execute_for_session", new_callable=AsyncMock):
+            await self.rail.freeze_current_qa_sync(
+                "session-1",
+                agent=agent,
+                session=session,
+                persist_context=False,
+            )
+
+        self.assertIsNone(registry.current_qa_id)
+        context_engine.save_contexts.assert_not_awaited()
+
+
+class TestQABlockFreezeRailFirstAskPlainQuery(unittest.IsolatedAsyncioTestCase):
+    """First permission ASK on a normal user query must not freeze (same-QA keep)."""
+
+    def setUp(self) -> None:
+        self.rail = JiuClawQABlockFreezeRail()
+        self.rail.workspace = SimpleNamespace(root_path="/tmp/ws")
+        self.freeze_mock = AsyncMock(return_value=_make_commit().entry)
+        self.rail._freezer = SimpleNamespace(freeze=self.freeze_mock)
+        self.rail._maybe_await_overview_before_freeze = AsyncMock()
+
+    async def test_plain_query_skips_when_session_interrupted(self) -> None:
+        ctx, context_engine, _session = _make_freeze_ctx(
+            query="请读取桌面文件并总结",
+            interruption=SimpleNamespace(original_query="paused"),
+        )
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "QABlockStore", return_value=MagicMock()):
+            await self.rail.after_invoke(ctx)
+
+        self.freeze_mock.assert_not_awaited()
+
+    async def test_plain_query_skips_when_result_type_interrupt(self) -> None:
+        ctx, context_engine, _session = _make_freeze_ctx(query="请发送文件给我")
+        ctx.inputs.result = {"result_type": "interrupt", "interrupt_ids": ["call_1"]}
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "QABlockStore", return_value=MagicMock()):
+            await self.rail.after_invoke(ctx)
+
+        self.freeze_mock.assert_not_awaited()
+
+    async def test_plain_query_freezes_when_not_interrupted(self) -> None:
+        ctx, context_engine, _session = _make_freeze_ctx(query="你好")
+        ctx.inputs.result = {"result_type": "answer", "output": "hi"}
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "clear_assembly_committed_qa_id"), patch.object(
+            _module, "QABlockStore", return_value=MagicMock()
+        ), patch.object(_module, "post_agent_execute_for_session", new_callable=AsyncMock):
+            await self.rail.after_invoke(ctx)
+
+        self.freeze_mock.assert_awaited_once()
+
+    async def test_settled_result_with_stale_key_freezes_and_clears_key(self) -> None:
+        """Explicit answer + leftover INTERRUPTION_KEY → freeze and clear (not mis-skip)."""
+        stale = SimpleNamespace(original_query="stale")
+        ctx, context_engine, session = _make_freeze_ctx(
+            query="今天天气怎么样",
+            interruption=stale,
+        )
+        ctx.inputs.result = {"result_type": "answer", "output": "sunny"}
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "clear_assembly_committed_qa_id"), patch.object(
+            _module, "QABlockStore", return_value=MagicMock()
+        ), patch.object(_module, "post_agent_execute_for_session", new_callable=AsyncMock):
+            await self.rail.after_invoke(ctx)
+
+        self.freeze_mock.assert_awaited_once()
+        self.assertIsNone(session.get_state(INTERRUPTION_KEY))
+
+    async def test_secondary_ask_keeps_interrupt_key(self) -> None:
+        """Second ASK during resume: skip freeze and do NOT clear INTERRUPTION_KEY."""
+        pending = SimpleNamespace(original_query="still waiting")
+        ctx, context_engine, session = _make_freeze_ctx(
+            query=InteractiveInput(),
+            interruption=pending,
+        )
+        ctx.inputs.result = {"result_type": "interrupt", "interrupt_ids": ["call_2"]}
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "QABlockStore", return_value=MagicMock()):
+            await self.rail.after_invoke(ctx)
+
+        self.freeze_mock.assert_not_awaited()
+        self.assertIs(session.get_state(INTERRUPTION_KEY), pending)
 
 
 if __name__ == "__main__":

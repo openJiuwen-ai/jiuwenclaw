@@ -105,44 +105,6 @@ export function createEvolveSimplifyCommand(): SlashCommand {
 }
 
 /**
- * /evolve_rebuild - Rebuild SKILL.md via followup execution
- * Usage: /evolve_rebuild <skill_name> [<user_query>...]
- */
-export function createEvolveRebuildCommand(): SlashCommand {
-  return {
-    name: "evolve_rebuild",
-    description: "Rebuild SKILL.md from archived history and evolution records",
-    usage: "/evolve_rebuild <skill_name> [<user_query>...]",
-    example: "/evolve_rebuild pptx improve error handling",
-    kind: CommandKind.BUILT_IN,
-    hidden: true,
-    takesArgs: true,
-    action: (ctx, args) => {
-      const parsedArgs = parseArgs(args);
-      const skillName = parsedArgs[0];
-
-      if (!skillName || skillName.startsWith("--")) {
-        ctx.addItem(
-          makeItem(
-            ctx.sessionId,
-            "error",
-            "用法：/evolve_rebuild <skill_name> [<user_query>...] - 请指定 Skill 名称",
-          ),
-        );
-        return;
-      }
-
-      const requestId = ctx.sendMessage(`/evolve_rebuild ${args.trim()}`);
-      if (!requestId) {
-        ctx.addItem(
-          makeItem(ctx.sessionId, "error", "offline: waiting for reconnect before sending evolve_rebuild request"),
-        );
-      }
-    },
-  };
-}
-
-/**
  * /solidify - Approve and solidify evolution proposals for a skill
  * Usage: /solidify <skill_name>
  */

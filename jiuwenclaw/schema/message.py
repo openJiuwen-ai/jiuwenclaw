@@ -71,6 +71,9 @@ class ReqMethod(Enum):
     SKILLS_EVOLUTION_STATUS = "skills.evolution.status"
     SKILLS_EVOLUTION_GET = "skills.evolution.get"
     SKILLS_EVOLUTION_SAVE = "skills.evolution.save"
+    SKILLS_EVOLUTION_ARCHIVES = "skills.evolution.archives"
+    SKILLS_EVOLUTION_ROLLBACK = "skills.evolution.rollback"
+    SKILLS_EVOLUTION_REBUILD = "skills.evolution.rebuild"
 
     EXTENSIONS_LIST = "extensions.list"
     EXTENSIONS_IMPORT = "extensions.import"

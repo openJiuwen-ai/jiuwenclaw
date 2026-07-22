@@ -423,6 +423,18 @@ def _is_no_search_degraded(inputs: dict[str, Any]) -> bool:
     return richness in ("thin", "empty")
 
 
+def _has_no_image_source(inputs: dict[str, Any]) -> bool:
+    """本流程不会有 image_map：无用户本地图，且未启用 AI 生图。
+
+    供 _build_p43_prompt 判定是否需要在大纲规划阶段就抑制"放图"意图。
+    """
+    image_paths = inputs.get("image_paths") or []
+    if image_paths:
+        return False
+    need_imagegen = bool(inputs.get("need_imagegen", False))
+    return not need_imagegen
+
+
 def _build_p43_prompt(
     inputs: dict[str, Any],
     source_material: str,
@@ -451,6 +463,15 @@ def _build_p43_prompt(
         parts.append(f"- presentation_purpose: {presentation_purpose}\n")
     if user_text:
         parts.append(f"- 用户原文：{user_text}\n")
+    # 无图片来源：topic 模式下从源头抑制"放图"意图，避免下游页面生成时自行产图。
+    # outline/description 模式保留用户原文，不注入此约束。
+    if source_type == "topic" and _has_no_image_source(inputs):
+        parts.append(
+            "- 图片素材状态：本流程无图片来源（无用户本地图、未启用 AI 生图）。"
+            "「内容概要」字段禁止出现“展示图片/配图/插图/带图”等任何放图承诺；"
+            "视觉表达用数据卡片、ECharts 图表、纯色/CSS 图形描述，"
+            "不得要求页面出现具体图片。\n"
+        )
     parts.append(f"- include_searched_sources_section: {include_sources}\n")
     if degraded:
         parts.append(

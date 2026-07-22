@@ -944,7 +944,18 @@ _IMAGE_LAYOUT_TEMPLATE_MANY = (
 def _build_image_section(image_map_page: str) -> str:
     """根据本页图片素材描述和图片数量，构造图片素材 section。"""
     if not image_map_page:
-        return ""
+        # 无图片素材：禁止自行绘制/编造任何图片（含外链图、伪造 CDN URL、radial-gradient 盘体等）。
+        # html-to-pptx 转换器不支持 radial-gradient/url()，自行产图会导致导出后透明空区。
+        return (
+            "\n### 图片素材：无（本页无任何图片素材来源）\n"
+            "- 禁止使用任何 `<img src=\"http...\">` 外链图片（含伪造 CDN 路径，"
+            "如 cdn.digitalhumanai.top/.../assets/... 等，该类图片路径不存在）\n"
+            "- 禁止 `background-image: url(http...)` 外链背景图\n"
+            "- 禁止用 `radial-gradient()` 绘制任何圆形盘体/图片位"
+            "（html-to-pptx 转换器不支持 radial-gradient，导出后会变成透明空区）\n"
+            "- 所有视觉表达改用：纯色 + box-shadow 模拟立体感、linear-gradient 渐变、"
+            "ECharts 图表、数据卡片、FontAwesome 图标，不得出现真实图片位\n"
+        )
     # 统计图片数量（每行一个 "- path:" 开头）
     img_count = image_map_page.count("- path:")
     layout = _IMAGE_LAYOUT_TEMPLATES.get(img_count)

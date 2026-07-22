@@ -133,6 +133,15 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
 }
 
+# Evolution rail RPCs are handled by DeepAdapter (not SkillManager).
+_SKILL_EVOLUTION_RAIL_ROUTES: frozenset[ReqMethod] = frozenset(
+    {
+        ReqMethod.SKILLS_EVOLUTION_ARCHIVES,
+        ReqMethod.SKILLS_EVOLUTION_ROLLBACK,
+        ReqMethod.SKILLS_EVOLUTION_REBUILD,
+    }
+)
+
 # Tools 管理请求路由表
 _TOOL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.TOOLS_ADD: "handle_tools_add",
@@ -1031,8 +1040,54 @@ class JiuWenClaw:
             metadata=request.metadata,
         )
 
+    async def _handle_skills_evolution_rail_request(
+        self, request: AgentRequest,
+    ) -> AgentResponse:
+        """Forward skills.evolution.* rail RPCs to DeepAdapter."""
+        adapter = await self._ensure_adapter()
+        if request.req_method == ReqMethod.SKILLS_EVOLUTION_ROLLBACK:
+            handler_name = "handle_skills_evolution_rollback"
+        elif request.req_method == ReqMethod.SKILLS_EVOLUTION_REBUILD:
+            handler_name = "handle_skills_evolution_rebuild"
+        else:
+            handler_name = "handle_skills_evolution_archives"
+        handler = getattr(adapter, handler_name, None)
+        if handler is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": f"当前 adapter 不支持 {request.req_method.value}"},
+                metadata=request.metadata,
+            )
+        try:
+            payload = await handler(request.params or {})
+        except Exception as exc:
+            logger.error(
+                "[JiuWenClaw] skills.evolution rail 请求处理失败: %s",
+                exc,
+                extra={"user_visible": "critical"},
+            )
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+                metadata=request.metadata,
+            )
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
     async def _handle_skills_request(self, request: AgentRequest) -> AgentResponse | None:
         """处理 Skills 相关请求，返回 None 表示不是 Skills 请求."""
+        if request.req_method in _SKILL_EVOLUTION_RAIL_ROUTES:
+            return await self._handle_skills_evolution_rail_request(request)
+
         if request.req_method not in _SKILL_ROUTES:
             return None
 
@@ -1238,68 +1293,67 @@ class JiuWenClaw:
             inputs["memory_block"] = memory_block
 
         async def run_agent_task():
-            # 注册 Office Claw MCP（请求级环境变量）
-            office_claw_mcp = request.params.get("office_claw_mcp")
-            if isinstance(office_claw_mcp, dict):
+            mcp_payload = self._extract_request_mcp_payload(request)
+            if mcp_payload:
                 try:
-                    await self._get_tool_manager().register_request_scoped_office_claw_mcp(office_claw_mcp)
+                    await self._get_tool_manager().register_request_scoped_mcp(
+                        mcp_payload, request_id=request.request_id
+                    )
                 except Exception as exc:
-                    logger.warning("[JiuWenClaw] office_claw_mcp 注册失败: %s", exc, extra={'user_visible': 'progress'})
+                    logger.warning("[JiuWenClaw] request_mcp_servers 注册失败: %s", exc, extra={'user_visible': 'progress'})
             return await adapter.process_message_impl(request, inputs)
 
-        result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
+        try:
+            result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
 
-        if result.ok and result.payload.get("content"):
-            content = result.payload["content"]
-            content_str = content if isinstance(content, str) else str(content)
-            # 记录Agent回答到日志
-            logger.info(
-                "[JiuWenClaw] Agent回答: %s",
-                _truncate_for_log(content_str),
-                extra={'user_visible': 'critical'}
-            )
-            append_history_record(
-                session_id=session_id,
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                role="assistant",
-                event_type="chat.final",
-                content=content_str,
-                timestamp=time.time(),
-                mode=request.params.get("mode", "unknown"),
-                sessions_root=self._sessions_dir,
-            )
-
-            # cloud memory: after chat hook
-            if memory_mode == "cloud":
-                after_ctx = MemoryHookContext(
-                    session_id=request.session_id or "default",
-                    request_id=request.request_id or "",
-                    channel_id=request.channel_id,
-                    agent_name="main_agent",
-                    workspace_dir=str(get_agent_home_dir()),
-                    assistant_message=content_str,
-                    extra=request.params,
+            if result.ok and result.payload.get("content"):
+                content = result.payload["content"]
+                content_str = content if isinstance(content, str) else str(content)
+                logger.info(
+                    "[JiuWenClaw] Agent回答: %s",
+                    _truncate_for_log(content_str),
+                    extra={'user_visible': 'critical'}
                 )
-                await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
+                append_history_record(
+                    session_id=session_id,
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    role="assistant",
+                    event_type="chat.final",
+                    content=content_str,
+                    timestamp=time.time(),
+                    mode=request.params.get("mode", "unknown"),
+                    sessions_root=self._sessions_dir,
+                )
 
-        # 文件后处理：上传 Agent 生成的输出文件到对象存储
-        if result.ok:
-            # 从 session_id 或 metadata 中提取用户 ID
-            user_id = request.session_id or "default"
-            if request.metadata and isinstance(request.metadata, dict):
-                user_id = request.metadata.get("user_id", user_id)
+                if memory_mode == "cloud":
+                    after_ctx = MemoryHookContext(
+                        session_id=request.session_id or "default",
+                        request_id=request.request_id or "",
+                        channel_id=request.channel_id,
+                        agent_name="main_agent",
+                        workspace_dir=str(get_agent_home_dir()),
+                        assistant_message=content_str,
+                        extra=request.params,
+                    )
+                    await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
 
-            # 统一提取 chat_id 和 channel_type
-            cleaned_chat_id, channel_type = self._extract_chat_id(request)
+            if result.ok:
+                user_id = request.session_id or "default"
+                if request.metadata and isinstance(request.metadata, dict):
+                    user_id = request.metadata.get("user_id", user_id)
 
-            logger.info(
-                f"[JiuWenClaw] 开始上传文件: request_id={request.request_id} "
-                f"files_count={len(result.payload.get('files'))} user_id={user_id} chat_id={cleaned_chat_id}",
-                extra={'user_visible': 'critical'}
-            )
-            await self.upload_agent_files(result, user_id, cleaned_chat_id, channel_type)
-        return result
+                cleaned_chat_id, channel_type = self._extract_chat_id(request)
+
+                logger.info(
+                    f"[JiuWenClaw] 开始上传文件: request_id={request.request_id} "
+                    f"files_count={len(result.payload.get('files'))} user_id={user_id} chat_id={cleaned_chat_id}",
+                    extra={'user_visible': 'critical'}
+                )
+                await self.upload_agent_files(result, user_id, cleaned_chat_id, channel_type)
+            return result
+        finally:
+            await self._cleanup_request_scoped_mcp(request.request_id)
 
     async def process_message_stream(
             self, request: AgentRequest
@@ -1457,17 +1511,18 @@ class JiuWenClaw:
 
             async def run_stream_task():
                 try:
-                    # 注册 Office Claw MCP（请求级环境变量）
-                    office_claw_mcp = request.params.get("office_claw_mcp")
-                    if isinstance(office_claw_mcp, dict):
+                    mcp_payload = self._extract_request_mcp_payload(request)
+                    if mcp_payload:
                         try:
-                            await self._get_tool_manager().register_request_scoped_office_claw_mcp(office_claw_mcp)
-                        except Exception as exc:
-                            logger.error(
-                                f"[JiuWenClaw] office_claw_mcp注册失败: request_id={request.request_id} error={str(exc)}",
-                                extra={'user_visible': 'critical'}
+                            await self._get_tool_manager().register_request_scoped_mcp(
+                                mcp_payload, request_id=request.request_id
                             )
-                            logger.warning("[JiuWenClaw] office_claw_mcp 注册失败: %s", exc)
+                        except Exception as exc:
+                            logger.warning(
+                                "[JiuWenClaw] request_mcp_servers 注册失败: request_id=%s error=%s",
+                                request.request_id, exc,
+                                extra={'user_visible': 'progress'},
+                            )
                     async for chunk in adapter.process_message_stream_impl(request, inputs):
                         await stream_queue.put(("chunk", chunk))
                 except asyncio.CancelledError:
@@ -1713,7 +1768,29 @@ class JiuWenClaw:
 
         finally:
             self._release_inflight_stream()
+            await self._cleanup_request_scoped_mcp(request.request_id)
             await self._try_apply_adapter_pending_reload()
+
+    @staticmethod
+    def _extract_request_mcp_payload(request) -> dict | None:
+        payload = request.params.get("request_mcp_servers")
+        servers = payload.get("mcpServers") if isinstance(payload, dict) else None
+        if isinstance(servers, dict) and servers:
+            return payload
+        legacy = request.params.get("office_claw_mcp")
+        if isinstance(legacy, dict):
+            from jiuwenclaw.agentserver.tool_manager import _OFFICE_CLAW_SERVER_NAME_PREFIX
+            return {"mcpServers": {_OFFICE_CLAW_SERVER_NAME_PREFIX: legacy}}
+        return None
+
+    async def _cleanup_request_scoped_mcp(self, request_id: str) -> None:
+        tm = self._tool_manager
+        if tm is None:
+            return
+        try:
+            await tm.unregister_request_scoped_mcp(request_id)
+        except Exception:
+            logger.exception("[JiuWenClaw] request-scoped MCP 清理失败: %s", request_id)
 
     async def _try_apply_adapter_pending_reload(self) -> None:
         """Apply adapter deferred config reload at a harness-idle boundary."""
@@ -1791,6 +1868,11 @@ class JiuWenClaw:
                 logger.warning("[JiuWenClaw] Adapter cleanup failed: %s", e)
             self._adapter = None
 
+        if self._tool_manager is not None:
+            try:
+                await self._tool_manager.unregister_all_request_scoped_mcp()
+            except Exception as e:
+                logger.warning("[JiuWenClaw] request-scoped MCP 兜底清理失败: %s", e)
         self._tool_manager = None
 
         logger.info("[JiuWenClaw] cleanup: 完成")

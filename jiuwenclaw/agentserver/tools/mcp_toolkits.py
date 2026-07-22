@@ -8,6 +8,12 @@ from pathlib import Path
 
 from openjiuwen.core.foundation.tool import Tool, McpServerConfig
 
+# 显式导入 MCP 客户端模块，触发 __init_subclass__ 自动注册到客户端注册表
+# 必须在 create_mcp_tool 被调用前完成
+from openjiuwen.core.foundation.tool.mcp.client import sse_client as _sse_client  # noqa: F401
+from openjiuwen.core.foundation.tool.mcp.client import stdio_client as _stdio_client  # noqa: F401
+from openjiuwen.core.foundation.tool.mcp.client import streamable_http_client as _streamable_http_client  # noqa: F401
+
 from jiuwenclaw.agentserver.tools.command_tools import mcp_exec_command
 from jiuwenclaw.agentserver.tools.web_fetch_tools import mcp_fetch_webpage
 from jiuwenclaw.agentserver.tools.web_search import web_search

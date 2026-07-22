@@ -33,6 +33,7 @@ from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import (
 from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import (
     get_current_task_id as get_global_task_id,
 )
+from jiuwenclaw.agentserver.thinking.rail import ThinkingInjectRail
 
 if TYPE_CHECKING:
     pass

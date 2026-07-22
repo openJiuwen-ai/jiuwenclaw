@@ -51,6 +51,7 @@ from jiuwenclaw.agentserver.skill_turbo.permission_bridge import (
 )
 from jiuwenclaw.agentserver.stream_utils import STREAM_SOURCE_ID_FIELD, parse_stream_chunk
 from jiuwenclaw.agentserver.skill_turbo.json_utils import extract_llm_json
+from jiuwenclaw.agentserver.skill_turbo.fallback_handler import FallbackContractError
 from jiuwenclaw.agentserver.skill_turbo.plan_node import AbortError, PlanNode
 from jiuwenclaw.agentserver.skill_turbo.validator import (
     PlanCodeValidationError,
@@ -651,6 +652,25 @@ class SkillTurboExecutor:
         except AbortError:
             # HITL 中断必须透传到 SkillTurbo.run_stream / adapter，
             # 由后者发出 ask_user_question + invocation_paused，不要在此包成 chat.error。
+            raise
+        except (FallbackContractError, FallbackLimitExceededError) as e:
+            # fallback 终止性失败（契约未达成 / 次数超限）：终止本 plan，但不发 chat.error。
+            # chat.error 会被 tool 转发到父会话，前端 useWebSocket 收到后会清空 activeRequestIdRef
+            # 并渲染"系统异常"，抢先终结本轮，LLM 来不及按 skill_prompt_rail 转 skill_tool 降级。
+            # 这里只发 plan.finished(failed) + complete（前端不处理 plan.*，不抢跑），然后向上
+            # raise，由 agent.py 包成 SkillTurboNotHandled，tool 层返回 success=false 给 LLM，
+            # LLM 再转 skill_tool 走标准流程——新一轮 request 前端会重新建 activeRequestIdRef。
+            logger.error(
+                "[SkillTurboExecutor] execute_plan_stream fallback terminal failure, degrading: %s",
+                e,
+            )
+            yield self._make_plan_finished_chunk(
+                request_id,
+                channel_id,
+                status="failed",
+                error=str(e),
+            )
+            yield self._make_complete_chunk(request_id, channel_id)
             raise
         except Exception as e:
             error = str(e)
@@ -1837,20 +1857,23 @@ class SkillTurboExecutor:
                 if item is None:
                     break
                 if isinstance(item, FallbackLimitExceededError):
+                    # fallback 超限：不发 node_error chat.error（会抢跑前端，详见 execute_plan_stream
+                    # 的 except FallbackContractError 注释），直接向上 raise 走不发 chat.error 的降级路径。
                     logger.error(
                         "[SkillTurboExecutor] _execute_node_stream FallbackLimitExceededError: %s",
                         item,
                     )
                     async for task_chunk in self._drain_task_event_chunks():
                         yield task_chunk
-                    yield self._make_node_error_chunk(
-                        request_id,
-                        channel_id,
-                        node,
-                        str(item),
-                        self._current_task_id(),
+                    raise item
+                if isinstance(item, FallbackContractError):
+                    # fallback 契约失败：不在内层转成 node_error chat.error（会抢跑前端），
+                    # 直接向上 raise，交给 execute_plan_stream 的 except FallbackContractError
+                    # 走"不发 chat.error、只 plan.finished(failed)+complete"的降级路径。
+                    logger.error(
+                        "[SkillTurboExecutor] _execute_node_stream FallbackContractError, propagating: %s",
+                        item,
                     )
-                    # Fallback 超限是终止性错误，向上传播让 execute_plan_stream 感知
                     raise item
                 if isinstance(item, BaseException):
                     # cancel 中断（asyncio.CancelledError / KeyboardInterrupt）必须向上抛，
