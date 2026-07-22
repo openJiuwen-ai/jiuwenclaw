@@ -48,6 +48,8 @@ jiuwenswarm-init
 jiuwenswarm-start
 ```
 
+> If you hit errors or other issues, check [FAQ](FAQ.md) first.
+
 After successful startup, the terminal will display backend service status:
 
 ```

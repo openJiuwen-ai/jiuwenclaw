@@ -129,6 +129,21 @@ pip install jiuwenswarm-tui
 jiuwenswarm-tui
 ```
 
+### Q: Windows 上执行 jiuwenswarm-init / jiuwenswarm-start 报"已被组织的 Device Guard 策略阻止"
+
+本机处于企业托管环境，上述命令被 Device Guard 策略拦截。改用以下等价命令即可：
+
+```bash
+python -m jiuwenswarm.init_workspace   # 等价 jiuwenswarm-init
+python -m jiuwenswarm.start_services   # 等价 jiuwenswarm-start
+# 实例管理子命令同样适用
+python -m jiuwenswarm.start_services --list
+python -m jiuwenswarm.start_services --status default
+python -m jiuwenswarm.start_services --name dev
+python -m jiuwenswarm.start_services --stop default
+python -m jiuwenswarm.start_services --restart default
+```
+
 ---
 
 ## 版本升级

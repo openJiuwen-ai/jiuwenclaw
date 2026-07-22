@@ -129,6 +129,21 @@ pip install jiuwenswarm-tui
 jiuwenswarm-tui
 ```
 
+### Q: On Windows, `jiuwenswarm-init` / `jiuwenswarm-start` fail with "blocked by your organization's Device Guard policy"
+
+The machine is in a managed (enterprise) environment and the above commands are blocked by Device Guard policy. Use the following equivalent commands instead:
+
+```bash
+python -m jiuwenswarm.init_workspace   # equivalent to jiuwenswarm-init
+python -m jiuwenswarm.start_services   # equivalent to jiuwenswarm-start
+# instance-management subcommands work the same way
+python -m jiuwenswarm.start_services --list
+python -m jiuwenswarm.start_services --status default
+python -m jiuwenswarm.start_services --name dev
+python -m jiuwenswarm.start_services --stop default
+python -m jiuwenswarm.start_services --restart default
+```
+
 ---
 
 ## Version Upgrades

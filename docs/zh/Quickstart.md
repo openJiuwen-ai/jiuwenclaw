@@ -48,6 +48,8 @@ jiuwenswarm-init
 jiuwenswarm-start
 ```
 
+> 如遇报错或其他问题，先查阅 [FAQ](FAQ.md)。
+
 启动成功后，终端会显示后端服务运行状态：
 
 ```
