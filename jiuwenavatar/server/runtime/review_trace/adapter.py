@@ -712,7 +712,6 @@ def _iter_tool_calls(data: Any) -> list[dict[str, Any]]:
     """
 
     by_id: dict[str, dict[str, Any]] = {}
-    by_sig: dict[str, dict[str, Any]] = []
     ordered: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     seen_sigs: set[str] = set()
@@ -827,7 +826,6 @@ def _iter_tool_calls(data: Any) -> list[dict[str, Any]]:
                     source="llm_response",
                 )
 
-    _ = by_sig  # keep the named bucket for clarity; ordered is the source of truth
     return ordered
 
 
