@@ -179,16 +179,23 @@ def _findings_from_review_texts(texts: list[str], activity: dict[str, Any]) -> l
         return []
     findings = []
     for index, match in enumerate(LOCATION_RE.finditer(scoped_text), start=1):
+        # Judge bucket and comment status from the text *around* this finding,
+        # not the whole scoped_text. A single "Must Fix" anywhere used to flip
+        # every text-scanned finding to must_fix; the local window keeps each
+        # finding's classification independent.
+        start = max(0, match.start() - 200)
+        end = min(len(scoped_text), match.end() + 200)
+        local_text = scoped_text[start:end]
         findings.append(
             {
                 "id": f"CR-{index:03d}",
-                "bucket": "must_fix" if _contains_any(scoped_text, ["Must Fix", "必须修复"]) else "should_fix",
+                "bucket": "must_fix" if _contains_any(local_text, ["Must Fix", "必须修复"]) else "should_fix",
                 "location": match.group(0),
                 # A source line in prose is not proof that GitCode resolved an
                 # inline-comment position. Keep this conservative unless
                 # structured review output provides a concrete position.
                 "position_resolved": False,
-                "comment_posted": _contains_any(scoped_text, ["posted", "已提交", "dry_run_success"]),
+                "comment_posted": _contains_any(local_text, ["posted", "已提交", "dry_run_success"]),
             }
         )
     return findings[:20]

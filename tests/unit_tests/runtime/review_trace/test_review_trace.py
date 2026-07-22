@@ -336,3 +336,60 @@ def test_redaction_masks_credentials_and_home() -> None:
     assert redacted["token"] == "******"
     assert "<USER_HOME>" in redacted["path"]
     assert redacted["text"] == "Bearer ******"
+
+
+def test_text_findings_use_local_bucket_context() -> None:
+    """Text-scan findings must classify bucket from local context, not the whole text.
+
+    When the review text contains both a "Must Fix" and a "Should Fix" section,
+    a finding scanned from each section must land in its own bucket. The prior
+    global check flipped every text-scan finding to one bucket based on a
+    single "Must Fix" anywhere in the text.
+    """
+    from jiuwenavatar.server.runtime.review_trace.adapter import trajectory_to_review_trace
+
+    # No result.json write -> the text-scan fallback path runs.
+    # Two findings in two sections, each near its own severity header, far
+    # enough apart that the 200-char local window keeps them isolated.
+    trajectory = {
+        "messages": ["https://gitcode.com/a/b/pull/1"],
+        "steps": [
+            {
+                "kind": "tool",
+                "detail": {
+                    "tool_name": "bash",
+                    "call_args": {
+                        "command": (
+                            "python code_review_runner.py collect --pr "
+                            "https://gitcode.com/a/b/pull/1"
+                        )
+                    },
+                    "call_result": {"success": True},
+                },
+            },
+            {
+                "kind": "llm",
+                "detail": {
+                    "messages": [
+                        {"role": "assistant", "content": (
+                            "Must Fix\n"
+                            "auth.py:12 leaks the token. "
+                            + ("padding " * 60)
+                            + "end of critical section."
+                        )},
+                        {"role": "assistant", "content": (
+                            "Should Fix\n"
+                            "style.py:5 has a long line. "
+                            + ("padding " * 60)
+                            + "end of minor section."
+                        )},
+                    ]
+                },
+            },
+        ],
+    }
+
+    trace = trajectory_to_review_trace(trajectory)
+    by_location = {f["location"]: f["bucket"] for f in trace["findings"]}
+    assert by_location.get("auth.py:12") == "must_fix"
+    assert by_location.get("style.py:5") == "should_fix"
