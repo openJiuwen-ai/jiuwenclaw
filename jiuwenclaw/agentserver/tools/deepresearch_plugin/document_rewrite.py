@@ -933,6 +933,33 @@ def _current_highlight_ranges(
     slot_texts: dict[str, str],
 ) -> list[dict[str, int | str]]:
     selected_by_id = {unit.unit_id: unit for unit in context.selected_units}
+    has_rewrite_result = False
+    for original_unit in original_map.units:
+        selected_unit = selected_by_id.get(original_unit.unit_id)
+        if selected_unit is None:
+            continue
+        selected_slots = {slot.slot_id: slot for slot in selected_unit.slots}
+        for original_slot in original_unit.slots:
+            selected_slot = selected_slots.get(original_slot.slot_id)
+            if selected_slot is None:
+                continue
+            visible_start = original_slot.visible_boundary_to_byte.index(
+                selected_slot.start_byte
+            )
+            visible_end = original_slot.visible_boundary_to_byte.index(
+                selected_slot.end_byte
+            )
+            if (
+                slot_texts[selected_slot.slot_id]
+                != original_slot.text[visible_start:visible_end]
+            ):
+                has_rewrite_result = True
+                break
+        if has_rewrite_result:
+            break
+    if not has_rewrite_result:
+        return []
+
     ranges: list[tuple[int, int, str]] = []
     for index, original_unit in enumerate(original_map.units):
         selected_unit = selected_by_id.get(original_unit.unit_id)
@@ -955,8 +982,7 @@ def _current_highlight_ranges(
             )
             replacement = slot_texts[selected_slot.slot_id]
             highlight_start = flat_cursor + visible_start
-            original_visible = original_slot.text[visible_start:visible_end]
-            if replacement and replacement != original_visible:
+            if replacement:
                 highlight_spans.append(
                     (highlight_start, highlight_start + len(replacement))
                 )

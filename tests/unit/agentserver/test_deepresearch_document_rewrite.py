@@ -1428,7 +1428,9 @@ def test_commit_noop_rewrite_has_no_highlight_ranges(tmp_path):
     assert child_provenance["rewrite_highlights"]["ranges"] == []
 
 
-def test_commit_highlights_changed_slot_but_not_noop_slot(tmp_path):
+def test_commit_highlights_whole_multi_unit_selection_when_one_slot_changes(
+    tmp_path,
+):
     body = "unchanged\n\nold text\n"
     report, _ = _write_document(tmp_path, body)
     prepared = _prepare(
@@ -1449,17 +1451,65 @@ def test_commit_highlights_changed_slot_but_not_noop_slot(tmp_path):
 
     child = Path(result["report_path"])
     child_bytes = child.read_bytes()
-    start = child_bytes.index(b"new text")
     child_provenance = json.loads(
         Path(result["provenance_path"]).read_text(encoding="utf-8")
     )
-    assert child_provenance["rewrite_highlights"]["ranges"] == [
-        {
+    expected = []
+    for text in (b"unchanged", b"new text"):
+        start = child_bytes.index(text)
+        expected.append({
             "start_byte": start,
-            "end_byte": start + len(b"new text"),
+            "end_byte": start + len(text),
             "unit_type": "paragraph",
-        }
-    ]
+        })
+    assert child_provenance["rewrite_highlights"]["ranges"] == expected
+
+
+@pytest.mark.parametrize("action", ["shorten", "expand", "polish"])
+def test_commit_highlights_whole_visible_selection_for_every_action(
+    tmp_path, action
+):
+    raw = "old **2024** [[1]](https://example.com/source) tail"
+    body = f"prefix {raw} suffix\n"
+    report, _ = _write_document(tmp_path, body)
+    prepared = _prepare(
+        tmp_path,
+        report,
+        raw,
+        visible="old 2024 [1] tail",
+        action=action,
+    )
+    changed_slot = next(
+        slot["slot_id"]
+        for unit in prepared["units"]
+        for slot in unit["slots"]
+        if slot["text"] == "old "
+    )
+
+    result = commit_rewrite(
+        context_token=prepared["context_token"],
+        session_id="S1",
+        structured_result=_structured_payload(
+            prepared, {changed_slot: "expanded "}
+        ),
+    )
+
+    child_bytes = Path(result["report_path"]).read_bytes()
+    provenance = json.loads(
+        Path(result["provenance_path"]).read_text(encoding="utf-8")
+    )
+    highlighted = b"".join(
+        child_bytes[item["start_byte"]:item["end_byte"]]
+        for item in provenance["rewrite_highlights"]["ranges"]
+    ).decode("utf-8")
+    assert "expanded " in highlighted
+    assert "2024" in highlighted
+    assert " tail" in highlighted
+    assert "prefix" not in highlighted
+    assert "suffix" not in highlighted
+    assert "**" not in highlighted
+    assert "[1]" not in highlighted
+    assert "https://example.com/source" not in highlighted
 
 
 @pytest.mark.parametrize(
@@ -1574,7 +1624,7 @@ def test_rewritten_child_can_be_rewritten_again_with_original_lineage(tmp_path):
     assert [
         item["unit_type"]
         for item in first_child_provenance["rewrite_highlights"]["ranges"]
-    ] == ["paragraph"]
+    ] == ["paragraph", "paragraph"]
     assert [
         item["unit_type"]
         for item in second_provenance["rewrite_highlights"]["ranges"]
