@@ -108,7 +108,7 @@ def _build_pipeline_from_config(config: dict, use_ahe: bool = False) -> object:
         # Use AHE decision policy when --ahe is active
         from jiuwenswarm.evolve.ahe.decision_policy import AheDecisionPolicy
 
-        policies = [AheDecisionPolicy(governor=None, model=None)]
+        policies = [AheDecisionPolicy(model=None)]
         logger.info("Using AHE decision policy: AheDecisionPolicy")
         return EvolutionPipeline(
             generators=generators,

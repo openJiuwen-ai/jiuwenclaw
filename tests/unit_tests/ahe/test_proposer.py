@@ -79,7 +79,7 @@ class TestAheProposerParseProposals:
         assert len(proposals) == 1
         assert proposals[0].proposer_name == "pda_proposer"
         assert proposals[0].target_id == "bash-tool"
-        assert "operations" in proposals[0].metadata
+        assert proposals[0].metadata["batch_id"] == "batch-001"
 
     def test_parse_invalid_proposal_skipped(self):
         proposer = AheProposer.__new__(AheProposer)
@@ -122,17 +122,3 @@ class TestAheProposerBuildSummaries:
         summary = AheProposer._build_diagnosis_summary(diag)
         assert "bash error" in summary
         assert "Missing path" in summary
-
-    def test_build_governance_summary(self):
-        from jiuwenswarm.evolve.models import GovernanceContext, ExperienceOperationType
-        ctx = GovernanceContext(
-            skill_name="bash-tool",
-            current_count=5,
-            max_count=10,
-            can_add=True,
-            replaceable_experiences=[{"id": "exp-001", "state": "candidate"}],
-            allowed_operations=[ExperienceOperationType.ADD, ExperienceOperationType.NOOP],
-        )
-        summary = AheProposer._build_governance_summary({"bash-tool": ctx})
-        assert "bash-tool" in summary
-        assert "5/10" in summary

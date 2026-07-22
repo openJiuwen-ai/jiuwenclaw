@@ -2,37 +2,15 @@
 """AHE algorithm-specific data models.
 
 These are AHE algorithm internals — not part of the PDA framework contract.
-Framework models (Proposal, DecisionResult, EvidenceRef, ExperienceOperation)
-remain in evolve/models.py.
+Framework models (Proposal, DecisionResult, EvidenceRef) remain in
+evolve/models.py.
 
 PDA framework owns the interfaces; AHE owns the implementation details.
 """
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-
-class GovernanceContext(BaseModel):
-    """Current experience governance state for a skill.
-
-    Provided by ExperienceGovernor before Propose; used by AheDecisionPolicy
-    for validation. AHE algorithm specific — only consumed by AHE modules.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    skill_name: str
-    current_count: int
-    max_count: int = 10
-    can_add: bool
-    existing_experiences: list[dict[str, Any]] = Field(default_factory=list)
-    similar_experiences: list[dict[str, Any]] = Field(default_factory=list)
-    replaceable_experiences: list[dict[str, Any]] = Field(default_factory=list)
-    protected_experiences: list[str] = Field(default_factory=list)
-    allowed_operations: list[Any] = Field(default_factory=list)
 
 
 class TraceOutcome(BaseModel):

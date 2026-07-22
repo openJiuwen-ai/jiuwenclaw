@@ -13,7 +13,6 @@ from jiuwenswarm.evolve.models import (
 )
 from jiuwenswarm.evolve.ahe.proposer import AheProposer
 from jiuwenswarm.evolve.ahe.decision_policy import AheDecisionPolicy
-from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
 
 
 class MockStore:
@@ -108,11 +107,7 @@ class TestPdaEndToEnd:
 
     async def test_propose_decide_cycle(self):
         """Test the Propose->Decide cycle with a manually crafted Proposal."""
-        governor = ExperienceGovernor(
-            skills_dir=str(self.skills_dir),
-            max_per_skill=10,
-        )
-        policy = AheDecisionPolicy(governor=governor, model=None)
+        policy = AheDecisionPolicy(model=None)
 
         # Create a valid proposal (mimicking what AheProposer would produce)
         proposal = Proposal(
@@ -130,18 +125,6 @@ class TestPdaEndToEnd:
             risk="Path may vary across environments",
             proposer_name="pda_proposer",
             state=ProposalState.CANDIDATE,
-            metadata={
-                "operations": [
-                    {
-                        "op": "add",
-                        "new_content": "Always use /usr/bin/python3 for Python execution",
-                        "reason": "Agent used wrong Python path",
-                        "evidence_refs": [
-                            {"trace_id": "trace-001", "description": "python: command not found"},
-                        ],
-                    }
-                ],
-            },
         )
 
         # RuleGate check (sync)
@@ -153,44 +136,6 @@ class TestPdaEndToEnd:
 
         print("PASS: Proposal passes RuleGate")
 
-    async def test_governor_with_evolutions(self):
-        """Test ExperienceGovernor can read and classify evolutions.json."""
-        # Create a skill dir with evolutions.json
-        skill_dir = self.skills_dir / "bash-tool"
-        skill_dir.mkdir(parents=True, exist_ok=True)
-
-        entries = [
-            {
-                "id": "exp-001",
-                "change": {"section": "Troubleshooting", "content": "Use python3", "action": "append"},
-                "metadata": {"state": "candidate", "hit_count": 0, "proposal_id": "prop-1"},
-            },
-            {
-                "id": "exp-002",
-                "change": {"section": "Troubleshooting", "content": "Check path", "action": "append"},
-                "metadata": {"state": "active", "hit_count": 5, "proposal_id": "prop-2"},
-            },
-        ]
-        evo_path = skill_dir / "evolutions.json"
-        evo_path.write_text(json.dumps({
-            "skill_id": "bash-tool",
-            "version": "1.0.0",
-            "entries": entries,
-        }, indent=2))
-
-        governor = ExperienceGovernor(
-            skills_dir=str(self.skills_dir),
-            max_per_skill=10,
-        )
-
-        ctx = governor.get_context("bash-tool")
-        assert ctx.current_count == 2
-        assert ctx.can_add is True
-        assert len(ctx.replaceable_experiences) == 1  # exp-001 is candidate with hit_count=0
-        assert "exp-002" in ctx.protected_experiences  # exp-002 is active with hit_count>0
-
-        print("PASS: Governor correctly classifies experiences")
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
@@ -201,5 +146,4 @@ if __name__ == "__main__":
     test.store = MockStore()
     asyncio.run(test.test_full_pipeline_mocked())
     asyncio.run(test.test_propose_decide_cycle())
-    asyncio.run(test.test_governor_with_evolutions())
     print("\nALL PDA E2E TESTS PASSED")

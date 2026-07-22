@@ -34,13 +34,10 @@ def run_sync_tests(module_path, test_classes):
         errored.append(f"  FAIL: {module_path}: {e}")
 
 # Layer 0: Models
-check_import("jiuwenswarm.evolve.models", "ExperienceOperationType")
-check_import("jiuwenswarm.evolve.models", "ExperienceOperation")
 check_import("jiuwenswarm.evolve.models", "Proposal")
 check_import("jiuwenswarm.evolve.models", "DecisionResult")
 
 # Layer 1: AHE models
-check_import("jiuwenswarm.evolve.ahe.models", "GovernanceContext")
 check_import("jiuwenswarm.evolve.ahe.models", "TraceOutcome")
 
 # Layer 2: OtelAdapter
@@ -51,10 +48,9 @@ check_import("jiuwenswarm.evolve.ahe.diagnosis", "DiagnosisAgent")
 check_import("jiuwenswarm.evolve.ahe.diagnosis.tools", "DiagnosisToolExecutor")
 check_import("jiuwenswarm.evolve.ahe.diagnosis.tools", "_truncate_tool_output")
 
-# Layer 4: Evaluator, Governor
+# Layer 4: Evaluator
 check_import("jiuwenswarm.evolve.ahe.evaluator", "TraceOutcomeEvaluator")
 check_import("jiuwenswarm.evolve.ahe.evaluator", "TaskNameInferrer")
-check_import("jiuwenswarm.evolve.ahe.experience_governor", "ExperienceGovernor")
 
 # Layer 5: Proposer, DecisionPolicy
 check_import("jiuwenswarm.evolve.ahe.proposer", "AheProposer")
@@ -83,18 +79,8 @@ else:
 print("\n=== Running Sync Tests ===")
 sync_errored = []
 
-def test_pda_models():
-    from jiuwenswarm.evolve.models import ExperienceOperationType, ExperienceOperation
-    op = ExperienceOperation(op=ExperienceOperationType.ADD, new_content="test", reason="r", evidence_refs=[])
-    assert op.op == ExperienceOperationType.ADD
-    op2 = ExperienceOperation(op=ExperienceOperationType.NOOP, reason="covered", evidence_refs=[])
-    assert op2.op == ExperienceOperationType.NOOP
-    print("  PASS: ExperienceOperation")
-
 def test_ahe_models():
-    from jiuwenswarm.evolve.ahe.models import GovernanceContext, TraceOutcome
-    ctx = GovernanceContext(skill_name="bash", current_count=5, max_count=10, can_add=True)
-    assert ctx.can_add is True
+    from jiuwenswarm.evolve.ahe.models import TraceOutcome
     to = TraceOutcome(trace_id="t1", outcome="pass", score=0.9)
     assert to.outcome == "pass"
     try:
@@ -155,31 +141,10 @@ def test_evaluator_fast():
     assert r2.outcome == "uncertain"
     print("  PASS: Evaluator fast")
 
-def test_governor():
-    import tempfile, json
-    from pathlib import Path
-    from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
-    from jiuwenswarm.evolve.models import ExperienceOperationType, ExperienceOperation
-    tmpdir = tempfile.mkdtemp()
-    skill_dir = Path(tmpdir) / "bash"
-    skill_dir.mkdir()
-    entries = [{"id": "e1", "change": {"content": "python path"}, "metadata": {"state": "candidate", "hit_count": 0}},
-               {"id": "e2", "change": {"content": "check dir"}, "metadata": {"state": "active", "hit_count": 5}}]
-    (skill_dir / "evolutions.json").write_text(json.dumps({"entries": entries}))
-    gov = ExperienceGovernor(skills_dir=tmpdir, max_per_skill=10)
-    ctx = gov.get_context("bash")
-    assert ctx.current_count == 2
-    assert ctx.can_add is True
-    assert len(ctx.replaceable_experiences) == 1
-    op = ExperienceOperation(op=ExperienceOperationType.ADD, new_content="test", reason="r", evidence_refs=[])
-    assert gov.validate_operation("bash", op) is True
-    print("  PASS: Governor")
-
 def test_rule_gate():
     from jiuwenswarm.evolve.ahe.decision_policy import AheDecisionPolicy
-    from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
     from jiuwenswarm.evolve.models import Proposal, ProposalTargetType, EvidenceRef
-    policy = AheDecisionPolicy(governor=ExperienceGovernor(), model=None)
+    policy = AheDecisionPolicy(model=None)
     p = Proposal(target_type=ProposalTargetType.SKILL, proposal_type="test",
                  failure_evidence=[EvidenceRef(trace_id="a", description="e")],
                  root_cause="r", targeted_fix={"suggestion": "fix"}, predicted_impact="p",
@@ -231,13 +196,11 @@ def test_proposer_parse():
     print("  PASS: Proposer parse")
 
 sync_tests = [
-    test_pda_models,
     test_ahe_models,
     test_truncation,
     test_tool_executor,
     test_task_name_inferrer,
     test_evaluator_fast,
-    test_governor,
     test_rule_gate,
     test_llm_parse,
     test_proposer_limits,

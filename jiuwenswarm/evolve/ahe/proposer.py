@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.evolve.models import (
@@ -19,14 +20,11 @@ from jiuwenswarm.evolve.models import (
     ProposalTargetType,
     EvidenceRef,
     TraceBatch,
-    ExperienceOperationType,
-    ExperienceOperation,
 )
 from jiuwenswarm.evolve.proposal_generators.base import ProposalGenerator
 from jiuwenswarm.evolve.registry import proposal_generators
 from jiuwenswarm.evolve.ahe.otel_adapter import OtelTraceAdapter
 from jiuwenswarm.evolve.ahe.evaluator import TraceOutcomeEvaluator
-from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
 from jiuwenswarm.evolve.ahe.diagnosis.agent import DiagnosisAgent
 from jiuwenswarm.evolve.ahe.proposer_prompts import AHE_PROPOSER_SYSTEM_PROMPT
 from jiuwenswarm.evolve.ahe.timing_stats import get_timing_stats, reset_timing_stats
@@ -63,7 +61,6 @@ class AheProposer(ProposalGenerator):
         self._traces_db_path = traces_db_path or "traces.db"
         self._adapter = None  # lazy init
         self._evaluator = None
-        self._governor = None
         self._diagnosis_agent = None
 
     @property
@@ -72,13 +69,39 @@ class AheProposer(ProposalGenerator):
             self._adapter = OtelTraceAdapter(db_path=self._traces_db_path)
         return self._adapter
 
-    @property
-    def _gov(self) -> ExperienceGovernor:
-        if self._governor is None:
-            self._governor = ExperienceGovernor(
-                skills_dir=self._skills_dir,
-            )
-        return self._governor
+    def _is_editable_skill(self, skill_name: str) -> bool:
+        """True if the skill exists in the user workspace and is not builtin.
+
+        Inlined safety guard (no separate governor). Builtin/system skills are
+        protected; only existing user skills may be evolved.
+        """
+        try:
+            from jiuwenswarm.common.utils import get_builtin_skills_dir
+
+            builtin_dir = get_builtin_skills_dir()
+            if builtin_dir.exists():
+                builtins = {i.name for i in builtin_dir.iterdir() if i.is_dir()}
+                if skill_name in builtins:
+                    return False
+        except Exception as exc:
+            logger.warning("AheProposer._is_editable_skill builtin check failed: %s", exc)
+
+        if not self._skills_dir:
+            return False
+        return (Path(self._skills_dir) / skill_name).is_dir()
+
+    def _editable_skill_names(self) -> set[str]:
+        """Names of user skills that exist in the workspace and are not builtin."""
+        if not self._skills_dir:
+            return set()
+        skills_dir = Path(self._skills_dir)
+        if not skills_dir.exists():
+            return set()
+        return {
+            item.name
+            for item in skills_dir.iterdir()
+            if item.is_dir() and self._is_editable_skill(item.name)
+        }
 
     @property
     def _eval(self) -> TraceOutcomeEvaluator:
@@ -390,23 +413,11 @@ class AheProposer(ProposalGenerator):
             stats.add_stage_detail("GOV", trace_id, gov_duration, {"skills_found": 0})
             return []
 
-        query_hint = self._build_governance_query_hint(
-            diagnosis_result,
-            normalized_trace,
-            outcome,
-        )
-        governance_contexts = {
-            name: self._gov.get_context(name, query_hint=query_hint)
-            for name in skill_names
-        }
         gov_duration = time.time() - gov_start
         stats.end_stage("GOV", trace_count=1)
         stats.add_stage_detail("GOV", trace_id, gov_duration, {"skills_found": len(skill_names)})
 
-        logger.info(
-            "Governance context for trace %s skills: %s",
-            trace_id, skill_names
-        )
+        logger.info("Editable skills for trace %s: %s", trace_id, skill_names)
 
         # ── Step 6: PROPOSE (generate proposals) ──
         stats.start_stage("PROPOSE")
@@ -414,7 +425,6 @@ class AheProposer(ProposalGenerator):
         proposals_raw = await self._call_llm_propose(
             failed_traces=[(normalized_trace, outcome)],
             diagnosis_result=diagnosis_result,
-            governance_contexts=governance_contexts,
             batch_id=batch_id,
         )
 
@@ -575,13 +585,13 @@ class AheProposer(ProposalGenerator):
 
         # 3. VALIDATE: Filter against user editable skills
         # Get the list of skills that actually exist in user workspace
-        editable_skills = self._gov.get_user_skill_names()
+        editable_skills = self._editable_skill_names()
 
         valid_names = set()
         rejected_names = set()
 
         for name in raw_names:
-            if self._gov.is_skill_editable(name):
+            if self._is_editable_skill(name):
                 valid_names.add(name)
             else:
                 rejected_names.add(name)
@@ -710,47 +720,10 @@ class AheProposer(ProposalGenerator):
             return AheProposer._parse_json_if_possible(arguments)
         return arguments
 
-    @staticmethod
-    def _build_governance_query_hint(
-        diagnosis_result: Any,
-        normalized_trace: dict,
-        outcome: Any,
-    ) -> str:
-        """Build a compact text hint for duplicate experience detection."""
-        parts: list[str] = []
-
-        reason = getattr(outcome, "reason", None)
-        if reason:
-            parts.append(str(reason))
-
-        input_data = normalized_trace.get("input", {})
-        output_data = normalized_trace.get("output", {})
-        if isinstance(input_data, dict):
-            parts.append(str(input_data.get("message") or input_data))
-        else:
-            parts.append(str(input_data))
-        if isinstance(output_data, dict):
-            parts.append(str(output_data.get("content") or output_data))
-        else:
-            parts.append(str(output_data))
-
-        for issue in getattr(diagnosis_result, "issues", []) or []:
-            for value in (
-                getattr(issue, "summary", ""),
-                getattr(issue, "root_cause", ""),
-                getattr(issue, "suggested_fix", ""),
-                getattr(issue, "evidence", ""),
-            ):
-                if value:
-                    parts.append(str(value))
-
-        return "\n".join(part[:1000] for part in parts if part)
-
     async def _call_llm_propose(
         self,
         failed_traces: list[tuple],
         diagnosis_result: Any,
-        governance_contexts: dict[str, Any],
         batch_id: str,
     ) -> list[dict]:
         """Call LLM to generate proposals from accumulated context.
@@ -761,15 +734,12 @@ class AheProposer(ProposalGenerator):
         # Build context
         trace_summaries = self._build_trace_summaries(failed_traces)
         diag_summary = self._build_diagnosis_summary(diagnosis_result)
-        gov_summary = self._build_governance_summary(governance_contexts)
 
         user_content = (
             "## Trace Evaluation Results\n"
             + json.dumps(trace_summaries, ensure_ascii=False, indent=2)
             + "\n\n## Diagnosis Results\n"
             + diag_summary
-            + "\n\n## Governance Context\n"
-            + gov_summary
             + "\n\nGenerate proposals for the problems found."
         )
 
@@ -812,12 +782,11 @@ class AheProposer(ProposalGenerator):
                 logger.info(
                     "AheProposer: LLM returned 0 proposals. reason=%r "
                     "category=%r trace_ids=%s diagnosis_issues=%s "
-                    "governance=%r response_preview=%r",
+                    "response_preview=%r",
                     no_proposal_reason,
                     parsed.get("no_proposal_category", ""),
                     [t.get("trace_id", "unknown") for t in trace_summaries],
                     self._summarize_diagnosis_issues_for_log(diagnosis_result),
-                    gov_summary[:1000],
                     str(content)[:2000].replace("\n", "\\n"),
                 )
             return proposals
@@ -889,7 +858,7 @@ class AheProposer(ProposalGenerator):
                 return value.strip()
         return (
             "LLM returned an empty proposals array without an explicit reason. "
-            "Check response_preview and governance/diagnosis context."
+            "Check response_preview and diagnosis context."
         )
 
     @staticmethod
@@ -905,23 +874,6 @@ class AheProposer(ProposalGenerator):
             })
         return items
 
-    @staticmethod
-    def _build_governance_summary(contexts: dict[str, Any]) -> str:
-        """Build governance context summary string."""
-        lines = []
-        for skill_name, ctx in contexts.items():
-            lines.append(
-                f"Skill '{skill_name}': {ctx.current_count}/{ctx.max_count} experiences, "
-                f"can_add={ctx.can_add}, allowed={[o.value for o in ctx.allowed_operations]}"
-            )
-            if ctx.similar_experiences:
-                sim_ids = [s["id"] for s in ctx.similar_experiences]
-                lines.append(f"  Similar experiences: {sim_ids}")
-            if ctx.replaceable_experiences:
-                rep_ids = [r["id"] for r in ctx.replaceable_experiences]
-                lines.append(f"  Replaceable experiences: {rep_ids}")
-        return "\n".join(lines)
-
     def _parse_proposals(
         self, raw_proposals: list[dict], batch_id: str
     ) -> list[Proposal]:
@@ -929,26 +881,6 @@ class AheProposer(ProposalGenerator):
         proposals = []
         for index, raw in enumerate(raw_proposals):
             try:
-                operations_raw = raw.get("operations", [])
-                # Normalize operations into ExperienceOperation list
-                ops = []
-                for op_raw in operations_raw:
-                    op_type = ExperienceOperationType(op_raw.get("op", "add"))
-                    ev_refs = self._parse_evidence_refs(
-                        op_raw.get("evidence_refs", []),
-                        proposal_index=index,
-                        context="operation.evidence_refs",
-                    )
-                    ops.append(
-                        ExperienceOperation(
-                            op=op_type,
-                            target_experience_id=op_raw.get("target_experience_id"),
-                            new_content=op_raw.get("new_content"),
-                            reason=op_raw.get("reason", ""),
-                            evidence_refs=ev_refs,
-                        ).model_dump()
-                    )
-
                 # Build failure evidence
                 evidence = self._parse_evidence_refs(
                     raw.get("failure_evidence", []),
@@ -969,7 +901,6 @@ class AheProposer(ProposalGenerator):
                     state=ProposalState.CANDIDATE,
                     metadata={
                         "batch_id": batch_id,
-                        "operations": ops,
                     },
                 )
                 proposals.append(prop)
@@ -1220,7 +1151,7 @@ class AheProposer(ProposalGenerator):
             if isinstance(proposals, list):
                 return parsed
             # Some models return a single proposal object.
-            if {"target_id", "target_type", "operations"} & set(parsed.keys()):
+            if {"target_id", "target_type", "targeted_fix"} & set(parsed.keys()):
                 return {"proposals": [parsed]}
         if isinstance(parsed, list):
             return {"proposals": parsed}

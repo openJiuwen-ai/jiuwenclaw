@@ -6,7 +6,6 @@ from jiuwenswarm.evolve.ahe.decision_policy import AheDecisionPolicy
 from jiuwenswarm.evolve.models import (
     Proposal, ProposalTargetType, ProposalState, EvidenceRef
 )
-from jiuwenswarm.evolve.ahe.experience_governor import ExperienceGovernor
 
 # AheProposer enforce_limits
 prop = AheProposer.__new__(AheProposer)
@@ -42,11 +41,11 @@ raw = [{'target_id': 'bash', 'target_type': 'skill', 'proposal_type': 'add',
 parsed = prop._parse_proposals(raw, 'batch-001')
 assert len(parsed) == 1
 assert parsed[0].proposer_name == 'pda_proposer'
-assert 'operations' in parsed[0].metadata
+assert parsed[0].metadata['batch_id'] == 'batch-001'
 print('PASS: AheProposer proposal parsing')
 
 # AheDecisionPolicy RuleGate (sync)
-policy = AheDecisionPolicy(governor=ExperienceGovernor(), model=None)
+policy = AheDecisionPolicy(model=None)
 
 p_valid = Proposal(target_type=ProposalTargetType.SKILL, proposal_type='test',
                    failure_evidence=[EvidenceRef(trace_id='a', description='e')],
@@ -119,13 +118,6 @@ diag = DiagnosisResult(mode="diagnose", issues=[
 summary = AheProposer._build_diagnosis_summary(diag)
 assert "bash error" in summary and "Missing path" in summary
 print('PASS: diagnosis summary building')
-
-from jiuwenswarm.evolve.models import GovernanceContext, ExperienceOperationType
-ctx = GovernanceContext(skill_name="bash", current_count=5, max_count=10, can_add=True,
-                        allowed_operations=[ExperienceOperationType.ADD])
-gov_summary = AheProposer._build_governance_summary({"bash": ctx})
-assert "bash" in gov_summary and "5/10" in gov_summary
-print('PASS: governance summary building')
 
 print()
 print('ALL TASKS 6-7 TESTS PASSED')
