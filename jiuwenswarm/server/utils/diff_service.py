@@ -20,6 +20,8 @@ from jiuwenswarm.server.runtime.session.session_history import load_history_reco
 
 logger = logging.getLogger(__name__)
 
+INTERNAL_UNTRACKED_DIRS = {".agent_history"}
+
 
 MAX_FILES = 50
 MAX_DIFF_SIZE_BYTES = 1_000_000
@@ -1433,6 +1435,8 @@ class DiffService:
             if not rel_path:
                 continue
             rel_path = DiffService._unquote_git_path(rel_path)
+            if self._is_internal_untracked_path(rel_path):
+                continue
             abs_path = str(Path(project_dir) / rel_path)
 
             entry: dict[str, Any] = {
@@ -1494,6 +1498,11 @@ class DiffService:
             files[abs_path] = entry
 
         return files
+
+    @staticmethod
+    def _is_internal_untracked_path(rel_path: str) -> bool:
+        parts = Path(rel_path).parts
+        return any(part in INTERNAL_UNTRACKED_DIRS for part in parts)
 
     def get_git_diff(self, project_dir: str | None) -> dict[str, Any] | None:
         """获取工作区相对于 HEAD 的 git diff，含未跟踪文件行数.
