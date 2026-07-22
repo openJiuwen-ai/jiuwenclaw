@@ -33,6 +33,10 @@ parse_args() {
                 DEPLOY_VARS["RENDER_ONLY"]="true"
                 i=$((i+1))
                 ;;
+            --no-auto-jiuwenclaw-id)
+                DEPLOY_VARS["AUTO_JIUWENCLAW_ID"]="false"
+                i=$((i+1))
+                ;;
             -h|--help)
                 print_help
                 ;;
@@ -90,6 +94,7 @@ Options:
   --web-port PORT           Set host port for web service （range: 30000-32767）
   --manager-web-port PORT   Set host port for manager web UI （range: 30000-32767）
   --render-only             Only render and output YAML manifests to conf directory
+  --no-auto-jiuwenclaw-id    Do not auto-generate JIUWENCLAW_ID in .env.custom when deploying gateway (default: auto-generate if unset)
   -h, --help                Display this help message and exit
 
 Examples:
