@@ -1948,18 +1948,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (cronMeta && typeof cronMeta === 'object') {
           const cronJobId = typeof cronMeta.job_id === 'string' ? cronMeta.job_id.trim() : '';
           const cronStatus = typeof cronMeta.status === 'string' ? cronMeta.status.trim() : '';
+          const isPlaceholder = typeof cronMeta.is_placeholder === 'boolean' ? cronMeta.is_placeholder : false;
           if (cronJobId && cronStatus !== 'running') {
             const cronJob = useCronStore.getState().jobs.find((j) => j.id === cronJobId);
             const cronProjectId = cronJob?.project_id || 'default';
             void useCronStore.getState().loadCronSessions(cronProjectId, cronJobId);
+          }
+          // 非占位（最终结果）广播到达时标记定时任务未读
+          if (cronJobId && !isPlaceholder) {
+            useCronStore.getState().markCronJobUnread(cronJobId);
           }
         }
 
         let sessionId = resolveEventSessionId(payload);
         // cron 广播 session_id 为空（后端对 web 通道置空），
         // 优先使用 cronMeta.exec_session_id 路由到定时任务专属会话。
-        // 若后端未提供 exec_session_id，fallback 到当前活跃会话——仅当它是 cron_ 前缀时，
-        // 避免污染普通会话（用户在"立即执行"后正在查看 cron session 的场景）。
+        // 若后端未提供 exec_session_id，用 job_id 查 lastRunSessionId（"立即执行"时存入）。
         if (!sessionId && cronMeta) {
           const execSessionId =
             typeof cronMeta.exec_session_id === 'string'
@@ -1969,9 +1973,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             sessionId = execSessionId;
             ensureSessionRuntimes(sessionId);
           } else {
-            const currentSid = useSessionStore.getState().currentSession?.session_id ?? '';
-            if (currentSid.startsWith('cron_')) {
-              sessionId = currentSid;
+            const cronJobIdFallback = typeof cronMeta.job_id === 'string' ? cronMeta.job_id.trim() : '';
+            if (cronJobIdFallback) {
+              const lastSid = useCronStore.getState().lastRunSessionId[cronJobIdFallback] ?? '';
+              if (lastSid) {
+                sessionId = lastSid;
+                ensureSessionRuntimes(sessionId);
+              }
             }
           }
         }
