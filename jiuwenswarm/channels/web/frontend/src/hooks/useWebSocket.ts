@@ -217,6 +217,9 @@ function applyIncomingGoal(
   // GoalCompletedCard（卡片+头部标签样式），跟普通回复气泡明显区分开。
   scheduleAfterTurnSettles(sessionId, () => {
     const messageId = `goal-completed-${goal.goal_id}`;
+    // "现在"必然晚于它引用的那条回复——回复的时间戳是收到第一个 chat.delta 时盖的章，不会再被
+    // chat.final 收尾时改动（见 chat.final 处理里去掉时间戳覆盖的注释），早于整轮跑完+判定目标
+    // 完成的这一刻，不需要额外兜底。
     const timestamp = new Date().toISOString();
     const content = buildGoalCompletedContent({ evidence: goal.last_assessment?.evidence?.trim() });
     useChatStore.getState().addMessage(sessionId, {
@@ -2247,10 +2250,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 定时任务等广播的 session_id 为空/null，若仍走 currentStreamId 会写到错误气泡甚至”无可见更新”。
         const streamId = currentStreamId;
         if (streamId && payloadSessionId) {
+          // 注意：这里不能再用 payload.timestamp 覆盖消息的 timestamp——它是"开始输出那一刻"
+          // 盖的章，收尾只应该改 content/isStreaming。目标模式下 chat.final 和 goal.updated
+          // (completed) 走的是两条独立通道、到达顺序不定，用后端 chat.final 自带的时间戳覆盖会
+          // 让这条回复的时间戳跟"整轮真正跑完"（含目标评估）的时刻赛跑，一旦覆盖后的新时间戳
+          // 晚于目标完成提示卡的时间戳，消息排序就会翻车（真机复现过，提示卡跑到回复上方）。
           useChatStore.getState().updateMessage(sessionId, streamId, {
             ...(content ? { content } : {}),
             isStreaming: false,
-            timestamp: normalizeEventTimestampIso(payload.timestamp),
             ...(isProactiveRecommendation ? { isProactiveRecommendation, ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}) } : {}),
           });
           useChatStore.getState().stopStreaming(sessionId);
