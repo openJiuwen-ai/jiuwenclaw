@@ -415,6 +415,71 @@ class _TrackingAsyncIterator:
             raise self._close_error
 
 
+def _patch_workflow_iterator(monkeypatch, source):
+    agent = SimpleNamespace(run=lambda **_kwargs: source)
+    factory = SimpleNamespace(create_agent=lambda _config: agent)
+    monkeypatch.setattr(manager_module, "AgentFactory", lambda: factory)
+
+
+@pytest.mark.asyncio
+async def test_task_manager_closes_workflow_iterator_after_json_error(monkeypatch):
+    source = _TrackingAsyncIterator(["not-json"])
+    _patch_workflow_iterator(monkeypatch, source)
+    manager = _make_manager()
+
+    with pytest.raises(json.JSONDecodeError):
+        await manager._run_jiuwen_workflow("query", {"llm_config": {}}, "")
+
+    assert source.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_task_manager_closes_workflow_iterator_after_progress_error(monkeypatch):
+    source = _TrackingAsyncIterator([
+        json.dumps({"agent": "outline", "event": "start", "content": "outline"})
+    ])
+    _patch_workflow_iterator(monkeypatch, source)
+    manager = _make_manager()
+    monkeypatch.setattr(
+        manager,
+        "_send_progress_push",
+        AsyncMock(side_effect=RuntimeError("progress failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="progress failed"):
+        await manager._run_jiuwen_workflow("query", {"llm_config": {}}, "")
+
+    assert source.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_task_manager_closes_workflow_iterator_after_body_cancellation(
+    monkeypatch,
+):
+    source = _TrackingAsyncIterator([
+        json.dumps({"agent": "outline", "event": "start", "content": "outline"})
+    ])
+    _patch_workflow_iterator(monkeypatch, source)
+    manager = _make_manager()
+    push_started = asyncio.Event()
+
+    async def blocking_progress_push(*_args, **_kwargs):
+        push_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(manager, "_send_progress_push", blocking_progress_push)
+    task = asyncio.create_task(
+        manager._run_jiuwen_workflow("query", {"llm_config": {}}, "")
+    )
+    await asyncio.wait_for(push_started.wait(), timeout=0.1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.1)
+
+    assert source.close_calls == 1
+
+
 @pytest.mark.asyncio
 async def test_scoped_tls_iterator_closes_after_first_item_error():
     source = _TrackingAsyncIterator(first_error=_IteratorPrimaryError("first failed"))

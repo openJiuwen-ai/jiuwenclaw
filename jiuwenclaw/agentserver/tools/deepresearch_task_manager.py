@@ -10,7 +10,7 @@ import re
 import secrets
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import aclosing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -1035,144 +1035,146 @@ class DeepResearchTaskManager:
                     agent_config=agent_config
                 )
 
-            async for chunk in iterate_with_scoped_tls_initialization(
+            stream = iterate_with_scoped_tls_initialization(
                 create_agent_stream,
                 TASK_MANAGER_TLS_ENV,
-            ):
-                chunk_count += 1
-                logger.debug("[DeepResearchTaskManager] Stream chunk #%d from node", chunk_count)
-                chunk_content = json.loads(chunk)
+            )
+            async with aclosing(stream):
+                async for chunk in stream:
+                    chunk_count += 1
+                    logger.debug("[DeepResearchTaskManager] Stream chunk #%d from node", chunk_count)
+                    chunk_content = json.loads(chunk)
 
-                # === 解析节点进度信息 ===
-                agent_name = chunk_content.get("agent", "")
-                event = chunk_content.get("event", "")
-                section_idx = chunk_content.get("section_idx", "0")
-                content_preview = chunk_content.get("content", "")[:50] if chunk_content.get("content") else ""
+                    # === 解析节点进度信息 ===
+                    agent_name = chunk_content.get("agent", "")
+                    event = chunk_content.get("event", "")
+                    section_idx = chunk_content.get("section_idx", "0")
+                    content_preview = chunk_content.get("content", "")[:50] if chunk_content.get("content") else ""
 
-                # 构建唯一节点标识（包含 section 编号）
-                node_key = f"{agent_name}_{section_idx}" if section_idx != "0" else agent_name
+                    # 构建唯一节点标识（包含 section 编号）
+                    node_key = f"{agent_name}_{section_idx}" if section_idx != "0" else agent_name
 
-                # === 收集大纲内容并持续解析章节标题 ===
-                # （不受 collect_progress 限制，因为 WebSocket 推送也需要 section_titles）
-                if agent_name == "outline":
-                    chunk_text = chunk_content.get("content", "")
-                    if chunk_text:
-                        outline_content_parts.append(chunk_text)
-                        # 每次收到 outline 内容都重新解析章节标题
-                        # （大纲是流式到达的，每次可能有新的标题出现）
-                        full_outline = "".join(outline_content_parts)
-                        parsed = self._extract_section_titles(full_outline)
-                        if parsed and parsed != section_titles:
-                            new_count = len(parsed)
-                            old_count = len(section_titles)
-                            section_titles = parsed
-                            if old_count == 0:
-                                logger.info(
-                                    "[DeepResearchTaskManager] 从大纲中提取到 %d 个章节标题: %s",
-                                    new_count,
-                                    section_titles,
-                                )
-                            else:
-                                logger.info(
-                                    "[DeepResearchTaskManager] 大纲更新，章节标题从 %d 个增至 %d 个: %s",
-                                    old_count, new_count,
-                                    section_titles,
-                                )
+                    # === 收集大纲内容并持续解析章节标题 ===
+                    # （不受 collect_progress 限制，因为 WebSocket 推送也需要 section_titles）
+                    if agent_name == "outline":
+                        chunk_text = chunk_content.get("content", "")
+                        if chunk_text:
+                            outline_content_parts.append(chunk_text)
+                            # 每次收到 outline 内容都重新解析章节标题
+                            # （大纲是流式到达的，每次可能有新的标题出现）
+                            full_outline = "".join(outline_content_parts)
+                            parsed = self._extract_section_titles(full_outline)
+                            if parsed and parsed != section_titles:
+                                new_count = len(parsed)
+                                old_count = len(section_titles)
+                                section_titles = parsed
+                                if old_count == 0:
+                                    logger.info(
+                                        "[DeepResearchTaskManager] 从大纲中提取到 %d 个章节标题: %s",
+                                        new_count,
+                                        section_titles,
+                                    )
+                                else:
+                                    logger.info(
+                                        "[DeepResearchTaskManager] 大纲更新，章节标题从 %d 个增至 %d 个: %s",
+                                        old_count, new_count,
+                                        section_titles,
+                                    )
 
-                # === 节点生命周期管理（支持并行执行） ===
-                # DeepSearch 引擎的多数节点不发送 event=start CustomSchema chunk，
-                # 但每个 chunk 都携带 agent 字段。当首次收到某节点的 chunk 时，
-                # 视为该节点开始执行；收到显式 event=done 时，视为节点完成。
-                # 使用 active_nodes 字典独立追踪每个节点的状态，支持并行章节。
-                if agent_name and node_key not in active_nodes:
-                    display_info = self.NODE_DISPLAY_INFO.get(agent_name)
-                    if display_info:
-                        # 首次收到该节点的 chunk，发送开始推送
-                        display_name = display_info[0]
-                        description = display_info[1]
-                        push_preview = self._build_push_preview(
-                            agent_name, section_idx, section_titles, content_preview, query,
-                        )
-                        # 进度条目（工具返回值）
-                        if collect_progress:
-                            entry = self._build_progress_entry(
-                                agent_name, display_name, description,
-                                section_idx, section_titles, content_preview, query,
+                    # === 节点生命周期管理（支持并行执行） ===
+                    # DeepSearch 引擎的多数节点不发送 event=start CustomSchema chunk，
+                    # 但每个 chunk 都携带 agent 字段。当首次收到某节点的 chunk 时，
+                    # 视为该节点开始执行；收到显式 event=done 时，视为节点完成。
+                    # 使用 active_nodes 字典独立追踪每个节点的状态，支持并行章节。
+                    if agent_name and node_key not in active_nodes:
+                        display_info = self.NODE_DISPLAY_INFO.get(agent_name)
+                        if display_info:
+                            # 首次收到该节点的 chunk，发送开始推送
+                            display_name = display_info[0]
+                            description = display_info[1]
+                            push_preview = self._build_push_preview(
+                                agent_name, section_idx, section_titles, content_preview, query,
                             )
-                            if entry:
-                                progress_entries.append(entry)
-                        # 修改1：推同一 section 内未完成节点的 done
-                        # 同一 section 内节点串行执行，新节点出现意味着上一节点已完成。
-                        # 必须按 section_idx 过滤，避免并行 section 的误推。
-                        for other_key, other_state in active_nodes.items():
-                            if (other_state["started"] and not other_state["done"]
-                                    and other_state["section_idx"] == section_idx
-                                    and other_key != node_key):
+                            # 进度条目（工具返回值）
+                            if collect_progress:
+                                entry = self._build_progress_entry(
+                                    agent_name, display_name, description,
+                                    section_idx, section_titles, content_preview, query,
+                                )
+                                if entry:
+                                    progress_entries.append(entry)
+                            # 修改1：推同一 section 内未完成节点的 done
+                            # 同一 section 内节点串行执行，新节点出现意味着上一节点已完成。
+                            # 必须按 section_idx 过滤，避免并行 section 的误推。
+                            for other_key, other_state in active_nodes.items():
+                                if (other_state["started"] and not other_state["done"]
+                                        and other_state["section_idx"] == section_idx
+                                        and other_key != node_key):
+                                    await self._send_progress_push(
+                                        session_id, channel_id, request_id,
+                                        other_state["agent_name"], "done", other_state["section_idx"],
+                                        section_titles=section_titles,
+                                    )
+                                    other_state["done"] = True
+                            # WebSocket 推送（前端实时进度）
+                            await self._send_progress_push(
+                                session_id, channel_id, request_id,
+                                agent_name, "start", section_idx, push_preview,
+                                section_titles=section_titles,
+                            )
+                            # 记录节点状态
+                            active_nodes[node_key] = {
+                                "started": True,
+                                "done": False,
+                                "agent_name": agent_name,
+                                "section_idx": section_idx,
+                            }
+                            # 修改2：终态节点立即推 done
+                            if agent_name in self.INSTANT_COMPLETE_NODES:
                                 await self._send_progress_push(
                                     session_id, channel_id, request_id,
-                                    other_state["agent_name"], "done", other_state["section_idx"],
+                                    agent_name, "done", section_idx,
                                     section_titles=section_titles,
                                 )
-                                other_state["done"] = True
-                        # WebSocket 推送（前端实时进度）
-                        await self._send_progress_push(
-                            session_id, channel_id, request_id,
-                            agent_name, "start", section_idx, push_preview,
-                            section_titles=section_titles,
-                        )
-                        # 记录节点状态
-                        active_nodes[node_key] = {
-                            "started": True,
-                            "done": False,
-                            "agent_name": agent_name,
-                            "section_idx": section_idx,
-                        }
-                        # 修改2：终态节点立即推 done
-                        if agent_name in self.INSTANT_COMPLETE_NODES:
+                                active_nodes[node_key]["done"] = True
+
+                    # === 处理显式 event=done 事件 ===
+                    # 部分节点（outline、plan_reasoning）通过 custom_stream_output
+                    # 显式发送 event=done，这些事件可能携带更精确的信息
+                    # （如 outline 的 done 触发 section_titles 最终解析）。
+                    if agent_name and event == "done":
+                        # outline 完成时：对累积大纲做最终一次 section_titles 解析
+                        if agent_name == "outline" and outline_content_parts:
+                            full_outline = "".join(outline_content_parts)
+                            final_parsed = self._extract_section_titles(full_outline)
+                            if final_parsed and final_parsed != section_titles:
+                                logger.info(
+                                    "[DeepResearchTaskManager] outline done: 最终解析章节标题 "
+                                    "从 %d 个增至 %d 个: %s",
+                                    len(section_titles), len(final_parsed),
+                                    final_parsed,
+                                )
+                                section_titles = final_parsed
+
+                        # 节点完成：仅在已开始且未完成时推送
+                        node_state = active_nodes.get(node_key)
+                        if node_state and node_state["started"] and not node_state["done"]:
                             await self._send_progress_push(
                                 session_id, channel_id, request_id,
                                 agent_name, "done", section_idx,
                                 section_titles=section_titles,
                             )
-                            active_nodes[node_key]["done"] = True
+                            node_state["done"] = True
 
-                # === 处理显式 event=done 事件 ===
-                # 部分节点（outline、plan_reasoning）通过 custom_stream_output
-                # 显式发送 event=done，这些事件可能携带更精确的信息
-                # （如 outline 的 done 触发 section_titles 最终解析）。
-                if agent_name and event == "done":
-                    # outline 完成时：对累积大纲做最终一次 section_titles 解析
-                    if agent_name == "outline" and outline_content_parts:
-                        full_outline = "".join(outline_content_parts)
-                        final_parsed = self._extract_section_titles(full_outline)
-                        if final_parsed and final_parsed != section_titles:
-                            logger.info(
-                                "[DeepResearchTaskManager] outline done: 最终解析章节标题 "
-                                "从 %d 个增至 %d 个: %s",
-                                len(section_titles), len(final_parsed),
-                                final_parsed,
-                            )
-                            section_titles = final_parsed
-
-                    # 节点完成：仅在已开始且未完成时推送
-                    node_state = active_nodes.get(node_key)
-                    if node_state and node_state["started"] and not node_state["done"]:
-                        await self._send_progress_push(
-                            session_id, channel_id, request_id,
-                            agent_name, "done", section_idx,
-                            section_titles=section_titles,
+                    # 现有逻辑：解析最终报告
+                    report_result = parse_endnode_content(chunk_content)
+                    if report_result:
+                        last_report = report_result
+                        logger.info(
+                            "[DeepResearchTaskManager] Final report received at chunk #%d",
+                            chunk_count,
+                            extra={'user_visible': 'critical'}
                         )
-                        node_state["done"] = True
-
-                # 现有逻辑：解析最终报告
-                report_result = parse_endnode_content(chunk_content)
-                if report_result:
-                    last_report = report_result
-                    logger.info(
-                        "[DeepResearchTaskManager] Final report received at chunk #%d",
-                        chunk_count,
-                        extra={'user_visible': 'critical'}
-                    )
 
             # === 发送所有活跃节点的完成通知 ===
             # 遍历所有已开始但未完成的节点，发送完成推送。
