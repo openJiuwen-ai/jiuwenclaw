@@ -4797,9 +4797,32 @@ class JiuWenSwarmDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+
+        session_metadata: dict[str, Any] = {}
+        if isinstance(session_id, str) and session_id.strip():
+            try:
+                from jiuwenswarm.server.runtime.session.session_metadata import (
+                    get_session_metadata,
+                )
+
+                loaded_metadata = get_session_metadata(session_id.strip(), cache_bust=True)
+                if isinstance(loaded_metadata, dict):
+                    session_metadata = loaded_metadata
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] failed to load session metadata for cron context: %s",
+                    exc,
+                )
         # 注入 project_dir 供 cron tool 路由解析任务归属项目（设计文档 §5.1）
         if isinstance(project_dir, str) and project_dir.strip():
             normalized_metadata.setdefault("project_dir", project_dir.strip())
+        for key in ("project_id", "project_dir", "work_mode"):
+            value = normalized_metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                continue
+            session_value = session_metadata.get(key)
+            if isinstance(session_value, str) and session_value.strip():
+                normalized_metadata[key] = session_value.strip()
         return (
             _CRON_TOOL_CHANNEL_ID.set(normalized_channel),
             _CRON_TOOL_SESSION_ID.set(session_id),

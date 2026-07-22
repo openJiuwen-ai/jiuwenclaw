@@ -41,6 +41,8 @@ class _CronToolsCronBackend(CronToolBackend):
         )
         chat_type = str(metadata.get("chat_type") or "").strip() or None
         project_dir = str(metadata.get("project_dir") or "").strip()
+        project_id = str(metadata.get("project_id") or "").strip()
+        work_mode = str(metadata.get("work_mode") or "").strip()
         app_id = str(metadata.get("app_id") or "").strip()
         return CronToolRoute(
             request_id=request_id,
@@ -48,6 +50,8 @@ class _CronToolsCronBackend(CronToolBackend):
             session_id=session_id,
             chat_type=chat_type,
             project_dir=project_dir,
+            project_id=project_id,
+            work_mode=work_mode,
             app_id=app_id,
         )
 

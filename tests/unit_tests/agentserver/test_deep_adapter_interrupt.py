@@ -184,3 +184,36 @@ def test_reset_runtime_cron_context_resets_shell_session(
         )
     )
     reset_shell_mock.assert_called_once_with(shell_token)
+
+
+def test_bind_runtime_cron_context_fills_locked_session_project_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda session_id, cache_bust=False: {
+            "session_id": session_id,
+            "project_id": "proj_locked",
+            "project_dir": "D:\\locked-project",
+            "work_mode": "code",
+        },
+    )
+
+    tokens = JiuWenSwarmDeepAdapter._bind_runtime_cron_context(
+        channel_id="web",
+        session_id="sess_locked",
+        metadata={"request_id": "req-old"},
+        request_id="req-new",
+        mode="agent",
+        project_dir=None,
+    )
+    try:
+        metadata = interface_deep._CRON_TOOL_METADATA.get()
+        assert metadata["request_id"] == "req-new"
+        assert metadata["project_id"] == "proj_locked"
+        assert metadata["project_dir"] == "D:\\locked-project"
+        assert metadata["work_mode"] == "code"
+    finally:
+        JiuWenSwarmDeepAdapter._reset_runtime_cron_context(tokens)
