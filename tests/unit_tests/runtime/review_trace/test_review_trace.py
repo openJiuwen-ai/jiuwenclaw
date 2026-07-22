@@ -393,3 +393,27 @@ def test_text_findings_use_local_bucket_context() -> None:
     by_location = {f["location"]: f["bucket"] for f in trace["findings"]}
     assert by_location.get("auth.py:12") == "must_fix"
     assert by_location.get("style.py:5") == "should_fix"
+
+
+def test_kindless_tool_step_with_tool_name_is_collected() -> None:
+    """A step without a ``kind`` field but carrying ``detail.tool_name`` is a
+    real tool call in older/edge-case trajectories and must still be collected.
+    Gating only on ``kind == "tool"`` would drop it. A kind-less step with no
+    tool_name must NOT be collected (it is not a tool call).
+    """
+    from jiuwenavatar.server.runtime.review_trace.adapter import _iter_tool_calls
+
+    data = {
+        "steps": [
+            # Kind-less, no tool_name: not a tool call, must be skipped.
+            {"detail": {"marker": "synthetic"}},
+            # Kind-less but carries a tool_name: real call, must be collected.
+            {"detail": {"tool_name": "bash", "call_args": {"command": "ls"}, "call_result": {"success": True}}},
+            # Normal kind=tool step: collected.
+            {"kind": "tool", "detail": {"tool_name": "powershell"}},
+        ]
+    }
+    calls = _iter_tool_calls(data)
+    tool_names = [c["tool_name"] for c in calls]
+    assert tool_names == ["bash", "powershell"]
+    assert all(c.get("_source") == "top_level_step" for c in calls)

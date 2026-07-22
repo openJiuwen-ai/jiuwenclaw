@@ -738,16 +738,21 @@ def _iter_tool_calls(data: Any) -> list[dict[str, Any]]:
         ordered.append(call)
 
     # Pass 1: top-level tool steps (authoritative for executed calls + results).
+    # A step is a tool call only when it carries a tool_name. ``kind=="tool"`` is
+    # the normal shape, but older/edge-case trajectories may omit ``kind`` while
+    # still recording a real call in ``detail.tool_name`` — keep that path, just
+    # gate it on tool_name explicitly so a kind-less non-tool step (e.g. a
+    # synthetic marker) is never mistaken for one.
     for step in data.get("steps") or [] if isinstance(data, dict) else []:
         if not isinstance(step, dict):
             continue
         detail = step.get("detail")
         if not isinstance(detail, dict):
             continue
-        if step.get("kind") == "tool" or not step.get("kind"):
-            tool_name = str(detail.get("tool_name") or "")
-            if not tool_name:
-                continue
+        tool_name = str(detail.get("tool_name") or "")
+        if not tool_name:
+            continue
+        if step.get("kind") == "tool" or "kind" not in step:
             _emit(
                 {
                     "tool_name": tool_name,
