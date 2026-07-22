@@ -175,11 +175,11 @@ def grant_ace(
         (ace_type, inherit_flags, rights, sid_obj),
     )
 
-    # PROTECTED_DACL 阻止继承的 ACE 覆盖我们的显式规则; 仅在 recursive 时启用,
-    # 避免把单文件路径从父目录继承链上切断导致读权限丢失.
+    # 不设 PROTECTED_DACL_SECURITY_INFORMATION: 旧版在 recursive 时总是切断
+    # 继承, 把工作区从父目录继承链永久脱离, 且 revoke 时也不恢复, 导致用户
+    # 自己的继承读写权限丢失 (review MAJOR #5). 现在保留继承, 仅在 DACL 上
+    # 增删显式 ACE.
     flags = win32security.DACL_SECURITY_INFORMATION
-    if recursive:
-        flags |= win32security.PROTECTED_DACL_SECURITY_INFORMATION
 
     win32security.SetNamedSecurityInfo(
         path,
@@ -200,21 +200,38 @@ def apply_sandbox_acl(
     workspace: str,
     allow_write: list[str],
     deny_write: list[str],
+    allow_read: list[str] | None = None,
+    deny_read: list[str] | None = None,
     *,
     recursive: bool = True,
-) -> None:
+) -> list[str]:
     """对沙箱工作区施加文件 ACL.
 
-    1. 对 allow_write 路径施加 Allow Write+Execute+Delete ACE (合成 SID).
-    2. 对 deny_write 路径施加 Deny Write ACE (合成 SID), 在 allow 范围内精细化封锁.
+    写控制 (allow-only):
+      1. 对 allow_write 路径施加 Allow Write+Execute+Delete ACE (合成 SID).
+      2. 对 deny_write 路径施加 Deny Write ACE (合成 SID), 在 allow 范围内精细化封锁.
+    读控制 (deny-then-allow, 对齐 docs/window沙箱.md 6.7):
+      3. 对 deny_read 路径施加 Deny Read ACE (合成 SID).
+      4. 对 allow_read 路径施加 Allow Read ACE (合成 SID), 覆盖 deny.
+      5. 若 allow_read 为空, 对 workspace 根施加 Allow Read ACE (合成 SID),
+         使独立用户身份的沙箱至少能读自己工作区 (review MAJOR #4: 读控制
+         之前完全缺失; Windows 独立用户默认读不了用户 profile, 靠 install
+         预装补, 但 workspace 仍需显式 Allow Read).
 
-    详见 docs/window沙箱.md 6.7.
+    Returns: 施加过 ACE 的顶层路径列表 (含 workspace + allow/deny 各项),
+        供 revoke_sandbox_acl 按清单撤销 (旧版只扫 workspace 树, 漏掉系统
+        路径上的 ACE, review MAJOR #6).
     """
     _require_windows()
     sid = get_synthetic_write_sid()
-    # allow_write 至少包含 workspace 本身.
-    targets = list(allow_write) or [workspace]
-    for path in targets:
+    allow_read = list(allow_read) if allow_read else []
+    deny_read = list(deny_read) if deny_read else []
+
+    applied: list[str] = []
+
+    # --- 写控制 ---
+    write_targets = list(allow_write) or [workspace]
+    for path in write_targets:
         expanded = os.path.expandvars(path)
         if not os.path.exists(expanded):
             logger.warning("allow_write 路径不存在, 跳过 ACL: %s", expanded)
@@ -225,6 +242,7 @@ def apply_sandbox_acl(
             mode="ALLOW",
             recursive=recursive,
         )
+        applied.append(expanded)
     for path in deny_write:
         expanded = os.path.expandvars(path)
         if not os.path.exists(expanded):
@@ -236,32 +254,87 @@ def apply_sandbox_acl(
             mode="DENY",
             recursive=recursive,
         )
+        applied.append(expanded)
+
+    # --- 读控制: deny_read (先施加 Deny Read) ---
+    for path in deny_read:
+        expanded = os.path.expandvars(path)
+        if not os.path.exists(expanded):
+            logger.warning("deny_read 路径不存在, 跳过 ACL: %s", expanded)
+            continue
+        grant_ace(
+            expanded, sid,
+            rights=const.DENY_READ_RIGHTS,
+            mode="DENY",
+            recursive=recursive,
+        )
+        applied.append(expanded)
+
+    # --- 读控制: allow_read (再施加 Allow Read 覆盖 deny) ---
+    read_targets = allow_read
+    if not read_targets:
+        # workspace 默认: 独立用户沙箱至少能读自己工作区.
+        read_targets = [workspace]
+    for path in read_targets:
+        expanded = os.path.expandvars(path)
+        if not os.path.exists(expanded):
+            logger.warning("allow_read 路径不存在, 跳过 ACL: %s", expanded)
+            continue
+        grant_ace(
+            expanded, sid,
+            rights=const.FILE_GENERIC_READ,
+            mode="ALLOW",
+            recursive=recursive,
+        )
+        applied.append(expanded)
+
     logger.info(
-        "施加沙箱 ACL 完成: workspace=%s allow=%d deny=%d",
-        workspace, len(targets), len(deny_write),
+        "施加沙箱 ACL 完成: workspace=%s allow_write=%d deny_write=%d "
+        "allow_read=%d deny_read=%d",
+        workspace, len(write_targets), len(deny_write),
+        len(read_targets), len(deny_read),
     )
+    # 去重保序 (同一路径可能同时出现在 allow_write 与 allow_read).
+    seen: set[str] = set()
+    unique: list[str] = []
+    for p in applied:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
 
 
-def revoke_sandbox_acl(workspace: str) -> None:
-    """撤销沙箱工作区上由合成 SID 施加的所有 ACE.
+def revoke_sandbox_acl(paths: list[str] | str) -> None:
+    """撤销合成 SID 施加的所有 ACE.
 
-    通过遍历 DACL, 删除 ACE 中 SID == 合成写 SID 的条目.
+    Args:
+        paths: apply_sandbox_acl 返回的施加路径清单 (含 workspace + allow/
+            deny 各项). 旧版只以 workspace 为根 rglob 扫描, 漏掉系统路径
+            上预装的合成 SID ACE (review MAJOR #6). 现按清单逐路径递归撤销.
+
+    兼容旧调用: 传单个字符串 (workspace) 时退化为只扫该路径树.
     """
     _require_windows()
     win32security, win32con, _ = _ensure_pywin32()
     sid_str = get_synthetic_write_sid()
     target_sid = _resolve_sid(sid_str)
 
-    # workspace 及其下所有 allow_write 路径都需清理; 这里以 workspace 为根递归.
-    root = Path(os.path.expandvars(workspace))
-    if not root.exists():
-        logger.debug("revoke workspace 不存在, 跳过: %s", workspace)
-        return
+    if isinstance(paths, str):
+        root_list = [paths]
+    else:
+        root_list = list(paths)
 
-    paths_to_clean: list[str] = [str(root)]
-    if root.is_dir():
-        for entry in root.rglob("*"):
-            paths_to_clean.append(str(entry))
+    # 收集所有需清理的路径: 每个 root 本身 + (若是目录) 其下所有子项.
+    paths_to_clean: list[str] = []
+    seen: set[str] = set()
+    for root_path in root_list:
+        root = Path(os.path.expandvars(root_path))
+        if not root.exists():
+            continue
+        for p in [str(root), *([str(e) for e in root.rglob("*")] if root.is_dir() else [])]:
+            if p not in seen:
+                seen.add(p)
+                paths_to_clean.append(p)
 
     for path in paths_to_clean:
         try:
@@ -295,14 +368,14 @@ def revoke_sandbox_acl(workspace: str) -> None:
                 acl.AddAccessDeniedAceEx(flags, mask, sid)
             for flags, mask, sid in allow_aces:
                 acl.AddAccessAllowedAceEx(flags, mask, sid)
+            # 不设 PROTECTED_DACL: 恢复继承, 不切断工作区继承链 (review MAJOR #5).
             win32security.SetNamedSecurityInfo(
                 path,
                 win32con.SE_FILE_OBJECT,
-                win32security.DACL_SECURITY_INFORMATION
-                | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                win32security.DACL_SECURITY_INFORMATION,
                 None, None, acl, None,
             )
             logger.debug("revoke: 清理 %s 上 %d 个 ACE", path, removed)
         except Exception:  # noqa: BLE001 - ACL 清理是 best-effort
             logger.debug("revoke 单个路径失败: %s", path, exc_info=True)
-    logger.info("撤销沙箱 ACL 完成: workspace=%s", workspace)
+    logger.info("撤销沙箱 ACL 完成: 清理路径数=%d", len(paths_to_clean))

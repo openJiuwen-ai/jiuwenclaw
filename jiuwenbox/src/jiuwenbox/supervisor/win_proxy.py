@@ -157,23 +157,23 @@ class EgressFilter:
         )
         port_in_allow = port in self._allowed_ports if self._allowed_ports else False
 
-        # 4a. 同时有 IP 和端口 allow 规则: AND (IP allow 或 domain allow) 且 port in allow.
-        if has_ip_rules and has_port_rules:
-            if (domain_allowed or ip_allowed) and port_in_allow:
-                return True, "explicitly allowed (ip+port)"
-            return False, f"{host}:{port} not in ip+port allow rules"
-
-        # 4b. 只有端口 allow 规则: 放行该端口所有 IP.
-        if has_port_rules:
+        # 4a. allow 规则按维度独立判定 (OR), 对齐 Linux iptables 的独立 ACCEPT 链:
+        #     - allowed_ips 是一条 ACCEPT-by-IP 规则;
+        #     - allowed_ports 是另一条 ACCEPT-by-port 规则.
+        #     任一命中即放行, 不做 AND (review MAJOR #10: 旧版在 IP+port 同时存在时
+        #     做 AND, 比 Linux 严, {allowed_ips:[10/8], allowed_ports:[443]} 会
+        #     错杀 10.1.2.3:8443).
+        if has_ip_rules or has_port_rules:
+            reasons: list[str] = []
+            if domain_allowed:
+                reasons.append("domain")
+            if ip_allowed:
+                reasons.append("ip")
             if port_in_allow:
-                return True, f"port {port} allowed (all IPs)"
-            return False, f"port {port} not in allowed_ports"
-
-        # 4c. 只有 IP/域名 allow 规则: 放行这些 IP/域名的所有端口.
-        if has_ip_rules:
-            if domain_allowed or ip_allowed:
-                return True, "explicitly allowed (ip/domain)"
-            return False, f"{host} not in ip/domain allow rules"
+                reasons.append("port")
+            if reasons:
+                return True, f"explicitly allowed ({'+'.join(reasons)})"
+            return False, f"{host}:{port} not in any allow rule"
 
         # 5. 无任何 allow 规则: 按 default.
         if self.egress.default == "deny":

@@ -51,6 +51,7 @@ def _require_windows() -> None:
 
 # ---------------------------------------------------------------------------
 # GUID 结构体 (WFP 大量使用 GUID 作为 layer/condition/filter key).
+# 布局对齐 Windows SDK GUID: { DWORD; WORD; WORD; BYTE[8] }.
 # ---------------------------------------------------------------------------
 class GUID(ctypes.Structure):
     _fields_ = [
@@ -81,32 +82,11 @@ def _guid_from_str(s: str) -> GUID:
 
 
 # ---------------------------------------------------------------------------
-# FWP_VALUE0 (Filter condition 值).
+# FWP_BYTE_BLOB / FWP_V4_ADDR_AND_MASK / FWP_V6_ADDR_AND_MASK.
+# 布局对齐 fwptypes.h.
 # ---------------------------------------------------------------------------
-class FWP_VALUE0(ctypes.Structure):
-    """FWP_VALUE0: 一个带类型标签的值 (Type + 联合体)."""
-
-    class _VALUE(ctypes.Union):
-        _fields_ = [
-            ("uint8", ctypes.c_uint8),
-            ("uint16", ctypes.c_uint16),
-            ("uint32", ctypes.c_uint32),
-            ("uint64", ctypes.POINTER(ctypes.c_uint64)),
-            ("int8", ctypes.c_int8),
-            ("int16", ctypes.c_int16),
-            ("int32", ctypes.c_int32),
-            ("int64", ctypes.POINTER(ctypes.c_int64)),
-            ("float32", wintypes.FLOAT),
-            ("double64", ctypes.c_double),
-            ("byteArray16", ctypes.c_void_p),
-            ("sid", ctypes.c_void_p),  # FWP_SID -> raw SID ptr
-            ("byteBlob", ctypes.c_void_p),  # FWP_BYTE_BLOB*
-        ]
-
-    _fields_ = [
-        ("type", ctypes.c_uint32),
-        ("value", _VALUE),
-    ]
+class FWP_BYTE_ARRAY16(ctypes.Structure):
+    _fields_ = [("byteArray16", ctypes.c_uint8 * 16)]
 
 
 class FWP_BYTE_BLOB(ctypes.Structure):
@@ -117,7 +97,10 @@ class FWP_BYTE_BLOB(ctypes.Structure):
 
 
 class FWP_V4_ADDR_MASK(ctypes.Structure):
-    """IPv4 地址 + 掩码 (用于 IP_REMOTE_ADDRESS 条件)."""
+    """IPv4 地址 + 掩码 (FWP_V4_ADDR_AND_MASK, fwptypes.h).
+
+    addr 为 host byte order (NOT network order). 127.0.0.1 = 0x7F000001.
+    """
     _fields_ = [
         ("addr", ctypes.c_uint32),
         ("mask", ctypes.c_uint32),
@@ -131,31 +114,93 @@ class FWP_V6_ADDR_AND_MASK(ctypes.Structure):
     ]
 
 
-class FWP_CONDITION_VALUE0(ctypes.Structure):
-    """FWP_CONDITION_VALUE0: condition 值 (比 FWP_VALUE0 多了 v4/v6 addr mask)."""
+# ---------------------------------------------------------------------------
+# FWP_VALUE0 / FWP_CONDITION_VALUE0 (带类型标签的联合体).
+# 联合体成员对照 fwptypes.h FWP_VALUE0_/FWP_CONDITION_VALUE0_ union:
+# 数值标量 + 指针成员 (byteArray16*/byteBlob*/sid*/sd*/v4AddrMask*/...).
+# 指针成员用 c_void_p (x64 8B), 标量成员按 SDK 类型. 联合体尺寸 = max(成员).
+# ---------------------------------------------------------------------------
+class FWP_VALUE0(ctypes.Structure):
+    """FWP_VALUE0: 一个带类型标签的值 (Type + 联合体)."""
 
     class _VALUE(ctypes.Union):
         _fields_ = [
             ("uint8", ctypes.c_uint8),
             ("uint16", ctypes.c_uint16),
             ("uint32", ctypes.c_uint32),
-            ("uint64", ctypes.POINTER(ctypes.c_uint64)),
             ("int8", ctypes.c_int8),
             ("int16", ctypes.c_int16),
             ("int32", ctypes.c_int32),
-            ("int64", ctypes.POINTER(ctypes.c_int64)),
             ("float32", wintypes.FLOAT),
             ("double64", ctypes.c_double),
-            ("byteArray16", ctypes.c_void_p),
-            ("byteBlob", ctypes.c_void_p),
-            ("sid", ctypes.c_void_p),
-            ("v4AddrMask", FWP_V4_ADDR_MASK),
-            ("v6AddrMask", FWP_V6_ADDR_AND_MASK),
+            # 指针成员 (x64 8B): uint64/int64 在 SDK 是 UINT64*/INT64* (指向值).
+            ("uint64", ctypes.POINTER(ctypes.c_uint64)),
+            ("int64", ctypes.POINTER(ctypes.c_int64)),
+            ("byteArray16", ctypes.c_void_p),   # FWP_BYTE_ARRAY16*
+            ("byteBlob", ctypes.c_void_p),      # FWP_BYTE_BLOB*
+            ("sid", ctypes.c_void_p),           # SID*
+            ("sd", ctypes.c_void_p),            # FWP_BYTE_BLOB* (SECURITY_DESCRIPTOR)
+            ("unicodeString", ctypes.c_void_p),  # LPWSTR
+            ("byteArray6", ctypes.c_void_p),    # FWP_BYTE_ARRAY6*
         ]
 
     _fields_ = [
         ("type", ctypes.c_uint32),
         ("value", _VALUE),
+    ]
+
+
+class FWP_CONDITION_VALUE0(ctypes.Structure):
+    """FWP_CONDITION_VALUE0: condition 值 (比 FWP_VALUE0 多 v4/v6 addr mask + range)."""
+
+    class _VALUE(ctypes.Union):
+        _fields_ = [
+            ("uint8", ctypes.c_uint8),
+            ("uint16", ctypes.c_uint16),
+            ("uint32", ctypes.c_uint32),
+            ("int8", ctypes.c_int8),
+            ("int16", ctypes.c_int16),
+            ("int32", ctypes.c_int32),
+            ("float32", wintypes.FLOAT),
+            ("double64", ctypes.c_double),
+            ("uint64", ctypes.POINTER(ctypes.c_uint64)),
+            ("int64", ctypes.POINTER(ctypes.c_int64)),
+            ("byteArray16", ctypes.c_void_p),
+            ("byteBlob", ctypes.c_void_p),
+            ("sid", ctypes.c_void_p),
+            ("sd", ctypes.c_void_p),
+            ("unicodeString", ctypes.c_void_p),
+            ("byteArray6", ctypes.c_void_p),
+            # v4/v6/range 在 SDK 是 *指针* (FWP_V4_ADDR_AND_MASK* 等),
+            # 用 c_void_p 保持 8B 对齐; 实际构造时用 ctypes.cast 指向局部实例.
+            ("v4AddrMask", ctypes.c_void_p),
+            ("v6AddrMask", ctypes.c_void_p),
+            ("rangeValue", ctypes.c_void_p),
+        ]
+
+    _fields_ = [
+        ("type", ctypes.c_uint32),
+        ("value", _VALUE),
+    ]
+
+
+class FWP_RANGE0(ctypes.Structure):
+    """FWP_RANGE0: 范围匹配的低/高值 (FWP_MATCH_RANGE 用)."""
+    _fields_ = [
+        ("valueLow", FWP_VALUE0),
+        ("valueHigh", FWP_VALUE0),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# FWPM_DISPLAY_DATA0 (内嵌结构体, 两 wchar_t* 指针, x64 16B).
+# FWPM_FILTER0/SUBLAYER0/SESSION0 都内嵌它, 不能用 c_void_p (8B) 否则后续
+# 字段全部错位 (review MAJOR #6).
+# ---------------------------------------------------------------------------
+class FWPM_DISPLAY_DATA0(ctypes.Structure):
+    _fields_ = [
+        ("name", ctypes.c_wchar_p),
+        ("description", ctypes.c_wchar_p),
     ]
 
 
@@ -169,52 +214,76 @@ class FWPM_FILTER_CONDITION0(ctypes.Structure):
 
 
 class FWPM_ACTION0(ctypes.Structure):
-    """Filter action: type + (filterType GUID for callouts)."""
+    """Filter action: type + union{filterType GUID; calloutKey GUID}.
+
+    BLOCK/PERMIT 不用 union, 但 SDK 结构体 union 占 GUID (16B) 尺寸,
+    需保留以使后续字段对齐.
+    """
     _fields_ = [
         ("type", ctypes.c_uint32),  # FWP_ACTION_*
-        ("filterType", GUID),
+        ("filterType", GUID),       # union{ GUID filterType; GUID calloutKey; }
     ]
 
 
+# ---------------------------------------------------------------------------
+# FWPM_FILTER0 (fwpmtypes.h). 布局严格对齐 SDK:
+#   filterKey(GUID) displayData(FWPM_DISPLAY_DATA0 内嵌) flags(UINT32)
+#   providerKey(GUID*) providerData(FWP_BYTE_BLOB 内嵌) layerKey(GUID)
+#   subLayerKey(GUID) weight(FWP_VALUE0) numFilterConditions(UINT32)
+#   filterCondition(FWPM_FILTER_CONDITION0*) action(FWPM_ACTION0)
+#   union{ UINT64 rawContext; GUID providerContextKey; }(占 8B)
+#   reserved(GUID*) filterId(UINT64) effectiveWeight(FWP_VALUE0)
+# review 错误: 旧版多了不存在的 providerDataSize、缺 flags、reserved 误为
+# c_uint64. 已修.
+# ---------------------------------------------------------------------------
 class FWPM_FILTER0(ctypes.Structure):
-    """FWPM_FILTER0: 完整的 filter 描述."""
     _fields_ = [
         ("filterKey", GUID),
-        ("displayData", ctypes.c_void_p),  # FWPM_DISPLAY_DATA*
-        ("providerKey", ctypes.c_void_p),  # GUID*
-        ("providerDataSize", ctypes.c_uint32),
-        ("providerData", ctypes.c_void_p),  # FWP_BYTE_BLOB*
+        ("displayData", FWPM_DISPLAY_DATA0),       # 内嵌, 非 c_void_p
+        ("flags", ctypes.c_uint32),
+        ("providerKey", ctypes.c_void_p),          # GUID*
+        ("providerData", FWP_BYTE_BLOB),          # 内嵌, 非 providerDataSize+ptr
         ("layerKey", GUID),
         ("subLayerKey", GUID),
         ("weight", FWP_VALUE0),
         ("numFilterConditions", ctypes.c_uint32),
-        ("filterConditions", ctypes.POINTER(FWPM_FILTER_CONDITION0)),
+        ("filterCondition", ctypes.POINTER(FWPM_FILTER_CONDITION0)),
         ("action", FWPM_ACTION0),
-        # union contextKey/providerContextKey ... 后续字段简化省略.
-        ("rawContext", ctypes.c_uint64),
-        ("reserved", ctypes.c_uint64),
+        ("rawContext", ctypes.c_uint64),           # union{rawContext; providerContextKey}
+        ("reserved", ctypes.c_void_p),            # GUID*
+        ("filterId", ctypes.c_uint64),            # BFE 填, 调用方不设
+        ("effectiveWeight", FWP_VALUE0),          # BFE 填
     ]
 
 
 class FWPM_SUBLAYER0(ctypes.Structure):
+    """FWPM_SUBLAYER0 (fwpmtypes.h): subLayerKey + displayData(内嵌) +
+    flags + providerKey(GUID*) + providerData(内嵌) + weight(UINT16).
+    weight 是 UINT16, 旧版误为 c_uint32; 且无 providerDataSize 字段."""
     _fields_ = [
         ("subLayerKey", GUID),
-        ("displayData", ctypes.c_void_p),
+        ("displayData", FWPM_DISPLAY_DATA0),
         ("flags", ctypes.c_uint32),
-        ("providerKey", ctypes.c_void_p),
-        ("providerDataSize", ctypes.c_uint32),
-        ("providerData", ctypes.c_void_p),
-        ("weight", ctypes.c_uint32),
+        ("providerKey", ctypes.c_void_p),   # GUID*
+        ("providerData", FWP_BYTE_BLOB),
+        ("weight", ctypes.c_uint16),
     ]
 
 
 class FWPM_SESSION0(ctypes.Structure):
+    """FWPM_SESSION0 (fwpmtypes.h): sessionKey + displayData(内嵌) +
+    flags + txnWaitTimeoutInMSec + processId/sid/username/kernelMode
+    (BFE 填, 但需占位保结构体尺寸). 旧版 displayData 误为 c_void_p、重复
+    txnWait 字段、缺输出字段."""
     _fields_ = [
         ("sessionKey", GUID),
-        ("displayData", ctypes.c_void_p),
+        ("displayData", FWPM_DISPLAY_DATA0),
         ("flags", ctypes.c_uint32),
-        ("txnWaitDurationInMSec", ctypes.c_uint32),
-        ("txnWaitDurationInMsec", ctypes.c_uint32),  # 兼容两种拼写
+        ("txnWaitTimeoutInMSec", ctypes.c_uint32),
+        ("processId", wintypes.DWORD),       # BFE 填
+        ("sid", ctypes.c_void_p),            # SID*, BFE 填
+        ("username", ctypes.c_wchar_p),     # wchar_t*, BFE 填
+        ("kernelMode", wintypes.BOOL),       # BFE 填
     ]
 
 
@@ -287,7 +356,7 @@ def _add_sublayer(engine: wintypes.HANDLE, sublayer_key: str, weight: int) -> GU
     fwpu = _get_fwpuclnt()
     sublayer = FWPM_SUBLAYER0()
     sublayer.subLayerKey = _guid_from_str(sublayer_key)
-    sublayer.weight = ctypes.c_uint32(weight)
+    sublayer.weight = ctypes.c_uint16(weight)
     sublayer.flags = 0
     hr = fwpu.FwpmSubLayerAdd0(engine, ctypes.byref(sublayer), None)
     if hr != 0 and hr != 0x800700B7:  # FWP_E_ALREADY_EXISTS
@@ -295,42 +364,111 @@ def _add_sublayer(engine: wintypes.HANDLE, sublayer_key: str, weight: int) -> GU
     return sublayer.subLayerKey
 
 
-def _build_ale_user_condition(sandbox_sid_ptr) -> FWPM_FILTER_CONDITION0:
-    """构造 ALE_USER_ID == sandbox SID 条件."""
+def _build_loopback_v4_condition() -> "tuple[FWPM_FILTER_CONDITION0, FWP_V4_ADDR_MASK]":
+    """构造 IP_REMOTE_ADDRESS == 127.0.0.1 条件 (IPv4).
+
+    SDK 的 FWP_CONDITION_VALUE0 里 v4AddrMask 是 *指针* (FWP_V4_ADDR_AND_MASK*),
+    不能直接内嵌赋值; 需返回一个存活的局部 FWP_V4_ADDR_MASK 实例, 由调用方
+    保持其生命周期到 FwpmFilterAdd0 返回 (否则指针悬垂). addr 用 host byte
+    order 0x7F000001 (review CRITICAL #4: 旧值 0x0100007F 是网络序, 匹配
+    1.0.0.127).
+    """
+    cond = FWPM_FILTER_CONDITION0()
+    cond.fieldKey = _guid_from_str(const.FWPM_CONDITION_IP_REMOTE_ADDRESS)
+    cond.matchType = const.FWP_MATCH_EQUAL
+    cond.conditionValue.type = const.FWP_V4_ADDR_MASK
+    addr_mask = FWP_V4_ADDR_MASK()
+    addr_mask.addr = const.LOOPBACK_IPV4_INT  # 0x7F000001 = 127.0.0.1 host order
+    addr_mask.mask = 0xFFFFFFFF
+    cond.conditionValue.value.v4AddrMask = ctypes.cast(
+        ctypes.pointer(addr_mask), ctypes.c_void_p,
+    ).value
+    return cond, addr_mask
+
+
+def _build_loopback_v6_condition() -> "tuple[FWPM_FILTER_CONDITION0, FWP_V6_ADDR_AND_MASK]":
+    """构造 IPv6 ::1 条件. 返回 (cond, 存活的局部实例)."""
+    cond = FWPM_FILTER_CONDITION0()
+    cond.fieldKey = _guid_from_str(const.FWPM_CONDITION_IP_REMOTE_ADDRESS)
+    cond.matchType = const.FWP_MATCH_EQUAL
+    cond.conditionValue.type = const.FWP_V6_ADDR_MASK
+    addr_mask = FWP_V6_ADDR_AND_MASK()
+    addr_arr = (ctypes.c_uint8 * 16)(
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+    )
+    ctypes.memmove(
+        ctypes.addressof(addr_mask.addr), addr_arr, 16,
+    )
+    addr_mask.prefixLength = 128
+    cond.conditionValue.value.v6AddrMask = ctypes.cast(
+        ctypes.pointer(addr_mask), ctypes.c_void_p,
+    ).value
+    return cond, addr_mask
+
+
+def _build_ale_user_condition(sandbox_user_sid: str) -> "tuple[FWPM_FILTER_CONDITION0, object]":
+    """构造 ALE_USER_ID 条件 (基于 SECURITY_DESCRIPTOR, 非 裸 SID).
+
+    SDK: FWPM_CONDITION_ALE_USER_ID 的 condition 值类型是
+    FWP_SECURITY_DESCRIPTOR_TYPE (FWP_BYTE_BLOB* 指向自相关 SD 字节),
+    而非 FWP_SID. BFE 评估时检查 SD 的 DACL 是否对发起连接的用户授予
+    FWP_ACTRL_MATCH_FILTER 访问权 (SDK 示例: Permitting and Blocking
+    Applications and Users, BuildSecurityDescriptorW + FWP_ACTRL_MATCH_FILTER).
+
+    用 win32security 构造自相关 SD: DACL 授 jbx-sandbox 用户
+    FWP_ACTRL_MATCH_FILTER. 返回 (cond, _keeps), _keeps 持有 SD 字节与
+    FWP_BYTE_BLOB 实例引用, 调用方需保持其生命周期到 FwpmFilterAdd0 返回.
+    """
     cond = FWPM_FILTER_CONDITION0()
     cond.fieldKey = _guid_from_str(const.FWPM_CONDITION_ALE_USER_ID)
     cond.matchType = const.FWP_MATCH_EQUAL
-    cond.conditionValue.type = const.FWP_SID
-    cond.conditionValue.value.sid = sandbox_sid_ptr
-    return cond
+    cond.conditionValue.type = const.FWP_SECURITY_DESCRIPTOR_TYPE
+
+    # 用 win32security 构造自相关 SD. 延迟 import (Linux 无 pywin32).
+    try:
+        import win32security  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError(
+            "构造 ALE_USER_ID 条件需要 pywin32 (win32security); "
+            "未安装, WFP user-keyed 过滤不可用 (降级 PowerShell 路径)"
+        ) from exc
+
+    # jbx-sandbox 用户的 SID (字符串 -> SID 对象).
+    user_sid_obj = win32security.ConvertStringSidToSid(sandbox_user_sid)
+    # pywin32 EXPLICIT_ACCESS dict 字段为大写键 (AccessPermissions/AccessMode/
+    # Inheritance/Trustee, 见 pywin32 PyACL.cpp PyWinObject_AsEXPLICIT_ACCESS).
+    # Trustee 接受 TRUSTEE 对象; 用 BuildTrusteeWithSid 从 SID 构造.
+    trustee = win32security.TRUSTEE()
+    win32security.BuildTrusteeWithSid(trustee, user_sid_obj)
+    explicit = {
+        "AccessPermissions": const.FWP_ACTRL_MATCH_FILTER,
+        "AccessMode": win32security.GRANT_ACCESS,
+        "Inheritance": 0,  # 不继承
+        "Trustee": trustee,
+    }
+    # SetEntriesInAcl 是 PyACL 方法: 在空 ACL 上添加 entries.
+    dacl = win32security.ACL()
+    dacl.SetEntriesInAcl([explicit])
+    sd = win32security.SECURITY_DESCRIPTOR()
+    sd.SetSecurityDescriptorDacl(1, dacl, 0)
+    # MakeSelfRelativeSD 返回自相关 SD 的 bytes (contiguous, FWP 要求此格式).
+    sd_bytes = win32security.MakeSelfRelativeSD(sd)
+
+    blob = FWP_BYTE_BLOB()
+    # 持有 sd_bytes (bytes) 引用, blob.data 指向其缓冲.
+    buf = (ctypes.c_uint8 * len(sd_bytes)).from_buffer_copy(sd_bytes)
+    blob.size = len(sd_bytes)
+    blob.data = ctypes.cast(buf, ctypes.POINTER(ctypes.c_uint8))
+    cond.conditionValue.value.sd = ctypes.cast(
+        ctypes.pointer(blob), ctypes.c_void_p,
+    ).value
+    return cond, _KeepAlive(blob=blob, buf=buf, sd_bytes=sd_bytes)
 
 
-def _build_loopback_v4_condition() -> FWPM_FILTER_CONDITION0:
-    """构造 IP_REMOTE_ADDRESS == 127.0.0.1 条件 (IPv4)."""
-    cond = FWPM_FILTER_CONDITION0()
-    cond.fieldKey = _guid_from_str(const.FWPM_CONDITION_IP_REMOTE_ADDRESS)
-    cond.matchType = const.FWP_MATCH_EQUAL
-    cond.conditionValue.type = const.FWP_V4_ADDR_MASK_TYPE
-    cond.conditionValue.value.v4AddrMask.addr = const.LOOPBACK_IPV4_INT
-    cond.conditionValue.value.v4AddrMask.mask = 0xFFFFFFFF
-    return cond
-
-
-def _build_loopback_v6_condition() -> FWPM_FILTER_CONDITION0:
-    """构造 IPv6 ::1 条件."""
-    cond = FWPM_FILTER_CONDITION0()
-    cond.fieldKey = _guid_from_str(const.FWPM_CONDITION_IP_REMOTE_ADDRESS)
-    cond.matchType = const.FWP_MATCH_EQUAL
-    cond.conditionValue.type = const.FWP_V6_ADDR_AND_MASK_TYPE
-    addr_arr = (ctypes.c_uint8 * 16)(
-        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,
-    )
-    ctypes.memmove(
-        ctypes.addressof(cond.conditionValue.value.v6AddrMask.addr),
-        addr_arr, 16,
-    )
-    cond.conditionValue.value.v6AddrMask.prefixLength = 128
-    return cond
+class _KeepAlive:
+    """持有 ctypes 对象引用, 防止条件构造返回后 GC 释放指针指向的内存."""
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
 
 
 def _build_port_eq_condition(port: int) -> FWPM_FILTER_CONDITION0:
@@ -357,8 +495,15 @@ def _add_filter(
     action_type: int,
     weight: int,
     display_name: str,
+    keeps_alive: list[object] | None = None,
 ) -> None:
-    """安装一个 filter (幂等: 已存在则先删后加)."""
+    """安装一个 filter.
+
+    幂等: 已存在 (FWP_E_ALREADY_EXISTS=0x800700B7) 则忽略, 不删后加
+    (旧 docstring 误导为"先删后加", 已修正).
+    keeps_alive: 条件构造返回的 keep-alive 引用 (FWP_V4_ADDR_MASK/
+    FWPM_DISPLAY_DATA/SD blob 等), 必须存活到本函数 FwpmFilterAdd0 返回.
+    """
     fwpu = _get_fwpuclnt()
     fkey = _guid_from_str(filter_key)
 
@@ -390,7 +535,7 @@ def install_wfp_filters(
 ) -> None:
     """安装 Block + Permit WFP filter set.
 
-    幂等: sublayer/filter 用固定 GUID key, 重复安装会命中
+    幂等: sublayer/filter 用固定合法 GUID key, 重复安装会命中
     FWP_E_ALREADY_EXISTS 并被忽略.
 
     Args:
@@ -399,19 +544,9 @@ def install_wfp_filters(
     """
     _require_windows()
     fwpu = _get_fwpuclnt()
-
-    # 把 SID 字符串转成 SID 指针 (通过 ConvertStringSidToSid, 需 advapi32).
-    import ctypes as _ctypes
-    advapi32 = _ctypes.WinDLL("advapi32", use_last_error=True)
-    advapi32.ConvertStringSidToSidW.argtypes = [
-        wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p),
-    ]
-    advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
-    sid_ptr = ctypes.c_void_p()
-    if not advapi32.ConvertStringSidToSidW(
-        sandbox_user_sid, ctypes.byref(sid_ptr),
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
+    # keeps_alive 列表: 持有所有条件构造返回的 ctypes 局部对象引用,
+    # 直到全部 FwpmFilterAdd0 完成才允许 GC (否则 v4AddrMask/SD blob 指针悬垂).
+    keeps: list[object] = []
 
     engine = _open_engine()
     try:
@@ -424,39 +559,41 @@ def install_wfp_filters(
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V4, const.JBX_FILTER_BLOCK_KEY_V4),
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V6, const.JBX_FILTER_BLOCK_KEY_V6),
             ):
-                block_cond = _build_ale_user_condition(sid_ptr)
+                block_cond, ka = _build_ale_user_condition(sandbox_user_sid)
+                keeps.append(ka)
                 _add_filter(
                     engine, fkey, layer, sublayer_key,
                     [block_cond],
                     const.FWP_ACTION_BLOCK,
                     const.FWP_WEIGHT_BLOCK,
                     f"JiuwenBox-Block-{fkey}",
+                    keeps_alive=keeps,
                 )
 
             # --- Permit filters (V4 + V6) for loopback + port range ---
             # 为端口范围内每个端口装一个独立 Permit filter (放行整个范围).
-            # filter key 形如 JiuwenBox-Permit-Loopback-V4-60080, 幂等安装/卸载.
+            # filter key 形如 <base_key>-<port>, 幂等安装/卸载.
             for layer, base_key in (
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V4, const.JBX_FILTER_PERMIT_KEY_V4),
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V6, const.JBX_FILTER_PERMIT_KEY_V6),
             ):
                 for port in range(permit_port_start, permit_port_end + 1):
-                    conds = [
-                        _build_ale_user_condition(sid_ptr),
-                        (
-                            _build_loopback_v4_condition()
-                            if "V4" in base_key
-                            else _build_loopback_v6_condition()
-                        ),
-                        _build_port_eq_condition(port),
-                    ]
+                    user_cond, user_ka = _build_ale_user_condition(sandbox_user_sid)
+                    keeps.append(user_ka)
+                    if "V4" in base_key:
+                        lb_cond, lb_ka = _build_loopback_v4_condition()
+                    else:
+                        lb_cond, lb_ka = _build_loopback_v6_condition()
+                    keeps.append(lb_ka)
+                    port_cond = _build_port_eq_condition(port)
                     port_key = f"{base_key}-{port}"
                     _add_filter(
                         engine, port_key, layer, sublayer_key,
-                        conds,
+                        [user_cond, lb_cond, port_cond],
                         const.FWP_ACTION_PERMIT,
                         const.FWP_WEIGHT_PERMIT,
                         f"JiuwenBox-Permit-Loopback-{base_key}-{port}",
+                        keeps_alive=keeps,
                     )
 
             fwpu.FwpmTransactionCommit0(engine)

@@ -347,13 +347,36 @@ def _is_admin() -> bool:
         return False
 
 
-def _elevate_and_run_install() -> int:
-    """通过 UAC 拉起提权子进程执行 install."""
+def _elevate_and_run_install(
+    force: bool = False,
+    preinstall_paths: list[str] | None = None,
+    proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
+    proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
+) -> int:
+    """通过 UAC 拉起提权子进程执行 install.
+
+    转发 force / preinstall_paths / proxy_port_* 参数到提权子进程 (review
+    MAJOR #9: 旧版只传 --install, force=True 从非管理员进程调用会静默 no-op).
+    """
+    import json
     shell32 = _get_shell32()
     py = sys.executable
-    params = (
-        f'-m jiuwenbox.supervisor.win_setup {const.INSTALL_SUBCOMMAND}'
-    )
+    parts = [
+        "-m", "jiuwenbox.supervisor.win_setup", const.INSTALL_SUBCOMMAND,
+    ]
+    if force:
+        parts.append("--force")
+    parts.append("--proxy-port-start")
+    parts.append(str(proxy_port_start))
+    parts.append("--proxy-port-end")
+    parts.append(str(proxy_port_end))
+    if preinstall_paths:
+        # 用 JSON 编码列表传参, 子进程解码; 避免路径含空格/引号的转义问题.
+        encoded = json.dumps(preinstall_paths)
+        parts.append("--preinstall-paths")
+        parts.append(encoded)
+    # 用 subprocess.list2cmdline 风格构造参数串 (ShellExecuteW 接受单一 params 字符串).
+    params = " ".join(_quote_arg(p) for p in parts)
     # ShellExecuteW(parent, verb, file, parameters, directory, show).
     SW_SHOWNORMAL = 1
     result = shell32.ShellExecuteW(
@@ -364,8 +387,15 @@ def _elevate_and_run_install() -> int:
             f"UAC 提权失败 (ShellExecuteW 返回 {result}); 请以管理员身份手动运行 "
             f"'python -m jiuwenbox.supervisor.win_setup --install'"
         )
-    logger.info("已通过 UAC 提权运行 install 子进程")
+    logger.info("已通过 UAC 提权运行 install 子进程 (force=%s)", force)
     return 0
+
+
+def _quote_arg(arg: str) -> str:
+    """参数含空格/制表符时用双引号包裹 (Windows 命令行规则)."""
+    if " " in arg or "\t" in arg:
+        return f'"{arg}"'
+    return arg
 
 
 # ---------------------------------------------------------------------------
@@ -374,12 +404,26 @@ def _elevate_and_run_install() -> int:
 def _preinstall_read_acl(paths: list[str], sid: str) -> None:
     """对指定路径列表递归施加 Allow Read ACE (合成/沙箱用户 SID).
 
-    best-effort: 单个路径失败不影响整体. 进度写注册表.
+    best-effort: 单个路径失败不影响整体. 进度写注册表 (REG_VALUE_READ_ACL_PROGRESS,
+    JSON 编码的已完成路径列表), 支持断点续传 (review MAJOR #8: 旧版从不写进度,
+    install 被强杀后从头再来).
     """
+    import json
     from jiuwenbox.supervisor import win_acl
+    # 读已完成进度, 跳过已完成路径.
+    done: set[str] = set()
+    raw_progress = _reg_get_str(const.REG_VALUE_READ_ACL_PROGRESS)
+    if raw_progress:
+        try:
+            done = set(json.loads(raw_progress))
+        except (ValueError, TypeError):
+            done = set()
     try:
         for path in paths:
             expanded = os.path.expandvars(path)
+            if expanded in done:
+                logger.debug("预装读 ACL: 已完成, 跳过 %s", expanded)
+                continue
             if not os.path.exists(expanded):
                 logger.debug("预装读 ACL: 路径不存在 %s", expanded)
                 continue
@@ -389,6 +433,12 @@ def _preinstall_read_acl(paths: list[str], sid: str) -> None:
                 rights=const.FILE_GENERIC_READ,
                 mode="ALLOW",
                 recursive=True,
+            )
+            done.add(expanded)
+            # 每完成一个路径写一次进度, 支持断点续传.
+            _reg_set_str(
+                const.REG_VALUE_READ_ACL_PROGRESS,
+                json.dumps(sorted(done)),
             )
             logger.debug("预装读 ACL 完成: %s", expanded)
     except Exception:  # noqa: BLE001 - best-effort
@@ -424,6 +474,8 @@ PREINSTALL_JOIN_TIMEOUT_SECONDS = 120.0
 def install(
     force: bool = False,
     preinstall_paths: list[str] | None = None,
+    proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
+    proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
 ) -> None:
     """执行一次性安装 (需管理员权限).
 
@@ -432,10 +484,19 @@ def install(
         preinstall_paths: 读 ACL 预装路径 (来自根 policy 的
             ``windows.filesystem.read_acl_preinstall``). 为 None 时用
             默认 4 个系统目录.
+        proxy_port_start/end: WFP Permit filter 放行的 loopback 端口范围
+            (来自根 policy 的 ``windows.proxy.port_range_*``). 必须与
+            win_proxy 实际监听端口一致, 否则代理路径被 Block 拦截
+            (review MAJOR #7: 旧版硬编码默认端口, 忽略 policy).
     """
     _require_windows()
-    if not _is_admin() and not force:
-        _elevate_and_run_install()
+    if not _is_admin():
+        _elevate_and_run_install(
+            force=force,
+            preinstall_paths=preinstall_paths,
+            proxy_port_start=proxy_port_start,
+            proxy_port_end=proxy_port_end,
+        )
         return
 
     # 幂等检查.
@@ -479,13 +540,10 @@ def install(
     _reg_set_str(const.REG_VALUE_SYNTHETIC_WRITE_SID, synth_sid)
 
     # 3. 安装 WFP filter set (网络隔离). 失败则降级到防火墙规则.
+    # 使用调用方传入的 policy 端口范围 (M7), 不再硬编码默认端口.
     try:
         from jiuwenbox.supervisor import win_wfp
-        win_wfp.install_wfp_filters(
-            sid,
-            const.DEFAULT_PROXY_PORT_RANGE_START,
-            const.DEFAULT_PROXY_PORT_RANGE_END,
-        )
+        win_wfp.install_wfp_filters(sid, proxy_port_start, proxy_port_end)
     except Exception:  # noqa: BLE001
         logger.warning(
             "WFP filter 安装失败, 降级到 PowerShell 防火墙规则", exc_info=True,
@@ -493,9 +551,7 @@ def install(
         try:
             from jiuwenbox.supervisor import win_wfp
             win_wfp.install_firewall_rule_fallback(
-                const.SANDBOX_USER_NAME,
-                const.DEFAULT_PROXY_PORT_RANGE_START,
-                const.DEFAULT_PROXY_PORT_RANGE_END,
+                const.SANDBOX_USER_NAME, proxy_port_start, proxy_port_end,
             )
         except Exception:  # noqa: BLE001
             logger.error("防火墙规则降级也失败, 网络隔离不可用", exc_info=True)
@@ -524,14 +580,17 @@ def install(
             PREINSTALL_JOIN_TIMEOUT_SECONDS,
         )
 
-    # 5. 写完成标记.
+    # 5. 写完成标记; 全部预装成功则清进度标记 (断点续传已无用).
     _reg_set_str(const.REG_VALUE_INSTALLED, "1")
+    _reg_set_str(const.REG_VALUE_READ_ACL_PROGRESS, "")
     logger.info("Windows 沙箱安装完成")
 
 
 def ensure_windows_setup(
     force: bool = False,
     preinstall_paths: list[str] | None = None,
+    proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
+    proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
 ) -> None:
     """运行时入口: 确保安装已完成 (幂等).
 
@@ -542,12 +601,19 @@ def ensure_windows_setup(
         preinstall_paths: 读 ACL 预装路径 (根 policy 的
             ``windows.filesystem.read_acl_preinstall``). 仅在首次安装时
             生效; 已安装则忽略.
+        proxy_port_start/end: WFP Permit filter 放行的 loopback 端口范围
+            (根 policy 的 ``windows.proxy.port_range_*``).
     """
     _require_windows()
     try:
         if not force and _reg_get_str(const.REG_VALUE_INSTALLED) == "1":
             return
-        install(force=force, preinstall_paths=preinstall_paths)
+        install(
+            force=force,
+            preinstall_paths=preinstall_paths,
+            proxy_port_start=proxy_port_start,
+            proxy_port_end=proxy_port_end,
+        )
     except Exception:  # noqa: BLE001
         logger.error("ensure_windows_setup 失败", exc_info=True)
         raise
@@ -612,16 +678,67 @@ def _elevate_uninstall() -> None:
 
 
 def _main(argv: list[str]) -> int:
-    if not argv:
-        print("用法: python -m jiuwenbox.supervisor.win_setup --install|--uninstall")
-        return 2
-    if argv[0] == const.INSTALL_SUBCOMMAND:
-        install()
+    """CLI 入口: 接收 --install / --uninstall 及 install 的参数.
+
+    install 支持的可选参数 (review MAJOR #9: 旧版不接, 导致 force/端口/
+    preinstall 从命令行无法传入):
+      --force                  强制重装
+      --proxy-port-start N     WFP Permit 放行的 loopback 端口范围起点
+      --proxy-port-end   N     范围终点
+      --preinstall-paths JSON  读 ACL 预装路径列表 (JSON 编码字符串)
+    """
+    import argparse
+    import json
+    # argparse 子命令不能带 "--" 前缀; 调用方 (UAC 提权) 用的是
+    # "--install"/"--uninstall", 这里规整为 "install"/"uninstall".
+    normalized = [a.lstrip("-") if a.startswith("--") and a.lstrip("-") in (
+        const.INSTALL_SUBCOMMAND.lstrip("-"),
+        const.UNINSTALL_SUBCOMMAND.lstrip("-"),
+    ) else a for a in argv]
+    parser = argparse.ArgumentParser(
+        prog="jiuwenbox.supervisor.win_setup",
+        description="Windows 沙箱一次性环境准备 (管理员)",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p_install = sub.add_parser(
+        const.INSTALL_SUBCOMMAND.lstrip("-"), help="执行安装",
+    )
+    p_install.add_argument("--force", action="store_true", help="强制重装")
+    p_install.add_argument(
+        "--proxy-port-start", type=int,
+        default=const.DEFAULT_PROXY_PORT_RANGE_START,
+    )
+    p_install.add_argument(
+        "--proxy-port-end", type=int,
+        default=const.DEFAULT_PROXY_PORT_RANGE_END,
+    )
+    p_install.add_argument(
+        "--preinstall-paths", default=None,
+        help="读 ACL 预装路径列表 (JSON 编码字符串)",
+    )
+    sub.add_parser(
+        const.UNINSTALL_SUBCOMMAND.lstrip("-"), help="执行卸载",
+    )
+    args = parser.parse_args(normalized)
+
+    if args.cmd == const.INSTALL_SUBCOMMAND.lstrip("-"):
+        preinstall_paths = None
+        if args.preinstall_paths:
+            try:
+                preinstall_paths = json.loads(args.preinstall_paths)
+            except (ValueError, TypeError) as exc:
+                print(f"--preinstall-paths 解析失败: {exc}")
+                return 2
+        install(
+            force=args.force,
+            preinstall_paths=preinstall_paths,
+            proxy_port_start=args.proxy_port_start,
+            proxy_port_end=args.proxy_port_end,
+        )
         return 0
-    if argv[0] == const.UNINSTALL_SUBCOMMAND:
+    if args.cmd == const.UNINSTALL_SUBCOMMAND.lstrip("-"):
         uninstall()
         return 0
-    print(f"未知子命令: {argv[0]}")
     return 2
 
 

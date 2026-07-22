@@ -264,14 +264,20 @@ def two_hop_spawn(
     proxy_port_start: int,
     proxy_port_end: int,
     env: dict[str, str] | None = None,
-) -> "tuple[int, int, int, int]":
-    """第一跳: 以 jbx-sandbox 身份启动 runner.
+) -> "tuple[int, int, int, int, int]":
+    """第一跳: 以 jbx-sandbox 身份启动 runner (CREATE_SUSPENDED).
+
+    Runner 以挂起状态启动, 调用方在 AssignProcessToJobObject 之后调用
+    win_job.resume_process(thread_handle) 恢复执行 (review MAJOR #1:
+    设计 6.8 要求 SUSPEND→Assign→Resume, 否则 Job 逃逸窗口).
 
     Returns:
-        (runner_pid, stdin_write_handle, stdout_read_handle, runner_process_handle):
+        (runner_pid, stdin_write_handle, stdout_read_handle,
+         runner_process_handle, runner_thread_handle):
             box-server 通过 stdin_write_handle 向 runner 发请求,
             从 stdout_read_handle 读响应. runner_process_handle 用于
-            停止/等待 runner.
+            停止/等待 runner. runner_thread_handle 用于 Job assign 后
+            ResumeThread; assign+resume 完成后由调用方 CloseHandle.
     """
     _require_windows()
     advapi32 = _get_advapi32()
@@ -321,7 +327,9 @@ def two_hop_spawn(
 
     # LOGON_WITH_PROFILE = 0x1, LOGON_NETCREDENTIALS_ONLY = 0x2
     LOGON_WITH_PROFILE = 0x00000001
-    creation_flags = const.CREATE_NO_WINDOW
+    # CREATE_SUSPENDED: runner 主线程挂起, 调用方 assign Job 后再 ResumeThread,
+    # 避免 Job 逃逸窗口 (设计 6.8 SUSPEND→Assign→Resume).
+    creation_flags = const.CREATE_NO_WINDOW | const.CREATE_SUSPENDED
 
     ok = advapi32.CreateProcessWithLogonW(
         sandbox_user, None, sandbox_password,
@@ -342,12 +350,12 @@ def two_hop_spawn(
         )
 
     # 关闭 runner 侧的读/写端副本 (runner 自己有继承的副本).
+    # pi.hThread 不在此关闭: 调用方 assign Job 后 resume 主线程, 再 CloseHandle.
     kernel32.CloseHandle(child_stdin_read)
     kernel32.CloseHandle(child_stdout_write)
-    kernel32.CloseHandle(pi.hThread)
 
     logger.info(
-        "两跳第一跳成功: sandbox_id=%s runner_pid=%d",
+        "两跳第一跳成功 (suspended): sandbox_id=%s runner_pid=%d",
         sandbox_id, pi.dwProcessId,
     )
     return (
@@ -355,6 +363,7 @@ def two_hop_spawn(
         int(child_stdin_write.value),
         int(child_stdout_read.value),
         int(pi.hProcess),
+        int(pi.hThread),
     )
 
 
@@ -431,17 +440,26 @@ def _get_everyone_sid() -> "ctypes.c_void_p":
 
 
 def _get_synthetic_write_sid_ptr() -> "ctypes.c_void_p":
-    """构造合成 JHXSandboxWrite SID (AllocateAndInitializeSid)."""
+    """构造合成 JHXSandboxWrite SID (AllocateAndInitializeSid).
+
+    生成的 SID 必须与 win_acl.get_synthetic_write_sid() 字符串版完全一致,
+    即 S-1-5-21-<sub0>-<sub1>-<RID>. SID 表示法 S-R-I-S1-S2-... 中 I 是
+    identifier authority, 其后每段是 sub-authority; "21" 是第一个 sub-authority
+    (不是 identifier authority 5 的一部分). 故 AllocateAndInitializeSid 的
+    nSubAuthorityCount = 4, sub list = [21, sub0, sub1, RID].
+    旧版误用 nSubAuthorityCount=3 漏了 21, 产出 S-1-5-... 与 ACL 授权的
+    S-1-5-21-... 不是同一个 SID, 导致受限 token 第二重 ACL 检查永远失败
+    (review CRITICAL #1).
+    """
     advapi32 = _get_advapi32()
     # SID_IDENTIFIER_AUTHORITY = 6 字节 (NT Authority = 5).
     SID_AUTH_NT = (ctypes.c_byte * 6)(0, 0, 0, 0, 0, 5)
     sid_ptr = ctypes.c_void_p()
-    # AllocateAndInitializeSid(auth, sub_authority_count, *subauths, &sid)
-    # 这里 sub_authority_count = 3 (固定前缀 21 的 3 个 sub authority + RID).
-    # 实际 SID: S-1-5-21-<sub0>-<sub1>-<RID> -> 4 个 sub authority (21 本身是
-    # identifier authority 5 + 第一个 sub = 21). 故 sub count = 3 (sub0,sub1,RID).
+    # AllocateAndInitializeSid(auth, nSubAuthorityCount, *subauths, &sid)
+    # nSubAuthorityCount=4: [21, sub0, sub1, RID] -> S-1-5-21-<sub0>-<sub1>-<RID>.
     ok = advapi32.AllocateAndInitializeSid(
-        ctypes.byref(SID_AUTH_NT), 3,
+        ctypes.byref(SID_AUTH_NT), 4,
+        21,  # sub0 = 21 (使 SID = S-1-5-21-...)
         const.SYNTHETIC_WRITE_SID_SUBAUTHS[0],
         const.SYNTHETIC_WRITE_SID_SUBAUTHS[1],
         const.SYNTHETIC_WRITE_SID_RID,
@@ -513,7 +531,17 @@ def _create_process_as_user(
         f'"{c}"' if " " in c or "\t" in c else c for c in command
     )
     # 构造子进程环境块 (Windows 要求 \0\0 结尾的 unicode 环境块).
-    env_block = _build_environment_block(env) if env else None
+    # 关键: env_block_buf 必须存活到 CreateProcessAsUserW 返回, 否则
+    # c_void_p 指向的内存被 GC 释放, 子进程拿到的是悬垂内存 (review
+    # CRITICAL #3). 旧版 _build_environment_block 返回 c_void_p 后 buf
+    # 立即被回收. 这里内联构造并持有 buf 引用直到 API 调用完成.
+    env_block_buf = None
+    env_block_ptr = None
+    if env:
+        parts = [f"{k}={v}" for k, v in env.items()]
+        block = "\0".join(parts) + "\0\0"
+        env_block_buf = ctypes.create_unicode_buffer(block)
+        env_block_ptr = ctypes.cast(env_block_buf, ctypes.c_void_p)
 
     startup = STARTUPINFOW()
     startup.cb = ctypes.sizeof(STARTUPINFOW)
@@ -533,23 +561,13 @@ def _create_process_as_user(
         None, None,
         True,  # inherit handles
         creation_flags,
-        env_block,
+        env_block_ptr,  # CreateProcessAsUserW 在此返回前读取 env block
         cwd,
         ctypes.byref(startup), ctypes.byref(pi),
     )
     if not ok:
         raise ctypes.WinError(ctypes.get_last_error())
-    advapi32  # silence unused
     return int(pi.dwProcessId), int(pi.hProcess)
-
-
-def _build_environment_block(env: dict[str, str]) -> "ctypes.c_wchar_p":
-    """把 env dict 编码成 Windows 环境块 (KEY=VALUE\\0...\\0)."""
-    parts = [f"{k}={v}" for k, v in env.items()]
-    block = "\0".join(parts) + "\0\0"
-    # 分配可写缓冲.
-    buf = ctypes.create_unicode_buffer(block)
-    return ctypes.cast(buf, ctypes.c_void_p)
 
 
 def runner_main(argv: list[str]) -> int:

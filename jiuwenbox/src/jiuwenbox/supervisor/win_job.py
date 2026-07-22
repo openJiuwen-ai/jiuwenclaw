@@ -106,7 +106,26 @@ def _get_kernel32() -> ctypes.WinDLL:
             wintypes.DWORD, wintypes.BOOL, wintypes.DWORD,
         ]
         _kernel32.OpenProcess.restype = wintypes.HANDLE
+        # ResumeThread: 恢复 CREATE_SUSPENDED 挂起的 runner 主线程 (设计 6.8
+        # SUSPEND→Assign→Resume 的 Resume 步, 避免 Job 逃逸窗口).
+        _kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+        _kernel32.ResumeThread.restype = wintypes.DWORD
     return _kernel32
+
+
+def resume_process(thread_handle: int) -> None:
+    """ResumeThread 恢复 CREATE_SUSPENDED 挂起的进程主线程.
+
+    配合 two_hop_spawn(CREATE_SUSPENDED): runner 挂起 → assign_process →
+    resume_process, 确保进程在加入 Job 后才开始执行 (review MAJOR #1).
+    """
+    _require_windows()
+    kernel32 = _get_kernel32()
+    # ResumeThread 返回之前的 suspend count (非 0 表示曾挂起); 0xFFFFFFFF 表示
+    # 失败. 成功时 count 通常为 1 (挂起一次).
+    prev = kernel32.ResumeThread(wintypes.HANDLE(thread_handle))
+    if prev == 0xFFFFFFFF:
+        raise ctypes.WinError(ctypes.get_last_error())
 
 
 def create_job(

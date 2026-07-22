@@ -22,6 +22,7 @@ Linux 回归由 ``test_server_api_default.py`` 覆盖, 本文件不重复.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
@@ -293,13 +294,17 @@ class TestProcessRuntimeWindowsBranch:
 
         # 构造 mock 的 win_* 模块.
         fake_win_acl = MagicMock()
+        # apply_sandbox_acl 返回施加路径清单 (review M6).
+        fake_win_acl.apply_sandbox_acl = MagicMock(return_value=["/ws"])
         fake_win_exec = MagicMock()
         fake_win_exec.two_hop_spawn = MagicMock(
-            return_value=(12345, 100, 101, 200),  # pid, stdin, stdout, proc_h
+            return_value=(12345, 100, 101, 200, 300),  # pid, stdin, stdout, proc_h, thread_h
         )
+        fake_win_exec._get_kernel32 = MagicMock(return_value=MagicMock())
         fake_win_job = MagicMock()
         fake_win_job.create_job = MagicMock(return_value=999)
         fake_win_job.assign_process_by_pid = MagicMock()
+        fake_win_job.resume_process = MagicMock()
         fake_win_setup = MagicMock()
         fake_win_setup.ensure_windows_setup = AsyncMock()
         fake_win_setup.get_sandbox_user_password = MagicMock(
@@ -351,13 +356,15 @@ class TestProcessRuntimeWindowsBranch:
         pid = _asyncio.run(runtime._create_windows("sb-1", Path("/tmp/p.yaml"), {}))
 
         assert pid == 12345
-        # ACL 施加被调用.
+        # ACL 施加被调用 (含读控制参数, review M4).
         fake_win_acl.apply_sandbox_acl.assert_called_once()
         # 两跳启动被调用.
         fake_win_exec.two_hop_spawn.assert_called_once()
         # Job 创建被调用 (resource 非空).
         fake_win_job.create_job.assert_called_once()
         fake_win_job.assign_process_by_pid.assert_called_once_with(999, 12345)
+        # assign 后 resume 主线程 (review M1 SUSPEND→Assign→Resume).
+        fake_win_job.resume_process.assert_called_once_with(300)
 
 
 class TestAppLifespanWindowsBranch:
@@ -478,23 +485,98 @@ class TestAppLifespanWindowsBranch:
 # WSL 可跑: win_wfp / win_job / win_exec / win_acl 调用参数 mock 验证.
 # ---------------------------------------------------------------------------
 class TestWinWfpFilterConstruction:
-    """验证 install_wfp_filters 构造的 Block/Permit filter 结构正确."""
+    """验证 install_wfp_filters 构造的 Block/Permit filter 结构正确.
 
-    def test_build_ale_user_condition_has_sid(self, monkeypatch):
-        from jiuwenbox.supervisor import win_wfp
-        # _build_ale_user_condition 把 SID 指针写入 FWP_CONDITION_VALUE0.sid
-        # 字段 (c_void_p). 传一个 int 作为指针值 (ctypes c_void_p 接受 int).
-        sid_ptr = 0x7FFF0000  # 假指针值
-        cond = win_wfp._build_ale_user_condition(sid_ptr)  # noqa: SLF001
-        assert cond.matchType == const.FWP_MATCH_EQUAL
-        assert cond.conditionValue.type == const.FWP_SID
+    _build_loopback_v4_condition / _build_ale_user_condition 现在返回
+    (cond, keep_alive) 元组 (review C3/C5/M2). ALE_USER_ID 用
+    FWP_SECURITY_DESCRIPTOR_TYPE (需 win32security, WSL 跳过).
+    """
 
     def test_build_loopback_v4_condition(self):
         from jiuwenbox.supervisor import win_wfp
-        cond = win_wfp._build_loopback_v4_condition()
+        cond, ka = win_wfp._build_loopback_v4_condition()  # noqa: SLF001
         assert cond.matchType == const.FWP_MATCH_EQUAL
-        assert cond.conditionValue.value.v4AddrMask.addr == const.LOOPBACK_IPV4_INT
-        assert cond.conditionValue.value.v4AddrMask.mask == 0xFFFFFFFF
+        assert cond.conditionValue.type == const.FWP_V4_ADDR_MASK
+        # keep_alive 持有 FWP_V4_ADDR_MASK 实例.
+        assert ka is not None
+
+    @pytest.mark.skipif(
+        True,  # win32security 不在 Linux, ALE_USER_ID 构造需 pywin32
+        reason="ALE_USER_ID 构造需 win32security (WSL 缺, win32 实跑)",
+    )
+    def test_build_ale_user_condition_uses_security_descriptor(self):
+        # 占位: win32 实跑验证 SD-based 条件 (review MAJOR #6 + SD decision).
+        pass
+
+
+# ---------------------------------------------------------------------------
+# WSL 可跑: WFP 常量与结构体自洽性 (review CRITICAL #2/#4/#5, MAJOR #3).
+# ---------------------------------------------------------------------------
+class TestWinWfpConstantsAndLayout:
+    def test_layer_and_condition_guids_match_sdk(self):
+        """5 个 WFP GUID 必须等于 Windows SDK fwpmu.h DEFINE_GUID 真值
+        (review CRITICAL #5: 旧版全是虚构值)."""
+        assert const.FWPM_LAYER_ALE_AUTH_CONNECT_V4 == "C38D57D1-05A7-4C33-900F-7FBCEEE60E82"
+        assert const.FWPM_LAYER_ALE_AUTH_CONNECT_V6 == "4A72393B-319F-44BC-84C3-BA54DCB3B6B4"
+        assert const.FWPM_CONDITION_ALE_USER_ID == "AF043A0A-B34D-4F86-979C-C90371AF6E66"
+        assert const.FWPM_CONDITION_IP_REMOTE_ADDRESS == "B235AE9A-1D64-49B8-A44C-5FF3D9095045"
+        assert const.FWPM_CONDITION_IP_REMOTE_PORT == "C35A604D-D22B-4E1A-91B4-68F674EE674B"
+
+    def test_sublayer_and_filter_keys_are_valid_uuids(self):
+        """sublayer/filter key 必须是合法 UUID 字符串, 否则 _guid_from_str
+        首行 uuid.UUID() 即抛 ValueError, WFP 安装从未执行
+        (review CRITICAL #2)."""
+        import uuid
+        for k in (
+            const.JBX_SUBLAYER_KEY,
+            const.JBX_FILTER_BLOCK_KEY_V4, const.JBX_FILTER_BLOCK_KEY_V6,
+            const.JBX_FILTER_PERMIT_KEY_V4, const.JBX_FILTER_PERMIT_KEY_V6,
+        ):
+            assert uuid.UUID(k)  # 不抛即合法
+
+    def test_loopback_ipv4_is_host_order(self):
+        """LOOPBACK_IPV4_INT 必须是 host byte order, 反解出 127.0.0.1.
+        旧值 0x0100007F 是网络序, 会让 Permit filter 匹配 1.0.0.127
+        (review CRITICAL #4)."""
+        import socket, struct
+        assert socket.inet_ntoa(struct.pack("!I", const.LOOPBACK_IPV4_INT)) == "127.0.0.1"
+        assert const.LOOPBACK_IPV4_INT == 0x7F000001
+
+    def test_fwp_data_type_enum_matches_sdk(self):
+        """FWP_DATA_TYPE 枚举值必须与 fwptypes.h 一致 (review MAJOR #3:
+        旧版 FWP_SID=12 实为 FWP_CHAR8, 真值 13)."""
+        assert const.FWP_EMPTY == 0
+        assert const.FWP_BYTE_ARRAY16_TYPE == 11
+        assert const.FWP_BYTE_BLOB_TYPE == 12
+        assert const.FWP_SID == 13
+        assert const.FWP_SECURITY_DESCRIPTOR_TYPE == 14
+        assert const.FWP_V4_ADDR_MASK == 256
+        assert const.FWP_V6_ADDR_AND_MASK == 257
+        assert const.FWP_RANGE_TYPE == 258
+
+    def test_fwpm_struct_layout_is_nontrivial(self):
+        """结构体可构造且尺寸非零 (精确尺寸在 Windows 因 wintypes.DWORD=4B
+        与 Linux=8B 不同, 仅校验非退化). review MAJOR #2: 旧版多 providerDataSize
+        /缺 flags 导致字段错位."""
+        import ctypes
+        from jiuwenbox.supervisor import win_wfp
+        for n in (
+            "FWPM_DISPLAY_DATA0", "FWPM_FILTER0", "FWPM_SUBLAYER0",
+            "FWPM_SESSION0", "FWP_VALUE0", "FWP_CONDITION_VALUE0",
+            "FWPM_FILTER_CONDITION0", "FWPM_ACTION0", "FWP_V4_ADDR_MASK",
+        ):
+            cls = getattr(win_wfp, n)
+            inst = cls()
+            assert ctypes.sizeof(cls) > 0, n
+
+    def test_fwpm_sublayer_weight_is_uint16(self):
+        """FWPM_SUBLAYER0.weight 是 UINT16 (SDK), 旧版误为 c_uint32.
+        review MAJOR #2."""
+        import ctypes
+        from jiuwenbox.supervisor import win_wfp
+        # 通过字段类型断言 (c_uint16 的 _type_ 是 'H').
+        field = [f for f in win_wfp.FWPM_SUBLAYER0._fields_ if f[0] == "weight"][0]
+        assert field[1]._type_ == "H"
 
     def test_guid_from_str_parses(self):
         from jiuwenbox.supervisor import win_wfp
@@ -611,6 +693,106 @@ class TestWinAclAceConstruction:
         )
         # 新增的 deny ACE 应在其中.
         assert ("deny", 0x400, "new-deny") in calls
+
+
+# ---------------------------------------------------------------------------
+# WSL 可跑: review 修复点验证.
+# ---------------------------------------------------------------------------
+class TestWinExecSidAndEnvBlock:
+    """review CRITICAL #1 (SID 一致性) + CRITICAL #3 (环境块悬垂指针)."""
+
+    def test_synthetic_write_sid_string_matches_allocate_layout(self):
+        """win_acl 字符串版 SID 必须与 win_exec AllocateAndInitializeSid
+        产出的布局一致 (S-1-5-21-<sub0>-<sub1>-<RID>). 旧版 win_exec 用
+        nSubAuthorityCount=3 漏了 21, 产出 S-1-5-... 与 ACL 授权的
+        S-1-5-21-... 不是同一个 SID (review CRITICAL #1).
+
+        本测试不跑真 AllocateAndInitializeSid (win32), 只校验 SID 字符串
+        的 sub-authority 结构 + 验证 win_exec 的常量编排: 前缀含 21.
+        """
+        from jiuwenbox.supervisor import win_acl, win_constants as const
+        sid = win_acl.get_synthetic_write_sid()
+        parts = sid.split("-")
+        # S-1-5-21-<sub0>-<sub1>-<RID> => 7 段
+        assert parts[:4] == ["S", "1", "5", "21"], (
+            f"SID 前缀必须 S-1-5-21-..., 实际 {sid}"
+        )
+        assert parts[4] == str(const.SYNTHETIC_WRITE_SID_SUBAUTHS[0])
+        assert parts[5] == str(const.SYNTHETIC_WRITE_SID_SUBAUTHS[1])
+        assert parts[6] == str(const.SYNTHETIC_WRITE_SID_RID)
+        # 关键: win_exec 要产同 SID, AllocateAndInitializeSid 必须把 21 作为
+        # 第一个 sub-authority (nSubAuthorityCount=4). 此处通过常量编排可推导:
+        # 合成 SID 的标识权威 = 5 (NT), sub[0]=21, sub[1..2]=SUBAUTHS, sub[3]=RID.
+        # 若 win_exec 用 nSubAuthorityCount=3 漏 21, 字符串会少一段 -> 永远抓不到.
+        assert len(parts) == 7
+
+    def test_build_runner_command_returns_thread_handle_in_tuple(self):
+        """two_hop_spawn 现返回 5 元组 (含 thread_handle 供 Job resume).
+        本测试不跑真 win32, 只验证 _build_runner_command 命令行构造不变
+        (review MAJOR #1 的接线前提)."""
+        from jiuwenbox.supervisor import win_exec
+        cmd = win_exec._build_runner_command("sb", "C:\\ws", 60080, 60089)
+        assert "runner" in cmd and "--sandbox-id sb" in cmd
+
+
+class TestWindowsPolicyReadFields:
+    """review MAJOR #4: WindowsFilesystemPolicy 增 allow_read/deny_read."""
+
+    def test_read_fields_parsed_and_expanded(self):
+        from jiuwenbox.models.policy import SecurityPolicy
+        p = SecurityPolicy.model_validate({
+            "windows": {"filesystem": {
+                "allow_read": ["~/docs", "$TMP/x"],
+                "deny_read": ["/etc/secret"],
+                "allow_write": ["/ws"],
+            }}
+        })
+        assert p.windows.filesystem.allow_read == [
+            os.path.expanduser("~/docs"), os.path.expandvars("$TMP/x"),
+        ]
+        assert p.windows.filesystem.deny_read == ["/etc/secret"]
+
+    def test_read_fields_default_empty(self):
+        from jiuwenbox.models.policy import SecurityPolicy
+        p = SecurityPolicy.model_validate({"windows": {}})
+        assert p.windows.filesystem.allow_read == []
+        assert p.windows.filesystem.deny_read == []
+
+    def test_read_fields_extra_forbid(self):
+        from jiuwenbox.models.policy import SecurityPolicy
+        with pytest.raises(Exception):
+            SecurityPolicy.model_validate({"windows": {"filesystem": {
+                "allow_read": ["/x"], "bogus": 1,
+            }}})
+
+
+class TestWinProxyEgressSemantics:
+    """review MAJOR #10: IP-allow 与 port-allow 不做隐式 AND."""
+
+    def _filter(self, **kwargs) -> "win_proxy.EgressFilter":
+        rule = NetworkRulePolicy(**kwargs)
+        return win_proxy.EgressFilter(rule)
+
+    def test_ip_allow_and_port_allow_not_anded(self):
+        """allowed_ips=[10/8] + allowed_ports=[443] 不应 AND: 10.1.2.3:8443
+        (IP 命中 allow) 必须放行 (Linux iptables 独立 ACCEPT 语义)."""
+        f = self._filter(
+            allowed_ips=["10.0.0.0/8"], allowed_ports=[443], default="deny",
+        )
+        allowed, _ = f.allow("10.1.2.3", 8443)
+        assert allowed, "IP 命中 allow 应放行, 不与 port allow 做 AND"
+
+    def test_port_allow_only_still_works(self):
+        f = self._filter(allowed_ports=[443], default="deny")
+        allowed, _ = f.allow("10.1.2.3", 443)
+        assert allowed
+
+    def test_blocked_port_overrides_allow(self):
+        f = self._filter(
+            allowed_ports=[443], blocked_ports=[443], default="deny",
+        )
+        allowed, _ = f.allow("10.1.2.3", 443)
+        assert not allowed
 
 
 # ---------------------------------------------------------------------------

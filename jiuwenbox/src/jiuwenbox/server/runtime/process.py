@@ -2773,20 +2773,33 @@ class ProcessRuntime(RuntimeAdapter):
             win_acl, win_exec, win_job, win_setup, win_constants as const,
         )
 
-        await win_setup.ensure_windows_setup()
-        policy = self._load_policy(policy_path)
+        # ensure_windows_setup 传入 policy 的代理端口范围 (WFP Permit 必须与
+        # win_proxy 监听端口一致, 否则代理路径被 Block 拦截; review MAJOR #7).
+        policy_pre = self._load_policy(policy_path)
+        await win_setup.ensure_windows_setup(
+            preinstall_paths=(
+                policy_pre.windows.filesystem.read_acl_preinstall or None
+            ),
+            proxy_port_start=policy_pre.windows.proxy.port_range_start,
+            proxy_port_end=policy_pre.windows.proxy.port_range_end,
+        )
+        policy = policy_pre
         self._win_policies[sandbox_id] = policy
         workspace = self._win_workspace_for(policy, sandbox_id)
-        self._win_acl_paths[sandbox_id] = workspace
 
-        # 1. 施加文件 ACL.
-        win_acl.apply_sandbox_acl(
+        # 1. 施加文件 ACL (含读控制 deny-then-allow + workspace 默认 Allow Read,
+        # review MAJOR #4). 返回施加过 ACE 的顶层路径清单, 存供 stop 时撤销
+        # (review MAJOR #6: 旧版 revoke 只扫 workspace, 漏系统路径 ACE).
+        acl_paths = win_acl.apply_sandbox_acl(
             workspace,
             policy.windows.filesystem.allow_write,
             policy.windows.filesystem.deny_write,
+            allow_read=policy.windows.filesystem.allow_read,
+            deny_read=policy.windows.filesystem.deny_read,
         )
+        self._win_acl_paths[sandbox_id] = acl_paths or [workspace]
 
-        # 2. 两跳启动 runner.
+        # 2. 两跳启动 runner (CREATE_SUSPENDED, review MAJOR #1).
         user = const.SANDBOX_USER_NAME
         password = win_setup.get_sandbox_user_password()
         if not password:
@@ -2796,14 +2809,16 @@ class ProcessRuntime(RuntimeAdapter):
             )
         proxy_start = policy.windows.proxy.port_range_start
         proxy_end = policy.windows.proxy.port_range_end
-        runner_pid, stdin_w, stdout_r, proc_handle = win_exec.two_hop_spawn(
-            sandbox_id,
-            sandbox_user=user,
-            sandbox_password=password,
-            workspace=workspace,
-            proxy_port_start=proxy_start,
-            proxy_port_end=proxy_end,
-            env=env,
+        runner_pid, stdin_w, stdout_r, proc_handle, thread_handle = (
+            win_exec.two_hop_spawn(
+                sandbox_id,
+                sandbox_user=user,
+                sandbox_password=password,
+                workspace=workspace,
+                proxy_port_start=proxy_start,
+                proxy_port_end=proxy_end,
+                env=env,
+            )
         )
         # 把 pipe HANDLE 转成 fd 并打开持久化文件对象: 每个 sandbox
         # 一次 open_osfhandle, 后续所有 exec/file-op roundtrip 复用同一对
@@ -2822,10 +2837,12 @@ class ProcessRuntime(RuntimeAdapter):
             "stdin_wf": stdin_wf,
             "stdout_rf": stdout_rf,
             "process_handle": proc_handle,
+            "thread_handle": thread_handle,  # Job assign+resume 后 CloseHandle
             "workspace": workspace,
         }
 
-        # 3. Job Object (可选).
+        # 3. Job Object (可选). runner 当前处于 SUSPENDED, assign 无竞态;
+        #    assign 后 resume, 再 CloseHandle thread (设计 6.8 SUSPEND→Assign→Resume).
         resource = policy.windows.resource
         if not resource.is_empty():
             try:
@@ -2833,12 +2850,43 @@ class ProcessRuntime(RuntimeAdapter):
                     resource.memory_max, resource.cpu_rate, resource.max_processes,
                 )
                 win_job.assign_process_by_pid(job, runner_pid)
+                # assign 成功后 resume runner 主线程, 让它在 Job 内开始执行.
+                try:
+                    win_job.resume_process(thread_handle)
+                except Exception:  # noqa: BLE001 - resume 失败不致命, TerminateProcess 仍可清理
+                    logger.warning(
+                        "Windows runner resume 失败 (sandbox=%s)", sandbox_id,
+                        exc_info=True,
+                    )
                 self._win_job_handles[sandbox_id] = job
             except Exception:  # noqa: BLE001 - Job 失败不阻断沙箱创建
                 logger.warning(
                     "Windows Job Object 创建失败 (sandbox=%s); 沙箱将不受资源限制",
                     sandbox_id, exc_info=True,
                 )
+                # 即使 Job 失败也要 resume runner, 否则进程永久挂起.
+                try:
+                    win_job.resume_process(thread_handle)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Windows runner resume (无 Job) 失败 (sandbox=%s)",
+                        sandbox_id, exc_info=True,
+                    )
+        else:
+            # 无 Job 限制也要 resume runner, 否则进程永久挂起.
+            try:
+                win_job.resume_process(thread_handle)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Windows runner resume 失败 (sandbox=%s)", sandbox_id,
+                    exc_info=True,
+                )
+        # thread_handle resume 后不再需要, 关闭避免句柄泄漏.
+        try:
+            kernel32.CloseHandle(wintypes.HANDLE(thread_handle))
+        except Exception:  # noqa: BLE001
+            logger.debug("CloseHandle thread_handle 失败", exc_info=True)
+        self._win_runners[sandbox_id].pop("thread_handle", None)
 
         logger.info("Windows 沙箱已创建: %s runner_pid=%d", sandbox_id, runner_pid)
         return runner_pid
@@ -2871,11 +2919,11 @@ class ProcessRuntime(RuntimeAdapter):
             if job is not None:
                 win_job.teardown(job)
 
-        # 5. 撤销文件 ACL.
-        workspace = self._win_acl_paths.pop(sandbox_id, None)
-        if workspace:
+        # 5. 撤销文件 ACL (按 apply 时返回的施加路径清单撤销, review MAJOR #6).
+        acl_paths = self._win_acl_paths.pop(sandbox_id, None)
+        if acl_paths:
             try:
-                win_acl.revoke_sandbox_acl(workspace)
+                win_acl.revoke_sandbox_acl(acl_paths)
             except Exception:  # noqa: BLE001
                 logger.debug("撤销 ACL 失败 sandbox=%s", sandbox_id, exc_info=True)
         # 清理 per-sandbox pipe lock.

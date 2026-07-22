@@ -772,6 +772,8 @@ class WindowsFilesystemPolicy(BaseModel):
       - read_acl_preinstall: 一次性预装读 ACL 的路径 (安装阶段).
       - allow_write: allow-only 模式下允许写入的路径 (合成 SID 授 Allow ACE).
       - deny_write: 在 allow 覆盖范围内精细化封锁 (如 .git/.env).
+      - allow_read: allow 列表施加 Allow Read ACE (deny-then-allow 覆盖 deny).
+      - deny_read:  deny 列表施加 Deny Read ACE.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -779,9 +781,14 @@ class WindowsFilesystemPolicy(BaseModel):
     read_acl_preinstall: list[str] = Field(default_factory=list)
     allow_write: list[str] = Field(default_factory=list)
     deny_write: list[str] = Field(default_factory=list)
+    allow_read: list[str] = Field(default_factory=list)
+    deny_read: list[str] = Field(default_factory=list)
 
     @field_validator(
-        "read_acl_preinstall", "allow_write", "deny_write", mode="before"
+        "read_acl_preinstall",
+        "allow_write", "deny_write",
+        "allow_read", "deny_read",
+        mode="before",
     )
     @classmethod
     def expand_path_lists(cls, value: object) -> object:

@@ -279,14 +279,32 @@ async def lifespan(_application: FastAPI):
         # 不动 (docs/window沙箱.md 6.9 lifespan 改动).
         if sys.platform == "win32":
             from jiuwenbox.supervisor import win_proxy, win_setup
-            # 根 policy 的 read_acl_preinstall 作为首次安装的读 ACL 预装路径.
+            # 根 policy 的 read_acl_preinstall + proxy 端口范围 作为首次安装参数
+            # (review MAJOR #7: WFP Permit 端口必须与 win_proxy 监听端口一致).
             try:
                 _root_policy = policy_reader.load_policy()
                 _preinstall = _root_policy.windows.filesystem.read_acl_preinstall
+                _proxy_start = _root_policy.windows.proxy.port_range_start
+                _proxy_end = _root_policy.windows.proxy.port_range_end
             except Exception:  # noqa: BLE001
                 _preinstall = None
+                _proxy_start = None
+                _proxy_end = None
+            import jiuwenbox.supervisor.win_constants as _wconst
             try:
-                win_setup.ensure_windows_setup(preinstall_paths=_preinstall)
+                win_setup.ensure_windows_setup(
+                    preinstall_paths=_preinstall or None,
+                    proxy_port_start=(
+                        _proxy_start
+                        if _proxy_start is not None
+                        else _wconst.DEFAULT_PROXY_PORT_RANGE_START
+                    ),
+                    proxy_port_end=(
+                        _proxy_end
+                        if _proxy_end is not None
+                        else _wconst.DEFAULT_PROXY_PORT_RANGE_END
+                    ),
+                )
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "ensure_windows_setup 失败; Windows 沙箱可能不可用",
