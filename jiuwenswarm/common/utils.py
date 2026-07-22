@@ -1741,12 +1741,33 @@ def _fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:8]
 
 
+# 已脱敏产物形态：纯 ****** 或 ******(fp:xxxxxxxx)。
+# 用于在二次脱敏时识别"已是脱敏值"，跳过重算指纹，避免产生"指纹的指纹"
+# 导致跨日志关联失效（如 stream_logger._mask_secrets 先脱敏，_write_raw 再脱敏）。
+_ALREADY_MASKED_PATTERN = re.compile(rf"^{re.escape(_SENSITIVE_MASK)}(\(fp:[0-9a-f]{{8}}\))?$")
+
+
+def _is_already_masked(value: Any) -> bool:
+    """判断 value 是否已是脱敏产物（纯掩码或带指纹），避免重复脱敏。"""
+    try:
+        v = str(value) if value is not None else ""
+    except Exception:
+        return False
+    return bool(v) and bool(_ALREADY_MASKED_PATTERN.match(v))
+
+
 def _masked_with_fp(value: Any) -> str:
-    """脱敏并附指纹：``******(fp:xxxxxxxx)``。value 为空或失败时退化为纯掩码。"""
+    """脱敏并附指纹：``******(fp:xxxxxxxx)``。value 为空或失败时退化为纯掩码。
+
+    若 value 本身已是脱敏产物（``******`` 或 ``******(fp:..)``），原样返回，
+    不重算指纹——避免对"指纹值"再算指纹导致跨日志关联失效。
+    """
     try:
         v = str(value) if value is not None else ""
     except Exception:
         return _SENSITIVE_MASK
+    if _is_already_masked(v):
+        return v
     fp = _fingerprint(v)
     if not fp:
         return _SENSITIVE_MASK
