@@ -322,6 +322,20 @@ _CRON_TOOL_MODE: ContextVar[str | None] = ContextVar(
     "cron_tool_mode",
     default=None,
 )
+_CRON_TOOL_BOUND: ContextVar[bool] = ContextVar(
+    "cron_tool_bound",
+    default=False,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeCronContextTokens:
+    channel: Token[str]
+    session: Token[str | None]
+    metadata: Token[dict[str, Any] | None]
+    mode: Token[str | None]
+    bound: Token[bool]
+    shell: Token[str | None]
 
 
 def get_runtime_tool_session_id() -> str | None:
@@ -397,6 +411,18 @@ _SKILL_RETRIEVAL_TOOL_NAMES = frozenset(
         "skill_index_build",
         "skill_branch_explore",
         "skill_branch_peek",
+    }
+)
+_CRON_TOOL_NAMES = frozenset(
+    {
+        "cron",
+        "cron_list_jobs",
+        "cron_get_job",
+        "cron_create_job",
+        "cron_update_job",
+        "cron_delete_job",
+        "cron_toggle_job",
+        "cron_preview_job",
     }
 )
 
@@ -647,22 +673,43 @@ class _RuntimeCronToolContext:
 
     def __init__(self, tool_scope: str) -> None:
         self._tool_scope = tool_scope
+        self._fallback_channel_id = CronTargetChannel.WEB.value
+        self._fallback_session_id: str | None = None
+        self._fallback_metadata: dict[str, Any] | None = None
+        self._fallback_mode: str | None = None
+
+    def remember_current_binding(self) -> None:
+        self._fallback_channel_id = _CRON_TOOL_CHANNEL_ID.get()
+        self._fallback_session_id = _CRON_TOOL_SESSION_ID.get()
+        metadata = _CRON_TOOL_METADATA.get()
+        self._fallback_metadata = dict(metadata) if isinstance(metadata, dict) else None
+        self._fallback_mode = _CRON_TOOL_MODE.get()
 
     @property
     def channel_id(self) -> str:
-        return _CRON_TOOL_CHANNEL_ID.get()
+        if _CRON_TOOL_BOUND.get():
+            return _CRON_TOOL_CHANNEL_ID.get()
+        return self._fallback_channel_id
 
     @property
     def session_id(self) -> str | None:
-        return _CRON_TOOL_SESSION_ID.get()
+        if _CRON_TOOL_BOUND.get():
+            return _CRON_TOOL_SESSION_ID.get()
+        return self._fallback_session_id
 
     @property
     def metadata(self) -> dict[str, Any] | None:
-        return _CRON_TOOL_METADATA.get()
+        if _CRON_TOOL_BOUND.get():
+            metadata = _CRON_TOOL_METADATA.get()
+            if isinstance(metadata, dict):
+                return metadata
+        return self._fallback_metadata
 
     @property
     def mode(self) -> str | None:
-        return _CRON_TOOL_MODE.get()
+        if _CRON_TOOL_BOUND.get():
+            return _CRON_TOOL_MODE.get()
+        return self._fallback_mode
 
     @property
     def tool_scope(self) -> str:
@@ -4785,7 +4832,7 @@ class JiuWenSwarmDeepAdapter:
         request_id: str | None,
         mode: str | None,
         project_dir: str | None = None,
-    ) -> tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None], Token[str | None]]:
+    ) -> _RuntimeCronContextTokens:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             set_shell_session_id,
         )
@@ -4823,30 +4870,29 @@ class JiuWenSwarmDeepAdapter:
             session_value = session_metadata.get(key)
             if isinstance(session_value, str) and session_value.strip():
                 normalized_metadata[key] = session_value.strip()
-        return (
-            _CRON_TOOL_CHANNEL_ID.set(normalized_channel),
-            _CRON_TOOL_SESSION_ID.set(session_id),
-            _CRON_TOOL_METADATA.set(normalized_metadata),
-            _CRON_TOOL_MODE.set(normalized_mode),
-            set_shell_session_id(session_id),
+        return _RuntimeCronContextTokens(
+            channel=_CRON_TOOL_CHANNEL_ID.set(normalized_channel),
+            session=_CRON_TOOL_SESSION_ID.set(session_id),
+            metadata=_CRON_TOOL_METADATA.set(normalized_metadata),
+            mode=_CRON_TOOL_MODE.set(normalized_mode),
+            bound=_CRON_TOOL_BOUND.set(True),
+            shell=set_shell_session_id(session_id),
         )
 
     @staticmethod
     def _reset_runtime_cron_context(
-        tokens: tuple[
-            Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None], Token[str | None]
-        ],
+        tokens: _RuntimeCronContextTokens,
     ) -> None:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             reset_shell_session_id,
         )
 
-        channel_token, session_token, metadata_token, mode_token, shell_token = tokens
-        reset_shell_session_id(shell_token)
-        _CRON_TOOL_MODE.reset(mode_token)
-        _CRON_TOOL_METADATA.reset(metadata_token)
-        _CRON_TOOL_SESSION_ID.reset(session_token)
-        _CRON_TOOL_CHANNEL_ID.reset(channel_token)
+        reset_shell_session_id(tokens.shell)
+        _CRON_TOOL_BOUND.reset(tokens.bound)
+        _CRON_TOOL_MODE.reset(tokens.mode)
+        _CRON_TOOL_METADATA.reset(tokens.metadata)
+        _CRON_TOOL_SESSION_ID.reset(tokens.session)
+        _CRON_TOOL_CHANNEL_ID.reset(tokens.channel)
 
     async def _update_rails_for_mode(self, mode: str) -> None:
         """装配 agent 模式 rails。
@@ -5017,6 +5063,9 @@ class JiuWenSwarmDeepAdapter:
                     logger.info(
                         "[JiuWenSwarmDeepAdapter] Registering %d cron tools", len(cron_tools)
                     )
+                    for existing in list(self._instance.ability_manager.list() or []):
+                        if getattr(existing, "name", "") in _CRON_TOOL_NAMES:
+                            self._instance.ability_manager.remove(existing.name)
                     for cron_tool in cron_tools:
                         if not Runner.resource_mgr.get_tool(cron_tool.card.id):
                             Runner.resource_mgr.add_tool(cron_tool)
@@ -7015,6 +7064,7 @@ class JiuWenSwarmDeepAdapter:
             mode=mode,
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
+        self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
         resolved_model = self._resolve_model_for_request(request)
@@ -7445,6 +7495,7 @@ class JiuWenSwarmDeepAdapter:
             mode=mode,
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
         )
+        self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
         # 按请求选择模型
