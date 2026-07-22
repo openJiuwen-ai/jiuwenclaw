@@ -2800,6 +2800,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "last_message_at": meta.get("last_message_at", 0),
             "message_count": int(meta.get("message_count", 0)),
             "mode": str(meta.get("mode", "unknown")),
+            "team_name": str(meta.get("team_name", "")),
             "pinned": bool(meta.get("pinned", False)),
             "pin_order": int(meta.get("pin_order", 0)),
             "project_dir": str(meta.get("project_dir", "")),
