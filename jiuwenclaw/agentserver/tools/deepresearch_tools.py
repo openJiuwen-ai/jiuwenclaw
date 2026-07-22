@@ -74,7 +74,52 @@ def _outline_title_cache(route: dict[str, object]) -> dict[str, dict[str, str]]:
     return cache
 
 
-def _write_report_markdown(final_result: dict, file_name: str, conversation_id: str) -> str:
+def _normalize_citation_artifacts(value: object) -> dict[str, str]:
+    """Keep only non-empty hidden citation paths allowed in provenance/events."""
+    if not isinstance(value, dict):
+        return {}
+    artifacts: dict[str, str] = {}
+    for key in ("raw_report_path", "citations_preview_path"):
+        item = value.get(key)
+        if isinstance(item, str) and item.strip():
+            artifacts[key] = item.strip()
+    return artifacts
+
+
+def _build_related_artifact_bundle(
+    value: object, markdown_index: int
+) -> dict | None:
+    """Build the hidden companion contract for one visible Markdown file."""
+    artifacts = _normalize_citation_artifacts(value)
+    related_artifacts = []
+    raw_report_path = artifacts.get("raw_report_path")
+    if raw_report_path:
+        related_artifacts.append({
+            "type": "raw_report",
+            "path": raw_report_path,
+            "contentType": "text/markdown",
+            "relatedToPathIndex": markdown_index,
+        })
+    preview_path = artifacts.get("citations_preview_path")
+    if preview_path:
+        related_artifacts.append({
+            "type": "citations_preview",
+            "path": preview_path,
+            "contentType": "application/json",
+            "schemaVersion": "1.1",
+            "relatedToPathIndex": markdown_index,
+        })
+    if not related_artifacts:
+        return None
+    return {"schemaVersion": "1.0", "relatedArtifacts": related_artifacts}
+
+
+def _write_report_markdown(
+    final_result: dict,
+    file_name: str,
+    conversation_id: str,
+    citation_artifacts: object = None,
+) -> str:
     """Build and write the completed report bundle into the request output directory."""
     from jiuwenclaw.agentserver.tools.deepresearch_plugin.conversion_utils import (
         make_safe_filename_component,
@@ -117,6 +162,9 @@ def _write_report_markdown(final_result: dict, file_name: str, conversation_id: 
         "chart_manifest": bundle.chart_manifest,
         "rewrite_history": [],
     }
+    normalized_artifacts = _normalize_citation_artifacts(citation_artifacts)
+    if normalized_artifacts:
+        provenance["citation_artifacts"] = normalized_artifacts
     _atomic_write_bytes(snapshot_path, snapshot_bytes)
     _atomic_write_bytes(
         report_path.with_suffix(".provenance.json"),
@@ -127,7 +175,10 @@ def _write_report_markdown(final_result: dict, file_name: str, conversation_id: 
 
 
 def _write_report_artifacts_stream(
-    final_result: dict, file_name: str, conversation_id: str
+    final_result: dict,
+    file_name: str,
+    conversation_id: str,
+    citation_artifacts: object = None,
 ) -> dict[str, str]:
     """Build and write the completed report bundle as MD + HTML.
 
@@ -143,7 +194,12 @@ def _write_report_artifacts_stream(
     # Reuse the rewrite-aware Markdown writer so the hidden final-result and
     # provenance sidecars are created before any visible artifact is delivered.
     report_path_md = Path(
-        _write_report_markdown(final_result, file_name, conversation_id)
+        _write_report_markdown(
+            final_result,
+            file_name,
+            conversation_id,
+            citation_artifacts,
+        )
     )
     artifacts: dict[str, str] = {"md": str(report_path_md)}
 
@@ -718,12 +774,14 @@ async def deepresearch_stream(
                 )
                 has_chat_route = bool(route.get("session_id") and route.get("channel_id"))
                 if response_content and has_chat_route:
+                    citation_artifacts = _normalize_citation_artifacts(chunk)
                     try:
                         artifacts = await asyncio.to_thread(
                             _write_report_artifacts_stream,
                             final_result,
                             file_name,
                             chunk.get("conversation_id", outcome_cid),
+                            citation_artifacts,
                         )
                     except Exception as exc:  # pylint: disable=broad-exception-caught
                         outcome = {
@@ -738,10 +796,17 @@ async def deepresearch_stream(
                         {"path": v, "name": os.path.basename(v)}
                         for v in artifacts.values()
                     ]
-                    report_delivered = await _send({
+                    file_payload = {
                         "event_type": "chat.file",
                         "files": files_to_deliver,
-                    })
+                    }
+                    markdown_index = list(artifacts).index("md")
+                    bundle = _build_related_artifact_bundle(
+                        citation_artifacts, markdown_index
+                    )
+                    if bundle:
+                        file_payload["metadata"] = {"artifactBundle": bundle}
+                    report_delivered = await _send(file_payload)
                 elif not response_content:
                     outcome = {
                         "status": "error",
