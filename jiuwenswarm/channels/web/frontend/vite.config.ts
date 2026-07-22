@@ -25,12 +25,12 @@ const NON_SENSITIVE_KEY_OVERRIDES = new Set(['context_window_tokens', 'context_w
  * 凭证值形态：即便没有敏感键名上下文，值本身是已知前缀的凭证（OpenAI/Bearer/JWT/
  * GitHub/GitLab token）也要脱敏。与后端 _SENSITIVE_PATTERNS 对齐。
  */
-const SENSITIVE_VALUE_PATTERNS: { re: RegExp; group?: number }[] = [
-  { re: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/ }, // JWT
-  { re: /\bsk-[A-Za-z0-9]{8,}\b/ },                                 // OpenAI 风格
-  { re: /\bghp_[A-Za-z0-9]{20,}\b/ },                               // GitHub PAT
-  { re: /\bglpat-[A-Za-z0-9_-]{20,}\b/ },                           // GitLab PAT
-  { re: /\bBearer\s+[A-Za-z0-9\-._~+/]+=*/i, group: undefined },    // Authorization Bearer
+const SENSITIVE_VALUE_PATTERNS: { re: RegExp }[] = [
+  { re: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g }, // JWT
+  { re: /\bsk-[A-Za-z0-9]{8,}\b/g },                                 // OpenAI 风格
+  { re: /\bghp_[A-Za-z0-9]{20,}\b/g },                               // GitHub PAT
+  { re: /\bglpat-[A-Za-z0-9_-]{20,}\b/g },                           // GitLab PAT
+  { re: /\bBearer\s+[A-Za-z0-9\-._~+/]+=*/gi },                      // Authorization Bearer
 ]
 
 /**
