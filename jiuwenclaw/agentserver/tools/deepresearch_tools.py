@@ -133,17 +133,19 @@ def _write_report_markdown(final_result: dict, file_name: str, conversation_id: 
 def _build_styled_export_llm_config() -> dict:
     """Build llm_config dict for the SDK's report_style_llm_context().
 
-    Resolves LLM credentials from the same config source as the task
-    manager, formatted for the SDK's report_style_llm_context().
+    Resolves LLM credentials via the same bridge-env logic
+    (``_build_bridge_env``) used by the skill subprocess, ensuring
+    identical API KEY resolution (DeepSearch-专属 → 项目全局 fallback,
+    provider-to-type mapping, SSL defaults).
     The SDK's LLMConfig only accepts ``"openai"`` or ``"siliconflow"``
     as model_type; most providers are OpenAI-compatible and default to
     ``"openai"``.
     """
-    config = _get_task_manager_cls()._load_config()
-    api_key = config.get("LLM_API_KEY", "")
-    model_name = config.get("LLM_MODEL_NAME", "")
-    base_url = config.get("LLM_BASE_URL", "")
-    model_type = config.get("LLM_MODEL_TYPE", "openai").lower()
+    bridge_env = _build_bridge_env(os.environ)
+    api_key = bridge_env.get("LLM_API_KEY", "")
+    model_name = bridge_env.get("LLM_MODEL_NAME", "")
+    base_url = bridge_env.get("LLM_BASE_URL", "")
+    model_type = bridge_env.get("LLM_MODEL_TYPE", "openai").lower()
 
     # LLMConfig.model_type only allows "openai" or "siliconflow";
     # map everything else to "openai" (OpenAI-compatible).
@@ -267,8 +269,23 @@ async def _write_report_artifacts_stream(
         )
 
         llm_config = _build_styled_export_llm_config()
-        async with report_style_llm_context(llm_config) as llm:
-            result = await stylize_report(final_result, llm)
+        # The SDK's LLMModelFactory reads verify_ssl from the
+        # LLM_SSL_VERIFY env var (default "true"), NOT from the
+        # llm_config dict.  The ``verify_ssl`` key we set in
+        # _build_styled_export_llm_config is silently dropped by
+        # LLMConfig (Pydantic extra='ignore'), so we must also set
+        # the env var — matching what _build_bridge_env does for the
+        # child-subprocess path.  Restore on exit to avoid leaking.
+        _prev_ssl_verify = os.environ.get("LLM_SSL_VERIFY")
+        os.environ["LLM_SSL_VERIFY"] = "false"
+        try:
+            async with report_style_llm_context(llm_config) as llm:
+                result = await stylize_report(final_result, llm)
+        finally:
+            if _prev_ssl_verify is None:
+                os.environ.pop("LLM_SSL_VERIFY", None)
+            else:
+                os.environ["LLM_SSL_VERIFY"] = _prev_ssl_verify
 
         # Extract the base64-encoded ZIP bundle and install to target path.
         with tempfile.TemporaryDirectory(prefix="jiuwenclaw_report_") as temporary_dir:
