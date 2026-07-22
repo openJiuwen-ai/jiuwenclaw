@@ -40,7 +40,7 @@ import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
 } from './features/tool-events/toolEventNormalizer';
-import { useWebSocket, mergePersistedGoalCompletionMessages } from './hooks';
+import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages } from './hooks';
 import { webRequest } from './services/webClient';
 import { useTeamPanelState } from './features/teamPanelState';
 import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session } from './types';
@@ -1308,7 +1308,12 @@ function AppContent() {
         // "目标完成"回显消息纯前端合成，从未写进后端 session 历史，history.get 拉回来的
         // messages 里不会有它——按时间戳把本地持久化的记录补回去，见
         // hooks/useWebSocket.ts 的 applyIncomingGoal/mergePersistedGoalCompletionMessages。
-        replaceHistoryMessages(sessionId, mergePersistedGoalCompletionMessages(sessionId, messages));
+        // 同时给命中"曾经设置过目标"的 user 消息回填 isGoalObjectiveMessage 徽章标记，
+        // 见 stampGoalObjectiveMessages。
+        replaceHistoryMessages(
+          sessionId,
+          stampGoalObjectiveMessages(sessionId, mergePersistedGoalCompletionMessages(sessionId, messages))
+        );
         const restoredTotalPages = totalPages ?? 1;
         setHistoryPagerMeta(sessionId, {
           loadedPages: 1,
@@ -1622,6 +1627,7 @@ function AppContent() {
             role: 'user',
             content,
             timestamp: new Date().toISOString(),
+            isGoalObjectiveMessage: true,
           });
           setGoalObjective(newSid, content);
         } else {
@@ -1686,8 +1692,12 @@ function AppContent() {
   const handleCancel = useCallback(() => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID) return;
+    // 目标是否 active 决定停止按钮要不要顺带把目标转为 paused——约定行为：其它状态
+    // （paused/blocked/completed/无目标）下，停止只结束会话，不碰目标本身。
+    const isGoalActive = useGoalStore.getState().runtimes[currentSessionId]?.goal?.status === 'active';
     if (mode === 'team') {
       void pause(currentSessionId);
+      if (isGoalActive) void pauseGoal(currentSessionId);
       return;
     }
     // agent 模式下有队列任务时，暂停队列自动发送
@@ -1698,7 +1708,28 @@ function AppContent() {
       }
     }
     void cancel(currentSessionId);
-  }, [cancel, mode, pause]);
+    if (isGoalActive) void pauseGoal(currentSessionId);
+  }, [cancel, mode, pause, pauseGoal]);
+
+  /**
+   * 删除目标：active 时除了清目标，还要顺带结束当前会话输出——复用停止按钮同一套中断调用
+   * （team 走 pause、其余走 cancel）。先清目标再补发中断，避免目标还没清掉那个空档被
+   * "ACTIVE 目标保持交互打开"的后端逻辑又续上一轮。非 active 状态下只清目标，不打断当前
+   * 会话（如果还有一轮在自然跑完，让它继续）。
+   */
+  const handleClearGoal = useCallback(
+    (sessionId: string) => {
+      const isGoalActive = useGoalStore.getState().runtimes[sessionId]?.goal?.status === 'active';
+      void clearGoal(sessionId);
+      if (!isGoalActive) return;
+      if (mode === 'team') {
+        void pause(sessionId);
+      } else {
+        void cancel(sessionId);
+      }
+    },
+    [cancel, clearGoal, mode, pause]
+  );
 
   const handleUserAnswer = useCallback((requestId: string, answers: UserAnswer[], source?: string) => {
     const currentSessionId = sessionIdRef.current;
@@ -2067,7 +2098,7 @@ function AppContent() {
                       onSetGoal={setGoalObjective}
                       onPauseGoal={pauseGoal}
                       onResumeGoal={resumeGoal}
-                      onClearGoal={clearGoal}
+                      onClearGoal={handleClearGoal}
                       onDrainTaskQueueIfIdle={drainTaskQueueIfIdle}
                     />
                   </div>

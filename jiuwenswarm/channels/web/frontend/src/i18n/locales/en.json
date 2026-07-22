@@ -428,12 +428,14 @@
     "editTitle": "Edit goal",
     "toolbarTag": "Goal",
     "closeTag": "Cancel goal",
-    "badge": "Set as goal",
+    "badge": "Goal",
     "status": {
       "active": "Active",
       "paused": "Paused",
       "completed": "Completed",
-      "blocked": "Blocked"
+      "blocked": "Blocked",
+      "disconnected": "Disconnected",
+      "unknown": "Status unknown"
     },
     "action": {
       "editTooltip": "Edit goal",

@@ -816,6 +816,7 @@ export function InputArea({
         role: 'user',
         content: trimmed,
         timestamp: new Date().toISOString(),
+        isGoalObjectiveMessage: true,
       });
       useGoalStore.getState().setArmed(sid, false);
       onSetGoal(sid, trimmed);

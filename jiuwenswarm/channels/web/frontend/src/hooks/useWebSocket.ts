@@ -73,8 +73,27 @@ function isCompletedResumeResult(interruptResult: unknown): boolean {
   return result.intent === 'resume' && result.success === true && result.has_active_task === false;
 }
 
-const GOAL_COMPLETED_AUTO_HIDE_MS = 4000;
+const GOAL_COMPLETED_AUTO_HIDE_MS = 2000;
 const GOAL_COMPLETED_SETTLE_FALLBACK_MS = 8000;
+/** get 失败后的重试间隔（毫秒）：首次失败后再试 2 次，都失败才判定为 unknown（真实环境联调方案）。 */
+const GOAL_GET_RETRY_DELAYS_MS = [3000, 5000];
+/** 目标处于 active/paused/blocked 期间，超过这个时长没收到新的 goal.snapshot/goal.updated 就主动 get 兜底。 */
+const GOAL_STALE_REFRESH_MS = 60000;
+const GOAL_STALE_REFRESH_CHECK_INTERVAL_MS = 15000;
+/**
+ * 已经判定为 unknown（performGoalGet 自己的 3 次重试都失败过）之后，巡检 effect 不再按
+ * GOAL_STALE_REFRESH_MS 的节奏重试——那样等于每 15s 就重新打一轮 3 连击，事实上会无限循环
+ * 高频重试一个已知连不上的后端。改成退避到这个更长的间隔再试一次，只要某次 get 成功
+ * （queryStatus 收敛回 'ok'），下一次巡检就会自动切回正常的 GOAL_STALE_REFRESH_MS 节奏。
+ */
+const GOAL_UNKNOWN_RETRY_INTERVAL_MS = 5 * 60 * 1000;
+/**
+ * set 发出后，等这么久还没等到 goal.snapshot/execution.error 把 pendingAction 清掉，才补一次
+ * 兜底 get——正常路径下 snapshot 应该早就到了，不必让这个兜底跟它赛跑（赛跑赢了反而会用 set
+ * 落地前的旧数据提前清掉 pendingAction，重新打开"按钮提前解禁、能打出冲突指令"的窗口）。这个值
+ * 只是给首次设置目标时快照丢包这种小概率情况兜底，不需要很短。
+ */
+const GOAL_SET_CONVERGENCE_DELAY_MS = 4000;
 
 /**
  * 目标完成事件（goal.updated）和它所在这一轮回复的正文（chat.delta/chat.final），走的是两条
@@ -124,9 +143,13 @@ function scheduleAfterTurnSettles(sessionId: string, run: () => void): void {
 function applyIncomingGoal(
   sessionId: string,
   goal: GoalRecord | null,
-  hideTimerMap: Map<string, ReturnType<typeof window.setTimeout>>
+  hideTimerMap: Map<string, ReturnType<typeof window.setTimeout>>,
+  lastGoalEventAtMap?: Map<string, number>
 ): void {
   const goalStore = useGoalStore.getState();
+  // 任何一次成功落地（不管是 get 的响应，还是 goal.snapshot/goal.updated 事件）都说明查询链路
+  // 是通的，把"多次 get 失败"攒出来的 unknown 态收敛回 ok——见 goalStore.ts queryStatus 注释。
+  goalStore.setQueryStatus(sessionId, 'ok');
 
   if (!goal) {
     const prevGoalId = goalStore.runtimes[sessionId]?.goal?.goal_id;
@@ -141,9 +164,18 @@ function applyIncomingGoal(
         hideTimerMap.delete(prevGoalId);
       }
     }
+    lastGoalEventAtMap?.delete(sessionId);
     goalStore.setGoal(sessionId, null);
     goalStore.setPendingAction(sessionId, null);
     return;
+  }
+
+  // 未完成目标才需要参与"1 分钟无更新兜底 get"的巡检（见 useWebSocket 里的巡检 effect），
+  // completed 记一次时间戳没有意义，巡检本身也会按 status 过滤掉，这里顺手不记，语义更清楚。
+  if (goal.status !== 'completed') {
+    lastGoalEventAtMap?.set(sessionId, Date.now());
+  } else {
+    lastGoalEventAtMap?.delete(sessionId);
   }
 
   goalStore.setLocalCreatedAt(goal.goal_id, new Date().toISOString());
@@ -215,6 +247,45 @@ function applyIncomingGoal(
 }
 
 /**
+ * 目标查询（command.goal get）的统一入口，带重试 + unknown 兜底（真实环境联调方案 C.e）：
+ * 失败先按 GOAL_GET_RETRY_DELAYS_MS 重试，全部重试完还失败就把 queryStatus 置 'unknown'
+ * （GoalBar 据此展示"状态未知"、全部操作按钮置灰），不再抛错、不插聊天错误消息——这是背景
+ * 巡检性质的调用（会话切换、断线重连、1 分钟无更新兜底都会触发），不是用户主动点击的操作，
+ * 不需要用系统消息打扰聊天记录。
+ *
+ * 也被 goalAction 的 pause/resume/clear 失败兜底复用：一元 RPC 失败时 webClient 目前不会把
+ * payload.goal 透传进 WebError（见 webClient.ts resolvePending 只读顶层 error/code），拿不到
+ * 失败当时的目标快照，索性直接用这个函数重新问一次权威状态。
+ *
+ * lastAttemptAtMap 记录的是"每次调用本函数的时刻"（不管这轮 3 连击最终成没成功），只给巡检
+ * effect 在 unknown 态下判断退避窗口用；跟 lastGoalEventAtMap（只在成功时更新，判断数据新鲜度）
+ * 是两回事，不要混用。
+ */
+async function performGoalGet(
+  sessionId: string,
+  mode: string,
+  hideTimerMap: Map<string, ReturnType<typeof window.setTimeout>>,
+  lastGoalEventAtMap?: Map<string, number>,
+  lastAttemptAtMap?: Map<string, number>
+): Promise<void> {
+  lastAttemptAtMap?.set(sessionId, Date.now());
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const goal = await requestGoalAction({ sessionId, action: 'get', mode });
+      applyIncomingGoal(sessionId, goal, hideTimerMap, lastGoalEventAtMap);
+      return;
+    } catch {
+      if (attempt >= GOAL_GET_RETRY_DELAYS_MS.length) {
+        useGoalStore.getState().setQueryStatus(sessionId, 'unknown');
+        useGoalStore.getState().setPendingAction(sessionId, null);
+        return;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, GOAL_GET_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+}
+
+/**
  * 会话历史加载完成后调用：把 localStorage 里持久化的"目标完成"消息（见 applyIncomingGoal 的
  * 实时跳变分支）按时间戳合并回刚加载的历史消息数组里——这些消息从未写进后端 session 历史，
  * 单靠 history.get 的结果永远不会包含它们。已经在 messages 里的（极端情况下未来后端也开始
@@ -237,6 +308,26 @@ export function mergePersistedGoalCompletionMessages(sessionId: string, messages
   ];
   merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   return merged;
+}
+
+/**
+ * 会话历史加载完成后调用：给命中 goalStore 持久化 objective 文本列表的 user 消息回填
+ * `isGoalObjectiveMessage`（见 goalStore.ts objectiveMessageTexts 的注释）。history.get
+ * 返回的消息不带任何前端专属字段，本地回显时打的标记刷新后会被这批新对象整体替换掉，只能
+ * 在这里按 content 重新核对一次——不依赖当前 Goal 状态，即使目标已被清除/替换也照样命中。
+ */
+export function stampGoalObjectiveMessages(sessionId: string, messages: Message[]): Message[] {
+  const objectiveTexts = useGoalStore.getState().getGoalObjectiveTextsForSession(sessionId);
+  if (objectiveTexts.length === 0) return messages;
+  const objectiveTextSet = new Set(objectiveTexts);
+  let changed = false;
+  const stamped = messages.map((message) => {
+    if (message.role !== 'user' || message.isGoalObjectiveMessage) return message;
+    if (!objectiveTextSet.has(message.content)) return message;
+    changed = true;
+    return { ...message, isGoalObjectiveMessage: true };
+  });
+  return changed ? stamped : messages;
 }
 
 function getConnectSignature(options: WebConnectOptions): string {
@@ -771,6 +862,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   );
   // goal_id -> 本地"完成后自动隐藏"定时器句柄，见 applyIncomingGoal
   const goalCompletedHideTimerRef = useRef<Map<string, ReturnType<typeof window.setTimeout>>>(new Map());
+  /** session_id -> 最近一次成功落地 goal.snapshot/goal.updated 的时间戳，供 1 分钟无更新兜底巡检用 */
+  const lastGoalEventAtRef = useRef<Map<string, number>>(new Map());
+  /** session_id -> 最近一次调用 performGoalGet 的时间戳（不管成败），供 unknown 态退避巡检用 */
+  const lastGoalGetAttemptAtRef = useRef<Map<string, number>>(new Map());
+  const wasConnectedRef = useRef(false);
   const contextCompressionSummaryRef = useRef<Map<string, ContextCompressionSummary>>(new Map());
   const pendingContextCompressionStartRef =
     useRef<Map<string, PendingContextCompressionStart>>(new Map());
@@ -1126,34 +1222,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       ensureSessionRuntimes(sessionId);
       useGoalStore.getState().setPendingAction(sessionId, action === 'get' ? null : action);
       const mode = useSessionStore.getState().getRuntime(sessionId)?.mode ?? 'agent';
-      try {
-        if (action === 'set' || action === 'resume') {
-          await sendGoalStreamCommand({ sessionId, action, objective, mode });
-          // 没有数据可落——pendingAction 会在 goal.snapshot/goal.updated 事件到达时清掉
-          // （applyGoalSnapshot -> applyIncomingGoal），这里不用管。
-          if (action === 'set') {
-            // set 是 fire-and-forget，发出去那一刻不知道后端实际接受时目标是什么状态——编辑
-            // 一个目标时，前端点保存前的检查只能基于"点击那一刻"的快照，没法完全排除目标在
-            // 发送这几百毫秒到几秒内又发生变化的极端情况（用户明确要求的兜底）。发送后主动
-            // 补一次 get，不管 goal.snapshot/goal.updated 事件本身有没有到、到得对不对，都用
-            // 这次 get 的结果把前端状态收敛回后端权威值一次——即使因为后端还没处理完这次 set
-            // 而拿到旧数据也无妨，之后真正的事件到达时会再次覆盖纠正。
-            // 注意：不能直接 void goalAction(sessionId, 'get')——那会在第一行把 pendingAction
-            // 清成 null（因为它是 'get'），导致 GoalBar 的 loading 态在 set 真正被后端处理完
-            // 之前就恢复可点击，留出一个能打出冲突指令的窗口。这里直接调用不碰 pendingAction
-            // 的底层请求 + 落状态，让 pendingAction 继续留给 set 对应的 goal.updated 事件清。
-            void requestGoalAction({ sessionId, action: 'get', mode })
-              .then((goal) => applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current))
-              .catch(() => {
-                // 静默失败：这只是收敛用的兜底 get，真正的状态最终仍由 goal.updated 事件驱动。
-              });
-          }
-          return;
-        }
-        const goal = await requestGoalAction({ sessionId, action, mode });
-        applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current);
-      } catch (error) {
-        useGoalStore.getState().setPendingAction(sessionId, null);
+
+      const reportFailure = (error: unknown) => {
         const webError = error as WebError;
         const errorMsg = webError.message || t('network.sendMessageFailed');
         useChatStore.getState().addMessage(sessionId, {
@@ -1162,6 +1232,85 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           content: t('network.errorPrefix', { message: errorMsg }),
           timestamp: new Date().toISOString(),
         });
+      };
+
+      if (action === 'get') {
+        // 查询本身的失败/重试/unknown 兜底统一交给 performGoalGet，这里不需要额外 try/catch。
+        await performGoalGet(sessionId, mode, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current, lastGoalGetAttemptAtRef.current);
+        return;
+      }
+
+      if (action === 'set' || action === 'resume') {
+        if (action === 'set' && objective) {
+          // "设为目标"徽章要靠这份历史记录复原（见 goalStore.ts objectiveMessageTexts 的
+          // 注释），发送这一刻就是唯一能拿到 objective 原文的地方，不能等回包再记。
+          useGoalStore.getState().recordGoalObjectiveText(sessionId, objective);
+        }
+        try {
+          await sendGoalStreamCommand({ sessionId, action, objective, mode });
+        } catch (error) {
+          // WS 层直接发送失败（未连接等）：这是能明确识别的失败，弹提示；set 不做进一步兜底
+          // （"没有创建"本来就成立，不需要额外收敛），resume 按 b/c 步骤的约定补一次 get 兜底。
+          useGoalStore.getState().setPendingAction(sessionId, null);
+          reportFailure(error);
+          if (action === 'resume') {
+            await performGoalGet(sessionId, mode, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current, lastGoalGetAttemptAtRef.current);
+          }
+          return;
+        }
+        // 没有数据可落——pendingAction 会在 goal.snapshot/goal.updated/execution.error 事件到达时
+        // 清掉（applyGoalSnapshot -> applyIncomingGoal）。协议文档确认这条流式失败事件的 payload
+        // 也一定带 goal 字段（哪怕是 null），所以 resume 的业务层失败不需要额外兜底 get。
+        if (action === 'set') {
+          // set 是 fire-and-forget，正常路径下应该很快会收到 goal.snapshot/execution.error
+          // 把 pendingAction 清掉。这里延迟 GOAL_SET_CONVERGENCE_DELAY_MS 后补一次兜底 get，
+          // 只覆盖"事件真的丢了"这类小概率情况（尤其是这个 session 第一次设置目标时，1 分钟
+          // 无更新兜底轮询要求 store 里已有非空 goal 才会巡检，覆盖不到这个场景）——不在发送后
+          // 立刻发，是因为立刻发会跟真正的 snapshot 赛跑，赢了反而用 set 落地前的旧数据提前
+          // 清掉 pendingAction，重新打开"按钮提前解禁、能打出冲突指令"的窗口，等于没解决问题。
+          window.setTimeout(() => {
+            // 到点一看 pendingAction 已经不是 'set' 了，说明真正的事件已经收敛过一次，不需要
+            // 再补——不管是被这次 set 自己的事件清的，还是用户切走后又发起了别的操作。
+            if (useGoalStore.getState().runtimes[sessionId]?.pendingAction !== 'set') return;
+            void requestGoalAction({ sessionId, action: 'get', mode })
+              .then((goal) => applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current))
+              .catch(() => {
+                // 静默失败：这只是收敛用的兜底 get，真正的状态最终仍由 goal.updated 事件驱动。
+              });
+          }, GOAL_SET_CONVERGENCE_DELAY_MS);
+        }
+        return;
+      }
+
+      if (action === 'clear') {
+        try {
+          const goal = await requestGoalAction({ sessionId, action, mode });
+          applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current);
+          // active 目标被删除时的会话结束由 App.tsx handleClearGoal 显式补发 cancel/pause 负责
+          // （真机联调确认只重置前端本地态不够，得发真信号），这里不用再管会话态。
+        } catch (error) {
+          // 一元 clear 失败时 webClient 目前不会把 payload.goal 透传进 WebError（见 webClient.ts
+          // resolvePending），拿不到失败当时的目标快照，主动补一次 get 收敛。
+          reportFailure(error);
+          await performGoalGet(sessionId, mode, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current, lastGoalGetAttemptAtRef.current);
+        }
+        return;
+      }
+
+      // action === 'pause'：同样是一元 RPC，失败兜底同 clear。
+      try {
+        const goal = await requestGoalAction({ sessionId, action, mode });
+        applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current);
+      } catch (error) {
+        const webError = error as WebError;
+        // code: invalid_state 说明目标这会儿已经不是 active 了（常见于跟 handleCancel 触发的
+        // 后端"中断顺带暂停"竞态：两边几乎同时发，谁先到不确定，晚到的这次 pause 打过去时
+        // 目标已经被另一条路径转过去了）——这只是提示"已经不需要再暂停"，不是真错误，不弹
+        // 系统消息；其余失败（如 no_goal、网络异常）照常提示。
+        if (webError.code !== 'invalid_state') {
+          reportFailure(error);
+        }
+        await performGoalGet(sessionId, mode, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current, lastGoalGetAttemptAtRef.current);
       }
     },
     [t]
@@ -1846,7 +1995,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         undefined;
       if (!sessionId) return;
       ensureSessionRuntimes(sessionId);
-      applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current);
+      applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current);
     };
 
     const unsubs = [
@@ -2051,6 +2200,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().setExecutionError(sessionId, null);
           if (currentMode !== 'team') {
             useChatStore.getState().setProcessing(sessionId, false);
+            // 正常情况下排空由 chat.processing_status(false) 负责；这里是它丢帧时的兜底
+            // 重置，同样可能是"目标这一轮真正结束"的那个信号，一并兜底排空一次排队消息
+            // （见问题3：目标完成后队列消息没有紧接着发出去）。已经排空过则是空操作，不会重复发送。
+            drainTaskQueueIfIdle(sessionId);
           }
           useChatStore.getState().setThinking(sessionId, false);
           useChatStore.getState().clearSubtasks(sessionId);
@@ -2757,6 +2910,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().setPaused(sessionId, false);
           useChatStore.getState().setProcessing(sessionId, false);
           useChatStore.getState().setThinking(sessionId, false);
+          // chat.interrupt_result 是一元响应，跟流式分片的 goal_intermediate 判断走的是完全
+          // 独立的通道——不依赖后端把"目标已清除/暂停后这一轮该不该被当成中间态"判断对，
+          // 用户主动点了停止/删除就该让当前气泡收尾，不再等一个可能被误判、永远不会来的
+          // 真正 chat.final。
+          useChatStore.getState().stopStreaming(sessionId);
         } else if (resultPayload.intent === 'supplement') {
           useChatStore.getState().setPaused(sessionId, false);
         }
@@ -3353,6 +3511,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       if (!connected && (state === 'reconnecting' || state === 'closed')) {
         onDisconnectRef.current?.();
       }
+      // 断线恢复（false -> true 跳变）：真实环境联调方案 B.8——对"曾经查到过目标"的会话主动
+      // get 一次，把 GoalBar 从 disconnected 收敛回真实状态。只挑非 completed 的目标查，
+      // completed 不需要（也不参与下面的 1 分钟无更新巡检）。
+      if (connected && !wasConnectedRef.current) {
+        const runtimes = useGoalStore.getState().runtimes;
+        for (const [sid, runtime] of Object.entries(runtimes)) {
+          if (!runtime.goal || runtime.goal.status === 'completed') continue;
+          const goalMode = useSessionStore.getState().getRuntime(sid)?.mode ?? 'agent';
+          void performGoalGet(sid, goalMode, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current, lastGoalGetAttemptAtRef.current);
+        }
+      }
+      wasConnectedRef.current = connected;
     });
     return () => {
       unsub();
@@ -3369,6 +3539,39 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       window.clearInterval(timer);
     };
   }, [setConnectionStats]);
+
+  useEffect(() => {
+    // 真实环境联调方案 9c：未完成目标超过 1 分钟没收到新的 goal.snapshot/goal.updated 事件，
+    // 主动 get 一次兜底，避免长时间静默期间前端展示的状态跟后端实际状态脱节。用一个共享轮询
+    // 巡检所有 session，而不是给每个 session 单独起 setTimeout——避免目标频繁切换 session 时
+    // 需要额外维护一堆定时器的生命周期。
+    //
+    // unknown 态用不同的判断依据：lastGoalEventAtRef 只在成功时更新，一直失败的话这个时间戳
+    // 永远不动，会导致每 15s 巡检都判定"超过 60s 未更新"、无限重触发 performGoalGet 自己的
+    // 3 连击重试——变成每 15s 打一轮 3 连击轰炸一个已知连不上的后端。已经 unknown 的 session
+    // 改用 lastGoalGetAttemptAtRef（记录"最近一次尝试"，不管成败）+ 更长的退避间隔，直到某次
+    // get 成功、queryStatus 收敛回 'ok'，才会自动切回上面 60s 节奏的正常巡检。
+    const timer = window.setInterval(() => {
+      if (webClient.getState() !== 'ready') return;
+      const runtimes = useGoalStore.getState().runtimes;
+      const now = Date.now();
+      for (const [sid, runtime] of Object.entries(runtimes)) {
+        if (!runtime.goal || runtime.goal.status === 'completed') continue;
+        if (runtime.queryStatus === 'unknown') {
+          const lastAttempt = lastGoalGetAttemptAtRef.current.get(sid) ?? 0;
+          if (now - lastAttempt < GOAL_UNKNOWN_RETRY_INTERVAL_MS) continue;
+        } else {
+          const lastAt = lastGoalEventAtRef.current.get(sid) ?? 0;
+          if (now - lastAt < GOAL_STALE_REFRESH_MS) continue;
+        }
+        const goalMode = useSessionStore.getState().getRuntime(sid)?.mode ?? 'agent';
+        void performGoalGet(sid, goalMode, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current, lastGoalGetAttemptAtRef.current);
+      }
+    }, GOAL_STALE_REFRESH_CHECK_INTERVAL_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     const markAllRuntimes = () => {

@@ -429,12 +429,14 @@
     "editTitle": "编辑目标",
     "toolbarTag": "目标",
     "closeTag": "取消目标",
-    "badge": "设为目标",
+    "badge": "目标",
     "status": {
       "active": "进行中",
       "paused": "已暂停",
       "completed": "已完成",
-      "blocked": "已阻塞"
+      "blocked": "已阻塞",
+      "disconnected": "连接已断开",
+      "unknown": "状态未知"
     },
     "action": {
       "editTooltip": "编辑目标",
