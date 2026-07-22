@@ -257,7 +257,6 @@ export function InputArea({
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
   const [attachmentAlerts, setAttachmentAlerts] = useState<AttachmentAlert[]>([]);
   const [attachmentMenuId, setAttachmentMenuId] = useState<string | null>(null);
-  const [isDraggingImage, setIsDraggingImage] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [workMenuOpen, setWorkMenuOpen] = useState<'project' | null>(null);
   const [workDialogOpen, setWorkDialogOpen] = useState(false);
@@ -1120,39 +1119,21 @@ export function InputArea({
   }, [appendImageFiles]);
 
   const handlePaste = useCallback((event: ClipboardEvent<HTMLDivElement>) => {
-    const items = Array.from(event.clipboardData.items);
-    const files = items
-      .filter((item) => item.kind === 'file' && ACCEPTED_IMAGE_TYPES.has(item.type))
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => Boolean(file));
-    if (files.length) {
+    if (Array.from(event.clipboardData.items).some((item) => item.kind === 'file')) {
       event.preventDefault();
-      void appendImageFiles(files);
-    }
-  }, [appendImageFiles]);
-
-  const handleDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
-    const hasImage = Array.from(event.dataTransfer.items).some(
-      (item) => item.kind === 'file' && ACCEPTED_IMAGE_TYPES.has(item.type)
-    );
-    if (!hasImage) return;
-    event.preventDefault();
-    setIsDraggingImage(true);
-  }, []);
-
-  const handleDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
-    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-      setIsDraggingImage(false);
     }
   }, []);
 
-  const handleDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
-    setIsDraggingImage(false);
-    const files = Array.from(event.dataTransfer.files).filter((file) => ACCEPTED_IMAGE_TYPES.has(file.type));
-    if (!files.length) return;
+  const handleFileDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
     event.preventDefault();
-    void appendImageFiles(files);
-  }, [appendImageFiles]);
+    event.dataTransfer.dropEffect = 'none';
+  }, []);
+
+  const handleFileDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+    event.preventDefault();
+  }, []);
 
   /** 在光标处插入技能 chip（不可编辑原子节点） */
   const insertSkillChip = useCallback((skillName: string) => {
@@ -1417,11 +1398,9 @@ export function InputArea({
             (isModeMenuOpen || workMenuOpen) && 'chat-input-container--menu-open',
             composerSuggestion && 'chat-input-container--suggestion-open',
             isListening && 'chat-input-container--recording',
-            isDraggingImage && 'chat-input-container--dragging',
           )}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
+          onDragOver={handleFileDragOver}
+          onDrop={handleFileDrop}
         >
       {isListening && (
         <div className="chat-input-recording-bar">

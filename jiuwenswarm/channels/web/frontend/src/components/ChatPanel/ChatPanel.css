@@ -174,13 +174,6 @@ overflow: hidden;
   border-color: var(--color-feedback-danger) !important;
 }
 
-.chat-input-container--dragging {
-  border-color: var(--color-action-primary);
-  box-shadow:
-    var(--effect-chat-composer-shadow),
-    0 0 0 2px rgba(var(--color-action-primary-rgb), 0.22);
-}
-
 .chat-input-frame {
   position: relative;
   width: 100%;
