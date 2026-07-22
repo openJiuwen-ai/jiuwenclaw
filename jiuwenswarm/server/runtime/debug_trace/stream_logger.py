@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from jiuwenswarm.server.runtime.debug_trace.config import DebugTraceSettings
+from jiuwenswarm.common.utils import _sanitize_log_text, _masked_with_fp
 
 _logger = logging.getLogger(__name__)
 
@@ -112,13 +113,16 @@ def _mask_secrets(value: Any) -> Any:
     """Recursively mask values whose dict key looks secret-like.
 
     Returns a shallow-ish copy for dicts/lists so the caller's payload is
-    untouched. Non-container values pass through unchanged.
+    untouched. Non-container values pass through unchanged. 命中敏感键名的
+    值替换为 ``******(fp:xxxxxxxx)``（与主 ``SensitiveDataFilter`` 指纹算法一致），
+    便于 trace 文件与其他日志跨文件关联同一 key。字符串值里夹带的凭证由
+    ``_write_raw`` 落盘前统一经 ``_sanitize_log_text`` 兜底脱敏。
     """
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for k, v in value.items():
             if isinstance(k, str) and _looks_secret(k):
-                out[k] = "***"
+                out[k] = _masked_with_fp(v)
             else:
                 out[k] = _mask_secrets(v)
         return out
@@ -447,7 +451,12 @@ class DebugTraceLogger:
         if self._file is None:
             return
         try:
-            self._file.write(f"{body}\n")
+            # 落盘前统一脱敏：trace 文件直接 file.write，不走 logging，
+            # 主 SensitiveDataFilter 管不到。此处对 body 走与主 filter 一致
+            # 的脱敏（含字符串值里夹带的 api_key/Bearer 等，并附指纹），
+            # 兜底覆盖所有写入路径（_emit / run 边界 / _safe_warn）。
+            masked = _sanitize_log_text(body) if body else body
+            self._file.write(f"{masked}\n")
             self._file.flush()
         except Exception as exc:
             _logger.debug("[DebugTrace] write failed: %s", exc)
@@ -456,8 +465,7 @@ class DebugTraceLogger:
         _logger.warning("[DebugTrace] %s (session=%s)", msg, self._session_id)
         if self._file is not None:
             try:
-                self._file.write(f"{_now_ts()} [WARN] {msg}\n")
-                self._file.flush()
+                self._write_raw(f"{_now_ts()} [WARN] {msg}")
             except Exception as exc:
                 _logger.debug("[DebugTrace] failed to write warning to dump file: %s", exc)
 

@@ -3,6 +3,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import svgr from 'vite-plugin-svgr'
 import { spawnSync } from 'child_process'
+import { createHash } from 'node:crypto'
 import path from 'path'
 import fs from 'fs'
 
@@ -11,6 +12,94 @@ type ConfigWithLogger = { logger?: { error?: (msg: string, opts?: { error?: Erro
 interface ErrorWithCode {
   code?: string
 }
+
+/**
+ * 敏感字段键名正则：与后端 jiuwenswarm.common.utils._KV_SENSITIVE_PATTERN 保持一致，
+ * 命中即对该键的值脱敏。显式排除 ``context_window_tokens``（含 token 子串但语义是
+ * 上下文窗口大小，非凭证）。
+ */
+const SENSITIVE_KEY_PATTERN = /(?:^|_)(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|credential|private[_-]?key|user[_-]?id|userid)(?:_|$)/i
+const NON_SENSITIVE_KEY_OVERRIDES = new Set(['context_window_tokens', 'context_window_token'])
+
+/**
+ * 凭证值形态：即便没有敏感键名上下文，值本身是已知前缀的凭证（OpenAI/Bearer/JWT/
+ * GitHub/GitLab token）也要脱敏。与后端 _SENSITIVE_PATTERNS 对齐。
+ */
+const SENSITIVE_VALUE_PATTERNS: { re: RegExp; group?: number }[] = [
+  { re: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/ }, // JWT
+  { re: /\bsk-[A-Za-z0-9]{8,}\b/ },                                 // OpenAI 风格
+  { re: /\bghp_[A-Za-z0-9]{20,}\b/ },                               // GitHub PAT
+  { re: /\bglpat-[A-Za-z0-9_-]{20,}\b/ },                           // GitLab PAT
+  { re: /\bBearer\s+[A-Za-z0-9\-._~+/]+=*/i, group: undefined },    // Authorization Bearer
+]
+
+/**
+ * 对单个敏感值做带指纹的脱敏：``******(fp:xxxxxxxx)``。
+ * 指纹 = SHA256(值) 前 4 字节（8 位 hex），与后端 _fingerprint 算法一致，
+ * 同一 key 在前后端两套日志中指纹相同，便于跨端关联排查。不可逆。
+ */
+function maskWithFp(value: string): string {
+  if (!value) return '******'
+  try {
+    const fp = createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 8)
+    return `******(fp:${fp})`
+  } catch {
+    return '******'
+  }
+}
+
+/**
+ * 对值做形态脱敏：把值中出现的凭证片段（sk-/Bearer/JWT 等）原地替换为带指纹掩码。
+ * 用于无敏感键名但值含凭证的场景（如一段日志文本里夹带 sk-xxx）。
+ */
+function maskValueShapes(value: string): string {
+  let out = value
+  for (const { re } of SENSITIVE_VALUE_PATTERNS) {
+    out = out.replace(re, (m) => maskWithFp(m))
+  }
+  return out
+}
+
+/**
+ * 递归脱敏任意结构（对象/数组/字符串）。键名命中敏感词的值整体替换为 ``******(fp:..)``；
+ * 字符串值再做形态脱敏兜底。与后端 SensitiveDataFilter 行为对齐。
+ */
+function maskSensitive(payload: unknown): unknown {
+  if (payload === null || payload === undefined) return payload
+  if (Array.isArray(payload)) {
+    return payload.map((item) => maskSensitive(item))
+  }
+  if (typeof payload === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
+      const keyLower = k.toLowerCase()
+      if (
+        !NON_SENSITIVE_KEY_OVERRIDES.has(keyLower) &&
+        SENSITIVE_KEY_PATTERN.test(keyLower)
+      ) {
+        // 敏感键：整体脱敏（保留指纹）。非字符串值先序列化再算指纹，便于关联。
+        const strVal = typeof v === 'string' ? v : safeStringify(v)
+        result[k] = maskWithFp(strVal)
+      } else {
+        result[k] = maskSensitive(v)
+      }
+    }
+    return result
+  }
+  if (typeof payload === 'string') {
+    return maskValueShapes(payload)
+  }
+  return payload
+}
+
+function safeStringify(v: unknown): string {
+  try {
+    return typeof v === 'string' ? v : JSON.stringify(v)
+  } catch {
+    return String(v)
+  }
+}
+
 
 /**
  * file-api 使用的项目根目录，需与后端 get_root_dir() 一致，前端编辑的 HEARTBEAT.md 才会被心跳读到。
@@ -197,7 +286,12 @@ function devWsTrafficLogger(): Plugin {
               payload = raw
             }
           }
-          const line = `${JSON.stringify({ ts: now, payload })}\n`
+          // 写盘前脱敏：前端会把 config.get/config.validate_model 等报文（含
+          // api_key/token/secret）原样上报给 vite dev server，vite 再 appendFile
+          // 写进 ws-dev.log。此处对 payload 递归脱敏，避免 api_key 明文落盘。
+          // 与后端 SensitiveDataFilter 行为/指纹算法一致，便于跨端关联排查。
+          const maskedPayload = maskSensitive(payload)
+          const line = `${JSON.stringify({ ts: now, payload: maskedPayload })}\n`
           fs.appendFile(logFile, line, (error) => {
             if (error) {
               server.config.logger.error(`[dev-ws-logger] write failed: ${error.message}`)
