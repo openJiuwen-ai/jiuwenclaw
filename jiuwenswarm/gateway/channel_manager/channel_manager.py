@@ -91,9 +91,14 @@ class ChannelManager(ABC):
         注意: 回调本身保持同步签名，避免旧 Channel 调用方（如飞书 webhook）
         产生 "coroutine was never awaited" 错误。
         """
+        # feishu_create_time 为飞书服务端在消息创建（用户发送）时刻打的毫秒时间戳，
+        # 与本行日志时间（我方收到回调时刻）的差值即"飞书侧创建→我方收到"的投递延迟，
+        # 用于排查飞书延迟补推旧消息造成的幽灵 /join、重复通知等问题。
+        # 其他 channel 无此字段时为 None，不影响日志。
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
         logger.info(
-            "[ChannelManager] Channel 消息 -> MessageHandler: id=%s channel_id=%s",
-            msg.id, msg.channel_id,
+            "[ChannelManager] Channel 消息 -> MessageHandler: id=%s channel_id=%s feishu_create_time=%s",
+            msg.id, msg.channel_id, metadata.get("feishu_create_time"),
         )
         if not self._get_channel_by_id(msg.channel_id):
             logger.info(f"[ChannelManager] Channel: {msg.channel_id} closed, cancel this user message.")

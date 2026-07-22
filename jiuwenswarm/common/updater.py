@@ -30,6 +30,18 @@ DEFAULT_TIMEOUT_SECONDS = 20
 DEFAULT_TEXT = "WbrW92Yn6jif-4Ks3kvzhWVv"
 DESKTOP_ENV_FLAG = "JIUWENSWARM_DESKTOP"
 
+DEFAULT_SOURCE_CONFIG: dict[str, Any] = {
+    "desktop_release_api_type": "gitcode",
+    "repo_owner": "openJiuwen",
+    "repo_name": "jiuwenswarm",
+    "release_api_url": "",
+    "pypi_mirror": "https://mirrors.aliyun.com/pypi",
+    "asset_name_pattern": "",
+    "asset_name_pattern_windows": DEFAULT_ASSET_PATTERN_WINDOWS,
+    "asset_name_pattern_macos": DEFAULT_ASSET_PATTERN_MACOS,
+    "asset_name_pattern_linux": DEFAULT_ASSET_PATTERN_LINUX,
+}
+
 
 def get_access_token() -> str:
     return os.getenv("GITCODE_TOKEN", "").strip() or DEFAULT_TEXT

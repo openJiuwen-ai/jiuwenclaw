@@ -379,14 +379,23 @@ class WebChannel(BaseWsChannel):
             *,
             seq: int | None = None,
             stream_id: str | None = None,
+            exclude_ws: Any = None,
     ) -> None:
-        """向所有已连接客户端广播 ``event`` 帧."""
+        """向所有已连接客户端广播 ``event`` 帧.
+
+        exclude_ws: 排除单个发起方 ws（如 config.changed 的保存发起方），
+        避免发起方收到自身触发的广播而误弹「丢弃草稿」确认框。发起方靠
+        保存响应的本地乐观合并自行刷新，无需这条广播。
+        """
         frame: dict[str, Any] = {"type": "event", "event": event, "payload": payload}
         if seq is not None:
             frame["seq"] = seq
         if stream_id is not None:
             frame["stream_id"] = stream_id
-        await self._broadcast(frame)
+        clients = self.clients
+        if exclude_ws is not None:
+            clients = {c for c in clients if c is not exclude_ws}
+        await self._broadcast_to(frame, clients)
 
     async def _download_file(self, url: str) -> bytes | None:
         try:
@@ -635,6 +644,26 @@ class WebChannel(BaseWsChannel):
                 "[WebChannel] cron push broadcast to %d client(s) id=%s run_id=%s",
                 len(clients), getattr(msg, "id", ""),
                 (msg.payload.get("cron") or {}).get("run_id", ""),
+            )
+            return
+
+        # ── 主动推荐系统通知推 web：与 cron 推送同理——后端主动推、无前端 session_id 绑定，
+        # 按 session_id 路由会被当"无 session"丢弃（旧路径 580 行 if not msg.session_id 兜底丢弃）。
+        # proactive notification（"今日已达上限"等系统提醒）带 payload.source ==
+        # "proactive_notification" 标记，据此广播给所有 web 客户端。前端 shouldHandleSessionEvent
+        # 对无 session_id 的 payload 放行，作为普通 assistant 消息渲染。
+        if (
+            msg.event_type == EventType.CHAT_FINAL
+            and isinstance(msg.payload, dict)
+            and msg.payload.get("source") == "proactive_notification"
+        ):
+            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            clients = self.clients
+            for w in clients:
+                self._enqueue_send(w, frame)
+            logger.debug(
+                "[WebChannel] proactive_notification broadcast to %d client(s) id=%s",
+                len(clients), getattr(msg, "id", ""),
             )
             return
 

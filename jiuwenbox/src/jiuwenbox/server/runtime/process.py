@@ -878,6 +878,8 @@ class ProcessRuntime(RuntimeAdapter):
         scripts, seccomp BPF, landlock payload) keep the per-call cost low.
         """
         config = BwrapConfig.from_policy(policy, list(command))
+        process_uid = config.uid
+        process_gid = config.gid
         if sandbox_env:
             config.env.update(sandbox_env)
         if workdir:
@@ -949,6 +951,24 @@ class ProcessRuntime(RuntimeAdapter):
             ]
 
         config.seccomp_fd = seccomp_fd
+        if self._needs_privdrop_for_process_identity(
+            process_uid,
+            use_user_namespace=policy.namespace.user,
+        ):
+            if process_uid is None or process_gid is None:
+                raise RuntimeError(
+                    "run_as_user/run_as_group could not be resolved for privilege drop",
+                )
+            config.command = self._wrap_command_with_privdrop(
+                config.command,
+                process_uid,
+                process_gid,
+            )
+            logger.info(
+                "Dropping sandbox command to host uid %d gid %d via Python",
+                process_uid,
+                process_gid,
+            )
         return config.to_args()
 
     def _get_netns_name(self, sandbox_id: str) -> str:
@@ -1305,6 +1325,47 @@ class ProcessRuntime(RuntimeAdapter):
                 oct(fallback_mode),
             )
             os.chmod(path, fallback_mode)
+
+    @staticmethod
+    def _needs_privdrop_for_process_identity(
+        uid: int | None,
+        *,
+        use_user_namespace: bool,
+    ) -> bool:
+        """Whether to drop to the host uid before running the sandbox command.
+
+        When ``namespace.user`` is enabled, bubblewrap already applies
+        ``--uid`` / ``--gid`` together with ``--unshare-user``.
+
+        Privilege drop is only needed when the server runs as root *and* the
+        sandbox reuses the host user namespace (``namespace.user: false``).
+        """
+        if use_user_namespace:
+            return False
+        return os.geteuid() == 0 and uid is not None and uid != 0
+
+    @staticmethod
+    def _wrap_command_with_privdrop(
+        command: list[str],
+        uid: int,
+        gid: int,
+    ) -> list[str]:
+        """Wrap ``command`` in a short Python helper that drops uid/gid.
+
+        Uses stdlib ``os.setuid`` / ``os.setgid`` so jiuwenbox does not depend
+        on the external ``setpriv(1)`` binary from util-linux.
+        """
+        encoded_command = json.dumps(command)
+        script = "; ".join([
+            "import json, os",
+            f"uid, gid = {uid}, {gid}",
+            f"cmd = json.loads({encoded_command!r})",
+            "exec('try:\\n os.setgroups([])\\nexcept OSError:\\n pass', globals())",
+            "os.setgid(gid)",
+            "os.setuid(uid)",
+            "os.execvp(cmd[0], cmd)",
+        ])
+        return [PYTHON_EXECUTABLE, "-S", "-c", script]
 
     def _ensure_policy_directories(
         self,
