@@ -107,7 +107,7 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
       const q = questions[idx];
       const s = overrides?.[idx] ?? states[idx] ?? emptyPage();
       const customText = s.custom.trim();
-      const answer: UserAnswer = { selected_options: [...s.selected] };
+      const answer: UserAnswer = { question: q?.question, selected_options: [...s.selected] };
       if (customText) answer.custom_input = customText;
       // 兜底：既无选择也无输入时，默认第一个普通选项（避免后端拿到空答案）。
       if (answer.selected_options.length === 0 && !customText) {
