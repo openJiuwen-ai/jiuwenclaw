@@ -70,7 +70,7 @@ poster_job/<job_id>/
 1. 根据风格写生图 prompt，**明确要求画面中无文字**，可预留空白安全区给标题/正文。
 2. 调用 `generate_image`（需已配置 `models.image_gen` / `IMAGE_GEN_*`）。
 3. 将结果保存/复制为 `base.png`（若工具返回路径，复制到 `poster_job/<job_id>/base.png`）。
-4. `full_regen += 1`。若 `full_regen > max_full_regen`，停止并报告。
+4. `full_regen += 1`。若 `full_regen >= max_full_regen`，停止并报告。
 5. （可选）对 `base.png` 调一次 `visual_question_answering`：  
    `question = "图中是否出现任何可读文字或字母？只回答 YES 或 NO。"`  
    若 YES：不得进入叠字交付；应改 prompt 再抽底图，或接受轻微残留但 **正文仍只以叠字为准**（MVP 推荐直接重抽底图，计入 `full_regen`）。
