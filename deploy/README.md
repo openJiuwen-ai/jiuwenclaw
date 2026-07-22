@@ -253,6 +253,7 @@ FEISHU_BOTS="
 - `--web-port`: 自定义Web模块对外访问端口，按需适配环境端口规划（范围：30000-32767）。若未传入该参数，且 `.env.custom` 文件中未配置 WEB_NODE_PORT 环境变量，程序将自动选取可用空闲端口。
 - `--manager-web-port`: 自定义 `Manager Web UI` 对外访问端口（范围：30000-32767）。若未传入该参数，且 `.env.custom` 文件中未配置 `MANAGER_WEB_NODE_PORT` 环境变量，程序将自动选取可用空闲端口。
 - `--render-only`：只渲染模板输出文件至 conf 目录，不操作集群、不校验集群资源
+- `--no-auto-jiuwenclaw-id`：部署 gateway 时不自动生成 `JIUWENCLAW_ID`（默认未配置时会自动生成）
 
 **参数使用示例：**
 ```
@@ -601,6 +602,8 @@ Gateway 是 JiuwenSwarm 的多渠道接入网关与消息调度核心，负责 A
 ```
 ./deploy.sh up gateway -n <你的命名空间>             # 部署 Gateway 核心网关模块
 ```
+
+部署时会检查 `.env.custom` 中的 `JIUWENCLAW_ID`：未配置则自动生成并写回；已配置则沿用原值。
 
 注意：默认以单机单实例模式运行；若需启用双实例主备高可用架构，请在启动前，修改配置文件 `.env.custom` 如下参数：
 
