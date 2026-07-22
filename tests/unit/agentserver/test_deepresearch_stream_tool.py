@@ -337,7 +337,14 @@ async def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
         side_effect=_convert,
     ):
         artifacts = await dt._write_report_artifacts_stream(
-            final_result, "研究报告.md", "C1"
+            final_result,
+            "研究报告.md",
+            "C1",
+            {
+                "raw_report_path": "/skill/data/C1.raw_report.md",
+                "citations_preview_path": "/skill/data/C1.citations.preview.json",
+                "citations_path": "/skill/data/C1.citations.json",
+            },
         )
 
     assert artifacts == {
@@ -345,7 +352,14 @@ async def test_write_report_artifacts_keeps_rewrite_sidecars_hidden(tmp_path):
         "html": str(tmp_path / "研究报告.html"),
     }
     assert (tmp_path / "研究报告.final-result.json").is_file()
-    assert (tmp_path / "研究报告.provenance.json").is_file()
+    provenance = json.loads(
+        (tmp_path / "研究报告.provenance.json").read_text(encoding="utf-8")
+    )
+    assert provenance["citation_artifacts"] == {
+        "raw_report_path": "/skill/data/C1.raw_report.md",
+        "citations_preview_path": "/skill/data/C1.citations.preview.json",
+    }
+    assert "citations_path" not in provenance["citation_artifacts"]
 
 
 @pytest.mark.asyncio
@@ -372,6 +386,40 @@ async def test_write_report_artifacts_keeps_rewrite_sidecars_when_html_fails(tmp
     assert (tmp_path / "研究报告.provenance.json").is_file()
 
 
+def test_build_related_artifact_bundle_exposes_only_hidden_preview_companions():
+    marker = {
+        "raw_report_path": "/skill/data/C1.raw_report.md",
+        "citations_path": "/skill/data/C1.citations.json",
+        "citations_preview_path": "/skill/data/C1.citations.preview.json",
+    }
+
+    assert dt._build_related_artifact_bundle(marker, 0) == {
+        "schemaVersion": "1.0",
+        "relatedArtifacts": [
+            {
+                "type": "raw_report",
+                "path": "/skill/data/C1.raw_report.md",
+                "contentType": "text/markdown",
+                "relatedToPathIndex": 0,
+            },
+            {
+                "type": "citations_preview",
+                "path": "/skill/data/C1.citations.preview.json",
+                "contentType": "application/json",
+                "schemaVersion": "1.1",
+                "relatedToPathIndex": 0,
+            },
+        ],
+    }
+
+
+def test_build_related_artifact_bundle_ignores_blank_companion_paths():
+    assert dt._build_related_artifact_bundle(
+        {"raw_report_path": " ", "citations_preview_path": None},
+        0,
+    ) is None
+
+
 @pytest.mark.asyncio
 async def test_completed_report_is_delivered_as_markdown_file_without_entering_tool_outcome():
     report_content = "# 最终报告\n\n完整正文"
@@ -382,6 +430,9 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
             "__deepsearch_status__": "completed",
             "conversation_id": "C1",
             "final_result": final_result,
+            "raw_report_path": "/skill/data/C1.raw_report.md",
+            "citations_path": "/skill/data/C1.citations.json",
+            "citations_preview_path": "/skill/data/C1.citations.preview.json",
         }),
     ]
     push = AsyncMock()
@@ -390,7 +441,11 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
          patch.object(dt, "_get_route", return_value={
              "request_id": "R1", "channel_id": "CH1", "session_id": "S1"
          }), \
-         patch.object(dt, "_write_report_markdown", return_value="/tmp/r.md") as write_report, \
+         patch.object(
+             dt,
+             "_write_report_artifacts_stream",
+             return_value={"md": "/tmp/r.md", "html": "/tmp/r.html"},
+         ) as write_report, \
          patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=_Proc(lines))), \
          patch(
              "jiuwenclaw.agentserver.gateway_push.transport.WebSocketGatewayPushTransport",
@@ -401,8 +456,44 @@ async def test_completed_report_is_delivered_as_markdown_file_without_entering_t
     payloads = [call.args[0]["payload"] for call in push.send_push.await_args_list]
     report_frames = [payload for payload in payloads if payload.get("event_type") == "chat.delta"]
     assert report_frames == []
-    write_report.assert_called_once_with(final_result, "r", "C1")
-    assert {"event_type": "chat.file", "files": [{"path": "/tmp/r.md", "name": "r.md"}]} in payloads
+    write_report.assert_called_once_with(
+        final_result,
+        "r",
+        "C1",
+        {
+            "raw_report_path": "/skill/data/C1.raw_report.md",
+            "citations_preview_path": "/skill/data/C1.citations.preview.json",
+        },
+    )
+    file_payload = next(payload for payload in payloads if payload.get("event_type") == "chat.file")
+    assert file_payload == {
+        "event_type": "chat.file",
+        "files": [
+            {"path": "/tmp/r.md", "name": "r.md"},
+            {"path": "/tmp/r.html", "name": "r.html"},
+        ],
+        "metadata": {
+            "artifactBundle": {
+                "schemaVersion": "1.0",
+                "relatedArtifacts": [
+                    {
+                        "type": "raw_report",
+                        "path": "/skill/data/C1.raw_report.md",
+                        "contentType": "text/markdown",
+                        "relatedToPathIndex": 0,
+                    },
+                    {
+                        "type": "citations_preview",
+                        "path": "/skill/data/C1.citations.preview.json",
+                        "contentType": "application/json",
+                        "schemaVersion": "1.1",
+                        "relatedToPathIndex": 0,
+                    },
+                ],
+            },
+        },
+    }
+    assert "C1.citations.json" not in json.dumps(file_payload)
     assert [_active_stage(update) for update in _task_updates(payloads)] == [1, 6, None]
     assert json.loads(result) == {
         "status": "completed",
